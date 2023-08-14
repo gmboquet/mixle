@@ -13,7 +13,7 @@ Examples
 Examples that run locally are located in ./pysp/examples/
 
 
-    $ python -m pysp.examples.mixture_example.py
+    $ python pysp/examples/mixture_example.py
 
 
 Examples that run with Apache Spark are located in./pysp/examples_spark/
