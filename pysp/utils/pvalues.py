@@ -4,25 +4,29 @@ import itertools
 from scipy.special import gammaln
 
 
-def binomial_rank(log_p_vec: Union[List[float], np.ndarray], log_p1_vec: Optional[Union[List[float], np.ndarray]] = None, count_vec: Optional[Union[List, np.ndarray]] = None, ll_eps: float = 1.0e-4, max_len: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, Tuple[float, float, float]]:
-    """
-    Approximates the log-density histogram for a composite of binomials.
+def binomial_rank(log_p_vec: Union[List[float], np.ndarray],
+                  log_p1_vec: Optional[Union[List[float], np.ndarray]] = None,
+                  count_vec: Optional[Union[List, np.ndarray]] = None, ll_eps: float = 1.0e-4,
+                  max_len: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, Tuple[float, float, float]]:
+    """Approximates the log-density histogram for a composite of binomials.
 
     x, y, (LL0, DLL, cnt) =  binomial_rank(np.log([0.3, 0.2]), count_vec=[3, 2], max_len=10000)
 
-    # P([1, 0, 0, 1, 1])
+    # p_mat([1, 0, 0, 1, 1])
     LL = np.log([0.3, 0.7, 0.7, 0.2, 0.2]).sum()
     approx_rank = y[int((LL - LL0)/DLL):].sum() * np.power(2.0, cnt)
 
-    :rtype: Tuple[np.ndarray, np.ndarray, Tuple[float, float, float]]
-    :param log_p_vec: Vector with log probabilities for each binomial distribution
-    :param log_p1_vec: Optional vector with log one minus probabilities for each binomial distribution (for high-precision)
-    :param count_vec: Vector with the number of draws for each binomial distribution
-    :param ll_eps: Bin spacing is determined so that |LL - floor(LL/space)*space| < ll_eps
-    :param max_len: Maximum number of bins for histogram
-    :return:
-    log_density array
-    corresponding probably array, Tuple[ll0, dll, total_count]
+
+        rtype(Tuple[np.ndarray, np.ndarray, Tuple[float, float, float]])
+
+    Args:
+        log_p_vec: Vector with log probabilities for each binomial distribution
+        log_p1_vec: Optional vector with log one minus probabilities for each binomial distribution (for high-precision)
+        count_vec: Vector with the number of draws for each binomial distribution
+        ll_eps: Bin spacing is determined so that |LL - floor(LL/space)*space| < ll_eps
+        max_len: Maximum number of bins for histogram
+    Returns:
+        log_density array, corresponding probs array, Tuple[ll0, dll, total_count]
     """
     entries = []
 

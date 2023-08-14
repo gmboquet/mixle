@@ -1,34 +1,31 @@
-#import os
-#os.environ['NUMBA_DISABLE_JIT'] =  '1'
-
-from pysp.stats import *
+"""Integer PLSI example on generated data."""
+import sys
 import numpy as np
-from pysp.utils.estimation import empirical_kl_divergence, optimize
+
+import pysp.utils.optsutil as ops
+from pysp.stats import *
+from pysp.utils.estimation import optimize
 
 if __name__ == '__main__':
+    n_docs = 10000
+    num_states = 3
+    num_authors = 10
+    num_words = 50
 
-    num_docs = 200
-    num_words = 20
-    num_states = 5
-    doc_len = 20
+    rng = np.random.RandomState(1)
+    state_word_mat = rng.dirichlet(alpha=np.ones(num_words), size=num_states).T
+    doc_state_mat = rng.dirichlet(alpha=np.ones(num_states), size=num_authors)
+    doc_vec = rng.dirichlet(alpha=np.ones(num_authors))
 
-    rng = np.random.RandomState()
-    state_word_mat = -np.log(rng.rand(num_words, num_states))
-    doc_state_mat  = -np.log(rng.rand(num_docs, num_states))
+    d = IntegerPLSIDistribution(state_word_mat=state_word_mat, doc_state_mat=doc_state_mat, doc_vec=doc_vec,
+                                len_dist=CategoricalDistribution({5: 0.25, 6: 0.25, 10: 0.25, 12: 0.25}))
+    data = d.sampler(seed=10).sample(n_docs)
+    print(data[:10])
 
-    state_word_mat /= state_word_mat.sum(axis=0, keepdims=True)
-    doc_state_mat  /= doc_state_mat.sum(axis=1, keepdims=True)
+    est = IntegerPLSIEstimator(num_vals=num_words, num_states=num_states, num_docs=num_authors,
+                               len_estimator=CategoricalEstimator())
 
-    len_dist = CategoricalDistribution({doc_len: 1.0})
+    fit = optimize(data=data, estimator=est, init_p=0.10, rng=np.random.RandomState(2), max_its=200, print_iter=10)
 
-    dist = IntegerPLSIDistribution(state_word_mat, doc_state_mat, np.ones(num_docs) / num_docs, len_dist)
 
-    data = dist.sampler(1).sample(10000)
-    est = IntegerPLSIEstimator(num_words, num_states, num_docs, len_estimator=CategoricalEstimator(), pseudo_count=(0.01, 0.01, 0.01))
-    model = optimize(data, est, rng=np.random.RandomState(1))
-    enc_data = seq_encode(data, model)
-
-    for i in range(100):
-        model = optimize(data, est, prev_estimate=model, print_iter=10, max_its=10)
-        print(empirical_kl_divergence(dist, model, enc_data))
 

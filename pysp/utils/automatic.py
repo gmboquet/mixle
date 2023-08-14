@@ -1,121 +1,93 @@
+"""Automatic detection of data type for estimators. Note that pysp.bstats is removed. """
 import math
 import numbers
 import numpy as np
 from collections import defaultdict, Iterable
 
+from pysp.stats.pdist import ParameterEstimator
 
-def get_optional_estimator(est, missing_value, use_bstats=False):
-    if use_bstats:
-        from pysp.bstats.optional import OptionalEstimator
-        return OptionalEstimator(est, missing_value=missing_value)
+from typing import Optional, Any, Sequence, Dict, TypeVar, Union
+T = TypeVar('T')
+
+def get_optional_estimator(est: ParameterEstimator, missing_value: Optional[Any] = None):
+    from pysp.stats.optional import OptionalEstimator
+    return OptionalEstimator(est, missing_value=missing_value)
+
+
+def get_sequence_estimator(est: ParameterEstimator) -> 'ParameterEstimator':
+    from pysp.stats.sequence import SequenceEstimator
+    return SequenceEstimator(est)
+
+def get_ignored_estimator() -> 'ParameterEstimator':
+    from pysp.stats.ignored import IgnoredEstimator
+    return IgnoredEstimator()
+
+def get_composite_estimator(ests: Sequence[ParameterEstimator]) -> 'ParameterEstimator':
+    from pysp.stats.composite import CompositeEstimator
+    return CompositeEstimator(ests)
+
+def get_categorical_estimator(vdict: Dict[T, float], pseudo_count: Optional[float] = None, emp_suff_stat: bool = True) \
+        -> 'ParameterEstimator':
+    from pysp.stats.categorical import CategoricalEstimator
+
+    if emp_suff_stat:
+        cnt = sum(vdict.values())
+        suff_stat = {k: v / cnt for k, v in vdict.items()}
     else:
-        from pysp.stats.optional import OptionalEstimator
-        return OptionalEstimator(est, missing_value=missing_value)
+        suff_stat = None
 
+    return CategoricalEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat)
 
-def get_sequence_estimator(est, use_bstats=False):
-    if use_bstats:
-        from pysp.bstats.sequence import SequenceEstimator
-        return SequenceEstimator(est)
-    else:
-        from pysp.stats.sequence import SequenceEstimator
-        return SequenceEstimator(est)
+def get_poisson_estimator(vdict: Dict[int, float], pseudo_count: Optional[float] = None, emp_suff_stat: bool = True) \
+        -> 'ParameterEstimator':
 
-def get_ignored_estimator(use_bstats=False):
-    if use_bstats:
-        from pysp.bstats.ignored import IgnoredEstimator
-        return IgnoredEstimator()
-    else:
-        from pysp.stats.ignored import IgnoredEstimator
-        return IgnoredEstimator()
+    from pysp.stats.poisson import PoissonEstimator
 
-def get_composite_estimator(ests, use_bstats=False):
-    if use_bstats:
-        from pysp.bstats.composite import CompositeEstimator
-        return CompositeEstimator(ests)
-    else:
-        from pysp.stats.composite import CompositeEstimator
-        return CompositeEstimator(ests)
+    if emp_suff_stat:
+        ss_0 = 0.0
+        ss_1 = 0.0
 
-def get_categorical_estimator(vdict, pseudo_count=None, emp_suff_stat=True, use_bstats=False):
+        for k, v in vdict.items():
+            if math.isfinite(k):
+                ss_0 += v
+                ss_1 += k * v
 
-    if not use_bstats:
+        ss_1 = ss_1 / ss_0
 
-        from pysp.stats.categorical import CategoricalEstimator
-
-        if emp_suff_stat:
-            cnt = sum(vdict.values())
-            suff_stat = {k: v / cnt for k, v in vdict.items()}
-        else:
-            suff_stat = None
-
-
-        return CategoricalEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat)
-
-    else:
-        from pysp.bstats.categorical import CategoricalEstimator
-
-        return CategoricalEstimator()
-
-
-def get_poisson_estimator(vdict, pseudo_count=None, emp_suff_stat=True, use_bstats=False):
-
-    if use_bstats:
-        from pysp.bstats.poisson import PoissonEstimator
-        return PoissonEstimator()
-    else:
-
-        from pysp.stats.poisson import PoissonEstimator
-
-        if emp_suff_stat:
-            ss_0 = 0.0
-            ss_1 = 0.0
-
-            for k, v in vdict.items():
-                if math.isfinite(k):
-                    ss_0 += v
-                    ss_1 += k * v
-
-            ss_1 = ss_1 / ss_0
-
-        elif pseudo_count is not None:
-            ss_1 = 1.0
-
-        else:
-            ss_1 = None
-
-        return PoissonEstimator(pseudo_count=pseudo_count, suff_stat=ss_1)
-
-
-def get_gaussian_estimator(vdict, pseudo_count=None, emp_suff_stat=True, use_bstats=False):
-
-    if use_bstats:
-        from pysp.bstats.gaussian import GaussianEstimator
-        return GaussianEstimator()
+    elif pseudo_count is not None:
+        ss_1 = 1.0
 
     else:
-        from pysp.stats.gaussian import GaussianEstimator
+        ss_1 = None
 
-        if emp_suff_stat:
-            ss_0 = 0.0
-            ss_1 = 0.0
-            ss_2 = 0.0
-            for k, v in vdict.items():
-                if math.isfinite(k):
-                    ss_0 += v
-                    ss_1 += k*v
-                    ss_2 += k*k*v
-            ss_1 = ss_1 / ss_0
-            ss_2 = (ss_2 / ss_0) - ss_1*ss_1
+    return PoissonEstimator(pseudo_count=pseudo_count, suff_stat=ss_1)
 
-        elif pseudo_count is not None:
-            ss_1 = 1.0e-6
-            ss_2 = 1.0e-6
-        else:
-            ss_1 = None
-            ss_2 = None
 
-        return GaussianEstimator(pseudo_count=(pseudo_count, pseudo_count), suff_stat=(ss_1, ss_2))
+def get_gaussian_estimator(vdict: Dict[Union[np.floating, float], float], pseudo_count: Optional[float] = None,
+                           emp_suff_stat: bool = True) -> 'ParameterEstimator':
+
+    from pysp.stats.gaussian import GaussianEstimator
+
+    if emp_suff_stat:
+        ss_0 = 0.0
+        ss_1 = 0.0
+        ss_2 = 0.0
+        for k, v in vdict.items():
+            if math.isfinite(k):
+                ss_0 += v
+                ss_1 += k*v
+                ss_2 += k*k*v
+        ss_1 = ss_1 / ss_0
+        ss_2 = (ss_2 / ss_0) - ss_1*ss_1
+
+    elif pseudo_count is not None:
+        ss_1 = 1.0e-6
+        ss_2 = 1.0e-6
+    else:
+        ss_1 = None
+        ss_2 = None
+
+    return GaussianEstimator(pseudo_count=(pseudo_count, pseudo_count), suff_stat=(ss_1, ss_2))
 
 class DatumNode(object):
 
@@ -163,7 +135,6 @@ class DatumNode(object):
         rv.vdict = self.vdict.copy()
         return rv
 
-
     def merge(self, x):
 
         self.count += x.count
@@ -210,78 +181,53 @@ class DatumNode(object):
         else:
             self.obj_count += v
 
-    def get_estimator(self, pseudo_count=1.0, emp_suff_stat=True, use_bstats=False):
+    def get_estimator(self, pseudo_count: Optional[float] = 1.0, emp_suff_stat: bool = True):
         # Value Type Node
-        rv = get_ignored_estimator(use_bstats)
+        rv = get_ignored_estimator()
 
         if len(self.children) == 0 and len(self.vdict) > 0:
             if self.obj_count > 0:
-                rv = get_ignored_estimator(use_bstats)
+                rv = get_ignored_estimator()
             elif self.str_count > 0:
-                rv = get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats)
+                rv = get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat)
             elif self.float_count > 0:
-                rv = get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats)
+                rv = get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat)
             elif self.int_count > 0:
                 if self.neg_count > 0:
-                    rv = get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats)
+                    rv = get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat)
                 else:
-                    rv = get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats)
+                    rv = get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat)
                     # More checking before we use this
                     #rv = get_poisson_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats)
             else:
-                rv = get_ignored_estimator(use_bstats)
+                rv = get_ignored_estimator()
 
         # Lists of Same Size
-        elif len(self.children) > 0 and len(set([u.count for u in self.children])) == 1 and all([u.count==self.count for u in self.children]):
-            rv = get_composite_estimator([u.get_estimator(pseudo_count, emp_suff_stat, use_bstats) for u in self.children], use_bstats)
+        elif len(self.children) > 0 and len(set([u.count for u in self.children])) == 1 and \
+                all([u.count == self.count for u in self.children]):
+            rv = get_composite_estimator([u.get_estimator(pseudo_count, emp_suff_stat) for u in self.children])
 
         # Lists of Different Size
         elif len(self.children) > 0 and len(set([u.count for u in self.children])) > 1:
             child = self.children[0].copy()
             for u in self.children[1:]:
                 child = child.merge(u)
-            rv = get_sequence_estimator(child.get_estimator(pseudo_count, emp_suff_stat, use_bstats), use_bstats)
+            rv = get_sequence_estimator(child.get_estimator(pseudo_count, emp_suff_stat))
 
         if self.none_count > 0:
-            rv = get_optional_estimator(rv, None, use_bstats)
+            rv = get_optional_estimator(rv, None)
 
         if self.nan_count > 0:
-            rv = get_optional_estimator(rv, math.nan, use_bstats)
+            rv = get_optional_estimator(rv, math.nan)
 
         return rv
 
-    def _get_child_node(self, idx):
+    def _get_child_node(self, idx: int):
         while len(self.children) <= idx:
             self.children.append(DatumNode(self))
         return self.children[idx]
 
+def get_estimator(data, pseudo_count: Optional[float] = 1.0, emp_suff_stat: bool = True):
+    return DatumNode(data=data).get_estimator(pseudo_count, emp_suff_stat)
 
 
-
-def get_estimator(data, pseudo_count=1.0, emp_suff_stat=True, use_bstats=True):
-    return DatumNode(data=data).get_estimator(pseudo_count, emp_suff_stat, use_bstats)
-
-
-def get_dpm_mixture(data, estimator=None, max_comp=20, rng=None, max_its=1000, print_iter=100, mix_threshold_count=0.5):
-
-    from pysp.bstats.dpm import DirichletProcessMixtureEstimator
-    from pysp.bstats.mixture import MixtureDistribution
-    from pysp.bstats.bestimation import optimize
-
-    if estimator is None:
-        est = get_estimator(data, use_bstats=True)
-    else:
-        est = estimator
-
-    est = DirichletProcessMixtureEstimator([est]*max_comp)
-
-    mix_model = optimize(data, est, max_its=max_its, rng=rng, print_iter=print_iter)
-
-    thresh = mix_threshold_count/len(data)
-    mix_comps = [mix_model.components[i] for i in np.flatnonzero(mix_model.w >= thresh)]
-    mix_weights = mix_model.w[mix_model.w >= thresh]
-
-    print(str(mix_weights))
-    print('# Components = %d' % (len(mix_comps)))
-
-    return MixtureDistribution(mix_comps, mix_weights)

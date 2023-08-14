@@ -1,5 +1,7 @@
+"""Generate data and fit a hierarchical mixture model. This is a mixture sequence mixture distribution."""
 import numpy as np
-
+import os
+os.environ['NUMBA_DISABLE_JIT'] = '1'
 from pysp.stats import *
 from pysp.utils.estimation import optimize, partition_data
 
@@ -39,5 +41,4 @@ if __name__ == '__main__':
     est = HierarchicalMixtureEstimator([est0]*num_topics, num_mixtures, len_estimator=est1)
 
     model = optimize(data, est, max_its=10000, print_iter=500, rng=np.random.RandomState(2))
-
     print(str(model))

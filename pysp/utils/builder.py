@@ -1,54 +1,53 @@
 from pysp.stats import *
-import numpy as np # This is for the eval-lambdas
+from typing import Optional, Tuple
 
-def read_index_csv(filename):
-	fin   = open(filename, 'r')
-	lines = map(lambda v: v.split('#',1)[0].split(',', 3), fin.read().split('\n'))
-	fin.close()
-	lines = filter(lambda v: len(v) == 4, lines)
+def read_index_csv(filename: str):
+    fin = open(filename, 'r')
+    lines = map(lambda v: v.split('#', 1)[0].split(',', 3), fin.read().split('\n'))
+    fin.close()
+    lines = filter(lambda v: len(v) == 4, lines)
 
-	return lines
+    return lines
 
 
 def get_indexed_rdd_pne(field_info=None, filename=None):
+    if filename is not None and field_info is None:
+        field_info = read_index_csv(filename)
 
-	if filename is not None and field_info is None:
-		field_info = read_index_csv(filename)
+    def entry_lambda(idx, map_str):
+        if map_str != '':
+            temp_lambda0 = eval('lambda x: ' + map_str)
+            temp_lambda = lambda u: temp_lambda0(u[idx])
+        else:
+            temp_lambda = lambda u: u[idx]
 
-	def entry_lambda(idx, mapstr):
-		if mapstr != '':
-			tempLambda0 = eval('lambda x: ' + mapstr)
-			tempLambda  = lambda u: tempLambda0(u[idx])
-		else:
-			tempLambda = lambda u: u[idx]
+        def ff(entry):
+            rv = temp_lambda(entry)
+            return rv
 
-		def ff(entry):
-			rv = tempLambda(entry)
-			return rv
+        return ff
 
-		return ff
+    parser_list = []
+    estimator_list = []
+    max_idx = -1
 
-	parser_list    = []
-	estimator_list = []
-	maxidx         = -1
+    for entry in field_info:
+        idx, name, lam, dist = entry
+        estimator = eval(dist)
 
-	for entry in field_info:
-		idx, name, lam, dist = entry
-		estimator = eval(dist)
+        if estimator is not None:
+            idx_i = int(idx)
+            parser_list.append(entry_lambda(idx_i, lam.strip()))
+            estimator_list.append(estimator)
+            max_idx = idx_i if idx_i > max_idx else max_idx
 
-		if estimator is not None:
-			idxi = int(idx)
-			parser_list.append(entry_lambda(idxi, lam.strip()))
-			estimator_list.append(estimator)
-			maxidx = idxi if idxi > maxidx else maxidx
+    def line_parser(line: str):
+        parts = line.split(',')
+        if len(parts) < (max_idx + 1):
+            return None
+        else:
+            return tuple([parser(parts) for parser in parser_list])
 
-	def line_parser(line):
-		parts = line.split(',')
-		if len(parts) < (maxidx+1):
-			return None
-		else:
-			return tuple([parser(parts) for parser in parser_list])
+    estimator = CompositeEstimator(tuple(estimator_list))
 
-	estimator = CompositeEstimator(tuple(estimator_list))
-
-	return estimator,line_parser
+    return estimator, line_parser

@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="pysparkplug",
-    version="0.1.8.5",
+    version="0.1.9.0",
     description="A package for estimating heterogeneous probability density functions.",
     author="Grant Boquet",
     author_email="grant.boquet@gmail.com",
@@ -27,9 +27,8 @@ setup(
         "numba",
         "mpmath",
         "pandas",
-        #"pyspark",
+        "pyspark",
         "tbb",
     ],
-    # ext_package='pysp',
-    # ext_modules=[Extension('c_ext', ['extensions/lda.c'])],
+
 )

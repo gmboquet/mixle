@@ -1,7 +1,9 @@
+import os
+os.environ['NUMBA_DISABLE_JIT'] = '1'
 import numpy as np
-
 from pysp.stats import *
-from pysp.utils.estimation import optimize, partition_data
+from pysp.utils.estimation import optimize
+
 
 if __name__ == '__main__':
 
@@ -23,7 +25,8 @@ if __name__ == '__main__':
     est1 = CategoricalEstimator()
     est  = ConditionalDistributionEstimator({'a': est0, 'b': est0}, default_estimator=est0, given_estimator=est1)
 
-    model = estimate(data, est)
+    init = initialize(data, est, rng=np.random.RandomState(2), p=0.10)
+    model = estimate(data, est, prev_estimate=init)
     print(str(model))
 
     model = optimize(data, est)

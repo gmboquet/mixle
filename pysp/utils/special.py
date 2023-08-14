@@ -1,3 +1,4 @@
+"""Defines the log-pseudo-determinant, polgamma, trigamma, and digamma inverse functions."""
 from scipy.special import gammaln
 from scipy.special import gammaln, betaln, beta
 from scipy.special import digamma, psi  # as digammaS0
@@ -5,34 +6,28 @@ from scipy.special import zeta, gamma, polygamma
 import numpy as np
 import math
 from pysp.arithmetic import *
+from typing import Union, Optional, Any, List, Iterable
+
+D1 = digamma(1.0)
 
 
-def logpdet(X: np.ndarray) -> float:
+def logpdet(x_mat: np.ndarray) -> float:
+    """Computes the log-pseudo-determinant for a symmetric dense matrix.
+
+    Args:
+        x_mat (np.ndarray): 2-d Numpy array representing a matrix.
+
+    Returns:
+        float, log-pseudo-determinant.
+
     """
-	Computes the log-pseudo-determinant for a symmetric dense matrix.
-    :param X:
-    :return: float, log-pseudo-determinant
-    """
-    eigs = np.abs(np.linalg.eig(X))
+    eigs = np.abs(np.linalg.eig(x_mat))
     eigs = eigs[eigs != 0]
 
     if len(eigs) > 0:
         return float(np.sum(np.log(eigs)))
     else:
         return -math.inf
-
-
-def stirling2(n: int, k: int) -> int:
-    assert n > 0 and k > 0
-
-    if n == 0 and k == 0:
-        return 1
-    elif n == 0:
-        return 0
-    elif k == 0:
-        return 0
-    else:
-        return k * stirling2(n - 1, k) + stirling2(n - 1, k - 1)
 
 
 def polygamma_loc(n, y, out=None):
@@ -45,55 +40,31 @@ def polygamma_loc(n, y, out=None):
     return fac2
 
 
-def trigamma(y, out=None):
+def trigamma(y: Union[np.ndarray, int, float, Iterable, List[float]], out: Optional[np.ndarray] = None) \
+        -> Union[np.ndarray, float]:
+    """Trigamma function.
+
+    Args:
+        y (Array-like): An array-like or float/int.
+        out (np.ndarray); Store output in this variable.
+
+    Returns:
+        Numpy array of trigamma function evaluated at y.
+
+    """
     return zeta(2, y, out=out)
 
+def digammainv(y: Union[np.ndarray, float], out: Optional[np.ndarray] = None) -> Union[np.ndarray, float]:
+    """Inverse digamma function evaluated on y.
 
-'''
-def digammaS1(y):
-    if y <= 0.0:
-        return -inf
-    else:
-        return digammaS0(y)
+    Args:
+        y (Union[np.ndarray, float]): Numpy array of values to be evaluated or single value.
+        out (Optional[np.ndarray]): Deprecated. Kept for consistency with other files.
 
-digammaS2 = vectorize(digammaS1)
+    Returns:
+        Numpy array if y is numpy array else float.
 
-def digamma(y):
-    return digammaS2(y)
-'''
-
-'''
-def digammainv(y, res=1.0e-6):
-
-    if y == -inf:
-        return 0.0
-
-    x = (exp(y) + half) if y >= -2.22 else (-one/(y-digamma(one)))
-
-    temp = digamma(x)-y
-    ee = abs(temp)
-    maxIts = 20
-    while maxIts != 0 and ee > res:
-        maxIts -= 1
-        #x = x - ((digamma(x) - y) / trigamma(x))
-        x -= ((temp) / trigamma(x))
-        temp = digamma(x) - y
-        #ee = abs(digamma(x) - y)
-        ee = abs(temp)
-
-        #if ee > res:
-        #    break
-
-    return x
-'''
-
-digamma1 = digamma(1.0)
-
-
-def digammainv(y, out=None):
-    # if y == -inf:
-    #    return 0.0
-
+    """
     if isinstance(y, np.ndarray):
 
         rv = np.zeros(y.shape, dtype=float)
@@ -102,7 +73,7 @@ def digammainv(y, out=None):
         Q = np.isfinite(y)
         z = y[Q]
         M = (z >= -2.22)
-        x = M * (exp(z) + 0.5) + (1.0 - M) * (-1.0 / (z - digamma1))
+        x = M * (exp(z) + 0.5) + (1.0 - M) * (-1.0 / (z - D1))
 
         t1 = np.zeros(x.shape, dtype=float)
         t2 = np.zeros(x.shape, dtype=float)
@@ -124,9 +95,8 @@ def digammainv(y, out=None):
         x = rv
 
     else:
-
-        M = (y >= -2.22)
-        x = M * (exp(y) + 0.5) + (1.0 - M) * (-1.0 / (y - digamma1))
+        m = (y >= -2.22)
+        x = m * (exp(y) + 0.5) + (1.0 - m) * (-1.0 / (y - D1))
 
         x -= ((digamma(x) - y) / trigamma(x))
         x -= ((digamma(x) - y) / trigamma(x))

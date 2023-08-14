@@ -20,9 +20,12 @@ if __name__ == '__main__':
 
     data = dist.sampler(1).sample(500)
 
-    est = IntegerHiddenAssociationEstimator(4, 2)
+    len_est = CategoricalEstimator()
+    prev_est = IntegerMultinomialEstimator(min_val=0, len_estimator=len_est)
+    est = IntegerHiddenAssociationEstimator(4, 2, prev_estimator=prev_est, len_estimator=len_est, use_numba=False)
+
     model = optimize(data, est, max_its=1, rng=np.random.RandomState(1))
     t0 = time.time()
-    model = optimize(data, est, max_its=500, prev_estimate=model)
+    model = optimize(data, est, max_its=500, print_iter=50, prev_estimate=model, init_p=1.0)
     print(time.time() - t0)
     print(str(model))
