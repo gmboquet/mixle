@@ -1,100 +1,144 @@
+"""Defines abstract classes for SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator,
+ProbabilityDistribution, StatisticAccumulator, StatisticAccumulatorFactory, DataSequenceEncoder, ParameterEstimator,
+ConditionalSampler, and DistributionSampler for classes of the pysp.stats.
+
+"""
 import math
 import numpy as np
-from pysp.arithmetic import maxrandint
+from abc import abstractmethod
+from pysp.arithmetic import *
+from typing import TypeVar, Optional, Any, Generic, Dict
 
-class ProbabilityDistribution(object):
-
-	def __init__(self):
-		pass
-
-	def __repr__(self):
-		return self.__str__()
-
-	def density(self, x) -> float:
-		return math.exp(self.log_density(x))
-
-	def log_density(self, x) -> float:
-		pass
-
-	def sampler(self, seed=None):
-		pass
-
-	def estimator(self, pseudo_count=None):
-		pass
+SS = TypeVar('SS')
 
 
-class DistributionSampler(object):
+class ProbabilityDistribution:
 
-	def __init__(self, dist, seed=None):
-		self.dist = dist
-		self.rng  = np.random.RandomState(seed)
+    def __init__(self) -> None:
+        pass
 
-	def new_seed(self):
-		return self.rng.randint(0, maxrandint)
+    def __repr__(self) -> str:
+        return self.__str__()
 
-	def sample(self, size=None):
-		pass
+    @abstractmethod
+    def density(self, x: Any) -> float:
+        return math.exp(self.log_density(x))
 
+    @abstractmethod
+    def log_density(self, x: Any) -> float: ...
 
-class ConditionalSampler(object):
+    @abstractmethod
+    def sampler(self, seed: Optional[int] = None) -> 'DistributionSampler':
+        ...
 
-	def sample_given(self, x):
-		pass
-
-
-class StatisticAccumulator(object):
-
-	def update(self, x, weight, estimate):
-		pass
-
-	def initialize(self, x, weight, rng):
-		self.update(x, weight, estimate=None)
-
-	def combine(self, suff_stat):
-		pass
-
-	def value(self):
-		pass
-
-	def from_value(self, x):
-		pass
-
-	def key_merge(self, stats_dict):
-		pass
-
-	def key_replace(self, stats_dict):
-		pass
-
-class StatisticAccumulatorFactory(object):
-
-	def make(self):
-		pass
-
-class ParameterEstimator(object):
-
-	def estimate(self, nobs, suff_stat):
-		pass
-
-	def accumulatorFactory(self):
-		pass
+    @abstractmethod
+    def estimator(self, pseudo_count: Optional[float] = None) -> 'ParameterEstimator':
+        ...
 
 
 class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
 
-	def seq_log_density(self, x):
-		return np.asarray([self.log_density(u) for u in x])
+    def seq_ld_lambda(self):
+        pass
 
-	def seq_log_density_lambda(self):
-		return [self.seq_log_density]
+    def seq_log_density(self, x: Any) -> np.ndarray:
+        return np.asarray([self.log_density(u) for u in x])
 
-	def seq_encode(self, x):
-		return x
+    def seq_log_density_lambda(self):
+        return [self.seq_log_density]
+
+    @abstractmethod
+    def dist_to_encoder(self) -> 'DataSequenceEncoder': ...
 
 
-class SequenceEncodableStatisticAccumulator(StatisticAccumulator):
+class DistributionSampler(object):
 
-	def get_seq_lambda(self):
-		pass
+    def __init__(self, dist: SequenceEncodableProbabilityDistribution, seed: Optional[int] = None) -> None:
+        self.dist = dist
+        self.rng = np.random.RandomState(seed)
 
-	def seq_update(self, x, weights, estimate):
-		pass
+    def new_seed(self) -> int:
+        return self.rng.randint(0, maxrandint)
+
+    @abstractmethod
+    def sample(self, size: Optional[int] = None) -> Any: ...
+
+
+class ConditionalSampler(object):
+    @abstractmethod
+    def sample_given(self, x): ...
+
+
+class StatisticAccumulator(Generic[SS]):
+
+    def update(self, x: Any, weight: float, estimate) -> None:
+        ...
+
+    def initialize(self, x: Any, weight: float, rng: np.random.RandomState) -> None:
+        self.update(x, weight, estimate=None)
+
+    @abstractmethod
+    def combine(self, suff_stat: SS) -> 'StatisticAccumulator':
+        ...
+
+    @abstractmethod
+    def value(self) -> SS:
+        ...
+
+    @abstractmethod
+    def from_value(self, x: SS) -> 'SequenceEncodableStatisticAccumulator':
+        ...
+
+    @abstractmethod
+    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+        ...
+
+    @abstractmethod
+    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+        ...
+
+
+class SequenceEncodableStatisticAccumulator(StatisticAccumulator[SS]):
+
+    def get_seq_lambda(self):
+        pass
+
+    @abstractmethod
+    def seq_update(self, x, weights: np.ndarray, estimate) -> None: ...
+
+    @abstractmethod
+    def seq_initialize(self, x, weights: np.ndarray, rng: np.random.RandomState) -> None: ...
+
+    @abstractmethod
+    def acc_to_encoder(self) -> 'DataSequenceEncoder': ...
+
+class StatisticAccumulatorFactory(object):
+
+    @abstractmethod
+    def make(self) -> 'SequenceEncodableStatisticAccumulator': ...
+
+
+class ParameterEstimator(Generic[SS]):
+
+    @abstractmethod
+    def estimate(self, nobs: Optional[float], suff_stat: SS) -> 'SequenceEncodableProbabilityDistribution': ...
+
+    @abstractmethod
+    def accumulator_factory(self) -> 'StatisticAccumulatorFactory': ...
+
+
+class DataSequenceEncoder:
+
+    def __str__(self) -> str:
+        return self.__str__()
+
+    def seq_encode(self, x: Any) -> Any:
+        return x
+
+    @abstractmethod
+    def __eq__(self, other: object) -> bool: ...
+
+
+
+
+
