@@ -352,7 +352,9 @@ def _tsne_barnes_hut(dist_csr: scipy.sparse.csr_matrix, emb_dim: int, perplexity
                      max_its: int, eta, early_exaggeration: float,
                      seed: Optional[int], Y: Optional[np.ndarray]) -> np.ndarray:
     from sklearn.manifold import TSNE
+    from sklearn.neighbors import sort_graph_by_row_values
 
+    dist_csr = sort_graph_by_row_values(dist_csr, warn_when_not_sorted=False)
     init = Y if Y is not None else 'random'
     learning_rate = 'auto' if eta is None else float(eta)
 
@@ -381,7 +383,7 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
     method:
         'exact'      - full-matrix gradient descent (supports optimize_alpha)
         'barnes_hut' - sparse kNN distances + scikit-learn Barnes-Hut t-SNE
-        'auto'       - barnes_hut for n > 1500 unless optimize_alpha is set
+        'auto'       - barnes_hut for n > 10 unless optimize_alpha is set
 
     Returns the n x emb_dim embedding.
     """
@@ -398,11 +400,13 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
     n = z_ij.shape[0]
 
     if method == 'auto':
-        method = 'exact' if (optimize_alpha or n <= 1500) else 'barnes_hut'
+        method = 'exact' if (optimize_alpha or n <= 10) else 'barnes_hut'
 
     if method == 'barnes_hut':
+        # sklearn requires int(3*perplexity + 1) + 1 neighbors per row of the
+        # precomputed graph (self excluded), so cap perplexity accordingly
         px = 30.0 if perplexity is None else float(perplexity)
-        px = min(px, (n - 2) / 3.0)
+        px = min(px, (n - 4) / 3.0)
         k = min(n - 1, int(3.0 * px) + 5)
         dist_csr = sparse_model_distances(z_ij, l_ij, k=k)
         return _tsne_barnes_hut(dist_csr, emb_dim, px, max_its, eta,
