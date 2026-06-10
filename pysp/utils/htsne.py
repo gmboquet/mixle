@@ -52,31 +52,105 @@ import numpy as np
 import scipy.sparse
 
 __all__ = ['htsne', 'humap', 'dpmsne', 'model_log_affinity', 'sparse_model_distances',
-           'model_knn', 'get_pmat']
+           'model_knn', 'get_pmat', 'balanced_factors']
 
 
-def _affinity_factors(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray],
-                      affinity: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Factor the affinity matrix as S = G H^T (up to immaterial per-row scale).
+def _affinity_factors(posterior_mat, ll_mat, affinity):
+    """Factor the log-affinity as log S = sum_f log(G_f H_f^T), returned as a
+    list of (G_f, H_f) pairs (up to immaterial per-row scale).
 
-    Row-conditional normalization and per-row perplexity calibration are
-    invariant to per-row scaling of S, so 'likelihood' rows are max-shifted
-    for numerical stability.
+    The single-factor modes return one pair; 'balanced' (built by
+    balanced_factors) supplies one pair per composite field.
     """
+    if isinstance(affinity, list):
+        return affinity                      # pre-built factor list
+
     z = np.asarray(posterior_mat, dtype=np.float64)
 
     if affinity == 'coassign':
-        return z, z
+        return [(z, z)]
     if affinity == 'bhattacharyya':
         zs = np.sqrt(z)
-        return zs, zs
+        return [(zs, zs)]
     if affinity == 'likelihood':
         if ll_mat is None:
             raise ValueError("affinity='likelihood' requires the component log-likelihood matrix.")
         l = np.asarray(ll_mat, dtype=np.float64)
-        return np.exp(l - l.max(axis=1, keepdims=True)), z
+        return [(np.exp(l - l.max(axis=1, keepdims=True)), z)]
 
-    raise ValueError("affinity must be one of 'coassign', 'bhattacharyya', 'likelihood'.")
+    raise ValueError("affinity must be 'coassign', 'bhattacharyya', 'likelihood', "
+                     "'balanced', or a pre-built factor list.")
+
+
+def balanced_factors(mix_model, data, field_weights=None):
+    """Per-field Bhattacharyya affinity factors for mixed-type composites.
+
+    In a composite, the joint posterior is dominated by whichever field has
+    the largest log-likelihood contrast across components - sharp categorical
+    or token-sequence fields contribute many nats per observation while
+    overlapping continuous fields contribute fractions of one, or a collapsed
+    continuous component contributes thousands. The drowned fields'
+    relationships then become invisible to the affinity.
+
+    'balanced' fixes the scale problem at the affinity level: a *field-
+    restricted* posterior z^f is computed from each field's likelihoods alone,
+    and the affinity is the (weighted) geometric mean of per-field
+    Bhattacharyya coefficients, so every field contributes comparably
+    regardless of its likelihood scale.
+    """
+    comps = list(mix_model.components)
+    first = comps[0]
+    if not hasattr(first, 'dists'):
+        raise ValueError("affinity='balanced' requires mixture components that are "
+                         'composite distributions (with a .dists attribute).')
+    n_fields = len(first.dists)
+    log_w = np.asarray(mix_model.log_w, dtype=np.float64).reshape(1, -1)
+
+    if field_weights is None:
+        field_weights = [1.0] * n_fields
+
+    factors = []
+    for f in range(n_fields):
+        fdists = [c.dists[f] for c in comps]
+        fdata = [x[f] for x in data]
+        if hasattr(fdists[0], 'dist_to_encoder'):
+            enc_f = fdists[0].dist_to_encoder().seq_encode(fdata)
+        else:
+            enc_f = fdists[0].seq_encode(fdata)
+        l_f = np.asarray([d.seq_log_density(enc_f) for d in fdists], dtype=np.float64).T
+
+        z_f = l_f + log_w
+        z_f -= z_f.max(axis=1, keepdims=True)
+        np.exp(z_f, out=z_f)
+        z_f /= z_f.sum(axis=1, keepdims=True)
+
+        sq = np.sqrt(z_f) ** field_weights[f]
+        factors.append((sq, sq))
+
+    return factors
+
+
+def _resolve_affinity(affinity, mix_model, data, field_weights):
+    """Resolve 'auto'/'balanced' to a concrete affinity for the given model.
+
+    'auto' uses per-field balancing whenever the mixture components are
+    composite (mixed-type) records and raw data is available to split into
+    fields, since a single sharp field otherwise dominates the joint
+    posterior; for everything else it uses 'bhattacharyya'.
+    """
+    if affinity == 'auto':
+        comps = getattr(mix_model, 'components', None)
+        if comps is not None and hasattr(comps[0], 'dists') and data is not None:
+            affinity = 'balanced'
+        else:
+            affinity = 'bhattacharyya'
+
+    if affinity == 'balanced':
+        if data is None:
+            raise ValueError("affinity='balanced' requires the raw data to extract per-field values.")
+        return balanced_factors(mix_model, data, field_weights=field_weights)
+
+    return affinity
 
 
 def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.ndarray, np.ndarray]:
@@ -115,11 +189,13 @@ def model_log_affinity(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] =
     Rows are comparable up to a per-row shift, which both the row-conditional
     normalization and per-row perplexity calibration are invariant to.
     """
-    g, h = _affinity_factors(posterior_mat, ll_mat, affinity)
-    n = g.shape[0]
+    factors = _affinity_factors(posterior_mat, ll_mat, affinity)
+    n = factors[0][0].shape[0]
 
+    log_s = np.zeros((n, n))
     with np.errstate(divide='ignore'):
-        log_s = np.log(np.dot(g, h.T))
+        for g, h in factors:
+            log_s += np.log(np.dot(g, h.T))
     log_s[np.arange(n), np.arange(n)] = -np.inf
 
     return log_s
@@ -216,23 +292,26 @@ def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarra
     non-negative; any per-row shift is immaterial because t-SNE's perplexity
     calibration is per row.
     """
-    g, h = _affinity_factors(posterior_mat, ll_mat, affinity)
-    n = g.shape[0]
+    factors = _affinity_factors(posterior_mat, ll_mat, affinity)
+    n = factors[0][0].shape[0]
     k = min(k, n - 1)
 
     rows = np.repeat(np.arange(n), k)
     cols = np.empty(n * k, dtype=np.int64)
     vals = np.empty(n * k, dtype=np.float64)
 
-    ht = h.T
+    hts = [h.T for _, h in factors]
     for s0 in range(0, n, block_size):
         s1 = min(s0 + block_size, n)
-        s_blk = np.dot(g[s0:s1], ht)                # affinities, up to per-row scale
-        s_blk[np.arange(s1 - s0), np.arange(s0, s1)] = 0.0
+        log_s = np.zeros((s1 - s0, n))
+        with np.errstate(divide='ignore'):
+            for (g, _), ht in zip(factors, hts):
+                log_s += np.log(np.maximum(np.dot(g[s0:s1], ht), 1.0e-300))
+        log_s[np.arange(s1 - s0), np.arange(s0, s1)] = -np.inf
+        s_blk = log_s
 
         nbr = np.argpartition(-s_blk, k - 1, axis=1)[:, :k]
-        np.maximum(s_blk, 1.0e-300, out=s_blk)
-        log_s = np.log(s_blk)
+        log_s = s_blk
 
         for bi, i in enumerate(range(s0, s1)):
             c = nbr[bi]
@@ -252,8 +331,8 @@ def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k:
     expected by umap-learn, where self counts toward n_neighbors). Built
     blockwise; the dense affinity matrix is never materialized.
     """
-    g, h = _affinity_factors(posterior_mat, ll_mat, affinity)
-    n = g.shape[0]
+    factors = _affinity_factors(posterior_mat, ll_mat, affinity)
+    n = factors[0][0].shape[0]
     k = min(k, n)
     m = k - 1  # non-self neighbors
 
@@ -262,15 +341,17 @@ def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k:
     knn_idx[:, 0] = np.arange(n)
     knn_dist[:, 0] = 0.0
 
-    ht = h.T
+    hts = [h.T for _, h in factors]
     for s0 in range(0, n, block_size):
         s1 = min(s0 + block_size, n)
-        s_blk = np.dot(g[s0:s1], ht)
-        s_blk[np.arange(s1 - s0), np.arange(s0, s1)] = 0.0
+        log_s = np.zeros((s1 - s0, n))
+        with np.errstate(divide='ignore'):
+            for (g, _), ht in zip(factors, hts):
+                log_s += np.log(np.maximum(np.dot(g[s0:s1], ht), 1.0e-300))
+        log_s[np.arange(s1 - s0), np.arange(s0, s1)] = -np.inf
+        s_blk = log_s
 
         nbr = np.argpartition(-s_blk, m - 1, axis=1)[:, :m]
-        np.maximum(s_blk, 1.0e-300, out=s_blk)
-        log_s = np.log(s_blk)
 
         for bi, i in enumerate(range(s0, s1)):
             c = nbr[bi]
@@ -453,7 +534,8 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
           optimize_alpha: bool = False, min_alpha: float = 1.0e-6, max_alpha_its: int = 3,
           seed: Optional[int] = None, mix_model=None, enc_data=None, method: str = 'auto',
           early_exaggeration: float = 12.0, tol: float = 1.0e-7, dpm_max_its: int = 200,
-          affinity: str = 'bhattacharyya', out=None, variable_length: bool = False):
+          affinity='auto', field_weights=None, out=None,
+          variable_length: bool = False):
     """Embed heterogeneous data with model-based t-SNE.
 
     A mixture model is fit to the data (a Dirichlet process mixture with
@@ -467,12 +549,18 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
         'auto'       - barnes_hut for n > 10 unless optimize_alpha is set
 
     affinity:
-        'bhattacharyya' (default) - Bhattacharyya coefficient between
-            posteriors; graded even under hard assignments, so embeddings
-            retain within-cluster geometry
+        'auto' (default) - 'balanced' for composite (mixed-type) components
+            when raw data is available, else 'bhattacharyya'
+        'bhattacharyya' - Bhattacharyya coefficient between joint posteriors;
+            graded even under hard assignments, so embeddings retain
+            within-cluster geometry
         'coassign'   - co-assignment probability P(z_i = z_j | x); exact but
             near-binary when posteriors are sharp
         'likelihood' - predictive affinity sum_k p(x_i|theta_k) z_jk
+        'balanced'   - for composite (mixed-type) records: per-field
+            posteriors combined by geometric-mean Bhattacharyya, so a sharp
+            discrete field cannot drown an overlapping continuous one (or
+            vice versa); optional field_weights sets per-field exponents
 
     Returns the n x emb_dim embedding.
     """
@@ -484,6 +572,8 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
         mix_model = get_dpm_mixture(data, rng=np.random.RandomState(seed),
                                     max_components=max_components, max_its=dpm_max_its,
                                     print_iter=print_iter, out=out)
+
+    affinity = _resolve_affinity(affinity, mix_model, data, field_weights)
 
     z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
     n = z_ij.shape[0]
@@ -512,8 +602,8 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
 def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
           max_components: int = 50, seed: Optional[int] = None, mix_model=None,
           enc_data=None, dpm_max_its: int = 200, print_iter: int = 100,
-          affinity: str = 'bhattacharyya', n_epochs: Optional[int] = None, out=None,
-          **umap_kwargs):
+          affinity='auto', field_weights=None,
+          n_epochs: Optional[int] = None, out=None, **umap_kwargs):
     """Embed heterogeneous data with model-based UMAP.
 
     The same mixture-model affinities as htsne (see the affinity argument
@@ -535,6 +625,8 @@ def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
         mix_model = get_dpm_mixture(data, rng=np.random.RandomState(seed),
                                     max_components=max_components, max_its=dpm_max_its,
                                     print_iter=print_iter, out=out)
+
+    affinity = _resolve_affinity(affinity, mix_model, data, field_weights)
 
     z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
     n = z_ij.shape[0]
