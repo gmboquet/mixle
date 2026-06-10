@@ -418,11 +418,15 @@ class DirichletProcessMixtureEstimator(object):
         new_alpha = gw1/gw2
 
 
+        # invert weights to stick fractions: v_i = w_i / prod_{j<i}(1 - v_j).
+        # tracked via the remaining mass directly (no logs), clipping each
+        # fraction so late sticks with underflowed mass stay well-defined
         v = np.zeros(len(w))
-        v[0] = w[0]
-        for i in range(1,len(w)):
-            v[i] = np.exp(np.log(w[i]) - np.sum(np.log1p(-v[:i])))
-        v = np.minimum(np.maximum(v, 1.0e-9), 1-1.0e-9)
+        remaining = 1.0
+        for i in range(len(w)):
+            vi = w[i] / remaining if remaining > 1.0e-12 else 0.0
+            v[i] = min(max(vi, 1.0e-9), 1.0 - 1.0e-9)
+            remaining *= (1.0 - v[i])
 
 
         gammas = np.copy(beta_counts)

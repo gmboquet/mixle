@@ -84,7 +84,8 @@ class CategoricalDistribution(ProbabilityDistribution):
 
 	def seq_log_density(self, x) -> float:
 		xs, val_map_inv = x
-		mapped_probs = np.log([self.prob_map.get(u,self.default_value) for u in val_map_inv])
+		with np.errstate(divide='ignore'):
+			mapped_probs = np.log([self.prob_map.get(u,self.default_value) for u in val_map_inv])
 
 		return mapped_probs[xs]
 
