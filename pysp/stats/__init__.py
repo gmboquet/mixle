@@ -43,6 +43,7 @@ __all__ = [
     "DirichletEstimator",
     "DirichletDataEncoder",
     "DiagonalGaussianDistribution",
+    "DiagonalGaussianSampler",
     "DistributionSampler",
     "DiagonalGaussianEstimator",
     "DiagonalGaussianDataEncoder",
@@ -164,6 +165,8 @@ __all__ = [
     "PoissonEstimator",
     "PoissonDataEncoder",
     "PoissonEnumerator",
+    "SelectDistribution",
+    "SelectEstimator",
     "SequenceDistribution",
     "SequenceSampler",
     "SequenceEstimator",
@@ -204,7 +207,7 @@ __all__ = [
 ### Abstract Classes
 import pyspark.rdd
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DataSequenceEncoder, \
-    DistributionEnumerator, EnumerationError
+    DistributionSampler, DistributionEnumerator, EnumerationError
 
 ### Discrete base distributions
 from pysp.stats.binomial import BinomialDistribution, BinomialSampler, BinomialEstimator, BinomialDataEncoder, \
@@ -263,10 +266,9 @@ from pysp.stats.optional import OptionalDistribution, OptionalSampler, OptionalE
 
 from pysp.stats.weighted import WeightedDistribution, WeightedEstimator, WeightedDataEncoder
 
-### Generic Distributions
-from pysp.stats.categorical import CategoricalDistribution, CategoricalSampler, CategoricalEstimator, \
-    CategoricalDataEncoder
+from pysp.stats.select import SelectDistribution, SelectEstimator
 
+### Generic Distributions
 from pysp.stats.mixture import MixtureDistribution, MixtureSampler, MixtureEstimator, MixtureDataEncoder, \
     MixtureEnumerator
 
@@ -289,9 +291,6 @@ from pysp.stats.jmixture import JointMixtureDistribution, JointMixtureSampler, J
 
 from pysp.stats.tree_hmm import TreeHiddenMarkovModelDistribution, TreeHiddenMarkovSampler, TreeHiddenMarkovEstimator
 from pysp.stats.lda import LDADistribution, LDASampler, LDAEstimator, LDADataEncoder
-
-from pysp.stats.markovchain import MarkovChainDistribution, MarkovChainSampler, MarkovChainEstimator, \
-    MarkovChainDataEncoder
 
 from pysp.stats.setdist import BernoulliSetDistribution, BernoulliSetSampler, BernoulliSetEstimator, \
     BernoulliSetDataEncoder
@@ -329,7 +328,7 @@ from pysp.stats.int_hidden_association import IntegerHiddenAssociationDistributi
 from pysp.stats.sparse_markov_transform import SparseMarkovAssociationDistribution, SparseMarkovAssociationSampler, \
     SparseMarkovAssociationEstimator, SparseMarkovAssociationDataEncoder
 
-from pysp.stats.dmvn import DiagonalGaussianDistribution, DistributionSampler, DiagonalGaussianEstimator, \
+from pysp.stats.dmvn import DiagonalGaussianDistribution, DiagonalGaussianSampler, DiagonalGaussianEstimator, \
     DiagonalGaussianDataEncoder
 
 from pysp.stats.ss_mixture import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureSampler, \
@@ -599,6 +598,10 @@ def seq_log_density_sum(enc_data: Union[List[Tuple[int, T]], 'pyspark.rdd.RDD'],
         Tuple of sum of total obs, and sum of log_density of estimate at all encoded data observations.
 
     """
+    if hasattr(enc_data, 'pysp_seq_log_density_sum'):
+        # parallel-backend handle (pysp.utils.parallel / parallel_mpi)
+        return enc_data.pysp_seq_log_density_sum(estimate)
+
     if isinstance(enc_data, pyspark.rdd.RDD):
         sc = enc_data.context
         estimate_broadcast = sc.broadcast(pickle.dumps(estimate, protocol=0))
@@ -699,6 +702,10 @@ def seq_estimate(enc_data: Union[List[Tuple[int, T]], 'pyspark.rdd.RDD'],
         SequenceEncodableProbabilityDistribution object.
 
     """
+    if hasattr(enc_data, 'pysp_seq_estimate'):
+        # parallel-backend handle (pysp.utils.parallel / parallel_mpi)
+        return enc_data.pysp_seq_estimate(estimator, prev_estimate)
+
     if isinstance(enc_data, pyspark.rdd.RDD):
         sc = enc_data.context
 
@@ -793,6 +800,9 @@ def seq_initialize(enc_data: Union[List[Tuple[int,T]], 'pyspark.rdd.RDD'],
         SequenceEncodableProbabilityDistribution object consistent with 'estimator'.
 
     """
+    if hasattr(enc_data, 'pysp_seq_initialize'):
+        # parallel-backend handle (pysp.utils.parallel / parallel_mpi)
+        return enc_data.pysp_seq_initialize(estimator, rng, p)
 
     if isinstance(enc_data, pyspark.rdd.RDD):
         sc = enc_data.context
