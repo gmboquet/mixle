@@ -32,5 +32,8 @@ setup(
         "scikit-learn",
         "umap-learn",
     ],
+    extras_require={
+        "torch": ["torch"],
+    },
 
 )
