@@ -185,7 +185,13 @@ def conditional_pmat(log_aff: np.ndarray, perplexity: Optional[float] = None) ->
     idx = np.arange(n)
     for i in range(n):
         cols = idx[finite[i]]
-        p[i, cols] = _calibrate_row(log_aff[i, cols].copy(), target_entropy)
+        if len(cols) == 0:
+            # the model gives this row no information (e.g. a posterior with
+            # support disjoint from every other point): fall back to uniform
+            p[i, :] = 1.0 / (n - 1)
+            p[i, i] = 0.0
+        else:
+            p[i, cols] = _calibrate_row(log_aff[i, cols].copy(), target_entropy)
     return p
 
 
@@ -440,13 +446,13 @@ def _tsne_barnes_hut(dist_csr: scipy.sparse.csr_matrix, emb_dim: int, perplexity
     return ts.fit_transform(dist_csr)
 
 
-def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
+def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
           Y: Optional[np.ndarray] = None, perplexity: Optional[float] = 30.0,
           max_its: int = 1000, print_iter: int = 100, eta: Optional[float] = None,
           momentum: float = 0.8, min_gain: float = 0.01, min_value: float = 1.0e-128,
           optimize_alpha: bool = False, min_alpha: float = 1.0e-6, max_alpha_its: int = 3,
           seed: Optional[int] = None, mix_model=None, enc_data=None, method: str = 'auto',
-          early_exaggeration: float = 12.0, tol: float = 1.0e-7, dpm_max_its: int = 100,
+          early_exaggeration: float = 12.0, tol: float = 1.0e-7, dpm_max_its: int = 200,
           affinity: str = 'bhattacharyya', out=None, variable_length: bool = False):
     """Embed heterogeneous data with model-based t-SNE.
 
@@ -504,8 +510,8 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
 
 
 def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
-          max_components: int = 30, seed: Optional[int] = None, mix_model=None,
-          enc_data=None, dpm_max_its: int = 100, print_iter: int = 100,
+          max_components: int = 50, seed: Optional[int] = None, mix_model=None,
+          enc_data=None, dpm_max_its: int = 200, print_iter: int = 100,
           affinity: str = 'bhattacharyya', n_epochs: Optional[int] = None, out=None,
           **umap_kwargs):
     """Embed heterogeneous data with model-based UMAP.
