@@ -11,7 +11,9 @@ must be specified to sample from the distribution.
 
 """
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
+    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
+    DistributionEnumerator, EnumerationError, child_enumerator
+from pysp.utils.enumeration import freeze, merge_enumerators
 import numpy as np
 from numpy.random import RandomState
 
@@ -139,6 +141,44 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> 'OptionalDataEncoder':
         return OptionalDataEncoder(encoder=self.dist.dist_to_encoder(), missing_value=self.missing_value)
+
+    def enumerator(self) -> 'OptionalEnumerator':
+        """Returns an OptionalEnumerator iterating the support (including the missing value) in
+        descending probability order."""
+        return OptionalEnumerator(self)
+
+
+class OptionalEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: 'OptionalDistribution') -> None:
+        """Enumerates the base support scaled by (1-p), merged with the missing value at p.
+
+        Base-support entries equal to the missing value are filtered out: log_density routes
+        them to the missing branch, so their base mass is unreachable. Raises EnumerationError
+        when no p was given (the degenerate legacy mode where total mass exceeds one).
+
+        Args:
+            dist (OptionalDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        if not dist.has_p:
+            raise EnumerationError(dist, reason='no missing probability p given; '
+                                                'total mass exceeds one in this legacy mode')
+        missing_key = freeze(dist.missing_value)
+        if dist.p >= 1.0:
+            self._merged = iter([(dist.missing_value, 0.0)])
+            return
+        base = child_enumerator(dist.dist, 'OptionalDistribution.dist')
+        base = ((v, lp) for v, lp in base if freeze(v) != missing_key)
+        if dist.p <= 0.0:
+            self._merged = ((v, lp) for v, lp in base)
+            return
+        self._merged = merge_enumerators(
+            [iter([(dist.missing_value, 0.0)]), base], [dist.log_p, dist.log_pn])
+
+    def __next__(self) -> Tuple[Any, float]:
+        return next(self._merged)
 
 
 class OptionalSampler(DistributionSampler):

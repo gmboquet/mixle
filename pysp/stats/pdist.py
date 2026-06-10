@@ -3,13 +3,47 @@ ProbabilityDistribution, StatisticAccumulator, StatisticAccumulatorFactory, Data
 ConditionalSampler, and DistributionSampler for classes of the pysp.stats.
 
 """
+import itertools
 import math
 import numpy as np
 from abc import abstractmethod
 from pysp.arithmetic import *
-from typing import TypeVar, Optional, Any, Generic, Dict
+from typing import TypeVar, Optional, Any, Generic, Dict, List, Tuple
 
 SS = TypeVar('SS')
+
+
+class EnumerationError(NotImplementedError):
+    """Raised when a distribution (or a child of a combinator) cannot enumerate its support.
+
+    The path argument identifies the offending child within a combinator, e.g.
+    'CompositeDistribution.dists[1]'.
+    """
+
+    def __init__(self, dist: Any, path: str = '', reason: str = '') -> None:
+        self.leaf = dist
+        self.path = path
+        self.reason = reason
+        msg = '%s does not support enumeration' % type(dist).__name__
+        if path:
+            msg = '%s -> %s' % (path, msg)
+        if reason:
+            msg += ': %s' % reason
+        super().__init__(msg)
+
+
+def child_enumerator(child: 'ProbabilityDistribution', path: str) -> 'DistributionEnumerator':
+    """Construct child.enumerator(), annotating EnumerationError with the child's path.
+
+    Combinator enumerators use this so a failure deep in a nested model reports the
+    full path to the offending leaf, e.g.
+    'CompositeDistribution.dists[1] -> MixtureDistribution.components[0] -> GaussianDistribution ...'.
+    """
+    try:
+        return child.enumerator()
+    except EnumerationError as e:
+        new_path = path if not e.path else '%s -> %s' % (path, e.path)
+        raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
 
 
 class ProbabilityDistribution:
@@ -34,6 +68,14 @@ class ProbabilityDistribution:
     @abstractmethod
     def estimator(self, pseudo_count: Optional[float] = None) -> 'ParameterEstimator':
         ...
+
+    def enumerator(self) -> 'DistributionEnumerator':
+        """Return a DistributionEnumerator over this distribution's support.
+
+        Distributions with an enumerable (discrete) support override this; the
+        default raises EnumerationError.
+        """
+        raise EnumerationError(self)
 
 
 class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
@@ -62,6 +104,32 @@ class DistributionSampler(object):
 
     @abstractmethod
     def sample(self, size: Optional[int] = None) -> Any: ...
+
+
+class DistributionEnumerator(object):
+    """Lazy iterator over the support of dist in non-increasing probability order.
+
+    Yields (value, log_prob) pairs, possibly infinitely many. Contract:
+      - Each support value is yielded exactly once (deduplication is the
+        enumerator's responsibility).
+      - log_prob equals dist.log_density(value) up to float round-off (~1e-10),
+        and the sequence of log_probs is non-increasing up to the same tolerance.
+      - Values with zero probability are skipped, never yielded.
+      - Ties are broken deterministically by insertion order; no further guarantee.
+    """
+
+    def __init__(self, dist: SequenceEncodableProbabilityDistribution) -> None:
+        self.dist = dist
+
+    def __iter__(self) -> 'DistributionEnumerator':
+        return self
+
+    @abstractmethod
+    def __next__(self) -> Tuple[Any, float]: ...
+
+    def top_k(self, k: int) -> List[Tuple[Any, float]]:
+        """Return the k most probable (value, log_prob) pairs (fewer if the support is smaller)."""
+        return list(itertools.islice(self, k))
 
 
 class ConditionalSampler(object):

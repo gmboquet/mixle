@@ -19,7 +19,8 @@ from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEncodableProbabilityDistribution, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
+    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
+    DistributionEnumerator
 from typing import List, Union, Tuple, Optional, Dict, Any
 
 
@@ -140,6 +141,34 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         """Return IntegerCategoricalDataEncoder object for encoding sequences of iid integer categorical
             observations."""
         return IntegerCategoricalDataEncoder()
+
+    def enumerator(self) -> 'IntegerCategoricalEnumerator':
+        """Return IntegerCategoricalEnumerator iterating the support in descending probability order."""
+        return IntegerCategoricalEnumerator(self)
+
+
+class IntegerCategoricalEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: IntegerCategoricalDistribution) -> None:
+        """Enumerates the support [min_val, max_val] in descending probability order.
+
+        Zero-probability entries of p_vec are skipped.
+
+        Args:
+            dist (IntegerCategoricalDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        order = np.argsort(-dist.log_p_vec, kind='stable')
+        self._order = [int(i) for i in order if dist.p_vec[i] > 0.0]
+        self._pos = 0
+
+    def __next__(self) -> Tuple[int, float]:
+        if self._pos >= len(self._order):
+            raise StopIteration
+        i = self._order[self._pos]
+        self._pos += 1
+        return (self.dist.min_val + i, float(self.dist.log_p_vec[i]))
 
 
 class IntegerCategoricalSampler(DistributionSampler):
