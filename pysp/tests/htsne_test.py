@@ -303,5 +303,45 @@ class HTSNETestCase(unittest.TestCase):
         self.assertGreater(separation_ratio(y, labels), 1.5)
 
 
+    # ---- balanced (mixed-type) affinities -----------------------------------
+
+    def test_balanced_factors_structure(self):
+        from pysp.utils.htsne import balanced_factors, model_log_affinity
+        factors = balanced_factors(self.model, self.data)
+        self.assertEqual(len(factors), 2)  # gaussian + categorical fields
+        # log-affinity over factors = sum of per-field Bhattacharyya logs
+        la = model_log_affinity(None, None, affinity=factors)
+        self.assertEqual(la.shape, (self.n, self.n))
+        self.assertTrue(np.all(np.isneginf(np.diag(la))))
+        # symmetric: each factor is (sq, sq)
+        off = ~np.eye(self.n, dtype=bool)
+        self.assertTrue(np.allclose(la[off], la.T[off], atol=1.0e-10))
+
+    def test_balanced_embeddings_run(self):
+        y = htsne(self.data, mix_model=self.model, perplexity=20.0, affinity='balanced',
+                  seed=3, max_its=300, out=io.StringIO())
+        self.assertEqual(y.shape, (self.n, 2))
+        self.assertGreater(separation_ratio(y, self.labels), 2.0)
+        yu = humap(self.data, mix_model=self.model, n_neighbors=15, affinity='balanced',
+                   seed=3, out=io.StringIO())
+        self.assertTrue(np.all(np.isfinite(yu)))
+
+    def test_auto_affinity_resolution(self):
+        from pysp.utils.htsne import _resolve_affinity
+        # composite components + raw data -> balanced factor list
+        r = _resolve_affinity('auto', self.model, self.data, None)
+        self.assertIsInstance(r, list)
+        # no raw data -> falls back to bhattacharyya
+        self.assertEqual(_resolve_affinity('auto', self.model, None, None), 'bhattacharyya')
+        # non-composite components -> bhattacharyya
+        plain = MixtureDistribution([GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)],
+                                    [0.5, 0.5])
+        self.assertEqual(_resolve_affinity('auto', plain, [0.0, 1.0], None), 'bhattacharyya')
+
+    def test_balanced_requires_data(self):
+        with self.assertRaises(ValueError):
+            htsne(None, mix_model=self.model, enc_data=('x',), affinity='balanced', out=io.StringIO())
+
+
 if __name__ == '__main__':
     unittest.main()
