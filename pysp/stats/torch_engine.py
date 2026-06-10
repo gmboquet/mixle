@@ -107,6 +107,19 @@ class _TGaussian(_TBase):
         c = gamma.sum(dim=0)
         return (s1.cpu().numpy(), s2.cpu().numpy(), c.cpu().numpy())
 
+    def default_prior(self, strength):
+        # NormalGamma(mu0, kappa, a, b) on (mu, 1/sigma2); strength=0 -> flat
+        return {'family': 'normalgamma', 'mu0': 0.0, 'kappa': 1.0e-3 * strength,
+                'a': 1.0 + 1.0e-3 * strength, 'b': 1.0e-3 * strength}
+
+    def log_prior(self, params, prior):
+        tau = 1.0 / params['s2']
+        lp = (prior['a'] - 1.0) * torch.log(tau) - prior['b'] * tau
+        if prior['kappa'] > 0:
+            lp = lp + 0.5 * torch.log(tau) \
+                - 0.5 * prior['kappa'] * tau * (params['mu'] - prior['mu0']) ** 2
+        return lp.sum()
+
 
 class _TLogP(_TBase):
     """Shared machinery for table distributions (categorical / integer range)."""
@@ -141,6 +154,15 @@ class _TLogP(_TBase):
         counts = torch.zeros((V, gamma.shape[1]), dtype=gamma.dtype, device=gamma.device)
         counts.index_add_(0, codes.clamp(min=0), gamma * valid.unsqueeze(1).to(gamma.dtype))
         return (counts.T.contiguous().cpu().numpy(),)
+
+    def default_prior(self, strength):
+        V = len(getattr(self.kb, 'vocab', [])) or (self.kb.max_val - self.kb.min_val + 1)
+        return {'family': 'dirichlet', 'alpha': 1.0 + strength / V}
+
+    def log_prior(self, params, prior):
+        if prior['alpha'] == 1.0:
+            return torch.zeros((), dtype=self.dtype, device=self.device)
+        return (prior['alpha'] - 1.0) * params['logp'].clamp(min=-1.0e6).sum()
 
 
 class _TCategorical(_TLogP):
@@ -207,6 +229,17 @@ class _TPoisson(_TBase):
         s = (gamma * cols[0].unsqueeze(1)).sum(dim=0)
         return (c.cpu().numpy(), s.cpu().numpy())
 
+    def default_prior(self, strength):
+        return {'family': 'gamma', 'a': 1.0 + 1.0e-3 * strength, 'b': 1.0e-3 * strength}
+
+    def log_prior(self, params, prior):
+        lam = params[self._rate_key]
+        rate = lam if self._rate_is_rate else 1.0 / lam
+        return ((prior['a'] - 1.0) * torch.log(rate) - prior['b'] * rate).sum()
+
+    _rate_key = 'lam'
+    _rate_is_rate = True
+
 
 class _TExponential(_TPoisson):
 
@@ -227,6 +260,9 @@ class _TExponential(_TPoisson):
         beta = params['beta'].unsqueeze(0)
         return -x / beta - torch.log(beta)
 
+    _rate_key = 'beta'
+    _rate_is_rate = False
+
 
 class _TGeometric(_TPoisson):
 
@@ -246,6 +282,13 @@ class _TGeometric(_TPoisson):
         x = cols[0].unsqueeze(1)
         p = params['p'].unsqueeze(0)
         return (x - 1.0) * torch.log1p(-p) + torch.log(p)
+
+    def default_prior(self, strength):
+        return {'family': 'beta', 'a': 1.0 + 1.0e-3 * strength, 'b': 1.0 + 1.0e-3 * strength}
+
+    def log_prior(self, params, prior):
+        pp = params['p']
+        return ((prior['a'] - 1.0) * torch.log(pp) + (prior['b'] - 1.0) * torch.log1p(-pp)).sum()
 
 
 class _TComposite(_TBase):
@@ -284,6 +327,12 @@ class _TComposite(_TBase):
     def stats(self, params, cols, gamma):
         return _k._CompositeB._tree(c.stats(p, cc, gamma)
                                     for c, p, cc in zip(self.children, params, cols))
+
+    def default_prior(self, strength):
+        return [c.default_prior(strength) for c in self.children]
+
+    def log_prior(self, params, priors):
+        return sum(c.log_prior(p, pr) for c, p, pr in zip(self.children, params, priors))
 
 
 class _TSequence(_TBase):
@@ -341,8 +390,17 @@ class _TSequence(_TBase):
         return inner_stats, len_stats
 
     def len_i_placeholder(self):
-        K = None
         return _k._PoissonB([PoissonDistribution(1.0)]).make_stats(1)
+
+    def default_prior(self, strength):
+        return (self.inner.default_prior(strength),
+                self.len_i.default_prior(strength) if self.len_i else None)
+
+    def log_prior(self, params, priors):
+        lp = self.inner.log_prior(params[0], priors[0])
+        if self.len_i and priors[1] is not None:
+            lp = lp + self.len_i.log_prior(params[1], priors[1])
+        return lp
 
 
 _IMPLS = {
@@ -485,7 +543,7 @@ class TorchMixture(object):
             old_ll = ll
         return model, old_ll
 
-    # -- gradient MLE (the new capability) -------------------------------------
+    # -- gradient MLE / MAP (the new capability) --------------------------------
 
     def fit_mle(self, enc, model=None, max_its: int = 500, lr: float = 0.05,
                 optimizer: str = 'adam', tol: float = 1.0e-7, out=None,
@@ -497,6 +555,39 @@ class TorchMixture(object):
         autograd. Needs no closed-form M-step, so penalties or partially frozen
         parameters are one-line extensions. Returns (model, log_likelihood).
         """
+        return self._fit_gradient(enc, model, None, None, max_its, lr, optimizer,
+                                  tol, out, print_iter, 'MLE')
+
+    def fit_map(self, enc, model=None, priors=None, prior_strength: float = 1.0,
+                w_alpha: Optional[float] = None, max_its: int = 500, lr: float = 0.05,
+                optimizer: str = 'adam', tol: float = 1.0e-7, out=None,
+                print_iter: int = 100):
+        """Maximize the posterior log p(data | theta) + log p(theta) by gradient ascent.
+
+        Priors are conjugate families on the *canonical* parameters (the mode is
+        parameterization-dependent, and the canonical mode is what users
+        expect): NormalGamma on Gaussian (mu, 1/sigma^2), Dirichlet on
+        categorical/integer-categorical tables and on the mixture weights,
+        Gamma on Poisson/Exponential rates, Beta on geometric p.
+
+        priors=None builds weakly-informative defaults scaled by prior_strength
+        (prior_strength=0 reduces exactly to fit_mle); pass a nested structure
+        mirroring the model tree (lists for composite slots, (inner, length)
+        pairs for sequences, dicts at the leaves) to customize. w_alpha sets
+        the Dirichlet concentration on mixture weights (default 1 +
+        prior_strength / K).
+
+        Returns (model, log_posterior).
+        """
+        if priors is None:
+            priors = self.impl.default_prior(prior_strength)
+        if w_alpha is None:
+            w_alpha = 1.0 + prior_strength / max(self.K, 1)
+        return self._fit_gradient(enc, model, priors, float(w_alpha), max_its, lr,
+                                  optimizer, tol, out, print_iter, 'MAP')
+
+    def _fit_gradient(self, enc, model, priors, w_alpha, max_its, lr, optimizer,
+                      tol, out, print_iter, tag):
         model = self.model if model is None else model
         _, cols = enc
 
@@ -522,32 +613,38 @@ class TorchMixture(object):
         opt_cls = {'adam': torch.optim.Adam, 'lbfgs': torch.optim.LBFGS}[optimizer]
         opt = opt_cls(leaves, lr=lr)
 
-        def nll():
+        def neg_objective():
             params = self.impl.canonical(raw)
             ll = self.impl.log_density(params, cols)
             if self.is_mixture:
-                ll = torch.logsumexp(ll + torch.log_softmax(w_logits, dim=0).unsqueeze(0), dim=1)
+                log_w = torch.log_softmax(w_logits, dim=0)
+                ll = torch.logsumexp(ll + log_w.unsqueeze(0), dim=1)
             else:
                 ll = ll[:, 0]
-            return -ll.sum()
+            obj = ll.sum()
+            if priors is not None:
+                obj = obj + self.impl.log_prior(params, priors)
+                if self.is_mixture and w_alpha is not None and w_alpha != 1.0:
+                    obj = obj + (w_alpha - 1.0) * torch.log_softmax(w_logits, dim=0).sum()
+            return -obj
 
         last = float('inf')
         for it in range(max_its):
             if optimizer == 'lbfgs':
                 def closure():
                     opt.zero_grad()
-                    loss = nll()
+                    loss = neg_objective()
                     loss.backward()
                     return loss
                 loss = opt.step(closure)
             else:
                 opt.zero_grad()
-                loss = nll()
+                loss = neg_objective()
                 loss.backward()
                 opt.step()
-            cur = float(loss)
+            cur = float(loss.detach())
             if out is not None and (it + 1) % print_iter == 0:
-                out.write('MLE iteration %d: ln[p(Data|Model)]=%e\n' % (it + 1, -cur))
+                out.write('%s iteration %d: objective=%e\n' % (tag, it + 1, -cur))
             if abs(last - cur) < tol * max(1.0, abs(cur)):
                 last = cur
                 break
