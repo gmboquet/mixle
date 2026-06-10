@@ -1,6 +1,3 @@
-import os
-os.environ['NUMBA_DISABLE_JIT'] =  '1'
-
 import numpy as np
 import time
 from pysp.stats import *

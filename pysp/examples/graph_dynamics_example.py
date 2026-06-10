@@ -1,5 +1,4 @@
 #import os
-#os.environ['NUMBA_DISABLE_JIT'] =  '1'
 
 import numpy as np
 from pysp.stats.lookback_hmm import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator

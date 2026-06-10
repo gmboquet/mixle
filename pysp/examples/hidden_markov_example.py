@@ -1,12 +1,5 @@
-"""Example of HMM sampling and estimation using 'best_of' to find optimal model fit with different initial conditions.
-Note that Numba is set for use here. """
-USE_NUMBA = True
+"""Example of HMM sampling and estimation using 'best_of' to find optimal model fit with different initial conditions."""
 import numpy as np
-import os
-
-if not USE_NUMBA:
-    os.environ['NUMBA_DISABLE_JIT'] = '1'
-
 
 from pysp.stats import *
 from pysp.utils.estimation import best_of, partition_data
@@ -49,13 +42,13 @@ if __name__ == '__main__':
     # Create an initial estimator
     est1 = CompositeEstimator((GaussianEstimator(), CategoricalEstimator(pseudo_count=1.0)))
     est2 = HiddenMarkovEstimator([est1] * 3, pseudo_count=(1.0, 1.0), keys=('init_key', 'trans_key', None),
-                                 len_estimator=PoissonEstimator(), use_numba=USE_NUMBA)
+                                 len_estimator=PoissonEstimator(), use_numba=True)
     iest = MixtureEstimator([est2] * 2, pseudo_count=1.0)
 
     # Create the estimator
     est1 = CompositeEstimator((GaussianEstimator(), CategoricalEstimator()))
     est2 = HiddenMarkovEstimator([est1] * 3, keys=('init_key', 'trans_key', None), len_estimator=PoissonEstimator(),
-                                 use_numba=USE_NUMBA)
+                                 use_numba=True)
     est = MixtureEstimator([est2] * 2)
 
     train_data, valid_data = partition_data(data, [0.9, 0.1], rng)

@@ -1,7 +1,5 @@
 """Example of semi-supervised mixture example. Note that None is included for obs with no known labels."""
-import os
 
-os.environ['NUMBA_DISABLE_JIT'] = '1'
 from pysp.stats import *
 from pysp.stats.ss_mixture import *
 from pysp.utils.estimation import best_of
