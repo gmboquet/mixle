@@ -30,6 +30,7 @@ setup(
         "pyspark",
         "tbb",
         "scikit-learn",
+        "umap-learn",
     ],
 
 )

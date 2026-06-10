@@ -14,8 +14,9 @@ from pysp.stats import (
     GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator,
     seq_encode, seq_estimate, seq_initialize,
 )
+from pysp.stats import PoissonDistribution, SequenceDistribution, IntegerCategoricalDistribution
 from pysp.utils.htsne import (
-    conditional_pmat, dpmsne, get_pmat, htsne, model_log_affinity,
+    conditional_pmat, dpmsne, get_pmat, htsne, humap, model_knn, model_log_affinity,
     sparse_model_distances, t_kernel, tsne_exact, update_alpha,
 )
 
@@ -205,6 +206,82 @@ class HTSNETestCase(unittest.TestCase):
         y = dpmsne(P=p, max_its=300, seed=3, out=io.StringIO())
         self.assertEqual(y.shape, (self.n, 2))
         self.assertGreater(separation_ratio(y, self.labels), 3.0)
+
+    # ---- model kNN and UMAP ------------------------------------------------------
+
+    def test_model_knn_properties(self):
+        k = 12
+        idx, dist = model_knn(self.z, self.l, k=k, block_size=64)
+        self.assertEqual(idx.shape, (self.n, k))
+        self.assertTrue(np.all(idx[:, 0] == np.arange(self.n)))
+        self.assertTrue(np.all(dist[:, 0] == 0.0))
+        self.assertTrue(np.all(np.diff(dist[:, 1:], axis=1) >= -1.0e-12))
+        self.assertTrue(np.all(dist >= 0.0))
+
+    def test_humap_embedding(self):
+        y = humap(self.data, mix_model=self.model, n_neighbors=15, seed=4, out=io.StringIO())
+        self.assertEqual(y.shape, (self.n, 2))
+        self.assertTrue(np.all(np.isfinite(y)))
+        self.assertGreater(separation_ratio(y, self.labels), 2.0)
+
+    # ---- variable-length handling ------------------------------------------------
+
+    @classmethod
+    def _varlen_data_and_model(cls, n_per=120, seed=2):
+        # two topics over integers; lengths vary wildly *within* each topic
+        len_probs = np.zeros(60)
+        len_probs[2:60] = 1.0
+        len_probs /= len_probs.sum()
+        len_dist = IntegerCategoricalDistribution(min_val=0, p_vec=len_probs)
+        topic_a = SequenceDistribution(
+            IntegerCategoricalDistribution(0, [0.85, 0.05, 0.05, 0.05]), len_dist=len_dist)
+        topic_b = SequenceDistribution(
+            IntegerCategoricalDistribution(0, [0.05, 0.05, 0.05, 0.85]), len_dist=len_dist)
+
+        data = topic_a.sampler(seed=seed).sample(size=n_per) + \
+            topic_b.sampler(seed=seed + 1).sample(size=n_per)
+        labels = np.repeat([0, 1], n_per)
+        model = MixtureDistribution([topic_a, topic_b], [0.5, 0.5])
+        return data, labels, model
+
+    def test_len_normalize_property(self):
+        # length normalization divides log-likelihood rows by lengths; verify
+        # the plumbing reproduces manual normalization end-to-end
+        data, labels, model = self._varlen_data_and_model(40)
+        from pysp.utils.htsne import _posteriors_and_loglikes, _resolve_length_normalization
+        z, l = _posteriors_and_loglikes(model, data=data)
+        lens = _resolve_length_normalization('auto', None, data)
+        self.assertIsNotNone(lens)
+        self.assertTrue(np.all(lens == [len(x) for x in data]))
+        # fixed-length data -> auto disables
+        self.assertIsNone(_resolve_length_normalization('auto', None, [[1, 2], [3, 4]]))
+        # explicit lengths override
+        ov = _resolve_length_normalization(True, np.full(len(data), 7.0), data)
+        self.assertTrue(np.all(ov == 7.0))
+
+    def test_varlen_embedding_organizes_by_topic(self):
+        data, labels, model = self._varlen_data_and_model(120)
+        lengths = np.asarray([len(x) for x in data], dtype=float)
+
+        y = htsne(data, mix_model=model, perplexity=20.0, method='exact', max_its=350,
+                  seed=3, len_normalize='auto', out=io.StringIO())
+        self.assertGreater(separation_ratio(y, labels), 2.0)
+
+        # the embedding should not be organized by observation length: within
+        # each topic, short and long observations should overlap
+        for c in (0, 1):
+            yc, lc = y[labels == c], lengths[labels == c]
+            short, long_ = yc[lc <= np.median(lc)], yc[lc > np.median(lc)]
+            gap = np.linalg.norm(short.mean(0) - long_.mean(0))
+            spread = 0.5 * (np.linalg.norm(short - short.mean(0), axis=1).mean()
+                            + np.linalg.norm(long_ - long_.mean(0), axis=1).mean())
+            self.assertLess(gap, 2.0 * spread)
+
+    def test_varlen_humap(self):
+        data, labels, model = self._varlen_data_and_model(120)
+        y = humap(data, mix_model=model, n_neighbors=15, seed=4, out=io.StringIO())
+        self.assertEqual(y.shape, (len(data), 2))
+        self.assertGreater(separation_ratio(y, labels), 1.5)
 
 
 if __name__ == '__main__':
