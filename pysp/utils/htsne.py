@@ -1,30 +1,46 @@
-"""Model-based (hierarchical) t-SNE for heterogeneous data.
+"""Model-based (hierarchical) t-SNE and UMAP for heterogeneous data.
 
-Instead of Euclidean distances, pairwise affinities are derived from a fitted
-mixture model: the similarity of observation i to observation j is the
-likelihood of x_i under the posterior mixture of x_j,
+Pairwise affinities are derived from a fitted mixture model rather than from
+Euclidean distances, so anything pysparkplug can model (tuples, sequences,
+sets, variable-length data, ...) can be embedded. Three affinity definitions
+are supported (the `affinity` argument):
 
-    s_ij = sum_k  p(x_i | theta_k) * p(z_j = k | x_j).
+- 'coassign' (default): the co-assignment probability
 
-Because affinities come from the model, this embeds any data type pysparkplug
-can model (tuples, sequences, sets, ...), not just vectors. The affinities are
-converted to t-SNE input probabilities by row-conditional normalization
+      s_ij = P(z_i = z_j | x_i, x_j) = sum_k z_ik z_jk,
 
-    p_{j|i} = softmax_j( log s_ij ),
+  where z_ik = p(z_i = k | x_i) is the posterior over components. This is an
+  exact probability under the fitted model (the posterior similarity matrix of
+  Bayesian clustering), symmetric, and requires no adjustments: observation
+  length or dimensionality affects affinities only through posterior
+  certainty, exactly as the model dictates.
 
-optionally calibrated to a target perplexity per row, and symmetrized
-P = (P + P^T) / (2n). Row normalization cancels any per-observation scale in
-log s_ij, so variable-length observations need no special handling.
+- 'bhattacharyya': the Bhattacharyya coefficient between posteriors,
+  s_ij = sum_k sqrt(z_ik z_jk); -log s_ij is the Bhattacharyya distance on the
+  posterior simplex. Like 'coassign' but with heavier weight on shared
+  low-probability components.
 
-Two embedding engines are provided:
+- 'likelihood': the predictive affinity s_ij = sum_k p(x_i | theta_k) z_jk
+  (likelihood of x_i under the posterior mixture of x_j). Retains within-
+  component likelihood detail, but for variable-length data the evidence in
+  x_i grows with its length, so long observations reduce to their single best
+  component while short ones stay blended.
 
-- 'exact': a corrected full-matrix gradient descent supporting a heavy-tailed
-  student-t kernel q_ij ~ (1 + d_ij^2 / alpha)^{-(alpha+1)/2} whose tail
-  parameter alpha can be optimized along with the embedding. O(n^2) per
-  iteration; intended for small n or when optimize_alpha is needed.
+For t-SNE the affinities are converted to input probabilities by
+row-conditional normalization p_{j|i} = softmax_j(log s_ij), optionally
+calibrated to a target perplexity per row, and symmetrized
+P = (P + P^T) / (2n).
+
+Two t-SNE engines are provided:
+
+- 'exact': a full-matrix gradient descent supporting a heavy-tailed student-t
+  kernel q_ij ~ (1 + d_ij^2 / alpha)^{-(alpha+1)/2} whose tail parameter alpha
+  can be optimized along with the embedding. O(n^2) per iteration.
 - 'barnes_hut': scalable O(n log n) t-SNE (scikit-learn) run on a sparse
-  k-nearest-neighbor matrix of model-based distances -log s_ij. The dense
-  affinity matrix is never materialized; neighbor search is done blockwise.
+  k-nearest-neighbor matrix of model distances -log s_ij. The dense affinity
+  matrix is never materialized; neighbor search is done blockwise.
+
+humap embeds the same model-based kNN graph with UMAP (umap-learn).
 """
 import sys
 from typing import Optional, Tuple
@@ -36,53 +52,28 @@ __all__ = ['htsne', 'humap', 'dpmsne', 'model_log_affinity', 'sparse_model_dista
            'model_knn', 'get_pmat']
 
 
-def _observation_lengths(data) -> Optional[np.ndarray]:
-    """Lengths of sized, non-record observations (lists/sequences); None if not applicable.
+def _affinity_factors(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray],
+                      affinity: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Factor the affinity matrix as S = G H^T (up to immaterial per-row scale).
 
-    Tuples are treated as fixed-arity records, and strings as atoms, so neither
-    contributes a length.
+    Row-conditional normalization and per-row perplexity calibration are
+    invariant to per-row scaling of S, so 'likelihood' rows are max-shifted
+    for numerical stability.
     """
-    if data is None:
-        return None
-    lens = []
-    for x in data:
-        if isinstance(x, (str, bytes, tuple)) or not hasattr(x, '__len__'):
-            return None
-        lens.append(len(x))
-    return np.asarray(lens, dtype=np.float64)
+    z = np.asarray(posterior_mat, dtype=np.float64)
 
+    if affinity == 'coassign':
+        return z, z
+    if affinity == 'bhattacharyya':
+        zs = np.sqrt(z)
+        return zs, zs
+    if affinity == 'likelihood':
+        if ll_mat is None:
+            raise ValueError("affinity='likelihood' requires the component log-likelihood matrix.")
+        l = np.asarray(ll_mat, dtype=np.float64)
+        return np.exp(l - l.max(axis=1, keepdims=True)), z
 
-def _resolve_length_normalization(len_normalize, lengths, data) -> Optional[np.ndarray]:
-    """Resolve the len_normalize/lengths options to a positive length vector or None.
-
-    Variable-length observations accumulate likelihood evidence proportional to
-    their length, so without normalization a long observation has a far more
-    peaked component profile than a short one and affinities organize by length
-    rather than content. Dividing each row of the component log-likelihood
-    matrix by the observation length compares per-element (geometric-mean)
-    evidence instead, which is the scale-free quantity.
-    """
-    if len_normalize is False or len_normalize is None:
-        return None
-
-    if lengths is not None:
-        lengths = np.asarray(lengths, dtype=np.float64)
-    else:
-        lengths = _observation_lengths(data)
-
-    if lengths is None:
-        if len_normalize is True:
-            raise ValueError('len_normalize=True requires lengths= when observation '
-                             'lengths cannot be derived from the data.')
-        return None
-
-    if np.any(lengths <= 0):
-        lengths = np.maximum(lengths, 1.0)
-
-    if len_normalize == 'auto' and np.all(lengths == lengths[0]):
-        return None
-
-    return lengths
+    raise ValueError("affinity must be one of 'coassign', 'bhattacharyya', 'likelihood'.")
 
 
 def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.ndarray, np.ndarray]:
@@ -114,22 +105,18 @@ def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.nd
     return z_mat, ll_mat
 
 
-def model_log_affinity(posterior_mat: np.ndarray, ll_mat: np.ndarray) -> np.ndarray:
-    """Dense n x n matrix of log s_ij = log sum_k exp(ll_ik) z_jk with -inf diagonal.
+def model_log_affinity(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None,
+                       affinity: str = 'coassign') -> np.ndarray:
+    """Dense n x n matrix of log affinities (see module docstring) with -inf diagonal.
 
-    Computed with the log-sum-exp trick: each row of ll is shifted by its max so
-    the matrix product is stable, and the shift is added back afterwards.
+    Rows are comparable up to a per-row shift, which both the row-conditional
+    normalization and per-row perplexity calibration are invariant to.
     """
-    z_ij = np.asarray(posterior_mat, dtype=np.float64)
-    l_ij = np.asarray(ll_mat, dtype=np.float64)
-    n = l_ij.shape[0]
-
-    v_i = l_ij.max(axis=1, keepdims=True)
-    g_ij = np.exp(l_ij - v_i)
+    g, h = _affinity_factors(posterior_mat, ll_mat, affinity)
+    n = g.shape[0]
 
     with np.errstate(divide='ignore'):
-        log_s = np.log(np.dot(g_ij, z_ij.T))
-    log_s += v_i
+        log_s = np.log(np.dot(g, h.T))
     log_s[np.arange(n), np.arange(n)] = -np.inf
 
     return log_s
@@ -199,21 +186,20 @@ def conditional_pmat(log_aff: np.ndarray, perplexity: Optional[float] = None) ->
     return p
 
 
-def get_pmat(posterior_mat, ll_mat, targ_perplexity=None, vlen=False):
-    """Symmetrized t-SNE input probabilities from model posteriors/log-likelihoods.
+def get_pmat(posterior_mat, ll_mat=None, targ_perplexity=None, vlen=False, affinity: str = 'coassign'):
+    """Symmetrized t-SNE input probabilities from model posteriors (and optionally
+    component log-likelihoods, for affinity='likelihood').
 
-    The vlen flag is kept for backward compatibility but no longer changes the
-    computation: row-conditional normalization cancels per-observation scale,
-    which is the mathematically sound treatment for variable-length data.
+    The vlen flag is kept for backward compatibility and ignored.
     """
-    log_s = model_log_affinity(posterior_mat, ll_mat)
+    log_s = model_log_affinity(posterior_mat, ll_mat, affinity=affinity)
     p = conditional_pmat(log_s, perplexity=targ_perplexity)
     p = (p + p.T) / (2.0 * p.shape[0])
     return p
 
 
-def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: np.ndarray, k: int,
-                           block_size: int = 1024) -> scipy.sparse.csr_matrix:
+def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k: int = 90,
+                           block_size: int = 1024, affinity: str = 'coassign') -> scipy.sparse.csr_matrix:
     """Sparse n x n matrix of model distances d_ij = max_j' log s_ij' - log s_ij.
 
     Keeps the k nearest neighbors (largest affinity) per row. Built blockwise so
@@ -221,22 +207,19 @@ def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: np.ndarray, k: int
     non-negative; any per-row shift is immaterial because t-SNE's perplexity
     calibration is per row.
     """
-    z_ij = np.asarray(posterior_mat, dtype=np.float64)
-    l_ij = np.asarray(ll_mat, dtype=np.float64)
-    n = l_ij.shape[0]
+    g, h = _affinity_factors(posterior_mat, ll_mat, affinity)
+    n = g.shape[0]
     k = min(k, n - 1)
 
     rows = np.repeat(np.arange(n), k)
     cols = np.empty(n * k, dtype=np.int64)
     vals = np.empty(n * k, dtype=np.float64)
 
-    zt = z_ij.T
+    ht = h.T
     for s0 in range(0, n, block_size):
         s1 = min(s0 + block_size, n)
-        v_i = l_ij[s0:s1].max(axis=1, keepdims=True)
-        g = np.exp(l_ij[s0:s1] - v_i)
-        s_blk = np.dot(g, zt)                       # affinities (up to e^{v_i} row scale)
-        s_blk[np.arange(s0, s1) - s0, np.arange(s0, s1)] = 0.0
+        s_blk = np.dot(g[s0:s1], ht)                # affinities, up to per-row scale
+        s_blk[np.arange(s1 - s0), np.arange(s0, s1)] = 0.0
 
         nbr = np.argpartition(-s_blk, k - 1, axis=1)[:, :k]
         np.maximum(s_blk, 1.0e-300, out=s_blk)
@@ -251,8 +234,8 @@ def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: np.ndarray, k: int
     return scipy.sparse.csr_matrix((vals, (rows, cols)), shape=(n, n))
 
 
-def model_knn(posterior_mat: np.ndarray, ll_mat: np.ndarray, k: int,
-              block_size: int = 1024) -> Tuple[np.ndarray, np.ndarray]:
+def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k: int = 15,
+              block_size: int = 1024, affinity: str = 'coassign') -> Tuple[np.ndarray, np.ndarray]:
     """k-nearest-neighbor arrays under the model distance d_ij = -log s_ij.
 
     Returns (indices, distances), each n x k, sorted ascending per row with
@@ -260,9 +243,8 @@ def model_knn(posterior_mat: np.ndarray, ll_mat: np.ndarray, k: int,
     expected by umap-learn, where self counts toward n_neighbors). Built
     blockwise; the dense affinity matrix is never materialized.
     """
-    z_ij = np.asarray(posterior_mat, dtype=np.float64)
-    l_ij = np.asarray(ll_mat, dtype=np.float64)
-    n = l_ij.shape[0]
+    g, h = _affinity_factors(posterior_mat, ll_mat, affinity)
+    n = g.shape[0]
     k = min(k, n)
     m = k - 1  # non-self neighbors
 
@@ -271,12 +253,10 @@ def model_knn(posterior_mat: np.ndarray, ll_mat: np.ndarray, k: int,
     knn_idx[:, 0] = np.arange(n)
     knn_dist[:, 0] = 0.0
 
-    zt = z_ij.T
+    ht = h.T
     for s0 in range(0, n, block_size):
         s1 = min(s0 + block_size, n)
-        v_i = l_ij[s0:s1].max(axis=1, keepdims=True)
-        g = np.exp(l_ij[s0:s1] - v_i)
-        s_blk = np.dot(g, zt)
+        s_blk = np.dot(g[s0:s1], ht)
         s_blk[np.arange(s1 - s0), np.arange(s0, s1)] = 0.0
 
         nbr = np.argpartition(-s_blk, m - 1, axis=1)[:, :m]
@@ -464,28 +444,25 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
           optimize_alpha: bool = False, min_alpha: float = 1.0e-6, max_alpha_its: int = 3,
           seed: Optional[int] = None, mix_model=None, enc_data=None, method: str = 'auto',
           early_exaggeration: float = 12.0, tol: float = 1.0e-7, dpm_max_its: int = 100,
-          len_normalize='auto', lengths: Optional[np.ndarray] = None,
-          out=None, variable_length: bool = False):
+          affinity: str = 'coassign', out=None, variable_length: bool = False):
     """Embed heterogeneous data with model-based t-SNE.
 
     A mixture model is fit to the data (a Dirichlet process mixture with
     automatically typed components by default, or pass mix_model), pairwise
-    affinities are computed from component likelihoods and posteriors, and the
-    affinities are embedded with t-SNE.
+    affinities are computed from the model, and the affinities are embedded
+    with t-SNE.
 
     method:
         'exact'      - full-matrix gradient descent (supports optimize_alpha)
         'barnes_hut' - sparse kNN distances + scikit-learn Barnes-Hut t-SNE
         'auto'       - barnes_hut for n > 10 unless optimize_alpha is set
 
-    len_normalize / lengths:
-        Variable-length observations (lists, sequences) accumulate likelihood
-        evidence proportional to their length; without correction, affinities
-        organize by length rather than content. 'auto' (default) divides each
-        observation's component log-likelihoods by its length whenever the
-        top-level data have varying lengths; pass lengths= explicitly for
-        nested structures (e.g. records containing sequences), or False to
-        disable.
+    affinity:
+        'coassign' (default) - co-assignment probability P(z_i = z_j | x), an
+            exact probability under the model; robust to variable-length data
+            because length enters only through posterior certainty
+        'bhattacharyya'      - Bhattacharyya coefficient between posteriors
+        'likelihood'         - predictive affinity sum_k p(x_i|theta_k) z_jk
 
     Returns the n x emb_dim embedding.
     """
@@ -499,11 +476,6 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
                                     print_iter=print_iter, out=out)
 
     z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
-
-    norm_lengths = _resolve_length_normalization(len_normalize, lengths, data)
-    if norm_lengths is not None:
-        l_ij = l_ij / norm_lengths[:, None]
-
     n = z_ij.shape[0]
 
     if method == 'auto':
@@ -515,11 +487,11 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
         px = 30.0 if perplexity is None else float(perplexity)
         px = min(px, (n - 4) / 3.0)
         k = min(n - 1, int(3.0 * px) + 5)
-        dist_csr = sparse_model_distances(z_ij, l_ij, k=k)
+        dist_csr = sparse_model_distances(z_ij, l_ij, k=k, affinity=affinity)
         return _tsne_barnes_hut(dist_csr, emb_dim, px, max_its, eta,
                                 early_exaggeration, seed, Y)
 
-    P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity)
+    P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity, affinity=affinity)
     return tsne_exact(P, emb_dim=emb_dim, alpha=alpha, Y=Y, max_its=max_its, eta=eta,
                       momentum=momentum, early_exaggeration=early_exaggeration,
                       min_gain=min_gain, min_value=min_value, optimize_alpha=optimize_alpha,
@@ -530,19 +502,15 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
 def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
           max_components: int = 30, seed: Optional[int] = None, mix_model=None,
           enc_data=None, dpm_max_its: int = 100, print_iter: int = 100,
-          len_normalize='auto', lengths: Optional[np.ndarray] = None,
-          n_epochs: Optional[int] = None, out=None, **umap_kwargs):
+          affinity: str = 'coassign', n_epochs: Optional[int] = None, out=None,
+          **umap_kwargs):
     """Embed heterogeneous data with model-based UMAP.
 
-    The same mixture-model affinities as htsne (likelihood of x_i under the
-    posterior mixture of x_j), but the k-nearest-neighbor graph of model
-    distances -log s_ij is handed to UMAP's fuzzy simplicial set construction
-    and layout (umap-learn) instead of t-SNE. Scales like UMAP: the dense
-    affinity matrix is never built.
-
-    len_normalize / lengths behave as in htsne: with variable-length
-    observations, per-element (length-normalized) log-likelihoods are used so
-    the embedding organizes by content rather than observation length.
+    The same mixture-model affinities as htsne (see the affinity argument
+    there), but the k-nearest-neighbor graph of model distances -log s_ij is
+    handed to UMAP's fuzzy simplicial set construction and layout (umap-learn)
+    instead of t-SNE. Scales like UMAP: the dense affinity matrix is never
+    built.
 
     Extra keyword arguments are passed to umap.UMAP. Returns the n x emb_dim
     embedding.
@@ -559,15 +527,10 @@ def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
                                     print_iter=print_iter, out=out)
 
     z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
-
-    norm_lengths = _resolve_length_normalization(len_normalize, lengths, data)
-    if norm_lengths is not None:
-        l_ij = l_ij / norm_lengths[:, None]
-
     n = z_ij.shape[0]
     k = min(n_neighbors, n - 1)
 
-    knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k)
+    knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k, affinity=affinity)
 
     reducer = umap.UMAP(n_components=emb_dim, n_neighbors=k, min_dist=min_dist,
                         precomputed_knn=(knn_idx, knn_dist), random_state=seed,
