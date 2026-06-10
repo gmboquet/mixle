@@ -1,302 +1,431 @@
-from typing import Tuple
+"""Model-based (hierarchical) t-SNE for heterogeneous data.
+
+Instead of Euclidean distances, pairwise affinities are derived from a fitted
+mixture model: the similarity of observation i to observation j is the
+likelihood of x_i under the posterior mixture of x_j,
+
+    s_ij = sum_k  p(x_i | theta_k) * p(z_j = k | x_j).
+
+Because affinities come from the model, this embeds any data type pysparkplug
+can model (tuples, sequences, sets, ...), not just vectors. The affinities are
+converted to t-SNE input probabilities by row-conditional normalization
+
+    p_{j|i} = softmax_j( log s_ij ),
+
+optionally calibrated to a target perplexity per row, and symmetrized
+P = (P + P^T) / (2n). Row normalization cancels any per-observation scale in
+log s_ij, so variable-length observations need no special handling.
+
+Two embedding engines are provided:
+
+- 'exact': a corrected full-matrix gradient descent supporting a heavy-tailed
+  student-t kernel q_ij ~ (1 + d_ij^2 / alpha)^{-(alpha+1)/2} whose tail
+  parameter alpha can be optimized along with the embedding. O(n^2) per
+  iteration; intended for small n or when optimize_alpha is needed.
+- 'barnes_hut': scalable O(n log n) t-SNE (scikit-learn) run on a sparse
+  k-nearest-neighbor matrix of model-based distances -log s_ij. The dense
+  affinity matrix is never materialized; neighbor search is done blockwise.
+"""
+import sys
+from typing import Optional, Tuple
+
 import numpy as np
-from scipy.optimize import root_scalar
-from pysp.utils.automatic import get_estimator, get_dpm_mixture
-from pysp.bstats.bestimation import optimize
-from pysp.bstats import *
+import scipy.sparse
+
+__all__ = ['htsne', 'dpmsne', 'model_log_affinity', 'sparse_model_distances', 'get_pmat']
 
 
-def adj_perplexity(x, ss):
-    s = 1 / ss
-    P = -x * s
-    M = P.max()
-    P = np.exp(P - M)
-    sumP = P.sum()
-    H = np.log(sumP) + M + s * np.sum(x * P) / sumP
-    P = P / sumP
-    return H, P
+def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (posterior_mat, component_log_like_mat), each n x K, for a mixture-like model.
+
+    Uses the model's seq_posterior/seq_component_log_density when available and
+    otherwise computes both from the component distributions and log weights,
+    which covers pysp.stats mixtures and pysp.bstats DPM models alike.
+    """
+    if enc_data is None:
+        if hasattr(mix_model, 'dist_to_encoder'):
+            enc_data = mix_model.dist_to_encoder().seq_encode(data)
+        else:
+            enc_data = mix_model.seq_encode(data)
+
+    if hasattr(mix_model, 'seq_component_log_density') and hasattr(mix_model, 'seq_posterior'):
+        ll_mat = np.asarray(mix_model.seq_component_log_density(enc_data), dtype=np.float64)
+        z_mat = np.asarray(mix_model.seq_posterior(enc_data), dtype=np.float64)
+        return z_mat, ll_mat
+
+    ll_mat = np.asarray([u.seq_log_density(enc_data) for u in mix_model.components], dtype=np.float64).T
+    log_w = np.asarray(mix_model.log_w, dtype=np.float64).reshape(1, -1)
+
+    z_mat = ll_mat + log_w
+    z_mat -= z_mat.max(axis=1, keepdims=True)
+    np.exp(z_mat, out=z_mat)
+    z_mat /= z_mat.sum(axis=1, keepdims=True)
+
+    return z_mat, ll_mat
 
 
-def vec_perplexity(x, s):
-    H, P = adj_perplexity(x, s)
-    return H
+def model_log_affinity(posterior_mat: np.ndarray, ll_mat: np.ndarray) -> np.ndarray:
+    """Dense n x n matrix of log s_ij = log sum_k exp(ll_ik) z_jk with -inf diagonal.
 
+    Computed with the log-sum-exp trick: each row of ll is shifted by its max so
+    the matrix product is stable, and the shift is added back afterwards.
+    """
+    z_ij = np.asarray(posterior_mat, dtype=np.float64)
+    l_ij = np.asarray(ll_mat, dtype=np.float64)
+    n = l_ij.shape[0]
 
-def row_perplexity_solve(x, a, s0, s1, d=10):
-    if d == 0:
-        return (s0 + s1) / 2.0
-    s2 = (s0 + s1) / 2.0
-    f0 = vec_perplexity(x, s0)
-    f1 = vec_perplexity(x, s1)
-    f2 = vec_perplexity(x, s2)
-
-    if f0 >= a:
-        return s0
-    elif f1 <= a:
-        return s1
-    elif f2 > a:
-        return row_perplexity_solve(x, a, s0, s2, d - 1)
-    elif f2 < a:
-        return row_perplexity_solve(x, a, s2, s1, d - 1)
-    else:
-        return s2
-
-
-def fix_row_perplexity(P, a):
-    rv = np.zeros([P.shape[0]] * 2)
-    ent_p = np.log2(a)*np.log(2)
-    for i in range(P.shape[0]):
-        x = P[i, :].copy()
-        x /= x.sum()
-        x = np.concatenate((x[:i], x[(i + 1):]))
-        x = -np.log(x)
-        c = row_perplexity_solve(x, ent_p, 1.0e-12, 1000, 20)
-        _, x = adj_perplexity(x, c)
-        rv[i, :i] = x[:i]
-        rv[i, (i + 1):] = x[i:]
-
-    return rv
-
-
-def get_pmat_vlen(posterior_mat, ll_mat, targ_perplexity=None):
+    v_i = l_ij.max(axis=1, keepdims=True)
+    g_ij = np.exp(l_ij - v_i)
 
     with np.errstate(divide='ignore'):
+        log_s = np.log(np.dot(g_ij, z_ij.T))
+    log_s += v_i
+    log_s[np.arange(n), np.arange(n)] = -np.inf
 
-        n = len(posterior_mat)
-        z_ij = posterior_mat
-        l_ij = ll_mat
-        v_ij = l_ij.max(axis=1, keepdims=True)
-        g_ij = np.exp(l_ij - v_ij)
-        p_ij = np.dot(g_ij, z_ij.T)
-        p_ij[range(n), range(n)] = 0
-        np.log(p_ij, out=p_ij)
-        p_ij += v_ij.T
-        p_ij -= np.max(p_ij, axis=1, keepdims=True)
-        np.exp(p_ij, out=p_ij)
-        p_ij /= np.sum(p_ij, axis=1, keepdims=True)
-        p_ij /= np.sum(p_ij, axis=0, keepdims=True)
-        p_ij = p_ij.T
+    return log_s
 
-        np.maximum(p_ij, 1.0e-128, out=p_ij)
-        if targ_perplexity is not None:
-            p_ij = fix_row_perplexity(p_ij, targ_perplexity)
 
-        p_ij /= n
-        return p_ij
+def _hbeta(neg_d: np.ndarray, beta: float) -> Tuple[float, np.ndarray]:
+    """Entropy (nats) and probabilities of p_j ~ exp(neg_d_j * beta) for one row."""
+    p = neg_d * beta
+    p -= p.max()
+    np.exp(p, out=p)
+    p /= p.sum()
+    h = -np.dot(p, np.log(np.maximum(p, 1.0e-300)))
+    return h, p
+
+
+def _calibrate_row(neg_d: np.ndarray, target_entropy: float, tol: float = 1.0e-5,
+                   max_iter: int = 64, beta_cap: float = 1.0e12) -> np.ndarray:
+    """Binary-search a precision beta so the row entropy hits target_entropy.
+
+    Model-based affinities can contain large groups of (near-)ties, in which
+    case entropies below log(tie-group size) are unreachable; beta is capped so
+    the search saturates gracefully at the sharpest achievable distribution.
+    """
+    beta, beta_min, beta_max = 1.0, 0.0, np.inf
+    h, p = _hbeta(neg_d, beta)
+
+    for _ in range(max_iter):
+        if abs(h - target_entropy) < tol or beta >= beta_cap:
+            break
+        if h > target_entropy:  # too flat -> increase precision
+            beta_min = beta
+            beta = beta * 2.0 if np.isinf(beta_max) else (beta + beta_max) / 2.0
+            beta = min(beta, beta_cap)
+        else:
+            beta_max = beta
+            beta = beta / 2.0 if beta_min == 0.0 else (beta + beta_min) / 2.0
+        h_new, p = _hbeta(neg_d, beta)
+        if h_new == h and beta_max - beta_min < 1.0e-12 * max(beta, 1.0):
+            break
+        h = h_new
+
+    return p
+
+
+def conditional_pmat(log_aff: np.ndarray, perplexity: Optional[float] = None) -> np.ndarray:
+    """Row-conditional probabilities p_{j|i} from log affinities (diagonal -inf).
+
+    With perplexity set, each row is calibrated so its entropy equals
+    log(perplexity); otherwise the raw row softmax is used.
+    """
+    n = log_aff.shape[0]
+    finite = np.isfinite(log_aff)
+
+    if perplexity is None:
+        p = log_aff - np.where(finite, log_aff, -np.inf).max(axis=1, keepdims=True)
+        np.exp(p, out=p)
+        p[~finite] = 0.0
+        p /= p.sum(axis=1, keepdims=True)
+        return p
+
+    target_entropy = np.log(perplexity)
+    p = np.zeros((n, n), dtype=np.float64)
+    idx = np.arange(n)
+    for i in range(n):
+        cols = idx[finite[i]]
+        p[i, cols] = _calibrate_row(log_aff[i, cols].copy(), target_entropy)
+    return p
 
 
 def get_pmat(posterior_mat, ll_mat, targ_perplexity=None, vlen=False):
+    """Symmetrized t-SNE input probabilities from model posteriors/log-likelihoods.
 
-    if vlen:
-        return get_pmat_vlen(posterior_mat, ll_mat, targ_perplexity)
-
-    with np.errstate(divide='ignore'):
-
-        n = len(posterior_mat)
-        z_ij = posterior_mat
-        l_ij = ll_mat
-        v_ij = l_ij.max(axis=1, keepdims=True)
-        g_ij = np.exp(l_ij - v_ij)
-        p_ij = np.dot(g_ij, z_ij.T)
-        p_ij[range(n), range(n)] = 0
-        np.log(p_ij, out=p_ij)
-        p_ij += v_ij
-        p_ij -= np.max(p_ij, axis=0, keepdims=True)
-        np.exp(p_ij, out=p_ij)
-        p_ij /= np.sum(p_ij, axis=0, keepdims=True)
-        p_ij = p_ij.T
-
-        np.maximum(p_ij, 1.0e-128, out=p_ij)
-        if targ_perplexity is not None:
-            p_ij = fix_row_perplexity(p_ij, targ_perplexity)
-
-        p_ij /= n
-        return p_ij
+    The vlen flag is kept for backward compatibility but no longer changes the
+    computation: row-conditional normalization cancels per-observation scale,
+    which is the mathematically sound treatment for variable-length data.
+    """
+    log_s = model_log_affinity(posterior_mat, ll_mat)
+    p = conditional_pmat(log_s, perplexity=targ_perplexity)
+    p = (p + p.T) / (2.0 * p.shape[0])
+    return p
 
 
-def t_cond_prob_mat(tx: np.ndarray, alpha: float) -> Tuple[np.ndarray, np.ndarray]:
-    n, m = tx.shape[0:2]
+def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: np.ndarray, k: int,
+                           block_size: int = 1024) -> scipy.sparse.csr_matrix:
+    """Sparse n x n matrix of model distances d_ij = max_j' log s_ij' - log s_ij.
 
+    Keeps the k nearest neighbors (largest affinity) per row. Built blockwise so
+    the dense n x n affinity matrix is never materialized. Distances are
+    non-negative; any per-row shift is immaterial because t-SNE's perplexity
+    calibration is per row.
+    """
+    z_ij = np.asarray(posterior_mat, dtype=np.float64)
+    l_ij = np.asarray(ll_mat, dtype=np.float64)
+    n = l_ij.shape[0]
+    k = min(k, n - 1)
+
+    rows = np.repeat(np.arange(n), k)
+    cols = np.empty(n * k, dtype=np.int64)
+    vals = np.empty(n * k, dtype=np.float64)
+
+    zt = z_ij.T
+    for s0 in range(0, n, block_size):
+        s1 = min(s0 + block_size, n)
+        v_i = l_ij[s0:s1].max(axis=1, keepdims=True)
+        g = np.exp(l_ij[s0:s1] - v_i)
+        s_blk = np.dot(g, zt)                       # affinities (up to e^{v_i} row scale)
+        s_blk[np.arange(s0, s1) - s0, np.arange(s0, s1)] = 0.0
+
+        nbr = np.argpartition(-s_blk, k - 1, axis=1)[:, :k]
+        np.maximum(s_blk, 1.0e-300, out=s_blk)
+        log_s = np.log(s_blk)
+
+        for bi, i in enumerate(range(s0, s1)):
+            c = nbr[bi]
+            d = log_s[bi, c].max() - log_s[bi, c]
+            cols[i * k:(i + 1) * k] = c
+            vals[i * k:(i + 1) * k] = d
+
+    return scipy.sparse.csr_matrix((vals, (rows, cols)), shape=(n, n))
+
+
+def t_kernel(tx: np.ndarray, alpha: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Heavy-tailed student-t kernel on embedding tx.
+
+    Returns (Q, num, d2): normalized probabilities Q, the gradient weights
+    num_ij = 1 / (1 + d_ij^2 / alpha), and squared distances d2. At alpha = 1
+    this is the standard t-SNE kernel.
+    """
+    n = tx.shape[0]
     rsum = np.sum(np.square(tx), axis=1, keepdims=True)
-    d_ij = np.dot(-2 * tx, tx.T)
-    d_ij += rsum
-    d_ij += rsum.T + 1
-    np.power(d_ij, -(alpha + 1.0)/2.0, out=d_ij)
+    d2 = np.dot(-2.0 * tx, tx.T)
+    d2 += rsum
+    d2 += rsum.T
+    np.maximum(d2, 0.0, out=d2)
 
-    d_ij[np.arange(n), np.arange(n)] = 0
-    q_ij = d_ij / np.sum(d_ij)
+    num = 1.0 / (1.0 + d2 / alpha)
+    qt = num ** ((alpha + 1.0) / 2.0)
+    qt[np.arange(n), np.arange(n)] = 0.0
+    q = qt / qt.sum()
 
-    return q_ij, d_ij
-
-
-def t_cond_prob_mat_alpha(tx: np.ndarray, alpha: float) -> Tuple[np.ndarray, np.ndarray]:
-    n, m = tx.shape[0:2]
-
-    rsum = np.sum(np.square(tx), axis=1, keepdims=True)
-    d_ij = np.dot(-2.0 * tx, tx.T)
-    d_ij += rsum
-    d_ij += rsum.T
-
-    c_ij = np.power((d_ij/alpha) + 1.0, -(alpha + 1.0)/2.0)
-    c_ij[np.arange(n), np.arange(n)] = 0
-    c_ij /= np.sum(c_ij)
-
-    return c_ij, d_ij
+    return q, num, d2
 
 
-def update_embed(P: np.ndarray, Y: np.ndarray, iY: np.ndarray, gains: np.ndarray, momentum: float, eta: float, alpha: float, min_gain: float, min_value: float = 1.0e-128) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    nn, mm = Y.shape
+def update_embed(P: np.ndarray, Y: np.ndarray, iY: np.ndarray, gains: np.ndarray,
+                 momentum: float, eta: float, alpha: float, min_gain: float,
+                 min_value: float = 1.0e-128) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """One delta-bar-delta gradient step of KL(P || Q) on the embedding Y.
 
-    Q, d_ij = t_cond_prob_mat(Y, alpha)
+    Gradient of the heavy-tailed kernel:
+        dC/dy_i = (2(alpha+1)/alpha) * sum_j (p_ij - q_ij) num_ij (y_i - y_j),
+    computed in matrix form (no per-row Python loop).
+    """
+    Q, num, _ = t_kernel(Y, alpha)
     np.maximum(Q, min_value, out=Q)
-    PQ = P - Q
-    dC = np.zeros((nn, mm))
 
-    for i in range(nn):
-        dCi = ((PQ[i, :] * d_ij[i, :]))
-        dC[i, :] = np.dot((Y[i, None, :] - Y).T, dCi)
-    dC *= (2.0*alpha + 2.0)/alpha
+    W = (P - Q) * num
+    dC = (np.sum(W, axis=1, keepdims=True) * Y - np.dot(W, Y)) * (2.0 * (alpha + 1.0) / alpha)
 
-    gains = (gains + 0.2) * ((dC > 0) != (iY > 0)) + (gains * 0.8) * ((dC > 0) == (iY > 0))
-    gains[gains < min_gain] = min_gain
+    inc = (dC > 0) != (iY > 0)
+    gains = np.where(inc, gains + 0.2, gains * 0.8)
+    np.maximum(gains, min_gain, out=gains)
 
     iY = momentum * iY - eta * (gains * dC)
-    Y += iY
+    Y = Y + iY
     Y -= np.mean(Y, axis=0, keepdims=True)
 
     return Y, iY, gains, Q
 
 
-def update_alpha(P, Y, alpha: float, min_alpha: float, min_value: float, max_its: int = 30, step: float = 0.1, eps: float = 1.0e-4) -> float:
+def _kl(P: np.ndarray, Q: np.ndarray) -> float:
+    m = (P > 0) & (Q > 0)
+    return float(np.dot(P[m], np.log(P[m]) - np.log(Q[m])))
 
-    Q, e_ij = t_cond_prob_mat_alpha(Y, alpha)
+
+def update_alpha(P: np.ndarray, Y: np.ndarray, alpha: float, min_alpha: float,
+                 min_value: float, max_its: int = 30, step: float = 0.1,
+                 eps: float = 1.0e-6, max_alpha: float = 1.0e6) -> float:
+    """Optimize the kernel tail parameter alpha by guarded Newton steps.
+
+    d(-log q~_ij)/d(alpha) = 0.5 log(1 + d2/alpha) - (alpha+1) d2 / (2 alpha^2 (1 + d2/alpha)),
+    and dKL/d(alpha) = sum_ij (p_ij - q_ij) d(-log q~_ij)/d(alpha) (the partition
+    function term cancels because sum P = sum Q = 1). Steps are clipped to a
+    +-step trust region; alpha is kept in [min_alpha, max_alpha].
+    """
+    Q, num, d2 = t_kernel(Y, alpha)
     np.maximum(Q, min_value, out=Q)
-    PQ = P - Q
-    GG = np.bitwise_and(P > 0, Q > 0)
-    CC = np.log(P[GG] / Q[GG]) * P[GG]
-    CC = CC.sum()
-    its = 0
+    kl = _kl(P, Q)
 
-    while True:
+    for _ in range(max_its):
+        e_a = 1.0 + d2 / alpha
+        dlq = 0.5 * np.log(e_a) - ((alpha + 1.0) / (2.0 * alpha * alpha)) * (d2 / e_a)
+        g = float(np.sum((P - Q) * dlq))
 
-        e_ij_a = (e_ij/alpha) + 1
-        dCa = (np.log(e_ij_a)*0.5 + (((-alpha - 1.0)/(2.0*alpha*alpha))*e_ij/e_ij_a)) * PQ
-        dCa = dCa[GG].sum()
-
-        if np.isfinite(dCa) and (dCa != 0):
-            if (alpha - (CC / dCa)) < (alpha*(1.0-step)):
-                alpha *= (1.0-step)
-            elif (alpha - (CC / dCa)) > (alpha*(1.0+step)):
-                alpha *= (1.0+step)
-            elif np.abs(dCa) > 0.0:
-                alpha = alpha - (CC / dCa)
-
-        alpha = max(alpha, min_alpha)
-
-        its += 1
-        if its >= max_its:
+        if not np.isfinite(g) or g == 0.0:
             break
 
-        CC_old = CC
-        Q, e_ij = t_cond_prob_mat_alpha(Y, alpha)
+        prop = alpha - kl / g if g != 0 else alpha
+        prop = min(max(prop, alpha * (1.0 - step)), alpha * (1.0 + step))
+        new_alpha = min(max(prop, min_alpha), max_alpha)
+
+        if new_alpha == alpha:
+            break
+
+        Q, num, d2 = t_kernel(Y, new_alpha)
         np.maximum(Q, min_value, out=Q)
-        PQ = P - Q
-        GG = np.bitwise_and(P > 0, Q > 0)
-        CC = np.log(P[GG] / Q[GG]) * P[GG]
-        CC = CC.sum()
+        new_kl = _kl(P, Q)
 
-        if CC_old - CC < eps:
+        if new_kl > kl - eps:
             break
+        alpha, kl = new_alpha, new_kl
 
     return alpha
 
 
-def htsne(data, emb_dim=2, alpha=1.0, max_components=30, mix_threshold_count=0.5, Y=None, perplexity=None, max_its=1000, print_iter=100, eta=500, momentum=0.8, min_gain=0.01, min_value=1.0e-128, optimize_alpha=False, min_alpha=1.0e-6, max_alpha_its=3, seed=None, comp_estimator=None, mix_model=None, variable_length=False):
+def tsne_exact(P: np.ndarray, emb_dim: int = 2, alpha: float = 1.0, Y: Optional[np.ndarray] = None,
+               max_its: int = 1000, eta: Optional[float] = None, momentum: float = 0.8,
+               early_exaggeration: float = 12.0, early_its: int = 250, min_gain: float = 0.01,
+               min_value: float = 1.0e-128, optimize_alpha: bool = False, min_alpha: float = 1.0e-6,
+               max_alpha_its: int = 3, tol: float = 1.0e-7, check_every: int = 50,
+               print_iter: int = 100, seed: Optional[int] = None, out=None) -> np.ndarray:
+    """Full-matrix t-SNE on symmetrized probabilities P with convergence stopping."""
+    if out is None:
+        out = sys.stdout
 
-    if max_components <= 1 or not isinstance(max_components, (int, np.int_)):
-        raise Exception('max_components must be and integer greater than 1.')
+    P = np.asarray(P, dtype=np.float64).copy()
+    P /= P.sum()
+    n = P.shape[0]
 
-    if mix_model is None:
-        mix_model = get_dpm_mixture(data, estimator=comp_estimator, max_comp=max_components, rng=np.random.RandomState(seed), max_its=max_its, print_iter=print_iter, mix_threshold_count=mix_threshold_count)
+    if eta is None:
+        eta = max(n / early_exaggeration, 50.0)
 
-    if mix_model.num_components == 0:
-        raise Exception('Something is broken. Mixture model has zero components.')
+    if Y is None:
+        rng = np.random.RandomState(seed)
+        Y = rng.randn(n, emb_dim) * 1.0e-4
+    else:
+        Y = np.array(Y, dtype=np.float64)
+        emb_dim = Y.shape[1]
 
-    enc_data = mix_model.seq_encode(data)
-    z_ij = mix_model.seq_posterior(enc_data)
-    l_ij = mix_model.seq_component_log_density(enc_data)
+    iY = np.zeros((n, emb_dim))
+    gains = np.ones((n, emb_dim))
 
-    P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity, vlen=variable_length)
-    P = np.asarray(P)
-    P += P.T
-    P /= np.sum(P)
+    P *= early_exaggeration
     np.maximum(P, min_value, out=P)
 
-    if Y is None:
-        rng = np.random.RandomState(seed)
-        nn = P.shape[0]
-        Y = rng.randn(nn, emb_dim) * 1.0e-4
-        iY = np.zeros((nn, emb_dim))
-        gains = np.zeros((nn, emb_dim))
-        P *= 4
-        for i in range(20):
-            Y, iY, gains, Q = update_embed(P, Y, iY, gains, 0.5, eta, alpha, min_gain, min_value)
-        for i in range(80):
-            Y, iY, gains, Q = update_embed(P, Y, iY, gains, momentum, eta, alpha, min_gain, min_value)
-        P /= 4
-    else:
-        Y = np.asarray(Y)
-        nn = Y.shape[0]
-        emb_dim = Y.shape[1]
-        iY = np.zeros((nn, emb_dim))
-        gains = np.zeros((nn, emb_dim))
-
+    last_kl = np.inf
     for i in range(1, max_its + 1):
-        Y, iY, gains, Q = update_embed(P, Y, iY, gains, momentum, eta, alpha, min_gain, min_value)
-        if optimize_alpha:
+        if i == early_its + 1:
+            P /= early_exaggeration
+            np.maximum(P, min_value, out=P)
+
+        mom = 0.5 if i <= early_its else momentum
+        Y, iY, gains, Q = update_embed(P, Y, iY, gains, mom, eta, alpha, min_gain, min_value)
+
+        if optimize_alpha and i > early_its:
             alpha = update_alpha(P, Y, alpha, min_alpha, min_value, max_alpha_its)
+
         if (i % print_iter) == 0:
-            KL = np.bitwise_and(P > 0, Q > 0)
-            KL = np.dot(P[KL], (np.log(P[KL]) - np.log(Q[KL])))
-            print('Iteration %d: alpha = %f, KL(P||Q)=%f' % (i, alpha, KL))
+            out.write('Iteration %d: alpha = %f, KL(P||Q)=%f\n' % (i, alpha, _kl(P, Q)))
+
+        if i > early_its and (i % check_every) == 0:
+            kl = _kl(P, Q)
+            if last_kl - kl < tol * max(1.0, abs(last_kl)):
+                break
+            last_kl = kl
 
     return Y
 
 
-def dpmsne(P=None, data=None, emb_dim=2, alpha=1.0, max_components=30, mix_threshold_count=0.5, Y=None, perplexity=None, max_its=1000, print_iter=100, eta=500, momentum=0.8, min_gain=0.01, min_value=1.0e-128, optimize_alpha=False, min_alpha=1.0e-6, max_alpha_its=3, seed=None, comp_estimator=None, mix_model=None, variable_length=False):
+def _tsne_barnes_hut(dist_csr: scipy.sparse.csr_matrix, emb_dim: int, perplexity: float,
+                     max_its: int, eta, early_exaggeration: float,
+                     seed: Optional[int], Y: Optional[np.ndarray]) -> np.ndarray:
+    from sklearn.manifold import TSNE
+
+    init = Y if Y is not None else 'random'
+    learning_rate = 'auto' if eta is None else float(eta)
+
+    ts = TSNE(n_components=emb_dim, perplexity=perplexity, metric='precomputed',
+              method='barnes_hut', init=init, learning_rate=learning_rate,
+              early_exaggeration=early_exaggeration, max_iter=max(max_its, 250),
+              random_state=seed)
+    return ts.fit_transform(dist_csr)
 
 
-    P = np.asarray(P)
-    P /= np.sum(P)
+def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
+          Y: Optional[np.ndarray] = None, perplexity: Optional[float] = 30.0,
+          max_its: int = 1000, print_iter: int = 100, eta: Optional[float] = None,
+          momentum: float = 0.8, min_gain: float = 0.01, min_value: float = 1.0e-128,
+          optimize_alpha: bool = False, min_alpha: float = 1.0e-6, max_alpha_its: int = 3,
+          seed: Optional[int] = None, mix_model=None, enc_data=None, method: str = 'auto',
+          early_exaggeration: float = 12.0, tol: float = 1.0e-7, dpm_max_its: int = 100,
+          out=None, variable_length: bool = False):
+    """Embed heterogeneous data with model-based t-SNE.
 
-    if Y is None:
-        rng = np.random.RandomState(seed)
-        nn = P.shape[0]
-        Y = rng.randn(nn, emb_dim) * 1.0e-4
-        iY = np.zeros((nn, emb_dim))
-        gains = np.zeros((nn, emb_dim))
-        P *= 4
-        for i in range(20):
-            Y, iY, gains, Q = update_embed(P, Y, iY, gains, 0.5, eta, alpha, min_gain, min_value)
-        for i in range(80):
-            Y, iY, gains, Q = update_embed(P, Y, iY, gains, momentum, eta, alpha, min_gain, min_value)
-        P /= 4
-    else:
-        Y = np.asarray(Y)
-        nn = Y.shape[0]
-        emb_dim = Y.shape[1]
-        iY = np.zeros((nn, emb_dim))
-        gains = np.zeros((nn, emb_dim))
+    A mixture model is fit to the data (a Dirichlet process mixture with
+    automatically typed components by default, or pass mix_model), pairwise
+    affinities are computed from component likelihoods and posteriors, and the
+    affinities are embedded with t-SNE.
 
-    for i in range(1, max_its + 1):
-        Y, iY, gains, Q = update_embed(P, Y, iY, gains, momentum, eta, alpha, min_gain, min_value)
-        if optimize_alpha:
-            alpha = update_alpha(P, Y, alpha, min_alpha, min_value, max_alpha_its)
-        if (i % print_iter) == 0:
-            KL = np.bitwise_and(P > 0, Q > 0)
-            KL = np.dot(P[KL], (np.log(P[KL]) - np.log(Q[KL])))
-            print('Iteration %d: alpha = %f, KL(P||Q)=%f' % (i, alpha, KL))
+    method:
+        'exact'      - full-matrix gradient descent (supports optimize_alpha)
+        'barnes_hut' - sparse kNN distances + scikit-learn Barnes-Hut t-SNE
+        'auto'       - barnes_hut for n > 1500 unless optimize_alpha is set
 
-    return Y
+    Returns the n x emb_dim embedding.
+    """
+    if out is None:
+        out = sys.stdout
+
+    if mix_model is None:
+        from pysp.utils.automatic import get_dpm_mixture
+        mix_model = get_dpm_mixture(data, rng=np.random.RandomState(seed),
+                                    max_components=max_components, max_its=dpm_max_its,
+                                    print_iter=print_iter, out=out)
+
+    z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
+    n = z_ij.shape[0]
+
+    if method == 'auto':
+        method = 'exact' if (optimize_alpha or n <= 1500) else 'barnes_hut'
+
+    if method == 'barnes_hut':
+        px = 30.0 if perplexity is None else float(perplexity)
+        px = min(px, (n - 2) / 3.0)
+        k = min(n - 1, int(3.0 * px) + 5)
+        dist_csr = sparse_model_distances(z_ij, l_ij, k=k)
+        return _tsne_barnes_hut(dist_csr, emb_dim, px, max_its, eta,
+                                early_exaggeration, seed, Y)
+
+    P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity)
+    return tsne_exact(P, emb_dim=emb_dim, alpha=alpha, Y=Y, max_its=max_its, eta=eta,
+                      momentum=momentum, early_exaggeration=early_exaggeration,
+                      min_gain=min_gain, min_value=min_value, optimize_alpha=optimize_alpha,
+                      min_alpha=min_alpha, max_alpha_its=max_alpha_its, tol=tol,
+                      print_iter=print_iter, seed=seed, out=out)
 
 
+def dpmsne(P=None, emb_dim: int = 2, alpha: float = 1.0, Y: Optional[np.ndarray] = None,
+           max_its: int = 1000, print_iter: int = 100, eta: Optional[float] = None,
+           momentum: float = 0.8, min_gain: float = 0.01, min_value: float = 1.0e-128,
+           optimize_alpha: bool = False, min_alpha: float = 1.0e-6, max_alpha_its: int = 3,
+           seed: Optional[int] = None, early_exaggeration: float = 12.0, tol: float = 1.0e-7,
+           out=None, **_compat_kwargs):
+    """Embed a precomputed (symmetric, non-negative) affinity matrix P with exact t-SNE."""
+    return tsne_exact(np.asarray(P, dtype=np.float64), emb_dim=emb_dim, alpha=alpha, Y=Y,
+                      max_its=max_its, eta=eta, momentum=momentum,
+                      early_exaggeration=early_exaggeration, min_gain=min_gain,
+                      min_value=min_value, optimize_alpha=optimize_alpha, min_alpha=min_alpha,
+                      max_alpha_its=max_alpha_its, tol=tol, print_iter=print_iter,
+                      seed=seed, out=out)

@@ -29,6 +29,7 @@ setup(
         "pandas",
         "pyspark",
         "tbb",
+        "scikit-learn",
     ],
 
 )
