@@ -76,6 +76,7 @@ __all__ = [
     "HiddenMarkovSampler",
     "HiddenMarkovEstimator",
     "HiddenMarkovDataEncoder",
+    "HiddenMarkovModelEnumerator",
     "HierarchicalMixtureDistribution",
     "HierarchicalMixtureSampler",
     "HierarchicalMixtureEstimator",
@@ -138,6 +139,7 @@ __all__ = [
     "MarkovChainSampler",
     "MarkovChainEstimator",
     "MarkovChainDataEncoder",
+    "MarkovChainEnumerator",
     "MixtureDistribution",
     "MixtureSampler",
     "MixtureEstimator",
@@ -272,14 +274,14 @@ from pysp.stats.heterogenous_mixture import HeterogeneousMixtureDistribution, He
     HeterogeneousMixtureEstimator, HeterogeneousMixtureDataEncoder, HeterogeneousMixtureEnumerator
 
 from pysp.stats.markovchain import MarkovChainDistribution, MarkovChainSampler, MarkovChainEstimator, \
-    MarkovChainDataEncoder
+    MarkovChainDataEncoder, MarkovChainEnumerator
 
 from pysp.stats.null_dist import NullDistribution, NullSampler, NullEstimator, NullDataEncoder, NullEnumerator
 
 from pysp.stats.hidden_association import HiddenAssociationDistribution, HiddenAssociationSampler, \
     HiddenAssociationEstimator, HiddenAssociationDataEncoder
 
-from pysp.stats.hidden_markov import HiddenMarkovModelDistribution, HiddenMarkovSampler, HiddenMarkovEstimator, \
+from pysp.stats.hidden_markov import HiddenMarkovModelEnumerator, HiddenMarkovModelDistribution, HiddenMarkovSampler, HiddenMarkovEstimator, \
     HiddenMarkovDataEncoder
 
 from pysp.stats.jmixture import JointMixtureDistribution, JointMixtureSampler, JointMixtureEstimator, \

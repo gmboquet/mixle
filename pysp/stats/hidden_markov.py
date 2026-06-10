@@ -34,7 +34,12 @@ from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DataSequenceEncoder, DistributionSampler, StatisticAccumulatorFactory
+    ParameterEstimator, DataSequenceEncoder, DistributionSampler, StatisticAccumulatorFactory, \
+    DistributionEnumerator, EnumerationError, child_enumerator
+from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, best_first_union_max
+from scipy.special import logsumexp
+import heapq
+import itertools
 from pysp.stats.markovchain import MarkovChainDistribution
 from pysp.stats.mixture import MixtureDistribution
 from pysp.stats.null_dist import NullDistribution, NullAccumulatorFactory, NullEstimator, NullDataEncoder, \
@@ -499,6 +504,167 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         return HiddenMarkovDataEncoder(emission_encoder=emission_encoder, len_encoder=len_encoder,
                                        use_numba=self.use_numba)
 
+    def enumerator(self) -> 'HiddenMarkovModelEnumerator':
+        """Returns HiddenMarkovModelEnumerator iterating observation sequences in descending
+        marginal probability order."""
+        return HiddenMarkovModelEnumerator(self)
+
+
+class _HmmPrefix(object):
+    """A concrete observation prefix in the HMM enumeration search.
+
+    Holds the exact log-space forward vector alpha (alpha[s] = log p(x_1..x_t, S_t = s))
+    and the projection proj[s'] = logsumexp_s(alpha[s] + log_A[s, s']) used to score and
+    expand all single-symbol extensions of this prefix. For the empty prefix, proj is the
+    initial state log-probability vector.
+    """
+
+    __slots__ = ('t', 'values', 'proj')
+
+    def __init__(self, t: int, values: tuple, proj: np.ndarray) -> None:
+        self.t = t
+        self.values = values
+        self.proj = proj
+
+
+class HiddenMarkovModelEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: SequenceEncodableProbabilityDistribution,
+                 topics: Optional[Sequence[SequenceEncodableProbabilityDistribution]] = None,
+                 log_w: Optional[np.ndarray] = None,
+                 log_transitions: Optional[np.ndarray] = None,
+                 len_dist: Optional[SequenceEncodableProbabilityDistribution] = None,
+                 path_root: Optional[str] = None) -> None:
+        """Enumerates observation sequences in descending marginal probability order.
+
+        The optional keyword arguments override the corresponding attributes of dist so HMM
+        variants with the same forward semantics (e.g. IndPiHiddenMarkovModelDistribution)
+        can reuse this enumerator.
+
+        The marginal probability of an observation sequence sums over all hidden state paths
+        (the forward algorithm), so enumeration is an A*-style best-first search over
+        observation prefixes:
+
+          - A shared symbol pool enumerates the deduped union of the emission supports in
+            descending max-over-states emission probability.
+          - Prefixes carry exact log-space forward vectors; partial nodes are scored with the
+            admissible bound logsumexp_s(proj[s] + UB[s, remaining-1]) + pool_max_emission,
+            where UB[s, r] = logsumexp_s'(log_A[s, s'] + max_emission[s'] + UB[s', r-1]) bounds
+            any r further (transition + emission) steps out of state s. The pool-rank bound is
+            also valid for all later ranks, enabling lazy sibling generation.
+          - Complete sequences re-enter the heap with their exact forward log-density plus the
+            length log-probability, so popped complete sequences are in true descending order.
+          - Lengths are pulled lazily from the length distribution's enumerator and merged on
+            a length frontier (per-length scores never exceed the length log-probability).
+
+        Raises EnumerationError for the taus/topics parameterization (different density
+        semantics), when terminal_values is set, when no length distribution is modeled, or
+        when an emission distribution does not support enumeration.
+
+        Args:
+            dist (HiddenMarkovModelDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        if dist.has_topics:
+            raise EnumerationError(dist, reason='taus/topics parameterization is not supported')
+        if dist.terminal_values is not None:
+            raise EnumerationError(dist, reason='terminal_values semantics are not supported')
+        len_dist = dist.len_dist if len_dist is None else len_dist
+        if len_dist is None or isinstance(len_dist, NullDistribution):
+            raise EnumerationError(dist, reason='no length distribution is modeled (len_dist is Null)')
+        path_root = path_root if path_root is not None else type(dist).__name__
+
+        self._topics = list(dist.topics) if topics is None else list(topics)
+        self._n_states = len(self._topics)
+        self._log_w = np.asarray(dist.log_w if log_w is None else log_w, dtype=np.float64)
+        self._log_a = np.asarray(dist.log_transitions if log_transitions is None else log_transitions,
+                                 dtype=np.float64)
+
+        emission_streams = [BufferedStream(child_enumerator(topic, '%s.topics[%d]' % (path_root, s)))
+                            for s, topic in enumerate(self._topics)]
+        heads = [es.get(0) for es in emission_streams]
+        self._head_max = np.asarray([h[1] if h is not None else -np.inf for h in heads], dtype=np.float64)
+
+        topics_loc = self._topics
+
+        def max_emission_lp(x) -> float:
+            with np.errstate(divide='ignore'):
+                return max(topic.log_density(x) for topic in topics_loc)
+
+        self._pool = BufferedStream(best_first_union_max(
+            emission_streams, [0.0] * self._n_states, max_emission_lp))
+        self._emis_cache: List[np.ndarray] = []
+
+        # UB[r][s] bounds r further (transition + emission) steps out of state s.
+        self._ub: List[np.ndarray] = [np.zeros(self._n_states, dtype=np.float64)]
+
+        len_stream = BufferedStream(child_enumerator(len_dist, '%s.len_dist' % path_root))
+        self._merge = LengthFrontierMerge(len_stream, self._kbest_sequences)
+
+    def _emissions(self, rank: int) -> Optional[np.ndarray]:
+        """Per-state emission log-densities of the pool symbol at rank; None past the pool end."""
+        while len(self._emis_cache) <= rank:
+            item = self._pool.get(len(self._emis_cache))
+            if item is None:
+                return None
+            with np.errstate(divide='ignore'):
+                self._emis_cache.append(np.asarray(
+                    [topic.log_density(item[0]) for topic in self._topics], dtype=np.float64))
+        return self._emis_cache[rank]
+
+    def _ub_for(self, r: int) -> np.ndarray:
+        while len(self._ub) <= r:
+            prev = self._ub[-1]
+            step = self._log_a + (self._head_max + prev)[None, :]
+            self._ub.append(logsumexp(step, axis=1))
+        return self._ub[r]
+
+    def _kbest_sequences(self, n: int, lp_len: float):
+        if n == 0:
+            yield ([], lp_len)
+            return
+        counter = itertools.count()
+        heap = []  # entries: (-score, counter, kind, payload)
+
+        def push_candidate(parent: '_HmmPrefix', rank: int) -> None:
+            if self._pool.get(rank) is None:
+                return
+            pool_lp = self._pool.get(rank)[1]
+            remaining = n - parent.t - 1
+            bound = logsumexp(parent.proj + self._ub_for(remaining)) + pool_lp + lp_len
+            if bound > -np.inf:
+                heapq.heappush(heap, (-bound, next(counter), 'cand', (parent, rank)))
+
+        root = _HmmPrefix(0, (), self._log_w)
+        push_candidate(root, 0)
+
+        while heap:
+            neg_score, _, kind, payload = heapq.heappop(heap)
+            if kind == 'done':
+                yield payload
+                continue
+            parent, rank = payload
+            push_candidate(parent, rank + 1)
+            x, _ = self._pool.get(rank)
+            alpha = parent.proj + self._emissions(rank)
+            t = parent.t + 1
+            if np.max(alpha) == -np.inf:
+                continue
+            if t == n:
+                exact = logsumexp(alpha) + lp_len
+                if exact > -np.inf:
+                    heapq.heappush(heap, (-exact, next(counter), 'done',
+                                          (list(parent.values) + [x], exact)))
+            else:
+                proj = logsumexp(alpha[:, None] + self._log_a, axis=0)
+                child = _HmmPrefix(t, parent.values + (x,), proj)
+                push_candidate(child, 0)
+
+    def __next__(self) -> Tuple[List[Any], float]:
+        return next(self._merge)
+
+
 class HiddenMarkovSampler(DistributionSampler):
 
     def __init__(self, dist: 'HiddenMarkovModelDistribution', seed: Optional[int] = None) -> None:
@@ -857,7 +1023,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             weights_nz = weights[nz_idx]
 
             for j in range(self.num_states):
-                w = weights_nz[idx].copy()
+                w = weights[idx].copy()
                 w[states != j] = 0
                 self.accumulators[j].seq_initialize(xs, w, self._acc_rng[j])
 
@@ -1567,7 +1733,7 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
 
 @numba.njit(
     'void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:])',
-    parallel=True, fastmath=True)
+    parallel=True, fastmath=True, cache=True)
 def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll, next_alpha_mat, alpha_buff_mat, out):
     for n in numba.prange(len(tz) - 1):
 
@@ -1613,7 +1779,7 @@ def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll,
 
 @numba.njit(
     'void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:], '
-    'float64[:], float64[:,:])')
+    'float64[:], float64[:,:])', cache=True)
 def numba_baum_welch(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc, beta_buff,
                      xi_buff):
     for n in range(len(tz) - 1):
@@ -1702,7 +1868,7 @@ def numba_baum_welch(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alp
 @numba.njit(
     'void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], '
     'float64[:,:])',
-    parallel=True, fastmath=True)
+    parallel=True, fastmath=True, cache=True)
 def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc):
     for n in numba.prange(len(tz) - 1):
 
@@ -1793,7 +1959,7 @@ def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, al
 @numba.njit(
     'void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], '
     'float64[:,:])',
-    parallel=True, fastmath=True)
+    parallel=True, fastmath=True, cache=True)
 def numba_baum_welch_alphas(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc):
     for n in numba.prange(len(tz) - 1):
 
@@ -1833,7 +1999,7 @@ def numba_baum_welch_alphas(num_states, tz, prob_mat, init_pvec, tran_mat, weigh
                 alpha_loc[s, i] /= alpha_sum
 
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])')
+@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
 def vec_bincount1(x, w, out):
     """Numba bincount on the rows of matrix w for groups x.
 
@@ -1851,7 +2017,7 @@ def vec_bincount1(x, w, out):
     return out
 
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])')
+@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
 def vec_bincount2(x, w, out):
     """Numba bincount on the rows of matrix w for groups x.
 

@@ -22,7 +22,8 @@ from typing import Any, Callable, Hashable, Iterator, List, Optional, Sequence, 
 from pysp.utils.vector import log_sum
 
 __all__ = ['BufferedStream', 'freeze', 'merge_enumerators', 'ProductEnumerator',
-           'best_first_union', 'best_first_union_max', 'supports_enumeration']
+           'LengthFrontierMerge', 'best_first_union', 'best_first_union_max',
+           'supports_enumeration']
 
 
 _NAN_SENTINEL = ('__pysp_nan__',)
@@ -163,6 +164,65 @@ class ProductEnumerator(object):
                 self._visited.add(succ)
                 heapq.heappush(self._heap, (-self._score(succ), next(self._counter), succ))
         return (value, score)
+
+
+class LengthFrontierMerge(object):
+    """Merge per-length sorted streams, instantiating lengths lazily from a sorted length stream.
+
+    len_stream yields (length, log_prob_of_length) in descending order. make_stream(length,
+    lp_len) returns a sorted iterator of (value, log_prob) whose log probs already include
+    lp_len and never exceed it (true whenever per-element contributions are log probs <= 0).
+    The next un-instantiated length's lp_len is then a valid upper bound on anything its
+    stream could produce, so lengths are instantiated only when they can beat the best
+    instantiated head. Supports of distinct lengths must be disjoint (no de-duplication).
+    """
+
+    def __init__(self, len_stream: BufferedStream,
+                 make_stream: Callable[[int, float], Iterator[Tuple[Any, float]]]) -> None:
+        self._len_stream = len_stream
+        self._make_stream = make_stream
+        self._next_len_rank = 0
+        self._counter = itertools.count()
+        self._heap: List[Tuple[float, int, int]] = []  # (-head_lp, counter, stream id)
+        self._heads = {}
+        self._streams = {}
+
+    def __iter__(self) -> 'LengthFrontierMerge':
+        return self
+
+    def _pop(self) -> Tuple[Any, float]:
+        _, _, sid = heapq.heappop(self._heap)
+        value, lp = self._heads.pop(sid)
+        try:
+            nxt = next(self._streams[sid])
+            self._heads[sid] = nxt
+            heapq.heappush(self._heap, (-nxt[1], next(self._counter), sid))
+        except StopIteration:
+            del self._streams[sid]
+        return (value, lp)
+
+    def __next__(self) -> Tuple[Any, float]:
+        while True:
+            frontier = self._len_stream.get(self._next_len_rank)
+            if frontier is None:
+                if self._heap:
+                    return self._pop()
+                raise StopIteration
+            if self._heap and -self._heap[0][0] >= frontier[1]:
+                return self._pop()
+            length, lp_len = frontier
+            sid = self._next_len_rank
+            self._next_len_rank += 1
+            if not isinstance(length, (int, np.integer)) or length < 0:
+                continue
+            stream = self._make_stream(int(length), lp_len)
+            try:
+                head = next(stream)
+            except StopIteration:
+                continue
+            self._streams[sid] = stream
+            self._heads[sid] = head
+            heapq.heappush(self._heap, (-head[1], next(self._counter), sid))
 
 
 def _best_first_union(streams: Sequence[BufferedStream],
