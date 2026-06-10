@@ -58,7 +58,7 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
 
 		if x is None or len(x) == 0:
 			if self.len_dist is not None:
-				return self.len_dist(0)
+				return self.len_dist.log_density(0)
 			else:
 				return 0.0
 
@@ -310,6 +310,17 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
 
 	def sampler(self, seed=None):
 		return IndPiHiddenMarkovSampler(self, seed)
+
+	def enumerator(self):
+		"""Returns an enumerator over observation sequences in descending marginal probability order.
+
+		Reuses HiddenMarkovModelEnumerator (same forward semantics) with this distribution's
+		averaged initial state vector logW.
+		"""
+		from pysp.stats.hidden_markov import HiddenMarkovModelEnumerator
+		return HiddenMarkovModelEnumerator(self, topics=self.topics, log_w=self.logW,
+		                                   log_transitions=self.logTransitions, len_dist=self.len_dist,
+		                                   path_root='IndPiHiddenMarkovModelDistribution')
 
 	def estimator(self, pseudo_count=None):
 		len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
@@ -852,7 +863,7 @@ class IndPiHiddenMarkovEstimator(ParameterEstimator):
 
 
 
-@numba.njit('void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:])', parallel=True, fastmath=True)
+@numba.njit('void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:])', parallel=True, fastmath=True, cache=True)
 def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll, next_alpha_mat, alpha_buff_mat, out):
 
 	for n in numba.prange(len(tz) - 1):
@@ -898,7 +909,7 @@ def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll,
 
 
 
-@numba.njit('void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:], float64[:], float64[:,:])')
+@numba.njit('void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:], float64[:], float64[:,:])', cache=True)
 def numba_baum_welch(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc, beta_buff, xi_buff):
 
 	for n in range(len(tz)-1):
@@ -987,7 +998,7 @@ def numba_baum_welch(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alp
 
 
 #@numba.njit('void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])', parallel=True, fastmath=True)
-@numba.njit('void(int64, int32[:], float64[:,:], float64[:,:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])', parallel=True, fastmath=True)
+@numba.njit('void(int64, int32[:], float64[:,:], float64[:,:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])', parallel=True, fastmath=True, cache=True)
 def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc):
 
 

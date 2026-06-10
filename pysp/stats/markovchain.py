@@ -21,7 +21,11 @@ from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DataSequenceEncoder, DistributionSampler, StatisticAccumulatorFactory
+    ParameterEstimator, DataSequenceEncoder, DistributionSampler, StatisticAccumulatorFactory, \
+    DistributionEnumerator, EnumerationError, child_enumerator
+from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
+import heapq
+import itertools
 
 from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullDataEncoder, NullEstimator, \
     NullAccumulatorFactory
@@ -247,6 +251,66 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         """
         len_encoder = self.len_dist.dist_to_encoder()
         return MarkovChainDataEncoder(len_encoder=len_encoder)
+
+    def enumerator(self) -> 'MarkovChainEnumerator':
+        """Returns MarkovChainEnumerator iterating state sequences in descending probability order."""
+        return MarkovChainEnumerator(self)
+
+
+class MarkovChainEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: 'MarkovChainDistribution') -> None:
+        """Enumerates state sequences in descending probability order.
+
+        Lengths come lazily from the length distribution's enumerator; within each length the
+        sequences are produced by a best-first search over prefixes, scored with the admissible
+        bound exact_prefix_log_prob + remaining_steps * max_transition_log_prob (each remaining
+        step can contribute at most the largest single transition log-probability).
+
+        Raises EnumerationError when default_value is non-zero (unbounded support over
+        arbitrary values) or when no length distribution is modeled.
+
+        Args:
+            dist (MarkovChainDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        if dist.default_value != 0.0:
+            raise EnumerationError(dist, reason='non-zero default_value gives an unbounded support')
+        if isinstance(dist.len_dist, NullDistribution):
+            raise EnumerationError(dist, reason='no length distribution is modeled (len_dist is Null)')
+        self._init = [(v, lp) for v, lp in dist.loginit_prob_map.items() if lp > -np.inf]
+        self._trans = {s: [(w, lp) for w, lp in m.items() if lp > -np.inf]
+                       for s, m in dist.log_transition_map.items()}
+        steps = [lp for m in self._trans.values() for _, lp in m]
+        self._max_step = min(max(steps), 0.0) if steps else -np.inf
+        len_stream = BufferedStream(child_enumerator(dist.len_dist, 'MarkovChainDistribution.len_dist'))
+        self._merge = LengthFrontierMerge(len_stream, self._kbest_paths)
+
+    def _kbest_paths(self, n: int, lp_len: float):
+        if n == 0:
+            yield ([], lp_len)
+            return
+        counter = itertools.count()
+        heap = []
+        for v, lp in self._init:
+            bound = lp_len + lp + (n - 1) * self._max_step
+            if bound > -np.inf:
+                heapq.heappush(heap, (-bound, next(counter), (v,), lp))
+        while heap:
+            _, _, prefix, exact = heapq.heappop(heap)
+            t = len(prefix)
+            if t == n:
+                yield (list(prefix), exact + lp_len)
+                continue
+            for w, lp_step in self._trans.get(prefix[-1], ()):
+                exact2 = exact + lp_step
+                bound2 = lp_len + exact2 + (n - t - 1) * self._max_step
+                if bound2 > -np.inf:
+                    heapq.heappush(heap, (-bound2, next(counter), prefix + (w,), exact2))
+
+    def __next__(self) -> Tuple[List[Any], float]:
+        return next(self._merge)
 
 
 class MarkovChainSampler(DistributionSampler):
