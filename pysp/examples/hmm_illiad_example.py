@@ -1,6 +1,12 @@
-"""Fit an HMM to text from the Iliad, comparing Numba use and fit without Numba."""
+"""Fit an HMM to text from the Iliad, comparing Numba use and fit without Numba.
+
+The text (public domain, Project Gutenberg #2199) is downloaded on first run
+and cached under data/iliad/ at the repository root.
+"""
+import os
 import re
 import time
+import urllib.request
 
 import numpy as np
 
@@ -8,13 +14,26 @@ from pysp.stats import *
 from pysp.utils.estimation import optimize
 from pysp.utils.optsutil import map_to_integers
 
+ILIAD_URL = 'https://www.gutenberg.org/cache/epub/2199/pg2199.txt'
+ILIAD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          '..', '..', 'data', 'iliad', 'iliad_en.txt')
+
+
+def load_iliad_text() -> str:
+    path = os.path.normpath(ILIAD_PATH)
+    if not os.path.exists(path):
+        print('Downloading the Iliad from %s -> %s' % (ILIAD_URL, path))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        urllib.request.urlretrieve(ILIAD_URL, path)
+    with open(path, 'rt', encoding='utf-8') as fin:
+        return fin.read()
+
+
 if __name__ == '__main__':
     rng = np.random.RandomState(2)
 
-    fin = open('../../data/iliad/iliad_en.txt', 'rt', encoding='utf-8')
-    data = fin.read()
+    data = load_iliad_text()
     words = re.split(r'\s+', data)
-    fin.close()
     m = len(words)
     n = 100
     wmap = dict()
