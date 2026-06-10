@@ -997,7 +997,7 @@ def numba_baum_welch(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alp
 
 
 
-#@numba.njit('void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])', parallel=True, fastmath=True)
+#@numba.njit('void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])', parallel=True, fastmath=True, cache=True)
 @numba.njit('void(int64, int32[:], float64[:,:], float64[:,:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])', parallel=True, fastmath=True, cache=True)
 def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc):
 
