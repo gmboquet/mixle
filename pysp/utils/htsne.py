@@ -5,20 +5,23 @@ Euclidean distances, so anything pysparkplug can model (tuples, sequences,
 sets, variable-length data, ...) can be embedded. Three affinity definitions
 are supported (the `affinity` argument):
 
-- 'coassign' (default): the co-assignment probability
+- 'bhattacharyya' (default): the Bhattacharyya coefficient between
+  posteriors, s_ij = sum_k sqrt(z_ik z_jk); -log s_ij is the Bhattacharyya
+  distance on the posterior simplex. The square root amplifies shared
+  low-probability components, so affinities stay *graded* even when hard
+  assignments coincide - which is what gives the embedding within-cluster
+  geometry. Like 'coassign', it depends on the data only through posteriors,
+  so variable-length observations need no adjustments.
+
+- 'coassign': the co-assignment probability
 
       s_ij = P(z_i = z_j | x_i, x_j) = sum_k z_ik z_jk,
 
-  where z_ik = p(z_i = k | x_i) is the posterior over components. This is an
-  exact probability under the fitted model (the posterior similarity matrix of
-  Bayesian clustering), symmetric, and requires no adjustments: observation
-  length or dimensionality affects affinities only through posterior
-  certainty, exactly as the model dictates.
-
-- 'bhattacharyya': the Bhattacharyya coefficient between posteriors,
-  s_ij = sum_k sqrt(z_ik z_jk); -log s_ij is the Bhattacharyya distance on the
-  posterior simplex. Like 'coassign' but with heavier weight on shared
-  low-probability components.
+  the posterior similarity matrix of Bayesian clustering - an exact
+  probability under the fitted model. The principled choice when the
+  affinity itself must be a probability, but near-deterministic posteriors
+  make it almost binary: every same-component pair ties at ~1, and t-SNE
+  renders tied groups as rings/blobs with no internal structure.
 
 - 'likelihood': the predictive affinity s_ij = sum_k p(x_i | theta_k) z_jk
   (likelihood of x_i under the posterior mixture of x_j). Retains within-
@@ -106,7 +109,7 @@ def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.nd
 
 
 def model_log_affinity(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None,
-                       affinity: str = 'coassign') -> np.ndarray:
+                       affinity: str = 'bhattacharyya') -> np.ndarray:
     """Dense n x n matrix of log affinities (see module docstring) with -inf diagonal.
 
     Rows are comparable up to a per-row shift, which both the row-conditional
@@ -186,7 +189,7 @@ def conditional_pmat(log_aff: np.ndarray, perplexity: Optional[float] = None) ->
     return p
 
 
-def get_pmat(posterior_mat, ll_mat=None, targ_perplexity=None, vlen=False, affinity: str = 'coassign'):
+def get_pmat(posterior_mat, ll_mat=None, targ_perplexity=None, vlen=False, affinity: str = 'bhattacharyya'):
     """Symmetrized t-SNE input probabilities from model posteriors (and optionally
     component log-likelihoods, for affinity='likelihood').
 
@@ -199,7 +202,7 @@ def get_pmat(posterior_mat, ll_mat=None, targ_perplexity=None, vlen=False, affin
 
 
 def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k: int = 90,
-                           block_size: int = 1024, affinity: str = 'coassign') -> scipy.sparse.csr_matrix:
+                           block_size: int = 1024, affinity: str = 'bhattacharyya') -> scipy.sparse.csr_matrix:
     """Sparse n x n matrix of model distances d_ij = max_j' log s_ij' - log s_ij.
 
     Keeps the k nearest neighbors (largest affinity) per row. Built blockwise so
@@ -235,7 +238,7 @@ def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarra
 
 
 def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k: int = 15,
-              block_size: int = 1024, affinity: str = 'coassign') -> Tuple[np.ndarray, np.ndarray]:
+              block_size: int = 1024, affinity: str = 'bhattacharyya') -> Tuple[np.ndarray, np.ndarray]:
     """k-nearest-neighbor arrays under the model distance d_ij = -log s_ij.
 
     Returns (indices, distances), each n x k, sorted ascending per row with
@@ -444,7 +447,7 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
           optimize_alpha: bool = False, min_alpha: float = 1.0e-6, max_alpha_its: int = 3,
           seed: Optional[int] = None, mix_model=None, enc_data=None, method: str = 'auto',
           early_exaggeration: float = 12.0, tol: float = 1.0e-7, dpm_max_its: int = 100,
-          affinity: str = 'coassign', out=None, variable_length: bool = False):
+          affinity: str = 'bhattacharyya', out=None, variable_length: bool = False):
     """Embed heterogeneous data with model-based t-SNE.
 
     A mixture model is fit to the data (a Dirichlet process mixture with
@@ -458,11 +461,12 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
         'auto'       - barnes_hut for n > 10 unless optimize_alpha is set
 
     affinity:
-        'coassign' (default) - co-assignment probability P(z_i = z_j | x), an
-            exact probability under the model; robust to variable-length data
-            because length enters only through posterior certainty
-        'bhattacharyya'      - Bhattacharyya coefficient between posteriors
-        'likelihood'         - predictive affinity sum_k p(x_i|theta_k) z_jk
+        'bhattacharyya' (default) - Bhattacharyya coefficient between
+            posteriors; graded even under hard assignments, so embeddings
+            retain within-cluster geometry
+        'coassign'   - co-assignment probability P(z_i = z_j | x); exact but
+            near-binary when posteriors are sharp
+        'likelihood' - predictive affinity sum_k p(x_i|theta_k) z_jk
 
     Returns the n x emb_dim embedding.
     """
@@ -502,7 +506,7 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
 def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
           max_components: int = 30, seed: Optional[int] = None, mix_model=None,
           enc_data=None, dpm_max_its: int = 100, print_iter: int = 100,
-          affinity: str = 'coassign', n_epochs: Optional[int] = None, out=None,
+          affinity: str = 'bhattacharyya', n_epochs: Optional[int] = None, out=None,
           **umap_kwargs):
     """Embed heterogeneous data with model-based UMAP.
 
