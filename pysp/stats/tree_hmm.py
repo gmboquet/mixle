@@ -1,7 +1,7 @@
 import math
 from typing import List, Any, Tuple, Sequence, Union, Optional, TypeVar, Dict
 import itertools
-import numba
+from pysp.utils.optional_deps import numba
 import numpy as np
 from numpy.random import RandomState
 import pysp.utils.vector as vec

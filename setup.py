@@ -4,11 +4,11 @@ from setuptools import setup, find_packages
 
 setup(
     name="pysparkplug",
-    version="0.1.9.0",
+    version="0.2.0.0",
     description="A package for estimating heterogeneous probability density functions.",
     author="Grant Boquet",
     author_email="grant.boquet@gmail.com",
-    url="N/A",
+    url="https://github.com/gmboquet/pysparkplug",
     packages=find_packages(),
     long_description="""\
     A package for estimating heterogeneous probability density functions.
@@ -20,20 +20,19 @@ setup(
     ],
     keywords="machine learning density estimation statistics heterogeneous data",
     license="MIT",
+    # the base install covers all distributions and local (numpy) estimation;
+    # acceleration, distribution, and embedding back-ends are opt-in extras
     install_requires=[
-        "scipy",
-        "matplotlib",
         "numpy",
-        "numba",
-        "mpmath",
+        "scipy",
         "pandas",
-        "pyspark",
-        "tbb",
-        "scikit-learn",
-        "umap-learn",
+        "mpmath",
     ],
     extras_require={
+        "numba": ["numba", "tbb"],
+        "spark": ["pyspark"],
         "torch": ["torch"],
+        "umap": ["umap-learn", "scikit-learn"],
+        "all": ["numba", "tbb", "pyspark", "torch", "umap-learn", "scikit-learn"],
     },
-
 )

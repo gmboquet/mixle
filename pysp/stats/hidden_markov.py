@@ -27,7 +27,7 @@ list of floats where the rows sum to 1.0. (3) is represented by a numpy array of
 
 """
 
-import numba
+from pysp.utils.optional_deps import numba
 import numpy as np
 import math
 from numpy.random import RandomState

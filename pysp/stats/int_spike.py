@@ -1,4 +1,4 @@
-"""Evaluate, estimate, and sample from a uniform distribution over integers in range [min_val, max_val] with a spike
+r"""Evaluate, estimate, and sample from a uniform distribution over integers in range [min_val, max_val] with a spike
   placed on the integer value k.
 
 Defines the IntegerUniformSpikeDistribution, IntegerUniformSpikeSampler, IntegerUniformSpikeAccumulatorFactory,
