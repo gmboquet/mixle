@@ -367,12 +367,22 @@ class MixtureEnumerator(DistributionEnumerator):
         super().__init__(dist)
         streams = []
         log_offsets = []
+        comps = []
         for k, comp in enumerate(dist.components):
             if dist.w[k] <= 0.0:
                 continue
             streams.append(BufferedStream(child_enumerator(comp, 'MixtureDistribution.components[%d]' % k)))
             log_offsets.append(dist.log_w[k])
-        self._union = best_first_union(streams, log_offsets, dist.log_density)
+            comps.append(comp)
+        log_w_arr = np.asarray(log_offsets, dtype=np.float64)
+
+        # Equivalent to dist.log_density but restricted to positive-weight components, so a
+        # zero-weight component never sees (possibly type-incompatible) candidate values.
+        def exact_log_density(x):
+            with np.errstate(divide='ignore'):
+                return vec.log_sum(np.asarray([c.log_density(x) for c in comps]) + log_w_arr)
+
+        self._union = best_first_union(streams, log_offsets, exact_log_density)
 
     def __next__(self) -> Tuple[Any, float]:
         return next(self._union)
