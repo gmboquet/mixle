@@ -1,3 +1,21 @@
+"""Bayesian estimation package for pysparkplug (pysp.bstats).
+
+Re-exports the Bayesian (conjugate-prior / variational) distributions and
+estimators, and provides driver functions for fitting them to data held
+locally (any iterable), in a pandas DataFrame, or in a pyspark RDD:
+
+  - estimate / seq_estimate: one accumulate-then-estimate step (EM/VB update),
+  - initialize: random-weight initialization of a model from data,
+  - seq_encode: chunked sequence-encoding of data for vectorized updates,
+  - seq_log_density / seq_log_density_sum: log-density evaluation over
+    encoded data.
+
+bstats estimators expose accumulator_factory() and estimate(suff_stat);
+legacy stats-style estimators expose accumulatorFactory() and
+estimate(nobs, suff_stat). The drivers below dispatch to whichever form an
+estimator provides, preferring the bstats snake_case API.
+"""
+
 __all__ = ['BernoulliDistribution', 'BernoulliEstimator', 'BernoulliSampler',
            'BernoulliSetDistribution', 'BernoulliSetEstimator', 'BernoulliSetSampler',
            'BetaDistribution', 'BetaSampler',
@@ -65,19 +83,120 @@ from pysp.bstats.setdist      import BernoulliSetDistribution, BernoulliSetEstim
 from pysp.bstats.dpm import DirichletProcessMixtureDistribution, DirichletProcessMixtureEstimator, DirichletProcessMixtureSampler
 
 
+import inspect
+
 import numpy as np
 import _pickle
 import pickle
 
 def load_models(x):
+    """Reconstruct a model (or models) from its dump_models() string.
+
+    Warning:
+        This is eval-based: the string is executed as Python code with the
+        names imported in this module in scope. Only call it on strings
+        produced by dump_models() from a trusted source - never on
+        untrusted input, since arbitrary code can be executed.
+
+    Args:
+        x (str): String representation produced by dump_models().
+
+    Returns:
+        The evaluated model object(s).
+    """
     return eval(x)
 
 def dump_models(x):
+    """Serialize a model (or models) to its repr-style string form.
+
+    Args:
+        x: Model object whose str() form reconstructs it via load_models().
+
+    Returns:
+        str: String representation of the model.
+    """
     return str(x)
 
 
+def _is_pandas_dataframe(data):
+    """Return True when data is a pandas DataFrame.
+
+    Dispatches on the type's module/name rather than isinstance so pandas
+    need not be imported here, and so the check works across pandas versions
+    (pandas 3 changed str(type(df)) from 'pandas.core.frame.DataFrame' to
+    'pandas.DataFrame').
+
+    Args:
+        data: Candidate data container.
+
+    Returns:
+        bool: True when data is a pandas DataFrame.
+    """
+    t = type(data)
+    return t.__name__ == 'DataFrame' and t.__module__.split('.', 1)[0] == 'pandas'
+
+
+def _accumulator_factory(estimator):
+    """Return the estimator's accumulator factory.
+
+    Prefers the bstats snake_case accumulator_factory(); falls back to the
+    legacy camelCase accumulatorFactory() for older stats-style estimators.
+
+    Args:
+        estimator: ParameterEstimator-like object.
+
+    Returns:
+        Factory object with a make() method producing accumulators.
+    """
+    factory_fn = getattr(estimator, 'accumulator_factory', None)
+    if factory_fn is None:
+        factory_fn = getattr(estimator, 'accumulatorFactory')
+    return factory_fn()
+
+
+def _estimator_estimate(estimator, nobs, suff_stat):
+    """Call estimator.estimate() with whichever arity it supports.
+
+    bstats estimators expose estimate(suff_stat); legacy stats-style
+    estimators expose estimate(nobs, suff_stat). The arity is detected from
+    the signature, defaulting to the bstats single-argument form when the
+    signature cannot be inspected.
+
+    Args:
+        estimator: ParameterEstimator-like object.
+        nobs (Optional[float]): Observation count passed only to legacy
+            two-argument estimators.
+        suff_stat: Sufficient statistics from an accumulator's value().
+
+    Returns:
+        The estimated distribution.
+    """
+    try:
+        params = inspect.signature(estimator.estimate).parameters
+        npos = len([p for p in params.values()
+                    if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
+    except (TypeError, ValueError):
+        npos = 1
+
+    if npos >= 2:
+        return estimator.estimate(nobs, suff_stat)
+    else:
+        return estimator.estimate(suff_stat)
+
 
 def _local_estimate(data, estimator, prev_estimate=None):
+    """Accumulate sufficient statistics over a local iterable and estimate.
+
+    Args:
+        data: Iterable of observations.
+        estimator: bstats ParameterEstimator.
+        prev_estimate: Previous model estimate passed to accumulator updates
+            (required by estimators whose update step depends on the current
+            model, e.g. mixtures).
+
+    Returns:
+        The estimated distribution.
+    """
     idata = iter(data)
     accumulator = estimator.accumulator_factory().make()
     nobs = 0.0
@@ -94,18 +213,33 @@ def _local_estimate(data, estimator, prev_estimate=None):
 
 
 def estimate(data, estimator, prev_estimate=None):
+    """Perform one accumulate-then-estimate step (EM/VB update) over data.
 
+    Dispatches on the data container: pyspark RDDs are accumulated per
+    partition and combined on the driver, pandas DataFrames use the
+    accumulator's df_update path, and any other iterable is processed
+    locally.
+
+    Args:
+        data: Iterable of observations, pandas DataFrame, or pyspark RDD.
+        estimator: bstats ParameterEstimator (legacy camelCase/two-argument
+            estimators are also supported).
+        prev_estimate: Previous model estimate passed to accumulator updates.
+
+    Returns:
+        The estimated distribution.
+    """
     if 'pyspark.rdd' in str(type(data)):
 
         sc = data.context
-        factory          = estimator.accumulatorFactory()
+        factory          = _accumulator_factory(estimator)
         estimatorBroadcast = sc.broadcast(estimator)
 
         temp_estimate  = pickle.dumps(prev_estimate, protocol=0)
         temp_estimateB = sc.broadcast(temp_estimate)
 
         def acc(splitIndex, itr):
-            accumulatorForSplit = estimatorBroadcast.value.accumulatorFactory().make()
+            accumulatorForSplit = _accumulator_factory(estimatorBroadcast.value).make()
             countsForSplit      = 0.0
             loc_prev_estimate   = pickle.loads(temp_estimateB.value)
 
@@ -123,18 +257,34 @@ def estimate(data, estimator, prev_estimate=None):
             nobs = nobs + nobsForSplit
             accumulator.combine(statsForSplit)
 
-        return estimator.estimate(nobs, accumulator.value())
+        stats_dict = dict()
+        accumulator.key_merge(stats_dict)
+        accumulator.key_replace(stats_dict)
 
-    elif 'pandas.core.frame.DataFrame' in str(type(data)):
-        accumulator = estimator.accumulatorFactory().make()
+        return _estimator_estimate(estimator, nobs, accumulator.value())
+
+    elif _is_pandas_dataframe(data):
+        accumulator = _accumulator_factory(estimator).make()
         accumulator.df_update(data, np.ones(len(data)), estimate=prev_estimate)
-        return estimator.estimate(None, accumulator.value())
+        return _estimator_estimate(estimator, None, accumulator.value())
 
     elif(hasattr(data, '__iter__')):
         return _local_estimate(data, estimator, prev_estimate)
 
 def seq_encode(data, model, num_chunks=1, chunk_size=None):
+    """Sequence-encode data with model.seq_encode for vectorized updates.
 
+    Args:
+        data: Iterable of observations or pyspark RDD.
+        model: Distribution whose seq_encode() is used to encode the data.
+        num_chunks (int): Number of chunks for local data (ignored for RDDs).
+        chunk_size (Optional[int]): If given, overrides num_chunks so each
+            chunk holds at most chunk_size observations.
+
+    Returns:
+        For local data, a list of (count, encoded_chunk) pairs; for RDDs, an
+        RDD of (count, encoded_partition) pairs.
+    """
     if 'pyspark.rdd' in str(type(data)):
         sc = data.context
 
@@ -162,7 +312,16 @@ def seq_encode(data, model, num_chunks=1, chunk_size=None):
 
 
 def seq_log_density_sum(enc_data, estimate):
+    """Total log-density of encoded data under a model estimate.
 
+    Args:
+        enc_data: Output of seq_encode() (local list or RDD of
+            (count, encoded_chunk) pairs).
+        estimate: Distribution used to evaluate seq_log_density.
+
+    Returns:
+        Tuple (count, total_log_density) summed over all chunks.
+    """
     if 'pyspark.rdd' in str(type(enc_data)):
         sc = enc_data.context
         estimate_broadcast = sc.broadcast(pickle.dumps(estimate, protocol=0))
@@ -187,7 +346,19 @@ def seq_log_density_sum(enc_data, estimate):
 
 
 def seq_log_density(enc_data, estimate, is_list=False):
+    """Per-observation log-densities of encoded data under a model estimate.
 
+    Args:
+        enc_data: Output of seq_encode() (local list or RDD of
+            (count, encoded_chunk) pairs).
+        estimate: Distribution, or, when is_list is True, a list of
+            distributions evaluated jointly on each chunk.
+        is_list (bool): If True, evaluate each distribution in estimate and
+            stack the per-chunk results.
+
+    Returns:
+        List of per-chunk numpy arrays of log-densities.
+    """
     if 'pyspark.rdd' in str(type(enc_data)):
         sc = enc_data.context
         temp_estimate = pickle.dumps(estimate, protocol=0)
@@ -212,7 +383,18 @@ def seq_log_density(enc_data, estimate, is_list=False):
 
 
 def seq_estimate(enc_data, estimator, prev_estimate):
+    """Perform one vectorized accumulate-then-estimate step on encoded data.
 
+    Args:
+        enc_data: Output of seq_encode() (local list or RDD of
+            (count, encoded_chunk) pairs).
+        estimator: bstats ParameterEstimator (legacy camelCase/two-argument
+            estimators are also supported).
+        prev_estimate: Previous model estimate passed to seq_update.
+
+    Returns:
+        The estimated distribution.
+    """
     if 'pyspark.rdd' in str(type(enc_data)):
         sc = enc_data.context
 
@@ -220,7 +402,7 @@ def seq_estimate(enc_data, estimator, prev_estimate):
         estimateBroadcast  = sc.broadcast(pickle.dumps(prev_estimate, protocol=0))
 
         def acc(splitIndex, itr):
-            accumulatorForSplit = estimatorBroadcast.value.accumulatorFactory().make()
+            accumulatorForSplit = _accumulator_factory(estimatorBroadcast.value).make()
             countsForSplit = zero
             local_estimate = pickle.loads(estimateBroadcast.value)
 
@@ -235,7 +417,7 @@ def seq_estimate(enc_data, estimator, prev_estimate):
         def red(x, y):
             xx = pickle.loads(x)
             yy = pickle.loads(y)
-            accumulator = estimatorBroadcast.value.accumulatorFactory().make()
+            accumulator = _accumulator_factory(estimatorBroadcast.value).make()
             nobs = xx[0] + yy[0]
             vals = accumulator.from_value(xx[1]).combine(yy[1]).value()
             rv = pickle.dumps((nobs, vals))
@@ -246,7 +428,7 @@ def seq_estimate(enc_data, estimator, prev_estimate):
         temp = enc_data.mapPartitionsWithIndex(acc, True).cache()
 
         nobs = zero
-        accumulator = estimator.accumulatorFactory().make()
+        accumulator = _accumulator_factory(estimator).make()
 
         for stuff in temp.collect():
             nobsForSplit, statsForSplit = pickle.loads(stuff)
@@ -264,7 +446,7 @@ def seq_estimate(enc_data, estimator, prev_estimate):
         temp.unpersist()
         enc_data.localCheckpoint()
 
-        return(estimator.estimate(nobs, accumulator.value()))
+        return _estimator_estimate(estimator, nobs, accumulator.value())
 
     else:
 
@@ -287,9 +469,24 @@ def seq_estimate(enc_data, estimator, prev_estimate):
 
 
 def initialize(data, estimator, rng, p):
+    """Initialize a model by accumulating a random subsample of data.
 
+    Each observation is included with probability p (weight 1.0, otherwise
+    0.0) and routed through the accumulator's initialize path, then a first
+    estimate is formed from the resulting sufficient statistics.
+
+    Args:
+        data: Iterable of observations, pandas DataFrame, or pyspark RDD.
+        estimator: bstats ParameterEstimator (legacy camelCase/two-argument
+            estimators are also supported).
+        rng (numpy.random.RandomState): Source of subsampling randomness.
+        p (float): Inclusion probability for each observation.
+
+    Returns:
+        The initialized distribution estimate.
+    """
     if 'pyspark.rdd' in str(type(data)):
-        factory = estimator.accumulator_factory()
+        factory = _accumulator_factory(estimator)
         sc = data.context
 
         num_partitions = data.getNumPartitions()
@@ -300,7 +497,7 @@ def initialize(data, estimator, rng, p):
 
 
         def acc(splitIndex, itr):
-            accumulatorForSplit = estimatorBroadcast.value.accumulator_factory().make()
+            accumulatorForSplit = _accumulator_factory(estimatorBroadcast.value).make()
             countsForSplit      = zero
             rng_loc = np.random.RandomState(seedsBroadcast.value[splitIndex])
 
@@ -324,12 +521,12 @@ def initialize(data, estimator, rng, p):
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
 
-        return(estimator.estimate(nobs, accumulator.value()))
+        return _estimator_estimate(estimator, nobs, accumulator.value())
 
-    elif 'pandas.core.frame.DataFrame' in str(type(data)):
-        accumulator = estimator.accumulatorFactory().make()
+    elif _is_pandas_dataframe(data):
+        accumulator = _accumulator_factory(estimator).make()
         accumulator.df_initialize(data, rng.rand(len(data)) * p, rng)
-        return estimator.estimate(None, accumulator.value())
+        return _estimator_estimate(estimator, None, accumulator.value())
 
     elif(hasattr(data, '__iter__')):
         idata       = iter(data)
