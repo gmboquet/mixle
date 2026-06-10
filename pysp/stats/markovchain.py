@@ -469,7 +469,7 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         if x is not None:
-            self.len_accumulator.update(len(x), weight, estimate.len_dist)
+            self.len_accumulator.update(len(x), weight, getattr(estimate, 'len_dist', None))
 
         if x is not None and len(x) != 0:
             x0 = x[0]
