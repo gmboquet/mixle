@@ -25,7 +25,9 @@ from math import exp
 from pysp.arithmetic import maxrandint
 import pysp.utils.vector as vec
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, StatisticAccumulatorFactory, \
-    SequenceEncodableStatisticAccumulator, DataSequenceEncoder, DistributionSampler, ParameterEstimator
+    SequenceEncodableStatisticAccumulator, DataSequenceEncoder, DistributionSampler, ParameterEstimator, \
+    DistributionEnumerator, child_enumerator
+from pysp.utils.enumeration import BufferedStream, best_first_union
 
 from typing import Optional, Union, Tuple, Any, TypeVar, List, Dict, Sequence
 
@@ -367,6 +369,39 @@ class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution)
         encoders = [comp.dist_to_encoder() for comp in self.components]
 
         return HeterogeneousMixtureDataEncoder(encoders=encoders)
+
+    def enumerator(self) -> 'HeterogeneousMixtureEnumerator':
+        """Returns a HeterogeneousMixtureEnumerator iterating the union of component supports in
+        descending mixture probability order."""
+        return HeterogeneousMixtureEnumerator(self)
+
+
+class HeterogeneousMixtureEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: HeterogeneousMixtureDistribution) -> None:
+        """Enumerates the union of component supports in descending mixture probability order.
+
+        Same algorithm as MixtureEnumerator: candidates from the component enumerations are
+        re-scored exactly with the mixture log-density and emitted once they beat the upper
+        bound on unseen values. Zero-weight components are never asked to enumerate.
+
+        Args:
+            dist (HeterogeneousMixtureDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        streams = []
+        log_offsets = []
+        for k, comp in enumerate(dist.components):
+            if dist.w[k] <= 0.0:
+                continue
+            streams.append(BufferedStream(
+                child_enumerator(comp, 'HeterogeneousMixtureDistribution.components[%d]' % k)))
+            log_offsets.append(dist.log_w[k])
+        self._union = best_first_union(streams, log_offsets, dist.log_density)
+
+    def __next__(self) -> Tuple[Any, float]:
+        return next(self._union)
 
 
 class HeterogeneousMixtureSampler(DistributionSampler):

@@ -8,7 +8,8 @@ Likelihood evals are equivalent to normal likelihood calls to the base distribut
 """
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
+    DistributionEnumerator, child_enumerator
 from numpy.random import RandomState
 import numpy as np
 from typing import Dict, Any, Optional, Tuple, Sequence, TypeVar
@@ -47,6 +48,10 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
 
     def sampler(self, seed: Optional[int] = None) -> 'DistributionSampler':
         return self.dist.sampler(seed)
+
+    def enumerator(self) -> 'DistributionEnumerator':
+        """Delegates to the base distribution's enumerator (log_density is pure delegation)."""
+        return child_enumerator(self.dist, 'WeightedDistribution.dist')
 
 
 class WeightedAccumulator(SequenceEncodableStatisticAccumulator):

@@ -10,7 +10,8 @@ import numpy as np
 from numpy.random import RandomState
 from pysp.utils.vector import gammaln
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
+    DistributionEnumerator
 
 from typing import Optional, Dict, List, Union, Tuple, Any, Sequence
 
@@ -158,6 +159,51 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
             BinomialDataEncoder object.
         """
         return BinomialDataEncoder()
+
+    def enumerator(self) -> 'BinomialEnumerator':
+        """Returns BinomialEnumerator iterating the support in descending probability order."""
+        return BinomialEnumerator(self)
+
+
+class BinomialEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: BinomialDistribution) -> None:
+        """Enumerates the support of a BinomialDistribution in descending probability order.
+
+        The binomial pmf is unimodal, so enumeration starts at the mode floor((n+1)*p)
+        and walks outward with two pointers, emitting the larger side each step.
+
+        Args:
+            dist (BinomialDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        self._shift = dist.min_val if dist.min_val is not None else 0
+        mode = int(np.floor((dist.n + 1) * dist.p))
+        self._mode = min(max(mode, 0), dist.n)
+        self._left = self._mode - 1
+        self._right = self._mode + 1
+        self._started = False
+
+    def _lp(self, i: int) -> float:
+        return self.dist.log_density(self._shift + i)
+
+    def __next__(self) -> Tuple[int, float]:
+        if not self._started:
+            self._started = True
+            return (self._shift + self._mode, self._lp(self._mode))
+        while self._left >= 0 or self._right <= self.dist.n:
+            lp_l = self._lp(self._left) if self._left >= 0 else -np.inf
+            lp_r = self._lp(self._right) if self._right <= self.dist.n else -np.inf
+            if lp_l >= lp_r:
+                i, lp = self._left, lp_l
+                self._left -= 1
+            else:
+                i, lp = self._right, lp_r
+                self._right += 1
+            if lp > -np.inf:
+                return (self._shift + i, lp)
+        raise StopIteration
 
 
 class BinomialSampler(DistributionSampler):

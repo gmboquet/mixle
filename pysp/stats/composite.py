@@ -11,7 +11,9 @@ must be compatible with data type T_k.
 import numpy as np
 from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
+    DistributionEnumerator, child_enumerator
+from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 from typing import Optional, List, Union, Any, Tuple, Sequence, TypeVar, Dict
 from pysp.arithmetic import maxrandint
 
@@ -61,7 +63,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             Density as float.
 
         """
-        rv = 0.0
+        rv = self.dists[0].density(x[0])
 
         for i in range(1, self.count):
             rv *= self.dists[i].density(x[i])
@@ -145,6 +147,32 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         encoders = tuple([d.dist_to_encoder() for d in self.dists])
 
         return CompositeDataEncoder(encoders=encoders)
+
+    def enumerator(self) -> 'CompositeEnumerator':
+        """Creates CompositeEnumerator iterating tuples in descending joint probability order."""
+        return CompositeEnumerator(self)
+
+
+class CompositeEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: 'CompositeDistribution') -> None:
+        """Enumerates tuples of the component supports in descending joint probability order.
+
+        Joint log-density is the sum of component log-densities, so this is a best-first
+        search over the product of the (sorted) component enumerations. All components
+        must support enumeration.
+
+        Args:
+            dist (CompositeDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        streams = [BufferedStream(child_enumerator(d, 'CompositeDistribution.dists[%d]' % i))
+                   for i, d in enumerate(dist.dists)]
+        self._product = ProductEnumerator(streams, combine=tuple)
+
+    def __next__(self) -> Tuple[Tuple[Any, ...], float]:
+        return next(self._product)
 
 
 class CompositeSampler(DistributionSampler):

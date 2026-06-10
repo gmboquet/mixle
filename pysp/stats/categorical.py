@@ -12,7 +12,8 @@ import numpy as np
 import math
 from typing import Dict, Optional, Tuple, Any, TypeVar, Union, List
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
+    DistributionEnumerator, EnumerationError
 from numpy.random import RandomState
 
 T = TypeVar('T')
@@ -154,6 +155,15 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         """
         return CategoricalDataEncoder()
 
+    def enumerator(self) -> 'CategoricalEnumerator':
+        """Creates a CategoricalEnumerator iterating the support in descending probability order.
+
+        Returns:
+            CategoricalEnumerator object.
+
+        """
+        return CategoricalEnumerator(self)
+
 class CategoricalSampler(DistributionSampler):
 
     def __init__(self, dist: CategoricalDistribution, seed: Optional[int] = None) -> None:
@@ -197,6 +207,34 @@ class CategoricalSampler(DistributionSampler):
             rv = self.rng.choice(self.num_levels, p=self.probs, size=size)
 
             return [levels[i] for i in rv]
+
+class CategoricalEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: CategoricalDistribution) -> None:
+        """Enumerates the support of a CategoricalDistribution in descending probability order.
+
+        Raises EnumerationError if the distribution has a non-zero default_value, since the
+        support is then unbounded (every value outside pmap has positive probability).
+
+        Args:
+            dist (CategoricalDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        if dist.no_default:
+            raise EnumerationError(dist, reason='non-zero default_value gives an unbounded support')
+        entries = [(k, v) for k, v in dist.pmap.items() if v > 0.0]
+        entries.sort(key=lambda u: -u[1])
+        self._entries = entries
+        self._pos = 0
+
+    def __next__(self) -> Tuple[Any, float]:
+        if self._pos >= len(self._entries):
+            raise StopIteration
+        k, v = self._entries[self._pos]
+        self._pos += 1
+        return (k, math.log(v) - self.dist.log1p_default_value)
+
 
 class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
 

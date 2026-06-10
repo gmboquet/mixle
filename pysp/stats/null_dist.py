@@ -11,13 +11,14 @@ Notes:
     Sequence encodings return None for any input.
 
 """
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, Tuple
 
 import numpy as np
 from numpy.random import RandomState
 
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
+    DistributionEnumerator
 
 
 class NullDistribution(SequenceEncodableProbabilityDistribution):
@@ -49,6 +50,23 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> 'NullDataEncoder':
         return NullDataEncoder()
+
+    def enumerator(self) -> 'NullEnumerator':
+        return NullEnumerator(self)
+
+
+class NullEnumerator(DistributionEnumerator):
+    """Yields the single value None with probability one, matching NullSampler.sample()."""
+
+    def __init__(self, dist: 'NullDistribution') -> None:
+        super().__init__(dist)
+        self._done = False
+
+    def __next__(self) -> Tuple[None, float]:
+        if self._done:
+            raise StopIteration
+        self._done = True
+        return (None, 0.0)
 
 
 class NullSampler(DistributionSampler):

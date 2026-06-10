@@ -10,14 +10,18 @@ __all__ = [
     "seq_log_density_sum",
     "seq_estimate",
     "seq_initialize",
+    "DistributionEnumerator",
+    "EnumerationError",
     "BinomialDistribution",
     "BinomialSampler",
     "BinomialEstimator",
     "BinomialDataEncoder",
+    "BinomialEnumerator",
     "CategoricalDistribution",
     "CategoricalSampler",
     "CategoricalEstimator",
     "CategoricalDataEncoder",
+    "CategoricalEnumerator",
     "MultinomialDistribution",
     "MultinomialSampler",
     "MultinomialEstimator",
@@ -26,6 +30,7 @@ __all__ = [
     "CompositeEstimator",
     "CompositeSampler",
     "CompositeDataEncoder",
+    "CompositeEnumerator",
     "ConditionalDistribution",
     "ConditionalDistributionSampler",
     "ConditionalDistributionEstimator",
@@ -61,6 +66,7 @@ __all__ = [
     "HeterogeneousMixtureSampler",
     "HeterogeneousMixtureEstimator",
     "HeterogeneousMixtureDataEncoder",
+    "HeterogeneousMixtureEnumerator",
     "HiddenAssociationDistribution",
     "HiddenAssociationSampler",
     "HiddenAssociationEstimator",
@@ -113,6 +119,7 @@ __all__ = [
     "IntegerCategoricalSampler",
     "IntegerCategoricalEstimator",
     "IntegerCategoricalDataEncoder",
+    "IntegerCategoricalEnumerator",
     "IntegerBernoulliSetDistribution",
     "IntegerBernoulliSetSampler",
     "IntegerBernoulliSetEstimator",
@@ -133,6 +140,7 @@ __all__ = [
     "MixtureSampler",
     "MixtureEstimator",
     "MixtureDataEncoder",
+    "MixtureEnumerator",
     "MultivariateGaussianDistribution",
     "MultivariateGaussianEstimator",
     "MultivariateGaussianSampler",
@@ -141,10 +149,12 @@ __all__ = [
     "NullSampler",
     "NullEstimator",
     "NullDataEncoder",
+    "NullEnumerator",
     "OptionalDistribution",
     "OptionalSampler",
     "OptionalEstimator",
     "OptionalDataEncoder",
+    "OptionalEnumerator",
     "PoissonDistribution",
     "PoissonSampler",
     "PoissonEstimator",
@@ -172,6 +182,10 @@ __all__ = [
     "TreeHiddenMarkovModelDistribution",
     "TreeHiddenMarkovSampler",
     "TreeHiddenMarkovEstimator",
+    "LDADistribution",
+    "LDASampler",
+    "LDAEstimator",
+    "LDADataEncoder",
     "VonMisesFisherDistribution",
     "VonMisesFisherSampler",
     "VonMisesFisherEstimator",
@@ -183,13 +197,15 @@ __all__ = [
 
 ### Abstract Classes
 import pyspark.rdd
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DataSequenceEncoder
+from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DataSequenceEncoder, \
+    DistributionEnumerator, EnumerationError
 
 ### Discrete base distributions
-from pysp.stats.binomial import BinomialDistribution, BinomialSampler, BinomialEstimator, BinomialDataEncoder
+from pysp.stats.binomial import BinomialDistribution, BinomialSampler, BinomialEstimator, BinomialDataEncoder, \
+    BinomialEnumerator
 
 from pysp.stats.categorical import CategoricalDistribution, CategoricalSampler, CategoricalEstimator, \
-    CategoricalDataEncoder
+    CategoricalDataEncoder, CategoricalEnumerator
 
 from pysp.stats.poisson import PoissonDistribution, PoissonSampler, PoissonEstimator, PoissonDataEncoder
 
@@ -198,7 +214,7 @@ from pysp.stats.geometric import GeometricDistribution, GeometricSampler, Geomet
 from pysp.stats.int_spike import IntegerUniformSpikeDistribution, IntegerUniformSpikeSampler, \
     IntegerUniformSpikeEstimator, IntegerUniformSpikeDataEncoder
 from pysp.stats.intrange import IntegerCategoricalDistribution, IntegerCategoricalSampler, \
-    IntegerCategoricalEstimator, IntegerCategoricalDataEncoder
+    IntegerCategoricalEstimator, IntegerCategoricalDataEncoder, IntegerCategoricalEnumerator
 
 from pysp.stats.catmultinomial import MultinomialDistribution, MultinomialSampler, MultinomialEstimator, \
     MultinomialDataEncoder
@@ -223,7 +239,8 @@ from pysp.stats.log_gaussian import LogGaussianDistribution, LogGaussianSampler,
 
 
 ### combinators distributions
-from pysp.stats.composite import CompositeDistribution, CompositeSampler, CompositeEstimator, CompositeDataEncoder
+from pysp.stats.composite import CompositeDistribution, CompositeSampler, CompositeEstimator, CompositeDataEncoder, \
+    CompositeEnumerator
 
 from pysp.stats.conditional import ConditionalDistribution, ConditionalDistributionSampler, \
     ConditionalDistributionEstimator, ConditionalDistributionDataEncoder
@@ -232,7 +249,8 @@ from pysp.stats.sequence import SequenceDistribution, SequenceSampler, SequenceE
 
 from pysp.stats.ignored import IgnoredDistribution, IgnoredSampler, IgnoredEstimator, IgnoredDataEncoder
 
-from pysp.stats.optional import OptionalDistribution, OptionalSampler, OptionalEstimator, OptionalDataEncoder
+from pysp.stats.optional import OptionalDistribution, OptionalSampler, OptionalEstimator, OptionalDataEncoder, \
+    OptionalEnumerator
 
 from pysp.stats.weighted import WeightedDistribution, WeightedEstimator, WeightedDataEncoder
 
@@ -240,15 +258,16 @@ from pysp.stats.weighted import WeightedDistribution, WeightedEstimator, Weighte
 from pysp.stats.categorical import CategoricalDistribution, CategoricalSampler, CategoricalEstimator, \
     CategoricalDataEncoder
 
-from pysp.stats.mixture import MixtureDistribution, MixtureSampler, MixtureEstimator, MixtureDataEncoder
+from pysp.stats.mixture import MixtureDistribution, MixtureSampler, MixtureEstimator, MixtureDataEncoder, \
+    MixtureEnumerator
 
 from pysp.stats.heterogenous_mixture import HeterogeneousMixtureDistribution, HeterogeneousMixtureSampler, \
-    HeterogeneousMixtureEstimator, HeterogeneousMixtureDataEncoder
+    HeterogeneousMixtureEstimator, HeterogeneousMixtureDataEncoder, HeterogeneousMixtureEnumerator
 
 from pysp.stats.markovchain import MarkovChainDistribution, MarkovChainSampler, MarkovChainEstimator, \
     MarkovChainDataEncoder
 
-from pysp.stats.null_dist import NullDistribution, NullSampler, NullEstimator, NullDataEncoder
+from pysp.stats.null_dist import NullDistribution, NullSampler, NullEstimator, NullDataEncoder, NullEnumerator
 
 from pysp.stats.hidden_association import HiddenAssociationDistribution, HiddenAssociationSampler, \
     HiddenAssociationEstimator, HiddenAssociationDataEncoder
@@ -260,7 +279,7 @@ from pysp.stats.jmixture import JointMixtureDistribution, JointMixtureSampler, J
     JointMixtureDataEncoder
 
 from pysp.stats.tree_hmm import TreeHiddenMarkovModelDistribution, TreeHiddenMarkovSampler, TreeHiddenMarkovEstimator
-#from pysp.stats.lda import LDADistribution, LDASampler, LDAEstimator, LDADataEncoder
+from pysp.stats.lda import LDADistribution, LDASampler, LDAEstimator, LDADataEncoder
 
 from pysp.stats.markovchain import MarkovChainDistribution, MarkovChainSampler, MarkovChainEstimator, \
     MarkovChainDataEncoder
