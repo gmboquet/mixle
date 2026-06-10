@@ -11,7 +11,8 @@ Data type (int): The geometric distribution with probability of success p, has d
 import numpy as np
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
+    DistributionEnumerator
 from numpy.random import RandomState
 from typing import Optional, Tuple, Sequence, Dict, Union, Any
 
@@ -118,6 +119,34 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> 'GeometricDataEncoder':
         """Returns GeometricDataEncoder object for encoding sequence of GeometricDistribution observations."""
         return GeometricDataEncoder()
+
+    def enumerator(self) -> 'GeometricEnumerator':
+        """Returns GeometricEnumerator iterating the support {1, 2, ...} in descending probability order."""
+        return GeometricEnumerator(self)
+
+
+class GeometricEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: GeometricDistribution) -> None:
+        """Enumerates the support {1, 2, 3, ...} of a GeometricDistribution.
+
+        The geometric pmf is strictly decreasing in x, so the natural order is already
+        the descending-probability order. The iterator is infinite for p < 1.
+
+        Args:
+            dist (GeometricDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        self._x = 1
+
+    def __next__(self) -> Tuple[int, float]:
+        x = self._x
+        lp = (x - 1) * self.dist.log_1p + self.dist.log_p
+        if lp == -np.inf:
+            raise StopIteration
+        self._x += 1
+        return (x, lp)
 
 
 class GeometricSampler(DistributionSampler):
@@ -359,7 +388,7 @@ class GeometricEstimator(ParameterEstimator):
 
         """
         self.pseudo_count = pseudo_count
-        self.suff_stat = min(min(suff_stat, 1.0),0.0) if suff_stat is not None else None
+        self.suff_stat = max(min(suff_stat, 1.0), 0.0) if suff_stat is not None else None
         self.keys = keys
         self.name = name
 
@@ -395,6 +424,8 @@ class GeometricEstimator(ParameterEstimator):
                     suff_stat[1] + self.pseudo_count)
         elif self.pseudo_count is not None and self.suff_stat is None:
             p = (suff_stat[0] + self.pseudo_count) / (suff_stat[1] + self.pseudo_count)
+        elif suff_stat[1] == 0.0:
+            p = 0.5
         else:
             p = suff_stat[0] / suff_stat[1]
 

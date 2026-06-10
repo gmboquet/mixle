@@ -19,7 +19,9 @@ import numpy as np
 from pysp.arithmetic import *
 from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DataSequenceEncoder, StatisticAccumulatorFactory, DistributionSampler
+    ParameterEstimator, DataSequenceEncoder, StatisticAccumulatorFactory, DistributionSampler, \
+    DistributionEnumerator, EnumerationError
+from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 
 from typing import Sequence, Optional, Tuple, Union, List, Any, Dict
@@ -111,6 +113,50 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> 'IntegerBernoulliSetDataEncoder':
         return IntegerBernoulliSetDataEncoder()
+
+    def enumerator(self) -> 'IntegerBernoulliSetEnumerator':
+        """Returns IntegerBernoulliSetEnumerator iterating subsets in descending probability order."""
+        return IntegerBernoulliSetEnumerator(self)
+
+
+class IntegerBernoulliSetEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: IntegerBernoulliSetDistribution) -> None:
+        """Enumerates subsets of {0,...,num_vals-1} in descending probability order.
+
+        Membership is independent per integer: including k contributes log_dvec[k] to the
+        log-density and excluding it contributes 0 (relative to the log_nsum offset). Each
+        integer therefore yields a sorted two-choice stream, and subsets are enumerated with
+        a best-first product search. Integers with p_k = 0 are exclude-only; p_k = 1 makes
+        the distribution's own log-density degenerate (infinite) and raises EnumerationError.
+
+        Args:
+            dist (IntegerBernoulliSetDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        if np.any(np.isposinf(dist.log_dvec)):
+            raise EnumerationError(dist, reason='some membership probability equals one, '
+                                                'making the log-density degenerate')
+        streams = []
+        for k in range(dist.num_vals):
+            d = dist.log_dvec[k]
+            if d == -np.inf:
+                choices = [(False, 0.0)]
+            elif d > 0.0:
+                choices = [(True, float(d)), (False, 0.0)]
+            else:
+                choices = [(False, 0.0), (True, float(d))]
+            streams.append(BufferedStream(iter(choices)))
+
+        def combine(flags: Tuple[bool, ...]) -> List[int]:
+            return [k for k, f in enumerate(flags) if f]
+
+        self._product = ProductEnumerator(streams, combine=combine, offset=float(dist.log_nsum))
+
+    def __next__(self) -> Tuple[List[int], float]:
+        return next(self._product)
+
 
 class IntegerBernoulliSetSampler(DistributionSampler):
 
@@ -271,13 +317,11 @@ class IntegerBernoulliSetEstimator(ParameterEstimator):
     def estimate(self, nobs: Optional[float], suff_stat: Optional[np.ndarray] = None) \
             -> 'IntegerBernoulliSetDistribution':
         if self.pseudo_count is not None and self.suff_stat is not None:
-            p0 = np.product(self.suff_stat, self.pseudo_count)
-            p1 = np.product(np.subtract(1.0, self.suff_stat), self.pseudo_count)
-            pvec = np.log(suff_stat[0] + p0)
-            nvec = np.log((suff_stat[1] - suff_stat[0]) + p1)
+            p0 = np.multiply(self.suff_stat, self.pseudo_count)
+            p1 = np.multiply(np.subtract(1.0, self.suff_stat), self.pseudo_count)
             tsum = np.log(suff_stat[1] + self.pseudo_count)
-            log_pvec = np.log(pvec) - tsum
-            log_nvec = np.log(nvec) - tsum
+            log_pvec = np.log(suff_stat[0] + p0) - tsum
+            log_nvec = np.log((suff_stat[1] - suff_stat[0]) + p1) - tsum
 
         elif self.pseudo_count is not None and self.suff_stat is None:
             p = self.pseudo_count
