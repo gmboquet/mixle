@@ -14,7 +14,9 @@ If component distribution P(Y|Z=k) has data type (T), then the Mixture distribut
 """
 import numpy as np
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
+    DistributionEnumerator, child_enumerator
+from pysp.utils.enumeration import BufferedStream, best_first_union
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
@@ -341,6 +343,39 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
         dist_encoder = self.components[0].dist_to_encoder()
         return MixtureDataEncoder(encoder=dist_encoder)
+
+    def enumerator(self) -> 'MixtureEnumerator':
+        """Returns a MixtureEnumerator iterating the union of component supports in descending
+        mixture probability order."""
+        return MixtureEnumerator(self)
+
+
+class MixtureEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: MixtureDistribution) -> None:
+        """Enumerates the union of component supports in descending mixture probability order.
+
+        Component supports may overlap, so candidates pulled from the component enumerations
+        are re-scored exactly with the mixture log-density and emitted only once their score
+        beats the upper bound on any not-yet-seen value. Components with zero weight are
+        never asked to enumerate.
+
+        Args:
+            dist (MixtureDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        streams = []
+        log_offsets = []
+        for k, comp in enumerate(dist.components):
+            if dist.w[k] <= 0.0:
+                continue
+            streams.append(BufferedStream(child_enumerator(comp, 'MixtureDistribution.components[%d]' % k)))
+            log_offsets.append(dist.log_w[k])
+        self._union = best_first_union(streams, log_offsets, dist.log_density)
+
+    def __next__(self) -> Tuple[Any, float]:
+        return next(self._union)
 
 
 class MixtureSampler(DistributionSampler):
