@@ -65,11 +65,30 @@ class HTSNETestCase(unittest.TestCase):
     # ---- affinity construction -------------------------------------------------
 
     def test_log_affinity_shape_and_diag(self):
-        log_s = model_log_affinity(self.z, self.l)
-        self.assertEqual(log_s.shape, (self.n, self.n))
-        self.assertTrue(np.all(np.isneginf(np.diag(log_s))))
-        off = log_s[~np.eye(self.n, dtype=bool)]
-        self.assertTrue(np.all(np.isfinite(off)))
+        for aff in ('coassign', 'bhattacharyya', 'likelihood'):
+            log_s = model_log_affinity(self.z, self.l, affinity=aff)
+            self.assertEqual(log_s.shape, (self.n, self.n))
+            self.assertTrue(np.all(np.isneginf(np.diag(log_s))))
+            off = log_s[~np.eye(self.n, dtype=bool)]
+            self.assertFalse(np.any(np.isnan(off)))
+            self.assertFalse(np.any(np.isposinf(off)))
+
+    def test_coassign_is_posterior_similarity(self):
+        # s_ij = P(z_i = z_j | x) = sum_k z_ik z_jk: exact, symmetric, in [0, 1]
+        log_s = model_log_affinity(self.z, affinity='coassign')
+        s = np.exp(log_s)
+        expected = np.dot(self.z, self.z.T)
+        expected[np.arange(self.n), np.arange(self.n)] = 0.0
+        self.assertTrue(np.allclose(s, expected, atol=1.0e-12))
+        self.assertTrue(np.allclose(s, s.T))
+        self.assertTrue(np.all((s >= 0) & (s <= 1 + 1.0e-12)))
+
+    def test_bhattacharyya_bounds_coassign(self):
+        # BC >= co-assignment probability (Cauchy-Schwarz), both <= 1
+        s_co = np.exp(model_log_affinity(self.z, affinity='coassign'))
+        s_bc = np.exp(model_log_affinity(self.z, affinity='bhattacharyya'))
+        self.assertTrue(np.all(s_bc >= s_co - 1.0e-12))
+        self.assertTrue(np.all(s_bc <= 1 + 1.0e-12))
 
     def test_conditional_rows_normalized(self):
         log_s = model_log_affinity(self.z, self.l)
@@ -116,8 +135,8 @@ class HTSNETestCase(unittest.TestCase):
         # adding per-row offsets to the log-likelihood matrix (e.g. from
         # variable-length observations) must not change the conditionals
         shift = np.random.RandomState(0).uniform(-50, 50, size=(self.n, 1))
-        p0 = get_pmat(self.z, self.l, targ_perplexity=None)
-        p1 = get_pmat(self.z, self.l + shift, targ_perplexity=None)
+        p0 = get_pmat(self.z, self.l, targ_perplexity=None, affinity='likelihood')
+        p1 = get_pmat(self.z, self.l + shift, targ_perplexity=None, affinity='likelihood')
         self.assertTrue(np.allclose(p0, p1, atol=1.0e-12))
 
         # and with calibration, on tie-free affinities
@@ -244,27 +263,27 @@ class HTSNETestCase(unittest.TestCase):
         model = MixtureDistribution([topic_a, topic_b], [0.5, 0.5])
         return data, labels, model
 
-    def test_len_normalize_property(self):
-        # length normalization divides log-likelihood rows by lengths; verify
-        # the plumbing reproduces manual normalization end-to-end
-        data, labels, model = self._varlen_data_and_model(40)
-        from pysp.utils.htsne import _posteriors_and_loglikes, _resolve_length_normalization
-        z, l = _posteriors_and_loglikes(model, data=data)
-        lens = _resolve_length_normalization('auto', None, data)
-        self.assertIsNotNone(lens)
-        self.assertTrue(np.all(lens == [len(x) for x in data]))
-        # fixed-length data -> auto disables
-        self.assertIsNone(_resolve_length_normalization('auto', None, [[1, 2], [3, 4]]))
-        # explicit lengths override
-        ov = _resolve_length_normalization(True, np.full(len(data), 7.0), data)
-        self.assertTrue(np.all(ov == 7.0))
+    def test_varlen_affinity_is_length_free(self):
+        # with co-assignment affinities, the only length effect is posterior
+        # certainty: two long observations of the same topic and two short ones
+        # of the same topic should both have near-1 affinity
+        data, labels, model = self._varlen_data_and_model(60)
+        from pysp.utils.htsne import _posteriors_and_loglikes
+        z, _ = _posteriors_and_loglikes(model, data=data)
+        s = np.dot(z, z.T)
+        lengths = np.asarray([len(x) for x in data])
+        same_topic = np.equal.outer(labels, labels)
+        long_pairs = np.greater.outer(lengths, 20) & np.greater.outer(lengths, 20).T
+        m = same_topic & long_pairs & ~np.eye(len(data), dtype=bool)
+        if np.any(m):
+            self.assertGreater(s[m].mean(), 0.9)
 
     def test_varlen_embedding_organizes_by_topic(self):
         data, labels, model = self._varlen_data_and_model(120)
         lengths = np.asarray([len(x) for x in data], dtype=float)
 
         y = htsne(data, mix_model=model, perplexity=20.0, method='exact', max_its=350,
-                  seed=3, len_normalize='auto', out=io.StringIO())
+                  seed=3, out=io.StringIO())
         self.assertGreater(separation_ratio(y, labels), 2.0)
 
         # the embedding should not be organized by observation length: within
