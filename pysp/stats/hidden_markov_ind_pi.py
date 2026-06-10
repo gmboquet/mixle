@@ -4,7 +4,7 @@ from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, ParameterEstimator
 from pysp.stats.markovchain import MarkovChainDistribution
 from pysp.stats.mixture import MixtureDistribution
-import numba
+from pysp.utils.optional_deps import numba
 import numpy as np
 import math
 
