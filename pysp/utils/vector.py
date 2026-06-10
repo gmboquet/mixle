@@ -112,15 +112,15 @@ def make_pdf(x: Union[np.ndarray, Sequence[float], List[np.ndarray]]):
     Returns:
         Returns an ndarray that s.t. np.exp(rv).sum() == 1.0.
     """
-    rv = np.asarray(x)
+    rv = np.array(x, dtype=np.float64)
     n = len(rv)
     rv_max = rv.max()
 
     if rv_max == -inf:
         rv = zeros(n) - log(n)
     else:
-        rv_sum = np.log(np.sum(np.exp(rv-rv_max))) + np.log(rv_max)
-        rv /= rv_sum
+        rv_sum = np.log(np.sum(np.exp(rv - rv_max))) + rv_max
+        rv -= rv_sum
 
     return rv
 
@@ -415,7 +415,7 @@ def log_posterior_sum(x: np.ndarray) -> Tuple[np.ndarray, float]:
 
     max_val = x.max()
     if isinf(max_val) or isnan(max_val):
-        return zeros(len(x)) - log(len(x))
+        return zeros(len(x)) - log(len(x)), -inf
 
     mass = log(exp(x - max_val).sum()) + max_val
     return x - mass, mass
@@ -572,74 +572,8 @@ def row_choice(p_mat: np.ndarray, rng: Optional[np.random.RandomState]) -> np.nd
     """
     N, m = p_mat.shape
     u = rng.rand(N)
-    rv = np.zeros(N, dtype=int)
 
-    bins = np.hstack((np.zeros((N, 1)), np.cumsum(p_mat, axis=1)))
-    idx = np.arange(0, N)
-
-    l = np.zeros(N, dtype=int)
-    r = np.zeros(N, dtype=int)
-    r.fill(m)
-
-    mid = (r-l) // 2
-
-    l_cond = u >= bins[idx, mid]
-    r_cond = u < bins[idx, mid+1]
-
-    bin_cond = np.bitwise_and(l_cond, r_cond)
-    in_bin = np.flatnonzero(bin_cond)
-
-    if np.any(bin_cond):
-        rv[idx[in_bin]] = mid[in_bin]
-        idx = np.delete(idx, in_bin)
-        l = l[idx]
-        r = r[idx]
-        r_cond = r_cond[idx]
-        l_cond = l_cond[idx]
-        mid = mid[idx]
-
-    if np.any(r_cond):
-        r[r_cond] = mid[r_cond]
-        l[r_cond] = 0
-
-    if np.any(~r_cond):
-        l[~r_cond] = mid[~r_cond]
-        r[~r_cond] = m
-
-    iterate_cond = len(idx) > 0
-
-    while iterate_cond:
-
-        mid = (r-l) // 2 + l
-
-        l_cond = u[idx] >= bins[idx, mid]
-        r_cond = u[idx] < bins[idx, mid+1]
-
-        in_bin = np.bitwise_and(l_cond, r_cond)
-        in_bin_idx = np.flatnonzero(in_bin)
-
-        if np.any(in_bin):
-            rv[idx[in_bin]] = mid[in_bin_idx]
-            idx = np.delete(idx, in_bin_idx)
-
-            if len(idx) > 0:
-                not_in_bin = ~in_bin
-                not_in_bin = np.flatnonzero(~in_bin)
-                l = l[not_in_bin]
-                r = r[not_in_bin]
-                r_cond = r_cond[not_in_bin]
-                l_cond = l_cond[not_in_bin]
-                mid = mid[not_in_bin]
-
-        if np.any(r_cond):
-            r[r_cond] = mid[r_cond]
-            l[r_cond] = 0
-
-        if np.any(~r_cond):
-            r[~r_cond] = mid[~r_cond]
-            l[~r_cond] = m
-
-        if len(idx) == 0 or np.all(l >= r):
-            iterate_cond = False
+    bins = np.cumsum(p_mat, axis=1)
+    rv = (u[:, None] >= bins[:, :-1]).sum(axis=1)
 
     return rv

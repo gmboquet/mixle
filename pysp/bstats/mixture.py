@@ -345,12 +345,15 @@ class MixtureEstimator(ParameterEstimator):
             d.set_prior(p)
 
     def model_log_density(self, model: MixtureDistribution) -> float:
-        #rv = 0.0
-        #if self.keys[0] is not None and self.keys not in given:
-        #    rv += self.prior.log_density(model.w)
-        #    given.add(self.keys[0])
-        #else
-        return self.get_prior().log_density(model.get_parameters())
+        # weight prior at the estimated weights, plus each component's prior
+        # term evaluated through the component estimator (which knows its own
+        # prior parameterization)
+        rv = 0.0 if self.prior is None else float(self.prior.log_density(model.w))
+
+        for est, comp in zip(self.estimators, model.components):
+            rv += est.model_log_density(comp)
+
+        return rv
 
     def estimate(self, suff_stat):
 
@@ -366,7 +369,13 @@ class MixtureEstimator(ParameterEstimator):
         if isinstance(self.prior, (DirichletDistribution, SymmetricDirichletDistribution)):
 
             cpp = np.add(counts, self.prior.get_parameters())-1.0
-            w   = cpp/(cpp.sum())
+            # MAP of a Dirichlet lies on the boundary when alpha_k + n_k < 1
+            cpp = np.maximum(cpp, 0.0)
+
+            if cpp.sum() == 0:
+                w = np.ones(num_components)/float(num_components)
+            else:
+                w = cpp/(cpp.sum())
 
             return MixtureDistribution(components, w, name=self.name, prior=DirichletDistribution(cpp+1))
 

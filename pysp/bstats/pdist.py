@@ -96,6 +96,28 @@ class ParameterEstimator(object):
 	def accumulator_factory(self):
 		pass
 
+	def get_prior(self):
+		return None
+
+	def model_log_density(self, model) -> float:
+		"""Log density of the model parameters under this estimator's prior.
+
+		Used as the prior/penalty term of the optimization objective
+		(penalized log-likelihood for MAP estimators, global ELBO terms for
+		variational estimators). Returns 0.0 when no usable prior is set.
+		"""
+		prior = self.get_prior()
+
+		if prior is None:
+			return 0.0
+
+		rv = prior.log_density(model.get_parameters())
+
+		if rv is None or (np.isscalar(rv) and np.isnan(rv)):
+			return 0.0
+
+		return float(rv)
+
 
 class SequenceEncodableDistribution(ProbabilityDistribution):
 

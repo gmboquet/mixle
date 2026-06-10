@@ -301,10 +301,22 @@ def log_density_test(dist):
     return max(rv) < 1.0e-14, max(rv)
 
 
+def em_fit(est, model, enc_data, step, max_its=200, delta=1.0e-7):
+    """Iterate EM (one `step` call per iteration) until the log-likelihood stops improving."""
+    old_ll = seq_log_density_sum(enc_data, model)[1]
+    for _ in range(max_its):
+        model = step(est, model)
+        ll = seq_log_density_sum(enc_data, model)[1]
+        if abs(ll - old_ll) < delta:
+            break
+        old_ll = ll
+    return model
+
+
 def estimation_test(dist):
 
     seeds = [1, 2, 3, 4]
-    szs = [50, 500, 1000]
+    szs = [50, 150, 300]
     rv  = []
 
     akld = []
@@ -318,7 +330,7 @@ def estimation_test(dist):
             est   = dist.estimator()
             enc_data = seq_encode(data, encoder=dist.dist_to_encoder())
             init = initialize(data, est, rng=np.random.RandomState(1), p=1.0)
-            est_dist = estimate(data, est, init)
+            est_dist = em_fit(est, init, enc_data, lambda e, m: estimate(data, e, m))
 
             emp_kld, _, _ = empirical_kl_divergence(dist, est_dist, enc_data)
 
@@ -351,7 +363,7 @@ def seq_estimation_test(dist):
             est   = dist.estimator()
             enc_data = seq_encode(data, model=dist)
             init = seq_initialize(enc_data, est, np.random.RandomState(1), p=1.0)
-            est_dist = seq_estimate(enc_data, est, init)
+            est_dist = em_fit(est, init, enc_data, lambda e, m: seq_estimate(enc_data, e, m))
 
             emp_kld, _, _ = empirical_kl_divergence(dist, est_dist, enc_data)
 

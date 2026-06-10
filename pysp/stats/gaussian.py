@@ -61,7 +61,7 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         """Log-density of Gaussian distribution at observation x.
 
         Log-density of Gaussian with mean mu and variance sigma2 given by,
-            log(f(x;mu, sigma2)) = -log(2*pi*sigma2) - (x-mu)^2/sigma2, for real-valued x.
+            log(f(x;mu, sigma2)) = -0.5*log(2*pi*sigma2) - 0.5*(x-mu)^2/sigma2, for real-valued x.
 
         Args:
             x (float): Real-valued observation of Gaussian.

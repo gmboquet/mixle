@@ -1,6 +1,7 @@
 __all__ = ['BernoulliDistribution', 'BernoulliEstimator', 'BernoulliSampler',
            'BernoulliSetDistribution', 'BernoulliSetEstimator', 'BernoulliSetSampler',
            'BetaDistribution', 'BetaSampler',
+           'BinomialDistribution', 'BinomialEstimator', 'BinomialSampler',
            'CategoricalDistribution', 'CategoricalEstimator', 'CategoricalSampler',
            'CompositeDistribution', 'CompositeEstimator', 'CompositeSampler',
            'DiagonalGaussianDistribution', 'DiagonalGaussianEstimator', 'DiagonalGaussianSampler',
@@ -11,10 +12,17 @@ __all__ = ['BernoulliDistribution', 'BernoulliEstimator', 'BernoulliSampler',
            'GaussianDistribution', 'GaussianEstimator', 'GaussianSampler',
            'GammaDistribution', 'GammaEstimator', 'GammaSampler',
            'GeometricDistribution', 'GeometricEstimator', 'GeometricSampler',
+           'HiddenMarkovModelDistribution', 'HiddenMarkovModelEstimator', 'HiddenMarkovModelSampler',
+           'HierarchicalDirichletProcessMixtureDistribution', 'HierarchicalDirichletProcessMixtureEstimator',
+           'HierarchicalDirichletProcessMixtureSampler',
            'IgnoredDistribution', 'IgnoredEstimator', 'IgnoredSampler',
            'IntegerCategoricalDistribution', 'IntegerCategoricalEstimator', 'IntegerCategoricalSampler',
+           'LogGaussianDistribution', 'LogGaussianEstimator', 'LogGaussianSampler',
+           'MarkovChainDistribution', 'MarkovChainEstimator', 'MarkovChainSampler',
            'MixtureDistribution', 'MixtureEstimator', 'MixtureSampler',
+           'MultivariateGaussianDistribution', 'MultivariateGaussianEstimator', 'MultivariateGaussianSampler',
            'MultivariateNormalGammaDistribution', 'MultivariateNormalGammaSampler',
+           'NormalWishartDistribution', 'NormalWishartSampler',
            'NullDistribution', 'NullEstimator', 'NullSampler',
            'OptionalDistribution', 'OptionalEstimator', 'OptionalSampler',
            'PoissonDistribution', 'PoissonEstimator', 'PoissonSampler',
@@ -26,6 +34,7 @@ from pysp.arithmetic import *
 
 from pysp.bstats.beta         import BetaDistribution, BetaSampler
 from pysp.bstats.bernoulli    import BernoulliDistribution, BernoulliEstimator, BernoulliSampler
+from pysp.bstats.binomial     import BinomialDistribution, BinomialEstimator, BinomialSampler
 from pysp.bstats.categorical  import CategoricalDistribution, CategoricalEstimator, CategoricalSampler
 from pysp.bstats.composite    import CompositeDistribution, CompositeEstimator, CompositeSampler
 from pysp.bstats.catdirichlet import DictDirichletDistribution
@@ -37,8 +46,16 @@ from pysp.bstats.gamma        import GammaDistribution, GammaEstimator, GammaSam
 from pysp.bstats.geometric    import GeometricDistribution, GeometricEstimator, GeometricSampler
 from pysp.bstats.ignored      import IgnoredDistribution, IgnoredEstimator, IgnoredSampler
 from pysp.bstats.intrange     import IntegerCategoricalDistribution, IntegerCategoricalEstimator, IntegerCategoricalSampler
+from pysp.bstats.log_gaussian import LogGaussianDistribution, LogGaussianEstimator, LogGaussianSampler
+from pysp.bstats.markovchain  import MarkovChainDistribution, MarkovChainEstimator, MarkovChainSampler
+from pysp.bstats.hdpm         import (HierarchicalDirichletProcessMixtureDistribution,
+                                      HierarchicalDirichletProcessMixtureEstimator,
+                                      HierarchicalDirichletProcessMixtureSampler)
+from pysp.bstats.hidden_markov import HiddenMarkovModelDistribution, HiddenMarkovModelEstimator, HiddenMarkovModelSampler
 from pysp.bstats.mixture      import MixtureDistribution, MixtureEstimator, MixtureSampler
+from pysp.bstats.mvn          import MultivariateGaussianDistribution, MultivariateGaussianEstimator, MultivariateGaussianSampler
 from pysp.bstats.mvngamma     import MultivariateNormalGammaDistribution, MultivariateNormalGammaSampler
+from pysp.bstats.normwishart  import NormalWishartDistribution, NormalWishartSampler
 from pysp.bstats.nulldist     import NullDistribution, NullEstimator, NullSampler
 from pysp.bstats.optional     import OptionalDistribution, OptionalEstimator, OptionalSampler
 from pysp.bstats.poisson      import PoissonDistribution, PoissonEstimator, PoissonSampler

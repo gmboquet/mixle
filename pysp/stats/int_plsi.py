@@ -881,7 +881,7 @@ class IntegerPLSIDataEncoder(DataSequenceEncoder):
 
 
 @numba.njit('void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:,:], float64[:,:], float64[:], '
-            'float64[:])', fastmath=True)
+            'float64[:])', fastmath=True, cache=True)
 def fast_seq_log_density(xv, xc, xd, xi, xm, wmat, smat, dvec, out):
     n = len(xv)
     m = len(xm)
@@ -898,7 +898,7 @@ def fast_seq_log_density(xv, xc, xd, xi, xm, wmat, smat, dvec, out):
     for i in range(m):
         out[i] += dvec[xm[i]]
 
-@numba.njit('void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:,:], float64[:,:])', fastmath=True)
+@numba.njit('void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:,:], float64[:,:])', fastmath=True, cache=True)
 def fast_seq_component_log_density(xv, xc, xd, xi, xm, wmat, out):
     n = len(xv)
     k = wmat.shape[1]
@@ -910,7 +910,7 @@ def fast_seq_component_log_density(xv, xc, xd, xi, xm, wmat, out):
             out[i3, j] += np.log(wmat[i1,j])*cc
 
 @numba.njit('void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:], float64[:,:], float64[:,:], '
-            'float64[:,:], float64[:,:], float64[:])', fastmath=True)
+            'float64[:,:], float64[:,:], float64[:])', fastmath=True, cache=True)
 def fast_seq_update(xv, xc, xd, xi, xm, weights, wmat, smat, wcnt, scnt, dcnt):
     n = len(xv)
     m = len(xm)
@@ -935,7 +935,7 @@ def fast_seq_update(xv, xc, xd, xi, xm, weights, wmat, smat, wcnt, scnt, dcnt):
         dcnt[xm[i]] += weights[i]
 
 
-@numba.njit('float64[:](float64[:,:], int32[:], float64[:,:], int32[:], float64[:])')
+@numba.njit('float64[:](float64[:,:], int32[:], float64[:,:], int32[:], float64[:])', cache=True)
 def index_dot(x, xi, y, yi, out):
     n = x.shape[1]
     for i in range(len(xi)):
@@ -945,13 +945,13 @@ def index_dot(x, xi, y, yi, out):
             out[i] += x[i1,j]*y[i2,j]
     return out
 
-@numba.njit('float64[:](int32[:], float64[:], float64[:])')
+@numba.njit('float64[:](int32[:], float64[:], float64[:])', cache=True)
 def bincount(x, w, out):
     for i in range(len(x)):
         out[x[i]] += w[i]
     return out
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])')
+@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
 def vec_bincount1(x, w, out):
     n = w.shape[1]
     for i in range(len(x)):
@@ -959,14 +959,14 @@ def vec_bincount1(x, w, out):
             out[x[i],j] += w[i,j]
     return out
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], int32[:], float64[:,:])')
+@numba.njit('float64[:,:](int32[:], float64[:,:], int32[:], float64[:,:])', cache=True)
 def vec_bincount2(x, w, y, out):
     for i in range(len(x)):
         out[x[i], :] += w[y[i], :]
     return out
 
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])')
+@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
 def vec_bincount3(x, w, out):
     """Numba bincount on the rows of matrix w for groups x.
 
@@ -990,7 +990,7 @@ def vec_bincount3(x, w, out):
     return out
 
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])')
+@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
 def vec_bincount4(x, w, out):
     """Numba bincount on the rows of matrix w for groups x.
 

@@ -666,7 +666,12 @@ class IntegerMultinomialEstimator(ParameterEstimator):
             pseudo_count_per_level = self.pseudo_count / float(len(suff_stat[1]))
             adjusted_nobs = suff_stat[1].sum() + self.pseudo_count
 
-            return IntegerMultinomialDistribution(suff_stat[0], (suff_stat[1]+pseudo_count_per_level)/adjusted_nobs,
+            if adjusted_nobs == 0.0:
+                p_vec = np.ones(len(suff_stat[1])) / float(len(suff_stat[1]))
+            else:
+                p_vec = (suff_stat[1] + pseudo_count_per_level) / adjusted_nobs
+
+            return IntegerMultinomialDistribution(suff_stat[0], p_vec,
                                                   len_dist=len_dist, name=self.name, keys=self.keys)
 
         elif self.pseudo_count is not None and self.min_val is not None and self.max_val is not None:
@@ -682,7 +687,12 @@ class IntegerMultinomialEstimator(ParameterEstimator):
             pseudo_count_per_level = self.pseudo_count / float(len(count_vec))
             adjusted_nobs = suff_stat[1].sum() + self.pseudo_count
 
-            return IntegerMultinomialDistribution(min_val, (count_vec+pseudo_count_per_level)/adjusted_nobs,
+            if adjusted_nobs == 0.0:
+                p_vec = np.ones(len(count_vec)) / float(len(count_vec))
+            else:
+                p_vec = (count_vec + pseudo_count_per_level) / adjusted_nobs
+
+            return IntegerMultinomialDistribution(min_val, p_vec,
                                                   len_dist=len_dist, name=self.name, keys=self.keys)
 
         elif self.pseudo_count is not None and self.suff_stat is not None:
@@ -702,10 +712,22 @@ class IntegerMultinomialEstimator(ParameterEstimator):
             i1 = (suff_stat[0] + len(suff_stat[1]) - 1) - min_val + 1
             count_vec[i0:i1] += suff_stat[1]
 
-            return IntegerMultinomialDistribution(min_val, count_vec/(count_vec.sum()), len_dist=len_dist,
+            count_sum = count_vec.sum()
+            if count_sum == 0.0:
+                p_vec = np.ones(len(count_vec)) / float(len(count_vec))
+            else:
+                p_vec = count_vec / count_sum
+
+            return IntegerMultinomialDistribution(min_val, p_vec, len_dist=len_dist,
                                                   name=self.name, keys=self.keys)
         else:
-            return IntegerMultinomialDistribution(suff_stat[0], suff_stat[1]/(suff_stat[1].sum()), len_dist=len_dist,
+            count_sum = suff_stat[1].sum()
+            if count_sum == 0.0:
+                p_vec = np.ones(len(suff_stat[1])) / float(len(suff_stat[1]))
+            else:
+                p_vec = suff_stat[1] / count_sum
+
+            return IntegerMultinomialDistribution(suff_stat[0], p_vec, len_dist=len_dist,
                                                   name=self.name, keys=self.keys)
 
 

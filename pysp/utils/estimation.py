@@ -54,7 +54,7 @@ def empirical_kl_divergence(dist1: SequenceEncodableProbabilityDistribution,
     p2 = np.exp(l2[gg] - max_l2)
     p2 /= p2.sum()
 
-    r1 = (p1[gg] * (np.log(p1[gg]) - np.log(p2[gg]))).sum()
+    r1 = (p1 * (np.log(p1) - np.log(p2))).sum()
     r2 = (~g1).sum()
     r3 = (~g2).sum()
 

@@ -170,46 +170,14 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
 
 
     def seq_encode(self, x):
+        return self.dist_to_encoder().seq_encode(x)
 
-        ids = []
-        idi = []
-        xss = []
-        sz  = []
-        xsi = []
-        imi = []
-        ims = []
+    def dist_to_encoder(self):
+        topic_encoder = self.topics[0].dist_to_encoder()
+        init_encoder = self.init_dist[0].dist_to_encoder()
+        len_encoder = self.len_dist.dist_to_encoder() if self.len_dist is not None else None
 
-
-        lag = self.lag
-        cnt = 0
-        for i in range(len(x)):
-
-            xxi = x[i][:lag]
-            xxs = [x[i][(j-lag):(j+1)] for j in range(lag, len(x[i]))]
-            xsi.append(xxi)
-            idi.append(i)
-            ids.extend([i]*len(xxs))
-            xss.extend(xxs)
-            sz.append(len(x[i])-lag+1)
-
-            imi.append(cnt)
-            ims.extend(range(cnt+1,cnt+1+(len(x[i])-lag)))
-            cnt += len(x[i])-lag+1
-
-        if self.len_dist is not None:
-            len_enc = self.len_dist.seq_encode(sz)
-        else:
-            len_enc = None
-
-        ids = np.asarray(ids, dtype=np.int32)
-        idi = np.asarray(idi, dtype=np.int32)
-        ims = np.asarray(ims, dtype=np.int32)
-        imi = np.asarray(imi, dtype=np.int32)
-        sz  = np.asarray(sz, dtype=np.int32)
-        xss = self.topics[0].seq_encode(xss)
-        xsi = self.init_dist[0].seq_encode(xsi)
-
-        return (ids, idi, ims, imi, sz, xss, xsi), len_enc
+        return LookbackHiddenMarkovDataEncoder(self.lag, topic_encoder, init_encoder, len_encoder)
 
     def seq_posterior(self, x):
 
@@ -251,6 +219,66 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
         len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
         comp_ests = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
         return LookbackHiddenMarkovEstimator(comp_ests, pseudo_count=(pseudo_count,pseudo_count), len_estimator=len_est)
+
+class LookbackHiddenMarkovDataEncoder(object):
+
+    def __init__(self, lag, topic_encoder, init_encoder, len_encoder=None):
+        self.lag = lag
+        self.topic_encoder = topic_encoder
+        self.init_encoder = init_encoder
+        self.len_encoder = len_encoder
+
+    def __str__(self):
+        return 'LookbackHiddenMarkovDataEncoder(lag=%s, topic_encoder=%s, init_encoder=%s, len_encoder=%s)' % \
+               (repr(self.lag), str(self.topic_encoder), str(self.init_encoder), str(self.len_encoder))
+
+    def __eq__(self, other):
+        if not isinstance(other, LookbackHiddenMarkovDataEncoder):
+            return False
+        return self.lag == other.lag and self.topic_encoder == other.topic_encoder \
+            and self.init_encoder == other.init_encoder and self.len_encoder == other.len_encoder
+
+    def seq_encode(self, x):
+
+        ids = []
+        idi = []
+        xss = []
+        sz  = []
+        xsi = []
+        imi = []
+        ims = []
+
+        lag = self.lag
+        cnt = 0
+        for i in range(len(x)):
+
+            xxi = x[i][:lag]
+            xxs = [x[i][(j-lag):(j+1)] for j in range(lag, len(x[i]))]
+            xsi.append(xxi)
+            idi.append(i)
+            ids.extend([i]*len(xxs))
+            xss.extend(xxs)
+            sz.append(len(x[i])-lag+1)
+
+            imi.append(cnt)
+            ims.extend(range(cnt+1,cnt+1+(len(x[i])-lag)))
+            cnt += len(x[i])-lag+1
+
+        if self.len_encoder is not None:
+            len_enc = self.len_encoder.seq_encode(sz)
+        else:
+            len_enc = None
+
+        ids = np.asarray(ids, dtype=np.int32)
+        idi = np.asarray(idi, dtype=np.int32)
+        ims = np.asarray(ims, dtype=np.int32)
+        imi = np.asarray(imi, dtype=np.int32)
+        sz  = np.asarray(sz, dtype=np.int32)
+        xss = self.topic_encoder.seq_encode(xss)
+        xsi = self.init_encoder.seq_encode(xsi)
+
+        return (ids, idi, ims, imi, sz, xss, xsi), len_enc
+
 
 class LookbackHiddenMarkovSampler(object):
 
@@ -327,6 +355,46 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
                 for j in range(self.num_states):
                     self.seq_accumulators[j].initialize(x[(i-lag):(i+1)], w[k+1,j], rng)
 
+
+    def seq_initialize(self, x, weights, rng):
+
+        (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
+
+        num_states = self.num_states
+        tot_cnt = len(ids) + len(idi)
+
+        # per-position sparse soft state assignment, mirroring initialize()
+        ww = rng.dirichlet(np.ones(num_states) / (num_states ** 2), size=tot_cnt)
+
+        w_init = ww[imi, :] * weights[idi][:, None]
+        w_seq = ww[ims, :] * weights[ids][:, None]
+
+        self.init_counts += w_init.sum(axis=0)
+        self.state_counts += w_init.sum(axis=0) + w_seq.sum(axis=0)
+
+        # transitions between consecutive positions within each sequence
+        tz = np.concatenate([[0], sz]).cumsum().astype(np.int32)
+        prev_mask = np.ones(tot_cnt, dtype=bool)
+        prev_mask[tz[1:] - 1] = False
+        prev_idx = np.flatnonzero(prev_mask)
+        next_idx = prev_idx + 1
+        seq_of_pos = np.repeat(np.arange(len(sz)), sz)
+        w_pos = weights[seq_of_pos[prev_idx]]
+        self.trans_counts += np.einsum('n,ni,nj->ij', w_pos, ww[prev_idx, :], ww[next_idx, :])
+
+        for j in range(num_states):
+            self.init_accumulators[j].seq_initialize(enc_idata, w_init[:, j], rng)
+            self.seq_accumulators[j].seq_initialize(enc_sdata, w_seq[:, j], rng)
+
+        if self.len_accumulator is not None and len_enc is not None:
+            self.len_accumulator.seq_initialize(len_enc, weights, rng)
+
+    def acc_to_encoder(self):
+        topic_encoder = self.seq_accumulators[0].acc_to_encoder()
+        init_encoder = self.init_accumulators[0].acc_to_encoder()
+        len_encoder = self.len_accumulator.acc_to_encoder() if self.len_accumulator is not None else None
+
+        return LookbackHiddenMarkovDataEncoder(self.lag, topic_encoder, init_encoder, len_encoder)
 
     def seq_update(self, x, weights, estimate):
 
@@ -505,11 +573,11 @@ class LookbackHiddenMarkovEstimator(ParameterEstimator):
         self.init_estimators = init_estimators
         self.lag = lag
 
-    def accumulatorFactory(self):
-        est_factories = [u.accumulatorFactory() for u in self.estimators]
-        iest_factories = [u.accumulatorFactory() for u in self.init_estimators]
+    def accumulator_factory(self):
+        est_factories = [u.accumulator_factory() for u in self.estimators]
+        iest_factories = [u.accumulator_factory() for u in self.init_estimators]
 
-        len_factory = self.len_estimator.accumulatorFactory() if self.len_estimator is not None else None
+        len_factory = self.len_estimator.accumulator_factory() if self.len_estimator is not None else None
         return LookbackHiddenMarkovEstimatorAccumulatorFactory(self.lag, est_factories, iest_factories, len_factory, self.keys)
 
     def estimate(self, nobs, suff_stat):
@@ -545,7 +613,7 @@ class LookbackHiddenMarkovEstimator(ParameterEstimator):
 
 
 
-@numba.njit('void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:])', parallel=True, fastmath=True)
+@numba.njit('void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:])', parallel=True, fastmath=True, cache=True)
 def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll, next_alpha_mat, alpha_buff_mat, out):
 
     for n in numba.prange(len(tz) - 1):
@@ -591,7 +659,7 @@ def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll,
 
 
 
-@numba.njit('void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:], float64[:], float64[:,:])')
+@numba.njit('void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:], float64[:], float64[:,:])', cache=True)
 def numba_baum_welch(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc, beta_buff, xi_buff):
 
     for n in range(len(tz)-1):
@@ -679,7 +747,7 @@ def numba_baum_welch(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alp
 
 
 
-@numba.njit('void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])', parallel=True, fastmath=True)
+@numba.njit('void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])', parallel=True, fastmath=True, cache=True)
 def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc):
 
     for n in numba.prange(len(tz)-1):
@@ -770,7 +838,7 @@ def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, al
 
 
 
-@numba.njit('void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])', parallel=True, fastmath=True)
+@numba.njit('void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])', parallel=True, fastmath=True, cache=True)
 def numba_baum_welch_alphas(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc):
 
     for n in numba.prange(len(tz)-1):
