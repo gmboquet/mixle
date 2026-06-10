@@ -34,6 +34,7 @@ setup(
     ],
     extras_require={
         "torch": ["torch"],
+        "mpi": ["mpi4py"],
     },
 
 )
