@@ -1,6 +1,3 @@
-import os
-#os.environ['NUMBA_DISABLE_JIT'] = '1'
-
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution
 from pysp.stats import *
 from pysp.utils.estimation import empirical_kl_divergence

@@ -1,7 +1,5 @@
 import numpy as np
-import os
 
-os.environ['NUMBA_DISABLE_JIT'] = '1'
 
 from pysp.stats.spearman_rho import SpearmanRankingDistribution, SpearmanRankingEstimator
 from pysp.utils.estimation import optimize

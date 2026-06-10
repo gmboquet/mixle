@@ -1,7 +1,5 @@
 """Simulate data and estimate from a Mixture distribution."""
-import os
 
-os.environ['NUMBA_DISABLE_JIT'] = '1'
 
 import numpy as np
 

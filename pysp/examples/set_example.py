@@ -1,9 +1,7 @@
 """Fit a Mixture of a composite of Bernoulli set distribution and bag of words model for NIPS documents with authors,
 represented by edges in a graph."""
 import json
-import os
 
-os.environ['NUMBA_DISABLE_JIT'] = '1'
 
 import numpy as np
 from pysp.stats import *

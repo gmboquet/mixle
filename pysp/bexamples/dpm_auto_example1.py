@@ -1,6 +1,3 @@
-import os
-os.environ['NUMBA_DISABLE_JIT'] =  '1'
-
 from pysp.utils.automatic import get_dpm_mixture, get_estimator
 from pysp.bstats import *
 import numpy as np
