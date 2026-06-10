@@ -42,3 +42,6 @@ pip-delete-this-directory.txt
 .venv/
 .DS_Store
 .claude/
+
+# Downloaded example datasets
+data/
