@@ -83,13 +83,13 @@ class NormalGammaSampler(object):
 		self.dist  = dist
 		self.seed  = seed
 		self.rng   = np.random.RandomState(seed)
-		self.grng  = np.random.RandomState(self.rng.tomaxint())
-		self.nrng  = np.random.RandomState(self.rng.tomaxint())
+		self.grng  = np.random.RandomState(self.rng.randint(0, 2**31 - 1))
+		self.nrng  = np.random.RandomState(self.rng.randint(0, 2**31 - 1))
 
 	def sample(self, size=None):
 		if size is None:
-			t = self.grng.gamma(self.dists.a, 1/self.dists.b)
-			x = self.nrng.normal(self.dists.mu, 1/(self.dists.lam*t))
+			t = self.grng.gamma(self.dist.a, 1/self.dist.b)
+			x = self.nrng.normal(self.dist.mu, np.sqrt(1/(self.dist.lam*t)))
 			return x,t
 		else:
 			return [self.sample() for i in range(size)]

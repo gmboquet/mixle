@@ -74,7 +74,7 @@ class BernoulliDistribution(ProbabilityDistribution):
             else:
                 return db - dab
         else:
-            pass
+            return self.log_density(x)
 
     def cross_entropy(self, dist: ProbabilityDistribution) -> float:
         a = dist.log_density(True)
@@ -85,7 +85,8 @@ class BernoulliDistribution(ProbabilityDistribution):
         return self.p * (self.log_p0 - self.log_p1) + self.log_p1
 
     def moment(self, p: int) -> float:
-        pass
+        # X takes values in {0, 1}, so E[X^p] = P(X=1) for any p >= 1
+        return 1.0 if p == 0 else self.p
 
     def seq_log_density(self, x):
         return np.where(x, self.log_p0, self.log_p1)

@@ -34,7 +34,7 @@ class BetaDistribution(ProbabilityDistribution):
 			bb = dist.b
 			return betaln(aa,bb) - (aa-1)*digamma(a) - (bb-1)*digamma(b) + (aa+bb-2)*digamma(a+b)
 		else:
-			return -scipy.integrate.quad(lambda x: dist.log_density(x) * self.density(x), 0, 1)
+			return -scipy.integrate.quad(lambda x: dist.log_density(x) * self.density(x), 0, 1)[0]
 
 	def entropy(self):
 		a = self.a
@@ -42,13 +42,13 @@ class BetaDistribution(ProbabilityDistribution):
 		return betaln(a, b) - (a - 1) * digamma(a) - (b - 1) * digamma(b) + (a + b - 2) * digamma(a + b)
 
 	def density(self, x):
-		np.power(x, self.a - 1) * np.power(1-x, self.b - 1)/beta(self.a, self.b)
+		return np.power(x, self.a - 1) * np.power(1-x, self.b - 1)/beta(self.a, self.b)
 
 	def log_density(self, x: float):
 		a = self.a
 		b = self.b
 
-		return np.log(x)*(a-1) + np.log1p(-x)*b + self.norm_const
+		return np.log(x)*(a-1) + np.log1p(-x)*(b-1) + self.norm_const
 
 	def sampler(self, seed: int = None):
 		return BetaSampler(self, seed)

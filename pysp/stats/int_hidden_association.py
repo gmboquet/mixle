@@ -740,7 +740,7 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
 
 @numba.njit(
     'void(int64, int64, int32[:], int32[:], int32[:], int32[:], float64[:], float64[:], float64[:], float64[:,:], '
-    'float64[:,:], float64[:], float64, float64, float64[:])')
+    'float64[:,:], float64[:], float64, float64, float64[:])', cache=True)
 def numba_seq_log_density(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weights, state_prob_mat, init_prob_vec,
                           a, b, out):
     x_mat = np.zeros((max_len1, num_states), dtype=np.float64)
@@ -773,7 +773,7 @@ def numba_seq_log_density(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond
 
 @numba.njit(
     'void(int64, int64, int32[:], int32[:], int32[:], int32[:], float64[:], float64[:], float64[:], float64[:,:], '
-    'float64[:,:], float64[:,:], float64[:,:], float64[:], float64[:])')
+    'float64[:,:], float64[:,:], float64[:,:], float64[:], float64[:])', cache=True)
 def numba_seq_update(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weights, state_prob_mat, weight_count,
                      state_count, init_count, weights):
     x_mat = np.zeros((max_len1, num_states), dtype=np.float64)
@@ -815,7 +815,7 @@ def numba_seq_update(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weig
                     state_count[k, wid] += temp
 
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])')
+@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
 def vec_bincount1(x, w, out):
     """Numba bincount on the rows of matrix w for groups x.
 
@@ -833,7 +833,7 @@ def vec_bincount1(x, w, out):
     return out
 
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])')
+@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
 def vec_bincount2(x, w, out):
     """Numba bincount on the rows of matrix w for groups x.
 

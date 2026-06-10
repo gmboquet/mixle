@@ -62,7 +62,7 @@ class GaussianDistribution(ProbabilityDistribution):
 
     def expected_log_density(self, x: float) -> float:
 
-        if self.has_conj_prior is not None:
+        if self.has_conj_prior:
             ea, eb, e1, e2 = self.expected_nparams
             return x*(e1 + x*e2) - ea + eb
         else:
@@ -240,6 +240,13 @@ class GaussianEstimator(ParameterEstimator):
 
     def get_prior(self):
         return self.prior
+
+    def model_log_density(self, model):
+        # the normal-gamma prior is over (mu, tau) with tau = 1/sigma2
+        if self.has_conj_prior:
+            mu, sigma2 = model.get_parameters()
+            return float(self.prior.log_density((mu, 1.0/sigma2)))
+        return super().model_log_density(model)
 
     def estimate(self, suff_stat):
 

@@ -37,7 +37,7 @@ if __name__ == '__main__':
 	# Estimate parameters
 	_, mm = best_of(train_data, valid_data, est, 5, 100, 0.01, 1.0e-8, rng)
 
-	enc_vdata = seq_encode(valid_data, mm)
+	enc_vdata = seq_encode(valid_data, model=mm)
 	kl, _, _  = empirical_kl_divergence(mm, dist, enc_vdata)
 
 	print('KL[Estimate||True | data] = %f'%(kl))

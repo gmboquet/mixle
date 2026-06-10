@@ -49,7 +49,7 @@ class SequenceDistribution(ProbabilityDistribution[List[X],Tuple[P1,P2],Tuple[V1
 			v3 = self.len_dist.moment(1)
 			return v3*v1 + v2
 		else:
-			pass
+			raise NotImplementedError('SequenceDistribution.cross_entropy is only implemented for SequenceDistribution arguments (got %s).' % type(dist).__name__)
 
 	def entropy(self):
 		v1 = self.dist.entropy()

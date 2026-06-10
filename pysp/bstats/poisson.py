@@ -117,7 +117,7 @@ class PoissonDistribution(ProbabilityDistribution):
             return self.lam
         else:
             rv = 0
-            for i in range(p):
+            for i in range(p + 1):
                 rv += np.power(self.lam, i) * stirling2(p, i)
             return rv
 
@@ -243,17 +243,20 @@ class PoissonEstimator(ParameterEstimator):
 
             k, theta = self.prior.get_parameters()
 
-            new_k          = k + psum
-            new_theta      = theta/(nobs*theta + 1)
-            posterior_mode = (new_k-1)*new_theta
+            new_k     = k + psum
+            new_theta = theta/(nobs*theta + 1)
+
+            # posterior mode of Gamma(k, theta) is (k-1)*theta for k >= 1; fall
+            # back to the posterior mean when the mode is at the boundary
+            if new_k >= 1.0:
+                posterior_mode = (new_k - 1.0)*new_theta
+            else:
+                posterior_mode = new_k*new_theta
+
+            posterior_mode = max(posterior_mode, 1.0e-128)
 
             return PoissonDistribution(posterior_mode, name=self.name, prior=GammaDistribution(new_k, new_theta))
 
-        elif self.has_prior:
-
-            ll_fun = lambda x: np.log(x)
-
-            pass
-
         else:
-            return PoissonDistribution(psum/nobs, name=self.name, prior=null_dist)
+            lam = psum/nobs if nobs > 0 else 1.0
+            return PoissonDistribution(max(lam, 1.0e-128), name=self.name, prior=self.prior if self.has_prior else null_dist)

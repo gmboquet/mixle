@@ -51,6 +51,7 @@ class DirichletProcessMixtureDistribution(ProbabilityDistribution):
 
         self.components = components
         self.max_components = len(components)
+        self.num_components = len(components)
         self.w = np.asarray(w)
         self.a = a
         self.log_w = np.log(w)
@@ -64,14 +65,41 @@ class DirichletProcessMixtureDistribution(ProbabilityDistribution):
         return vec.log_sum(np.asarray([u.log_density(x) for u in self.components]) + self.log_w)
 
     def expected_log_density(self, x):
-
-        if self.conj_prior_params is not None:
-            ccnt, gcnt = self.conj_prior_params
-
-            cc = digamma(ccnt) - digamma(np.sum(ccnt))
-        return vec.log_sum(np.asarray([u.expected_log_density(x) for u in self.components]) + cc)
+        return vec.log_sum(np.asarray([u.expected_log_density(x) for u in self.components]) + self.log_w)
 
     def seq_log_density(self, x):
+
+        ll_mat = np.asarray([u.seq_log_density(x) for u in self.components]).T + self.log_w
+        ll_max = ll_mat.max(axis=1, keepdims=True)
+
+        good_rows = np.isfinite(ll_max.flatten())
+
+        if np.all(good_rows):
+            ll_mat -= ll_max
+            np.exp(ll_mat, out=ll_mat)
+            ll_sum = np.sum(ll_mat, axis=1, keepdims=True)
+            np.log(ll_sum, out=ll_sum)
+            ll_sum += ll_max
+            return ll_sum.flatten()
+        else:
+            rv = np.zeros(len(good_rows), dtype=float)
+            rv[~good_rows] = -np.inf
+            if np.any(good_rows):
+                ll_loc = ll_mat[good_rows, :] - ll_max[good_rows]
+                rv[good_rows] = (np.log(np.sum(np.exp(ll_loc), axis=1, keepdims=True)) + ll_max[good_rows]).flatten()
+            return rv
+
+    def seq_local_elbo(self, x):
+        """Per-observation local ELBO contributions.
+
+        For each observation i this returns
+
+            sum_k phi_ik * ( E_q[log p(z_i = k | v)] + E_q[log p(x_i | theta_k)] - log phi_ik )
+
+        where phi_i is the optimal variational assignment for x_i. The global
+        (data-independent) ELBO terms are returned by
+        DirichletProcessMixtureEstimator.model_log_density.
+        """
 
         exp_ll  = np.asarray([u.seq_expected_log_density(x) for u in self.components]).T + self.log_w
         max_ell = exp_ll.max(axis=1, keepdims=True)
@@ -81,47 +109,26 @@ class DirichletProcessMixtureDistribution(ProbabilityDistribution):
         phi_g = 1 - np.cumsum(phi, axis=1)
 
         gam  = self.g
-        gams = gam[:,0]+gam[:,1]
-        a = self.a
+        gams = gam[:, 0] + gam[:, 1]
 
-        # cross entropy of beta and variational betas
-        temp1 = np.sum(-betaln(1,a) + (digamma(gam[:,1])-digamma(gams))*(a-1))
-
-        # cross entropy of component priors and variational priors
-        temp2 = 0
-        for i in range(self.max_components):
-            temp2 += -self.components[i].get_prior().cross_entropy(self.component_priors[i])
-
-        #
+        # E_q[log p(z_i | v)] via stick-breaking expectations
         exp_v  = digamma(gam[:, 0]) - digamma(gams)
         exp_nv = digamma(gam[:, 1]) - digamma(gams)
-        temp31 = (phi_g * exp_nv).sum() + (phi * exp_v).sum()
-        temp32 = np.sum(phi * (exp_ll - self.log_w))
-        temp3 = temp31 + temp32
+        rv = np.dot(phi_g, exp_nv) + np.dot(phi, exp_v)
 
-        # entropy of the variational approximation
-        # entropy of variational betas
-        temp41 = -(betaln(gam[:,0],gam[:,1]).sum() - ((gam-1)*digamma(gam)).sum() + ((gams-2)*digamma(gams)).sum())
-        # entropy of variational component priors
-        temp42 = np.sum([-u.get_prior().entropy() for u in self.components])
-        # entropy of sample variational multinomials
-        temp43 = np.sum(np.log(phi[phi > 0])*phi[phi > 0])
-        temp4 = temp41 + temp42 + temp43
-        #temp4 = temp43
-        #ll = np.asarray([u.seq_log_density(x) for u in self.components]).T + self.log_w
-        #max_ll = np.max(ll, axis=1, keepdims=True)
-        #xd = np.exp(ll - max_ll)
-        #rv = (np.log(np.sum(xd, axis=1, keepdims=True)) + max_ll).flatten()
-        #print([temp1, temp2, temp3, temp4])
+        # E_q[log p(x_i | theta_k)] under the variational assignments
+        rv += np.sum(phi * (exp_ll - self.log_w), axis=1)
 
-        return temp1 + temp2 + temp3 - temp4
-        #return temp3 - temp4
+        # entropy of the local variational multinomials
+        log_phi = np.log(phi, out=np.zeros_like(phi), where=phi > 0)
+        rv -= np.sum(phi * log_phi, axis=1)
+
+        return rv
 
     def seq_expected_log_density(self, x):
-        #cc = digamma(self.conj_prior_params) - digamma(np.sum(self.conj_prior_params))
         ll = np.asarray([u.seq_expected_log_density(x) for u in self.components]).T + self.log_w
-        ml = np.max(ll, axis=1)
-        return (np.log(np.sum(np.exp(ll.T - ml), axis=1, keepdims=True)) + ml).flatten()
+        ml = np.max(ll, axis=1, keepdims=True)
+        return (np.log(np.sum(np.exp(ll - ml), axis=1, keepdims=True)) + ml).flatten()
 
     def seq_encode(self, x):
         return self.components[0].seq_encode(x)

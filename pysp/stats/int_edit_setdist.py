@@ -335,13 +335,15 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
                 log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
                 log_pmat.fill(np.log(self.min_prob))
 
-                if s0 != 0:
-                    log_pmat[:, 0] = np.log(np.maximum((s0 - count_mat[:, 1]) / s0, self.min_prob))
-                    log_pmat[:, 2] = np.log(np.maximum(count_mat[:, 1] / s0, self.min_prob))
+                nz0 = s0 != 0
+                if np.any(nz0):
+                    log_pmat[nz0, 0] = np.log(np.maximum((s0[nz0] - count_mat[nz0, 1]) / s0[nz0], self.min_prob))
+                    log_pmat[nz0, 2] = np.log(np.maximum(count_mat[nz0, 1] / s0[nz0], self.min_prob))
 
-                if s1 != 0:
-                    log_pmat[:, 1] = np.log(np.maximum(count_mat[:, 0] / s1, self.min_prob))
-                    log_pmat[:, 3] = np.log(np.maximum(count_mat[:, 2] / s1, self.min_prob))
+                nz1 = s1 != 0
+                if np.any(nz1):
+                    log_pmat[nz1, 1] = np.log(np.maximum(count_mat[nz1, 0] / s1[nz1], self.min_prob))
+                    log_pmat[nz1, 3] = np.log(np.maximum(count_mat[nz1, 2] / s1[nz1], self.min_prob))
 
             else:
 

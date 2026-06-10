@@ -11,6 +11,38 @@ from typing import Union, Optional, Any, List, Iterable
 D1 = digamma(1.0)
 
 
+def stirling2(n: int, k: int) -> int:
+    """Stirling number of the second kind S(n, k).
+
+    Counts the number of ways to partition n labeled objects into k non-empty
+    unlabeled subsets. Computed with the standard recurrence
+    S(n, k) = k*S(n-1, k) + S(n-1, k-1) using exact integer arithmetic.
+
+    Args:
+        n (int): Number of objects (n >= 0).
+        k (int): Number of subsets (k >= 0).
+
+    Returns:
+        Integer value of S(n, k); 0 when k > n or when exactly one of n, k is 0.
+
+    """
+    if k > n or k < 0:
+        return 0
+    if n == 0 and k == 0:
+        return 1
+    if k == 0:
+        return 0
+
+    row = [1] + [0] * k
+    for i in range(1, n + 1):
+        upper = min(i, k)
+        for j in range(upper, 0, -1):
+            row[j] = j * row[j] + row[j - 1]
+        row[0] = 0
+
+    return row[k]
+
+
 def logpdet(x_mat: np.ndarray) -> float:
     """Computes the log-pseudo-determinant for a symmetric dense matrix.
 
@@ -21,8 +53,8 @@ def logpdet(x_mat: np.ndarray) -> float:
         float, log-pseudo-determinant.
 
     """
-    eigs = np.abs(np.linalg.eig(x_mat))
-    eigs = eigs[eigs != 0]
+    eigs = np.abs(np.linalg.eigvalsh(x_mat))
+    eigs = eigs[eigs > np.max(eigs, initial=0.0) * max(x_mat.shape) * np.finfo(np.float64).eps]
 
     if len(eigs) > 0:
         return float(np.sum(np.log(eigs)))
@@ -73,7 +105,9 @@ def digammainv(y: Union[np.ndarray, float], out: Optional[np.ndarray] = None) ->
         Q = np.isfinite(y)
         z = y[Q]
         M = (z >= -2.22)
-        x = M * (exp(z) + 0.5) + (1.0 - M) * (-1.0 / (z - D1))
+        x = np.empty(z.shape, dtype=float)
+        x[M] = exp(z[M]) + 0.5
+        x[~M] = -1.0 / (z[~M] - D1)
 
         t1 = np.zeros(x.shape, dtype=float)
         t2 = np.zeros(x.shape, dtype=float)
@@ -95,8 +129,7 @@ def digammainv(y: Union[np.ndarray, float], out: Optional[np.ndarray] = None) ->
         x = rv
 
     else:
-        m = (y >= -2.22)
-        x = m * (exp(y) + 0.5) + (1.0 - m) * (-1.0 / (y - D1))
+        x = (exp(y) + 0.5) if y >= -2.22 else (-1.0 / (y - D1))
 
         x -= ((digamma(x) - y) / trigamma(x))
         x -= ((digamma(x) - y) / trigamma(x))

@@ -535,6 +535,12 @@ def seq_encode(data: Union[Sequence[T], pyspark.rdd.RDD],
         Sequence encoded data for use with 'seq_' functions.
 
     """
+    # tolerate a model or estimator passed positionally in the encoder slot
+    if isinstance(encoder, SequenceEncodableProbabilityDistribution):
+        model, encoder = encoder, None
+    elif isinstance(encoder, ParameterEstimator):
+        estimator, encoder = encoder, None
+
     if encoder is None:
         if model is not None:
             encoder = model.dist_to_encoder()
@@ -590,7 +596,7 @@ def seq_log_density_sum(enc_data: Union[List[Tuple[int, T]], 'pyspark.rdd.RDD'],
         Tuple of sum of total obs, and sum of log_density of estimate at all encoded data observations.
 
     """
-    if "pyspark.rdd" in str(type(enc_data)):
+    if isinstance(enc_data, pyspark.rdd.RDD):
         sc = enc_data.context
         estimate_broadcast = sc.broadcast(pickle.dumps(estimate, protocol=0))
 
@@ -838,6 +844,8 @@ def seq_initialize(enc_data: Union[List[Tuple[int,T]], 'pyspark.rdd.RDD'],
         estimator_broadcast.destroy()
         temp.unpersist()
         enc_data.localCheckpoint()
+
+        return estimator.estimate(nobs, accumulator.value())
 
     else:
         accumulator = estimator.accumulator_factory().make()

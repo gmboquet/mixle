@@ -68,7 +68,7 @@ if __name__ == '__main__':
 
 	imm = initialize(data_cnt, estimator, rng, 0.1)
 
-	enc_data   = seq_encode(data_cnt, imm)
+	enc_data   = seq_encode(data_cnt, model=imm)
 	prev_model = imm
 
 	dcnt, lob_sum = seq_log_density_sum(enc_data, imm)

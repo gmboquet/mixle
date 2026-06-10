@@ -49,7 +49,10 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
         self.prior = prior
 
         if isinstance(self.prior, DirichletDistribution):
-            self.conj_prior_params = prior.get_parameters()
+            cpp = prior.get_parameters()
+            if np.ndim(cpp) == 0:
+                cpp = np.ones(self.num_vals)*cpp
+            self.conj_prior_params = cpp
             self.expected_nparams = digamma(self.conj_prior_params) - digamma(np.sum(self.conj_prior_params))
         elif isinstance(self.prior, SymmetricDirichletDistribution):
             self.conj_prior_params = np.ones(self.num_vals)*prior.get_parameters()
@@ -83,6 +86,7 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
             for x,p in enumerate(self.prob_vec):
                 if p > 0:
                     rv += dist.log_density(x+self.min_index) * p
+            return -rv
 
     def moment(self, p, o=0):
         return np.dot(np.power(np.arange(self.min_index, self.max_index+1)-o, p), self.prob_vec)
@@ -120,7 +124,12 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
 
     def seq_expected_log_density(self, x):
         idx = x - self.min_index
-        return self.expected_nparams[idx]
+        in_range = np.bitwise_and(idx >= 0, idx < self.num_vals)
+        rv = np.zeros(len(x))
+        rv.fill(self.log_default_value)
+        rv[in_range] = self.expected_nparams[idx[in_range]]
+        rv -= self.log_const
+        return rv
 
     def seq_encode(self, x):
         return np.asarray(x, dtype=int)

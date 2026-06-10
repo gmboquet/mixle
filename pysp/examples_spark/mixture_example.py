@@ -55,8 +55,8 @@ if __name__ == '__main__':
 
 	mm = initialize(train_data, iest, rng, 0.05)
 
-	enc_data  = seq_encode(train_data, mm)
-	enc_vdata = seq_encode(valid_data, mm)
+	enc_data  = seq_encode(train_data, model=mm)
+	enc_vdata = seq_encode(valid_data, model=mm)
 	_, old_ll = seq_log_density_sum(enc_vdata, mm)
 	_, old_tll = seq_log_density_sum(enc_data, mm)
 
