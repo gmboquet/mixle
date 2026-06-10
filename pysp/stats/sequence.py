@@ -14,11 +14,15 @@ p_mat(x) = P_dist(x[0])*...*P_dist(x[n-1])*P_len(n),
 for an observation x of data type Sequence[T] having length n.
 
 """
+import heapq
+import itertools
 import numpy as np
 from numpy.random import RandomState
 from pysp.arithmetic import maxrandint
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
+    DistributionEnumerator, EnumerationError, child_enumerator
+from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
     NullAccumulatorFactory
 
@@ -208,6 +212,78 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         len_encoder = self.len_dist.dist_to_encoder()
         encoders = (dist_encoder, len_encoder)
         return SequenceDataEncoder(encoders=encoders)
+
+    def enumerator(self) -> 'SequenceEnumerator':
+        """Returns SequenceEnumerator iterating sequences in descending probability order."""
+        return SequenceEnumerator(self)
+
+
+class SequenceEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: SequenceDistribution) -> None:
+        """Enumerates sequences (lists) in descending probability order.
+
+        Lengths are pulled lazily from the length distribution's enumerator; each length L
+        contributes an independent L-fold product stream over the (shared, buffered) element
+        enumeration, offset by the length log-probability. Supports of different lengths are
+        disjoint, so streams are merged without re-scoring; the next un-instantiated length's
+        log-probability is a valid frontier bound since element log-probs are non-positive.
+
+        Raises EnumerationError when no length distribution is modeled (the support is then
+        ill-defined) or when len_normalized is set (the geometric-mean density breaks the
+        additive log-density structure).
+
+        Args:
+            dist (SequenceDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        if dist.null_len_dist:
+            raise EnumerationError(dist, reason='no length distribution is modeled (len_dist is Null)')
+        if dist.len_normalized:
+            raise EnumerationError(dist, reason='len_normalized densities are not enumerable')
+        self._elem_buf = BufferedStream(child_enumerator(dist.dist, 'SequenceDistribution.dist'))
+        self._len_stream = BufferedStream(child_enumerator(dist.len_dist, 'SequenceDistribution.len_dist'))
+        self._next_len_rank = 0
+        self._counter = itertools.count()
+        self._heap: List[Tuple[float, int, int]] = []  # (-head_lp, counter, product id)
+        self._heads: Dict[int, Tuple[Any, float]] = {}
+        self._products: Dict[int, ProductEnumerator] = {}
+
+    def _pop(self) -> Tuple[Any, float]:
+        _, _, pid = heapq.heappop(self._heap)
+        value, lp = self._heads.pop(pid)
+        try:
+            nxt = next(self._products[pid])
+            self._heads[pid] = nxt
+            heapq.heappush(self._heap, (-nxt[1], next(self._counter), pid))
+        except StopIteration:
+            del self._products[pid]
+        return (value, lp)
+
+    def __next__(self) -> Tuple[Any, float]:
+        while True:
+            frontier = self._len_stream.get(self._next_len_rank)
+            if frontier is None:
+                if self._heap:
+                    return self._pop()
+                raise StopIteration
+            if self._heap and -self._heap[0][0] >= frontier[1]:
+                return self._pop()
+            # Instantiate the next length's product stream.
+            length, lp_len = frontier
+            pid = self._next_len_rank
+            self._next_len_rank += 1
+            if not isinstance(length, (int, np.integer)) or length < 0:
+                continue
+            product = ProductEnumerator([self._elem_buf] * int(length), combine=list, offset=lp_len)
+            try:
+                head = next(product)
+            except StopIteration:
+                continue
+            self._products[pid] = product
+            self._heads[pid] = head
+            heapq.heappush(self._heap, (-head[1], next(self._counter), pid))
 
 
 class SequenceSampler(DistributionSampler):

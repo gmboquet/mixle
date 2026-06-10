@@ -17,7 +17,8 @@ else.
 import numpy as np
 from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
+    DistributionEnumerator
 from pysp.utils.vector import gammaln
 from math import log
 from typing import Tuple, List, Union, Optional, Any, Dict, Sequence
@@ -63,7 +64,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         """Log-density of Poisson distribution evaluated at x.
 
         Log-density given by,
-            log(p_mat(x_mat=x; lam) = -x*log(lam) - log(x!) - lam, for x in {0,1,2,...}
+            log(p_mat(x_mat=x; lam) = x*log(lam) - log(x!) - lam, for x in {0,1,2,...}
         and -np.inf else.
 
         Note: log(Gamma(x+1.0)) = log(x!), where Gamma is the gamma function.
@@ -131,6 +132,47 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> 'PoissonDataEncoder':
         """Return PoissonDataEncoder object."""
         return PoissonDataEncoder()
+
+    def enumerator(self) -> 'PoissonEnumerator':
+        """Returns PoissonEnumerator iterating the support {0, 1, ...} in descending probability order."""
+        return PoissonEnumerator(self)
+
+
+class PoissonEnumerator(DistributionEnumerator):
+
+    def __init__(self, dist: PoissonDistribution) -> None:
+        """Enumerates the support {0, 1, 2, ...} of a PoissonDistribution.
+
+        The Poisson pmf is unimodal with mode floor(lam), so enumeration starts at the
+        mode and walks outward with two pointers (left bounded at 0, right unbounded),
+        emitting the larger side each step. The iterator is infinite.
+
+        Args:
+            dist (PoissonDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        mode = int(np.floor(dist.lam))
+        self._left = mode - 1
+        self._right = mode + 1
+        self._lp_left = dist.log_density(self._left) if self._left >= 0 else -np.inf
+        self._lp_right = dist.log_density(self._right)
+        self._head: Optional[Tuple[int, float]] = (mode, dist.log_density(mode))
+
+    def __next__(self) -> Tuple[int, float]:
+        if self._head is not None:
+            rv = self._head
+            self._head = None
+            return rv
+        if self._lp_left >= self._lp_right and self._left >= 0:
+            rv = (self._left, self._lp_left)
+            self._left -= 1
+            self._lp_left = self.dist.log_density(self._left) if self._left >= 0 else -np.inf
+        else:
+            rv = (self._right, self._lp_right)
+            self._right += 1
+            self._lp_right = self.dist.log_density(self._right)
+        return rv
 
 
 class PoissonSampler(DistributionSampler):
@@ -404,6 +446,8 @@ class PoissonEstimator(ParameterEstimator):
         if self.pseudo_count is not None and self.suff_stat is not None:
             return PoissonDistribution((psum + self.suff_stat * self.pseudo_count) / (nobs + self.pseudo_count),
                                        name=self.name)
+        elif nobs == 0.0:
+            return PoissonDistribution(1.0, name=self.name)
         else:
             return PoissonDistribution(psum / nobs, name=self.name)
 

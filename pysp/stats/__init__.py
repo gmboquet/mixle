@@ -62,6 +62,7 @@ __all__ = [
     "GeometricSampler",
     "GeometricEstimator",
     "GeometricDataEncoder",
+    "GeometricEnumerator",
     "HeterogeneousMixtureDistribution",
     "HeterogeneousMixtureSampler",
     "HeterogeneousMixtureEstimator",
@@ -124,6 +125,7 @@ __all__ = [
     "IntegerBernoulliSetSampler",
     "IntegerBernoulliSetEstimator",
     "IntegerBernoulliSetDataEncoder",
+    "IntegerBernoulliSetEnumerator",
     "JointMixtureDistribution",
     "JointMixtureSampler",
     "JointMixtureEstimator",
@@ -159,10 +161,12 @@ __all__ = [
     "PoissonSampler",
     "PoissonEstimator",
     "PoissonDataEncoder",
+    "PoissonEnumerator",
     "SequenceDistribution",
     "SequenceSampler",
     "SequenceEstimator",
     "SequenceDataEncoder",
+    "SequenceEnumerator",
     "BernoulliSetDistribution",
     "BernoulliSetSampler",
     "BernoulliSetEstimator",
@@ -207,9 +211,11 @@ from pysp.stats.binomial import BinomialDistribution, BinomialSampler, BinomialE
 from pysp.stats.categorical import CategoricalDistribution, CategoricalSampler, CategoricalEstimator, \
     CategoricalDataEncoder, CategoricalEnumerator
 
-from pysp.stats.poisson import PoissonDistribution, PoissonSampler, PoissonEstimator, PoissonDataEncoder
+from pysp.stats.poisson import PoissonDistribution, PoissonSampler, PoissonEstimator, PoissonDataEncoder, \
+    PoissonEnumerator
 
-from pysp.stats.geometric import GeometricDistribution, GeometricSampler, GeometricEstimator, GeometricDataEncoder
+from pysp.stats.geometric import GeometricDistribution, GeometricSampler, GeometricEstimator, GeometricDataEncoder, \
+    GeometricEnumerator
 
 from pysp.stats.int_spike import IntegerUniformSpikeDistribution, IntegerUniformSpikeSampler, \
     IntegerUniformSpikeEstimator, IntegerUniformSpikeDataEncoder
@@ -245,7 +251,8 @@ from pysp.stats.composite import CompositeDistribution, CompositeSampler, Compos
 from pysp.stats.conditional import ConditionalDistribution, ConditionalDistributionSampler, \
     ConditionalDistributionEstimator, ConditionalDistributionDataEncoder
 
-from pysp.stats.sequence import SequenceDistribution, SequenceSampler, SequenceEstimator, SequenceDataEncoder
+from pysp.stats.sequence import SequenceDistribution, SequenceSampler, SequenceEstimator, SequenceDataEncoder, \
+    SequenceEnumerator
 
 from pysp.stats.ignored import IgnoredDistribution, IgnoredSampler, IgnoredEstimator, IgnoredDataEncoder
 
@@ -308,7 +315,7 @@ from pysp.stats.int_plsi import IntegerPLSIDistribution, IntegerPLSISampler, Int
 
 from pysp.stats.icltree import ICLTreeDistribution, ICLTreeSampler, ICLTreeEstimator, ICLTreeDataEncoder
 
-from pysp.stats.intsetdist import IntegerBernoulliSetDistribution, IntegerBernoulliSetSampler, \
+from pysp.stats.intsetdist import IntegerBernoulliSetEnumerator, IntegerBernoulliSetDistribution, IntegerBernoulliSetSampler, \
     IntegerBernoulliSetEstimator, IntegerBernoulliSetDataEncoder
 
 from pysp.stats.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator, MultivariateGaussianSampler, \
