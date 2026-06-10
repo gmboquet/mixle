@@ -1,6 +1,4 @@
-import os
 import numpy as np
-os.environ['NUMBA_DISABLE_JIT'] = '1'
 
 from pysp.stats import *
 from pysp.utils.automatic import get_estimator

@@ -1,7 +1,5 @@
 """Detailed example of estimation and model validation with a test set."""
 import numpy as np
-import os
-os.environ['NUMBA_DISABLE_JIT'] = '1'
 from pysp.stats import *
 from pysp.utils.estimation import empirical_kl_divergence, partition_data
 

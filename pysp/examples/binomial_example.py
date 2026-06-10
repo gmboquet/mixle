@@ -1,5 +1,3 @@
-import os
-os.environ['NUMBA_DISABLE_JIT'] =  '1'
 from pysp.stats import *
 from pysp.utils.estimation import optimize
 import numpy as np

@@ -13,7 +13,7 @@ if __name__ == '__main__':
 
     fin = open('../../data/iliad/iliad_en.txt', 'rt', encoding='utf-8')
     data = fin.read()
-    words = re.split('\s+', data)
+    words = re.split(r'\s+', data)
     fin.close()
     m = len(words)
     n = 100

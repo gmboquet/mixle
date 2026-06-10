@@ -1,9 +1,7 @@
 """Example of Bernoulli step set edit distribution. Transition probabilities for sets are printed out for fit.
 This is similar to step_edit_example.py"""
 import numpy as np
-import os
 
-os.environ['NUMBA_DISABLE_JIT'] = '1'
 
 from pysp.stats import *
 from pysp.utils.estimation import optimize
