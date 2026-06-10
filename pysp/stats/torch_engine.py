@@ -22,9 +22,12 @@ Two ways to fit:
 Device/dtype notes: float64 on CPU/CUDA reproduces the legacy numerics; MPS
 only supports float32, so expect ~1e-5 relative agreement there.
 
-Supported distributions match pysp.stats.kernels: Gaussian, Categorical,
-IntegerCategorical, Poisson, Exponential, Geometric, Composite (any nesting),
-Sequence (variable length, optional length model), and a top-level mixture of
+Supported distributions match pysp.stats.kernels: Gaussian, LogGaussian,
+Gamma, Categorical, IntegerCategorical, Poisson, Exponential, Geometric,
+Binomial, DiagonalGaussian (vector leaf), Optional (missing-data wrapper
+around any supported child), Ignored (fixed wrapped dist, scored via a
+precomputed column but never fitted), Composite (any nesting), Sequence
+(variable length, optional length model), and a top-level mixture of
 same-structure components.
 """
 import math
@@ -34,14 +37,19 @@ import numpy as np
 import torch
 
 from pysp.stats.gaussian import GaussianDistribution
+from pysp.stats.log_gaussian import LogGaussianDistribution
+from pysp.stats.gamma import GammaDistribution
 from pysp.stats.categorical import CategoricalDistribution
 from pysp.stats.intrange import IntegerCategoricalDistribution
 from pysp.stats.poisson import PoissonDistribution
 from pysp.stats.exponential import ExponentialDistribution
 from pysp.stats.geometric import GeometricDistribution
+from pysp.stats.binomial import BinomialDistribution
+from pysp.stats.dmvn import DiagonalGaussianDistribution
 from pysp.stats.composite import CompositeDistribution
 from pysp.stats.sequence import SequenceDistribution
 from pysp.stats.mixture import MixtureDistribution
+from pysp.stats.optional import OptionalDistribution
 from pysp.stats import kernels as _k
 
 __all__ = ['TorchMixture']
@@ -291,6 +299,296 @@ class _TGeometric(_TPoisson):
         return ((prior['a'] - 1.0) * torch.log(pp) + (prior['b'] - 1.0) * torch.log1p(-pp)).sum()
 
 
+class _TGamma(_TBase):
+
+    def params(self, dists):
+        return {'k': self._t([d.k for d in dists]),
+                'theta': self._t([d.theta for d in dists])}
+
+    def raw_params(self, dists):
+        return {'log_k': self._t([math.log(d.k) for d in dists]).requires_grad_(True),
+                'log_theta': self._t([math.log(d.theta) for d in dists]).requires_grad_(True)}
+
+    def canonical(self, raw):
+        return {'k': raw['log_k'].exp(), 'theta': raw['log_theta'].exp()}
+
+    def to_dists(self, raw):
+        kk = raw['log_k'].detach().exp().cpu().numpy()
+        th = raw['log_theta'].detach().exp().cpu().numpy()
+        return [GammaDistribution(float(a), float(b)) for a, b in zip(kk, th)]
+
+    def log_density(self, params, cols):
+        # cols[1] holds log(x), precomputed at encode time by the kernel builder
+        x, lx = cols[0].unsqueeze(1), cols[1].unsqueeze(1)
+        kk, th = params['k'].unsqueeze(0), params['theta'].unsqueeze(0)
+        return (kk - 1.0) * lx - x / th - torch.lgamma(kk) - kk * torch.log(th)
+
+    def stats(self, params, cols, gamma):
+        c = gamma.sum(dim=0)
+        s = (gamma * cols[0].unsqueeze(1)).sum(dim=0)
+        sl = (gamma * cols[1].unsqueeze(1)).sum(dim=0)
+        return (c.cpu().numpy(), s.cpu().numpy(), sl.cpu().numpy())
+
+    def default_prior(self, strength):
+        # Gamma(a_rate, b_rate) on the rate 1/theta (the conjugate prior given
+        # the shape) and Gamma(a_shape, b_shape) on the shape k: the shape has
+        # no standard conjugate family, and a gamma prior keeps k > 0 with
+        # adjustable mass in the weakly-informative region near k ~ 1 (a_shape
+        # slightly above 1 with small b_shape shrinks k gently toward
+        # moderate values); strength=0 -> flat on both (exact MLE).
+        return {'family': 'gamma-shape-rate',
+                'a_rate': 1.0 + 1.0e-3 * strength, 'b_rate': 1.0e-3 * strength,
+                'a_shape': 1.0 + 1.0e-3 * strength, 'b_shape': 1.0e-3 * strength}
+
+    def log_prior(self, params, prior):
+        rate = 1.0 / params['theta']
+        lp = (prior['a_rate'] - 1.0) * torch.log(rate) - prior['b_rate'] * rate
+        lp = lp + (prior['a_shape'] - 1.0) * torch.log(params['k']) - prior['b_shape'] * params['k']
+        return lp.sum()
+
+
+class _TLogGaussian(_TGaussian):
+    """Gaussian machinery on the pre-encoded log-x column (cols[0] = log x);
+    only the density gains the -log x Jacobian term and dists are rebuilt as
+    LogGaussian. Stats are the Gaussian moments of log x, which is exactly the
+    legacy LogGaussianAccumulator layout; the NormalGamma prior acts on
+    (mu, 1/sigma2) of the log-scale parameters."""
+
+    def to_dists(self, raw):
+        mu = raw['mu'].detach().cpu().numpy()
+        s2 = raw['log_s2'].detach().exp().cpu().numpy()
+        return [LogGaussianDistribution(float(m), float(v)) for m, v in zip(mu, s2)]
+
+    def log_density(self, params, cols):
+        lx = cols[0].unsqueeze(1)                                    # (n, 1) log x
+        mu, s2 = params['mu'].unsqueeze(0), params['s2'].unsqueeze(0)
+        return -0.5 * torch.log(2.0 * math.pi * s2) - 0.5 * (lx - mu) ** 2 / s2 - lx
+
+
+class _TBinomial(_TBase):
+
+    def params(self, dists):
+        return {'logp': self._t([d.log_p for d in dists]),
+                'log1mp': self._t([d.log_1p for d in dists]),
+                'nv': self._t([float(d.n) for d in dists]),
+                'mv': self._t([float(d.min_val) if d.min_val is not None else 0.0
+                               for d in dists])}
+
+    def raw_params(self, dists):
+        # n / min_val are structural (the estimator re-derives them from data
+        # extremes, not from a gradient), so only logit_p is optimized; the
+        # compile-time values ride along as constants.
+        self._nv = self._t([float(d.n) for d in dists])
+        self._mv = self._t([float(d.min_val) if d.min_val is not None else 0.0
+                            for d in dists])
+        self._nm = [(int(d.n), d.min_val) for d in dists]
+        p = np.clip(np.array([d.p for d in dists], dtype=np.float64),
+                    1.0e-12, 1.0 - 1.0e-12)
+        return {'logit_p': self._t(np.log(p) - np.log1p(-p)).requires_grad_(True)}
+
+    def canonical(self, raw):
+        lo = raw['logit_p']
+        return {'logp': torch.nn.functional.logsigmoid(lo),
+                'log1mp': torch.nn.functional.logsigmoid(-lo),
+                'nv': self._nv, 'mv': self._mv}
+
+    def to_dists(self, raw):
+        p = torch.sigmoid(raw['logit_p']).detach().cpu().numpy()
+        return [BinomialDistribution(float(pk), n, min_val=m)
+                for pk, (n, m) in zip(p, self._nm)]
+
+    def log_density(self, params, cols):
+        # cols[1] holds the log-binomial coefficient precomputed for the
+        # compile-time (n, min_val); components whose (n, min_val) moved (the
+        # estimator re-derives both from data) recompute it via torch.lgamma.
+        x = cols[0].unsqueeze(1)                                     # (n, 1)
+        n = params['nv'].unsqueeze(0)                                # (1, K)
+        xx = x - params['mv'].unsqueeze(0)                           # (n, K)
+        ok = (xx >= 0.0) & (xx <= n)
+        xs = torch.where(ok, xx, torch.zeros_like(xx))
+        base = torch.lgamma(n + 1.0) - torch.lgamma(xs + 1.0) - torch.lgamma(n - xs + 1.0)
+        match = (params['nv'] == self.kb.n0) & (params['mv'] == self.kb.m0)
+        base = torch.where(match.unsqueeze(0), cols[1].unsqueeze(1).expand_as(base), base)
+        out = base + params['log1mp'].unsqueeze(0) * (n - xx) + params['logp'].unsqueeze(0) * xx
+        neg = torch.tensor(float('-inf'), dtype=out.dtype, device=out.device)
+        return torch.where(ok, out, neg)
+
+    def stats(self, params, cols, gamma):
+        # cols[2] holds the data-wide (min, max); the w-weighted constants keep
+        # the stats layout identical to the kernel accumulator (additive form)
+        c = gamma.sum(dim=0)
+        s = (gamma * cols[0].unsqueeze(1)).sum(dim=0)
+        mn = c * cols[2][0]
+        mx = c * cols[2][1]
+        return (c.cpu().numpy(), s.cpu().numpy(), mn.cpu().numpy(), mx.cpu().numpy())
+
+    def default_prior(self, strength):
+        # Beta(a, b) on the success probability p; strength=0 -> Beta(1,1) flat
+        return {'family': 'beta', 'a': 1.0 + 1.0e-3 * strength, 'b': 1.0 + 1.0e-3 * strength}
+
+    def log_prior(self, params, prior):
+        return ((prior['a'] - 1.0) * params['logp']
+                + (prior['b'] - 1.0) * params['log1mp']).sum()
+
+
+class _TDiagGaussian(_TGaussian):
+    """Vectorized over the d dimensions: params are (K, d) tensors and the
+    Gaussian NormalGamma prior applies independently per dimension (the
+    inherited log_prior is elementwise and sums over both axes)."""
+
+    def params(self, dists):
+        return {'mu': self._t(np.array([d.mu for d in dists])),
+                's2': self._t(np.array([d.covar for d in dists]))}
+
+    def raw_params(self, dists):
+        mu = np.array([d.mu for d in dists], dtype=np.float64)
+        s2 = np.array([d.covar for d in dists], dtype=np.float64)
+        return {'mu': self._t(mu).requires_grad_(True),
+                'log_s2': self._t(np.log(s2)).requires_grad_(True)}
+
+    def to_dists(self, raw):
+        mu = raw['mu'].detach().cpu().numpy()
+        s2 = raw['log_s2'].detach().exp().cpu().numpy()
+        return [DiagonalGaussianDistribution([float(v) for v in m], [float(v) for v in s])
+                for m, s in zip(mu, s2)]
+
+    def log_density(self, params, cols):
+        # cols[0] is the flattened (n*d) observation matrix from the kernel sink
+        d = self.kb.dim
+        x = cols[0].view(-1, 1, d)                                   # (n, 1, d)
+        mu, s2 = params['mu'].unsqueeze(0), params['s2'].unsqueeze(0)  # (1, K, d)
+        return (-0.5 * torch.log(2.0 * math.pi * s2)
+                - 0.5 * (x - mu) ** 2 / s2).sum(dim=2)
+
+    def stats(self, params, cols, gamma):
+        d = self.kb.dim
+        x = cols[0].view(-1, d)
+        s1 = gamma.T @ x                                             # (K, d)
+        s2 = gamma.T @ (x * x)
+        c = gamma.sum(dim=0)
+        return (s1.cpu().numpy(), s2.cpu().numpy(), c.cpu().numpy())
+
+
+class _TOptional(_TBase):
+    """Missing-data wrapper: the presence-index column (idx[i] = compacted
+    child row, or -1 when missing) routes present rows into the child impl
+    exactly as the kernel builder composes it; missing rows score the missing
+    mass. The missing probability is optimized as a logit with a Beta prior;
+    components built without p (has_p False) score 0 on both branches and
+    contribute no p parameter gradient."""
+
+    def __init__(self, kb, device, dtype):
+        super().__init__(kb, device, dtype)
+        self.child = _impl(kb.inner, device, dtype)
+        self._mask = None  # per-component has_p, set by raw_params
+
+    def params(self, dists):
+        K = len(dists)
+        miss = np.zeros(K)
+        pres = np.zeros(K)
+        for k, d in enumerate(dists):
+            if d.has_p:
+                miss[k] = d.log_p
+                pres[k] = d.log_pn
+        return {'miss_lp': self._t(miss), 'pres_lp': self._t(pres),
+                'child': self.child.params([d.dist for d in dists])}
+
+    def raw_params(self, dists):
+        self._mask = torch.as_tensor([bool(d.has_p) for d in dists], device=self.device)
+        p = np.clip(np.array([d.p for d in dists], dtype=np.float64),
+                    1.0e-12, 1.0 - 1.0e-12)
+        own = {'logit_p': self._t(np.log(p) - np.log1p(-p)).requires_grad_(True)}
+        return [own, self.child.raw_params([d.dist for d in dists])]
+
+    def canonical(self, raw):
+        own, child_raw = raw
+        lo = own['logit_p']
+        zero = torch.zeros_like(lo)
+        return {'miss_lp': torch.where(self._mask, torch.nn.functional.logsigmoid(lo), zero),
+                'pres_lp': torch.where(self._mask, torch.nn.functional.logsigmoid(-lo), zero),
+                'child': self.child.canonical(child_raw)}
+
+    def to_dists(self, raw):
+        own, child_raw = raw
+        p = torch.sigmoid(own['logit_p']).detach().cpu().numpy()
+        mask = self._mask.cpu().numpy()
+        return [OptionalDistribution(cd, p=float(p[k]) if mask[k] else None,
+                                     missing_value=self.kb.missing_value)
+                for k, cd in enumerate(self.child.to_dists(child_raw))]
+
+    def to_tensors(self, cols):
+        idx, inner_cols = cols
+        return (torch.as_tensor(idx, device=self.device, dtype=torch.int64),
+                self.child.to_tensors(inner_cols))
+
+    def log_density(self, params, cols):
+        idx, inner_cols = cols
+        miss = params['miss_lp'].unsqueeze(0)                        # (1, K)
+        child_ld = self.child.log_density(params['child'], inner_cols)  # (m, K)
+        if child_ld.shape[0] == 0:                                   # all rows missing
+            return miss.expand(idx.shape[0], child_ld.shape[1]).clone()
+        pres = params['pres_lp'].unsqueeze(0) + child_ld[idx.clamp(min=0)]
+        return torch.where((idx >= 0).unsqueeze(1), pres, miss)
+
+    def stats(self, params, cols, gamma):
+        idx, inner_cols = cols
+        present = idx >= 0
+        pf = present.to(gamma.dtype).unsqueeze(1)
+        miss_w = (gamma * (1.0 - pf)).sum(dim=0)
+        pres_w = (gamma * pf).sum(dim=0)
+        # compacted child rows were emitted in row order, so boolean indexing
+        # delivers gamma in exactly the child-column order
+        child_stats = self.child.stats(params['child'], inner_cols, gamma[present])
+        return (miss_w.cpu().numpy(), pres_w.cpu().numpy(), child_stats)
+
+    def default_prior(self, strength):
+        # Beta(a, b) on the missing probability p; strength=0 -> Beta(1,1) flat
+        return {'family': 'beta', 'a': 1.0 + 1.0e-3 * strength, 'b': 1.0 + 1.0e-3 * strength,
+                'child': self.child.default_prior(strength)}
+
+    def log_prior(self, params, prior):
+        # components without p have miss_lp = pres_lp = 0, contributing nothing
+        lp = ((prior['a'] - 1.0) * params['miss_lp']
+              + (prior['b'] - 1.0) * params['pres_lp']).sum()
+        return lp + self.child.log_prior(params['child'], prior['child'])
+
+
+class _TIgnored(_TBase):
+    """Fixed wrapped dists: cols[0] is the (n, K) log-density matrix the kernel
+    builder precomputed at encode time. Nothing is estimated - no raw params,
+    empty stats - and, mirroring the kernel path, scoring a model whose wrapped
+    dists changed since compile raises."""
+
+    def params(self, dists):
+        for d, s in zip(dists, self.kb._frozen):
+            if str(d.dist) != s:
+                raise ValueError('IgnoredDistribution wrapped dists changed since compile; '
+                                 'rebuild the TorchMixture.')
+        return {}
+
+    def raw_params(self, dists):
+        self.params(dists)  # same fixed-dist validation; no parameters to fit
+        return {}
+
+    def canonical(self, raw):
+        return {}
+
+    def to_dists(self, raw):
+        return list(self.kb.dists)
+
+    def log_density(self, params, cols):
+        return cols[0]
+
+    def stats(self, params, cols, gamma):
+        return (np.zeros(1),)
+
+    def default_prior(self, strength):
+        return None
+
+    def log_prior(self, params, prior):
+        return torch.zeros((), dtype=self.dtype, device=self.device)
+
+
 class _TComposite(_TBase):
 
     def __init__(self, kb, device, dtype):
@@ -405,13 +703,19 @@ class _TSequence(_TBase):
 
 _IMPLS = {
     _k._GaussianB: _TGaussian,
+    _k._LogGaussianB: _TLogGaussian,
+    _k._GammaB: _TGamma,
     _k._CategoricalB: _TCategorical,
     _k._IntRangeB: _TIntRange,
     _k._PoissonB: _TPoisson,
     _k._ExponentialB: _TExponential,
     _k._GeometricB: _TGeometric,
+    _k._BinomialB: _TBinomial,
+    _k._DiagGaussianB: _TDiagGaussian,
     _k._CompositeB: _TComposite,
     _k._SequenceB: _TSequence,
+    _k._OptionalB: _TOptional,
+    _k._IgnoredB: _TIgnored,
 }
 
 
@@ -566,9 +870,12 @@ class TorchMixture(object):
 
         Priors are conjugate families on the *canonical* parameters (the mode is
         parameterization-dependent, and the canonical mode is what users
-        expect): NormalGamma on Gaussian (mu, 1/sigma^2), Dirichlet on
-        categorical/integer-categorical tables and on the mixture weights,
-        Gamma on Poisson/Exponential rates, Beta on geometric p.
+        expect): NormalGamma on Gaussian (mu, 1/sigma^2) - per dimension for
+        DiagonalGaussian and on the log-scale parameters for LogGaussian -
+        Dirichlet on categorical/integer-categorical tables and on the mixture
+        weights, Gamma on Poisson/Exponential rates, Gamma on the gamma rate
+        1/theta and shape k, Beta on geometric/binomial p and on the Optional
+        missing probability (Ignored has nothing to fit).
 
         priors=None builds weakly-informative defaults scaled by prior_strength
         (prior_strength=0 reduces exactly to fit_mle); pass a nested structure
