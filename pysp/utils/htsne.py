@@ -32,7 +32,57 @@ from typing import Optional, Tuple
 import numpy as np
 import scipy.sparse
 
-__all__ = ['htsne', 'dpmsne', 'model_log_affinity', 'sparse_model_distances', 'get_pmat']
+__all__ = ['htsne', 'humap', 'dpmsne', 'model_log_affinity', 'sparse_model_distances',
+           'model_knn', 'get_pmat']
+
+
+def _observation_lengths(data) -> Optional[np.ndarray]:
+    """Lengths of sized, non-record observations (lists/sequences); None if not applicable.
+
+    Tuples are treated as fixed-arity records, and strings as atoms, so neither
+    contributes a length.
+    """
+    if data is None:
+        return None
+    lens = []
+    for x in data:
+        if isinstance(x, (str, bytes, tuple)) or not hasattr(x, '__len__'):
+            return None
+        lens.append(len(x))
+    return np.asarray(lens, dtype=np.float64)
+
+
+def _resolve_length_normalization(len_normalize, lengths, data) -> Optional[np.ndarray]:
+    """Resolve the len_normalize/lengths options to a positive length vector or None.
+
+    Variable-length observations accumulate likelihood evidence proportional to
+    their length, so without normalization a long observation has a far more
+    peaked component profile than a short one and affinities organize by length
+    rather than content. Dividing each row of the component log-likelihood
+    matrix by the observation length compares per-element (geometric-mean)
+    evidence instead, which is the scale-free quantity.
+    """
+    if len_normalize is False or len_normalize is None:
+        return None
+
+    if lengths is not None:
+        lengths = np.asarray(lengths, dtype=np.float64)
+    else:
+        lengths = _observation_lengths(data)
+
+    if lengths is None:
+        if len_normalize is True:
+            raise ValueError('len_normalize=True requires lengths= when observation '
+                             'lengths cannot be derived from the data.')
+        return None
+
+    if np.any(lengths <= 0):
+        lengths = np.maximum(lengths, 1.0)
+
+    if len_normalize == 'auto' and np.all(lengths == lengths[0]):
+        return None
+
+    return lengths
 
 
 def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.ndarray, np.ndarray]:
@@ -199,6 +249,48 @@ def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: np.ndarray, k: int
             vals[i * k:(i + 1) * k] = d
 
     return scipy.sparse.csr_matrix((vals, (rows, cols)), shape=(n, n))
+
+
+def model_knn(posterior_mat: np.ndarray, ll_mat: np.ndarray, k: int,
+              block_size: int = 1024) -> Tuple[np.ndarray, np.ndarray]:
+    """k-nearest-neighbor arrays under the model distance d_ij = -log s_ij.
+
+    Returns (indices, distances), each n x k, sorted ascending per row with
+    each point as its own first neighbor at distance 0 (the convention
+    expected by umap-learn, where self counts toward n_neighbors). Built
+    blockwise; the dense affinity matrix is never materialized.
+    """
+    z_ij = np.asarray(posterior_mat, dtype=np.float64)
+    l_ij = np.asarray(ll_mat, dtype=np.float64)
+    n = l_ij.shape[0]
+    k = min(k, n)
+    m = k - 1  # non-self neighbors
+
+    knn_idx = np.empty((n, k), dtype=np.int64)
+    knn_dist = np.empty((n, k), dtype=np.float64)
+    knn_idx[:, 0] = np.arange(n)
+    knn_dist[:, 0] = 0.0
+
+    zt = z_ij.T
+    for s0 in range(0, n, block_size):
+        s1 = min(s0 + block_size, n)
+        v_i = l_ij[s0:s1].max(axis=1, keepdims=True)
+        g = np.exp(l_ij[s0:s1] - v_i)
+        s_blk = np.dot(g, zt)
+        s_blk[np.arange(s1 - s0), np.arange(s0, s1)] = 0.0
+
+        nbr = np.argpartition(-s_blk, m - 1, axis=1)[:, :m]
+        np.maximum(s_blk, 1.0e-300, out=s_blk)
+        log_s = np.log(s_blk)
+
+        for bi, i in enumerate(range(s0, s1)):
+            c = nbr[bi]
+            d = log_s[bi, c].max() - log_s[bi, c]
+            order = np.argsort(d)
+            knn_idx[i, 1:] = c[order]
+            knn_dist[i, 1:] = d[order]
+
+    return knn_idx, knn_dist
 
 
 def t_kernel(tx: np.ndarray, alpha: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -372,6 +464,7 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
           optimize_alpha: bool = False, min_alpha: float = 1.0e-6, max_alpha_its: int = 3,
           seed: Optional[int] = None, mix_model=None, enc_data=None, method: str = 'auto',
           early_exaggeration: float = 12.0, tol: float = 1.0e-7, dpm_max_its: int = 100,
+          len_normalize='auto', lengths: Optional[np.ndarray] = None,
           out=None, variable_length: bool = False):
     """Embed heterogeneous data with model-based t-SNE.
 
@@ -385,6 +478,15 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
         'barnes_hut' - sparse kNN distances + scikit-learn Barnes-Hut t-SNE
         'auto'       - barnes_hut for n > 10 unless optimize_alpha is set
 
+    len_normalize / lengths:
+        Variable-length observations (lists, sequences) accumulate likelihood
+        evidence proportional to their length; without correction, affinities
+        organize by length rather than content. 'auto' (default) divides each
+        observation's component log-likelihoods by its length whenever the
+        top-level data have varying lengths; pass lengths= explicitly for
+        nested structures (e.g. records containing sequences), or False to
+        disable.
+
     Returns the n x emb_dim embedding.
     """
     if out is None:
@@ -397,6 +499,11 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
                                     print_iter=print_iter, out=out)
 
     z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
+
+    norm_lengths = _resolve_length_normalization(len_normalize, lengths, data)
+    if norm_lengths is not None:
+        l_ij = l_ij / norm_lengths[:, None]
+
     n = z_ij.shape[0]
 
     if method == 'auto':
@@ -418,6 +525,60 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 30,
                       min_gain=min_gain, min_value=min_value, optimize_alpha=optimize_alpha,
                       min_alpha=min_alpha, max_alpha_its=max_alpha_its, tol=tol,
                       print_iter=print_iter, seed=seed, out=out)
+
+
+def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
+          max_components: int = 30, seed: Optional[int] = None, mix_model=None,
+          enc_data=None, dpm_max_its: int = 100, print_iter: int = 100,
+          len_normalize='auto', lengths: Optional[np.ndarray] = None,
+          n_epochs: Optional[int] = None, out=None, **umap_kwargs):
+    """Embed heterogeneous data with model-based UMAP.
+
+    The same mixture-model affinities as htsne (likelihood of x_i under the
+    posterior mixture of x_j), but the k-nearest-neighbor graph of model
+    distances -log s_ij is handed to UMAP's fuzzy simplicial set construction
+    and layout (umap-learn) instead of t-SNE. Scales like UMAP: the dense
+    affinity matrix is never built.
+
+    len_normalize / lengths behave as in htsne: with variable-length
+    observations, per-element (length-normalized) log-likelihoods are used so
+    the embedding organizes by content rather than observation length.
+
+    Extra keyword arguments are passed to umap.UMAP. Returns the n x emb_dim
+    embedding.
+    """
+    import umap
+
+    if out is None:
+        out = sys.stdout
+
+    if mix_model is None:
+        from pysp.utils.automatic import get_dpm_mixture
+        mix_model = get_dpm_mixture(data, rng=np.random.RandomState(seed),
+                                    max_components=max_components, max_its=dpm_max_its,
+                                    print_iter=print_iter, out=out)
+
+    z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
+
+    norm_lengths = _resolve_length_normalization(len_normalize, lengths, data)
+    if norm_lengths is not None:
+        l_ij = l_ij / norm_lengths[:, None]
+
+    n = z_ij.shape[0]
+    k = min(n_neighbors, n - 1)
+
+    knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k)
+
+    reducer = umap.UMAP(n_components=emb_dim, n_neighbors=k, min_dist=min_dist,
+                        precomputed_knn=(knn_idx, knn_dist), random_state=seed,
+                        n_epochs=n_epochs, **umap_kwargs)
+
+    import warnings
+    with warnings.catch_warnings():
+        # expected with precomputed knn / fixed seed; not actionable here
+        warnings.filterwarnings('ignore', message='.*knn_search_index.*')
+        warnings.filterwarnings('ignore', message='.*n_jobs value.*overridden.*')
+        return reducer.fit_transform(np.zeros((n, 1), dtype=np.float32))
 
 
 def dpmsne(P=None, emb_dim: int = 2, alpha: float = 1.0, Y: Optional[np.ndarray] = None,

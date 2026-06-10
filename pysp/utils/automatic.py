@@ -16,6 +16,16 @@ from pysp.stats.pdist import ParameterEstimator
 from typing import Optional, Any, Sequence, Dict, TypeVar, Union
 T = TypeVar('T')
 
+# Leaf-typing heuristics: integers with at most this many distinct values (or
+# at most this fraction of observations) are modeled as categorical rather
+# than Poisson/Gaussian; string fields where nearly every value is unique are
+# treated as identifiers and ignored.
+MAX_INT_CATEGORICAL_DISTINCT = 20
+MAX_INT_CATEGORICAL_FRACTION = 0.05
+ID_DISTINCT_FRACTION = 0.95
+ID_MIN_COUNT = 100
+
+
 def get_optional_estimator(est: ParameterEstimator, missing_value: Optional[Any] = None, use_bstats: bool = False):
     if use_bstats:
         from pysp.bstats.optional import OptionalEstimator
@@ -24,12 +34,42 @@ def get_optional_estimator(est: ParameterEstimator, missing_value: Optional[Any]
     return OptionalEstimator(est, missing_value=missing_value)
 
 
-def get_sequence_estimator(est: ParameterEstimator, use_bstats: bool = False) -> 'ParameterEstimator':
+def get_length_estimator(len_dict: Dict[int, int], pseudo_count: Optional[float] = None,
+                         emp_suff_stat: bool = True, use_bstats: bool = False) -> 'ParameterEstimator':
+    """Length model for sequences: categorical for a single observed length,
+    Poisson (count) otherwise."""
+    if len(len_dict) <= 1:
+        return get_categorical_estimator(dict(len_dict), pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+    if use_bstats:
+        from pysp.bstats.poisson import PoissonEstimator
+        return PoissonEstimator()
+    return get_poisson_estimator(dict(len_dict), pseudo_count, emp_suff_stat)
+
+
+def get_sequence_estimator(est: ParameterEstimator, len_dict: Optional[Dict[int, int]] = None,
+                           pseudo_count: Optional[float] = None, emp_suff_stat: bool = True,
+                           use_bstats: bool = False) -> 'ParameterEstimator':
+    len_est = None
+    if len_dict:
+        len_est = get_length_estimator(len_dict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
     if use_bstats:
         from pysp.bstats.sequence import SequenceEstimator
-        return SequenceEstimator(est)
+        return SequenceEstimator(est) if len_est is None else SequenceEstimator(est, len_estimator=len_est)
     from pysp.stats.sequence import SequenceEstimator
-    return SequenceEstimator(est)
+    return SequenceEstimator(est) if len_est is None else SequenceEstimator(est, len_estimator=len_est)
+
+
+def get_set_estimator(member_dict: Dict[Any, int], num_sets: int, pseudo_count: Optional[float] = None,
+                      emp_suff_stat: bool = True, use_bstats: bool = False) -> 'ParameterEstimator':
+    """Bernoulli set model with membership probabilities from observed sets."""
+    if use_bstats:
+        from pysp.bstats.setdist import BernoulliSetEstimator
+        return BernoulliSetEstimator()
+    from pysp.stats.setdist import BernoulliSetEstimator
+    suff_stat = None
+    if emp_suff_stat and num_sets > 0:
+        suff_stat = {k: v / num_sets for k, v in member_dict.items()}
+    return BernoulliSetEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat)
 
 def get_ignored_estimator(use_bstats: bool = False) -> 'ParameterEstimator':
     if use_bstats:
@@ -126,11 +166,21 @@ def get_gaussian_estimator(vdict: Dict[Union[np.floating, float], float], pseudo
     return GaussianEstimator(pseudo_count=(pseudo_count, pseudo_count), suff_stat=(ss_1, ss_2))
 
 class DatumNode(object):
+    """Accumulates type/structure evidence for one slot of the data.
+
+    Tuples are treated as fixed-arity records (positional children). Lists,
+    arrays, and other sized iterables are positional only if every observation
+    has the same length (vector semantics); otherwise they are variable-length
+    sequences of a merged element type with a length model. Sets map to a
+    Bernoulli set model and dicts are ignored.
+    """
 
     def __init__(self, parent=None, data=None):
         self.children   = []
         self.parent     = parent
         self.vdict      = defaultdict(int)
+        self.len_dict   = defaultdict(int)
+        self.set_member = defaultdict(int)
         self.count      = 0
         self.none_count = 0
         self.nan_count  = 0
@@ -142,6 +192,9 @@ class DatumNode(object):
         self.obj_count = 0
         self.neg_count = 0
         self.zero_count = 0
+        self.tuple_count = 0
+        self.seq_count = 0
+        self.set_count = 0
 
         if data is not None:
             self.add_data(data)
@@ -153,48 +206,68 @@ class DatumNode(object):
     def add_datum(self, x):
         self.count += 1
 
-        if isinstance(x, (tuple, list)):
-            for i,xx in enumerate(x):
-                self._get_child_node(i).add_datum(xx)
-        elif isinstance(x, (Iterable,)) and not isinstance(x, (str,)):
-            for i,xx in enumerate(x):
-                self._get_child_node(i).add_datum(xx)
-        elif x is None:
+        if x is None:
             self.none_count += 1
-        else:
+        elif isinstance(x, (str, bytes)):
             self.vdict[x] += 1
             self._analyze_type(x)
+        elif isinstance(x, tuple):
+            self.tuple_count += 1
+            self.len_dict[len(x)] += 1
+            for i, xx in enumerate(x):
+                self._get_child_node(i).add_datum(xx)
+        elif isinstance(x, (set, frozenset)):
+            self.set_count += 1
+            self.len_dict[len(x)] += 1
+            for xx in x:
+                self.set_member[xx] += 1
+        elif isinstance(x, dict):
+            self.obj_count += 1
+        elif isinstance(x, Iterable):
+            x = list(x)
+            self.seq_count += 1
+            self.len_dict[len(x)] += 1
+            for i, xx in enumerate(x):
+                self._get_child_node(i).add_datum(xx)
+        else:
+            self._analyze_type(x)
+            if not (isinstance(x, (float, np.floating)) and not math.isfinite(x)):
+                self.vdict[x] += 1
+
+    _COUNTERS = ('count', 'none_count', 'nan_count', 'inf_count', 'str_count', 'float_count',
+                 'int_count', 'bool_count', 'obj_count', 'neg_count', 'zero_count',
+                 'tuple_count', 'seq_count', 'set_count')
 
     def copy(self):
         rv = DatumNode(self.parent)
         rv.children = [u.copy() for u in self.children]
         rv.vdict = self.vdict.copy()
+        rv.len_dict = self.len_dict.copy()
+        rv.set_member = self.set_member.copy()
+        for c in self._COUNTERS:
+            setattr(rv, c, getattr(self, c))
         return rv
 
     def merge(self, x):
-
-        self.count += x.count
-        self.none_count += x.none_count
-        self.nan_count += x.nan_count
+        for c in self._COUNTERS:
+            setattr(self, c, getattr(self, c) + getattr(x, c))
 
         for i in range(len(x.children)):
-            temp = self._get_child_node(i).merge(x.children[i])
-            self.children[i] = temp
-        for k,v in x.vdict.items():
+            self.children[i] = self._get_child_node(i).merge(x.children[i])
+        for k, v in x.vdict.items():
             self.vdict[k] += v
+        for k, v in x.len_dict.items():
+            self.len_dict[k] += v
+        for k, v in x.set_member.items():
+            self.set_member[k] += v
 
-        self.neg_count += x.neg_count
-        self.inf_count += x.inf_count
-        self.int_count += x.int_count
-        self.float_count += x.float_count
-        self.obj_count += x.obj_count
-        self.str_count += x.str_count
-        self.bool_count += x.bool_count
         return self
 
     def _analyze_type(self, x, v=1):
 
-        if isinstance(x, (float, np.floating)):
+        if isinstance(x, (bool, np.bool_)):
+            self.bool_count += v
+        elif isinstance(x, (float, np.floating)):
             if math.isnan(x):
                 self.nan_count += v
             elif math.isinf(x):
@@ -207,51 +280,92 @@ class DatumNode(object):
                 self.zero_count += v
             if math.isfinite(x) and x < 0:
                 self.neg_count += v
-
         elif isinstance(x, (int, np.integer)):
             self.int_count += v
-        elif isinstance(x, bool):
-            self.bool_count += v
-        elif isinstance(x, str):
+            if x == 0:
+                self.zero_count += v
+            if x < 0:
+                self.neg_count += v
+        elif isinstance(x, (str, bytes)):
             self.str_count += v
         else:
             self.obj_count += v
 
+    def _leaf_estimator(self, pseudo_count, emp_suff_stat, use_bstats):
+        if self.obj_count > 0 or len(self.vdict) == 0:
+            return get_ignored_estimator(use_bstats=use_bstats)
+
+        if self.str_count > 0:
+            # identifier-like fields (nearly all values distinct) carry no
+            # density information; ignore them instead of fitting a
+            # one-bucket-per-row categorical
+            if self.count >= ID_MIN_COUNT and len(self.vdict) >= ID_DISTINCT_FRACTION * self.count:
+                return get_ignored_estimator(use_bstats=use_bstats)
+            return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+
+        if self.bool_count > 0 and self.float_count == 0 and self.int_count == 0:
+            return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+
+        if self.float_count > 0:
+            return get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+
+        if self.int_count > 0:
+            distinct = len(self.vdict)
+            if distinct <= max(MAX_INT_CATEGORICAL_DISTINCT, MAX_INT_CATEGORICAL_FRACTION * self.count):
+                return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+            if self.neg_count == 0:
+                if use_bstats:
+                    from pysp.bstats.poisson import PoissonEstimator
+                    return PoissonEstimator()
+                return get_poisson_estimator(self.vdict, pseudo_count, emp_suff_stat)
+            return get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+
+        return get_ignored_estimator(use_bstats=use_bstats)
+
+    def _merged_child(self):
+        child = self.children[0].copy()
+        for u in self.children[1:]:
+            child = child.merge(u)
+        return child
+
     def get_estimator(self, pseudo_count: Optional[float] = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
-        # Value Type Node
-        rv = get_ignored_estimator(use_bstats=use_bstats)
+        structured = self.tuple_count + self.seq_count + self.set_count
+        typed = self.count - self.none_count
 
-        if len(self.children) == 0 and len(self.vdict) > 0:
-            if self.obj_count > 0:
-                rv = get_ignored_estimator(use_bstats=use_bstats)
-            elif self.str_count > 0:
-                rv = get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
-            elif self.float_count > 0:
-                rv = get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
-            elif self.int_count > 0:
-                if self.neg_count > 0:
-                    rv = get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
-                else:
-                    rv = get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
-                    # More checking before we use this
-                    #rv = get_poisson_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats)
+        if typed == 0:
+            rv = get_ignored_estimator(use_bstats=use_bstats)
+
+        elif structured > 0 and (len(self.vdict) > 0 or self.obj_count > 0 or
+                                 (self.set_count > 0 and self.set_count < structured)):
+            # mixed scalars/containers or mixed container kinds: not modelable
+            rv = get_ignored_estimator(use_bstats=use_bstats)
+
+        elif self.set_count > 0:
+            rv = get_set_estimator(self.set_member, self.set_count, pseudo_count, emp_suff_stat,
+                                   use_bstats=use_bstats)
+
+        elif structured > 0:
+            fixed_arity = len(self.len_dict) == 1
+            if self.tuple_count > 0 and self.seq_count == 0 and fixed_arity:
+                # records: positional composite
+                rv = get_composite_estimator(
+                    [u.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats) for u in self.children],
+                    use_bstats=use_bstats)
+            elif fixed_arity and self.tuple_count == 0 and not self._children_homogeneous():
+                # fixed-length lists/vectors with positionally distinct types
+                rv = get_composite_estimator(
+                    [u.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats) for u in self.children],
+                    use_bstats=use_bstats)
             else:
-                rv = get_ignored_estimator(use_bstats=use_bstats)
+                # variable-length (or homogeneous fixed-length) sequences
+                child = self._merged_child()
+                rv = get_sequence_estimator(
+                    child.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats),
+                    len_dict=self.len_dict, pseudo_count=pseudo_count, emp_suff_stat=emp_suff_stat,
+                    use_bstats=use_bstats)
 
-        # Lists of Same Size
-        elif len(self.children) > 0 and len(set([u.count for u in self.children])) == 1 and \
-                all([u.count == self.count for u in self.children]):
-            rv = get_composite_estimator(
-                [u.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats) for u in self.children],
-                use_bstats=use_bstats)
-
-        # Lists of Different Size
-        elif len(self.children) > 0 and len(set([u.count for u in self.children])) > 1:
-            child = self.children[0].copy()
-            for u in self.children[1:]:
-                child = child.merge(u)
-            rv = get_sequence_estimator(child.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats),
-                                        use_bstats=use_bstats)
+        else:
+            rv = self._leaf_estimator(pseudo_count, emp_suff_stat, use_bstats)
 
         if self.none_count > 0:
             rv = get_optional_estimator(rv, None, use_bstats=use_bstats)
@@ -260,6 +374,28 @@ class DatumNode(object):
             rv = get_optional_estimator(rv, math.nan, use_bstats=use_bstats)
 
         return rv
+
+    def _children_homogeneous(self):
+        """True when all positional children carry the same scalar type profile,
+        so a fixed-length list is better modeled as an iid sequence than a
+        composite of per-position estimators."""
+        if len(self.children) <= 1:
+            return True
+
+        def profile(u):
+            return (u.str_count > 0, u.bool_count > 0, u.float_count > 0, u.int_count > 0,
+                    u.obj_count > 0, len(u.children) > 0)
+
+        profiles = {profile(u) for u in self.children}
+        if len(profiles) > 1:
+            return False
+
+        # numeric positions with disjoint supports look like distinct dimensions
+        p = next(iter(profiles))
+        if p[2] or p[3]:
+            return False
+
+        return True
 
     def _get_child_node(self, idx: int):
         while len(self.children) <= idx:
