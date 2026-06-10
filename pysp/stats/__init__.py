@@ -2,6 +2,8 @@
 and DataSequenceEncoder objects for the distributions in pyps.stats. This module also loads functions used to
 estimate Distributions from data sets.
 """
+from __future__ import annotations
+
 __all__ = [
     "initialize",
     "estimate",
@@ -202,7 +204,7 @@ __all__ = [
 ]
 
 ### Abstract Classes
-import pyspark.rdd
+from pysp.utils.optional_deps import pyspark, RDD_TYPES
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DataSequenceEncoder, \
     DistributionEnumerator, EnumerationError
 
@@ -382,7 +384,7 @@ def initialize(data: Union[Sequence[T], pyspark.rdd.RDD],
         SequenceEncodableProbabilityDistribution object consistent with 'estimator'.
 
     """
-    if isinstance(data, pyspark.rdd.RDD):
+    if isinstance(data, RDD_TYPES):
         factory = estimator.accumulator_factory()
         sc = data.context
 
@@ -464,7 +466,7 @@ def estimate(data: Union[Sequence[T], pyspark.rdd.RDD],
     """
     prev_estimate = prev_estimate if prev_estimate is not None else NullDistribution()
 
-    if isinstance(data, pyspark.rdd.RDD):
+    if isinstance(data, RDD_TYPES):
         sc = data.context
         factory = estimator.accumulator_factory()
         estimator_broadcast = sc.broadcast(estimator)
@@ -549,7 +551,7 @@ def seq_encode(data: Union[Sequence[T], pyspark.rdd.RDD],
         else:
             raise Exception('At least one arg: encoder, estimator, or dist must be passed.')
 
-    if isinstance(data, pyspark.rdd.RDD):
+    if isinstance(data, RDD_TYPES):
         sc = data.context
         temp_encoder = pickle.dumps(encoder, protocol=0)
         encoder_broadcast = sc.broadcast(temp_encoder)
@@ -596,7 +598,7 @@ def seq_log_density_sum(enc_data: Union[List[Tuple[int, T]], 'pyspark.rdd.RDD'],
         Tuple of sum of total obs, and sum of log_density of estimate at all encoded data observations.
 
     """
-    if isinstance(enc_data, pyspark.rdd.RDD):
+    if isinstance(enc_data, RDD_TYPES):
         sc = enc_data.context
         estimate_broadcast = sc.broadcast(pickle.dumps(estimate, protocol=0))
 
@@ -645,7 +647,7 @@ def seq_log_density(enc_data: Union[List[Tuple[int, T]], 'pyspark.rdd.RDD'],
     """
     is_list = issubclass(type(estimate), Sequence)
 
-    if isinstance(enc_data, pyspark.rdd.RDD):
+    if isinstance(enc_data, RDD_TYPES):
         sc = enc_data.context
         temp_estimate = pickle.dumps(estimate, protocol=0)
         estimate_broadcast = sc.broadcast(temp_estimate)
@@ -696,7 +698,7 @@ def seq_estimate(enc_data: Union[List[Tuple[int, T]], 'pyspark.rdd.RDD'],
         SequenceEncodableProbabilityDistribution object.
 
     """
-    if isinstance(enc_data, pyspark.rdd.RDD):
+    if isinstance(enc_data, RDD_TYPES):
         sc = enc_data.context
 
         estimator_broadcast = sc.broadcast(estimator)
@@ -791,7 +793,7 @@ def seq_initialize(enc_data: Union[List[Tuple[int,T]], 'pyspark.rdd.RDD'],
 
     """
 
-    if isinstance(enc_data, pyspark.rdd.RDD):
+    if isinstance(enc_data, RDD_TYPES):
         sc = enc_data.context
         num_partitions = enc_data.getNumPartitions()
         seeds = rng.randint(2 ** 31, size=num_partitions)

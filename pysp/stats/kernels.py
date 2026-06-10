@@ -44,7 +44,7 @@ kernel path streams each observation exactly once.
 import math
 from typing import Any, List, Optional, Sequence, Tuple
 
-import numba
+from pysp.utils.optional_deps import numba
 import numpy as np
 
 from pysp.stats.gaussian import GaussianDistribution
@@ -169,8 +169,8 @@ class _LeafBuilder(object):
 
 
 class _GaussianB(_LeafBuilder):
-    kernel = _gaussian_ld
-    acc_kernel = _gaussian_acc
+    kernel = staticmethod(_gaussian_ld)
+    acc_kernel = staticmethod(_gaussian_acc)
 
     def params(self, dists):
         mu = np.array([d.mu for d in dists], dtype=np.float64)
@@ -186,8 +186,8 @@ class _GaussianB(_LeafBuilder):
 
 
 class _CategoricalB(_LeafBuilder):
-    kernel = _categorical_ld
-    acc_kernel = _categorical_acc
+    kernel = staticmethod(_categorical_ld)
+    acc_kernel = staticmethod(_categorical_acc)
 
     def __init__(self, dists):
         super().__init__(dists)
@@ -223,8 +223,8 @@ class _CategoricalB(_LeafBuilder):
 
 
 class _IntRangeB(_LeafBuilder):
-    kernel = _intrange_ld
-    acc_kernel = _intrange_acc
+    kernel = staticmethod(_intrange_ld)
+    acc_kernel = staticmethod(_intrange_acc)
     dtype = np.int64
 
     def __init__(self, dists):
@@ -250,7 +250,7 @@ class _IntRangeB(_LeafBuilder):
 
 
 class _CountSumB(_LeafBuilder):
-    acc_kernel = _count_sum_acc
+    acc_kernel = staticmethod(_count_sum_acc)
 
     def make_stats(self, K):
         return np.zeros(K), np.zeros(K)
@@ -260,7 +260,7 @@ class _CountSumB(_LeafBuilder):
 
 
 class _PoissonB(_CountSumB):
-    kernel = _poisson_ld
+    kernel = staticmethod(_poisson_ld)
 
     def params(self, dists):
         lam = np.array([d.lam for d in dists], dtype=np.float64)
@@ -273,7 +273,7 @@ class _PoissonB(_CountSumB):
 
 
 class _ExponentialB(_CountSumB):
-    kernel = _exponential_ld
+    kernel = staticmethod(_exponential_ld)
 
     def params(self, dists):
         beta = np.array([d.beta for d in dists], dtype=np.float64)
@@ -281,7 +281,7 @@ class _ExponentialB(_CountSumB):
 
 
 class _GeometricB(_CountSumB):
-    kernel = _geometric_ld
+    kernel = staticmethod(_geometric_ld)
 
     def params(self, dists):
         p = np.array([d.p for d in dists], dtype=np.float64)

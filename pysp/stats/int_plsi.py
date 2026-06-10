@@ -23,7 +23,7 @@ author 'd'.
 Note: To use this distribution, convert your words and authors of the corpus to unique integer keys.
 
 """
-import numba
+from pysp.utils.optional_deps import numba
 import numpy as np
 from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, StatisticAccumulatorFactory, \
