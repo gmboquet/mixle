@@ -555,5 +555,27 @@ class UtilityTestCase(unittest.TestCase):
         self.assertEqual(stirling2(6, 3), 90)
 
 
+class IntegerCategoricalConventionTestCase(unittest.TestCase):
+    """bstats accepts both its own (prob_vec, ...) order and the pysp.stats
+    (min_val, p_vec) order, plus the pysp.stats keyword names, so the two
+    packages can be used interchangeably."""
+
+    def test_argument_conventions_agree(self):
+        pv = [0.5, 0.3, 0.2]
+        d_bstats = IntegerCategoricalDistribution(pv, min_index=2)
+        d_stats_order = IntegerCategoricalDistribution(2, pv)
+        d_kw = IntegerCategoricalDistribution(p_vec=pv, min_val=2)
+        for d in (d_stats_order, d_kw):
+            self.assertEqual(d.min_index, d_bstats.min_index)
+            for x in (2, 3, 4):
+                self.assertAlmostEqual(d.log_density(x), d_bstats.log_density(x), places=12)
+
+    def test_estimator_keyword_aliases(self):
+        from pysp.bstats.intrange import IntegerCategoricalEstimator as ICE
+        e1 = ICE(min_index=0, max_index=3)
+        e2 = ICE(min_val=0, max_val=3)
+        self.assertEqual((e1.minVal, e1.maxVal), (e2.minVal, e2.maxVal))
+
+
 if __name__ == '__main__':
     unittest.main()
