@@ -12,11 +12,23 @@ The core idea: every distribution is **composable**. A Gaussian and a categorica
 
 Python 3.10+ (developed against 3.12). NumPy 2.x, SciPy, Numba, and PySpark 4.x are supported.
 
+The base install is lightweight (numpy, scipy, pandas, mpmath) and covers every distribution and local estimation:
+
 ```sh
-git clone https://github.com/gmboquet/pysparkplug.git
-cd pysparkplug
-pip install -e .
+pip install git+https://github.com/gmboquet/pysparkplug.git
 ```
+
+Acceleration and integration back-ends are opt-in extras:
+
+```sh
+pip install "pysparkplug[numba] @ git+https://github.com/gmboquet/pysparkplug.git"   # JIT-compiled estimation
+pip install "pysparkplug[spark] @ git+https://github.com/gmboquet/pysparkplug.git"   # distributed estimation on RDDs
+pip install "pysparkplug[torch] @ git+https://github.com/gmboquet/pysparkplug.git"   # GPU/autograd engine
+pip install "pysparkplug[umap]  @ git+https://github.com/gmboquet/pysparkplug.git"   # Barnes-Hut t-SNE + UMAP embeddings
+pip install "pysparkplug[all]   @ git+https://github.com/gmboquet/pysparkplug.git"   # everything
+```
+
+Without the extras, numba-flagged code paths run as pure Python (correct, just slower), Spark inputs are unavailable, and `htsne` uses its exact engine. For development: `git clone` and `pip install -e ".[all]"`.
 
 ## Quickstart
 

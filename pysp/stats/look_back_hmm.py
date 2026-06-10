@@ -1,6 +1,6 @@
 import math
 
-import numba
+from pysp.utils.optional_deps import numba
 import numpy as np
 from numpy.random import RandomState
 
