@@ -31,40 +31,38 @@ import sys
 from typing import Union, Sequence, Any, Optional, Dict, Tuple
 
 
-def lniv_z(v, ln_z):
-    return v * (ln_z - np.log(2.0)) - gammaln(np.exp(ln_z) + 1.0)
+def lniv_uniform(v, ln_z):
+    """log I_v(z) by the uniform large-order asymptotic (A&S 9.7.7):
 
+        I_v(v t) ~ exp(v eta) / (sqrt(2 pi v) (1 + t^2)^{1/4}),
+        eta = sqrt(1 + t^2) + log(t / (1 + sqrt(1 + t^2))).
 
-def lniv_h(v, ln_z):
-    pt = ln_z * 0.0
-    cc = 1.0
-    rv = 1.0
-    for i in range(10):
-        num = np.log(4.0 * v * v - (2 * i + 1) ** 2)
-        den = np.log((i + 1) * 8) + ln_z
-        cc *= 1.0
-        pt += (num - den)
-        rv += cc * np.exp(pt)
-    rv = np.log(rv)
-    rv += (np.exp(ln_z) - 0.5 * (np.log(2.0 * pi) + ln_z))
-    return rv
+    Valid uniformly in t = z/v for large v, including t -> 0 where it reduces
+    to the small-argument form (z/2)^v / Gamma(v+1) via Stirling.
+    """
+    t = np.exp(ln_z - np.log(v))
+    s = np.sqrt(1.0 + t * t)
+    eta = s + np.log(t) - np.log1p(s)
+    return v * eta - 0.5 * np.log(2.0 * np.pi * v) - 0.25 * np.log1p(t * t)
 
 
 def lniv(v, ln_z):
-    z = exp(ln_z)
+    """Numerically stable log I_v(e^{ln_z}).
 
-    if np.isfinite(ln_z):
-        rv0 = scipy.special.ive(v, z)
-        if rv0 == 0:
-            rv = lniv_z(v, ln_z)
-        elif np.isposinf(rv0):
-            rv = lniv_h(v, ln_z)
-        else:
-            rv = np.log(rv0) + z
-    else:
-        rv = 0
+    Uses the exponentially scaled Bessel function where it has support and the
+    uniform large-order expansion where ive underflows (large v relative to z;
+    ive cannot underflow for v = 0, so that branch always has v > 0).
+    """
+    if not np.isfinite(ln_z):
+        return 0.0 if v == 0 else -np.inf
 
-    return rv
+    z = np.exp(ln_z)
+    rv0 = scipy.special.ive(v, z)
+
+    if rv0 > 0 and np.isfinite(rv0):
+        return np.log(rv0) + z
+
+    return lniv_uniform(v, ln_z)
 
 
 class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
@@ -92,21 +90,18 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         mu = np.asarray(mu).copy()
 
         if kappa > 0:
+            # log c_p(kappa) = (p/2 - 1) log kappa - (p/2) log(2 pi) - log I_{p/2-1}(kappa)
+            v = (dim / 2.0) - 1.0
             log_kappa = np.log(kappa)
-            cc = log_kappa * ((dim / 2.0) - 1) - lniv((dim / 2.0) - 1.0, log_kappa)
-
-            log_kappa0 = -10000
-            # This is a hack to identify the limiting constant as k -> 0
-            cc0 = log_kappa0 * ((dim / 2.0) - 1) - lniv((dim / 2.0) - 1.0, log_kappa0)
-            cc = (cc - cc0) + gammaln(dim / 2.0)
+            self.log_const = v * log_kappa - (dim / 2.0) * np.log(2.0 * pi) - lniv(v, log_kappa)
         else:
-            cc = gammaln(dim / 2.0)
+            # uniform density on the (p-1)-sphere: Gamma(p/2) / (2 pi^{p/2})
+            self.log_const = gammaln(dim / 2.0) - np.log(2.0) - (dim / 2.0) * np.log(pi)
 
         self.name = name
         self.dim = dim
         self.mu = mu
         self.kappa = kappa
-        self.log_const = cc - np.log(2.0 * pi) * (dim / 2.0)
         self.key = keys
 
     def __str__(self) -> str:
@@ -312,20 +307,19 @@ class VonMisesFisherEstimator(ParameterEstimator):
         ssum_norm = np.sqrt(np.dot(ssum, ssum))
 
         if ssum_norm > 0 and count > 0:
-            rhat = ssum_norm / count
+            # rhat -> 1 means kappa -> inf; clamp so the Banerjee initializer
+            # and Newton refinement stay finite
+            rhat = min(ssum_norm / count, 1.0 - 1.0e-10)
             mu = ssum / ssum_norm
 
-            if rhat != 1.0:
-                k = rhat * (dim - (rhat * rhat)) / (1.0 - (rhat * rhat))
-            else:
-                k = 1.1 * (dim - 1.1 ** 2) / (1.0 - (1.1 ** 2))
-            dk = 1
+            k = rhat * (dim - (rhat * rhat)) / (1.0 - (rhat * rhat))
 
-            for i in range(3):
-                # while dk > 1.0e-12:
-                # old_k = k
-                k = _newton(dim, rhat, k)
-        # dk = np.abs(k-old_k)/old_k
+            # Newton refinement of A_p(k) = rhat; near rhat = 1 the Banerjee
+            # initializer is already accurate and Newton is ill-conditioned
+            # (A_p'(k) -> 0), so leave the closed-form value
+            if rhat < 1.0 - 1.0e-9:
+                for i in range(3):
+                    k = _newton(dim, rhat, k)
 
         else:
             mu = np.ones(dim) / np.sqrt(dim)
