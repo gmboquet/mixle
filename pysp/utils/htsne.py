@@ -2,16 +2,29 @@
 
 Pairwise affinities are derived from a fitted mixture model rather than from
 Euclidean distances, so anything pysparkplug can model (tuples, sequences,
-sets, variable-length data, ...) can be embedded. Three affinity definitions
+sets, variable-length data, ...) can be embedded. Four affinity definitions
 are supported (the `affinity` argument):
 
-- 'bhattacharyya' (default): the Bhattacharyya coefficient between
-  posteriors, s_ij = sum_k sqrt(z_ik z_jk); -log s_ij is the Bhattacharyya
-  distance on the posterior simplex. The square root amplifies shared
-  low-probability components, so affinities stay *graded* even when hard
-  assignments coincide - which is what gives the embedding within-cluster
-  geometry. Like 'coassign', it depends on the data only through posteriors,
-  so variable-length observations need no adjustments.
+- 'balanced' (the 'auto' default whenever raw data is available): the model
+  is flattened into its leaf fields (nested composites, sequence
+  element/length models, and optional wrappers all decompose), a
+  field-restricted posterior z^f is computed from each field's likelihoods
+  alone, and the pair distance is the sum over fields of per-field
+  Bhattacharyya distances -log sum_k sqrt(z^f_ik z^f_jk), each Winsorized at
+  `evidence_cap` nats. The per-field posteriors keep every field's structure
+  visible regardless of its likelihood scale (a 15-token sequence field
+  contributes ~17 nats of contrast per observation, an overlapping Gaussian
+  fractions of one - the joint posterior only ever sees the loudest field),
+  and the cap bounds each field's influence so one spuriously sharp field
+  cannot veto a pair's similarity that every other field supports.
+
+- 'bhattacharyya': the Bhattacharyya coefficient between joint posteriors,
+  s_ij = sum_k sqrt(z_ik z_jk); -log s_ij is the Bhattacharyya distance on
+  the posterior simplex. The square root amplifies shared low-probability
+  components, so affinities stay *graded* even when hard assignments
+  coincide - which is what gives the embedding within-cluster geometry. Like
+  'coassign', it depends on the data only through posteriors, so
+  variable-length observations need no adjustments.
 
 - 'coassign': the co-assignment probability
 
@@ -82,49 +95,122 @@ def _affinity_factors(posterior_mat, ll_mat, affinity):
                      "'balanced', or a pre-built factor list.")
 
 
-def balanced_factors(mix_model, data, field_weights=None):
-    """Per-field Bhattacharyya affinity factors for mixed-type composites.
+def _field_log_densities(dists, items):
+    """Yield per-field (n, K) component log-density matrices for one model
+    subtree, flattening structure into its leaf fields:
 
-    In a composite, the joint posterior is dominated by whichever field has
-    the largest log-likelihood contrast across components - sharp categorical
-    or token-sequence fields contribute many nats per observation while
+    - composite records recurse into their child fields (nested composites
+      flatten all the way down),
+    - sequences score each child field summed over the sequence's elements,
+      with the length model contributing its own field,
+    - optional wrappers contribute a missing-ness field, with the inner
+      distribution's fields scored only on rows where the value is present,
+    - ignored/null distributions contribute nothing,
+    - everything else (Gaussian, categorical, Markov chains, ...) is a leaf
+      scored with its own seq_log_density.
+    """
+    tname = type(dists[0]).__name__
+    n, K = len(items), len(dists)
+
+    if 'Ignored' in tname or 'Null' in tname:
+        return
+
+    if 'Composite' in tname and hasattr(dists[0], 'dists'):
+        for f in range(len(dists[0].dists)):
+            yield from _field_log_densities([d.dists[f] for d in dists],
+                                            [x[f] for x in items])
+        return
+
+    if 'Sequence' in tname and hasattr(dists[0], 'dist') and hasattr(dists[0], 'len_dist'):
+        lens = [len(x) for x in items]
+        elems = [e for x in items for e in x]
+        if elems:
+            seg = np.repeat(np.arange(n), lens)
+            for l_e in _field_log_densities([d.dist for d in dists], elems):
+                l_f = np.zeros((n, K))
+                np.add.at(l_f, seg, l_e)
+                yield l_f
+        len_dists = [d.len_dist for d in dists]
+        if len_dists[0] is not None:
+            yield from _field_log_densities(len_dists, lens)
+        return
+
+    if 'Optional' in tname and hasattr(dists[0], 'dist'):
+        mv = getattr(dists[0], 'missing_value', None)
+        mv_is_nan = isinstance(mv, float) and np.isnan(mv)
+        miss = np.asarray([x is None or x is mv or
+                           (mv_is_nan and isinstance(x, float) and np.isnan(x))
+                           for x in items])
+        lp0 = np.asarray([getattr(d, 'log_p0', getattr(d, 'log_p', None)) for d in dists],
+                         dtype=np.float64)        # log P(missing)
+        lp1 = np.asarray([getattr(d, 'log_p1', getattr(d, 'log_pn', None)) for d in dists],
+                         dtype=np.float64)        # log P(present)
+        yield np.where(miss[:, None], lp0[None, :], lp1[None, :])
+        if (~miss).any():
+            fill = items[int(np.argmax(~miss))]
+            sub = [fill if m else x for x, m in zip(items, miss)]
+            keep = (~miss).astype(np.float64)[:, None]
+            for l_in in _field_log_densities([d.dist for d in dists], sub):
+                yield l_in * keep
+        return
+
+    if hasattr(dists[0], 'dist_to_encoder'):
+        enc = dists[0].dist_to_encoder().seq_encode(items)
+    elif hasattr(dists[0], 'seq_encode'):
+        enc = dists[0].seq_encode(items)
+    else:
+        enc = None
+
+    l = np.empty((n, K))
+    for k, d in enumerate(dists):
+        if enc is not None:
+            l[:, k] = np.asarray(d.seq_log_density(enc), dtype=np.float64)
+        else:
+            l[:, k] = [d.log_density(x) for x in items]
+    yield l
+
+
+def balanced_factors(mix_model, data, field_weights=None):
+    """Per-field Bhattacharyya affinity factors for heterogeneous models.
+
+    The joint posterior is dominated by whichever field has the largest
+    log-likelihood contrast across components - sharp categorical or
+    token-sequence fields contribute many nats per observation while
     overlapping continuous fields contribute fractions of one, or a collapsed
     continuous component contributes thousands. The drowned fields'
-    relationships then become invisible to the affinity.
+    relationships then become invisible to any affinity computed from the
+    joint posterior.
 
     'balanced' fixes the scale problem at the affinity level: a *field-
-    restricted* posterior z^f is computed from each field's likelihoods alone,
-    and the affinity is the (weighted) geometric mean of per-field
-    Bhattacharyya coefficients, so every field contributes comparably
-    regardless of its likelihood scale.
+    restricted* posterior z^f is computed from each field's likelihoods alone
+    (fields are the model's flattened leaves - nested composites, sequence
+    element/length models, and optional wrappers all decompose; see
+    _field_log_densities), and the affinity combines per-field Bhattacharyya
+    coefficients, so every field contributes comparably regardless of its
+    likelihood scale. Combined with an evidence cap (see model_log_affinity)
+    no single field can veto a pair's similarity either.
     """
     comps = list(mix_model.components)
-    first = comps[0]
-    if not hasattr(first, 'dists'):
-        raise ValueError("affinity='balanced' requires mixture components that are "
-                         'composite distributions (with a .dists attribute).')
-    n_fields = len(first.dists)
     log_w = np.asarray(mix_model.log_w, dtype=np.float64).reshape(1, -1)
 
+    l_fields = list(_field_log_densities(comps, list(data)))
+    if not l_fields:
+        raise ValueError("affinity='balanced' found no scorable fields in the mixture components.")
+
     if field_weights is None:
-        field_weights = [1.0] * n_fields
+        field_weights = [1.0] * len(l_fields)
+    elif len(field_weights) != len(l_fields):
+        raise ValueError('field_weights has %d entries but the model flattens to %d '
+                         'leaf fields.' % (len(field_weights), len(l_fields)))
 
     factors = []
-    for f in range(n_fields):
-        fdists = [c.dists[f] for c in comps]
-        fdata = [x[f] for x in data]
-        if hasattr(fdists[0], 'dist_to_encoder'):
-            enc_f = fdists[0].dist_to_encoder().seq_encode(fdata)
-        else:
-            enc_f = fdists[0].seq_encode(fdata)
-        l_f = np.asarray([d.seq_log_density(enc_f) for d in fdists], dtype=np.float64).T
-
+    for l_f, w_f in zip(l_fields, field_weights):
         z_f = l_f + log_w
         z_f -= z_f.max(axis=1, keepdims=True)
         np.exp(z_f, out=z_f)
         z_f /= z_f.sum(axis=1, keepdims=True)
 
-        sq = np.sqrt(z_f) ** field_weights[f]
+        sq = np.sqrt(z_f) ** w_f
         factors.append((sq, sq))
 
     return factors
@@ -133,17 +219,19 @@ def balanced_factors(mix_model, data, field_weights=None):
 def _resolve_affinity(affinity, mix_model, data, field_weights):
     """Resolve 'auto'/'balanced' to a concrete affinity for the given model.
 
-    'auto' uses per-field balancing whenever the mixture components are
-    composite (mixed-type) records and raw data is available to split into
-    fields, since a single sharp field otherwise dominates the joint
-    posterior; for everything else it uses 'bhattacharyya'.
+    'auto' uses per-field balancing whenever raw data is available to split
+    into the model's leaf fields, since a single sharp field otherwise
+    dominates the joint posterior; if the data cannot be decomposed (or no
+    raw data was given) it falls back to 'bhattacharyya' on the joint
+    posterior.
     """
     if affinity == 'auto':
-        comps = getattr(mix_model, 'components', None)
-        if comps is not None and hasattr(comps[0], 'dists') and data is not None:
-            affinity = 'balanced'
-        else:
-            affinity = 'bhattacharyya'
+        if getattr(mix_model, 'components', None) is not None and data is not None:
+            try:
+                return balanced_factors(mix_model, data, field_weights=field_weights)
+            except Exception:
+                return 'bhattacharyya'
+        return 'bhattacharyya'
 
     if affinity == 'balanced':
         if data is None:
@@ -183,19 +271,33 @@ def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.nd
 
 
 def model_log_affinity(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None,
-                       affinity: str = 'bhattacharyya') -> np.ndarray:
+                       affinity: str = 'bhattacharyya',
+                       evidence_cap: Optional[float] = None) -> np.ndarray:
     """Dense n x n matrix of log affinities (see module docstring) with -inf diagonal.
 
     Rows are comparable up to a per-row shift, which both the row-conditional
     normalization and per-row perplexity calibration are invariant to.
+
+    evidence_cap bounds the dissimilarity evidence any single factor (field)
+    may contribute: each factor's log affinity is floored at -evidence_cap
+    nats before the factors are summed. Without the cap a single sharp field
+    with (near-)disjoint per-field posteriors drives its log affinity to -inf
+    and vetoes the pair no matter what every other field says; with it, a
+    field can at most testify "these differ by evidence_cap nats". The cap is
+    only applied to multi-factor (per-field) affinities - for a single factor
+    it could only create ties.
     """
     factors = _affinity_factors(posterior_mat, ll_mat, affinity)
     n = factors[0][0].shape[0]
+    cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
 
     log_s = np.zeros((n, n))
     with np.errstate(divide='ignore'):
         for g, h in factors:
-            log_s += np.log(np.dot(g, h.T))
+            term = np.log(np.dot(g, h.T))
+            if cap is not None:
+                np.maximum(term, -cap, out=term)
+            log_s += term
     log_s[np.arange(n), np.arange(n)] = -np.inf
 
     return log_s
@@ -271,30 +373,33 @@ def conditional_pmat(log_aff: np.ndarray, perplexity: Optional[float] = None) ->
     return p
 
 
-def get_pmat(posterior_mat, ll_mat=None, targ_perplexity=None, vlen=False, affinity: str = 'bhattacharyya'):
+def get_pmat(posterior_mat, ll_mat=None, targ_perplexity=None, vlen=False, affinity: str = 'bhattacharyya',
+             evidence_cap: Optional[float] = None):
     """Symmetrized t-SNE input probabilities from model posteriors (and optionally
     component log-likelihoods, for affinity='likelihood').
 
     The vlen flag is kept for backward compatibility and ignored.
     """
-    log_s = model_log_affinity(posterior_mat, ll_mat, affinity=affinity)
+    log_s = model_log_affinity(posterior_mat, ll_mat, affinity=affinity, evidence_cap=evidence_cap)
     p = conditional_pmat(log_s, perplexity=targ_perplexity)
     p = (p + p.T) / (2.0 * p.shape[0])
     return p
 
 
 def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k: int = 90,
-                           block_size: int = 1024, affinity: str = 'bhattacharyya') -> scipy.sparse.csr_matrix:
+                           block_size: int = 1024, affinity: str = 'bhattacharyya',
+                           evidence_cap: Optional[float] = None) -> scipy.sparse.csr_matrix:
     """Sparse n x n matrix of model distances d_ij = max_j' log s_ij' - log s_ij.
 
     Keeps the k nearest neighbors (largest affinity) per row. Built blockwise so
     the dense n x n affinity matrix is never materialized. Distances are
     non-negative; any per-row shift is immaterial because t-SNE's perplexity
-    calibration is per row.
+    calibration is per row. evidence_cap as in model_log_affinity.
     """
     factors = _affinity_factors(posterior_mat, ll_mat, affinity)
     n = factors[0][0].shape[0]
     k = min(k, n - 1)
+    cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
 
     rows = np.repeat(np.arange(n), k)
     cols = np.empty(n * k, dtype=np.int64)
@@ -306,7 +411,10 @@ def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarra
         log_s = np.zeros((s1 - s0, n))
         with np.errstate(divide='ignore'):
             for (g, _), ht in zip(factors, hts):
-                log_s += np.log(np.maximum(np.dot(g[s0:s1], ht), 1.0e-300))
+                term = np.log(np.maximum(np.dot(g[s0:s1], ht), 1.0e-300))
+                if cap is not None:
+                    np.maximum(term, -cap, out=term)
+                log_s += term
         log_s[np.arange(s1 - s0), np.arange(s0, s1)] = -np.inf
         s_blk = log_s
 
@@ -323,18 +431,21 @@ def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarra
 
 
 def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k: int = 15,
-              block_size: int = 1024, affinity: str = 'bhattacharyya') -> Tuple[np.ndarray, np.ndarray]:
+              block_size: int = 1024, affinity: str = 'bhattacharyya',
+              evidence_cap: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
     """k-nearest-neighbor arrays under the model distance d_ij = -log s_ij.
 
     Returns (indices, distances), each n x k, sorted ascending per row with
     each point as its own first neighbor at distance 0 (the convention
     expected by umap-learn, where self counts toward n_neighbors). Built
     blockwise; the dense affinity matrix is never materialized.
+    evidence_cap as in model_log_affinity.
     """
     factors = _affinity_factors(posterior_mat, ll_mat, affinity)
     n = factors[0][0].shape[0]
     k = min(k, n)
     m = k - 1  # non-self neighbors
+    cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
 
     knn_idx = np.empty((n, k), dtype=np.int64)
     knn_dist = np.empty((n, k), dtype=np.float64)
@@ -347,7 +458,10 @@ def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k:
         log_s = np.zeros((s1 - s0, n))
         with np.errstate(divide='ignore'):
             for (g, _), ht in zip(factors, hts):
-                log_s += np.log(np.maximum(np.dot(g[s0:s1], ht), 1.0e-300))
+                term = np.log(np.maximum(np.dot(g[s0:s1], ht), 1.0e-300))
+                if cap is not None:
+                    np.maximum(term, -cap, out=term)
+                log_s += term
         log_s[np.arange(s1 - s0), np.arange(s0, s1)] = -np.inf
         s_blk = log_s
 
@@ -534,8 +648,8 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
           optimize_alpha: bool = False, min_alpha: float = 1.0e-6, max_alpha_its: int = 3,
           seed: Optional[int] = None, mix_model=None, enc_data=None, method: str = 'auto',
           early_exaggeration: float = 12.0, tol: float = 1.0e-7, dpm_max_its: int = 200,
-          affinity='auto', field_weights=None, out=None,
-          variable_length: bool = False):
+          affinity='auto', field_weights=None, evidence_cap: Optional[float] = 1.0,
+          out=None, variable_length: bool = False):
     """Embed heterogeneous data with model-based t-SNE.
 
     A mixture model is fit to the data (a Dirichlet process mixture with
@@ -549,18 +663,26 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
         'auto'       - barnes_hut for n > 10 unless optimize_alpha is set
 
     affinity:
-        'auto' (default) - 'balanced' for composite (mixed-type) components
-            when raw data is available, else 'bhattacharyya'
+        'auto' (default) - 'balanced' whenever raw data is available and the
+            model decomposes into leaf fields, else 'bhattacharyya'
+        'balanced'   - per-field posteriors (the model's flattened leaves:
+            nested composites, sequence element/length models, and optional
+            wrappers all decompose) combined by per-field Bhattacharyya, so a
+            sharp discrete field cannot drown an overlapping continuous one
+            (or vice versa); optional field_weights sets per-field exponents
         'bhattacharyya' - Bhattacharyya coefficient between joint posteriors;
             graded even under hard assignments, so embeddings retain
             within-cluster geometry
         'coassign'   - co-assignment probability P(z_i = z_j | x); exact but
             near-binary when posteriors are sharp
         'likelihood' - predictive affinity sum_k p(x_i|theta_k) z_jk
-        'balanced'   - for composite (mixed-type) records: per-field
-            posteriors combined by geometric-mean Bhattacharyya, so a sharp
-            discrete field cannot drown an overlapping continuous one (or
-            vice versa); optional field_weights sets per-field exponents
+
+    evidence_cap (default 1.0 nats) bounds the dissimilarity evidence any
+    single field may contribute to a pair's distance under multi-field
+    affinities: without it, one spuriously sharp field (a serial-number-like
+    categorical the model micro-clustered) drives its per-field affinity to
+    zero and vetoes the pair's similarity no matter what every other field
+    says. None disables the cap; single-field affinities ignore it.
 
     Returns the n x emb_dim embedding.
     """
@@ -587,11 +709,13 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
         px = 30.0 if perplexity is None else float(perplexity)
         px = min(px, (n - 4) / 3.0)
         k = min(n - 1, int(3.0 * px) + 5)
-        dist_csr = sparse_model_distances(z_ij, l_ij, k=k, affinity=affinity)
+        dist_csr = sparse_model_distances(z_ij, l_ij, k=k, affinity=affinity,
+                                          evidence_cap=evidence_cap)
         return _tsne_barnes_hut(dist_csr, emb_dim, px, max_its, eta,
                                 early_exaggeration, seed, Y)
 
-    P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity, affinity=affinity)
+    P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity, affinity=affinity,
+                 evidence_cap=evidence_cap)
     return tsne_exact(P, emb_dim=emb_dim, alpha=alpha, Y=Y, max_its=max_its, eta=eta,
                       momentum=momentum, early_exaggeration=early_exaggeration,
                       min_gain=min_gain, min_value=min_value, optimize_alpha=optimize_alpha,
@@ -602,15 +726,15 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
 def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
           max_components: int = 50, seed: Optional[int] = None, mix_model=None,
           enc_data=None, dpm_max_its: int = 200, print_iter: int = 100,
-          affinity='auto', field_weights=None,
+          affinity='auto', field_weights=None, evidence_cap: Optional[float] = 1.0,
           n_epochs: Optional[int] = None, out=None, **umap_kwargs):
     """Embed heterogeneous data with model-based UMAP.
 
-    The same mixture-model affinities as htsne (see the affinity argument
-    there), but the k-nearest-neighbor graph of model distances -log s_ij is
-    handed to UMAP's fuzzy simplicial set construction and layout (umap-learn)
-    instead of t-SNE. Scales like UMAP: the dense affinity matrix is never
-    built.
+    The same mixture-model affinities as htsne (see the affinity and
+    evidence_cap arguments there), but the k-nearest-neighbor graph of model
+    distances -log s_ij is handed to UMAP's fuzzy simplicial set construction
+    and layout (umap-learn) instead of t-SNE. Scales like UMAP: the dense
+    affinity matrix is never built.
 
     Extra keyword arguments are passed to umap.UMAP. Returns the n x emb_dim
     embedding.
@@ -632,7 +756,8 @@ def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
     n = z_ij.shape[0]
     k = min(n_neighbors, n - 1)
 
-    knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k, affinity=affinity)
+    knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k, affinity=affinity,
+                                  evidence_cap=evidence_cap)
 
     reducer = umap.UMAP(n_components=emb_dim, n_neighbors=k, min_dist=min_dist,
                         precomputed_knn=(knn_idx, knn_dist), random_state=seed,
