@@ -93,7 +93,7 @@ python mixture_example.py
 python hidden_markov_example.py
 ```
 
-A few examples need datasets that are not shipped: `set_example.py` (NIPS submissions) and the two `wikipedia_*` examples (a Wikipedia corpus + stop-word list). `hmm_illiad_example.py` downloads its public-domain text from Project Gutenberg on first run (cached under `data/iliad/`) and compares Numba vs. pure-NumPy fitting. `lda_example.py` runs to a tight tolerance and takes a while.
+A few examples need datasets that are not shipped: `set_example.py` (NIPS submissions) and the two `wikipedia_*` examples (a Wikipedia corpus + stop-word list). Everything else generates its own data — e.g. `hmm_numba_example.py` fits an HMM to generated text-like sequences and compares Numba vs. pure-NumPy fitting. `lda_example.py` runs to a tight tolerance and takes a while.
 
 ## Running on Spark
 
