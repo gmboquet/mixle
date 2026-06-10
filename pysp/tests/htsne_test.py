@@ -303,5 +303,92 @@ class HTSNETestCase(unittest.TestCase):
         self.assertGreater(separation_ratio(y, labels), 1.5)
 
 
+    # ---- balanced (mixed-type) affinities -----------------------------------
+
+    def test_balanced_factors_structure(self):
+        from pysp.utils.htsne import balanced_factors, model_log_affinity
+        factors = balanced_factors(self.model, self.data)
+        self.assertEqual(len(factors), 2)  # gaussian + categorical fields
+        # log-affinity over factors = sum of per-field Bhattacharyya logs
+        la = model_log_affinity(None, None, affinity=factors)
+        self.assertEqual(la.shape, (self.n, self.n))
+        self.assertTrue(np.all(np.isneginf(np.diag(la))))
+        # symmetric: each factor is (sq, sq)
+        off = ~np.eye(self.n, dtype=bool)
+        self.assertTrue(np.allclose(la[off], la.T[off], atol=1.0e-10))
+
+    def test_balanced_embeddings_run(self):
+        y = htsne(self.data, mix_model=self.model, perplexity=20.0, affinity='balanced',
+                  seed=3, max_its=300, out=io.StringIO())
+        self.assertEqual(y.shape, (self.n, 2))
+        self.assertGreater(separation_ratio(y, self.labels), 2.0)
+        yu = humap(self.data, mix_model=self.model, n_neighbors=15, affinity='balanced',
+                   seed=3, out=io.StringIO())
+        self.assertTrue(np.all(np.isfinite(yu)))
+
+    def test_auto_affinity_resolution(self):
+        from pysp.utils.htsne import _resolve_affinity
+        # composite components + raw data -> balanced factor list (one per leaf field)
+        r = _resolve_affinity('auto', self.model, self.data, None)
+        self.assertIsInstance(r, list)
+        self.assertEqual(len(r), 2)
+        # no raw data -> falls back to bhattacharyya
+        self.assertEqual(_resolve_affinity('auto', self.model, None, None), 'bhattacharyya')
+        # non-composite components decompose too: a plain mixture is one leaf field
+        plain = MixtureDistribution([GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)],
+                                    [0.5, 0.5])
+        r = _resolve_affinity('auto', plain, [0.0, 1.0], None)
+        self.assertIsInstance(r, list)
+        self.assertEqual(len(r), 1)
+
+    def test_balanced_requires_data(self):
+        with self.assertRaises(ValueError):
+            htsne(None, mix_model=self.model, enc_data=('x',), affinity='balanced', out=io.StringIO())
+
+    def test_balanced_decomposes_sequences_and_optionals(self):
+        # sequence-of-records components flatten into element fields + length;
+        # the old implementation refused anything without top-level .dists
+        from pysp.utils.htsne import balanced_factors
+        data, labels, model = self._varlen_data_and_model(60)
+        factors = balanced_factors(model, data)
+        self.assertGreater(len(factors), 1)
+        n = len(data)
+        for g, h in factors:
+            self.assertEqual(g.shape[0], n)
+            # per-field posteriors: squared factors sum to one per row
+            self.assertTrue(np.allclose((g * g).sum(axis=1), 1.0, atol=1.0e-8))
+        y = htsne(data, mix_model=model, seed=3, max_its=200, out=io.StringIO())
+        self.assertEqual(y.shape, (n, 2))
+        self.assertGreater(separation_ratio(y, labels), 1.5)
+
+    def test_evidence_cap_bounds_field_influence(self):
+        from pysp.utils.htsne import balanced_factors, model_log_affinity
+        factors = balanced_factors(self.model, self.data)
+        la_inf = model_log_affinity(None, None, affinity=factors)
+        cap = 1.0
+        la_cap = model_log_affinity(None, None, affinity=factors, evidence_cap=cap)
+        off = ~np.eye(self.n, dtype=bool)
+        # capped log-affinity is bounded below by -cap * n_fields and never
+        # smaller than the uncapped one
+        self.assertTrue(np.all(la_cap[off] >= -cap * len(factors) - 1.0e-12))
+        self.assertTrue(np.all(la_cap[off] >= la_inf[off] - 1.0e-12))
+        # pairs within every field's cap are unaffected
+        mild = la_inf[off] > -0.5
+        if mild.any():
+            self.assertTrue(np.allclose(la_cap[off][mild], la_inf[off][mild], atol=1.0e-10))
+        # single-factor affinities ignore the cap (it could only create ties)
+        from pysp.utils.htsne import _posteriors_and_loglikes
+        z, _ = _posteriors_and_loglikes(self.model, data=self.data)
+        la1 = model_log_affinity(z, affinity='bhattacharyya')
+        la1c = model_log_affinity(z, affinity='bhattacharyya', evidence_cap=cap)
+        self.assertTrue(np.allclose(np.nan_to_num(la1, neginf=-1e30),
+                                    np.nan_to_num(la1c, neginf=-1e30)))
+
+    def test_field_weights_validated_against_flattened_fields(self):
+        from pysp.utils.htsne import balanced_factors
+        with self.assertRaises(ValueError):
+            balanced_factors(self.model, self.data, field_weights=[1.0])
+
+
 if __name__ == '__main__':
     unittest.main()

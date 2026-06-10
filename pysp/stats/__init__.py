@@ -464,7 +464,10 @@ def estimate(data: Union[Sequence[T], pyspark.rdd.RDD],
         SequenceEncodableProbabilityDistribution object.
 
     """
-    prev_estimate = prev_estimate if prev_estimate is not None else NullDistribution()
+    # accumulators distinguish estimate-free updates with `estimate is None`;
+    # substituting a NullDistribution here would defeat those guards
+    if isinstance(prev_estimate, NullDistribution):
+        prev_estimate = None
 
     if isinstance(data, RDD_TYPES):
         sc = data.context
