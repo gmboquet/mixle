@@ -11,13 +11,18 @@ The ConditionalDistribution allows for user defined conditional distributions P_
 P_given(X0).
 
 """
+import heapq
+import itertools
+
 import numpy as np
 import math
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, ConditionalSampler
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, ConditionalSampler, \
+    DistributionEnumerator, EnumerationError, child_enumerator
 from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullDataEncoder, NullAccumulatorFactory, \
     NullEstimator
-from typing import Optional, List, Union, Any, Tuple, Sequence, TypeVar, Dict
+from pysp.utils.enumeration import BufferedStream
+from typing import Optional, List, Union, Any, Tuple, Sequence, TypeVar, Dict, Iterator
 from pysp.arithmetic import maxrandint
 from numpy.random import RandomState
 
@@ -33,6 +38,8 @@ SS2 = TypeVar('SS2')
 
 
 class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
+    """ConditionalDistribution models pairs (x0, x1) with density P_cond(x1 | x0) * P_given(x0),
+    where the conditional distributions are looked up from a dictionary keyed by x0."""
 
     def __init__(self,
                  dmap: Union[Dict[Any, SequenceEncodableProbabilityDistribution],
@@ -220,8 +227,114 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
                                                   default_encoder=default_encoder,
                                                   given_encoder=given_encoder)
 
+    def enumerator(self) -> 'ConditionalDistributionEnumerator':
+        """Creates a ConditionalDistributionEnumerator iterating (given, value) pairs in
+        descending joint probability order.
+
+        Requires an enumerable given distribution and enumerable conditional distributions;
+        raises EnumerationError otherwise.
+
+        Returns:
+            ConditionalDistributionEnumerator object.
+
+        """
+        return ConditionalDistributionEnumerator(self)
+
+
+class ConditionalDistributionEnumerator(DistributionEnumerator):
+    """Enumerates (given, value) pairs of a ConditionalDistribution in descending joint
+    probability order."""
+
+    def __init__(self, dist: ConditionalDistribution) -> None:
+        """Enumerates (given, value) pairs in descending joint probability order.
+
+        The joint log-density log P(x0, x1) = log P_cond(x1|x0) + log P_given(x0) factors over a
+        per-given-value stream of pairs, so this is a lazy k-way merge of the per-x0 streams.
+        Streams are instantiated in descending P_given(x0) order; since the head of stream x0 is
+        bounded above by log P_given(x0), a buffered head is emitted only once it beats the next
+        un-instantiated stream's bound, which makes the global order correct.
+
+        Raises EnumerationError if the given distribution is unspecified (NullDistribution) or
+        not enumerable, or if any conditional (or the default, when present) is not enumerable.
+        Given values whose conditional has zero mass everywhere (no dmap entry and no default)
+        contribute no pairs.
+
+        Args:
+            dist (ConditionalDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+
+        if not dist.has_given:
+            raise EnumerationError(dist, reason='the given distribution is unspecified '
+                                                '(NullDistribution), so the support over (given, value) '
+                                                'pairs is not enumerable')
+
+        self._given_stream = BufferedStream(
+            child_enumerator(dist.given_dist, 'ConditionalDistribution.given_dist'))
+
+        # Fail fast: build one enumerator per conditional up front. Each given value appears at
+        # most once in the given enumeration, so each stored enumerator is consumed at most once.
+        self._cond_enums = {k: child_enumerator(v, 'ConditionalDistribution.dmap[%s]' % repr(k))
+                            for k, v in dist.dmap.items()}
+        if dist.has_default:
+            child_enumerator(dist.default_dist, 'ConditionalDistribution.default_dist')
+
+        self._next_rank = 0
+        self._counter = itertools.count()
+        self._heap: List[Tuple[float, int, int]] = []  # (-head_lp, counter, stream id)
+        self._heads: Dict[int, Tuple[Any, float]] = {}
+        self._streams: Dict[int, Iterator[Tuple[Any, float]]] = {}
+
+    def _make_stream(self, x0: Any, lp0: float) -> Optional[Iterator[Tuple[Any, float]]]:
+        """Return a sorted stream of ((x0, x1), lp0 + lp1) pairs, or None when x0 has no mass."""
+        if x0 in self._cond_enums:
+            child = self._cond_enums.pop(x0)
+        elif self.dist.has_default:
+            child = child_enumerator(self.dist.default_dist, 'ConditionalDistribution.default_dist')
+        else:
+            return None
+        return (((x0, x1), lp0 + lp1) for x1, lp1 in child)
+
+    def _pop(self) -> Tuple[Any, float]:
+        """Emit the best instantiated head and advance its stream."""
+        _, _, sid = heapq.heappop(self._heap)
+        value, lp = self._heads.pop(sid)
+        try:
+            nxt = next(self._streams[sid])
+            self._heads[sid] = nxt
+            heapq.heappush(self._heap, (-nxt[1], next(self._counter), sid))
+        except StopIteration:
+            del self._streams[sid]
+        return (value, lp)
+
+    def __next__(self) -> Tuple[Any, float]:
+        while True:
+            frontier = self._given_stream.get(self._next_rank)
+            if frontier is None:
+                if self._heap:
+                    return self._pop()
+                raise StopIteration
+            if self._heap and -self._heap[0][0] >= frontier[1]:
+                return self._pop()
+            x0, lp0 = frontier
+            sid = self._next_rank
+            self._next_rank += 1
+            stream = self._make_stream(x0, lp0)
+            if stream is None:
+                continue
+            try:
+                head = next(stream)
+            except StopIteration:
+                continue
+            self._streams[sid] = stream
+            self._heads[sid] = head
+            heapq.heappush(self._heap, (-head[1], next(self._counter), sid))
+
 
 class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
+    """ConditionalDistributionSampler draws (given, value) pairs from a ConditionalDistribution,
+    or values conditioned on a fixed given value via sample_given()."""
 
     def __init__(self, dist: ConditionalDistribution, seed: Optional[int] = None) -> None:
         """ConditionalDistributionSampler object samples from ConditionalDistribution either directly or conditionally.
@@ -317,6 +430,8 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
 
 
 class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
+    """ConditionalDistributionAccumulator accumulates sufficient statistics for each conditional
+    distribution, the default distribution, and the given distribution."""
 
     def __init__(self,
                  accumulator_map: Dict[T0, SequenceEncodableStatisticAccumulator],
@@ -657,6 +772,8 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class ConditionalDistributionAccumulatorFactory(StatisticAccumulatorFactory):
+    """ConditionalDistributionAccumulatorFactory creates ConditionalDistributionAccumulator
+    objects from the per-key, default, and given factories."""
 
     def __init__(self,
                  factory_map: Dict[T0, StatisticAccumulatorFactory],
@@ -707,6 +824,8 @@ class ConditionalDistributionAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class ConditionalDistributionEstimator(ParameterEstimator):
+    """ConditionalDistributionEstimator estimates a ConditionalDistribution from aggregated
+    sufficient statistics."""
 
     def __init__(self,
                  estimator_map: Dict[T0, ParameterEstimator],
@@ -785,6 +904,8 @@ class ConditionalDistributionEstimator(ParameterEstimator):
 
 
 class ConditionalDistributionDataEncoder(DataSequenceEncoder):
+    """ConditionalDistributionDataEncoder encodes sequences of (given, value) pairs, grouping the
+    values by given value and delegating each group to the matching conditional encoder."""
 
     def __init__(self,
                  encoder_map: Dict[T0, DataSequenceEncoder],

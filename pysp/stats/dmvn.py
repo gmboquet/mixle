@@ -24,6 +24,7 @@ from typing import Sequence, Optional, Dict, Any, Tuple, List, Union
 
 
 class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
+    """Multivariate Gaussian distribution with independent components (diagonal covariance matrix)."""
 
     def __init__(self, mu: Union[Sequence[float], np.ndarray], covar: Union[Sequence[float], np.ndarray],
                  name: Optional[str] = None, keys: Optional[str] = None) -> None:
@@ -59,40 +60,95 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         self.key = keys
 
     def __str__(self) -> str:
+        """Returns string representation of DiagonalGaussianDistribution object."""
         s1 = repr(list(self.mu.flatten()))
         s2 = repr(list(self.covar.flatten()))
         s3 = repr(self.name)
         return 'DiagonalGaussianDistribution(%s, %s, name=%s)' % (s1, s2, s3)
 
     def density(self, x: Union[Sequence[float], np.ndarray]):
+        """Evaluate the density at observation x.
+
+        See log_density() for details.
+
+        Args:
+            x (Union[Sequence[float], np.ndarray]): Length-dim observation vector.
+
+        Returns:
+            Density at x.
+
+        """
         return exp(self.log_density(x))
 
     def log_density(self, x: Union[Sequence[float], np.ndarray]):
+        """Evaluate the log-density at observation x.
+
+        The log-density is given by
+
+            log(p(x)) = -0.5*sum_{i=1}^{n} (x_i-m_i)^2 / s2_i - 0.5*log(s2_i) - (n/2)*log(2*pi).
+
+        Args:
+            x (Union[Sequence[float], np.ndarray]): Length-dim observation vector.
+
+        Returns:
+            Log-density at x.
+
+        """
         rv = np.dot(x * x, self.ca)
         rv += np.dot(x, self.cb)
         rv += self.cc
         return rv
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Vectorized evaluation of the log-density at a sequence-encoded input x.
+
+        Args:
+            x (np.ndarray): Encoded data matrix with shape (sz, dim) from
+                DiagonalGaussianDataEncoder.seq_encode().
+
+        Returns:
+            Numpy array of length sz containing the log-density of each encoded observation.
+
+        """
         rv = np.dot(x * x, self.ca)
         rv += np.dot(x, self.cb)
         rv += self.cc
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'DiagonalGaussianSampler':
+        """Create a DiagonalGaussianSampler for sampling from this distribution.
+
+        Args:
+            seed (Optional[int]): Seed to set for sampling with RandomState.
+
+        Returns:
+            DiagonalGaussianSampler object.
+
+        """
         return DiagonalGaussianSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'DiagonalGaussianEstimator':
+        """Create a DiagonalGaussianEstimator for estimating this distribution.
+
+        Args:
+            pseudo_count (Optional[float]): Used to inflate sufficient statistics in estimation.
+
+        Returns:
+            DiagonalGaussianEstimator object.
+
+        """
         if pseudo_count is None:
             return DiagonalGaussianEstimator(name=self.name, keys=self.key)
         else:
             return DiagonalGaussianEstimator(pseudo_count=(pseudo_count, pseudo_count), name=self.name, keys=self.key)
 
     def dist_to_encoder(self) -> 'DiagonalGaussianDataEncoder':
+        """Returns a DiagonalGaussianDataEncoder object for encoding sequences of iid observations."""
         return DiagonalGaussianDataEncoder(dim=self.dim)
 
 
 class DiagonalGaussianSampler(DistributionSampler):
+    """DiagonalGaussianSampler object for sampling from a DiagonalGaussianDistribution."""
 
     def __init__(self, dist: DiagonalGaussianDistribution, seed: Optional[int] = None) -> None:
         """DiagonalGaussianSampler object for sampling from DiagonalGaussian instance.
@@ -110,6 +166,15 @@ class DiagonalGaussianSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: Optional[int] = None) -> Union[Sequence[np.ndarray], np.ndarray]:
+        """Draw iid samples from the diagonal Gaussian distribution.
+
+        Args:
+            size (Optional[int]): Number of iid samples to draw. If None, a single sample is drawn.
+
+        Returns:
+            Numpy array with shape (dim,) if size is None, else a list of 'size' such arrays.
+
+        """
         if size is None:
             rv = self.rng.randn(self.dist.dim)
             rv *= np.sqrt(self.dist.covar)
@@ -120,6 +185,7 @@ class DiagonalGaussianSampler(DistributionSampler):
 
 
 class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
+    """DiagonalGaussianAccumulator object for aggregating sufficient statistics from iid observations."""
 
     def __init__(self, dim: Optional[int] = None, keys: Optional[str] = None) -> None:
         """DiagonalGaussianAccumulator object for aggregating sufficient statistics from iid observations.
@@ -144,7 +210,18 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Union[Sequence[float], np.ndarray], weight: float,
                estimate: Optional[DiagonalGaussianDistribution]) -> None:
+        """Update sufficient statistics with a single weighted observation.
 
+        Args:
+            x (Union[Sequence[float], np.ndarray]): Length-dim observation vector.
+            weight (float): Weight for the observation.
+            estimate (Optional[DiagonalGaussianDistribution]): Kept for consistency with
+                SequenceEncodableStatisticAccumulator (not used).
+
+        Returns:
+            None.
+
+        """
         if self.dim is None:
             self.dim = len(x)
             self.sum = vec.zeros(self.dim)
@@ -157,9 +234,31 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 += x_weight
 
     def initialize(self, x: Union[Sequence[float], np.ndarray], weight: float, rng: RandomState) -> None:
+        """Initialize the accumulator with a weighted observation. Calls update().
+
+        Args:
+            x (Union[Sequence[float], np.ndarray]): Length-dim observation vector.
+            weight (float): Weight for the observation.
+            rng (RandomState): Kept for consistency with SequenceEncodableStatisticAccumulator.
+
+        Returns:
+            None.
+
+        """
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Optional[DiagonalGaussianDistribution]) -> None:
+        """Vectorized update of sufficient statistics with an encoded sequence of observations.
+
+        Args:
+            x (np.ndarray): Encoded data matrix with shape (sz, dim).
+            weights (np.ndarray): Numpy array of sz observation weights.
+            estimate (Optional[DiagonalGaussianDistribution]): Kept for consistency (not used).
+
+        Returns:
+            None.
+
+        """
         if self.dim is None:
             self.dim = len(x[0])
             self.sum = vec.zeros(self.dim)
@@ -172,9 +271,30 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 += x_weight.sum(axis=1)
 
     def seq_initialize(self, x, weights: np.ndarray, rng: RandomState) -> None:
+        """Vectorized initialization of the accumulator. Calls seq_update().
+
+        Args:
+            x (np.ndarray): Encoded data matrix with shape (sz, dim).
+            weights (np.ndarray): Numpy array of sz observation weights.
+            rng (RandomState): Kept for consistency with SequenceEncodableStatisticAccumulator.
+
+        Returns:
+            None.
+
+        """
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: Tuple[np.ndarray, np.ndarray, float]) -> 'DiagonalGaussianAccumulator':
+        """Merge the sufficient statistics of suff_stat into this accumulator.
+
+        Args:
+            suff_stat (Tuple[np.ndarray, np.ndarray, float]): Tuple of (weighted sum of observations,
+                weighted sum of squared observations, sum of weights).
+
+        Returns:
+            DiagonalGaussianAccumulator object.
+
+        """
         if suff_stat[0] is not None and self.sum is not None:
             self.sum += suff_stat[0]
             self.sum2 += suff_stat[1]
@@ -188,15 +308,35 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Returns the sufficient statistics (sum, sum of squares, count) of the accumulator."""
         return self.sum, self.sum2, self.count
 
     def from_value(self, x: Tuple[np.ndarray, np.ndarray, float]) -> 'DiagonalGaussianAccumulator':
+        """Set the sufficient statistics of the accumulator to x.
+
+        Args:
+            x (Tuple[np.ndarray, np.ndarray, float]): Tuple of (weighted sum of observations,
+                weighted sum of squared observations, sum of weights).
+
+        Returns:
+            DiagonalGaussianAccumulator object.
+
+        """
         self.sum = x[0]
         self.sum2 = x[1]
         self.count = x[2]
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+        """Combine sufficient statistics with other accumulators sharing a matching key.
+
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary mapping keys to aggregated statistics.
+
+        Returns:
+            None.
+
+        """
         if self.key is not None:
             if self.key in stats_dict:
                 self.combine(stats_dict[self.key].value())
@@ -204,15 +344,26 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.key] = self
 
     def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+        """Replace sufficient statistics with values from stats_dict for a matching key.
+
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary mapping keys to aggregated statistics.
+
+        Returns:
+            None.
+
+        """
         if self.key is not None:
             if self.key in stats_dict:
                 self.from_value(stats_dict[self.key])
 
     def acc_to_encoder(self) -> 'DiagonalGaussianDataEncoder':
+        """Returns a DiagonalGaussianDataEncoder object for encoding sequences of iid observations."""
         return DiagonalGaussianDataEncoder(dim=self.dim)
 
 
 class DiagonalGaussianAccumulatorFactory(StatisticAccumulatorFactory):
+    """DiagonalGaussianAccumulatorFactory object for creating DiagonalGaussianAccumulator objects."""
 
     def __init__(self, dim: Optional[int] = None, keys: Optional[str] = None) -> None:
         """DiagonalGaussianAccumulatorFactory object for creating DiagonalGaussianAccumulator objects.
@@ -230,10 +381,13 @@ class DiagonalGaussianAccumulatorFactory(StatisticAccumulatorFactory):
         self.key = keys
 
     def make(self) -> 'DiagonalGaussianAccumulator':
+        """Returns a new DiagonalGaussianAccumulator with the factory's dim and keys."""
         return DiagonalGaussianAccumulator(dim=self.dim, keys=self.key)
 
 
 class DiagonalGaussianEstimator(ParameterEstimator):
+    """DiagonalGaussianEstimator object for estimating a diagonal Gaussian distribution from
+    aggregated sufficient statistics."""
 
     def __init__(self, dim: Optional[int] = None, pseudo_count: Tuple[Optional[float], Optional[float]] = (None, None),
                  suff_stat: Tuple[Optional[np.ndarray], Optional[np.ndarray]] = (None, None),
@@ -272,10 +426,26 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         self.key = keys
 
     def accumulator_factory(self) -> 'DiagonalGaussianAccumulatorFactory':
+        """Returns a DiagonalGaussianAccumulatorFactory built from the estimator's attributes."""
         return DiagonalGaussianAccumulatorFactory(dim=self.dim, keys=self.key)
 
     def estimate(self, nobs: Optional[float], suff_stat: Tuple[np.ndarray, np.ndarray, float]) \
             -> 'DiagonalGaussianDistribution':
+        """Estimate a diagonal Gaussian distribution from aggregated sufficient statistics.
+
+        Suff_stat is a Tuple of size 3 containing:
+            suff_stat[0] (np.ndarray): Component-wise sum of weighted observation values.
+            suff_stat[1] (np.ndarray): Component-wise sum of weighted squared observation values.
+            suff_stat[2] (float): Sum of weights for each observation.
+
+        Args:
+            nobs (Optional[float]): Weighted number of observations used in aggregation of suff stats.
+            suff_stat (Tuple[np.ndarray, np.ndarray, float]): See above for details.
+
+        Returns:
+            DiagonalGaussianDistribution object.
+
+        """
         nobs = suff_stat[2]
         pc1, pc2 = self.pseudo_count
 
@@ -293,21 +463,46 @@ class DiagonalGaussianEstimator(ParameterEstimator):
 
 
 class DiagonalGaussianDataEncoder(DataSequenceEncoder):
+    """DiagonalGaussianDataEncoder object for encoding sequences of iid diagonal-Gaussian observations."""
 
     def __init__(self, dim: Optional[int] = None) -> None:
-        """DiagonalGaussianDataEncoder object for encoding sequences of iid diagonal-Gaussian observations."""
+        """DiagonalGaussianDataEncoder object.
+
+        Args:
+            dim (Optional[int]): Optional dimension of the Gaussian. Inferred from data if None.
+
+        """
         self.dim = dim
 
     def __str__(self) -> str:
+        """Returns string representation of DiagonalGaussianDataEncoder object."""
         return 'DiagonalGaussianDataEncoder(dim=' + str(self.dim) + ')'
 
     def __eq__(self, other: object) -> bool:
+        """Checks if other object is a DiagonalGaussianDataEncoder with the same dim.
+
+        Args:
+            other (object): Object to compare against.
+
+        Returns:
+            bool.
+
+        """
         if isinstance(other, DiagonalGaussianDataEncoder):
             return self.dim == other.dim
         else:
             return False
 
     def seq_encode(self, x: Sequence[Union[List[float], np.ndarray]]) -> np.ndarray:
+        """Encode a sequence of iid length-dim observations for vectorized 'seq_' calls.
+
+        Args:
+            x (Sequence[Union[List[float], np.ndarray]]): Sequence of length-dim observation vectors.
+
+        Returns:
+            Encoded data matrix with shape (len(x), dim).
+
+        """
         if self.dim is None:
             self.dim = len(x[0])
         xv = np.reshape(x, (-1, self.dim))
