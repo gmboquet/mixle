@@ -395,7 +395,7 @@ class GammaEstimator(ParameterEstimator):
         ss1, ss2 = self.suff_stat
 
         if suff_stat[0] == 0:
-            return GammaDistribution(1.0, 1.0)
+            return GammaDistribution(1.0, 1.0, name=self.name)
 
         adj_sum = suff_stat[1] + ss1 * pc1
         adj_cnt = suff_stat[0] + pc1
@@ -407,7 +407,9 @@ class GammaEstimator(ParameterEstimator):
 
         k = self.estimate_shape(adj_mean, adj_lmean, self.threshold)
 
-        return GammaDistribution(k, adj_sum / (k * adj_lcnt), name=self.name)
+        # theta = mean / k, where the mean uses the count adjusted by pc1 (adj_lcnt
+        # uses pc2 and is only valid for the log-mean).
+        return GammaDistribution(k, adj_mean / k, name=self.name)
 
     @staticmethod
     def estimate_shape(avg_sum: float, avg_sum_of_logs: float, threshold: float) -> float:

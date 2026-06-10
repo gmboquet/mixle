@@ -29,7 +29,7 @@ def empirical_kl_divergence(dist1, dist2, enc_data):
 	p2 = np.exp(l2[gg] - max_l2)
 	p2 /= p2.sum()
 
-	r1 = (p1[gg]*(np.log(p1[gg]) - np.log(p2[gg]))).sum()
+	r1 = (p1*(np.log(p1) - np.log(p2))).sum()
 	r2 = (~g1).sum()
 	r3 = (~g2).sum()
 
@@ -41,7 +41,7 @@ def k_fold_split_index(sz, k, rng):
 	sidx = np.argsort(idx)
 
 	rv = np.zeros(sz, dtype=int)
-	for i in k:
+	for i in range(k):
 		rv[sidx[np.arange(start=i, stop=sz, step=k, dtype=int)]] = i
 
 	return rv
@@ -127,8 +127,43 @@ def best_of(data, vdata, est, trials, max_its, init_p, delta, rng, init_estimato
 	return rv_ll, rv_mm
 
 
-def optimize(data, estimator, max_its=10, delta=1.0e-6, init_estimator=None, init_p=0.1, rng=np.random.RandomState(), prev_estimate=None, vdata=None, enc_data=None, enc_vdata=None, out=sys.stdout, print_iter=1):
+def _data_objective_sum(enc_data, model):
+	"""Data-dependent part of the optimization objective.
 
+	For variational models exposing seq_local_elbo this is the sum of the
+	per-observation local ELBO contributions; otherwise it is the observed
+	data log-likelihood at the current parameter estimates.
+	"""
+	if hasattr(model, 'seq_local_elbo'):
+		return sum([model.seq_local_elbo(u[1]).sum() for u in enc_data])
+	else:
+		_, rv = seq_log_density_sum(enc_data, model)
+		return rv
+
+
+def _model_objective(estimator, model):
+	"""Prior/global part of the optimization objective.
+
+	For MAP estimators this is the log prior density of the estimated
+	parameters; for variational estimators this is the data-independent part
+	of the ELBO (prior cross-entropies plus variational entropies).
+	"""
+	if hasattr(estimator, 'model_log_density'):
+		rv = estimator.model_log_density(model)
+		return 0.0 if rv is None else rv
+	return 0.0
+
+
+def optimize(data, estimator, max_its=10, delta=1.0e-6, init_estimator=None, init_p=0.1, rng=np.random.RandomState(), prev_estimate=None, vdata=None, enc_data=None, enc_vdata=None, out=sys.stdout, print_iter=1):
+	"""Iterate EM/VB updates, accepting steps that increase the penalized
+	objective obj = data term + prior term and stopping when the improvement
+	falls below delta.
+
+	The data term is the log-likelihood (MAP estimators) or the local ELBO
+	contributions (variational estimators with seq_local_elbo); the prior
+	term comes from estimator.model_log_density. Convergence is checked on
+	the combined objective, so the prior is part of the stopping rule.
+	"""
 	div_error = np.geterr()
 	np.seterr(divide='ignore')
 
@@ -151,47 +186,40 @@ def optimize(data, estimator, max_its=10, delta=1.0e-6, init_estimator=None, ini
 	if enc_vdata is None:
 		enc_vdata = seq_encode(vdata, mm)
 
+	_, old_vll = seq_log_density_sum(enc_vdata, mm)
 
-	vcnt,old_vll = seq_log_density_sum(enc_vdata, mm)
-	cnt, old_ll  = seq_log_density_sum(enc_data, mm)
-
-
-	model_ll = estimator.model_log_density(mm)
+	old_obj = _data_objective_sum(enc_data, mm) + _model_objective(estimator, mm)
 
 	best_model = mm
-	best_ll = old_vll
+	best_vll = old_vll
 
 	for i in range(max_its):
 
 		mm_next = seq_estimate(enc_data, estimator, mm)
 
-		old_model_ll = model_ll
-		model_ll = estimator.model_log_density(mm_next)
-		vcnt,vll = seq_log_density_sum(enc_vdata, mm_next)
-		cnt, ll  = seq_log_density_sum(enc_data, mm_next)
+		model_ll = _model_objective(estimator, mm_next)
+		data_ll  = _data_objective_sum(enc_data, mm_next)
+		obj      = data_ll + model_ll
 
+		_, vll = seq_log_density_sum(enc_vdata, mm_next)
 
-		dmll = model_ll - old_model_ll
-		dll = ll - old_ll
-		dvll = vll - old_vll
+		dobj = obj - old_obj
 
-
-
-		if (dll >= 0) or (delta is None):
+		if (dobj >= 0) or (delta is None):
 			mm = mm_next
 
-		if (delta is not None) and (dll < delta):
-			out.write('Terminating %d. LL=%f, dLL=%e, MLL=%f, dMLL=%e, VLL=%f\n'% (i+1, ll, dll, model_ll, dmll, vll))
+		if (delta is not None) and (dobj < delta):
+			out.write('Terminating %d. OBJ=%f, dOBJ=%e, LL=%f, MLL=%f, VLL=%f\n' % (i+1, obj, dobj, data_ll, model_ll, vll))
 			break
 
 		if (i+1) % print_iter == 0:
-			out.write('Iteration %d. LL=%f, dLL=%e, MLL=%f, dMLL=%e, VLL=%f\n'% (i+1, ll, dll, model_ll, dmll, vll))
+			out.write('Iteration %d. OBJ=%f, dOBJ=%e, LL=%f, MLL=%f, VLL=%f\n' % (i+1, obj, dobj, data_ll, model_ll, vll))
 
-		old_ll  = ll
+		old_obj = obj
 		old_vll = vll
 
-		if best_ll < vll:
-			best_ll = vll
+		if best_vll < vll:
+			best_vll = vll
 			best_model = mm
 
 	np.seterr(divide=div_error['divide'])

@@ -8,9 +8,9 @@ if __name__ == '__main__':
     data = dist.sampler(1).sample(100)
 
     est = SpearmanRankingEstimator(4)
-    acc = est.accumulatorFactory().make()
+    acc = est.accumulator_factory().make()
 
-    enc_data = dist.seq_encode(data)
+    enc_data = dist.dist_to_encoder().seq_encode(data)
     acc.seq_update(enc_data, np.ones(len(data)), None)
 
     est_model = est.estimate(None, acc.value())

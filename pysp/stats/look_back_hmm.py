@@ -593,7 +593,7 @@ class LookbackHiddenMarkovDataEncoder(DataSequenceEncoder):
 
 @numba.njit(
     'void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:])',
-    parallel=True, fastmath=True)
+    parallel=True, fastmath=True, cache=True)
 def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll, next_alpha_mat, alpha_buff_mat, out):
     for n in numba.prange(len(tz) - 1):
 
@@ -638,7 +638,7 @@ def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll,
 
 
 @numba.njit(
-    'void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:], float64[:], float64[:,:])')
+    'void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:], float64[:], float64[:,:])', cache=True)
 def numba_baum_welch(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc, beta_buff,
                      xi_buff):
     for n in range(len(tz) - 1):
@@ -726,7 +726,7 @@ def numba_baum_welch(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alp
 
 @numba.njit(
     'void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])',
-    parallel=True, fastmath=True)
+    parallel=True, fastmath=True, cache=True)
 def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc):
     for n in numba.prange(len(tz) - 1):
 
@@ -816,7 +816,7 @@ def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, al
 
 @numba.njit(
     'void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], float64[:,:])',
-    parallel=True, fastmath=True)
+    parallel=True, fastmath=True, cache=True)
 def numba_baum_welch_alphas(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc):
     for n in numba.prange(len(tz) - 1):
 

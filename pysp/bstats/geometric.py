@@ -69,9 +69,9 @@ class GeometricDistribution(ProbabilityDistribution):
 
     def log_density(self, x: int) -> float:
         if self.p == 1.0:
-            return 1.0 if x == 1 else 0.0
+            return 0.0 if x == 1 else -np.inf
         elif self.p == 0.0:
-            return 0.0
+            return -np.inf
         else:
             return (x-1)*self.log_1p + self.log_p
 
@@ -83,7 +83,7 @@ class GeometricDistribution(ProbabilityDistribution):
             else:
                 return (gb-gab)*(x-1) + (ga - gab)
         else:
-            return None
+            return self.log_density(x)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         rv = x-1
@@ -101,7 +101,7 @@ class GeometricDistribution(ProbabilityDistribution):
             rv[x < 1] = -np.inf
             return rv
         else:
-            return None
+            return self.seq_log_density(x)
 
 
     def seq_encode(self, x):

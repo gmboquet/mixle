@@ -118,7 +118,7 @@ class DirichletDistribution(ProbabilityDistribution):
 
 			return -((gammaln(np.sum(aa)) - np.sum(gammaln(aa))) + np.dot(digamma(a)-digamma(np.sum(a)), aa - 1))
 		else:
-			pass
+			raise NotImplementedError('DirichletDistribution.cross_entropy is only implemented for Dirichlet arguments (got %s).' % type(dist).__name__)
 
 	def entropy(self):
 		a = self.alpha

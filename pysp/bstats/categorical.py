@@ -231,23 +231,27 @@ class CategoricalEstimator(ParameterEstimator):
 			if isinstance(conj_prior_params, float):
 				alpha = conj_prior_params
 
-				keys       = count_map.keys()
-				norm_const = (alpha - 1)*len(keys) + stats_sum
-
-				pMap = {k: ((alpha-1) + count_map[k])/norm_const for k in keys}
+				keys = count_map.keys()
+				# Dirichlet MAP sits on the boundary when alpha_k + n_k < 1
+				num  = {k: max((alpha-1) + count_map[k], 0.0) for k in keys}
 				cpp  = {k: (alpha + count_map[k]) for k in keys}
-
-				return CategoricalDistribution(pMap, default_value=default_value, name=self.name, prior=DictDirichletDistribution(cpp))
 			else:
 				alpha_sum = sum(conj_prior_params.values())
 
 				keys = set(conj_prior_params.keys()).union(count_map.keys())
-				norm_const = (alpha_sum - len(keys)) + count_map
+				num  = {k: max((conj_prior_params.get(k, 0.0)-1) + count_map.get(k, 0.0), 0.0) for k in keys}
+				cpp  = {k: (conj_prior_params.get(k, 0.0) + count_map.get(k, 0.0)) for k in keys}
 
-				pMap = {k: ((conj_prior_params.get(k, 0.0)-1) + count_map.get(k, 0.0)) / norm_const for k in keys}
-				cpp = {k: (conj_prior_params.get(k, 0.0) + count_map.get(k, 0.0)) for k in keys}
+			norm_const = sum(num.values())
 
-				return CategoricalDistribution(pMap, default_value=default_value, name=self.name, prior=DictDirichletDistribution(cpp))
+			if norm_const > 0:
+				pMap = {k: v/norm_const for k, v in num.items()}
+			else:
+				# fall back to the posterior mean when the MAP is degenerate
+				cpp_sum = sum(cpp.values())
+				pMap = {k: v/cpp_sum for k, v in cpp.items()}
+
+			return CategoricalDistribution(pMap, default_value=default_value, name=self.name, prior=DictDirichletDistribution(cpp))
 
 		else:
 

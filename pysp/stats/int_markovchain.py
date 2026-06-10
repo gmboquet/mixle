@@ -227,18 +227,14 @@ class IntegerMarkovChainSampler(DistributionSampler):
         self.rng = rng
         self.trans_sampler = np.random.RandomState(seeds[0])
 
-        if isinstance(self.dist.init_dist, NullDistribution):
-            raise Exception('IntegerMarkovChainSampler requires init_dist for IntegerMarkovDistribution.')
-        else:
-            self.init_sampler = dist.init_dist.sampler(seeds[1])
-
-        if isinstance(dist.len_dist, NullDistribution):
-            raise Exception('IntegerMarkovChainSampler requires len_dist for IntegerMarkovDistribution.')
-        else:
-            self.len_sampler = dist.len_dist.sampler(seeds[2])
+        # init/len samplers are only needed for unconditional sampling; sample_given works without them
+        self.init_sampler = None if isinstance(dist.init_dist, NullDistribution) else dist.init_dist.sampler(seeds[1])
+        self.len_sampler = None if isinstance(dist.len_dist, NullDistribution) else dist.len_dist.sampler(seeds[2])
 
     def single_sample(self) -> Sequence[int]:
         """Returns a single sample from the integer Markov chain distribution."""
+        if self.init_sampler is None or self.len_sampler is None:
+            raise Exception('IntegerMarkovChainSampler requires init_dist and len_dist for unconditional sampling.')
         cnt = self.len_sampler.sample()
         lag = self.dist.lag
         n_val = self.dist.num_values

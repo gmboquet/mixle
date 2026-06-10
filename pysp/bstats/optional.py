@@ -85,7 +85,7 @@ class OptionalDistribution(ProbabilityDistribution):
             else:
                 return db - dab + self.dist.expected_log_density(x)
         else:
-            pass
+            return self.log_density(x)
 
     def cross_entropy(self, dist: ProbabilityDistribution) -> float:
         if isinstance(dist, OptionalDistribution):

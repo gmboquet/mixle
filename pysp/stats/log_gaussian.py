@@ -60,8 +60,8 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: float) -> float:
         """Log-density of log-Gaussian distribution at observation x.
 
-        Log-density of Gaussian with mean mu and variance sigma2 given by,
-            log(f(x;mu, sigma2)) = -log(2*pi*sigma2) - x - (x-mu)^2/sigma2, for positive x.
+        Log-density of log-Gaussian with log-mean mu and log-variance sigma2 given by,
+            log(f(x;mu, sigma2)) = -0.5*log(2*pi*sigma2) - log(x) - 0.5*(log(x)-mu)^2/sigma2, for positive x.
 
         Args:
             x (float): Positive valued observation of log-Gaussian.
