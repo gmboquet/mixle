@@ -1,0 +1,176 @@
+"""mpi4py backend for distributed estimation (SPMD).
+
+Every MPI rank runs the same script; rank 0 plays the Spark driver. Each rank
+holds a shard of the raw data, encodes it locally once, and keeps the encoded
+chunks resident (process persistence is free under MPI). Per EM iteration the
+model is broadcast from the root for bitwise consistency, every rank
+accumulates sufficient statistics over its shard, the per-rank
+``(count, accumulator.value())`` payloads are gathered to the root, the root
+folds them with ``combine()``, applies ``key_merge``/``key_replace`` once
+globally, runs the M-step, and broadcasts the new model - so every rank
+returns an identical distribution and the surrounding ``optimize`` loop stays
+in lockstep across ranks with no further coordination.
+
+Usage (run with ``mpiexec -n 4 python script.py``)::
+
+    from pysp.utils.parallel_mpi import MPIEncodedData, mpi_out
+    from pysp.utils.estimation import optimize
+
+    data = load_data()                       # every rank loads (or root_only=True)
+    enc = MPIEncodedData(data, estimator=est)
+    model = optimize(None, est, enc_data=enc, max_its=50, out=mpi_out())
+
+``mpi_out()`` returns ``sys.stdout`` on the root and a throwaway buffer on
+other ranks so iteration logging is printed once. Log-density sums are
+``allreduce``-d, so the convergence test in ``optimize`` agrees on all ranks.
+
+mpi4py is an optional dependency (``pip install pysparkplug[mpi]``); importing
+this module without it raises ImportError.
+"""
+import io
+import pickle
+import sys
+from typing import Any, Optional, Sequence, Tuple
+
+import numpy as np
+
+from mpi4py import MPI
+
+__all__ = ['MPIEncodedData', 'mpi_out']
+
+_PROTO = pickle.HIGHEST_PROTOCOL
+
+
+def mpi_out(comm: Optional['MPI.Comm'] = None, root: int = 0):
+    """sys.stdout on the root rank, a discarded buffer elsewhere."""
+    comm = MPI.COMM_WORLD if comm is None else comm
+    return sys.stdout if comm.Get_rank() == root else io.StringIO()
+
+
+class MPIEncodedData:
+    """Encoded-data handle sharded across MPI ranks (SPMD).
+
+    Drop-in for the ``enc_data`` argument of ``optimize``/``best_of``/
+    ``seq_estimate``/``seq_initialize``/``seq_log_density_sum``; construct it
+    and call those functions identically on every rank.
+
+    Args:
+        data (Sequence): Raw observations. With ``root_only=False`` (default)
+            every rank passes the SAME full dataset and keeps the round-robin
+            shard ``data[rank::size]``. With ``root_only=True`` only the root
+            needs real data (other ranks may pass None); shards are scattered.
+        estimator (Optional[ParameterEstimator]): Used to build the encoder
+            when ``encoder`` is not given.
+        encoder (Optional[DataSequenceEncoder]): Explicit encoder.
+        sub_chunks (int): Encoded sub-chunks per rank (bounds peak memory of
+            the vectorized update).
+        comm (Optional[MPI.Comm]): Communicator (default COMM_WORLD).
+        root (int): Driver rank for the combine/M-step.
+    """
+
+    def __init__(self, data: Optional[Sequence[Any]], estimator=None, encoder=None,
+                 sub_chunks: int = 1, comm: Optional['MPI.Comm'] = None,
+                 root: int = 0, root_only: bool = False):
+        self.comm = MPI.COMM_WORLD if comm is None else comm
+        self.root = root
+        self.rank = self.comm.Get_rank()
+        self.world = self.comm.Get_size()
+
+        if encoder is None:
+            if estimator is None:
+                raise ValueError('MPIEncodedData requires an estimator or an explicit encoder.')
+            encoder = estimator.accumulator_factory().make().acc_to_encoder()
+
+        if root_only:
+            if self.rank == self.root:
+                if data is None:
+                    raise ValueError('root_only=True requires data on the root rank.')
+                shards = [[data[j] for j in range(i, len(data), self.world)]
+                          for i in range(self.world)]
+            else:
+                shards = None
+            shard = self.comm.scatter(shards, root=self.root)
+        else:
+            if data is None:
+                raise ValueError('every rank must pass data when root_only=False.')
+            shard = [data[j] for j in range(self.rank, len(data), self.world)]
+
+        n = len(shard)
+        k = max(1, min(int(sub_chunks), n)) if n else 1
+        self._enc_chunks = []
+        for i in range(k):
+            part = [shard[j] for j in range(i, n, k)]
+            if part:
+                self._enc_chunks.append((len(part), encoder.seq_encode(part)))
+
+        self.size = self.comm.allreduce(float(n), op=MPI.SUM)
+
+    # -- local accumulation --------------------------------------------------
+
+    def _local_update(self, estimator, model) -> Tuple[float, Any]:
+        accumulator = estimator.accumulator_factory().make()
+        count = 0.0
+        for sz, x in self._enc_chunks:
+            count += sz
+            accumulator.seq_update(x, np.ones(sz), model)
+        return count, accumulator.value()
+
+    def _fold_and_share(self, estimator, local: Tuple[float, Any]):
+        """Gather per-rank stats, fold+M-step on the root, broadcast the model."""
+        gathered = self.comm.gather(pickle.dumps(local, protocol=_PROTO), root=self.root)
+        if self.rank == self.root:
+            accumulator = estimator.accumulator_factory().make()
+            nobs = 0.0
+            for raw in gathered:
+                count, stats = pickle.loads(raw)
+                nobs += count
+                accumulator.combine(stats)
+            stats_dict = dict()
+            accumulator.key_merge(stats_dict)
+            accumulator.key_replace(stats_dict)
+            model_b = pickle.dumps(estimator.estimate(nobs, accumulator.value()),
+                                   protocol=_PROTO)
+        else:
+            model_b = None
+        return pickle.loads(self.comm.bcast(model_b, root=self.root))
+
+    # -- protocol recognized by pysp.stats dispatch -------------------------
+
+    def pysp_seq_estimate(self, estimator, prev_estimate):
+        """One distributed EM step; every rank returns the identical model."""
+        # broadcast the root's model so all ranks accumulate against the same
+        # floating-point parameters even if a caller diverged
+        model = pickle.loads(self.comm.bcast(
+            pickle.dumps(prev_estimate, protocol=_PROTO), root=self.root))
+        return self._fold_and_share(estimator, self._local_update(estimator, model))
+
+    def pysp_seq_initialize(self, estimator, rng: np.random.RandomState, p: float):
+        """Distributed randomized initialization; identical model on all ranks."""
+        if self.rank == self.root:
+            seeds = [int(s) for s in rng.randint(2 ** 31, size=self.world)]
+        else:
+            seeds = None
+        seed = self.comm.scatter(seeds, root=self.root)
+        rng_loc = np.random.RandomState(seed)
+        rng_w = np.random.RandomState(seed=rng_loc.randint(2 ** 31))
+
+        accumulator = estimator.accumulator_factory().make()
+        count = 0.0
+        for sz, x in self._enc_chunks:
+            w = np.zeros(sz, dtype=float)
+            w[rng_w.rand(sz) <= p] = 1.0
+            count += np.sum(w)
+            accumulator.seq_initialize(x, w, rng_loc)
+        return self._fold_and_share(estimator, (count, accumulator.value()))
+
+    def pysp_seq_log_density_sum(self, estimate) -> Tuple[float, float]:
+        """Allreduced (count, log-density sum) - identical on every rank."""
+        cnt, ll = 0.0, 0.0
+        for sz, x in self._enc_chunks:
+            cnt += sz
+            ll += estimate.seq_log_density(x).sum()
+        return (self.comm.allreduce(cnt, op=MPI.SUM),
+                self.comm.allreduce(ll, op=MPI.SUM))
+
+    def __len__(self) -> int:
+        return int(self.size)
