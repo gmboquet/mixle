@@ -123,6 +123,66 @@ class TorchEngineTestCase(unittest.TestCase):
         self.assertLess(abs(mus[1] - 5.0), 0.2)
         self.assertLess(abs(ws[0] - 0.3), 0.05)
 
+    # -- gradient MAP --------------------------------------------------------------
+
+    def test_fit_map_zero_strength_equals_mle(self):
+        truth = MixtureDistribution([CompositeDistribution((GaussianDistribution(-4.0, 1.0),)),
+                                     CompositeDistribution((GaussianDistribution(4.0, 1.0),))],
+                                    [0.5, 0.5])
+        data = truth.sampler(seed=3).sample(size=500)
+        start = MixtureDistribution([CompositeDistribution((GaussianDistribution(-1.0, 4.0),)),
+                                     CompositeDistribution((GaussianDistribution(1.0, 4.0),))],
+                                    [0.5, 0.5])
+        tm = TorchMixture(start)
+        enc = tm.encode(data)
+        m_mle, ll_mle = tm.fit_mle(enc, max_its=400, lr=0.05, out=io.StringIO())
+        m_map, lp_map = tm.fit_map(enc, prior_strength=0.0, max_its=400, lr=0.05, out=io.StringIO())
+        self.assertLess(abs(ll_mle - lp_map), 1.0e-4 * abs(ll_mle))
+
+    def test_fit_map_regularizes_variance(self):
+        # tiny dataset with near-identical points: MLE collapses sigma^2 toward
+        # the (tiny) sample variance; an informative NormalGamma prior holds it up
+        data = [0.0, 0.01, -0.01, 0.005, -0.005, 0.0, 0.01, -0.01]
+        start = GaussianDistribution(0.0, 1.0)
+        tm = TorchMixture(start)
+        enc = tm.encode(data)
+        m_mle, _ = tm.fit_mle(enc, max_its=2000, lr=0.05, out=io.StringIO())
+        prior = {'family': 'normalgamma', 'mu0': 0.0, 'kappa': 1.0e-3, 'a': 3.0, 'b': 2.0}
+        m_map, _ = tm.fit_map(enc, priors=prior, max_its=2000, lr=0.05, out=io.StringIO())
+
+        self.assertLess(m_mle.sigma2, 0.01)
+        self.assertGreater(m_map.sigma2, 10.0 * m_mle.sigma2)
+        # MAP mode in sigma^2 coordinates: maximizing
+        # (a - 1 + 0.5 + n/2) log tau - (b + SS/2) tau over sigma^2 = 1/tau gives
+        # sigma^2* = (b + SS/2) / (a + n/2 - 0.5) at kappa ~ 0
+        n = len(data)
+        ss = sum(x * x for x in data)
+        expected = (2.0 + 0.5 * ss) / (3.0 + n / 2.0 - 0.5)
+        self.assertLess(abs(m_map.sigma2 - expected) / expected, 0.05)
+
+    def test_fit_map_smooths_unseen_categories(self):
+        # vocabulary contains 'c' but the data never does: MAP with a Dirichlet
+        # prior keeps visibly more mass on 'c' than MLE
+        comp = CompositeDistribution((CategoricalDistribution({'a': 0.6, 'b': 0.3, 'c': 0.1}),))
+        data = [('a',)] * 60 + [('b',)] * 40
+        tm = TorchMixture(comp)
+        enc = tm.encode(data)
+        m_mle, _ = tm.fit_mle(enc, max_its=1500, lr=0.1, out=io.StringIO())
+        m_map, _ = tm.fit_map(enc, prior_strength=30.0, max_its=1500, lr=0.1, out=io.StringIO())
+        p_mle = m_mle.dists[0].pmap['c']
+        p_map = m_map.dists[0].pmap['c']
+        self.assertGreater(p_map, 5.0 * max(p_mle, 1.0e-12))
+        self.assertGreater(p_map, 0.01)
+
+    def test_fit_map_full_model_runs(self):
+        # default priors must compose over the deep model (composite + sequence)
+        tm = TorchMixture(self.model)
+        enc = tm.encode(self.data)
+        fitted, lp = tm.fit_map(enc, prior_strength=1.0, max_its=150, lr=0.05, out=io.StringIO())
+        self.assertTrue(np.isfinite(lp))
+        ll = fitted.seq_log_density(fitted.dist_to_encoder().seq_encode(self.data))
+        self.assertTrue(np.all(np.isfinite(ll)))
+
     # -- devices ------------------------------------------------------------------
 
     def test_float32_parity_loose(self):

@@ -14,7 +14,25 @@ default_prior = DirichletDistribution(1.0 + 1.0e-12)
 
 class IntegerCategoricalDistribution(ProbabilityDistribution):
 
-    def __init__(self, prob_vec: Union[np.ndarray, List[float], sp.spmatrix], default_value: float = 0.0, min_index: int = 0, name: Optional[str] = None, prior: ProbabilityDistribution = default_prior):
+    def __init__(self, prob_vec: Union[np.ndarray, List[float], sp.spmatrix, int] = None,
+                 default_value: Union[float, np.ndarray, List[float]] = 0.0, min_index: int = 0,
+                 name: Optional[str] = None, prior: ProbabilityDistribution = default_prior,
+                 min_val: Optional[int] = None, p_vec=None):
+        """Accepts both calling conventions:
+
+            IntegerCategoricalDistribution(min_val, p_vec)   # pysp.stats order
+            IntegerCategoricalDistribution(p_vec, min_index=...)
+
+        plus the pysp.stats keyword names min_val/p_vec as aliases.
+        """
+        if p_vec is not None:
+            prob_vec = p_vec
+        if min_val is not None:
+            min_index = int(min_val)
+        if prob_vec is not None and np.ndim(prob_vec) == 0 and np.ndim(default_value) > 0:
+            # pysp.stats argument order: (min_val, p_vec)
+            prob_vec, min_index, default_value = default_value, int(prob_vec), 0.0
+
         self.min_index = min_index
         self.name = name
         self.set_parameters(prob_vec)#, default_value, min_index))
@@ -287,7 +305,13 @@ class IntegerCategoricalAccumulatorFactory(object):
 
 class IntegerCategoricalEstimator(object):
 
-    def __init__(self, min_index: Optional[int] = None, max_index: Optional[int] = None, default_value: float = 0.0, name: Optional[str] = None, prior: ProbabilityDistribution = default_prior, keys: Tuple[Optional[str], ] = (None,)):
+    def __init__(self, min_index: Optional[int] = None, max_index: Optional[int] = None, default_value: float = 0.0, name: Optional[str] = None, prior: ProbabilityDistribution = default_prior, keys: Tuple[Optional[str], ] = (None,),
+                 min_val: Optional[int] = None, max_val: Optional[int] = None):
+        # min_val/max_val accepted as aliases to match pysp.stats.IntegerCategoricalEstimator
+        if min_val is not None:
+            min_index = min_val
+        if max_val is not None:
+            max_index = max_val
 
         self.minVal        = min_index
         self.maxVal        = max_index
