@@ -19,7 +19,9 @@ from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
+    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
+    DistributionEnumerator, child_enumerator
+from pysp.utils.enumeration import BufferedStream, best_first_union
 
 
 E0 = TypeVar('E0')  # Type of encoded data.
@@ -103,6 +105,15 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def component_log_density(self, x: int) -> np.ndarray:
+        """Log-density of each mixture component (length distribution, dirac at v) at x.
+
+        Args:
+            x (int): Integer value.
+
+        Returns:
+            Numpy array of the two component log-densities.
+
+        """
         rv = np.zeros(2, dtype=np.float64)
         rv[0] = self.log_p + self.len_dist.log_density(x)
         if x == self.v:
@@ -110,6 +121,15 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def posterior(self, x: int) -> np.ndarray:
+        """Posterior probability of each mixture component given observation x.
+
+        Args:
+            x (int): Integer value.
+
+        Returns:
+            Numpy array of the two component posterior probabilities (sums to one).
+
+        """
         comp_log_density = self.component_log_density(x)
         if comp_log_density[1] == -np.inf:
             return np.array([1, 0], dtype=np.float64)
@@ -126,6 +146,15 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
         return comp_log_density
 
     def seq_component_log_density(self, x: E) -> np.ndarray:
+        """Vectorized component log-densities at sequence encoded input x.
+
+        Args:
+            x (E): Sequence encoded data from DiracLengthMixtureDataEncoder.
+
+        Returns:
+            Numpy array of shape (len(x), 2) of component log-densities.
+
+        """
         sz, idx_v, idx_nv, enc_x = x
         ll_mat = np.zeros((sz, 2), dtype=np.float64)
 
@@ -135,6 +164,15 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
         return ll_mat
 
     def seq_log_density(self, x: E) -> np.ndarray:
+        """Vectorized evaluation of the mixture log-density at sequence encoded input x.
+
+        Args:
+            x (E): Sequence encoded data from DiracLengthMixtureDataEncoder.
+
+        Returns:
+            Numpy array of log-density (float) of len(x).
+
+        """
         sz, idx_v, idx_nv, enc_x = x
         ll_mat = np.zeros((sz, 2), dtype=np.float64)
 
@@ -172,6 +210,15 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
             return rv
 
     def seq_posterior(self, x: E) -> np.ndarray:
+        """Vectorized component posterior probabilities at sequence encoded input x.
+
+        Args:
+            x (E): Sequence encoded data from DiracLengthMixtureDataEncoder.
+
+        Returns:
+            Numpy array of shape (len(x), 2) of component posteriors.
+
+        """
         sz, idx_v, idx_nv, enc_x = x
         rv = np.zeros((sz, 2), dtype=np.float64)
 
@@ -201,9 +248,27 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'DiracLengthMixtureSampler':
+        """Create a DiracLengthMixtureSampler from parameters of this distribution.
+
+        Args:
+            seed (Optional[int]): Used to set seed in random sampler.
+
+        Returns:
+            DiracLengthMixtureSampler object.
+
+        """
         return DiracLengthMixtureSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'DiracLengthMixtureEstimator':
+        """Create a DiracLengthMixtureEstimator with matching dirac value v.
+
+        Args:
+            pseudo_count (Optional[float]): Used to inflate sufficient statistics.
+
+        Returns:
+            DiracLengthMixtureEstimator object.
+
+        """
 
         if pseudo_count is not None:
             est = self.len_dist.estimator(pseudo_count)
@@ -215,12 +280,48 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
             return DiracLengthMixtureEstimator(estimator=est, v=self.v, name=self.name)
 
     def dist_to_encoder(self) -> 'DiracLengthMixtureDataEncoder':
-        """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
+        """Returns a DiracLengthMixtureDataEncoder for encoding sequences of iid integer observations."""
         len_dist_encoder = self.len_dist.dist_to_encoder()
         return DiracLengthMixtureDataEncoder(encoder=len_dist_encoder, v=self.v)
 
+    def enumerator(self) -> 'DiracLengthMixtureEnumerator':
+        """Returns a DiracLengthMixtureEnumerator iterating the union of the length-distribution
+        support and the dirac point v in descending probability order."""
+        return DiracLengthMixtureEnumerator(self)
+
+
+class DiracLengthMixtureEnumerator(DistributionEnumerator):
+    """Enumerates the union of the length-distribution support and the dirac point v.
+
+    The model is a two-component mixture: the length distribution with weight p and a dirac
+    delta at v with weight 1-p. The dirac component contributes the trivial single-point
+    stream [(v, 0.0)]. Supports may overlap (the length distribution can also emit v), so
+    candidates are de-duplicated and re-scored exactly with the mixture log-density.
+    """
+
+    def __init__(self, dist: DiracLengthMixtureDistribution) -> None:
+        """DiracLengthMixtureEnumerator object.
+
+        Args:
+            dist (DiracLengthMixtureDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        streams = [BufferedStream(child_enumerator(dist.len_dist, 'DiracLengthMixtureDistribution.len_dist')),
+                   BufferedStream(iter([(dist.v, 0.0)]))]
+        log_offsets = [float(dist.log_p), float(dist.log_1p)]
+
+        def exact_log_density(x):
+            return float(dist.log_density(x))
+
+        self._union = best_first_union(streams, log_offsets, exact_log_density)
+
+    def __next__(self) -> Tuple[int, float]:
+        return next(self._union)
+
 
 class DiracLengthMixtureSampler(DistributionSampler):
+    """DiracLengthMixtureSampler object for sampling from a DiracLengthMixtureDistribution."""
 
     def __init__(self, dist: DiracLengthMixtureDistribution, seed: Optional[int] = None) -> None:
         """DiracLengthMixtureSampler used to generate samples.
@@ -270,6 +371,23 @@ class DiracLengthMixtureSampler(DistributionSampler):
 
 
 class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
+    """DiracLengthMixtureAccumulator object for accumulating component counts and length-distribution statistics.
+
+    Args:
+        accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the length distribution.
+        v (int): Dirac location.
+        keys (Tuple[Optional[str], Optional[str]]): Keys for the mixture weights and component statistics.
+        name (Optional[str]): Set name for object instance.
+
+    Attributes:
+        accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the length distribution.
+        comp_counts (np.ndarray): Posterior-weighted counts for the two components.
+        weight_key (Optional[str]): Key for merging mixture weight counts.
+        comp_key (Optional[str]): Key for merging component sufficient statistics.
+        v (int): Dirac location.
+        name (Optional[str]): Name for object instance.
+
+    """
 
     def __init__(self, accumulator: SequenceEncodableStatisticAccumulator, v: int = 0,
                  keys: Tuple[Optional[str], Optional[str]] = (None, None), name: Optional[str] = None):
@@ -286,6 +404,14 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self._w_rng: Optional[RandomState] = None
 
     def seq_update(self, x: E, weights: np.ndarray, estimate: 'DiracLengthMixtureDistribution'):
+        """Vectorized accumulation of posterior-weighted statistics from encoded observations x.
+
+        Args:
+            x (E): Sequence encoded data from DiracLengthMixtureDataEncoder.
+            weights (np.ndarray): Weights on the observations.
+            estimate (DiracLengthMixtureDistribution): Previous estimate used for posteriors.
+
+        """
         sz, idx_v, idx_nv, enc_x = x
         ll_mat = np.zeros((sz, 2), dtype=np.float64)
 
@@ -318,6 +444,14 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator.seq_update(enc_x, ll_mat[:, 0], estimate.len_dist)
 
     def update(self, x: int, weight: float, estimate: 'DiracLengthMixtureDistribution') -> None:
+        """Add one observation's posterior-weighted contribution to the sufficient statistics.
+
+        Args:
+            x (int): Integer observation.
+            weight (float): Weight on the observation.
+            estimate (DiracLengthMixtureDistribution): Previous estimate used for posteriors.
+
+        """
         posterior = estimate.posterior(x)
         posterior *= weight
         self.comp_counts += posterior
@@ -331,6 +465,14 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self._init_rng = True
 
     def initialize(self, x: int, weight: float, rng: np.random.RandomState):
+        """Initialize the accumulator with observation x, randomly splitting weight at the dirac point.
+
+        Args:
+            x (int): Integer observation.
+            weight (float): Weight on the observation.
+            rng (RandomState): Random number generator for initialization.
+
+        """
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -343,6 +485,14 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             self.comp_counts[0] += weight
 
     def seq_initialize(self, x: E, weights: np.ndarray, rng: np.random.RandomState) -> None:
+        """Vectorized initialization from encoded observations x with random splits at the dirac point.
+
+        Args:
+            x (E): Sequence encoded data from DiracLengthMixtureDataEncoder.
+            weights (np.ndarray): Weights on the observations.
+            rng (RandomState): Random number generator for initialization.
+
+        """
 
         sz, xi_v, xi_nv, enc_x = x
 
@@ -363,21 +513,41 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.comp_counts[1] += np.sum(ww[xi_v, 1])
 
     def combine(self, suff_stat: Tuple[np.ndarray, SS0]) -> 'DiracLengthMixtureAccumulator':
+        """Combine sufficient statistics (component counts, length-dist stats) with this accumulator.
+
+        Args:
+            suff_stat (Tuple[np.ndarray, SS0]): Component counts and length-distribution statistics.
+
+        Returns:
+            This DiracLengthMixtureAccumulator.
+
+        """
         self.comp_counts += suff_stat[0]
         self.accumulator.combine(suff_stat[1])
 
         return self
 
     def value(self) -> Tuple[np.ndarray, Any]:
+        """Returns sufficient statistics as a tuple (component counts, length-distribution statistics)."""
         return self.comp_counts, self.accumulator.value()
 
     def from_value(self, x: Tuple[np.ndarray, SS0]) -> 'DiracLengthMixtureAccumulator':
+        """Set sufficient statistics from a (component counts, length-distribution statistics) tuple.
+
+        Args:
+            x (Tuple[np.ndarray, SS0]): Component counts and length-distribution statistics.
+
+        Returns:
+            This DiracLengthMixtureAccumulator.
+
+        """
         self.comp_counts = x[0]
         self.accumulator.from_value(x[1])
 
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+        """Merge keyed sufficient statistics into stats_dict under the weight and component keys."""
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
                 stats_dict[self.weight_key] += self.comp_counts
@@ -393,6 +563,7 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+        """Replace keyed sufficient statistics from stats_dict under the weight and component keys."""
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
                 self.comp_counts = stats_dict[self.weight_key]
@@ -405,11 +576,27 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> 'DiracLengthMixtureDataEncoder':
+        """Returns a DiracLengthMixtureDataEncoder for encoding sequences of iid integer observations."""
         acc_encoder = self.accumulator.acc_to_encoder()
         return DiracLengthMixtureDataEncoder(encoder=acc_encoder, v=self.v)
 
 
 class DiracLengthMixtureAccumulatorFactory(StatisticAccumulatorFactory):
+    """DiracLengthMixtureAccumulatorFactory object for creating DiracLengthMixtureAccumulator objects.
+
+    Args:
+        factory (StatisticAccumulatorFactory): Accumulator factory for the length distribution.
+        v (int): Dirac location.
+        keys (Tuple[Optional[str], Optional[str]]): Keys for the mixture weights and component statistics.
+        name (Optional[str]): Set name for object instance.
+
+    Attributes:
+        factory (StatisticAccumulatorFactory): Accumulator factory for the length distribution.
+        v (int): Dirac location.
+        keys (Tuple[Optional[str], Optional[str]]): Keys for the mixture weights and component statistics.
+        name (Optional[str]): Name for object instance.
+
+    """
 
     def __init__(self, factory: StatisticAccumulatorFactory, v: int = 0,
                  keys: Tuple[Optional[str], Optional[str]] = (None, None), name: Optional[str] = None) -> None:
@@ -419,10 +606,32 @@ class DiracLengthMixtureAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
 
     def make(self) -> 'DiracLengthMixtureAccumulator':
+        """Returns a new DiracLengthMixtureAccumulator wrapping a fresh length-distribution accumulator."""
         return DiracLengthMixtureAccumulator(accumulator=self.factory.make(), v=self.v, keys=self.keys, name=self.name)
 
 
 class DiracLengthMixtureEstimator(ParameterEstimator):
+    """DiracLengthMixtureEstimator object for estimating DiracLengthMixtureDistribution objects.
+
+    Args:
+        estimator (ParameterEstimator): Estimator for the length distribution.
+        v (int): Dirac location.
+        fixed_p (Optional[float]): Hold the length-distribution weight p fixed at this value.
+        suff_stat (Optional[float]): Prior value of p used with pseudo_count for regularization.
+        pseudo_count (Optional[float]): Used to inflate the component count statistics.
+        name (Optional[str]): Set name for object instance.
+        keys (Tuple[Optional[str], Optional[str]]): Keys for the mixture weights and component statistics.
+
+    Attributes:
+        estimator (ParameterEstimator): Estimator for the length distribution.
+        v (int): Dirac location.
+        pseudo_count (Optional[float]): Used to inflate the component count statistics.
+        suff_stat (Optional[float]): Prior value of p used with pseudo_count for regularization.
+        keys (Tuple[Optional[str], Optional[str]]): Keys for the mixture weights and component statistics.
+        name (Optional[str]): Name for object instance.
+        fixed_p_vec (Optional[np.ndarray]): Fixed component weights [p, 1-p] when fixed_p is given.
+
+    """
 
     def __init__(self, estimator: ParameterEstimator, v: int = 0, fixed_p: Optional[int] = None,
                  suff_stat: Optional[float] = None, pseudo_count: Optional[float] = None,
@@ -436,10 +645,21 @@ class DiracLengthMixtureEstimator(ParameterEstimator):
         self.fixed_p_vec = np.asarray([fixed_p, 1-fixed_p]) if fixed_p is not None and 0 < fixed_p <= 1 else None
 
     def accumulator_factory(self) -> 'DiracLengthMixtureAccumulatorFactory':
+        """Returns a DiracLengthMixtureAccumulatorFactory consistent with this estimator."""
         factory = self.estimator.accumulator_factory()
         return DiracLengthMixtureAccumulatorFactory(factory=factory, v=self.v, keys=self.keys, name=self.name)
 
     def estimate(self, nobs: Optional[float], suff_stat: Tuple[np.ndarray, SS0]) -> 'DiracLengthMixtureDistribution':
+        """Estimate a DiracLengthMixtureDistribution from accumulated sufficient statistics.
+
+        Args:
+            nobs (Optional[float]): Weighted number of observations.
+            suff_stat (Tuple[np.ndarray, SS0]): Component counts and length-distribution statistics.
+
+        Returns:
+            DiracLengthMixtureDistribution object.
+
+        """
         counts, comp_suff_stats = suff_stat
 
         len_dist = self.estimator.estimate(counts[0], comp_suff_stats)
@@ -470,15 +690,28 @@ class DiracLengthMixtureEstimator(ParameterEstimator):
 
 
 class DiracLengthMixtureDataEncoder(DataSequenceEncoder):
+    """DiracLengthMixtureDataEncoder object for encoding sequences of iid integer observations.
+
+    Args:
+        encoder (DataSequenceEncoder): Encoder for the length distribution.
+        v (int): Dirac location.
+
+    Attributes:
+        encoder (DataSequenceEncoder): Encoder for the length distribution.
+        v (int): Dirac location.
+
+    """
 
     def __init__(self, encoder: DataSequenceEncoder, v: int = 0) -> None:
         self.encoder = encoder
         self.v = v
 
     def __str__(self) -> str:
+        """Returns string representation of DiracLengthMixtureDataEncoder object."""
         return 'DiracMixtureDataEncoder(encoder=%s, v=%s)' % (repr(self.encoder), repr(self.v))
 
     def __eq__(self, other: object) -> bool:
+        """Return True if other is a DiracLengthMixtureDataEncoder with equal base encoder and v."""
         if isinstance(other, DiracLengthMixtureDataEncoder):
             if other.encoder == self.encoder:
                 return other.v == self.v
@@ -488,6 +721,15 @@ class DiracLengthMixtureDataEncoder(DataSequenceEncoder):
             return False
 
     def seq_encode(self, x: Sequence[int]) -> Tuple[int, np.ndarray, np.ndarray, Any]:
+        """Encode a sequence of iid integer observations for vectorized use.
+
+        Args:
+            x (Sequence[int]): Sequence of iid integer observations.
+
+        Returns:
+            Tuple of (sequence length, indices equal to v, indices not equal to v, base-encoded data).
+
+        """
         x = np.asarray(x, dtype=np.int32)
         xi_v = np.flatnonzero(x == self.v).astype(np.int32)
         xi_nv = np.flatnonzero(x != self.v).astype(np.int32)

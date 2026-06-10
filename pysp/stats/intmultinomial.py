@@ -14,15 +14,20 @@ the integer-categories given by p = (p_0, ..., p_k), is given by
 where P_len(N) is a distribution for the number of trials in the multinomial.
 
 """
+import itertools
+
 import numpy as np
 from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEncodableProbabilityDistribution, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
+    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
+    DistributionEnumerator, EnumerationError
 from pysp.arithmetic import maxrandint
 from pysp.stats.null_dist import NullDistribution, NullEstimator, NullDataEncoder, NullAccumulator, \
     NullAccumulatorFactory
+from pysp.stats.catmultinomial import MultisetProductEnumerator
+from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
 
 from typing import Optional, Sequence, Tuple, Any, TypeVar, Union, List, Dict
 
@@ -190,6 +195,59 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Returns IntegerMultinomialDataEncoder object with len_encoder created from len_dist."""
         len_encoder = self.len_dist.dist_to_encoder()
         return IntegerMultinomialDataEncoder(len_encoder=len_encoder)
+
+    def enumerator(self) -> 'IntegerMultinomialEnumerator':
+        """Returns IntegerMultinomialEnumerator iterating count vectors in descending log-density order."""
+        return IntegerMultinomialEnumerator(self)
+
+
+class IntegerMultinomialEnumerator(DistributionEnumerator):
+    """Enumerates integer count vectors (lists of (category, count) pairs) in descending log-density order."""
+
+    def __init__(self, dist: IntegerMultinomialDistribution) -> None:
+        """IntegerMultinomialEnumerator object.
+
+        IntegerMultinomialDistribution.log_density scores an observation by sum_k n_k * log(p_k)
+        alone -- it includes neither the multinomial coefficient nor the trial-count (len_dist)
+        contribution -- so every finite count vector over the positive-probability categories
+        has positive density and the support is countably infinite. Trial counts are introduced
+        lazily through a synthetic frontier: every size-n count vector scores at most
+        n * log(p_max), which strictly decreases in n, so size n is instantiated only once it
+        can still beat the best pending value. Within a size, count vectors are produced by a
+        best-first multiset search over the probability-sorted categories. Values are emitted
+        as lists of (category, count) pairs sorted by category, matching the sampler's format;
+        log_prob equals log_density exactly.
+
+        Raises EnumerationError when some category has probability one: arbitrarily large
+        counts of that category then all have density one and no non-increasing complete
+        ordering of the support mass exists.
+
+        Args:
+            dist (IntegerMultinomialDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        entries = [(int(dist.min_val + k), float(lp)) for k, lp in enumerate(dist.log_p_vec) if lp > -np.inf]
+        if any(lp >= 0.0 for _, lp in entries):
+            raise EnumerationError(dist, reason='a category has probability one, so arbitrarily large trial '
+                                                'counts all have density one and the support mass diverges')
+        entries.sort(key=lambda u: -u[1])
+
+        def combine(pairs: Tuple[Tuple[int, int], ...]) -> List[Tuple[int, int]]:
+            return sorted(pairs)
+
+        if len(entries) == 0:
+            # No positive-probability category: only the empty observation has positive density.
+            self._merge = iter([([], 0.0)])
+        else:
+            elem_buf = BufferedStream(iter(entries))
+            lp_max = entries[0][1]
+            len_stream = BufferedStream((n, n * lp_max) for n in itertools.count())
+            self._merge = LengthFrontierMerge(
+                len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=combine, offset=0.0))
+
+    def __next__(self) -> Tuple[List[Tuple[int, int]], float]:
+        return next(self._merge)
 
 
 class IntegerMultinomialSampler(DistributionSampler):

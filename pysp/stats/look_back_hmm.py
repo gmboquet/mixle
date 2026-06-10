@@ -1,3 +1,32 @@
+"""Evaluate, estimate, and sample from a lookback hidden Markov model (typed rewrite).
+
+Defines the LookbackHiddenMarkovDistribution, LookbackHiddenMarkovSampler,
+LookbackHiddenMarkovEstimatorAccumulator, LookbackHiddenMarkovEstimatorAccumulatorFactory,
+LookbackHiddenMarkovEstimator, and the LookbackHiddenMarkovDataEncoder classes for use with pysparkplug.
+
+A lookback hidden Markov model is a hidden Markov model whose emission distributions condition on the
+previous ``lag`` observations: with hidden states Z(t) following a Markov chain with initial state
+probabilities w and transition matrix A,
+
+    P(X(1),...,X(n)) = sum_z P(X(1:lag) | Z(1)=z_1) * w[z_1]
+                       * prod_{t=lag+1}^{n} P(X(t) | X(t-lag:t-1), Z(t)=z_t) * A[z_{t-1}, z_t],
+
+where the per-state ``topics`` distributions model windows x[t-lag:t+1] of length lag+1 (e.g.
+IntegerMarkovChainDistribution), and the per-state ``init_dist`` distributions model the first ``lag``
+observations. An optional length distribution models the number of emission windows.
+
+Data type: Sequence[T] - each observation is a sequence (e.g. a list) whose length-(lag+1) sliding
+windows have the data type accepted by the topic distributions, and whose first ``lag`` entries have
+the data type accepted by the initial distributions.
+
+Note: This is the typed rewrite of the sibling module pysp.stats.lookback_hmm, which is the original
+implementation kept stable for pysp.examples and external users. The math is identical, but the two
+modules differ slightly in their handling of optional arguments: this module substitutes Null*
+objects (NullDistribution, NullEstimator, NullDataEncoder, ...) for an absent len_dist/init_dist,
+while the sibling uses None (and omits the length term from densities). The
+LookbackHiddenMarkovDataEncoder constructor signatures also differ (here: encoder first with an
+``encoder`` attribute; sibling: lag first with a ``topic_encoder`` attribute).
+"""
 import math
 
 import numba
@@ -21,15 +50,45 @@ E1 = TypeVar('E1')
 
 
 class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution):
+    """Hidden Markov model whose state emissions condition on the previous ``lag`` observations."""
 
     def __init__(self, topics: Sequence[SequenceEncodableProbabilityDistribution], w: np.ndarray,
                  transitions, lag: int = 0,
                  init_dist: Optional[Sequence[SequenceEncodableProbabilityDistribution]] = None,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  name: Optional[str] = None) -> None:
+        """LookbackHiddenMarkovDistribution object for sequences with lagged emission dependence.
+
+        Args:
+            topics (Sequence[SequenceEncodableProbabilityDistribution]): Per-state emission
+                distributions over windows x[t-lag:t+1] of length lag+1.
+            w (np.ndarray): Initial state probabilities (sums to 1.0).
+            transitions (Union[Sequence[Sequence[float]], np.ndarray]): Row-stochastic state
+                transition matrix with shape (num_states, num_states).
+            lag (int): Number of preceding observations each emission conditions on.
+            init_dist (Optional[Sequence[SequenceEncodableProbabilityDistribution]]): Per-state
+                distributions for the first ``lag`` observations x[:lag]. Defaults to a list of
+                NullDistribution objects when None.
+            len_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for the
+                number of emission windows (len(x) - lag + 1). Defaults to NullDistribution.
+            name (Optional[str]): Assign string name to object instance.
+
+        Attributes:
+            topics (Sequence[SequenceEncodableProbabilityDistribution]): Per-state emission distributions.
+            init_dist (Sequence[SequenceEncodableProbabilityDistribution]): Per-state initial distributions.
+            lag (int): Number of preceding observations each emission conditions on.
+            num_topics (int): Number of topic distributions.
+            num_states (int): Number of hidden states (length of w).
+            w (np.ndarray): Initial state probabilities.
+            log_w (np.ndarray): Log of w.
+            transitions (np.ndarray): Transition matrix with shape (num_states, num_states).
+            len_dist (SequenceEncodableProbabilityDistribution): Length distribution.
+            name (Optional[str]): Name of object instance.
+
+        """
         with np.errstate(divide='ignore'):
             self.topics = topics
-            self.init_dist = init_dist if init_dist is not None else [NullDistribution()]*lag
+            self.init_dist = init_dist if init_dist is not None else [NullDistribution()]*len(w)
             self.lag = lag
             self.num_topics = len(topics)
             self.num_states = len(w)
@@ -40,6 +99,7 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
             self.name = name
 
     def __str__(self) -> str:
+        """Returns string representation of LookbackHiddenMarkovDistribution object."""
         s1 = ','.join(map(str, self.topics))
         s2 = repr(list(self.w))
         s3 = repr([list(u) for u in self.transitions])
@@ -52,10 +112,31 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
         s1, s2, s3, s4, s5, s6, s7)
 
     def density(self, x):
+        """Evaluate the density of the distribution at sequence x.
+
+        Args:
+            x (Sequence[T]): Observed sequence.
+
+        Returns:
+            float: Density at x.
+
+        """
         return exp(self.log_density(x))
 
     def log_density(self, x):
+        """Evaluate the log-density of the distribution at sequence x.
 
+        Marginalizes the hidden state path with a scaled forward pass. The initial segment x[:lag] is
+        scored by init_dist, each window x[t-lag:t+1] by the topic distributions, and the number of
+        emission windows by len_dist.
+
+        Args:
+            x (Sequence[T]): Observed sequence with len(x) >= lag.
+
+        Returns:
+            float: Log-density at x.
+
+        """
         if x is None or len(x) == 0:
             if self.len_dist is not None:
                 return self.len_dist(0)
@@ -110,7 +191,15 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
         return retval
 
     def viterbi_sequence(self, x):
+        """Compute the most likely hidden state sequence for observed sequence x.
 
+        Args:
+            x (Sequence[T]): Observed sequence with len(x) >= lag.
+
+        Returns:
+            np.ndarray: Integer array of len(x) - lag + 1 most likely hidden state indices.
+
+        """
         obs_cnt = len(x) - self.lag + 1
         log_w = self.log_w
         log_t = np.log(self.transitions)
@@ -142,7 +231,15 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
         return rv
 
     def seq_log_density(self, x):
+        """Vectorized evaluation of the log-density at encoded sequences x.
 
+        Args:
+            x: Encoded sequence data produced by seq_encode() / dist_to_encoder().
+
+        Returns:
+            np.ndarray: Log-density value for each encoded sequence.
+
+        """
         num_states = self.num_states
 
         (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
@@ -175,7 +272,16 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
         return ll_ret
 
     def seq_posterior(self, x):
+        """Compute posterior hidden state probabilities for encoded sequences x.
 
+        Args:
+            x: Encoded sequence data produced by seq_encode() / dist_to_encoder().
+
+        Returns:
+            List[np.ndarray]: For each sequence, an array of per-position posterior state
+                probabilities with shape (num_windows, num_states).
+
+        """
         (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
 
         tot_cnt = len(ids) + len(idi)
@@ -207,18 +313,58 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
         return [alphas[tz[i]:tz[i + 1], :] for i in range(len(tz) - 1)]
 
     def sampler(self, seed: Optional[int] = None) -> 'LookbackHiddenMarkovSampler':
+        """Create a LookbackHiddenMarkovSampler for this distribution.
+
+        Args:
+            seed (Optional[int]): Seed for random number generator.
+
+        Returns:
+            LookbackHiddenMarkovSampler: Sampler object (requires a non-null len_dist).
+
+        """
         return LookbackHiddenMarkovSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'LookbackHiddenMarkovEstimator':
+        """Create a LookbackHiddenMarkovEstimator from this distribution.
+
+        Note: lag and init_estimators are not propagated; construct a LookbackHiddenMarkovEstimator
+        directly when lag > 0.
+
+        Args:
+            pseudo_count (Optional[float]): Regularize the initial-state and transition estimates.
+
+        Returns:
+            LookbackHiddenMarkovEstimator: Estimator built from the topic and length distributions.
+
+        """
         len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
         comp_ests = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
         return LookbackHiddenMarkovEstimator(comp_ests, pseudo_count=(pseudo_count, pseudo_count),
                                              len_estimator=len_est)
 
+    def seq_encode(self, x: Sequence[Sequence[T]]):
+        """Encode a sequence of observed sequences for vectorized 'seq_' calls.
+
+        Args:
+            x (Sequence[Sequence[T]]): Sequence of iid observed sequences.
+
+        Returns:
+            Encoded data consistent with seq_log_density(), seq_posterior(), and seq_update().
+
+        """
+        return self.dist_to_encoder().seq_encode(x)
+
     def dist_to_encoder(self) -> 'LookbackHiddenMarkovDataEncoder':
+        """Return a LookbackHiddenMarkovDataEncoder for encoding sequences of iid observations.
+
+        Returns:
+            LookbackHiddenMarkovDataEncoder: Encoder built from the topic, initial, and length
+                distributions of this instance.
+
+        """
         encoder = self.topics[0].dist_to_encoder()
         len_encoder = self.len_dist.dist_to_encoder()
-        init_encoder = self.init_dist.dist_to_encoder()
+        init_encoder = self.init_dist[0].dist_to_encoder()
 
         return LookbackHiddenMarkovDataEncoder(encoder=encoder, len_encoder=len_encoder, init_encoder=init_encoder,
                                                lag=self.lag)
@@ -226,8 +372,17 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
 
 
 class LookbackHiddenMarkovSampler(DistributionSampler):
+    """Sampler for LookbackHiddenMarkovDistribution. Requires non-null init_dist and len_dist."""
 
     def __init__(self, dist: LookbackHiddenMarkovDistribution, seed: Optional[int] = None) -> None:
+        """LookbackHiddenMarkovSampler object.
+
+        Args:
+            dist (LookbackHiddenMarkovDistribution): Distribution to sample from (init_dist and
+                len_dist must be set, and topics must support sample_given()).
+            seed (Optional[int]): Seed for random number generator.
+
+        """
         self.num_states = dist.num_states
         self.dist = dist
         self.rng = RandomState(seed)
@@ -244,7 +399,16 @@ class LookbackHiddenMarkovSampler(DistributionSampler):
         self.state_sampler = MarkovChainDistribution(p_map, t_map).sampler(seed=self.rng.randint(0, maxrandint))
 
     def sample(self, size: Optional[int] = None):
+        """Draw iid sequences from the lookback hidden Markov distribution.
 
+        Args:
+            size (Optional[int]): Number of sequences to draw. If None, a single sequence is returned.
+
+        Returns:
+            Union[List[T], List[List[T]]]: One sampled sequence if size is None, else a list of
+                ``size`` sampled sequences.
+
+        """
         if size is None:
             lag = self.dist.lag
             n = self.len_sampler.sample()
@@ -259,8 +423,23 @@ class LookbackHiddenMarkovSampler(DistributionSampler):
 
 
 class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulator for sufficient statistics of a lookback hidden Markov model."""
 
     def __init__(self, seq_accumulators, init_accumulators=None, lag=0, len_accumulator=None, keys=(None, None, None)):
+        """LookbackHiddenMarkovEstimatorAccumulator object.
+
+        Args:
+            seq_accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Per-state accumulators
+                for the emission window distributions.
+            init_accumulators (Optional[Sequence[SequenceEncodableStatisticAccumulator]]): Per-state
+                accumulators for the initial-segment distributions.
+            lag (int): Number of preceding observations each emission conditions on.
+            len_accumulator (Optional[SequenceEncodableStatisticAccumulator]): Accumulator for the
+                window-count distribution.
+            keys (Tuple[Optional[str], Optional[str], Optional[str]]): Keys for initial-state counts,
+                transition counts, and state accumulators.
+
+        """
         self.seq_accumulators = seq_accumulators
         self.init_accumulators = init_accumulators
         self.num_states = len(seq_accumulators)
@@ -275,10 +454,25 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
         self.state_key = keys[2]
 
     def update(self, x, weight, estimate):
+        """Update sufficient statistics with one observed sequence and weight.
+
+        Args:
+            x (Sequence[T]): Observed sequence.
+            weight (float): Weight for the observation.
+            estimate (LookbackHiddenMarkovDistribution): Current estimate used for the E-step.
+
+        """
         self.seq_update(estimate.seq_encode([x]), np.asarray([weight]), estimate)
 
     def initialize(self, x, weight, rng):
+        """Initialize sufficient statistics with one observed sequence using random state weights.
 
+        Args:
+            x (Sequence[T]): Observed sequence.
+            weight (float): Weight for the observation.
+            rng (np.random.RandomState): Random number generator for the random state assignment.
+
+        """
         n = len(x) - self.lag + 1
         lag = self.lag
 
@@ -300,8 +494,69 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
                 for j in range(self.num_states):
                     self.seq_accumulators[j].initialize(x[(i - lag):(i + 1)], w[k + 1, j], rng)
 
-    def seq_update(self, x, weights, estimate):
+    def seq_initialize(self, x, weights, rng):
+        """Vectorized initialization of sufficient statistics with encoded sequences.
 
+        Args:
+            x: Encoded sequence data produced by acc_to_encoder() (or a matching dist encoder).
+            weights (np.ndarray): Weight for each encoded sequence.
+            rng (np.random.RandomState): Random number generator for the random state assignment.
+
+        """
+        (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
+
+        num_states = self.num_states
+        tot_cnt = len(ids) + len(idi)
+
+        # per-position sparse soft state assignment, mirroring initialize()
+        ww = rng.dirichlet(np.ones(num_states) / (num_states ** 2), size=tot_cnt)
+
+        w_init = ww[imi, :] * weights[idi][:, None]
+        w_seq = ww[ims, :] * weights[ids][:, None]
+
+        self.init_counts += w_init.sum(axis=0)
+        self.state_counts += w_init.sum(axis=0) + w_seq.sum(axis=0)
+
+        # transitions between consecutive positions within each sequence
+        tz = np.concatenate([[0], sz]).cumsum().astype(np.int32)
+        prev_mask = np.ones(tot_cnt, dtype=bool)
+        prev_mask[tz[1:] - 1] = False
+        prev_idx = np.flatnonzero(prev_mask)
+        next_idx = prev_idx + 1
+        seq_of_pos = np.repeat(np.arange(len(sz)), sz)
+        w_pos = weights[seq_of_pos[prev_idx]]
+        self.trans_counts += np.einsum('n,ni,nj->ij', w_pos, ww[prev_idx, :], ww[next_idx, :])
+
+        for j in range(num_states):
+            self.init_accumulators[j].seq_initialize(enc_idata, w_init[:, j], rng)
+            self.seq_accumulators[j].seq_initialize(enc_sdata, w_seq[:, j], rng)
+
+        if self.len_accumulator is not None and len_enc is not None:
+            self.len_accumulator.seq_initialize(len_enc, weights, rng)
+
+    def acc_to_encoder(self) -> 'LookbackHiddenMarkovDataEncoder':
+        """Return a LookbackHiddenMarkovDataEncoder consistent with this accumulator.
+
+        Returns:
+            LookbackHiddenMarkovDataEncoder: Encoder built from the member accumulators.
+
+        """
+        encoder = self.seq_accumulators[0].acc_to_encoder()
+        init_encoder = self.init_accumulators[0].acc_to_encoder() if self.init_accumulators else NullDataEncoder()
+        len_encoder = self.len_accumulator.acc_to_encoder() if self.len_accumulator is not None else NullDataEncoder()
+
+        return LookbackHiddenMarkovDataEncoder(encoder=encoder, lag=self.lag, len_encoder=len_encoder,
+                                               init_encoder=init_encoder)
+
+    def seq_update(self, x, weights, estimate):
+        """Vectorized Baum-Welch update of sufficient statistics with encoded sequences.
+
+        Args:
+            x: Encoded sequence data produced by acc_to_encoder() (or a matching dist encoder).
+            weights (np.ndarray): Weight for each encoded sequence.
+            estimate (LookbackHiddenMarkovDistribution): Current estimate used for the E-step.
+
+        """
         (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
 
         tot_cnt = len(ids) + len(idi)
@@ -343,7 +598,15 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
             self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
 
     def combine(self, suff_stat):
+        """Aggregate sufficient statistics from suff_stat (a value() tuple) into this accumulator.
 
+        Args:
+            suff_stat (Tuple): Sufficient statistics in the format returned by value().
+
+        Returns:
+            LookbackHiddenMarkovEstimatorAccumulator: This accumulator after aggregation.
+
+        """
         lag, num_states, init_counts, state_counts, trans_counts, seq_accumulators, init_accumulators, len_acc = suff_stat
 
         self.init_counts += init_counts
@@ -360,7 +623,13 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
         return self
 
     def value(self):
+        """Return the sufficient statistics of this accumulator.
 
+        Returns:
+            Tuple: (lag, num_states, init_counts, state_counts, trans_counts, seq_acc_values,
+                init_acc_values, len_acc_value).
+
+        """
         if self.len_accumulator is not None:
             len_val = self.len_accumulator.value()
         else:
@@ -370,6 +639,15 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
             [u.value() for u in self.seq_accumulators]), tuple([u.value() for u in self.init_accumulators]), len_val
 
     def from_value(self, x):
+        """Set the sufficient statistics of this accumulator from a value() tuple.
+
+        Args:
+            x (Tuple): Sufficient statistics in the format returned by value().
+
+        Returns:
+            LookbackHiddenMarkovEstimatorAccumulator: This accumulator after assignment.
+
+        """
         lag, num_states, init_counts, state_counts, trans_counts, seq_accumulators, init_accumulators, len_acc = x
 
         self.lag = lag
@@ -390,7 +668,12 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
         return self
 
     def key_merge(self, stats_dict):
+        """Merge keyed sufficient statistics of this accumulator into stats_dict.
 
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary mapping keys to merged sufficient statistics.
+
+        """
         if self.init_key is not None:
             if self.init_key in stats_dict:
                 stats_dict[self.init_key] += self.init_counts
@@ -421,7 +704,12 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
             self.len_accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict):
+        """Replace keyed sufficient statistics of this accumulator with values from stats_dict.
 
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary mapping keys to merged sufficient statistics.
+
+        """
         if self.init_key is not None:
             if self.init_key in stats_dict:
                 self.init_counts = stats_dict[self.init_key]
@@ -444,12 +732,27 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
             self.len_accumulator.key_replace(stats_dict)
 
 
-class LookbackHiddenMarkovEstimatorAccumulatorFactory(object):
+class LookbackHiddenMarkovEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for creating LookbackHiddenMarkovEstimatorAccumulator objects."""
 
     def __init__(self, lag: int, seq_factories: Sequence[StatisticAccumulatorFactory],
                  init_factories: Optional[Sequence[StatisticAccumulatorFactory]] = None,
                  len_factory: Optional[StatisticAccumulatorFactory] = NullAccumulatorFactory(),
                  keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None)):
+        """LookbackHiddenMarkovEstimatorAccumulatorFactory object.
+
+        Args:
+            lag (int): Number of preceding observations each emission conditions on.
+            seq_factories (Sequence[StatisticAccumulatorFactory]): Per-state factories for the
+                emission window accumulators.
+            init_factories (Optional[Sequence[StatisticAccumulatorFactory]]): Per-state factories for
+                the initial-segment accumulators. Defaults to NullAccumulatorFactory per state.
+            len_factory (Optional[StatisticAccumulatorFactory]): Factory for the window-count
+                accumulator. Defaults to NullAccumulatorFactory.
+            keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Keys for
+                initial-state counts, transition counts, and state accumulators.
+
+        """
         self.seq_factories = seq_factories
         self.keys = keys if keys is not None else (None, None, None)
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
@@ -461,6 +764,12 @@ class LookbackHiddenMarkovEstimatorAccumulatorFactory(object):
             self.init_factories = init_factories
 
     def make(self) -> 'LookbackHiddenMarkovEstimatorAccumulator':
+        """Create a new LookbackHiddenMarkovEstimatorAccumulator from the member factories.
+
+        Returns:
+            LookbackHiddenMarkovEstimatorAccumulator: Accumulator with zeroed sufficient statistics.
+
+        """
         len_acc = self.len_factory.make() if self.len_factory is not None else None
         seq_acc = [self.seq_factories[i].make() for i in range(len(self.seq_factories))]
         init_acc = [self.init_factories[i].make() for i in range(len(self.init_factories))]
@@ -469,6 +778,7 @@ class LookbackHiddenMarkovEstimatorAccumulatorFactory(object):
 
 
 class LookbackHiddenMarkovEstimator(ParameterEstimator):
+    """Estimator for a lookback hidden Markov model from aggregated sufficient statistics."""
 
     def __init__(self, estimators: Sequence[ParameterEstimator], lag: int = 0,
                  init_estimators: Optional[Sequence[ParameterEstimator]] = None,
@@ -477,12 +787,31 @@ class LookbackHiddenMarkovEstimator(ParameterEstimator):
                  pseudo_count: Optional[Tuple[Optional[float], Optional[float]]] = (None, None),
                  name: Optional[str] = None,
                  keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None)):
+        """LookbackHiddenMarkovEstimator object.
+
+        Args:
+            estimators (Sequence[ParameterEstimator]): Per-state estimators for the emission window
+                distributions (one per hidden state).
+            lag (int): Number of preceding observations each emission conditions on.
+            init_estimators (Optional[Sequence[ParameterEstimator]]): Per-state estimators for the
+                initial-segment distributions. Defaults to NullEstimator per state (the sibling
+                module pysp.stats.lookback_hmm requires these to be passed explicitly).
+            len_estimator (Optional[ParameterEstimator]): Estimator for the window-count distribution.
+                Defaults to NullEstimator.
+            suff_stat (Optional[Tuple]): Kept for interface consistency (unused).
+            pseudo_count (Optional[Tuple[Optional[float], Optional[float]]]): Regularize the
+                initial-state probabilities and the transition matrix respectively.
+            name (Optional[str]): Assign string name to the estimated distribution.
+            keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Keys for
+                initial-state counts, transition counts, and state accumulators.
+
+        """
         self.num_states = len(estimators)
         self.estimators = estimators
         self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None)
         self.suff_stat = suff_stat
         self.keys = keys if keys is not None else (None, None, None)
-        self.len_estimator = len_estimator
+        self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.name = name
         self.lag = lag
 
@@ -492,6 +821,13 @@ class LookbackHiddenMarkovEstimator(ParameterEstimator):
             self.init_estimators = init_estimators
 
     def accumulator_factory(self):
+        """Create a LookbackHiddenMarkovEstimatorAccumulatorFactory from the member estimators.
+
+        Returns:
+            LookbackHiddenMarkovEstimatorAccumulatorFactory: Factory for accumulators consistent
+                with this estimator.
+
+        """
         est_factories = [u.accumulator_factory() for u in self.estimators]
         iest_factories = [u.accumulator_factory() for u in self.init_estimators]
 
@@ -500,7 +836,17 @@ class LookbackHiddenMarkovEstimator(ParameterEstimator):
                                                                self.keys)
 
     def estimate(self, nobs: Optional[float], suff_stat):
+        """Estimate a LookbackHiddenMarkovDistribution from aggregated sufficient statistics.
 
+        Args:
+            nobs (Optional[float]): Weighted number of observations (passed to the length estimator).
+            suff_stat (Tuple): Sufficient statistics in the format returned by
+                LookbackHiddenMarkovEstimatorAccumulator.value().
+
+        Returns:
+            LookbackHiddenMarkovDistribution: M-step estimate of the distribution.
+
+        """
         lag, num_states, init_counts, state_counts, trans_counts, topic_ss, init_ss, len_ss = suff_stat
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
@@ -529,33 +875,71 @@ class LookbackHiddenMarkovEstimator(ParameterEstimator):
 
 
 class LookbackHiddenMarkovDataEncoder(DataSequenceEncoder):
+    """Encoder for sequences of iid lookback-HMM observations (each a Sequence[T])."""
 
     def __init__(self, encoder: DataSequenceEncoder, lag: int,
                  len_encoder: Optional[DataSequenceEncoder] = NullDataEncoder(),
                  init_encoder: Optional[DataSequenceEncoder] = NullDataEncoder()) -> None:
+        """LookbackHiddenMarkovDataEncoder object.
+
+        Args:
+            encoder (DataSequenceEncoder): Encoder for length-(lag+1) emission windows.
+            lag (int): Number of preceding observations each emission conditions on.
+            len_encoder (Optional[DataSequenceEncoder]): Encoder for window counts. Defaults to
+                NullDataEncoder.
+            init_encoder (Optional[DataSequenceEncoder]): Encoder for the initial x[:lag] segments.
+                Defaults to NullDataEncoder.
+
+        """
         self.encoder = encoder
         self.lag = lag
         self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
         self.init_encoder = init_encoder if init_encoder is not None else NullDataEncoder()
 
     def __str__(self) -> str:
+        """Returns string representation of LookbackHiddenMarkovDataEncoder object."""
         s = 'LookbackHiddenMarkovDataEncoder(encoder=' + str(self.encoder) +',lag=' + str(self.lag)
         s += ',len_encoder=' + str(self.len_encoder) + ',init_encoder=' + str(self.init_encoder) + ')'
         return s
 
     def __eq__(self, other: object) -> bool:
+        """Checks if other is an equivalent LookbackHiddenMarkovDataEncoder (same lag and member encoders).
+
+        Args:
+            other (object): Object to compare.
+
+        Returns:
+            True if other is a LookbackHiddenMarkovDataEncoder with equal lag and member encoders.
+
+        """
         if isinstance(other, LookbackHiddenMarkovDataEncoder):
             c0 = self.len_encoder == other.len_encoder
             c1 = self.init_encoder == other.init_encoder
             c2 = self.lag == other.lag
+            c3 = self.encoder == other.encoder
 
-            return c0 and c1 and c2
+            return c0 and c1 and c2 and c3
 
         else:
             return False
 
     def seq_encode(self, x):
+        """Encode a sequence of iid observed sequences for vectorized processing.
 
+        Each sequence x[i] is split into its initial segment x[i][:lag] and its sliding windows
+        x[i][j-lag:j+1] for j in [lag, len(x[i])); index arrays track which flattened position belongs
+        to which sequence and which positions are initial segments vs emission windows.
+
+        Args:
+            x (Sequence[Sequence[T]]): Sequence of iid observed sequences.
+
+        Returns:
+            Tuple: ((ids, idi, ims, imi, sz, enc_windows, enc_inits), len_enc) where ids/idi map
+                windows/initial segments to sequence indices, ims/imi give their flattened positions,
+                sz holds per-sequence window counts, enc_windows/enc_inits are the encoded windows and
+                initial segments, and len_enc is the encoded window counts.
+
+        """
         ids = []
         idi = []
         xss = []

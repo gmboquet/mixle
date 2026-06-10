@@ -21,13 +21,17 @@ The multinomial is assumed to have data type: Sequence[Tuple[T, float]], where T
 
 """
 from __future__ import annotations
+import heapq
+import itertools
 import numpy as np
 from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEncodableProbabilityDistribution, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
+    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
+    DistributionEnumerator, EnumerationError, child_enumerator
 from pysp.arithmetic import maxrandint
 from pysp.stats.null_dist import NullDistribution, NullEstimator, NullAccumulator, NullAccumulatorFactory
-from typing import Optional, Sequence, Tuple, Any, Union, Dict, TypeVar
+from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
+from typing import Optional, Sequence, Tuple, Any, Union, Dict, TypeVar, Callable, List
 
 T = TypeVar('T') ## Generic data type for value.
 T1 = TypeVar('T1') ## encoded type for dist
@@ -112,7 +116,9 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         rv = 0.0
-        cc = 0.0
+        # Start the trial count at integer zero so integer counts stay integers and the
+        # total is a valid argument for integer-supported length distributions.
+        cc = 0
         for i in range(len(x)):
             rv += self.dist.log_density(x[i][0])*x[i][1]
             cc += x[i][1]
@@ -191,6 +197,126 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> 'MultinomialDataEncoder':
         """Create a MultinomialDataEncoder object from object instance. """
         return MultinomialDataEncoder(encoder=self.dist.dist_to_encoder(), len_encoder=self.len_dist.dist_to_encoder())
+
+    def enumerator(self) -> 'MultinomialEnumerator':
+        """Returns MultinomialEnumerator iterating (value, count)-pair lists in descending probability order."""
+        return MultinomialEnumerator(self)
+
+
+class MultisetProductEnumerator(object):
+    """Best-first enumeration of the size-n multisets drawn from a sorted (value, log_prob) stream.
+
+    Yields (combine(pairs), log_prob) where pairs is a tuple of (value, count) entries with
+    distinct values and counts summing to n, and log_prob = offset + the sum of the n chosen
+    element log probs, in non-increasing order. Each multiset is represented exactly once as
+    a non-decreasing tuple of ranks into the shared BufferedStream; successors increment a
+    single rank while preserving sorted order (only the right-most rank of a run of equal
+    ranks may move), which keeps every multiset reachable exactly once and, because the
+    stream is sorted, makes successor scores monotone non-increasing.
+    """
+
+    def __init__(self, stream: BufferedStream, n: int,
+                 combine: Callable[[Tuple[Tuple[Any, int], ...]], Any] = list,
+                 offset: float = 0.0) -> None:
+        """MultisetProductEnumerator object.
+
+        Args:
+            stream (BufferedStream): Buffered (value, log_prob) stream sorted by descending log_prob.
+            n (int): Multiset size (total count); n = 0 yields the single empty multiset.
+            combine (Callable): Maps the tuple of (value, count) pairs (in stream-rank order) to
+                the emitted support value. Defaults to list.
+            offset (float): Log-probability offset added to every emitted score.
+
+        """
+        self.stream = stream
+        self.n = n
+        self.combine = combine
+        self.offset = offset
+        self._counter = itertools.count()
+        self._heap: List[Tuple[float, int, Tuple[int, ...]]] = []
+        self._visited = set()
+        if n == 0:
+            # The empty multiset, carrying the offset mass alone.
+            self._heap.append((-offset, next(self._counter), ()))
+            self._visited.add(())
+        elif stream.get(0) is not None:
+            root = (0,) * n
+            self._heap.append((-self._score(root), next(self._counter), root))
+            self._visited.add(root)
+
+    def __iter__(self) -> 'MultisetProductEnumerator':
+        return self
+
+    def _score(self, idx: Tuple[int, ...]) -> float:
+        """Return offset plus the sum of the element log probs at ranks idx (recomputed to avoid drift)."""
+        rv = self.offset
+        for i in idx:
+            rv += self.stream.get(i)[1]
+        return rv
+
+    def _pairs(self, idx: Tuple[int, ...]) -> Tuple[Tuple[Any, int], ...]:
+        """Group the non-decreasing rank tuple idx into (value, count) pairs in rank order."""
+        groups: List[List[int]] = []
+        for i in idx:
+            if groups and groups[-1][0] == i:
+                groups[-1][1] += 1
+            else:
+                groups.append([i, 1])
+        return tuple((self.stream.get(i)[0], c) for i, c in groups)
+
+    def __next__(self) -> Tuple[Any, float]:
+        if not self._heap:
+            raise StopIteration
+        _, _, idx = heapq.heappop(self._heap)
+        score = self.offset if len(idx) == 0 else self._score(idx)
+        value = self.combine(self._pairs(idx))
+        for k in range(len(idx)):
+            nxt = idx[k] + 1
+            if k + 1 < len(idx) and nxt > idx[k + 1]:
+                continue
+            succ = idx[:k] + (nxt,) + idx[k + 1:]
+            if succ not in self._visited and self.stream.get(nxt) is not None:
+                self._visited.add(succ)
+                heapq.heappush(self._heap, (-self._score(succ), next(self._counter), succ))
+        return (value, score)
+
+
+class MultinomialEnumerator(DistributionEnumerator):
+    """Enumerates multinomial observations (lists of (value, count) pairs) in descending probability order."""
+
+    def __init__(self, dist: MultinomialDistribution) -> None:
+        """MultinomialEnumerator object.
+
+        Trial counts are pulled lazily from the length distribution's enumerator; each count n
+        contributes the size-n multisets over the (shared, buffered) category enumeration,
+        offset by the trial-count log-probability. Supports of distinct trial counts are
+        disjoint, so the per-count streams merge without re-scoring; the next un-instantiated
+        count's log-probability is a valid frontier bound since category log probs are
+        non-positive. Values are emitted with distinct categories ordered by descending
+        category probability; log_density is invariant to pair order and includes no
+        multinomial coefficient, so each multiset is yielded exactly once with log_prob equal
+        to log_density.
+
+        Raises EnumerationError when no trial-count distribution is modeled (len_dist is Null,
+        leaving the support over total counts undefined) or when len_normalized is set (the
+        geometric-mean density breaks the additive log-density structure).
+
+        Args:
+            dist (MultinomialDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        if isinstance(dist.len_dist, NullDistribution):
+            raise EnumerationError(dist, reason='no trial-count distribution is modeled (len_dist is Null)')
+        if dist.len_normalized:
+            raise EnumerationError(dist, reason='len_normalized densities are not enumerable')
+        elem_buf = BufferedStream(child_enumerator(dist.dist, 'MultinomialDistribution.dist'))
+        len_stream = BufferedStream(child_enumerator(dist.len_dist, 'MultinomialDistribution.len_dist'))
+        self._merge = LengthFrontierMerge(
+            len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=list, offset=lp_len))
+
+    def __next__(self) -> Tuple[Any, float]:
+        return next(self._merge)
 
 
 class MultinomialSampler(DistributionSampler):
