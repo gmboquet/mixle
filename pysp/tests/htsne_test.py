@@ -17,7 +17,7 @@ from pysp.stats import (
 )
 from pysp.stats import PoissonDistribution, SequenceDistribution, IntegerCategoricalDistribution
 from pysp.utils.htsne import (
-    _barnes_hut_negative_forces, _sparse_joint_pmat,
+    _barnes_hut_negative_forces, _exact_negative_forces, _sparse_joint_pmat,
     approx_sparse_model_distances, conditional_pmat, dpmsne, get_pmat, htsne, humap,
     local_factors, model_knn, model_log_affinity, sparse_model_distances, t_kernel,
     tsne_exact, update_alpha,
@@ -54,6 +54,26 @@ def separation_ratio(y, labels):
     between = np.mean([np.linalg.norm(cents[i] - cents[j])
                        for i in range(len(cents)) for j in range(i + 1, len(cents))])
     return between / max(within, 1.0e-12)
+
+
+def affinity_neighbor_purity(log_s, labels, k=10):
+    labels = np.asarray(labels)
+    vals = []
+    for i in range(len(labels)):
+        nbr = np.argsort(log_s[i])[::-1][:k]
+        vals.append(np.mean(labels[nbr] == labels[i]))
+    return float(np.mean(vals))
+
+
+def embedding_neighbor_purity(y, labels, k=10):
+    labels = np.asarray(labels)
+    d2 = np.sum((y[:, None, :] - y[None, :, :]) ** 2, axis=2)
+    np.fill_diagonal(d2, np.inf)
+    vals = []
+    for i in range(len(labels)):
+        nbr = np.argsort(d2[i])[:k]
+        vals.append(np.mean(labels[nbr] == labels[i]))
+    return float(np.mean(vals))
 
 
 class HTSNETestCase(unittest.TestCase):
@@ -230,6 +250,14 @@ class HTSNETestCase(unittest.TestCase):
         self.assertTrue(np.allclose(f_bh, f_exact, atol=1.0e-12))
         self.assertAlmostEqual(z_bh, z_exact, places=10)
 
+    def test_vectorized_exact_repulsion_matches_tree_exact(self):
+        rng = np.random.RandomState(12)
+        y = rng.randn(50, 2)
+        f_vec, z_vec = _exact_negative_forces(y)
+        f_tree, z_tree = _barnes_hut_negative_forces(y, theta=0.0, leaf_size=1)
+        self.assertTrue(np.allclose(f_vec, f_tree, atol=1.0e-12))
+        self.assertAlmostEqual(z_vec, z_tree, places=10)
+
     # ---- kernel and alpha ------------------------------------------------------
 
     def test_kernel_standard_tsne_at_alpha_one(self):
@@ -389,6 +417,105 @@ class HTSNETestCase(unittest.TestCase):
         y = humap(data, mix_model=model, n_neighbors=15, n_epochs=50, seed=4, out=io.StringIO())
         self.assertEqual(y.shape, (len(data), 2))
         self.assertGreater(separation_ratio(y, labels), 1.5)
+
+    @classmethod
+    def _crossed_varlen_data_and_model(cls, n_per=45):
+        content = [
+            IntegerCategoricalDistribution(0, [0.82, 0.12, 0.03, 0.03]),
+            IntegerCategoricalDistribution(0, [0.03, 0.03, 0.12, 0.82]),
+        ]
+        lengths = [PoissonDistribution(6.0), PoissonDistribution(24.0)]
+
+        comps, comp_meta = [], []
+        for topic in range(2):
+            for length in range(2):
+                comps.append(SequenceDistribution(content[topic], len_dist=lengths[length]))
+                comp_meta.append((topic, length))
+
+        data, comp_labels, topic_labels, length_labels = [], [], [], []
+        for k, comp in enumerate(comps):
+            samples = comp.sampler(seed=100 + k).sample(size=n_per)
+            data.extend(samples)
+            comp_labels.extend([k] * len(samples))
+            topic_labels.extend([comp_meta[k][0]] * len(samples))
+            length_labels.extend([comp_meta[k][1]] * len(samples))
+
+        model = MixtureDistribution(comps, [0.25] * 4)
+        return data, np.asarray(comp_labels), np.asarray(topic_labels), np.asarray(length_labels), model
+
+    def test_crossed_varlen_sequence_local_affinity_tracks_content_and_length(self):
+        data, comp_labels, topic_labels, length_labels, model = self._crossed_varlen_data_and_model()
+        factors = local_factors(model, data)
+        self.assertEqual(len(factors), 2)  # sequence content + sequence length
+        self.assertTrue(any(isinstance(f, dict) and f.get('kind') == 'local' for f in factors))
+
+        log_s = model_log_affinity(None, None, affinity=factors, evidence_cap=1.0)
+        self.assertGreater(affinity_neighbor_purity(log_s, comp_labels, k=12), 0.90)
+        self.assertGreater(affinity_neighbor_purity(log_s, topic_labels, k=12), 0.95)
+        self.assertGreater(affinity_neighbor_purity(log_s, length_labels, k=12), 0.90)
+
+    def test_crossed_varlen_sequence_local_embedding_tracks_both_axes(self):
+        data, comp_labels, topic_labels, length_labels, model = self._crossed_varlen_data_and_model()
+        y = htsne(data, mix_model=model, perplexity=18.0, method='exact', affinity='local',
+                  max_its=300, seed=8, out=io.StringIO())
+        self.assertGreater(embedding_neighbor_purity(y, comp_labels, k=12), 0.90)
+        self.assertGreater(embedding_neighbor_purity(y, topic_labels, k=12), 0.95)
+        self.assertGreater(embedding_neighbor_purity(y, length_labels, k=12), 0.90)
+
+    @classmethod
+    def _complex_heterogeneous_data_and_model(cls, n_per=55):
+        cat_probs = [
+            {'red': 0.78, 'blue': 0.12, 'green': 0.10},
+            {'red': 0.10, 'blue': 0.78, 'green': 0.12},
+            {'red': 0.12, 'blue': 0.10, 'green': 0.78},
+        ]
+        seq_probs = [
+            [0.80, 0.12, 0.04, 0.04],
+            [0.04, 0.80, 0.12, 0.04],
+            [0.04, 0.04, 0.12, 0.80],
+        ]
+        miss_probs = [0.15, 0.45, 0.70]
+        count_rates = [3.0, 9.0, 16.0]
+        seq_lens = [5.0, 14.0, 24.0]
+
+        comps = []
+        for k in range(3):
+            comps.append(CompositeDistribution((
+                GaussianDistribution(-5.0 + 5.0 * k, 1.0 + 0.5 * k),
+                CategoricalDistribution(cat_probs[k]),
+                OptionalDistribution(GaussianDistribution(-3.0 + 3.0 * k, 1.2), p=miss_probs[k]),
+                PoissonDistribution(count_rates[k]),
+                SequenceDistribution(IntegerCategoricalDistribution(0, seq_probs[k]),
+                                     len_dist=PoissonDistribution(seq_lens[k])),
+            )))
+
+        data, labels = [], []
+        for k, comp in enumerate(comps):
+            samples = comp.sampler(seed=200 + k).sample(size=n_per)
+            data.extend(samples)
+            labels.extend([k] * len(samples))
+
+        model = MixtureDistribution(comps, [1.0 / 3.0] * 3)
+        return data, np.asarray(labels), model
+
+    def test_complex_heterogeneous_local_affinity_decomposes_all_fields(self):
+        data, labels, model = self._complex_heterogeneous_data_and_model()
+        factors = local_factors(model, data)
+        self.assertEqual(len(factors), 7)
+        self.assertEqual(sum(isinstance(f, dict) and f.get('kind') == 'local' for f in factors), 3)
+
+        log_s = model_log_affinity(None, None, affinity=factors, evidence_cap=1.0)
+        self.assertGreater(affinity_neighbor_purity(log_s, labels, k=12), 0.95)
+
+    def test_complex_heterogeneous_local_barnes_hut_embedding(self):
+        data, labels, model = self._complex_heterogeneous_data_and_model()
+        y = htsne(data, mix_model=model, perplexity=18.0, method='barnes_hut',
+                  affinity='local', neighbor_method='exact', max_its=300,
+                  seed=9, out=io.StringIO())
+        self.assertEqual(y.shape, (len(data), 2))
+        self.assertTrue(np.all(np.isfinite(y)))
+        self.assertGreater(embedding_neighbor_purity(y, labels, k=12), 0.90)
+        self.assertGreater(separation_ratio(y, labels), 2.5)
 
 
     # ---- balanced (mixed-type) affinities -----------------------------------
