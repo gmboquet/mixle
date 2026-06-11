@@ -118,7 +118,9 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
             x[3] (Optional[np.ndarray]): Optional warm-start gammas (defaults to None).
             x[4] (E0): Sequence encoded flattened values.
 
-        Note: Returns the per-document variational lower bound (ELBO); see log_density().
+        Note: Returns the per-document variational lower bound (ELBO); see log_density(). If a
+        document-length distribution 'len_dist' is set, its log-density of the total token count
+        of each document is added to the returned values.
 
         Args:
             x: Encoded corpus of LDA documents (see LDADataEncoder.seq_encode()).
@@ -152,6 +154,11 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         elob7 = gammaln(alpha.sum()) - gammaln(alpha).sum()
 
         elob = elob3 + elob5 + elob6 + elob7
+
+        if self.len_dist is not None and not isinstance(self.len_dist, NullDistribution):
+            doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
+            len_enc = self.len_dist.dist_to_encoder().seq_encode(doc_lens)
+            elob += self.len_dist.seq_log_density(len_enc)
 
         return elob
 
@@ -228,10 +235,12 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
             LDAEstimator object.
 
         """
+        len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
+
         if pseudo_count is None:
-            return LDAEstimator(estimators=[d.estimator() for d in self.topics])
+            return LDAEstimator(estimators=[d.estimator() for d in self.topics], len_estimator=len_est)
         else:
-            return LDAEstimator(estimators=[d.estimator() for d in self.topics],
+            return LDAEstimator(estimators=[d.estimator() for d in self.topics], len_estimator=len_est,
                                 pseudo_count=(pseudo_count,pseudo_count))
 
     def dist_to_encoder(self) -> 'LDADataEncoder':
@@ -313,6 +322,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
     """LDAEstimatorAccumulator object for aggregating sufficient statistics of observed LDA documents."""
 
     def __init__(self, accumulators: Sequence[SequenceEncodableStatisticAccumulator],
+                 len_accumulator: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
                  keys: Optional[Tuple[Optional[str],Optional[str]]] = (None, None),
                  prev_alpha: Optional[np.ndarray] = None) -> None:
         """LDAEstimatorAccumulator object.
@@ -320,6 +330,8 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         Args:
             accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Accumulators for the topic
                 distributions.
+            len_accumulator (Optional[SequenceEncodableStatisticAccumulator]): Accumulator for the
+                document-length distribution (fed the total token count of each document).
             keys (Optional[Tuple[Optional[str], Optional[str]]]): Keys for merging the alpha sufficient
                 statistics and the topic accumulators with matching objects.
             prev_alpha (Optional[np.ndarray]): Previous (or fixed) Dirichlet parameter estimate.
@@ -330,6 +342,8 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             sum_of_logs (np.ndarray): Aggregated expected log topic proportions (length num_topics).
             doc_counts (float): Aggregated weighted document count.
             topic_counts (np.ndarray): Aggregated weighted per-topic value counts.
+            len_accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the document-length
+                distribution. Set to NullAccumulator if None is passed.
             prev_alpha (Optional[np.ndarray]): Previous Dirichlet parameter estimate.
             alpha_key (Optional[str]): Key for merging alpha sufficient statistics.
             topics_key (Optional[str]): Key for merging topic accumulators.
@@ -340,6 +354,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum_of_logs = np.zeros(self.num_topics)
         self.doc_counts = 0.0
         self.topic_counts = np.zeros(self.num_topics)
+        self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
         self.prev_alpha = prev_alpha
         self.alpha_key, self.topics_key = keys if keys is not None else (None, None)
 
@@ -347,6 +362,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self._rng_theta = None
         self._rng_idx = None
         self._rng_topics = None
+        self._rng_len = None
 
     def update(self, x: Sequence[Tuple[Any, float]], weight: float, estimate: LDADistribution) -> None:
         """Update sufficient statistics with a single weighted LDA document.
@@ -382,6 +398,8 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self._rng_idx = RandomState(seed=seeds[1])
             self._rng_w = RandomState(seed=seeds[2])
             self._rng_topics = [RandomState(seed=seeds[3+j]) for j in range(self.num_topics)]
+            if not isinstance(self.len_accumulator, NullAccumulator):
+                self._rng_len = RandomState(seed=rng.randint(maxrandint))
             self._init_rng = True
 
     def seq_initialize(self, x: Tuple[int, np.ndarray, np.ndarray, Optional[np.ndarray], E0], weights: np.ndarray,
@@ -429,6 +447,11 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.topic_counts[j] += np.sum(w)
             self.accumulators[j].seq_initialize(enc_data, w, self._rng_topics[j])
 
+        if not isinstance(self.len_accumulator, NullAccumulator):
+            doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
+            len_enc = self.len_accumulator.acc_to_encoder().seq_encode(doc_lens)
+            self.len_accumulator.seq_initialize(len_enc, weights, self._rng_len)
+
     def initialize(self, x: Sequence[Tuple[Any, float]], weight: float, rng: np.random.RandomState) -> None:
         """Initialize sufficient statistics with a single weighted LDA document.
 
@@ -468,6 +491,9 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                 self.accumulators[j].initialize(x[i][0], w[i], self._rng_topics[j])
                 self.topic_counts[j] += w[i]
 
+        if not isinstance(self.len_accumulator, NullAccumulator):
+            self.len_accumulator.initialize(np.sum(counts), weight, self._rng_len)
+
     def seq_update(self, x: Tuple[int, np.ndarray, np.ndarray, Optional[np.ndarray], E0], weights: np.ndarray,
                    estimate: LDADistribution) -> None:
         """Vectorized update of sufficient statistics from an encoded corpus x.
@@ -499,18 +525,25 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.topic_counts += np.sum(log_density_gamma, axis=0)
         self.prev_alpha = estimate.alpha
 
+        if not isinstance(self.len_accumulator, NullAccumulator):
+            doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
+            len_enc = self.len_accumulator.acc_to_encoder().seq_encode(doc_lens)
+            self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
+
     # return num_documents, idx, counts, final_gammas, enc_data
 
-    def combine(self, suff_stat: Tuple[Optional[np.ndarray], np.ndarray, float, np.ndarray, Sequence[SS0]]) \
+    def combine(self, suff_stat: Tuple[Optional[np.ndarray], np.ndarray, float, np.ndarray, Sequence[SS0],
+                                       Optional[Any]]) \
             -> 'LDAEstimatorAccumulator':
         """Combine the sufficient statistics of suff_stat with this accumulator.
 
-        Arg suff_stat is a Tuple of length 5 containing:
+        Arg suff_stat is a Tuple of length 6 containing:
             suff_stat[0] (Optional[np.ndarray]): Previous Dirichlet parameter estimate.
             suff_stat[1] (np.ndarray): Aggregated expected log topic proportions.
             suff_stat[2] (float): Aggregated weighted document count.
             suff_stat[3] (np.ndarray): Aggregated weighted per-topic value counts.
             suff_stat[4] (Sequence[SS0]): Sufficient statistics for each topic.
+            suff_stat[5] (Optional[Any]): Sufficient statistics for the document-length distribution.
 
         Args:
             suff_stat: See above for details.
@@ -519,7 +552,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             LDAEstimatorAccumulator object.
 
         """
-        prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats = suff_stat
+        prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats, len_suff_stat = suff_stat
 
         if self.prev_alpha is None:
             self.prev_alpha = prev_alpha
@@ -531,14 +564,18 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         for i in range(self.num_topics):
             self.accumulators[i].combine(topic_suff_stats[i])
 
+        if len_suff_stat is not None:
+            self.len_accumulator.combine(len_suff_stat)
+
         return self
 
-    def value(self) -> Tuple[Optional[np.ndarray], np.ndarray, float, np.ndarray, Sequence[Any]]:
+    def value(self) -> Tuple[Optional[np.ndarray], np.ndarray, float, np.ndarray, Sequence[Any], Optional[Any]]:
         """Returns sufficient statistics as a Tuple (see combine() for entry details)."""
-        return self.prev_alpha, self.sum_of_logs, self.doc_counts, self.topic_counts, [u.value() for u in
-                                                                                       self.accumulators]
+        return self.prev_alpha, self.sum_of_logs, self.doc_counts, self.topic_counts, \
+               [u.value() for u in self.accumulators], self.len_accumulator.value()
 
-    def from_value(self, x: Tuple[Optional[np.ndarray], np.ndarray, float, np.ndarray, Sequence[SS0]]) \
+    def from_value(self, x: Tuple[Optional[np.ndarray], np.ndarray, float, np.ndarray, Sequence[SS0],
+                                  Optional[Any]]) \
             -> 'LDAEstimatorAccumulator':
         """Set the sufficient statistics of this accumulator to x.
 
@@ -549,13 +586,16 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             LDAEstimatorAccumulator object.
 
         """
-        prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats = x
+        prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats, len_suff_stat = x
 
         self.prev_alpha = prev_alpha
         self.sum_of_logs = sum_of_logs
         self.doc_counts = doc_counts
         self.topic_counts = topic_counts
         self.accumulators = [self.accumulators[i].from_value(topic_suff_stats[i]) for i in range(self.num_topics)]
+
+        if len_suff_stat is not None:
+            self.len_accumulator.from_value(len_suff_stat)
 
         return self
 
@@ -594,6 +634,8 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         for u in self.accumulators:
             u.key_merge(stats_dict)
 
+        self.len_accumulator.key_merge(stats_dict)
+
     def key_replace(self, stats_dict: Dict[str, Any]) -> None:
         """Replace sufficient statistics of object instance with those of matching keys in stats_dict.
 
@@ -619,6 +661,8 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         for u in self.accumulators:
             u.key_replace(stats_dict)
 
+        self.len_accumulator.key_replace(stats_dict)
+
     def acc_to_encoder(self) -> 'LDADataEncoder':
         """Return an LDADataEncoder object for encoding sequences of iid LDA documents."""
         return LDADataEncoder(encoder=self.accumulators[0].acc_to_encoder())
@@ -628,6 +672,7 @@ class LDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
     """LDAEstimatorAccumulatorFactory object for creating LDAEstimatorAccumulator objects."""
 
     def __init__(self, factories: Sequence[StatisticAccumulatorFactory], dim: int,
+                 len_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
                  keys: Optional[Tuple[Optional[str], Optional[str]]] = (None, None),
                  prev_alpha: Optional[np.ndarray] = None) -> None:
         """LDAEstimatorAccumulatorFactory object.
@@ -635,6 +680,7 @@ class LDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         Args:
             factories (Sequence[StatisticAccumulatorFactory]): Factories for the topic accumulators.
             dim (int): Number of topics.
+            len_factory (StatisticAccumulatorFactory): Factory for the document-length accumulator.
             keys (Optional[Tuple[Optional[str], Optional[str]]]): Keys for the alpha sufficient
                 statistics and the topic accumulators.
             prev_alpha (Optional[np.ndarray]): Previous (or fixed) Dirichlet parameter estimate.
@@ -642,6 +688,7 @@ class LDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         Attributes:
             factories (Sequence[StatisticAccumulatorFactory]): Factories for the topic accumulators.
             dim (int): Number of topics.
+            len_factory (StatisticAccumulatorFactory): Factory for the document-length accumulator.
             keys (Tuple[Optional[str], Optional[str]]): Keys for the alpha sufficient statistics and
                 the topic accumulators.
             prev_alpha (Optional[np.ndarray]): Previous (or fixed) Dirichlet parameter estimate.
@@ -649,18 +696,23 @@ class LDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         """
         self.factories = factories
         self.dim = dim
+        self.len_factory = len_factory
         self.keys = keys if keys is not None else (None, None)
         self.prev_alpha = prev_alpha
 
     def make(self) -> 'LDAEstimatorAccumulator':
         """Returns an LDAEstimatorAccumulator object from attribute variables."""
-        return LDAEstimatorAccumulator([self.factories[i].make() for i in range(self.dim)], self.keys, self.prev_alpha)
+        len_acc = self.len_factory.make() if self.len_factory is not None else None
+        return LDAEstimatorAccumulator([self.factories[i].make() for i in range(self.dim)], len_acc, self.keys,
+                                       self.prev_alpha)
 
 
 class LDAEstimator(ParameterEstimator):
     """LDAEstimator object for estimating an LDADistribution from aggregated sufficient statistics."""
 
-    def __init__(self, estimators: Sequence[ParameterEstimator], suff_stat: Optional[Any] = None,
+    def __init__(self, estimators: Sequence[ParameterEstimator],
+                 len_estimator: Optional[ParameterEstimator] = NullEstimator(),
+                 suff_stat: Optional[Any] = None,
                  pseudo_count: Optional[Tuple[float, float]] = None,
                  keys: Optional[Tuple[Optional[str], Optional[str]]] = (None, None),
                  fixed_alpha: Optional[np.ndarray] = None,
@@ -670,6 +722,8 @@ class LDAEstimator(ParameterEstimator):
 
         Args:
             estimators (Sequence[ParameterEstimator]): ParameterEstimator objects for the topics.
+            len_estimator (Optional[ParameterEstimator]): ParameterEstimator object for the
+                document-length distribution.
             suff_stat (Optional[Any]): Kept for consistency with ParameterEstimator interface.
             pseudo_count (Optional[Tuple[float, float]]): Used to re-weight the alpha sufficient
                 statistics in estimation.
@@ -682,6 +736,8 @@ class LDAEstimator(ParameterEstimator):
         Attributes:
             num_topics (int): Number of topics.
             estimators (Sequence[ParameterEstimator]): ParameterEstimator objects for the topics.
+            len_estimator (ParameterEstimator): ParameterEstimator object for the document-length
+                distribution. Set to NullEstimator if None is passed.
             pseudo_count (Optional[Tuple[float, float]]): Used to re-weight the alpha sufficient
                 statistics in estimation.
             suff_stat (Optional[Any]): Kept for consistency with ParameterEstimator interface.
@@ -694,6 +750,7 @@ class LDAEstimator(ParameterEstimator):
         """
         self.num_topics = len(estimators)
         self.estimators = estimators
+        self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.keys = keys if keys is not None else (None, None)
@@ -704,17 +761,20 @@ class LDAEstimator(ParameterEstimator):
     def accumulator_factory(self) -> 'LDAEstimatorAccumulatorFactory':
         """Returns an LDAEstimatorAccumulatorFactory object from attribute variables."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
-        return LDAEstimatorAccumulatorFactory(est_factories, self.num_topics, self.keys, self.fixed_alpha)
+        len_factory = self.len_estimator.accumulator_factory()
+        return LDAEstimatorAccumulatorFactory(est_factories, self.num_topics, len_factory, self.keys,
+                                              self.fixed_alpha)
 
     def estimate(self, nobs: Optional[float], suff_stat) -> 'LDADistribution':
         """Estimate an LDADistribution from aggregated sufficient statistics.
 
-        Arg suff_stat is a Tuple of length 5 containing:
+        Arg suff_stat is a Tuple of length 6 containing:
             suff_stat[0] (Optional[np.ndarray]): Previous Dirichlet parameter estimate.
             suff_stat[1] (np.ndarray): Aggregated expected log topic proportions.
             suff_stat[2] (float): Aggregated weighted document count.
             suff_stat[3] (np.ndarray): Aggregated weighted per-topic value counts.
             suff_stat[4] (Sequence[SS0]): Sufficient statistics for each topic.
+            suff_stat[5] (Optional[Any]): Sufficient statistics for the document-length distribution.
 
         Args:
             nobs (Optional[float]): Weighted number of observations used in aggregation of suff_stat.
@@ -724,14 +784,15 @@ class LDAEstimator(ParameterEstimator):
             LDADistribution object.
 
         """
-        prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats = suff_stat
+        prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats, len_suff_stat = suff_stat
 
         num_topics = self.num_topics
         topics = [self.estimators[i].estimate(topic_counts[i], topic_suff_stats[i]) for i in range(num_topics)]
+        len_dist = self.len_estimator.estimate(nobs, len_suff_stat)
 
         if doc_counts == 0:
             sys.stderr.write('Warning: LDA Estimation performed with zero documents.\n')
-            return LDADistribution(topics, prev_alpha, gamma_threshold=self.gamma_threshold)
+            return LDADistribution(topics, prev_alpha, len_dist=len_dist, gamma_threshold=self.gamma_threshold)
 
         if self.fixed_alpha is None:
 
@@ -745,7 +806,7 @@ class LDAEstimator(ParameterEstimator):
         else:
             new_alpha = np.asarray(self.fixed_alpha).copy()
 
-        return LDADistribution(topics, new_alpha, gamma_threshold=self.gamma_threshold)
+        return LDADistribution(topics, new_alpha, len_dist=len_dist, gamma_threshold=self.gamma_threshold)
 
 class LDADataEncoder(DataSequenceEncoder):
     """LDADataEncoder object for encoding sequences of iid LDA documents."""

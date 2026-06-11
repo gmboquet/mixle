@@ -406,13 +406,11 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
 
             vv = x[2]
 
-            p = np.asarray(self.trans_count[vv[:,0], vv[:,1]]).flatten()
-            pp = p[pairidx]*cxvec
-            sval = np.bincount(seqidx, weights=pp)
-            np.divide(weights[fsqyvec], sval, out=sval)
-            sval *= fcyvec
-            pp   *= sval[seqidx]
-            pp = np.bincount(pairidx, weights=pp)
+            # No estimate exists yet, so allocate transition mass uniformly
+            # ((cx/sum(cx)) outer cy, as in the low-memory branch) instead of
+            # reading the all-zero trans_count.
+            pp = cxvec * cyvec * weights[obsidx]
+            pp = np.bincount(pairidx, weights=pp, minlength=vv.shape[0])
 
             umat = csr_matrix((pp, (vv[:,0], vv[:,1])), shape=(nw, nw))
             self.trans_count += umat

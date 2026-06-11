@@ -13,7 +13,12 @@ probabilities w and transition matrix A,
 
 where the per-state ``topics`` distributions model windows x[t-lag:t+1] of length lag+1 (e.g.
 IntegerMarkovChainDistribution), and the per-state ``init_dist`` distributions model the first ``lag``
-observations. An optional length distribution models the number of emission windows.
+observations. An optional length distribution models the number of hidden positions: len(x) - lag + 1
+(initial segment plus emission windows) when lag > 0, and len(x) when lag == 0.
+
+With lag == 0 the model reduces to an ordinary hidden Markov model: there is no initial segment,
+``init_dist`` is never evaluated, the first state is drawn from w and emits the window x[0:1], and each
+subsequent state emits x[t:t+1].
 
 Data type: Sequence[T] - each observation is a sequence (e.g. a list) whose length-(lag+1) sliding
 windows have the data type accepted by the topic distributions, and whose first ``lag`` entries have
@@ -68,9 +73,10 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
             lag (int): Number of preceding observations each emission conditions on.
             init_dist (Optional[Sequence[SequenceEncodableProbabilityDistribution]]): Per-state
                 distributions for the first ``lag`` observations x[:lag]. Defaults to a list of
-                NullDistribution objects when None.
+                NullDistribution objects when None. Never evaluated when lag == 0.
             len_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for the
-                number of emission windows (len(x) - lag + 1). Defaults to NullDistribution.
+                number of hidden positions (len(x) - lag + 1 when lag > 0, len(x) when lag == 0).
+                Defaults to NullDistribution.
             name (Optional[str]): Assign string name to object instance.
 
         Attributes:
@@ -128,7 +134,8 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
 
         Marginalizes the hidden state path with a scaled forward pass. The initial segment x[:lag] is
         scored by init_dist, each window x[t-lag:t+1] by the topic distributions, and the number of
-        emission windows by len_dist.
+        hidden positions by len_dist. When lag == 0 there is no initial segment: the first state emits
+        the window x[0:1] directly (ordinary HMM).
 
         Args:
             x (Sequence[T]): Observed sequence with len(x) >= lag.
@@ -151,8 +158,12 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
 
         obs_log_likelihood = np.zeros(num_states, dtype=np.float64)
         obs_log_likelihood += log_w
-        for i in range(num_states):
-            obs_log_likelihood[i] += init_comps[i].log_density(x[:lag])
+        if lag > 0:
+            for i in range(num_states):
+                obs_log_likelihood[i] += init_comps[i].log_density(x[:lag])
+        else:
+            for i in range(num_states):
+                obs_log_likelihood[i] += comps[i].log_density(x[0:1])
 
         if np.max(obs_log_likelihood) == -np.inf:
             return -np.inf
@@ -163,7 +174,7 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
         sum_ll = np.sum(obs_log_likelihood)
         retval = np.log(sum_ll) + max_ll
 
-        for k in range(lag, len(x)):
+        for k in range(max(lag, 1), len(x)):
 
             #  P(Z(t+1) | Z(t) = i) P(Z(t) = i | X(t), X(t-1), ...)
             np.dot(self.transitions.T, obs_log_likelihood, out=obs_log_likelihood)
@@ -186,7 +197,7 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
             retval += np.log(sum_ll) + max_ll
 
         if self.len_dist is not None:
-            retval += self.len_dist.log_density(len(x) - lag + 1)
+            retval += self.len_dist.log_density(len(x) - lag + 1 if lag > 0 else len(x))
 
         return retval
 
@@ -197,10 +208,11 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
             x (Sequence[T]): Observed sequence with len(x) >= lag.
 
         Returns:
-            np.ndarray: Integer array of len(x) - lag + 1 most likely hidden state indices.
+            np.ndarray: Integer array of len(x) - lag + 1 (len(x) when lag == 0) most likely hidden
+                state indices.
 
         """
-        obs_cnt = len(x) - self.lag + 1
+        obs_cnt = len(x) - self.lag + 1 if self.lag > 0 else len(x)
         log_w = self.log_w
         log_t = np.log(self.transitions)
         num_states = self.num_states
@@ -213,10 +225,14 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
         obs_mat = np.zeros((num_states, obs_cnt), dtype=float)
 
         obs_mat[:, 0] += log_w
-        for i in range(num_states):
-            obs_mat[i, 0] += init_comps[i].log_density(x[:lag])
+        if lag > 0:
+            for i in range(num_states):
+                obs_mat[i, 0] += init_comps[i].log_density(x[:lag])
+        else:
+            for i in range(num_states):
+                obs_mat[i, 0] += comps[i].log_density(x[0:1])
 
-        for idx, k in enumerate(range(lag, len(x))):
+        for idx, k in enumerate(range(max(lag, 1), len(x))):
             for i in range(num_states):
                 obs_ll = comps[i].log_density(x[(k - lag):(k + 1)])
                 temp_ll = obs_mat[:, idx] + log_t[:, i] + obs_ll
@@ -255,7 +271,8 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
 
         # Compute state likelihood vectors and scale the max to one
         for i in range(num_states):
-            pr_obs[imi, i] = self.init_dist[i].seq_log_density(enc_idata).astype(np.float64)
+            if self.lag > 0:
+                pr_obs[imi, i] = self.init_dist[i].seq_log_density(enc_idata).astype(np.float64)
             pr_obs[ims, i] = self.topics[i].seq_log_density(enc_sdata).astype(np.float64)
 
         pr_max0 = pr_obs.max(axis=1)
@@ -298,7 +315,8 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
 
         # Compute state likelihood vectors and scale the max to one
         for i in range(num_states):
-            pr_obs[imi, i] = self.init_dist[i].seq_log_density(enc_idata)
+            if self.lag > 0:
+                pr_obs[imi, i] = self.init_dist[i].seq_log_density(enc_idata)
             pr_obs[ims, i] = self.topics[i].seq_log_density(enc_sdata)
 
         pr_max = pr_obs.max(axis=1, keepdims=True)
@@ -414,6 +432,10 @@ class LookbackHiddenMarkovSampler(DistributionSampler):
             n = self.len_sampler.sample()
             state_seq = self.state_sampler.sample_seq(n)
 
+            if lag == 0:
+                # ordinary HMM: each of the n states emits one observation given an empty history
+                return [self.obs_samplers[state_seq[i]].sample_given([]) for i in range(n)]
+
             rv = list(self.init_samplers[state_seq[0]].sample())  # [v_1, ..., v_lag]
             for i in range(1, n):
                 rv.append(self.obs_samplers[state_seq[i]].sample_given(rv[-lag:]))
@@ -473,8 +495,8 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
             rng (np.random.RandomState): Random number generator for the random state assignment.
 
         """
-        n = len(x) - self.lag + 1
         lag = self.lag
+        n = len(x) - lag + 1 if lag > 0 else len(x)
 
         if self.len_accumulator is not None:
             self.len_accumulator.initialize(n, weight, rng)
@@ -485,14 +507,22 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
             self.init_counts += w[0, :]
             self.state_counts += w.sum(axis=0)
 
-            for j in range(self.num_states):
-                self.init_accumulators[j].initialize(x[:lag], w[0, j], rng)
-
-            for k, i in enumerate(range(lag, len(x))):
-                self.trans_counts += np.outer(w[k, :], w[k + 1, :])
-
+            if lag > 0:
                 for j in range(self.num_states):
-                    self.seq_accumulators[j].initialize(x[(i - lag):(i + 1)], w[k + 1, j], rng)
+                    self.init_accumulators[j].initialize(x[:lag], w[0, j], rng)
+
+                for k, i in enumerate(range(lag, len(x))):
+                    self.trans_counts += np.outer(w[k, :], w[k + 1, :])
+
+                    for j in range(self.num_states):
+                        self.seq_accumulators[j].initialize(x[(i - lag):(i + 1)], w[k + 1, j], rng)
+            else:
+                for k in range(len(x)):
+                    if k > 0:
+                        self.trans_counts += np.outer(w[k - 1, :], w[k, :])
+
+                    for j in range(self.num_states):
+                        self.seq_accumulators[j].initialize(x[k:(k + 1)], w[k, j], rng)
 
     def seq_initialize(self, x, weights, rng):
         """Vectorized initialization of sufficient statistics with encoded sequences.
@@ -514,11 +544,18 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
         w_init = ww[imi, :] * weights[idi][:, None]
         w_seq = ww[ims, :] * weights[ids][:, None]
 
-        self.init_counts += w_init.sum(axis=0)
-        self.state_counts += w_init.sum(axis=0) + w_seq.sum(axis=0)
+        tz = np.concatenate([[0], sz]).cumsum().astype(np.int32)
+
+        if self.lag > 0:
+            self.init_counts += w_init.sum(axis=0)
+            self.state_counts += w_init.sum(axis=0) + w_seq.sum(axis=0)
+        else:
+            # lag == 0: the first emission window of each sequence is the initial position
+            nz = sz > 0
+            self.init_counts += (ww[tz[:-1][nz], :] * weights[nz][:, None]).sum(axis=0)
+            self.state_counts += w_seq.sum(axis=0)
 
         # transitions between consecutive positions within each sequence
-        tz = np.concatenate([[0], sz]).cumsum().astype(np.int32)
         prev_mask = np.ones(tot_cnt, dtype=bool)
         prev_mask[tz[1:] - 1] = False
         prev_idx = np.flatnonzero(prev_mask)
@@ -528,7 +565,8 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
         self.trans_counts += np.einsum('n,ni,nj->ij', w_pos, ww[prev_idx, :], ww[next_idx, :])
 
         for j in range(num_states):
-            self.init_accumulators[j].seq_initialize(enc_idata, w_init[:, j], rng)
+            if self.lag > 0:
+                self.init_accumulators[j].seq_initialize(enc_idata, w_init[:, j], rng)
             self.seq_accumulators[j].seq_initialize(enc_sdata, w_seq[:, j], rng)
 
         if self.len_accumulator is not None and len_enc is not None:
@@ -572,7 +610,8 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
 
         # Compute state likelihood vectors and scale the max to one
         for i in range(num_states):
-            pr_obs[imi, i] = estimate.init_dist[i].seq_log_density(enc_idata)
+            if self.lag > 0:
+                pr_obs[imi, i] = estimate.init_dist[i].seq_log_density(enc_idata)
             pr_obs[ims, i] = estimate.topics[i].seq_log_density(enc_sdata)
 
         pr_max = pr_obs.max(axis=1, keepdims=True)
@@ -589,7 +628,8 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
         # numba_baum_welch2.parallel_diagnostics(level=4)
 
         for i in range(num_states):
-            self.init_accumulators[i].seq_update(enc_idata, alphas[imi, i], estimate.init_dist[i])
+            if self.lag > 0:
+                self.init_accumulators[i].seq_update(enc_idata, alphas[imi, i], estimate.init_dist[i])
             self.seq_accumulators[i].seq_update(enc_sdata, alphas[ims, i], estimate.topics[i])
 
         self.state_counts += alphas.sum(axis=0)
@@ -935,7 +975,8 @@ class LookbackHiddenMarkovDataEncoder(DataSequenceEncoder):
 
         Each sequence x[i] is split into its initial segment x[i][:lag] and its sliding windows
         x[i][j-lag:j+1] for j in [lag, len(x[i])); index arrays track which flattened position belongs
-        to which sequence and which positions are initial segments vs emission windows.
+        to which sequence and which positions are initial segments vs emission windows. When lag == 0
+        there are no initial segments: every position is an emission window (ordinary HMM).
 
         Args:
             x (Sequence[Sequence[T]]): Sequence of iid observed sequences.
@@ -943,8 +984,9 @@ class LookbackHiddenMarkovDataEncoder(DataSequenceEncoder):
         Returns:
             Tuple: ((ids, idi, ims, imi, sz, enc_windows, enc_inits), len_enc) where ids/idi map
                 windows/initial segments to sequence indices, ims/imi give their flattened positions,
-                sz holds per-sequence window counts, enc_windows/enc_inits are the encoded windows and
-                initial segments, and len_enc is the encoded window counts.
+                sz holds per-sequence position counts, enc_windows/enc_inits are the encoded windows and
+                initial segments (enc_inits is None when lag == 0), and len_enc is the encoded position
+                counts.
 
         """
         ids = []
@@ -958,17 +1000,23 @@ class LookbackHiddenMarkovDataEncoder(DataSequenceEncoder):
         lag = self.lag
         cnt = 0
         for i in range(len(x)):
-            xxi = x[i][:lag]
             xxs = [x[i][(j - lag):(j + 1)] for j in range(lag, len(x[i]))]
-            xsi.append(xxi)
-            idi.append(i)
             ids.extend([i] * len(xxs))
             xss.extend(xxs)
-            sz.append(len(x[i]) - lag + 1)
 
-            imi.append(cnt)
-            ims.extend(range(cnt + 1, cnt + 1 + (len(x[i]) - lag)))
-            cnt += len(x[i]) - lag + 1
+            if lag > 0:
+                xsi.append(x[i][:lag])
+                idi.append(i)
+                sz.append(len(x[i]) - lag + 1)
+
+                imi.append(cnt)
+                ims.extend(range(cnt + 1, cnt + 1 + (len(x[i]) - lag)))
+                cnt += len(x[i]) - lag + 1
+            else:
+                sz.append(len(x[i]))
+
+                ims.extend(range(cnt, cnt + len(x[i])))
+                cnt += len(x[i])
 
         len_enc = self.len_encoder.seq_encode(sz)
 
@@ -978,7 +1026,7 @@ class LookbackHiddenMarkovDataEncoder(DataSequenceEncoder):
         imi = np.asarray(imi, dtype=np.int32)
         sz = np.asarray(sz, dtype=np.int32)
         xss = self.encoder.seq_encode(xss)
-        xsi = self.init_encoder.seq_encode(xsi)
+        xsi = self.init_encoder.seq_encode(xsi) if lag > 0 else None
 
         return (ids, idi, ims, imi, sz, xss, xsi), len_enc
 
