@@ -1,3 +1,24 @@
+"""Create, estimate, and sample from a hidden Markov model on a rooted tree.
+
+Defines the TreeHiddenMarkovModelDistribution, TreeHiddenMarkovSampler, TreeHiddenMarkovAccumulatorFactory,
+TreeHiddenMarkovAccumulator, TreeHiddenMarkovEstimator, and the TreeHiddenMarkovDataEncoder classes for use
+with pysparkplug.
+
+Data type: Sequence[Tuple[Tuple[int, int], T]]. A single observation is a rooted tree given as a sequence
+of ((node_id, parent_id), emission) tuples, where node_id is an integer in 0,1,...,n-1, the root node has
+parent_id = -1, and the emission has the data type T of the emission (topic) distributions.
+
+Each node u carries a hidden state Z_u in {0,...,K-1}. The root state is drawn from the initial state
+weights w, the state of every child is drawn from the transition probability matrix A conditioned on its
+parent's state (children of a node are conditionally independent given the parent state), and the observed
+emission at node u is drawn from topics[Z_u]. The number of children of each node is modeled by an optional
+length distribution (len_dist) with support on the non-negative integers, which is required for sampling.
+
+Inference uses an upward-downward (beta/eta) message passing recursion over tree levels. Two equivalent
+vectorized implementations are provided and selected with the use_numba flag: numba-compiled kernels that
+parallelize over trees, and a pure-numpy implementation that batches nodes level by level.
+
+"""
 import math
 from typing import List, Any, Tuple, Sequence, Union, Optional, TypeVar, Dict
 import itertools
@@ -49,6 +70,10 @@ def find_level(parents: np.ndarray) -> List[int]:
 
 
 class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
+    """Hidden Markov model on a rooted tree with emission distributions of type T.
+
+    Data type: Sequence[Tuple[Tuple[int, int], T]] (((node_id, parent_id), emission) per node, root parent -1).
+    """
 
     def __init__(self, topics: Sequence[SequenceEncodableProbabilityDistribution],
                  w: Union[Sequence[float], np.ndarray],
@@ -101,6 +126,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             self.use_numba = use_numba
 
     def __str__(self) -> str:
+        """Returns string representation of TreeHiddenMarkovModelDistribution object."""
         s1 = ','.join(map(str, self.topics))
         s2 = repr(list(self.w))
         s3 = repr([list(u) for u in self.transitions])
@@ -112,13 +138,48 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
                'use_numba=%s)' % (s1, s2, s3, s4, s5, s6)
 
     def density(self, x: Sequence[Tuple[D, T]]) -> float:
+        """Density of tree HMM at a single observed tree x.
+
+        See log_density() for details.
+
+        Args:
+            x (Sequence[Tuple[D, T]]): Tree as ((node_id, parent_id), emission) tuples (root parent -1).
+
+        Returns:
+            Density at observation x.
+
+        """
         return exp(self.log_density(x))
 
     def log_density(self, x: Sequence[Tuple[D, T]]) -> float:
+        """Log-density of tree HMM at a single observed tree x.
+
+        The hidden states are marginalized out with an upward (beta) message passing recursion over the
+        tree. Note: the contribution of the length distribution to the likelihood is not included.
+
+        Args:
+            x (Sequence[Tuple[D, T]]): Tree as ((node_id, parent_id), emission) tuples (root parent -1).
+
+        Returns:
+            Log-density at observation x.
+
+        """
         enc_x = self.dist_to_encoder().seq_encode([x])
         return self.seq_log_density(enc_x)[0]
 
     def seq_log_density(self, x: E) -> np.ndarray:
+        """Vectorized evaluation of log-density at sequence encoded input x.
+
+        Dispatches to numba kernels or to the pure-numpy level-by-level recursion depending on which
+        encoding (use_numba) the input was created with.
+
+        Args:
+            x (E): Sequence encoded trees from TreeHiddenMarkovDataEncoder.seq_encode().
+
+        Returns:
+            Numpy array of log-density (float), one entry per encoded tree.
+
+        """
 
         if x[0] is not None:
             tz, (max_level, xln, xlnl, tlnz), (xbi, xp, xc, xl, txz, tp, tpz), enc_x, len_enc = x[0]
@@ -223,6 +284,16 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             return ll_ret
 
     def seq_posterior(self, x: E) -> Optional[List[np.ndarray]]:
+        """Posterior state membership probabilities for each node of each encoded tree.
+
+        Args:
+            x (E): Sequence encoded trees from TreeHiddenMarkovDataEncoder.seq_encode().
+
+        Returns:
+            List with one numpy array per tree, each of shape (num_nodes, num_states), containing the
+            posterior probability of each hidden state at each node.
+
+        """
 
         if x[0] is not None:
             tz, (max_level, xln, xlnl, tlnz), (xbi, xp, xc, xl, txz, tp, tpz), enc_x, _ = x[0]
@@ -311,10 +382,28 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             return [betas[tz[i]:tz[i + 1], :] for i in range(len(tz) - 1)]
 
     def viterbi(self, x: Sequence[Tuple[D, T]]) -> np.ndarray:
+        """Most likely hidden state assignment for each node of a single observed tree.
+
+        Args:
+            x (Sequence[Tuple[D, T]]): Tree as ((node_id, parent_id), emission) tuples (root parent -1).
+
+        Returns:
+            Numpy array of int states, one per node of the tree.
+
+        """
         enc_x = self.dist_to_encoder().seq_encode([x])
         return self.seq_viterbi(enc_x)[0]
 
     def seq_viterbi(self, x: E) -> List[np.ndarray]:
+        """Vectorized Viterbi state assignments for sequence encoded trees.
+
+        Args:
+            x (E): Sequence encoded trees from TreeHiddenMarkovDataEncoder.seq_encode().
+
+        Returns:
+            List with one numpy array of int states per tree (one state per node).
+
+        """
         if x[0] is not None:
             tz, (max_level, xln, xlnl, tlnz), (xbi, xp, xc, xl, txz, tp, tpz), enc_x, _ = x[0]
 
@@ -375,11 +464,34 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             return [state_tracker[tz[i]:tz[i + 1]] for i in range(len(tz) - 1)]
 
     def sampler(self, seed: Optional[int] = None) -> 'TreeHiddenMarkovSampler':
+        """Create a TreeHiddenMarkovSampler object from parameters of distribution instance.
+
+        Args:
+            seed (Optional[int]): Used to set seed in random sampler.
+
+        Returns:
+            TreeHiddenMarkovSampler object.
+
+        Raises:
+            Exception: If len_dist is a NullDistribution (a length distribution with support on the
+                non-negative integers is required for sampling).
+
+        """
         if isinstance(self.len_dist, NullDistribution):
             raise Exception('TreeHiddenMarkovSampler requires len_dist with support on non-negative integers')
         return TreeHiddenMarkovSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'TreeHiddenMarkovEstimator':
+        """Create a TreeHiddenMarkovEstimator with estimators for the topics and length distribution.
+
+        Args:
+            pseudo_count (Optional[float]): Used to inflate sufficient statistics of the initial state
+                weights, transition matrix, topics, and length distribution.
+
+        Returns:
+            TreeHiddenMarkovEstimator object.
+
+        """
         len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
         comp_ests = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
         return TreeHiddenMarkovEstimator(comp_ests, pseudo_count=(pseudo_count, pseudo_count), len_estimator=len_est,
@@ -395,8 +507,26 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
 
 
 class TreeHiddenMarkovSampler(DistributionSampler):
+    """Sampler for the TreeHiddenMarkovModelDistribution. Draws rooted trees of state-emitted observations."""
 
     def __init__(self, dist: 'TreeHiddenMarkovModelDistribution', seed: Optional[int] = None) -> None:
+        """TreeHiddenMarkovSampler object.
+
+        Args:
+            dist (TreeHiddenMarkovModelDistribution): Distribution to sample from. Must have a len_dist
+                with support on the non-negative integers.
+            seed (Optional[int]): Seed for random number generator.
+
+        Attributes:
+            num_states (int): Number of hidden states.
+            dist (TreeHiddenMarkovModelDistribution): Distribution to sample from.
+            rng (RandomState): Random number generator.
+            obs_samplers (List[DistributionSampler]): Sampler for each topic (emission) distribution.
+            init_w (np.ndarray): Initial state weights.
+            transitions (np.ndarray): Transition probability matrix.
+            len_sampler (Optional[DistributionSampler]): Sampler for the number of children of a node.
+
+        """
         self.num_states = dist.num_states
         self.dist = dist
         self.rng = RandomState(seed)
@@ -410,9 +540,33 @@ class TreeHiddenMarkovSampler(DistributionSampler):
             self.len_sampler = None
 
     def sample_state(self, given_state: int, size: Optional[int] = None) -> Union[int, np.ndarray]:
+        """Draw child state(s) from the transition matrix row of a given parent state.
+
+        Args:
+            given_state (int): State of the parent node.
+            size (Optional[int]): Number of child states to draw. If None, a single int is returned.
+
+        Returns:
+            Single state (int) if size is None, else numpy array of size states.
+
+        """
         return self.rng.choice(self.num_states, p=self.transitions[given_state, :], replace=True, size=size)
 
     def sample_tree(self, size: Optional[int] = None):
+        """Sample rooted tree(s) of ((node_id, parent_id), emission) tuples.
+
+        The root state is drawn from the initial weights, each child state from the transition matrix,
+        and the number of children of each node from the length sampler. Sampling stops once the
+        terminal_level of the distribution is reached.
+
+        Args:
+            size (Optional[int]): Number of trees to draw. If None, a single tree is returned.
+
+        Returns:
+            A single tree (list of ((node_id, parent_id), emission) tuples with root parent -1) if size
+            is None, else a list of size trees.
+
+        """
         if size is None:
 
             seq = []
@@ -454,6 +608,18 @@ class TreeHiddenMarkovSampler(DistributionSampler):
             return [self.sample_tree() for xx in range(size)]
 
     def sample(self, size: Optional[int] = None):
+        """Draw iid tree observations from the tree HMM.
+
+        Args:
+            size (Optional[int]): Number of trees to draw. If None, a single tree is returned.
+
+        Returns:
+            A single tree if size is None, else a list of size trees. See sample_tree().
+
+        Raises:
+            RuntimeError: If no length sampler is available for the number of children.
+
+        """
         if self.len_sampler is not None:
             return self.sample_tree(size=size)
         else:
@@ -461,12 +627,38 @@ class TreeHiddenMarkovSampler(DistributionSampler):
 
 
 class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulator for the tree HMM. Tracks initial-state, state, and transition counts plus emission stats."""
 
     def __init__(self, accumulators: Sequence[SequenceEncodableStatisticAccumulator],
                  len_accumulator: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
                  keys: Tuple[Optional[str], Optional[str], Optional[str]] = (None, None, None),
                  name: Optional[str] = None, use_numba: bool = True) -> None:
+        """TreeHiddenMarkovAccumulator object.
 
+        Args:
+            accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Accumulator for the emission
+                distribution of each hidden state.
+            len_accumulator (Optional[SequenceEncodableStatisticAccumulator]): Accumulator for the
+                number-of-children distribution. Defaults to NullAccumulator.
+            keys (Tuple[Optional[str], Optional[str], Optional[str]]): Keys for merging the initial state
+                counts, transition counts, and state (emission) accumulators respectively.
+            name (Optional[str]): Optional name for object instance.
+            use_numba (bool): If True, encoders created from this accumulator use the numba encoding.
+
+        Attributes:
+            accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Emission accumulators.
+            num_states (int): Number of hidden states.
+            init_counts (np.ndarray): Expected root-state counts.
+            trans_counts (np.ndarray): Expected state transition counts (num_states by num_states).
+            state_counts (np.ndarray): Expected state membership counts.
+            len_accumulator (SequenceEncodableStatisticAccumulator): Accumulator for number of children.
+            init_key (Optional[str]): Key for merging initial state counts.
+            trans_key (Optional[str]): Key for merging transition counts.
+            state_key (Optional[str]): Key for merging emission accumulators.
+            name (Optional[str]): Optional name for object instance.
+            use_numba (bool): If True, encoders created from this accumulator use the numba encoding.
+
+        """
         self.accumulators = accumulators
         self.num_states = len(accumulators)
         self.init_counts = np.zeros(self.num_states, dtype=np.float64)
@@ -488,10 +680,26 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self._idx_rng: Optional[RandomState] = None
 
     def update(self, x: Sequence[Tuple[D, T]], weight: float, estimate: TreeHiddenMarkovModelDistribution) -> None:
+        """Update sufficient statistics with a single weighted tree observation.
+
+        Encodes the tree and delegates to seq_update().
+
+        Args:
+            x (Sequence[Tuple[D, T]]): Tree as ((node_id, parent_id), emission) tuples (root parent -1).
+            weight (float): Weight for observation.
+            estimate (TreeHiddenMarkovModelDistribution): Previous estimate used for the E-step.
+
+        """
         enc_x = estimate.dist_to_encoder().seq_encode([x])
         self.seq_update(enc_x, np.asarray([weight]), estimate)
 
     def _rng_initialize(self, rng: RandomState) -> None:
+        """Seed the member random number generators used by initialize()/seq_initialize().
+
+        Args:
+            rng (RandomState): Random number generator used to draw the member seeds.
+
+        """
         rng_seeds = rng.randint(maxrandint, size=2 + self.num_states)
         self._idx_rng = RandomState(seed=rng_seeds[0])
         self._len_rng = RandomState(seed=rng_seeds[1])
@@ -500,6 +708,14 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self._init_rng = True
 
     def initialize(self, x: Sequence[Tuple[D, T]], weight: float, rng: RandomState) -> None:
+        """Initialize sufficient statistics with a single weighted tree observation.
+
+        Args:
+            x (Sequence[Tuple[D, T]]): Tree as ((node_id, parent_id), emission) tuples (root parent -1).
+            weight (float): Weight for observation.
+            rng (RandomState): Random number generator used to draw random state assignments.
+
+        """
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -507,6 +723,17 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self.seq_initialize(enc_x, weights=np.asarray([weight]), rng=rng)
 
     def seq_initialize(self, x: E, weights: np.ndarray, rng: np.random.RandomState) -> None:
+        """Vectorized initialization of sufficient statistics from sequence encoded trees.
+
+        Hidden states are assigned uniformly at random and the initial-state, state, transition, emission,
+        and length statistics are accumulated under that random assignment.
+
+        Args:
+            x (E): Sequence encoded trees from TreeHiddenMarkovDataEncoder.seq_encode().
+            weights (np.ndarray): Weights for each encoded tree.
+            rng (np.random.RandomState): Random number generator used to draw state assignments.
+
+        """
 
         if not self._init_rng:
             self._rng_initialize(rng)
@@ -568,7 +795,18 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 self.len_accumulator.seq_initialize(len_enc[1], weights[len_enc[0]], self._len_rng)
 
     def seq_update(self, x: E, weights: np.ndarray, estimate: TreeHiddenMarkovModelDistribution) -> None:
+        """Vectorized E-step update of sufficient statistics from sequence encoded trees.
 
+        Runs the upward-downward (Baum-Welch style) recursion under the previous estimate to obtain
+        expected initial-state, state membership, and transition counts, and passes the node posteriors
+        as weights to the emission accumulators (and tree weights to the length accumulator).
+
+        Args:
+            x (E): Sequence encoded trees from TreeHiddenMarkovDataEncoder.seq_encode().
+            weights (np.ndarray): Weights for each encoded tree.
+            estimate (TreeHiddenMarkovModelDistribution): Previous estimate used for the E-step.
+
+        """
         if x[0] is not None:
             tz, (max_level, xln, xlnl, tlnz), (xbi, xp, xc, xl, txz, tp, tpz), enc_x, len_enc = x[0]
 
@@ -703,6 +941,16 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[SS0], Optional[SS1]]) \
             -> 'TreeHiddenMarkovAccumulator':
+        """Combine sufficient statistics from another accumulator into this one.
+
+        Args:
+            suff_stat (Tuple): Tuple of number of states, initial-state counts, state counts, transition
+                counts, emission sufficient statistics per state, and length sufficient statistics.
+
+        Returns:
+            Self, with aggregated sufficient statistics.
+
+        """
         num_states, init_counts, state_counts, trans_counts, acc_values, len_acc_value = suff_stat
 
         self.init_counts += init_counts
@@ -719,6 +967,8 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any],
                              Optional[Any]]:
+        """Returns sufficient statistics as a Tuple of number of states, initial-state counts, state
+        counts, transition counts, emission sufficient statistics per state, and length statistics."""
         len_val = self.len_accumulator.value()
 
         return self.num_states, self.init_counts, self.state_counts, self.trans_counts, tuple(
@@ -726,6 +976,16 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[SS0], Optional[SS1]]) \
             -> 'TreeHiddenMarkovAccumulator':
+        """Set sufficient statistics of accumulator from value x.
+
+        Args:
+            x (Tuple): Tuple of number of states, initial-state counts, state counts, transition counts,
+                emission sufficient statistics per state, and length sufficient statistics.
+
+        Returns:
+            Self, with sufficient statistics set to x.
+
+        """
         num_states, init_counts, state_counts, trans_counts, accumulators, len_acc = x
         self.num_states = num_states
         self.init_counts = init_counts
@@ -741,6 +1001,12 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+        """Merge keyed sufficient statistics into stats_dict (and recurse into member accumulators).
+
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary mapping keys to shared sufficient statistics.
+
+        """
         if self.init_key is not None:
             if self.init_key in stats_dict:
                 stats_dict[self.init_key] += self.init_counts
@@ -770,6 +1036,12 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         return None
 
     def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+        """Replace keyed sufficient statistics with values from stats_dict (and recurse into members).
+
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary mapping keys to shared sufficient statistics.
+
+        """
         if self.init_key is not None:
             if self.init_key in stats_dict:
                 self.init_counts = stats_dict[self.init_key]
@@ -791,6 +1063,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         return None
 
     def acc_to_encoder(self) -> 'TreeHiddenMarkovDataEncoder':
+        """Returns a TreeHiddenMarkovDataEncoder object for encoding sequences of tree HMM observations."""
         emission_encoder = self.accumulators[0].acc_to_encoder()
         len_encoder = self.len_accumulator.acc_to_encoder()
 
@@ -799,12 +1072,26 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class TreeHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for creating TreeHiddenMarkovAccumulator objects."""
 
     def __init__(self, factories: Sequence[StatisticAccumulatorFactory],
                  len_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
                  keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None),
                  name: Optional[str] = None,
                  use_numba: bool = True) -> None:
+        """TreeHiddenMarkovAccumulatorFactory object.
+
+        Args:
+            factories (Sequence[StatisticAccumulatorFactory]): Factory for the emission accumulator of
+                each hidden state.
+            len_factory (StatisticAccumulatorFactory): Factory for the number-of-children accumulator.
+                Defaults to NullAccumulatorFactory.
+            keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Keys for merging the
+                initial state counts, transition counts, and state (emission) accumulators respectively.
+            name (Optional[str]): Optional name for object instance.
+            use_numba (bool): If True, created accumulators use the numba encoding.
+
+        """
         self.factories = factories
         self.keys = keys if keys is not None else (None, None, None)
         self.len_factory = len_factory
@@ -812,6 +1099,7 @@ class TreeHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
         self.use_numba = use_numba
 
     def make(self) -> 'TreeHiddenMarkovAccumulator':
+        """Returns a new TreeHiddenMarkovAccumulator object."""
         len_acc = self.len_factory.make() if self.len_factory is not None else None
         return TreeHiddenMarkovAccumulator([self.factories[i].make() for i in range(len(self.factories))],
                                            len_accumulator=len_acc, keys=self.keys, name=self.name,
@@ -819,6 +1107,7 @@ class TreeHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class TreeHiddenMarkovEstimator(ParameterEstimator):
+    """Estimator for the TreeHiddenMarkovModelDistribution from aggregated sufficient statistics."""
 
     def __init__(self, estimators: List[ParameterEstimator],
                  len_estimator: Optional[ParameterEstimator] = NullEstimator(),
@@ -826,7 +1115,21 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
                  name: Optional[str] = None,
                  keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None),
                  use_numba: bool = True) -> None:
+        """TreeHiddenMarkovEstimator object.
 
+        Args:
+            estimators (List[ParameterEstimator]): Estimator for the emission distribution of each hidden
+                state. The number of states is set to len(estimators).
+            len_estimator (Optional[ParameterEstimator]): Estimator for the number-of-children
+                distribution. Defaults to NullEstimator.
+            pseudo_count (Optional[Tuple[Optional[float], Optional[float]]]): Pseudo-counts used to smooth
+                the initial state weights and the transition matrix rows respectively.
+            name (Optional[str]): Optional name for object instance.
+            keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Keys for merging the
+                initial state counts, transition counts, and state (emission) accumulators respectively.
+            use_numba (bool): If True, the estimated distribution and accumulators use the numba encoding.
+
+        """
         self.num_states = len(estimators)
         self.estimators = estimators
         self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None)
@@ -836,6 +1139,7 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
         self.use_numba = use_numba
 
     def accumulator_factory(self) -> TreeHiddenMarkovAccumulatorFactory:
+        """Returns a TreeHiddenMarkovAccumulatorFactory for creating TreeHiddenMarkovAccumulator objects."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         len_factory = self.len_estimator.accumulator_factory()
         return TreeHiddenMarkovAccumulatorFactory(factories=est_factories, len_factory=len_factory, keys=self.keys,
@@ -844,6 +1148,22 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
     def estimate(self, nobs: Optional[float],
                  suff_stat: Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[SS0], Optional[SS1]]) \
             -> 'TreeHiddenMarkovModelDistribution':
+        """Estimate a TreeHiddenMarkovModelDistribution from sufficient statistics (M-step).
+
+        Initial state weights and transition rows are normalized counts, optionally smoothed with the
+        pseudo_count pair. Rows of the transition matrix with no observed transitions are left as zeros
+        when no pseudo-count is given. Topics and the length distribution are estimated from their
+        respective sufficient statistics.
+
+        Args:
+            nobs (Optional[float]): Number of observations.
+            suff_stat (Tuple): Tuple of number of states, initial-state counts, state counts, transition
+                counts, emission sufficient statistics per state, and length sufficient statistics.
+
+        Returns:
+            TreeHiddenMarkovModelDistribution object.
+
+        """
         num_states, init_counts, state_counts, trans_counts, topic_ss, len_ss = suff_stat
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
@@ -877,21 +1197,42 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
 
 
 class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
+    """Data encoder for sequences of tree HMM observations (flattens trees into level-indexed arrays)."""
 
     def __init__(self, emission_encoder: DataSequenceEncoder,
                  len_encoder: Optional[DataSequenceEncoder] = NullDataEncoder(),
                  use_numba: bool = True) -> None:
+        """TreeHiddenMarkovDataEncoder object.
+
+        Args:
+            emission_encoder (DataSequenceEncoder): Encoder for the node emissions (data type T).
+            len_encoder (Optional[DataSequenceEncoder]): Encoder for the number of children of each node.
+                Defaults to NullDataEncoder.
+            use_numba (bool): If True, seq_encode() produces the numba-kernel encoding, else the
+                pure-numpy level-batched encoding.
+
+        """
         self.emission_encoder = emission_encoder
         self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
         self.use_numba = use_numba
 
     def __str__(self) -> str:
+        """Returns string representation of TreeHiddenMarkovDataEncoder object."""
         s1 = repr(self.emission_encoder)
         s2 = repr(self.len_encoder)
         s3 = repr(self.use_numba)
         return 'TreeHiddenMarkovDataEncoder(emission_encoder=%s, len_encoder=%s, use_numba=%s)' % (s1, s2, s3)
 
     def __eq__(self, other: object) -> bool:
+        """Checks if other object is a TreeHiddenMarkovDataEncoder with matching length encoder.
+
+        Args:
+            other (object): Object to compare against.
+
+        Returns:
+            True if other is a TreeHiddenMarkovDataEncoder with an equal len_encoder, else False/None.
+
+        """
         if isinstance(other, TreeHiddenMarkovDataEncoder):
             if self.len_encoder == other.len_encoder:
                 return True
@@ -899,7 +1240,17 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
             return False
 
     def _seq_encode(self, x: Sequence[Sequence[Tuple[D, T]]]) -> Tuple[int, np.ndarray, E5, E6, Any, Optional[Any]]:
+        """Encode trees for the pure-numpy implementation (nodes batched across trees by level).
 
+        Args:
+            x (Sequence[Sequence[Tuple[D, T]]]): Sequence of trees of ((node_id, parent_id), emission)
+                tuples (root parent -1).
+
+        Returns:
+            Tuple of total node count, tree slice offsets, leaf-node arrays, level-indexed parent/child
+            arrays, encoded emissions, and the optional (tree index, encoded child counts) pair.
+
+        """
         xs = []  # flattened values of nodes in order encoded
         obs_idx = [] #  tree seq idx for observed flattened nodes
         idx = []  # idx for node observation by tree in seq used in betas
@@ -1008,6 +1359,20 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
                                                                       Optional[Tuple[int, np.ndarray, E5, E6, Any,
                                                                                      Optional[Tuple[np.ndarray,
                                                                                                     Any]]]]]:
+        """Encode a sequence of tree observations for vectorized functions.
+
+        Returns a pair (numba_encoding, numpy_encoding) with exactly one entry set, depending on
+        use_numba: the numba encoding stores per-tree slice offsets consumed by the numba kernels, while
+        the numpy encoding (see _seq_encode()) batches nodes across trees by level.
+
+        Args:
+            x (Sequence[Sequence[Tuple[D, T]]]): Sequence of trees of ((node_id, parent_id), emission)
+                tuples (root parent -1).
+
+        Returns:
+            Tuple (E) with the numba encoding in slot 0 (numpy slot None), or vice versa.
+
+        """
         if self.use_numba:
             xs = []  # flattened values of nodes in order encoded
             idx = []  # idx corresponding to weight
@@ -1112,6 +1477,7 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
     fastmath=True, parallel=True, cache=True)
 def numba_seq_log_density(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, xlnl, pr_obs, p_level, tr_mat,
                           pr_max0, betas, etas, out):
+    """Numba kernel: per-tree log-likelihood via the upward (beta) recursion, written to out."""
     for n in numba.prange(len(tz)-1):
         #  Observed value slice (xs)
         s0, s1 = tz[n], tz[n+1]
@@ -1200,6 +1566,8 @@ def numba_seq_log_density(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, x
     'float64[:,:, :], float64[:,:])', parallel=True, cache=True)
 def numba_baum_welch(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, xlnl, pr_obs, p_level, tr_mat,
                      weights, betas, etas, alphas, xi_acc, pi_acc):
+    """Numba kernel: upward-downward E-step writing node posteriors (alphas), per-tree expected
+    transition counts (xi_acc), and root-state counts (pi_acc)."""
     for n in numba.prange(len(tz)-1):
 
         #  Observed value slice (xs)
@@ -1335,6 +1703,7 @@ def numba_baum_welch(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, x
     'int32[:], float64[:,:], float64[:, :], float64[:,:], float64[:,:], float64[:,:])', fastmath=True, parallel=True, cache=True)
 def numba_posteriors(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, xlnl, pr_obs, p_level, tr_mat,
                      betas, etas):
+    """Numba kernel: upward (beta) recursion writing normalized per-node state posteriors into betas."""
     for n in numba.prange(len(tz)-1):
 
         #  Observed value slice (xs)
@@ -1417,6 +1786,7 @@ def numba_posteriors(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, x
 @numba.jit('void(int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int64[:], float64[:], float64[:], '
            'float64[:], float64[:,:])', parallel=True, nopython=True, cache=True)
 def numba_initialize(tz, txz, tp, tpz, xp, xc, states, weights, init_counts, state_counts, trans_counts):
+    """Numba kernel: accumulate initial-state, state, and transition counts for random state assignments."""
     for n in numba.prange(len(tz) - 1):
         s0, s1 = tz[n], tz[n+1]
 
@@ -1451,6 +1821,7 @@ def numba_initialize(tz, txz, tp, tpz, xp, xc, states, weights, init_counts, sta
     'int32[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:,:], int32[:])', parallel=True, cache=True)
 def numba_viterbi(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, log_pr_obs, log_init_p, log_tr_mat,
                      betas, etas, out):
+    """Numba kernel: max-product upward recursion writing the most likely state per node into out."""
     for n in numba.prange(len(tz)-1):
 
         #  Observed value slice (xs)
@@ -1544,13 +1915,14 @@ def numba_viterbi(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, log_
 
 @numba.njit('float64[:](int32[:], float64[:], float64[:])', parallel=True, cache=True)
 def vec_bincount(idx, ll, out):
+    """Numba kernel: scatter-add ll into out at positions idx (weighted bincount)."""
     for i in numba.prange(len(idx)):
         out[idx[i]] += ll[i]
     return out
 
 @numba.njit('void(int32, int32, float64[:, :], float64[:], float64[:, :])', cache=True)
 def level_state_prob(levels, num_states, tr_mat, init_prob, out):
-
+    """Numba kernel: marginal state probabilities per tree level, out[k] = init_prob @ tr_mat^k."""
     for i in range(num_states):
         out[0, i] = init_prob[i]
 

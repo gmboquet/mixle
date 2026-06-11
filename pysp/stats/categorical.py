@@ -316,7 +316,7 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
 
         else:
             for i in range(0, len(bcnt)):
-                self.count_map[inv_key_map[i]] += bcnt[i]
+                self.count_map[inv_key_map[i]] = self.count_map.get(inv_key_map[i], 0.0) + bcnt[i]
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: Optional[RandomState]) -> None:
         """Vectorized initialization of Categorical sufficient statistics from encoded sequence of data.

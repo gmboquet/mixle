@@ -1,9 +1,27 @@
+"""Evaluate, estimate, and sample from a graph-grammar distribution over networks.
+
+Defines the GrammarDistribution, GrammarSampler, GrammarAccumulatorFactory, GrammarEstimatorAccumulator,
+GrammarEstimator, and the GrammarDataEncoder classes for use with pysparkplug.
+
+Data type: A clustering-based node replacement grammar (a ``cnrg.VRG.VRG`` object) extracted from an observed
+graph. The likelihood of an observed grammar is computed rule-by-rule against the model grammar: a rule
+contributes the (frequency-weighted) probability of an isomorphic model rule with a matching (or nearby,
+controlled by lhs_delta) left-hand side, mixed with a degree-distribution background model weighted by mix_p.
+
+This module depends on the optional third-party package 'cnrg' (Clustering-based Node Replacement Grammars).
+The module stays importable when 'cnrg' is missing; an informative ImportError is raised at the first use of
+functionality that requires it (sampling and accumulation).
+
+"""
 from pysp.arithmetic import *
 from numpy.random import RandomState
 from pysp.stats.pdist import (
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     ParameterEstimator,
+    StatisticAccumulatorFactory,
+    DataSequenceEncoder,
+    DistributionSampler,
 )
 import numpy as np
 from scipy.sparse import dok_matrix
@@ -17,13 +35,27 @@ import networkx as nx
 from tqdm import tqdm
 import copy
 
-from cnrg.VRG import VRG
-from cnrg.extract import MuExtractor, LocalExtractor, GlobalExtractor
-from cnrg.Tree import create_tree
-import cnrg.partitions as partitions
-from cnrg.LightMultiGraph import LightMultiGraph
-from cnrg.MDL import graph_dl
-from cnrg.generate import generate_graph
+try:
+    from cnrg.VRG import VRG
+    from cnrg.extract import MuExtractor, LocalExtractor, GlobalExtractor
+    from cnrg.Tree import create_tree
+    import cnrg.partitions as partitions
+    from cnrg.LightMultiGraph import LightMultiGraph
+    from cnrg.MDL import graph_dl
+    from cnrg.generate import generate_graph
+
+    _CNRG_IMPORT_ERROR = None
+except ImportError as _e:
+    VRG = None
+    MuExtractor = None
+    LocalExtractor = None
+    GlobalExtractor = None
+    create_tree = None
+    partitions = None
+    LightMultiGraph = None
+    graph_dl = None
+    generate_graph = None
+    _CNRG_IMPORT_ERROR = _e
 
 from pprint import pprint
 import networkx.algorithms.isomorphism as iso
@@ -31,7 +63,31 @@ import numpy as np
 import random
 
 
+def _require_cnrg():
+    """Raise an informative ImportError if the optional 'cnrg' package is not installed.
+
+    Returns:
+        None. Raises ImportError (chained to the original import failure) when 'cnrg' is unavailable.
+
+    """
+    if _CNRG_IMPORT_ERROR is not None:
+        raise ImportError(
+            "pysp.stats.grammar requires the optional third-party package 'cnrg' "
+            "(Clustering-based Node Replacement Grammars) for sampling and estimation. "
+            "Install 'cnrg' to use this functionality."
+        ) from _CNRG_IMPORT_ERROR
+
+
 def get_degree_dist(rule_list):
+    """Compute the edge-weight (degree) histogram over the graphs of a list of grammar rules.
+
+    Args:
+        rule_list: List of cnrg rule objects, each with a networkx graph attribute.
+
+    Returns:
+        Dict mapping observed edge weight to its count, with an extra 'inf' bucket of count 1 for unseen weights.
+
+    """
     dist = {}
     for rule in rule_list:
         for a in rule.graph:
@@ -45,10 +101,30 @@ def get_degree_dist(rule_list):
 
 
 class GrammarDistribution(SequenceEncodableProbabilityDistribution):
+    """GrammarDistribution object for evaluating the likelihood of node-replacement grammars (VRG objects)."""
+
     def __init__(
         self, grammar, mix_p, decomp_level=0, lhs_delta=0, name=None, orig_n=100
     ):
+        """GrammarDistribution object defined by a model grammar and mixing parameters.
 
+        Args:
+            grammar: cnrg VRG object serving as the model grammar.
+            mix_p (float): Weight in [0, 1] on the degree-distribution background model.
+            decomp_level (int): Maximum recursion depth for decomposing unmatched rules.
+            lhs_delta (int): Allowed slack when matching rule left-hand sides.
+            name (Optional[str]): String name of object instance.
+            orig_n (int): Target number of nodes used when sampling graphs.
+
+        Attributes:
+            grammar: cnrg VRG object serving as the model grammar.
+            mix_p (float): Weight in [0, 1] on the degree-distribution background model.
+            decomp_level (int): Maximum recursion depth for decomposing unmatched rules.
+            lhs_delta (int): Allowed slack when matching rule left-hand sides.
+            name (Optional[str]): String name of object instance.
+            orig_n (int): Target number of nodes used when sampling graphs.
+
+        """
         self.name = name
         self.grammar = grammar
         self.mix_p = mix_p
@@ -73,9 +149,34 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def density(self, x):
+        """Density of the grammar distribution at observation x.
+
+        See log_density() for details.
+
+        Args:
+            x: Observed cnrg VRG object.
+
+        Returns:
+            Density at observation x.
+
+        """
         return np.exp(self.log_density(x))
 
     def log_density(self, x):
+        """Log-density of the grammar distribution at observation x.
+
+        Each rule of the observed grammar is matched (up to isomorphism, with left-hand side slack lhs_delta)
+        against the model grammar; matched rules contribute their frequency-weighted probability mixed with a
+        degree-distribution background term weighted by mix_p. Unmatched rules can be recursively decomposed up
+        to decomp_level times. The per-rule probabilities are averaged and logged.
+
+        Args:
+            x: Observed cnrg VRG object.
+
+        Returns:
+            Log-density at observation x.
+
+        """
         total_p = 0.0
         # change to check for colors as well
         #                em = iso.numerical_edge_match('weight',1)
@@ -203,25 +304,84 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
 
     # combine list of grammars into singular grammar? need to take multiple sample outputs as input
     def seq_encode(self, x):
+        """Encode a sequence of grammar observations for vectorized calls (identity encoding).
+
+        Args:
+            x: Sequence of cnrg VRG objects.
+
+        Returns:
+            The input sequence unchanged.
+
+        """
         return x
 
     def seq_log_density(self, x):
+        """Evaluate log_density() at each encoded observation.
+
+        Args:
+            x: Sequence of cnrg VRG objects (from seq_encode).
+
+        Returns:
+            Numpy array of log-densities, one per observation.
+
+        """
         return np.asarray([self.log_density(xx) for xx in x])
 
     def sampler(self, seed=None):
+        """Create a GrammarSampler object from the model grammar of this instance.
+
+        Args:
+            seed (Optional[int]): Unused; kept for protocol compatibility.
+
+        Returns:
+            GrammarSampler object.
+
+        """
         return GrammarSampler(self.grammar, orig_n=self.orig_n)
 
-    def estimator(self):
-        return GrammarEstimator(self)
+    def estimator(self, pseudo_count=None):
+        """Create a GrammarEstimator object.
+
+        Args:
+            pseudo_count (Optional[float]): Added to rule frequencies when estimating.
+
+        Returns:
+            GrammarEstimator object.
+
+        """
+        return GrammarEstimator(pseudo_count=pseudo_count, name=self.name)
+
+    def dist_to_encoder(self):
+        """Returns a GrammarDataEncoder object for encoding sequences of data."""
+        return GrammarDataEncoder()
 
 
-class GrammarSampler(object):
+class GrammarSampler(DistributionSampler):
+    """GrammarSampler object for sampling graphs generated from a node-replacement grammar."""
+
     def __init__(self, grammar, orig_n=100):
+        """GrammarSampler object.
 
+        Args:
+            grammar: cnrg VRG object to generate graphs from.
+            orig_n (int): Default target number of nodes for generated graphs.
+
+        Attributes:
+            grammar: cnrg VRG object to generate graphs from.
+            orig_n (int): Default target number of nodes for generated graphs.
+
+        """
         self.grammar = grammar
         self.orig_n = orig_n
 
     def sample(self):
+        """Generate a single graph from the grammar with roughly orig_n nodes.
+
+        Returns:
+            A networkx graph generated from the grammar.
+
+        """
+        _require_cnrg()
 
         g, rule_ordering = generate_graph(
             rule_dict=self.grammar.rule_dict, target_n=self.orig_n
@@ -230,6 +390,17 @@ class GrammarSampler(object):
         return g
 
     def sample_seq(self, size_arr):
+        """Generate one graph per entry of size_arr, each targeting that many nodes.
+
+        Args:
+            size_arr: Sequence of target node counts.
+
+        Returns:
+            List of networkx graphs, one per requested size.
+
+        """
+        _require_cnrg()
+
         rv = []
         for size in size_arr:
             g, rule_ordering = generate_graph(
@@ -240,12 +411,36 @@ class GrammarSampler(object):
 
 
 class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
+    """GrammarEstimatorAccumulator object for merging observed grammars into a frequency-weighted grammar."""
+
     def __init__(self):
+        """GrammarEstimatorAccumulator object.
+
+        Attributes:
+            grammar: cnrg VRG object accumulating frequency-weighted rules from observations.
+
+        """
+        _require_cnrg()
         #             self.rule_list = []
         #             self.rule_dict = {}
         self.grammar = VRG("mu_level_dl", "leiden", "", 4)
 
     def update(self, grammar, weight, estimate):
+        """Merge an observed grammar into the accumulated grammar with the given weight.
+
+        Rules isomorphic to an already-accumulated rule (matching left-hand side, edge colors, weights, and
+        node labels/colors) have their frequency incremented by weight times the observed frequency; new rules
+        are copied in with weight-scaled frequency.
+
+        Args:
+            grammar: Observed cnrg VRG object.
+            weight (float): Weight of the observation.
+            estimate (Optional[GrammarDistribution]): Previous estimate (unused).
+
+        Returns:
+            The accumulated cnrg VRG object.
+
+        """
         #   change to check for node color as well
         #            em = iso.numerical_edge_match('weight',1)
         #            rgrammar = cnrg.VRG(x[0].type,x[0].clustering,x[0].name,x[0].mu)
@@ -298,9 +493,46 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         return rgrammar
 
     def initialize(self, x, weight, rng):
+        """Initialize the accumulator with a single weighted observation.
+
+        Args:
+            x: Observed cnrg VRG object.
+            weight (float): Weight of the observation.
+            rng: RandomState (unused).
+
+        Returns:
+            None.
+
+        """
         self.update(x, weight, None)
 
+    def seq_initialize(self, x, weights, rng):
+        """Initialize the accumulator with a sequence of weighted observations.
+
+        Args:
+            x: Sequence of cnrg VRG objects (from seq_encode).
+            weights: Sequence of observation weights.
+            rng: RandomState (unused).
+
+        Returns:
+            None.
+
+        """
+        for i in range(len(x)):
+            self.initialize(x[i], weights[i], rng)
+
     def seq_update(self, x, weights, estimate):
+        """Merge a sequence of weighted observed grammars into the accumulated grammar.
+
+        Args:
+            x: Sequence of cnrg VRG objects (from seq_encode).
+            weights: Sequence of observation weights.
+            estimate (Optional[GrammarDistribution]): Previous estimate (unused).
+
+        Returns:
+            None.
+
+        """
         #            for grammar in x:
         for i in range(len(x)):
             grammar = x[i]
@@ -308,20 +540,63 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.update(grammar, weight, estimate)
 
     def combine(self, suff_stat):
+        """Merge the sufficient statistic of another accumulator (a cnrg VRG object) into this one.
+
+        Args:
+            suff_stat: cnrg VRG object from another accumulator's value().
+
+        Returns:
+            This GrammarEstimatorAccumulator object.
+
+        """
         self.update(suff_stat, 1.0, None)
         return self
 
     def value(self):
+        """Returns the accumulated cnrg VRG object sufficient statistic."""
         return self.grammar
 
     def from_value(self, x):
+        """Set the accumulated sufficient statistic from a cnrg VRG object.
+
+        Args:
+            x: cnrg VRG object.
+
+        Returns:
+            This GrammarEstimatorAccumulator object.
+
+        """
         self.grammar = x
         return self
 
+    def acc_to_encoder(self):
+        """Returns a GrammarDataEncoder object for encoding sequences of data."""
+        return GrammarDataEncoder()
+
+
+class GrammarAccumulatorFactory(StatisticAccumulatorFactory):
+    """GrammarAccumulatorFactory object for creating GrammarEstimatorAccumulator objects."""
+
+    def make(self):
+        """Returns a new GrammarEstimatorAccumulator object."""
+        return GrammarEstimatorAccumulator()
+
 
 class GrammarEstimator(ParameterEstimator):
-    def __init__(self, pseudo_count=None, name=None):
+    """GrammarEstimator object for estimating GrammarDistribution objects from aggregated grammars."""
 
+    def __init__(self, pseudo_count=None, name=None):
+        """GrammarEstimator object.
+
+        Args:
+            pseudo_count (Optional[float]): Added to each accumulated rule frequency when estimating.
+            name (Optional[str]): String name of object instance.
+
+        Attributes:
+            pseudo_count (Optional[float]): Added to each accumulated rule frequency when estimating.
+            name (Optional[str]): String name of object instance.
+
+        """
         self.name = name
         self.pseudo_count = pseudo_count
 
@@ -329,15 +604,25 @@ class GrammarEstimator(ParameterEstimator):
 
     #                self.grammar = VRG('mu_level_dl','leiden','',4)
 
+    def accumulator_factory(self):
+        """Returns a GrammarAccumulatorFactory object."""
+        return GrammarAccumulatorFactory()
+
     def accumulatorFactory(self):
-
-        obj = type(
-            "", (object,), {"make": lambda self: GrammarEstimatorAccumulator()}
-        )()
-
-        return obj
+        """Deprecated alias for accumulator_factory()."""
+        return self.accumulator_factory()
 
     def estimate(self, nobs, suff_stat):
+        """Estimate a GrammarDistribution from an accumulated grammar sufficient statistic.
+
+        Args:
+            nobs (Optional[float]): Weighted number of observations (unused).
+            suff_stat: cnrg VRG object of accumulated rule frequencies.
+
+        Returns:
+            GrammarDistribution object.
+
+        """
         grammar = suff_stat
         if self.pseudo_count is not None:
             for rlist in grammar.rule_dict.values():
@@ -345,3 +630,35 @@ class GrammarEstimator(ParameterEstimator):
                     rule.frequency += self.pseudo_count
 
         return GrammarDistribution(grammar, 0.01)
+
+
+class GrammarDataEncoder(DataSequenceEncoder):
+    """GrammarDataEncoder object for encoding sequences of grammar observations (identity encoding)."""
+
+    def __str__(self):
+        """Returns string representation of GrammarDataEncoder object."""
+        return 'GrammarDataEncoder'
+
+    def __eq__(self, other):
+        """Encoders are interchangeable iff other is also a GrammarDataEncoder.
+
+        Args:
+            other (object): Object to compare against.
+
+        Returns:
+            True if other is a GrammarDataEncoder instance.
+
+        """
+        return isinstance(other, GrammarDataEncoder)
+
+    def seq_encode(self, x):
+        """Encode a sequence of grammar observations for vectorized calls (identity encoding).
+
+        Args:
+            x: Sequence of cnrg VRG objects.
+
+        Returns:
+            The input sequence unchanged.
+
+        """
+        return x
