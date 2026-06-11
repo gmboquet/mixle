@@ -5,6 +5,7 @@ stationary init mode), agreement with the dense HiddenMarkovModelDistribution, s
 estimation smoke runs (free theta, fixed theta, k_max caps) on tiny synthetic data with fixed
 seeds.
 """
+import itertools
 import unittest
 
 import numpy as np
@@ -16,9 +17,11 @@ from pysp.stats.hidden_markov import HiddenMarkovModelDistribution
 from pysp.stats.null_dist import NullDistribution
 from pysp.stats.quantized_hmm import (
     QuantizedHiddenMarkovModelDistribution,
+    QuantizedHiddenMarkovModelEnumerator,
     QuantizedHiddenMarkovEstimator,
     _split_collapsed_states,
 )
+from pysp.utils.enumeration import freeze
 
 
 def make_quantized_dist(init_mode='quantized', use_numba=False, theta=0.5):
@@ -109,6 +112,40 @@ class QuantizedHmmParameterizationTestCase(unittest.TestCase):
             self.assertIn(len(seq), (3, 4))
             for v in seq:
                 self.assertIn(v, self.dist.levels)
+
+
+class QuantizedHmmEnumeratorTestCase(unittest.TestCase):
+
+    def setUp(self):
+        self.dist = make_quantized_dist()
+
+    def test_specialized_enumerator_matches_brute_force(self):
+        self.assertIsInstance(self.dist.enumerator(), QuantizedHiddenMarkovModelEnumerator)
+
+        support = [list(t) for n in (3, 4) for t in itertools.product(self.dist.levels, repeat=n)]
+        brute = [(v, self.dist.log_density(v)) for v in support]
+        brute = [(v, lp) for v, lp in brute if lp > -np.inf]
+        brute.sort(key=lambda u: -u[1])
+
+        items = list(self.dist.enumerator())
+        self.assertEqual(len(items), len(brute))
+
+        lps = [lp for _, lp in items]
+        for i in range(len(lps) - 1):
+            self.assertGreaterEqual(lps[i], lps[i + 1] - 1.0e-9)
+        self.assertEqual(len({freeze(v) for v, _ in items}), len(items))
+
+        np.testing.assert_allclose(lps, [lp for _, lp in brute], atol=1.0e-9)
+        for v, lp in items:
+            self.assertAlmostEqual(lp, self.dist.log_density(v), delta=1.0e-9)
+
+        def tiers(pairs):
+            out = {}
+            for v, lp in pairs:
+                out.setdefault(round(lp, 8), set()).add(freeze(v))
+            return out
+
+        self.assertEqual(tiers(items), tiers(brute))
 
 
 class QuantizedHmmEstimationTestCase(unittest.TestCase):
