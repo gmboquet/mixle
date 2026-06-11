@@ -7,11 +7,13 @@ Data type: int.
 
 """
 import numpy as np
+import math
 from numpy.random import RandomState
 from pysp.utils.vector import gammaln
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator
+from pysp.utils.enumeration import QuantizedEnumerationIndex
 
 from typing import Optional, Dict, List, Union, Tuple, Any, Sequence
 
@@ -163,6 +165,39 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
     def enumerator(self) -> 'BinomialEnumerator':
         """Returns BinomialEnumerator iterating the support in descending probability order."""
         return BinomialEnumerator(self)
+
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
+        """Build a bounded bit-quantized index by walking the binomial mode outward."""
+        if max_bits < 0:
+            raise ValueError('max_bits must be non-negative.')
+        if bin_width_bits <= 0:
+            raise ValueError('bin_width_bits must be positive.')
+
+        shift = self.min_val if self.min_val is not None else 0
+        mode = int(np.floor((self.n + 1) * self.p))
+        mode = min(max(mode, 0), self.n)
+        left = mode
+        right = mode + 1
+        limit_lp = -(float(max_bits) + 1.0e-12) * math.log(2.0)
+        items: List[Tuple[int, float]] = []
+
+        while left >= 0 or right <= self.n:
+            lp_l = self.log_density(shift + left) if left >= 0 else -np.inf
+            lp_r = self.log_density(shift + right) if right <= self.n else -np.inf
+            if lp_l < limit_lp and lp_r < limit_lp:
+                break
+            if lp_l >= lp_r:
+                if lp_l >= limit_lp:
+                    items.append((shift + left, float(lp_l)))
+                left -= 1
+            else:
+                if lp_r >= limit_lp:
+                    items.append((shift + right, float(lp_r)))
+                right += 1
+
+        return QuantizedEnumerationIndex.from_items(
+            items, max_bits=max_bits, bin_width_bits=bin_width_bits,
+            sorted_items=True, truncated=len(items) < self.n + 1)
 
 
 class BinomialEnumerator(DistributionEnumerator):
@@ -636,4 +671,3 @@ class BinomialDataEncoder(DataSequenceEncoder):
         max_val = np.max(ux)
 
         return ux, ix, xx, min_val, max_val
-

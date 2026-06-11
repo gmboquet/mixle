@@ -88,7 +88,7 @@ All of these accept either an in-memory list **or a Spark RDD** — the same cod
 
 Around 60 composable families in `pysp.stats`, including:
 
-- **Scalar/basic:** Gaussian, LogGaussian, Exponential, Gamma, Poisson, Geometric, Binomial, von Mises–Fisher, multivariate/diagonal Gaussian, Dirichlet, categorical & integer-categorical
+- **Scalar/basic:** Gaussian, StudentT, LogGaussian, Laplace, Uniform, Exponential, Gamma, Beta, Rayleigh, Pareto, Poisson, Bernoulli, Geometric, Binomial, Negative Binomial, von Mises-Fisher, multivariate/diagonal Gaussian, Dirichlet, categorical & integer-categorical
 - **Combinators:** `CompositeDistribution` (tuples), `SequenceDistribution` (variable-length i.i.d. with length model), `OptionalDistribution` (missing data), `IgnoredDistribution`, `ConditionalDistribution`, `WeightedDistribution`
 - **Latent structure:** mixtures (plain, heterogeneous, hierarchical, joint, semi-supervised), LDA, PLSI, hidden Markov models (standard, lookback, tree-structured), Markov chains, hidden associations, Spearman ranking, Bernoulli set/edit-set models
 - **Bayesian (`pysp.bstats`):** conjugate-prior/variational counterparts, Dirichlet-process mixtures (`bexamples/` shows DPM auto-modeling)

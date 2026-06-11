@@ -28,7 +28,8 @@ included) are reused unchanged, and results agree with the legacy seq path to
 floating-point tolerance.
 
 Supported distributions: Gaussian, LogGaussian, Gamma, Categorical,
-IntegerCategorical, Poisson, Exponential, Geometric, Binomial,
+IntegerCategorical, Bernoulli, StudentT, Rayleigh, Pareto, Uniform,
+Poisson, Exponential, Geometric, Binomial, NegativeBinomial,
 DiagonalGaussian (vector leaf), Optional (missing-data wrapper around any
 supported child), Ignored (fixed wrapped dist, scored but never estimated),
 Composite (any nesting), Sequence (variable-length, with optional length
@@ -59,12 +60,18 @@ import numpy as np
 from pysp.stats.gaussian import GaussianDistribution
 from pysp.stats.log_gaussian import LogGaussianDistribution
 from pysp.stats.gamma import GammaDistribution
+from pysp.stats.bernoulli import BernoulliDistribution
+from pysp.stats.student_t import StudentTDistribution
+from pysp.stats.rayleigh import RayleighDistribution
+from pysp.stats.pareto import ParetoDistribution
+from pysp.stats.uniform import UniformDistribution
 from pysp.stats.categorical import CategoricalDistribution
 from pysp.stats.intrange import IntegerCategoricalDistribution
 from pysp.stats.poisson import PoissonDistribution
 from pysp.stats.exponential import ExponentialDistribution
 from pysp.stats.geometric import GeometricDistribution
 from pysp.stats.binomial import BinomialDistribution
+from pysp.stats.negative_binomial import NegativeBinomialDistribution
 from pysp.stats.dmvn import DiagonalGaussianDistribution
 from pysp.stats.composite import CompositeDistribution
 from pysp.stats.sequence import SequenceDistribution
@@ -131,6 +138,14 @@ def _intrange_acc(i, k, w, params, cols, stats):
 
 
 @numba.njit(inline='always', cache=True)
+def _bernoulli_ld(i, k, params, cols):
+    logp, log1mp = params
+    if cols[0][i] >= 0.5:
+        return logp[k]
+    return log1mp[k]
+
+
+@numba.njit(inline='always', cache=True)
 def _poisson_ld(i, k, params, cols):
     # cols[1] holds lgamma(x+1), precomputed once at encode time
     lam, loglam = params
@@ -160,6 +175,76 @@ def _geometric_ld(i, k, params, cols):
     logp, log1mp = params
     x = cols[0][i]
     return (x - 1.0) * log1mp[k] + logp[k]
+
+
+@numba.njit(inline='always', cache=True)
+def _negative_binomial_ld(i, k, params, cols):
+    r, logp, log1mp, loggr = params
+    x = cols[0][i]
+    if x < 0.0:
+        return _NEG_INF
+    return (math.lgamma(x + r[k]) - loggr[k] - cols[1][i]
+            + r[k] * logp[k] + x * log1mp[k])
+
+
+@numba.njit(inline='always', cache=True)
+def _student_t_ld(i, k, params, cols):
+    df, loc, scale, logc = params
+    z = (cols[0][i] - loc[k]) / scale[k]
+    return logc[k] - 0.5 * (df[k] + 1.0) * math.log1p((z * z) / df[k])
+
+
+@numba.njit(inline='always', cache=True)
+def _rayleigh_ld(i, k, params, cols):
+    sigma2, logsigma2 = params
+    x = cols[0][i]
+    if x <= 0.0:
+        return _NEG_INF
+    return cols[2][i] - logsigma2[k] - cols[1][i] / (2.0 * sigma2[k])
+
+
+@numba.njit(inline='always', cache=True)
+def _rayleigh_acc(i, k, w, params, cols, stats):
+    stats[0][k] += w
+    stats[1][k] += w * cols[1][i]
+
+
+@numba.njit(inline='always', cache=True)
+def _pareto_ld(i, k, params, cols):
+    xm, alpha, logxm, logalpha = params
+    x = cols[0][i]
+    if x < xm[k]:
+        return _NEG_INF
+    return logalpha[k] + alpha[k] * logxm[k] - (alpha[k] + 1.0) * cols[1][i]
+
+
+@numba.njit(inline='always', cache=True)
+def _pareto_acc(i, k, w, params, cols, stats):
+    if w > 0.0:
+        stats[0][k] += w
+        stats[1][k] += w * cols[1][i]
+        if cols[0][i] < stats[2][k]:
+            stats[2][k] = cols[0][i]
+
+
+@numba.njit(inline='always', cache=True)
+def _uniform_ld(i, k, params, cols):
+    low, high, logp = params
+    x = cols[0][i]
+    if x < low[k] or x > high[k]:
+        return _NEG_INF
+    return logp[k]
+
+
+@numba.njit(inline='always', cache=True)
+def _uniform_acc(i, k, w, params, cols, stats):
+    if w > 0.0:
+        x = cols[0][i]
+        stats[0][k] += w
+        if x < stats[1][k]:
+            stats[1][k] = x
+        if x > stats[2][k]:
+            stats[2][k] = x
 
 
 @numba.njit(inline='always', cache=True)
@@ -360,6 +445,20 @@ class _CountSumB(_LeafBuilder):
         return stats[0][k], stats[1][k]
 
 
+class _BernoulliB(_CountSumB):
+    kernel = staticmethod(_bernoulli_ld)
+
+    def params(self, dists):
+        return (np.array([d.log_p for d in dists], dtype=np.float64),
+                np.array([d.log_1p for d in dists], dtype=np.float64))
+
+    def freeze(self, buf):
+        x = np.asarray(buf)
+        if x.size and np.any((x != 0) & (x != 1)):
+            raise Exception('BernoulliDistribution requires observations in {False, True} or {0, 1}.')
+        return (x.astype(np.float64),)
+
+
 class _PoissonB(_CountSumB):
     kernel = staticmethod(_poisson_ld)
 
@@ -387,6 +486,103 @@ class _GeometricB(_CountSumB):
     def params(self, dists):
         p = np.array([d.p for d in dists], dtype=np.float64)
         return np.log(p), np.log1p(-p)
+
+
+class _NegativeBinomialB(_CountSumB):
+    kernel = staticmethod(_negative_binomial_ld)
+
+    def params(self, dists):
+        r = np.array([d.r for d in dists], dtype=np.float64)
+        return (r,
+                np.array([d.log_p for d in dists], dtype=np.float64),
+                np.array([d.log_1p for d in dists], dtype=np.float64),
+                np.array([d.log_gamma_r for d in dists], dtype=np.float64))
+
+    def freeze(self, buf):
+        from scipy.special import gammaln
+        x = np.asarray(buf, dtype=np.float64)
+        if x.size and (np.any(x < 0) or np.any(np.isnan(x)) or np.any(np.floor(x) != x)):
+            raise Exception('NegativeBinomialDistribution requires non-negative integer values for x.')
+        return x, gammaln(x + 1.0)
+
+
+class _StudentTB(_LeafBuilder):
+    kernel = staticmethod(_student_t_ld)
+    acc_kernel = staticmethod(_gaussian_acc)
+
+    def params(self, dists):
+        df = np.array([d.df for d in dists], dtype=np.float64)
+        loc = np.array([d.loc for d in dists], dtype=np.float64)
+        scale = np.array([d.scale for d in dists], dtype=np.float64)
+        logc = np.array([d.log_const for d in dists], dtype=np.float64)
+        return df, loc, scale, logc
+
+    def make_stats(self, K):
+        return np.zeros(K), np.zeros(K), np.zeros(K)
+
+    def stats_to_ss(self, stats, k):
+        return stats[0][k], stats[1][k], stats[2][k]
+
+
+class _RayleighB(_LeafBuilder):
+    kernel = staticmethod(_rayleigh_ld)
+    acc_kernel = staticmethod(_rayleigh_acc)
+
+    def params(self, dists):
+        sigma2 = np.array([d.sigma2 for d in dists], dtype=np.float64)
+        return sigma2, np.log(sigma2)
+
+    def freeze(self, buf):
+        x = np.asarray(buf, dtype=np.float64)
+        if x.size and (np.any(x < 0.0) or np.any(np.isnan(x))):
+            raise Exception('RayleighDistribution requires non-negative values for x.')
+        with np.errstate(divide='ignore'):
+            lx = np.log(x)
+        return x, x * x, lx
+
+    def make_stats(self, K):
+        return np.zeros(K), np.zeros(K)
+
+    def stats_to_ss(self, stats, k):
+        return stats[0][k], stats[1][k]
+
+
+class _ParetoB(_LeafBuilder):
+    kernel = staticmethod(_pareto_ld)
+    acc_kernel = staticmethod(_pareto_acc)
+
+    def params(self, dists):
+        xm = np.array([d.xm for d in dists], dtype=np.float64)
+        alpha = np.array([d.alpha for d in dists], dtype=np.float64)
+        return xm, alpha, np.log(xm), np.log(alpha)
+
+    def freeze(self, buf):
+        x = np.asarray(buf, dtype=np.float64)
+        if x.size and (np.any(x <= 0.0) or np.any(np.isnan(x))):
+            raise Exception('ParetoDistribution requires positive values for x.')
+        return x, np.log(x)
+
+    def make_stats(self, K):
+        return np.zeros(K), np.zeros(K), np.full(K, np.inf)
+
+    def stats_to_ss(self, stats, k):
+        return stats[0][k], stats[1][k], stats[2][k]
+
+
+class _UniformB(_LeafBuilder):
+    kernel = staticmethod(_uniform_ld)
+    acc_kernel = staticmethod(_uniform_acc)
+
+    def params(self, dists):
+        low = np.array([d.low for d in dists], dtype=np.float64)
+        high = np.array([d.high for d in dists], dtype=np.float64)
+        return low, high, -np.log(high - low)
+
+    def make_stats(self, K):
+        return np.zeros(K), np.full(K, np.inf), np.full(K, -np.inf)
+
+    def stats_to_ss(self, stats, k):
+        return stats[0][k], stats[1][k], stats[2][k]
 
 
 class _GammaB(_LeafBuilder):
@@ -817,12 +1013,18 @@ _BUILDERS = {
     GaussianDistribution: _GaussianB,
     LogGaussianDistribution: _LogGaussianB,
     GammaDistribution: _GammaB,
+    BernoulliDistribution: _BernoulliB,
+    StudentTDistribution: _StudentTB,
+    RayleighDistribution: _RayleighB,
+    ParetoDistribution: _ParetoB,
+    UniformDistribution: _UniformB,
     CategoricalDistribution: _CategoricalB,
     IntegerCategoricalDistribution: _IntRangeB,
     PoissonDistribution: _PoissonB,
     ExponentialDistribution: _ExponentialB,
     GeometricDistribution: _GeometricB,
     BinomialDistribution: _BinomialB,
+    NegativeBinomialDistribution: _NegativeBinomialB,
     DiagonalGaussianDistribution: _DiagGaussianB,
     CompositeDistribution: _CompositeB,
     SequenceDistribution: _SequenceB,

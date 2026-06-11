@@ -84,6 +84,22 @@ class ProbabilityDistribution:
         """
         raise EnumerationError(self)
 
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0):
+        """Build a bounded bit-quantized index over this distribution's support.
+
+        This is a convenience wrapper around ``self.enumerator().quantized_index``.
+        Non-enumerable distributions raise EnumerationError through enumerator().
+
+        Args:
+            max_bits (float): Maximum information content in bits to index.
+            bin_width_bits (float): Width of each quantized probability bin in bits.
+
+        Returns:
+            pysp.utils.enumeration.QuantizedEnumerationIndex.
+
+        """
+        return self.enumerator().quantized_index(max_bits=max_bits, bin_width_bits=bin_width_bits)
+
 
 class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
     """ProbabilityDistribution with vectorized log-density evaluation on encoded data.
@@ -149,6 +165,25 @@ class DistributionEnumerator(object):
     def top_k(self, k: int) -> List[Tuple[Any, float]]:
         """Return the k most probable (value, log_prob) pairs (fewer if the support is smaller)."""
         return list(itertools.islice(self, k))
+
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0):
+        """Precompute a bounded bit-quantized index over this enumeration.
+
+        The index groups values by floor((-log2 p(x)) / bin_width_bits), includes only
+        values with -log2 p(x) <= max_bits, and returns exact log probabilities for
+        indexed values. Building the index consumes this enumerator.
+
+        Args:
+            max_bits (float): Maximum information content in bits to index.
+            bin_width_bits (float): Width of each quantized probability bin in bits.
+
+        Returns:
+            pysp.utils.enumeration.QuantizedEnumerationIndex.
+
+        """
+        from pysp.utils.enumeration import QuantizedEnumerationIndex
+        return QuantizedEnumerationIndex.from_enumerator(self, max_bits=max_bits,
+                                                         bin_width_bits=bin_width_bits)
 
 
 class ConditionalSampler(object):
@@ -255,8 +290,6 @@ class DataSequenceEncoder:
 
     @abstractmethod
     def __eq__(self, other: object) -> bool: ...
-
-
 
 
 

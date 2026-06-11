@@ -30,6 +30,7 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceE
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
 from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
     NullAccumulatorFactory
+from pysp.stats.int_edit_setdist import IntegerBernoulliEditEnumerator
 from typing import Sequence, Optional, Union, Any, Tuple, List, TypeVar, Dict
 
 T = Tuple[Union[Sequence[int], np.ndarray], Union[Sequence[int], np.ndarray]]
@@ -189,6 +190,16 @@ class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribut
     def dist_to_encoder(self) -> 'IntegerStepBernoulliEditDataEncoder':
         """Returns an IntegerStepBernoulliEditDataEncoder object for encoding sequences of data."""
         return IntegerStepBernoulliEditDataEncoder(init_encoder=self.init_dist.dist_to_encoder())
+
+
+    def enumerator(self) -> 'IntegerStepBernoulliEditEnumerator':
+        """Returns IntegerStepBernoulliEditEnumerator iterating set-pairs in descending probability order."""
+        return IntegerStepBernoulliEditEnumerator(self)
+
+
+class IntegerStepBernoulliEditEnumerator(IntegerBernoulliEditEnumerator):
+    """Enumerates finite previous/next integer-set pairs for the step edit-set distribution."""
+
 
 class IntegerStepBernoulliEditSampler(DistributionSampler):
     """IntegerStepBernoulliEditSampler object for drawing (prev set, next set) pairs from an

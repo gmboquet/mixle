@@ -8,6 +8,7 @@ import time
 import unittest
 
 import numpy as np
+import scipy.sparse
 
 from pysp.stats import (
     CategoricalDistribution, CategoricalEstimator, CompositeDistribution, CompositeEstimator,
@@ -16,8 +17,10 @@ from pysp.stats import (
 )
 from pysp.stats import PoissonDistribution, SequenceDistribution, IntegerCategoricalDistribution
 from pysp.utils.htsne import (
-    conditional_pmat, dpmsne, get_pmat, htsne, humap, model_knn, model_log_affinity,
-    sparse_model_distances, t_kernel, tsne_exact, update_alpha,
+    _barnes_hut_negative_forces, _sparse_joint_pmat,
+    approx_sparse_model_distances, conditional_pmat, dpmsne, get_pmat, htsne, humap,
+    local_factors, model_knn, model_log_affinity, sparse_model_distances, t_kernel,
+    tsne_exact, update_alpha,
 )
 
 
@@ -167,6 +170,66 @@ class HTSNETestCase(unittest.TestCase):
                                         np.maximum(-log_s[i, d_csr[i].indices], 0.0),
                                         atol=1.0e-12))
 
+    def test_local_affinity_resolves_within_component_geometry(self):
+        data = [-3.0, 0.0, 0.1, 4.0]
+        model = MixtureDistribution([GaussianDistribution(0.0, 4.0)], [1.0])
+        factors = local_factors(model, data)
+        self.assertEqual(len(factors), 1)
+        self.assertIsInstance(factors[0], dict)
+
+        log_s = model_log_affinity(None, None, affinity=factors)
+        self.assertGreater(log_s[1, 2], log_s[1, 3])
+
+        d_csr = sparse_model_distances(None, None, k=1, affinity=factors)
+        self.assertEqual(d_csr[1].indices[0], 2)
+
+    def test_approx_sparse_distances_can_reduce_to_exact(self):
+        k = 10
+        d_csr = approx_sparse_model_distances(
+            self.z, self.l, k=k, n_trees=1, leaf_size=self.n,
+            candidate_multiplier=1, seed=5)
+        self.assertEqual(d_csr.shape, (self.n, self.n))
+        self.assertTrue(np.all(d_csr.getnnz(axis=1) == k))
+
+        log_s = model_log_affinity(self.z, self.l)
+        for i in (0, 17, self.n - 1):
+            dense_vals = np.sort(log_s[i])[::-1][:k]
+            sparse_vals = np.sort(log_s[i, d_csr[i].indices])[::-1]
+            self.assertTrue(np.allclose(dense_vals, sparse_vals, atol=1.0e-9))
+
+    def test_sparse_joint_pmat_matches_dense_when_graph_is_complete(self):
+        rng = np.random.RandomState(9)
+        n = 45
+        log_s = -rng.gamma(shape=2.0, scale=1.0, size=(n, n))
+        log_s[np.arange(n), np.arange(n)] = -np.inf
+        rows, cols = np.where(~np.eye(n, dtype=bool))
+        dist = -log_s[rows, cols]
+        d_csr = scipy.sparse.csr_matrix((dist, (rows, cols)), shape=(n, n))
+
+        p_sparse = _sparse_joint_pmat(d_csr, perplexity=12.0).toarray()
+        p_dense = conditional_pmat(log_s, perplexity=12.0)
+        p_dense = (p_dense + p_dense.T) / (2.0 * n)
+
+        self.assertTrue(np.allclose(p_sparse, p_dense, atol=1.0e-10))
+
+    def test_barnes_hut_theta_zero_matches_exact_repulsion(self):
+        rng = np.random.RandomState(11)
+        y = rng.randn(35, 2)
+        f_bh, z_bh = _barnes_hut_negative_forces(y, theta=0.0, leaf_size=1)
+
+        f_exact = np.zeros_like(y)
+        z_exact = 0.0
+        for i in range(y.shape[0]):
+            diff = y[i] - y
+            d2 = np.sum(diff * diff, axis=1)
+            q = 1.0 / (1.0 + d2)
+            q[i] = 0.0
+            f_exact[i] = np.sum((q * q)[:, None] * diff, axis=0)
+            z_exact += q.sum()
+
+        self.assertTrue(np.allclose(f_bh, f_exact, atol=1.0e-12))
+        self.assertAlmostEqual(z_bh, z_exact, places=10)
+
     # ---- kernel and alpha ------------------------------------------------------
 
     def test_kernel_standard_tsne_at_alpha_one(self):
@@ -195,10 +258,19 @@ class HTSNETestCase(unittest.TestCase):
     def test_exact_embedding_converges_and_separates(self):
         t0 = time.time()
         y = htsne(self.data, mix_model=self.model, perplexity=20.0, method='exact',
-                  max_its=400, seed=3, out=io.StringIO())
+                  affinity='balanced', max_its=400, seed=3, out=io.StringIO())
         self.assertLess(time.time() - t0, 30.0)
         self.assertEqual(y.shape, (self.n, 2))
         self.assertGreater(separation_ratio(y, self.labels), 3.0)
+
+    def test_default_local_embedding_runs(self):
+        data = self.data[:75]
+        labels = self.labels[:75]
+        y = htsne(data, mix_model=self.model, perplexity=10.0, method='exact',
+                  max_its=300, seed=3, out=io.StringIO())
+        self.assertEqual(y.shape, (len(data), 2))
+        self.assertTrue(np.all(np.isfinite(y)))
+        self.assertGreater(separation_ratio(y, labels), 1.5)
 
     def test_exact_kl_decreases(self):
         p = get_pmat(self.z, self.l, targ_perplexity=20.0)
@@ -212,10 +284,17 @@ class HTSNETestCase(unittest.TestCase):
     def test_barnes_hut_embedding(self):
         t0 = time.time()
         y = htsne(self.data, mix_model=self.model, perplexity=20.0, method='barnes_hut',
-                  max_its=350, seed=3, out=io.StringIO())
+                  affinity='balanced', max_its=350, seed=3, out=io.StringIO())
         self.assertLess(time.time() - t0, 60.0)
         self.assertEqual(y.shape, (self.n, 2))
         self.assertGreater(separation_ratio(y, self.labels), 3.0)
+
+    def test_barnes_hut_approx_neighbor_embedding(self):
+        y = htsne(self.data[:30], mix_model=self.model, perplexity=5.0, method='barnes_hut',
+                  affinity='balanced', neighbor_method='approx', neighbor_trees=2, neighbor_leaf_size=20,
+                  candidate_multiplier=2, max_its=300, seed=3, out=io.StringIO())
+        self.assertEqual(y.shape, (30, 2))
+        self.assertTrue(np.all(np.isfinite(y)))
 
     def test_optimize_alpha_path(self):
         y = htsne(self.data[:100], mix_model=self.model, perplexity=10.0, method='exact',
@@ -246,7 +325,8 @@ class HTSNETestCase(unittest.TestCase):
                                         atol=1.0e-12))
 
     def test_humap_embedding(self):
-        y = humap(self.data, mix_model=self.model, n_neighbors=15, seed=4, out=io.StringIO())
+        y = humap(self.data, mix_model=self.model, n_neighbors=15, affinity='balanced',
+                  n_epochs=50, seed=4, out=io.StringIO())
         self.assertEqual(y.shape, (self.n, 2))
         self.assertTrue(np.all(np.isfinite(y)))
         self.assertGreater(separation_ratio(y, self.labels), 2.0)
@@ -290,8 +370,8 @@ class HTSNETestCase(unittest.TestCase):
         data, labels, model = self._varlen_data_and_model(120)
         lengths = np.asarray([len(x) for x in data], dtype=float)
 
-        y = htsne(data, mix_model=model, perplexity=20.0, method='exact', max_its=350,
-                  seed=3, out=io.StringIO())
+        y = htsne(data, mix_model=model, perplexity=20.0, method='exact', affinity='balanced',
+                  max_its=350, seed=3, out=io.StringIO())
         self.assertGreater(separation_ratio(y, labels), 2.0)
 
         # the embedding should not be organized by observation length: within
@@ -306,7 +386,7 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_varlen_humap(self):
         data, labels, model = self._varlen_data_and_model(120)
-        y = humap(data, mix_model=model, n_neighbors=15, seed=4, out=io.StringIO())
+        y = humap(data, mix_model=model, n_neighbors=15, n_epochs=50, seed=4, out=io.StringIO())
         self.assertEqual(y.shape, (len(data), 2))
         self.assertGreater(separation_ratio(y, labels), 1.5)
 
@@ -327,19 +407,17 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_balanced_embeddings_run(self):
         y = htsne(self.data, mix_model=self.model, perplexity=20.0, affinity='balanced',
-                  seed=3, max_its=300, out=io.StringIO())
+                  method='exact', seed=3, max_its=300, out=io.StringIO())
         self.assertEqual(y.shape, (self.n, 2))
         self.assertGreater(separation_ratio(y, self.labels), 2.0)
-        yu = humap(self.data, mix_model=self.model, n_neighbors=15, affinity='balanced',
-                   seed=3, out=io.StringIO())
-        self.assertTrue(np.all(np.isfinite(yu)))
 
     def test_auto_affinity_resolution(self):
         from pysp.utils.htsne import _resolve_affinity
-        # composite components + raw data -> balanced factor list (one per leaf field)
+        # composite components + raw data -> local factor list (one per leaf field)
         r = _resolve_affinity('auto', self.model, self.data, None)
         self.assertIsInstance(r, list)
         self.assertEqual(len(r), 2)
+        self.assertTrue(any(isinstance(f, dict) and f.get('kind') == 'local' for f in r))
         # no raw data -> falls back to bhattacharyya
         self.assertEqual(_resolve_affinity('auto', self.model, None, None), 'bhattacharyya')
         # non-composite components decompose too: a plain mixture is one leaf field
@@ -365,7 +443,8 @@ class HTSNETestCase(unittest.TestCase):
             self.assertEqual(g.shape[0], n)
             # per-field posteriors: squared factors sum to one per row
             self.assertTrue(np.allclose((g * g).sum(axis=1), 1.0, atol=1.0e-8))
-        y = htsne(data, mix_model=model, seed=3, max_its=200, out=io.StringIO())
+        y = htsne(data, mix_model=model, seed=3, max_its=200, affinity='balanced',
+                  out=io.StringIO())
         self.assertEqual(y.shape, (n, 2))
         self.assertGreater(separation_ratio(y, labels), 1.5)
 
