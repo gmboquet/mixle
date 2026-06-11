@@ -1,6 +1,6 @@
 """Smoke tests for the duplicate lookback hidden Markov modules.
 
-Covers both pysp.stats.lookback_hmm (the original module, kept for pysp.examples) and
+Covers both pysp.stats.lookback_hmm (the original module, kept for the example scripts) and
 pysp.stats.look_back_hmm (the typed rewrite). Checks that both import, that a tiny fixed-seed
 sample -> seq_initialize -> seq_estimate loop runs, that the data encoders round-trip
 (dist_to_encoder == acc_to_encoder, vectorized log-densities match per-item log_density), and

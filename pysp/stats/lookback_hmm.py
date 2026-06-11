@@ -19,7 +19,7 @@ Data type: Sequence[T] - each observation is a sequence (e.g. a list) whose leng
 windows have the data type accepted by the topic distributions, and whose first ``lag`` entries have
 the data type accepted by the initial distributions.
 
-Note: This is the original (legacy) implementation, kept stable because pysp.examples
+Note: This is the original (legacy) implementation, kept stable because the example scripts
 (lookback_hmm_example.py, graph_dynamics_example.py) and external users depend on it. A typed rewrite
 with the same class names lives in the sibling module pysp.stats.look_back_hmm. The two modules differ
 slightly in their handling of optional arguments: this module uses None for an absent len_dist/init_dist
