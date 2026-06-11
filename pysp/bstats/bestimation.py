@@ -1,10 +1,43 @@
+"""Model-fitting drivers for pysparkplug's Bayesian estimation (pysp.bstats).
+
+The central routine is optimize(), which alternates accumulate-then-estimate
+steps (seq_estimate) with evaluations of the penalized objective
+
+	obj = data term + prior term,
+
+where the data term is the observed-data log-likelihood (MAP/EM estimators)
+or the sum of per-observation local ELBO contributions (variational
+estimators exposing seq_local_elbo), and the prior term comes from
+ParameterEstimator.model_log_density (log prior at the estimated parameters
+for MAP, the data-independent ELBO terms for VB). With conjugate updates each
+iteration cannot decrease obj, so optimize() stops once the improvement falls
+below delta. Restarts (best_of), fixed-iteration runs (iterate),
+validation-metric hill climbing (hill_climb), and data-splitting utilities
+are also provided. All drivers accept local data, pandas DataFrames, or
+pyspark RDDs via the dispatch in pysp.bstats.
+"""
 import numpy as np
 import sys
 import time
 from pysp.bstats import initialize, seq_estimate, seq_log_density_sum, seq_encode, seq_log_density
 
 def empirical_kl_divergence(dist1, dist2, enc_data):
+	"""Empirical KL divergence between two models on encoded data.
 
+	Both models are scored on the same encoded sample; their log-densities
+	are normalized into empirical distributions over the sample (restricted
+	to observations both models score finitely), and KL(p1 || p2) of those
+	empirical distributions is returned.
+
+	Args:
+		dist1: First distribution (defines p1).
+		dist2: Second distribution (defines p2).
+		enc_data: Output of seq_encode() compatible with both models.
+
+	Returns:
+		Tuple (kl, n_bad_1, n_bad_2) with the empirical KL divergence and
+		the number of observations each model failed to score (NaN/-inf).
+	"""
 	ll = seq_log_density(enc_data, estimate=(dist1, dist2), is_list=True)
 
 	r1 = 0.0
@@ -36,7 +69,16 @@ def empirical_kl_divergence(dist1, dist2, enc_data):
 	return r1, r2, r3
 
 def k_fold_split_index(sz, k, rng):
+	"""Assign sz items to k folds of (near-)equal size in random order.
 
+	Args:
+		sz (int): Number of items.
+		k (int): Number of folds.
+		rng (numpy.random.RandomState): Source of shuffling randomness.
+
+	Returns:
+		Numpy integer array of length sz with fold labels in [0, k).
+	"""
 	idx  = rng.rand(sz)
 	sidx = np.argsort(idx)
 
@@ -48,7 +90,16 @@ def k_fold_split_index(sz, k, rng):
 
 
 def partition_data_index(sz, pvec, rng):
+	"""Randomly partition index range [0, sz) into parts with proportions pvec.
 
+	Args:
+		sz (int): Number of items.
+		pvec: Sequence of partition proportions (should sum to at most 1).
+		rng (numpy.random.RandomState): Source of shuffling randomness.
+
+	Returns:
+		List of index arrays, one per entry of pvec.
+	"""
 	idx  = rng.rand(sz)
 	sidx = np.argsort(idx)
 
@@ -65,7 +116,16 @@ def partition_data_index(sz, pvec, rng):
 	return rv
 
 def partition_data(data, pvec, rng):
+	"""Randomly partition data into parts with proportions pvec.
 
+	Args:
+		data: Indexable sequence of observations.
+		pvec: Sequence of partition proportions (should sum to at most 1).
+		rng (numpy.random.RandomState): Source of shuffling randomness.
+
+	Returns:
+		List of observation lists, one per entry of pvec.
+	"""
 	idx_list = partition_data_index(len(data), pvec, rng)
 
 	return [[data[i] for i in u] for u in idx_list]
@@ -73,7 +133,34 @@ def partition_data(data, pvec, rng):
 
 
 def best_of(data, vdata, est, trials, max_its, init_p, delta, rng, init_estimator=None, enc_data=None, enc_vdata=None, out=sys.stdout, print_iter=1):
+	"""Run several randomly-initialized EM fits and keep the best one.
 
+	Each trial initializes a model from data, runs up to max_its
+	accumulate-then-estimate iterations (stopping when the training
+	log-likelihood gain drops below delta), and scores the result on the
+	validation data; the model with the highest validation log-likelihood
+	across trials is returned.
+
+	Args:
+		data: Training observations (iterable, DataFrame, or RDD).
+		vdata: Validation observations used to pick the winning trial.
+		est: ParameterEstimator used for the EM updates.
+		trials (int): Number of random restarts.
+		max_its (int): Maximum iterations per trial.
+		init_p (float): Inclusion probability for the random initialization.
+		delta (Optional[float]): Early-stopping threshold on the training
+			log-likelihood gain (None disables early stopping).
+		rng (numpy.random.RandomState): Source of initialization randomness.
+		init_estimator: Estimator used only for initialization (defaults to
+			est).
+		enc_data: Optional pre-encoded training data.
+		enc_vdata: Optional pre-encoded validation data.
+		out: Stream for progress messages.
+		print_iter (int): Progress is printed every print_iter iterations.
+
+	Returns:
+		Tuple (best validation log-likelihood, best model).
+	"""
 	rv_ll = -np.inf
 	rv_mm = None
 
@@ -163,6 +250,28 @@ def optimize(data, estimator, max_its=10, delta=1.0e-6, init_estimator=None, ini
 	contributions (variational estimators with seq_local_elbo); the prior
 	term comes from estimator.model_log_density. Convergence is checked on
 	the combined objective, so the prior is part of the stopping rule.
+
+	Args:
+		data: Training observations (iterable, DataFrame, or RDD).
+		estimator: ParameterEstimator used for the EM/VB updates.
+		max_its (int): Maximum number of iterations.
+		delta (Optional[float]): Stop when the objective gain drops below
+			this value (None disables the convergence check).
+		init_estimator: Estimator used only for initialization (defaults to
+			estimator).
+		init_p (float): Inclusion probability for the random initialization.
+		rng (numpy.random.RandomState): Source of initialization randomness.
+		prev_estimate: Warm-start model; skips initialization when given.
+		vdata: Validation observations (defaults to data); the model with
+			the best validation log-likelihood seen during the run is
+			returned.
+		enc_data: Optional pre-encoded training data.
+		enc_vdata: Optional pre-encoded validation data.
+		out: Stream for progress messages.
+		print_iter (int): Progress is printed every print_iter iterations.
+
+	Returns:
+		The model with the highest validation log-likelihood encountered.
 	"""
 	div_error = np.geterr()
 	np.seterr(divide='ignore')
@@ -227,7 +336,29 @@ def optimize(data, estimator, max_its=10, delta=1.0e-6, init_estimator=None, ini
 	return best_model
 
 def iterate(data, estimator, max_its, prev_estimate=None, init_p=0.1, rng=np.random.RandomState(), out=sys.stdout, is_encoded=False, init_estimator=None, print_iter=1):
+	"""Run a fixed number of accumulate-then-estimate iterations.
 
+	Unlike optimize(), no objective is tracked and no convergence check is
+	performed; the model after max_its iterations is returned.
+
+	Args:
+		data: Training observations, or pre-encoded data when is_encoded is
+			True.
+		estimator: ParameterEstimator used for the EM/VB updates.
+		max_its (int): Number of iterations to run.
+		prev_estimate: Warm-start model; skips initialization when given.
+		init_p (float): Inclusion probability for the random initialization.
+		rng (numpy.random.RandomState): Source of initialization randomness.
+		out: Stream for progress messages.
+		is_encoded (bool): If True, data is already the output of
+			seq_encode().
+		init_estimator: Estimator used only for initialization (defaults to
+			estimator).
+		print_iter (int): Progress is printed every print_iter iterations.
+
+	Returns:
+		The model after max_its iterations.
+	"""
 	if init_estimator is None:
 		iest = estimator
 	else:
@@ -258,7 +389,30 @@ def iterate(data, estimator, max_its, prev_estimate=None, init_p=0.1, rng=np.ran
 
 
 def hill_climb(data, vdata, estimator, prev_estimate, max_its, metric_lambda, best_estimate=None, enc_data=None, enc_vdata=None, out=sys.stdout, print_iter=1):
+	"""Iterate EM updates, keeping the model that maximizes a validation metric.
 
+	Every iteration applies seq_estimate to the training data; the returned
+	model is the iterate with the best metric_lambda(vdata, model) score
+	(ties broken by validation log-likelihood), which need not be the final
+	iterate.
+
+	Args:
+		data: Training observations.
+		vdata: Validation observations scored by metric_lambda.
+		estimator: ParameterEstimator used for the EM updates.
+		prev_estimate: Starting model.
+		max_its (int): Number of iterations to run.
+		metric_lambda: Callable (vdata, model) -> float; higher is better.
+		best_estimate: Optional incumbent model to beat (defaults to
+			prev_estimate).
+		enc_data: Optional pre-encoded training data.
+		enc_vdata: Optional pre-encoded validation data.
+		out: Stream for progress messages.
+		print_iter (int): Progress is printed every print_iter iterations.
+
+	Returns:
+		The model with the best validation metric encountered.
+	"""
 	mm = prev_estimate
 
 	if enc_data is None:

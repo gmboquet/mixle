@@ -1,3 +1,19 @@
+"""Finite mixture distribution with a Dirichlet prior on the mixture weights.
+
+A mixture models data drawn from one of K component distributions chosen with
+probabilities w = (w_1, ..., w_K). The data type accepted is whatever the
+component distributions accept (all components must share a common data type),
+and the density is
+
+    f(x) = sum_k w_k * f_k(x).
+
+Defines the MixtureDistribution, MixtureSampler, MixtureEstimatorAccumulator,
+MixtureEstimatorAccumulatorFactory, and MixtureEstimator classes for use with
+pysparkplug. With a (symmetric) Dirichlet prior on the weights, estimation is
+MAP (counts + alpha - 1, clamped at the simplex boundary) and the posterior
+Dirichlet is carried forward as the new prior. expected_log_density uses the
+digamma expectations E[ln w_k] = psi(alpha_k) - psi(sum alpha).
+"""
 from typing import TypeVar, Optional, Generic, List, Mapping
 
 from pysp.arithmetic import *
@@ -14,8 +30,19 @@ from scipy.special import gammaln, digamma
 default_prior = SymmetricDirichletDistribution(1)
 
 class MixtureDistribution(ProbabilityDistribution):
+    """Finite mixture of component distributions with mixing weights w."""
 
     def __init__(self, components, w, name=None, prior: Optional[ProbabilityDistribution] = None):
+        """Create a mixture distribution.
+
+        Args:
+            components: Sequence of component ProbabilityDistribution objects
+                sharing a common data type.
+            w: Mixture weights (length-K array summing to one).
+            name (Optional[str]): Name of the distribution.
+            prior (Optional[ProbabilityDistribution]): Prior on the mixture
+                weights. Defaults to a flat Dirichlet.
+        """
         self.set_name(name)
 
         if prior is None:
@@ -47,9 +74,18 @@ class MixtureDistribution(ProbabilityDistribution):
         return 'MixtureDistribution([%s], [%s], name=%s, prior=%s)' % (','.join([str(u) for u in self.components]), ','.join(map(str, self.w)), str(self.name), str(self.prior))
 
     def get_prior(self):
+        """Return the joint prior as a CompositeDistribution of the weight
+        prior and the component priors."""
         return CompositeDistribution((self.prior, CompositeDistribution([d.get_prior() for d in self.components])))
 
     def set_prior(self, prior):
+        """Set the joint prior from a CompositeDistribution of (weight prior,
+        CompositeDistribution of component priors).
+
+        Args:
+            prior: CompositeDistribution matching the structure returned by
+                get_prior().
+        """
         self.prior = prior.dists[0]
         for d,p in zip(self.components, prior.dists[1].dists):
             d.set_prior(p)
@@ -65,30 +101,80 @@ class MixtureDistribution(ProbabilityDistribution):
             self.expected_nparams  = None
 
     def get_parameters(self):
+        """Return (w, [component parameters])."""
         return self.w, [u.get_parameters() for u in self.components]
 
     def set_parameters(self, params):
+        """Set parameters from (w, [component parameters]).
+
+        Args:
+            params: Tuple of mixture weights and a list of per-component
+                parameter values.
+        """
         self.w = params[0]
         for d,p in zip(self.components, params[1]):
             d.set_parameters(p)
 
     def density(self, x):
+        """Density of the mixture at observation x.
+
+        Args:
+            x: Observation compatible with the component distributions.
+
+        Returns:
+            Density (float) at x.
+        """
         return exp(self.log_density(x))
 
     def log_density(self, x):
+        """Log-density log(sum_k w_k f_k(x)) at observation x.
+
+        Args:
+            x: Observation compatible with the component distributions.
+
+        Returns:
+            Log-density (float) at x.
+        """
         return vec.log_sum(np.asarray([u.log_density(x) for u in self.components]) + self.log_w)
 
     def expected_log_density(self, x):
-        cc = self.expected_nparams
+        """Prior-expected log-density at observation x.
+
+        Uses E[ln w_k] under a (symmetric) Dirichlet weight prior, falling
+        back to the current log weights when no conjugate prior is set.
+
+        Args:
+            x: Observation compatible with the component distributions.
+
+        Returns:
+            Expected log-density (float) at x.
+        """
+        cc = self.expected_nparams if self.expected_nparams is not None else self.log_w
         return vec.log_sum(np.asarray([u.expected_log_density(x) for u in self.components]) + cc)
 
     def seq_expected_log_density(self, x):
-        cc = self.expected_nparams
+        """Vectorized expected log-density at sequence-encoded input x.
+
+        Args:
+            x: Encoded data from seq_encode().
+
+        Returns:
+            Numpy array of expected log-densities, one entry per observation.
+        """
+        cc = self.expected_nparams if self.expected_nparams is not None else self.log_w
         ll = np.asarray([u.seq_expected_log_density(x) for u in self.components]).T + cc
-        ml = np.max(ll, axis=1)
-        return np.log(np.sum(np.exp(ll - ml), axis=1)) + ml
+        ml = np.max(ll, axis=1, keepdims=True)
+        return np.log(np.sum(np.exp(ll - ml), axis=1)) + ml.flatten()
 
     def posterior(self, x):
+        """Posterior component-membership probabilities for observation x.
+
+        Args:
+            x: Observation compatible with the component distributions.
+
+        Returns:
+            Numpy array of length num_components summing to one.
+        """
 
         comp_log_density = np.asarray([m.log_density(x) for m in self.components])
         comp_log_density += self.log_w
@@ -106,6 +192,14 @@ class MixtureDistribution(ProbabilityDistribution):
 
 
     def seq_log_density(self, x):
+        """Vectorized log-density at sequence-encoded input x.
+
+        Args:
+            x: Encoded data from seq_encode().
+
+        Returns:
+            Numpy array of log-densities, one entry per observation.
+        """
 
         ll_mat = np.asarray([u.seq_log_density(x) for u in self.components]).T + self.log_w
         ll_max  = ll_mat.max(axis=1, keepdims=True)
@@ -139,10 +233,26 @@ class MixtureDistribution(ProbabilityDistribution):
 
 
     def seq_component_log_density(self, x):
+        """Per-component log-densities at sequence-encoded input x.
+
+        Args:
+            x: Encoded data from seq_encode().
+
+        Returns:
+            Numpy array of shape (n, num_components).
+        """
         ll_mat = np.asarray([u.seq_log_density(x) for u in self.components]).T
         return ll_mat
 
     def seq_posterior(self, x):
+        """Posterior component-membership probabilities at encoded input x.
+
+        Args:
+            x: Encoded data from seq_encode().
+
+        Returns:
+            Numpy array of shape (n, num_components) with rows summing to one.
+        """
 
         ll_mat = np.asarray([u.seq_log_density(x) for u in self.components]).T + self.log_w
         ll_max = ll_mat.max(axis=1, keepdims=True)
@@ -164,18 +274,39 @@ class MixtureDistribution(ProbabilityDistribution):
         return ll_mat
 
     def seq_encode(self, x):
+        """Encode a sequence of observations for vectorized evaluation.
+
+        Args:
+            x: Iterable of observations.
+
+        Returns:
+            Encoding produced by the first component (shared by all).
+        """
         return self.components[0].seq_encode(x)
 
     def sampler(self, seed: Optional[int] = None):
+        """Return a MixtureSampler for this distribution.
+
+        Args:
+            seed (Optional[int]): Seed for the random number generator.
+        """
         return MixtureSampler(self, seed)
 
     def estimator(self):
+        """Return a MixtureEstimator matching this distribution."""
         return MixtureEstimator([u.estimator() for u in self.components], name=self.name, prior=self.prior)
 
 
 class MixtureSampler(object):
+    """Draws observations from a MixtureDistribution."""
 
     def __init__(self, dist: MixtureDistribution, seed: Optional[int] = None):
+        """Create a sampler for a MixtureDistribution.
+
+        Args:
+            dist (MixtureDistribution): Distribution to sample from.
+            seed (Optional[int]): Seed for the random number generator.
+        """
 
         rng_loc = RandomState(seed)
 
@@ -184,6 +315,15 @@ class MixtureSampler(object):
         self.compSamplers = [d.sampler(seed=rng_loc.randint(maxint)) for d in self.dist.components]
 
     def sample(self, size=None):
+        """Draw size samples (or one sample when size is None).
+
+        Args:
+            size (Optional[int]): Number of samples to draw.
+
+        Returns:
+            A single observation when size is None, otherwise a list of
+            observations.
+        """
 
         compState = self.rng.choice(range(0, self.dist.num_components), size=size, replace=True, p=self.dist.w)
 
@@ -194,8 +334,17 @@ class MixtureSampler(object):
 
 
 class MixtureEstimatorAccumulator(StatisticAccumulator):
+    """Accumulates posterior-weighted component counts and component
+    sufficient statistics for mixture estimation."""
 
     def __init__(self, accumulators, keys=(None, None)):
+        """Create a mixture accumulator.
+
+        Args:
+            accumulators: List of per-component StatisticAccumulator objects.
+            keys: Tuple (weight_key, comp_key) for sharing statistics across
+                accumulators with matching keys.
+        """
         self.accumulators = accumulators
         self.num_components = len(accumulators)
         self.comp_counts = np.zeros(self.num_components, dtype=float)
@@ -203,6 +352,14 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
         self.comp_key = keys[1]
 
     def update(self, x, weight, estimate):
+        """Accumulate one observation, splitting weight by the posterior of
+        the current estimate.
+
+        Args:
+            x: Observation.
+            weight (float): Observation weight.
+            estimate (MixtureDistribution): Current model estimate.
+        """
 
         likelihood = np.asarray([estimate.components[i].log_density(x) for i in range(self.num_components)])
         likelihood += estimate.log_w
@@ -219,6 +376,13 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
             self.accumulators[i].update(x, likelihood[i] * weight, estimate.components[i])
 
     def initialize(self, x, weight, rng):
+        """Initialize component accumulators with randomly split weight.
+
+        Args:
+            x: Observation.
+            weight (float): Observation weight.
+            rng (RandomState): Random number generator.
+        """
 
         if weight == 0:
             for i in range(self.num_components):
@@ -231,6 +395,13 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
                 self.comp_counts[i] += w
 
     def seq_update(self, x, weights, estimate):
+        """Vectorized update from sequence-encoded data.
+
+        Args:
+            x: Encoded data from MixtureDistribution.seq_encode().
+            weights (np.ndarray): Observation weights.
+            estimate (MixtureDistribution): Current model estimate.
+        """
 
         ll_mat = np.asarray([u.seq_log_density(x) for u in estimate.components]).T + estimate.log_w
         ll_max = ll_mat.max(axis=1, keepdims=True)
@@ -251,8 +422,6 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
         ll_sum = np.sum(ll_mat, axis=1, keepdims=True)
         ll_mat /= ll_sum
 
-        ttt = 1
-
         for i in range(self.num_components):
             w_loc = ll_mat[:, i]*weights
             self.comp_counts[i] += w_loc.sum()
@@ -262,6 +431,14 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
 
 
     def combine(self, suff_stat):
+        """Merge another accumulator's value() into this one.
+
+        Args:
+            suff_stat: Tuple (comp_counts, component suff stats).
+
+        Returns:
+            This accumulator.
+        """
 
         self.comp_counts += suff_stat[0]
         for i in range(self.num_components):
@@ -270,15 +447,29 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
         return self
 
     def value(self):
+        """Return (comp_counts, tuple of component suff stats)."""
         return self.comp_counts, tuple([u.value() for u in self.accumulators])
 
     def from_value(self, x):
+        """Set this accumulator's state from a value() tuple.
+
+        Args:
+            x: Tuple (comp_counts, component suff stats).
+
+        Returns:
+            This accumulator.
+        """
         self.comp_counts = x[0]
         for i in range(self.num_components):
             self.accumulators[i].from_value(x[1][i])
         return self
 
     def key_merge(self, stats_dict):
+        """Merge keyed statistics into stats_dict.
+
+        Args:
+            stats_dict: Mapping from key to shared statistics.
+        """
 
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
@@ -298,6 +489,12 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
             u.key_merge(stats_dict)
 
     def key_replace(self, stats_dict):
+        """Replace this accumulator's statistics with keyed entries from
+        stats_dict.
+
+        Args:
+            stats_dict: Mapping from key to shared statistics.
+        """
 
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
@@ -312,18 +509,39 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
             u.key_replace(stats_dict)
 
 class MixtureEstimatorAccumulatorFactory(object):
+    """Factory for creating MixtureEstimatorAccumulator objects."""
+
     def __init__(self, factories, dim, keys):
+        """Create a mixture accumulator factory.
+
+        Args:
+            factories: List of per-component accumulator factories.
+            dim (int): Number of mixture components.
+            keys: Tuple (weight_key, comp_key) passed to the accumulators.
+        """
         self.factories = factories
         self.dim = dim
         self.keys = keys
 
     def make(self):
+        """Return a new MixtureEstimatorAccumulator."""
         return MixtureEstimatorAccumulator([self.factories[i].make() for i in range(self.dim)], self.keys)
 
 
 class MixtureEstimator(ParameterEstimator):
+    """Estimates a MixtureDistribution from accumulated sufficient
+    statistics, using Dirichlet MAP weights when a conjugate prior is set."""
 
     def __init__(self, estimators, fixed_w=None, name=None, prior=default_prior, keys=(None, None)):
+        """Create a mixture estimator.
+
+        Args:
+            estimators: List of per-component ParameterEstimator objects.
+            fixed_w: Optional fixed mixture weights (skips weight estimation).
+            name (Optional[str]): Name of the estimated distribution.
+            prior: Prior on the mixture weights.
+            keys: Tuple (weight_key, comp_key) for sharing statistics.
+        """
 
         self.num_components = len(estimators)
         self.estimators = estimators
@@ -333,18 +551,36 @@ class MixtureEstimator(ParameterEstimator):
         self.fixed_w = None if fixed_w is None else np.copy(fixed_w)
 
     def accumulator_factory(self):
+        """Return a MixtureEstimatorAccumulatorFactory for this estimator."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         return MixtureEstimatorAccumulatorFactory(est_factories, self.num_components, self.keys)
 
     def get_prior(self):
+        """Return the joint prior as a CompositeDistribution of the weight
+        prior and the component estimators' priors."""
         return CompositeDistribution((self.prior, CompositeDistribution([d.get_prior() for d in self.estimators], name=self.keys[1])))
 
     def set_prior(self, prior):
+        """Set the joint prior from a CompositeDistribution of (weight prior,
+        CompositeDistribution of component priors).
+
+        Args:
+            prior: CompositeDistribution matching get_prior() structure.
+        """
         self.prior = prior.dists[0]
         for d,p in zip(self.estimators, prior.dists[1].dists):
             d.set_prior(p)
 
     def model_log_density(self, model: MixtureDistribution) -> float:
+        """Log density of the model parameters under this estimator's prior.
+
+        Args:
+            model (MixtureDistribution): Model to evaluate.
+
+        Returns:
+            Weight-prior log density at the estimated weights plus each
+            component's prior term.
+        """
         # weight prior at the estimated weights, plus each component's prior
         # term evaluated through the component estimator (which knows its own
         # prior parameterization)
@@ -356,6 +592,16 @@ class MixtureEstimator(ParameterEstimator):
         return rv
 
     def estimate(self, suff_stat):
+        """Estimate a MixtureDistribution from sufficient statistics.
+
+        Args:
+            suff_stat: Tuple (comp_counts, component suff stats) as returned
+                by MixtureEstimatorAccumulator.value().
+
+        Returns:
+            MixtureDistribution with MAP weights (under a Dirichlet prior)
+            and estimated components.
+        """
 
         num_components = self.num_components
         counts, comp_suff_stats = suff_stat

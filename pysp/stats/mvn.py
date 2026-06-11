@@ -1,4 +1,4 @@
-""""Create, estimate, and sample from a multivariate normal distribution with mean vector 'mu' (length n), and
+"""Create, estimate, and sample from a multivariate normal distribution with mean vector 'mu' (length n), and
 covariance matrix 'covar' (n by n).
 
 Defines the MultivariateGaussianDistribution, MultivariateGaussianSampler, MultivariateGaussianAccumulatorFactory,
@@ -26,6 +26,7 @@ from typing import Union, List, Dict, Optional, Any, Sequence, Tuple
 
 
 class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution):
+    """Multivariate normal distribution with mean vector mu and full covariance matrix covar."""
 
     def __init__(self, mu: Union[List[float], np.ndarray], covar: Union[List[List[float]], np.ndarray],
                  name: Optional[str] = None, keys: Optional[str] = None) -> None:
@@ -63,6 +64,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             self.chol_const = -0.5 * (len(self.mu) * np.log(2.0 * pi) + 2.0 * np.log(vec.diag(self.chol[0])).sum())
 
     def __str__(self) -> str:
+        """Returns string representation of MultivariateGaussianDistribution object."""
         s1 = repr(list(self.mu))
         s2 = repr([list(u) for u in self.covar])
         s3 = repr(self.name)
@@ -105,6 +107,16 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
                 raise e
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Vectorized evaluation of the log-density at a sequence-encoded input x.
+
+        Args:
+            x (np.ndarray): Encoded data matrix with shape (sz, dim) from
+                MultivariateGaussianDataEncoder.seq_encode().
+
+        Returns:
+            Numpy array of length sz containing the log-density of each encoded observation.
+
+        """
         if self.use_lstsq:
             return np.ones(x.shape[0])
         else:
@@ -114,9 +126,29 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             return rv
 
     def sampler(self, seed: Optional[int] = None):
+        """Create a MultivariateGaussianSampler for sampling from this distribution.
+
+        Args:
+            seed (Optional[int]): Seed to set for sampling with RandomState.
+
+        Returns:
+            MultivariateGaussianSampler object.
+
+        """
         return MultivariateGaussianSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None):
+        """Create a MultivariateGaussianEstimator for estimating this distribution.
+
+        If pseudo_count is passed, the current mean and covariance are used to regularize the estimate.
+
+        Args:
+            pseudo_count (Optional[float]): Used to inflate sufficient statistics in estimation.
+
+        Returns:
+            MultivariateGaussianEstimator object.
+
+        """
         if pseudo_count is None:
             return MultivariateGaussianEstimator(name=self.name)
         else:
@@ -125,21 +157,61 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
                                                  name=self.name)
 
     def dist_to_encoder(self) -> 'MultivariateGaussianDataEncoder':
+        """Returns a MultivariateGaussianDataEncoder object for encoding sequences of iid observations."""
         return MultivariateGaussianDataEncoder(dim=self.dim)
 
 
 class MultivariateGaussianSampler(DistributionSampler):
+    """MultivariateGaussianSampler object for sampling from a MultivariateGaussianDistribution."""
 
     def __init__(self, dist: 'MultivariateGaussianDistribution', seed: Optional[int] = None) -> None:
+        """MultivariateGaussianSampler object.
+
+        Args:
+            dist (MultivariateGaussianDistribution): Object instance to sample from.
+            seed (Optional[int]): Seed for random number generator.
+
+        Attributes:
+            dist (MultivariateGaussianDistribution): Object instance to sample from.
+            rng (RandomState): Seeded RandomState for sampling.
+
+        """
         self.rng = RandomState(seed)
         self.dist = dist
 
     def sample(self, size: Optional[int] = None) -> np.ndarray:
+        """Draw iid samples from the multivariate Gaussian distribution.
+
+        Args:
+            size (Optional[int]): Number of iid samples to draw. If None, a single sample is drawn.
+
+        Returns:
+            Numpy array with shape (dim,) if size is None, else with shape (size, dim).
+
+        """
         return self.rng.multivariate_normal(mean=self.dist.mu, cov=self.dist.covar, size=size)
 
 
 class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
+    """MultivariateGaussianAccumulator object for aggregating sufficient statistics from iid observations."""
+
     def __init__(self, dim: Optional[int] = None, keys: Optional[str] = None, name: Optional[str] = None) -> None:
+        """MultivariateGaussianAccumulator object.
+
+        Args:
+            dim (Optional[int]): Optional dimension of the Gaussian. Inferred from data if None.
+            keys (Optional[str]): Set keys for merging sufficient statistics.
+            name (Optional[str]): Set name for object instance.
+
+        Attributes:
+            dim (Optional[int]): Dimension of the Gaussian, set on first update if None.
+            count (float): Sum of observation weights.
+            sum (Optional[np.ndarray]): Weighted sum of observation vectors.
+            sum2 (Optional[np.ndarray]): Weighted sum of observation outer products.
+            key (Optional[str]): Key for merging sufficient statistics.
+            name (Optional[str]): Name of object instance.
+
+        """
         self.dim = dim
         self.count = 0.0
         self.key = keys
@@ -153,6 +225,18 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum2 = None
 
     def update(self, x: np.ndarray, weight: float, estimate: Optional[MultivariateGaussianDistribution]) -> None:
+        """Update sufficient statistics with a single weighted observation.
+
+        Args:
+            x (np.ndarray): Length-dim observation vector.
+            weight (float): Weight for the observation.
+            estimate (Optional[MultivariateGaussianDistribution]): Kept for consistency with
+                SequenceEncodableStatisticAccumulator (not used).
+
+        Returns:
+            None.
+
+        """
         if self.dim is None:
             self.dim = len(x)
             self.sum = vec.zeros(self.dim)
@@ -164,9 +248,31 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += weight
 
     def initialize(self, x: np.ndarray, weight: float, rng: Optional[RandomState]) -> None:
+        """Initialize the accumulator with a weighted observation. Calls update().
+
+        Args:
+            x (np.ndarray): Length-dim observation vector.
+            weight (float): Weight for the observation.
+            rng (Optional[RandomState]): Kept for consistency with SequenceEncodableStatisticAccumulator.
+
+        Returns:
+            None.
+
+        """
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Optional[RandomState]) -> None:
+        """Vectorized update of sufficient statistics with an encoded sequence of observations.
+
+        Args:
+            x (np.ndarray): Encoded data matrix with shape (sz, dim).
+            weights (np.ndarray): Numpy array of sz observation weights.
+            estimate (Optional[MultivariateGaussianDistribution]): Kept for consistency (not used).
+
+        Returns:
+            None.
+
+        """
         if self.dim is None:
             self.dim = x.shape[1]
             self.sum = vec.zeros(self.dim)
@@ -178,9 +284,30 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 += np.einsum('ji,ik->jk', x_weight, x)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: Optional[RandomState]) -> None:
+        """Vectorized initialization of the accumulator. Calls seq_update().
+
+        Args:
+            x (np.ndarray): Encoded data matrix with shape (sz, dim).
+            weights (np.ndarray): Numpy array of sz observation weights.
+            rng (Optional[RandomState]): Kept for consistency with SequenceEncodableStatisticAccumulator.
+
+        Returns:
+            None.
+
+        """
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: Tuple[np.ndarray, np.ndarray, float]) -> 'MultivariateGaussianAccumulator':
+        """Merge the sufficient statistics of suff_stat into this accumulator.
+
+        Args:
+            suff_stat (Tuple[np.ndarray, np.ndarray, float]): Tuple of (weighted sum of observations,
+                weighted sum of outer products, sum of weights).
+
+        Returns:
+            MultivariateGaussianAccumulator object.
+
+        """
         if suff_stat[0] is not None and self.sum is not None:
             self.sum += suff_stat[0]
             self.sum2 += suff_stat[1]
@@ -194,39 +321,86 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Returns the sufficient statistics (sum, sum of outer products, count) of the accumulator."""
         return self.sum, self.sum2, self.count
 
     def from_value(self, x: Tuple[np.ndarray, np.ndarray, float]) -> 'MultivariateGaussianAccumulator':
+        """Set the sufficient statistics of the accumulator to x.
+
+        Args:
+            x (Tuple[np.ndarray, np.ndarray, float]): Tuple of (weighted sum of observations,
+                weighted sum of outer products, sum of weights).
+
+        Returns:
+            MultivariateGaussianAccumulator object.
+
+        """
         self.sum = x[0]
         self.sum2 = x[1]
         self.count = x[2]
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+        """Combine sufficient statistics with other accumulators sharing a matching key.
+
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary mapping keys to aggregated statistics.
+
+        Returns:
+            None.
+
+        """
         if self.key is not None:
             if self.key in stats_dict:
                 self.combine(stats_dict[self.key])
 
     def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+        """Replace sufficient statistics with values from stats_dict for a matching key.
+
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary mapping keys to aggregated statistics.
+
+        Returns:
+            None.
+
+        """
         if self.key is not None:
             if self.key in stats_dict:
                 self.from_value(stats_dict[self.key])
 
     def acc_to_encoder(self) -> 'MultivariateGaussianDataEncoder':
+        """Returns a MultivariateGaussianDataEncoder object for encoding sequences of iid observations."""
         return MultivariateGaussianDataEncoder(dim=self.dim)
 
 class MultivariateGaussianAccumulatorFactory(StatisticAccumulatorFactory):
+    """MultivariateGaussianAccumulatorFactory object for creating MultivariateGaussianAccumulator objects."""
 
     def __init__(self, dim: Optional[int], keys: Optional[str] = None, name: Optional[str] = None) -> None:
+        """MultivariateGaussianAccumulatorFactory object.
+
+        Args:
+            dim (Optional[int]): Optional dimension of the Gaussian.
+            keys (Optional[str]): Set keys for merging sufficient statistics.
+            name (Optional[str]): Set name for object instance.
+
+        Attributes:
+            dim (Optional[int]): Optional dimension of the Gaussian.
+            key (Optional[str]): Key for merging sufficient statistics.
+            name (Optional[str]): Name of object instance.
+
+        """
         self.dim = dim
         self.key = keys
         self.name = name
 
     def make(self) -> 'MultivariateGaussianAccumulator':
+        """Returns a new MultivariateGaussianAccumulator with the factory's dim, keys, and name."""
         return MultivariateGaussianAccumulator(dim=self.dim, keys=self.key, name=self.name)
 
 
 class MultivariateGaussianEstimator(ParameterEstimator):
+    """MultivariateGaussianEstimator object for estimating a multivariate normal distribution from
+    aggregated sufficient statistics."""
 
     def __init__(self, dim: Optional[int] = None,
                  pseudo_count: Optional[Tuple[Optional[float], Optional[float]]] = (None, None),
@@ -264,6 +438,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         self.key = keys
 
     def accumulator_factory(self) -> 'MultivariateGaussianAccumulatorFactory':
+        """Returns a MultivariateGaussianAccumulatorFactory built from the estimator's attributes."""
         return MultivariateGaussianAccumulatorFactory(dim=self.dim, keys=self.key, name=self.name)
 
     def estimate(self, nobs: Optional[float], suff_stat: Tuple[np.ndarray, np.ndarray, float]) \
@@ -299,17 +474,44 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         return MultivariateGaussianDistribution(mu, covar, name=self.name)
 
 class MultivariateGaussianDataEncoder(DataSequenceEncoder):
+    """MultivariateGaussianDataEncoder object for encoding sequences of iid multivariate Gaussian observations."""
 
     def __init__(self, dim: Optional[int] = None) -> None:
+        """MultivariateGaussianDataEncoder object.
+
+        Args:
+            dim (Optional[int]): Optional dimension of the Gaussian. Inferred from data if None.
+
+        """
         self.dim = dim
 
     def __str__(self) -> str:
+        """Returns string representation of MultivariateGaussianDataEncoder object."""
         return 'MultivariateGaussianDataEncoder(dim=' + str(self.dim) + ')'
 
     def __eq__(self, other: object) -> bool:
+        """Checks if other object is a MultivariateGaussianDataEncoder with the same dim.
+
+        Args:
+            other (object): Object to compare against.
+
+        Returns:
+            bool.
+
+        """
         return other.dim == self.dim if isinstance(other, MultivariateGaussianDataEncoder) else False
 
     def seq_encode(self, x: Union[Sequence[List[float]], Sequence[List[np.ndarray]], np.ndarray]):
+        """Encode a sequence of iid length-dim observations for vectorized 'seq_' calls.
+
+        Args:
+            x (Union[Sequence[List[float]], Sequence[List[np.ndarray]], np.ndarray]): Sequence of
+                length-dim observation vectors.
+
+        Returns:
+            Encoded data matrix with shape (len(x), dim).
+
+        """
         self.dim = len(x[0]) if self.dim is None else self.dim
         return np.reshape(np.asarray(x), (-1, self.dim))
 

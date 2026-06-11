@@ -31,10 +31,27 @@ from pysp.bstats.markovchain import default_prior, _map_probs, _unpack_chain_pri
 
 
 class HiddenMarkovModelDistribution(ProbabilityDistribution):
+    """Hidden Markov model with latent integer states, emission ("topic")
+    distributions, and conjugate Dirichlet priors on the initial-state and
+    transition probabilities."""
 
     def __init__(self, topics, w, transitions, name: Optional[str] = None,
                  prior=None, len_dist: ProbabilityDistribution = null_dist):
+        """HiddenMarkovModelDistribution object.
 
+        Args:
+            topics: List of S emission distributions, one per state (each
+                carrying its own prior).
+            w: Length-S vector of initial-state probabilities.
+            transitions: (S, S) row-stochastic transition matrix.
+            name (Optional[str]): Name of object.
+            prior: (init_prior, row_priors) tuple or composable
+                CompositeDistribution form (see set_prior()); defaults to
+                unit-parameter Dirichlets.
+            len_dist (ProbabilityDistribution): Distribution of the sequence
+                length; null_dist treats lengths as exogenous.
+
+        """
         self.name = name
         self.topics = topics
         self.num_states = len(topics)
@@ -50,9 +67,18 @@ class HiddenMarkovModelDistribution(ProbabilityDistribution):
             tstr, wstr, astr, self.name, str(self.len_dist))
 
     def get_parameters(self):
+        """Returns the parameter tuple (w, transitions, topic parameters)."""
         return self.w, self.transitions, [u.get_parameters() for u in self.topics]
 
     def set_parameters(self, params) -> None:
+        """Set the parameters and refresh the cached log-probabilities.
+
+        Args:
+            params: Tuple (w, transitions) or (w, transitions,
+                topic parameters); topic parameters, when present, are
+                pushed down into the topics.
+
+        """
         if len(params) == 3:
             w, transitions, topic_params = params
             for topic, tp in zip(self.topics, topic_params):
@@ -67,6 +93,8 @@ class HiddenMarkovModelDistribution(ProbabilityDistribution):
             self.log_trans = np.log(self.transitions)
 
     def get_prior(self):
+        """Returns the priors in composable form: CompositeDistribution of
+        (init_prior, row priors, topic priors)."""
         # composable form: nesting machinery (DPM/mixtures) can take
         # cross-entropies and entropies of this against another HMM prior
         return CompositeDistribution((self.init_prior,
@@ -74,6 +102,19 @@ class HiddenMarkovModelDistribution(ProbabilityDistribution):
                                       CompositeDistribution([t.get_prior() for t in self.topics])))
 
     def set_prior(self, prior) -> None:
+        """Set the priors and precompute conjugate-prior expectations.
+
+        Accepts the (init_prior, row_priors) tuple form or the composable
+        form returned by get_prior() (whose topic priors, when present, are
+        pushed down into the topics). When the initial-state prior and all
+        row priors are Dirichlet, this caches the digamma expectations
+        E[ln p_k] = psi(alpha_k) - psi(sum alpha) used by
+        expected_log_density and sets has_conj_prior accordingly.
+
+        Args:
+            prior: (init_prior, row_priors) tuple or CompositeDistribution.
+
+        """
         self.init_prior, self.row_priors, extra = _unpack_chain_prior(prior)
 
         if len(extra) > 0:
@@ -96,15 +137,46 @@ class HiddenMarkovModelDistribution(ProbabilityDistribution):
             self.has_conj_prior = False
 
     def density(self, x) -> float:
+        """Density of the HMM at observation sequence x; see log_density().
+
+        Args:
+            x: Sequence of emissions accepted by the topics.
+
+        Returns:
+            Density at observation x.
+
+        """
         return np.exp(self.log_density(x))
 
     def log_density(self, x) -> float:
+        """Marginal log-likelihood of an emission sequence via the scaled
+        forward recursion (plus the len_dist term when present).
+
+        Args:
+            x: Sequence of emissions accepted by the topics.
+
+        Returns:
+            Log-density at observation x.
+
+        """
         if len(x) == 0:
             return self._len_term(x)
         log_b = np.asarray([[topic.log_density(u) for topic in self.topics] for u in x])
         return self._forward_ll(log_b, self.log_w, self.log_trans) + self._len_term(x)
 
     def expected_log_density(self, x) -> float:
+        """Forward log-likelihood with digamma-expected initial/transition
+        log-probabilities and the topics' expected_log_density emissions.
+
+        Falls back to the plug-in log_density(x) without a conjugate prior.
+
+        Args:
+            x: Sequence of emissions accepted by the topics.
+
+        Returns:
+            Expected log-density at observation x.
+
+        """
         if not self.has_conj_prior:
             return self.log_density(x)
         if len(x) == 0:
@@ -140,6 +212,16 @@ class HiddenMarkovModelDistribution(ProbabilityDistribution):
         return float(ll + b_max.sum())
 
     def seq_encode(self, x: Sequence[Sequence]):
+        """Encode emission sequences into a flat topic encoding with offsets.
+
+        Args:
+            x (Sequence[Sequence]): Iterable of emission sequences.
+
+        Returns:
+            Tuple (lengths, offsets, flat_enc, len_enc) for use with
+            seq_ methods.
+
+        """
         lengths = np.asarray([len(u) for u in x], dtype=int)
         offsets = np.concatenate([[0], np.cumsum(lengths)])
 
@@ -159,6 +241,15 @@ class HiddenMarkovModelDistribution(ProbabilityDistribution):
         return np.asarray([topic.seq_log_density(flat_enc) for topic in self.topics]).T
 
     def seq_log_density(self, x) -> np.ndarray:
+        """Vectorized log-density at sequence-encoded input x.
+
+        Args:
+            x: Encoded sequences from seq_encode().
+
+        Returns:
+            Numpy array of log-densities, one per sequence.
+
+        """
         lengths, offsets, flat_enc, len_enc = x
         log_b_all = self._emission_log_densities(flat_enc)
 
@@ -175,6 +266,15 @@ class HiddenMarkovModelDistribution(ProbabilityDistribution):
         return rv
 
     def seq_expected_log_density(self, x) -> np.ndarray:
+        """Vectorized expected_log_density() at sequence-encoded input x.
+
+        Args:
+            x: Encoded sequences from seq_encode().
+
+        Returns:
+            Numpy array of expected log-densities, one per sequence.
+
+        """
         if not self.has_conj_prior:
             return self.seq_log_density(x)
 
@@ -194,7 +294,15 @@ class HiddenMarkovModelDistribution(ProbabilityDistribution):
         return rv
 
     def viterbi(self, x) -> List[int]:
-        """Most likely state sequence for a single observation sequence."""
+        """Most likely state sequence for a single observation sequence.
+
+        Args:
+            x: Sequence of emissions accepted by the topics.
+
+        Returns:
+            List of len(x) integer states maximizing the joint probability.
+
+        """
         if len(x) == 0:
             return []
         log_b = np.asarray([[topic.log_density(u) for topic in self.topics] for u in x])
@@ -213,17 +321,41 @@ class HiddenMarkovModelDistribution(ProbabilityDistribution):
         return states[::-1]
 
     def sampler(self, seed: Optional[int] = None):
+        """Create a HiddenMarkovModelSampler for this distribution.
+
+        Args:
+            seed (Optional[int]): Seed for the random number generator.
+
+        Returns:
+            HiddenMarkovModelSampler object.
+
+        """
         return HiddenMarkovModelSampler(self, seed)
 
     def estimator(self):
+        """Create a HiddenMarkovModelEstimator from this distribution's
+        topics, priors, and length estimator.
+
+        Returns:
+            HiddenMarkovModelEstimator object.
+
+        """
         len_est = NullEstimator() if isinstance(self.len_dist, NullDistribution) else self.len_dist.estimator()
         return HiddenMarkovModelEstimator([u.estimator() for u in self.topics], name=self.name,
                                           prior=(self.init_prior, self.row_priors), len_estimator=len_est)
 
 
 class HiddenMarkovModelSampler(object):
+    """Draws emission sequences from a HiddenMarkovModelDistribution."""
 
     def __init__(self, dist: HiddenMarkovModelDistribution, seed: Optional[int] = None):
+        """HiddenMarkovModelSampler object.
+
+        Args:
+            dist (HiddenMarkovModelDistribution): Distribution to sample from.
+            seed (Optional[int]): Seed for the random number generator.
+
+        """
         rng = RandomState(seed)
         self.rng = RandomState(rng.randint(0, maxint))
         self.dist = dist
@@ -234,6 +366,16 @@ class HiddenMarkovModelSampler(object):
             self.len_sampler = dist.len_dist.sampler(seed=rng.randint(0, maxint))
 
     def sample_seq(self, n: Optional[int] = None):
+        """Draw a single emission sequence (states are latent).
+
+        Args:
+            n (Optional[int]): Sequence length; drawn from the len_dist
+                sampler when None (which then must exist).
+
+        Returns:
+            List of n emissions.
+
+        """
         if n is None:
             if self.len_sampler is None:
                 raise Exception('HiddenMarkovModelSampler requires a len_dist (or explicit n) to sample sequences.')
@@ -250,14 +392,35 @@ class HiddenMarkovModelSampler(object):
         return rv
 
     def sample(self, size=None):
+        """Draw size sequences (a single sequence when size is None).
+
+        Args:
+            size (Optional[int]): Number of sequences to draw.
+
+        Returns:
+            An emission sequence if size is None, else a list of size sequences.
+
+        """
         if size is None:
             return self.sample_seq()
         return [self.sample_seq() for _ in range(size)]
 
 
 class HiddenMarkovModelAccumulator(StatisticAccumulator):
+    """Accumulates HMM sufficient statistics via forward-backward: expected
+    initial-state counts, expected transition counts, and posterior-weighted
+    emission statistics per topic."""
 
     def __init__(self, accumulators, len_accumulator=NullAccumulator(), name=None, keys=None):
+        """HiddenMarkovModelAccumulator object.
+
+        Args:
+            accumulators: List of S topic accumulators.
+            len_accumulator: Accumulator for the sequence lengths.
+            name (Optional[str]): Name of the accumulator.
+            keys (Optional[str]): Key for sharing sufficient statistics.
+
+        """
         self.accumulators = accumulators
         self.num_states = len(accumulators)
         self.name = name
@@ -267,6 +430,14 @@ class HiddenMarkovModelAccumulator(StatisticAccumulator):
         self.len_accumulator = len_accumulator
 
     def initialize(self, x, weight, rng):
+        """Initialize with random Dirichlet state assignments for sequence x.
+
+        Args:
+            x: Sequence of emissions accepted by the topics.
+            weight (float): Weight of the observation.
+            rng (RandomState): Random number generator for the assignments.
+
+        """
         if len(x) == 0:
             return
 
@@ -286,12 +457,36 @@ class HiddenMarkovModelAccumulator(StatisticAccumulator):
             self.len_accumulator.update(len(x), weight, None)
 
     def update(self, x, weight, estimate):
+        """Accumulate the E-step statistics for one sequence (delegates to
+        seq_update on a singleton encoding).
+
+        Args:
+            x: Sequence of emissions accepted by the topics.
+            weight (float): Weight of the observation.
+            estimate (HiddenMarkovModelDistribution): Current estimate used
+                for the forward-backward recursion.
+
+        """
         if len(x) == 0:
             return
         enc = estimate.seq_encode([x])
         self.seq_update(enc, np.asarray([weight]), estimate)
 
     def seq_update(self, x, weights, estimate):
+        """Forward-backward E-step on sequence-encoded data.
+
+        Runs the scaled forward-backward recursion per sequence at the
+        current point estimates, accumulating expected initial-state counts,
+        expected transition counts (xi), and pushing the state posteriors
+        (gamma) into the topic accumulators.
+
+        Args:
+            x: Encoded sequences from seq_encode().
+            weights (np.ndarray): Weight per sequence.
+            estimate (HiddenMarkovModelDistribution): Current estimate used
+                for the recursion.
+
+        """
         lengths, offsets, flat_enc, len_enc = x
 
         log_b_all = estimate._emission_log_densities(flat_enc)
@@ -352,6 +547,14 @@ class HiddenMarkovModelAccumulator(StatisticAccumulator):
             self.len_accumulator.seq_update(len_enc, weights, None)
 
     def seq_initialize(self, x, weights, rng):
+        """Vectorized initialize() with random Dirichlet state assignments.
+
+        Args:
+            x: Encoded sequences from seq_encode().
+            weights (np.ndarray): Weight per sequence.
+            rng (RandomState): Random number generator for the assignments.
+
+        """
         lengths, offsets, flat_enc, len_enc = x
         tot = int(lengths.sum())
 
@@ -375,6 +578,15 @@ class HiddenMarkovModelAccumulator(StatisticAccumulator):
             self.len_accumulator.seq_initialize(len_enc, weights, rng)
 
     def combine(self, suff_stat):
+        """Add another accumulator's sufficient-statistic value into this one.
+
+        Args:
+            suff_stat: Tuple as returned by value().
+
+        Returns:
+            This accumulator.
+
+        """
         self.init_counts += suff_stat[0]
         self.trans_counts += suff_stat[1]
         for k in range(self.num_states):
@@ -384,10 +596,20 @@ class HiddenMarkovModelAccumulator(StatisticAccumulator):
         return self
 
     def value(self):
+        """Returns (init_counts, trans_counts, topic values, len_value)."""
         len_val = None if isinstance(self.len_accumulator, NullAccumulator) else self.len_accumulator.value()
         return self.init_counts, self.trans_counts, tuple(u.value() for u in self.accumulators), len_val
 
     def from_value(self, x):
+        """Set the sufficient statistics from a value() tuple.
+
+        Args:
+            x: Tuple as returned by value().
+
+        Returns:
+            This accumulator.
+
+        """
         self.init_counts = x[0]
         self.trans_counts = x[1]
         for k in range(self.num_states):
@@ -397,6 +619,12 @@ class HiddenMarkovModelAccumulator(StatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict):
+        """Merge this accumulator's keyed statistics into a shared dict.
+
+        Args:
+            stats_dict (dict): Shared key-to-statistics dictionary.
+
+        """
         if self.key is not None:
             if self.key in stats_dict:
                 stats_dict[self.key].combine(self.value())
@@ -406,6 +634,12 @@ class HiddenMarkovModelAccumulator(StatisticAccumulator):
             u.key_merge(stats_dict)
 
     def key_replace(self, stats_dict):
+        """Replace this accumulator's statistics with the pooled keyed values.
+
+        Args:
+            stats_dict (dict): Shared key-to-statistics dictionary.
+
+        """
         if self.key is not None:
             if self.key in stats_dict:
                 self.from_value(stats_dict[self.key].value())
@@ -414,24 +648,51 @@ class HiddenMarkovModelAccumulator(StatisticAccumulator):
 
 
 class HiddenMarkovModelAccumulatorFactory(object):
+    """Factory that creates HiddenMarkovModelAccumulator objects."""
 
     def __init__(self, factories, len_factory, name, keys):
+        """HiddenMarkovModelAccumulatorFactory object.
+
+        Args:
+            factories: List of S topic accumulator factories.
+            len_factory: Factory for the length accumulators (None for none).
+            name (Optional[str]): Name passed to created accumulators.
+            keys (Optional[str]): Key passed to created accumulators.
+
+        """
         self.factories = factories
         self.len_factory = len_factory
         self.name = name
         self.keys = keys
 
     def make(self):
+        """Returns a new HiddenMarkovModelAccumulator."""
         len_acc = NullAccumulator() if self.len_factory is None else self.len_factory.make()
         return HiddenMarkovModelAccumulator([f.make() for f in self.factories],
                                             len_accumulator=len_acc, name=self.name, keys=self.keys)
 
 
 class HiddenMarkovModelEstimator(ParameterEstimator):
+    """Estimates a HiddenMarkovModelDistribution by MAP-EM, using clamped
+    Dirichlet MAP updates for the chain and each topic's conjugate update
+    for the emissions."""
 
     def __init__(self, estimators, name: Optional[str] = None, keys: Optional[str] = None,
                  prior=None, len_estimator: ParameterEstimator = NullEstimator()):
+        """HiddenMarkovModelEstimator object.
 
+        Args:
+            estimators: List of S topic estimators.
+            name (Optional[str]): Name of the estimated distribution.
+            keys (Optional[str]): Key for sharing sufficient statistics.
+            prior: (init_prior, row_priors) tuple or composable form (with
+                optional topic priors pushed into the topic estimators);
+                Dirichlets enable the conjugate update. Defaults to
+                unit-parameter Dirichlets.
+            len_estimator (ParameterEstimator): Estimator for the sequence
+                lengths (NullEstimator treats lengths as exogenous).
+
+        """
         self.estimators = estimators
         self.num_states = len(estimators)
         self.name = name
@@ -440,16 +701,30 @@ class HiddenMarkovModelEstimator(ParameterEstimator):
         self.set_prior(prior if prior is not None else default_prior(self.num_states))
 
     def accumulator_factory(self):
+        """Returns a HiddenMarkovModelAccumulatorFactory for this estimator."""
         len_factory = None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.accumulator_factory()
         return HiddenMarkovModelAccumulatorFactory([u.accumulator_factory() for u in self.estimators],
                                                    len_factory, self.name, self.keys)
 
     def get_prior(self):
+        """Returns the priors in composable form: CompositeDistribution of
+        (init_prior, row priors, topic priors)."""
         return CompositeDistribution((self.init_prior,
                                       CompositeDistribution(self.row_priors),
                                       CompositeDistribution([e.get_prior() for e in self.estimators])))
 
     def set_prior(self, prior):
+        """Set the priors and flag whether they admit the conjugate update.
+
+        Topic priors, when present in the composable form, are pushed down
+        into the topic estimators.
+
+        Args:
+            prior: (init_prior, row_priors) tuple or CompositeDistribution
+                form; has_conj_prior is set when the chain priors are all
+                Dirichlet.
+
+        """
         self.init_prior, self.row_priors, extra = _unpack_chain_prior(prior)
 
         if len(extra) > 0:
@@ -460,6 +735,20 @@ class HiddenMarkovModelEstimator(ParameterEstimator):
             all(isinstance(u, DirichletDistribution) for u in self.row_priors)
 
     def model_log_density(self, model) -> float:
+        """Log-density of the model parameters under the priors.
+
+        Sums the Dirichlet log-densities of the initial-state and
+        transition probabilities (floored at a tiny constant so boundary
+        MAP estimates score finitely) and each topic estimator's
+        model_log_density of its topic.
+
+        Args:
+            model (HiddenMarkovModelDistribution): Model to score.
+
+        Returns:
+            Prior log-density of the model parameters.
+
+        """
         rv = 0.0
         if self.has_conj_prior:
             tiny = 1.0e-300
@@ -471,7 +760,23 @@ class HiddenMarkovModelEstimator(ParameterEstimator):
         return rv
 
     def estimate(self, suff_stat) -> HiddenMarkovModelDistribution:
+        """Estimate a HiddenMarkovModelDistribution from sufficient statistics.
 
+        Each topic is re-estimated with its own estimator (whose conjugate
+        update carries its posterior forward as its prior). With Dirichlet
+        chain priors the initial-state and per-row transition probabilities
+        are the clamped Dirichlet MAP (posterior mean when degenerate) and
+        the posterior Dirichlets are carried as the new prior; otherwise the
+        maximum likelihood estimates are returned with uniform fallbacks.
+
+        Args:
+            suff_stat: Tuple (init_counts, trans_counts, topic stats,
+                len_value) as returned by HiddenMarkovModelAccumulator.value().
+
+        Returns:
+            HiddenMarkovModelDistribution object.
+
+        """
         init_counts, trans_counts, topic_stats, len_val = suff_stat
         s = self.num_states
 

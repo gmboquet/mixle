@@ -27,10 +27,19 @@ legacy accumulators, so the existing estimator M-steps (pseudo-counts
 included) are reused unchanged, and results agree with the legacy seq path to
 floating-point tolerance.
 
-Supported distributions: Gaussian, Categorical, IntegerCategorical, Poisson,
-Exponential, Geometric, Composite (any nesting), Sequence (variable-length,
-with optional length model), and a Mixture over same-structure components at
-the top level. Unsupported models should continue to use the seq_* path.
+Supported distributions: Gaussian, LogGaussian, Gamma, Categorical,
+IntegerCategorical, Poisson, Exponential, Geometric, Binomial,
+DiagonalGaussian (vector leaf), Optional (missing-data wrapper around any
+supported child), Ignored (fixed wrapped dist, scored but never estimated),
+Composite (any nesting), Sequence (variable-length, with optional length
+model), and a Mixture over same-structure components at the top level.
+Unsupported models should continue to use the seq_* path.
+
+Still excluded: latent-variable families (HMMs, LDA/PLSI, tree models, hidden
+association) require per-row dynamic programs that do not fit the stateless
+scalar row kernel; heterogeneous mixtures break the identical-structure
+requirement; full-covariance MVN and von Mises-Fisher need linear algebra /
+Bessel-function evaluations outside the scalar kernels' scope for now.
 
 Performance characteristics (Apple silicon, float64): on flat scalar fields
 the fused scalar loops run at rough parity with the legacy vectorized numpy
@@ -48,14 +57,20 @@ from pysp.utils.optional_deps import numba
 import numpy as np
 
 from pysp.stats.gaussian import GaussianDistribution
+from pysp.stats.log_gaussian import LogGaussianDistribution
+from pysp.stats.gamma import GammaDistribution
 from pysp.stats.categorical import CategoricalDistribution
 from pysp.stats.intrange import IntegerCategoricalDistribution
 from pysp.stats.poisson import PoissonDistribution
 from pysp.stats.exponential import ExponentialDistribution
 from pysp.stats.geometric import GeometricDistribution
+from pysp.stats.binomial import BinomialDistribution
+from pysp.stats.dmvn import DiagonalGaussianDistribution
 from pysp.stats.composite import CompositeDistribution
 from pysp.stats.sequence import SequenceDistribution
 from pysp.stats.mixture import MixtureDistribution
+from pysp.stats.optional import OptionalDistribution
+from pysp.stats.ignored import IgnoredDistribution
 from pysp.stats.null_dist import NullDistribution
 
 __all__ = ['CompiledMixture', 'build_kernel']
@@ -145,6 +160,92 @@ def _geometric_ld(i, k, params, cols):
     logp, log1mp = params
     x = cols[0][i]
     return (x - 1.0) * log1mp[k] + logp[k]
+
+
+@numba.njit(inline='always', cache=True)
+def _gamma_ld(i, k, params, cols):
+    # cols[1] holds log(x), precomputed once at encode time
+    neg_inv_theta, km1, logc = params
+    return cols[0][i] * neg_inv_theta[k] + cols[1][i] * km1[k] + logc[k]
+
+
+@numba.njit(inline='always', cache=True)
+def _gamma_acc(i, k, w, params, cols, stats):
+    stats[0][k] += w
+    stats[1][k] += w * cols[0][i]
+    stats[2][k] += w * cols[1][i]
+
+
+@numba.njit(inline='always', cache=True)
+def _log_gaussian_ld(i, k, params, cols):
+    # cols[0] holds log(x); a Gaussian on log x with a -log(x) Jacobian term
+    mu, s2, logc = params
+    lx = cols[0][i]
+    d = lx - mu[k]
+    return logc[k] - 0.5 * d * d / s2[k] - lx
+
+
+@numba.njit(inline='always', cache=True)
+def _binomial_ld(i, k, params, cols):
+    # cols[1] holds the log-binomial coefficient, precomputed at encode time
+    # for the compile-time (n, min_val); when a model carries different values
+    # (the estimator re-derives both from data) it is recomputed inline.
+    logp, log1mp, nv, mv, n0, m0 = params
+    n = nv[k]
+    xx = cols[0][i] - mv[k]
+    if xx < 0.0 or xx > n:
+        return _NEG_INF
+    if n == n0 and mv[k] == m0:
+        base = cols[1][i]
+    else:
+        base = math.lgamma(n + 1.0) - math.lgamma(xx + 1.0) - math.lgamma(n - xx + 1.0)
+    return base + log1mp[k] * (n - xx) + logp[k] * xx
+
+
+@numba.njit(inline='always', cache=True)
+def _binomial_acc(i, k, w, params, cols, stats):
+    # cols[2] holds the data-wide (min, max); accumulating w*const keeps the
+    # stats additive across chunked/threaded buffers (recovered by w-sum).
+    stats[0][k] += w
+    stats[1][k] += w * cols[0][i]
+    stats[2][k] += w * cols[2][0]
+    stats[3][k] += w * cols[2][1]
+
+
+@numba.njit(inline='always', cache=True)
+def _diag_gaussian_ld(i, k, params, cols):
+    # vector leaf: cols[0] is the flattened (n*d) observation matrix
+    ca, cb, cc = params
+    d = ca.shape[1]
+    off = i * d
+    rv = cc[k]
+    for j in range(d):
+        x = cols[0][off + j]
+        rv += x * x * ca[k, j] + x * cb[k, j]
+    return rv
+
+
+@numba.njit(inline='always', cache=True)
+def _diag_gaussian_acc(i, k, w, params, cols, stats):
+    d = stats[0].shape[1]
+    off = i * d
+    for j in range(d):
+        x = cols[0][off + j]
+        stats[0][k, j] += w * x
+        stats[1][k, j] += w * x * x
+    stats[2][k] += w
+
+
+@numba.njit(inline='always', cache=True)
+def _ignored_ld(i, k, params, cols):
+    # cols[0] holds per-component log-densities precomputed at encode time
+    # (the wrapped dists are fixed: scored but never estimated)
+    return cols[0][i, k]
+
+
+@numba.njit(inline='always', cache=True)
+def _ignored_acc(i, k, w, params, cols, stats):
+    pass
 
 
 # ----------------------------------------------------------------------------
@@ -286,6 +387,137 @@ class _GeometricB(_CountSumB):
     def params(self, dists):
         p = np.array([d.p for d in dists], dtype=np.float64)
         return np.log(p), np.log1p(-p)
+
+
+class _GammaB(_LeafBuilder):
+    kernel = _gamma_ld
+    acc_kernel = _gamma_acc
+
+    def params(self, dists):
+        theta = np.array([d.theta for d in dists], dtype=np.float64)
+        km1 = np.array([d.k - 1.0 for d in dists], dtype=np.float64)
+        logc = np.array([d.log_const for d in dists], dtype=np.float64)
+        return -1.0 / theta, km1, logc
+
+    def freeze(self, buf):
+        x = np.asarray(buf, dtype=np.float64)
+        if x.size and (np.any(x <= 0) or np.any(np.isnan(x))):
+            raise Exception('GammaDistribution has support x > 0.')
+        return x, np.log(x)
+
+    def make_stats(self, K):
+        return np.zeros(K), np.zeros(K), np.zeros(K)
+
+    def stats_to_ss(self, stats, k):
+        # legacy GammaAccumulator.value(): (nobs, sum, sum_of_logs)
+        return stats[0][k], stats[1][k], stats[2][k]
+
+
+class _LogGaussianB(_LeafBuilder):
+    kernel = _log_gaussian_ld
+    acc_kernel = _gaussian_acc  # Gaussian moments of the log-x column
+
+    def params(self, dists):
+        mu = np.array([d.mu for d in dists], dtype=np.float64)
+        s2 = np.array([d.sigma2 for d in dists], dtype=np.float64)
+        logc = np.array([d.log_const for d in dists], dtype=np.float64)
+        return mu, s2, logc
+
+    def freeze(self, buf):
+        lx = np.log(np.asarray(buf, dtype=np.float64))
+        if lx.size and (np.any(np.isnan(lx)) or np.any(np.isinf(lx))):
+            raise Exception('LogGaussianDistribution requires support x in (0,inf).')
+        return (lx,)
+
+    def make_stats(self, K):
+        return np.zeros(K), np.zeros(K), np.zeros(K)
+
+    def stats_to_ss(self, stats, k):
+        # legacy LogGaussianAccumulator.value(): (log_sum, log_sum2, count, count2)
+        return stats[0][k], stats[1][k], stats[2][k], stats[2][k]
+
+
+class _BinomialB(_LeafBuilder):
+    kernel = _binomial_ld
+    acc_kernel = _binomial_acc
+
+    def __init__(self, dists):
+        super().__init__(dists)
+        # n is a fixed per-distribution parameter and min_val shifts the
+        # support; the estimator re-derives both from the data min/max, so a
+        # later model may not match the compile-time values - the kernel then
+        # falls back to inline lgamma instead of the precomputed column.
+        ns = {int(d.n) for d in dists}
+        ms = {int(d.min_val) if d.min_val is not None else 0 for d in dists}
+        if len(ns) == 1 and len(ms) == 1:
+            self.n0, self.m0 = float(ns.pop()), float(ms.pop())
+        else:
+            self.n0, self.m0 = -1.0, -1.0  # sentinel: never matches (n >= 0)
+
+    def params(self, dists):
+        logp = np.array([d.log_p for d in dists], dtype=np.float64)
+        log1mp = np.array([d.log_1p for d in dists], dtype=np.float64)
+        nv = np.array([float(d.n) for d in dists], dtype=np.float64)
+        mv = np.array([float(d.min_val) if d.min_val is not None else 0.0 for d in dists],
+                      dtype=np.float64)
+        return logp, log1mp, nv, mv, np.float64(self.n0), np.float64(self.m0)
+
+    def freeze(self, buf):
+        from scipy.special import gammaln
+        x = np.asarray(buf, dtype=np.float64)
+        if x.size and (np.any(x < 0) or np.any(np.isnan(x))):
+            raise Exception('BinomialDistribution requires non-negative integer values for x.')
+        if self.n0 >= 0:
+            xx = x - self.m0
+            lbc = gammaln(self.n0 + 1.0) - gammaln(xx + 1.0) - gammaln(self.n0 - xx + 1.0)
+        else:
+            lbc = np.zeros_like(x)
+        mnmx = np.array([x.min(), x.max()], dtype=np.float64) if x.size else np.zeros(2)
+        return x, lbc, mnmx
+
+    def make_stats(self, K):
+        return np.zeros(K), np.zeros(K), np.zeros(K), np.zeros(K)
+
+    def stats_to_ss(self, stats, k):
+        # legacy BinomialAccumulator.value(): (count, sum, min_val, max_val);
+        # min/max are the data-wide values the legacy encoder reports, recovered
+        # exactly from the w-weighted constants accumulated in stats[2:4].
+        c = stats[0][k]
+        if c > 0:
+            return c, stats[1][k], int(round(stats[2][k] / c)), int(round(stats[3][k] / c))
+        return c, stats[1][k], None, None
+
+
+class _DiagGaussianB(_LeafBuilder):
+    kernel = _diag_gaussian_ld
+    acc_kernel = _diag_gaussian_acc
+
+    def __init__(self, dists):
+        super().__init__(dists)
+        self.dim = int(dists[0].dim)
+        if any(int(d.dim) != self.dim for d in dists):
+            raise ValueError('DiagonalGaussian components must share the same dimension.')
+
+    def params(self, dists):
+        ca = np.array([d.ca for d in dists], dtype=np.float64)
+        cb = np.array([d.cb for d in dists], dtype=np.float64)
+        cc = np.array([d.cc for d in dists], dtype=np.float64)
+        return ca, cb, cc
+
+    def new_sink(self):
+        buf = []
+        ext = buf.extend
+        return buf, lambda x: ext(x)
+
+    def freeze(self, buf):
+        return (np.asarray(buf, dtype=np.float64),)
+
+    def make_stats(self, K):
+        return np.zeros((K, self.dim)), np.zeros((K, self.dim)), np.zeros(K)
+
+    def stats_to_ss(self, stats, k):
+        # legacy DiagonalGaussianAccumulator.value(): (sum, sum2, count)
+        return stats[0][k].copy(), stats[1][k].copy(), stats[2][k]
 
 
 def _pair_kernels(f, g):
@@ -459,15 +691,143 @@ class _SequenceB(object):
         return self.inner.stats_to_ss(stats[0], k), len_ss
 
 
+def _optional_kernel(inner):
+    @numba.njit(inline='always')
+    def ld(i, k, params, cols):
+        ci = cols[0][i]
+        if ci < 0:
+            return params[0][k]
+        return params[1][k] + inner(ci, k, params[2], cols[1])
+    return ld
+
+
+def _optional_acc(inner):
+    @numba.njit(inline='always')
+    def acc(i, k, w, params, cols, stats):
+        ci = cols[0][i]
+        if ci < 0:
+            stats[0][k] += w
+        else:
+            stats[1][k] += w
+            inner(ci, k, w, params[2], cols[1], stats[2])
+    return acc
+
+
+class _OptionalB(object):
+    """Missing-data wrapper: a presence-index column routes present rows into
+    the (compacted) child columns; missing rows score the missing mass."""
+
+    def __init__(self, dists):
+        d0 = dists[0]
+        self.nan_missing = d0.missing_value_is_nan
+        self.missing_value = d0.missing_value
+        for d in dists[1:]:
+            same = d.missing_value_is_nan if self.nan_missing else \
+                (not d.missing_value_is_nan and d.missing_value == self.missing_value)
+            if not same:
+                raise ValueError('Optional components must share the same missing_value.')
+        self.inner = build_kernel([d.dist for d in dists])
+        self.kernel = _optional_kernel(self.inner.kernel)
+        self.acc_kernel = _optional_acc(self.inner.acc_kernel)
+
+    def params(self, dists):
+        K = len(dists)
+        miss_lp = np.zeros(K)  # log_density: 0.0 missing / child present when no p
+        pres_lp = np.zeros(K)
+        for k, d in enumerate(dists):
+            if d.has_p:
+                miss_lp[k] = d.log_p
+                pres_lp[k] = d.log_pn
+        return miss_lp, pres_lp, self.inner.params([d.dist for d in dists])
+
+    def _is_missing(self, v):
+        if self.nan_missing:
+            return isinstance(v, (np.floating, float)) and np.isnan(v)
+        return v == self.missing_value
+
+    def new_sink(self):
+        inner_buf, inner_add = self.inner.new_sink()
+        idx = []
+        n_present = [0]
+
+        def add(x):
+            if self._is_missing(x):
+                idx.append(-1)
+            else:
+                idx.append(n_present[0])
+                n_present[0] += 1
+                inner_add(x)
+        return (idx, inner_buf), add
+
+    def freeze(self, bufs):
+        idx, inner_buf = bufs
+        return np.asarray(idx, dtype=np.int64), self.inner.freeze(inner_buf)
+
+    def make_stats(self, K):
+        return np.zeros(K), np.zeros(K), self.inner.make_stats(K)
+
+    def stats_to_ss(self, stats, k):
+        # legacy OptionalEstimatorAccumulator.value(): ([missing_w, present_w], child)
+        return [stats[0][k], stats[1][k]], self.inner.stats_to_ss(stats[2], k)
+
+
+class _IgnoredB(object):
+    """Fixed wrapped dists: per-component log-densities are precomputed at
+    encode time (the wrapped dist scores rows but is never estimated)."""
+
+    def __init__(self, dists):
+        self.dists = list(dists)
+        self._frozen = [str(d.dist) for d in dists]
+        self.encoder = dists[0].dist_to_encoder()
+        for d in dists[1:]:
+            if d.dist_to_encoder() != self.encoder:
+                raise ValueError('Ignored components must share the same data encoder.')
+        self._dummy = np.zeros(1)
+
+    kernel = _ignored_ld
+    acc_kernel = _ignored_acc
+
+    def params(self, dists):
+        for d, s in zip(dists, self._frozen):
+            if str(d.dist) != s:
+                raise ValueError('IgnoredDistribution wrapped dists changed since compile; '
+                                 'rebuild the CompiledMixture.')
+        return (self._dummy,)
+
+    def new_sink(self):
+        buf = []
+        return buf, buf.append
+
+    def freeze(self, buf):
+        enc = self.encoder.seq_encode(buf)
+        mat = np.empty((len(buf), len(self.dists)), dtype=np.float64)
+        for k, d in enumerate(self.dists):
+            mat[:, k] = d.seq_log_density(enc)
+        return (mat,)
+
+    def make_stats(self, K):
+        return (np.zeros(1),)
+
+    def stats_to_ss(self, stats, k):
+        # legacy IgnoredAccumulator.value(): None (nothing is estimated)
+        return None
+
+
 _BUILDERS = {
     GaussianDistribution: _GaussianB,
+    LogGaussianDistribution: _LogGaussianB,
+    GammaDistribution: _GammaB,
     CategoricalDistribution: _CategoricalB,
     IntegerCategoricalDistribution: _IntRangeB,
     PoissonDistribution: _PoissonB,
     ExponentialDistribution: _ExponentialB,
     GeometricDistribution: _GeometricB,
+    BinomialDistribution: _BinomialB,
+    DiagonalGaussianDistribution: _DiagGaussianB,
     CompositeDistribution: _CompositeB,
     SequenceDistribution: _SequenceB,
+    OptionalDistribution: _OptionalB,
+    IgnoredDistribution: _IgnoredB,
 }
 
 
