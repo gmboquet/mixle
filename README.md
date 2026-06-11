@@ -97,26 +97,28 @@ Estimators accept `pseudo_count` for regularization and `keys` for tying suffici
 
 ## Examples
 
-Local examples live in [pysp/examples/](pysp/examples/) and run from that directory:
+Local examples live in [examples/examples_pysp/](examples/examples_pysp/) (Bayesian counterparts in [examples/examples_bayes/](examples/examples_bayes/)) and run from that directory:
 
 ```sh
-cd pysp/examples
+cd examples/examples_pysp
 python mixture_example.py
 python hidden_markov_example.py
 ```
+
+Multiprocessing and MPI twins of the mixture example live in [examples/examples_mp/](examples/examples_mp/) and [examples/examples_mpi/](examples/examples_mpi/) (`pip install pysparkplug[mpi]`, run with `mpiexec -n 4 python examples/examples_mpi/mixture_example.py`).
 
 A few examples need datasets that are not shipped: `set_example.py` (NIPS submissions) and the two `wikipedia_*` examples (a Wikipedia corpus + stop-word list). Everything else generates its own data — e.g. `hmm_numba_example.py` fits an HMM to generated text-like sequences and compares Numba vs. pure-NumPy fitting. `lda_example.py` runs to a tight tolerance and takes a while.
 
 ## Running on Spark
 
-Spark examples are in [pysp/examples_spark/](pysp/examples_spark/). PySpark 4.x needs a JVM (Java 17 or 21) and the workers must use the same Python as the driver:
+Spark examples are in [examples/examples_spark/](examples/examples_spark/). PySpark 4.x needs a JVM (Java 17 or 21) and the workers must use the same Python as the driver:
 
 ```sh
 export JAVA_HOME=$(/usr/libexec/java_home -v 17)   # or your JDK 17/21 path
 export PYSPARK_PYTHON=/path/to/your/venv/bin/python
 export PYSPARK_DRIVER_PYTHON=$PYSPARK_PYTHON
 
-python pysp/examples_spark/mixture_example.py
+python examples/examples_spark/mixture_example.py
 ```
 
 The estimation helpers detect RDD inputs automatically: sampling (`pysp.stats.rdd_sampler`), initialization, encoding, and each EM step run per-partition, and sufficient statistics are merged on the driver — so a model fit locally and one fit on a cluster go through identical math.
