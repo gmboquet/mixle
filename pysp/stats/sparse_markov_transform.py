@@ -124,7 +124,7 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         temp = self.cond_prob_mat[vx[:, None], vy].toarray()
         ll2 = np.dot(np.log(np.dot((temp * b + a).T, cx / nx)), cy)
         ll1 = np.dot(np.log(self.init_prob_vec[vx] * b + a), cx)
-        rv  = ll2# + ll2
+        rv  = ll1 + ll2
         rv += self.len_dist.log_density([nx, ny])
 
         return float(rv)
@@ -157,6 +157,7 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
             np.log(sval, out=sval)
             sval *= fcyvec
             rv = np.bincount(fsqyvec, weights=sval, minlength=xlen)
+            rv += np.bincount(fsqxvec, weights=np.log(self.init_prob_vec[fvxvec]*b + a)*fcxvec, minlength=xlen)
 
         else:
             rv = np.zeros(len(x[0]), dtype=np.float64)
@@ -169,7 +170,7 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
                 ll2 = np.dot(np.log(np.dot((temp*b + a).T, cx/nx)),cy)
                 ll1 = np.dot(np.log(self.init_prob_vec[xx]*b + a), cx)
 
-                rv[i] = ll2# + ll2
+                rv[i] = ll1 + ll2
 
         if not isinstance(self.len_dist, NullDistribution):
             lln = self.len_dist.seq_log_density(x[1])
@@ -321,14 +322,17 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         vy = np.asarray([u[0] for u in x[1]], dtype=int)
         cy = np.asarray([u[1] for u in x[1]], dtype=float)
 
+        a = estimate.alpha / self.num_vals
+        b = 1 - estimate.alpha
+
         temp = estimate.cond_prob_mat[vx[:, None], vy].toarray()
 
         loc_cprob = temp * cx[:, None]
         w = loc_cprob.sum(axis=0)
-        loc_cprob *= (cy / w) * weight
+        loc_cprob *= (cy * b / (w * b + a * np.sum(cx))) * weight
 
         self.trans_count[vx[:, None], vy] += loc_cprob
-        self.init_count[vx] += cx
+        self.init_count[vx] += cx * weight
 
         self.size_accumulator.update((cx.sum(), cy.sum()), weight, estimate.len_dist)
 
@@ -402,17 +406,15 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
 
             vv = x[2]
 
-            p = np.asarray(self.trans_count[vv[:,0], vv[:,1]]).flatten()
-            pp = p[pairidx]*cxvec
-            sval = np.bincount(seqidx, weights=pp)
-            np.divide(weights[fsqyvec], sval, out=sval)
-            sval *= fcyvec
-            pp   *= sval[seqidx]
-            pp = np.bincount(pairidx, weights=pp)
+            # No estimate exists yet, so allocate transition mass uniformly
+            # ((cx/sum(cx)) outer cy, as in the low-memory branch) instead of
+            # reading the all-zero trans_count.
+            pp = cxvec * cyvec * weights[obsidx]
+            pp = np.bincount(pairidx, weights=pp, minlength=vv.shape[0])
 
             umat = csr_matrix((pp, (vv[:,0], vv[:,1])), shape=(nw, nw))
             self.trans_count += umat
-            self.init_count += np.bincount(fvxvec, weights=fcxvec, minlength=nw)
+            self.init_count += np.bincount(fvxvec, weights=fcxvec*weights[fsqxvec], minlength=nw)
 
         else:
 
@@ -442,6 +444,8 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             self.trans_count = csr_matrix((num_vals, num_vals))
 
         nw = self.num_vals
+        a = estimate.alpha / nw
+        b = 1 - estimate.alpha
 
         if x[3] is not None:
 
@@ -452,14 +456,16 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             p = np.asarray(estimate.cond_prob_mat[vv[:,0], vv[:,1]]).flatten()
             pp = p[pairidx]*cxvec
             sval = np.bincount(seqidx, weights=pp)
-            np.divide(weights[fsqyvec], sval, out=sval)
+            sval *= b
+            sval += a
+            np.divide(weights[fsqyvec]*b, sval, out=sval)
             sval *= fcyvec
             pp   *= sval[seqidx]
             pp = np.bincount(pairidx, weights=pp)
 
             umat = csr_matrix((pp, (vv[:,0], vv[:,1])), shape=(nw, nw))
             self.trans_count += umat
-            self.init_count += np.bincount(fvxvec, weights=fcxvec, minlength=nw)
+            self.init_count += np.bincount(fvxvec, weights=fcxvec*weights[fsqxvec], minlength=nw)
 
         else:
 
@@ -474,10 +480,10 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
 
                 loc_cprob = temp * cx[:, None]
                 w = loc_cprob.sum(axis=0)
-                loc_cprob *= (cy / w) * weight
+                loc_cprob *= (cy * b / (w * b + a * np.sum(cx))) * weight
 
                 umat[vx[:, None], vy] += loc_cprob
-                self.init_count[vx] += cx
+                self.init_count[vx] += cx * weight
 
             self.trans_count += umat
 

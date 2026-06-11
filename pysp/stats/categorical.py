@@ -14,6 +14,7 @@ from typing import Dict, Optional, Tuple, Any, TypeVar, Union, List
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator, EnumerationError
+from pysp.utils.enumeration import QuantizedEnumerationIndex
 from numpy.random import RandomState
 
 T = TypeVar('T')
@@ -163,6 +164,13 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         return CategoricalEnumerator(self)
+
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
+        """Build a bounded bit-quantized index directly from the finite support map."""
+        if self.no_default:
+            raise EnumerationError(self, reason='non-zero default_value gives an unbounded support')
+        items = [(k, math.log(v) - self.log1p_default_value) for k, v in self.pmap.items() if v > 0.0]
+        return QuantizedEnumerationIndex.from_items(items, max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 class CategoricalSampler(DistributionSampler):
 
@@ -582,4 +590,3 @@ class CategoricalDataEncoder(DataSequenceEncoder):
         val_map_inv = np.asarray([x[i] for i in uidx], dtype=object)
 
         return xs, val_map_inv
-

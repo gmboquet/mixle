@@ -1,0 +1,223 @@
+"""Create, estimate, and sample from a beta distribution on (0, 1)."""
+import math
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
+
+import numpy as np
+from numpy.random import RandomState
+
+from pysp.stats.dirichlet import dirichlet_param_solve
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
+from pysp.utils.special import digamma, gammaln
+
+
+class BetaDistribution(SequenceEncodableProbabilityDistribution):
+    """Beta distribution with positive shape parameters a and b."""
+
+    def __init__(self, a: float, b: float, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+        if a <= 0.0 or b <= 0.0 or not np.isfinite(a) or not np.isfinite(b):
+            raise ValueError('BetaDistribution requires a > 0 and b > 0.')
+        self.a = float(a)
+        self.b = float(b)
+        self.log_const = float(gammaln(self.a) + gammaln(self.b) - gammaln(self.a + self.b))
+        self.name = name
+        self.keys = keys
+
+    def __str__(self) -> str:
+        return 'BetaDistribution(%s, %s, name=%s, keys=%s)' % (
+            repr(self.a), repr(self.b), repr(self.name), repr(self.keys))
+
+    def density(self, x: float) -> float:
+        return math.exp(self.log_density(x))
+
+    def log_density(self, x: float) -> float:
+        if x <= 0.0 or x >= 1.0:
+            return -np.inf
+        return (self.a - 1.0) * math.log(x) + (self.b - 1.0) * math.log1p(-x) - self.log_const
+
+    def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
+        lx, l1mx, _, _ = x
+        return (self.a - 1.0) * lx + (self.b - 1.0) * l1mx - self.log_const
+
+    def sampler(self, seed: Optional[int] = None) -> 'BetaSampler':
+        return BetaSampler(self, seed)
+
+    def estimator(self, pseudo_count: Optional[float] = None) -> 'BetaEstimator':
+        if pseudo_count is None:
+            return BetaEstimator(name=self.name, keys=self.keys)
+        suff_stat = np.asarray([
+            digamma(self.a) - digamma(self.a + self.b),
+            digamma(self.b) - digamma(self.a + self.b),
+        ], dtype=np.float64)
+        return BetaEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat,
+                             name=self.name, keys=self.keys)
+
+    def dist_to_encoder(self) -> 'BetaDataEncoder':
+        return BetaDataEncoder()
+
+
+class BetaSampler(DistributionSampler):
+    """Draw iid beta observations."""
+
+    def __init__(self, dist: BetaDistribution, seed: Optional[int] = None) -> None:
+        self.rng = RandomState(seed)
+        self.dist = dist
+
+    def sample(self, size: Optional[int] = None) -> Union[float, np.ndarray]:
+        return self.rng.beta(self.dist.a, self.dist.b, size=size)
+
+
+class BetaAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulate sufficient statistics for beta estimation."""
+
+    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+        self.count = 0.0
+        self.sum_of_logs = 0.0
+        self.sum_of_log1m = 0.0
+        self.sum = 0.0
+        self.sum2 = 0.0
+        self.name = name
+        self.key = keys
+
+    def update(self, x: float, weight: float, estimate: Optional[BetaDistribution]) -> None:
+        if x <= 0.0 or x >= 1.0:
+            raise ValueError('BetaDistribution requires observations in (0, 1).')
+        self.count += weight
+        self.sum_of_logs += math.log(x) * weight
+        self.sum_of_log1m += math.log1p(-x) * weight
+        self.sum += x * weight
+        self.sum2 += x * x * weight
+
+    def initialize(self, x: float, weight: float, rng: Optional[RandomState]) -> None:
+        self.update(x, weight, None)
+
+    def seq_update(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray,
+                   estimate: Optional[BetaDistribution]) -> None:
+        lx, l1mx, xx, xx2 = x
+        self.count += np.sum(weights, dtype=np.float64)
+        self.sum_of_logs += np.dot(lx, weights)
+        self.sum_of_log1m += np.dot(l1mx, weights)
+        self.sum += np.dot(xx, weights)
+        self.sum2 += np.dot(xx2, weights)
+
+    def seq_initialize(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray,
+                       rng: Optional[RandomState]) -> None:
+        self.seq_update(x, weights, None)
+
+    def combine(self, suff_stat: Tuple[float, float, float, float, float]) -> 'BetaAccumulator':
+        self.count += suff_stat[0]
+        self.sum_of_logs += suff_stat[1]
+        self.sum_of_log1m += suff_stat[2]
+        self.sum += suff_stat[3]
+        self.sum2 += suff_stat[4]
+        return self
+
+    def value(self) -> Tuple[float, float, float, float, float]:
+        return self.count, self.sum_of_logs, self.sum_of_log1m, self.sum, self.sum2
+
+    def from_value(self, x: Tuple[float, float, float, float, float]) -> 'BetaAccumulator':
+        self.count = x[0]
+        self.sum_of_logs = x[1]
+        self.sum_of_log1m = x[2]
+        self.sum = x[3]
+        self.sum2 = x[4]
+        return self
+
+    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+        if self.key is not None:
+            if self.key in stats_dict:
+                stats_dict[self.key].combine(self.value())
+            else:
+                stats_dict[self.key] = self
+
+    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+        if self.key is not None and self.key in stats_dict:
+            self.from_value(stats_dict[self.key].value())
+
+    def acc_to_encoder(self) -> 'BetaDataEncoder':
+        return BetaDataEncoder()
+
+
+class BetaAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for BetaAccumulator."""
+
+    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+        self.name = name
+        self.keys = keys
+
+    def make(self) -> BetaAccumulator:
+        return BetaAccumulator(name=self.name, keys=self.keys)
+
+
+class BetaEstimator(ParameterEstimator):
+    """Estimate beta shape parameters from weighted log-moment statistics."""
+
+    def __init__(self, pseudo_count: Optional[float] = None,
+                 suff_stat: Optional[Sequence[float]] = None,
+                 delta: float = 1.0e-8, name: Optional[str] = None,
+                 keys: Optional[str] = None) -> None:
+        self.pseudo_count = pseudo_count
+        self.suff_stat = np.asarray(suff_stat, dtype=np.float64) if suff_stat is not None else None
+        self.delta = delta
+        self.name = name
+        self.keys = keys
+
+    def accumulator_factory(self) -> BetaAccumulatorFactory:
+        return BetaAccumulatorFactory(name=self.name, keys=self.keys)
+
+    @staticmethod
+    def _moment_initial(count: float, sum_x: float, sum_x2: float) -> np.ndarray:
+        if count <= 0.0:
+            return np.array([1.0, 1.0], dtype=np.float64)
+        mean = float(np.clip(sum_x / count, 1.0e-6, 1.0 - 1.0e-6))
+        var = max(sum_x2 / count - mean * mean, 0.0)
+        max_var = mean * (1.0 - mean)
+        if var > 0.0 and var < max_var:
+            common = max_var / var - 1.0
+            if np.isfinite(common) and common > 0.0:
+                return np.array([mean * common, (1.0 - mean) * common], dtype=np.float64)
+        return np.array([1.0, 1.0], dtype=np.float64)
+
+    def estimate(self, nobs: Optional[float],
+                 suff_stat: Tuple[float, float, float, float, float]) -> BetaDistribution:
+        count, sum_log_x, sum_log1m, sum_x, sum_x2 = suff_stat
+        if count <= 0.0 and self.pseudo_count is None:
+            return BetaDistribution(1.0, 1.0, name=self.name, keys=self.keys)
+
+        logs = np.asarray([sum_log_x, sum_log1m], dtype=np.float64)
+        denom = count
+        if self.pseudo_count is not None:
+            prior_logs = self.suff_stat
+            if prior_logs is None:
+                prior_logs = np.asarray([digamma(1.0) - digamma(2.0),
+                                         digamma(1.0) - digamma(2.0)], dtype=np.float64)
+            logs = logs + self.pseudo_count * prior_logs
+            denom = denom + self.pseudo_count
+
+        mean_logs = logs / denom
+        initial = self._moment_initial(count, sum_x, sum_x2)
+        alpha, _ = dirichlet_param_solve(initial, mean_logs, self.delta)
+        alpha = np.maximum(alpha, 1.0e-12)
+        return BetaDistribution(float(alpha[0]), float(alpha[1]), name=self.name, keys=self.keys)
+
+
+class BetaDataEncoder(DataSequenceEncoder):
+    """Encode beta observations with log x and log(1-x) columns."""
+
+    def __str__(self) -> str:
+        return 'BetaDataEncoder'
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, BetaDataEncoder)
+
+    def seq_encode(self, x: Sequence[float]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        rv = np.asarray(x, dtype=np.float64)
+        if rv.size and (np.any(rv <= 0.0) or np.any(rv >= 1.0) or np.any(np.isnan(rv))):
+            raise ValueError('BetaDistribution requires observations in (0, 1).')
+        return np.log(rv), np.log1p(-rv), rv, rv * rv

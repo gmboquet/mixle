@@ -14,6 +14,19 @@ __all__ = [
     "seq_initialize",
     "DistributionEnumerator",
     "EnumerationError",
+    "BernoulliDistribution",
+    "BernoulliSampler",
+    "BernoulliEstimator",
+    "BernoulliDataEncoder",
+    "BernoulliEnumerator",
+    "BetaDistribution",
+    "BetaSampler",
+    "BetaEstimator",
+    "BetaDataEncoder",
+    "LaplaceDistribution",
+    "LaplaceSampler",
+    "LaplaceEstimator",
+    "LaplaceDataEncoder",
     "BinomialDistribution",
     "BinomialSampler",
     "BinomialEstimator",
@@ -28,6 +41,7 @@ __all__ = [
     "MultinomialSampler",
     "MultinomialEstimator",
     "MultinomialDataEncoder",
+    "MultinomialEnumerator",
     "CompositeDistribution",
     "CompositeEstimator",
     "CompositeSampler",
@@ -37,9 +51,11 @@ __all__ = [
     "ConditionalDistributionSampler",
     "ConditionalDistributionEstimator",
     "ConditionalDistributionDataEncoder",
+    "ConditionalDistributionEnumerator",
     "DiracLengthMixtureDistribution",
     "DiracLengthMixtureSampler",
     "DiracLengthMixtureEstimator",
+    "DiracLengthMixtureEnumerator",
     "DirichletDistribution",
     "DirichletSampler",
     "DirichletEstimator",
@@ -66,6 +82,27 @@ __all__ = [
     "GeometricEstimator",
     "GeometricDataEncoder",
     "GeometricEnumerator",
+    "NegativeBinomialDistribution",
+    "NegativeBinomialSampler",
+    "NegativeBinomialEstimator",
+    "NegativeBinomialDataEncoder",
+    "NegativeBinomialEnumerator",
+    "ParetoDistribution",
+    "ParetoSampler",
+    "ParetoEstimator",
+    "ParetoDataEncoder",
+    "RayleighDistribution",
+    "RayleighSampler",
+    "RayleighEstimator",
+    "RayleighDataEncoder",
+    "StudentTDistribution",
+    "StudentTSampler",
+    "StudentTEstimator",
+    "StudentTDataEncoder",
+    "UniformDistribution",
+    "UniformSampler",
+    "UniformEstimator",
+    "UniformDataEncoder",
     "HeterogeneousMixtureDistribution",
     "HeterogeneousMixtureSampler",
     "HeterogeneousMixtureEstimator",
@@ -80,14 +117,23 @@ __all__ = [
     "HiddenMarkovEstimator",
     "HiddenMarkovDataEncoder",
     "HiddenMarkovModelEnumerator",
+    "QuantizedHiddenMarkovModelDistribution",
+    "QuantizedHiddenMarkovEstimator",
+    "QuantizedHiddenMarkovModelEnumerator",
     "HierarchicalMixtureDistribution",
     "HierarchicalMixtureSampler",
     "HierarchicalMixtureEstimator",
     "HierarchicalMixtureDataEncoder",
+    "HierarchicalMixtureEnumerator",
+    "IndianBuffetProcessDistribution",
+    "IndianBuffetProcessSampler",
+    "IndianBuffetProcessEstimator",
+    "IndianBuffetProcessDataEncoder",
     "ICLTreeDistribution",
     "ICLTreeEstimator",
     "ICLTreeSampler",
     "ICLTreeDataEncoder",
+    "ICLTreeEnumerator",
     "IgnoredDistribution",
     "IgnoredSampler",
     "IgnoredEstimator",
@@ -96,10 +142,12 @@ __all__ = [
     "IntegerBernoulliEditSampler",
     "IntegerBernoulliEditEstimator",
     "IntegerBernoulliEditDataEncoder",
+    "IntegerBernoulliEditEnumerator",
     "IntegerStepBernoulliEditDistribution",
     "IntegerStepBernoulliEditSampler",
     "IntegerStepBernoulliEditEstimator",
     "IntegerStepBernoulliEditDataEncoder",
+    "IntegerStepBernoulliEditEnumerator",
     "IntegerHiddenAssociationDistribution",
     "IntegerHiddenAssociationEstimator",
     "IntegerHiddenAssociationSampler",
@@ -108,6 +156,7 @@ __all__ = [
     "IntegerMarkovChainSampler",
     "IntegerMarkovChainEstimator",
     "IntegerMarkovChainDataEncoder",
+    "IntegerMarkovChainEnumerator",
     "IntegerPLSIDistribution",
     "IntegerPLSISampler",
     "IntegerPLSIEstimator",
@@ -116,10 +165,12 @@ __all__ = [
     "IntegerUniformSpikeEstimator",
     "IntegerUniformSpikeSampler",
     "IntegerUniformSpikeDataEncoder",
+    "IntegerUniformSpikeEnumerator",
     "IntegerMultinomialDistribution",
     "IntegerMultinomialSampler",
     "IntegerMultinomialEstimator",
     "IntegerMultinomialDataEncoder",
+    "IntegerMultinomialEnumerator",
     "IntegerCategoricalDistribution",
     "IntegerCategoricalSampler",
     "IntegerCategoricalEstimator",
@@ -134,6 +185,7 @@ __all__ = [
     "JointMixtureSampler",
     "JointMixtureEstimator",
     "JointMixtureDataEncoder",
+    "JointMixtureEnumerator",
     "LogGaussianDistribution",
     "LogGaussianSampler",
     "LogGaussianEstimator",
@@ -169,6 +221,7 @@ __all__ = [
     "PoissonEnumerator",
     "SelectDistribution",
     "SelectEstimator",
+    "SelectEnumerator",
     "SequenceDistribution",
     "SequenceSampler",
     "SequenceEstimator",
@@ -178,6 +231,7 @@ __all__ = [
     "BernoulliSetSampler",
     "BernoulliSetEstimator",
     "BernoulliSetDataEncoder",
+    "BernoulliSetEnumerator",
     "SparseMarkovAssociationDistribution",
     "SparseMarkovAssociationSampler",
     "SparseMarkovAssociationEstimator",
@@ -186,6 +240,7 @@ __all__ = [
     "SpearmanRankingSampler",
     "SpearmanRankingEstimator",
     "SpearmanRankingDataEncoder",
+    "SpearmanRankingEnumerator",
     "SemiSupervisedMixtureDistribution",
     "SemiSupervisedMixtureSampler",
     "SemiSupervisedMixtureEstimator",
@@ -212,6 +267,9 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, Parameter
     DistributionSampler, DistributionEnumerator, EnumerationError
 
 ### Discrete base distributions
+from pysp.stats.bernoulli import BernoulliDistribution, BernoulliSampler, BernoulliEstimator, BernoulliDataEncoder, \
+    BernoulliEnumerator
+
 from pysp.stats.binomial import BinomialDistribution, BinomialSampler, BinomialEstimator, BinomialDataEncoder, \
     BinomialEnumerator
 
@@ -224,24 +282,39 @@ from pysp.stats.poisson import PoissonDistribution, PoissonSampler, PoissonEstim
 from pysp.stats.geometric import GeometricDistribution, GeometricSampler, GeometricEstimator, GeometricDataEncoder, \
     GeometricEnumerator
 
+from pysp.stats.negative_binomial import NegativeBinomialDistribution, NegativeBinomialSampler, \
+    NegativeBinomialEstimator, NegativeBinomialDataEncoder, NegativeBinomialEnumerator
+
 from pysp.stats.int_spike import IntegerUniformSpikeDistribution, IntegerUniformSpikeSampler, \
-    IntegerUniformSpikeEstimator, IntegerUniformSpikeDataEncoder
+    IntegerUniformSpikeEstimator, IntegerUniformSpikeDataEncoder, IntegerUniformSpikeEnumerator
 from pysp.stats.intrange import IntegerCategoricalDistribution, IntegerCategoricalSampler, \
     IntegerCategoricalEstimator, IntegerCategoricalDataEncoder, IntegerCategoricalEnumerator
 
 from pysp.stats.catmultinomial import MultinomialDistribution, MultinomialSampler, MultinomialEstimator, \
-    MultinomialDataEncoder
+    MultinomialDataEncoder, MultinomialEnumerator
 
 from pysp.stats.intmultinomial import IntegerMultinomialDistribution, IntegerMultinomialSampler, \
-    IntegerMultinomialEstimator, IntegerMultinomialDataEncoder
+    IntegerMultinomialEstimator, IntegerMultinomialDataEncoder, IntegerMultinomialEnumerator
 
 ### Continuous base distributions
+from pysp.stats.beta import BetaDistribution, BetaSampler, BetaEstimator, BetaDataEncoder
+
 from pysp.stats.exponential import ExponentialDistribution, ExponentialSampler, ExponentialEstimator, \
     ExponentialDataEncoder
 
 from pysp.stats.gamma import GammaDistribution, GammaSampler, GammaEstimator, GammaDataEncoder
 
 from pysp.stats.gaussian import GaussianDistribution, GaussianSampler, GaussianEstimator, GaussianDataEncoder
+
+from pysp.stats.laplace import LaplaceDistribution, LaplaceSampler, LaplaceEstimator, LaplaceDataEncoder
+
+from pysp.stats.pareto import ParetoDistribution, ParetoSampler, ParetoEstimator, ParetoDataEncoder
+
+from pysp.stats.rayleigh import RayleighDistribution, RayleighSampler, RayleighEstimator, RayleighDataEncoder
+
+from pysp.stats.student_t import StudentTDistribution, StudentTSampler, StudentTEstimator, StudentTDataEncoder
+
+from pysp.stats.uniform import UniformDistribution, UniformSampler, UniformEstimator, UniformDataEncoder
 
 from pysp.stats.dirichlet import DirichletDistribution, DirichletSampler, DirichletEstimator, DirichletDataEncoder
 
@@ -256,7 +329,7 @@ from pysp.stats.composite import CompositeDistribution, CompositeSampler, Compos
     CompositeEnumerator
 
 from pysp.stats.conditional import ConditionalDistribution, ConditionalDistributionSampler, \
-    ConditionalDistributionEstimator, ConditionalDistributionDataEncoder
+    ConditionalDistributionEstimator, ConditionalDistributionDataEncoder, ConditionalDistributionEnumerator
 
 from pysp.stats.sequence import SequenceDistribution, SequenceSampler, SequenceEstimator, SequenceDataEncoder, \
     SequenceEnumerator
@@ -268,7 +341,7 @@ from pysp.stats.optional import OptionalDistribution, OptionalSampler, OptionalE
 
 from pysp.stats.weighted import WeightedDistribution, WeightedEstimator, WeightedDataEncoder
 
-from pysp.stats.select import SelectDistribution, SelectEstimator
+from pysp.stats.select import SelectDistribution, SelectEstimator, SelectEnumerator
 
 ### Generic Distributions
 from pysp.stats.mixture import MixtureDistribution, MixtureSampler, MixtureEstimator, MixtureDataEncoder, \
@@ -288,35 +361,42 @@ from pysp.stats.hidden_association import HiddenAssociationDistribution, HiddenA
 from pysp.stats.hidden_markov import HiddenMarkovModelEnumerator, HiddenMarkovModelDistribution, HiddenMarkovSampler, HiddenMarkovEstimator, \
     HiddenMarkovDataEncoder
 
+from pysp.stats.quantized_hmm import QuantizedHiddenMarkovModelDistribution, QuantizedHiddenMarkovEstimator, \
+    QuantizedHiddenMarkovModelEnumerator
+
 from pysp.stats.jmixture import JointMixtureDistribution, JointMixtureSampler, JointMixtureEstimator, \
-    JointMixtureDataEncoder
+    JointMixtureDataEncoder, JointMixtureEnumerator
 
 from pysp.stats.tree_hmm import TreeHiddenMarkovModelDistribution, TreeHiddenMarkovSampler, TreeHiddenMarkovEstimator
 from pysp.stats.lda import LDADistribution, LDASampler, LDAEstimator, LDADataEncoder
 
+from pysp.stats.ibp import IndianBuffetProcessDistribution, IndianBuffetProcessSampler, \
+    IndianBuffetProcessEstimator, IndianBuffetProcessDataEncoder
+
 from pysp.stats.setdist import BernoulliSetDistribution, BernoulliSetSampler, BernoulliSetEstimator, \
-    BernoulliSetDataEncoder
+    BernoulliSetDataEncoder, BernoulliSetEnumerator
 
 from pysp.stats.spearman_rho import SpearmanRankingDistribution, SpearmanRankingSampler, SpearmanRankingEstimator, \
-    SpearmanRankingDataEncoder
+    SpearmanRankingDataEncoder, SpearmanRankingEnumerator
 
 ### Reduced Generic Distributions
 from pysp.stats.hmixture import HierarchicalMixtureDistribution, HierarchicalMixtureSampler, \
-    HierarchicalMixtureEstimator, HierarchicalMixtureDataEncoder
+    HierarchicalMixtureEstimator, HierarchicalMixtureDataEncoder, HierarchicalMixtureEnumerator
 
 from pysp.stats.int_edit_setdist import IntegerBernoulliEditDistribution, IntegerBernoulliEditSampler, \
-    IntegerBernoulliEditEstimator, IntegerBernoulliEditDataEncoder
+    IntegerBernoulliEditEstimator, IntegerBernoulliEditDataEncoder, IntegerBernoulliEditEnumerator
 
 from pysp.stats.int_edit_stepsetdist import IntegerStepBernoulliEditDistribution, IntegerStepBernoulliEditSampler, \
-    IntegerStepBernoulliEditEstimator, IntegerStepBernoulliEditDataEncoder
+    IntegerStepBernoulliEditEstimator, IntegerStepBernoulliEditDataEncoder, IntegerStepBernoulliEditEnumerator
 
 from pysp.stats.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainSampler, \
-    IntegerMarkovChainEstimator, IntegerMarkovChainDataEncoder
+    IntegerMarkovChainEstimator, IntegerMarkovChainDataEncoder, IntegerMarkovChainEnumerator
 
 from pysp.stats.int_plsi import IntegerPLSIDistribution, IntegerPLSISampler, IntegerPLSIEstimator, \
     IntegerPLSIDataEncoder
 
-from pysp.stats.icltree import ICLTreeDistribution, ICLTreeSampler, ICLTreeEstimator, ICLTreeDataEncoder
+from pysp.stats.icltree import ICLTreeDistribution, ICLTreeSampler, ICLTreeEstimator, ICLTreeDataEncoder, \
+    ICLTreeEnumerator
 
 from pysp.stats.intsetdist import IntegerBernoulliSetEnumerator, IntegerBernoulliSetDistribution, IntegerBernoulliSetSampler, \
     IntegerBernoulliSetEstimator, IntegerBernoulliSetDataEncoder
@@ -337,7 +417,7 @@ from pysp.stats.ss_mixture import SemiSupervisedMixtureDistribution, SemiSupervi
     SemiSupervisedMixtureEstimator, SemiSupervisedMixtureDataEncoder
 
 from pysp.stats.dirac_length import DiracLengthMixtureDistribution, DiracLengthMixtureEstimator, \
-    DiracLengthMixtureSampler
+    DiracLengthMixtureSampler, DiracLengthMixtureEnumerator
 
 
 ### imports
@@ -877,4 +957,3 @@ def seq_initialize(enc_data: Union[List[Tuple[int,T]], 'pyspark.rdd.RDD'],
         accumulator.key_replace(stats_dict)
 
         return estimator.estimate(nobs, accumulator.value())
-

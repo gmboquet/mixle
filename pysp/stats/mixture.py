@@ -12,11 +12,12 @@ where P(Z=k) is a mixture weight for component k, and P(Y|Z=k) is defined as a t
 If component distribution P(Y|Z=k) has data type (T), then the Mixture distribution has data type (T) as well.
 
 """
+import math
 import numpy as np
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
-    DistributionEnumerator, child_enumerator
-from pysp.utils.enumeration import BufferedStream, best_first_union
+    DistributionEnumerator, child_enumerator, EnumerationError
+from pysp.utils.enumeration import BufferedStream, QuantizedEnumerationIndex, best_first_union, freeze
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
@@ -348,6 +349,62 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         """Returns a MixtureEnumerator iterating the union of component supports in descending
         mixture probability order."""
         return MixtureEnumerator(self)
+
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
+        """Build a bounded bit-quantized index from bounded component indexes.
+
+        A value with mixture mass at least 2**(-max_bits) must have at least one
+        positive-weight component contribution of at least that threshold divided by
+        the number of active components. Each component is therefore indexed only to
+        that candidate bound, the candidate union is de-duplicated, and candidates are
+        re-scored with the exact mixture log-density before final binning.
+        """
+        if max_bits < 0:
+            raise ValueError('max_bits must be non-negative.')
+        if bin_width_bits <= 0:
+            raise ValueError('bin_width_bits must be positive.')
+
+        active = [(k, comp, float(self.w[k]), float(self.log_w[k]))
+                  for k, comp in enumerate(self.components) if self.w[k] > 0.0]
+        if not active:
+            return QuantizedEnumerationIndex.from_items(
+                [], max_bits=max_bits, bin_width_bits=bin_width_bits, truncated=False)
+
+        active_count = len(active)
+        comps = [comp for _, comp, _, _ in active]
+        log_w_arr = np.asarray([log_w for _, _, _, log_w in active], dtype=np.float64)
+
+        def exact_log_density(x):
+            with np.errstate(divide='ignore'):
+                return vec.log_sum(np.asarray([c.log_density(x) for c in comps]) + log_w_arr)
+
+        candidates = []
+        seen = set()
+        truncated = False
+        for k, comp, weight, _ in active:
+            candidate_bits = float(max_bits) + math.log(active_count * weight, 2.0)
+            if candidate_bits < 0.0:
+                truncated = True
+                continue
+            try:
+                child_index = comp.quantized_index(max_bits=candidate_bits, bin_width_bits=bin_width_bits)
+            except EnumerationError as e:
+                path = 'MixtureDistribution.components[%d]' % k
+                new_path = path if not e.path else '%s -> %s' % (path, e.path)
+                raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
+            truncated = truncated or child_index.truncated
+            for value, _ in child_index.iter_from():
+                key = freeze(value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append((value, exact_log_density(value)))
+
+        if truncated:
+            return QuantizedEnumerationIndex.from_items(
+                candidates, max_bits=max_bits, bin_width_bits=bin_width_bits, truncated=True)
+        return QuantizedEnumerationIndex.from_items(
+            candidates, max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
 class MixtureEnumerator(DistributionEnumerator):

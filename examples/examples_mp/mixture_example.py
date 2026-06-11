@@ -1,6 +1,6 @@
 """Simulate data and estimate a Mixture distribution with the multiprocessing backend.
 
-Twin of pysp/examples/mixture_example.py: the model and data are identical; the
+Twin of examples/examples_pysp/mixture_example.py: the model and data are identical; the
 only change is that the encoded training data lives in a pool of persistent
 worker processes (pysp.utils.parallel.MPEncodedData) instead of the driver
 process. optimize() is unchanged - it recognizes the handle.

@@ -14,11 +14,13 @@ for x in {0,1,2,...}, and
 else.
 
 """
+import math
 import numpy as np
 from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator
+from pysp.utils.enumeration import QuantizedEnumerationIndex
 from pysp.utils.vector import gammaln
 from math import log
 from typing import Tuple, List, Union, Optional, Any, Dict, Sequence
@@ -136,6 +138,35 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
     def enumerator(self) -> 'PoissonEnumerator':
         """Returns PoissonEnumerator iterating the support {0, 1, ...} in descending probability order."""
         return PoissonEnumerator(self)
+
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
+        """Build a bounded bit-quantized index by walking the Poisson mode outward."""
+        if max_bits < 0:
+            raise ValueError('max_bits must be non-negative.')
+        if bin_width_bits <= 0:
+            raise ValueError('bin_width_bits must be positive.')
+
+        mode = int(np.floor(self.lam))
+        left = mode
+        right = mode + 1
+        lp_left = self.log_density(left)
+        lp_right = self.log_density(right)
+        limit_lp = -(float(max_bits) + 1.0e-12) * math.log(2.0)
+        items: List[Tuple[int, float]] = []
+
+        while (left >= 0 and lp_left >= limit_lp) or lp_right >= limit_lp:
+            if left >= 0 and lp_left >= lp_right:
+                items.append((left, float(lp_left)))
+                left -= 1
+                lp_left = self.log_density(left) if left >= 0 else -np.inf
+            else:
+                items.append((right, float(lp_right)))
+                right += 1
+                lp_right = self.log_density(right)
+
+        return QuantizedEnumerationIndex.from_items(
+            items, max_bits=max_bits, bin_width_bits=bin_width_bits,
+            sorted_items=True, truncated=True)
 
 
 class PoissonEnumerator(DistributionEnumerator):

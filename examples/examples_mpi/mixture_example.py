@@ -1,8 +1,8 @@
 """Simulate data and estimate a Mixture distribution with the mpi4py backend.
 
-Twin of pysp/examples/mixture_example.py for MPI. Run with:
+Twin of examples/examples_pysp/mixture_example.py for MPI. Run with:
 
-    mpiexec -n 4 python -m pysp.examples_mpi.mixture_example
+    mpiexec -n 4 python examples/examples_mpi/mixture_example.py
 
 Every rank runs this same script (SPMD): each rank samples the identical
 dataset (same seed), keeps its own shard data[rank::size] encoded and

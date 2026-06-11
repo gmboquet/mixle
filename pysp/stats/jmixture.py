@@ -469,14 +469,14 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         idx1 = self._idx1_rng.choice(self.num_components1)
         idx2 = self._idx2_rng.choice(self.num_components2)
 
-        self.joint_counts[idx1, idx2] += 1.0
+        self.joint_counts[idx1, idx2] += weight
 
         for i in range(self.num_components1):
-            w = 1.0 if i == idx1 else 0.0
+            w = weight if i == idx1 else 0.0
             self.accumulators1[i].initialize(x[0], w, self._acc1_rng[i])
             self.comp_counts1[i] += w
         for i in range(self.num_components2):
-            w = 1.0 if i == idx2 else 0.0
+            w = weight if i == idx2 else 0.0
             self.accumulators2[i].initialize(x[1], w, self._acc2_rng[i])
             self.comp_counts2[i] += w
 
@@ -502,18 +502,18 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         idx1 = self._idx1_rng.choice(self.num_components1, size=sz)
         idx2 = self._idx2_rng.choice(self.num_components2, size=sz)
 
-        temp = np.bincount(idx1*self.num_components1 + idx2, minlength=self.num_components1*self.num_components2)
+        temp = np.bincount(idx1*self.num_components2 + idx2, weights=weights, minlength=self.num_components1*self.num_components2)
         self.joint_counts += np.reshape(temp, (self.num_components1, self.num_components2))
 
         for i in range(self.num_components1):
             w = np.zeros(sz)
-            w[idx1 == i] = 1.0
+            w[idx1 == i] = weights[idx1 == i]
             self.accumulators1[i].seq_initialize(enc1, w, self._acc1_rng[i])
             self.comp_counts1[i] += np.sum(w)
 
         for i in range(self.num_components2):
             w = np.zeros(sz)
-            w[idx2 == i] = 1.0
+            w[idx2 == i] = weights[idx2 == i]
             self.accumulators2[i].seq_initialize(enc2, w, self._acc2_rng[i])
             self.comp_counts2[i] += np.sum(w)
 
@@ -817,8 +817,8 @@ class JointMixtureEstimator(ParameterEstimator):
             p2 = self.pseudo_count[1] / float(self.num_components2)
             p3 = self.pseudo_count[2] / float(self.num_components2 * self.num_components1)
 
-            w1 = (counts1 + p1) / (counts1.sum() + p1)
-            w2 = (counts2 + p2) / (counts2.sum() + p2)
+            w1 = (counts1 + p1) / (counts1.sum() + self.pseudo_count[0])
+            w2 = (counts2 + p2) / (counts2.sum() + self.pseudo_count[1])
             taus = joint_counts + p3
 
             taus12_sum = np.sum(taus, axis=1, keepdims=True)
