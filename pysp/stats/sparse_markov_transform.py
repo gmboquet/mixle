@@ -36,6 +36,7 @@ SS1 = TypeVar('SS1')
 
 
 class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistribution):
+    """SparseMarkovAssociationDistribution object modeling a count-set S2 generated from a count-set S1."""
 
     def __init__(self, init_prob_vec: Union[Sequence[float], np.ndarray], cond_prob_mat: csr_matrix,
                  alpha: float = 0.0, len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
@@ -69,6 +70,7 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         self.low_memory = low_memory
 
     def __str__(self) -> str:
+        """Returns string representation of SparseMarkovAssociationDistribution object."""
         s1 = ','.join(map(str, self.init_prob_vec))
         temp = self.cond_prob_mat.nonzero()
         tt = np.asarray(self.cond_prob_mat[temp[0], temp[1]]).flatten()
@@ -81,10 +83,32 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         return 'SparseMarkovAssociationDistribution([%s], %s, alpha=%s, len_dist=%s)' % (s1, s2, s3, s4)
 
     def density(self, x: Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]) -> float:
+        """Density of the sparse Markov association model at observation x.
+
+        See log_density() for details.
+
+        Args:
+            x: Observation tuple (S1, S2), each a list of (value, count) pairs.
+
+        Returns:
+            Density at observation x.
+
+        """
         return exp(self.log_density(x))
 
     def log_density(self, x: Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]) -> float:
+        """Log-density of the sparse Markov association model at observation x.
 
+        Computes log(P(S2 | S1)) (see module docstring, eq. (1)) plus the log-density of the total counts
+        [n1, n2] under len_dist.
+
+        Args:
+            x: Observation tuple (S1, S2), each a list of (value, count) pairs.
+
+        Returns:
+            Log-density at observation x.
+
+        """
         nw = self.num_vals
         a  = self.alpha / nw
         b  = 1 - self.alpha
@@ -106,7 +130,15 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         return float(rv)
 
     def seq_log_density(self, x) -> np.ndarray:
+        """Vectorized evaluation of log-density at sequence encoded input x.
 
+        Args:
+            x: Encoded sequence (from SparseMarkovAssociationDataEncoder.seq_encode).
+
+        Returns:
+            Numpy array of log-densities, one per encoded observation.
+
+        """
         nw = self.num_vals
         a = self.alpha / nw
         b = 1 - self.alpha
@@ -146,26 +178,70 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'SparseMarkovAssociationSampler':
+        """Create a SparseMarkovAssociationSampler object from this instance.
+
+        Args:
+            seed (Optional[int]): Used to set seed in random sampler.
+
+        Returns:
+            SparseMarkovAssociationSampler object.
+
+        """
         return SparseMarkovAssociationSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'SparseMarkovAssociationEstimator':
+        """Create a SparseMarkovAssociationEstimator object from this instance.
+
+        Args:
+            pseudo_count (Optional[float]): Kept for protocol compatibility (unused).
+
+        Returns:
+            SparseMarkovAssociationEstimator object.
+
+        """
         return SparseMarkovAssociationEstimator(num_vals=self.num_vals,alpha=self.alpha,
                                                 len_estimator=self.len_dist.estimator(), low_memory=self.low_memory)
 
     def dist_to_encoder(self) -> 'SparseMarkovAssociationDataEncoder':
+        """Returns a SparseMarkovAssociationDataEncoder object for encoding sequences of data."""
         return SparseMarkovAssociationDataEncoder(len_encoder=self.len_dist.dist_to_encoder(),
                                                   low_memory=self.low_memory)
 
 
 class SparseMarkovAssociationSampler(DistributionSampler):
+    """SparseMarkovAssociationSampler object for sampling from a SparseMarkovAssociationDistribution."""
 
     def __init__(self, dist: SparseMarkovAssociationDistribution, seed: Optional[int] = None) -> None:
+        """SparseMarkovAssociationSampler object.
+
+        Args:
+            dist (SparseMarkovAssociationDistribution): Distribution to sample from. Its len_dist must support
+                sampling the total counts [n1, n2].
+            seed (Optional[int]): Used to set seed in random sampler.
+
+        Attributes:
+            dist (SparseMarkovAssociationDistribution): Distribution to sample from.
+            rng (RandomState): RandomState with seed set if passed in args.
+            size_sampler (DistributionSampler): Sampler for the total counts [n1, n2].
+
+        """
         self.rng = np.random.RandomState(seed)
         self.dist = dist
         self.size_sampler = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
     def sample(self, size: Optional[int] = None) -> Union[T, Sequence[T]]:
+        """Draw 'size' iid observations from the sparse Markov association model.
 
+        Each observation is a tuple (S1, S2) of lists of (value, count) pairs. If size is None a single
+        observation is returned, else a list of 'size' observations is returned.
+
+        Args:
+            size (Optional[int]): Number of observations to draw. Treated as a single draw if None.
+
+        Returns:
+            A single observation tuple, or a list of observation tuples when size is not None.
+
+        """
         if size is None:
             slens = self.size_sampler.sample()
             rng = np.random.RandomState(self.rng.randint(0, maxrandint))
@@ -191,9 +267,28 @@ class SparseMarkovAssociationSampler(DistributionSampler):
 
 
 class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
+    """SparseMarkovAssociationAccumulator object for accumulating sufficient statistics of the model."""
 
     def __init__(self, num_vals: int, size_acc: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
                  keys: Tuple[Optional[str], Optional[str]] = (None, None), low_memory: bool = True) -> None:
+        """SparseMarkovAssociationAccumulator object.
+
+        Args:
+            num_vals (int): Number of possible values W.
+            size_acc (Optional[SequenceEncodableStatisticAccumulator]): Accumulator for the total counts.
+            keys (Tuple[Optional[str], Optional[str]]): Keys for initial and transition statistics.
+            low_memory (bool): If True, use low_memory function calls.
+
+        Attributes:
+            init_count (np.ndarray): Weighted counts for the initial probability vector.
+            trans_count (Optional[Union[lil_matrix, csr_matrix]]): Weighted (W by W) transition counts.
+            size_accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the total counts.
+            num_vals (int): Number of possible values W.
+            init_key (Optional[str]): Key for the initial-count statistics.
+            trans_key (Optional[str]): Key for the transition-count statistics.
+            low_memory (bool): If True, use low_memory function calls.
+
+        """
         self.init_count = np.zeros(num_vals)
         self.trans_count: Optional[Union[lil_matrix, csr_matrix]] = None
         self.size_accumulator = size_acc if size_acc is not None else NullAccumulator()
@@ -206,7 +301,17 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         self._size_rng = None
 
     def update(self, x: T, weight: float, estimate: SparseMarkovAssociationDistribution) -> None:
+        """Update sufficient statistics with a single weighted observation.
 
+        Args:
+            x: Observation tuple (S1, S2), each a list of (value, count) pairs.
+            weight (float): Weight of the observation.
+            estimate (SparseMarkovAssociationDistribution): Previous estimate used to assign responsibility.
+
+        Returns:
+            None.
+
+        """
         if self.trans_count is None:
             num_vals = self.num_vals
             self.trans_count = lil_matrix((num_vals, num_vals))
@@ -228,12 +333,31 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         self.size_accumulator.update((cx.sum(), cy.sum()), weight, estimate.len_dist)
 
     def initialize_rng(self, rng: np.random.RandomState) -> None:
+        """Seed the internal RandomState for the size accumulator from rng (idempotent).
+
+        Args:
+            rng (RandomState): Source of the seed.
+
+        Returns:
+            None.
+
+        """
         if not self._init_rng:
             self._size_rng = np.random.RandomState(seed=rng.randint(2**31))
             self._init_rng = True
 
     def initialize(self, x: T, weight: float, rng: np.random.RandomState) -> None:
+        """Initialize sufficient statistics with a single weighted observation (no previous estimate).
 
+        Args:
+            x: Observation tuple (S1, S2), each a list of (value, count) pairs.
+            weight (float): Weight of the observation.
+            rng (RandomState): Used to seed the size accumulator initialization.
+
+        Returns:
+            None.
+
+        """
         if not self._init_rng:
             self.initialize_rng(rng)
 
@@ -252,7 +376,17 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         self.size_accumulator.initialize((cx.sum(), cy.sum()), weight, self._size_rng)
 
     def seq_initialize(self, x, weights: np.ndarray, rng: np.random.RandomState) -> None:
+        """Initialize sufficient statistics with a sequence of weighted encoded observations.
 
+        Args:
+            x: Encoded sequence (from SparseMarkovAssociationDataEncoder.seq_encode).
+            weights (np.ndarray): Weights, one per encoded observation.
+            rng (RandomState): Used to seed the size accumulator initialization.
+
+        Returns:
+            None.
+
+        """
         if not self._init_rng:
             self.initialize_rng(rng)
 
@@ -292,7 +426,17 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         self.size_accumulator.seq_initialize(x[1], weights, self._size_rng)
 
     def seq_update(self, x, weights: np.ndarray, estimate: SparseMarkovAssociationDistribution) -> None:
+        """Update sufficient statistics with a sequence of weighted encoded observations.
 
+        Args:
+            x: Encoded sequence (from SparseMarkovAssociationDataEncoder.seq_encode).
+            weights (np.ndarray): Weights, one per encoded observation.
+            estimate (SparseMarkovAssociationDistribution): Previous estimate used to assign responsibility.
+
+        Returns:
+            None.
+
+        """
         if self.trans_count is None:
             num_vals = self.num_vals
             self.trans_count = csr_matrix((num_vals, num_vals))
@@ -341,6 +485,15 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: Tuple[np.ndarray, Optional[Union[lil_matrix, csr_matrix]], SS1]) \
             -> 'SparseMarkovAssociationAccumulator':
+        """Merge the sufficient statistics of another accumulator into this one.
+
+        Args:
+            suff_stat: Tuple (init_count, trans_count, size_value) from another accumulator's value().
+
+        Returns:
+            This SparseMarkovAssociationAccumulator object.
+
+        """
         init_count, trans_count, size_acc = suff_stat
 
         self.size_accumulator.combine(size_acc)
@@ -350,10 +503,20 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> Tuple[np.ndarray, Optional[Union[lil_matrix, csr_matrix]], Any]:
+        """Returns the sufficient statistic tuple (init_count, trans_count, size_value)."""
         return self.init_count, self.trans_count, self.size_accumulator.value()
 
     def from_value(self, x: Tuple[np.ndarray, Optional[Union[lil_matrix, csr_matrix]], SS1]) \
             -> 'SparseMarkovAssociationAccumulator':
+        """Set the sufficient statistics from a value() tuple.
+
+        Args:
+            x: Tuple (init_count, trans_count, size_value).
+
+        Returns:
+            This SparseMarkovAssociationAccumulator object.
+
+        """
         init_count, trans_count, size_acc = x
 
         self.init_count = init_count
@@ -363,7 +526,15 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+        """Merge keyed sufficient statistics into stats_dict for init_key and trans_key.
 
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary of keyed sufficient statistics.
+
+        Returns:
+            None.
+
+        """
         if self.init_key is not None:
             if self.init_key in stats_dict:
                 stats_dict[self.init_key] += self.init_count
@@ -379,7 +550,15 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         self.size_accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+        """Replace keyed sufficient statistics from stats_dict for init_key and trans_key.
 
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary of keyed sufficient statistics.
+
+        Returns:
+            None.
+
+        """
         if self.init_key is not None:
             if self.init_key in stats_dict:
                 self.init_count = stats_dict[self.init_key]
@@ -391,26 +570,45 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         self.size_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> 'SparseMarkovAssociationDataEncoder':
+        """Returns a SparseMarkovAssociationDataEncoder object for encoding sequences of data."""
         return SparseMarkovAssociationDataEncoder(len_encoder=self.size_accumulator.acc_to_encoder(),
                                                   low_memory=self.low_memory)
 
 
 class SparseMarkovAssociationAccumulatorFactory(StatisticAccumulatorFactory):
+    """SparseMarkovAssociationAccumulatorFactory object for creating SparseMarkovAssociationAccumulator objects."""
 
     def __init__(self, num_vals: int, len_factory: Optional[StatisticAccumulatorFactory] = NullAccumulatorFactory(),
                  low_memory: bool = True,
                  keys: Tuple[Optional[str], Optional[str]] = (None, None)) -> None:
+        """SparseMarkovAssociationAccumulatorFactory object.
+
+        Args:
+            num_vals (int): Number of possible values W.
+            len_factory (Optional[StatisticAccumulatorFactory]): Factory for the total-count accumulator.
+            low_memory (bool): If True, use low_memory function calls.
+            keys (Tuple[Optional[str], Optional[str]]): Keys for initial and transition statistics.
+
+        Attributes:
+            num_vals (int): Number of possible values W.
+            len_factory (StatisticAccumulatorFactory): Factory for the total-count accumulator.
+            low_memory (bool): If True, use low_memory function calls.
+            keys (Tuple[Optional[str], Optional[str]]): Keys for initial and transition statistics.
+
+        """
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
         self.low_memory = low_memory
         self.keys = keys
         self.num_vals = num_vals
 
     def make(self) -> 'SparseMarkovAssociationAccumulator':
+        """Returns a new SparseMarkovAssociationAccumulator object."""
         return SparseMarkovAssociationAccumulator(self.num_vals, size_acc=self.len_factory.make(), keys=self.keys,
                                                   low_memory=self.low_memory)
 
 
 class SparseMarkovAssociationEstimator(ParameterEstimator):
+    """SparseMarkovAssociationEstimator object for estimating SparseMarkovAssociationDistribution objects."""
 
     def __init__(self, num_vals: int, alpha: float = 0.0, len_estimator: Optional[ParameterEstimator] = NullEstimator(),
                  suff_stat: Optional[Any] = None, pseudo_count: Optional[float] = None,
@@ -447,6 +645,7 @@ class SparseMarkovAssociationEstimator(ParameterEstimator):
         self.low_memory = low_memory
 
     def accumulator_factory(self) -> 'SparseMarkovAssociationAccumulatorFactory':
+        """Returns a SparseMarkovAssociationAccumulatorFactory object for this estimator."""
         return SparseMarkovAssociationAccumulatorFactory(self.num_vals, self.len_estimator.accumulator_factory(),
                                                          self.low_memory,
                                                          self.keys)
@@ -485,23 +684,55 @@ class SparseMarkovAssociationEstimator(ParameterEstimator):
 
 
 class SparseMarkovAssociationDataEncoder(DataSequenceEncoder):
+    """SparseMarkovAssociationDataEncoder object for encoding sequences of (S1, S2) count-set observations."""
 
     def __init__(self, len_encoder: DataSequenceEncoder, low_memory: bool) -> None:
+        """SparseMarkovAssociationDataEncoder object.
+
+        Args:
+            len_encoder (DataSequenceEncoder): Encoder for the total counts [n1, n2].
+            low_memory (bool): If True, produce the compact encoding (no flattened pair-index arrays).
+
+        Attributes:
+            len_encoder (DataSequenceEncoder): Encoder for the total counts [n1, n2].
+            low_memory (bool): If True, produce the compact encoding.
+
+        """
         self.len_encoder = len_encoder
         self.low_memory = low_memory
 
     def __eq__(self, other: object) -> bool:
+        """Encoders are interchangeable iff other is a SparseMarkovAssociationDataEncoder with equal members.
+
+        Args:
+            other (object): Object to compare against.
+
+        Returns:
+            True if other is an equivalent SparseMarkovAssociationDataEncoder instance.
+
+        """
         if isinstance(other, SparseMarkovAssociationDataEncoder):
             return other.len_encoder == self.len_encoder and self.low_memory == other.low_memory
         else:
             return False
 
     def __str__(self) -> str:
+        """Returns string representation of SparseMarkovAssociationDataEncoder object."""
         return 'SparseMarkovAssociationDataEncoder(len_encoder=' + \
                str(self.len_encoder)+',low_memory=' + str(self.low_memory) + ')'
 
     def seq_encode(self, x: Sequence[Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]]):
+        """Encode a sequence of observations for vectorized calls.
 
+        Args:
+            x: Sequence of observation tuples (S1, S2), each a list of (value, count) pairs.
+
+        Returns:
+            Tuple (rv, nn, vv, qq) where rv holds per-observation (values, counts) arrays, nn is the encoded
+            length data, vv is the array of distinct (u, v) pairs, and qq holds flattened pair-index arrays for
+            the vectorized path (None when low_memory is True).
+
+        """
         if self.low_memory:
 
             rv = []

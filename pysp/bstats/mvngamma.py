@@ -1,3 +1,17 @@
+"""Multivariate (factorized) Normal-Gamma distribution over (mu, tau) for a
+vector of independent Gaussians with unknown means and precisions.
+
+Each component i is an independent NormalGamma:
+
+    tau_i ~ Gamma(a_i, b_i),  mu_i | tau_i ~ Gaussian(mu0_i, 1/(lam_i*tau_i))
+
+Data type: (Tuple[np.ndarray, np.ndarray]): A pair (mu, tau) of length-d
+    vectors; the log-density is the sum of the d univariate NormalGamma
+    log-densities.
+
+This is the conjugate prior used by DiagonalGaussianDistribution (dmvn) and
+the vectorized counterpart of NormalGammaDistribution (normgamma).
+"""
 from typing import Optional, Union, Tuple, Sequence
 
 from pysp.bstats.pdist import ProbabilityDistribution
@@ -14,9 +28,22 @@ ParamType = Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
 
 class MultivariateNormalGammaDistribution(ProbabilityDistribution):
+    """Vector of independent NormalGamma distributions over per-component
+    (mu_i, tau_i) pairs; conjugate prior for diagonal Gaussians."""
 
     def __init__(self, mu: np.ndarray, lam: np.ndarray, a: np.ndarray, b: np.ndarray, name: Optional[str] = None, prior: Optional[ProbabilityDistribution] = None):
+        """MultivariateNormalGammaDistribution object.
 
+        Args:
+            mu (np.ndarray): Length-d vector of prior means mu0_i.
+            lam (np.ndarray): Length-d vector of mean-precision scales lam_i > 0.
+            a (np.ndarray): Length-d vector of Gamma shapes a_i > 0.
+            b (np.ndarray): Length-d vector of Gamma rates b_i > 0.
+            name (Optional[str]): Name of object.
+            prior (Optional[ProbabilityDistribution]): Hyper-prior (unused by
+                the conjugate machinery; stored for interface compatibility).
+
+        """
         self.name  = name
         self.prior = prior
         self.set_parameters((mu, lam, a, b))
@@ -30,9 +57,16 @@ class MultivariateNormalGammaDistribution(ProbabilityDistribution):
         return 'MultivariateNormalGammaDistribution([%s], [%s], [%s], [%s], name=%s, prior=%s)' % (mu, lam, a, b, self.name, str(self.prior))
 
     def get_parameters(self):
+        """Returns the parameter tuple (mu, lam, a, b) of vectors."""
         return self.mu, self.lam, self.a, self.b
 
     def set_parameters(self, value):
+        """Set the parameters from a tuple of vectors.
+
+        Args:
+            value: Tuple (mu, lam, a, b) of length-d arrays.
+
+        """
         mu, lam, a, b = value
 
         self.mu  = np.asarray(mu,  dtype=float)
@@ -41,6 +75,16 @@ class MultivariateNormalGammaDistribution(ProbabilityDistribution):
         self.b   = np.asarray(b,   dtype=float)
 
     def cross_entropy(self, dist: ProbabilityDistribution) -> float:
+        """Cross-entropy H(self, dist) = -E_self[log dist], summed over
+        components, for a MultivariateNormalGamma argument (0 otherwise).
+
+        Args:
+            dist (ProbabilityDistribution): Distribution to evaluate against.
+
+        Returns:
+            Cross-entropy in nats.
+
+        """
         if isinstance(dist, MultivariateNormalGammaDistribution):
             a = self.a
             b = self.b
@@ -65,6 +109,7 @@ class MultivariateNormalGammaDistribution(ProbabilityDistribution):
             return 0
 
     def entropy(self) -> float:
+        """Returns the entropy (in nats), summed over components."""
         a = self.a
         b = self.b
         lam = self.lam
@@ -72,9 +117,28 @@ class MultivariateNormalGammaDistribution(ProbabilityDistribution):
         return -np.sum(((a - 0.5)*(digamma(a) - np.log(b)) - a - 0.5 + np.log(b)*a + 0.5*np.log(lam) - gammaln(a) - 0.5*np.log(2*np.pi)))
 
     def density(self, x: (float, float)) -> float:
+        """Density at x = (mu, tau); see log_density().
+
+        Args:
+            x: Tuple (mu, tau) of length-d vectors.
+
+        Returns:
+            Density at x.
+
+        """
         return np.exp(self.log_density(x))
 
     def log_density(self, x: FlexDatumType) -> float:
+        """Log-density at x = (mu, tau), summed over the d components.
+
+        Args:
+            x (FlexDatumType): Tuple (mu, tau) of length-d vectors with
+                tau_i > 0.
+
+        Returns:
+            Log-density at x.
+
+        """
         a = self.a
         b = self.b
         mu = self.mu
@@ -86,12 +150,29 @@ class MultivariateNormalGammaDistribution(ProbabilityDistribution):
         return float(np.sum(c0 + c1 + c2))
 
     def sampler(self, seed: Optional[int] = None):
+        """Create a MultivariateNormalGammaSampler for this distribution.
+
+        Args:
+            seed (Optional[int]): Seed for the random number generator.
+
+        Returns:
+            MultivariateNormalGammaSampler object.
+
+        """
         return MultivariateNormalGammaSampler(self, seed)
 
 
 class MultivariateNormalGammaSampler(object):
+    """Draws (mu, tau) samples from a MultivariateNormalGammaDistribution."""
 
     def __init__(self, dist: MultivariateNormalGammaDistribution, seed: Optional[int] = None):
+        """MultivariateNormalGammaSampler object.
+
+        Args:
+            dist (MultivariateNormalGammaDistribution): Distribution to sample from.
+            seed (Optional[int]): Seed for the random number generator.
+
+        """
         self.dist  = dist
         self.seed  = seed
         self.rng   = np.random.RandomState(seed)
@@ -99,6 +180,16 @@ class MultivariateNormalGammaSampler(object):
         self.nrng  = np.random.RandomState(self.rng.randint(0, 2**31 - 1))
 
     def sample(self, size=None):
+        """Draw size samples (a single (mu, tau) pair when size is None).
+
+        Args:
+            size (Optional[int]): Number of samples to draw.
+
+        Returns:
+            A tuple (mu, tau) of length-d arrays if size is None, else a
+            list of size such tuples.
+
+        """
         if size is None:
             t = self.grng.gamma(self.dist.a, 1/self.dist.b)
             x = self.nrng.normal(self.dist.mu, np.sqrt(1/(self.dist.lam*t)))

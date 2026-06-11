@@ -24,6 +24,10 @@ from typing import Sequence, Tuple, Any, List, Dict, Union, Optional
 
 
 class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
+    """Integer Chow-Liu tree distribution factorizing a joint over fixed-length integer vectors along a tree.
+
+    Data type: Union[Sequence[int], np.ndarray] (fixed-length vector of non-negative integers).
+    """
 
     def __init__(self, dependency_list: List[Tuple[int, Optional[int]]],
                  conditional_log_densities: Union[Sequence[float], np.ndarray],
@@ -57,6 +61,7 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
 
     def __str__(self) -> str:
+        """Returns string representation of ICLTreeDistribution object."""
         f1 = ','.join([str(u[1]) for u in self.dependency_list])
         f3 = ','.join([str(u[0]) for u in self.dependency_list])
         f2 = ['[' + ','.join(map(str, u.flatten())) + ']' for u in self.conditional_log_densities]
@@ -64,9 +69,32 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
         return 'ICLTreeDistribution([%s], [%s], feature_order=[%s], name=%s)' % (f1, f2, f3, f4)
 
     def density(self, x: Union[Sequence[int], np.ndarray]) -> float:
+        """Density of integer Chow-Liu tree distribution at observation x.
+
+        See log_density() for details.
+
+        Args:
+            x (Union[Sequence[int], np.ndarray]): Fixed-length vector of non-negative integers.
+
+        Returns:
+            Density at observation x.
+
+        """
         return np.exp(self.log_density(x))
 
     def log_density(self, x: Union[Sequence[int], np.ndarray]) -> float:
+        """Log-density of integer Chow-Liu tree distribution at observation x.
+
+        Sums the conditional log-densities of each feature given its parent in the dependency tree
+        (the root feature contributes its marginal log-density).
+
+        Args:
+            x (Union[Sequence[int], np.ndarray]): Fixed-length vector of non-negative integers.
+
+        Returns:
+            Log-density at observation x.
+
+        """
         rv = 0
         for i, (j, k) in enumerate(self.dependency_list):
             if k is None:
@@ -77,6 +105,15 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Vectorized evaluation of log-density at sequence encoded input x.
+
+        Args:
+            x (np.ndarray): 2-d numpy array of N integer vectors with num_features columns.
+
+        Returns:
+            Numpy array of log-density (float) of length N.
+
+        """
         rv = np.zeros(x.shape[0])
         for i, (j, k) in enumerate(self.dependency_list):
             if k is None:
@@ -87,22 +124,61 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'ICLTreeSampler':
+        """Create an ICLTreeSampler object from parameters of ICLTreeDistribution instance.
+
+        Args:
+            seed (Optional[int]): Used to set seed in random sampler.
+
+        Returns:
+            ICLTreeSampler object.
+
+        """
         return ICLTreeSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'ICLTreeEstimator':
+        """Create an ICLTreeEstimator object.
+
+        Args:
+            pseudo_count (Optional[float]): Used to inflate sufficient statistics (currently not passed on).
+
+        Returns:
+            ICLTreeEstimator object.
+
+        """
         return ICLTreeEstimator(name=self.name)
 
     def dist_to_encoder(self) -> 'ICLTreeDataEncoder':
+        """Returns an ICLTreeDataEncoder object for encoding sequences of data."""
         return ICLTreeDataEncoder()
 
 
 class ICLTreeSampler(DistributionSampler):
+    """Sampler for the ICLTreeDistribution. Samples each feature given its sampled parent value."""
 
     def __init__(self, dist: ICLTreeDistribution, seed: Optional[int] = None) -> None:
+        """ICLTreeSampler object.
+
+        Args:
+            dist (ICLTreeDistribution): Distribution to sample from.
+            seed (Optional[int]): Seed for random number generator.
+
+        """
         self.rng = RandomState(seed)
         self.dist = dist
 
     def sample(self, size: Optional[int] = None) -> Union[List[Optional[int]], Sequence[List[Optional[int]]]]:
+        """Draw iid integer vectors from the integer Chow-Liu tree distribution.
+
+        Features are drawn in dependency order: the root from its marginal, each remaining
+        feature from its conditional given the sampled parent value.
+
+        Args:
+            size (Optional[int]): Number of samples to draw. If None, a single vector is returned.
+
+        Returns:
+            A single integer vector (List[int]) if size is None, else a list of size vectors.
+
+        """
 
         if size is None:
             rv = [None] * self.dist.num_features
@@ -122,8 +198,27 @@ class ICLTreeSampler(DistributionSampler):
 
 
 class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulator for the ICLTreeDistribution. Tracks pairwise joint and marginal feature-state counts."""
 
     def __init__(self, num_features: int, num_states: int, keys: Optional[str] = None, name: Optional[str] = None):
+        """ICLTreeAccumulator object.
+
+        Args:
+            num_features (int): Number of features (length of observed integer vectors).
+            num_states (int): Number of states (distinct integer values) per feature.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
+            name (Optional[str]): Optional name for object instance.
+
+        Attributes:
+            num_states (int): Number of states per feature.
+            num_features (int): Number of features.
+            counts (Optional[np.ndarray]): Pairwise joint counts with shape
+                (num_features, num_features, num_states, num_states). None until dimensions are known.
+            marginal_counts (Optional[np.ndarray]): Marginal counts with shape (num_features, num_states).
+            key (Optional[str]): Optional key for merging sufficient statistics.
+            name (Optional[str]): Optional name for object instance.
+
+        """
         self.num_states = num_states
         self.num_features = num_features
 
@@ -138,7 +233,13 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         self.name = name
 
     def _expand_states(self, num_states: int, num_features: int):
+        """Allocate or grow the count arrays to hold num_states states for num_features features.
 
+        Args:
+            num_states (int): New number of states per feature.
+            num_features (int): Number of features.
+
+        """
         if (self.counts is None) and (num_states is not None) and (num_features is not None):
             self.num_features = num_features
             self.num_states = num_states
@@ -158,7 +259,14 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Union[Sequence[int], np.ndarray], weight: float,
                estimate: Optional[ICLTreeDistribution]) -> None:
+        """Update pairwise joint and marginal counts with a weighted observation.
 
+        Args:
+            x (Union[Sequence[int], np.ndarray]): Fixed-length vector of non-negative integers.
+            weight (float): Weight for observation.
+            estimate (Optional[ICLTreeDistribution]): Previous estimate (unused).
+
+        """
         if (self.counts is None) or (self.num_states <= np.max(x)):
             self._expand_states(max(x) + 1, len(x))
 
@@ -170,7 +278,14 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
             self.counts[i, ff, xx[i], xx] += weight
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Optional[ICLTreeDistribution]) -> None:
+        """Vectorized update of pairwise joint and marginal counts from sequence encoded data.
 
+        Args:
+            x (np.ndarray): 2-d numpy array of N integer vectors with num_features columns.
+            weights (np.ndarray): Weights for each of the N observations.
+            estimate (Optional[ICLTreeDistribution]): Previous estimate (unused).
+
+        """
         max_x = np.max(x)
 
         if (self.counts is None) or (self.num_states <= max_x):
@@ -189,13 +304,40 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
                 self.counts[i, j, :, :] += joint_cnt
 
     def initialize(self, x: Union[Sequence[int], np.ndarray], weight: float, rng: Optional[RandomState]) -> None:
+        """Initialize sufficient statistics with a weighted observation.
+
+        Args:
+            x (Union[Sequence[int], np.ndarray]): Fixed-length vector of non-negative integers.
+            weight (float): Weight for observation.
+            rng (Optional[RandomState]): Random number generator (unused).
+
+        """
         self.update(x, weight, None)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: Optional[RandomState]) -> None:
+        """Vectorized initialization of sufficient statistics from sequence encoded data.
+
+        Args:
+            x (np.ndarray): 2-d numpy array of N integer vectors with num_features columns.
+            weights (np.ndarray): Weights for each of the N observations.
+            rng (Optional[RandomState]): Random number generator (unused).
+
+        """
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: Tuple[int, int, np.ndarray, np.ndarray]) -> 'ICLTreeAccumulator':
+        """Combine sufficient statistics from another accumulator into this one.
 
+        Count arrays are expanded if the incoming statistics track more states.
+
+        Args:
+            suff_stat (Tuple[int, int, np.ndarray, np.ndarray]): Tuple of number of features, number of
+                states, pairwise joint counts, and marginal counts.
+
+        Returns:
+            Self, with aggregated sufficient statistics.
+
+        """
         num_features, num_states, counts, marginal_counts = suff_stat
 
         if self.counts is None and counts is None:
@@ -227,9 +369,21 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> Tuple[int, int, np.ndarray, np.ndarray]:
+        """Returns sufficient statistics as a Tuple of number of features, number of states, pairwise
+        joint counts, and marginal counts."""
         return self.num_features, self.num_states, self.counts, self.marginal_counts
 
     def from_value(self, x: Tuple[int, int, np.ndarray, np.ndarray]) -> 'ICLTreeAccumulator':
+        """Set sufficient statistics of accumulator from value x.
+
+        Args:
+            x (Tuple[int, int, np.ndarray, np.ndarray]): Tuple of number of features, number of states,
+                pairwise joint counts, and marginal counts.
+
+        Returns:
+            Self, with sufficient statistics set to x.
+
+        """
         self.num_features = x[0]
         self.num_states = x[1]
         self.counts = x[2]
@@ -238,33 +392,75 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+        """No-op kept for interface consistency (keyed merging is not supported for ICLTreeAccumulator).
+
+        Args:
+            stats_dict (Dict[str, Any]): Dict mapping keys to shared sufficient statistics (ignored).
+
+        Returns:
+            None.
+
+        """
         pass
 
     def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+        """No-op kept for interface consistency (keyed merging is not supported for ICLTreeAccumulator).
+
+        Args:
+            stats_dict (Dict[str, Any]): Dict mapping keys to shared sufficient statistics (ignored).
+
+        Returns:
+            None.
+
+        """
         pass
 
     def acc_to_encoder(self) -> 'ICLTreeDataEncoder':
+        """Returns an ICLTreeDataEncoder object for encoding sequences of data."""
         return ICLTreeDataEncoder()
 
 class ICLTreeAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for creating ICLTreeAccumulator objects."""
 
     def __init__(self, num_features: Optional[int] = None, num_states: Optional[int] = None,
                  keys: Optional[str] = None,
                  name: Optional[str] = None) -> None:
+        """ICLTreeAccumulatorFactory object.
+
+        Args:
+            num_features (Optional[int]): Number of features. If None, set from data on first update.
+            num_states (Optional[int]): Number of states per feature. If None, set from data.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
+            name (Optional[str]): Optional name for object instance.
+
+        """
         self.num_features = num_features
         self.num_states = num_states
         self.keys = keys
         self.name = name
 
     def make(self) -> 'ICLTreeAccumulator':
+        """Returns a new ICLTreeAccumulator object."""
         return ICLTreeAccumulator(self.num_features, self.num_states, self.keys)
 
 class ICLTreeEstimator(ParameterEstimator):
+    """Estimator for the ICLTreeDistribution. Learns the dependency tree with the Chow-Liu algorithm."""
 
     def __init__(self, num_features: Optional[int] = None, num_states: Optional[int] = None,
                  pseudo_count: Optional[float] = None,
                  suff_stat: Optional[Any] = None,
                  keys: Optional[str] = None, name: Optional[str] = None):
+        """ICLTreeEstimator object.
+
+        Args:
+            num_features (Optional[int]): Number of features. If None, set from data.
+            num_states (Optional[int]): Number of states per feature. If None, set from data.
+            pseudo_count (Optional[float]): Smoothing count spread over the marginal and joint counts.
+            suff_stat (Optional[Any]): Kept for interface consistency (unused).
+            keys (Optional[str]): Optional key for merging sufficient statistics.
+            name (Optional[str]): Optional name for object instance.
+
+        """
         self.num_features = num_features
         self.num_states = num_states
         self.pseudo_count = pseudo_count
@@ -273,10 +469,25 @@ class ICLTreeEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self):
+        """Returns an ICLTreeAccumulatorFactory for creating ICLTreeAccumulator objects."""
         return ICLTreeAccumulatorFactory(self.num_features, self.num_states, self.keys)
 
     def estimate(self, nobs, suff_stat):
+        """Estimate an ICLTreeDistribution from sufficient statistics via the Chow-Liu algorithm.
 
+        Pairwise mutual information is computed from the (optionally smoothed) joint and marginal
+        counts, a maximum mutual information spanning tree is extracted, and conditional densities
+        are computed along the tree rooted at feature 0.
+
+        Args:
+            nobs (Optional[float]): Number of observations (unused).
+            suff_stat (Tuple[int, int, np.ndarray, np.ndarray]): Tuple of number of features, number of
+                states, pairwise joint counts, and marginal counts.
+
+        Returns:
+            ICLTreeDistribution object.
+
+        """
         num_features, num_states, counts, marginal_counts = suff_stat
 
         mi_mat = np.zeros((num_features, num_features))
@@ -345,14 +556,34 @@ class ICLTreeEstimator(ParameterEstimator):
 
 
 class ICLTreeDataEncoder(DataSequenceEncoder):
+    """Data encoder for sequences of fixed-length integer vector observations."""
 
     def __str__(self) -> str:
+        """Returns string representation of ICLTreeDataEncoder object."""
         return 'ICLTreeDataEncoder'
 
     def __eq__(self, other: object) -> bool:
+        """Checks if other object is an instance of an ICLTreeDataEncoder.
+
+        Args:
+            other (object): Object to compare against.
+
+        Returns:
+            True if other is an ICLTreeDataEncoder instance, else False.
+
+        """
         return isinstance(other, ICLTreeDataEncoder)
 
     def seq_encode(self, x: Union[List[int], np.ndarray]) -> np.ndarray:
+        """Encode a sequence of N integer vectors for vectorized functions.
+
+        Args:
+            x (Union[List[int], np.ndarray]): Sequence of N fixed-length integer vectors.
+
+        Returns:
+            2-d numpy array of ints with N rows and num_features columns.
+
+        """
         return np.asarray(x, dtype=int)
 
 

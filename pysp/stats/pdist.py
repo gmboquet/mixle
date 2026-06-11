@@ -47,6 +47,13 @@ def child_enumerator(child: 'ProbabilityDistribution', path: str) -> 'Distributi
 
 
 class ProbabilityDistribution:
+    """Base class for all probability distributions in pysp.stats.
+
+    A distribution evaluates the (log-)density of a single observation of its data
+    type, creates a DistributionSampler for drawing observations, and creates a
+    ParameterEstimator for re-estimating itself from data. Discrete distributions
+    may additionally provide a DistributionEnumerator over their support.
+    """
 
     def __init__(self) -> None:
         pass
@@ -79,6 +86,12 @@ class ProbabilityDistribution:
 
 
 class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
+    """ProbabilityDistribution with vectorized log-density evaluation on encoded data.
+
+    dist_to_encoder() returns a DataSequenceEncoder whose seq_encode() output is
+    consumed by seq_log_density() (and by the matching accumulator's seq_update /
+    seq_initialize), enabling fast vectorized estimation over iid sequences.
+    """
 
     def seq_ld_lambda(self):
         pass
@@ -94,12 +107,18 @@ class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
 
 
 class DistributionSampler(object):
+    """Draws iid observations from a distribution using a seeded RandomState.
+
+    sample(size=None) returns a single observation of the distribution's data type;
+    sample(size=n) returns a length-n collection of observations.
+    """
 
     def __init__(self, dist: SequenceEncodableProbabilityDistribution, seed: Optional[int] = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def new_seed(self) -> int:
+        """Return a fresh random seed drawn from this sampler's RandomState."""
         return self.rng.randint(0, maxrandint)
 
     @abstractmethod
@@ -133,11 +152,21 @@ class DistributionEnumerator(object):
 
 
 class ConditionalSampler(object):
+    """Sampler mixin for conditional draws: sample_given(x) draws from P(. | x)."""
+
     @abstractmethod
     def sample_given(self, x): ...
 
 
 class StatisticAccumulator(Generic[SS]):
+    """Accumulates weighted sufficient statistics of type SS from observations.
+
+    update(x, weight, estimate) adds one observation (estimate is the previous model,
+    used for E-step posteriors; it may be None during initialization). Accumulators
+    merge across partitions via combine(suff_stat) / value() / from_value(), and
+    key_merge / key_replace pool statistics shared across model components through
+    a stats_dict keyed by the accumulator's key.
+    """
 
     def update(self, x: Any, weight: float, estimate) -> None:
         ...
@@ -167,6 +196,12 @@ class StatisticAccumulator(Generic[SS]):
 
 
 class SequenceEncodableStatisticAccumulator(StatisticAccumulator[SS]):
+    """StatisticAccumulator with vectorized updates on encoded data sequences.
+
+    seq_update / seq_initialize consume the output of the matching
+    DataSequenceEncoder's seq_encode() (obtained via acc_to_encoder()) together with
+    a per-observation weight vector.
+    """
 
     def get_seq_lambda(self):
         pass
@@ -181,12 +216,19 @@ class SequenceEncodableStatisticAccumulator(StatisticAccumulator[SS]):
     def acc_to_encoder(self) -> 'DataSequenceEncoder': ...
 
 class StatisticAccumulatorFactory(object):
+    """Factory whose make() returns a fresh, zeroed accumulator for one estimator."""
 
     @abstractmethod
     def make(self) -> 'SequenceEncodableStatisticAccumulator': ...
 
 
 class ParameterEstimator(Generic[SS]):
+    """Estimates a distribution from accumulated sufficient statistics.
+
+    accumulator_factory() supplies accumulators that gather sufficient statistics of
+    type SS, and estimate(nobs, suff_stat) maps those statistics (plus optional
+    regularization configured on the estimator) to a new distribution.
+    """
 
     @abstractmethod
     def estimate(self, nobs: Optional[float], suff_stat: SS) -> 'SequenceEncodableProbabilityDistribution': ...
@@ -196,11 +238,19 @@ class ParameterEstimator(Generic[SS]):
 
 
 class DataSequenceEncoder:
+    """Encodes an iid data sequence into the vectorized form used by seq_* methods.
+
+    seq_encode(x) transforms a sequence of observations into the encoding consumed
+    by seq_log_density / seq_update / seq_initialize. Encoders must define __eq__
+    (so equivalent encoders are interchangeable when batching) and a readable
+    __str__.
+    """
 
     def __str__(self) -> str:
-        return self.__str__()
+        return type(self).__name__
 
     def seq_encode(self, x: Any) -> Any:
+        """Encode the iid observation sequence x for vectorized evaluation."""
         return x
 
     @abstractmethod
