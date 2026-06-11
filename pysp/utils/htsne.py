@@ -627,8 +627,12 @@ def tsne_exact(P: np.ndarray, emb_dim: int = 2, alpha: float = 1.0, Y: Optional[
 def _tsne_barnes_hut(dist_csr: scipy.sparse.csr_matrix, emb_dim: int, perplexity: float,
                      max_its: int, eta, early_exaggeration: float,
                      seed: Optional[int], Y: Optional[np.ndarray]) -> np.ndarray:
-    from sklearn.manifold import TSNE
-    from sklearn.neighbors import sort_graph_by_row_values
+    try:
+        from sklearn.manifold import TSNE
+        from sklearn.neighbors import sort_graph_by_row_values
+    except ImportError:
+        from pysp.utils.optional_deps import require
+        require('scikit-learn', 'umap')
 
     dist_csr = sort_graph_by_row_values(dist_csr, warn_when_not_sorted=False)
     init = Y if Y is not None else 'random'
@@ -739,7 +743,11 @@ def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
     Extra keyword arguments are passed to umap.UMAP. Returns the n x emb_dim
     embedding.
     """
-    import umap
+    try:
+        import umap
+    except ImportError:
+        from pysp.utils.optional_deps import require
+        require('umap-learn', 'umap')
 
     if out is None:
         out = sys.stdout
