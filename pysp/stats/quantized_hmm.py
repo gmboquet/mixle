@@ -47,8 +47,10 @@ If included, the length of the sequences is modeled through a length distributio
 non-negative integers.
 """
 
+import heapq
+import itertools
 import math
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from scipy.optimize import minimize_scalar
@@ -57,7 +59,9 @@ from scipy.special import logsumexp
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.hidden_markov import HiddenMarkovAccumulatorFactory, HiddenMarkovModelDistribution
 from pysp.stats.null_dist import NullDistribution, NullEstimator
-from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
+from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution, \
+    DistributionEnumerator, EnumerationError, child_enumerator
+from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
 
 STRUCTURAL_ZERO = -1
 
@@ -512,6 +516,128 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
                                               pseudo_count=pseudo_count, k_max=self.k_max,
                                               init_mode=self.init_mode, len_estimator=len_est,
                                               name=self.name, use_numba=self.use_numba)
+
+    def enumerator(self) -> 'QuantizedHiddenMarkovModelEnumerator':
+        """Returns a quantized-HMM-specialized enumerator over observation sequences.
+
+        The enumerator is exact like HiddenMarkovModelEnumerator, but avoids constructing
+        per-state categorical emission streams and instead uses the finite level set plus the
+        cached quantized emission log-probability matrix directly.
+        """
+        return QuantizedHiddenMarkovModelEnumerator(self)
+
+
+class _QuantizedHmmPrefix(object):
+    """Concrete observation prefix used by QuantizedHiddenMarkovModelEnumerator."""
+
+    __slots__ = ('t', 'values', 'proj')
+
+    def __init__(self, t: int, values: Tuple[Any, ...], proj: np.ndarray) -> None:
+        self.t = t
+        self.values = values
+        self.proj = proj
+
+
+class QuantizedHiddenMarkovModelEnumerator(DistributionEnumerator):
+    """Exact best-first enumerator specialized for QuantizedHiddenMarkovModelDistribution."""
+
+    def __init__(self, dist: QuantizedHiddenMarkovModelDistribution) -> None:
+        """QuantizedHiddenMarkovModelEnumerator object.
+
+        Args:
+            dist (QuantizedHiddenMarkovModelDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        if dist.has_topics:
+            raise EnumerationError(dist, reason='taus/topics parameterization is not supported')
+        if dist.terminal_values is not None:
+            raise EnumerationError(dist, reason='terminal_values semantics are not supported')
+        if isinstance(dist.len_dist, NullDistribution):
+            raise EnumerationError(dist, reason='no length distribution is modeled (len_dist is Null)')
+
+        self._levels = list(dist.levels)
+        self._n_states = dist.n_states
+        self._log_w = np.asarray(dist.log_w, dtype=np.float64)
+        self._log_a = np.asarray(dist.log_transitions, dtype=np.float64)
+        self._emit_lp = _exponent_log_probs(dist.emission_exponents, dist.log_theta)
+        self._head_max = np.max(self._emit_lp, axis=1)
+
+        pool = []
+        for rank, value in enumerate(self._levels):
+            emis = self._emit_lp[:, rank]
+            pool_lp = float(np.max(emis))
+            if pool_lp > -np.inf:
+                pool.append((value, pool_lp, emis))
+        pool.sort(key=lambda u: -u[1])
+        self._pool = pool
+
+        # UB[r][s] bounds r further (transition + emission) steps out of state s.
+        self._ub: List[np.ndarray] = [np.zeros(self._n_states, dtype=np.float64)]
+
+        len_stream = BufferedStream(child_enumerator(
+            dist.len_dist, 'QuantizedHiddenMarkovModelDistribution.len_dist'))
+        self._merge = LengthFrontierMerge(len_stream, self._kbest_sequences)
+
+    def _emissions(self, rank: int) -> Optional[np.ndarray]:
+        if rank >= len(self._pool):
+            return None
+        return self._pool[rank][2]
+
+    def _ub_for(self, r: int) -> np.ndarray:
+        while len(self._ub) <= r:
+            prev = self._ub[-1]
+            step = self._log_a + (self._head_max + prev)[None, :]
+            self._ub.append(logsumexp(step, axis=1))
+        return self._ub[r]
+
+    def _kbest_sequences(self, n: int, lp_len: float) -> Iterator[Tuple[List[Any], float]]:
+        if n == 0:
+            yield ([], lp_len)
+            return
+        if len(self._pool) == 0:
+            return
+
+        counter = itertools.count()
+        heap = []  # entries: (-score, counter, kind, payload)
+
+        def push_candidate(parent: '_QuantizedHmmPrefix', rank: int) -> None:
+            if rank >= len(self._pool):
+                return
+            pool_lp = self._pool[rank][1]
+            remaining = n - parent.t - 1
+            bound = logsumexp(parent.proj + self._ub_for(remaining)) + pool_lp + lp_len
+            if bound > -np.inf:
+                heapq.heappush(heap, (-bound, next(counter), 'cand', (parent, rank)))
+
+        root = _QuantizedHmmPrefix(0, (), self._log_w)
+        push_candidate(root, 0)
+
+        while heap:
+            _, _, kind, payload = heapq.heappop(heap)
+            if kind == 'done':
+                yield payload
+                continue
+
+            parent, rank = payload
+            push_candidate(parent, rank + 1)
+            x = self._pool[rank][0]
+            alpha = parent.proj + self._pool[rank][2]
+            t = parent.t + 1
+            if np.max(alpha) == -np.inf:
+                continue
+            if t == n:
+                exact = float(logsumexp(alpha) + lp_len)
+                if exact > -np.inf:
+                    heapq.heappush(heap, (-exact, next(counter), 'done',
+                                          (list(parent.values) + [x], exact)))
+            else:
+                proj = logsumexp(alpha[:, None] + self._log_a, axis=0)
+                child = _QuantizedHmmPrefix(t, parent.values + (x,), proj)
+                push_candidate(child, 0)
+
+    def __next__(self) -> Tuple[List[Any], float]:
+        return next(self._merge)
 
 
 class QuantizedHiddenMarkovEstimator(ParameterEstimator):

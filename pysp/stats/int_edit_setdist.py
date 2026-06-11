@@ -22,16 +22,20 @@ defining probabilities for an integer 0<=k<N being in a set (Generally a Bernoul
 
 """
 
+import heapq
+import itertools
 import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
+    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
+    DistributionEnumerator, EnumerationError, child_enumerator
 from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
     NullAccumulatorFactory
-from typing import Sequence, Optional, Union, Any, Tuple, List, TypeVar, Dict
+from pysp.utils.enumeration import BufferedStream, ProductEnumerator
+from typing import Sequence, Optional, Union, Any, Tuple, List, TypeVar, Dict, Iterator, Set
 
 
 T = Tuple[Union[Sequence[int], np.ndarray], Union[Sequence[int], np.ndarray]]
@@ -189,6 +193,117 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
     def dist_to_encoder(self) -> 'IntegerBernoulliEditDataEncoder':
         """Returns an IntegerBernoulliEditDataEncoder object for encoding sequences of data."""
         return IntegerBernoulliEditDataEncoder(init_encoder=self.init_dist.dist_to_encoder())
+
+    def enumerator(self) -> 'IntegerBernoulliEditEnumerator':
+        """Returns IntegerBernoulliEditEnumerator iterating set-pairs in descending probability order."""
+        return IntegerBernoulliEditEnumerator(self)
+
+
+class IntegerBernoulliEditEnumerator(DistributionEnumerator):
+    """Enumerates finite previous/next integer-set pairs in descending probability order."""
+
+    def __init__(self, dist: IntegerBernoulliEditDistribution) -> None:
+        """IntegerBernoulliEditEnumerator object.
+
+        Previous sets are pulled from init_dist when it is enumerable; with a Null init_dist,
+        all subsets of ``{0, ..., num_vals - 1}`` are considered with log-density 0. For each
+        previous set, the conditional next-set support is an independent two-choice product.
+
+        Args:
+            dist (IntegerBernoulliEditDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        self._prev_stream = BufferedStream(self._prev_iterator())
+        self._next_rank = 0
+        self._heap: List[Tuple[float, int, int]] = []
+        self._heads: Dict[int, Tuple[Any, float]] = {}
+        self._streams: Dict[int, Iterator[Tuple[Any, float]]] = {}
+        self._counter = itertools.count()
+
+    def _prev_iterator(self) -> Iterator[Tuple[List[int], float]]:
+        if isinstance(self.dist.init_dist, NullDistribution):
+            choices = [(False, 0.0), (True, 0.0)]
+            streams = [BufferedStream(iter(choices)) for _ in range(self.dist.num_vals)]
+
+            def combine(flags: Tuple[bool, ...]) -> List[int]:
+                return [k for k, flag in enumerate(flags) if flag]
+
+            return iter(ProductEnumerator(streams, combine=combine))
+        return iter(child_enumerator(self.dist.init_dist, 'IntegerBernoulliEditDistribution.init_dist'))
+
+    def _valid_prev(self, value: Any) -> Optional[List[int]]:
+        if not isinstance(value, (list, tuple, np.ndarray, set, frozenset)):
+            return None
+        try:
+            vals = sorted(set(int(v) for v in value))
+        except (TypeError, ValueError):
+            return None
+        if any(v < 0 or v >= self.dist.num_vals for v in vals):
+            return None
+        return vals
+
+    def _next_stream(self, prev: List[int], lp_prev: float) -> Iterator[Tuple[Any, float]]:
+        prev_set: Set[int] = set(prev)
+        streams = []
+        for k in range(self.dist.num_vals):
+            if k in prev_set:
+                choices = [(False, float(self.dist.log_edit_pmat[k, 1])),
+                           (True, float(self.dist.log_edit_pmat[k, 3]))]
+            else:
+                choices = [(False, float(self.dist.log_edit_pmat[k, 0])),
+                           (True, float(self.dist.log_edit_pmat[k, 2]))]
+            choices = [(flag, lp) for flag, lp in choices if lp > -np.inf]
+            choices.sort(key=lambda u: -u[1])
+            streams.append(BufferedStream(iter(choices)))
+
+        def combine(flags: Tuple[bool, ...]) -> Tuple[List[int], List[int]]:
+            return (list(prev), [k for k, flag in enumerate(flags) if flag])
+
+        return iter(ProductEnumerator(streams, combine=combine, offset=lp_prev))
+
+    def _pop(self) -> Tuple[Any, float]:
+        _, _, sid = heapq.heappop(self._heap)
+        value, lp = self._heads.pop(sid)
+        try:
+            nxt = next(self._streams[sid])
+            self._heads[sid] = nxt
+            heapq.heappush(self._heap, (-nxt[1], next(self._counter), sid))
+        except StopIteration:
+            del self._streams[sid]
+        return (value, lp)
+
+    def __next__(self) -> Tuple[Any, float]:
+        while True:
+            frontier = None
+            while frontier is None:
+                item = self._prev_stream.get(self._next_rank)
+                if item is None:
+                    break
+                self._next_rank += 1
+                prev = self._valid_prev(item[0])
+                if prev is not None:
+                    frontier = (prev, float(item[1]))
+
+            if frontier is None:
+                if self._heap:
+                    return self._pop()
+                raise StopIteration
+
+            if self._heap and -self._heap[0][0] >= frontier[1]:
+                self._next_rank -= 1
+                return self._pop()
+
+            prev, lp_prev = frontier
+            sid = self._next_rank - 1
+            stream = self._next_stream(prev, lp_prev)
+            try:
+                head = next(stream)
+            except StopIteration:
+                continue
+            self._streams[sid] = stream
+            self._heads[sid] = head
+            heapq.heappush(self._heap, (-head[1], next(self._counter), sid))
 
 
 class IntegerBernoulliEditSampler(DistributionSampler):
@@ -702,4 +817,3 @@ class IntegerBernoulliEditDataEncoder(DataSequenceEncoder):
         init_enc = self.init_encoder.seq_encode(pre)
 
         return len(x), idx, xs, ys, ym, init_enc
-

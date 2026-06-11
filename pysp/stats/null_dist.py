@@ -19,6 +19,7 @@ from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator
+from pysp.utils.enumeration import QuantizedEnumerationIndex
 
 
 class NullDistribution(SequenceEncodableProbabilityDistribution):
@@ -111,6 +112,12 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
     def enumerator(self) -> 'NullEnumerator':
         """Returns a NullEnumerator object enumerating the support of the NullDistribution."""
         return NullEnumerator(self)
+
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
+        """Build the single-item bounded bit-quantized index for NullDistribution."""
+        return QuantizedEnumerationIndex.from_items(
+            [(None, 0.0)], max_bits=max_bits, bin_width_bits=bin_width_bits,
+            sorted_items=True, truncated=False)
 
 
 class NullEnumerator(DistributionEnumerator):
