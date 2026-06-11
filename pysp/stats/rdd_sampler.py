@@ -1,4 +1,7 @@
-from pyspark import SparkContext, SparkConf
+try:
+    from pyspark import SparkContext, SparkConf
+except ImportError:
+    SparkContext = SparkConf = None  # pip install pysparkplug[spark]
 from numpy.random import RandomState
 from pysp.arithmetic import *
 import numpy as np

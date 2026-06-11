@@ -34,7 +34,7 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceE
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
 from pysp.stats.markovchain import MarkovChainDistribution
 from pysp.stats.mixture import MixtureDistribution
-import numba
+from pysp.utils.optional_deps import numba
 import numpy as np
 import math
 from pysp.arithmetic import maxrandint
