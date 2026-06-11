@@ -13,7 +13,7 @@ where the 'd' is some author (doc_id) in the corpus and each tuple (v_i, c_i) co
 for some value 'v_i' in dictionary of words used in the corpus. Let w denote the distinct words {v_i} in the document
 represented by x. The density for the PLSI model is given by
 
-    p_mat(w, d) = P_len(nn)*p_mat(d) sum_{j=0}^{k-1} sum_{s=0}^{S-1} ( p_mat(v_j | s )p_mat(s | d) )^(c_j),
+    p_mat(w, d) = P_len(nn)*p_mat(d) prod_{j=0}^{k-1} ( sum_{s=0}^{S-1} p_mat(v_j | s )p_mat(s | d) )^(c_j),
 
 where P_len(nn) is the density of the length distribution for 'nn' representing the total number of words in
 the document (i.e. nn = sum_i c_i), p_mat(d) is the probability of observing a document from author 'd', p_mat(v_j|s) is the
@@ -757,7 +757,10 @@ class IntegerPLSIEstimator(ParameterEstimator):
             word_prob_mat /= np.sum(word_prob_mat, axis=0, keepdims=True)
 
         else:
-            word_prob_mat = word_count.T / np.sum(word_count, axis=1)
+            word_count_sum = np.sum(word_count, axis=1)
+            zero_states = word_count_sum == 0
+            word_prob_mat = word_count.T / np.where(zero_states, 1.0, word_count_sum)
+            word_prob_mat[:, zero_states] = 1.0 / word_count.shape[1]
 
         if self.pseudo_count[1] is not None and self.suff_stat[1] is not None:
             adj_cnt = self.pseudo_count[1] / comp_count.shape[1]
@@ -770,20 +773,27 @@ class IntegerPLSIEstimator(ParameterEstimator):
             state_prob_mat /= np.sum(state_prob_mat, axis=1, keepdims=True)
 
         else:
-            state_prob_mat = comp_count / np.sum(comp_count, axis=1, keepdims=True)
+            comp_count_sum = np.sum(comp_count, axis=1, keepdims=True)
+            zero_docs = comp_count_sum[:, 0] == 0
+            state_prob_mat = comp_count / np.where(comp_count_sum == 0, 1.0, comp_count_sum)
+            state_prob_mat[zero_docs, :] = 1.0 / comp_count.shape[1]
 
         if self.pseudo_count[2] is not None and self.suff_stat[2] is not None:
-            adj_cnt = self.pseudo_count[1] / len(doc_count)
+            adj_cnt = self.pseudo_count[2] / len(doc_count)
             doc_prob_vec = doc_count + adj_cnt*self.suff_stat[2]
             doc_prob_vec /= np.sum(doc_prob_vec)
 
         elif self.pseudo_count[2] is not None and self.suff_stat[2] is None:
-            adj_cnt = self.pseudo_count[1] / len(doc_count)
+            adj_cnt = self.pseudo_count[2] / len(doc_count)
             doc_prob_vec = doc_count + adj_cnt
             doc_prob_vec /= np.sum(doc_prob_vec)
 
         else:
-            doc_prob_vec = doc_count / np.sum(doc_count)
+            doc_count_sum = np.sum(doc_count)
+            if doc_count_sum > 0:
+                doc_prob_vec = doc_count / doc_count_sum
+            else:
+                doc_prob_vec = np.ones(len(doc_count)) / len(doc_count)
 
         len_dist = self.len_estimator.estimate(None, len_suff_stats)
 

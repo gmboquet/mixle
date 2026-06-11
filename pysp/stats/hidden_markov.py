@@ -1442,7 +1442,7 @@ class HiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
         """
         self.factories = factories
         self.use_numba = use_numba
-        self.keys = keys if keys is None else (None, None, None)
+        self.keys = keys if keys is not None else (None, None, None)
         self.len_factory = len_factory
         self.name = name
 

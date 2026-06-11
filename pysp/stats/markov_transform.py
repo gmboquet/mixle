@@ -372,15 +372,18 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
         cc = cc.flatten()[:,None]
         cs = cc.sum()
 
+        a = estimate.alpha/nw
+        b = 1 - estimate.alpha
+
         temp = estimate.cond_prob_mat[ridx, vz].toarray()
 
         loc_cprob = temp * cc
         w = loc_cprob.sum(axis=0)
-        loc_cprob *= (cz / w) * weight
+        loc_cprob *= (cz * b / (b*w + a*cs)) * weight
 
         self.trans_count[ridx, vz] += loc_cprob
-        self.init_count[vx] += cx
-        self.init_count[vy] += cy
+        self.init_count[vx] += cx * weight
+        self.init_count[vy] += cy * weight
 
         if self.size_accumulator is not None:
             self.size_accumulator.update((cx.sum(), cy.sum(), cz.sum()), weight, estimate.len_dist)
@@ -413,14 +416,14 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
         cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
         cc = cc.flatten()
 
-        loc_cprob = np.outer(cc, weight*cz)
+        loc_cprob = np.outer(cc / cc.sum(), weight*cz)
         #umat = lil_matrix((nw * nw, nw))
         #umat[ridx, vz] = loc_cprob
 
         self.trans_count[ridx, vz] += loc_cprob
         #self.trans_count += umat
-        self.init_count[vx] += cx
-        self.init_count[vy] += cy
+        self.init_count[vx] += cx * weight
+        self.init_count[vy] += cy * weight
 
         if self.size_accumulator is not None:
             self.size_accumulator.initialize((cx.sum(), cy.sum(), cz.sum()), weight, rng)
@@ -451,11 +454,11 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
             cc = np.reshape(cx, (-1,1)) * np.reshape(cy, (1,-1))
             cc = cc.flatten()
 
-            loc_cprob = np.outer(cc, ww*cz)
+            loc_cprob = np.outer(cc / cc.sum(), ww*cz)
 
             self.trans_count[ridx, zz] += loc_cprob
-            self.init_count[xx] += cx
-            self.init_count[yy] += cy
+            self.init_count[xx] += cx * ww
+            self.init_count[yy] += cy * ww
 
         if self.size_accumulator is not None:
             self.size_accumulator.seq_initialize(x[1], weights, rng)
@@ -474,6 +477,8 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
         """
         nw = self.num_vals
         nzv = x[2]
+        a = estimate.alpha/nw
+        b = 1 - estimate.alpha
 
         umat = csc_matrix((np.zeros(nzv.shape[0]), (nzv[:,0]*nw + nzv[:,1], nzv[:,2])), shape=(nw*nw, nw))
 
@@ -492,11 +497,11 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
 
             loc_cprob = temp * cc
             w = loc_cprob.sum(axis=0)
-            loc_cprob *= (cz/w)*ww
+            loc_cprob *= (cz*b/(b*w + a*cs))*ww
 
             umat[ridx,zz] += loc_cprob
-            self.init_count[xx] += cx
-            self.init_count[yy] += cy
+            self.init_count[xx] += cx * ww
+            self.init_count[yy] += cy * ww
 
         if self.size_accumulator is not None:
             self.size_accumulator.seq_update(x[1], weights, estimate.len_dist)

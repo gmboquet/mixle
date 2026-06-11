@@ -139,13 +139,15 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
         """Create an ICLTreeEstimator object.
 
         Args:
-            pseudo_count (Optional[float]): Used to inflate sufficient statistics (currently not passed on).
+            pseudo_count (Optional[float]): Used to inflate sufficient statistics.
 
         Returns:
             ICLTreeEstimator object.
 
         """
-        return ICLTreeEstimator(name=self.name)
+        num_states = len(self.conditional_densities[0])
+        return ICLTreeEstimator(num_features=self.num_features, num_states=num_states,
+                                pseudo_count=pseudo_count, name=self.name)
 
     def dist_to_encoder(self) -> 'ICLTreeDataEncoder':
         """Returns an ICLTreeDataEncoder object for encoding sequences of data."""
@@ -346,8 +348,8 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         elif (self.counts is None) and (counts is not None):
             self.counts = counts
             self.marginal_counts = marginal_counts
-            self.num_states = suff_stat.shape[-1]
-            self.num_features = suff_stat.shape[0]
+            self.num_states = num_states
+            self.num_features = num_features
 
         elif self.counts is not None and counts is None:
             pass
@@ -498,16 +500,23 @@ class ICLTreeEstimator(ParameterEstimator):
 
         for i in range(num_features - 1):
             for j in range(i + 1, num_features):
-                joint_ij = counts[i, j, :, :] + pseudo_count_adj1
-                indep_ij = np.outer(marginal_counts[i, :], marginal_counts[j, :]) + pseudo_count_adj1
+                if pseudo_count > 0:
+                    n_ij = counts[i, j, :, :].sum()
+                    joint_ij = (counts[i, j, :, :] + pseudo_count_adj1) / (n_ij + pseudo_count)
+                    marg_i = (marginal_counts[i, :] + pseudo_count_adj0) / (n_ij + pseudo_count)
+                    marg_j = (marginal_counts[j, :] + pseudo_count_adj0) / (n_ij + pseudo_count)
+                    indep_ij = np.outer(marg_i, marg_j)
+                else:
+                    joint_ij = counts[i, j, :, :].copy()
+                    indep_ij = np.outer(marginal_counts[i, :], marginal_counts[j, :])
 
-                joint_ij_sum = joint_ij.sum()
-                indep_ij_sum = indep_ij.sum()
+                    joint_ij_sum = joint_ij.sum()
+                    indep_ij_sum = indep_ij.sum()
 
-                if joint_ij_sum > 0:
-                    joint_ij /= joint_ij_sum
-                if indep_ij_sum > 0:
-                    indep_ij /= indep_ij_sum
+                    if joint_ij_sum > 0:
+                        joint_ij /= joint_ij_sum
+                    if indep_ij_sum > 0:
+                        indep_ij /= indep_ij_sum
 
                 good = np.bitwise_and(joint_ij > 0, indep_ij > 0)
 

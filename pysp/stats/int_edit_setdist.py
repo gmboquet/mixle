@@ -450,7 +450,7 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
 class IntegerBernoulliEditAccumulatorFactory(StatisticAccumulatorFactory):
     """IntegerBernoulliEditAccumulatorFactory object for creating IntegerBernoulliEditAccumulator objects."""
 
-    def __init__(self, num_vals: int, init_factory: Optional[StatisticAccumulatorFactory] = NullAccumulatorFactory,
+    def __init__(self, num_vals: int, init_factory: Optional[StatisticAccumulatorFactory] = None,
                  keys: Optional[str] = None) -> None:
         """IntegerBernoulliEditAccumulatorFactory for creating IntegerBernoulliEditAccumulator objects.
 
@@ -575,29 +575,56 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
                 s1 = count_mat[:, 0] + count_mat[:, 2]
                 s0 = tot_sum - s1
 
-                log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-                log_pmat.fill(np.log(self.min_prob))
-
                 nz0 = s0 != 0
-                if np.any(nz0):
-                    log_pmat[nz0, 0] = np.log(np.maximum((s0[nz0] - count_mat[nz0, 1]) / s0[nz0], self.min_prob))
-                    log_pmat[nz0, 2] = np.log(np.maximum(count_mat[nz0, 1] / s0[nz0], self.min_prob))
-
                 nz1 = s1 != 0
-                if np.any(nz1):
-                    log_pmat[nz1, 1] = np.log(np.maximum(count_mat[nz1, 0] / s1[nz1], self.min_prob))
-                    log_pmat[nz1, 3] = np.log(np.maximum(count_mat[nz1, 2] / s1[nz1], self.min_prob))
+
+                p0 = np.ones(self.num_vals, dtype=np.float64)
+                p2 = np.zeros(self.num_vals, dtype=np.float64)
+                p0[nz0] = np.maximum((s0[nz0] - count_mat[nz0, 1]) / s0[nz0], self.min_prob)
+                p2[nz0] = np.maximum(count_mat[nz0, 1] / s0[nz0], self.min_prob)
+                z0 = p0[nz0] + p2[nz0]
+                p0[nz0] /= z0
+                p2[nz0] /= z0
+
+                p1 = np.zeros(self.num_vals, dtype=np.float64)
+                p3 = np.ones(self.num_vals, dtype=np.float64)
+                p1[nz1] = np.maximum(count_mat[nz1, 0] / s1[nz1], self.min_prob)
+                p3[nz1] = np.maximum(count_mat[nz1, 2] / s1[nz1], self.min_prob)
+                z1 = p1[nz1] + p3[nz1]
+                p1[nz1] /= z1
+                p3[nz1] /= z1
+
+                log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
+                with np.errstate(divide='ignore'):
+                    log_pmat[:, 0] = np.log(p0)
+                    log_pmat[:, 1] = np.log(p1)
+                    log_pmat[:, 2] = np.log(p2)
+                    log_pmat[:, 3] = np.log(p3)
 
             else:
 
                 s1 = count_mat[:, 0] + count_mat[:, 2]
                 s0 = tot_sum - s1
 
+                nz0 = s0 != 0
+                nz1 = s1 != 0
+
+                p0 = np.ones(self.num_vals, dtype=np.float64)
+                p2 = np.zeros(self.num_vals, dtype=np.float64)
+                p0[nz0] = (s0[nz0] - count_mat[nz0, 1]) / s0[nz0]
+                p2[nz0] = count_mat[nz0, 1] / s0[nz0]
+
+                p1 = np.zeros(self.num_vals, dtype=np.float64)
+                p3 = np.ones(self.num_vals, dtype=np.float64)
+                p1[nz1] = count_mat[nz1, 0] / s1[nz1]
+                p3[nz1] = count_mat[nz1, 2] / s1[nz1]
+
                 log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-                log_pmat[:, 0] = np.log((s0 - count_mat[:, 1]) / s0)
-                log_pmat[:, 1] = np.log(count_mat[:, 0] / s1)
-                log_pmat[:, 2] = np.log(count_mat[:, 1] / s0)
-                log_pmat[:, 3] = np.log(count_mat[:, 2] / s1)
+                with np.errstate(divide='ignore'):
+                    log_pmat[:, 0] = np.log(p0)
+                    log_pmat[:, 1] = np.log(p1)
+                    log_pmat[:, 2] = np.log(p2)
+                    log_pmat[:, 3] = np.log(p3)
 
         return IntegerBernoulliEditDistribution(log_pmat, init_dist=init_dist, name=self.name)
 
