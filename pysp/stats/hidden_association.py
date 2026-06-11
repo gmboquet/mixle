@@ -314,7 +314,7 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         self.cond_accumulator = cond_acc
         self.given_accumulator = given_acc if given_acc is not None else NullAccumulator()
         self.size_accumulator = size_acc if size_acc is not None else NullAccumulator()
-        self.init_key, self.trans_key = keys[0], keys[1] if keys is not None else (None, None)
+        self.init_key, self.trans_key = keys if keys is not None else (None, None)
         self.name = name
 
     def update(self, x: Tuple[List[Tuple[T, float]], List[Tuple[T, float]]], weight: float,
@@ -379,7 +379,7 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         for j, (x1, c1) in enumerate(x[1]):
             nn += c1
             for i, (x0, c0) in enumerate(x[0]):
-                self.cond_accumulator.initialize((x0, x1), w[j, i] * weight, rng)
+                self.cond_accumulator.initialize((x0, x1), w[j, i] * c1 * weight, rng)
 
         if self.given_accumulator is not None:
             self.given_accumulator.initialize(x[0], weight, rng)
@@ -454,21 +454,25 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
-        """Merge keyed statistics of the size accumulator into stats_dict.
+        """Merge keyed statistics of the conditional, given, and size accumulators into stats_dict.
 
         Args:
             stats_dict (Dict[str, Any]): Maps keys to merged sufficient statistics.
 
         """
+        self.cond_accumulator.key_merge(stats_dict)
+        self.given_accumulator.key_merge(stats_dict)
         self.size_accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: Dict[str, Any]) -> None:
-        """Replace keyed statistics of the size accumulator with those in stats_dict.
+        """Replace keyed statistics of the conditional, given, and size accumulators with those in stats_dict.
 
         Args:
             stats_dict (Dict[str, Any]): Maps keys to merged sufficient statistics.
 
         """
+        self.cond_accumulator.key_replace(stats_dict)
+        self.given_accumulator.key_replace(stats_dict)
         self.size_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> 'HiddenAssociationDataEncoder':

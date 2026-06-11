@@ -8,12 +8,14 @@ independent observations of 'n'-tupled data. Each component 'k' of the Composite
 must be compatible with data type T_k.
 
 """
+import math
+from collections import defaultdict
 import numpy as np
 from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
-    DistributionEnumerator, child_enumerator
-from pysp.utils.enumeration import BufferedStream, ProductEnumerator
+    DistributionEnumerator, child_enumerator, EnumerationError
+from pysp.utils.enumeration import BufferedStream, LazyQuantizedEnumerationIndex, ProductEnumerator
 from typing import Optional, List, Union, Any, Tuple, Sequence, TypeVar, Dict
 from pysp.arithmetic import maxrandint
 
@@ -151,6 +153,106 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
     def enumerator(self) -> 'CompositeEnumerator':
         """Creates CompositeEnumerator iterating tuples in descending joint probability order."""
         return CompositeEnumerator(self)
+
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> LazyQuantizedEnumerationIndex:
+        """Build a bounded index with a DP over additive quantized child costs.
+
+        Each child item is assigned an integer cost ceil(bits/bin_width_bits). The
+        composite cost is the sum of those integer costs, so the bin counts are a
+        convolution of child cost-bin counts. Items are unranked lazily from the child
+        bin offsets when requested; the returned log probability is still the exact
+        joint log-density.
+        """
+        if max_bits < 0:
+            raise ValueError('max_bits must be non-negative.')
+        if bin_width_bits <= 0:
+            raise ValueError('bin_width_bits must be positive.')
+
+        max_bin = int(math.floor(float(max_bits) / float(bin_width_bits) + 1.0e-12))
+        if self.count == 0:
+            counts = {0: 1} if max_bin >= 0 else {}
+
+            def empty_getter(bin_id: int, offset: int) -> Tuple[Tuple[Any, ...], float]:
+                if bin_id != 0 or offset != 0:
+                    raise IndexError('offset outside indexed bin.')
+                return (), 0.0
+
+            return LazyQuantizedEnumerationIndex(
+                counts, bin_width_bits=bin_width_bits, max_bits=max_bits,
+                truncated=False, getter=empty_getter)
+
+        child_bins: List[Dict[int, List[Tuple[Any, float]]]] = []
+        truncated = False
+        for i, dist in enumerate(self.dists):
+            try:
+                child_index = dist.quantized_index(max_bits=max_bits, bin_width_bits=bin_width_bits)
+            except EnumerationError as e:
+                path = 'CompositeDistribution.dists[%d]' % i
+                new_path = path if not e.path else '%s -> %s' % (path, e.path)
+                raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
+
+            truncated = truncated or child_index.truncated
+            bins_i: Dict[int, List[Tuple[Any, float]]] = defaultdict(list)
+            for value, log_prob in child_index.iter_from():
+                bits = max(0.0, -float(log_prob) / math.log(2.0))
+                qbin = int(math.ceil(bits / float(bin_width_bits) - 1.0e-12))
+                if qbin <= max_bin:
+                    bins_i[qbin].append((value, float(log_prob)))
+                else:
+                    truncated = True
+            child_bins.append(dict(bins_i))
+
+        if any(len(bins_i) == 0 for bins_i in child_bins):
+            def empty_getter(bin_id: int, offset: int) -> Tuple[Tuple[Any, ...], float]:
+                raise IndexError('offset outside indexed bin.')
+
+            return LazyQuantizedEnumerationIndex(
+                {}, bin_width_bits=bin_width_bits, max_bits=max_bits,
+                truncated=True, getter=empty_getter)
+
+        plans: Dict[int, List[Tuple[Tuple[int, ...], int]]] = {0: [((), 1)]}
+        for bins_i in child_bins:
+            next_plans: Dict[int, List[Tuple[Tuple[int, ...], int]]] = defaultdict(list)
+            for partial_bin, partial_plans in plans.items():
+                for child_bin in sorted(bins_i):
+                    new_bin = partial_bin + child_bin
+                    if new_bin > max_bin:
+                        truncated = True
+                        continue
+                    child_count = len(bins_i[child_bin])
+                    for prefix, count in partial_plans:
+                        next_plans[new_bin].append((prefix + (child_bin,), count * child_count))
+            plans = dict(next_plans)
+
+        counts = {b: sum(count for _, count in plan_list)
+                  for b, plan_list in plans.items() if plan_list}
+        plans_by_bin = {b: plan_list for b, plan_list in plans.items() if plan_list}
+
+        def getter(bin_id: int, offset: int) -> Tuple[Tuple[Any, ...], float]:
+            if offset < 0:
+                raise IndexError('offset must be non-negative.')
+            for plan, plan_count in plans_by_bin.get(bin_id, []):
+                if offset >= plan_count:
+                    offset -= plan_count
+                    continue
+                values = []
+                log_prob = 0.0
+                local = offset
+                item_offsets = [0] * len(plan)
+                for j in range(len(plan) - 1, -1, -1):
+                    n = len(child_bins[j][plan[j]])
+                    item_offsets[j] = local % n
+                    local //= n
+                for j, item_offset in enumerate(item_offsets):
+                    value, lp = child_bins[j][plan[j]][item_offset]
+                    values.append(value)
+                    log_prob += lp
+                return tuple(values), float(log_prob)
+            raise IndexError('offset outside indexed bin.')
+
+        return LazyQuantizedEnumerationIndex(
+            counts, bin_width_bits=bin_width_bits, max_bits=max_bits,
+            truncated=truncated, getter=getter)
 
 
 class CompositeEnumerator(DistributionEnumerator):
@@ -579,4 +681,3 @@ class CompositeDataEncoder(DataSequenceEncoder):
             enc_data.append(encoder.seq_encode([u[i] for u in x]))
 
         return tuple(enc_data)
-

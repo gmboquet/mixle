@@ -30,6 +30,7 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceE
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
 from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
     NullAccumulatorFactory
+from pysp.stats.int_edit_setdist import IntegerBernoulliEditEnumerator
 from typing import Sequence, Optional, Union, Any, Tuple, List, TypeVar, Dict
 
 T = Tuple[Union[Sequence[int], np.ndarray], Union[Sequence[int], np.ndarray]]
@@ -42,7 +43,7 @@ class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribut
     """Step Bernoulli edit set distribution: each integer independently transitions in/out between two sets."""
 
     def __init__(self, log_edit_pmat: Union[Sequence[Tuple[float, float]], np.ndarray],
-                 init_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution,
+                 init_dist: Optional[SequenceEncodableProbabilityDistribution] = None,
                  name: Optional[str] = None) -> None:
         """IntegerStepBernoulliEditDistribution object defining edit probabilities between integer sets.
 
@@ -189,6 +190,16 @@ class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribut
     def dist_to_encoder(self) -> 'IntegerStepBernoulliEditDataEncoder':
         """Returns an IntegerStepBernoulliEditDataEncoder object for encoding sequences of data."""
         return IntegerStepBernoulliEditDataEncoder(init_encoder=self.init_dist.dist_to_encoder())
+
+
+    def enumerator(self) -> 'IntegerStepBernoulliEditEnumerator':
+        """Returns IntegerStepBernoulliEditEnumerator iterating set-pairs in descending probability order."""
+        return IntegerStepBernoulliEditEnumerator(self)
+
+
+class IntegerStepBernoulliEditEnumerator(IntegerBernoulliEditEnumerator):
+    """Enumerates finite previous/next integer-set pairs for the step edit-set distribution."""
+
 
 class IntegerStepBernoulliEditSampler(DistributionSampler):
     """IntegerStepBernoulliEditSampler object for drawing (prev set, next set) pairs from an
@@ -470,7 +481,7 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
 class IntegerStepBernoulliEditAccumulatorFactory(StatisticAccumulatorFactory):
     """IntegerStepBernoulliEditAccumulatorFactory object for creating IntegerStepBernoulliEditAccumulator objects."""
 
-    def __init__(self, num_vals: int, init_factory: Optional[StatisticAccumulatorFactory] = NullAccumulatorFactory,
+    def __init__(self, num_vals: int, init_factory: Optional[StatisticAccumulatorFactory] = None,
                  keys: Optional[str] = None) -> None:
         """IntegerStepBernoulliEditAccumulatorFactory for creating IntegerStepBernoulliEditAccumulator objects.
 
@@ -536,52 +547,57 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
         init_factory = self.init_est.accumulator_factory()
         return IntegerStepBernoulliEditAccumulatorFactory(self.num_vals, init_factory, self.keys)
 
-    def __get_pqk(self, obs_counts: np.ndarray, n: int) -> np.ndarray:
-        """Fit a two-level (p, q) step function to per-element Bernoulli counts.
+    def __get_pqk(self, successes: np.ndarray, trials: np.ndarray) -> np.ndarray:
+        """Fit a two-level (p, q) step function to per-element binomial counts.
 
-        Sorts the elements by count, then for each split rank k assigns probability p to the
-        top-k elements and q to the rest (estimated by pooled frequency on each side), and keeps
-        the split maximizing the Bernoulli log-likelihood.
+        Sorts the elements by empirical rate, then for each split rank k assigns probability p to
+        the top-k elements and q to the rest (estimated by pooled successes over pooled trials on
+        each side), and keeps the split maximizing the binomial log-likelihood. Elements with no
+        trials are excluded from the split search and assigned the overall pooled rate (0.5 when
+        no element has trials).
 
         Args:
-            obs_counts (np.ndarray): Per-element success counts (or probabilities when n=1).
-            n (int): Number of trials per element.
+            successes (np.ndarray): Per-element success counts.
+            trials (np.ndarray): Per-element trial counts.
 
         Returns:
             Numpy array of per-element probabilities taking at most two distinct values.
 
         """
-        sidx = np.argsort(-obs_counts)
-        obs_counts = obs_counts[sidx]
-        N = len(obs_counts)
+        N = len(successes)
+        obs = np.flatnonzero(trials > 0)
+        M = len(obs)
+
+        if M == 0:
+            return np.full(N, 0.5)
+
+        sidx = obs[np.argsort(-(successes[obs] / trials[obs]))]
+        cs = np.cumsum(successes[sidx])
+        ct = np.cumsum(trials[sidx])
+        tot_s = cs[-1]
+        tot_t = ct[-1]
 
         max_ll = -np.inf
         max_params = None
-        for i in range(N):
-            k = i + 1
-            p = obs_counts[:k].sum() / (n * k)
-            if p == 1:
-                v1 = (obs_counts[:k]).sum() * np.log(p)
-            else:
-                v1 = (n - obs_counts[:k]).sum() * np.log1p(-p) + (obs_counts[:k]).sum() * np.log(p)
-            if k < N:
-                q = obs_counts[k:].sum() / (n * (N - k))
-                if q == 1:
-                    v2 = (obs_counts[k:]).sum() * np.log(q)
-                else:
-                    v2 = (n - obs_counts[k:]).sum() * np.log1p(-q) + (obs_counts[k:]).sum() * np.log(q)
+        for i in range(M):
+            sh, th = cs[i], ct[i]
+            p = sh / th
+            v1 = (sh * np.log(p) if sh > 0 else 0.0) + ((th - sh) * np.log1p(-p) if th > sh else 0.0)
+            if i + 1 < M:
+                sl, tl = tot_s - sh, tot_t - th
+                q = sl / tl
+                v2 = (sl * np.log(q) if sl > 0 else 0.0) + ((tl - sl) * np.log1p(-q) if tl > sl else 0.0)
             else:
                 q = 0.0
                 v2 = 0.0
             ll = v1 + v2
-            # print((i, ll, p, q))
             if ll > max_ll:
-                max_params = (p, q, k - 1)
+                max_params = (p, q, i)
                 max_ll = ll
 
         p, q, k = max_params
 
-        arr = np.zeros(len(sidx))
+        arr = np.full(N, tot_s / tot_t)
         arr[sidx[:k + 1]] = p
         arr[sidx[k + 1:]] = q
         return arr
@@ -648,40 +664,68 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
                 s1 = count_mat[:, 0] + count_mat[:, 2]
                 s0 = tot_sum - s1
 
+                nz0 = s0 != 0
+                nz1 = s1 != 0
+
+                p0 = np.ones(self.num_vals, dtype=np.float64)
+                p2 = np.zeros(self.num_vals, dtype=np.float64)
+                p0[nz0] = np.maximum((s0[nz0] - count_mat[nz0, 1]) / s0[nz0], self.min_prob)
+                p2[nz0] = np.maximum(count_mat[nz0, 1] / s0[nz0], self.min_prob)
+                z0 = p0[nz0] + p2[nz0]
+                p0[nz0] /= z0
+                p2[nz0] /= z0
+
+                p1 = np.zeros(self.num_vals, dtype=np.float64)
+                p3 = np.ones(self.num_vals, dtype=np.float64)
+                p1[nz1] = np.maximum(count_mat[nz1, 0] / s1[nz1], self.min_prob)
+                p3[nz1] = np.maximum(count_mat[nz1, 2] / s1[nz1], self.min_prob)
+                z1 = p1[nz1] + p3[nz1]
+                p1[nz1] /= z1
+                p3[nz1] /= z1
+
                 log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-                log_pmat.fill(np.log(self.min_prob))
-
-                if s0 != 0:
-                    log_pmat[:, 0] = np.log(np.maximum((s0 - count_mat[:, 1]) / s0, self.min_prob))
-                    log_pmat[:, 2] = np.log(np.maximum(count_mat[:, 1] / s0, self.min_prob))
-
-                if s1 != 0:
-                    log_pmat[:, 1] = np.log(np.maximum(count_mat[:, 0] / s1, self.min_prob))
-                    log_pmat[:, 3] = np.log(np.maximum(count_mat[:, 2] / s1, self.min_prob))
+                with np.errstate(divide='ignore'):
+                    log_pmat[:, 0] = np.log(p0)
+                    log_pmat[:, 1] = np.log(p1)
+                    log_pmat[:, 2] = np.log(p2)
+                    log_pmat[:, 3] = np.log(p3)
 
             else:
 
                 s1 = count_mat[:, 0] + count_mat[:, 2]
                 s0 = tot_sum - s1
 
+                nz0 = s0 != 0
+                nz1 = s1 != 0
+
+                p0 = np.ones(self.num_vals, dtype=np.float64)
+                p2 = np.zeros(self.num_vals, dtype=np.float64)
+                p0[nz0] = (s0[nz0] - count_mat[nz0, 1]) / s0[nz0]
+                p2[nz0] = count_mat[nz0, 1] / s0[nz0]
+
+                p1 = np.zeros(self.num_vals, dtype=np.float64)
+                p3 = np.ones(self.num_vals, dtype=np.float64)
+                p1[nz1] = count_mat[nz1, 0] / s1[nz1]
+                p3[nz1] = count_mat[nz1, 2] / s1[nz1]
+
                 log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-                log_pmat[:, 0] = np.log((s0 - count_mat[:, 1]) / s0)
-                log_pmat[:, 1] = np.log(count_mat[:, 0] / s1)
-                log_pmat[:, 2] = np.log(count_mat[:, 1] / s0)
-                log_pmat[:, 3] = np.log(count_mat[:, 2] / s1)
+                with np.errstate(divide='ignore'):
+                    log_pmat[:, 0] = np.log(p0)
+                    log_pmat[:, 1] = np.log(p1)
+                    log_pmat[:, 2] = np.log(p2)
+                    log_pmat[:, 3] = np.log(p3)
 
-        obs_counts = np.exp(log_pmat[:, 1])
-        n = 1
-        arr1 = self.__get_pqk(obs_counts, n)
+        s1 = count_mat[:, 0] + count_mat[:, 2]
+        s0 = tot_sum - s1
 
-        obs_counts = np.exp(log_pmat[:, 2])
-        n = 1
-        arr2 = self.__get_pqk(obs_counts, n)
+        arr1 = self.__get_pqk(count_mat[:, 0], s1)
+        arr2 = self.__get_pqk(count_mat[:, 1], s0)
 
-        log_pmat[:, 2] = np.log(arr2)
-        log_pmat[:, 0] = np.log(1 - arr2)
-        log_pmat[:, 1] = np.log(arr1)
-        log_pmat[:, 3] = np.log(1 - arr1)
+        with np.errstate(divide='ignore'):
+            log_pmat[:, 2] = np.log(arr2)
+            log_pmat[:, 0] = np.log(1 - arr2)
+            log_pmat[:, 1] = np.log(arr1)
+            log_pmat[:, 3] = np.log(1 - arr1)
 
         return IntegerStepBernoulliEditDistribution(log_pmat, init_dist=init_dist, name=self.name)
 

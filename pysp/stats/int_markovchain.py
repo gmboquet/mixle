@@ -20,14 +20,19 @@ for the initial distribution. If the sequence length is less than the lag, i.e. 
 Note: P_len() should be compatible with non-negative integers. P_init() must be compatible with sequences of ints.
 
 """
+import heapq
+import itertools
+
 import numpy as np
 from numpy.random import RandomState
 from pysp.arithmetic import maxrandint
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DataSequenceEncoder, DistributionSampler, StatisticAccumulatorFactory
+    ParameterEstimator, DataSequenceEncoder, DistributionSampler, StatisticAccumulatorFactory, \
+    DistributionEnumerator, EnumerationError, child_enumerator
 from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
     NullAccumulatorFactory
-from typing import Union, List, Sequence, Any, Optional, TypeVar, Tuple, Dict
+from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, ProductEnumerator
+from typing import Union, List, Sequence, Any, Optional, TypeVar, Tuple, Dict, Iterator
 
 
 E1 = TypeVar('E1') ## init encoding
@@ -203,6 +208,146 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         len_encoder = self.len_dist.dist_to_encoder()
         init_encoder = self.init_dist.dist_to_encoder()
         return IntegerMarkovChainDataEncoder(lag=self.lag, len_encoder=len_encoder, init_encoder=init_encoder)
+
+    def enumerator(self) -> 'IntegerMarkovChainEnumerator':
+        """Returns IntegerMarkovChainEnumerator iterating integer sequences in descending probability order."""
+        return IntegerMarkovChainEnumerator(self)
+
+
+class IntegerMarkovChainEnumerator(DistributionEnumerator):
+    """Enumerates integer Markov-chain sequences in descending probability order."""
+
+    def __init__(self, dist: IntegerMarkovChainDistribution) -> None:
+        """IntegerMarkovChainEnumerator object.
+
+        Lengths are pulled from len_dist. For each length, a best-first search expands
+        prefixes using an admissible upper bound based on the largest transition probability.
+
+        Args:
+            dist (IntegerMarkovChainDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        if dist.lag <= 0:
+            raise EnumerationError(dist, reason='lag must be positive for enumeration')
+        if isinstance(dist.len_dist, NullDistribution):
+            raise EnumerationError(dist, reason='no length distribution is modeled (len_dist is Null)')
+
+        with np.errstate(divide='ignore'):
+            self._log_cond = np.log(np.asarray(dist.cond_dist, dtype=np.float64))
+
+        expected_shape = (dist.num_values ** dist.lag, dist.num_values)
+        if self._log_cond.shape != expected_shape:
+            raise EnumerationError(dist, reason='cond_dist shape must be %s for num_values=%d and lag=%d' %
+                                                (expected_shape, dist.num_values, dist.lag))
+
+        self._choices = [(i, 0.0) for i in range(dist.num_values)]
+        self._transitions: List[List[Tuple[int, float]]] = []
+        steps = []
+        for row in self._log_cond:
+            entries = [(int(i), float(lp)) for i, lp in enumerate(row) if lp > -np.inf]
+            entries.sort(key=lambda u: -u[1])
+            self._transitions.append(entries)
+            steps.extend(lp for _, lp in entries)
+        self._max_step = min(max(steps), 0.0) if steps else -np.inf
+        self._shape = [dist.num_values] * dist.lag
+
+        len_stream = BufferedStream(child_enumerator(dist.len_dist, 'IntegerMarkovChainDistribution.len_dist'))
+        self._merge = LengthFrontierMerge(len_stream, self._kbest_paths)
+
+    def _init_iterator(self) -> Iterator[Tuple[Any, float]]:
+        if isinstance(self.dist.init_dist, NullDistribution):
+            streams = [BufferedStream(iter(self._choices)) for _ in range(self.dist.lag)]
+            return iter(ProductEnumerator(streams, combine=list))
+        return iter(child_enumerator(self.dist.init_dist, 'IntegerMarkovChainDistribution.init_dist'))
+
+    def _valid_prefix(self, value: Any) -> Optional[Tuple[int, ...]]:
+        if not isinstance(value, (list, tuple, np.ndarray)):
+            return None
+        if len(value) != self.dist.lag:
+            return None
+        try:
+            prefix = tuple(int(v) for v in value)
+        except (TypeError, ValueError):
+            return None
+        if any(v < 0 or v >= self.dist.num_values for v in prefix):
+            return None
+        return prefix
+
+    def _bound(self, exact: float, remaining: int, lp_len: float) -> float:
+        if exact == -np.inf:
+            return -np.inf
+        if remaining == 0:
+            return exact + lp_len
+        if self._max_step == -np.inf:
+            return -np.inf
+        return exact + remaining * self._max_step + lp_len
+
+    def _row_index(self, prefix: Tuple[int, ...]) -> int:
+        return int(np.ravel_multi_index(prefix[-self.dist.lag:], self._shape))
+
+    def _short_paths(self, n: int, lp_len: float) -> Iterator[Tuple[List[int], float]]:
+        streams = [BufferedStream(iter(self._choices)) for _ in range(n)]
+        return iter(ProductEnumerator(streams, combine=list, offset=lp_len))
+
+    def _kbest_paths(self, n: int, lp_len: float) -> Iterator[Tuple[List[int], float]]:
+        if n == 0:
+            yield ([], lp_len)
+            return
+        if n < self.dist.lag:
+            yield from self._short_paths(n, lp_len)
+            return
+
+        counter = itertools.count()
+        heap: List[Tuple[float, int, Tuple[int, ...], float]] = []
+        init_stream = BufferedStream(self._init_iterator())
+        init_rank = 0
+        pending_init: Optional[Tuple[Tuple[int, ...], float, float]] = None
+        init_remaining = n - self.dist.lag
+
+        def next_pending_init() -> Optional[Tuple[Tuple[int, ...], float, float]]:
+            nonlocal init_rank, pending_init
+            while pending_init is None:
+                item = init_stream.get(init_rank)
+                if item is None:
+                    return None
+                init_rank += 1
+                prefix = self._valid_prefix(item[0])
+                if prefix is None:
+                    continue
+                exact = float(item[1])
+                bound = self._bound(exact, init_remaining, lp_len)
+                if bound == -np.inf:
+                    continue
+                pending_init = (prefix, exact, bound)
+            return pending_init
+
+        while True:
+            frontier = next_pending_init()
+            frontier_bound = -np.inf if frontier is None else frontier[2]
+            if heap and -heap[0][0] >= frontier_bound:
+                _, _, prefix, exact = heapq.heappop(heap)
+                if len(prefix) == n:
+                    yield (list(prefix), exact + lp_len)
+                    continue
+
+                row_idx = self._row_index(prefix)
+                remaining = n - len(prefix) - 1
+                for value, lp_step in self._transitions[row_idx]:
+                    exact2 = exact + lp_step
+                    bound2 = self._bound(exact2, remaining, lp_len)
+                    if bound2 > -np.inf:
+                        heapq.heappush(heap, (-bound2, next(counter), prefix + (value,), exact2))
+            elif frontier is not None:
+                prefix, exact, bound = frontier
+                pending_init = None
+                heapq.heappush(heap, (-bound, next(counter), prefix, exact))
+            else:
+                if not heap:
+                    return
+
+    def __next__(self) -> Tuple[List[int], float]:
+        return next(self._merge)
 
 
 class IntegerMarkovChainSampler(DistributionSampler):
@@ -841,4 +986,3 @@ class IntegerMarkovChainDataEncoder(DataSequenceEncoder):
         init_enc = self.init_encoder.seq_encode(init_entries)
 
         return seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc
-

@@ -65,8 +65,8 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         """IntegerHiddenAssociationDistribution object for specifying integer Hidden association distribution.
 
         Args:
-            state_prob_mat (Union[List[List[float]], np.ndarray]): States given previous words.
-            cond_weights (Union[List[List[float]], np.ndarray]): Words in S2 given states.
+            state_prob_mat (Union[List[List[float]], np.ndarray]): Words in S2 given states.
+            cond_weights (Union[List[List[float]], np.ndarray]): States given words in S1.
             alpha (float): Probability of drawing from uniform vs transition density.
             prev_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for given P(S1).
                 Should be compatible with Tuple[int, float].
@@ -418,6 +418,9 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         cy = np.asarray([u[1] for u in x[1]], dtype=float)
         nx = np.sum(cx)
 
+        a = estimate.alpha / estimate.num_vals2
+        b = 1 - estimate.alpha
+
         x_mat = (estimate.cond_weights[vx, :].T * (cx / nx)).T
         y_mat = estimate.state_prob_mat[:, vy]
         z_mat = x_mat[:, :, None] * y_mat[None, :, :]
@@ -425,11 +428,11 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         # [old word] x [state] x [new word]
 
         ss = np.sum(np.sum(z_mat, axis=0, keepdims=True), axis=1, keepdims=True)
-        z_mat /= ss
+        z_mat *= b / (ss * b + len(vx) * a)
 
         self.weight_count[vx, :] += np.dot(z_mat, cy) * weight
         self.state_count[:, vy] += np.sum(z_mat, axis=0) * cy * weight
-        self.init_count[vx] += cx
+        self.init_count[vx] += cx * weight
 
         self.prev_accumulator.update(x[0], weight, None if estimate is None else estimate.prev_dist)
         self.size_accumulator.update(cy.sum(), weight, None if estimate is None else estimate.len_dist)
@@ -464,7 +467,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
         self.weight_count[vx, :] += self._rng_weight.dirichlet(np.ones(self.num_states), size=len(vx)) * weight
         self.state_count[:, vy] += self._rng_state.dirichlet(np.ones(self.num_states), size=len(vy)).T * cy * weight
-        self.init_count[vx] += cx
+        self.init_count[vx] += cx * weight
 
         self.prev_accumulator.initialize(x[0], weight, self._rng_prev)
         self.size_accumulator.initialize(cy.sum(), weight, self._rng_size)
@@ -490,7 +493,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
                 self.weight_count[vx, :] += self._rng_weight.dirichlet(np.ones(self.num_states), size=len(vx)) * weight
                 self.state_count[:, vy] += self._rng_state.dirichlet(np.ones(self.num_states), size=len(vy)).T * cy * \
                                            weight
-                self.init_count[vx] += cx
+                self.init_count[vx] += cx * weight
 
             self.prev_accumulator.seq_initialize(xx[1], weights, self._rng_prev)
             self.size_accumulator.seq_initialize(xx[2], weights, self._rng_size)
@@ -534,6 +537,8 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         """
         if x[1] is None:
             xx = x[0]
+            a = estimate.alpha / estimate.num_vals2
+            b = 1 - estimate.alpha
 
             for i, (entry, weight) in enumerate(zip(xx[0], weights)):
                 vx, cx, vy, cy = entry
@@ -545,11 +550,11 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
                 # [old word] x [state] x [new word]
 
                 ss = np.sum(np.sum(z_mat, axis=0, keepdims=True), axis=1, keepdims=True)
-                z_mat /= ss
+                z_mat *= b / (ss * b + len(vx) * a)
 
                 self.weight_count[vx, :] += np.dot(z_mat, cy) * weight
                 self.state_count[:, vy] += np.sum(z_mat, axis=0) * cy * weight
-                self.init_count[vx] += cx
+                self.init_count[vx] += cx * weight
 
             self.prev_accumulator.seq_update(xx[1], weights, None if estimate is None else estimate.prev_dist)
             self.size_accumulator.seq_update(xx[2], weights, None if estimate is None else estimate.len_dist)
@@ -561,8 +566,12 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             t1 = np.concatenate([[0], s1]).cumsum().astype(np.int32)
             max_len = s0.max()
 
+            a = estimate.alpha / estimate.num_vals2
+            b = 1 - estimate.alpha
+
             numba_seq_update(self.num_states, max_len, t0, t1, x0, x1, c0, c1, w0, estimate.cond_weights,
-                             estimate.state_prob_mat, self.weight_count, self.state_count, self.init_count, weights)
+                             estimate.state_prob_mat, self.weight_count, self.state_count, self.init_count, weights,
+                             a, b)
 
             self.prev_accumulator.seq_update(xv, weights, None if estimate is None else estimate.prev_dist)
             self.size_accumulator.seq_update(nn, weights, None if estimate is None else estimate.len_dist)
@@ -1004,14 +1013,14 @@ def numba_seq_log_density(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond
             for j in range(l1):
                 for k in range(num_states):
                     temp_sum += x_mat[j, k] * state_prob_mat[k, wid]
-            out[i] += math.log(temp_sum) * cy[w]
+            out[i] += math.log(temp_sum * b + l1 * a) * cy[w]
 
 
 @numba.njit(
     'void(int64, int64, int32[:], int32[:], int32[:], int32[:], float64[:], float64[:], float64[:], float64[:,:], '
-    'float64[:,:], float64[:,:], float64[:,:], float64[:], float64[:])', cache=True)
+    'float64[:,:], float64[:,:], float64[:,:], float64[:], float64[:], float64, float64)', cache=True)
 def numba_seq_update(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weights, state_prob_mat, weight_count,
-                     state_count, init_count, weights):
+                     state_count, init_count, weights, a, b):
     """Numba kernel accumulating posterior weight/state counts in place from flattened encodings."""
     x_mat = np.zeros((max_len1, num_states), dtype=np.float64)
     z_mat = np.zeros((max_len1, num_states), dtype=np.float64)
@@ -1031,7 +1040,7 @@ def numba_seq_update(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weig
 
         for j in range(l1):
             temp = cx[j] / nx
-            # init_count[vx[j]] += cx[j] * weight
+            init_count[vx[j]] += cx[j] * weight
             for k in range(num_states):
                 x_mat[j, k] = cond_weights[vx[j], k] * temp
 
@@ -1044,7 +1053,7 @@ def numba_seq_update(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weig
                     z_mat[j, k] = temp
                     temp_sum += temp
 
-            temp_weight = cy[w] * weight / temp_sum
+            temp_weight = cy[w] * weight * b / (temp_sum * b + l1 * a)
             for j in range(l1):
                 for k in range(num_states):
                     temp = temp_weight * z_mat[j, k]
