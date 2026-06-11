@@ -454,21 +454,25 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
-        """Merge keyed statistics of the size accumulator into stats_dict.
+        """Merge keyed statistics of the conditional, given, and size accumulators into stats_dict.
 
         Args:
             stats_dict (Dict[str, Any]): Maps keys to merged sufficient statistics.
 
         """
+        self.cond_accumulator.key_merge(stats_dict)
+        self.given_accumulator.key_merge(stats_dict)
         self.size_accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: Dict[str, Any]) -> None:
-        """Replace keyed statistics of the size accumulator with those in stats_dict.
+        """Replace keyed statistics of the conditional, given, and size accumulators with those in stats_dict.
 
         Args:
             stats_dict (Dict[str, Any]): Maps keys to merged sufficient statistics.
 
         """
+        self.cond_accumulator.key_replace(stats_dict)
+        self.given_accumulator.key_replace(stats_dict)
         self.size_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> 'HiddenAssociationDataEncoder':

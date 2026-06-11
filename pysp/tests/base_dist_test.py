@@ -169,9 +169,9 @@ class BaseDistributionTestCase(unittest.TestCase):
         topics = []
 
         for s in range(num_states):
-            topics.append(GaussianDistribution(mu=0 + s * 10, sigma2=0.10 ** 2))
+            topics.append(GaussianDistribution(mu=0 + s * 10, sigma2=1.0))
 
-        len_probs = np.array([0, 0, 1], dtype=np.float64)
+        len_probs = np.array([0.25, 0.25, 0.5], dtype=np.float64)
         len_probs /= np.sum(len_probs)
 
         trans_mat = np.asarray(p)  # np.asarray([[0.1, 0.90], [0.90, 0.1]])
