@@ -289,7 +289,8 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
             SemiSupervisedMixtureDataEncoder object.
 
         """
-        return SemiSupervisedMixtureDataEncoder(encoder=self.components[0].dist_to_encoder())
+        return SemiSupervisedMixtureDataEncoder(encoder=self.components[0].dist_to_encoder(),
+                                                num_components=self.num_components)
 
     def enumerator(self) -> 'DistributionEnumerator':
         """Enumeration is not well-defined for semi-supervised mixtures.
@@ -623,7 +624,8 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             SemiSupervisedMixtureDataEncoder object.
 
         """
-        return SemiSupervisedMixtureDataEncoder(encoder=self.accumulators[0].acc_to_encoder())
+        return SemiSupervisedMixtureDataEncoder(encoder=self.accumulators[0].acc_to_encoder(),
+                                                num_components=self.num_components)
 
 
 class SemiSupervisedMixtureEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
@@ -758,17 +760,22 @@ class SemiSupervisedMixtureDataEncoder(DataSequenceEncoder):
     """SemiSupervisedMixtureDataEncoder encodes sequences of (value, prior) observations using a
     shared component encoder for the values and flat arrays for the prior labels."""
 
-    def __init__(self, encoder: DataSequenceEncoder):
+    def __init__(self, encoder: DataSequenceEncoder, num_components: Optional[int] = None):
         """SemiSupervisedMixtureDataEncoder object.
 
         Args:
             encoder (DataSequenceEncoder): Encoder shared by all mixture components.
+            num_components (Optional[int]): Number of mixture components, used to validate prior
+                component indices when provided.
 
         Attributes:
             encoder (DataSequenceEncoder): Encoder shared by all mixture components.
+            num_components (Optional[int]): Number of mixture components, used to validate prior
+                component indices when provided.
 
         """
         self.encoder = encoder
+        self.num_components = num_components
 
     def __str__(self) -> str:
         """Returns string representation of SemiSupervisedMixtureDataEncoder object."""
@@ -814,14 +821,26 @@ class SemiSupervisedMixtureDataEncoder(DataSequenceEncoder):
         prior_val = []
         data = []
 
+        num_components = self.num_components
+
         for i, xi in enumerate(x):
             datum, prior = xi
             data.append(datum)
             if prior is not None:
+                prior_total = 0.0
                 for prior_entry in prior:
+                    if num_components is not None and not (0 <= prior_entry[0] < num_components):
+                        raise ValueError('Prior component index %d for observation %d is out of range [0, %d).'
+                                         % (prior_entry[0], i, num_components))
+                    if prior_entry[1] < 0:
+                        raise ValueError('Prior value %s for component %d of observation %d is negative.'
+                                         % (str(prior_entry[1]), prior_entry[0], i))
+                    prior_total += prior_entry[1]
                     prior_idx.append(i)
                     prior_comp.append(prior_entry[0])
                     prior_val.append(prior_entry[1])
+                if not prior_total > 0:
+                    raise ValueError('Prior for observation %d has non-positive total mass.' % i)
 
         prior_comp = np.asarray(prior_comp, dtype=int)
         prior_idx = np.asarray(prior_idx, dtype=int)

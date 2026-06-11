@@ -288,6 +288,8 @@ from pysp.stats.hidden_association import HiddenAssociationDistribution, HiddenA
 from pysp.stats.hidden_markov import HiddenMarkovModelEnumerator, HiddenMarkovModelDistribution, HiddenMarkovSampler, HiddenMarkovEstimator, \
     HiddenMarkovDataEncoder
 
+from pysp.stats.quantized_hmm import QuantizedHiddenMarkovModelDistribution, QuantizedHiddenMarkovEstimator
+
 from pysp.stats.jmixture import JointMixtureDistribution, JointMixtureSampler, JointMixtureEstimator, \
     JointMixtureDataEncoder
 

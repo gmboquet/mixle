@@ -75,10 +75,15 @@ def _affinity_factors(posterior_mat, ll_mat, affinity):
     The single-factor modes return one pair; 'balanced' (built by
     balanced_factors) supplies one pair per composite field.
     """
-    if isinstance(affinity, list):
-        return affinity                      # pre-built factor list
+    if isinstance(affinity, (list, tuple)):
+        factors = list(affinity)
+        if not factors:
+            raise ValueError("affinity factor list must not be empty.")
+        return factors                       # pre-built factor list
 
     z = np.asarray(posterior_mat, dtype=np.float64)
+    if z.ndim != 2:
+        raise ValueError("posterior_mat must be a two-dimensional array.")
 
     if affinity == 'coassign':
         return [(z, z)]
@@ -89,6 +94,8 @@ def _affinity_factors(posterior_mat, ll_mat, affinity):
         if ll_mat is None:
             raise ValueError("affinity='likelihood' requires the component log-likelihood matrix.")
         l = np.asarray(ll_mat, dtype=np.float64)
+        if l.shape != z.shape:
+            raise ValueError("ll_mat must have the same shape as posterior_mat.")
         return [(np.exp(l - l.max(axis=1, keepdims=True)), z)]
 
     raise ValueError("affinity must be 'coassign', 'bhattacharyya', 'likelihood', "
@@ -129,6 +136,10 @@ def _field_log_densities(dists, items):
             for l_e in _field_log_densities([d.dist for d in dists], elems):
                 l_f = np.zeros((n, K))
                 np.add.at(l_f, seg, l_e)
+                if getattr(dists[0], 'len_normalized', False):
+                    denom = np.asarray(lens, dtype=np.float64)
+                    mask = denom > 0
+                    l_f[mask] /= denom[mask, None]
                 yield l_f
         len_dists = [d.len_dist for d in dists]
         if len_dists[0] is not None:
@@ -141,11 +152,17 @@ def _field_log_densities(dists, items):
         miss = np.asarray([x is None or x is mv or
                            (mv_is_nan and isinstance(x, float) and np.isnan(x))
                            for x in items])
-        lp0 = np.asarray([getattr(d, 'log_p0', getattr(d, 'log_p', None)) for d in dists],
-                         dtype=np.float64)        # log P(missing)
-        lp1 = np.asarray([getattr(d, 'log_p1', getattr(d, 'log_pn', None)) for d in dists],
-                         dtype=np.float64)        # log P(present)
-        yield np.where(miss[:, None], lp0[None, :], lp1[None, :])
+        has_gate = [getattr(d, 'has_p', True) for d in dists]
+        if any(has_gate):
+            lp0 = np.asarray([
+                getattr(d, 'log_p0', getattr(d, 'log_p', 0.0)) if has_p else 0.0
+                for d, has_p in zip(dists, has_gate)
+            ], dtype=np.float64)                  # log P(missing)
+            lp1 = np.asarray([
+                getattr(d, 'log_p1', getattr(d, 'log_pn', 0.0)) if has_p else 0.0
+                for d, has_p in zip(dists, has_gate)
+            ], dtype=np.float64)                  # log P(present)
+            yield np.where(miss[:, None], lp0[None, :], lp1[None, :])
         if (~miss).any():
             fill = items[int(np.argmax(~miss))]
             sub = [fill if m else x for x, m in zip(items, miss)]
@@ -187,8 +204,10 @@ def balanced_factors(mix_model, data, field_weights=None):
     element/length models, and optional wrappers all decompose; see
     _field_log_densities), and the affinity combines per-field Bhattacharyya
     coefficients, so every field contributes comparably regardless of its
-    likelihood scale. Combined with an evidence cap (see model_log_affinity)
-    no single field can veto a pair's similarity either.
+    likelihood scale. field_weights apply as exponents on whole field
+    coefficients, i.e. weights on log field-affinities. Combined with an
+    evidence cap (see model_log_affinity) no single field can veto a pair's
+    similarity either.
     """
     comps = list(mix_model.components)
     log_w = np.asarray(mix_model.log_w, dtype=np.float64).reshape(1, -1)
@@ -205,15 +224,34 @@ def balanced_factors(mix_model, data, field_weights=None):
 
     factors = []
     for l_f, w_f in zip(l_fields, field_weights):
-        z_f = l_f + log_w
+        if w_f < 0:
+            raise ValueError("field_weights must be non-negative.")
+        z_f = np.asarray(l_f, dtype=np.float64) + log_w
+        finite_rows = np.isfinite(z_f).any(axis=1)
+        if not np.all(finite_rows):
+            z_f[~finite_rows] = log_w
         z_f -= z_f.max(axis=1, keepdims=True)
         np.exp(z_f, out=z_f)
         z_f /= z_f.sum(axis=1, keepdims=True)
 
-        sq = np.sqrt(z_f) ** w_f
-        factors.append((sq, sq))
+        sq = np.sqrt(z_f)
+        factors.append((sq, sq) if w_f == 1.0 else (sq, sq, float(w_f)))
 
     return factors
+
+
+def _factor_parts(factor):
+    if len(factor) == 2:
+        g, h = factor
+        weight = 1.0
+    elif len(factor) == 3:
+        g, h, weight = factor
+    else:
+        raise ValueError("affinity factors must be (G, H) or (G, H, weight) tuples.")
+
+    if weight < 0:
+        raise ValueError("affinity factor weights must be non-negative.")
+    return np.asarray(g, dtype=np.float64), np.asarray(h, dtype=np.float64), float(weight)
 
 
 def _resolve_affinity(affinity, mix_model, data, field_weights):
@@ -288,16 +326,21 @@ def model_log_affinity(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] =
     it could only create ties.
     """
     factors = _affinity_factors(posterior_mat, ll_mat, affinity)
-    n = factors[0][0].shape[0]
+    parsed = [_factor_parts(factor) for factor in factors]
+    n = parsed[0][0].shape[0]
     cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
 
     log_s = np.zeros((n, n))
     with np.errstate(divide='ignore'):
-        for g, h in factors:
+        for g, h, weight in parsed:
+            if weight == 0.0:
+                continue
+            if g.shape[0] != n or h.shape[0] != n or g.shape[1] != h.shape[1]:
+                raise ValueError("affinity factor arrays must have compatible n x K shapes.")
             term = np.log(np.dot(g, h.T))
             if cap is not None:
                 np.maximum(term, -cap, out=term)
-            log_s += term
+            log_s += weight * term
     log_s[np.arange(n), np.arange(n)] = -np.inf
 
     return log_s
@@ -348,15 +391,30 @@ def conditional_pmat(log_aff: np.ndarray, perplexity: Optional[float] = None) ->
     With perplexity set, each row is calibrated so its entropy equals
     log(perplexity); otherwise the raw row softmax is used.
     """
+    log_aff = np.asarray(log_aff, dtype=np.float64)
     n = log_aff.shape[0]
+    if log_aff.ndim != 2 or log_aff.shape[1] != n:
+        raise ValueError("log_aff must be a square matrix.")
+    if n < 2:
+        raise ValueError("at least two observations are required.")
+
     finite = np.isfinite(log_aff)
 
     if perplexity is None:
-        p = log_aff - np.where(finite, log_aff, -np.inf).max(axis=1, keepdims=True)
-        np.exp(p, out=p)
-        p[~finite] = 0.0
-        p /= p.sum(axis=1, keepdims=True)
+        p = np.zeros((n, n), dtype=np.float64)
+        for i in range(n):
+            cols = finite[i]
+            if np.any(cols):
+                row = log_aff[i, cols] - log_aff[i, cols].max()
+                p[i, cols] = np.exp(row)
+                p[i, cols] /= p[i, cols].sum()
+            else:
+                p[i, :] = 1.0 / (n - 1)
+                p[i, i] = 0.0
         return p
+
+    if perplexity <= 0:
+        raise ValueError("perplexity must be positive.")
 
     target_entropy = np.log(perplexity)
     p = np.zeros((n, n), dtype=np.float64)
@@ -389,32 +447,37 @@ def get_pmat(posterior_mat, ll_mat=None, targ_perplexity=None, vlen=False, affin
 def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k: int = 90,
                            block_size: int = 1024, affinity: str = 'bhattacharyya',
                            evidence_cap: Optional[float] = None) -> scipy.sparse.csr_matrix:
-    """Sparse n x n matrix of model distances d_ij = max_j' log s_ij' - log s_ij.
+    """Sparse n x n matrix of model distances d_ij = -log s_ij.
 
     Keeps the k nearest neighbors (largest affinity) per row. Built blockwise so
     the dense n x n affinity matrix is never materialized. Distances are
-    non-negative; any per-row shift is immaterial because t-SNE's perplexity
-    calibration is per row. evidence_cap as in model_log_affinity.
+    non-negative. evidence_cap as in model_log_affinity.
     """
     factors = _affinity_factors(posterior_mat, ll_mat, affinity)
-    n = factors[0][0].shape[0]
+    parsed = [_factor_parts(factor) for factor in factors]
+    n = parsed[0][0].shape[0]
     k = min(k, n - 1)
     cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
+
+    if k <= 0:
+        return scipy.sparse.csr_matrix((n, n), dtype=np.float64)
 
     rows = np.repeat(np.arange(n), k)
     cols = np.empty(n * k, dtype=np.int64)
     vals = np.empty(n * k, dtype=np.float64)
 
-    hts = [h.T for _, h in factors]
+    hts = [h.T for _, h, _ in parsed]
     for s0 in range(0, n, block_size):
         s1 = min(s0 + block_size, n)
         log_s = np.zeros((s1 - s0, n))
         with np.errstate(divide='ignore'):
-            for (g, _), ht in zip(factors, hts):
+            for (g, _, weight), ht in zip(parsed, hts):
+                if weight == 0.0:
+                    continue
                 term = np.log(np.maximum(np.dot(g[s0:s1], ht), 1.0e-300))
                 if cap is not None:
                     np.maximum(term, -cap, out=term)
-                log_s += term
+                log_s += weight * term
         log_s[np.arange(s1 - s0), np.arange(s0, s1)] = -np.inf
         s_blk = log_s
 
@@ -423,7 +486,8 @@ def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarra
 
         for bi, i in enumerate(range(s0, s1)):
             c = nbr[bi]
-            d = log_s[bi, c].max() - log_s[bi, c]
+            d = -log_s[bi, c]
+            np.maximum(d, 0.0, out=d)
             cols[i * k:(i + 1) * k] = c
             vals[i * k:(i + 1) * k] = d
 
@@ -442,7 +506,8 @@ def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k:
     evidence_cap as in model_log_affinity.
     """
     factors = _affinity_factors(posterior_mat, ll_mat, affinity)
-    n = factors[0][0].shape[0]
+    parsed = [_factor_parts(factor) for factor in factors]
+    n = parsed[0][0].shape[0]
     k = min(k, n)
     m = k - 1  # non-self neighbors
     cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
@@ -452,16 +517,21 @@ def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k:
     knn_idx[:, 0] = np.arange(n)
     knn_dist[:, 0] = 0.0
 
-    hts = [h.T for _, h in factors]
+    if m == 0:
+        return knn_idx, knn_dist
+
+    hts = [h.T for _, h, _ in parsed]
     for s0 in range(0, n, block_size):
         s1 = min(s0 + block_size, n)
         log_s = np.zeros((s1 - s0, n))
         with np.errstate(divide='ignore'):
-            for (g, _), ht in zip(factors, hts):
+            for (g, _, weight), ht in zip(parsed, hts):
+                if weight == 0.0:
+                    continue
                 term = np.log(np.maximum(np.dot(g[s0:s1], ht), 1.0e-300))
                 if cap is not None:
                     np.maximum(term, -cap, out=term)
-                log_s += term
+                log_s += weight * term
         log_s[np.arange(s1 - s0), np.arange(s0, s1)] = -np.inf
         s_blk = log_s
 
@@ -469,7 +539,8 @@ def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k:
 
         for bi, i in enumerate(range(s0, s1)):
             c = nbr[bi]
-            d = log_s[bi, c].max() - log_s[bi, c]
+            d = -log_s[bi, c]
+            np.maximum(d, 0.0, out=d)
             order = np.argsort(d)
             knn_idx[i, 1:] = c[order]
             knn_dist[i, 1:] = d[order]
@@ -673,7 +744,8 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
             nested composites, sequence element/length models, and optional
             wrappers all decompose) combined by per-field Bhattacharyya, so a
             sharp discrete field cannot drown an overlapping continuous one
-            (or vice versa); optional field_weights sets per-field exponents
+            (or vice versa); optional field_weights sets exponents on whole
+            field-level Bhattacharyya coefficients
         'bhattacharyya' - Bhattacharyya coefficient between joint posteriors;
             graded even under hard assignments, so embeddings retain
             within-cluster geometry

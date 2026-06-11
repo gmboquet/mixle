@@ -914,9 +914,15 @@ class HierarchicalMixtureEstimator(ParameterEstimator):
         else:
             taus = counts
             w = taus.sum(axis=1, keepdims=True)
-            taus /= w
-            w /= w.sum()
-            w = w.flatten()
+            w_pos = w[:, 0] > 0
+            taus[w_pos, :] /= w[w_pos, :]
+            taus[~w_pos, :] = 1.0 / float(num_components)
+            w_sum = w.sum()
+
+            if w_sum == 0:
+                w = np.ones(num_mixtures) / float(num_mixtures)
+            else:
+                w = (w / w_sum).flatten()
 
         return HierarchicalMixtureDistribution(components, w, taus, len_dist=len_dist, name=self.name, keys=self.keys)
 

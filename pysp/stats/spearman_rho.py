@@ -229,7 +229,7 @@ class SpearmanRankingAccumulator(SequenceEncodableStatisticAccumulator):
         """
         if weight != 0:
             self.sum += np.multiply(x, weight)
-            self.count += 0
+            self.count += weight
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Optional[SpearmanRankingDistribution]) -> None:
         """Vectorized update of sufficient statistics from sequence encoded data.
