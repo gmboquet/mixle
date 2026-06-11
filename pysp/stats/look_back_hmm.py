@@ -20,7 +20,7 @@ windows have the data type accepted by the topic distributions, and whose first 
 the data type accepted by the initial distributions.
 
 Note: This is the typed rewrite of the sibling module pysp.stats.lookback_hmm, which is the original
-implementation kept stable for pysp.examples and external users. The math is identical, but the two
+implementation kept stable for the example scripts and external users. The math is identical, but the two
 modules differ slightly in their handling of optional arguments: this module substitutes Null*
 objects (NullDistribution, NullEstimator, NullDataEncoder, ...) for an absent len_dist/init_dist,
 while the sibling uses None (and omits the length term from densities). The
