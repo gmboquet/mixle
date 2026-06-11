@@ -25,7 +25,7 @@ Note: This is the k-rank equivalent of SparseMarkovAssociationModel.
 
 """
 import math
-import numba
+from pysp.utils.optional_deps import numba
 import numpy as np
 
 from pysp.arithmetic import *
