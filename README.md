@@ -24,13 +24,11 @@ Acceleration and integration back-ends are opt-in extras:
 pip install "pysparkplug[numba] @ git+https://github.com/gmboquet/pysparkplug.git"   # JIT-compiled estimation
 pip install "pysparkplug[spark] @ git+https://github.com/gmboquet/pysparkplug.git"   # distributed estimation on RDDs
 pip install "pysparkplug[torch] @ git+https://github.com/gmboquet/pysparkplug.git"   # GPU/autograd engine
-pip install "pysparkplug[umap]  @ git+https://github.com/gmboquet/pysparkplug.git"   # Barnes-Hut t-SNE + UMAP embeddings
+pip install "pysparkplug[umap]  @ git+https://github.com/gmboquet/pysparkplug.git"   # UMAP embeddings
 pip install "pysparkplug[all]   @ git+https://github.com/gmboquet/pysparkplug.git"   # everything
 ```
 
-Without the extras, numba-flagged code paths run as pure Python (correct, just slower), Spark inputs are unavailable, and `htsne` uses its exact engine. For development: `git clone` and `pip install -e ".[all]"`.
-
-For the model-based embedding method behind `htsne` and `humap`, see [HTSNE_PAPER.md](HTSNE_PAPER.md).
+Without the extras, numba-flagged code paths run as pure Python (correct, just slower), Spark inputs are unavailable, and `humap` is unavailable. `htsne` includes exact and internal Barnes-Hut engines in the base install. For development: `git clone` and `pip install -e ".[all]"`.
 
 ## Quickstart
 

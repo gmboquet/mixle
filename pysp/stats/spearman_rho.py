@@ -18,7 +18,8 @@ dimension equal to K representing the mean of the rank variables, and rho is a c
 import numpy as np
 from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
+    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
+    DistributionEnumerator
 import itertools
 
 from typing import Optional, Sequence, Union, Any, Dict, List, Tuple
@@ -124,7 +125,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         return SpearmanRankingSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'SpearmanRankingEstimator':
-        """Create a SpearmanRankingEstimator with matching dimension.
+        """Create a SpearmanRankingEstimator with matching dimension and concentration rho.
 
         Args:
             pseudo_count (Optional[float]): Used to inflate sufficient statistics.
@@ -133,11 +134,42 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
             SpearmanRankingEstimator object.
 
         """
-        return SpearmanRankingEstimator(self.dim, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
+        return SpearmanRankingEstimator(self.dim, rho=self.rho, pseudo_count=pseudo_count, name=self.name,
+                                        keys=self.keys)
 
     def dist_to_encoder(self) -> 'SpearmanRankingDataEncoder':
         """Returns a SpearmanRankingDataEncoder object for encoding sequences of data."""
         return SpearmanRankingDataEncoder()
+
+    def enumerator(self) -> 'SpearmanRankingEnumerator':
+        """Returns SpearmanRankingEnumerator iterating permutations in descending probability order."""
+        return SpearmanRankingEnumerator(self)
+
+
+class SpearmanRankingEnumerator(DistributionEnumerator):
+    """Enumerates all permutations in descending Spearman probability order."""
+
+    def __init__(self, dist: SpearmanRankingDistribution) -> None:
+        """SpearmanRankingEnumerator object.
+
+        Args:
+            dist (SpearmanRankingDistribution): Distribution whose finite permutation support is enumerated.
+
+        """
+        super().__init__(dist)
+        with np.errstate(divide='ignore'):
+            entries = [(list(p), float(dist.log_density(p))) for p in itertools.permutations(range(dist.dim))]
+        entries = [(v, lp) for v, lp in entries if lp > -np.inf]
+        entries.sort(key=lambda u: -u[1])
+        self._entries = entries
+        self._pos = 0
+
+    def __next__(self) -> Tuple[List[int], float]:
+        if self._pos >= len(self._entries):
+            raise StopIteration
+        item = self._entries[self._pos]
+        self._pos += 1
+        return item
 
 
 class SpearmanRankingSampler(DistributionSampler):
@@ -346,21 +378,31 @@ class SpearmanRankingAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class SpearmanRankingEstimator(ParameterEstimator):
-    """Estimator for the SpearmanRankingDistribution from aggregated sufficient statistics."""
+    """Estimator for the SpearmanRankingDistribution from aggregated sufficient statistics.
 
-    def __init__(self, dim: int, pseudo_count: Optional[float] = None, suff_stat: Optional[Tuple[float, np.ndarray]] = None,
+    The consensus ranking sigma is estimated by maximum likelihood, while the concentration
+    rho is held fixed at the configured value rather than estimated from the data.
+    """
+
+    def __init__(self, dim: int, rho: float = 1.0, pseudo_count: Optional[float] = None,
+                 suff_stat: Optional[Tuple[float, np.ndarray]] = None,
                  name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
         """SpearmanRankingEstimator object.
 
         Args:
             dim (int): Dimension K of the rank vectors.
+            rho (float): Fixed concentration for the estimated distribution. Must be positive.
             pseudo_count (Optional[float]): Used to inflate sufficient statistics.
             suff_stat (Optional[Tuple[float, np.ndarray]]): Tuple of count and component-wise rank sums.
             name (Optional[str]): Optional name for object instance.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
+        if rho <= 0:
+            raise ValueError('SpearmanRankingEstimator requires rho > 0 (got %s).' % repr(rho))
+
+        self.rho = rho
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.keys = keys
@@ -374,8 +416,10 @@ class SpearmanRankingEstimator(ParameterEstimator):
     def estimate(self, nobs: Optional[float], suff_stat: Tuple[float, np.ndarray]) -> 'SpearmanRankingDistribution':
         """Estimate a SpearmanRankingDistribution from sufficient statistics.
 
-        The location sigma is set to the rank order (argsort) of the component-wise rank sums
-        with rho fixed at 1.0. If no data was observed, rho is set to 0.0.
+        The consensus ranking sigma is the maximum likelihood estimate, given by the rank order
+        (argsort) of the component-wise rank sums. The concentration is not estimated from the
+        data; it is held fixed at the rho configured on the estimator. If no data was observed,
+        rho is set to 0.0.
 
         Args:
             nobs (Optional[float]): Number of observations (unused).
@@ -389,7 +433,7 @@ class SpearmanRankingEstimator(ParameterEstimator):
 
         if count > 0:
             sigma = np.argsort(vsum)
-            rho = 1.0
+            rho = self.rho
         else:
             sigma = vsum
             rho = 0.0
@@ -428,4 +472,3 @@ class SpearmanRankingDataEncoder(DataSequenceEncoder):
         """
         rv = np.asarray(x)
         return rv
-

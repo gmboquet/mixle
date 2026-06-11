@@ -155,7 +155,9 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         """Log-density of tree HMM at a single observed tree x.
 
         The hidden states are marginalized out with an upward (beta) message passing recursion over the
-        tree. Note: the contribution of the length distribution to the likelihood is not included.
+        tree. When a non-null length distribution (len_dist) is set, its contribution to the likelihood
+        (the sum over nodes of len_dist.log_density(num_children)) is included; a NullDistribution length
+        contributes nothing.
 
         Args:
             x (Sequence[Tuple[D, T]]): Tree as ((node_id, parent_id), emission) tuples (root parent -1).
@@ -210,15 +212,21 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             numba_seq_log_density(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, xlnl, pr_obs, p_level, a_mat,
                                   pr_max0, betas, etas, ll_ret)
 
-            # if len_enc is not None:
-            #     ret_len = np.zeros(num_trees, dtype=np.float64)
-            #     ll_ret += vec_bincount(len_enc[0], self.len_dist.seq_log_density(len_enc[1]), ret_len)
+            #  Childless-root trees have no leaf/parent entries and never enter the kernel.
+            single = np.flatnonzero(np.diff(tz) == 1)
+            if single.size > 0:
+                r = tz[single]
+                ll_ret[single] += np.log(np.dot(pr_obs[r, :], w)) + pr_max0[r]
+
+            if len_enc is not None and len_enc[1] is not None:
+                len_ll = self.len_dist.seq_log_density(len_enc[1])
+                ll_ret += np.bincount(len_enc[0], weights=len_ll, minlength=num_trees)
 
             return ll_ret
 
         else:
 
-            cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, _), enc_x, len_enc = x[1]
+            cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, _, _), enc_x, len_enc = x[1]
 
             num_states = self.num_states
             max_level = len(level_idx)
@@ -277,9 +285,9 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
                 ll_ret += np.bincount(i_nxt[level], weights=np.log(betas_sum.flatten())+pr_max0[p_nxt[level]],
                                       minlength=num_trees)
 
-            # if len_enc is not None:
-            #     ret_len = np.zeros(num_trees, dtype=np.float64)
-            #     ll_ret += vec_bincount(len_enc[0], self.len_dist.seq_log_density(len_enc[1]), ret_len)
+            if len_enc is not None and len_enc[1] is not None:
+                len_ll = self.len_dist.seq_log_density(len_enc[1])
+                ll_ret += np.bincount(len_enc[0], weights=len_ll, minlength=num_trees)
 
             return ll_ret
 
@@ -323,10 +331,17 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             numba_posteriors(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, xlnl, pr_obs, p_level, a_mat,
                              betas, etas)
 
+            #  Childless-root trees have no leaf/parent entries and never enter the kernel.
+            single = np.flatnonzero(np.diff(tz) == 1)
+            if single.size > 0:
+                r = tz[single]
+                gam = pr_obs[r, :] * w[None, :]
+                betas[r, :] = gam / gam.sum(axis=1, keepdims=True)
+
             return [betas[tz[i]:tz[i + 1], :] for i in range(len(tz) - 1)]
 
         else:
-            cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, _), enc_x, len_enc = x[1]
+            cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, _, _), enc_x, len_enc = x[1]
 
             num_states = self.num_states
             max_level = len(level_idx)
@@ -427,7 +442,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             return [out[tz[i]:tz[i + 1]] for i in range(len(tz) - 1)]
 
         else:
-            cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns), enc_x, _ = x[1]
+            cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns, rni), enc_x, _ = x[1]
 
             num_states = self.num_states
             max_level = len(level_idx)
@@ -758,13 +773,13 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 self.len_accumulator.seq_initialize(len_enc[1], weights[len_enc[0]], self._len_rng)
 
         else:
-            cnt, tz, _, (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns), enc_x, len_enc = x[1]
+            cnt, tz, _, (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns, rni), enc_x, len_enc = x[1]
 
             num_states = self.num_states
             states = self._idx_rng.choice(self.num_states, replace=True, size=cnt)
 
             #  Get root node states
-            root_states = np.bincount(states[rns], weights=weights[i_nxt[0]], minlength=num_states)
+            root_states = np.bincount(states[rns], weights=weights[rni], minlength=num_states)
             self.init_counts += root_states
             self.state_counts += root_states
 
@@ -838,6 +853,16 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             numba_baum_welch(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, xlnl, pr_obs, p_level, a_mat,
                              weights, betas, etas, alphas, xi_acc, pi_acc)
 
+            #  Childless-root trees have no leaf/parent entries and never enter the kernel.
+            single = np.flatnonzero(np.diff(tz) == 1)
+            if single.size > 0:
+                r = tz[single]
+                gam = pr_obs[r, :] * w[None, :]
+                gam /= gam.sum(axis=1, keepdims=True)
+                gam *= weights[single][:, None]
+                alphas[r, :] = gam
+                pi_acc[single, :] = gam
+
             self.init_counts += pi_acc.sum(axis=0)
             self.trans_counts += xi_acc.sum(axis=0)
 
@@ -851,7 +876,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
         else:
             ## numpy calculation from encoding
-            cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns), enc_x, len_enc = x[1]
+            cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns, rni), enc_x, len_enc = x[1]
 
             num_states = estimate.num_states
             max_level = len(level_idx)
@@ -929,11 +954,13 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 self.trans_counts += xi_loc.sum(axis=0)
                 alphas[xcs, :] += temp
 
+            for i in range(num_states):
+                alphas[:, i] *= weights[len_enc[0]]
+
             self.init_counts += np.sum(alphas[rns, :], axis=0)
             self.state_counts += alphas.sum(axis=0)
 
             for i in range(num_states):
-                alphas[:, i] *= weights[len_enc[0]]
                 self.accumulators[i].seq_update(enc_x, alphas[:, i], estimate.topics[i])
 
             if len_enc is not None:
@@ -1260,6 +1287,7 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
         xlnl = []  # levels for the leaf nodes
         xlni = []
         root_id = []
+        root_node = []  # flattened index of each (non-empty) tree's root node
 
         xbi = []  # Use this to track beta_j(p(u), u)
         xp = []  # parents, repeated for each child
@@ -1276,6 +1304,7 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
             tz.append(n)
             if n > 0:
                 root_id.append(i)
+                root_node.append(cnt)  # flattened index of this tree's root node
 
             xi0 = np.asarray([v[0][0] for v in xx], dtype=np.int32)
             xp0 = np.asarray([v[0][1] for v in xx], dtype=np.int32)
@@ -1309,6 +1338,12 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
                 xln.extend(xln_temp + cnt)
                 idx.extend([i] * len(xl_temp))
 
+            elif n == 1:
+                #  Childless root: score it as a level-0 leaf (its marginal uses p_level[0] = w).
+                xln.append(cnt)
+                xlnl.append(0)
+                xlni.append(i)
+
             #  Length distribution
             nc_temp = np.zeros(n, dtype=np.int32)
             nc_temp[u0] = u1
@@ -1326,21 +1361,25 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
         xlnl = np.asarray(xlnl, dtype=np.int32)
         xlni = np.asarray(xlni, dtype=np.int32)
         root_idx = np.asarray(root_id, dtype=np.int32)
+        #  Root node (flattened index) and owning tree index for every non-empty tree, including the
+        #  childless single-node trees that never appear as a parent in the level arrays.
+        rns = np.asarray(root_node, dtype=np.int32)
+        rni = root_idx
 
         level_idx = []
         eta_p = []
         p_nxt = []
-        i_nxt = [root_idx]
+        i_nxt = []
 
-        for level in range(1, np.max(xl)+1):
+        max_level = int(np.max(xl)) if len(xl) > 0 else 0
+        for level in range(1, max_level + 1):
 
             level_idx.append(np.flatnonzero(xl == level))
-            u0, u1 = np.unique(xp[level_idx[-1]], return_counts=True)
+            #  Unique parents at this level (sorted, grouped by parent) and the tree index of each.
+            u0, first, u1 = np.unique(xp[level_idx[-1]], return_index=True, return_counts=True)
             eta_p.append(np.cumsum(np.append([0], u1)))
             p_nxt.append(u0)
-            i_nxt.append(idx[level_idx[-1]])
-
-        rns = np.unique(xp[level_idx[0]]) # root nodes
+            i_nxt.append(idx[level_idx[-1]][first])  # tree index aligned to p_nxt (per parent)
 
         enc_x = self.emission_encoder.seq_encode(xs)
         len_enc = self.len_encoder.seq_encode(nc)
@@ -1349,10 +1388,10 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
         obs_idx = np.asarray(obs_idx, dtype=np.int32)
 
         if len_enc is not None:
-            return cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns), enc_x, \
+            return cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns, rni), enc_x, \
                    (obs_idx, len_enc)
         else:
-            return cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns), enc_x, None
+            return cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns, rni), enc_x, None
 
     def seq_encode(self, x: Sequence[Sequence[Tuple[D, T]]]) -> Tuple[Optional[Tuple[np.ndarray, E1, E2, Any,
                                                                       Optional[Tuple[np.ndarray, Any]]]],
@@ -1466,7 +1505,8 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
             #if len_enc is not None:
             len_enc = tuple([np.asarray(idx, np.int32), len_enc])
 
-            return (tz, (np.max(xln), xln, xlnl, tlnz), (xbi, xp, xc, xl, txz, tp, tpz), enc_x, len_enc), None
+            max_xln = int(np.max(xln)) if len(xln) > 0 else 0
+            return (tz, (max_xln, xln, xlnl, tlnz), (xbi, xp, xc, xl, txz, tp, tpz), enc_x, len_enc), None
 
         else:
             return None, self._seq_encode(x)
