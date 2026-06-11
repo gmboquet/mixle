@@ -429,13 +429,17 @@ def _local_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) ->
     zr, zc = sq[row_idx], sq[col_idx]
     xr, xc = x[row_idx], x[col_idx]
     sim = np.zeros((len(row_idx), len(col_idx)), dtype=np.float64)
+    diff = xr[:, None, :] - xc[None, :, :]
+    sqdiff1 = diff[..., 0] * diff[..., 0] if diff.shape[2] == 1 else None
 
     for k in range(sq.shape[1]):
         gate = np.outer(zr[:, k], zc[:, k])
         if not np.any(gate > 0):
             continue
-        diff = xr[:, None, :] - xc[None, :, :]
-        delta = np.einsum('...d,de,...e->...', diff, inv_cov[k], diff)
+        if sqdiff1 is None:
+            delta = np.einsum('...d,de,...e->...', diff, inv_cov[k], diff)
+        else:
+            delta = sqdiff1 * inv_cov[k, 0, 0]
         delta = np.maximum(delta, 0.0)
         sim += gate * np.exp(-0.125 * np.minimum(delta, 80.0))
 
@@ -1254,6 +1258,34 @@ def _barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5,
     return forces, max(float(z_sum), 1.0e-300)
 
 
+def _exact_negative_forces(Y: np.ndarray) -> Tuple[np.ndarray, float]:
+    """Exact t-SNE repulsive forces, vectorized over all pairs."""
+    rsum = np.sum(Y * Y, axis=1, keepdims=True)
+    d2 = -2.0 * np.dot(Y, Y.T)
+    d2 += rsum
+    d2 += rsum.T
+    np.maximum(d2, 0.0, out=d2)
+    d2 += 1.0
+    np.reciprocal(d2, out=d2)
+    d2[np.arange(Y.shape[0]), np.arange(Y.shape[0])] = 0.0
+    z_sum = float(d2.sum())
+    d2 *= d2
+    forces = np.sum(d2, axis=1, keepdims=True) * Y - np.dot(d2, Y)
+    return forces, max(z_sum, 1.0e-300)
+
+
+def _negative_forces(Y: np.ndarray, theta: float, leaf_size: int,
+                     repulsion_method: str, exact_threshold: int) -> Tuple[np.ndarray, float]:
+    method = repulsion_method
+    if method == 'auto':
+        method = 'exact' if Y.shape[0] <= exact_threshold else 'barnes_hut'
+    if method == 'exact':
+        return _exact_negative_forces(Y)
+    if method == 'barnes_hut':
+        return _barnes_hut_negative_forces(Y, theta=theta, leaf_size=leaf_size)
+    raise ValueError("repulsion_method must be 'auto', 'exact', or 'barnes_hut'.")
+
+
 def _sparse_positive_forces_from_edges(rows: np.ndarray, cols: np.ndarray, data: np.ndarray,
                                        Y: np.ndarray, scale: float = 1.0) -> np.ndarray:
     """Exact attractive t-SNE forces over sparse probability edges."""
@@ -1303,7 +1335,8 @@ def _tsne_barnes_hut_from_p(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
                             early_its: int = 250, min_gain: float = 0.01,
                             tol: float = 1.0e-7, check_every: int = 50,
                             print_iter: int = 100, theta: float = 0.5,
-                            leaf_size: int = 16, seed: Optional[int] = None,
+                            leaf_size: int = 16, repulsion_method: str = 'auto',
+                            exact_repulsion_threshold: int = 5000, seed: Optional[int] = None,
                             Y: Optional[np.ndarray] = None, out=None) -> np.ndarray:
     """Barnes-Hut t-SNE on a sparse symmetric probability matrix."""
     if out is None:
@@ -1342,7 +1375,9 @@ def _tsne_barnes_hut_from_p(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
         exaggeration = early_exaggeration if it <= early_its else 1.0
 
         pos = _sparse_positive_forces_from_edges(p_rows, p_cols, p_data, Y, exaggeration)
-        neg, z_sum = _barnes_hut_negative_forces(Y, theta=theta, leaf_size=leaf_size)
+        neg, z_sum = _negative_forces(Y, theta=theta, leaf_size=leaf_size,
+                                      repulsion_method=repulsion_method,
+                                      exact_threshold=exact_repulsion_threshold)
         dC = 4.0 * (pos - neg / z_sum)
 
         inc = (dC > 0) != (iY > 0)
@@ -1355,12 +1390,16 @@ def _tsne_barnes_hut_from_p(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
         Y -= np.mean(Y, axis=0, keepdims=True)
 
         if (it % print_iter) == 0:
-            _, kl_z_sum = _barnes_hut_negative_forces(Y, theta=theta, leaf_size=leaf_size)
+            _, kl_z_sum = _negative_forces(Y, theta=theta, leaf_size=leaf_size,
+                                           repulsion_method=repulsion_method,
+                                           exact_threshold=exact_repulsion_threshold)
             kl = _sparse_tsne_kl_from_edges(p_rows, p_cols, p_data, Y, kl_z_sum)
             out.write('Iteration %d: KL(P||Q)=%f\n' % (it, kl))
 
         if it > early_its and (it % check_every) == 0:
-            _, kl_z_sum = _barnes_hut_negative_forces(Y, theta=theta, leaf_size=leaf_size)
+            _, kl_z_sum = _negative_forces(Y, theta=theta, leaf_size=leaf_size,
+                                           repulsion_method=repulsion_method,
+                                           exact_threshold=exact_repulsion_threshold)
             kl = _sparse_tsne_kl_from_edges(p_rows, p_cols, p_data, Y, kl_z_sum)
             if last_kl - kl < tol * max(1.0, abs(last_kl)):
                 break
@@ -1373,13 +1412,16 @@ def _tsne_barnes_hut(dist_csr: scipy.sparse.csr_matrix, emb_dim: int, perplexity
                      max_its: int, eta, momentum: float, early_exaggeration: float,
                      min_gain: float, tol: float, print_iter: int, seed: Optional[int],
                      Y: Optional[np.ndarray], out=None, theta: float = 0.5,
-                     leaf_size: int = 16) -> np.ndarray:
+                     leaf_size: int = 16, repulsion_method: str = 'auto',
+                     exact_repulsion_threshold: int = 5000) -> np.ndarray:
     P = _sparse_joint_pmat(dist_csr, perplexity)
     return _tsne_barnes_hut_from_p(P, emb_dim=emb_dim, max_its=max_its, eta=eta,
                                   momentum=momentum, early_exaggeration=early_exaggeration,
                                   min_gain=min_gain, tol=tol, print_iter=print_iter,
-                                  theta=theta, leaf_size=leaf_size, seed=seed,
-                                  Y=Y, out=out)
+                                  theta=theta, leaf_size=leaf_size,
+                                  repulsion_method=repulsion_method,
+                                  exact_repulsion_threshold=exact_repulsion_threshold,
+                                  seed=seed, Y=Y, out=out)
 
 
 def tsne_barnes_hut(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
@@ -1387,7 +1429,8 @@ def tsne_barnes_hut(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
                     momentum: float = 0.8, early_exaggeration: float = 12.0,
                     min_gain: float = 0.01, tol: float = 1.0e-7,
                     print_iter: int = 100, theta: float = 0.5,
-                    leaf_size: int = 16, seed: Optional[int] = None,
+                    leaf_size: int = 16, repulsion_method: str = 'auto',
+                    exact_repulsion_threshold: int = 5000, seed: Optional[int] = None,
                     Y: Optional[np.ndarray] = None, out=None) -> np.ndarray:
     """Embed a precomputed sparse t-SNE probability matrix with Barnes-Hut.
 
@@ -1398,8 +1441,10 @@ def tsne_barnes_hut(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
     return _tsne_barnes_hut_from_p(P, emb_dim=emb_dim, max_its=max_its, eta=eta,
                                   momentum=momentum, early_exaggeration=early_exaggeration,
                                   min_gain=min_gain, tol=tol, print_iter=print_iter,
-                                  theta=theta, leaf_size=leaf_size, seed=seed,
-                                  Y=Y, out=out)
+                                  theta=theta, leaf_size=leaf_size,
+                                  repulsion_method=repulsion_method,
+                                  exact_repulsion_threshold=exact_repulsion_threshold,
+                                  seed=seed, Y=Y, out=out)
 
 
 def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
@@ -1413,7 +1458,8 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
           out=None, variable_length: bool = False, barnes_hut_theta: float = 0.5,
           barnes_hut_leaf_size: int = 16, neighbor_method: str = 'auto',
           neighbor_threshold: int = 5000, neighbor_trees: int = 8,
-          neighbor_leaf_size: Optional[int] = None, candidate_multiplier: int = 8):
+          neighbor_leaf_size: Optional[int] = None, candidate_multiplier: int = 8,
+          repulsion_method: str = 'auto', exact_repulsion_threshold: int = 5000):
     """Embed heterogeneous data with model-based t-SNE.
 
     A mixture model is fit to the data (a Dirichlet process mixture with
@@ -1454,6 +1500,11 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
 
     barnes_hut_theta controls the Barnes-Hut opening angle for method='barnes_hut';
     0.0 gives exact repulsive forces and larger values are faster/coarser.
+
+    repulsion_method controls repulsive forces for method='barnes_hut':
+    'exact' uses a vectorized all-pairs calculation, 'barnes_hut' uses the
+    tree approximation, and 'auto' uses exact repulsion when n is at most
+    exact_repulsion_threshold.
 
     neighbor_method controls graph construction for method='barnes_hut':
     'exact' uses blockwise all-pairs top-k, 'approx' uses a random-projection
@@ -1498,7 +1549,9 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
         return _tsne_barnes_hut(dist_csr, emb_dim, px, max_its, eta, momentum,
                                 early_exaggeration, min_gain, tol, print_iter, seed, Y,
                                 out=out, theta=barnes_hut_theta,
-                                leaf_size=barnes_hut_leaf_size)
+                                leaf_size=barnes_hut_leaf_size,
+                                repulsion_method=repulsion_method,
+                                exact_repulsion_threshold=exact_repulsion_threshold)
 
     P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity, affinity=affinity,
                  evidence_cap=evidence_cap)
