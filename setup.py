@@ -33,7 +33,7 @@ setup(
         "spark": ["pyspark"],
         "torch": ["torch"],
         "mpi": ["mpi4py"],
-        "umap": ["umap-learn", "scikit-learn"],
-        "all": ["numba", "tbb", "pyspark", "torch", "mpi4py", "umap-learn", "scikit-learn"],
+        "umap": ["umap-learn"],
+        "all": ["numba", "tbb", "pyspark", "torch", "mpi4py", "umap-learn"],
     },
 )

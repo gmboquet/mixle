@@ -8,11 +8,13 @@ Data type (int): The geometric distribution with probability of success p, has d
     P(x=k) = (k-1)*log(1-p) + log(p), for k = 1,2,...
 
 """
+import math
 import numpy as np
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator
+from pysp.utils.enumeration import QuantizedEnumerationIndex
 from numpy.random import RandomState
 from typing import Optional, Tuple, Sequence, Dict, Union, Any
 
@@ -123,6 +125,33 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
     def enumerator(self) -> 'GeometricEnumerator':
         """Returns GeometricEnumerator iterating the support {1, 2, ...} in descending probability order."""
         return GeometricEnumerator(self)
+
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
+        """Build a bounded bit-quantized index directly from the geometric tail formula."""
+        if max_bits < 0:
+            raise ValueError('max_bits must be non-negative.')
+        if bin_width_bits <= 0:
+            raise ValueError('bin_width_bits must be positive.')
+
+        if self.log_p == -np.inf:
+            return QuantizedEnumerationIndex.from_items(
+                [], max_bits=max_bits, bin_width_bits=bin_width_bits, truncated=False)
+
+        if self.log_1p == -np.inf:
+            return QuantizedEnumerationIndex.from_items(
+                [(1, float(self.log_p))], max_bits=max_bits,
+                bin_width_bits=bin_width_bits, sorted_items=True, truncated=False)
+
+        limit_nats = float(max_bits) * math.log(2.0)
+        max_offset = int(math.floor((limit_nats + float(self.log_p)) / (-float(self.log_1p)) + 1.0e-12))
+        if max_offset < 0:
+            items = []
+        else:
+            items = [(x, float((x - 1) * self.log_1p + self.log_p)) for x in range(1, max_offset + 2)]
+
+        return QuantizedEnumerationIndex.from_items(
+            items, max_bits=max_bits, bin_width_bits=bin_width_bits,
+            sorted_items=True, truncated=True)
 
 
 class GeometricEnumerator(DistributionEnumerator):
@@ -468,4 +497,3 @@ class GeometricDataEncoder(DataSequenceEncoder):
             raise Exception('GeometricDistribution requires integers greater than 0 for x.')
         else:
             return np.asarray(rv, dtype=float)
-

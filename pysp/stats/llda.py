@@ -18,8 +18,11 @@ the alpha rows of its labels. Generation of a document of length N with L topics
 If included, 'len_dist' models the number of values N in a document, and 'set_dist' models the label sets
 (both are used for sampling).
 
-Estimation uses a mean-field variational EM (per-document gamma updates) with per-label alpha rows updated
-from the aggregated expected log topic weights.
+Estimation uses a mean-field variational EM (per-document gamma updates). The expected log topic weights
+are aggregated per distinct label set, and the alpha rows are updated jointly by maximizing the coupled
+objective in which each document's Dirichlet parameter is the average of its label rows (see
+'update_alpha_coupled()'). When every document carries exactly one label the objective decouples and the
+classic per-row fixed-point update ('update_alpha()') is used.
 
 """
 import numpy as np
@@ -133,7 +136,7 @@ class LLDADistribution(SequenceEncodableProbabilityDistribution):
 
 		elob0 = digamma(document_gammas) - digamma(np.sum(document_gammas, axis=1, keepdims=True))
 		elob1 = elob0[idx, :]
-		elob2 = log_density_gamma * (elob1 + per_topic_log_densities - np.log(log_density_gamma))
+		elob2 = log_density_gamma * (elob1 + per_topic_log_densities - np.log(log_density_gamma) + np.log(np.reshape(counts, (-1, 1))))
 		elob3 = np.sum(elob0 * ((document_alphas - 1.0) - (document_gammas - 1.0)), axis=1)
 		elob4 = np.bincount(idx_full.flat, weights=elob2.flat)
 		elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
@@ -309,11 +312,119 @@ class LLDASampler(DistributionSampler):
 
 
 
+class LLDALabelSetStats(object):
+	"""Sufficient statistics for the coupled alpha update, grouped by distinct document label set.
+
+	Maps each distinct label set S (a sorted tuple of label indices, duplicates preserved) to a pair
+	[n_S, m_S], where n_S is the total weight of the documents carrying label set S and m_S is the
+	weighted sum of the per-document expected log topic weights E[log theta] (a vector with one entry
+	per topic) over those documents.
+	"""
+
+	def __init__(self, stats=None):
+		"""LLDALabelSetStats object.
+
+		Args:
+			stats (Optional[Dict[Tuple[int, ...], List]]): Optional mapping from label-set tuples to
+				[n_S, m_S] pairs. Defaults to an empty mapping.
+
+		"""
+		self.stats = dict() if stats is None else stats
+
+	def add(self, label_set, weight, sum_log_p):
+		"""Accumulate document weight and summed expected log topic weights for one label set.
+
+		Args:
+			label_set (Tuple[int, ...]): Sorted tuple of label indices.
+			weight (float): Total document weight to add for the label set.
+			sum_log_p (np.ndarray): Weighted sum of per-document E[log theta] vectors to add.
+
+		Returns:
+			None.
+
+		"""
+		entry = self.stats.get(label_set)
+		if entry is None:
+			self.stats[label_set] = [float(weight), np.array(sum_log_p, dtype=float)]
+		else:
+			entry[0] += float(weight)
+			entry[1] += sum_log_p
+
+	def combine(self, other):
+		"""Merge the statistics of another LLDALabelSetStats instance into this instance.
+
+		Args:
+			other (LLDALabelSetStats): Statistics to merge in (left unmodified).
+
+		Returns:
+			LLDALabelSetStats object (self).
+
+		"""
+		for label_set, entry in other.stats.items():
+			self.add(label_set, entry[0], entry[1])
+		return self
+
+	def copy(self):
+		"""Returns a deep copy of the LLDALabelSetStats instance."""
+		return LLDALabelSetStats({k: [v[0], v[1].copy()] for k, v in self.stats.items()})
+
+	def arrays(self):
+		"""Returns the statistics as parallel arrays in sorted label-set order.
+
+		Returns:
+			Tuple of the sorted label-set tuples (List[Tuple[int, ...]]), the per-set weights n_S
+			(1-d numpy array), and the per-set summed expected log topic weights m_S (2-d numpy array
+			with one row per label set).
+
+		"""
+		label_sets = sorted(self.stats.keys())
+		if len(label_sets) == 0:
+			return label_sets, np.zeros(0), np.zeros((0, 0))
+		n = np.asarray([self.stats[k][0] for k in label_sets], dtype=float)
+		m = np.asarray([self.stats[k][1] for k in label_sets], dtype=float)
+		return label_sets, n, m
+
+	def __array__(self, dtype=None, copy=None):
+		"""Canonical array form: one row [n_S, m_S] per label set in sorted order (for comparisons)."""
+		label_sets, n, m = self.arrays()
+		if len(label_sets) == 0:
+			rv = np.zeros((0, 0))
+		else:
+			rv = np.concatenate((np.reshape(n, (-1, 1)), m), axis=1)
+		if dtype is not None:
+			rv = rv.astype(dtype)
+		return rv
+
+	def __str__(self):
+		"""Returns string representation of LLDALabelSetStats instance."""
+		return 'LLDALabelSetStats(%s)' % (str(self.stats))
+
+
+def doc_label_sets(nbx, nbcnt):
+	"""Returns the sorted label-set tuple of each encoded document.
+
+	Args:
+		nbx (np.ndarray): Flattened array of label indices over all documents (document-contiguous).
+		nbcnt (np.ndarray): Number of labels for each document.
+
+	Returns:
+		List of sorted label-index tuples, one per document.
+
+	"""
+	rv = []
+	pos = 0
+	for c in nbcnt:
+		rv.append(tuple(sorted(int(u) for u in nbx[pos:(pos + c)])))
+		pos += c
+	return rv
+
+
 class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 	"""LLDAEstimatorAccumulator object for aggregating sufficient statistics from labeled documents.
 
-	Tracks per-label expected log topic weights ('sum_of_logs'), per-label document counts ('doc_counts'),
-	per-label topic counts ('topic_counts'), and the topic distribution accumulators.
+	Tracks per-label-set expected log topic weights and document counts ('set_stats'), per-label
+	weighted document counts ('doc_counts'), per-label topic counts ('topic_counts'), and the topic
+	distribution accumulators.
 	"""
 
 	def __init__(self, accumulators, num_alphas, keys=(None, None), prev_alpha=None):
@@ -331,7 +442,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 				distributions.
 			num_topics (int): Number of topic distributions.
 			num_alphas (int): Number of label rows in the alphas matrix.
-			sum_of_logs (np.ndarray): Per-label aggregated expected log topic weights.
+			set_stats (LLDALabelSetStats): Per-label-set aggregated expected log topic weights and counts.
 			doc_counts (Union[float, np.ndarray]): Per-label weighted document counts.
 			topic_counts (np.ndarray): Per-label weighted topic counts.
 			prev_alpha (Optional[np.ndarray]): Previous alphas matrix.
@@ -351,7 +462,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 		self.accumulators = accumulators
 		self.num_topics   = len(accumulators)
 		self.num_alphas   = num_alphas
-		self.sum_of_logs  = np.zeros((num_alphas, num_topics))
+		self.set_stats    = LLDALabelSetStats()
 		self.doc_counts   = 0.0
 		self.topic_counts = np.zeros((num_alphas, num_topics))
 		self.prev_alpha   = prev_alpha
@@ -401,6 +512,39 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 		self._rng_topics = [RandomState(seed=seeds[3+j]) for j in range(self.num_topics)]
 		self._init_rng = True
 
+	def _accumulate_set_stats(self, doc_log_p, weights, nbx, nbcnt):
+		"""Accumulate per-label-set statistics from per-document expected log topic weights.
+
+		Groups the documents by their (sorted) label set and adds the weighted document counts and the
+		weighted sums of 'doc_log_p' rows to 'set_stats'.
+
+		Args:
+			doc_log_p (np.ndarray): Per-document expected log topic weights (num_documents by num_topics).
+			weights (np.ndarray): Numpy array of weights for the documents.
+			nbx (np.ndarray): Flattened array of label indices over all documents.
+			nbcnt (np.ndarray): Number of labels for each document.
+
+		Returns:
+			None.
+
+		"""
+
+		doc_sets = doc_label_sets(nbx, nbcnt)
+
+		set_index = dict()
+		set_ids = np.zeros(len(doc_sets), dtype=int)
+		for d, label_set in enumerate(doc_sets):
+			set_ids[d] = set_index.setdefault(label_set, len(set_index))
+
+		num_sets = len(set_index)
+		set_n = np.bincount(set_ids, weights=weights, minlength=num_sets)
+		set_m = np.zeros((num_sets, self.num_topics))
+		for i in range(self.num_topics):
+			set_m[:, i] = np.bincount(set_ids, weights=doc_log_p[:, i]*weights, minlength=num_sets)
+
+		for label_set, j in set_index.items():
+			self.set_stats.add(label_set, set_n[j], set_m[j, :])
+
 	def initialize(self, x, weight, rng):
 		"""Initialize the accumulator with a single labeled document.
 
@@ -423,13 +567,13 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
 		xdoc = x[0]
 		xnbh = x[1]
-		aloc = self.prev_alpha[xnbh, :].sum(axis=0)
+		aloc = self.prev_alpha[xnbh, :].mean(axis=0)
 
 		theta = rng.dirichlet(aloc)
 
 		idx_list = rng.choice(self.num_topics, size=len(xdoc), replace=True, p=theta)
 
-		self.sum_of_logs += np.log(theta)
+		self.set_stats.add(tuple(sorted(int(u) for u in xnbh)), weight, weight*np.log(theta))
 		self.doc_counts  += weight
 
 		for i in range(len(xdoc)):
@@ -468,10 +612,12 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 		if self.prev_alpha is None:
 			self.prev_alpha = np.ones((self.num_alphas, self.num_topics))
 
-		# Per-document Dirichlet parameter: sum of prev_alpha rows over the document labels.
+		# Per-document Dirichlet parameter: average of prev_alpha rows over the document labels.
 		aloc = np.zeros((num_documents, self.num_topics))
 		for j in range(self.num_topics):
 			aloc[:, j] = np.bincount(nbidx, weights=self.prev_alpha[nbx, j], minlength=num_documents)
+		nbcnt_loc = np.maximum(nbcnt.astype(float), 1.0)
+		aloc /= np.reshape(nbcnt_loc, (-1, 1))
 
 		# Per-document topic weights theta ~ Dirichlet(aloc) via normalized gamma draws.
 		theta = self._rng_theta.gamma(shape=aloc)
@@ -481,7 +627,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
 		idx_list = row_choice(p_mat=theta[idx, :], rng=self._rng_idx)
 
-		self.sum_of_logs += np.log(theta).sum(axis=0)
+		self._accumulate_set_stats(np.log(theta), weights, nbx, nbcnt)
 		self.doc_counts  += np.sum(weights)
 
 		ww_v = -np.log(self._rng_w.rand(len(idx)*self.num_topics))
@@ -498,8 +644,9 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 	def seq_update(self, x, weights, estimate):
 		"""Vectorized update of the accumulator from an encoded sequence of labeled documents.
 
-		Computes the variational posterior for each document under 'estimate' and aggregates per-label
-		expected log topic weights, document counts, topic counts, and the topic accumulator statistics.
+		Computes the variational posterior for each document under 'estimate' and aggregates per-label-set
+		expected log topic weights, per-label document counts, topic counts, and the topic accumulator
+		statistics.
 
 		Args:
 			x: Encoded sequence of iid LLDA observations (see LLDADataEncoder.seq_encode()).
@@ -520,19 +667,17 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
 		mlpf = digamma(final_gammas) - digamma(np.sum(final_gammas, axis=1, keepdims=True))
 
-		nbh_mlpf = np.zeros((num_alphas, num_topics))
 		nbh_cnt  = np.reshape(np.bincount(nbx, weights=weights[nbidx], minlength=num_alphas), (-1, 1))
 		nbh_tcnt = np.zeros((num_alphas, num_topics))
 
 		for i in range(num_topics):
 			self.accumulators[i].seq_update(enc_data, log_density_gamma[:, i]*weights[idx]*counts, estimate.topics[i])
 
-			nbh_mlpf[:, i] = np.bincount(nbx, weights=mlpf[nbidx,i]*weights[nbidx], minlength=num_alphas)
 			doc_tcnt = np.bincount(idx, weights=log_density_gamma[:, i], minlength=num_documents)
 			nbh_tcnt[:, i] = np.bincount(nbx, weights=doc_tcnt[nbidx] * weights[nbidx], minlength=num_alphas)
 
 
-		self.sum_of_logs  += nbh_mlpf
+		self._accumulate_set_stats(mlpf, weights, nbx, nbcnt)
 		self.doc_counts   += nbh_cnt
 		self.topic_counts += nbh_tcnt
 		self.prev_alpha    = estimate.alphas
@@ -545,7 +690,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
 		Sufficient statistics in suff_stat are a Tuple containing:
 			suff_stat[0] (Optional[np.ndarray]): Previous alphas matrix.
-			suff_stat[1] (np.ndarray): Per-label aggregated expected log topic weights.
+			suff_stat[1] (LLDALabelSetStats): Per-label-set expected log topic weights and counts.
 			suff_stat[2] (Union[float, np.ndarray]): Per-label weighted document counts.
 			suff_stat[3] (np.ndarray): Per-label weighted topic counts.
 			suff_stat[4] (Sequence): Topic distribution accumulator values.
@@ -558,12 +703,12 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
 		"""
 
-		prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats = suff_stat
+		prev_alpha, set_stats, doc_counts, topic_counts, topic_suff_stats = suff_stat
 
 		if self.prev_alpha is None:
 			self.prev_alpha = prev_alpha
 
-		self.sum_of_logs  += sum_of_logs
+		self.set_stats.combine(set_stats)
 		self.doc_counts   += doc_counts
 		self.topic_counts += topic_counts
 
@@ -576,11 +721,11 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 		"""Returns sufficient statistics of the accumulator instance.
 
 		Returns:
-			Tuple of previous alphas matrix, per-label sum of expected log topic weights, per-label document
+			Tuple of previous alphas matrix, per-label-set statistics (LLDALabelSetStats), per-label document
 			counts, per-label topic counts, and the topic accumulator values.
 
 		"""
-		return self.prev_alpha, self.sum_of_logs, self.doc_counts, self.topic_counts, [u.value() for u in self.accumulators]
+		return self.prev_alpha, self.set_stats, self.doc_counts, self.topic_counts, [u.value() for u in self.accumulators]
 
 	def from_value(self, x):
 		"""Set the sufficient statistics of the accumulator instance to the value x.
@@ -593,10 +738,10 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
 		"""
 
-		prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats = x
+		prev_alpha, set_stats, doc_counts, topic_counts, topic_suff_stats = x
 
 		self.prev_alpha   = prev_alpha
-		self.sum_of_logs  = sum_of_logs
+		self.set_stats    = set_stats
 		self.doc_counts   = doc_counts
 		self.topic_counts = topic_counts
 		self.accumulators = [self.accumulators[i].from_value(topic_suff_stats[i]) for i in range(self.num_topics)]
@@ -621,10 +766,10 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 				p_sol, p_doc, p_pa = stats_dict[self.alpha_key]
 
 				prev_alpha = self.prev_alpha if self.prev_alpha is not None else p_pa
-				stats_dict[self.alpha_key] = (self.sum_of_logs + p_sol, self.doc_counts + p_doc, prev_alpha)
+				stats_dict[self.alpha_key] = (self.set_stats.copy().combine(p_sol), self.doc_counts + p_doc, prev_alpha)
 
 			else:
-				stats_dict[self.alpha_key] = (self.sum_of_logs, self.doc_counts, self.prev_alpha)
+				stats_dict[self.alpha_key] = (self.set_stats, self.doc_counts, self.prev_alpha)
 
 		if self.topics_key is not None:
 			if self.topics_key in stats_dict:
@@ -653,7 +798,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 			if self.alpha_key in stats_dict:
 				p_sol, p_doc, p_pa = stats_dict[self.alpha_key]
 				self.prev_alpha = p_pa
-				self.sum_of_logs = p_sol
+				self.set_stats = p_sol
 				self.doc_counts = p_doc
 
 		if self.topics_key is not None:
@@ -748,13 +893,15 @@ class LLDAEstimator(ParameterEstimator):
 
 		Sufficient statistics in arg 'suff_stat' are a Tuple containing:
 			suff_stat[0] (Optional[np.ndarray]): Previous alphas matrix.
-			suff_stat[1] (np.ndarray): Per-label aggregated expected log topic weights.
+			suff_stat[1] (LLDALabelSetStats): Per-label-set expected log topic weights and counts.
 			suff_stat[2] (Union[float, np.ndarray]): Per-label weighted document counts.
 			suff_stat[3] (np.ndarray): Per-label weighted topic counts.
 			suff_stat[4] (Sequence): Sufficient statistics for the topic distribution accumulators.
 
-		If 'fixed_alpha' is None, the alphas matrix is re-estimated with fixed-point updates (see
-		'update_alpha()'). Otherwise it is set to 'fixed_alpha'.
+		If 'fixed_alpha' is None, the alphas matrix is re-estimated by maximizing the coupled objective
+		over all label rows (see 'update_alpha_coupled()'). When every document carries exactly one label
+		the objective decouples and the per-row fixed-point updates are used (see 'update_alpha()').
+		Otherwise the alphas matrix is set to 'fixed_alpha'.
 
 		Args:
 			nobs (Optional[float]): Number of observations used in estimation.
@@ -765,7 +912,7 @@ class LLDAEstimator(ParameterEstimator):
 
 		"""
 
-		prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats = suff_stat
+		prev_alpha, set_stats, doc_counts, topic_counts, topic_suff_stats = suff_stat
 
 
 		num_topics = self.num_topics
@@ -777,11 +924,30 @@ class LLDAEstimator(ParameterEstimator):
 
 		if self.fixed_alpha is None:
 
-			if self.pseudo_count is not None:
-				mean_of_logs = (sum_of_logs + np.log(self.pseudo_count[1]))/(doc_counts + self.pseudo_count[0])
+			if prev_alpha is None:
+				prev_alpha = np.ones((self.num_alphas, num_topics))
 
-			#new_alpha, _ = find_alpha(prev_alpha, sum_of_logs/doc_counts, gamma_threshold*np.sqrt(float(doc_counts)))
-			new_alpha = update_alpha(prev_alpha, sum_of_logs/doc_counts, self.alpha_threshold)
+			label_sets, set_n, set_m = set_stats.arrays()
+
+			if len(label_sets) == 0:
+				new_alpha = np.asarray(prev_alpha, dtype=float).copy()
+			else:
+
+				if self.pseudo_count is not None:
+					set_n_eff = set_n + self.pseudo_count[0]
+					mean_of_logs = (set_m + np.log(self.pseudo_count[1]))/np.reshape(set_n_eff, (-1, 1))
+				else:
+					set_n_eff = set_n
+					mean_of_logs = set_m/np.reshape(set_n, (-1, 1))
+
+				if all(len(u) == 1 for u in label_sets):
+					# Single-label documents: the coupled objective decouples per label row into the
+					# classic fixed-point objective, so update the observed rows independently.
+					rows = np.asarray([u[0] for u in label_sets], dtype=int)
+					new_alpha = np.asarray(prev_alpha, dtype=float).copy()
+					new_alpha[rows, :] = update_alpha(new_alpha[rows, :], mean_of_logs, self.alpha_threshold)
+				else:
+					new_alpha = update_alpha_coupled(prev_alpha, label_sets, set_n_eff, mean_of_logs, self.alpha_threshold)
 		else:
 			new_alpha = np.asarray(self.fixed_alpha).copy()
 
@@ -934,6 +1100,153 @@ def update_alpha(current_alpha, mean_log_p, alpha_threshold):
 def updateAlpha(current_alpha, mean_log_p, alpha_threshold):
 	"""Deprecated alias for update_alpha()."""
 	return update_alpha(current_alpha, mean_log_p, alpha_threshold)
+
+
+def label_set_membership(label_sets):
+	"""Returns flattened membership arrays for a sequence of label sets.
+
+	Args:
+		label_sets (Sequence[Tuple[int, ...]]): Label-set tuples (one per distinct document label set).
+
+	Returns:
+		Tuple of the flattened label indices (member_label), the label-set index of each flattened entry
+		(member_set), and the per-set sizes |S| as floats.
+
+	"""
+	set_sizes    = np.asarray([len(u) for u in label_sets], dtype=int)
+	member_label = np.asarray([l for u in label_sets for l in u], dtype=int)
+	member_set   = np.repeat(np.arange(len(label_sets), dtype=int), set_sizes)
+	return member_label, member_set, set_sizes.astype(float)
+
+
+def coupled_alpha_doc_params(alpha, label_sets):
+	"""Returns the per-label-set Dirichlet parameters a_S = mean_{l in S} alpha[l].
+
+	Args:
+		alpha (np.ndarray): Alphas matrix (num_alphas by num_topics).
+		label_sets (Sequence[Tuple[int, ...]]): Label-set tuples.
+
+	Returns:
+		Numpy 2-d array with one Dirichlet parameter row per label set.
+
+	"""
+	member_label, member_set, set_sizes = label_set_membership(label_sets)
+	a = np.zeros((len(label_sets), alpha.shape[1]))
+	np.add.at(a, member_set, alpha[member_label, :])
+	a /= np.reshape(set_sizes, (-1, 1))
+	return a
+
+
+def coupled_alpha_objective(alpha, label_sets, set_counts, set_mean_logs):
+	"""Coupled multi-label alpha objective (terms independent of alpha dropped).
+
+	F(alpha) = sum_S n_S * [ log Gamma(sum_k a_Sk) - sum_k log Gamma(a_Sk) + sum_k a_Sk * mbar_Sk ],
+	where a_S = mean_{l in S} alpha[l], n_S = set_counts[S], and mbar_S = set_mean_logs[S] are the
+	per-set mean expected log topic weights.
+
+	Args:
+		alpha (np.ndarray): Alphas matrix (num_alphas by num_topics).
+		label_sets (Sequence[Tuple[int, ...]]): Label-set tuples.
+		set_counts (np.ndarray): Per-set document weights n_S.
+		set_mean_logs (np.ndarray): Per-set mean expected log topic weights mbar_S (one row per set).
+
+	Returns:
+		Objective value F(alpha).
+
+	"""
+	a = coupled_alpha_doc_params(alpha, label_sets)
+	return np.dot(set_counts, gammaln(a.sum(axis=1)) - gammaln(a).sum(axis=1) + (a*set_mean_logs).sum(axis=1))
+
+
+def coupled_alpha_gradient(alpha, label_sets, set_counts, set_mean_logs):
+	"""Gradient of the coupled multi-label alpha objective with respect to alpha.
+
+	dF/d alpha[l,k] = sum_{S contains l} (n_S/|S|) * [ psi(sum_j a_Sj) - psi(a_Sk) + mbar_Sk ], with one
+	term per occurrence of l in S.
+
+	Args:
+		alpha (np.ndarray): Alphas matrix (num_alphas by num_topics).
+		label_sets (Sequence[Tuple[int, ...]]): Label-set tuples.
+		set_counts (np.ndarray): Per-set document weights n_S.
+		set_mean_logs (np.ndarray): Per-set mean expected log topic weights mbar_S (one row per set).
+
+	Returns:
+		Numpy 2-d array with the same shape as alpha.
+
+	"""
+	member_label, member_set, set_sizes = label_set_membership(label_sets)
+	a = coupled_alpha_doc_params(alpha, label_sets)
+	g_set  = digamma(a.sum(axis=1, keepdims=True)) - digamma(a) + set_mean_logs
+	g_set *= np.reshape(set_counts/set_sizes, (-1, 1))
+	g = np.zeros(alpha.shape)
+	np.add.at(g, member_label, g_set[member_set, :])
+	return g
+
+
+def update_alpha_coupled(current_alpha, label_sets, set_counts, set_mean_logs, alpha_threshold, max_its=2000):
+	"""Coupled update of the full alphas matrix for documents with multi-label sets.
+
+	Maximizes 'coupled_alpha_objective()' over all positive alpha entries. Since each document Dirichlet
+	parameter a_S averages several alpha rows, the rows do not decouple; the objective is concave in
+	alpha (a_S is linear in alpha and the Dirichlet log-partition is convex), so ascent converges to the
+	global maximum. The ascent is run on beta = log(alpha) (keeping alpha positive) with backtracking
+	line search and an adaptive step size, warm-started from 'current_alpha', until the row-wise relative
+	change of alpha falls below alpha_threshold (matching the 'update_alpha()' convergence semantics).
+
+	Label rows that appear in no label set have zero gradient and are returned unchanged.
+
+	Args:
+		current_alpha (np.ndarray): Current alphas matrix (num_alphas by num_topics), used as warm start.
+		label_sets (Sequence[Tuple[int, ...]]): Distinct document label sets (sorted tuples).
+		set_counts (np.ndarray): Per-set document weights n_S.
+		set_mean_logs (np.ndarray): Per-set mean expected log topic weights mbar_S (one row per set).
+		alpha_threshold (float): Convergence threshold for the row-wise relative alpha changes.
+		max_its (int): Maximum number of accepted ascent steps.
+
+	Returns:
+		Numpy 2-d array of updated alphas (num_alphas by num_topics).
+
+	"""
+
+	alpha = np.maximum(np.asarray(current_alpha, dtype=float), 1.0e-10)
+	beta  = np.log(alpha)
+	f_cur = coupled_alpha_objective(alpha, label_sets, set_counts, set_mean_logs)
+	step  = 1.0
+
+	for its_cnt in range(max_its):
+
+		g_beta = coupled_alpha_gradient(alpha, label_sets, set_counts, set_mean_logs)
+		g_beta *= alpha
+		g_sq = np.sum(g_beta * g_beta)
+
+		if not np.isfinite(g_sq) or g_sq == 0.0:
+			break
+
+		# Backtracking line search on F along the beta-space gradient direction (Armijo condition).
+		t = step
+		accepted = False
+		while t >= 1.0e-16:
+			beta_new  = np.clip(beta + t*g_beta, -300.0, 300.0)
+			alpha_new = np.exp(beta_new)
+			f_new     = coupled_alpha_objective(alpha_new, label_sets, set_counts, set_mean_logs)
+			if np.isfinite(f_new) and f_new >= f_cur + 1.0e-4*t*g_sq:
+				accepted = True
+				break
+			t *= 0.5
+
+		if not accepted:
+			break
+
+		res   = np.max(np.abs(alpha_new - alpha).sum(axis=1) / alpha_new.sum(axis=1))
+		alpha = alpha_new
+		beta  = beta_new
+		f_cur = f_new
+		step  = min(t*2.0, 1.0e8)
+
+		if res <= alpha_threshold:
+			break
+
+	return alpha
 
 
 def mpe_update(X, y, min_size=2):

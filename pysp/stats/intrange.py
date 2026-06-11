@@ -21,6 +21,7 @@ from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEncodableProbabilityDistribution, \
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
     DistributionEnumerator
+from pysp.utils.enumeration import QuantizedEnumerationIndex
 from typing import List, Union, Tuple, Optional, Dict, Any
 
 
@@ -145,6 +146,11 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
     def enumerator(self) -> 'IntegerCategoricalEnumerator':
         """Return IntegerCategoricalEnumerator iterating the support in descending probability order."""
         return IntegerCategoricalEnumerator(self)
+
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
+        """Build a bounded bit-quantized index directly from the finite integer support."""
+        items = [(self.min_val + i, float(lp)) for i, lp in enumerate(self.log_p_vec)]
+        return QuantizedEnumerationIndex.from_items(items, max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
 class IntegerCategoricalEnumerator(DistributionEnumerator):

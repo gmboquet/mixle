@@ -13,12 +13,15 @@ where j_k < i_k for all k = 1,2,3,..N.
 Data type: Union[Sequence[int], np.ndarray] .
 
 """
+import itertools
+
 import numpy as np
 from numpy.random import RandomState
 from scipy.sparse.csgraph import minimum_spanning_tree, breadth_first_order
 
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DataSequenceEncoder, DistributionSampler, StatisticAccumulatorFactory
+    ParameterEstimator, DataSequenceEncoder, DistributionSampler, StatisticAccumulatorFactory, \
+    DistributionEnumerator, EnumerationError
 
 from typing import Sequence, Tuple, Any, List, Dict, Union, Optional
 
@@ -139,17 +142,84 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
         """Create an ICLTreeEstimator object.
 
         Args:
-            pseudo_count (Optional[float]): Used to inflate sufficient statistics (currently not passed on).
+            pseudo_count (Optional[float]): Used to inflate sufficient statistics.
 
         Returns:
             ICLTreeEstimator object.
 
         """
-        return ICLTreeEstimator(name=self.name)
+        num_states = len(self.conditional_densities[0])
+        return ICLTreeEstimator(num_features=self.num_features, num_states=num_states,
+                                pseudo_count=pseudo_count, name=self.name)
 
     def dist_to_encoder(self) -> 'ICLTreeDataEncoder':
         """Returns an ICLTreeDataEncoder object for encoding sequences of data."""
         return ICLTreeDataEncoder()
+
+    def enumerator(self) -> 'ICLTreeEnumerator':
+        """Returns ICLTreeEnumerator iterating fixed-length integer vectors in descending probability order."""
+        return ICLTreeEnumerator(self)
+
+
+class ICLTreeEnumerator(DistributionEnumerator):
+    """Enumerates the finite support of an integer Chow-Liu tree."""
+
+    def __init__(self, dist: ICLTreeDistribution) -> None:
+        """ICLTreeEnumerator object.
+
+        The support is the Cartesian product of each feature's finite state range, inferred
+        from the root marginal and conditional probability tables.
+
+        Args:
+            dist (ICLTreeDistribution): Distribution whose support is enumerated.
+
+        """
+        super().__init__(dist)
+        domain_sizes: List[Optional[int]] = [None] * dist.num_features
+
+        for i, (feature, parent) in enumerate(dist.dependency_list):
+            table = np.asarray(dist.conditional_log_densities[i])
+            if parent is None:
+                if table.ndim != 1:
+                    raise EnumerationError(dist, reason='root conditional table must be one-dimensional')
+                child_size = table.shape[0]
+                parent_size = None
+            else:
+                if table.ndim != 2:
+                    raise EnumerationError(dist, reason='conditional tables must be two-dimensional')
+                parent_size, child_size = table.shape
+                self._set_domain_size(domain_sizes, parent, parent_size, dist)
+            self._set_domain_size(domain_sizes, feature, child_size, dist)
+
+        if any(sz is None for sz in domain_sizes):
+            raise EnumerationError(dist, reason='could not infer every feature domain size')
+
+        with np.errstate(divide='ignore'):
+            entries = []
+            ranges = [range(int(sz)) for sz in domain_sizes]
+            for value in itertools.product(*ranges):
+                lp = float(dist.log_density(value))
+                if lp > -np.inf:
+                    entries.append((list(value), lp))
+        entries.sort(key=lambda u: -u[1])
+        self._entries = entries
+        self._pos = 0
+
+    @staticmethod
+    def _set_domain_size(domain_sizes: List[Optional[int]], idx: int, size: int,
+                         dist: ICLTreeDistribution) -> None:
+        if idx < 0 or idx >= len(domain_sizes):
+            raise EnumerationError(dist, reason='feature index out of range')
+        if domain_sizes[idx] is not None and domain_sizes[idx] != size:
+            raise EnumerationError(dist, reason='inconsistent feature domain sizes')
+        domain_sizes[idx] = int(size)
+
+    def __next__(self) -> Tuple[List[int], float]:
+        if self._pos >= len(self._entries):
+            raise StopIteration
+        item = self._entries[self._pos]
+        self._pos += 1
+        return item
 
 
 class ICLTreeSampler(DistributionSampler):
@@ -346,8 +416,8 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         elif (self.counts is None) and (counts is not None):
             self.counts = counts
             self.marginal_counts = marginal_counts
-            self.num_states = suff_stat.shape[-1]
-            self.num_features = suff_stat.shape[0]
+            self.num_states = num_states
+            self.num_features = num_features
 
         elif self.counts is not None and counts is None:
             pass
@@ -498,16 +568,23 @@ class ICLTreeEstimator(ParameterEstimator):
 
         for i in range(num_features - 1):
             for j in range(i + 1, num_features):
-                joint_ij = counts[i, j, :, :] + pseudo_count_adj1
-                indep_ij = np.outer(marginal_counts[i, :], marginal_counts[j, :]) + pseudo_count_adj1
+                if pseudo_count > 0:
+                    n_ij = counts[i, j, :, :].sum()
+                    joint_ij = (counts[i, j, :, :] + pseudo_count_adj1) / (n_ij + pseudo_count)
+                    marg_i = (marginal_counts[i, :] + pseudo_count_adj0) / (n_ij + pseudo_count)
+                    marg_j = (marginal_counts[j, :] + pseudo_count_adj0) / (n_ij + pseudo_count)
+                    indep_ij = np.outer(marg_i, marg_j)
+                else:
+                    joint_ij = counts[i, j, :, :].copy()
+                    indep_ij = np.outer(marginal_counts[i, :], marginal_counts[j, :])
 
-                joint_ij_sum = joint_ij.sum()
-                indep_ij_sum = indep_ij.sum()
+                    joint_ij_sum = joint_ij.sum()
+                    indep_ij_sum = indep_ij.sum()
 
-                if joint_ij_sum > 0:
-                    joint_ij /= joint_ij_sum
-                if indep_ij_sum > 0:
-                    indep_ij /= indep_ij_sum
+                    if joint_ij_sum > 0:
+                        joint_ij /= joint_ij_sum
+                    if indep_ij_sum > 0:
+                        indep_ij /= indep_ij_sum
 
                 good = np.bitwise_and(joint_ij > 0, indep_ij > 0)
 
@@ -585,7 +662,6 @@ class ICLTreeDataEncoder(DataSequenceEncoder):
 
         """
         return np.asarray(x, dtype=int)
-
 
 
 
