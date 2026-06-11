@@ -132,7 +132,7 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
         """
         if x is None or len(x) == 0:
             if self.len_dist is not None:
-                return self.len_dist(0)
+                return self.len_dist.log_density(0)
             else:
                 return 0.0
 
@@ -350,19 +350,18 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
     def estimator(self, pseudo_count=None):
         """Create a LookbackHiddenMarkovEstimator from this distribution.
 
-        Note: lag and init_estimators are not propagated; construct a LookbackHiddenMarkovEstimator
-        directly when lag > 0.
-
         Args:
             pseudo_count (Optional[float]): Regularize the initial-state and transition estimates.
 
         Returns:
-            LookbackHiddenMarkovEstimator: Estimator built from the topic and length distributions.
+            LookbackHiddenMarkovEstimator: Estimator built from the topic, initial-segment, and
+                length distributions, preserving the lag.
 
         """
         len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
         comp_ests = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
-        return LookbackHiddenMarkovEstimator(comp_ests, pseudo_count=(pseudo_count,pseudo_count), len_estimator=len_est)
+        init_ests = [u.estimator(pseudo_count=pseudo_count) for u in self.init_dist]
+        return LookbackHiddenMarkovEstimator(comp_ests, lag=self.lag, init_estimators=init_ests, len_estimator=len_est, pseudo_count=(pseudo_count,pseudo_count), name=self.name)
 
 class LookbackHiddenMarkovDataEncoder(DataSequenceEncoder):
     """Encoder for sequences of iid lookback-HMM observations (each a Sequence[T])."""
@@ -943,7 +942,14 @@ class LookbackHiddenMarkovEstimator(ParameterEstimator):
             transitions /= row_sum
         else:
             row_sum = trans_counts.sum(axis=1, keepdims=True)
-            transitions = trans_counts / row_sum
+            bad_rows = row_sum.flatten() == 0.0
+
+            if np.any(bad_rows):
+                good_rows = ~bad_rows
+                transitions = np.zeros_like(trans_counts, dtype=np.float64)
+                transitions[good_rows, :] += trans_counts[good_rows, :] / row_sum[good_rows]
+            else:
+                transitions = trans_counts / row_sum
 
         return LookbackHiddenMarkovDistribution(topics, w, transitions, lag=lag, init_dist=init_dist, len_dist=len_dist, name=self.name)
 

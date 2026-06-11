@@ -12,7 +12,7 @@ import numpy as np
 from pysp.stats import (
     CategoricalDistribution, CategoricalEstimator, CompositeDistribution, CompositeEstimator,
     GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator,
-    seq_encode, seq_estimate, seq_initialize,
+    OptionalDistribution, seq_encode, seq_estimate, seq_initialize,
 )
 from pysp.stats import PoissonDistribution, SequenceDistribution, IntegerCategoricalDistribution
 from pysp.utils.htsne import (
@@ -163,6 +163,9 @@ class HTSNETestCase(unittest.TestCase):
             dense_vals = np.sort(log_s[i])[::-1][:k]
             sparse_vals = np.sort(log_s[i, d_csr[i].indices])[::-1]
             self.assertTrue(np.allclose(dense_vals, sparse_vals, atol=1.0e-9))
+            self.assertTrue(np.allclose(d_csr[i].data,
+                                        np.maximum(-log_s[i, d_csr[i].indices], 0.0),
+                                        atol=1.0e-12))
 
     # ---- kernel and alpha ------------------------------------------------------
 
@@ -236,6 +239,11 @@ class HTSNETestCase(unittest.TestCase):
         self.assertTrue(np.all(dist[:, 0] == 0.0))
         self.assertTrue(np.all(np.diff(dist[:, 1:], axis=1) >= -1.0e-12))
         self.assertTrue(np.all(dist >= 0.0))
+        log_s = model_log_affinity(self.z, self.l)
+        for i in (0, 17, self.n - 1):
+            self.assertTrue(np.allclose(dist[i, 1:],
+                                        np.maximum(-log_s[i, idx[i, 1:]], 0.0),
+                                        atol=1.0e-12))
 
     def test_humap_embedding(self):
         y = humap(self.data, mix_model=self.model, n_neighbors=15, seed=4, out=io.StringIO())
@@ -384,10 +392,36 @@ class HTSNETestCase(unittest.TestCase):
         self.assertTrue(np.allclose(np.nan_to_num(la1, neginf=-1e30),
                                     np.nan_to_num(la1c, neginf=-1e30)))
 
+    def test_field_weights_apply_to_whole_field_coefficient(self):
+        from pysp.utils.htsne import balanced_factors, model_log_affinity
+        factors = balanced_factors(self.model, self.data, field_weights=[2.0, 0.0])
+        la = model_log_affinity(None, None, affinity=factors, evidence_cap=None)
+
+        g, h, weight = factors[0]
+        expected = weight * np.log(np.dot(g, h.T))
+        expected[np.arange(self.n), np.arange(self.n)] = -np.inf
+        off = ~np.eye(self.n, dtype=bool)
+        self.assertTrue(np.allclose(la[off], expected[off], atol=1.0e-12))
+
+    def test_optional_without_missing_probability_has_no_gate_field(self):
+        from pysp.utils.htsne import balanced_factors, model_log_affinity
+        model = MixtureDistribution([
+            OptionalDistribution(GaussianDistribution(-2.0, 1.0), p=None),
+            OptionalDistribution(GaussianDistribution(2.0, 1.0), p=None),
+        ], [0.5, 0.5])
+        data = [None, -2.0, -1.5, None, 1.5, 2.0]
+        factors = balanced_factors(model, data)
+        self.assertEqual(len(factors), 1)
+        la = model_log_affinity(None, None, affinity=factors)
+        off = ~np.eye(len(data), dtype=bool)
+        self.assertTrue(np.all(np.isfinite(la[off])))
+
     def test_field_weights_validated_against_flattened_fields(self):
         from pysp.utils.htsne import balanced_factors
         with self.assertRaises(ValueError):
             balanced_factors(self.model, self.data, field_weights=[1.0])
+        with self.assertRaises(ValueError):
+            balanced_factors(self.model, self.data, field_weights=[1.0, -1.0])
 
 
 if __name__ == '__main__':

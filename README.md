@@ -30,6 +30,8 @@ pip install "pysparkplug[all]   @ git+https://github.com/gmboquet/pysparkplug.gi
 
 Without the extras, numba-flagged code paths run as pure Python (correct, just slower), Spark inputs are unavailable, and `htsne` uses its exact engine. For development: `git clone` and `pip install -e ".[all]"`.
 
+For the model-based embedding method behind `htsne` and `humap`, see [HTSNE_PAPER.md](HTSNE_PAPER.md).
+
 ## Quickstart
 
 Fit a two-component mixture over heterogeneous records of the form `(category, real value, variable-length count sequence)`:

@@ -133,7 +133,7 @@ class LLDADistribution(SequenceEncodableProbabilityDistribution):
 
 		elob0 = digamma(document_gammas) - digamma(np.sum(document_gammas, axis=1, keepdims=True))
 		elob1 = elob0[idx, :]
-		elob2 = log_density_gamma * (elob1 + per_topic_log_densities - np.log(log_density_gamma))
+		elob2 = log_density_gamma * (elob1 + per_topic_log_densities - np.log(log_density_gamma) + np.log(np.reshape(counts, (-1, 1))))
 		elob3 = np.sum(elob0 * ((document_alphas - 1.0) - (document_gammas - 1.0)), axis=1)
 		elob4 = np.bincount(idx_full.flat, weights=elob2.flat)
 		elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
@@ -779,9 +779,11 @@ class LLDAEstimator(ParameterEstimator):
 
 			if self.pseudo_count is not None:
 				mean_of_logs = (sum_of_logs + np.log(self.pseudo_count[1]))/(doc_counts + self.pseudo_count[0])
+			else:
+				mean_of_logs = sum_of_logs/doc_counts
 
 			#new_alpha, _ = find_alpha(prev_alpha, sum_of_logs/doc_counts, gamma_threshold*np.sqrt(float(doc_counts)))
-			new_alpha = update_alpha(prev_alpha, sum_of_logs/doc_counts, self.alpha_threshold)
+			new_alpha = update_alpha(prev_alpha, mean_of_logs, self.alpha_threshold)
 		else:
 			new_alpha = np.asarray(self.fixed_alpha).copy()
 
