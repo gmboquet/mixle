@@ -41,6 +41,7 @@ SS1 = TypeVar('SS1') ### type for value of length dist sufficient statistics.
 
 class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Integer-valued probabilistic latent semantic indexing distribution."""
     def __init__(self, state_word_mat: Union[List[List[float]], np.ndarray],
                  doc_state_mat: Union[List[List[float]], np.ndarray], doc_vec: Union[List[float], np.ndarray],
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),

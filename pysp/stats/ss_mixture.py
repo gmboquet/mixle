@@ -40,6 +40,23 @@ E = Tuple[int, E0, Tuple[E1, np.ndarray, np.ndarray], Sequence[Tuple[T0, Optiona
 SS0 = TypeVar('SS0')  # Suff-stat type from components
 
 
+def _sum_prior_weights(prior: Sequence[Tuple[int, T1]], num_components: int) -> np.ndarray:
+    """Validate and sum prior mass by component for one observation."""
+    prior_weights = np.zeros(num_components, dtype=np.float64)
+
+    for idx, val in prior:
+        if not (0 <= idx < num_components):
+            raise ValueError('Prior component index %d is out of range [0, %d).' % (idx, num_components))
+        if val < 0:
+            raise ValueError('Prior value %s for component %d is negative.' % (str(val), idx))
+        prior_weights[idx] += val
+
+    if not prior_weights.sum() > 0:
+        raise ValueError('Prior has non-positive total mass.')
+
+    return prior_weights
+
+
 class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution):
     """SemiSupervisedMixtureDistribution models observations (value, prior) where the optional
     prior labels re-weight the mixture weights over the listed components."""
@@ -73,7 +90,7 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
     def __str__(self) -> str:
         """Returns string representation of SemiSupervisedMixtureDistribution object."""
         return 'SemiSupervisedMixtureDistribution([%s], [%s], name=%s)' % (
-            ','.join([str(u) for u in self.components]), ','.join(map(str, self.w)), ','.join(repr(self.name)))
+            ','.join([str(u) for u in self.components]), ','.join(map(str, self.w)), repr(self.name))
 
     def density(self, x: Tuple[T0, Optional[Sequence[Tuple[int, T1]]]]) -> float:
         """Density of the semi-supervised mixture at observation x.
@@ -109,15 +126,10 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
         if prior is None:
             return vec.log_sum(np.asarray([u.log_density(datum) for u in self.components]) + self.log_w)
         else:
-            w_loc = np.zeros(self.num_components)
-            h_loc = np.zeros(self.num_components, dtype=bool)
-            i_loc = np.zeros(self.num_components, dtype=int)
+            w_loc = _sum_prior_weights(prior, self.num_components)
+            h_loc = w_loc > 0.0
 
-            for idx, val in prior:
-                w_loc[idx] += np.log(val)
-                h_loc[idx] = True
-                i_loc[idx] = idx
-
+            w_loc[h_loc] = np.log(w_loc[h_loc])
             w_loc[h_loc] += self.log_w[h_loc]
             w_loc = vec.log_posterior(w_loc[h_loc])
 
@@ -141,14 +153,10 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
         if prior is None:
             rv = vec.posterior(np.asarray([u.log_density(datum) for u in self.components]) + self.log_w)
         else:
+            w_loc = _sum_prior_weights(prior, self.num_components)
+            h_loc = w_loc > 0.0
 
-            w_loc = np.zeros(self.num_components)
-            h_loc = np.zeros(self.num_components, dtype=bool)
-
-            for idx, val in prior:
-                w_loc[idx] += np.log(val)
-                h_loc[idx] = True
-
+            w_loc[h_loc] = np.log(w_loc[h_loc])
             w_loc[h_loc] += self.log_w[h_loc]
             for i in np.flatnonzero(h_loc):
                 w_loc[i] += self.components[i].log_density(datum)
@@ -845,6 +853,15 @@ class SemiSupervisedMixtureDataEncoder(DataSequenceEncoder):
         prior_comp = np.asarray(prior_comp, dtype=int)
         prior_idx = np.asarray(prior_idx, dtype=int)
         prior_val = np.asarray(prior_val, dtype=float)
+
+        if len(prior_idx) > 0:
+            width = num_components if num_components is not None else int(prior_comp.max()) + 1
+            flat_idx = prior_idx * width + prior_comp
+            prior_val = np.bincount(flat_idx, weights=prior_val, minlength=len(x) * width)
+            flat_idx = np.flatnonzero(prior_val > 0.0)
+            prior_idx = (flat_idx // width).astype(int)
+            prior_comp = (flat_idx % width).astype(int)
+            prior_val = prior_val[flat_idx]
 
         prior_mat = (prior_idx, prior_comp, prior_val, np.log(prior_val))
 

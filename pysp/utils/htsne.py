@@ -2,7 +2,7 @@
 
 Pairwise affinities are derived from a fitted mixture model rather than from
 Euclidean distances, so anything pysparkplug can model (tuples, sequences,
-sets, variable-length data, ...) can be embedded. Five affinity definitions
+sets, variable-length data, ...) can be embedded. Six affinity definitions
 are supported (the `affinity` argument):
 
 - 'local' (the 'auto' default whenever raw data is available): the model is
@@ -26,6 +26,12 @@ are supported (the `affinity` argument):
   fractions of one - the joint posterior only ever sees the loudest field),
   and the cap bounds each field's influence so one spuriously sharp field
   cannot veto a pair's similarity that every other field supports.
+
+- 'fisher': each observation is mapped through the model's to_fisher() view to
+  posterior-expected sufficient statistics and, by default, whitened by the
+  empirical observed Fisher covariance of those score vectors. Pair affinities
+  are Gaussian in that Fisher-vector space, so htsne can use the same
+  sufficient-statistic geometry exposed to downstream tools.
 
 - 'bhattacharyya': the Bhattacharyya coefficient between joint posteriors,
   s_ij = sum_k sqrt(z_ik z_jk); -log s_ij is the Bhattacharyya distance on
@@ -73,10 +79,11 @@ from typing import Optional, Tuple
 
 import numpy as np
 import scipy.sparse
+from pysp.utils.optional_deps import HAS_NUMBA, numba
 
 __all__ = ['htsne', 'humap', 'dpmsne', 'model_log_affinity', 'sparse_model_distances',
            'approx_sparse_model_distances', 'model_knn', 'get_pmat', 'balanced_factors',
-           'local_factors', 'tsne_barnes_hut']
+           'local_factors', 'fisher_factors', 'tsne_barnes_hut']
 
 
 def _affinity_factors(posterior_mat, ll_mat, affinity):
@@ -91,6 +98,10 @@ def _affinity_factors(posterior_mat, ll_mat, affinity):
         if not factors:
             raise ValueError("affinity factor list must not be empty.")
         return factors                       # pre-built factor list
+
+    if affinity == 'fisher':
+        raise ValueError("affinity='fisher' requires fisher_factors(model, data=...) "
+                         "or htsne/humap with a model.")
 
     z = np.asarray(posterior_mat, dtype=np.float64)
     if z.ndim != 2:
@@ -110,7 +121,11 @@ def _affinity_factors(posterior_mat, ll_mat, affinity):
         return [(np.exp(l - l.max(axis=1, keepdims=True)), z)]
 
     raise ValueError("affinity must be 'coassign', 'bhattacharyya', 'likelihood', "
-                     "'local', 'balanced', or a pre-built factor list.")
+                     "'local', 'balanced', 'fisher', or a pre-built factor list.")
+
+
+def _is_prebuilt_affinity(affinity) -> bool:
+    return isinstance(affinity, (list, tuple))
 
 
 def _leaf_feature_matrix(dists, items):
@@ -216,7 +231,7 @@ def _field_log_density_features(dists, items):
             sub = [fill if m else x for x, m in zip(items, miss)]
             keep = (~miss).astype(np.float64)[:, None]
             for l_in, _ in _field_log_density_features([d.dist for d in dists], sub):
-                yield l_in * keep, None
+                yield np.where(keep > 0.0, l_in, 0.0), None
         return
 
     if hasattr(dists[0], 'dist_to_encoder'):
@@ -389,9 +404,55 @@ def local_factors(mix_model, data, field_weights=None):
     return factors
 
 
+def _observed_fisher_vectors(view, stats: np.ndarray, metric: str, ridge: float) -> np.ndarray:
+    return view.observed_fisher_vectors(stats=np.asarray(stats, dtype=np.float64),
+                                        metric=metric, ridge=ridge)
+
+
+def fisher_factors(model, data=None, enc_data=None, metric: str = 'diagonal',
+                   ridge: float = 1.0e-8, weight: float = 1.0,
+                   information: str = 'observed'):
+    """Fisher-vector affinity factor for a model and observations.
+
+    The model supplies posterior-expected sufficient statistics through
+    to_fisher().  By default those statistics are treated as observed score
+    vectors and whitened by their empirical observed Fisher covariance.  Set
+    information='model' to use the view's model Fisher metric directly.  Pair
+    affinities are s_ij = exp(-0.5 ||v_i - v_j||^2).
+    """
+    if data is None and enc_data is None:
+        raise ValueError("affinity='fisher' requires raw data or encoded data.")
+    if data is not None and enc_data is not None:
+        raise ValueError("pass only one of data or enc_data for affinity='fisher'.")
+    if weight < 0:
+        raise ValueError("fisher affinity weight must be non-negative.")
+    if information not in ('observed', 'model'):
+        raise ValueError("information must be 'observed' or 'model'.")
+
+    view = model.to_fisher()
+    if data is not None:
+        stats = view.expected_statistics_matrix(data=list(data))
+    else:
+        stats = view.seq_expected_statistics(enc_data)
+    if information == 'observed':
+        x = _observed_fisher_vectors(view, stats=stats, metric=metric, ridge=ridge)
+    else:
+        x = view.fisher_vectors(stats=stats, metric=metric, ridge=ridge)
+    x = np.nan_to_num(np.asarray(x, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+
+    return [{
+        'kind': 'fisher',
+        'x': x,
+        'weight': float(weight),
+        'metric': metric,
+        'ridge': float(ridge),
+        'information': information,
+    }]
+
+
 def _factor_parts(factor):
     if isinstance(factor, dict):
-        raise ValueError("local affinity factors are not dot-product factors.")
+        raise ValueError("local/fisher affinity factors are not dot-product factors.")
     if len(factor) == 2:
         g, h = factor
         weight = 1.0
@@ -409,14 +470,20 @@ def _is_local_factor(factor) -> bool:
     return isinstance(factor, dict) and factor.get('kind') == 'local'
 
 
+def _is_fisher_factor(factor) -> bool:
+    return isinstance(factor, dict) and factor.get('kind') == 'fisher'
+
+
 def _factor_n(factor) -> int:
     if _is_local_factor(factor):
         return int(factor['sqrt_z'].shape[0])
+    if _is_fisher_factor(factor):
+        return int(factor['x'].shape[0])
     return int(_factor_parts(factor)[0].shape[0])
 
 
 def _factor_weight(factor) -> float:
-    if _is_local_factor(factor):
+    if _is_local_factor(factor) or _is_fisher_factor(factor):
         return float(factor.get('weight', 1.0))
     return _factor_parts(factor)[2]
 
@@ -446,6 +513,18 @@ def _local_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) ->
     return sim
 
 
+def _fisher_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) -> np.ndarray:
+    x = np.asarray(factor['x'], dtype=np.float64)
+    xr = x[row_idx]
+    xc = x[col_idx]
+
+    rr = np.sum(xr * xr, axis=1, keepdims=True)
+    cc = np.sum(xc * xc, axis=1, keepdims=True).T
+    d2 = rr + cc - 2.0 * np.dot(xr, xc.T)
+    np.maximum(d2, 0.0, out=d2)
+    return np.exp(-0.5 * np.minimum(d2, 1400.0))
+
+
 def _factor_similarity_block(factor, row_idx: np.ndarray, col_idx: Optional[np.ndarray] = None) -> np.ndarray:
     row_idx = np.asarray(row_idx, dtype=np.int64)
     if col_idx is None:
@@ -455,6 +534,8 @@ def _factor_similarity_block(factor, row_idx: np.ndarray, col_idx: Optional[np.n
 
     if _is_local_factor(factor):
         return _local_similarity_block(factor, row_idx, col_idx)
+    if _is_fisher_factor(factor):
+        return _fisher_similarity_block(factor, row_idx, col_idx)
 
     g, h, _ = _factor_parts(factor)
     return np.dot(g[row_idx], h[col_idx].T)
@@ -464,13 +545,17 @@ def _factor_similarity_candidates(factor, i: int, candidates: np.ndarray) -> np.
     candidates = np.asarray(candidates, dtype=np.int64)
     if _is_local_factor(factor):
         return _local_similarity_block(factor, np.asarray([i], dtype=np.int64), candidates)[0]
+    if _is_fisher_factor(factor):
+        return _fisher_similarity_block(factor, np.asarray([i], dtype=np.int64), candidates)[0]
 
     g, h, _ = _factor_parts(factor)
     return np.dot(h[candidates], g[i])
 
 
-def _resolve_affinity(affinity, mix_model, data, field_weights):
-    """Resolve 'auto'/'local'/'balanced' to a concrete affinity for the model.
+def _resolve_affinity(affinity, mix_model, data, field_weights, enc_data=None,
+                      fisher_metric: str = 'diagonal', fisher_ridge: float = 1.0e-8,
+                      fisher_information: str = 'observed'):
+    """Resolve named affinity modes to a concrete affinity for the model.
 
     'auto' uses local statistical factors whenever raw data is available to
     split into the model's leaf fields; if the data cannot be decomposed (or
@@ -494,6 +579,12 @@ def _resolve_affinity(affinity, mix_model, data, field_weights):
         if data is None:
             raise ValueError("affinity='balanced' requires the raw data to extract per-field values.")
         return balanced_factors(mix_model, data, field_weights=field_weights)
+
+    if affinity == 'fisher':
+        f_data = None if enc_data is not None else data
+        return fisher_factors(mix_model, data=f_data, enc_data=enc_data,
+                              metric=fisher_metric, ridge=fisher_ridge,
+                              information=fisher_information)
 
     return affinity
 
@@ -746,6 +837,14 @@ def _candidate_features(factors) -> Tuple[np.ndarray, np.ndarray]:
             x = (x - x.mean(axis=0, keepdims=True)) / np.maximum(sd, 1.0e-8)
             rg = np.hstack((sq, 0.25 * x))
             ch = rg
+        elif _is_fisher_factor(factor):
+            x = np.asarray(factor['x'], dtype=np.float64)
+            rg = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+            ch = rg
+            scale = np.sqrt(weight)
+            row_blocks.append(scale * rg)
+            col_blocks.append(scale * ch)
+            continue
         else:
             g, h, _ = _factor_parts(factor)
             rg = np.nan_to_num(np.asarray(g, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
@@ -983,6 +1082,17 @@ def t_kernel(tx: np.ndarray, alpha: float) -> Tuple[np.ndarray, np.ndarray, np.n
     return q, num, d2
 
 
+def _exact_tsne_gradient(P: np.ndarray, Y: np.ndarray, alpha: float,
+                         min_value: float = 1.0e-128) -> Tuple[np.ndarray, np.ndarray]:
+    """Gradient of KL(P || Q(Y)) for the dense heavy-tailed t-SNE kernel."""
+    Q, num, _ = t_kernel(Y, alpha)
+    np.maximum(Q, min_value, out=Q)
+
+    W = (P - Q) * num
+    dC = (np.sum(W, axis=1, keepdims=True) * Y - np.dot(W, Y)) * (2.0 * (alpha + 1.0) / alpha)
+    return dC, Q
+
+
 def update_embed(P: np.ndarray, Y: np.ndarray, iY: np.ndarray, gains: np.ndarray,
                  momentum: float, eta: float, alpha: float, min_gain: float,
                  min_value: float = 1.0e-128) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -992,11 +1102,7 @@ def update_embed(P: np.ndarray, Y: np.ndarray, iY: np.ndarray, gains: np.ndarray
         dC/dy_i = (2(alpha+1)/alpha) * sum_j (p_ij - q_ij) num_ij (y_i - y_j),
     computed in matrix form (no per-row Python loop).
     """
-    Q, num, _ = t_kernel(Y, alpha)
-    np.maximum(Q, min_value, out=Q)
-
-    W = (P - Q) * num
-    dC = (np.sum(W, axis=1, keepdims=True) * Y - np.dot(W, Y)) * (2.0 * (alpha + 1.0) / alpha)
+    dC, Q = _exact_tsne_gradient(P, Y, alpha, min_value=min_value)
 
     inc = (dC > 0) != (iY > 0)
     gains = np.where(inc, gains + 0.2, gains * 0.8)
@@ -1141,14 +1247,21 @@ def _sparse_conditional_pmat(dist_csr: scipy.sparse.csr_matrix,
     return scipy.sparse.csr_matrix((data, indices.copy(), indptr.copy()), shape=dist_csr.shape)
 
 
+def _csr_without_diagonal(mat: scipy.sparse.spmatrix) -> scipy.sparse.csr_matrix:
+    coo = mat.tocoo()
+    keep = coo.row != coo.col
+    rv = scipy.sparse.csr_matrix((coo.data[keep], (coo.row[keep], coo.col[keep])), shape=coo.shape)
+    rv.sum_duplicates()
+    rv.eliminate_zeros()
+    return rv
+
+
 def _sparse_joint_pmat(dist_csr: scipy.sparse.csr_matrix,
                        perplexity: float) -> scipy.sparse.csr_matrix:
     """Symmetrized sparse t-SNE input probabilities from model distances."""
     p_cond = _sparse_conditional_pmat(dist_csr, perplexity)
-    p = (p_cond + p_cond.T).tocsr()
+    p = _csr_without_diagonal(p_cond + p_cond.T)
     p *= 1.0 / (2.0 * p.shape[0])
-    p.setdiag(0.0)
-    p.eliminate_zeros()
     total = p.sum()
     if total > 0:
         p *= 1.0 / total
@@ -1195,19 +1308,142 @@ def _build_bh_tree(Y: np.ndarray, idx: np.ndarray, leaf_size: int) -> _BHNode:
     return _BHNode(idx, bmin, bmax, center, width, children)
 
 
-def _barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5,
-                                leaf_size: int = 16) -> Tuple[np.ndarray, float]:
-    """Approximate t-SNE repulsive forces and normalization with Barnes-Hut.
+def _flatten_bh_tree(root: _BHNode, emb_dim: int):
+    """Flatten a Barnes-Hut tree into arrays suitable for numba traversal."""
+    bmins = []
+    bmaxs = []
+    centers = []
+    widths = []
+    masses = []
+    child_starts = []
+    child_counts = []
+    child_links = []
+    leaf_starts = []
+    leaf_counts = []
+    leaf_links = []
 
-    Returns (F, Z) where
+    def walk(node):
+        node_id = len(masses)
+        bmins.append(np.asarray(node.bmin, dtype=np.float64))
+        bmaxs.append(np.asarray(node.bmax, dtype=np.float64))
+        centers.append(np.asarray(node.center, dtype=np.float64))
+        widths.append(float(node.width))
+        masses.append(int(node.mass))
+        child_starts.append(0)
+        child_counts.append(0)
+        leaf_starts.append(0)
+        leaf_counts.append(0)
 
-        F_i ~= sum_j (1 + ||y_i-y_j||^2)^-2 (y_i - y_j)
-        Z   ~= sum_ij (1 + ||y_i-y_j||^2)^-1.
+        if node.children is None:
+            leaf_starts[node_id] = len(leaf_links)
+            leaf_idx = np.asarray(node.idx, dtype=np.int64)
+            leaf_links.extend(int(i) for i in leaf_idx)
+            leaf_counts[node_id] = len(leaf_idx)
+        else:
+            direct_children = []
+            for child in node.children:
+                direct_children.append(walk(child))
+            child_starts[node_id] = len(child_links)
+            child_links.extend(direct_children)
+            child_counts[node_id] = len(direct_children)
 
-    With theta <= 0 the traversal descends to leaves, giving the exact sums
-    up to floating-point order.
-    """
-    Y = np.asarray(Y, dtype=np.float64)
+        return node_id
+
+    walk(root)
+    empty_box = np.empty((0, emb_dim), dtype=np.float64)
+
+    return (
+        np.vstack(bmins).astype(np.float64, copy=False) if bmins else empty_box,
+        np.vstack(bmaxs).astype(np.float64, copy=False) if bmaxs else empty_box,
+        np.vstack(centers).astype(np.float64, copy=False) if centers else empty_box,
+        np.asarray(widths, dtype=np.float64),
+        np.asarray(masses, dtype=np.int64),
+        np.asarray(child_starts, dtype=np.int64),
+        np.asarray(child_counts, dtype=np.int64),
+        np.asarray(child_links, dtype=np.int64),
+        np.asarray(leaf_starts, dtype=np.int64),
+        np.asarray(leaf_counts, dtype=np.int64),
+        np.asarray(leaf_links, dtype=np.int64),
+    )
+
+
+@numba.njit(cache=True, parallel=True)
+def _numba_barnes_hut_negative_forces(Y, bmin, bmax, center, width, mass,
+                                      child_start, child_count, child_index,
+                                      leaf_start, leaf_count, leaf_index,
+                                      theta):
+    n, emb_dim = Y.shape
+    forces = np.zeros((n, emb_dim), dtype=np.float64)
+    z_terms = np.zeros(n, dtype=np.float64)
+    num_nodes = width.shape[0]
+    eps = 1.0e-12
+
+    for i in numba.prange(n):
+        fi = np.zeros(emb_dim, dtype=np.float64)
+        zi = 0.0
+        stack = np.empty(num_nodes, dtype=np.int64)
+        sp = 1
+        stack[0] = 0
+
+        while sp > 0:
+            sp -= 1
+            node = stack[sp]
+            if mass[node] == 0:
+                continue
+
+            if child_count[node] == 0:
+                start = leaf_start[node]
+                end = start + leaf_count[node]
+                for p in range(start, end):
+                    j = leaf_index[p]
+                    if j == i:
+                        continue
+                    d2 = 0.0
+                    for d in range(emb_dim):
+                        diff = Y[i, d] - Y[j, d]
+                        d2 += diff * diff
+                    q = 1.0 / (1.0 + d2)
+                    coeff = q * q
+                    for d in range(emb_dim):
+                        fi[d] += coeff * (Y[i, d] - Y[j, d])
+                    zi += q
+                continue
+
+            d2 = 0.0
+            for d in range(emb_dim):
+                diff = Y[i, d] - center[node, d]
+                d2 += diff * diff
+
+            inside = True
+            for d in range(emb_dim):
+                if Y[i, d] < bmin[node, d] - eps or Y[i, d] > bmax[node, d] + eps:
+                    inside = False
+                    break
+
+            if (not inside) and d2 > 0.0 and theta > 0.0 and width[node] / np.sqrt(d2) < theta:
+                q = 1.0 / (1.0 + d2)
+                coeff = mass[node] * q * q
+                for d in range(emb_dim):
+                    fi[d] += coeff * (Y[i, d] - center[node, d])
+                zi += mass[node] * q
+            else:
+                start = child_start[node]
+                end = start + child_count[node]
+                for p in range(start, end):
+                    stack[sp] = child_index[p]
+                    sp += 1
+
+        for d in range(emb_dim):
+            forces[i, d] = fi[d]
+        z_terms[i] = zi
+
+    return forces, max(float(np.sum(z_terms)), 1.0e-300)
+
+
+def _python_barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5,
+                                       leaf_size: int = 16) -> Tuple[np.ndarray, float]:
+    """Pure-Python Barnes-Hut traversal used as the no-numba fallback."""
+    Y = np.ascontiguousarray(Y, dtype=np.float64)
     n, emb_dim = Y.shape
     if n <= 1:
         return np.zeros_like(Y), 1.0
@@ -1231,19 +1467,21 @@ def _barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5,
                 continue
 
             if node.children is None:
-                for j in node.idx:
-                    if j == i:
-                        continue
-                    diff = yi - Y[j]
-                    d2 = float(np.dot(diff, diff))
-                    q = 1.0 / (1.0 + d2)
-                    fi += (q * q) * diff
-                    zi += q
+                diff = yi.reshape((1, -1)) - Y[node.idx]
+                d2 = np.sum(diff * diff, axis=1)
+                q = 1.0 / (1.0 + d2)
+                q[node.idx == i] = 0.0
+                fi += np.sum((q * q)[:, None] * diff, axis=0)
+                zi += float(q.sum())
                 continue
 
             diff = yi - node.center
             d2 = float(np.dot(diff, diff))
-            inside = bool(np.all(yi >= node.bmin - eps) and np.all(yi <= node.bmax + eps))
+            inside = True
+            for d in range(emb_dim):
+                if yi[d] < node.bmin[d] - eps or yi[d] > node.bmax[d] + eps:
+                    inside = False
+                    break
 
             if (not inside) and d2 > 0.0 and theta > 0.0 and node.width / np.sqrt(d2) < theta:
                 q = 1.0 / (1.0 + d2)
@@ -1256,6 +1494,32 @@ def _barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5,
         z_sum += zi
 
     return forces, max(float(z_sum), 1.0e-300)
+
+
+def _barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5,
+                                leaf_size: int = 16) -> Tuple[np.ndarray, float]:
+    """Approximate t-SNE repulsive forces and normalization with Barnes-Hut.
+
+    Returns (F, Z) where
+
+        F_i ~= sum_j (1 + ||y_i-y_j||^2)^-2 (y_i - y_j)
+        Z   ~= sum_ij (1 + ||y_i-y_j||^2)^-1.
+
+    With theta <= 0 the traversal descends to leaves, giving the exact sums
+    up to floating-point order.
+    """
+    Y = np.ascontiguousarray(Y, dtype=np.float64)
+    n, emb_dim = Y.shape
+    if n <= 1:
+        return np.zeros_like(Y), 1.0
+
+    theta = max(float(theta), 0.0)
+    leaf_size = max(int(leaf_size), 1)
+    if not HAS_NUMBA:
+        return _python_barnes_hut_negative_forces(Y, theta=theta, leaf_size=leaf_size)
+
+    root = _build_bh_tree(Y, np.arange(n, dtype=np.int64), leaf_size)
+    return _numba_barnes_hut_negative_forces(Y, *_flatten_bh_tree(root, emb_dim), theta)
 
 
 def _exact_negative_forces(Y: np.ndarray) -> Tuple[np.ndarray, float]:
@@ -1301,6 +1565,22 @@ def _sparse_positive_forces_from_edges(rows: np.ndarray, cols: np.ndarray, data:
     return forces
 
 
+def _sparse_positive_forces_symmetric_from_edges(rows: np.ndarray, cols: np.ndarray, data: np.ndarray,
+                                                 Y: np.ndarray, scale: float = 1.0) -> np.ndarray:
+    """Exact attractive forces for upper-triangular edges from a symmetric P."""
+    if len(data) == 0:
+        return np.zeros_like(Y)
+
+    diff = Y[rows] - Y[cols]
+    d2 = np.sum(diff * diff, axis=1)
+    num = 1.0 / (1.0 + d2)
+    weighted = (scale * data * num)[:, None] * diff
+    forces = np.zeros_like(Y)
+    np.add.at(forces, rows, weighted)
+    np.add.at(forces, cols, -weighted)
+    return forces
+
+
 def _sparse_positive_forces(P: scipy.sparse.csr_matrix,
                             Y: np.ndarray) -> np.ndarray:
     """Exact attractive t-SNE forces over nonzero sparse probabilities."""
@@ -1342,9 +1622,7 @@ def _tsne_barnes_hut_from_p(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
     if out is None:
         out = sys.stdout
 
-    P = P.tocsr().astype(np.float64, copy=True)
-    P.setdiag(0.0)
-    P.eliminate_zeros()
+    P = _csr_without_diagonal(P).astype(np.float64, copy=False)
     total = P.sum()
     if total <= 0:
         raise ValueError("P must contain positive off-diagonal probabilities.")
@@ -1366,15 +1644,17 @@ def _tsne_barnes_hut_from_p(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
 
     iY = np.zeros_like(Y)
     gains = np.ones_like(Y)
-    n_iter = max(int(max_its), int(early_its) + 50)
+    n_iter = max(int(max_its), 0)
     last_kl = np.inf
     p_edges = P.tocoo()
     p_rows, p_cols, p_data = p_edges.row, p_edges.col, p_edges.data
+    p_upper = scipy.sparse.triu(P, k=1).tocoo()
+    pos_rows, pos_cols, pos_data = p_upper.row, p_upper.col, p_upper.data
 
     for it in range(1, n_iter + 1):
         exaggeration = early_exaggeration if it <= early_its else 1.0
 
-        pos = _sparse_positive_forces_from_edges(p_rows, p_cols, p_data, Y, exaggeration)
+        pos = _sparse_positive_forces_symmetric_from_edges(pos_rows, pos_cols, pos_data, Y, exaggeration)
         neg, z_sum = _negative_forces(Y, theta=theta, leaf_size=leaf_size,
                                       repulsion_method=repulsion_method,
                                       exact_threshold=exact_repulsion_threshold)
@@ -1455,6 +1735,8 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
           seed: Optional[int] = None, mix_model=None, enc_data=None, method: str = 'auto',
           early_exaggeration: float = 12.0, tol: float = 1.0e-7, dpm_max_its: int = 200,
           affinity='auto', field_weights=None, evidence_cap: Optional[float] = 1.0,
+          fisher_metric: str = 'diagonal', fisher_ridge: float = 1.0e-8,
+          fisher_information: str = 'observed',
           out=None, variable_length: bool = False, barnes_hut_theta: float = 0.5,
           barnes_hut_leaf_size: int = 16, neighbor_method: str = 'auto',
           neighbor_threshold: int = 5000, neighbor_trees: int = 8,
@@ -1465,7 +1747,9 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
     A mixture model is fit to the data (a Dirichlet process mixture with
     automatically typed components by default, or pass mix_model), pairwise
     affinities are computed from the model, and the affinities are embedded
-    with t-SNE.
+    with t-SNE. Passing affinity='fisher' with any model that exposes
+    to_fisher(), or passing a pre-built affinity factor list, bypasses the
+    mixture-posterior affinity path and does not require a DPM/mixture model.
 
     method:
         'exact'      - full-matrix gradient descent (supports optimize_alpha)
@@ -1484,6 +1768,12 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
             sharp discrete field cannot drown an overlapping continuous one
             (or vice versa); optional field_weights sets exponents on whole
             field-level Bhattacharyya coefficients
+        'fisher'     - posterior-expected sufficient statistics from
+            mix_model.to_fisher(), whitened by an observed Fisher metric;
+            fisher_information='observed' uses the empirical covariance of
+            observed score vectors, while 'model' uses the view's model metric;
+            fisher_metric is 'diagonal' by default, with 'identity' and 'full'
+            also accepted
         'bhattacharyya' - Bhattacharyya coefficient between joint posteriors;
             graded even under hard assignments, so embeddings retain
             within-cluster geometry
@@ -1515,16 +1805,26 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
     if out is None:
         out = sys.stdout
 
-    if mix_model is None:
+    if mix_model is None and not _is_prebuilt_affinity(affinity):
         from pysp.utils.automatic import get_dpm_mixture
         mix_model = get_dpm_mixture(data, rng=np.random.RandomState(seed),
                                     max_components=max_components, max_its=dpm_max_its,
                                     print_iter=print_iter, out=out)
 
-    affinity = _resolve_affinity(affinity, mix_model, data, field_weights)
+    if mix_model is not None:
+        affinity = _resolve_affinity(affinity, mix_model, data, field_weights,
+                                     enc_data=enc_data, fisher_metric=fisher_metric,
+                                     fisher_ridge=fisher_ridge,
+                                     fisher_information=fisher_information)
 
-    z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
-    n = z_ij.shape[0]
+    if _is_prebuilt_affinity(affinity):
+        z_ij, l_ij = None, None
+        n = _factor_n(_affinity_factors(None, None, affinity)[0])
+        if data is not None and len(data) != n:
+            raise ValueError('pre-built affinity row count does not match data length.')
+    else:
+        z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
+        n = z_ij.shape[0]
 
     if method == 'auto':
         method = 'exact' if (optimize_alpha or n <= 10) else 'barnes_hut'
@@ -1566,6 +1866,8 @@ def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
           max_components: int = 50, seed: Optional[int] = None, mix_model=None,
           enc_data=None, dpm_max_its: int = 200, print_iter: int = 100,
           affinity='auto', field_weights=None, evidence_cap: Optional[float] = 1.0,
+          fisher_metric: str = 'diagonal', fisher_ridge: float = 1.0e-8,
+          fisher_information: str = 'observed',
           n_epochs: Optional[int] = None, out=None, **umap_kwargs):
     """Embed heterogeneous data with model-based UMAP.
 
@@ -1579,7 +1881,13 @@ def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
     embedding.
     """
     try:
-        import umap
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                'ignore',
+                message='Tensorflow not installed; ParametricUMAP will be unavailable',
+                category=ImportWarning)
+            import umap
     except ImportError:
         from pysp.utils.optional_deps import require
         require('umap-learn', 'umap')
@@ -1587,16 +1895,26 @@ def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
     if out is None:
         out = sys.stdout
 
-    if mix_model is None:
+    if mix_model is None and not _is_prebuilt_affinity(affinity):
         from pysp.utils.automatic import get_dpm_mixture
         mix_model = get_dpm_mixture(data, rng=np.random.RandomState(seed),
                                     max_components=max_components, max_its=dpm_max_its,
                                     print_iter=print_iter, out=out)
 
-    affinity = _resolve_affinity(affinity, mix_model, data, field_weights)
+    if mix_model is not None:
+        affinity = _resolve_affinity(affinity, mix_model, data, field_weights,
+                                     enc_data=enc_data, fisher_metric=fisher_metric,
+                                     fisher_ridge=fisher_ridge,
+                                     fisher_information=fisher_information)
 
-    z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
-    n = z_ij.shape[0]
+    if _is_prebuilt_affinity(affinity):
+        z_ij, l_ij = None, None
+        n = _factor_n(_affinity_factors(None, None, affinity)[0])
+        if data is not None and len(data) != n:
+            raise ValueError('pre-built affinity row count does not match data length.')
+    else:
+        z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
+        n = z_ij.shape[0]
     k = min(n_neighbors, n - 1)
 
     knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k, affinity=affinity,
@@ -1606,7 +1924,6 @@ def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
                         precomputed_knn=(knn_idx, knn_dist), random_state=seed,
                         n_epochs=n_epochs, **umap_kwargs)
 
-    import warnings
     with warnings.catch_warnings():
         # expected with precomputed knn / fixed seed; not actionable here
         warnings.filterwarnings('ignore', message='.*knn_search_index.*')

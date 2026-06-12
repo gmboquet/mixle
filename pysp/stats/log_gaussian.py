@@ -16,6 +16,7 @@ from typing import Optional, Tuple, List, Callable, Dict, Union, Any
 
 
 class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
+    """Log-normal distribution where ``log(X)`` is Gaussian with mean ``mu`` and variance ``sigma2``."""
 
     def __init__(self, mu: float, sigma2: float, name: Optional[str] = None) -> None:
         """LogGaussianDistribution object defines Gaussian distribution with mean mu and variance sigma2.
@@ -55,6 +56,8 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
             Density of Log-Gaussian at x.
 
         """
+        if x <= 0.0:
+            return 0.0
         return self.const * exp(-0.5 * (np.log(x) - self.mu) ** 2 / self.sigma2) / x
 
     def log_density(self, x: float) -> float:
@@ -70,9 +73,13 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at observation x.
 
         """
-        return self.log_const - 0.5 * (np.log(x) - self.mu) ** 2 / self.sigma2 - np.log(x)
+        if x <= 0.0:
+            return -np.inf
+        y = np.log(x)
+        return self.log_const - 0.5 * (y - self.mu) ** 2 / self.sigma2 - y
 
     def seq_ld_lambda(self) -> List[Callable]:
+        """Return vectorized log-density callables for fast scoring."""
         return [self.seq_log_density]
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
@@ -474,5 +481,4 @@ class LogGaussianDataEncoder(DataSequenceEncoder):
         if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
             raise Exception('LogGaussianDistribution requires support x in (0,inf).')
         return rv
-
 

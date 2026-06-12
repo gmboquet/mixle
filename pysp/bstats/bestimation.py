@@ -170,22 +170,23 @@ def best_of(data, vdata, est, trials, max_its, init_p, delta, rng, init_estimato
 	else:
 		iest = init_estimator
 
+	base_enc_data = enc_data
+	base_enc_vdata = enc_vdata
+
 	for kk in range(trials):
 
 		mm = initialize(data, iest, rng, init_p)
 
-		if enc_data is None:
-			enc_data = seq_encode(data, mm)
-		if enc_vdata is None:
-			enc_vdata = seq_encode(vdata, mm)
+		enc_data_loc = base_enc_data if base_enc_data is not None else seq_encode(data, mm)
+		enc_vdata_loc = base_enc_vdata if base_enc_vdata is not None else seq_encode(vdata, mm)
 
-		_, old_ll = seq_log_density_sum(enc_data, mm)
+		_, old_ll = seq_log_density_sum(enc_data_loc, mm)
 		#_, old_vll = seq_log_density_sum(enc_vdata, mm)
 
 		for i in range(max_its):
 
-			mm_next = seq_estimate(enc_data, est, mm)
-			_, ll = seq_log_density_sum(enc_data, mm_next)
+			mm_next = seq_estimate(enc_data_loc, est, mm)
+			_, ll = seq_log_density_sum(enc_data_loc, mm_next)
 			#_, vll = seq_log_density_sum(enc_vdata, mm_next)
 
 			#dvll = vll - old_vll
@@ -204,7 +205,7 @@ def best_of(data, vdata, est, trials, max_its, init_p, delta, rng, init_estimato
 			#old_vll = vll
 
 
-		_, vll = seq_log_density_sum(enc_vdata, mm)
+		_, vll = seq_log_density_sum(enc_vdata_loc, mm)
 		out.write('Trial %d. VLL=%f\n' % (kk + 1, vll))
 
 		if vll > rv_ll:
@@ -273,67 +274,65 @@ def optimize(data, estimator, max_its=10, delta=1.0e-6, init_estimator=None, ini
 	Returns:
 		The model with the highest validation log-likelihood encountered.
 	"""
-	div_error = np.geterr()
-	np.seterr(divide='ignore')
+	div_error = np.seterr(divide='ignore')
+	try:
+		if init_estimator is None:
+			iest = estimator
+		else:
+			iest = init_estimator
 
-	if init_estimator is None:
-		iest = estimator
-	else:
-		iest = init_estimator
+		if prev_estimate is None:
+			mm = initialize(data, iest, rng, init_p)
+		else:
+			mm = prev_estimate
 
-	if prev_estimate is None:
-		mm = initialize(data, iest, rng, init_p)
-	else:
-		mm = prev_estimate
+		if vdata is None:
+			vdata = data
 
-	if vdata is None:
-		vdata = data
+		if enc_data is None:
+			enc_data = seq_encode(data, mm)
 
-	if enc_data is None:
-		enc_data = seq_encode(data, mm)
+		if enc_vdata is None:
+			enc_vdata = seq_encode(vdata, mm)
 
-	if enc_vdata is None:
-		enc_vdata = seq_encode(vdata, mm)
+		_, old_vll = seq_log_density_sum(enc_vdata, mm)
 
-	_, old_vll = seq_log_density_sum(enc_vdata, mm)
+		old_obj = _data_objective_sum(enc_data, mm) + _model_objective(estimator, mm)
 
-	old_obj = _data_objective_sum(enc_data, mm) + _model_objective(estimator, mm)
+		best_model = mm
+		best_vll = old_vll
 
-	best_model = mm
-	best_vll = old_vll
+		for i in range(max_its):
 
-	for i in range(max_its):
+			mm_next = seq_estimate(enc_data, estimator, mm)
 
-		mm_next = seq_estimate(enc_data, estimator, mm)
+			model_ll = _model_objective(estimator, mm_next)
+			data_ll  = _data_objective_sum(enc_data, mm_next)
+			obj      = data_ll + model_ll
 
-		model_ll = _model_objective(estimator, mm_next)
-		data_ll  = _data_objective_sum(enc_data, mm_next)
-		obj      = data_ll + model_ll
+			_, vll = seq_log_density_sum(enc_vdata, mm_next)
 
-		_, vll = seq_log_density_sum(enc_vdata, mm_next)
+			dobj = obj - old_obj
 
-		dobj = obj - old_obj
+			accepted = (dobj >= 0) or (delta is None)
+			if accepted:
+				mm = mm_next
+				if best_vll < vll:
+					best_vll = vll
+					best_model = mm
 
-		if (dobj >= 0) or (delta is None):
-			mm = mm_next
+			if (delta is not None) and (dobj < delta):
+				out.write('Terminating %d. OBJ=%f, dOBJ=%e, LL=%f, MLL=%f, VLL=%f\n' % (i+1, obj, dobj, data_ll, model_ll, vll))
+				break
 
-		if (delta is not None) and (dobj < delta):
-			out.write('Terminating %d. OBJ=%f, dOBJ=%e, LL=%f, MLL=%f, VLL=%f\n' % (i+1, obj, dobj, data_ll, model_ll, vll))
-			break
+			if (i+1) % print_iter == 0:
+				out.write('Iteration %d. OBJ=%f, dOBJ=%e, LL=%f, MLL=%f, VLL=%f\n' % (i+1, obj, dobj, data_ll, model_ll, vll))
 
-		if (i+1) % print_iter == 0:
-			out.write('Iteration %d. OBJ=%f, dOBJ=%e, LL=%f, MLL=%f, VLL=%f\n' % (i+1, obj, dobj, data_ll, model_ll, vll))
+			old_obj = obj
 
-		old_obj = obj
-		old_vll = vll
-
-		if best_vll < vll:
-			best_vll = vll
-			best_model = mm
-
-	np.seterr(divide=div_error['divide'])
-
-	return best_model
+		return best_model
+	finally:
+		np.seterr(**div_error)
 
 def iterate(data, estimator, max_its, prev_estimate=None, init_p=0.1, rng=np.random.RandomState(), out=sys.stdout, is_encoded=False, init_estimator=None, print_iter=1):
 	"""Run a fixed number of accumulate-then-estimate iterations.
@@ -445,5 +444,3 @@ def hill_climb(data, vdata, estimator, prev_estimate, max_its, metric_lambda, be
 		mm = mm_next
 
 	return best_model
-
-

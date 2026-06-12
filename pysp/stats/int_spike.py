@@ -24,7 +24,7 @@ from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEncodableProbabilityDistribution, \
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
     DistributionEnumerator
-from pysp.utils.enumeration import QuantizedEnumerationIndex
+from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 
 
 class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
@@ -176,6 +176,23 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
         if self.num_vals > 1 and self.log_1p > -np.inf:
             items.extend((v, float(self.log_1p)) for v in range(self.min_val, self.max_val + 1) if v != self.k)
         return QuantizedEnumerationIndex.from_items(items, max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+    def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view over finite integer spike supports."""
+        dists = [self] + list(others)
+        if any(not isinstance(dist, IntegerUniformSpikeDistribution) for dist in dists):
+            return super().quantized_multi_cross_index(others, max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+        lo = min(dist.min_val for dist in dists)
+        hi = max(dist.max_val for dist in dists)
+        items = []
+        for value in range(lo, hi + 1):
+            items.append((value, tuple(float(dist.log_density(value)) for dist in dists)))
+        return QuantizedCrossIndex.from_items(items, max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+    def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view over two integer spike supports."""
+        return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
 class IntegerUniformSpikeEnumerator(DistributionEnumerator):
@@ -621,4 +638,3 @@ class IntegerUniformSpikeDataEncoder(DataSequenceEncoder):
 
         """
         return np.asarray(x, dtype=int)
-

@@ -19,7 +19,7 @@ from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator
-from pysp.utils.enumeration import QuantizedEnumerationIndex
+from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 
 
 class NullDistribution(SequenceEncodableProbabilityDistribution):
@@ -65,17 +65,19 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         """
         return 0.0
 
-    def seq_log_density(self, x: Optional[Any]) -> float:
+    def seq_log_density(self, x: Optional[Any]) -> np.ndarray:
         """Vectorized log-density evaluated at sequence encoded input x. Always 0.0.
 
         Args:
-            x (Optional[Any]): Sequence encoded data (ignored).
+            x (Optional[Any]): Sequence encoded data; NullDataEncoder returns the sequence length.
 
         Returns:
-            0.0 for any input.
+            A zero vector with one entry per encoded observation.
 
         """
-        return 0.0
+        if isinstance(x, (int, np.integer)):
+            return np.zeros(int(x), dtype=float)
+        return np.zeros(0, dtype=float)
 
     def sampler(self, seed: Optional[int] = None) -> 'NullSampler':
         """Create a NullSampler object.
@@ -118,6 +120,19 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         return QuantizedEnumerationIndex.from_items(
             [(None, 0.0)], max_bits=max_bits, bin_width_bits=bin_width_bits,
             sorted_items=True, truncated=False)
+
+    def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view for null distributions."""
+        dists = [self] + list(others)
+        if any(not isinstance(dist, NullDistribution) for dist in dists):
+            return super().quantized_multi_cross_index(others, max_bits=max_bits, bin_width_bits=bin_width_bits)
+        return QuantizedCrossIndex.from_items(
+            [(None, tuple([0.0] * len(dists)))], max_bits=max_bits,
+            bin_width_bits=bin_width_bits, truncated=False)
+
+    def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view for two null distributions."""
+        return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
 class NullEnumerator(DistributionEnumerator):
@@ -361,7 +376,7 @@ class NullEstimator(ParameterEstimator):
 
 
 class NullDataEncoder(DataSequenceEncoder):
-    """Data encoder for the NullDistribution. Encodes any sequence of data as None."""
+    """Data encoder for the NullDistribution. Encodes any sequence as its length."""
 
     def __str__(self) -> str:
         """Returns string representation of NullDataEncoder object."""
@@ -379,14 +394,14 @@ class NullDataEncoder(DataSequenceEncoder):
         """
         return isinstance(other, NullDataEncoder)
 
-    def seq_encode(self, x: Any) -> None:
-        """Encode a sequence of observations (returns None for the NullDistribution).
+    def seq_encode(self, x: Any) -> int:
+        """Encode a sequence of observations as its length.
 
         Args:
             x (Any): Sequence of observations of any type (ignored).
 
         Returns:
-            None.
+            Number of observations in the sequence.
 
         """
-        return None
+        return len(x)

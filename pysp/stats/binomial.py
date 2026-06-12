@@ -13,7 +13,7 @@ from pysp.utils.vector import gammaln
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator
-from pysp.utils.enumeration import QuantizedEnumerationIndex
+from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 
 from typing import Optional, Dict, List, Union, Tuple, Any, Sequence
 
@@ -21,6 +21,7 @@ E = Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]
 
 
 class BinomialDistribution(SequenceEncodableProbabilityDistribution):
+    """Binomial distribution over ``min_val + {0, ..., n}`` with success probability ``p``."""
 
     def __init__(self, p: float, n: int, min_val: Optional[int] = None, name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
@@ -50,14 +51,14 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
             keys (Optional[str]): All BinomialDistributions with same keys are same distributions.
         """
         if p <= 0.0 or p >= 1.0:
-            raise Exception('Binomial distribution requires p in [0,1]')
+            raise ValueError('Binomial distribution requires p in (0, 1).')
         else:
-            self.p = p
+            self.p = float(p)
 
-        if n < 0 or np.isinf(n):
-            raise Exception('Binomial distribution requires n > 0.')
+        if n < 0 or np.isinf(n) or int(n) != n:
+            raise ValueError('Binomial distribution requires a non-negative integer n.')
         else:
-            self.n = n
+            self.n = int(n)
 
         self.log_p = np.log(p)
         self.log_1p = np.log1p(-p)
@@ -95,11 +96,16 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
             Log-probability mass of x for binomial(n,p) with min_val=min_val. -inf if x is not in support.
         """
         n = self.n
+        try:
+            xx = float(x)
+        except Exception:
+            return -np.inf
         if self.min_val is not None:
-            xx = x - self.min_val
-        else:
-            xx = x
+            xx -= self.min_val
 
+        if not np.isfinite(xx) or np.floor(xx) != xx or xx < 0 or xx > n:
+            return -np.inf
+        xx = int(xx)
         return (gammaln(n+1) - gammaln(xx + 1) - gammaln(n - xx + 1)) + self.log_1p * (n - xx) + self.log_p * xx
 
     def seq_log_density(self, x: E) -> np.ndarray:
@@ -125,7 +131,10 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         else:
             xx = ux
 
-        cc = (gn - gammaln(xx + 1) - gammaln((n + 1) - xx)) + self.log_1p * (n - xx) + self.log_p * xx
+        good = np.isfinite(xx) & (np.floor(xx) == xx) & (xx >= 0) & (xx <= n)
+        cc = np.full_like(xx, -np.inf, dtype=np.float64)
+        xg = xx[good]
+        cc[good] = (gn - gammaln(xg + 1) - gammaln(n - xg + 1)) + self.log_1p * (n - xg) + self.log_p * xg
         return cc[ix]
 
     def sampler(self, seed: Optional[int] = None) -> 'BinomialSampler':
@@ -198,6 +207,23 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         return QuantizedEnumerationIndex.from_items(
             items, max_bits=max_bits, bin_width_bits=bin_width_bits,
             sorted_items=True, truncated=len(items) < self.n + 1)
+
+    def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view over finite binomial supports."""
+        dists = [self] + list(others)
+        if any(not isinstance(dist, BinomialDistribution) for dist in dists):
+            return super().quantized_multi_cross_index(others, max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+        lo = min((dist.min_val if dist.min_val is not None else 0) for dist in dists)
+        hi = max((dist.min_val if dist.min_val is not None else 0) + dist.n for dist in dists)
+        items = []
+        for value in range(lo, hi + 1):
+            items.append((value, tuple(float(dist.log_density(value)) for dist in dists)))
+        return QuantizedCrossIndex.from_items(items, max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+    def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view over two binomial supports."""
+        return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
 class BinomialEnumerator(DistributionEnumerator):
@@ -622,6 +648,7 @@ class BinomialEstimator(ParameterEstimator):
             else:
                 p = 0.5
 
+        p = float(np.clip(p, 1.0e-12, 1.0 - 1.0e-12))
         return BinomialDistribution(p, max_val - min_val, min_val=min_val, name=self.name, keys=self.keys)
 
 
@@ -660,12 +687,14 @@ class BinomialDataEncoder(DataSequenceEncoder):
                 reconstruct x, numpy array of x, min value of x, and max value of x.
 
         """
-        xx = np.array(x)
+        xx0 = np.asarray(x, dtype=np.float64)
 
-        if np.any(xx < 0) or np.any(np.isnan(xx)):
-            raise Exception('BinomialDistribution requires non-negative integer values for x.')
+        if np.any(xx0 < 0) or np.any(np.isnan(xx0)) or np.any(np.floor(xx0) != xx0):
+            raise ValueError('BinomialDistribution requires non-negative integer values for x.')
 
-        xx = np.asarray(x, dtype=np.int32)
+        xx = np.asarray(xx0, dtype=np.int32)
+        if xx.size == 0:
+            return xx, np.asarray([], dtype=np.int64), xx, 0, 0
         ux, ix = np.unique(xx, return_inverse=True)
         min_val = np.min(ux)
         max_val = np.max(ux)

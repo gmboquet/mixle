@@ -50,30 +50,37 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         return None
 
     def density(self, x: Union[bool, int]) -> float:
+        """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: Union[bool, int]) -> float:
+        """Return the log-density or log-mass at a single observation."""
         xx = self._as_bool(x)
         if xx is None:
             return -np.inf
         return self.log_p if xx else self.log_1p
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         return np.where(x, self.log_p, self.log_1p)
 
     def sampler(self, seed: Optional[int] = None) -> 'BernoulliSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return BernoulliSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'BernoulliEstimator':
+        """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return BernoulliEstimator(name=self.name, keys=self.keys)
         return BernoulliEstimator(pseudo_count=pseudo_count, suff_stat=self.p,
                                   name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> 'BernoulliDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return BernoulliDataEncoder()
 
     def enumerator(self) -> 'BernoulliEnumerator':
+        """Return an enumerator over the distribution support when available."""
         return BernoulliEnumerator(self)
 
 

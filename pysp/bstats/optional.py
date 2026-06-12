@@ -101,6 +101,8 @@ class OptionalDistribution(ProbabilityDistribution):
             self.has_conj_prior = True
             self.has_prior = True
         elif isinstance(prior, NullDistribution) or prior is None:
+            self.conj_prior_params = None
+            self.has_conj_prior = False
             self.has_prior = False
         else:
             self.conj_prior_params = None
@@ -195,7 +197,7 @@ class OptionalDistribution(ProbabilityDistribution):
     def entropy(self) -> float:
         """Returns the entropy of this distribution in nats."""
         v1 = -self.p * self.log_p0
-        v2 = (self.p - 1.0) * (-self.log_p1 + self.dist.entropy())
+        v2 = (1.0 - self.p) * (-self.log_p1 + self.dist.entropy())
         return v1 + v2
 
     def seq_log_density(self, x):
@@ -215,7 +217,7 @@ class OptionalDistribution(ProbabilityDistribution):
     def seq_expected_log_density(self, x):
         """Vectorized posterior-expected log-density at sequence-encoded x.
 
-        Requires a conjugate Beta prior on p.
+        Falls back to seq_log_density when no conjugate prior on p is set.
 
         Args:
             x: Sequence-encoded data from seq_encode().
@@ -223,6 +225,8 @@ class OptionalDistribution(ProbabilityDistribution):
         Returns:
             Numpy array of expected log-densities.
         """
+        if not self.has_conj_prior:
+            return self.seq_log_density(x)
         da, db, dab = self.conj_prior_params
         aa = da - dab
         bb = db - dab

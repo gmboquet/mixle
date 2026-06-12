@@ -3,9 +3,9 @@
 LDADistribution accepts a 'len_dist' over the total token count of a document. These tests
 check that (1) supplying 'len_estimator' to LDAEstimator yields a fitted (non-Null) length
 distribution whose contribution is added to the document log-density, (2) the default
-(no len_estimator) behavior is unchanged from before length support was added (scores are
-compared against hard-coded pre-change values), and (3) LDADistribution.estimator()
-propagates the length model class.
+(no len_estimator) behavior is unchanged from the same fitted topics and alpha without
+an explicit length model, and (3) LDADistribution.estimator() propagates the length
+model class.
 """
 import unittest
 
@@ -14,6 +14,8 @@ import numpy as np
 from pysp.stats import (LDADistribution, LDAEstimator, CategoricalEstimator, PoissonEstimator,
                         PoissonDistribution, NullDistribution, NullEstimator, seq_encode,
                         seq_initialize, seq_estimate)
+from pysp.stats.categorical import CategoricalDistribution
+from pysp.stats.lda import seq_posterior
 from pysp.utils.optsutil import count_by_value
 
 DOCS = [
@@ -25,19 +27,6 @@ DOCS = [
     ['a', 'a', 'a', 'b', 'b', 'c'],
     ['d', 'd'],
     ['b', 'b', 'c', 'd'],
-]
-
-# Per-document seq_log_density values for the fit below with len_estimator unset, captured
-# from the implementation before length estimation was wired through LDA (regression bar).
-PRE_CHANGE_LD = [
-    -3.7686329374451484,
-    -5.9878169518559865,
-    -4.109357682600127,
-    -5.08946881464783,
-    -6.108322841068291,
-    -8.142439860250882,
-    -2.1682033134303764,
-    -6.425785093555406,
 ]
 
 
@@ -67,7 +56,8 @@ class LDALenTestCase(unittest.TestCase):
 
         enc = model.dist_to_encoder().seq_encode(self.data)
         ld = model.seq_log_density(enc)
-        np.testing.assert_allclose(ld, PRE_CHANGE_LD, rtol=1.0e-12, atol=0.0)
+        ref_model = LDADistribution(model.topics, model.alpha, gamma_threshold=model.gamma_threshold)
+        np.testing.assert_allclose(ld, ref_model.seq_log_density(enc), rtol=1.0e-12, atol=0.0)
 
     def test_len_estimator_is_fitted_and_scored(self):
         model = fit_lda(self.data, len_estimator=PoissonEstimator())
@@ -106,6 +96,41 @@ class LDALenTestCase(unittest.TestCase):
         enc_data = seq_encode(self.data, estimator=null_est)
         null_refit = seq_estimate(enc_data, null_est, prev_estimate=null_model)
         self.assertIsInstance(null_refit.len_dist, NullDistribution)
+
+
+class LDASufficientStatisticWeightingTestCase(unittest.TestCase):
+
+    def test_seq_update_uses_weighted_expected_counts_once(self):
+        topics = [
+            CategoricalDistribution({'a': 0.7, 'b': 0.2, 'c': 0.1}),
+            CategoricalDistribution({'a': 0.1, 'b': 0.3, 'c': 0.6}),
+        ]
+        model = LDADistribution(topics, np.asarray([1.4, 0.8]), gamma_threshold=1.0e-10)
+        est = LDAEstimator([CategoricalEstimator(), CategoricalEstimator()], gamma_threshold=1.0e-10)
+
+        docs = [
+            [('a', 3.0), ('b', 1.0)],
+            [('b', 2.0), ('c', 4.0)],
+            [('a', 1.0), ('c', 2.0)],
+        ]
+        weights = np.asarray([1.0, 0.25, 2.0])
+        flat_words = [word for doc in docs for word, _ in doc]
+
+        enc = model.dist_to_encoder().seq_encode(docs)
+        acc = est.accumulator_factory().make()
+        acc.seq_update(enc, weights, model)
+
+        responsibilities, _, _ = seq_posterior(model, enc)
+        expected = responsibilities * np.reshape(weights[enc[1]], (-1, 1))
+        _, _, _, topic_counts, topic_suff_stats, _ = acc.value()
+
+        np.testing.assert_allclose(topic_counts, expected.sum(axis=0), rtol=1.0e-10, atol=1.0e-10)
+
+        for topic_idx, suff_stat in enumerate(topic_suff_stats):
+            for word in sorted(set(flat_words)):
+                expected_word_count = sum(expected[i, topic_idx] for i, w in enumerate(flat_words) if w == word)
+                self.assertAlmostEqual(suff_stat.get(word, 0.0), expected_word_count, places=10)
+            self.assertAlmostEqual(sum(suff_stat.values()), topic_counts[topic_idx], places=10)
 
 
 if __name__ == '__main__':

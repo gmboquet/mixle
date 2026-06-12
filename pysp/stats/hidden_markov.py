@@ -58,6 +58,7 @@ E2 = Tuple[Tuple[np.ndarray, np.ndarray, np.ndarray], Optional[Any]]
 
 class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Hidden Markov model distribution for variable-length observation sequences."""
     def __init__(self, topics: Sequence[SequenceEncodableProbabilityDistribution],
                  w: Union[Sequence[float], np.ndarray],
                  transitions: Union[List[List[float]], np.ndarray],
@@ -258,6 +259,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, x: Union[E1, E2]) -> 'np.ndarray':
 
+        """Return vectorized log-density values for sequence-encoded observations."""
         x0, x1 = x
         if x1 is None:
 
@@ -354,6 +356,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
     def seq_posterior(self, x: E2) -> Optional[List[np.ndarray]]:
 
+        """Return vectorized posterior state probabilities for encoded observations."""
         if not self.use_numba:
             return None
 
@@ -388,6 +391,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         return [alphas[tz[i]:tz[i + 1], :] for i in range(len(tz) - 1)]
 
     def viterbi(self, x: List[T]) -> np.ndarray:
+        """Return the most likely latent-state path for a single observation sequence."""
         nn = len(x)
         num_states = self.n_states
 
@@ -415,6 +419,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
     def seq_viterbi(self, x: E2):
 
+        """Return Viterbi paths for sequence-encoded observation sequences."""
         x0, x1 = x
         if x1 is None:
 

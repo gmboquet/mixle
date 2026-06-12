@@ -181,6 +181,12 @@ def best_of(data: Optional[Sequence[T]], vdata: Optional[Sequence[T]], est: Para
 
             if enc_vdata is None and vdata is not None:
                 enc_vdata = seq_encode(vdata, encoder)
+        elif enc_vdata is None and vdata is not None:
+            encoder = i_est.accumulator_factory().make().acc_to_encoder()
+            enc_vdata = seq_encode(vdata, encoder)
+
+        if enc_vdata is None:
+            enc_vdata = enc_data
 
         mm = seq_initialize(enc_data, i_est, rng, init_p)
         _, old_ll = seq_log_density_sum(enc_data, mm)
@@ -389,4 +395,3 @@ def iterate(data: List[T], estimator: Optional[ParameterEstimator], max_its: int
             out.write('Iteration %d\t E[dT]=%f.\n' % (i + 1, (time.time() - t0) / float(i + 1)))
 
     return mm
-

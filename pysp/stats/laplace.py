@@ -41,24 +41,30 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.mu), repr(self.b), repr(self.name), repr(self.keys))
 
     def density(self, x: float) -> float:
+        """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: float) -> float:
+        """Return the log-density or log-mass at a single observation."""
         return self.log_const - abs(x - self.mu) / self.b
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         return self.log_const - np.abs(x - self.mu) / self.b
 
     def sampler(self, seed: Optional[int] = None) -> 'LaplaceSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return LaplaceSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'LaplaceEstimator':
+        """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return LaplaceEstimator(name=self.name, keys=self.keys)
         return LaplaceEstimator(pseudo_count=pseudo_count, suff_stat=(self.mu, self.b),
                                 name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> 'LaplaceDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return LaplaceDataEncoder()
 
 

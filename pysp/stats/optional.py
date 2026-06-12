@@ -26,6 +26,7 @@ SS = TypeVar('SS')
 
 class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Mixture-style wrapper that models missing observations explicitly."""
     def __init__(self, dist: SequenceEncodableProbabilityDistribution, p: Optional[float] = None,
                  missing_value: Any = None, name: Optional[str] = None) -> None:
         """OptionalDistribution for handling missing values in estimation.
@@ -120,6 +121,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
                 return 0.0
 
     def seq_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, E]) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         sz, z_idx, nz_idx, enc_data = x
 
         rv = np.zeros(sz)
@@ -133,13 +135,16 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'OptionalSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return OptionalSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'OptionalEstimator':
+        """Return an estimator for fitting this distribution from data."""
         return OptionalEstimator(self.dist.estimator(pseudo_count=pseudo_count), missing_value=self.missing_value,
                                  pseudo_count=pseudo_count, est_prob=self.has_p, name=self.name)
 
     def dist_to_encoder(self) -> 'OptionalDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return OptionalDataEncoder(encoder=self.dist.dist_to_encoder(), missing_value=self.missing_value)
 
     def enumerator(self) -> 'OptionalEnumerator':
@@ -232,17 +237,18 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.name = name
 
     def update(self, x: T, weight: float, estimate: OptionalDistribution) -> None:
+        base_estimate = estimate.dist if estimate is not None else None
         if self.missing_value_is_nan:
             if isinstance(x, (np.floating, float)) and np.isnan(x):
                 self.weights[0] += weight
             else:
-                self.accumulator.update(x, weight, estimate)
+                self.accumulator.update(x, weight, base_estimate)
                 self.weights[1] += weight
         else:
             if (x == self.missing_value) or (x is self.missing_value):
                 self.weights[0] += weight
             else:
-                self.accumulator.update(x, weight, estimate)
+                self.accumulator.update(x, weight, base_estimate)
                 self.weights[1] += weight
 
     def initialize(self, x: T, weight: float, rng: RandomState) -> None:
@@ -422,4 +428,3 @@ class OptionalDataEncoder(DataSequenceEncoder):
         z_idx = np.asarray(z_idx, dtype=int)
 
         return len(x), z_idx, nz_idx, enc_data
-
