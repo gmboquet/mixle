@@ -14,12 +14,13 @@ from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator
-from pysp.utils.enumeration import QuantizedEnumerationIndex
+from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 from numpy.random import RandomState
 from typing import Optional, Tuple, Sequence, Dict, Union, Any
 
 
 class GeometricDistribution(SequenceEncodableProbabilityDistribution):
+    """Geometric distribution on ``{1, 2, ...}`` with success probability ``p``."""
 
     def __init__(self, p: float, name: Optional[str] = None) -> None:
         """GeometricDistribution object defining geometric distribution with probability of success p.
@@ -37,9 +38,11 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
             name (Optional[str]): Assign name to GeometricDistribution object.
 
         """
-        self.p = p
-        self.log_p = np.log(p)
-        self.log_1p = np.log1p(-p)
+        if p <= 0.0 or p > 1.0 or not np.isfinite(p):
+            raise ValueError('GeometricDistribution requires p in (0, 1].')
+        self.p = float(p)
+        self.log_p = np.log(self.p)
+        self.log_1p = np.log1p(-self.p)
         self.name = name
 
     def __str__(self) -> str:
@@ -73,7 +76,15 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
             Log-density of geometric distribution evaluated at x.
 
         """
-        return (x - 1) * self.log_1p + self.log_p
+        try:
+            xx = float(x)
+        except Exception:
+            return -np.inf
+        if not np.isfinite(xx) or xx < 1 or np.floor(xx) != xx:
+            return -np.inf
+        if self.p == 1.0:
+            return 0.0 if xx == 1 else -np.inf
+        return (xx - 1.0) * self.log_1p + self.log_p
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized log-density evaluated on sequence encoded x.
@@ -85,9 +96,12 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of log-density evaluated at each encoded observation value x.
 
         """
-        rv = x - 1
-        rv *= self.log_1p
-        rv += self.log_p
+        xx = np.asarray(x, dtype=np.float64)
+        good = np.isfinite(xx) & (xx >= 1) & (np.floor(xx) == xx)
+        if self.p == 1.0:
+            return np.where(good & (xx == 1), 0.0, -np.inf)
+        rv = (xx - 1.0) * self.log_1p + self.log_p
+        rv = np.where(good, rv, -np.inf)
 
         return rv
 
@@ -152,6 +166,39 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         return QuantizedEnumerationIndex.from_items(
             items, max_bits=max_bits, bin_width_bits=bin_width_bits,
             sorted_items=True, truncated=True)
+
+    def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view over bounded geometric prefixes."""
+        dists = [self] + list(others)
+        if any(not isinstance(dist, GeometricDistribution) for dist in dists):
+            return super().quantized_multi_cross_index(others, max_bits=max_bits, bin_width_bits=bin_width_bits)
+        if isinstance(max_bits, np.ndarray):
+            max_bits_tuple = tuple(float(x) for x in max_bits.tolist())
+        elif isinstance(max_bits, (list, tuple)):
+            max_bits_tuple = tuple(float(x) for x in max_bits)
+        else:
+            max_bits_tuple = tuple([float(max_bits)] * len(dists))
+        if len(max_bits_tuple) != len(dists):
+            raise ValueError('max_bits length must match the number of distributions.')
+
+        def max_value(dist: 'GeometricDistribution', bit_bound: float) -> int:
+            if bit_bound < 0.0 or dist.log_p == -np.inf:
+                return 0
+            if dist.log_1p == -np.inf:
+                return 1 if -float(dist.log_p) / math.log(2.0) <= bit_bound + 1.0e-12 else 0
+            limit_nats = float(bit_bound) * math.log(2.0)
+            max_offset = int(math.floor((limit_nats + float(dist.log_p)) / (-float(dist.log_1p)) + 1.0e-12))
+            return max(0, max_offset) + 1 if max_offset >= 0 else 0
+
+        hi = max(max_value(dist, bit_bound) for dist, bit_bound in zip(dists, max_bits_tuple))
+        items = [(value, tuple(float(dist.log_density(value)) for dist in dists))
+                 for value in range(1, hi + 1)]
+        return QuantizedCrossIndex.from_items(
+            items, max_bits=max_bits_tuple, bin_width_bits=bin_width_bits, truncated=True)
+
+    def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view over two bounded geometric prefixes."""
+        return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
 class GeometricEnumerator(DistributionEnumerator):
@@ -244,7 +291,7 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        if x >= 0:
+        if x >= 1:
             self.sum += x * weight
             self.count += weight
 
@@ -458,6 +505,7 @@ class GeometricEstimator(ParameterEstimator):
         else:
             p = suff_stat[0] / suff_stat[1]
 
+        p = float(np.clip(p, 1.0e-12, 1.0))
         return GeometricDistribution(p, name=self.name)
 
 
@@ -492,8 +540,8 @@ class GeometricDataEncoder(DataSequenceEncoder):
             Numpy array of positive integers.
 
         """
-        rv = np.asarray(x)
-        if np.any(rv < 1) or np.any(np.isnan(rv)):
-            raise Exception('GeometricDistribution requires integers greater than 0 for x.')
+        rv = np.asarray(x, dtype=np.float64)
+        if np.any(rv < 1) or np.any(np.isnan(rv)) or np.any(np.floor(rv) != rv):
+            raise ValueError('GeometricDistribution requires positive integer values for x.')
         else:
-            return np.asarray(rv, dtype=float)
+            return rv

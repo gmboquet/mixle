@@ -200,6 +200,15 @@ class HierarchicalMixtureUpdateTestCase(unittest.TestCase):
         sv, qv = scalar_vs_seq(self.dist, self.data)
         assert_stats_close(self, sv, qv)
 
+    def test_component_log_density_matches_seq_component_log_density(self):
+        for x in self.data[:5]:
+            enc = self.dist.dist_to_encoder().seq_encode([x])
+            np.testing.assert_allclose(
+                self.dist.component_log_density(x),
+                self.dist.seq_component_log_density(enc)[0],
+                rtol=1e-10,
+                atol=1e-10)
+
     def test_update_accumulates(self):
         factory = self.dist.estimator().accumulator_factory()
         acc = factory.make()
@@ -208,6 +217,41 @@ class HierarchicalMixtureUpdateTestCase(unittest.TestCase):
         comp_counts = acc.value()[0]
         n_values = sum(len(x) for x in self.data[:3])
         self.assertAlmostEqual(np.sum(comp_counts), float(n_values), delta=1e-9)
+
+    def test_impossible_observation_has_negative_infinity_density(self):
+        dist = HierarchicalMixtureDistribution(
+            topics=[CategoricalDistribution({'a': 1.0}),
+                    CategoricalDistribution({'b': 1.0})],
+            mixture_weights=[0.5, 0.5],
+            topic_weights=[[1.0, 0.0], [0.0, 1.0]],
+            len_dist=IntegerCategoricalDistribution(1, [1.0]))
+
+        cases = [
+            (['a'], np.asarray([0.0, -np.inf])),
+            (['b'], np.asarray([-np.inf, 0.0])),
+            (['z'], np.asarray([-np.inf, -np.inf])),
+        ]
+        for x, expected in cases:
+            enc = dist.dist_to_encoder().seq_encode([x])
+            np.testing.assert_allclose(dist.component_log_density(x), expected)
+            np.testing.assert_allclose(dist.seq_component_log_density(enc)[0], expected)
+
+        self.assertEqual(dist.log_density(['z']), -np.inf)
+
+    def test_seq_update_handles_impossible_observation_without_nan(self):
+        dist = HierarchicalMixtureDistribution(
+            topics=[CategoricalDistribution({'a': 1.0}),
+                    CategoricalDistribution({'b': 1.0})],
+            mixture_weights=[0.5, 0.5],
+            topic_weights=[[1.0, 0.0], [0.0, 1.0]],
+            len_dist=IntegerCategoricalDistribution(1, [1.0]))
+        acc = dist.estimator().accumulator_factory().make()
+        enc = dist.dist_to_encoder().seq_encode([['z']])
+
+        acc.seq_update(enc, np.ones(1), dist)
+        comp_counts = acc.value()[0]
+
+        self.assertTrue(np.all(np.isfinite(comp_counts)))
 
 
 class HierarchicalMixtureEnumeratorTestCase(unittest.TestCase):

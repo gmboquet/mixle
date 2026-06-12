@@ -55,9 +55,11 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         return np.isfinite(xx) and xx >= 0.0 and math.floor(xx) == xx
 
     def density(self, x: int) -> float:
+        """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: int) -> float:
+        """Return the log-density or log-mass at a single observation."""
         if not self._valid_count(x):
             return -np.inf
         xx = float(x)
@@ -65,23 +67,28 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
                 + self.r * self.log_p + xx * self.log_1p)
 
     def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         xx, lgx1 = x
         return (gammaln(xx + self.r) - self.log_gamma_r - lgx1
                 + self.r * self.log_p + xx * self.log_1p)
 
     def sampler(self, seed: Optional[int] = None) -> 'NegativeBinomialSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return NegativeBinomialSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'NegativeBinomialEstimator':
+        """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return NegativeBinomialEstimator(r=self.r, name=self.name, keys=self.keys)
         return NegativeBinomialEstimator(r=self.r, pseudo_count=pseudo_count, suff_stat=self.p,
                                          name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> 'NegativeBinomialDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return NegativeBinomialDataEncoder()
 
     def enumerator(self) -> 'NegativeBinomialEnumerator':
+        """Return an enumerator over the distribution support when available."""
         return NegativeBinomialEnumerator(self)
 
 

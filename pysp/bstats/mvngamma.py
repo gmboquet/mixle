@@ -76,13 +76,17 @@ class MultivariateNormalGammaDistribution(ProbabilityDistribution):
 
     def cross_entropy(self, dist: ProbabilityDistribution) -> float:
         """Cross-entropy H(self, dist) = -E_self[log dist], summed over
-        components, for a MultivariateNormalGamma argument (0 otherwise).
+        components, for a MultivariateNormalGamma argument.
 
         Args:
             dist (ProbabilityDistribution): Distribution to evaluate against.
 
         Returns:
             Cross-entropy in nats.
+
+        Raises:
+            NotImplementedError: If dist is not a
+                MultivariateNormalGammaDistribution.
 
         """
         if isinstance(dist, MultivariateNormalGammaDistribution):
@@ -101,12 +105,9 @@ class MultivariateNormalGammaDistribution(ProbabilityDistribution):
             c3 = -0.5*ll*((1/l) + m*m*a/b - 2*mm*m*a/b + mm*mm*a/b)
             return -np.sum(c1 + c2 + c3)
         else:
-            #lf2 = lambda x, y: dist.log_density((x, y)) * self.density((x, y))
-            #lf1 = lambda x, y: dist.log_density((-x, y)) * self.density((-x, y))
-            #a1 = scipy.integrate.dblquad(lf1, 0, np.inf, lambda u: 0, lambda u: np.inf)
-            #a2 = scipy.integrate.dblquad(lf2, 0, np.inf, lambda u: 0, lambda u: np.inf)
-            #return -(a1[0] + a2[0])
-            return 0
+            raise NotImplementedError(
+                'MultivariateNormalGammaDistribution.cross_entropy is only implemented for '
+                'MultivariateNormalGammaDistribution arguments (got %s).' % type(dist).__name__)
 
     def entropy(self) -> float:
         """Returns the entropy (in nats), summed over components."""
@@ -196,4 +197,3 @@ class MultivariateNormalGammaSampler(object):
             return x,t
         else:
             return [self.sample() for i in range(size)]
-

@@ -41,6 +41,7 @@ enc_data_type = Tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.nd
 
 class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Markov-chain distribution over finite-state sequences."""
     def __init__(self, init_prob_map: Dict[T, float], transition_map: Dict[T, Dict[T, float]],
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  default_value: float = 0.0, name: Optional[str] = None) -> None:

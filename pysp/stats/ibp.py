@@ -166,6 +166,7 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
                     repr(self.min_prob), repr(self.name), repr(self.keys), repr(self.data_format))
 
     def density(self, x: Any) -> float:
+        """Return the probability density or mass at a single observation."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: Any) -> float:
@@ -179,10 +180,12 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.expected_log_nsum + np.dot(xx, self.expected_log_dvec))
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         xx = np.asarray(x, dtype=np.float64)
         return self.log_nsum + np.dot(xx, self.log_dvec)
 
     def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized expected log-density values for encoded observations."""
         xx = np.asarray(x, dtype=np.float64)
         return self.expected_log_nsum + np.dot(xx, self.expected_log_dvec)
 
@@ -191,15 +194,18 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         return self.seq_expected_log_density(x)
 
     def sampler(self, seed: Optional[int] = None) -> 'IndianBuffetProcessSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return IndianBuffetProcessSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'IndianBuffetProcessEstimator':
+        """Return an estimator for fitting this distribution from data."""
         suff_stat = self.feature_probs.copy() if pseudo_count is not None else None
         return IndianBuffetProcessEstimator(
             self.num_features, alpha=self.alpha, pseudo_count=pseudo_count, suff_stat=suff_stat,
             min_prob=self.min_prob, name=self.name, keys=self.keys, data_format=self.data_format)
 
     def dist_to_encoder(self) -> 'IndianBuffetProcessDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return IndianBuffetProcessDataEncoder(self.num_features, self.data_format)
 
 

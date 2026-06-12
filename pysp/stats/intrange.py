@@ -20,13 +20,14 @@ import pysp.utils.vector as vec
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEncodableProbabilityDistribution, \
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
-    DistributionEnumerator
-from pysp.utils.enumeration import QuantizedEnumerationIndex
+    DistributionEnumerator, EnumerationError
+from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 from typing import List, Union, Tuple, Optional, Dict, Any
 
 
 class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Categorical distribution over a bounded integer range."""
     def __init__(self, min_val: int, p_vec: Union[List[float], np.ndarray], name: Optional[str] = None) -> None:
         """IntegerCategoricalDistribution object defining an integer categorical distribution.
 
@@ -151,6 +152,23 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         """Build a bounded bit-quantized index directly from the finite integer support."""
         items = [(self.min_val + i, float(lp)) for i, lp in enumerate(self.log_p_vec)]
         return QuantizedEnumerationIndex.from_items(items, max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+    def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view over integer categorical ranges."""
+        dists = [self] + list(others)
+        if any(not isinstance(dist, IntegerCategoricalDistribution) for dist in dists):
+            return super().quantized_multi_cross_index(others, max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+        lo = min(dist.min_val for dist in dists)
+        hi = max(dist.max_val for dist in dists)
+        items = []
+        for value in range(lo, hi + 1):
+            items.append((value, tuple(float(dist.log_density(value)) for dist in dists)))
+        return QuantizedCrossIndex.from_items(items, max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+    def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view over two integer categorical ranges."""
+        return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
 class IntegerCategoricalEnumerator(DistributionEnumerator):

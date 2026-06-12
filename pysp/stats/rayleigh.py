@@ -33,9 +33,11 @@ class RayleighDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.sigma), repr(self.name), repr(self.keys))
 
     def density(self, x: float) -> float:
+        """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: float) -> float:
+        """Return the log-density or log-mass at a single observation."""
         if x < 0.0:
             return -np.inf
         if x == 0.0:
@@ -43,20 +45,24 @@ class RayleighDistribution(SequenceEncodableProbabilityDistribution):
         return math.log(x) - self.log_sigma2 - x * x / (2.0 * self.sigma2)
 
     def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         xx, xx2, lx = x
         rv = lx - self.log_sigma2 - xx2 / (2.0 * self.sigma2)
         return np.where(xx >= 0.0, rv, -np.inf)
 
     def sampler(self, seed: Optional[int] = None) -> 'RayleighSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return RayleighSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'RayleighEstimator':
+        """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return RayleighEstimator(name=self.name, keys=self.keys)
         return RayleighEstimator(pseudo_count=pseudo_count, suff_stat=self.sigma,
                                  name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> 'RayleighDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return RayleighDataEncoder()
 
 

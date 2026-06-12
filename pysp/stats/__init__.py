@@ -12,6 +12,8 @@ __all__ = [
     "seq_log_density_sum",
     "seq_estimate",
     "seq_initialize",
+    "load_models",
+    "dump_models",
     "DistributionEnumerator",
     "EnumerationError",
     "BernoulliDistribution",
@@ -27,6 +29,10 @@ __all__ = [
     "LaplaceSampler",
     "LaplaceEstimator",
     "LaplaceDataEncoder",
+    "LogisticDistribution",
+    "LogisticSampler",
+    "LogisticEstimator",
+    "LogisticDataEncoder",
     "BinomialDistribution",
     "BinomialSampler",
     "BinomialEstimator",
@@ -52,6 +58,11 @@ __all__ = [
     "ConditionalDistributionEstimator",
     "ConditionalDistributionDataEncoder",
     "ConditionalDistributionEnumerator",
+    "ChowLiuTreeDistribution",
+    "ChowLiuTreeEstimator",
+    "ChowLiuTreeSampler",
+    "ChowLiuTreeDataEncoder",
+    "ChowLiuTreeEnumerator",
     "DiracLengthMixtureDistribution",
     "DiracLengthMixtureSampler",
     "DiracLengthMixtureEstimator",
@@ -103,11 +114,21 @@ __all__ = [
     "UniformSampler",
     "UniformEstimator",
     "UniformDataEncoder",
+    "WeibullDistribution",
+    "WeibullSampler",
+    "WeibullEstimator",
+    "WeibullDataEncoder",
     "HeterogeneousMixtureDistribution",
     "HeterogeneousMixtureSampler",
     "HeterogeneousMixtureEstimator",
     "HeterogeneousMixtureDataEncoder",
     "HeterogeneousMixtureEnumerator",
+    "HeterogeneousPCFGDistribution",
+    "HeterogeneousPCFGSampler",
+    "HeterogeneousPCFGEstimator",
+    "InducedHeterogeneousPCFGEstimator",
+    "HeterogeneousPCFGDataEncoder",
+    "HeterogeneousPCFGEnumerator",
     "HiddenAssociationDistribution",
     "HiddenAssociationSampler",
     "HiddenAssociationEstimator",
@@ -219,6 +240,11 @@ __all__ = [
     "PoissonEstimator",
     "PoissonDataEncoder",
     "PoissonEnumerator",
+    "PointMassDistribution",
+    "PointMassSampler",
+    "PointMassEstimator",
+    "PointMassDataEncoder",
+    "PointMassEnumerator",
     "SelectDistribution",
     "SelectEstimator",
     "SelectEnumerator",
@@ -227,6 +253,11 @@ __all__ = [
     "SequenceEstimator",
     "SequenceDataEncoder",
     "SequenceEnumerator",
+    "SegmentalHiddenMarkovModelDistribution",
+    "SegmentalHiddenMarkovDistribution",
+    "SegmentalHiddenMarkovSampler",
+    "SegmentalHiddenMarkovEstimator",
+    "SegmentalHiddenMarkovDataEncoder",
     "BernoulliSetDistribution",
     "BernoulliSetSampler",
     "BernoulliSetEstimator",
@@ -248,6 +279,16 @@ __all__ = [
     "TreeHiddenMarkovModelDistribution",
     "TreeHiddenMarkovSampler",
     "TreeHiddenMarkovEstimator",
+    "TransformDistribution",
+    "TransformSampler",
+    "TransformEstimator",
+    "TransformDataEncoder",
+    "TransformEnumerator",
+    "IdentityTransform",
+    "AffineTransform",
+    "ExpTransform",
+    "LogTransform",
+    "LogitTransform",
     "LDADistribution",
     "LDASampler",
     "LDAEstimator",
@@ -279,6 +320,9 @@ from pysp.stats.categorical import CategoricalDistribution, CategoricalSampler, 
 from pysp.stats.poisson import PoissonDistribution, PoissonSampler, PoissonEstimator, PoissonDataEncoder, \
     PoissonEnumerator
 
+from pysp.stats.point_mass import PointMassDistribution, PointMassSampler, PointMassEstimator, \
+    PointMassDataEncoder, PointMassEnumerator
+
 from pysp.stats.geometric import GeometricDistribution, GeometricSampler, GeometricEstimator, GeometricDataEncoder, \
     GeometricEnumerator
 
@@ -308,6 +352,8 @@ from pysp.stats.gaussian import GaussianDistribution, GaussianSampler, GaussianE
 
 from pysp.stats.laplace import LaplaceDistribution, LaplaceSampler, LaplaceEstimator, LaplaceDataEncoder
 
+from pysp.stats.logistic import LogisticDistribution, LogisticSampler, LogisticEstimator, LogisticDataEncoder
+
 from pysp.stats.pareto import ParetoDistribution, ParetoSampler, ParetoEstimator, ParetoDataEncoder
 
 from pysp.stats.rayleigh import RayleighDistribution, RayleighSampler, RayleighEstimator, RayleighDataEncoder
@@ -315,6 +361,8 @@ from pysp.stats.rayleigh import RayleighDistribution, RayleighSampler, RayleighE
 from pysp.stats.student_t import StudentTDistribution, StudentTSampler, StudentTEstimator, StudentTDataEncoder
 
 from pysp.stats.uniform import UniformDistribution, UniformSampler, UniformEstimator, UniformDataEncoder
+
+from pysp.stats.weibull import WeibullDistribution, WeibullSampler, WeibullEstimator, WeibullDataEncoder
 
 from pysp.stats.dirichlet import DirichletDistribution, DirichletSampler, DirichletEstimator, DirichletDataEncoder
 
@@ -331,8 +379,14 @@ from pysp.stats.composite import CompositeDistribution, CompositeSampler, Compos
 from pysp.stats.conditional import ConditionalDistribution, ConditionalDistributionSampler, \
     ConditionalDistributionEstimator, ConditionalDistributionDataEncoder, ConditionalDistributionEnumerator
 
+from pysp.stats.chow_liu_tree import ChowLiuTreeDistribution, ChowLiuTreeEstimator, ChowLiuTreeSampler, \
+    ChowLiuTreeDataEncoder, ChowLiuTreeEnumerator
+
 from pysp.stats.sequence import SequenceDistribution, SequenceSampler, SequenceEstimator, SequenceDataEncoder, \
     SequenceEnumerator
+
+from pysp.stats.segmental_hmm import SegmentalHiddenMarkovModelDistribution, SegmentalHiddenMarkovDistribution, \
+    SegmentalHiddenMarkovSampler, SegmentalHiddenMarkovEstimator, SegmentalHiddenMarkovDataEncoder
 
 from pysp.stats.ignored import IgnoredDistribution, IgnoredSampler, IgnoredEstimator, IgnoredDataEncoder
 
@@ -343,12 +397,19 @@ from pysp.stats.weighted import WeightedDistribution, WeightedEstimator, Weighte
 
 from pysp.stats.select import SelectDistribution, SelectEstimator, SelectEnumerator
 
+from pysp.stats.transform import TransformDistribution, TransformSampler, TransformEstimator, TransformDataEncoder, \
+    TransformEnumerator, IdentityTransform, AffineTransform, ExpTransform, LogTransform, LogitTransform
+
 ### Generic Distributions
 from pysp.stats.mixture import MixtureDistribution, MixtureSampler, MixtureEstimator, MixtureDataEncoder, \
     MixtureEnumerator
 
 from pysp.stats.heterogenous_mixture import HeterogeneousMixtureDistribution, HeterogeneousMixtureSampler, \
     HeterogeneousMixtureEstimator, HeterogeneousMixtureDataEncoder, HeterogeneousMixtureEnumerator
+
+from pysp.stats.heterogeneous_pcfg import HeterogeneousPCFGDistribution, HeterogeneousPCFGSampler, \
+    HeterogeneousPCFGEstimator, InducedHeterogeneousPCFGEstimator, HeterogeneousPCFGDataEncoder, \
+    HeterogeneousPCFGEnumerator
 
 from pysp.stats.markovchain import MarkovChainDistribution, MarkovChainSampler, MarkovChainEstimator, \
     MarkovChainDataEncoder, MarkovChainEnumerator
@@ -431,12 +492,16 @@ T = TypeVar('T')
 T_D = TypeVar('T_D', bound=SequenceEncodableProbabilityDistribution)
 
 
-def load_models(x: str) -> SequenceEncodableProbabilityDistribution:
-    return eval(x)
+def load_models(x: str):
+    """Reconstruct a model or collection of models from dump_models() JSON."""
+    from pysp.utils.serialization import from_json
+    return from_json(x)
 
 
-def dump_models(x: SequenceEncodableProbabilityDistribution) -> str:
-    return str(x)
+def dump_models(x) -> str:
+    """Serialize a stats model or collection of models to safe strict JSON."""
+    from pysp.utils.serialization import to_json
+    return to_json(x)
 
 
 def initialize(data: Union[Sequence[T], pyspark.rdd.RDD],

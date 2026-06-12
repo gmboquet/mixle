@@ -17,6 +17,7 @@ from typing import Optional, Tuple, List, Callable, Dict, Union, Any
 
 class GaussianDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Univariate Gaussian distribution."""
     def __init__(self, mu: float, sigma2: float, name: Optional[str] = None) -> None:
         """GaussianDistribution object defines Gaussian distribution with mean mu and variance sigma2.
 
@@ -33,8 +34,12 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
             log_const (float): Log of above.
 
         """
-        self.mu = mu
-        self.sigma2 = 1.0 if (sigma2 <= 0 or isnan(sigma2) or isinf(sigma2)) else sigma2
+        if not np.isfinite(mu):
+            raise ValueError('GaussianDistribution requires finite mu.')
+        if sigma2 <= 0.0 or not np.isfinite(sigma2):
+            raise ValueError('GaussianDistribution requires finite sigma2 > 0.')
+        self.mu = float(mu)
+        self.sigma2 = float(sigma2)
         self.log_const = -0.5 * log(2.0 * pi * self.sigma2)
         self.const = 1.0 / sqrt(2.0 * pi * self.sigma2)
         self.name = name
@@ -73,6 +78,7 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         return self.log_const - 0.5 * (x - self.mu) * (x - self.mu) / self.sigma2
 
     def seq_ld_lambda(self) -> List[Callable]:
+        """Return vectorized log-density callables for encoded data."""
         return [self.seq_log_density]
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
@@ -441,6 +447,9 @@ class GaussianEstimator(ParameterEstimator):
         else:
             sigma2 = suff_stat[1] / nobs_loc2 - mu * mu
 
+        if sigma2 <= 0.0 or not np.isfinite(sigma2):
+            sigma2 = 1.0e-12
+
         return GaussianDistribution(mu, sigma2, name=self.name)
 
 
@@ -480,5 +489,4 @@ class GaussianDataEncoder(DataSequenceEncoder):
         if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
             raise Exception('GaussianDistribution requires support x in (-inf,inf).')
         return rv
-
 

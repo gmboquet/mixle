@@ -43,11 +43,9 @@ class GeometricDistribution(ProbabilityDistribution):
 
         """
         self.parents = []
-        self.p      = p
-        self.log_p  = np.log(p)
-        self.log_1p = np.log1p(-p)
         self.name = name
         self.keys = keys
+        self.set_parameters(p)
         self.set_prior(prior)
 
     def __str__(self):
@@ -91,6 +89,8 @@ class GeometricDistribution(ProbabilityDistribution):
 
         """
         self.p = params
+        self.log_p = np.log(params) if params > 0.0 else -np.inf
+        self.log_1p = np.log1p(-params) if params < 1.0 else -np.inf
 
     def entropy(self) -> float:
         """Returns the entropy of the geometric distribution (in nats)."""
@@ -125,14 +125,22 @@ class GeometricDistribution(ProbabilityDistribution):
             The p-th moment as a float.
 
         """
+        order = int(p)
         p_loc = self.p
-        if p == 1:
+        if order == 0:
+            return 1.0
+        if p_loc <= 0.0:
+            return np.inf
+        if p_loc == 1.0:
+            return 1.0
+        if order == 1:
             return 1.0/p_loc
-        elif p == 2:
+        elif order == 2:
             return (2-p_loc)/(p_loc*p_loc)
         else:
-            aa = mpmath.polylog(-1, 1 - p)
-            return float(mpmath.nstr(aa, 12)) * p / (1 - p)
+            q = 1.0 - p_loc
+            aa = mpmath.polylog(-order, q)
+            return float(aa) * p_loc / q
 
     def density(self, x: int) -> float:
         """Density of the geometric distribution at observation x.
@@ -156,6 +164,8 @@ class GeometricDistribution(ProbabilityDistribution):
             Log-density at observation x.
 
         """
+        if x < 1:
+            return -np.inf
         if self.p == 1.0:
             return 0.0 if x == 1 else -np.inf
         elif self.p == 0.0:
@@ -195,9 +205,16 @@ class GeometricDistribution(ProbabilityDistribution):
             Numpy array of log-densities, one per observation.
 
         """
-        rv = x-1
-        rv *= self.log_1p
-        rv += self.log_p
+        rv = np.zeros_like(x, dtype=np.float64)
+        invalid = x < 1
+        if self.p == 1.0:
+            rv.fill(-np.inf)
+            rv[x == 1] = 0.0
+        elif self.p == 0.0:
+            rv.fill(-np.inf)
+        else:
+            rv = (x - 1.0)*self.log_1p + self.log_p
+            rv[invalid] = -np.inf
         return rv
 
     def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:

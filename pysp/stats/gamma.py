@@ -8,6 +8,7 @@ Data type: (float): The GammaDistribution with shape k > 0.0 and scale theta > 0
 
 """
 import numpy as np
+import math
 from numpy.random import RandomState
 from typing import Tuple, List, Optional, Union, Dict, Any
 from pysp.arithmetic import *
@@ -16,8 +17,14 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, Parameter
 from pysp.utils.special import gammaln, digamma, trigamma
 
 
+_MIN_GAMMA_PARAM = 1.0e-12
+_MIN_GAMMA_SCALE = float(np.finfo(float).tiny)
+_MAX_GAMMA_SHAPE = 1.0e12
+
+
 class GammaDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Gamma distribution parameterized by shape and scale."""
     def __init__(self, k: float, theta: float, name: Optional[str] = None) -> None:
         """GammaDistribution for shape k and scale theta.
 
@@ -33,9 +40,13 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
             log_const (float): Normalizing constant of gamma distribution.
 
         """
-        self.k = k
-        self.theta = theta
-        self.log_const = -(gammaln(k) + k * log(theta))
+        if k <= 0.0 or not np.isfinite(k):
+            raise ValueError('GammaDistribution requires finite k > 0.')
+        if theta <= 0.0 or not np.isfinite(theta):
+            raise ValueError('GammaDistribution requires finite theta > 0.')
+        self.k = float(k)
+        self.theta = float(theta)
+        self.log_const = -(gammaln(self.k) + self.k * log(self.theta))
         self.name = name
 
     def __str__(self) -> str:
@@ -54,7 +65,13 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
             Density of gamma distribution evaluated at x.
 
         """
-        return exp(self.log_const + (self.k - one) * log(x) - x / self.theta)
+        try:
+            xx = float(x)
+        except Exception:
+            return 0.0
+        if not np.isfinite(xx) or xx <= 0.0:
+            return 0.0
+        return exp(self.log_const + (self.k - one) * log(xx) - xx / self.theta)
 
     def log_density(self, x: float) -> float:
         """Log-density of gamma distribution evaluated at x.
@@ -71,7 +88,13 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
             Log-density of gamma distribution evaluated at x.
 
         """
-        return self.log_const + (self.k - one) * log(x) - x / self.theta
+        try:
+            xx = float(x)
+        except Exception:
+            return -np.inf
+        if not np.isfinite(xx) or xx <= 0.0:
+            return -np.inf
+        return self.log_const + (self.k - one) * log(xx) - xx / self.theta
 
     def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Vectorized evaluation of sequence encoded observations from gamma distribution.
@@ -92,7 +115,7 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
             rv += x[1] * (self.k - 1.0)
         rv += self.log_const
 
-        return rv
+        return np.where(np.isfinite(x[0]) & (x[0] > 0.0), rv, -np.inf)
 
     def sampler(self, seed: Optional[int] = None) -> 'GammaSampler':
         """Create a GammaSampler object from GammaDistribution.
@@ -226,6 +249,8 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
+        if x <= 0.0 or not np.isfinite(x):
+            raise ValueError('GammaDistribution has support x > 0.')
         self.nobs += weight
         self.sum += x * weight
         self.sum_of_logs += log(x) * weight
@@ -394,22 +419,26 @@ class GammaEstimator(ParameterEstimator):
         pc1, pc2 = self.pseudo_count
         ss1, ss2 = self.suff_stat
 
-        if suff_stat[0] == 0:
+        if suff_stat[0] <= 0:
             return GammaDistribution(1.0, 1.0, name=self.name)
 
         adj_sum = suff_stat[1] + ss1 * pc1
         adj_cnt = suff_stat[0] + pc1
+        if adj_cnt <= 0.0 or adj_sum <= 0.0 or not np.isfinite(adj_sum):
+            return GammaDistribution(1.0, 1.0, name=self.name)
         adj_mean = adj_sum / adj_cnt
 
         adj_lsum = suff_stat[2] + ss2 * pc2
         adj_lcnt = suff_stat[0] + pc2
+        if adj_lcnt <= 0.0 or not np.isfinite(adj_lsum):
+            return GammaDistribution(1.0, adj_mean, name=self.name)
         adj_lmean = adj_lsum / adj_lcnt
 
         k = self.estimate_shape(adj_mean, adj_lmean, self.threshold)
 
         # theta = mean / k, where the mean uses the count adjusted by pc1 (adj_lcnt
         # uses pc2 and is only valid for the log-mean).
-        return GammaDistribution(k, adj_mean / k, name=self.name)
+        return GammaDistribution(k, max(_MIN_GAMMA_SCALE, adj_mean / k), name=self.name)
 
     @staticmethod
     def estimate_shape(avg_sum: float, avg_sum_of_logs: float, threshold: float) -> float:
@@ -424,13 +453,50 @@ class GammaEstimator(ParameterEstimator):
             Estimate of shape parameter 'k'.
 
         """
-        s = log(avg_sum) - avg_sum_of_logs
-        old_k = inf
-        k = (3 - s + sqrt((s - 3) * (s - 3) + 24 * s)) / (12 * s)
-        while abs(old_k - k) > threshold:
-            old_k = k
-            k -= (log(k) - digamma(k) - s) / (one / k - trigamma(k))
-        return k
+        avg_sum = float(avg_sum)
+        avg_sum_of_logs = float(avg_sum_of_logs)
+        if avg_sum <= 0.0 or not np.isfinite(avg_sum) or not np.isfinite(avg_sum_of_logs):
+            return 1.0
+
+        s = float(math.log(avg_sum) - avg_sum_of_logs)
+        if not np.isfinite(s):
+            return 1.0
+        if s <= 0.0:
+            return _MAX_GAMMA_SHAPE
+
+        threshold = max(float(threshold), 1.0e-12)
+
+        def shape_eq(k: float) -> float:
+            return float(math.log(k) - digamma(k) - s)
+
+        lo = _MIN_GAMMA_PARAM
+        hi = min(_MAX_GAMMA_SHAPE, max(1.0, 1.0 / (2.0 * s)))
+        f_lo = shape_eq(lo)
+        if not np.isfinite(f_lo) or f_lo <= 0.0:
+            return lo
+
+        f_hi = shape_eq(hi)
+        while np.isfinite(f_hi) and f_hi > 0.0 and hi < _MAX_GAMMA_SHAPE:
+            hi = min(_MAX_GAMMA_SHAPE, hi * 2.0)
+            f_hi = shape_eq(hi)
+        if not np.isfinite(f_hi):
+            return 1.0
+        if f_hi > 0.0:
+            return _MAX_GAMMA_SHAPE
+
+        for _ in range(200):
+            mid = 0.5 * (lo + hi)
+            f_mid = shape_eq(mid)
+            if not np.isfinite(f_mid):
+                break
+            if f_mid > 0.0:
+                lo = mid
+            else:
+                hi = mid
+            if hi - lo <= threshold * max(1.0, hi):
+                break
+
+        return min(_MAX_GAMMA_SHAPE, max(_MIN_GAMMA_PARAM, 0.5 * (lo + hi)))
 
 
 class GammaDataEncoder(DataSequenceEncoder):
@@ -466,8 +532,8 @@ class GammaDataEncoder(DataSequenceEncoder):
         """
         rv1 = np.asarray(x, dtype=float)
 
-        if np.any(rv1 <= 0) or np.any(np.isnan(rv1)):
-            raise Exception('GammaDistribution has support x > 0.')
+        if np.any(rv1 <= 0) or np.any(~np.isfinite(rv1)):
+            raise ValueError('GammaDistribution has support x > 0.')
         else:
             rv2 = np.log(rv1)
             return rv1, rv2
