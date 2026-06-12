@@ -10,17 +10,19 @@ Covers:
 """
 import io
 import unittest
+import warnings
 
 import numpy as np
 import scipy.stats
 
 from pysp.bstats import (
-    BetaDistribution, BinomialDistribution, BinomialEstimator,
+    BernoulliDistribution, BetaDistribution, BinomialDistribution, BinomialEstimator,
     CategoricalDistribution, CategoricalEstimator, DirichletDistribution,
     ExponentialDistribution, ExponentialEstimator, GaussianDistribution,
     GaussianEstimator, GeometricDistribution, LogGaussianDistribution,
     LogGaussianEstimator, MixtureDistribution, MixtureEstimator,
-    PoissonDistribution, PoissonEstimator, IntegerCategoricalDistribution,
+    OptionalDistribution, PoissonDistribution, PoissonEstimator, IntegerCategoricalDistribution,
+    initialize, estimate, seq_encode, seq_estimate,
 )
 from pysp.bstats.bestimation import optimize, k_fold_split_index
 from pysp.bstats.dpm import DirichletProcessMixtureEstimator
@@ -112,6 +114,14 @@ class ConjugateUpdateTestCase(unittest.TestCase):
         # probabilities are a valid distribution
         self.assertAlmostEqual(sum(np.exp(d.log_density(k)) for k in 'abc'), 1.0, places=10)
 
+    def test_categorical_zero_probability_is_explicit_neg_inf(self):
+        d = CategoricalDistribution({'a': 1.0}, default_value=0.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            self.assertEqual(d.log_density('b'), -np.inf)
+            enc = d.seq_encode(['a', 'b'])
+            np.testing.assert_allclose(d.seq_log_density(enc), np.asarray([0.0, -np.inf]))
+
 
 class PriorDensityTestCase(unittest.TestCase):
 
@@ -145,10 +155,110 @@ class PriorDensityTestCase(unittest.TestCase):
         for mu, tau in samples:
             self.assertTrue(np.isfinite(mu) and tau > 0)
 
+    def test_multivariate_normal_gamma_cross_entropy_contract(self):
+        from pysp.bstats.mvngamma import MultivariateNormalGammaDistribution
+
+        d = MultivariateNormalGammaDistribution(
+            np.array([0.0, 1.0]), np.array([2.0, 3.0]),
+            np.array([4.0, 5.0]), np.array([6.0, 7.0]))
+        self.assertAlmostEqual(d.cross_entropy(d), d.entropy(), places=10)
+        with self.assertRaises(NotImplementedError):
+            d.cross_entropy(NormalGammaDistribution(0.0, 1.0, 2.0, 3.0))
+
     def test_dirichlet_entropy_matches_scipy(self):
         alpha = np.array([1.5, 2.5, 3.0])
         d = DirichletDistribution(alpha)
         self.assertAlmostEqual(d.entropy(), scipy.stats.dirichlet.entropy(alpha), places=10)
+
+    def test_discrete_entropy_and_cross_entropy_have_standard_sign(self):
+        cases = [
+            (BernoulliDistribution(0.3), scipy.stats.bernoulli(0.3).entropy()),
+            (BinomialDistribution(5, 0.3), scipy.stats.binom(5, 0.3).entropy()),
+            (PoissonDistribution(3.0), scipy.stats.poisson(3.0).entropy()),
+            (GeometricDistribution(0.3), scipy.stats.geom(0.3).entropy()),
+        ]
+        for dist, expected in cases:
+            with self.subTest(dist=type(dist).__name__):
+                self.assertAlmostEqual(dist.entropy(), expected, places=8)
+                self.assertAlmostEqual(dist.cross_entropy(dist), dist.entropy(), places=8)
+
+        p1 = PoissonDistribution(3.0)
+        p2 = PoissonDistribution(5.0)
+        expected = scipy.stats.poisson(3.0).entropy() + 3.0*np.log(3.0/5.0) + 5.0 - 3.0
+        self.assertAlmostEqual(p1.cross_entropy(p2), expected, places=8)
+
+        cat = CategoricalDistribution({'a': 0.2, 'b': 0.8})
+        expected = scipy.stats.entropy([0.2, 0.8])
+        self.assertAlmostEqual(cat.entropy(), expected, places=10)
+        self.assertAlmostEqual(cat.cross_entropy(cat), expected, places=10)
+
+        opt = OptionalDistribution(CategoricalDistribution({'a': 1.0}), p=0.25, missing_value=None)
+        expected = scipy.stats.entropy([0.25, 0.75])
+        self.assertAlmostEqual(opt.entropy(), expected, places=10)
+
+    def test_support_boundaries_match_scalar_and_vectorized_log_density(self):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            self.assertEqual(BetaDistribution(2.0, 3.0).log_density(0.0), -np.inf)
+            self.assertEqual(BetaDistribution(2.0, 3.0).log_density(1.0), -np.inf)
+
+            for dist, data in [
+                (ExponentialDistribution(2.0), [-1.0, 0.5]),
+                (GammaDistribution(2.0, 3.0), [-1.0, 0.0, 2.0]),
+                (GeometricDistribution(0.3), [-1, 0, 1, 2]),
+                (PoissonDistribution(3.0), [-1, 0, 3]),
+            ]:
+                enc = dist.seq_encode(data)
+                expected = np.asarray([dist.log_density(x) for x in data])
+                np.testing.assert_allclose(dist.seq_log_density(enc), expected)
+
+    def test_seq_expected_log_density_falls_back_without_conjugate_prior(self):
+        from pysp.bstats.nulldist import null_dist
+
+        cases = [
+            (BernoulliDistribution(0.3, prior=null_dist), [True, False]),
+            (IntegerCategoricalDistribution([0.2, 0.3, 0.5], prior=null_dist), [0, 1, 2]),
+            (OptionalDistribution(GaussianDistribution(0.0, 1.0), p=0.25,
+                                  missing_value=None, prior=null_dist), [None, -1.0, 0.5]),
+        ]
+        for dist, data in cases:
+            with self.subTest(dist=type(dist).__name__):
+                enc = dist.seq_encode(data)
+                np.testing.assert_allclose(
+                    dist.seq_expected_log_density(enc),
+                    dist.seq_log_density(enc))
+
+    def test_base_expected_log_density_falls_back_to_plugin_density(self):
+        from pysp.bstats.dirac import DiracDistribution
+        from pysp.bstats.setdist import BernoulliSetDistribution
+
+        cases = [
+            (DiracDistribution('x'), ['x', 'y']),
+            (BernoulliSetDistribution({'a': 0.25, 'b': 0.75}), [{'a'}, {'b'}, set()]),
+        ]
+        for dist, data in cases:
+            with self.subTest(dist=type(dist).__name__):
+                enc = dist.seq_encode(data)
+                self.assertEqual(dist.expected_log_density(data[0]), dist.log_density(data[0]))
+                np.testing.assert_allclose(dist.seq_expected_log_density(enc), dist.seq_log_density(enc))
+
+    def test_conditional_distribution_without_default_matches_scalar_and_vectorized(self):
+        from pysp.bstats.conditional import ConditionalDistribution
+
+        dist = ConditionalDistribution({'seen': GaussianDistribution(0.0, 1.0)}, default_dist=None)
+        data = [('seen', 0.0), ('missing', 1.0)]
+        enc = dist.seq_encode(data)
+
+        self.assertEqual(dist.log_density(data[1]), -np.inf)
+        np.testing.assert_allclose(
+            dist.seq_log_density(enc),
+            np.asarray([dist.log_density(x) for x in data]))
+
+    def test_count_distribution_moments(self):
+        self.assertEqual(PoissonDistribution(4.0).moment(0), 1.0)
+        self.assertAlmostEqual(
+            GeometricDistribution(0.3).moment(3),
+            scipy.stats.geom(0.3).moment(3),
+            places=8)
 
 
 class DensityConsistencyTestCase(unittest.TestCase):
@@ -236,12 +346,129 @@ class OptimizeConvergenceTestCase(unittest.TestCase):
         self.assertAlmostEqual(model.w.sum(), 1.0, places=8)
         self.assertTrue(np.all(model.w >= 0))
 
+    def test_dpm_single_component_truncation_is_valid(self):
+        data = GaussianDistribution(0.0, 1.0).sampler(seed=1).sample(80)
+        est = DirichletProcessMixtureEstimator([GaussianEstimator()])
+        model, objs = self.run_optimize(est, data, max_its=5, seed=3)
+
+        self.assertGreater(len(objs), 0)
+        self.assertEqual(len(model.components), 1)
+        self.assertAlmostEqual(model.w[0], 1.0, places=12)
+        self.assertTrue(np.isfinite(model.a))
+        self.assertTrue(np.all(np.isfinite(model.g)))
+        enc = seq_encode(data, model, num_chunks=1)
+        local_elbo = model.seq_local_elbo(enc[0][1])
+        comp_expected = model.components[0].seq_expected_log_density(enc[0][1])
+        np.testing.assert_allclose(local_elbo, comp_expected, rtol=1.0e-12, atol=1.0e-12)
+
+    def test_dpm_scalar_and_vectorized_updates_agree(self):
+        truth = MixtureDistribution(
+            [GaussianDistribution(-3.0, 0.7), GaussianDistribution(2.0, 1.2)], [0.45, 0.55])
+        data = truth.sampler(seed=11).sample(250)
+        est = DirichletProcessMixtureEstimator([GaussianEstimator() for _ in range(5)])
+        prev = initialize(data, est, rng=np.random.RandomState(12), p=0.8)
+
+        scalar = estimate(data, est, prev)
+        vector = seq_estimate(seq_encode(data, prev, num_chunks=4), est, prev)
+
+        np.testing.assert_allclose(scalar.w, vector.w, rtol=1.0e-12, atol=1.0e-12)
+        self.assertAlmostEqual(scalar.a, vector.a, places=10)
+        np.testing.assert_allclose(
+            sorted(c.mu for c in scalar.components),
+            sorted(c.mu for c in vector.components),
+            rtol=1.0e-12, atol=1.0e-12)
+
     def test_optimize_runs_with_plain_estimator(self):
         # model_log_density falls back gracefully for non-mixture estimators
         data = GaussianDistribution(2.0, 1.0).sampler(seed=5).sample(200)
         buf = io.StringIO()
         model = optimize(data, GaussianEstimator(), max_its=5, rng=np.random.RandomState(1), out=buf)
         self.assertAlmostEqual(model.mu, 2.0, delta=0.3)
+
+    def test_optimize_returns_accepted_step_before_delta_termination(self):
+        data = GaussianDistribution(0.0, 1.0).sampler(seed=1).sample(200)
+        prev = GaussianDistribution(10.0, 1.0)
+        model = optimize(data, GaussianEstimator(), max_its=1, delta=1.0e99,
+                         prev_estimate=prev, out=io.StringIO())
+
+        self.assertLess(abs(model.mu), 0.5)
+
+    def test_optimize_restores_numpy_error_state(self):
+        data = GaussianDistribution(0.0, 1.0).sampler(seed=2).sample(30)
+        old_err = np.seterr(divide='raise')
+        try:
+            optimize(data, GaussianEstimator(), max_its=1, rng=np.random.RandomState(2),
+                     out=io.StringIO())
+            self.assertEqual(np.geterr()['divide'], 'raise')
+        finally:
+            np.seterr(**old_err)
+
+    def test_local_drivers_support_legacy_estimator_api(self):
+        class LegacyAccumulator:
+            def __init__(self):
+                self.n = 0.0
+                self.s = 0.0
+
+            def update(self, x, weight, estimate):
+                self.n += weight
+                self.s += weight * x
+
+            def initialize(self, x, weight, rng):
+                self.update(x, weight, None)
+
+            def seq_update(self, x, weights, estimate):
+                x = np.asarray(x, dtype=float)
+                weights = np.asarray(weights, dtype=float)
+                self.n += float(weights.sum())
+                self.s += float(np.dot(x, weights))
+
+            def combine(self, suff_stat):
+                self.n += suff_stat[0]
+                self.s += suff_stat[1]
+                return self
+
+            def value(self):
+                return self.n, self.s
+
+            def from_value(self, suff_stat):
+                self.n, self.s = suff_stat
+                return self
+
+            def key_merge(self, stats_dict):
+                return None
+
+            def key_replace(self, stats_dict):
+                return None
+
+        class LegacyFactory:
+            def make(self):
+                return LegacyAccumulator()
+
+        class LegacyEstimator:
+            def accumulatorFactory(self):
+                return LegacyFactory()
+
+            def estimate(self, nobs, suff_stat):
+                self.last_nobs = nobs
+                n, s = suff_stat
+                return GaussianDistribution(s / n, 1.0)
+
+        data = [1.0, 2.0, 4.0]
+        est = LegacyEstimator()
+        expected = np.mean(data)
+
+        local_model = estimate(data, est)
+        self.assertAlmostEqual(local_model.mu, expected)
+        self.assertAlmostEqual(est.last_nobs, len(data))
+
+        init_model = initialize(data, est, rng=np.random.RandomState(1), p=1.0)
+        self.assertAlmostEqual(init_model.mu, expected)
+        self.assertAlmostEqual(est.last_nobs, len(data))
+
+        enc = seq_encode(data, local_model, num_chunks=2)
+        seq_model = seq_estimate(enc, est, local_model)
+        self.assertAlmostEqual(seq_model.mu, expected)
+        self.assertAlmostEqual(est.last_nobs, len(data))
 
 
 class NormalWishartTestCase(unittest.TestCase):

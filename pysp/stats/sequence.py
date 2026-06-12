@@ -38,6 +38,7 @@ E = Tuple[np.ndarray, np.ndarray, np.ndarray, E1, Optional[E2]]
 
 class SequenceDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Independent sequence distribution built from a component observation distribution."""
     def __init__(self, dist: SequenceEncodableProbabilityDistribution,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  len_normalized: Optional[bool] = False, name: Optional[str] = None) -> None:
@@ -137,6 +138,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def seq_ld_lambda(self):
+        """Return vectorized log-density callables for encoded data."""
         rv = self.dist.seq_ld_lambda()
 
         if not self.null_len_dist:

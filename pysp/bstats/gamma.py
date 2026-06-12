@@ -10,6 +10,7 @@ theta = mean(x)/k.
 """
 from typing import Optional
 import numpy as np
+import math
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
@@ -17,6 +18,16 @@ from pysp.bstats.pdist import ProbabilityDistribution, StatisticAccumulator, Par
 from pysp.utils.special import gammaln, digamma, trigamma
 from pysp.bstats.nulldist import null_dist
 import scipy.integrate
+
+_MIN_GAMMA_PARAM = 1.0e-12
+_MIN_GAMMA_SCALE = float(np.finfo(float).tiny)
+_MAX_GAMMA_SHAPE = 1.0e12
+
+
+def _finite_positive(x: float, default: float = 1.0) -> float:
+	x = float(x)
+	return x if np.isfinite(x) and x > 0.0 else default
+
 
 class GammaDistribution(ProbabilityDistribution):
 	"""Gamma distribution with shape k > 0 and scale theta > 0 for positive
@@ -31,9 +42,9 @@ class GammaDistribution(ProbabilityDistribution):
 			name (Optional[str]): Name for the distribution.
 			prior (ProbabilityDistribution): Prior on (k, theta). Defaults to null_dist.
 		"""
-		self.k         = k
-		self.theta     = theta
-		self.log_const = -(gammaln(k) + k*log(theta))
+		self.k         = _finite_positive(k)
+		self.theta     = _finite_positive(theta)
+		self.log_const = -(gammaln(self.k) + self.k*log(self.theta))
 		self.prior = prior
 		self.name = name
 		self.parents = []
@@ -99,6 +110,8 @@ class GammaDistribution(ProbabilityDistribution):
 		Returns:
 			float: Density value exp(log_density(x)).
 		"""
+		if x <= 0.0:
+			return 0.0
 		return exp(self.log_const + (self.k-one)*log(x) - x/self.theta)
 
 	def log_density(self, x):
@@ -110,6 +123,8 @@ class GammaDistribution(ProbabilityDistribution):
 		Returns:
 			float: Log density value.
 		"""
+		if x <= 0.0:
+			return -np.inf
 		return self.log_const + (self.k-one)*log(x) - x/self.theta
 
 	def seq_log_density(self, x):
@@ -125,6 +140,7 @@ class GammaDistribution(ProbabilityDistribution):
 		if self.k != 1.0:
 			rv += x[1]*(self.k - 1.0)
 		rv += self.log_const
+		rv[x[0] <= 0.0] = -np.inf
 		return rv
 
 	def seq_encode(self, x):
@@ -345,20 +361,24 @@ class GammaEstimator(ParameterEstimator):
 		pc1,pc2 = self.pseudo_count
 		ss1,ss2 = self.suff_stat
 
-		if suff_stat[0] == 0:
+		if suff_stat[0] <= 0:
 			return GammaDistribution(1.0, 1.0, name=self.name, prior=self.prior)
 
 		adj_sum   = suff_stat[1] + ss1*pc1
 		adj_cnt   = suff_stat[0] + pc1
+		if adj_cnt <= 0.0 or adj_sum <= 0.0 or not np.isfinite(adj_sum):
+			return GammaDistribution(1.0, 1.0, name=self.name, prior=self.prior)
 		adj_mean  = adj_sum/adj_cnt
 
 		adj_lsum  = suff_stat[2] + ss2*pc2
 		adj_lcnt  = suff_stat[0] + pc2
+		if adj_lcnt <= 0.0 or not np.isfinite(adj_lsum):
+			return GammaDistribution(1.0, adj_mean, name=self.name, prior=self.prior)
 		adj_lmean = adj_lsum/adj_lcnt
 
 		k = self.estimate_shape(adj_mean, adj_lmean, self.threshold)
 
-		return GammaDistribution(k, adj_sum/(k*adj_cnt), name=self.name, prior=self.prior)
+		return GammaDistribution(k, max(_MIN_GAMMA_SCALE, adj_sum/(k*adj_cnt)), name=self.name, prior=self.prior)
 
 	@staticmethod
 	def estimate_shape(avg_sum, avg_sum_of_logs, threshold):
@@ -375,10 +395,47 @@ class GammaEstimator(ParameterEstimator):
 		Returns:
 			float: Estimated shape parameter k.
 		"""
-		s = log(avg_sum) - avg_sum_of_logs
-		old_k = inf
-		k = (3 - s + sqrt((s-3)*(s-3) + 24*s))/(12*s)
-		while abs(old_k-k) > threshold:
-			old_k = k
-			k    -= (log(k) - digamma(k) - s)/(one/k - trigamma(k))
-		return k
+		avg_sum = float(avg_sum)
+		avg_sum_of_logs = float(avg_sum_of_logs)
+		if avg_sum <= 0.0 or not np.isfinite(avg_sum) or not np.isfinite(avg_sum_of_logs):
+			return 1.0
+
+		s = float(math.log(avg_sum) - avg_sum_of_logs)
+		if not np.isfinite(s):
+			return 1.0
+		if s <= 0.0:
+			return _MAX_GAMMA_SHAPE
+
+		threshold = max(float(threshold), 1.0e-12)
+
+		def shape_eq(k):
+			return float(math.log(k) - digamma(k) - s)
+
+		lo = _MIN_GAMMA_PARAM
+		hi = min(_MAX_GAMMA_SHAPE, max(1.0, 1.0/(2.0*s)))
+		f_lo = shape_eq(lo)
+		if not np.isfinite(f_lo) or f_lo <= 0.0:
+			return lo
+
+		f_hi = shape_eq(hi)
+		while np.isfinite(f_hi) and f_hi > 0.0 and hi < _MAX_GAMMA_SHAPE:
+			hi = min(_MAX_GAMMA_SHAPE, hi*2.0)
+			f_hi = shape_eq(hi)
+		if not np.isfinite(f_hi):
+			return 1.0
+		if f_hi > 0.0:
+			return _MAX_GAMMA_SHAPE
+
+		for _ in range(200):
+			mid = 0.5*(lo + hi)
+			f_mid = shape_eq(mid)
+			if not np.isfinite(f_mid):
+				break
+			if f_mid > 0.0:
+				lo = mid
+			else:
+				hi = mid
+			if hi - lo <= threshold*max(1.0, hi):
+				break
+
+		return min(_MAX_GAMMA_SHAPE, max(_MIN_GAMMA_PARAM, 0.5*(lo + hi)))

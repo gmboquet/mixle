@@ -63,9 +63,18 @@ class IgnoredDistribution(ProbabilityDistribution):
 		return self.dist.get_parameters()
 
 	def cross_entropy(self, dist):
+		"""Return the wrapped distribution's cross entropy against dist.
+
+		Args:
+			dist (ProbabilityDistribution): Distribution to evaluate against.
+
+		Returns:
+			float: self.dist.cross_entropy(dist).
+		"""
 		return self.dist.cross_entropy(dist)
 
 	def entropy(self):
+		"""Return the wrapped distribution's entropy."""
 		return self.dist.entropy()
 
 	def density(self, x):

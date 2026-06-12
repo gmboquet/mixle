@@ -265,6 +265,27 @@ class SemiSupervisedMixtureAccumulatorTestCase(unittest.TestCase):
             self.assertAlmostEqual(c_scalar.mu, c_seq.mu, places=10)
             self.assertAlmostEqual(c_scalar.sigma2, c_seq.sigma2, places=10)
 
+    def test_string_representation_keeps_name_intact(self) -> None:
+        dist = SemiSupervisedMixtureDistribution(self.dist.components, [0.5, 0.5], name='semi')
+        dist_str = str(dist)
+
+        self.assertIn("name='semi'", dist_str)
+        self.assertNotIn("name=',s,e,m,i,'", dist_str)
+
+    def test_duplicate_prior_labels_are_aggregated(self) -> None:
+        duplicate = (1.5, [(0, 0.2), (0, 0.3), (1, 0.5)])
+        combined = (1.5, [(0, 0.5), (1, 0.5)])
+
+        self.assertAlmostEqual(self.dist.log_density(duplicate), self.dist.log_density(combined), places=12)
+        np.testing.assert_allclose(self.dist.posterior(duplicate), self.dist.posterior(combined), rtol=1e-12)
+
+        enc = self.dist.dist_to_encoder().seq_encode([duplicate, combined])
+        log_density = self.dist.seq_log_density(enc)
+        posterior = self.dist.seq_posterior(enc)
+
+        self.assertAlmostEqual(log_density[0], log_density[1], places=12)
+        np.testing.assert_allclose(posterior[0], posterior[1], rtol=1e-12)
+
     def test_enumerator_fails_fast_with_reason(self) -> None:
         with self.assertRaises(EnumerationError) as ctx:
             self.dist.enumerator()

@@ -40,6 +40,7 @@ E = Tuple[int, np.ndarray, np.ndarray, np.ndarray, Optional[E0]]
 
 class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Multinomial distribution over integer-keyed count maps."""
     def __init__(self, min_val: int = 0, p_vec: List[float] = None,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  name: Optional[str] = None, keys: Optional[str] = None) -> None:

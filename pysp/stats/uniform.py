@@ -33,24 +33,30 @@ class UniformDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.low), repr(self.high), repr(self.name), repr(self.keys))
 
     def density(self, x: float) -> float:
+        """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: float) -> float:
+        """Return the log-density or log-mass at a single observation."""
         return self.log_density_value if self.low <= x <= self.high else -np.inf
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         return np.where((x >= self.low) & (x <= self.high), self.log_density_value, -np.inf)
 
     def sampler(self, seed: Optional[int] = None) -> 'UniformSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return UniformSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'UniformEstimator':
+        """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return UniformEstimator(name=self.name, keys=self.keys)
         return UniformEstimator(pseudo_count=pseudo_count, suff_stat=(self.low, self.high),
                                 name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> 'UniformDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return UniformDataEncoder()
 
 

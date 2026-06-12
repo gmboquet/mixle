@@ -165,14 +165,18 @@ class BernoulliDistribution(ProbabilityDistribution):
         """
         a = dist.log_density(True)
         b = dist.log_density(False)
-        return (a-b)*self.p + b
+        return -((a-b)*self.p + b)
 
     def entropy(self) -> float:
         """Returns the entropy -p log(p) - (1-p) log(1-p) in nats."""
-        return self.p * (self.log_p0 - self.log_p1) + self.log_p1
+        return -(self.p * self.log_p0 + (1.0 - self.p) * self.log_p1)
 
     def moment(self, p: int) -> float:
-        # X takes values in {0, 1}, so E[X^p] = P(X=1) for any p >= 1
+        """Return the p-th raw moment E[X^p].
+
+        Since X is in {0, 1}, E[X^p] is 1 for p == 0 and P(X=1)
+        for any positive integer p.
+        """
         return 1.0 if p == 0 else self.p
 
     def seq_log_density(self, x):
@@ -187,8 +191,9 @@ class BernoulliDistribution(ProbabilityDistribution):
         return np.where(x, self.log_p0, self.log_p1)
 
     def seq_expected_log_density(self, x):
-        """Vectorized expected log-density at sequence-encoded input x
-        (requires a conjugate prior).
+        """Vectorized expected log-density at sequence-encoded input x.
+
+        Falls back to seq_log_density when no conjugate prior is set.
 
         Args:
             x: Encoded data from seq_encode().
@@ -196,6 +201,8 @@ class BernoulliDistribution(ProbabilityDistribution):
         Returns:
             Numpy array of expected log-densities, one entry per observation.
         """
+        if not self.has_conj_prior:
+            return self.seq_log_density(x)
         da, db, dab = self.conj_prior_params
         return np.where(x, da - dab, db - dab)
 

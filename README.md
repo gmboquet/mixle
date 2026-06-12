@@ -88,12 +88,14 @@ All of these accept either an in-memory list **or a Spark RDD** — the same cod
 
 Around 60 composable families in `pysp.stats`, including:
 
-- **Scalar/basic:** Gaussian, StudentT, LogGaussian, Laplace, Uniform, Exponential, Gamma, Beta, Rayleigh, Pareto, Poisson, Bernoulli, Geometric, Binomial, Negative Binomial, von Mises-Fisher, multivariate/diagonal Gaussian, Dirichlet, categorical & integer-categorical
-- **Combinators:** `CompositeDistribution` (tuples), `SequenceDistribution` (variable-length i.i.d. with length model), `OptionalDistribution` (missing data), `IgnoredDistribution`, `ConditionalDistribution`, `WeightedDistribution`
-- **Latent structure:** mixtures (plain, heterogeneous, hierarchical, joint, semi-supervised), LDA, PLSI, hidden Markov models (standard, lookback, tree-structured), Markov chains, hidden associations, Spearman ranking, Bernoulli set/edit-set models
+- **Scalar/basic:** Gaussian, StudentT/Cauchy, Logistic, LogGaussian/log-normal, Laplace, Uniform, Exponential, Gamma/chi-square, Beta, Weibull, Rayleigh, Pareto, Poisson, Bernoulli, Geometric, Binomial, Negative Binomial, von Mises-Fisher, multivariate/diagonal Gaussian, Dirichlet, categorical & integer-categorical
+- **Combinators:** `CompositeDistribution` (tuples), `SequenceDistribution` (variable-length i.i.d. with length model), `OptionalDistribution` (missing data), `TransformDistribution` (fixed invertible transforms), `IgnoredDistribution`, `ConditionalDistribution`, `WeightedDistribution`, fixed `PointMassDistribution`
+- **Latent structure:** mixtures (plain, heterogeneous, hierarchical, joint, semi-supervised), LDA, PLSI, hidden Markov models (standard, segmental/variable-emission, lookback, tree-structured), heterogeneous/induced PCFGs, Markov chains, hidden associations, Spearman ranking, Bernoulli set/edit-set models
 - **Bayesian (`pysp.bstats`):** conjugate-prior/variational counterparts, Dirichlet-process mixtures (`bexamples/` shows DPM auto-modeling)
 
 Estimators accept `pseudo_count` for regularization and `keys` for tying sufficient statistics across model parts. Several models (HMMs, tree HMM, PLSI) take `use_numba=True` to switch to parallel Numba kernels; the first call pays a JIT compile that is cached afterwards.
+
+Hidden-association models are the closest probabilistic analogue to attention in this library: they infer soft latent alignments between observed items and hidden explanatory slots, but the mechanism is a generative EM model rather than a transformer-style learned query/key/value layer.
 
 ## Examples
 
@@ -126,10 +128,16 @@ The estimation helpers detect RDD inputs automatically: sampling (`pysp.stats.rd
 ## Tests
 
 ```sh
-python -m unittest discover pysp/tests
+python -m pytest -m fast
+python -m pytest -m "not optional and not benchmark"
 ```
 
-`base_dist_test.py` checks each enabled distribution end-to-end: sampler repeatability, `str`/`eval` round-trips, vectorized-vs-scalar log densities, and that EM-to-convergence improves (in KL) with more data.
+The test suite still uses `unittest.TestCase` internally, but pytest provides
+collection, markers, and CI tiers.  Marker conventions live in
+[`pysp/tests/README.md`](pysp/tests/README.md).  `base_dist_test.py` checks each
+enabled distribution end-to-end: sampler repeatability, `str`/`eval`
+round-trips, vectorized-vs-scalar log densities, and that EM-to-convergence
+improves (in KL) with more data.
 
 ## License
 

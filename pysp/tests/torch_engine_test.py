@@ -4,20 +4,30 @@ Parity is checked against the legacy seq_* path on CPU float64; the gradient
 MLE path is checked for likelihood improvement and parameter recovery.
 """
 import io
+import importlib
 import unittest
 
 import numpy as np
-import torch
+
+HAS_TORCH = importlib.util.find_spec('torch') is not None
+if HAS_TORCH:
+    import torch
+else:
+    torch = None
 
 from pysp.stats import (
     CategoricalDistribution, CategoricalEstimator, CompositeDistribution,
     GaussianDistribution, IntegerCategoricalDistribution, MixtureDistribution,
     PoissonDistribution, SequenceDistribution, seq_encode, seq_estimate,
 )
-from pysp.stats.torch_engine import TorchMixture
+if HAS_TORCH:
+    from pysp.stats.torch_engine import TorchMixture
+else:
+    TorchMixture = None
 from pysp.tests.kernels_test import make_estimator, make_mixture
 
 
+@unittest.skipUnless(HAS_TORCH, 'torch is not installed')
 class TorchEngineTestCase(unittest.TestCase):
 
     @classmethod
@@ -192,7 +202,7 @@ class TorchEngineTestCase(unittest.TestCase):
         rel = np.abs(ll - ll_legacy) / np.maximum(np.abs(ll_legacy), 1.0)
         self.assertLess(rel.max(), 1.0e-4)
 
-    @unittest.skipUnless(torch.backends.mps.is_available(), 'MPS not available')
+    @unittest.skipUnless(HAS_TORCH and torch.backends.mps.is_available(), 'MPS not available')
     def test_mps_smoke(self):
         tm = TorchMixture(self.model, device='mps', dtype=torch.float32)
         enc = tm.encode(self.data)

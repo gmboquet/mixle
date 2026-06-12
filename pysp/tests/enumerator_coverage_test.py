@@ -60,6 +60,18 @@ class FiniteEnumeratorCoverageTestCase(unittest.TestCase):
         total = np.logaddexp.reduce([lp for _, lp in dist.enumerator()])
         self.assertAlmostEqual(total, 0.0, delta=1e-8)
 
+    def test_icltree_string_representation_keeps_name_intact(self):
+        dist = ICLTreeDistribution(
+            [None, 0],
+            [np.log([0.6, 0.4]),
+             np.log([[0.7, 0.3],
+                     [0.2, 0.8]])],
+            name='tree')
+        dist_str = str(dist)
+
+        self.assertIn("name='tree'", dist_str)
+        self.assertNotIn("name=',t,r,e,e,'", dist_str)
+
     def test_integer_markov_chain_enumerator(self):
         init_dist = SequenceDistribution(
             IntegerCategoricalDistribution(0, [0.55, 0.45]),

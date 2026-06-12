@@ -68,7 +68,7 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
         f1 = ','.join([str(u[1]) for u in self.dependency_list])
         f3 = ','.join([str(u[0]) for u in self.dependency_list])
         f2 = ['[' + ','.join(map(str, u.flatten())) + ']' for u in self.conditional_log_densities]
-        f4 = ','.join(repr(self.name))
+        f4 = repr(self.name)
         return 'ICLTreeDistribution([%s], [%s], feature_order=[%s], name=%s)' % (f1, f2, f3, f4)
 
     def density(self, x: Union[Sequence[int], np.ndarray]) -> float:
@@ -662,6 +662,5 @@ class ICLTreeDataEncoder(DataSequenceEncoder):
 
         """
         return np.asarray(x, dtype=int)
-
 
 

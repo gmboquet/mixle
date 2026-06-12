@@ -177,6 +177,8 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
             else:
                 if cond_vals[i] in self.dmap:
                     rv[idx_vals[i]] += self.dmap[cond_vals[i]].seq_log_density(eobs_vals[i])
+                else:
+                    rv[idx_vals[i]] = -np.inf
 
         if self.has_given:
             rv += self.given_dist.seq_log_density(given_enc)
@@ -365,7 +367,7 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
 
         loc_seed = rng.randint(0, maxrandint)
         self.given_sampler = dist.given_dist.sampler(loc_seed)
-        self.has_given_sampler = isinstance(dist.given_dist, NullDistribution)
+        self.has_given_sampler = not isinstance(dist.given_dist, NullDistribution)
 
         self.samplers = {k: u.sampler(rng.randint(0, maxrandint)) for k, u in self.dist.dmap.items()}
 
@@ -1047,4 +1049,3 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
         given_enc = self.given_encoder.seq_encode(given_vals)
 
         return len(x), cond_vals, tuple(eobs_vals), tuple(idx_vals), given_enc
-

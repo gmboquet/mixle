@@ -45,7 +45,8 @@ __all__ = ['BernoulliDistribution', 'BernoulliEstimator', 'BernoulliSampler',
            'OptionalDistribution', 'OptionalEstimator', 'OptionalSampler',
            'PoissonDistribution', 'PoissonEstimator', 'PoissonSampler',
            'SequenceDistribution', 'SequenceEstimator', 'SequenceSampler',
-           'estimate', 'seq_estimate', 'initialize', 'seq_log_density_sum', 'seq_encode', 'seq_log_density']
+           'estimate', 'seq_estimate', 'initialize', 'seq_log_density_sum', 'seq_encode', 'seq_log_density',
+           'load_models', 'dump_models']
 
 
 from pysp.arithmetic import *
@@ -90,32 +91,14 @@ import _pickle
 import pickle
 
 def load_models(x):
-    """Reconstruct a model (or models) from its dump_models() string.
-
-    Warning:
-        This is eval-based: the string is executed as Python code with the
-        names imported in this module in scope. Only call it on strings
-        produced by dump_models() from a trusted source - never on
-        untrusted input, since arbitrary code can be executed.
-
-    Args:
-        x (str): String representation produced by dump_models().
-
-    Returns:
-        The evaluated model object(s).
-    """
-    return eval(x)
+    """Reconstruct a model or collection of models from dump_models() JSON."""
+    from pysp.utils.serialization import from_json
+    return from_json(x)
 
 def dump_models(x):
-    """Serialize a model (or models) to its repr-style string form.
-
-    Args:
-        x: Model object whose str() form reconstructs it via load_models().
-
-    Returns:
-        str: String representation of the model.
-    """
-    return str(x)
+    """Serialize a bstats model or collection of models to safe strict JSON."""
+    from pysp.utils.serialization import to_json
+    return to_json(x)
 
 
 def _is_pandas_dataframe(data):
@@ -198,7 +181,7 @@ def _local_estimate(data, estimator, prev_estimate=None):
         The estimated distribution.
     """
     idata = iter(data)
-    accumulator = estimator.accumulator_factory().make()
+    accumulator = _accumulator_factory(estimator).make()
     nobs = 0.0
 
     for x in idata:
@@ -209,7 +192,7 @@ def _local_estimate(data, estimator, prev_estimate=None):
     accumulator.key_merge(stats_dict)
     accumulator.key_replace(stats_dict)
 
-    return estimator.estimate(accumulator.value())
+    return _estimator_estimate(estimator, nobs, accumulator.value())
 
 
 def estimate(data, estimator, prev_estimate=None):
@@ -450,7 +433,7 @@ def seq_estimate(enc_data, estimator, prev_estimate):
 
     else:
 
-        accumulator = estimator.accumulator_factory().make()
+        accumulator = _accumulator_factory(estimator).make()
         nobs        = 0.0
 
         data_update = []
@@ -465,7 +448,7 @@ def seq_estimate(enc_data, estimator, prev_estimate):
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
 
-        return estimator.estimate(accumulator.value())
+        return _estimator_estimate(estimator, nobs, accumulator.value())
 
 
 def initialize(data, estimator, rng, p):
@@ -530,7 +513,7 @@ def initialize(data, estimator, rng, p):
 
     elif(hasattr(data, '__iter__')):
         idata       = iter(data)
-        accumulator = estimator.accumulator_factory().make()
+        accumulator = _accumulator_factory(estimator).make()
         nobs        = 0.0
 
         for x in idata:
@@ -543,6 +526,4 @@ def initialize(data, estimator, rng, p):
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
 
-        return estimator.estimate(accumulator.value())
-
-
+        return _estimator_estimate(estimator, nobs, accumulator.value())

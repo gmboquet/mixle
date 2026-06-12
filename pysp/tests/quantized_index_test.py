@@ -16,7 +16,9 @@ from pysp.stats import (
     PoissonDistribution,
 )
 from pysp.tests.enumeration_test import make_cases
-from pysp.utils.enumeration import QuantizedEnumerationIndex, freeze
+from pysp.stats.pdist import EnumerationError
+from pysp.utils.enumeration import BufferedStream, QuantizedEnumerationIndex, \
+    bounded_best_first_union_index, freeze
 
 
 def bounded_items(dist, max_bits, bin_width_bits=1.0):
@@ -64,6 +66,79 @@ class QuantizedEnumerationIndexTestCase(unittest.TestCase):
         self.assertEqual([freeze(v) for v, _ in index.slice(1, 2)],
                          [freeze(v) for v, _ in exact[1:3]])
         self.assertEqual(index.bin_for_index(2), (3, 0))
+
+    def test_bounded_union_stops_from_global_frontier(self):
+        streams = [
+            BufferedStream(iter([('a', math.log(0.6)), ('tail-a', math.log(1.0e-30))])),
+            BufferedStream(iter([('b', math.log(0.4)), ('tail-b', math.log(1.0e-30))])),
+        ]
+        exact_scores = {
+            'a': math.log(0.6),
+            'b': math.log(0.4),
+            'tail-a': math.log(1.0e-30),
+            'tail-b': math.log(1.0e-30),
+        }
+        scored = []
+
+        def exact_log_density(value):
+            scored.append(value)
+            return exact_scores[value]
+
+        index = bounded_best_first_union_index(
+            streams, [0.0, 0.0], exact_log_density,
+            max_bits=2.0, bin_width_bits=1.0)
+
+        self.assertEqual([value for value, _ in index.iter_from()], ['a', 'b'])
+        self.assertEqual(scored, ['a', 'b'])
+        self.assertTrue(index.truncated)
+
+    def test_bounded_union_reuses_known_component_contributions(self):
+        streams = [
+            BufferedStream(iter([('a', math.log(0.6))])),
+            BufferedStream(iter([('tail', math.log(0.1))])),
+        ]
+        component_calls = []
+
+        def exact_log_density(value):
+            raise AssertionError('component-aware bounded union should not use full scoring')
+
+        def component_log_density(k, value):
+            component_calls.append((k, value))
+            self.assertEqual((k, value), (1, 'a'))
+            return -np.inf
+
+        index = bounded_best_first_union_index(
+            streams, [0.0, 0.0], exact_log_density,
+            max_bits=2.0, bin_width_bits=1.0,
+            component_log_density=component_log_density)
+
+        self.assertEqual([value for value, _ in index.iter_from()], ['a'])
+        self.assertEqual(component_calls, [(1, 'a')])
+        self.assertTrue(index.truncated)
+
+    def test_bounded_union_collects_duplicate_contributions_before_stopping(self):
+        streams = [
+            BufferedStream(iter([('a', math.log(0.4))])),
+            BufferedStream(iter([('a', math.log(0.3))])),
+        ]
+        component_calls = []
+
+        def exact_log_density(value):
+            raise AssertionError('known duplicate contributions are sufficient')
+
+        def component_log_density(k, value):
+            component_calls.append((k, value))
+            return -np.inf
+
+        index = bounded_best_first_union_index(
+            streams, [0.0, 0.0], exact_log_density,
+            max_bits=1.0, bin_width_bits=1.0,
+            component_log_density=component_log_density)
+
+        self.assertEqual([value for value, _ in index.iter_from()], ['a'])
+        self.assertAlmostEqual(index.get(0)[1], math.log(0.7), places=12)
+        self.assertEqual(component_calls, [])
+        self.assertFalse(index.truncated)
 
     def test_infinite_support_truncates_at_bit_bound(self):
         dist = GeometricDistribution(0.5)
@@ -119,10 +194,10 @@ class QuantizedEnumerationIndexTestCase(unittest.TestCase):
         self.assertEqual([v for v, _ in index.iter_from()], ['a', 'b'])
         self.assertEqual(index.counts, {0: 1, 2: 1})
 
-    def test_mixture_native_index_matches_exact_without_mixture_enumerator(self):
+    def test_mixture_frontier_index_matches_exact_without_mixture_enumerator(self):
         class DirectIntegerCategorical(IntegerCategoricalDistribution):
-            def enumerator(self):
-                raise AssertionError('child quantized_index should not call enumerator')
+            def quantized_index(self, max_bits, bin_width_bits=1.0):
+                raise AssertionError('mixture frontier should not call child quantized_index')
 
         class DirectMixture(MixtureDistribution):
             def enumerator(self):
@@ -140,6 +215,113 @@ class QuantizedEnumerationIndexTestCase(unittest.TestCase):
 
         native = dist.quantized_index(max_bits=4.0, bin_width_bits=0.5)
         exact = exact_dist.enumerator().quantized_index(max_bits=4.0, bin_width_bits=0.5)
+        self.assertEqual(native.summary(), exact.summary())
+        self.assertEqual([freeze(v) for v, _ in native.iter_from()],
+                         [freeze(v) for v, _ in exact.iter_from()])
+        np.testing.assert_allclose([lp for _, lp in native.iter_from()],
+                                   [lp for _, lp in exact.iter_from()],
+                                   atol=1.0e-12)
+
+    def test_three_component_mixture_falls_back_to_multi_cross_index(self):
+        class DirectIntegerCategorical(IntegerCategoricalDistribution):
+            def enumerator(self):
+                raise EnumerationError(self, reason='force cross-index fallback')
+
+            def quantized_index(self, max_bits, bin_width_bits=1.0):
+                raise AssertionError('mixture should use multi cross-index, not marginal indexes')
+
+        class DirectMixture(MixtureDistribution):
+            def enumerator(self):
+                raise AssertionError('mixture enumerator should not be used')
+
+        components = [
+            DirectIntegerCategorical(0, [0.7, 0.2, 0.1]),
+            DirectIntegerCategorical(1, [0.5, 0.25, 0.25]),
+            DirectIntegerCategorical(2, [0.1, 0.9]),
+        ]
+        dist = DirectMixture(components, [0.4, 0.35, 0.25])
+        exact_dist = MixtureDistribution(
+            [IntegerCategoricalDistribution(0, [0.7, 0.2, 0.1]),
+             IntegerCategoricalDistribution(1, [0.5, 0.25, 0.25]),
+             IntegerCategoricalDistribution(2, [0.1, 0.9])],
+            [0.4, 0.35, 0.25])
+
+        native = dist.quantized_index(max_bits=5.0, bin_width_bits=0.5)
+        exact = exact_dist.enumerator().quantized_index(max_bits=5.0, bin_width_bits=0.5)
+        self.assertEqual(native.summary(), exact.summary())
+        self.assertEqual([freeze(v) for v, _ in native.iter_from()],
+                         [freeze(v) for v, _ in exact.iter_from()])
+        np.testing.assert_allclose([lp for _, lp in native.iter_from()],
+                                   [lp for _, lp in exact.iter_from()],
+                                   atol=1.0e-12)
+
+    def test_mixture_falls_back_to_generic_multi_cross_index_for_other_leaves(self):
+        class DirectBinomial(BinomialDistribution):
+            def enumerator(self):
+                raise EnumerationError(self, reason='force cross-index fallback')
+
+        class DirectMixture(MixtureDistribution):
+            def enumerator(self):
+                raise AssertionError('mixture enumerator should not be used')
+
+        dist = DirectMixture(
+            [DirectBinomial(0.25, 6), DirectBinomial(0.65, 6), DirectBinomial(0.45, 6)],
+            [0.2, 0.5, 0.3])
+        exact_dist = MixtureDistribution(
+            [BinomialDistribution(0.25, 6), BinomialDistribution(0.65, 6), BinomialDistribution(0.45, 6)],
+            [0.2, 0.5, 0.3])
+
+        native = dist.quantized_index(max_bits=5.0, bin_width_bits=0.5)
+        exact = exact_dist.enumerator().quantized_index(max_bits=5.0, bin_width_bits=0.5)
+        self.assertEqual(native.summary(), exact.summary())
+        self.assertEqual([freeze(v) for v, _ in native.iter_from()],
+                         [freeze(v) for v, _ in exact.iter_from()])
+        np.testing.assert_allclose([lp for _, lp in native.iter_from()],
+                                   [lp for _, lp in exact.iter_from()],
+                                   atol=1.0e-12)
+
+    def test_mixture_of_composites_falls_back_to_composite_cross_index(self):
+        class DirectCategorical(CategoricalDistribution):
+            def enumerator(self):
+                raise AssertionError('categorical enumerator should not be used')
+
+            def quantized_index(self, max_bits, bin_width_bits=1.0):
+                raise AssertionError('mixture should use cross-index, not marginal indexes')
+
+        class DirectComposite(CompositeDistribution):
+            def enumerator(self):
+                raise EnumerationError(self, reason='force cross-index fallback')
+
+            def quantized_index(self, max_bits, bin_width_bits=1.0):
+                raise AssertionError('mixture should use composite cross-index')
+
+        class DirectMixture(MixtureDistribution):
+            def enumerator(self):
+                raise AssertionError('mixture enumerator should not be used')
+
+        comp0 = DirectComposite((
+            DirectCategorical({'a': 0.6, 'b': 0.4}),
+            DirectCategorical({'x': 0.7, 'y': 0.3}),
+        ))
+        comp1 = DirectComposite((
+            DirectCategorical({'a': 0.2, 'b': 0.8}),
+            DirectCategorical({'x': 0.25, 'z': 0.75}),
+        ))
+        dist = DirectMixture([comp0, comp1], [0.55, 0.45])
+
+        exact_dist = MixtureDistribution([
+            CompositeDistribution((
+                CategoricalDistribution({'a': 0.6, 'b': 0.4}),
+                CategoricalDistribution({'x': 0.7, 'y': 0.3}),
+            )),
+            CompositeDistribution((
+                CategoricalDistribution({'a': 0.2, 'b': 0.8}),
+                CategoricalDistribution({'x': 0.25, 'z': 0.75}),
+            )),
+        ], [0.55, 0.45])
+
+        native = dist.quantized_index(max_bits=5.0, bin_width_bits=0.5)
+        exact = exact_dist.enumerator().quantized_index(max_bits=5.0, bin_width_bits=0.5)
         self.assertEqual(native.summary(), exact.summary())
         self.assertEqual([freeze(v) for v, _ in native.iter_from()],
                          [freeze(v) for v, _ in exact.iter_from()])

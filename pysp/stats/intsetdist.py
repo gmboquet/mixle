@@ -29,6 +29,7 @@ from typing import Sequence, Optional, Tuple, Union, List, Any, Dict
 
 class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Distribution over finite sets of integer-valued Bernoulli outcomes."""
     def __init__(self, log_pvec: Union[Sequence[float], np.ndarray],
                  log_nvec: Optional[Union[Sequence[float], np.ndarray]] = None,
                  name: Optional[str] = None,
@@ -92,13 +93,16 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         return 'IntegerBernoulliSetDistribution(%s, log_nvec=%s, name=%s)' % (s1, s2, s3)
 
     def density(self, x: Union[Sequence[int], np.ndarray]) -> float:
+        """Return the probability density or mass at a single observation."""
         return exp(self.log_density(x))
 
     def log_density(self, x: Union[Sequence[int], np.ndarray]) -> float:
+        """Return the log-density or log-mass at a single observation."""
         xx = np.asarray(x, dtype=int)
         return np.sum(self.log_dvec[xx]) + self.log_nsum
 
     def seq_log_density(self, x: Tuple[int, np.ndarray, np.ndarray]) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         sz, idx, xs = x
         rv = np.zeros(sz, dtype=np.float64)
         rv += np.bincount(idx, weights=self.log_dvec[xs], minlength=sz)
@@ -106,12 +110,15 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'IntegerBernoulliSetSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return IntegerBernoulliSetSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'IntegerBernoulliSetEstimator':
+        """Return an estimator for fitting this distribution from data."""
         return IntegerBernoulliSetEstimator(self.num_vals, pseudo_count=pseudo_count, name=self.name)
 
     def dist_to_encoder(self) -> 'IntegerBernoulliSetDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return IntegerBernoulliSetDataEncoder()
 
     def enumerator(self) -> 'IntegerBernoulliSetEnumerator':

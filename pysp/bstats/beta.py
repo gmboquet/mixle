@@ -93,6 +93,8 @@ class BetaDistribution(ProbabilityDistribution):
 		Returns:
 			Density value at x.
 		"""
+		if x <= 0.0 or x >= 1.0:
+			return 0.0
 		return np.power(x, self.a - 1) * np.power(1-x, self.b - 1)/beta(self.a, self.b)
 
 	def log_density(self, x: float):
@@ -104,6 +106,8 @@ class BetaDistribution(ProbabilityDistribution):
 		Returns:
 			Log-density value at x.
 		"""
+		if x <= 0.0 or x >= 1.0:
+			return -np.inf
 		a = self.a
 		b = self.b
 

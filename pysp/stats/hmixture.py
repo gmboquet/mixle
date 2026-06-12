@@ -162,28 +162,24 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         n = len(x)
-        ll_topic = np.zeros((n, self.num_topics))
+        if n == 0:
+            return np.zeros(self.num_mixtures, dtype=np.float64)
 
+        ll_topic = np.zeros((n, self.num_topics), dtype=np.float64)
         for i in range(n):
-            ll_topic[i, :] = np.array([self.topics[j].log_density(x[i]) for j in range(self.num_topics)])
+            ll_topic[i, :] = np.asarray([self.topics[j].log_density(x[i]) for j in range(self.num_topics)])
 
-        ll_topic_max = np.max(ll_topic, axis=0, keepdims=True)
-        ll_topic -= ll_topic_max
-        np.exp(ll_topic, out=ll_topic)
-        ll_topic = np.log(np.sum(ll_topic, axis=0, keepdims=False)) + ll_topic_max.flatten()
-
-        rv = np.zeros(self.num_mixtures)
+        rv = np.zeros(self.num_mixtures, dtype=np.float64)
         for k in range(self.num_mixtures):
-            ll_k = ll_topic + self.log_taus[k, :]
-            ll_k[self.taus[k, :] == 0.0] = -np.inf
+            ll_k = ll_topic + self.log_taus[k, :][None, :]
+            row_max = np.max(ll_k, axis=1)
+            good_rows = np.isfinite(row_max)
 
-            max_k = np.max(ll_k)
-
-            if max_k == -np.inf:
+            if not np.all(good_rows):
                 rv[k] = -np.inf
             else:
-                ll_k -= max_k
-                rv[k] = np.log(np.sum(np.exp(ll_k))) + max_k
+                ll_k = ll_k - row_max[:, None]
+                rv[k] = np.sum(np.log(np.sum(np.exp(ll_k), axis=1)) + row_max)
 
         return rv
 
@@ -230,19 +226,18 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
         for i in range(self.num_topics):
             ll_mat[:, i] = self.topics[i].seq_log_density(enc_data)
 
-        ll_max = ll_mat.max(axis=1, keepdims=True)
-
-        bad_rows = np.isinf(ll_max.flatten())
-        ll_mat[bad_rows, :] = 0.0
-        ll_max[bad_rows] = 0.0
-
-        ll_mat -= ll_max
-        np.exp(ll_mat, out=ll_mat) ### (tsz,1)
+        ll_max = ll_mat.max(axis=1)
+        good_rows = np.isfinite(ll_max)
+        ll_exp = np.zeros_like(ll_mat)
+        if np.any(good_rows):
+            ll_exp[good_rows, :] = np.exp(ll_mat[good_rows, :] - ll_max[good_rows, None])
 
         # Compute ln p_mat(data | mixture)
-        ll_mat = np.dot(ll_mat, self.taus.T) ### (tsz, num_mixtures)
-        np.log(ll_mat, out=ll_mat)
-        ll_mat += ll_max
+        ll_mix = np.dot(ll_exp, self.taus.T) ### (tsz, num_mixtures)
+        ll_mat = np.full_like(ll_mix, -np.inf)
+        pos = ll_mix > 0.0
+        ll_mat[pos] = np.log(ll_mix[pos])
+        ll_mat[good_rows, :] += ll_max[good_rows, None]
 
         # Compute ln p_mat(bag of data | mixture)
         for i in range(self.num_mixtures):
@@ -278,13 +273,14 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         # Compute ln p_mat(bag of data)
         ll_max2 = np.max(rv, axis=1, keepdims=True)
-        rv -= ll_max2
-        np.exp(rv, out=rv)
-        ll_sum = rv.sum(axis=1, keepdims=True)
-        np.log(ll_sum, out=ll_sum)
-        ll_sum += ll_max2
-
-        rv = ll_sum.flatten()
+        good_rows = np.isfinite(ll_max2.flatten())
+        out = np.full(sz, -np.inf, dtype=np.float64)
+        if np.any(good_rows):
+            rv_good = rv[good_rows, :] - ll_max2[good_rows, :]
+            np.exp(rv_good, out=rv_good)
+            ll_sum = np.sum(rv_good, axis=1)
+            out[good_rows] = np.log(ll_sum) + ll_max2[good_rows, 0]
+        rv = out
 
         if self.len_dist is not None:
             rv += self.len_dist.seq_log_density(enc_len)
@@ -319,6 +315,10 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         # Compute ln p_mat(bag of data)
         ll_max2 = np.max(rv, axis=1, keepdims=True)
+        bad_rows = ~np.isfinite(ll_max2.flatten())
+        if np.any(bad_rows):
+            rv[bad_rows, :] = self.log_w
+            ll_max2[bad_rows, :] = np.max(self.log_w)
         rv -= ll_max2
         np.exp(rv, out=rv)
         rv /= np.sum(rv, axis=1, keepdims=True)
@@ -611,26 +611,31 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         for i in range(self.num_topics):
             ll_mat[:, i] = estimate.topics[i].seq_log_density(enc_data)
 
-        ll_max = ll_mat.max(axis=1, keepdims=True)
+        ll_max = ll_mat.max(axis=1)
+        good_rows = np.isfinite(ll_max)
+        ll_exp = np.zeros_like(ll_mat)
+        if np.any(good_rows):
+            ll_exp[good_rows, :] = np.exp(ll_mat[good_rows, :] - ll_max[good_rows, None])
 
-        bad_rows = np.isinf(ll_max.flatten())
-        ll_mat[bad_rows, :] = 0.0
-        ll_max[bad_rows] = 0.0
+        ll_mat_t = np.dot(ll_exp, estimate.taus.T)
+        ll_mat_t2 = np.full_like(ll_mat_t, -np.inf)
+        pos = ll_mat_t > 0.0
+        ll_mat_t2[pos] = np.log(ll_mat_t[pos])
 
-        ll_mat -= ll_max
-
-        np.exp(ll_mat, out=ll_mat)
-
-        ll_mat_t = np.dot(ll_mat, estimate.taus.T)
-        ll_mat_t2 = np.log(ll_mat_t)
-
-        ll_max = np.bincount(idx, weights=ll_max.flatten(), minlength=sz)
+        ll_max_sum = np.full(sz, 0.0, dtype=np.float64)
+        if tsz > 0:
+            ll_max_for_sum = np.where(good_rows, ll_max, -np.inf)
+            ll_max_sum = np.bincount(idx, weights=ll_max_for_sum, minlength=sz)
         for i in range(self.num_mixtures):
             rv[:, i] = np.bincount(idx, weights=ll_mat_t2[:, i], minlength=sz)
 
         rv += estimate.log_w
-        rv += ll_max[:, None]
+        rv += ll_max_sum[:, None]
         ll_max2 = np.max(rv, axis=1, keepdims=True)
+        bad_seq = ~np.isfinite(ll_max2.flatten())
+        if np.any(bad_seq):
+            rv[bad_seq, :] = estimate.log_w
+            ll_max2[bad_seq, :] = np.max(estimate.log_w)
         rv -= ll_max2
 
         np.exp(rv, out=rv)
@@ -640,8 +645,12 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         ww = np.reshape(weights[idx], (-1, 1))
 
         for i in range(self.num_mixtures):
-            temp = estimate.taus[i, None, :] * (rv[:, i, None] / ll_mat_t[:, i, None])
-            temp *= ll_mat
+            temp = np.zeros((tsz, self.num_topics), dtype=np.float64)
+            valid = ll_mat_t[:, i] > 0.0
+            if np.any(valid):
+                temp[valid, :] = estimate.taus[i, None, :] * (
+                    rv[valid, i, None] / ll_mat_t[valid, i, None])
+                temp[valid, :] *= ll_exp[valid, :]
             temp *= ww
             rv3 += temp
             self.comp_counts[i, :] += temp.sum(axis=0)
@@ -1002,5 +1011,4 @@ class HierarchicalMixtureDataEncoder(DataSequenceEncoder):
         enc_data = self.topic_encoder.seq_encode(sx)
 
         return len(x), idx, cnt, enc_data, enc_len
-
 

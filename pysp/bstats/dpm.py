@@ -54,6 +54,31 @@ def cbg(x,s1,s2):
 default_prior = GammaDistribution(2,1)
 #default_prior = null_dist
 
+
+def _expected_log_stick_weights(gam):
+    """Return E_q[log pi_k] for a truncated stick-breaking variational state.
+
+    The final component consumes the remaining stick, so it has no v_K term:
+    log pi_K = sum_{j<K} log(1 - v_j).  ``gam`` keeps a final row for shape
+    compatibility, but that row is ignored by the stick prior.
+    """
+    num_components = gam.shape[0]
+    if num_components == 1:
+        return np.zeros(1, dtype=float)
+
+    gams = gam[:, 0] + gam[:, 1]
+    exp_v = digamma(gam[:, 0]) - digamma(gams)
+    exp_nv = digamma(gam[:, 1]) - digamma(gams)
+
+    rv = np.empty(num_components, dtype=float)
+    remaining_log = 0.0
+    for i in range(num_components - 1):
+        rv[i] = remaining_log + exp_v[i]
+        remaining_log += exp_nv[i]
+    rv[-1] = remaining_log
+    return rv
+
+
 class DirichletProcessMixtureDistribution(ProbabilityDistribution):
     """Truncated Dirichlet process mixture with stick-breaking weights w over
     K component distributions, carrying the variational Beta posteriors."""
@@ -213,15 +238,9 @@ class DirichletProcessMixtureDistribution(ProbabilityDistribution):
 
         phi  = np.exp(exp_ll - max_ell)
         phi /= phi.sum(axis=1, keepdims=True)
-        phi_g = 1 - np.cumsum(phi, axis=1)
 
-        gam  = self.g
-        gams = gam[:, 0] + gam[:, 1]
-
-        # E_q[log p(z_i | v)] via stick-breaking expectations
-        exp_v  = digamma(gam[:, 0]) - digamma(gams)
-        exp_nv = digamma(gam[:, 1]) - digamma(gams)
-        rv = np.dot(phi_g, exp_nv) + np.dot(phi, exp_v)
+        # E_q[log p(z_i | v)] via truncated stick-breaking expectations.
+        rv = np.sum(phi * _expected_log_stick_weights(self.g), axis=1)
 
         # E_q[log p(x_i | theta_k)] under the variational assignments
         rv += np.sum(phi * (exp_ll - self.log_w), axis=1)
@@ -535,7 +554,7 @@ class DirichletProcessMixtureAccumulatorFactory(object):
         return DirichletProcessMixtureAccumulator([self.factories[i].make() for i in range(self.dim)], self.keys)
 
 
-class DirichletProcessMixtureEstimator(object):
+class DirichletProcessMixtureEstimator(ParameterEstimator):
     """Estimates a DirichletProcessMixtureDistribution by mean-field
     variational Bayes from accumulated assignment statistics."""
 
@@ -600,12 +619,18 @@ class DirichletProcessMixtureEstimator(object):
             Sum of the global ELBO terms.
 
         """
-        gam  = model.g
+        gam = model.g[:-1, :] if model.g.shape[0] > 1 else model.g[:0, :]
         gams = gam[:,0]+gam[:,1]
         a = model.a
 
         # cross entropy of beta and variational betas
-        temp1 = np.sum(-betaln(1,a) + (digamma(gam[:,1])-digamma(gams))*(a-1))
+        if gam.shape[0] == 0:
+            temp1 = 0.0
+            temp41 = 0.0
+        else:
+            temp1 = np.sum(-betaln(1,a) + (digamma(gam[:,1])-digamma(gams))*(a-1))
+            # entropy of variational betas
+            temp41 = -(betaln(gam[:,0],gam[:,1]).sum() - ((gam-1)*digamma(gam)).sum() + ((gams-2)*digamma(gams)).sum())
 
         # cross entropy of component priors and variational priors
         temp2 = 0
@@ -613,8 +638,6 @@ class DirichletProcessMixtureEstimator(object):
             temp2 += -model.components[i].get_prior().cross_entropy(model.component_priors[i])
 
         # entropy of the variational approximation
-        # entropy of variational betas
-        temp41 = -(betaln(gam[:,0],gam[:,1]).sum() - ((gam-1)*digamma(gam)).sum() + ((gams-2)*digamma(gams)).sum())
         # entropy of variational component priors
         temp42 = np.sum([-u.get_prior().entropy() for u in model.components])
         # entropy of sample variational multinomials
@@ -655,6 +678,7 @@ class DirichletProcessMixtureEstimator(object):
         comp_counts = comp_counts[sidx]
         beta_counts = beta_counts[sidx, :]
         components = [components[i] for i in sidx]
+        component_priors = [component_priors[i] for i in sidx]
 
         #
 
@@ -668,66 +692,46 @@ class DirichletProcessMixtureEstimator(object):
 
         #
 
-        dgsum_loc = digamma(beta_counts.sum(axis=1) + 1.0 + alpha)
-        dg1_loc = digamma(beta_counts[:, 0] + 1.0)
-        dg2_loc = digamma(beta_counts[:, 1] + alpha)
-
-        expected_log_betas = np.vstack([dg1_loc - dgsum_loc, dg2_loc - dgsum_loc]).T
-
-        #
-
-        expected_log_w     = expected_log_betas[:,0]
-        expected_log_nw    = np.cumsum(expected_log_betas[:, 1])
-        expected_log_w[1:] += expected_log_nw[:-1]
-
-        #
-
-        w = np.exp(expected_log_w - np.max(expected_log_w))
-        w /= w.sum()
-
-        #
-
-
         if self.prior is None:
-
-            s1 = 0
-            s2 = 0
+            s1 = 0.0
+            s2 = 0.0
             hyper_posterior = None
 
         elif isinstance(self.prior, GammaDistribution):
             s1 = self.prior.k
             s2 = 1/self.prior.theta
 
-            s1_new = s1 + num_components
-            s2_new = s2 - expected_log_nw[-1]
-            hyper_posterior = GammaDistribution(s1_new, 1/s2_new)
-
         else:
-            s1 = 0
-            s2 = 0
+            s1 = 0.0
+            s2 = 0.0
             hyper_posterior = None
 
-        gw1 = s1 + num_components - 1.0
-        gw2 = s2 - expected_log_nw[-2]
-        new_alpha = gw1/gw2
+        if num_components <= 1:
+            if isinstance(self.prior, GammaDistribution):
+                new_alpha = s1 / s2
+                hyper_posterior = self.prior
+            else:
+                new_alpha = alpha
+        else:
+            old_alpha = max(float(alpha), 1.0e-12)
+            old_gammas = np.copy(beta_counts)
+            old_gammas[:, 0] += 1.0
+            old_gammas[:, 1] += old_alpha
+            expected_log_remaining = _expected_log_stick_weights(old_gammas)[-1]
 
+            gw1 = s1 + num_components - 1.0
+            gw2 = s2 - expected_log_remaining
+            new_alpha = gw1 / max(gw2, 1.0e-300)
 
-        # invert weights to stick fractions: v_i = w_i / prod_{j<i}(1 - v_j).
-        # tracked via the remaining mass directly (no logs), clipping each
-        # fraction so late sticks with underflowed mass stay well-defined
-        v = np.zeros(len(w))
-        remaining = 1.0
-        for i in range(len(w)):
-            vi = w[i] / remaining if remaining > 1.0e-12 else 0.0
-            v[i] = min(max(vi, 1.0e-9), 1.0 - 1.0e-9)
-            remaining *= (1.0 - v[i])
-
+            if isinstance(self.prior, GammaDistribution):
+                hyper_posterior = GammaDistribution(gw1, 1/gw2)
 
         gammas = np.copy(beta_counts)
         gammas[:,0] += 1
         gammas[:,1] += new_alpha
 
+        expected_log_w = _expected_log_stick_weights(gammas)
+        w = np.exp(expected_log_w - np.max(expected_log_w))
+        w /= w.sum()
 
         return DirichletProcessMixtureDistribution(components, w, new_alpha, gammas, component_priors, prior=hyper_posterior)
-
-

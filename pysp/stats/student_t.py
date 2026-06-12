@@ -36,20 +36,25 @@ class StudentTDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.df), repr(self.loc), repr(self.scale), repr(self.name), repr(self.keys))
 
     def density(self, x: float) -> float:
+        """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: float) -> float:
+        """Return the log-density or log-mass at a single observation."""
         z = (x - self.loc) / self.scale
         return self.log_const - 0.5 * (self.df + 1.0) * math.log1p((z * z) / self.df)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         z = (x - self.loc) / self.scale
         return self.log_const - 0.5 * (self.df + 1.0) * np.log1p((z * z) / self.df)
 
     def sampler(self, seed: Optional[int] = None) -> 'StudentTSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return StudentTSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'StudentTEstimator':
+        """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return StudentTEstimator(df=self.df, name=self.name, keys=self.keys)
         return StudentTEstimator(df=self.df, pseudo_count=pseudo_count,
@@ -57,6 +62,7 @@ class StudentTDistribution(SequenceEncodableProbabilityDistribution):
                                  name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> 'StudentTDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return StudentTDataEncoder()
 
 

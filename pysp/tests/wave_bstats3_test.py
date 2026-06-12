@@ -170,10 +170,9 @@ class PoissonFixesTestCase(unittest.TestCase):
 
         ce = d1.cross_entropy(d2)
         self.assertIsNotNone(ce)
-        # bstats sign convention: entropy() is E[log f(X)] (categorical's
-        # entropy is sum p*log p), so cross_entropy(p, q) = E_p[log q] and
-        # by Gibbs' inequality E_p[log q] <= E_p[log p], equality iff q == p
-        self.assertLess(ce, d1.entropy())
+        # Standard sign convention: cross_entropy(p, q) = H(p) + KL(p || q),
+        # so it is at least the entropy of p, with equality iff q == p.
+        self.assertGreater(ce, d1.entropy())
         self.assertAlmostEqual(d1.cross_entropy(d1), d1.entropy(), places=10)
 
     def test_cross_entropy_rejects_other_distributions(self):
