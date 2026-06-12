@@ -21,7 +21,73 @@ from pysp.bstats.pdist import ProbabilityDistribution, SequenceEncodableAccumula
 from pysp.utils.special import *
 
 
-def dirichlet_param_solve(alpha, meanLogP, delta):
+_MIN_DIRICHLET_ALPHA = 1.0e-10
+_MAX_DIRICHLET_ALPHA = 1.0e10
+_MAX_DIRICHLET_ITERATIONS = 10000
+
+
+def _safe_simplex_mean(x, dim):
+	rv = np.asarray(x, dtype=float).copy()
+	if rv.size != dim:
+		rv = np.ones(dim, dtype=float)
+	rv[~np.isfinite(rv)] = 0.0
+	rv = np.maximum(rv, 0.0)
+	total = rv.sum()
+	if total <= 0.0:
+		rv = np.ones(dim, dtype=float)/float(dim)
+	else:
+		rv /= total
+	rv = np.maximum(rv, _MIN_DIRICHLET_ALPHA)
+	rv /= rv.sum()
+	return rv
+
+
+def _mean_from_mean_log(meanLogP, dim):
+	mlp = np.asarray(meanLogP, dtype=float).copy()
+	finite = np.isfinite(mlp)
+	if not np.any(finite):
+		return np.ones(dim, dtype=float)/float(dim)
+	floor = np.min(mlp[finite])
+	mlp[~finite] = floor
+	mlp -= np.max(mlp)
+	rv = np.exp(np.maximum(mlp, -745.0))
+	return _safe_simplex_mean(rv, dim)
+
+
+def _initial_dirichlet_alpha(mean_v, mean_v2=None, meanLogP=None):
+	mean = _safe_simplex_mean(mean_v, len(mean_v))
+	alpha0 = 1.0
+
+	if mean_v2 is not None:
+		second = np.asarray(mean_v2, dtype=float).copy()
+		second[~np.isfinite(second)] = np.nan
+		var = second - mean*mean
+		good = (mean > _MIN_DIRICHLET_ALPHA) & (mean < 1.0 - _MIN_DIRICHLET_ALPHA) \
+			& np.isfinite(var) & (var > 0.0)
+		if np.any(good):
+			cand = mean[good]*(1.0 - mean[good])/var[good] - 1.0
+			cand = cand[np.isfinite(cand) & (cand > 0.0)]
+			if cand.size > 0:
+				alpha0 = float(np.median(cand))
+		elif np.all(np.isfinite(second)) and np.all(np.abs(second - mean*mean) <= 1.0e-14):
+			alpha0 = _MAX_DIRICHLET_ALPHA/float(len(mean))
+
+	if (not np.isfinite(alpha0) or alpha0 <= 0.0) and meanLogP is not None:
+		alpha0 = float(len(mean))
+	if not np.isfinite(alpha0) or alpha0 <= 0.0:
+		alpha0 = 1.0
+
+	alpha0 = min(_MAX_DIRICHLET_ALPHA, max(_MIN_DIRICHLET_ALPHA*len(mean), alpha0))
+	alpha = mean*alpha0
+	return np.clip(alpha, _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
+
+
+def _valid_alpha(alpha, dim=None):
+	arr = np.asarray(alpha, dtype=float)
+	return (dim is None or arr.size == dim) and np.all(np.isfinite(arr)) and np.all(arr > 0.0)
+
+
+def dirichlet_param_solve(alpha, meanLogP, delta, max_iter=_MAX_DIRICHLET_ITERATIONS):
 	"""Fixed-point solve for the ML Dirichlet parameters.
 
 	Iterates alpha <- digammainv(meanLogP + digamma(sum(alpha))) until the
@@ -38,39 +104,42 @@ def dirichlet_param_solve(alpha, meanLogP, delta):
 	"""
 
 	dim = len(alpha)
-
-	valid = np.bitwise_and(np.isfinite(alpha), alpha > 0)
-	valid = np.bitwise_and(valid, np.isfinite(meanLogP))
-
-	alpha = alpha[valid]
-	mlp   = meanLogP[valid]
-
-	count = 0
-	asum  = alpha.sum()
-	dalpha = (2*delta)+1
-
-	while dalpha > delta:
-
-		count += 1
-
-		dasum = digamma(asum)
-		old_alpha = alpha
-		adj_alpha = mlp + dasum
-		alpha = digammainv(adj_alpha)
-		asum = np.sum(alpha)
-		dalpha = np.abs(alpha - old_alpha).sum()
-		dalpha /= asum
-
-	if dim != alpha.size:
-		rv = np.zeros(dim, dtype=float)
-		rv[valid] = alpha
+	delta = 1.0e-8 if delta is None else max(float(delta), 1.0e-12)
+	mlp = np.asarray(meanLogP, dtype=float).copy()
+	if mlp.size != dim:
+		mlp = np.full(dim, digamma(1.0) - digamma(float(dim)), dtype=float)
+	finite = np.isfinite(mlp)
+	if not np.any(finite):
+		mlp[:] = digamma(1.0) - digamma(float(dim))
 	else:
-		rv = alpha
+		mlp[~finite] = np.min(mlp[finite])
 
-	return rv, count
+	alpha = np.asarray(alpha, dtype=float).copy()
+	if not _valid_alpha(alpha, dim):
+		alpha = _initial_dirichlet_alpha(_mean_from_mean_log(mlp, dim), meanLogP=mlp)
+	alpha = np.clip(alpha, _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
+
+	for count in range(1, max_iter + 1):
+		old_alpha = alpha.copy()
+		asum = float(alpha.sum())
+		if not np.isfinite(asum) or asum <= 0.0:
+			alpha = _initial_dirichlet_alpha(_mean_from_mean_log(mlp, dim), meanLogP=mlp)
+			asum = float(alpha.sum())
+		adj_alpha = mlp + digamma(asum)
+		alpha = np.asarray(digammainv(adj_alpha), dtype=float)
+		bad = ~np.isfinite(alpha) | (alpha <= 0.0)
+		if np.any(bad):
+			alpha[bad] = old_alpha[bad]
+		alpha = np.clip(alpha, _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
+		denom = max(_MIN_DIRICHLET_ALPHA, float(alpha.sum()))
+		dalpha = float(np.abs(alpha - old_alpha).sum()/denom)
+		if dalpha <= delta:
+			return alpha, count
+
+	return alpha, max_iter
 
 
-def mpe(x0, f, eps):
+def mpe(x0, f, eps, max_iter=1000):
 	"""Minimal polynomial extrapolation of the fixed-point sequence x <- f(x).
 
 	Args:
@@ -82,23 +151,31 @@ def mpe(x0, f, eps):
 		Tuple[np.ndarray, int]: Extrapolated fixed point and iteration count.
 	"""
 
-	x1 = f(x0)
-	x2 = f(x1)
-	x3 = f(x2)
+	x0 = np.clip(np.asarray(x0, dtype=float), _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
+	x1 = np.clip(f(x0), _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
+	x2 = np.clip(f(x1), _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
+	x3 = np.clip(f(x2), _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
 	X = np.asarray([x0, x1, x2, x3])
 	s0 = x3
 	s = s0
 	res = np.abs(x3 - x2).sum()
 	its_cnt = 2
 
-	while res > eps:
-		y = f(X[-1, :])
+	while res > eps and its_cnt < max_iter:
+		y = np.clip(f(X[-1, :]), _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
 		dy = y-X[-1,:]
 		U  = (X[1:,:]-X[:-1,:]).T
 		X2 = X[1:,:].T
 		c = np.dot(np.linalg.pinv(U), dy)
 		c *= -1
-		s = (np.dot(X2, c) + y)/(c.sum() + 1)
+		denom = c.sum() + 1
+		if not np.isfinite(denom) or abs(denom) <= _MIN_DIRICHLET_ALPHA:
+			s = y
+		else:
+			s = (np.dot(X2, c) + y)/denom
+		if not _valid_alpha(s, len(x0)):
+			s = y
+		s = np.clip(s, _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
 
 		res = np.abs(s-s0).sum()
 		s0 = s
@@ -128,7 +205,10 @@ def find_alpha(current_alpha, mlp, thresh):
 		Tuple[np.ndarray, int]: Estimated parameters and iteration count.
 	"""
 	f = alpha_seq_lambda(mlp)
-	return mpe(current_alpha, f, thresh)
+	alpha, its = mpe(current_alpha, f, thresh)
+	if not _valid_alpha(alpha, len(current_alpha)):
+		return dirichlet_param_solve(current_alpha, mlp, thresh)
+	return alpha, its
 
 
 class DirichletDistribution(ProbabilityDistribution):
@@ -534,24 +614,55 @@ class DirichletEstimator(ParameterEstimator):
 			suff_stat = legacy_suff_stat
 
 		nobs, sum_of_logs, sum_v, sum_v2 = suff_stat
+		nobs = float(nobs)
 		dim = len(sum_of_logs)
+		sum_of_logs = np.asarray(sum_of_logs, dtype=float)
+		sum_v = np.asarray(sum_v, dtype=float)
+		sum_v2 = np.asarray(sum_v2, dtype=float)
 
 		if self.pseudo_count is not None and self.suff_stat is None:
+			pc              = max(0.0, float(self.pseudo_count))
 			c1              = digamma(one) - digamma(dim)
-			c2              = sum_of_logs + c1*self.pseudo_count
-			initialEstimate = c2*(dim/sum(c2))
-			meanLogP        = c2 / (nobs + self.pseudo_count)
+			c2              = sum_of_logs + c1*pc
+			total           = nobs + pc
+			if total <= 0.0:
+				meanLogP = np.full(dim, c1, dtype=float)
+			else:
+				meanLogP = c2/total
+			prior_mean = np.ones(dim, dtype=float)/float(dim)
+			if nobs > 0.0:
+				mean_v = _safe_simplex_mean((sum_v + pc*prior_mean)/total, dim)
+				mean_v2 = (sum_v2 + pc*prior_mean*prior_mean)/total
+			else:
+				mean_v = prior_mean
+				mean_v2 = None
+			initialEstimate = _initial_dirichlet_alpha(mean_v, mean_v2, meanLogP)
 
 		elif self.pseudo_count is not None and self.suff_stat is not None:
-			c2              = sum_of_logs + self.suff_stat*self.pseudo_count
-			initialEstimate = c2*(dim/sum(c2))
-			meanLogP        = c2 / (nobs + self.pseudo_count)
+			pc              = max(0.0, float(self.pseudo_count))
+			prior_mlp      = np.asarray(self.suff_stat, dtype=float)
+			if prior_mlp.size != dim:
+				prior_mlp = np.resize(prior_mlp, dim)
+			prior_mlp[~np.isfinite(prior_mlp)] = digamma(one) - digamma(dim)
+			c2              = sum_of_logs + prior_mlp*pc
+			total           = nobs + pc
+			meanLogP        = prior_mlp if total <= 0.0 else c2/total
+			prior_mean      = _mean_from_mean_log(prior_mlp, dim)
+			if nobs > 0.0:
+				mean_v = _safe_simplex_mean((sum_v + pc*prior_mean)/total, dim)
+				mean_v2 = (sum_v2 + pc*prior_mean*prior_mean)/total
+			else:
+				mean_v = prior_mean
+				mean_v2 = None
+			initialEstimate = _initial_dirichlet_alpha(mean_v, mean_v2, meanLogP)
 
 		else:
+			if nobs <= 0.0:
+				return DirichletDistribution(np.ones(dim, dtype=float))
 
 			sum_v = sum_v/nobs
 			sum_v2 = sum_v2/nobs
-			sum_v[-1] = 1.0 - sum_v[:-1].sum()
+			sum_v = _safe_simplex_mean(sum_v, dim)
 
 			'''
 			#initialConst = (sum_v[0]-sum_v2[0])/(sum_v2[0]-sum_v[0]*sum_v[0])
@@ -566,11 +677,14 @@ class DirichletEstimator(ParameterEstimator):
 			#initialEstimate = sum_of_logs*(dim/sum(sum_of_logs))
 
 			'''
-			initialEstimate = sum_v
+			initialEstimate = _initial_dirichlet_alpha(sum_v, sum_v2)
 
 			meanLogP        = sum_of_logs/nobs
 
-		if nobs == 1.0:
+		if not np.all(np.isfinite(meanLogP)):
+			meanLogP = np.where(np.isfinite(meanLogP), meanLogP, digamma(one) - digamma(dim))
+
+		if nobs <= 1.0 and self.pseudo_count is None:
 			return DirichletDistribution(initialEstimate)
 
 		else:

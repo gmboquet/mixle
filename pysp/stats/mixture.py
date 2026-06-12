@@ -17,7 +17,8 @@ import numpy as np
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator, child_enumerator, EnumerationError
-from pysp.utils.enumeration import BufferedStream, QuantizedEnumerationIndex, best_first_union, freeze
+from pysp.utils.enumeration import BufferedStream, QuantizedEnumerationIndex, best_first_union, \
+    bounded_best_first_union_index, freeze
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
@@ -351,13 +352,13 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         return MixtureEnumerator(self)
 
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
-        """Build a bounded bit-quantized index from bounded component indexes.
+        """Build a bounded bit-quantized index from a global mixture frontier.
 
-        A value with mixture mass at least 2**(-max_bits) must have at least one
-        positive-weight component contribution of at least that threshold divided by
-        the number of active components. Each component is therefore indexed only to
-        that candidate bound, the candidate union is de-duplicated, and candidates are
-        re-scored with the exact mixture log-density before final binning.
+        The primary path pulls candidates from weighted component enumerator heads.
+        The log-sum of those heads bounds every unseen value, so construction stops
+        when the live global frontier falls below ``2**(-max_bits)``. This avoids the
+        looser per-component ``log2(K)`` candidate expansion. If a component cannot
+        enumerate, the method falls back to the structured cross-index path.
         """
         if max_bits < 0:
             raise ValueError('max_bits must be non-negative.')
@@ -377,6 +378,37 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         def exact_log_density(x):
             with np.errstate(divide='ignore'):
                 return vec.log_sum(np.asarray([c.log_density(x) for c in comps]) + log_w_arr)
+
+        def component_log_density(k: int, x: T) -> float:
+            return float(comps[k].log_density(x))
+
+        try:
+            streams = [
+                BufferedStream(child_enumerator(comp, 'MixtureDistribution.components[%d]' % k))
+                for k, comp, _, _ in active
+            ]
+            log_offsets = [log_w for _, _, _, log_w in active]
+            return bounded_best_first_union_index(
+                streams, log_offsets, exact_log_density,
+                max_bits=max_bits, bin_width_bits=bin_width_bits,
+                component_log_density=component_log_density)
+        except EnumerationError:
+            pass
+
+        cross_bits = tuple(float(max_bits) + math.log(active_count * weight, 2.0)
+                           for _, _, weight, _ in active)
+        try:
+            cross = comps[0].quantized_multi_cross_index(
+                comps[1:], max_bits=cross_bits, bin_width_bits=bin_width_bits)
+            candidates = []
+            for value, log_probs in cross.iter_items():
+                mix_lp = vec.log_sum(log_w_arr + np.asarray(log_probs, dtype=np.float64))
+                candidates.append((value, float(mix_lp)))
+            return QuantizedEnumerationIndex.from_items(
+                candidates, max_bits=max_bits, bin_width_bits=bin_width_bits,
+                truncated=cross.truncated)
+        except EnumerationError:
+            pass
 
         candidates = []
         seen = set()

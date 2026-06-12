@@ -4,7 +4,7 @@ Defines the ExponentialDistribution, ExponentialSampler, ExponentialAccumulatorF
 ExponentialEstimator, and the ExponentialDataEncoder classes for use with pysparkplug.
 
 Data type: (float): The ExponentialDistribution with scale beta > 0.0, has log-density
-    log(f(x;beta)) = -log(beta) - x/beta, for x > 0, else -np.inf.
+    log(f(x;beta)) = -log(beta) - x/beta, for x >= 0, else -np.inf.
 
 """
 from typing import Optional, Tuple
@@ -17,14 +17,15 @@ from typing import List, Union, Dict, Any
 
 
 class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
+    """Exponential distribution on non-negative real values with scale ``beta``."""
 
     def __init__(self, beta: float, name: Optional[str] = None):
-        """ExponentialDistribution object for shape beta, with mean (1/beta).
+        """ExponentialDistribution object for scale beta, with mean beta.
 
-        Data type: int.
+        Data type: float.
 
         Log-Density given by,
-            log(f(x;beta)) = -log(beta) - x/beta, for x > 0.
+            log(f(x;beta)) = -log(beta) - x/beta, for x >= 0.
 
         Args:
             beta (float): Positive valued real number defining scale of exponential distribution.
@@ -36,8 +37,10 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
             name (Optional[str]): Assign a name to ExponentialDistribution object.
 
         """
-        self.beta = beta
-        self.log_beta = np.log(beta)
+        if beta <= 0.0 or not np.isfinite(beta):
+            raise ValueError('ExponentialDistribution requires beta > 0.')
+        self.beta = float(beta)
+        self.log_beta = np.log(self.beta)
         self.name = name
 
     def __str__(self) -> str:
@@ -50,7 +53,7 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         See log_density() for details.
 
         Args:
-            x (float): Positive real-valued number.
+            x (float): Non-negative real-valued number.
 
         Returns:
             Density evaluated at x.
@@ -61,10 +64,10 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: float) -> float:
         """Evaluate the log-density of exponential distribution with scale beta.
 
-        log(f(x;beta)) = -log(beta) - x/beta, for x > 0, else -np.inf.
+        log(f(x;beta)) = -log(beta) - x/beta, for x >= 0, else -np.inf.
 
         Args:
-            x (float): Positive real-valued number.
+            x (float): Non-negative real-valued number.
 
         Returns:
             Log-density evaluated at x.
@@ -89,6 +92,7 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         """
         rv = x * (-1.0 / self.beta)
         rv -= self.log_beta
+        rv = np.where(x >= 0.0, rv, -np.inf)
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'ExponentialSampler':
@@ -423,10 +427,10 @@ class ExponentialDataEncoder(DataSequenceEncoder):
         """Encode sequence of iid exponential observations.
 
         Data type must be a float.
-        Data must also be positive real-valued numbers.
+        Data must also be non-negative real-valued numbers.
 
         Args:
-            x (Union[List[float], np.ndarray]): IID numpy array or list of positive real-valued floats.
+            x (Union[List[float], np.ndarray]): IID numpy array or list of non-negative real-valued floats.
 
         Returns:
             Numpy array of floats.
@@ -434,7 +438,7 @@ class ExponentialDataEncoder(DataSequenceEncoder):
         """
         rv = np.asarray(x, dtype=float)
 
-        if np.any(rv <= 0) or np.any(np.isnan(rv)):
-            raise Exception('Exponential requires x > 0.')
+        if np.any(rv < 0) or np.any(np.isnan(rv)):
+            raise ValueError('Exponential requires x >= 0.')
 
         return rv

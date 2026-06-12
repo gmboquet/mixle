@@ -14,13 +14,14 @@ from typing import Dict, Optional, Tuple, Any, TypeVar, Union, List
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator, EnumerationError
-from pysp.utils.enumeration import QuantizedEnumerationIndex
+from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 from numpy.random import RandomState
 
 T = TypeVar('T')
 
 class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Categorical distribution over hashable labels."""
     def __init__(self, pmap: Dict[Any, float], default_value: float = 0.0, name: Optional[str] = None) -> None:
         """Defines a CategoricalDistribution object for data type T.
 
@@ -95,7 +96,8 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             Log-density of Categorical distribution evaluated at x.
 
         """
-        return np.log(self.pmap.get(x, self.default_value)) - self.log1p_default_value
+        p = self.pmap.get(x, self.default_value)
+        return -np.inf if p <= 0.0 else np.log(p) - self.log1p_default_value
 
     def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Vectorized evaluation of log-density for sequence encoded data.
@@ -171,6 +173,31 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             raise EnumerationError(self, reason='non-zero default_value gives an unbounded support')
         items = [(k, math.log(v) - self.log1p_default_value) for k, v in self.pmap.items() if v > 0.0]
         return QuantizedEnumerationIndex.from_items(items, max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+    def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view for finite categorical maps."""
+        dists = [self] + list(others)
+        if any(not isinstance(dist, CategoricalDistribution) for dist in dists):
+            return super().quantized_multi_cross_index(others, max_bits=max_bits, bin_width_bits=bin_width_bits)
+        if any(dist.no_default for dist in dists):
+            raise EnumerationError(self, reason='non-zero default_value gives an unbounded support')
+
+        keys = set()
+        for dist in dists:
+            keys.update(dist.pmap.keys())
+        items = []
+        for key in keys:
+            lps = []
+            for dist in dists:
+                p = dist.pmap.get(key, 0.0)
+                lps.append(math.log(p) - dist.log1p_default_value if p > 0.0 else -np.inf)
+            items.append((key, tuple(lps)))
+        return QuantizedCrossIndex.from_items(items, max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+    def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an exact aligned cross-bin view for two finite categorical maps."""
+        return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
+
 
 class CategoricalSampler(DistributionSampler):
 

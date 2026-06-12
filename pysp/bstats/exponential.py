@@ -122,7 +122,7 @@ class ExponentialDistribution(ProbabilityDistribution):
 
 		ea, eb, e1 = self.expected_nparams
 
-		return e1*x + (eb - ea)
+		return -inf if x < 0 else e1*x + (eb - ea)
 
 	def seq_log_density(self, x):
 		"""Vectorized log-density at sequence-encoded input x.
@@ -135,6 +135,7 @@ class ExponentialDistribution(ProbabilityDistribution):
 		"""
 		rv = x*(-self.lam)
 		rv += self.log_lam
+		rv[x < 0] = -inf
 		return rv
 
 	def seq_expected_log_density(self, x):
@@ -154,7 +155,9 @@ class ExponentialDistribution(ProbabilityDistribution):
 
 		ea, eb, e1 = self.expected_nparams
 
-		return e1*x + (eb - ea)
+		rv = e1*x + (eb - ea)
+		rv[x < 0] = -inf
+		return rv
 
 	def seq_encode(self, x):
 		"""Encode a sequence of observations for vectorized evaluation.

@@ -165,8 +165,9 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         n2 = np.sum(cy)
 
         ll = self.cond_weights[vx, :].T * (cx / np.sum(cx))
-        ll = np.dot(ll.T, self.state_prob_mat[:, vy]) * b + a
-        log_sum_x = np.log(np.sum(ll, axis=0))
+        ll = np.dot(ll.T, self.state_prob_mat[:, vy])
+        with np.errstate(divide='ignore'):
+            log_sum_x = np.log(b * np.sum(ll, axis=0) + a)
         rv = float(np.dot(log_sum_x, cy))
         # rv += np.dot(np.log(self.init_prob_vec[vx]), cx)
 
@@ -199,8 +200,9 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
                 vx, cx, vy, cy = entry
 
                 x_mat = self.cond_weights[vx, :].T * (cx / np.sum(cx))
-                x_mat = np.dot(x_mat.T, self.state_prob_mat[:, vy]) * b + a
-                rv[i] = np.dot(np.log(np.sum(x_mat, axis=0)), cy)
+                x_mat = np.dot(x_mat.T, self.state_prob_mat[:, vy])
+                with np.errstate(divide='ignore'):
+                    rv[i] = np.dot(np.log(b * np.sum(x_mat, axis=0) + a), cy)
                 # rv[i] += np.dot(np.log(self.init_prob_vec[vx]), cx)
 
             rv += self.prev_dist.seq_log_density(xx[1])
@@ -428,7 +430,10 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         # [old word] x [state] x [new word]
 
         ss = np.sum(np.sum(z_mat, axis=0, keepdims=True), axis=1, keepdims=True)
-        z_mat *= b / (ss * b + len(vx) * a)
+        denom = ss * b + a
+        scale = np.zeros_like(denom)
+        np.divide(b, denom, out=scale, where=denom > 0.0)
+        z_mat *= scale
 
         self.weight_count[vx, :] += np.dot(z_mat, cy) * weight
         self.state_count[:, vy] += np.sum(z_mat, axis=0) * cy * weight
@@ -550,7 +555,10 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
                 # [old word] x [state] x [new word]
 
                 ss = np.sum(np.sum(z_mat, axis=0, keepdims=True), axis=1, keepdims=True)
-                z_mat *= b / (ss * b + len(vx) * a)
+                denom = ss * b + a
+                scale = np.zeros_like(denom)
+                np.divide(b, denom, out=scale, where=denom > 0.0)
+                z_mat *= scale
 
                 self.weight_count[vx, :] += np.dot(z_mat, cy) * weight
                 self.state_count[:, vy] += np.sum(z_mat, axis=0) * cy * weight
@@ -1013,7 +1021,11 @@ def numba_seq_log_density(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond
             for j in range(l1):
                 for k in range(num_states):
                     temp_sum += x_mat[j, k] * state_prob_mat[k, wid]
-            out[i] += math.log(temp_sum * b + l1 * a) * cy[w]
+            prob = temp_sum * b + a
+            if prob > 0.0:
+                out[i] += math.log(prob) * cy[w]
+            else:
+                out[i] = -math.inf
 
 
 @numba.njit(
@@ -1053,7 +1065,11 @@ def numba_seq_update(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weig
                     z_mat[j, k] = temp
                     temp_sum += temp
 
-            temp_weight = cy[w] * weight * b / (temp_sum * b + l1 * a)
+            denom = temp_sum * b + a
+            if denom > 0.0:
+                temp_weight = cy[w] * weight * b / denom
+            else:
+                temp_weight = 0.0
             for j in range(l1):
                 for k in range(num_states):
                     temp = temp_weight * z_mat[j, k]
@@ -1099,4 +1115,3 @@ def vec_bincount2(x, w, out):
     for j in range(len(x)):
         out[:, x[j]] += w[:, j]
     return out
-

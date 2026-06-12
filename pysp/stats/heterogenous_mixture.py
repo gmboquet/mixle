@@ -36,6 +36,7 @@ T = TypeVar('T')
 
 class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Mixture distribution with component-specific observation encoders."""
     def __init__(self,
                  components: Sequence[SequenceEncodableProbabilityDistribution],
                  w: Union[List[float], np.ndarray],

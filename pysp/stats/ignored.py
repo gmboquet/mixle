@@ -19,6 +19,7 @@ E = TypeVar('E')
 
 class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Distribution wrapper that assigns zero log-density while preserving an estimator interface."""
     def __init__(self, dist: Optional[SequenceEncodableProbabilityDistribution], name: Optional[str] = None):
         """IgnoredDistribution object for using IgnoredDistributions in estimation.
 
@@ -57,16 +58,20 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
         return self.dist.log_density(x)
 
     def seq_log_density(self, x: E) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         rv = self.dist.seq_log_density(x)
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'IgnoredSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return IgnoredSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'IgnoredEstimator':
+        """Return an estimator for fitting this distribution from data."""
         return IgnoredEstimator(dist=self.dist, name=self.name)
 
     def dist_to_encoder(self) -> 'IgnoredDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return IgnoredDataEncoder(encoder=self.dist.dist_to_encoder())
 
 

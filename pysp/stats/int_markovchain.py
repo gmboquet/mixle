@@ -43,6 +43,7 @@ SS2 = TypeVar('SS2') ## suff-stat of length
 
 class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Markov-chain distribution over integer-valued states."""
     def __init__(self, num_values: int, cond_dist: Union[List[List[float]], np.ndarray],
                  lag: int = 1, init_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
