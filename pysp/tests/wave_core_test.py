@@ -128,6 +128,45 @@ class IntegerUniformSpikeEnumeratorTestCase(unittest.TestCase):
 
 class DiracLengthMixtureEnumeratorTestCase(unittest.TestCase):
 
+    def test_scalar_component_log_density_matches_vectorized_path(self):
+        len_dist = IntegerCategoricalDistribution(0, [0.2, 0.5, 0.3])
+        dist = DiracLengthMixtureDistribution(len_dist=len_dist, p=0.7, v=0)
+        data = [0, 1, 2]
+        enc = dist.dist_to_encoder().seq_encode(data)
+
+        scalar = np.vstack([dist.component_log_density(x) for x in data])
+        vectorized = dist.seq_component_log_density(enc)
+
+        np.testing.assert_allclose(scalar, vectorized, rtol=0.0, atol=1e-12)
+        self.assertEqual(scalar[0, 1], 0.0)
+        self.assertEqual(scalar[1, 1], -np.inf)
+
+    def test_scalar_posterior_matches_vectorized_path(self):
+        len_dist = IntegerCategoricalDistribution(0, [0.2, 0.5, 0.3])
+        dist = DiracLengthMixtureDistribution(len_dist=len_dist, p=0.7, v=0)
+        data = [0, 1, 2]
+        enc = dist.dist_to_encoder().seq_encode(data)
+
+        scalar = np.vstack([dist.posterior(x) for x in data])
+        vectorized = dist.seq_posterior(enc)
+
+        np.testing.assert_allclose(scalar, vectorized, rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(scalar[0], [0.7 * 0.2 / (0.7 * 0.2 + 0.3),
+                                               0.3 / (0.7 * 0.2 + 0.3)])
+        np.testing.assert_allclose(scalar[1:], [[1.0, 0.0], [1.0, 0.0]])
+
+    def test_posterior_when_dirac_point_is_outside_length_support(self):
+        len_dist = IntegerCategoricalDistribution(1, [0.4, 0.6])
+        dist = DiracLengthMixtureDistribution(len_dist=len_dist, p=0.7, v=0)
+        data = [0, 1, 2]
+        enc = dist.dist_to_encoder().seq_encode(data)
+
+        scalar = np.vstack([dist.posterior(x) for x in data])
+        vectorized = dist.seq_posterior(enc)
+
+        np.testing.assert_allclose(scalar, vectorized, rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(scalar, [[0.0, 1.0], [1.0, 0.0], [1.0, 0.0]])
+
     def test_finite_support_with_overlap(self):
         len_dist = IntegerCategoricalDistribution(0, [0.2, 0.5, 0.3])
         dist = DiracLengthMixtureDistribution(len_dist=len_dist, p=0.7, v=0)

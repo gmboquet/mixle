@@ -115,8 +115,8 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         rv = np.zeros(2, dtype=np.float64)
-        rv[0] = self.log_p + self.len_dist.log_density(x)
-        if x == self.v:
+        rv[0] = self.len_dist.log_density(x)
+        if x != self.v:
             rv[1] = -np.inf
         return rv
 
@@ -131,13 +131,14 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         comp_log_density = self.component_log_density(x)
-        if comp_log_density[1] == -np.inf:
-            return np.array([1, 0], dtype=np.float64)
-        else:
-            comp_log_density[0] += self.log_p
-            comp_log_density[1] += self.log_1p
+        comp_log_density[0] += self.log_p
+        comp_log_density[1] += self.log_1p
 
         max_val = np.max(comp_log_density)
+        if max_val == -np.inf:
+            rv = np.array([np.exp(self.log_p), np.exp(self.log_1p)], dtype=np.float64)
+            rv /= rv.sum()
+            return rv
 
         comp_log_density -= max_val
         np.exp(comp_log_density, out=comp_log_density)
@@ -230,7 +231,7 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
             ll_mat = rv[idx_v, :]
 
             ll_mat[:, 1] += self.log_1p
-            ll_mat[:, 0] += self.len_dist.seq_log_density(enc_x) + self.log_p
+            ll_mat[:, 0] += self.len_dist.seq_log_density(enc_x)[idx_v] + self.log_p
 
             ll_max = ll_mat.max(axis=1, keepdims=True)
             bad_rows = np.isinf(ll_max.flatten())
@@ -426,7 +427,7 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             rv[:, 1] += estimate.log_1p
 
             rv_max = rv.max(axis=1, keepdims=True)
-            bad_rows = np.isinf(rv.flatten())
+            bad_rows = np.isinf(rv_max.flatten())
 
             if np.any(bad_rows):
                 rv[bad_rows, :] = np.array([estimate.log_p, estimate.log_1p], dtype=np.float64)
