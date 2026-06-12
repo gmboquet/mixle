@@ -197,6 +197,24 @@ class LLDAMultiLabelAlphaTestCase(unittest.TestCase):
         fitted_split = self.est.estimate(None, ss_split)
         self.assertTrue(np.allclose(fitted_split.alphas, self.fitted.alphas, rtol=1.0e-6, atol=1.0e-8))
 
+    def test_topic_suff_stats_use_weighted_expected_counts_once(self):
+        weights = np.linspace(0.25, 1.75, len(self.data))
+        acc = self.est.accumulator_factory().make()
+        acc.seq_update(self.enc, weights, self.model)
+
+        responsibilities, _, _, _ = seq_posterior(self.model, self.enc)
+        expected = responsibilities * np.reshape(weights[self.enc[1]], (-1, 1))
+        flat_words = [word for doc, _ in self.data for word, _ in doc]
+
+        _, _, _, topic_counts, topic_suff_stats = acc.value()
+        np.testing.assert_allclose(topic_counts.sum(axis=0), expected.sum(axis=0), rtol=1.0e-10, atol=1.0e-10)
+
+        for topic_idx, suff_stat in enumerate(topic_suff_stats):
+            for word in sorted(set(flat_words)):
+                expected_word_count = sum(expected[i, topic_idx] for i, w in enumerate(flat_words) if w == word)
+                self.assertAlmostEqual(suff_stat.get(word, 0.0), expected_word_count, places=10)
+            self.assertAlmostEqual(sum(suff_stat.values()), expected[:, topic_idx].sum(), places=10)
+
 
 if __name__ == '__main__':
     unittest.main()

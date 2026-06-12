@@ -513,16 +513,16 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """
         num_documents, idx, counts, old_gammas, enc_data = x
         log_density_gamma, final_gammas, per_topic_log_densities = seq_posterior(estimate, x)
+        weighted_topic_counts = log_density_gamma * np.reshape(weights[idx], (-1, 1))
 
         for i in range(self.num_topics):
-            self.accumulators[i].seq_update(enc_data, log_density_gamma[:, i] * weights[idx] * counts,
-                                            estimate.topics[i])
+            self.accumulators[i].seq_update(enc_data, weighted_topic_counts[:, i], estimate.topics[i])
 
         mlpf = digamma(final_gammas) - digamma(np.sum(final_gammas, axis=1, keepdims=True))
 
         self.sum_of_logs += np.dot(weights, mlpf)
         self.doc_counts += weights.sum()
-        self.topic_counts += np.sum(log_density_gamma, axis=0)
+        self.topic_counts += np.sum(weighted_topic_counts, axis=0)
         self.prev_alpha = estimate.alpha
 
         if not isinstance(self.len_accumulator, NullAccumulator):
