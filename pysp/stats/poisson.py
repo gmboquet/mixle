@@ -5,7 +5,7 @@ PoissonEstimator, and the PoissonDataEncoder classes for use with pysparkplug.
 
 Data type (int): The Poisson distribution with rate lam, has log-density
 
-    log(p_mat(x_mat=x; lam) = -x*log(lam) - log(x!) - lam,
+    log(p_mat(x_mat=x; lam)) = x*log(lam) - log(x!) - lam,
 
 for x in {0,1,2,...}, and
 
@@ -20,13 +20,14 @@ from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator
-from pysp.utils.enumeration import QuantizedEnumerationIndex
+from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.utils.vector import gammaln
 from math import log
 from typing import Tuple, List, Union, Optional, Any, Dict, Sequence
 
 
 class PoissonDistribution(SequenceEncodableProbabilityDistribution):
+    """Poisson distribution over non-negative integer counts with rate ``lam``."""
 
     def __init__(self, lam: float, name: Optional[str] = None) -> None:
         """PoissonDistribution object defining Poisson distribution with mean lam > 0.0.
@@ -40,8 +41,10 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
             name (Optional[str]): String name for object instance.
             log_lambda (float): Log of attribute lam.
         """
-        self.lam = lam
-        self.log_lambda = log(lam)
+        if lam <= 0.0 or not np.isfinite(lam):
+            raise ValueError('PoissonDistribution requires lam > 0.')
+        self.lam = float(lam)
+        self.log_lambda = log(self.lam)
         self.name = name
 
     def __str__(self) -> str:
@@ -78,10 +81,14 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
             Log-density of Poisson distribution evaluated at x.
 
         """
-        if x < 0:
+        try:
+            xx = float(x)
+        except Exception:
+            return -np.inf
+        if not np.isfinite(xx) or xx < 0 or np.floor(xx) != xx:
             return -np.inf
         else:
-            return x * self.log_lambda - gammaln(x + 1.0) - self.lam
+            return xx * self.log_lambda - gammaln(xx + 1.0) - self.lam
 
     def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Vectorized log-density evaluated on sequence encoded x.
@@ -98,9 +105,12 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of log-density evaluated at each encoded observation value x.
 
         """
-        rv = x[0] * self.log_lambda
-        rv -= x[1]
+        vals, log_fact = x
+        rv = vals * self.log_lambda
+        rv -= log_fact
         rv -= self.lam
+        good = np.isfinite(vals) & (vals >= 0) & (np.floor(vals) == vals)
+        rv = np.where(good, rv, -np.inf)
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'PoissonSampler':
@@ -167,6 +177,36 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         return QuantizedEnumerationIndex.from_items(
             items, max_bits=max_bits, bin_width_bits=bin_width_bits,
             sorted_items=True, truncated=True)
+
+    def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an aligned cross-bin view over bounded Poisson high-mass regions."""
+        dists = [self] + list(others)
+        if any(not isinstance(dist, PoissonDistribution) for dist in dists):
+            return super().quantized_multi_cross_index(others, max_bits=max_bits, bin_width_bits=bin_width_bits)
+        if isinstance(max_bits, np.ndarray):
+            max_bits_tuple = tuple(float(x) for x in max_bits.tolist())
+        elif isinstance(max_bits, (list, tuple)):
+            max_bits_tuple = tuple(float(x) for x in max_bits)
+        else:
+            max_bits_tuple = tuple([float(max_bits)] * len(dists))
+        if len(max_bits_tuple) != len(dists):
+            raise ValueError('max_bits length must match the number of distributions.')
+
+        values = set()
+        for dist, bit_bound in zip(dists, max_bits_tuple):
+            if bit_bound < 0.0:
+                continue
+            index = dist.quantized_index(max_bits=bit_bound, bin_width_bits=bin_width_bits)
+            values.update(value for value, _ in index.iter_from())
+
+        items = [(value, tuple(float(dist.log_density(value)) for dist in dists))
+                 for value in sorted(values)]
+        return QuantizedCrossIndex.from_items(
+            items, max_bits=max_bits_tuple, bin_width_bits=bin_width_bits, truncated=True)
+
+    def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an aligned cross-bin view over two bounded Poisson high-mass regions."""
+        return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
 class PoissonEnumerator(DistributionEnumerator):
@@ -475,16 +515,16 @@ class PoissonEstimator(ParameterEstimator):
         nobs, psum = suff_stat
 
         if self.pseudo_count is not None and self.suff_stat is not None:
-            return PoissonDistribution((psum + self.suff_stat * self.pseudo_count) / (nobs + self.pseudo_count),
-                                       name=self.name)
+            lam = (psum + self.suff_stat * self.pseudo_count) / (nobs + self.pseudo_count)
+            return PoissonDistribution(max(float(lam), 1.0e-12), name=self.name)
         elif nobs == 0.0:
             return PoissonDistribution(1.0, name=self.name)
         else:
-            return PoissonDistribution(psum / nobs, name=self.name)
+            return PoissonDistribution(max(float(psum / nobs), 1.0e-12), name=self.name)
 
 
 class PoissonDataEncoder(DataSequenceEncoder):
-    """GeometricDataEncoder object for encoding sequences of iid Poisson observations with data type int."""
+    """Encode iid non-negative integer Poisson observations with log-factorials."""
 
     def __str__(self) -> str:
         """Returns string representation of PoissonDataEncoder object."""
@@ -505,7 +545,7 @@ class PoissonDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Union[np.ndarray, Sequence[int]]) -> Tuple[np.ndarray, np.ndarray]:
         """Encode iid sequence of Poisson observations for vectorized "seq_" function calls.
 
-        Data type must be int. Values must be non-negative integers. Non-integer values are converted to integer.
+        Data type must be int. Values must be non-negative integers.
         Returns Tuple of np.ndarray[int] of x, and np.log(Gamma(x+1.0)), where Gamma is the Gamma function.
 
         Args:
@@ -517,8 +557,8 @@ class PoissonDataEncoder(DataSequenceEncoder):
         """
         rv1 = np.asarray(x)
 
-        if np.any(rv1 < 0) or np.any(np.isnan(rv1)):
-            raise Exception('Poisson requires non-negative integer values of x.')
+        if np.any(rv1 < 0) or np.any(np.isnan(rv1)) or np.any(np.floor(rv1) != rv1):
+            raise ValueError('Poisson requires non-negative integer values of x.')
         else:
             rv2 = gammaln(rv1 + 1.0)
             return rv1, rv2

@@ -1,7 +1,6 @@
-"""Functions for classification evaluation. Create ROC curves and search depth rankings. """
+"""Functions for classification evaluation. Create ROC curves and search depth rankings."""
 import numpy as np
-from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEncodableProbabilityDistribution, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
+from pysp.stats.pdist import SequenceEncodableProbabilityDistribution
 
 from typing import Sequence, TypeVar, Optional, List, Tuple, Union
 
@@ -62,13 +61,18 @@ def roc_curve(pos_x: Union[List[float], np.ndarray], neg_x:  Union[List[float], 
         neg_x (Union[List[float], np.ndarray]): Probs for negative classifications.
 
     Returns:
-        (total positive rate, 1 - false positive rate)
+        Tuple of true-positive rate and false-positive rate arrays.
 
     """
-    res = np.zeros((len(pos_x)+len(neg_x), 2))
-    res[:len(pos_x), 0] = np.asarray(pos_x)
+    pos_x = np.asarray(pos_x, dtype=np.float64)
+    neg_x = np.asarray(neg_x, dtype=np.float64)
+    if len(pos_x) == 0 or len(neg_x) == 0:
+        raise ValueError('roc_curve requires at least one positive and one negative score')
+
+    res = np.zeros((len(pos_x) + len(neg_x), 2))
+    res[:len(pos_x), 0] = pos_x
     res[:len(pos_x), 1] = 1
-    res[len(pos_x):, 0] = np.asarray(neg_x)
+    res[len(pos_x):, 0] = neg_x
     res[len(pos_x):, 1] = 0
 
     sidx = np.argsort(-res[:, 0])
@@ -80,7 +84,34 @@ def roc_curve(pos_x: Union[List[float], np.ndarray], neg_x:  Union[List[float], 
     pd /= float(len(pos_x))
     fa /= float(len(neg_x))
 
-    return pd, fa
+    return np.concatenate(([0.0], pd)), np.concatenate(([0.0], fa))
+
+
+def auc(x: Union[List[float], np.ndarray], y: Union[List[float], np.ndarray]) -> float:
+    """Trapezoidal area under a curve.
+
+    Args:
+        x: X-axis coordinates, such as false-positive rates.
+        y: Y-axis coordinates, such as true-positive rates.
+
+    Returns:
+        Non-negative trapezoidal area after sorting by x.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if x.shape != y.shape:
+        raise ValueError('x and y must have the same shape')
+    if x.ndim != 1:
+        raise ValueError('x and y must be one-dimensional')
+    order = np.argsort(x)
+    trapezoid = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
+    return float(trapezoid(y[order], x[order]))
+
+
+def roc_auc(pos_x: Union[List[float], np.ndarray], neg_x: Union[List[float], np.ndarray]) -> float:
+    """Area under the ROC curve for positive and negative scores."""
+    pd, fa = roc_curve(pos_x, neg_x)
+    return auc(fa, pd)
 
 def roc_percentiles(pos_x: Union[List[float], np.ndarray], neg_x:  Union[List[float], np.ndarray],
                     perc_points: Union[List[float], np.ndarray]) -> np.ndarray:
@@ -131,5 +162,3 @@ def ranking_depth(x, k=None, comp_func = lambda a, b: a == b):
         idx += 1
 
     return retval
-
-

@@ -78,12 +78,14 @@ def sorted_dict_merge_add(k_vec1: np.ndarray, c_vec1: np.ndarray, k_vec2: np.nda
 
     _, idx1, idx2 = np.intersect1d(k_vec1, k_vec2, assume_unique=True, return_indices=True)
 
-    adj_cnt = c_vec1[idx1] + c_vec2[idx2]
+    rv_vals = k_vec1.copy()
+    rv_cnts = c_vec1.copy()
+    rv_cnts[idx1] += c_vec2[idx2]
     new_vals = np.delete(k_vec2, idx2)
     new_cnts = np.delete(c_vec2, idx2)
-    new_idx = np.searchsorted(k_vec1, new_vals)
-    rv_vals = np.insert(k_vec1, new_idx, new_vals)
-    rv_cnts = np.insert(adj_cnt, new_idx, new_cnts)
+    new_idx = np.searchsorted(rv_vals, new_vals)
+    rv_vals = np.insert(rv_vals, new_idx, new_vals)
+    rv_cnts = np.insert(rv_cnts, new_idx, new_cnts)
 
     return rv_vals, rv_cnts
 

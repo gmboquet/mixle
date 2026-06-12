@@ -178,7 +178,7 @@ def flat_map(f: Callable[[T], Sequence[T1]], x: Sequence[T]) -> List[T1]:
 
 def least_occurring(x: Sequence[T], count: Optional[int] = None, percent: Optional[float] = None,
                     keep_freq: bool = True):
-    cnt_map = count_by_value(x).items()
+    cnt_map = list(count_by_value(x).items())
     s_idx = np.argsort([u[1] for u in cnt_map])
 
     if count is not None:

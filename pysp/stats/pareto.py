@@ -34,28 +34,38 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.xm), repr(self.alpha), repr(self.name), repr(self.keys))
 
     def density(self, x: float) -> float:
+        """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: float) -> float:
-        if x < self.xm:
+        """Return the log-density or log-mass at a single observation."""
+        try:
+            xx = float(x)
+        except Exception:
             return -np.inf
-        return self.log_alpha + self.alpha * self.log_xm - (self.alpha + 1.0) * math.log(x)
+        if not np.isfinite(xx) or xx < self.xm:
+            return -np.inf
+        return self.log_alpha + self.alpha * self.log_xm - (self.alpha + 1.0) * math.log(xx)
 
     def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         xx, lx = x
         rv = self.log_alpha + self.alpha * self.log_xm - (self.alpha + 1.0) * lx
         return np.where(xx >= self.xm, rv, -np.inf)
 
     def sampler(self, seed: Optional[int] = None) -> 'ParetoSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return ParetoSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'ParetoEstimator':
+        """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return ParetoEstimator(name=self.name, keys=self.keys)
         return ParetoEstimator(pseudo_count=pseudo_count, suff_stat=(self.xm, self.alpha),
                                name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> 'ParetoDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return ParetoDataEncoder()
 
 

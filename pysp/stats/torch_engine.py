@@ -22,9 +22,10 @@ Two ways to fit:
 Device/dtype notes: float64 on CPU/CUDA reproduces the legacy numerics; MPS
 only supports float32, so expect ~1e-5 relative agreement there.
 
-Supported distributions match pysp.stats.kernels: Gaussian, LogGaussian,
-Gamma, Categorical, IntegerCategorical, Bernoulli, StudentT, Rayleigh,
-Pareto, Poisson, Exponential, Geometric, Binomial, NegativeBinomial,
+Supported distributions match pysp.stats.kernels for the common fitted leaves:
+Gaussian, LogGaussian, Gamma, Categorical, IntegerCategorical, Bernoulli,
+StudentT, Logistic, Weibull, Rayleigh, Pareto, Poisson, Exponential,
+Geometric, Binomial, NegativeBinomial,
 DiagonalGaussian (vector leaf), Optional (missing-data wrapper
 around any supported child), Ignored (fixed wrapped dist, scored via a
 precomputed column but never fitted), Composite (any nesting), Sequence
@@ -42,6 +43,8 @@ from pysp.stats.log_gaussian import LogGaussianDistribution
 from pysp.stats.gamma import GammaDistribution
 from pysp.stats.bernoulli import BernoulliDistribution
 from pysp.stats.student_t import StudentTDistribution
+from pysp.stats.logistic import LogisticDistribution
+from pysp.stats.weibull import WeibullDistribution
 from pysp.stats.rayleigh import RayleighDistribution
 from pysp.stats.pareto import ParetoDistribution
 from pysp.stats.categorical import CategoricalDistribution
@@ -166,6 +169,99 @@ class _TStudentT(_TBase):
         logc = (torch.lgamma((df + 1.0) / 2.0) - torch.lgamma(df / 2.0)
                 - 0.5 * torch.log(df * math.pi) - torch.log(scale))
         return logc - 0.5 * (df + 1.0) * torch.log1p((z * z) / df)
+
+    def stats(self, params, cols, gamma):
+        x = cols[0]
+        s1 = (gamma * x.unsqueeze(1)).sum(dim=0)
+        s2 = (gamma * (x * x).unsqueeze(1)).sum(dim=0)
+        c = gamma.sum(dim=0)
+        return (s1.cpu().numpy(), s2.cpu().numpy(), c.cpu().numpy())
+
+    def default_prior(self, strength):
+        return None
+
+    def log_prior(self, params, prior):
+        return torch.zeros((), dtype=self.dtype, device=self.device)
+
+
+class _TLogistic(_TBase):
+
+    def params(self, dists):
+        return {'loc': self._t([d.loc for d in dists]),
+                'scale': self._t([d.scale for d in dists])}
+
+    def raw_params(self, dists):
+        return {'loc': self._t([d.loc for d in dists]).requires_grad_(True),
+                'log_scale': self._t([math.log(d.scale) for d in dists]).requires_grad_(True)}
+
+    def canonical(self, raw):
+        return {'loc': raw['loc'], 'scale': raw['log_scale'].exp()}
+
+    def to_dists(self, raw):
+        loc = raw['loc'].detach().cpu().numpy()
+        scale = raw['log_scale'].detach().exp().cpu().numpy()
+        return [LogisticDistribution(loc=float(m), scale=float(s)) for m, s in zip(loc, scale)]
+
+    def log_density(self, params, cols):
+        x = cols[0].unsqueeze(1)
+        loc = params['loc'].unsqueeze(0)
+        scale = params['scale'].unsqueeze(0)
+        z = (x - loc) / scale
+        log_scale = torch.log(scale)
+        pos = -log_scale - z - 2.0 * torch.log1p(torch.exp(-z))
+        neg = -log_scale + z - 2.0 * torch.log1p(torch.exp(z))
+        return torch.where(z >= 0.0, pos, neg)
+
+    def stats(self, params, cols, gamma):
+        x = cols[0]
+        s1 = (gamma * x.unsqueeze(1)).sum(dim=0)
+        s2 = (gamma * (x * x).unsqueeze(1)).sum(dim=0)
+        c = gamma.sum(dim=0)
+        return (s1.cpu().numpy(), s2.cpu().numpy(), c.cpu().numpy())
+
+    def default_prior(self, strength):
+        return None
+
+    def log_prior(self, params, prior):
+        return torch.zeros((), dtype=self.dtype, device=self.device)
+
+
+class _TWeibull(_TBase):
+
+    def params(self, dists):
+        return {'shape': self._t([d.shape for d in dists]),
+                'scale': self._t([d.scale for d in dists])}
+
+    def raw_params(self, dists):
+        return {'log_shape': self._t([math.log(d.shape) for d in dists]).requires_grad_(True),
+                'log_scale': self._t([math.log(d.scale) for d in dists]).requires_grad_(True)}
+
+    def canonical(self, raw):
+        return {'shape': raw['log_shape'].exp(), 'scale': raw['log_scale'].exp()}
+
+    def to_dists(self, raw):
+        shape = raw['log_shape'].detach().exp().cpu().numpy()
+        scale = raw['log_scale'].detach().exp().cpu().numpy()
+        return [WeibullDistribution(float(a), float(b)) for a, b in zip(shape, scale)]
+
+    def log_density(self, params, cols):
+        x = cols[0].unsqueeze(1)
+        lx = cols[1].unsqueeze(1)
+        shape = params['shape'].unsqueeze(0)
+        scale = params['scale'].unsqueeze(0)
+        log_shape = torch.log(shape)
+        log_scale = torch.log(scale)
+
+        safe_lx = torch.where(x > 0.0, lx, torch.zeros_like(lx))
+        z = x / scale
+        out = log_shape - log_scale + (shape - 1.0) * (safe_lx - log_scale) - torch.pow(z, shape)
+
+        pos_inf = torch.full_like(out, float('inf'))
+        neg_inf = torch.full_like(out, float('-inf'))
+        zero_val = torch.where(shape < 1.0, pos_inf,
+                               torch.where(shape > 1.0, neg_inf, -log_scale))
+        out = torch.where(x == 0.0, zero_val, out)
+        return torch.where(x < 0.0, neg_inf, out)
 
     def stats(self, params, cols, gamma):
         x = cols[0]
@@ -919,6 +1015,8 @@ _IMPLS = {
     _k._GammaB: _TGamma,
     _k._BernoulliB: _TBernoulli,
     _k._StudentTB: _TStudentT,
+    _k._LogisticB: _TLogistic,
+    _k._WeibullB: _TWeibull,
     _k._RayleighB: _TRayleigh,
     _k._ParetoB: _TPareto,
     _k._CategoricalB: _TCategorical,
@@ -1093,8 +1191,8 @@ class TorchMixture(object):
         weights, Gamma on Poisson/Exponential rates, Gamma on the gamma rate
         1/theta and shape k, Beta on bernoulli/geometric/binomial/
         negative-binomial p and on the Optional missing probability. StudentT,
-        Rayleigh, and Pareto use the likelihood when default priors are used
-        (Ignored has nothing to fit).
+        Logistic, Weibull, Rayleigh, and Pareto use the likelihood when default
+        priors are used (Ignored has nothing to fit).
 
         priors=None builds weakly-informative defaults scaled by prior_strength
         (prior_strength=0 reduces exactly to fit_mle); pass a nested structure

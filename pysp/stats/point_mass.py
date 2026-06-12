@@ -1,0 +1,188 @@
+"""Fixed point-mass distribution."""
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
+
+import numpy as np
+from numpy.random import RandomState
+
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
+from pysp.utils.enumeration import QuantizedEnumerationIndex, freeze
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        try:
+            return bool(np.array_equal(a, b))
+        except Exception:
+            return False
+    try:
+        return freeze(a) == freeze(b)
+    except Exception:
+        return a == b
+
+
+class PointMassDistribution(SequenceEncodableProbabilityDistribution):
+    """Fixed Dirac/point-mass distribution assigning all mass to one value."""
+
+    def __init__(self, value: Any, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+        self.value = value
+        self.name = name
+        self.keys = keys
+
+    def __str__(self) -> str:
+        return 'PointMassDistribution(%s, name=%s, keys=%s)' % (
+            repr(self.value), repr(self.name), repr(self.keys))
+
+    def density(self, x: Any) -> float:
+        """Return the probability density or mass at a single observation."""
+        return 1.0 if _same_value(x, self.value) else 0.0
+
+    def log_density(self, x: Any) -> float:
+        """Return the log-density or log-mass at a single observation."""
+        return 0.0 if _same_value(x, self.value) else -np.inf
+
+    def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
+        return np.where(x, 0.0, -np.inf)
+
+    def sampler(self, seed: Optional[int] = None) -> 'PointMassSampler':
+        """Return a sampler for drawing observations from this distribution."""
+        return PointMassSampler(self, seed)
+
+    def estimator(self, pseudo_count: Optional[float] = None) -> 'PointMassEstimator':
+        """Return an estimator for fitting this distribution from data."""
+        return PointMassEstimator(self.value, name=self.name, keys=self.keys)
+
+    def dist_to_encoder(self) -> 'PointMassDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
+        return PointMassDataEncoder(self.value)
+
+    def enumerator(self) -> 'PointMassEnumerator':
+        """Return an enumerator over the distribution support when available."""
+        return PointMassEnumerator(self)
+
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
+        """Return a bounded quantized support index for this observation."""
+        return QuantizedEnumerationIndex.from_items(
+            [(self.value, 0.0)], max_bits=max_bits, bin_width_bits=bin_width_bits,
+            sorted_items=True, truncated=False)
+
+
+class PointMassEnumerator(DistributionEnumerator):
+    """Enumerate the single atom of a PointMassDistribution."""
+
+    def __init__(self, dist: PointMassDistribution) -> None:
+        super().__init__(dist)
+        self._done = False
+
+    def __next__(self) -> Tuple[Any, float]:
+        if self._done:
+            raise StopIteration
+        self._done = True
+        return self.dist.value, 0.0
+
+
+class PointMassSampler(DistributionSampler):
+    """Sampler returning the fixed atom."""
+
+    def __init__(self, dist: PointMassDistribution, seed: Optional[int] = None) -> None:
+        self.rng = RandomState(seed)
+        self.dist = dist
+
+    def sample(self, size: Optional[int] = None) -> Union[Any, Sequence[Any]]:
+        if size is None:
+            return self.dist.value
+        return [self.dist.value for _ in range(int(size))]
+
+
+class PointMassAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulator for a fixed point mass; no parameters are learned."""
+
+    def __init__(self, value: Any, keys: Optional[str] = None) -> None:
+        self.atom = value
+        self.key = keys
+
+    def update(self, x: Any, weight: float, estimate: Optional[PointMassDistribution]) -> None:
+        pass
+
+    def seq_update(self, x: np.ndarray, weights: np.ndarray,
+                   estimate: Optional[PointMassDistribution]) -> None:
+        pass
+
+    def initialize(self, x: Any, weight: float, rng: Optional[RandomState]) -> None:
+        pass
+
+    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: Optional[RandomState]) -> None:
+        pass
+
+    def combine(self, suff_stat: Any) -> 'PointMassAccumulator':
+        return self
+
+    def value(self) -> None:
+        return None
+
+    def from_value(self, x: Any) -> 'PointMassAccumulator':
+        return self
+
+    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+        if self.key is not None and self.key not in stats_dict:
+            stats_dict[self.key] = None
+
+    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+        pass
+
+    def acc_to_encoder(self) -> 'PointMassDataEncoder':
+        return PointMassDataEncoder(self.atom)
+
+
+class PointMassAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for PointMassAccumulator."""
+
+    def __init__(self, value: Any, keys: Optional[str] = None) -> None:
+        self.value = value
+        self.keys = keys
+
+    def make(self) -> PointMassAccumulator:
+        return PointMassAccumulator(self.value, keys=self.keys)
+
+
+class PointMassEstimator(ParameterEstimator):
+    """Estimator that always returns the configured point mass."""
+
+    def __init__(self, value: Any, pseudo_count: Optional[float] = None,
+                 suff_stat: Optional[Any] = None, name: Optional[str] = None,
+                 keys: Optional[str] = None) -> None:
+        self.value = value
+        self.pseudo_count = pseudo_count
+        self.suff_stat = suff_stat
+        self.name = name
+        self.keys = keys
+
+    def accumulator_factory(self) -> PointMassAccumulatorFactory:
+        return PointMassAccumulatorFactory(self.value, keys=self.keys)
+
+    def estimate(self, nobs: Optional[float], suff_stat: Optional[Any] = None) -> PointMassDistribution:
+        return PointMassDistribution(self.value, name=self.name, keys=self.keys)
+
+
+class PointMassDataEncoder(DataSequenceEncoder):
+    """Encode observations as a boolean equality mask against the fixed atom."""
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def __str__(self) -> str:
+        return 'PointMassDataEncoder(value=%s)' % repr(self.value)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, PointMassDataEncoder) and _same_value(other.value, self.value)
+
+    def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
+        return np.asarray([_same_value(v, self.value) for v in x], dtype=bool)

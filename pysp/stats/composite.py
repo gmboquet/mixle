@@ -15,7 +15,7 @@ from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator, child_enumerator, EnumerationError
-from pysp.utils.enumeration import BufferedStream, LazyQuantizedEnumerationIndex, ProductEnumerator
+from pysp.utils.enumeration import BufferedStream, LazyQuantizedEnumerationIndex, ProductEnumerator, QuantizedCrossIndex
 from typing import Optional, List, Union, Any, Tuple, Sequence, TypeVar, Dict
 from pysp.arithmetic import maxrandint
 
@@ -27,6 +27,7 @@ SS = TypeVar('SS')
 
 class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Product distribution over heterogeneous component variables."""
     def __init__(self,
                  dists: Sequence[SequenceEncodableProbabilityDistribution]) -> None:
         """CompositeDistribution for modeling independent distributions of from (Dist_0,Dist_1,...,Dist_{n-1}).
@@ -253,6 +254,61 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         return LazyQuantizedEnumerationIndex(
             counts, bin_width_bits=bin_width_bits, max_bits=max_bits,
             truncated=truncated, getter=getter)
+
+    def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an aligned cross-bin view for compatible composite distributions."""
+        dists = [self] + list(others)
+        if any(not isinstance(dist, CompositeDistribution) for dist in dists):
+            raise EnumerationError(self, reason='composite cross-index requires CompositeDistribution objects')
+        if any(dist.count != self.count for dist in dists):
+            raise EnumerationError(self, reason='composite cross-index requires equal tuple arity')
+        if isinstance(max_bits, np.ndarray):
+            max_bits_tuple = tuple(float(x) for x in max_bits.tolist())
+        elif isinstance(max_bits, (list, tuple)):
+            max_bits_tuple = tuple(float(x) for x in max_bits)
+        else:
+            max_bits_tuple = tuple([float(max_bits)] * len(dists))
+        if len(max_bits_tuple) != len(dists):
+            raise ValueError('max_bits length must match the number of distributions.')
+        if bin_width_bits <= 0:
+            raise ValueError('bin_width_bits must be positive.')
+
+        child_crosses = []
+        truncated = False
+        for i in range(self.count):
+            try:
+                child_cross = self.dists[i].quantized_multi_cross_index(
+                    [dist.dists[i] for dist in dists[1:]],
+                    max_bits=max_bits_tuple,
+                    bin_width_bits=bin_width_bits)
+            except EnumerationError as e:
+                path = 'CompositeDistribution.dists[%d]' % i
+                new_path = path if not e.path else '%s -> %s' % (path, e.path)
+                raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
+            child_crosses.append(child_cross)
+            truncated = truncated or child_cross.truncated
+
+        partials: List[Tuple[Tuple[Any, ...], Tuple[float, ...]]] = [((), tuple([0.0] * len(dists)))]
+        log2 = math.log(2.0)
+        for child_cross in child_crosses:
+            next_partials: List[Tuple[Tuple[Any, ...], Tuple[float, ...]]] = []
+            for prefix, lp_prefix in partials:
+                for value, lps in child_cross.iter_items():
+                    new_lps = tuple(float(lp_prefix[j] + lps[j]) for j in range(len(dists)))
+                    bits = tuple(np.inf if lp == -np.inf else max(0.0, -lp / log2) for lp in new_lps)
+                    if any(bits[j] <= max_bits_tuple[j] + 1.0e-12 for j in range(len(dists))):
+                        next_partials.append((prefix + (value,), new_lps))
+            partials = next_partials
+            if not partials:
+                break
+
+        items = [(values, lps) for values, lps in partials]
+        return QuantizedCrossIndex.from_items(
+            items, max_bits=max_bits_tuple, bin_width_bits=bin_width_bits, truncated=truncated)
+
+    def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
+        """Build an aligned cross-bin view for two compatible composite distributions."""
+        return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
 class CompositeEnumerator(DistributionEnumerator):

@@ -1,18 +1,26 @@
 import unittest
 
 import numpy as np
+import scipy.special
 import scipy.stats
 
 from pysp.stats import (
     BernoulliDistribution, BernoulliEstimator,
     BetaDistribution, BetaEstimator,
+    AffineTransform, ExpTransform,
+    CategoricalDistribution,
+    GaussianDistribution, GaussianEstimator,
     LaplaceDistribution, LaplaceEstimator,
+    LogisticDistribution, LogisticEstimator,
     MixtureDistribution, MixtureEstimator,
     NegativeBinomialDistribution, NegativeBinomialEstimator,
     ParetoDistribution, ParetoEstimator,
+    PointMassDistribution, PointMassEstimator,
     RayleighDistribution, RayleighEstimator,
     StudentTDistribution, StudentTEstimator,
+    TransformDistribution, TransformEstimator,
     UniformDistribution, UniformEstimator,
+    WeibullDistribution, WeibullEstimator,
     seq_encode, seq_estimate, seq_log_density_sum,
 )
 
@@ -22,11 +30,17 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
     def test_string_round_trip(self):
         dists = [
             BernoulliDistribution(0.3, name='b', keys='k'),
+            PointMassDistribution('fixed', name='pm', keys='k'),
             NegativeBinomialDistribution(3.0, 0.45, name='nb', keys='k'),
             BetaDistribution(2.0, 5.0, name='beta', keys='k'),
             StudentTDistribution(5.0, loc=1.0, scale=2.0, name='t', keys='k'),
             LaplaceDistribution(1.0, 2.0, name='laplace', keys='k'),
+            LogisticDistribution(loc=1.0, scale=2.0, name='logistic', keys='k'),
+            TransformDistribution(GaussianDistribution(0.0, 1.0),
+                                  transform=AffineTransform(loc=2.0, scale=3.0),
+                                  name='affine', keys='k'),
             UniformDistribution(-1.0, 3.0, name='uniform', keys='k'),
+            WeibullDistribution(1.5, 2.0, name='weibull', keys='k'),
             ParetoDistribution(2.0, 3.0, name='pareto', keys='k'),
             RayleighDistribution(2.0, name='rayleigh', keys='k'),
         ]
@@ -36,11 +50,16 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
     def test_seq_log_density_matches_scalar(self):
         dists = [
             BernoulliDistribution(0.3),
+            PointMassDistribution('fixed'),
             NegativeBinomialDistribution(3.0, 0.45),
             BetaDistribution(2.0, 5.0),
             StudentTDistribution(5.0, loc=1.0, scale=2.0),
             LaplaceDistribution(1.0, 2.0),
+            LogisticDistribution(loc=1.0, scale=2.0),
+            TransformDistribution(GaussianDistribution(0.0, 1.0),
+                                  transform=AffineTransform(loc=2.0, scale=3.0)),
             UniformDistribution(-1.0, 3.0),
+            WeibullDistribution(1.5, 2.0),
             ParetoDistribution(2.0, 3.0),
             RayleighDistribution(2.0),
         ]
@@ -50,6 +69,10 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
             seq_ll = dist.seq_log_density(enc)
             scalar_ll = np.asarray([dist.log_density(x) for x in data])
             self.assertTrue(np.allclose(seq_ll, scalar_ll, rtol=1.0e-12, atol=1.0e-12), str(dist))
+
+        pm = PointMassDistribution('fixed')
+        pm_enc = pm.dist_to_encoder().seq_encode(['fixed', 'other', 'fixed'])
+        np.testing.assert_array_equal(pm.seq_log_density(pm_enc), np.asarray([0.0, -np.inf, 0.0]))
 
     def test_scipy_density_matches(self):
         beta = BetaDistribution(2.5, 4.0)
@@ -66,8 +89,51 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
         lap = LaplaceDistribution(1.0, 2.0)
         self.assertAlmostEqual(lap.log_density(-0.25), scipy.stats.laplace.logpdf(-0.25, loc=1.0, scale=2.0), places=10)
 
+        logistic = LogisticDistribution(loc=1.0, scale=2.0)
+        self.assertAlmostEqual(logistic.log_density(-0.25),
+                               scipy.stats.logistic.logpdf(-0.25, loc=1.0, scale=2.0), places=10)
+
+        aff = TransformDistribution(GaussianDistribution(0.5, 4.0),
+                                    transform=AffineTransform(loc=1.0, scale=3.0))
+        self.assertTrue(aff.density_correction)
+        self.assertAlmostEqual(aff.log_density(2.5),
+                               scipy.stats.norm.logpdf(2.5, loc=2.5, scale=6.0), places=10)
+
+        exp = TransformDistribution(GaussianDistribution(0.25, 1.5), transform=ExpTransform())
+        self.assertAlmostEqual(exp.log_density(1.25),
+                               scipy.stats.lognorm.logpdf(1.25, s=np.sqrt(1.5), scale=np.exp(0.25)),
+                               places=10)
+        self.assertEqual(exp.log_density(-1.0), -np.inf)
+        exp_enc = exp.dist_to_encoder().seq_encode([-1.0, 1.25])
+        np.testing.assert_array_equal(np.isneginf(exp.seq_log_density(exp_enc)), np.asarray([True, False]))
+
+        tcat = TransformDistribution(CategoricalDistribution({0: 0.6, 1: 0.4}),
+                                     transform=AffineTransform(loc=10.0, scale=2.0))
+        self.assertFalse(tcat.density_correction)
+        self.assertAlmostEqual(tcat.log_density(12.0), np.log(0.4), places=10)
+        self.assertEqual(tcat.log_density(11.0), -np.inf)
+
+        class LabelTransform(object):
+            def forward(self, x):
+                return 'v%s' % x
+
+            def inverse(self, y):
+                return int(y[1:])
+
+            def invalid_inverse_value(self):
+                return 0
+
+        labels = TransformDistribution(CategoricalDistribution({0: 0.6, 1: 0.4}),
+                                       transform=LabelTransform(), density_correction=False)
+        labels_enc = labels.dist_to_encoder().seq_encode(['v0', 'v1'])
+        np.testing.assert_allclose(labels.seq_log_density(labels_enc), np.log([0.6, 0.4]))
+
         unif = UniformDistribution(-1.0, 3.0)
         self.assertAlmostEqual(unif.log_density(0.5), scipy.stats.uniform.logpdf(0.5, loc=-1.0, scale=4.0), places=10)
+
+        weib = WeibullDistribution(1.5, 2.0)
+        self.assertAlmostEqual(weib.log_density(1.25),
+                               scipy.stats.weibull_min.logpdf(1.25, 1.5, scale=2.0), places=10)
 
         pareto = ParetoDistribution(2.0, 3.0)
         self.assertAlmostEqual(pareto.log_density(5.0), scipy.stats.pareto.logpdf(5.0, 3.0, scale=2.0), places=10)
@@ -126,6 +192,37 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
         self.assertGreater(fitted.scale, 0.0)
         self.assertTrue(np.isfinite(fitted.loc))
 
+        loc0, scale0, n = 1.25, 2.5, 100.0
+        var0 = (np.pi * np.pi / 3.0) * scale0 * scale0
+        fitted = LogisticEstimator().estimate(None, (n * loc0, n * (var0 + loc0 * loc0), n))
+        self.assertAlmostEqual(fitted.loc, loc0)
+        self.assertAlmostEqual(fitted.scale, scale0)
+
+        shape0, scale0 = 1.7, 2.3
+        mean0 = scale0 * np.exp(scipy.special.gammaln(1.0 + 1.0 / shape0))
+        second0 = scale0 * scale0 * np.exp(scipy.special.gammaln(1.0 + 2.0 / shape0))
+        fitted = WeibullEstimator().estimate(None, (n * mean0, n * second0, n))
+        self.assertAlmostEqual(fitted.shape, shape0, places=6)
+        self.assertAlmostEqual(fitted.scale, scale0, places=6)
+
+        pm = PointMassEstimator('fixed').estimate(None, None)
+        self.assertIsInstance(pm, PointMassDistribution)
+        self.assertEqual(pm.log_density('fixed'), 0.0)
+        self.assertEqual(pm.log_density('other'), -np.inf)
+        pm_acc = PointMassEstimator('fixed').accumulator_factory().make()
+        self.assertIsNone(pm_acc.value())
+
+        base = np.asarray([-2.0, -1.0, 0.0, 1.0, 4.0])
+        data = 2.0 + 3.0 * base
+        transform = AffineTransform(loc=2.0, scale=3.0)
+        dist = TransformDistribution(GaussianDistribution(0.0, 1.0), transform=transform)
+        est = TransformEstimator(GaussianEstimator(), transform=transform)
+        enc = seq_encode(data, estimator=est)
+        fitted = seq_estimate(enc, est, dist)
+        self.assertIsInstance(fitted, TransformDistribution)
+        self.assertAlmostEqual(fitted.dist.mu, base.mean())
+        self.assertAlmostEqual(fitted.dist.sigma2, np.mean((base - base.mean()) ** 2))
+
     def test_beta_estimator_is_finite_and_improves_likelihood(self):
         dist = BetaDistribution(2.0, 5.0)
         data = dist.sampler(7).sample(300)
@@ -154,7 +251,9 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
 
         dists = [
             StudentTDistribution(5.0, loc=1.0, scale=2.0),
+            LogisticDistribution(loc=1.0, scale=2.0),
             UniformDistribution(-1.0, 3.0),
+            WeibullDistribution(1.5, 2.0),
             ParetoDistribution(2.0, 3.0),
             RayleighDistribution(2.0),
         ]
@@ -225,6 +324,8 @@ class StandardDistributionTorchTestCase(unittest.TestCase):
 
         dists = [
             StudentTDistribution(5.0, loc=1.0, scale=2.0),
+            LogisticDistribution(loc=1.0, scale=2.0),
+            WeibullDistribution(1.5, 2.0),
             ParetoDistribution(2.0, 3.0),
             RayleighDistribution(2.0),
         ]

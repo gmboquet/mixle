@@ -70,10 +70,13 @@ class ConditionalDistribution(ProbabilityDistribution):
 			float: Log density of y (or of x when pass_value is set) under
 			dmap[c], or under default_dist when c is unmatched.
 		"""
+		dist = self.dmap.get(x[0], self.default_dist)
+		if dist is None:
+			return -np.inf
 		if self.pass_value:
-			return self.dmap.get(x[0], self.default_dist).log_density(x)
+			return dist.log_density(x)
 		else:
-			return self.dmap.get(x[0], self.default_dist).log_density(x[1])
+			return dist.log_density(x[1])
 
 	def seq_log_density(self, x):
 		"""Vectorized log density for sequence-encoded observations.
