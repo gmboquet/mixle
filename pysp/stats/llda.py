@@ -423,7 +423,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 	"""LLDAEstimatorAccumulator object for aggregating sufficient statistics from labeled documents.
 
 	Tracks per-label-set expected log topic weights and document counts ('set_stats'), per-label
-	weighted document counts ('doc_counts'), per-label topic counts ('topic_counts'), and the topic
+	weighted document counts ('doc_counts'), label-allocated topic counts ('topic_counts'), and the topic
 	distribution accumulators.
 	"""
 
@@ -444,7 +444,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 			num_alphas (int): Number of label rows in the alphas matrix.
 			set_stats (LLDALabelSetStats): Per-label-set aggregated expected log topic weights and counts.
 			doc_counts (Union[float, np.ndarray]): Per-label weighted document counts.
-			topic_counts (np.ndarray): Per-label weighted topic counts.
+			topic_counts (np.ndarray): Label-allocated weighted topic counts.
 			prev_alpha (Optional[np.ndarray]): Previous alphas matrix.
 			alpha_key (Optional[str]): Key for alpha statistics.
 			topics_key (Optional[str]): Key for topic accumulators.
@@ -584,7 +584,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 			for j in range(self.num_topics):
 				#w = weight*x[i][1] if idx == j else 0.0
 				w = ww_v[j]
-				self.topic_counts[xnbh, j] += w
+				self.topic_counts[xnbh, j] += w / len(xnbh)
 				self.accumulators[j].initialize(xdoc[i][0], w, rng)
 
 	def seq_initialize(self, x, weights, rng):
@@ -638,15 +638,16 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
 		for j in range(self.num_topics):
 			doc_w = np.bincount(idx, weights=ww_v[:, j], minlength=num_documents)
-			self.topic_counts[:, j] += np.bincount(nbx, weights=doc_w[nbidx], minlength=self.num_alphas)
+			label_weight = doc_w[nbidx] / np.maximum(nbcnt[nbidx].astype(float), 1.0)
+			self.topic_counts[:, j] += np.bincount(nbx, weights=label_weight, minlength=self.num_alphas)
 			self.accumulators[j].seq_initialize(enc_data, ww_v[:, j], self._rng_topics[j])
 
 	def seq_update(self, x, weights, estimate):
 		"""Vectorized update of the accumulator from an encoded sequence of labeled documents.
 
 		Computes the variational posterior for each document under 'estimate' and aggregates per-label-set
-		expected log topic weights, per-label document counts, topic counts, and the topic accumulator
-		statistics.
+		expected log topic weights, per-label document counts, label-allocated topic counts, and the
+		topic accumulator statistics.
 
 		Args:
 			x: Encoded sequence of iid LLDA observations (see LLDADataEncoder.seq_encode()).
@@ -664,6 +665,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 		num_documents, idx, counts, old_gammas, enc_data, nbx, nbcnt, nbidx = x
 		#num_documents, idx, counts, old_gammas, enc_data = x
 		log_density_gamma, final_gammas, doc_alphas, per_topic_log_densities = seq_posterior(estimate, x)
+		weighted_topic_counts = log_density_gamma * np.reshape(weights[idx], (-1, 1))
 
 		mlpf = digamma(final_gammas) - digamma(np.sum(final_gammas, axis=1, keepdims=True))
 
@@ -671,10 +673,11 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 		nbh_tcnt = np.zeros((num_alphas, num_topics))
 
 		for i in range(num_topics):
-			self.accumulators[i].seq_update(enc_data, log_density_gamma[:, i]*weights[idx]*counts, estimate.topics[i])
+			self.accumulators[i].seq_update(enc_data, weighted_topic_counts[:, i], estimate.topics[i])
 
 			doc_tcnt = np.bincount(idx, weights=log_density_gamma[:, i], minlength=num_documents)
-			nbh_tcnt[:, i] = np.bincount(nbx, weights=doc_tcnt[nbidx] * weights[nbidx], minlength=num_alphas)
+			label_weight = doc_tcnt[nbidx] * weights[nbidx] / np.maximum(nbcnt[nbidx].astype(float), 1.0)
+			nbh_tcnt[:, i] = np.bincount(nbx, weights=label_weight, minlength=num_alphas)
 
 
 		self._accumulate_set_stats(mlpf, weights, nbx, nbcnt)
@@ -692,7 +695,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 			suff_stat[0] (Optional[np.ndarray]): Previous alphas matrix.
 			suff_stat[1] (LLDALabelSetStats): Per-label-set expected log topic weights and counts.
 			suff_stat[2] (Union[float, np.ndarray]): Per-label weighted document counts.
-			suff_stat[3] (np.ndarray): Per-label weighted topic counts.
+			suff_stat[3] (np.ndarray): Label-allocated weighted topic counts.
 			suff_stat[4] (Sequence): Topic distribution accumulator values.
 
 		Args:
@@ -722,7 +725,7 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
 		Returns:
 			Tuple of previous alphas matrix, per-label-set statistics (LLDALabelSetStats), per-label document
-			counts, per-label topic counts, and the topic accumulator values.
+			counts, label-allocated topic counts, and the topic accumulator values.
 
 		"""
 		return self.prev_alpha, self.set_stats, self.doc_counts, self.topic_counts, [u.value() for u in self.accumulators]
@@ -895,7 +898,7 @@ class LLDAEstimator(ParameterEstimator):
 			suff_stat[0] (Optional[np.ndarray]): Previous alphas matrix.
 			suff_stat[1] (LLDALabelSetStats): Per-label-set expected log topic weights and counts.
 			suff_stat[2] (Union[float, np.ndarray]): Per-label weighted document counts.
-			suff_stat[3] (np.ndarray): Per-label weighted topic counts.
+			suff_stat[3] (np.ndarray): Label-allocated weighted topic counts.
 			suff_stat[4] (Sequence): Sufficient statistics for the topic distribution accumulators.
 
 		If 'fixed_alpha' is None, the alphas matrix is re-estimated by maximizing the coupled objective
