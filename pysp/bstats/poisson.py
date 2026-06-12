@@ -129,6 +129,8 @@ class PoissonDistribution(ProbabilityDistribution):
         Returns:
             Log-density (float) at x.
         """
+        if x < 0:
+            return -np.inf
         return x*self.log_lambda - float(gammaln(x + 1.0)) - self.lam
 
     def expected_log_density(self, x: float) -> float:
@@ -168,7 +170,7 @@ class PoissonDistribution(ProbabilityDistribution):
             lam1 = self.lam
             lam2 = dist.lam
             rv = self.entropy()
-            rv += lam1 - lam2 - (np.log(lam1)-np.log(lam2))*lam1
+            rv += (np.log(lam1)-np.log(lam2))*lam1 + lam2 - lam1
             return rv
         else:
             raise NotImplementedError('PoissonDistribution.cross_entropy is only implemented for PoissonDistribution arguments (got %s).' % type(dist).__name__)
@@ -179,13 +181,13 @@ class PoissonDistribution(ProbabilityDistribution):
 
         if self.lam > 450:
             l = self.lam
-            rv = -(0.5*np.log(2.0*np.pi*l) + 0.5 - 1/(12.0*l) - 1.0/(24.0*l*l) - 19.0/(360.0*l*l*l))
+            rv = 0.5*np.log(2.0*np.pi*l) + 0.5 - 1/(12.0*l) - 1.0/(24.0*l*l) - 19.0/(360.0*l*l*l)
         else:
             lam = self.lam
             rv0 = 0.5 * np.log(2.0 * np.pi * lam) + 0.5 + (lam + 0.5) * exp1(lam) - np.exp(-lam)
             rterm = lambda x: (np.exp(-lam * x) / x) * ((1 / x) - 0.5 + (1 / np.log1p(-x)))
             rv1 = scipy.integrate.quad(rterm, 0, 1)[0]
-            rv = -rv0 + rv1
+            rv = rv0 - rv1
         return rv
 
     def moment(self, p: int) -> float:
@@ -198,7 +200,7 @@ class PoissonDistribution(ProbabilityDistribution):
             E[X^p] computed via Stirling numbers of the second kind.
         """
         if p == 0:
-            return 0
+            return 1.0
         elif p == 1:
             return self.lam
         else:
@@ -216,9 +218,11 @@ class PoissonDistribution(ProbabilityDistribution):
         Returns:
             Numpy array of log-densities, one entry per observation.
         """
+        invalid = x[0] < 0
         rv = x[0]*self.log_lambda
         rv -= x[1]
         rv -= self.lam
+        rv[invalid] = -np.inf
         return rv
 
     def seq_expected_log_density(self, x):
@@ -239,7 +243,9 @@ class PoissonDistribution(ProbabilityDistribution):
         e1 = (digamma(k) + np.log(theta))*x[0]
         e2 = k*theta
         e3 = x[1]
-        return e1 - e2 - e3
+        rv = e1 - e2 - e3
+        rv[x[0] < 0] = -np.inf
+        return rv
 
     def seq_encode(self, x):
         """Encode a sequence of observations for vectorized evaluation.

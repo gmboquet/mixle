@@ -418,12 +418,24 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
 
         else:
 
+            rows = []
+            cols = []
+            vals = []
+
             for i, (entry, weight) in enumerate(zip(x[0], weights)):
 
                 vx, cx, vy, cy = entry
+                loc_counts = np.outer(cx / np.sum(cx), cy) * weight
 
-                self.trans_count[vx[:, None], vy] += np.outer(cx / np.sum(cx), cy) * weight
+                rows.append(np.repeat(vx, len(vy)))
+                cols.append(np.tile(vy, len(vx)))
+                vals.append(loc_counts.ravel())
                 self.init_count[vx] += cx*weight
+
+            if vals:
+                umat = csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+                                  shape=(nw, nw))
+                self.trans_count += umat
 
         self.size_accumulator.seq_initialize(x[1], weights, self._size_rng)
 
@@ -470,7 +482,9 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         else:
 
             nzv = x[2]
-            umat = csr_matrix((np.zeros(nzv.shape[0]), (nzv[:, 0], nzv[:, 1])), shape=(nw, nw))
+            rows = []
+            cols = []
+            vals = []
 
             for i, (entry, weight) in enumerate(zip(x[0], weights)):
 
@@ -482,10 +496,15 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
                 w = loc_cprob.sum(axis=0)
                 loc_cprob *= (cy * b / (w * b + a * np.sum(cx))) * weight
 
-                umat[vx[:, None], vy] += loc_cprob
+                rows.append(np.repeat(vx, len(vy)))
+                cols.append(np.tile(vy, len(vx)))
+                vals.append(loc_cprob.ravel())
                 self.init_count[vx] += cx * weight
 
-            self.trans_count += umat
+            if vals:
+                umat = csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+                                  shape=(nw, nw))
+                self.trans_count += umat
 
         self.size_accumulator.seq_update(x[1], weights, estimate.len_dist)
 
@@ -834,4 +853,3 @@ class SparseMarkovAssociationDataEncoder(DataSequenceEncoder):
             qq = (obsidx, seqidx, pairidx, cxvec, cyvec, fsqxvec, fvxvec, fcxvec, fsqyvec, fcyvec)
 
         return rv, nn, vv, qq
-

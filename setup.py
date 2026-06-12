@@ -27,6 +27,8 @@ setup(
         "scipy",
         "pandas",
         "mpmath",
+        "networkx",
+        "tqdm",
     ],
     extras_require={
         "numba": ["numba", "tbb"],
@@ -34,6 +36,7 @@ setup(
         "torch": ["torch"],
         "mpi": ["mpi4py"],
         "umap": ["umap-learn"],
+        "test": ["pytest>=8"],
         "all": ["numba", "tbb", "pyspark", "torch", "mpi4py", "umap-learn"],
     },
 )

@@ -28,8 +28,8 @@ included) are reused unchanged, and results agree with the legacy seq path to
 floating-point tolerance.
 
 Supported distributions: Gaussian, LogGaussian, Gamma, Categorical,
-IntegerCategorical, Bernoulli, StudentT, Rayleigh, Pareto, Uniform,
-Poisson, Exponential, Geometric, Binomial, NegativeBinomial,
+IntegerCategorical, Bernoulli, StudentT, Logistic, Weibull, Rayleigh,
+Pareto, Uniform, Poisson, Exponential, Geometric, Binomial, NegativeBinomial,
 DiagonalGaussian (vector leaf), Optional (missing-data wrapper around any
 supported child), Ignored (fixed wrapped dist, scored but never estimated),
 Composite (any nesting), Sequence (variable-length, with optional length
@@ -62,6 +62,8 @@ from pysp.stats.log_gaussian import LogGaussianDistribution
 from pysp.stats.gamma import GammaDistribution
 from pysp.stats.bernoulli import BernoulliDistribution
 from pysp.stats.student_t import StudentTDistribution
+from pysp.stats.logistic import LogisticDistribution
+from pysp.stats.weibull import WeibullDistribution
 from pysp.stats.rayleigh import RayleighDistribution
 from pysp.stats.pareto import ParetoDistribution
 from pysp.stats.uniform import UniformDistribution
@@ -192,6 +194,40 @@ def _student_t_ld(i, k, params, cols):
     df, loc, scale, logc = params
     z = (cols[0][i] - loc[k]) / scale[k]
     return logc[k] - 0.5 * (df[k] + 1.0) * math.log1p((z * z) / df[k])
+
+
+@numba.njit(inline='always', cache=True)
+def _logistic_ld(i, k, params, cols):
+    loc, scale, logscale = params
+    z = (cols[0][i] - loc[k]) / scale[k]
+    if z >= 0.0:
+        return -logscale[k] - z - 2.0 * math.log1p(math.exp(-z))
+    return -logscale[k] + z - 2.0 * math.log1p(math.exp(z))
+
+
+@numba.njit(inline='always', cache=True)
+def _weibull_ld(i, k, params, cols):
+    shape, scale, logshape, logscale = params
+    x = cols[0][i]
+    if x < 0.0:
+        return _NEG_INF
+    if x == 0.0:
+        if shape[k] < 1.0:
+            return math.inf
+        if shape[k] > 1.0:
+            return _NEG_INF
+        return -logscale[k]
+    z = x / scale[k]
+    return logshape[k] - logscale[k] + (shape[k] - 1.0) * (cols[1][i] - logscale[k]) \
+        - math.pow(z, shape[k])
+
+
+@numba.njit(inline='always', cache=True)
+def _weibull_acc(i, k, w, params, cols, stats):
+    x = cols[0][i]
+    stats[0][k] += w * x
+    stats[1][k] += w * x * x
+    stats[2][k] += w
 
 
 @numba.njit(inline='always', cache=True)
@@ -524,6 +560,46 @@ class _StudentTB(_LeafBuilder):
         return stats[0][k], stats[1][k], stats[2][k]
 
 
+class _LogisticB(_LeafBuilder):
+    kernel = staticmethod(_logistic_ld)
+    acc_kernel = staticmethod(_gaussian_acc)
+
+    def params(self, dists):
+        loc = np.array([d.loc for d in dists], dtype=np.float64)
+        scale = np.array([d.scale for d in dists], dtype=np.float64)
+        return loc, scale, np.log(scale)
+
+    def make_stats(self, K):
+        return np.zeros(K), np.zeros(K), np.zeros(K)
+
+    def stats_to_ss(self, stats, k):
+        return stats[0][k], stats[1][k], stats[2][k]
+
+
+class _WeibullB(_LeafBuilder):
+    kernel = staticmethod(_weibull_ld)
+    acc_kernel = staticmethod(_weibull_acc)
+
+    def params(self, dists):
+        shape = np.array([d.shape for d in dists], dtype=np.float64)
+        scale = np.array([d.scale for d in dists], dtype=np.float64)
+        return shape, scale, np.log(shape), np.log(scale)
+
+    def freeze(self, buf):
+        x = np.asarray(buf, dtype=np.float64)
+        if x.size and (np.any(x < 0.0) or np.any(np.isnan(x))):
+            raise Exception('WeibullDistribution requires non-negative values for x.')
+        with np.errstate(divide='ignore'):
+            lx = np.log(x)
+        return x, lx
+
+    def make_stats(self, K):
+        return np.zeros(K), np.zeros(K), np.zeros(K)
+
+    def stats_to_ss(self, stats, k):
+        return stats[0][k], stats[1][k], stats[2][k]
+
+
 class _RayleighB(_LeafBuilder):
     kernel = staticmethod(_rayleigh_ld)
     acc_kernel = staticmethod(_rayleigh_acc)
@@ -586,8 +662,8 @@ class _UniformB(_LeafBuilder):
 
 
 class _GammaB(_LeafBuilder):
-    kernel = _gamma_ld
-    acc_kernel = _gamma_acc
+    kernel = staticmethod(_gamma_ld)
+    acc_kernel = staticmethod(_gamma_acc)
 
     def params(self, dists):
         theta = np.array([d.theta for d in dists], dtype=np.float64)
@@ -610,8 +686,8 @@ class _GammaB(_LeafBuilder):
 
 
 class _LogGaussianB(_LeafBuilder):
-    kernel = _log_gaussian_ld
-    acc_kernel = _gaussian_acc  # Gaussian moments of the log-x column
+    kernel = staticmethod(_log_gaussian_ld)
+    acc_kernel = staticmethod(_gaussian_acc)  # Gaussian moments of the log-x column
 
     def params(self, dists):
         mu = np.array([d.mu for d in dists], dtype=np.float64)
@@ -634,8 +710,8 @@ class _LogGaussianB(_LeafBuilder):
 
 
 class _BinomialB(_LeafBuilder):
-    kernel = _binomial_ld
-    acc_kernel = _binomial_acc
+    kernel = staticmethod(_binomial_ld)
+    acc_kernel = staticmethod(_binomial_acc)
 
     def __init__(self, dists):
         super().__init__(dists)
@@ -685,8 +761,8 @@ class _BinomialB(_LeafBuilder):
 
 
 class _DiagGaussianB(_LeafBuilder):
-    kernel = _diag_gaussian_ld
-    acc_kernel = _diag_gaussian_acc
+    kernel = staticmethod(_diag_gaussian_ld)
+    acc_kernel = staticmethod(_diag_gaussian_acc)
 
     def __init__(self, dists):
         super().__init__(dists)
@@ -980,8 +1056,8 @@ class _IgnoredB(object):
                 raise ValueError('Ignored components must share the same data encoder.')
         self._dummy = np.zeros(1)
 
-    kernel = _ignored_ld
-    acc_kernel = _ignored_acc
+    kernel = staticmethod(_ignored_ld)
+    acc_kernel = staticmethod(_ignored_acc)
 
     def params(self, dists):
         for d, s in zip(dists, self._frozen):
@@ -1015,6 +1091,8 @@ _BUILDERS = {
     GammaDistribution: _GammaB,
     BernoulliDistribution: _BernoulliB,
     StudentTDistribution: _StudentTB,
+    LogisticDistribution: _LogisticB,
+    WeibullDistribution: _WeibullB,
     RayleighDistribution: _RayleighB,
     ParetoDistribution: _ParetoB,
     UniformDistribution: _UniformB,

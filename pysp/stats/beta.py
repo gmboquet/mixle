@@ -34,21 +34,30 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.a), repr(self.b), repr(self.name), repr(self.keys))
 
     def density(self, x: float) -> float:
+        """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: float) -> float:
-        if x <= 0.0 or x >= 1.0:
+        """Return the log-density or log-mass at a single observation."""
+        try:
+            xx = float(x)
+        except Exception:
             return -np.inf
-        return (self.a - 1.0) * math.log(x) + (self.b - 1.0) * math.log1p(-x) - self.log_const
+        if not np.isfinite(xx) or xx <= 0.0 or xx >= 1.0:
+            return -np.inf
+        return (self.a - 1.0) * math.log(xx) + (self.b - 1.0) * math.log1p(-xx) - self.log_const
 
     def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         lx, l1mx, _, _ = x
         return (self.a - 1.0) * lx + (self.b - 1.0) * l1mx - self.log_const
 
     def sampler(self, seed: Optional[int] = None) -> 'BetaSampler':
+        """Return a sampler for drawing observations from this distribution."""
         return BetaSampler(self, seed)
 
     def estimator(self, pseudo_count: Optional[float] = None) -> 'BetaEstimator':
+        """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return BetaEstimator(name=self.name, keys=self.keys)
         suff_stat = np.asarray([
@@ -59,6 +68,7 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
                              name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> 'BetaDataEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
         return BetaDataEncoder()
 
 

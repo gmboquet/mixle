@@ -15,11 +15,11 @@ import scipy.stats
 
 from pysp.stats import (
     initialize, estimate, seq_encode,
-    BinomialDistribution, CategoricalDistribution, CompositeDistribution,
+    BetaDistribution, BinomialDistribution, CategoricalDistribution, CompositeDistribution, ConditionalDistribution,
     DiagonalGaussianDistribution, DirichletDistribution, ExponentialDistribution,
     GammaDistribution, GaussianDistribution, GeometricDistribution,
     IntegerCategoricalDistribution, LogGaussianDistribution, MixtureDistribution,
-    MultivariateGaussianDistribution, OptionalDistribution, PoissonDistribution,
+    MultivariateGaussianDistribution, OptionalDistribution, ParetoDistribution, PoissonDistribution,
     SequenceDistribution,
 )
 from pysp.stats.geometric import GeometricEstimator
@@ -213,6 +213,64 @@ class ReferenceLogDensityTestCase(unittest.TestCase):
         # component densities underflow individually; LSE must keep this finite & correct
         ref = scipy.stats.norm.logpdf(100.0, loc=100.0, scale=1.0) + np.log(0.5)
         self.assert_close(d.log_density(100.0), ref)
+
+    def test_invalid_support_returns_negative_infinity(self):
+        invalid_cases = [
+            (PoissonDistribution(lam=2.0), [-1, 1.5, 'bad']),
+            (GeometricDistribution(p=0.4), [0, -1, 1.5, 'bad']),
+            (BinomialDistribution(p=0.4, n=5), [-1, 6, 2.5, 'bad']),
+            (BetaDistribution(a=2.0, b=3.0), [0.0, 1.0, np.nan, 'bad']),
+            (GammaDistribution(k=2.0, theta=3.0), [0.0, -1.0, np.nan, 'bad']),
+            (LogGaussianDistribution(mu=0.0, sigma2=1.0), [0.0, -1.0]),
+            (ExponentialDistribution(beta=2.0), [-1.0]),
+            (ParetoDistribution(xm=2.0, alpha=3.0), [1.0, np.nan, 'bad']),
+            (DirichletDistribution([2.0, 3.0, 4.0]), [[0.2, 0.3, 0.4], [-0.1, 0.6, 0.5]]),
+        ]
+        for dist, values in invalid_cases:
+            for x in values:
+                self.assertEqual(dist.log_density(x), -np.inf, msg='%s at %s' % (dist, x))
+
+        self.assertEqual(LogGaussianDistribution(0.0, 1.0).density(0.0), 0.0)
+
+    def test_invalid_distribution_parameters_raise(self):
+        invalid = [
+            (GaussianDistribution, (0.0, 0.0)),
+            (GaussianDistribution, (np.nan, 1.0)),
+            (GammaDistribution, (0.0, 1.0)),
+            (GammaDistribution, (1.0, np.inf)),
+            (ExponentialDistribution, (0.0,)),
+            (PoissonDistribution, (0.0,)),
+            (GeometricDistribution, (0.0,)),
+            (BinomialDistribution, (0.4, 1.5)),
+            (BetaDistribution, (0.0, 1.0)),
+        ]
+        for cls, args in invalid:
+            with self.assertRaises(ValueError, msg='%s%r' % (cls.__name__, args)):
+                cls(*args)
+
+    def test_count_encoders_reject_fractional_counts(self):
+        for dist in [PoissonDistribution(2.0), GeometricDistribution(0.4), BinomialDistribution(0.3, 5)]:
+            with self.assertRaises(ValueError, msg=str(dist)):
+                dist.dist_to_encoder().seq_encode([1.5])
+
+    def test_count_seq_log_density_handles_out_of_support_values(self):
+        b = BinomialDistribution(0.4, 5)
+        enc_b = b.dist_to_encoder().seq_encode([0, 5, 6])
+        np.testing.assert_array_equal(np.isneginf(b.seq_log_density(enc_b)), [False, False, True])
+
+        p = PoissonDistribution(2.0)
+        enc_p = (np.asarray([0.0, 1.0, 1.5]), scipy.special.gammaln(np.asarray([1.0, 2.0, 2.5])))
+        np.testing.assert_array_equal(np.isneginf(p.seq_log_density(enc_p)), [False, False, True])
+
+        g = GeometricDistribution(0.4)
+        np.testing.assert_array_equal(np.isneginf(g.seq_log_density(np.asarray([0.0, 1.0, 1.5, 2.0]))),
+                                      [True, False, True, False])
+
+    def test_conditional_seq_log_density_without_default_matches_scalar(self):
+        d = ConditionalDistribution({'seen': GaussianDistribution(0.0, 1.0)}, default_dist=None)
+        data = [('seen', 0.25), ('missing', 0.25)]
+        enc = d.dist_to_encoder().seq_encode(data)
+        np.testing.assert_allclose(d.seq_log_density(enc), np.asarray([d.log_density(x) for x in data]))
 
 
 class ConsistencyTestCase(unittest.TestCase):

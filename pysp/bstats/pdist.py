@@ -50,6 +50,34 @@ class ProbabilityDistribution(Generic[X,P,V]):
 		"""Returns the distribution's parameters."""
 		return self.params
 
+	def to_dict(self):
+		"""Return a safe JSON-compatible representation of this distribution."""
+		from pysp.utils.serialization import to_serializable
+		return to_serializable(self)
+
+	@classmethod
+	def from_dict(cls, payload):
+		"""Reconstruct a distribution from ``to_dict`` output."""
+		from pysp.utils.serialization import from_serializable
+		rv = from_serializable(payload)
+		if not isinstance(rv, cls):
+			raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+		return rv
+
+	def to_json(self, **kwargs):
+		"""Serialize this distribution as safe strict JSON."""
+		from pysp.utils.serialization import to_json
+		return to_json(self, **kwargs)
+
+	@classmethod
+	def from_json(cls, text):
+		"""Deserialize a distribution from ``to_json`` output."""
+		from pysp.utils.serialization import from_json
+		rv = from_json(text)
+		if not isinstance(rv, cls):
+			raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+		return rv
+
 	def set_parameters(self, value: P) -> None:
 		"""Sets the distribution's parameters.
 
@@ -71,6 +99,12 @@ class ProbabilityDistribution(Generic[X,P,V]):
 		self.name = name
 
 	def add_parent(self, dist) -> None:
+		"""Register a parent distribution in composite model graphs.
+
+		The base implementation is intentionally a no-op because most bstats
+		distributions do not maintain reverse parent links. Subclasses that
+		need graph bookkeeping may override this method.
+		"""
 		#self.parents.append(dist)
 		pass
 
@@ -110,7 +144,7 @@ class ProbabilityDistribution(Generic[X,P,V]):
 		Returns:
 			Expected log-density at observation x.
 		"""
-		return None
+		return self.log_density(x)
 
 	def seq_log_density(self, x: V) -> np.ndarray:
 		"""Vectorized log-density at sequence-encoded input x.
@@ -122,6 +156,14 @@ class ProbabilityDistribution(Generic[X,P,V]):
 			Numpy array of log-densities, one per encoded observation.
 		"""
 		return np.asarray([self.log_density(u) for u in x])
+
+	def seq_expected_log_density(self, x: V) -> np.ndarray:
+		"""Vectorized posterior-expected log-density at encoded input x.
+
+		The default implementation falls back to seq_log_density, matching the
+		scalar expected_log_density fallback for non-conjugate models.
+		"""
+		return self.seq_log_density(x)
 
 	def seq_encode(self, x: Iterable[X]) -> V:
 		"""Encode an iterable of observations for the vectorized seq_* methods.
@@ -166,6 +208,16 @@ class ProbabilityDistribution(Generic[X,P,V]):
 			ParameterEstimator object.
 		"""
 		return None
+
+	def to_fisher(self):
+		"""Return a Fisher-geometry view of this distribution.
+
+		The default view is accumulator-backed, so bstats distributions inherit
+		a generic sufficient-statistic/Fisher-vector interface.  Individual
+		distributions may override this with faster or more canonical views.
+		"""
+		from pysp.utils.fisher import to_fisher
+		return to_fisher(self)
 
 
 class ProbabilityDistributionFactory(object):
@@ -261,6 +313,34 @@ class StatisticAccumulator(object):
 class ParameterEstimator(object):
 	"""Base class estimating a distribution from accumulated sufficient
 	statistics, optionally under a prior."""
+
+	def to_dict(self):
+		"""Return a safe JSON-compatible representation of this estimator."""
+		from pysp.utils.serialization import to_serializable
+		return to_serializable(self)
+
+	@classmethod
+	def from_dict(cls, payload):
+		"""Reconstruct an estimator from ``to_dict`` output."""
+		from pysp.utils.serialization import from_serializable
+		rv = from_serializable(payload)
+		if not isinstance(rv, cls):
+			raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+		return rv
+
+	def to_json(self, **kwargs):
+		"""Serialize this estimator as safe strict JSON."""
+		from pysp.utils.serialization import to_json
+		return to_json(self, **kwargs)
+
+	@classmethod
+	def from_json(cls, text):
+		"""Deserialize an estimator from ``to_json`` output."""
+		from pysp.utils.serialization import from_json
+		rv = from_json(text)
+		if not isinstance(rv, cls):
+			raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+		return rv
 
 	def estimate(self, suff_stat):
 		"""Estimate a distribution from sufficient statistics.

@@ -7,10 +7,10 @@ from pysp.arithmetic import *
 import numpy as np
 import pickle
 from pysp.arithmetic import maxrandint
-from typing import Optional
+from typing import Any, Optional
 
 
-def take_sample(rdd: SparkContext.parallelize, with_replacement: bool, n: int, seed: Optional[int] = None):
+def take_sample(rdd: Any, with_replacement: bool, n: int, seed: Optional[int] = None):
     rng = RandomState(seed)
     sample = rdd.zipWithUniqueId().takeSample(with_replacement, n, rng.randint(0, maxrandint))
     sidx = np.argsort([u[1] for u in sample])

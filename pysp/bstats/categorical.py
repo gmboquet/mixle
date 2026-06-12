@@ -102,11 +102,46 @@ class CategoricalDistribution(ProbabilityDistribution):
 			self.has_conj_prior    = False
 
 	def entropy(self) -> float:
-		"""Return sum_k p_k log p_k over the probability map entries."""
+		"""Return the entropy of the categorical distribution in nats.
+
+		The stored probabilities are normalized by ``1 + default_value`` to
+		match log_density().  When default_value is positive it is treated as
+		the aggregate mass of the out-of-map default bucket.
+		"""
 		rv = 0.0
+		z = 1.0 + self.default_value
 		for v in self.prob_map.values():
 			if v > 0:
-				rv += np.log(v)*v
+				p = v/z
+				rv -= np.log(p)*p
+		if self.default_value > 0:
+			p = self.default_value/z
+			rv -= np.log(p)*p
+		return rv
+
+	def cross_entropy(self, dist: ProbabilityDistribution) -> float:
+		"""Cross entropy -E_self[log dist(X)] over the categorical support.
+
+		For another CategoricalDistribution, the default_value of each
+		distribution is treated as a single aggregate default bucket, matching
+		the entropy convention used here.  For non-categorical distributions,
+		this is implemented only when this distribution has no default bucket.
+		"""
+		z = 1.0 + self.default_value
+		rv = 0.0
+		for k, v in self.prob_map.items():
+			if v > 0:
+				rv -= (v/z) * dist.log_density(k)
+
+		if self.default_value > 0:
+			if isinstance(dist, CategoricalDistribution):
+				if dist.default_value <= 0.0:
+					return np.inf
+				rv -= (self.default_value/z) * (dist.log_default_value - dist.log1p_default_value)
+			else:
+				raise NotImplementedError(
+					'CategoricalDistribution.cross_entropy with default_value > 0 requires '
+					'a CategoricalDistribution argument.')
 		return rv
 
 	def log_density(self, x) -> float:
@@ -119,7 +154,8 @@ class CategoricalDistribution(ProbabilityDistribution):
 			log p_x for mapped values, log(default_value) otherwise, both
 			normalized by log(1 + default_value).
 		"""
-		return np.log(self.prob_map.get(x, self.default_value)) - self.log1p_default_value
+		p = self.prob_map.get(x, self.default_value)
+		return -np.inf if p <= 0.0 else np.log(p) - self.log1p_default_value
 
 	def expected_log_density(self, x) -> float:
 		"""Prior-expected log-density E[log p_x] at observation x.
@@ -152,10 +188,12 @@ class CategoricalDistribution(ProbabilityDistribution):
 			Numpy array of log-densities, one entry per observation.
 		"""
 		xs, val_map_inv = x
-		with np.errstate(divide='ignore'):
-			mapped_probs = np.log([self.prob_map.get(u,self.default_value) for u in val_map_inv])
+		mapped_probs = np.asarray([self.prob_map.get(u, self.default_value) for u in val_map_inv], dtype=np.float64)
+		mapped_log_probs = np.full(len(mapped_probs), -np.inf, dtype=np.float64)
+		good = mapped_probs > 0.0
+		mapped_log_probs[good] = np.log(mapped_probs[good]) - self.log1p_default_value
 
-		return mapped_probs[xs]
+		return mapped_log_probs[xs]
 
 	def seq_expected_log_density(self, x):
 		"""Vectorized expected log-density at sequence-encoded input x.

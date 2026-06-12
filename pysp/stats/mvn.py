@@ -237,6 +237,7 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        x = np.asarray(x, dtype=float)
         if self.dim is None:
             self.dim = len(x)
             self.sum = vec.zeros(self.dim)
@@ -514,4 +515,3 @@ class MultivariateGaussianDataEncoder(DataSequenceEncoder):
         """
         self.dim = len(x[0]) if self.dim is None else self.dim
         return np.reshape(np.asarray(x), (-1, self.dim))
-

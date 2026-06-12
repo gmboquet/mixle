@@ -61,20 +61,63 @@ class ProbabilityDistribution:
     def __repr__(self) -> str:
         return self.__str__()
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a safe JSON-compatible representation of this distribution."""
+        from pysp.utils.serialization import to_serializable
+        return to_serializable(self)
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> 'ProbabilityDistribution':
+        """Reconstruct a distribution from ``to_dict`` output."""
+        from pysp.utils.serialization import from_serializable
+        rv = from_serializable(payload)
+        if not isinstance(rv, cls):
+            raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+        return rv
+
+    def to_json(self, **kwargs: Any) -> str:
+        """Serialize this distribution as safe strict JSON."""
+        from pysp.utils.serialization import to_json
+        return to_json(self, **kwargs)
+
+    @classmethod
+    def from_json(cls, text: str) -> 'ProbabilityDistribution':
+        """Deserialize a distribution from ``to_json`` output."""
+        from pysp.utils.serialization import from_json
+        rv = from_json(text)
+        if not isinstance(rv, cls):
+            raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+        return rv
+
     @abstractmethod
     def density(self, x: Any) -> float:
+        """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
     @abstractmethod
-    def log_density(self, x: Any) -> float: ...
+    def log_density(self, x: Any) -> float:
+        """Return the log-density or log-mass at a single observation."""
+        ...
 
     @abstractmethod
     def sampler(self, seed: Optional[int] = None) -> 'DistributionSampler':
+        """Return a sampler for drawing observations from this distribution."""
         ...
 
     @abstractmethod
     def estimator(self, pseudo_count: Optional[float] = None) -> 'ParameterEstimator':
+        """Return an estimator for fitting this distribution from data."""
         ...
+
+    def to_fisher(self):
+        """Return a Fisher-geometry view of this distribution.
+
+        The default view is accumulator-backed, so distributions inherit a
+        generic sufficient-statistic/Fisher-vector interface.  Individual
+        distributions may override this with faster or more canonical views.
+        """
+        from pysp.utils.fisher import to_fisher
+        return to_fisher(self)
 
     def enumerator(self) -> 'DistributionEnumerator':
         """Return a DistributionEnumerator over this distribution's support.
@@ -100,6 +143,56 @@ class ProbabilityDistribution:
         """
         return self.enumerator().quantized_index(max_bits=max_bits, bin_width_bits=bin_width_bits)
 
+    def quantized_multi_cross_index(self, others: List['ProbabilityDistribution'], max_bits,
+                                    bin_width_bits: float = 1.0):
+        """Build an aligned bounded cross-bin view against other distributions.
+
+        The generic implementation is a bounded candidate join: it unions the bounded
+        quantized indexes of all participating distributions, then evaluates every
+        candidate under every distribution. Structured distributions can override this
+        to build the same aligned rows from support algebra instead.
+        """
+        from pysp.utils.enumeration import QuantizedCrossIndex, freeze
+
+        dists = [self] + list(others)
+        if isinstance(max_bits, np.ndarray):
+            max_bits_tuple = tuple(float(x) for x in max_bits.tolist())
+        elif isinstance(max_bits, (list, tuple)):
+            max_bits_tuple = tuple(float(x) for x in max_bits)
+        else:
+            max_bits_tuple = tuple([float(max_bits)] * len(dists))
+        if len(max_bits_tuple) != len(dists):
+            raise ValueError('max_bits length must match the number of distributions.')
+        if bin_width_bits <= 0:
+            raise ValueError('bin_width_bits must be positive.')
+
+        seen = set()
+        values = []
+        truncated = False
+        for dist, bit_bound in zip(dists, max_bits_tuple):
+            if bit_bound < 0.0:
+                truncated = True
+                continue
+            index = dist.quantized_index(max_bits=bit_bound, bin_width_bits=bin_width_bits)
+            truncated = truncated or index.truncated
+            for value, _ in index.iter_from():
+                key = freeze(value)
+                if key not in seen:
+                    seen.add(key)
+                    values.append(value)
+
+        items = []
+        for value in values:
+            items.append((value, tuple(float(dist.log_density(value)) for dist in dists)))
+        return QuantizedCrossIndex.from_items(
+            items, max_bits=max_bits_tuple, bin_width_bits=bin_width_bits,
+            truncated=truncated)
+
+    def quantized_cross_index(self, other: 'ProbabilityDistribution', max_bits,
+                              bin_width_bits: float = 1.0):
+        """Build an aligned bounded cross-bin view against another distribution."""
+        return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
+
 
 class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
     """ProbabilityDistribution with vectorized log-density evaluation on encoded data.
@@ -110,16 +203,21 @@ class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
     """
 
     def seq_ld_lambda(self):
+        """Return vectorized log-density callables for encoded data."""
         pass
 
     def seq_log_density(self, x: Any) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
         return np.asarray([self.log_density(u) for u in x])
 
     def seq_log_density_lambda(self):
+        """Return vectorized log-density callables for encoded data."""
         return [self.seq_log_density]
 
     @abstractmethod
-    def dist_to_encoder(self) -> 'DataSequenceEncoder': ...
+    def dist_to_encoder(self) -> 'DataSequenceEncoder':
+        """Return the data encoder used by this distribution for vectorized methods."""
+        ...
 
 
 class DistributionSampler(object):
@@ -265,6 +363,34 @@ class ParameterEstimator(Generic[SS]):
     regularization configured on the estimator) to a new distribution.
     """
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a safe JSON-compatible representation of this estimator."""
+        from pysp.utils.serialization import to_serializable
+        return to_serializable(self)
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> 'ParameterEstimator':
+        """Reconstruct an estimator from ``to_dict`` output."""
+        from pysp.utils.serialization import from_serializable
+        rv = from_serializable(payload)
+        if not isinstance(rv, cls):
+            raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+        return rv
+
+    def to_json(self, **kwargs: Any) -> str:
+        """Serialize this estimator as safe strict JSON."""
+        from pysp.utils.serialization import to_json
+        return to_json(self, **kwargs)
+
+    @classmethod
+    def from_json(cls, text: str) -> 'ParameterEstimator':
+        """Deserialize an estimator from ``to_json`` output."""
+        from pysp.utils.serialization import from_json
+        rv = from_json(text)
+        if not isinstance(rv, cls):
+            raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+        return rv
+
     @abstractmethod
     def estimate(self, nobs: Optional[float], suff_stat: SS) -> 'SequenceEncodableProbabilityDistribution': ...
 
@@ -290,6 +416,3 @@ class DataSequenceEncoder:
 
     @abstractmethod
     def __eq__(self, other: object) -> bool: ...
-
-
-

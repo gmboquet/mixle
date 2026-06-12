@@ -192,7 +192,9 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
 
     def expected_log_density(self, x: int) -> float:
         """Prior-expected log-density E_q[log p(x)] at observation x via the
-        cached digamma terms (requires a conjugate prior).
+        cached digamma terms.
+
+        Falls back to log_density when no conjugate prior is set.
 
         Args:
             x (int): Observed value.
@@ -200,6 +202,9 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
         Returns:
             Expected log-density (float) at x.
         """
+
+        if self.expected_nparams is None:
+            return self.log_density(x)
 
         # E[ params ]*x
         #e_x = digamma(self.conj_prior_params[idx]) - digamma(np.sum(self.conj_prior_params))
@@ -234,12 +239,17 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
     def seq_expected_log_density(self, x):
         """Vectorized expected log-density at sequence-encoded input x.
 
+        Falls back to seq_log_density when no conjugate prior is set.
+
         Args:
             x: Encoded data from seq_encode().
 
         Returns:
             Numpy array of expected log-densities, one entry per observation.
         """
+        if self.expected_nparams is None:
+            return self.seq_log_density(x)
+
         idx = x - self.min_index
         in_range = np.bitwise_and(idx >= 0, idx < self.num_vals)
         rv = np.zeros(len(x))
@@ -493,7 +503,7 @@ class IntegerCategoricalAccumulatorFactory(object):
         return IntegerCategoricalAccumulator(self.min_val, self.max_val, self.keys)
 
 
-class IntegerCategoricalEstimator(object):
+class IntegerCategoricalEstimator(ParameterEstimator):
     """Estimates an IntegerCategoricalDistribution from accumulated counts,
     using Dirichlet MAP probabilities when a conjugate prior is set."""
 

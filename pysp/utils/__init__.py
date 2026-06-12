@@ -1,1 +1,14 @@
-__all__ = ['optsutil', 'vector']
+__all__ = [
+    'automatic',
+    'builder',
+    'enumeration',
+    'estimation',
+    'metrics',
+    'optional_deps',
+    'optsutil',
+    'parallel',
+    'parallel_mpi',
+    'pvalues',
+    'special',
+    'vector',
+]

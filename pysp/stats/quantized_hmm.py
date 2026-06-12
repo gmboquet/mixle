@@ -384,6 +384,7 @@ def _stationary_distribution(transitions: np.ndarray) -> np.ndarray:
 
 class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
 
+    """Hidden Markov model distribution with quantized observation summaries."""
     def __init__(self, theta: float,
                  levels: Sequence[Any],
                  transition_exponents: Union[Sequence[Sequence[int]], np.ndarray],

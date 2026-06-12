@@ -7,9 +7,12 @@ improvement on a small mixture, fit_map at prior_strength=0 == fit_mle, and a
 composite fusing several new leaves end-to-end.
 """
 import io
+import importlib
 import unittest
 
 import numpy as np
+
+HAS_TORCH = importlib.util.find_spec('torch') is not None
 
 from pysp.stats import (
     BinomialDistribution, BinomialEstimator,
@@ -24,7 +27,10 @@ from pysp.stats import (
     OptionalDistribution, OptionalEstimator,
     seq_encode, seq_estimate,
 )
-from pysp.stats.torch_engine import TorchMixture
+if HAS_TORCH:
+    from pysp.stats.torch_engine import TorchMixture
+else:
+    TorchMixture = None
 from pysp.tests.kernels_ext_test import dist_params
 
 
@@ -32,6 +38,7 @@ def _cat(k):
     return CategoricalDistribution({'a': 0.6 - 0.2 * k, 'b': 0.3, 'c': 0.1 + 0.2 * k})
 
 
+@unittest.skipUnless(HAS_TORCH, 'torch is not installed')
 class TorchExtBase(unittest.TestCase):
 
     RTOL = 1.0e-8

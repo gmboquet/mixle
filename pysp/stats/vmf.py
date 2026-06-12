@@ -55,6 +55,17 @@ def lniv_uniform(v, ln_z):
     Returns:
         Approximate value of log I_v(z) as a float.
     """
+    if v == 0:
+        if not np.isfinite(ln_z):
+            return 0.0
+        z = np.exp(ln_z)
+        if z == 0.0:
+            return 0.0
+        rv0 = scipy.special.i0e(z)
+        if rv0 > 0.0 and np.isfinite(rv0):
+            return np.log(rv0) + z
+        return z - 0.5 * np.log(2.0 * np.pi * z)
+
     t = np.exp(ln_z - np.log(v))
     s = np.sqrt(1.0 + t * t)
     eta = s + np.log(t) - np.log1p(s)
@@ -578,4 +589,3 @@ class VonMisesFisherDataEncoder(DataSequenceEncoder):
         """
         rv = np.asarray(x).copy()
         return rv
-

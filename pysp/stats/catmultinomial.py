@@ -42,6 +42,7 @@ SS2 = TypeVar('SS2') ## suff stat type for len_dist
 
 class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
+    """Multinomial distribution over count vectors."""
     def __init__(self, dist: SequenceEncodableProbabilityDistribution,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  len_normalized: bool = False,
