@@ -177,6 +177,48 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
+    def compute_capabilities(self):
+        """Return backend capability metadata for this concrete Markov-transform instance."""
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        ready = intersect_engine_ready((self.len_dist,)) if self.len_dist is not None \
+            else ('numpy', 'torch')
+        return DistributionCapabilities(engine_ready=ready, kernel_status='generic_object')
+
+    def backend_seq_log_density(self, x, engine):
+        """Engine-neutral Markov-transform scoring.
+
+        The sparse conditional-probability gather stays on the host (scipy sparse), but the
+        per-observation dense reductions (log-likelihood of the transform plus the two marginal
+        terms) run on the active engine (numpy or torch).
+        """
+        from pysp.stats.backend import backend_seq_log_density
+
+        nw = self.num_vals
+        a = self.alpha / nw
+        b = 1 - self.alpha
+        init_log = engine.log(engine.asarray(self.init_prob_vec))
+
+        vals = []
+        for entry in x[0]:
+            xx, cx, yy, cy, zz, cz = entry
+            ridx = (np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))).flatten()
+            cc = (np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))).flatten()
+            cc = cc / cc.sum()
+            loc_dense = (self.cond_prob_mat[ridx, :][:, zz]).toarray().T  # (len(zz), len(ridx))
+            loc = engine.asarray(loc_dense) * b + a
+            inner = engine.matmul(loc, engine.asarray(cc))               # (len(zz),)
+            ll3 = engine.sum(engine.log(inner) * engine.asarray(np.asarray(cz, dtype=np.float64)))
+            ll1 = engine.sum(init_log[engine.asarray(np.asarray(xx, dtype=np.int64))]
+                             * engine.asarray(np.asarray(cx, dtype=np.float64)))
+            ll2 = engine.sum(init_log[engine.asarray(np.asarray(yy, dtype=np.int64))]
+                             * engine.asarray(np.asarray(cy, dtype=np.float64)))
+            vals.append(float(engine.to_numpy(ll1 + ll2 + ll3)))
+
+        rv = engine.asarray(np.asarray(vals, dtype=np.float64))
+        if self.len_dist is not None:
+            rv = rv + backend_seq_log_density(self.len_dist, x[1], engine)
+        return rv
+
 
     def seq_encode(self, x):
         """Encode a sequence of observations for vectorized calls (legacy method).
@@ -506,6 +548,42 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
 
         if self.size_accumulator is not None:
             self.size_accumulator.seq_update(x[1], weights, estimate.len_dist)
+
+        self.trans_count += umat
+
+    def seq_update_engine(self, x, weights, estimate, engine):
+        """Engine-aware E-step. The per-observation transition responsibilities are computed on the
+        active engine (numpy or torch); the sparse conditional gather and the sparse count scatter
+        stay on the host, since the sufficient statistic is a sparse matrix. Mirrors seq_update.
+        """
+        nw = self.num_vals
+        nzv = x[2]
+        a = estimate.alpha / nw
+        b = 1 - estimate.alpha
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+
+        umat = csc_matrix((np.zeros(nzv.shape[0]), (nzv[:, 0] * nw + nzv[:, 1], nzv[:, 2])),
+                          shape=(nw * nw, nw))
+
+        for i, (entry, ww) in enumerate(zip(x[0], weights_np)):
+            xx, cx, yy, cy, zz, cz = entry
+            ridx = (np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))).flatten()[:, None]
+            cc = (np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))).flatten()[:, None]
+            cs = float(cc.sum())
+
+            temp = estimate.cond_prob_mat[ridx, zz].toarray()             # (len(ridx), len(zz))
+            loc_cprob = engine.asarray(temp) * engine.asarray(cc)
+            w = engine.sum(loc_cprob, axis=0)                             # (len(zz),)
+            scale = engine.asarray(np.asarray(cz, dtype=np.float64)) * b / (b * w + a * cs) * float(ww)
+            loc_cprob = loc_cprob * scale[None, :]
+
+            umat[ridx, zz] += np.asarray(engine.to_numpy(loc_cprob))
+            self.init_count[xx] += cx * ww
+            self.init_count[yy] += cy * ww
+
+        if self.size_accumulator is not None:
+            self.size_accumulator.seq_update(x[1], weights_np, estimate.len_dist)
 
         self.trans_count += umat
 
