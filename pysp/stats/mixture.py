@@ -490,6 +490,61 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         return QuantizedEnumerationIndex.from_items(
             candidates, max_bits=max_bits, bin_width_bits=bin_width_bits)
 
+    def quantized_count_index(self, quantizer, max_fine_bucket: int):
+        """BoundedCount for the MARGINAL mixture law: pool weight-scaled component count indices.
+
+        log p(x) = logsumexp_k (log w_k + log p_k(x)) has no exact structural count -- overlapping
+        component supports would need value-level deduplication. This builds the count semiring's
+        ``plus``-fold over ``scale(component_index, log w_k)`` instead, which:
+          * reaches a 2**M budget structurally (no enumeration), and
+          * is a conservative UPPER bound -- a value shared by several components is counted once
+            per component, and each value is binned by its dominant weighted component (the tropical
+            cost, within log2(K) bits of the exact logsumexp).
+        Every unranked value still carries its exact mixture ``log_density`` (re-evaluated by the
+        budget builder). For an exact small-budget index (best-first union with dedup), use
+        ``quantized_index``. Components that cannot count structurally raise EnumerationError.
+        """
+        from pysp.utils.quantization import child_count_index
+        from pysp.utils.quantization_semiring import CountSemiring
+
+        sr = CountSemiring()
+        total = sr.zero()
+        built = False
+        truncated = False
+        for k, comp in enumerate(self.components):
+            if self.w[k] <= 0.0:
+                continue
+            child_index, child_truncated = child_count_index(
+                comp, 'MixtureDistribution.components[%d]' % k, quantizer, max_fine_bucket)
+            truncated = truncated or child_truncated
+            scaled = sr.scale(child_index, float(self.log_w[k]), quantizer, max_fine_bucket)
+            total = scaled if not built else sr.plus(total, scaled)
+            built = True
+
+        if not built:
+            return sr.zero(), truncated
+        return total, truncated
+
+    def is_canonical_copy(self, value, coarse_bin: int, quantizer) -> bool:
+        """Stateless dedup: keep ``value`` only at its dominant (best-weighted) component's bin.
+
+        Mirrors the count-index construction -- a copy from component k sits at fine bucket
+        fine_bucket(log p_k(value)) + fine_bucket(log w_k) -- so the canonical bin is the minimum of
+        those over components. O(K) model evaluations, no state.
+        """
+        best = None
+        for k in range(len(self.components)):
+            if self.w[k] <= 0.0:
+                continue
+            lp = self.components[k].log_density(value)
+            if lp == -np.inf:
+                continue
+            fb = quantizer.fine_bucket(float(lp)) + quantizer.fine_bucket(float(self.log_w[k]))
+            cb = quantizer.coarse_bin(fb)
+            if best is None or cb < best:
+                best = cb
+        return best is not None and coarse_bin == best
+
 
 class MixtureEnumerator(DistributionEnumerator):
 

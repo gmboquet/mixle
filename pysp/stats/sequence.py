@@ -372,86 +372,57 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         the contributing length, then the per-position element buckets via the convolution unranker.
         """
         from pysp.stats.pdist import EnumerationError
-        from pysp.utils.quantization import (CountHistogram, CountIndex, child_count_index,
-                                             convolve_indices)
+        from pysp.utils.quantization import child_count_index
+        from pysp.utils.quantization_semiring import CountSemiring
 
         if self.null_len_dist:
             raise EnumerationError(self, reason='no length distribution is modeled (len_dist is Null)')
         if self.len_normalized:
             raise EnumerationError(self, reason='len_normalized densities are not enumerable')
 
+        sr = CountSemiring()
         elem_index, elem_truncated = child_count_index(self.dist, 'SequenceDistribution.dist',
                                                        quantizer, max_fine_bucket)
         truncated = elem_truncated
 
         # Collect lengths (descending probability) whose length-term bucket is within the bound.
-        lengths: List[Tuple[int, int]] = []  # (L, shift_in_fine_buckets)
+        lengths: List[Tuple[int, float]] = []  # (L, lp_len)
         _LEN_CAP = 1 << 24
-        seen_lengths = 0
         for length, lp_len in child_enumerator(self.len_dist, 'SequenceDistribution.len_dist'):
             if not isinstance(length, (int, np.integer)) or length < 0:
                 continue
             if lp_len == -np.inf:
                 continue
-            s_len = quantizer.fine_bucket(lp_len)
-            if s_len > max_fine_bucket:
+            if quantizer.fine_bucket(lp_len) > max_fine_bucket:
                 truncated = True
                 break
-            lengths.append((int(length), s_len))
-            seen_lengths += 1
-            if seen_lengths >= _LEN_CAP:
+            lengths.append((int(length), float(lp_len)))
+            if len(lengths) >= _LEN_CAP:
                 truncated = True
                 break
 
         if not lengths:
-            return CountIndex(CountHistogram.empty(), lambda fb, off: (_ for _ in ()).throw(IndexError())), truncated
+            return sr.zero(), truncated
 
         max_len = max(L for L, _ in lengths)
-        # powers[k] = elem_index.hist convolved with itself k times (k=0 is the empty product).
-        powers: List[CountHistogram] = [CountHistogram.delta(0, 1)]
-        for _ in range(max_len):
-            nxt = quantizer.convolve(powers[-1], elem_index.hist, max_fine_bucket=max_fine_bucket)
-            powers.append(nxt)
-            if nxt.is_empty():
-                # No element mass within the bound beyond this length; deeper powers stay empty.
-                truncated = True
-                break
-        # Lengths whose element power is empty (length too long for any in-bound sequence) drop out,
-        # but L=0 (empty sequence) always contributes its single empty value.
-        powers_len = len(powers) - 1
+        # The iid-sequence reduction: total = (+)_L  scale_{p(L)}( (x)^L elem ). The k-fold products
+        # share incrementally-built count histograms; each carries the flat product unranker.
+        prefix = sr.power_prefix(elem_index, max_len, quantizer, max_fine_bucket)
+        built = len(prefix) - 1
+        if built < max_len:
+            truncated = True
 
-        total = CountHistogram.empty()
-        contributing: List[Tuple[int, int]] = []
-        for L, s_len in lengths:
-            if L > powers_len:
+        total = sr.zero()
+        for L, lp_len in lengths:
+            if L > built:
                 truncated = True
                 continue
-            piece = powers[L].shift(s_len).truncate(max_fine_bucket)
-            if piece.is_empty():
+            piece = sr.scale(prefix[L], lp_len, quantizer, max_fine_bucket)
+            if piece.hist.is_empty():
                 continue
-            total = total.add(piece)
-            contributing.append((L, s_len))
+            total = sr.plus(total, sr.map_values(piece, list))
 
-        unranker_cache: Dict[int, CountIndex] = {}
-
-        def unranker_for(L: int) -> CountIndex:
-            ci = unranker_cache.get(L)
-            if ci is None:
-                ci = convolve_indices([elem_index] * L, quantizer, max_fine_bucket)
-                unranker_cache[L] = ci
-            return ci
-
-        def getter(fb: int, off: int) -> Tuple[Any, float]:
-            o = int(off)
-            for L, s_len in contributing:
-                cnt = powers[L].count_at(fb - s_len)
-                if o < cnt:
-                    value, lp = unranker_for(L).get_in_bucket(fb - s_len, o)
-                    return list(value), float(lp)
-                o -= cnt
-            raise IndexError('offset outside sequence fine bucket %d' % fb)
-
-        return CountIndex(total, getter), truncated
+        return total, truncated
 
 
 class SequenceEnumerator(DistributionEnumerator):
