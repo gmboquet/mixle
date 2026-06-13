@@ -81,6 +81,7 @@ __all__ = [
     "NumbaKernel",
     "GeneratedNumbaKernel",
     "NumbaKernelFactory",
+    "GeneratedNumbaKernelFactory",
     "StackedComponentParams",
     "StackedMixtureResidentStats",
     "StackedMixtureShardEstimate",
@@ -385,7 +386,8 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, Parameter
     DistributionSampler, DistributionEnumerator, EnumerationError, KeyValidationError, encoded_nbytes, \
     scale_suff_stat, validate_estimator_keys
 from pysp.stats.kernel import EngineNotSupportedError, Kernel, KernelFactory, GenericKernel, GenericKernelFactory, \
-    NumbaKernel, GeneratedNumbaKernel, NumbaKernelFactory, register_kernel_factory, kernel_for
+    NumbaKernel, GeneratedNumbaKernel, NumbaKernelFactory, GeneratedNumbaKernelFactory, register_kernel_factory, \
+    kernel_for
 from pysp.stats.stacked import StackedComponentParams, StackedMixtureResidentStats, StackedMixtureShardEstimate, \
     StackedMixtureKernel, StackedMixtureKernelFactory, stacked_component_log_density, stacked_component_params, \
     stacked_component_strategy, estimate_component_shard_value, tie_component_shard_values
