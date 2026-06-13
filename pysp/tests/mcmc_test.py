@@ -2,7 +2,13 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import GammaDistribution, GaussianDistribution
+from pysp.stats import (
+    BernoulliDistribution,
+    CategoricalDistribution,
+    GammaDistribution,
+    GaussianDistribution,
+    PoissonDistribution,
+)
 from pysp.utils.mcmc import (
     AdaptiveCovarianceProposal,
     AdaptiveRandomWalkProposal,
@@ -11,11 +17,14 @@ from pysp.utils.mcmc import (
     LangevinProposal,
     MixtureProposal,
     RandomWalkProposal,
+    build_parameter_bridge,
     hamiltonian_monte_carlo,
     metropolis_hastings,
     metropolis_within_gibbs,
     posterior_predictive,
+    sample_conjugate_posterior,
     sample_distribution,
+    sample_parameter_posterior,
 )
 
 
@@ -338,6 +347,251 @@ class MCMCTestCase(unittest.TestCase):
         self.assertEqual(len(result.samples), 100)
         self.assertTrue(np.all(np.isfinite(result.log_probs)))
         self.assertGreater(result.acceptance_rate, 0.0)
+
+
+class ParameterPosteriorTestCase(unittest.TestCase):
+
+    def test_gaussian_mean_posterior_matches_conjugate(self):
+        # Known-variance normal model with a normal prior on the mean has a
+        # closed-form normal posterior. We sample the full (mu, sigma2) posterior
+        # under a flat prior and compare the marginal mu posterior mean/variance
+        # to the analytic Normal-known-variance result evaluated at the MLE
+        # variance, which is the right reference up to O(1/n).
+        rng = np.random.RandomState(101)
+        true_mu, true_sigma2 = 2.0, 1.5
+        data = rng.normal(true_mu, np.sqrt(true_sigma2), size=400)
+        n = len(data)
+        sample_mean = float(data.mean())
+        sample_var = float(data.var())
+
+        result = sample_parameter_posterior(
+            GaussianDistribution(0.0, 1.0), data,
+            prior=None, sampler='mh', steps=4000, burn_in=2000, seed=7,
+            proposal=RandomWalkProposal(scale=[0.08, 0.08]))
+
+        mus = np.asarray([t[0] for t in result.samples], dtype=float)
+        s2s = np.asarray([t[1] for t in result.samples], dtype=float)
+
+        # Posterior mean of mu concentrates at the sample mean; posterior
+        # variance of mu is approximately sigma2 / n.
+        post_mu_mean = float(mus.mean())
+        post_mu_var = float(mus.var())
+        analytic_mu_var = sample_var / n
+
+        self.assertLess(abs(post_mu_mean - sample_mean), 5.0 * np.sqrt(analytic_mu_var))
+        self.assertLess(abs(post_mu_var - analytic_mu_var) / analytic_mu_var, 0.4)
+        # Variance posterior centers near the sample variance.
+        self.assertLess(abs(float(s2s.mean()) - sample_var) / sample_var, 0.2)
+        self.assertGreater(result.acceptance_rate, 0.1)
+        self.assertLess(result.acceptance_rate, 0.95)
+
+    def test_gaussian_posterior_hmc_agrees_with_mh(self):
+        rng = np.random.RandomState(202)
+        data = rng.normal(-1.0, 2.0, size=300)
+
+        mh = sample_parameter_posterior(
+            GaussianDistribution(0.0, 1.0), data, sampler='mh',
+            steps=3000, burn_in=1500, seed=11,
+            proposal=RandomWalkProposal(scale=[0.1, 0.1]))
+        hmc = sample_parameter_posterior(
+            GaussianDistribution(0.0, 1.0), data, sampler='hmc',
+            steps=1500, burn_in=800, seed=12, step_size=0.02, num_steps=15)
+
+        mh_mu = float(np.mean([t[0] for t in mh.samples]))
+        hmc_mu = float(np.mean([t[0] for t in hmc.samples]))
+        self.assertLess(abs(mh_mu - hmc_mu), 0.1)
+        self.assertGreater(hmc.acceptance_rate, 0.5)
+
+    def test_poisson_rate_posterior_matches_gamma_conjugate(self):
+        # Flat improper prior on log(lam) gives posterior proportional to the
+        # likelihood; with the reparameterization Jacobian this equals the
+        # Gamma(sum+1, 1/n) posterior in lam-space (a Gamma posterior for an
+        # improper Gamma(1, inf) prior). Compare the MH posterior mean of lam to
+        # that analytic mean within a few posterior standard errors.
+        rng = np.random.RandomState(303)
+        data = rng.poisson(5.0, size=250)
+        total = float(data.sum())
+        n = len(data)
+
+        result = sample_parameter_posterior(
+            PoissonDistribution(1.0), data, prior=None, sampler='mh',
+            steps=4000, burn_in=2000, seed=13,
+            proposal=RandomWalkProposal(scale=0.05))
+
+        lams = np.asarray(result.samples, dtype=float)
+        # Posterior over lam under flat prior on log-lam: Gamma(total, scale=1/n)
+        # => mean total/n, variance total/n^2.
+        analytic_mean = total / n
+        analytic_var = total / (n * n)
+        self.assertLess(abs(float(lams.mean()) - analytic_mean), 5.0 * np.sqrt(analytic_var))
+        self.assertLess(abs(float(lams.var()) - analytic_var) / analytic_var, 0.4)
+        self.assertTrue(np.all(lams > 0.0))
+
+    def test_bernoulli_probability_posterior_stays_in_unit_interval(self):
+        rng = np.random.RandomState(404)
+        data = (rng.rand(300) < 0.35).astype(int)
+        ones = int(data.sum())
+        n = len(data)
+
+        result = sample_parameter_posterior(
+            BernoulliDistribution(0.5), data, prior=None, sampler='mh',
+            steps=4000, burn_in=2000, seed=14,
+            proposal=RandomWalkProposal(scale=0.1))
+
+        ps = np.asarray(result.samples, dtype=float)
+        self.assertTrue(np.all(ps > 0.0))
+        self.assertTrue(np.all(ps < 1.0))
+        # Flat prior on logit p -> Beta(ones, zeros) posterior; mean ones/n.
+        self.assertLess(abs(float(ps.mean()) - ones / n), 0.05)
+
+    def test_categorical_posterior_samples_are_valid_simplices(self):
+        rng = np.random.RandomState(505)
+        labels = ['a', 'b', 'c', 'd']
+        true_p = [0.1, 0.4, 0.3, 0.2]
+        data = rng.choice(labels, p=true_p, size=600).tolist()
+        proto = CategoricalDistribution({k: 0.25 for k in labels})
+
+        result = sample_parameter_posterior(
+            proto, data, prior=None, sampler='mh',
+            steps=3000, burn_in=1500, seed=15)
+
+        for prob_map in result.samples:
+            self.assertEqual(set(prob_map), set(labels))
+            vals = np.asarray(list(prob_map.values()), dtype=float)
+            self.assertTrue(np.all(vals > 0.0))
+            self.assertTrue(np.all(vals < 1.0))
+            self.assertAlmostEqual(float(vals.sum()), 1.0, places=9)
+
+        # Posterior means recover the empirical frequencies.
+        counts = {k: data.count(k) for k in labels}
+        n = len(data)
+        for k in labels:
+            post_mean = float(np.mean([pm[k] for pm in result.samples]))
+            self.assertLess(abs(post_mean - counts[k] / n), 0.05)
+
+    def test_return_distributions_rebuilds_models(self):
+        rng = np.random.RandomState(606)
+        data = rng.poisson(3.0, size=100)
+        result = sample_parameter_posterior(
+            PoissonDistribution(1.0), data, sampler='mh', steps=50, burn_in=50,
+            seed=16, return_distributions=True,
+            proposal=RandomWalkProposal(scale=0.05))
+        self.assertEqual(len(result.samples), 50)
+        for dist in result.samples:
+            self.assertIsInstance(dist, PoissonDistribution)
+            self.assertGreater(dist.lam, 0.0)
+
+    def test_prior_callable_shifts_posterior(self):
+        # A strong prior pulling lam toward a small value should lower the
+        # posterior mean relative to the flat-prior posterior.
+        rng = np.random.RandomState(707)
+        data = rng.poisson(8.0, size=40)
+
+        flat = sample_parameter_posterior(
+            PoissonDistribution(1.0), data, prior=None, sampler='mh',
+            steps=3000, burn_in=1500, seed=17,
+            proposal=RandomWalkProposal(scale=0.08))
+        # log Gamma(k=2, scale=1) density on lam (drops constant terms).
+        shaped = sample_parameter_posterior(
+            PoissonDistribution(1.0), data,
+            prior=lambda lam: (2.0 - 1.0) * np.log(lam) - lam / 1.0,
+            sampler='mh', steps=3000, burn_in=1500, seed=18,
+            proposal=RandomWalkProposal(scale=0.08))
+
+        flat_mean = float(np.mean(flat.samples))
+        shaped_mean = float(np.mean(shaped.samples))
+        self.assertLess(shaped_mean, flat_mean)
+        self.assertGreater(shaped_mean, 0.0)
+
+    def test_unsupported_family_raises_not_implemented(self):
+        with self.assertRaisesRegex(NotImplementedError, 'does not support'):
+            build_parameter_bridge(GammaDistribution(2.0, 1.0).estimator())
+
+    def test_bridge_round_trips_parameters(self):
+        for proto in (GaussianDistribution(1.3, 2.7),
+                      PoissonDistribution(4.2),
+                      BernoulliDistribution(0.37),
+                      CategoricalDistribution({'a': 0.2, 'b': 0.5, 'c': 0.3})):
+            bridge = build_parameter_bridge(proto)
+            phi = bridge.to_unconstrained(bridge.initial_theta)
+            theta = bridge.from_unconstrained(phi)
+            if isinstance(theta, dict):
+                for k in theta:
+                    self.assertAlmostEqual(theta[k], bridge.initial_theta[k], places=8)
+            elif isinstance(theta, tuple):
+                for a, b in zip(theta, bridge.initial_theta):
+                    self.assertAlmostEqual(a, b, places=8)
+            else:
+                self.assertAlmostEqual(theta, bridge.initial_theta, places=8)
+
+
+class ConjugatePosteriorTestCase(unittest.TestCase):
+
+    def _bstats(self):
+        import pysp.bstats as bstats
+        from pysp.bstats.beta import BetaDistribution as BBeta
+        from pysp.bstats.gamma import GammaDistribution as BGamma
+        return bstats, BBeta, BGamma
+
+    def test_poisson_gamma_conjugate_matches_analytic(self):
+        bstats, _, BGamma = self._bstats()
+        rng = np.random.RandomState(11)
+        data = rng.poisson(4.0, size=200).tolist()
+        k0, theta0 = 2.0, 1.0
+        proto = bstats.PoissonDistribution(1.0, prior=BGamma(k0, theta0))
+
+        result = sample_conjugate_posterior(proto, data, draws=40000, seed=21)
+        samples = np.asarray(result.samples, dtype=float)
+
+        total = float(sum(data))
+        n = len(data)
+        post_k = k0 + total
+        post_theta = theta0 / (n * theta0 + 1.0)
+        analytic_mean = post_k * post_theta
+        analytic_var = post_k * post_theta * post_theta
+
+        self.assertTrue(np.all(result.accepted))
+        self.assertLess(abs(float(samples.mean()) - analytic_mean), 4.0 * np.sqrt(analytic_var / len(samples)) + 0.01)
+        self.assertLess(abs(float(samples.var()) - analytic_var) / analytic_var, 0.1)
+
+    def test_bernoulli_beta_conjugate_matches_analytic(self):
+        bstats, BBeta, _ = self._bstats()
+        rng = np.random.RandomState(12)
+        data = (rng.rand(200) < 0.3).astype(int).tolist()
+        a0, b0 = 1.0, 1.0
+        proto = bstats.BernoulliDistribution(0.5, prior=BBeta(a0, b0))
+
+        result = sample_conjugate_posterior(proto, data, draws=40000, seed=22)
+        samples = np.asarray(result.samples, dtype=float)
+
+        ones = int(sum(data))
+        zeros = len(data) - ones
+        pa, pb = a0 + ones, b0 + zeros
+        analytic_mean = pa / (pa + pb)
+        analytic_var = pa * pb / ((pa + pb) ** 2 * (pa + pb + 1.0))
+
+        self.assertTrue(np.all((samples > 0.0) & (samples < 1.0)))
+        self.assertLess(abs(float(samples.mean()) - analytic_mean), 0.01)
+        self.assertLess(abs(float(samples.var()) - analytic_var) / analytic_var, 0.1)
+
+    def test_gaussian_normalgamma_conjugate_centers_on_data(self):
+        bstats, _, _ = self._bstats()
+        rng = np.random.RandomState(13)
+        data = rng.normal(2.0, 1.5, size=300).tolist()
+        proto = bstats.GaussianDistribution(0.0, 1.0)
+
+        result = sample_conjugate_posterior(proto, data, draws=40000, seed=23)
+        mus = np.asarray([t[0] for t in result.samples], dtype=float)
+        s2s = np.asarray([t[1] for t in result.samples], dtype=float)
+
+        self.assertTrue(np.all(s2s > 0.0))
+        self.assertLess(abs(float(mus.mean()) - float(np.mean(data))), 0.05)
+        self.assertLess(abs(float(s2s.mean()) - float(np.var(data))) / float(np.var(data)), 0.15)
+
+    def test_conjugate_unsupported_leaf_raises(self):
+        bstats, _, _ = self._bstats()
+        with self.assertRaisesRegex(NotImplementedError, 'supports bstats'):
+            sample_conjugate_posterior(bstats.ExponentialDistribution(1.0), [0.5, 1.0], draws=5)
 
 
 if __name__ == '__main__':
