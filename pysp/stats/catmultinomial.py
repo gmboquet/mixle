@@ -645,6 +645,27 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator.seq_update(enc_seq, w, estimate.dist if estimate is not None else None)
         self.len_accumulator.seq_update(enc_nseq, weights*enc_ww, estimate.len_dist if estimate is not None else None)
 
+    def seq_update_engine(self, x, weights: Any, estimate: Optional['MultinomialDistribution'],
+                          engine: Any) -> None:
+        """Engine-resident E-step: the per-value and per-length weights are formed on the active
+        engine and the value/length accumulators are routed through the engine. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
+        w_eng = engine.asarray(weights)
+        idx_a = np.asarray(idx, dtype=np.int64)
+        if self.len_normalized:
+            w = w_eng[idx_a] * engine.asarray(np.asarray(icnt, dtype=np.float64)[idx_a])
+        else:
+            w = w_eng[idx_a]
+        w = w * engine.asarray(np.asarray(enc_w, dtype=np.float64))
+
+        child_seq_update(self.accumulator, enc_seq, w,
+                         estimate.dist if estimate is not None else None, engine)
+        child_seq_update(self.len_accumulator, enc_nseq,
+                         w_eng * engine.asarray(np.asarray(enc_ww, dtype=np.float64)),
+                         estimate.len_dist if estimate is not None else None, engine)
+
     def seq_initialize(self, x, weights: np.ndarray, rng: RandomState) -> None:
         """Vectorized initialization of of sufficient statistics for an encoded sequence of observations.
 

@@ -2582,10 +2582,14 @@ def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=No
 
     wvec = engine.asarray(np.ones(n)) if weights is None else engine.asarray(weights)
 
-    # gamma (posterior state probabilities)
+    # gamma (posterior state probabilities). Empty/all-padded sequences give -inf alpha+beta whose
+    # normalization is -inf - (-inf) = NaN; zero the padded slots with a mask-select (not a
+    # multiply, since NaN * 0 = NaN) so degenerate sequences contribute nothing.
+    zero = engine.asarray(0.0)
     ab = alpha_stack + beta_stack
     log_gamma = ab - engine.logsumexp(ab, axis=2, keepdims=True)
-    gamma = engine.exp(log_gamma) * m[:, :, None] * wvec[:, None, None]
+    gamma = engine.exp(log_gamma) * wvec[:, None, None]
+    gamma = engine.where(m[:, :, None] > 0, gamma, zero)
     pi = gamma[:, 0, :]
 
     # xi (expected transition counts) summed over valid transitions
@@ -2594,7 +2598,8 @@ def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=No
         log_xi = (alpha_stack[:, t, :][:, :, None] + log_a[None, :, :]
                   + (log_emit[:, t + 1, :] + beta_stack[:, t + 1, :])[:, None, :]
                   - ll[:, None, None])
-        contrib = engine.exp(log_xi) * (m[:, t + 1] * wvec)[:, None, None]
+        contrib = engine.exp(log_xi) * wvec[:, None, None]
+        contrib = engine.where((m[:, t + 1] > 0)[:, None, None], contrib, zero)
         xi_sum = xi_sum + engine.sum(contrib, axis=0)
 
     return ll, gamma, xi_sum, pi

@@ -891,6 +891,29 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             else:
                 self.given_accumulator.seq_update(given_enc, weights, estimate.given_dist)
 
+    def seq_update_engine(self, x: E0, weights: Any, estimate: 'ConditionalDistribution',
+                          engine: Any) -> None:
+        """Engine-resident E-step: per-conditional-value subgroup weights are gathered on the active
+        engine and the matching child accumulators (and the given accumulator) are routed through
+        the engine. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        sz, cond_vals, eobs_vals, idx_vals, given_enc = x
+        w_eng = engine.asarray(weights)
+
+        for i in range(len(cond_vals)):
+            wi = w_eng[np.asarray(idx_vals[i], dtype=np.int64)]
+            if cond_vals[i] in self.accumulator_map:
+                child_seq_update(self.accumulator_map[cond_vals[i]], eobs_vals[i], wi,
+                                 estimate.dmap[cond_vals[i]] if estimate is not None else None, engine)
+            elif self.has_default:
+                child_seq_update(self.default_accumulator, eobs_vals[i], wi,
+                                 None if estimate is None else estimate.default_dist, engine)
+
+        if self.has_given:
+            child_seq_update(self.given_accumulator, given_enc, w_eng,
+                             None if estimate is None else estimate.given_dist, engine)
+
     def combine(self, suff_stat: Tuple[Dict[T0, SS0], Optional[SS1], Optional[SS2]]) \
             -> 'ConditionalDistributionAccumulator':
         """Aggregate sufficient statistics (suff_stat) with sufficient statistics of ConditionalDistributionAccumulator
