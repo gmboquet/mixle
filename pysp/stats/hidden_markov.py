@@ -1614,6 +1614,73 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             if self.len_accumulator is not None:
                 self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
 
+    def seq_update_engine(self, x, weights, estimate: 'HiddenMarkovModelDistribution', engine) -> None:
+        """Engine-resident Baum-Welch E-step.
+
+        Mirrors :meth:`seq_update` but computes the posteriors (gamma), expected transition counts
+        (xi), and initial-state posteriors (pi) with :func:`hmm_engine_forward_backward`, so the
+        forward-backward runs on the active engine (numpy or torch/GPU/autograd). Per-state emission
+        statistics are accumulated by the existing child accumulators using the engine-computed
+        gamma weights. Falls back to the host :meth:`seq_update` for the blocked (non-numba)
+        encoding.
+        """
+        x0, x1 = x
+        num_states = estimate.n_states
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        with np.errstate(divide='ignore'):
+            log_w = np.log(estimate.w)
+            log_a = np.log(estimate.transitions)
+
+        if x1 is not None:
+            # numba encoding: observations are stored sequence-contiguously.
+            (idx, sz, enc_data), len_enc = x1
+            sz = np.asarray(sz)
+            tot_cnt = int(sz.sum())
+            pr_obs = np.empty((tot_cnt, num_states), dtype=np.float64)
+            for i in range(num_states):
+                pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+            padded, mask, offsets = hmm_pad_log_emissions(pr_obs, sz)
+            scatter = None
+        else:
+            # blocked encoding: idx_mat[n, t] is the flat row of observation (sequence n, step t),
+            # or -1 when the sequence is shorter than t. Gather it into the padded layout and keep
+            # the index map for scattering gamma back to the flat emission order.
+            (tot_cnt, idx_bands, has_next, len_vec, idx_mat, idx_vec, enc_data), _, len_enc = x0
+            pr_obs = np.empty((tot_cnt, num_states), dtype=np.float64)
+            for i in range(num_states):
+                pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+            n_seq, tmax = idx_mat.shape
+            valid = idx_mat >= 0
+            padded = np.full((n_seq, tmax, num_states), -np.inf, dtype=np.float64)
+            padded[valid] = pr_obs[idx_mat[valid]]
+            mask = valid.astype(np.float64)
+            scatter = (valid, idx_mat)
+
+        _, gamma, xi_sum, pi = hmm_engine_forward_backward(
+            engine, padded, log_w, log_a, mask, weights=weights_np)
+        gamma = np.asarray(engine.to_numpy(gamma))
+        xi_sum = np.asarray(engine.to_numpy(xi_sum))
+        pi = np.asarray(engine.to_numpy(pi))
+
+        gamma_flat = np.zeros((tot_cnt, num_states), dtype=np.float64)
+        if scatter is None:
+            for i in range(len(sz)):
+                n = int(sz[i])
+                if n > 0:
+                    gamma_flat[offsets[i]:offsets[i + 1], :] = gamma[i, :n, :]
+        else:
+            valid, idx_mat = scatter
+            gamma_flat[idx_mat[valid]] = gamma[valid]
+
+        self.init_counts += pi.sum(axis=0)
+        self.trans_counts += xi_sum
+        self.state_counts += gamma_flat.sum(axis=0)
+        for i in range(num_states):
+            self.accumulators[i].seq_update(enc_data, gamma_flat[:, i], estimate.topics[i])
+        if self.len_accumulator is not None:
+            self.len_accumulator.seq_update(len_enc, weights_np, estimate.len_dist)
+
     def combine(self, suff_stat: Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[T1], Optional[T2]]) \
             -> 'HiddenMarkovAccumulator':
         """Combine the sufficient statistics of HiddenMarkovAccumulator with suff_stat arg.
@@ -2528,6 +2595,44 @@ def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=No
         xi_sum = xi_sum + engine.sum(contrib, axis=0)
 
     return ll, gamma, xi_sum, pi
+
+
+def _register_hmm_engine_kernel():
+    """Register the engine-resident HMM kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class HiddenMarkovModelKernel(GenericKernel):
+        """HMM kernel whose E-step runs the forward-backward on the active engine.
+
+        Scoring reuses the generic backend path. For non-numpy engines the accumulation uses
+        ``HiddenMarkovAccumulator.seq_update_engine`` (the ComputeEngine forward-backward), so EM
+        estimation runs on torch (GPU/autograd). The numpy engine keeps the tuned host Baum-Welch.
+        """
+
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('HiddenMarkovModelKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class HiddenMarkovModelKernelFactory(KernelFactory):
+        """Build the engine-resident HMM kernel, falling back to the generic kernel as needed."""
+
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return HiddenMarkovModelKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(HiddenMarkovModelDistribution, HiddenMarkovModelKernelFactory())
+
+
+_register_hmm_engine_kernel()
 
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
