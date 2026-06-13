@@ -569,6 +569,34 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         '''
         self.len_acc.seq_update(nn, weights, estimate.len_dist)
 
+    def seq_update_engine(self, x, weights, estimate, engine):
+        """Engine-resident E-step: the PLSI responsibility update (state-word x doc-state gather,
+        per-pair normalization, and the word/doc segment sums) runs on the active engine, matching
+        the host seq_update.
+        """
+        nn, (xv, xc, xd, xi, xn, xm) = x
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        xv_e = engine.asarray(np.asarray(xv, dtype=np.int64))
+        xd_e = engine.asarray(np.asarray(xd, dtype=np.int64))
+        xi_e = engine.asarray(np.asarray(xi, dtype=np.int64))
+
+        prob = engine.asarray(estimate.prob_mat)                                   # (num_vals, S)
+        state = engine.asarray(estimate.state_mat)                                 # (num_docs, S)
+        update = prob[xv_e, :] * state[xd_e, :]                                    # (n_pairs, S)
+        temp = engine.asarray(np.asarray(xc, dtype=np.float64)) * engine.asarray(weights_np)[xi_e]
+        update = update * (temp / engine.sum(update, axis=1))[:, None]
+
+        wc_rows = [engine.index_add(engine.zeros(self.num_vals), xv_e, update[:, i])
+                   for i in range(self.num_states)]
+        cc_cols = [engine.index_add(engine.zeros(self.num_docs), xd_e, update[:, i])
+                   for i in range(self.num_states)]
+        self.word_count += np.asarray(engine.to_numpy(engine.stack(wc_rows, axis=0)))
+        self.comp_count += np.asarray(engine.to_numpy(engine.stack(cc_cols, axis=1)))
+        self.doc_count += np.bincount(np.asarray(xm, dtype=np.int64), weights=weights_np,
+                                      minlength=self.num_docs)
+        self.len_acc.seq_update(nn, weights_np, estimate.len_dist)
+
     def combine(self, suff_stat: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]]) -> 'IntegerPLSIAccumulator':
         """Combine the sufficient statistics in arg 'suff_stat' with object instance.
 
@@ -1091,3 +1119,32 @@ def vec_bincount4(x, w, out):
     for j in range(len(x)):
         out[x[j], :] += w[:, j]
     return out
+
+
+def _register_int_plsi_engine_kernel():
+    """Register the engine-resident integer-PLSI kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class IntegerPLSIKernel(GenericKernel):
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('IntegerPLSIKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class IntegerPLSIKernelFactory(KernelFactory):
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return IntegerPLSIKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(IntegerPLSIDistribution, IntegerPLSIKernelFactory())
+
+
+_register_int_plsi_engine_kernel()
