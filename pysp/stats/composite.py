@@ -339,6 +339,33 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             counts, bin_width_bits=bin_width_bits, max_bits=max_bits,
             truncated=truncated, getter=getter)
 
+    def quantized_count_index(self, quantizer, max_fine_bucket: int):
+        """Structural count index: convolve the child count histograms (additive composition).
+
+        The complete log density is the sum of independent child log densities, so the joint
+        count histogram is the convolution of the child histograms. Children are consumed by their
+        *counts* and lazy unranker -- never drained -- so a child with astronomically large support
+        (e.g. a Sequence) composes without being materialized.
+        """
+        from pysp.utils.quantization import CountHistogram, CountIndex, convolve_indices
+
+        if self.count == 0:
+            return CountIndex(CountHistogram.delta(0, 1), lambda fb, off: ((), 0.0)), False
+
+        children = []
+        truncated = False
+        for i, dist in enumerate(self.dists):
+            try:
+                child_index, child_truncated = dist.quantized_count_index(quantizer, max_fine_bucket)
+            except EnumerationError as e:
+                path = 'CompositeDistribution.dists[%d]' % i
+                new_path = path if not e.path else '%s -> %s' % (path, e.path)
+                raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
+            children.append(child_index)
+            truncated = truncated or child_truncated
+
+        return convolve_indices(children, quantizer, max_fine_bucket), truncated
+
     def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
         """Build an aligned cross-bin view for compatible composite distributions."""
         dists = [self] + list(others)

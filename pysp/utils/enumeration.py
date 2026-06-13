@@ -13,6 +13,7 @@ generic algorithms used by the combinator distributions:
 
 See pysp.stats.pdist.DistributionEnumerator for the enumeration contract.
 """
+import bisect
 import heapq
 import itertools
 import math
@@ -117,9 +118,13 @@ class QuantizedEnumerationIndex(object):
         self.counts: Dict[int, int] = {b: len(items) for b, items in self._bins}
         self._bin_lookup: Dict[int, List[Tuple[Any, float]]] = {b: items for b, items in self._bins}
         self._starts: Dict[int, int] = {}
+        self._cum_starts: List[int] = []
+        self._cum_bins: List[int] = []
         pos = 0
         for b, items in self._bins:
             self._starts[b] = pos
+            self._cum_starts.append(pos)
+            self._cum_bins.append(b)
             pos += len(items)
         self.total_count = pos
 
@@ -224,13 +229,8 @@ class QuantizedEnumerationIndex(object):
             raise IndexError('index must be non-negative.')
         if index >= self.total_count:
             raise IndexError('index %d outside indexed range of %d items.' % (index, self.total_count))
-        pos = 0
-        for b, items in self._bins:
-            n = len(items)
-            if index < pos + n:
-                return b, index - pos
-            pos += n
-        raise IndexError('index %d outside indexed range of %d items.' % (index, self.total_count))
+        j = bisect.bisect_right(self._cum_starts, index) - 1
+        return self._cum_bins[j], index - self._cum_starts[j]
 
     def get(self, index: int) -> Tuple[Any, float]:
         """Return the indexed (value, exact_log_prob) pair."""
@@ -308,9 +308,13 @@ class LazyQuantizedEnumerationIndex(QuantizedEnumerationIndex):
         self._getter = getter
         self._bins = [(b, self.counts[b]) for b in sorted(self.counts)]
         self._starts: Dict[int, int] = {}
+        self._cum_starts: List[int] = []
+        self._cum_bins: List[int] = []
         pos = 0
         for b, n in self._bins:
             self._starts[b] = pos
+            self._cum_starts.append(pos)
+            self._cum_bins.append(b)
             pos += n
         self.total_count = pos
 
@@ -320,12 +324,8 @@ class LazyQuantizedEnumerationIndex(QuantizedEnumerationIndex):
             raise IndexError('index must be non-negative.')
         if index >= self.total_count:
             raise IndexError('index %d outside indexed range of %d items.' % (index, self.total_count))
-        pos = 0
-        for b, n in self._bins:
-            if index < pos + n:
-                return b, index - pos
-            pos += n
-        raise IndexError('index %d outside indexed range of %d items.' % (index, self.total_count))
+        j = bisect.bisect_right(self._cum_starts, index) - 1
+        return self._cum_bins[j], index - self._cum_starts[j]
 
     def get(self, index: int) -> Tuple[Any, float]:
         """Return the indexed (value, exact_log_prob) pair."""
@@ -590,11 +590,15 @@ def _best_first_union(streams: Sequence[BufferedStream],
     seen = set()
     buffer: List[Tuple[float, int, Any]] = []
 
+    def compute_bound() -> float:
+        if not live:
+            return -np.inf
+        return bound_fn(np.asarray([log_offsets[k] + streams[k].get(r)[1] for k, r in live.items()]))
+
+    # The bound depends only on the live heads, which change only when a head is consumed;
+    # cache it and recompute after each head pop instead of on every buffer-drain iteration.
+    bound = compute_bound()
     while True:
-        if live:
-            bound = bound_fn(np.asarray([log_offsets[k] + streams[k].get(r)[1] for k, r in live.items()]))
-        else:
-            bound = -np.inf
         if buffer and -buffer[0][0] >= bound - tol:
             neg_lp, _, v = heapq.heappop(buffer)
             yield (v, -neg_lp)
@@ -619,6 +623,7 @@ def _best_first_union(streams: Sequence[BufferedStream],
             heapq.heappush(heads, (-(log_offsets[k] + nxt[1]), next(counter), k, rank + 1))
         else:
             del live[k]
+        bound = compute_bound()
 
 
 def best_first_union(streams: Sequence[BufferedStream],
@@ -852,9 +857,10 @@ def bounded_best_first_union_index(streams: Sequence[BufferedStream],
                 del live[k]
         return False
 
+    # The live frontier bound changes only when a head is consumed; cache it and recompute
+    # after each head pop rather than rebuilding the log-sum on every buffer-drain iteration.
+    bound = live_bound()
     while True:
-        bound = live_bound()
-
         if buffer and -buffer[0][0] >= bound - tol:
             neg_lp, _, value = heapq.heappop(buffer)
             lp = -neg_lp
@@ -903,6 +909,7 @@ def bounded_best_first_union_index(streams: Sequence[BufferedStream],
             heapq.heappush(heads, (-(log_offsets[k] + nxt[1]), next(counter), k, rank + 1))
         elif k in live:
             del live[k]
+        bound = live_bound()
 
     return QuantizedEnumerationIndex.from_items(
         items, max_bits=max_bits, bin_width_bits=bin_width_bits,

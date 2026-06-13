@@ -155,6 +155,50 @@ class ProbabilityDistribution:
         """
         return self.enumerator().quantized_index(max_bits=max_bits, bin_width_bits=bin_width_bits)
 
+    def quantized_count_index(self, quantizer, max_fine_bucket: int):
+        """Build a structural CountIndex over this distribution's support, bounded by depth.
+
+        This is the count-semiring counterpart of ``quantized_index``: it returns per-fine-bucket
+        *counts* of the complete model probability together with a structural unranker, so the
+        support can be indexed without being enumerated. The default builds a leaf index from the
+        exact ``enumerator()`` truncated at ``max_fine_bucket`` (cheap for closed-form/small-support
+        families); exponential-support composers (Composite/Sequence/MarkovChain) override this with
+        a dynamic program over the model's likelihood recursion.
+
+        Args:
+            quantizer (pysp.utils.quantization.Quantizer): Fine/coarse bucketing.
+            max_fine_bucket (int): Inclusive depth bound on indexed fine buckets.
+
+        Returns:
+            Tuple (CountIndex, truncated) -- truncated is True when in-support values were dropped
+            because they fell beyond the depth bound.
+
+        """
+        from pysp.utils.quantization import leaf_count_index
+        return leaf_count_index(self.enumerator(), quantizer, max_fine_bucket)
+
+    def count_budget_index(self, budget_bits: float, bin_width_bits: float = 1.0,
+                           oversample: int = 8, num_workers: Optional[int] = None):
+        """Build a budget-bounded quantized seek index covering the top ``2**budget_bits`` values.
+
+        Computes per-bin counts structurally (never enumerating the domain) and accumulates coarse
+        bins in descending-probability order until the cumulative count reaches the budget. The
+        returned LazyQuantizedEnumerationIndex supports arbitrary-rank seek/unranking; each unranked
+        value carries its exact ``log_density``.
+
+        Args:
+            budget_bits (float): Index into the top ``2**budget_bits`` most probable values.
+            bin_width_bits (float): Coarse output bin width in bits.
+            oversample (int): Fine buckets per coarse bin (accumulation resolution).
+
+        Returns:
+            pysp.utils.enumeration.LazyQuantizedEnumerationIndex.
+
+        """
+        from pysp.utils.quantization import count_budget_index
+        return count_budget_index(self, budget_bits, bin_width_bits=bin_width_bits,
+                                  oversample=oversample, num_workers=num_workers)
+
     def quantized_multi_cross_index(self, others: List['ProbabilityDistribution'], max_bits,
                                     bin_width_bits: float = 1.0):
         """Build an aligned bounded cross-bin view against other distributions.
