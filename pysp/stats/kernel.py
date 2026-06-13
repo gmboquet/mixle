@@ -226,11 +226,19 @@ class GeneratedNumbaKernel(Kernel):
         enc = getattr(enc, 'engine_payload', enc)   # unwrap resident payloads
         if self.components is not None:
             row_weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
-            gamma = self.posteriors(enc)
-            gamma *= row_weights.reshape(-1, 1)
-            component_stats = _generated_numba_component_stats(enc, gamma, self.components, self.engine)
-            component_counts = gamma.sum(axis=0)
-            return component_counts, _unstack_numba_component_stats(component_stats, len(component_counts))
+            try:
+                gamma = self.posteriors(enc)
+                gamma *= row_weights.reshape(-1, 1)
+                component_stats = _generated_numba_component_stats(enc, gamma, self.components, self.engine)
+                component_counts = gamma.sum(axis=0)
+                return component_counts, _unstack_numba_component_stats(component_stats, len(component_counts))
+            except ValueError:
+                # A component family has no generated stacked scorer / sufficient-statistic hook (or
+                # a width mismatch): fall back to the host mixture accumulator, which handles any
+                # component family.
+                accumulator = self.estimator.accumulator_factory().make()
+                accumulator.seq_update(getattr(enc, 'host_payload', enc), row_weights, self.dist)
+                return accumulator.value()
         if generated_sufficient_statistics_available(self.dist):
             return generated_sufficient_statistics(self.dist, enc, weights, self.engine)
         # Scorer-only leaf (numba scorer but no generated suff-stat hook): accumulate via the host

@@ -991,10 +991,13 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 			np.exp(pr_obs, out=pr_obs)
 
 
-			# Vectorized alpha pass
+			# Vectorized alpha pass. The first band only covers sequences that actually have a
+			# step-0 observation, so index the per-sequence init weights to those sequences (empty
+			# sequences are absent from band 0).
 			band = idx_bands[0]
 			alphas_prev = alphas[band[0]:band[1], :]
-			np.multiply(pr_obs[band[0]:band[1], :], w, out=alphas_prev)
+			w0 = w[good[:, 0]] if w.shape[0] == num_seq else w
+			np.multiply(pr_obs[band[0]:band[1], :], w0, out=alphas_prev)
 			pr_sum = alphas_prev.sum(axis=1, keepdims=True)
 			pr_sum[pr_sum == 0] = 1.0
 			alphas_prev /= pr_sum
