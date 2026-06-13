@@ -8,10 +8,12 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+.github/
 .idea
 .Python
 build/
 develop-eggs/
+notes/
 dist/
 downloads/
 eggs/
