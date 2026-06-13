@@ -398,6 +398,22 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.weights[1] += np.sum(nz_weights)
         self.accumulator.seq_update(enc_data, nz_weights, estimate.dist if estimate is not None else None)
 
+    def seq_update_engine(self, x: Tuple[int, np.ndarray, np.ndarray, E], weights: Any,
+                          estimate: OptionalDistribution, engine: Any) -> None:
+        """Engine-resident E-step: missing/observed mass is summed on the active engine and the
+        observed child accumulator is routed through the engine. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        sz, z_idx, nz_idx, enc_data = x
+        w_eng = engine.asarray(weights)
+        nz_weights = w_eng[np.asarray(nz_idx, dtype=np.int64)]
+        z_weights = w_eng[np.asarray(z_idx, dtype=np.int64)]
+
+        self.weights[0] += float(engine.to_numpy(engine.sum(z_weights)))
+        self.weights[1] += float(engine.to_numpy(engine.sum(nz_weights)))
+        child_seq_update(self.accumulator, enc_data, nz_weights,
+                         estimate.dist if estimate is not None else None, engine)
+
     def seq_initialize(self, x: Tuple[int, np.ndarray, np.ndarray, E], weights: np.ndarray, rng: RandomState) -> None:
         sz, z_idx, nz_idx, enc_data = x
         nz_weights = weights[nz_idx]

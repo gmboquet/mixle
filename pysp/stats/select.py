@@ -452,6 +452,21 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[j].seq_update(enc_tuple[i], w, estimate.dists[j] if estimate is not None else None)
             self.weights[j] += np.sum(w)
 
+    def seq_update_engine(self, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]],
+                          weights: Any, estimate: Optional[SelectDistribution], engine: Any) -> None:
+        """Engine-resident E-step: each group's weights are gathered on the active engine and routed
+        to the chosen child accumulator through the engine. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        xi, idx, enc_tuple = x
+        w_eng = engine.asarray(weights)
+        for i in range(len(idx)):
+            j = idx[i]
+            w = w_eng[np.asarray(xi[i], dtype=np.int64)]
+            child_seq_update(self.accumulators[j], enc_tuple[i], w,
+                             estimate.dists[j] if estimate is not None else None, engine)
+            self.weights[j] += float(engine.to_numpy(engine.sum(w)))
+
     def seq_initialize(self, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]],
                        weights: np.ndarray, rng: RandomState) -> None:
         """Vectorized initialization of the child accumulators from sequence encoded data x.

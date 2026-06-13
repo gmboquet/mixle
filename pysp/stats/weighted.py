@@ -264,6 +264,15 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.accumulator.seq_update(x[0], weights*x[1], estimate.dist)
 
+    def seq_update_engine(self, x, weights: Any, estimate: WeightedDistribution, engine: Any) -> None:
+        """Engine-resident E-step: per-observation weights are scaled on the active engine and the
+        base accumulator is routed through the engine. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        w = engine.asarray(weights) * engine.asarray(np.asarray(x[1], dtype=np.float64))
+        child_seq_update(self.accumulator, x[0], w,
+                         estimate.dist if estimate is not None else None, engine)
+
     def seq_initialize(self, x: Tuple[E, np.ndarray], weights: np.ndarray, rng: np.random.RandomState) -> None:
         """Vectorized initialization of the base accumulator with scaled weights.
 

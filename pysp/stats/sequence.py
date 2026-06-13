@@ -677,6 +677,28 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         if not self.null_len_accumulator:
             self.len_accumulator.seq_update(enc_nseq, weights, estimate.len_dist if estimate is not None else None)
 
+    def seq_update_engine(self, x: E, weights: Any, estimate: Optional['SequenceDistribution'],
+                          engine: Any) -> None:
+        """Engine-resident E-step: per-element weights are gathered/normalized on the active engine
+        and the base/length accumulators are routed through the engine. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        idx, icnt, inz, enc_seq, enc_nseq = x
+
+        w_eng = engine.asarray(weights)
+        idx_arr = np.asarray(idx, dtype=np.int64)
+        if self.len_normalized:
+            w = w_eng[idx_arr] * engine.asarray(np.asarray(icnt, dtype=np.float64)[idx_arr])
+        else:
+            w = w_eng[idx_arr]
+
+        child_seq_update(self.accumulator, enc_seq, w,
+                         estimate.dist if estimate is not None else None, engine)
+
+        if not self.null_len_accumulator:
+            child_seq_update(self.len_accumulator, enc_nseq, w_eng,
+                             estimate.len_dist if estimate is not None else None, engine)
+
     def combine(self, suff_stat: Tuple[SS1, Optional[SS2]]) -> 'SequenceAccumulator':
         """Combine the sufficient statistics of SequenceAccumulator instance with suff_stat arg.
 

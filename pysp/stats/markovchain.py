@@ -1078,6 +1078,39 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         # ------------- slow and sparse...
         self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
 
+    def seq_update_engine(self, x: enc_data_type, weights: Any,
+                          estimate: MarkovChainDistribution, engine: Any) -> None:
+        """Engine-resident E-step: initial-state counts are reduced on the active engine and the
+        transition weights are gathered on the engine before filling the sparse count maps; the
+        length accumulator is routed through the engine. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
+        key_sz = len(inv_key_map)
+        w_eng = engine.asarray(weights)
+
+        init_count = np.asarray(engine.to_numpy(engine.bincount(
+            engine.asarray(np.asarray(init_x, dtype=np.int64)),
+            weights=w_eng[np.asarray(idx0, dtype=np.int64)], minlength=key_sz)), dtype=np.float64)
+        for i in range(len(init_count)):
+            v = init_count[i]
+            if v != 0:
+                self.init_count_map[inv_key_map[i]] = self.init_count_map.get(inv_key_map[i], 0.0) + v
+
+        w_trans = np.asarray(engine.to_numpy(w_eng[np.asarray(idx1, dtype=np.int64)]), dtype=np.float64)
+        for i in range(len(prev_x)):
+            k1 = inv_key_map[prev_x[i]]
+            k2 = inv_key_map[next_x[i]]
+            ww = w_trans[i]
+            if k1 not in self.trans_count_map:
+                self.trans_count_map[k1] = {k2: ww}
+            else:
+                m = self.trans_count_map[k1]
+                m[k2] = m.get(k2, 0.0) + ww
+
+        child_seq_update(self.len_accumulator, len_enc, w_eng,
+                         estimate.len_dist if estimate is not None else None, engine)
+
     def combine(self, suff_stat: suff_stat_type) -> 'MarkovChainAccumulator':
         """Merge the sufficient statistics of arg suff_stat with MarkovChainAccumulator.
 
