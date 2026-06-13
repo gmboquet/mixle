@@ -655,7 +655,6 @@ def _register_builtin_compute_metadata() -> None:
         register_capabilities(dist_type, legacy_numpy_caps)
 
     numpy_only_reasons = {
-        HeterogeneousPCFGDistribution: 'grammar dynamic program is intentionally NumPy only',
         SparseMarkovAssociationDistribution: 'sparse markov-transform family is intentionally NumPy/SciPy only',
     }
     for dist_type, reason in numpy_only_reasons.items():
