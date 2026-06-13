@@ -595,6 +595,45 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             self.comp_counts[i] += w_loc.sum()
             self.accumulators[i].seq_update(enc_data, w_loc, estimate.components[i])
 
+    def seq_update_engine(self, x, weights, estimate, engine):
+        """Engine-resident E-step: component scoring and the responsibility softmax run on the active
+        engine; the (cheap, index-based) semi-supervised prior adjustment is built host-side. Matches
+        the host seq_update.
+        """
+        from pysp.stats.backend import backend_seq_log_density
+
+        sz, enc_data, (enc_prior, enc_prior_sum, enc_prior_flag), _ = x
+        num_components = estimate.num_components
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+
+        # prior-adjusted base log-matrix (host-side index ops; cheap)
+        base = np.full((sz, num_components), -np.inf, dtype=np.float64)
+        norm_const = np.bincount(enc_prior[0], weights=(enc_prior[2] * estimate.w[enc_prior[1]]),
+                                 minlength=sz)
+        norm_const = np.log(norm_const[enc_prior_flag])
+        base[~enc_prior_flag, :] = estimate.log_w
+        base[enc_prior[0], enc_prior[1]] = enc_prior[3] + estimate.log_w[enc_prior[1]]
+        nc = np.zeros((sz, 1), dtype=np.float64)
+        nc[enc_prior_flag, 0] = norm_const
+
+        emit = engine.stack([backend_seq_log_density(estimate.components[i], enc_data, engine)
+                             for i in range(num_components)], axis=1)              # (sz, C)
+        ll = engine.asarray(base) + emit - engine.asarray(nc)
+
+        ll_max = engine.max(ll, axis=1, keepdims=True)
+        bad = ll_max <= engine.asarray(-1.0e308)
+        ll = engine.where(bad, engine.asarray(estimate.log_w)[None, :], ll)
+        ll_max = engine.where(bad, engine.asarray(float(np.max(estimate.log_w))), ll_max)
+        e = engine.exp(ll - ll_max)
+        resp = e / engine.sum(e, axis=1, keepdims=True)
+        resp = resp * engine.asarray(weights_np)[:, None]
+
+        resp_np = np.asarray(engine.to_numpy(resp))
+        self.comp_counts += resp_np.sum(axis=0)
+        for i in range(num_components):
+            self.accumulators[i].seq_update(enc_data, resp_np[:, i], estimate.components[i])
+
     def combine(self, suff_stat: Tuple[np.ndarray, Tuple[SS0, ...]]) -> 'SemiSupervisedMixtureEstimatorAccumulator':
         """Aggregate sufficient statistics suff_stat with this accumulator's statistics.
 
@@ -932,3 +971,32 @@ class SemiSupervisedMixtureDataEncoder(DataSequenceEncoder):
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 SemiSupervisedMixtureAccumulator = SemiSupervisedMixtureEstimatorAccumulator
 SemiSupervisedMixtureAccumulatorFactory = SemiSupervisedMixtureEstimatorAccumulatorFactory
+
+
+def _register_ss_mixture_engine_kernel():
+    """Register the engine-resident semi-supervised-mixture kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class SemiSupervisedMixtureKernel(GenericKernel):
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('SemiSupervisedMixtureKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class SemiSupervisedMixtureKernelFactory(KernelFactory):
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return SemiSupervisedMixtureKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(SemiSupervisedMixtureDistribution, SemiSupervisedMixtureKernelFactory())
+
+
+_register_ss_mixture_engine_kernel()
