@@ -41,7 +41,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy',), kernel_status='generic_object')
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_object')
 
     def __init__(self, block_probs: Any, block_assignments: Optional[Any] = None,
                  block_prior: Optional[Any] = None, directed: bool = False,
@@ -107,6 +107,38 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
 
     def seq_log_density(self, x: Sequence[GraphObservation]) -> np.ndarray:
         return np.asarray([self.log_density(obs) for obs in x], dtype=np.float64)
+
+    def backend_seq_log_density(self, x: Sequence[GraphObservation], engine: Any) -> Any:
+        """Engine-routed block-structured Bernoulli edge log-likelihood.
+
+        Each graph's edges are flattened host-side into per-edge (value, block-pair probability)
+        arrays with a graph-segment id; the Bernoulli terms and the segment reduction run on the
+        active engine (differentiable in ``block_probs`` on torch). The optional assignment prior is
+        added per graph.
+        """
+        n = len(x)
+        seg, adj_vals, p_vals = [], [], []
+        priors = np.zeros(n, dtype=np.float64)
+        for gi, obs in enumerate(x):
+            obs = self._obs_with_assignments(obs)
+            adj = obs.adjacency
+            assignments = obs.block_assignments
+            for i, j in _edge_indices(adj.shape[0], directed=self.directed, self_loops=self.self_loops):
+                seg.append(gi)
+                adj_vals.append(float(adj[i, j]))
+                p_vals.append(float(self.block_probs[assignments[i], assignments[j]]))
+            if self.include_assignment_prior:
+                priors[gi] = float(np.sum(self.log_block_prior[assignments]))
+
+        out = engine.zeros(n)
+        if seg:
+            p_arr = np.clip(np.asarray(p_vals, dtype=np.float64), _EPS, 1.0 - _EPS)
+            av = engine.asarray(np.asarray(adj_vals, dtype=np.float64))
+            bern = av * engine.asarray(np.log(p_arr)) + (1.0 - av) * engine.asarray(np.log1p(-p_arr))
+            out = engine.index_add(out, engine.asarray(np.asarray(seg, dtype=np.int64)), bern)
+        if self.include_assignment_prior:
+            out = out + engine.asarray(priors)
+        return out
 
     def _prior_predictive_link_probability(self, same_node: bool = False) -> float:
         if same_node:
