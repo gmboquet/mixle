@@ -90,5 +90,57 @@ class HmmEngineForwardBackwardTestCase(unittest.TestCase):
                                 '%s transition counts differ' % name)
 
 
+class HmmEngineEStepTestCase(unittest.TestCase):
+    """The engine-resident E-step (accumulator + kernel) matches the host Baum-Welch."""
+
+    def setUp(self):
+        topics = [CategoricalDistribution({'a': 0.7, 'b': 0.2, 'c': 0.1}),
+                  CategoricalDistribution({'a': 0.1, 'b': 0.3, 'c': 0.6})]
+        self.numba_dist = HiddenMarkovModelDistribution(
+            topics, [0.6, 0.4], [[0.7, 0.3], [0.4, 0.6]],
+            len_dist=CategoricalDistribution({3: 0.4, 4: 0.6}), use_numba=True)
+        self.blocked_dist = HiddenMarkovModelDistribution(
+            topics, [0.6, 0.4], [[0.7, 0.3], [0.4, 0.6]],
+            len_dist=CategoricalDistribution({3: 0.4, 4: 0.6}), use_numba=False)
+        self.data = self.numba_dist.sampler(seed=3).sample(40)
+        self.weights = np.linspace(0.5, 1.5, len(self.data))
+        self.engines = [('numpy', NUMPY_ENGINE)] + ([('torch', _TORCH)] if _TORCH is not None else [])
+
+    def _assert_value_parity(self, host_value, eng_value, label):
+        for k in (1, 2, 3):  # init / state / transition counts
+            self.assertTrue(np.allclose(np.asarray(host_value[k]), np.asarray(eng_value[k]), atol=1.0e-8),
+                            '%s suff-stat block %d differs' % (label, k))
+        for host_acc, eng_acc in zip(host_value[4], eng_value[4]):
+            for key in set(host_acc) | set(eng_acc):
+                self.assertAlmostEqual(host_acc.get(key, 0.0), eng_acc.get(key, 0.0), places=7,
+                                       msg='%s emission counts differ' % label)
+
+    def test_accumulator_seq_update_engine_parity(self):
+        for dist in (self.numba_dist, self.blocked_dist):
+            est = dist.estimator()
+            enc = dist.dist_to_encoder().seq_encode(self.data)
+            host = est.accumulator_factory().make()
+            host.seq_update(enc, self.weights, dist)
+            host_value = host.value()
+            for name, engine in self.engines:
+                with self.subTest(encoding=('numba' if dist.use_numba else 'blocked'), engine=name):
+                    acc = est.accumulator_factory().make()
+                    acc.seq_update_engine(enc, self.weights, dist, engine)
+                    self._assert_value_parity(host_value, acc.value(), name)
+
+    def test_engine_kernel_accumulate_parity(self):
+        dist = self.blocked_dist          # torch-capable encoding
+        est = dist.estimator()
+        enc = dist.dist_to_encoder().seq_encode(self.data)
+        host = est.accumulator_factory().make()
+        host.seq_update(enc, self.weights, dist)
+        host_value = host.value()
+        for name, engine in self.engines:
+            with self.subTest(engine=name):
+                kernel = dist.kernel(engine=engine, estimator=est)
+                self.assertEqual(type(kernel).__name__, 'HiddenMarkovModelKernel')
+                self._assert_value_parity(host_value, kernel.accumulate(enc, self.weights), name)
+
+
 if __name__ == '__main__':
     unittest.main()
