@@ -333,21 +333,10 @@ class ComputeMetadataTestCase(unittest.TestCase):
         self.assertEqual(capabilities_for(step_edit).kernel_status, 'generic_table')
 
     def test_permanent_numpy_only_capabilities_are_registered(self):
-        # HeterogeneousPCFG was reversed: its CKY inside DP now runs through ComputeEngine ops
-        # (numpy + torch). SparseMarkovAssociation remains NumPy/SciPy-only.
-        expected = {
-            SparseMarkovAssociationDistribution,
-        }
-        self.assertEqual(set(numpy_only_distribution_types()), expected)
-        self.assertTrue(expected.issubset(set(registered_capability_types())))
-        for dist_type in expected:
-            caps = capabilities_for(dist_type)
-            with self.subTest(dist=dist_type.__name__):
-                self.assertEqual(caps.engine_ready, ('numpy',))
-                self.assertEqual(caps.kernel_status, 'numpy_only')
-                self.assertTrue(caps.is_permanently_numpy_only)
-                self.assertIsNotNone(caps.numpy_only_reason)
-                self.assertIsNone(declaration_for(dist_type))
+        # No distribution remains permanently NumPy-only: HeterogeneousPCFG (CKY inside) and
+        # SparseMarkovAssociation (sparse-gather + engine reductions) were both routed through
+        # ComputeEngine ops (numpy + torch).
+        self.assertEqual(set(numpy_only_distribution_types()), set())
 
     def test_latent_family_capabilities_are_legacy_numpy_not_permanent(self):
         for dist_type in (
