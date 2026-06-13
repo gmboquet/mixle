@@ -22,7 +22,7 @@ from pysp.bstats import (
     GaussianEstimator, GeometricDistribution, LogGaussianDistribution,
     LogGaussianEstimator, MixtureDistribution, MixtureEstimator,
     OptionalDistribution, PoissonDistribution, PoissonEstimator, IntegerCategoricalDistribution,
-    initialize, estimate, seq_encode, seq_estimate,
+    initialize, estimate, mixture_prior, seq_encode, seq_estimate,
 )
 from pysp.bstats.bestimation import optimize, k_fold_split_index
 from pysp.bstats.dpm import DirichletProcessMixtureEstimator
@@ -121,6 +121,71 @@ class ConjugateUpdateTestCase(unittest.TestCase):
             self.assertEqual(d.log_density('b'), -np.inf)
             enc = d.seq_encode(['a', 'b'])
             np.testing.assert_allclose(d.seq_log_density(enc), np.asarray([0.0, -np.inf]))
+
+
+class MixtureConjugatePriorTestCase(unittest.TestCase):
+    """Mixture priors should compose weight and component conjugate priors."""
+
+    def test_mixture_prior_helper_sets_weight_and_component_priors(self):
+        weight_prior = DirichletDistribution(np.asarray([2.0, 3.0]))
+        component_priors = [
+            NormalGammaDistribution(0.0, 1.0, 2.0, 3.0),
+            NormalGammaDistribution(5.0, 2.0, 4.0, 6.0),
+        ]
+
+        prior = mixture_prior(weight_prior, component_priors)
+        est = MixtureEstimator([GaussianEstimator(), GaussianEstimator()], prior=prior)
+
+        self.assertIs(est.prior, weight_prior)
+        self.assertIs(est.estimators[0].get_prior(), component_priors[0])
+        self.assertIs(est.estimators[1].get_prior(), component_priors[1])
+
+        rt = est.get_prior()
+        self.assertIs(rt.dists[0], weight_prior)
+        self.assertIs(rt.dists[1].dists[0], component_priors[0])
+        self.assertIs(rt.dists[1].dists[1], component_priors[1])
+
+        dist = MixtureDistribution(
+            [GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0)],
+            [0.4, 0.6],
+            prior={'weights': weight_prior, 'components': component_priors},
+        )
+
+        self.assertIs(dist.prior, weight_prior)
+        self.assertIs(dist.components[0].get_prior(), component_priors[0])
+        self.assertIs(dist.components[1].get_prior(), component_priors[1])
+
+    def test_mixture_estimate_carries_weight_and_component_posteriors(self):
+        weight_prior = DirichletDistribution(np.asarray([2.0, 3.0]))
+        component_priors = [
+            NormalGammaDistribution(0.0, 1.0, 2.0, 3.0),
+            NormalGammaDistribution(5.0, 2.0, 4.0, 6.0),
+        ]
+        est = MixtureEstimator(
+            [GaussianEstimator(), GaussianEstimator()],
+            prior=mixture_prior(weight_prior, component_priors),
+        )
+
+        counts = np.asarray([3.0, 5.0])
+        comp_stats = (
+            (3.0, 5.0, 3.0, 3.0, 3.0),
+            (20.0, 102.0, 20.0, 4.0, 4.0),
+        )
+        model = est.estimate((counts, comp_stats))
+
+        expected_weight_alpha = weight_prior.get_parameters() + counts
+        np.testing.assert_allclose(model.get_prior().dists[0].get_parameters(), expected_weight_alpha)
+        expected_w_mode = expected_weight_alpha - 1.0
+        expected_w_mode /= expected_w_mode.sum()
+        np.testing.assert_allclose(model.w, expected_w_mode)
+
+        expected_components = [
+            GaussianEstimator(prior=component_priors[i]).estimate(comp_stats[i])
+            for i in range(2)
+        ]
+        for component, expected in zip(model.components, expected_components):
+            np.testing.assert_allclose(component.get_prior().get_parameters(),
+                                       expected.get_prior().get_parameters())
 
 
 class PriorDensityTestCase(unittest.TestCase):

@@ -31,6 +31,23 @@ def _same_value(a: Any, b: Any) -> bool:
 class PointMassDistribution(SequenceEncodableProbabilityDistribution):
     """Fixed Dirac/point-mass distribution assigning all mass to one value."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec
+        return DistributionDeclaration(
+            name='point_mass',
+            distribution_type=cls,
+            parameters=(ParameterSpec('value', constraint='fixed', differentiable=False),),
+            statistics=(),
+            support='fixed_atom',
+            differentiable=False,
+        )
+
     def __init__(self, value: Any, name: Optional[str] = None, keys: Optional[str] = None) -> None:
         self.value = value
         self.name = name
@@ -51,6 +68,35 @@ class PointMassDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         return np.where(x, 0.0, -np.inf)
+
+    def backend_seq_log_density(self, x: np.ndarray, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density from encoded equality flags."""
+        xx = engine.asarray(x)
+        return engine.where(xx, engine.zeros(xx.shape), engine.asarray(-np.inf))
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['PointMassDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked point-mass parameters for identical fixed atoms."""
+        value = dists[0].value
+        if any(not _same_value(dist.value, value) for dist in dists):
+            raise ValueError('Stacked PointMassDistribution components require the same fixed atom.')
+        return {'num_components': len(dists)}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: np.ndarray, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of point-mass log densities."""
+        xx = engine.asarray(x)
+        nobs = int(tuple(getattr(xx, 'shape', (len(x),)))[0])
+        num_components = int(params['num_components'])
+        base = engine.where(xx, engine.zeros(tuple(getattr(xx, 'shape', (nobs,)))),
+                            engine.asarray(-np.inf))
+        return base[:, None] + engine.zeros((nobs, num_components))
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: np.ndarray, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[None, ...]:
+        """Return per-component empty statistics for fixed point masses."""
+        return tuple(None for _ in range(int(params['num_components'])))
 
     def sampler(self, seed: Optional[int] = None) -> 'PointMassSampler':
         """Return a sampler for drawing observations from this distribution."""

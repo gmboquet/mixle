@@ -577,6 +577,13 @@ class SequenceEstimator(ParameterEstimator):
 
 		return SequenceEstimatorAccumulatorFactory(self.estimator.accumulator_factory(), self.len_normalized, len_factory, self.keys)
 
+	def scale_suff_stat(self, suff_stat, c):
+		"""Scale entry and length sufficient statistics through child estimators."""
+		entry_stat = self.estimator.scale_suff_stat(suff_stat[0], c)
+		if self.len_estimator is None or suff_stat[1] is None:
+			return entry_stat, None
+		return entry_stat, self.len_estimator.scale_suff_stat(suff_stat[1], c)
+
 	def estimate(self, suff_stat):
 		"""Estimate a SequenceDistribution from sufficient statistics.
 

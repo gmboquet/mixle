@@ -30,6 +30,31 @@ from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationInde
 class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
     """IntegerUniformSpikeDistribution object: uniform over an integer range with a spike of mass p at k."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_table')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='integer_uniform_spike',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('k', constraint='integer', differentiable=False),
+                ParameterSpec('num_vals', constraint='positive_integer', differentiable=False),
+                ParameterSpec('p', constraint='unit_interval'),
+                ParameterSpec('min_val', constraint='integer', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('min_val', kind='metadata', additive=False, scales=False),
+                StatisticSpec('count_vec'),
+            ),
+            support='bounded_integer_spike',
+            differentiable=False,
+        )
+
     def __init__(self, k: int, num_vals: int,  p: float, min_val: Optional[int] = 0, name: Optional[str] = None) \
             -> None:
         """IntegerUniformSpikeDistribution object for creating a uniform integer distribution with a spike on k.
@@ -130,6 +155,59 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
         rv[in_range] = rv1
 
         return rv
+
+    def backend_seq_log_density(self, x: np.ndarray, engine: Any) -> Any:
+        """Engine-neutral log-density for encoded integer spike observations."""
+        xx = engine.asarray(x)
+        in_range = (xx >= self.min_val) & (xx <= self.max_val)
+        is_spike = xx == self.k
+        return engine.where(in_range,
+                            engine.where(is_spike, engine.asarray(self.log_p), engine.asarray(self.log_1p)),
+                            engine.asarray(-np.inf))
+
+    @classmethod
+    def backend_stacked_params(cls, dists: List['IntegerUniformSpikeDistribution'],
+                               engine: Any) -> Dict[str, Any]:
+        """Return stacked integer-uniform-spike parameters for a shared support."""
+        min_val = int(dists[0].min_val)
+        num_vals = int(dists[0].num_vals)
+        if any(int(dist.min_val) != min_val or int(dist.num_vals) != num_vals for dist in dists):
+            raise ValueError('Stacked IntegerUniformSpikeDistribution components require shared support.')
+        return {
+            '__pysp_component_axis__': {'k': 0, 'log_p': 0, 'log_1p': 0},
+            'min_val': min_val,
+            'max_val': min_val + num_vals - 1,
+            'num_vals': num_vals,
+            'k': engine.asarray(np.asarray([dist.k for dist in dists], dtype=np.int64)),
+            'log_p': engine.asarray(np.asarray([dist.log_p for dist in dists], dtype=np.float64)),
+            'log_1p': engine.asarray(np.asarray([dist.log_1p for dist in dists], dtype=np.float64)),
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: np.ndarray, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of integer-uniform-spike log densities."""
+        xx = engine.asarray(x)
+        in_range = (xx >= params['min_val']) & (xx <= params['max_val'])
+        is_spike = xx[:, None] == params['k'][None, :]
+        rv = engine.where(is_spike, params['log_p'][None, :], params['log_1p'][None, :])
+        return engine.where(in_range[:, None], rv, engine.asarray(-np.inf))
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: np.ndarray, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any]:
+        """Return component-stacked legacy ``(min_val, count_vec)`` statistics."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        rel = xx - engine.asarray(params['min_val'])
+        rows = []
+        zero_rows = ww * engine.asarray(0.0)
+        for value_index in range(int(params['num_vals'])):
+            mask = rel == engine.asarray(value_index)
+            rows.append(engine.sum(engine.where(mask[:, None], ww, zero_rows), axis=0))
+        count_mat = engine.stack(rows, axis=1)
+        min_vals = engine.asarray(np.full(int(params['num_components']), int(params['min_val'])))
+        return min_vals, count_mat
 
     def sampler(self, seed: Optional[int] = None) -> 'IntegerUniformSpikeSampler':
         """Create an IntegerUniformSpikeSampler from parameters of this distribution.
@@ -448,6 +526,13 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
         self.max_val = x[0] + len(x[1]) - 1
         self.count_vec = x[1]
 
+        return self
+
+    def scale(self, c: float) -> 'IntegerUniformSpikeAccumulator':
+        """Scale linear counts while preserving the integer support offset."""
+        if self.count_vec is not None:
+            self.count_vec *= c
+        self.count *= c
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

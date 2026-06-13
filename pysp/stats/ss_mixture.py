@@ -61,6 +61,29 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
     """SemiSupervisedMixtureDistribution models observations (value, prior) where the optional
     prior labels re-weight the mixture weights over the listed components."""
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.components)),
+                                        kernel_status='generic_latent')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        children = tuple(declaration_for(component) for component in self.components)
+        children = tuple(child for child in children if child is not None)
+        return DistributionDeclaration(
+            name='semi_supervised_mixture',
+            distribution_type=type(self),
+            parameters=(ParameterSpec('w', constraint='simplex_vector'),),
+            statistics=(
+                StatisticSpec('component_counts'),
+                StatisticSpec('components', kind='tuple'),
+            ),
+            support='labeled_mixture',
+            children=children,
+            child_roles=tuple('component_%d' % i for i in range(len(children))),
+            differentiable=False,
+        )
+
     def __init__(self, components: Sequence[SequenceEncodableProbabilityDistribution],
                  w: Union[List[float], np.ndarray], name: Optional[str] = None) -> None:
         """Create SemiSupervisedMixtureDistribution object.
@@ -218,6 +241,39 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
             rv[~good_rows] = -np.inf
 
             return rv
+
+    def backend_seq_log_density(self, x: E, engine: Any) -> Any:
+        """Engine-neutral semi-supervised mixture log-density for encoded observations."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        sz, enc_data, (enc_prior, enc_prior_sum, enc_prior_flag), _ = x
+        prior_idx, prior_comp, prior_val, prior_log_val = enc_prior
+        has_prior_idx = np.flatnonzero(enc_prior_flag)
+        no_prior_idx = np.flatnonzero(~enc_prior_flag)
+
+        ll_mat = engine.zeros((sz, self.num_components)) + engine.asarray(-np.inf)
+        log_w = engine.asarray(self.log_w)
+
+        if len(no_prior_idx):
+            ll_mat[engine.asarray(no_prior_idx), :] = log_w
+
+        if len(prior_idx):
+            entry_scores = engine.asarray(prior_log_val + self.log_w[prior_comp])
+            ll_mat[engine.asarray(prior_idx), engine.asarray(prior_comp)] = entry_scores
+            norm_weights = engine.asarray(prior_val * self.w[prior_comp])
+            norm_const = engine.log(
+                engine.bincount(engine.asarray(prior_idx), weights=norm_weights, minlength=sz)[
+                    engine.asarray(has_prior_idx)])
+        else:
+            norm_const = None
+
+        for i in range(self.num_components):
+            if not self.zw[i]:
+                ll_mat[:, i] = ll_mat[:, i] + backend_seq_log_density(self.components[i], enc_data, engine)
+                if norm_const is not None:
+                    ll_mat[engine.asarray(has_prior_idx), i] = ll_mat[engine.asarray(has_prior_idx), i] - norm_const
+
+        return engine.logsumexp(ll_mat, axis=1)
 
     def seq_posterior(self, x: E) -> np.ndarray:
         """Vectorized component posteriors on sequence encoded data x.

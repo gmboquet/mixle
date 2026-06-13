@@ -19,6 +19,33 @@ from pysp.utils.special import gammaln
 class StudentTDistribution(SequenceEncodableProbabilityDistribution):
     """Student's t distribution with degrees of freedom df, location loc, and scale > 0."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='student_t',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('df', constraint='positive'),
+                ParameterSpec('loc'),
+                ParameterSpec('scale', constraint='positive'),
+            ),
+            statistics=(StatisticSpec('sum'), StatisticSpec('sum2'), StatisticSpec('count')),
+            support='real',
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row Student-t sufficient statistics in accumulator order."""
+        xx = engine.asarray(x)
+        return xx, xx * xx, xx * 0.0 + engine.asarray(1.0)
+
     def __init__(self, df: float, loc: float = 0.0, scale: float = 1.0,
                  name: Optional[str] = None, keys: Optional[str] = None) -> None:
         if df <= 0.0 or scale <= 0.0 or not np.isfinite(df) or not np.isfinite(scale):
@@ -48,6 +75,37 @@ class StudentTDistribution(SequenceEncodableProbabilityDistribution):
         """Return vectorized log-density values for sequence-encoded observations."""
         z = (x - self.loc) / self.scale
         return self.log_const - 0.5 * (self.df + 1.0) * np.log1p((z * z) / self.df)
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, df: Any, loc: Any, scale: Any, engine: Any) -> Any:
+        """Engine-neutral Student-t log-density from explicit parameters."""
+        z = (x - loc) / scale
+        half = engine.asarray(0.5)
+        one = engine.asarray(1.0)
+        log_const = (engine.gammaln((df + one) * half) - engine.gammaln(df * half)
+                     - half * engine.log(df * engine.asarray(math.pi)) - engine.log(scale))
+        return log_const - half * (df + one) * engine.log(one + (z * z) / df)
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x), engine.asarray(self.df), engine.asarray(self.loc), engine.asarray(self.scale), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['StudentTDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Student-t parameters for a homogeneous mixture kernel."""
+        return {
+            'df': engine.asarray([d.df for d in dists]),
+            'loc': engine.asarray([d.loc for d in dists]),
+            'scale': engine.asarray([d.scale for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Student-t log densities."""
+        xx = engine.asarray(x)
+        return cls.backend_log_density_from_params(
+            xx[:, None], params['df'][None, :], params['loc'][None, :], params['scale'][None, :], engine)
 
     def sampler(self, seed: Optional[int] = None) -> 'StudentTSampler':
         """Return a sampler for drawing observations from this distribution."""
@@ -148,8 +206,9 @@ class StudentTEstimator(ParameterEstimator):
     """Moment-style fixed-df estimator for Student's t location and scale.
 
     The exact MLE has no simple closed-form update. This estimator keeps df fixed
-    and uses weighted moments, while gradient optimizers can fit all three
-    parameters through pysp.stats.torch_engine.
+    and uses weighted moments, while generic gradient optimizers such as
+    ``pysp.utils.estimation.fit_mle`` / ``fit_map`` can fit all three
+    parameters through distribution-owned backend math.
     """
 
     def __init__(self, df: float = 5.0, pseudo_count: Optional[float] = None,

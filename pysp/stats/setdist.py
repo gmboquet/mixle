@@ -32,6 +32,29 @@ from typing import Optional, Dict, Tuple, Any, Dict, List, Sequence, TypeVar, Un
 class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
     """Bernoulli set distribution: each support element is included in an observed set independently."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_table')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='bernoulli_set',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('pmap', constraint='simplex_map'),
+                ParameterSpec('min_prob', constraint='unit_interval', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('inclusion_counts', kind='count_map'),
+                StatisticSpec('total_weight'),
+            ),
+            support='finite_hashable_set',
+            differentiable=False,
+        )
+
     def __init__(self, pmap: Dict[Any, float], min_prob: float = 1.0e-128, name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
         """BernoulliSetDistribution object for creating a Bernoulli set distribution.
@@ -155,11 +178,100 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         rv += self.nlog_sum
 
         if self.num_required != 0:
-            required_loc = np.isin(val_map_inv, self.required)
+            required_loc = np.isin(val_map_inv, list(self.required))
             req_cnt = np.bincount(idx, weights=required_loc[xs], minlength=sz)
             rv[req_cnt != self.num_required] = -np.inf
 
         return rv
+
+    def backend_seq_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, np.ndarray], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded object-valued sets."""
+        sz, idx, val_map_inv, xs = x
+        rv = engine.zeros(sz) + float(self.nlog_sum)
+
+        if len(xs) > 0:
+            dlog_loc = np.asarray([self.log_dmap[u] for u in val_map_inv], dtype=np.float64)
+            rv = engine.index_add(rv, engine.asarray(idx), engine.asarray(dlog_loc)[engine.asarray(xs)])
+
+        if self.num_required != 0:
+            req_cnt = engine.zeros(sz)
+            if len(xs) > 0:
+                required_loc = np.isin(val_map_inv, list(self.required))
+                req_cnt = engine.index_add(req_cnt, engine.asarray(idx),
+                                           engine.asarray(np.asarray(required_loc[xs], dtype=np.float64)))
+            rv = engine.where(req_cnt != float(self.num_required), engine.asarray(np.full(sz, -np.inf)), rv)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['BernoulliSetDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Bernoulli-set parameters for shared object support."""
+        labels = tuple(dists[0].pmap.keys())
+        min_prob = float(dists[0].min_prob)
+        if any(tuple(dist.pmap.keys()) != labels or float(dist.min_prob) != min_prob for dist in dists):
+            raise ValueError('Stacked BernoulliSetDistribution components require shared support/min_prob.')
+        log_d = np.asarray([[dist.log_dmap[label] for dist in dists] for label in labels], dtype=np.float64)
+        required = np.asarray([[label in dist.required for dist in dists] for label in labels], dtype=np.float64)
+        num_required = np.asarray([dist.num_required for dist in dists], dtype=np.float64)
+        return {
+            '__pysp_component_axis__': {'log_d': 1, 'nlog_sum': 0, 'required': 1, 'num_required': 0},
+            'labels': labels,
+            'log_d': engine.asarray(log_d),
+            'nlog_sum': engine.asarray(np.asarray([dist.nlog_sum for dist in dists], dtype=np.float64)),
+            'required': engine.asarray(required),
+            'num_required': engine.asarray(num_required),
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[int, np.ndarray, np.ndarray, np.ndarray],
+                                    params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Bernoulli-set log densities."""
+        sz, idx, val_map_inv, xs = x
+        label_to_idx = {label: i for i, label in enumerate(params['labels'])}
+        mapped = np.asarray([label_to_idx.get(label, -1) for label in val_map_inv], dtype=np.int64)
+        good = mapped >= 0
+        safe = np.clip(mapped, 0, max(0, len(params['labels']) - 1))
+        rv = engine.zeros((sz, int(params['num_components']))) + params['nlog_sum'][None, :]
+
+        if len(xs) > 0:
+            log_dloc = params['log_d'][engine.asarray(safe), :]
+            log_dloc = engine.where(engine.asarray(good)[:, None], log_dloc, engine.asarray(-np.inf))
+            rv = engine.index_add(rv, engine.asarray(idx), log_dloc[engine.asarray(xs), :])
+
+        if np.any(np.asarray(engine.to_numpy(params['num_required'])) != 0):
+            req_cnt = engine.zeros((sz, int(params['num_components'])))
+            if len(xs) > 0:
+                required_loc = params['required'][engine.asarray(safe), :]
+                required_loc = engine.where(engine.asarray(good)[:, None], required_loc, engine.asarray(0.0))
+                req_cnt = engine.index_add(req_cnt, engine.asarray(idx), required_loc[engine.asarray(xs), :])
+            rv = engine.where(req_cnt != params['num_required'][None, :], engine.asarray(-np.inf), rv)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Tuple[int, np.ndarray, np.ndarray, np.ndarray],
+                                              weights: Any, params: Dict[str, Any], engine: Any) \
+            -> Tuple[Tuple[Dict[Any, float], float], ...]:
+        """Return per-component legacy ``(count_map, total_weight)`` statistics."""
+        sz, idx, val_map_inv, xs = x
+        xx = engine.asarray(xs)
+        ww = engine.asarray(weights)
+        count_rows = []
+        if len(xs) > 0:
+            row_weights = ww[engine.asarray(idx)]
+            zero_rows = row_weights * engine.asarray(0.0)
+            for value_index in range(len(val_map_inv)):
+                mask = xx == engine.asarray(value_index)
+                count_rows.append(engine.sum(engine.where(mask[:, None], row_weights, zero_rows), axis=0))
+            counts = np.asarray(engine.to_numpy(engine.stack(count_rows, axis=0)), dtype=np.float64)
+        else:
+            counts = np.zeros((0, int(params['num_components'])), dtype=np.float64)
+        totals = np.asarray(engine.to_numpy(engine.sum(ww, axis=0)), dtype=np.float64)
+        return tuple(({
+            val_map_inv[j]: float(counts[j, component])
+            for j in range(len(val_map_inv))
+        }, float(totals[component])) for component in range(int(params['num_components'])))
 
     def sampler(self, seed: Optional[int] = None) -> 'BernoulliSetSampler':
         """Create a BernoulliSetSampler object from parameters of BernoulliSetDistribution instance.
@@ -546,4 +658,3 @@ class BernoulliSetDataEncoder(DataSequenceEncoder):
         xs = np.asarray(xs, dtype=np.int32)
 
         return len(x), idx, val_map, xs
-

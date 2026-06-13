@@ -22,6 +22,29 @@ from typing import Optional, Tuple, Sequence, Dict, Union, Any
 class GeometricDistribution(SequenceEncodableProbabilityDistribution):
     """Geometric distribution on ``{1, 2, ...}`` with success probability ``p``."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='geometric',
+            distribution_type=cls,
+            parameters=(ParameterSpec('p', constraint='unit_interval'),),
+            statistics=(StatisticSpec('count'), StatisticSpec('sum')),
+            support='positive_integer',
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row Geometric sufficient statistics in accumulator order."""
+        xx = engine.asarray(x)
+        return xx * 0.0 + engine.asarray(1.0), xx
+
     def __init__(self, p: float, name: Optional[str] = None) -> None:
         """GeometricDistribution object defining geometric distribution with probability of success p.
 
@@ -104,6 +127,34 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         rv = np.where(good, rv, -np.inf)
 
         return rv
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, p: Any, engine: Any) -> Any:
+        """Engine-neutral geometric log-density from explicit parameters."""
+        one = engine.asarray(1.0)
+        good = (x >= one) & (engine.floor(x) == x)
+        log_p = engine.log(p)
+        log_1p = engine.log(one - p)
+        rv = (x - one) * log_1p + log_p
+        at_one = engine.where((x == one) & good, engine.asarray(0.0), engine.asarray(-np.inf))
+        rv = engine.where(p == one, at_one, rv)
+        return engine.where(good, rv, engine.asarray(-np.inf))
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        xx = engine.asarray(x)
+        return self.backend_log_density_from_params(xx, engine.asarray(self.p), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['GeometricDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked geometric parameters for a homogeneous mixture kernel."""
+        return {'p': engine.asarray([d.p for d in dists])}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of geometric log densities."""
+        xx = engine.asarray(x)
+        return cls.backend_log_density_from_params(xx[:, None], params['p'][None, :], engine)
 
     def sampler(self, seed: Optional[int] = None) -> 'GeometricSampler':
         """Creates GeometricSampler object from GeometricDistribution instance.

@@ -1,3 +1,5 @@
+"""Run heterogeneous mixture estimation on Spark RDD partitions."""
+
 from pyspark import SparkContext, SparkConf
 from pysp.stats import *
 from pysp.stats.rdd_sampler import sample_rdd
@@ -80,4 +82,3 @@ if __name__ == '__main__':
 		old_tll = tll
 
 	print(str(mm))
-

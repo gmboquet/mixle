@@ -1,17 +1,15 @@
 """Tests for pysp.stats.grammar, pysp.stats.markov_transform, and pysp.stats.sparse_markov_transform.
 
-Covers: clean module imports (grammar must import without the optional 'cnrg' package), the guarded
-ImportError raised at first cnrg use, the GrammarDistribution.estimator() fix, markov_transform
-sample/estimate smoke on tiny data, and DataSequenceEncoder equality / encode round-trip consistency.
+Covers: clean grammar module imports without cnrg, the in-tree grammar accumulator/sampler path, the
+GrammarDistribution.estimator() fix, markov_transform sample/estimate smoke on tiny data, and DataSequenceEncoder
+equality / encode round-trip consistency.
 """
 import importlib
-import importlib.util
 import unittest
 import warnings
 
+import networkx as nx
 import numpy as np
-
-CNRG_MISSING = importlib.util.find_spec('cnrg') is None
 
 
 def _make_markov_transform_dist(alpha=0.05, with_len=True):
@@ -79,6 +77,18 @@ class ImportTestCase(unittest.TestCase):
 
 class GrammarTestCase(unittest.TestCase):
 
+    @staticmethod
+    def _grammar():
+        from pysp.stats.grammar import GrammarRule, VRG
+
+        graph = nx.Graph()
+        graph.add_node(0, label='A', node_color='')
+        graph.add_node(1, label='B', node_color='')
+        graph.add_edge(0, 1, weight=1.0, edge_color='')
+        grammar = VRG(name='tiny')
+        grammar.add_rule(GrammarRule(2, graph, frequency=3.0))
+        return grammar
+
     def test_estimator_does_not_pass_distribution_as_pseudo_count(self):
         from pysp.stats.grammar import GrammarDistribution, GrammarEstimator
 
@@ -109,18 +119,26 @@ class GrammarTestCase(unittest.TestCase):
         self.assertEqual(enc.seq_encode(data), data)
         self.assertEqual(str(enc), 'GrammarDataEncoder')
 
-    @unittest.skipUnless(CNRG_MISSING, "cnrg is installed; guarded ImportError not expected")
-    def test_cnrg_required_at_first_use(self):
-        from pysp.stats.grammar import GrammarEstimatorAccumulator, GrammarEstimator, GrammarSampler
+    def test_in_tree_grammar_accumulates_scores_and_samples_without_cnrg(self):
+        from pysp.stats.grammar import GrammarDistribution, GrammarEstimator, GrammarEstimatorAccumulator, \
+            GrammarSampler
 
-        with self.assertRaisesRegex(ImportError, 'cnrg'):
-            GrammarEstimatorAccumulator()
-        with self.assertRaisesRegex(ImportError, 'cnrg'):
-            GrammarEstimator().accumulator_factory().make()
-        with self.assertRaisesRegex(ImportError, 'cnrg'):
-            GrammarSampler(None).sample()
-        with self.assertRaisesRegex(ImportError, 'cnrg'):
-            GrammarSampler(None).sample_seq([10])
+        grammar = self._grammar()
+        dist = GrammarDistribution(grammar, 0.01)
+        self.assertTrue(np.isfinite(dist.log_density(grammar)))
+
+        acc = GrammarEstimatorAccumulator()
+        acc.update(grammar, 2.0, None)
+        fitted = GrammarEstimator().estimate(None, acc.value())
+        self.assertIsInstance(fitted, GrammarDistribution)
+        self.assertEqual(fitted.grammar.rule_dict[2][0].frequency, 6.0)
+
+        sampler = GrammarSampler(grammar, orig_n=4, seed=1)
+        graph = sampler.sample()
+        self.assertGreaterEqual(graph.number_of_nodes(), 4)
+        graphs = sampler.sample_seq([2, 3])
+        self.assertEqual(len(graphs), 2)
+        self.assertTrue(all(g.number_of_nodes() >= 2 for g in graphs))
 
 
 class MarkovTransformTestCase(unittest.TestCase):

@@ -1,3 +1,5 @@
+"""Fit a two-component binomial mixture with the standard EM optimizer."""
+
 from pysp.stats import *
 from pysp.utils.estimation import optimize
 import numpy as np

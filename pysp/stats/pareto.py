@@ -18,6 +18,29 @@ from pysp.stats.pdist import (
 class ParetoDistribution(SequenceEncodableProbabilityDistribution):
     """Pareto type-I distribution with scale xm > 0 and shape alpha > 0."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='pareto',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('xm', constraint='positive'),
+                ParameterSpec('alpha', constraint='positive'),
+            ),
+            statistics=(
+                StatisticSpec('count'),
+                StatisticSpec('sum_of_logs'),
+                StatisticSpec('min_val', kind='support_bound', additive=False, scales=False),
+            ),
+            support='positive_tail',
+        )
+
     def __init__(self, xm: float, alpha: float, name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
         if xm <= 0.0 or alpha <= 0.0 or not np.isfinite(xm) or not np.isfinite(alpha):
@@ -52,6 +75,46 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
         xx, lx = x
         rv = self.log_alpha + self.alpha * self.log_xm - (self.alpha + 1.0) * lx
         return np.where(xx >= self.xm, rv, -np.inf)
+
+    @staticmethod
+    def backend_log_density_from_params(vals: Any, log_vals: Any, xm: Any, alpha: Any, engine: Any) -> Any:
+        """Engine-neutral Pareto log-density from explicit parameters."""
+        rv = engine.log(alpha) + alpha * engine.log(xm) - (alpha + engine.asarray(1.0)) * log_vals
+        return engine.where(vals >= xm, rv, engine.asarray(-np.inf))
+
+    def backend_seq_log_density(self, x: Tuple[Any, Any], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x[0]), engine.asarray(x[1]), engine.asarray(self.xm), engine.asarray(self.alpha), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['ParetoDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Pareto parameters for a homogeneous mixture kernel."""
+        return {
+            'xm': engine.asarray([d.xm for d in dists]),
+            'alpha': engine.asarray([d.alpha for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Any, Any], params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Pareto log densities."""
+        vals = engine.asarray(x[0])
+        log_vals = engine.asarray(x[1])
+        return cls.backend_log_density_from_params(
+            vals[:, None], log_vals[:, None], params['xm'][None, :], params['alpha'][None, :], engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Tuple[Any, Any], weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any, Any]:
+        """Return stacked Pareto sufficient statistics using engine-resident arrays."""
+        vals = engine.asarray(x[0])
+        log_vals = engine.asarray(x[1])
+        ww = engine.asarray(weights)
+        mask = ww > 0.0
+        count = engine.sum(ww, axis=0)
+        sum_logs = engine.sum(ww * log_vals[:, None], axis=0)
+        min_val = -engine.max(engine.where(mask, -vals[:, None], engine.asarray(-np.inf)), axis=0)
+        return count, sum_logs, min_val
 
     def sampler(self, seed: Optional[int] = None) -> 'ParetoSampler':
         """Return a sampler for drawing observations from this distribution."""
@@ -127,6 +190,12 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = x[0]
         self.sum_of_logs = x[1]
         self.min_val = x[2]
+        return self
+
+    def scale(self, c: float) -> 'ParetoAccumulator':
+        """Scale linear count/log-sum statistics while preserving support bound."""
+        self.count *= c
+        self.sum_of_logs *= c
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

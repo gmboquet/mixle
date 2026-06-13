@@ -18,6 +18,60 @@ from pysp.stats.pdist import (
 class RayleighDistribution(SequenceEncodableProbabilityDistribution):
     """Rayleigh distribution with scale sigma > 0."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='rayleigh',
+            distribution_type=cls,
+            parameters=(ParameterSpec('sigma', constraint='positive'),),
+            statistics=(StatisticSpec('count'), StatisticSpec('sum2')),
+            support='positive_real',
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure=cls.exp_family_base_measure,
+                legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
+            ),
+        )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Tuple[Any, Any, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Rayleigh sufficient statistics for generated scoring."""
+        return (engine.asarray(x[1]),)
+
+    @staticmethod
+    def exp_family_legacy_sufficient_statistics(x: Tuple[Any, Any, Any],
+                                                params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row Rayleigh sufficient statistics in accumulator order."""
+        vals2 = engine.asarray(x[1])
+        return vals2 * 0.0 + engine.asarray(1.0), vals2
+
+    @staticmethod
+    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Rayleigh natural parameters for generated scoring."""
+        sigma2 = params['sigma'] * params['sigma']
+        return (-engine.asarray(0.5) / sigma2,)
+
+    @staticmethod
+    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+        """Return Rayleigh log partition for generated scoring."""
+        sigma2 = params['sigma'] * params['sigma']
+        return engine.log(sigma2)
+
+    @staticmethod
+    def exp_family_base_measure(x: Tuple[Any, Any, Any], engine: Any) -> Any:
+        """Return Rayleigh support/base measure for generated scoring."""
+        vals = engine.asarray(x[0])
+        log_vals = engine.asarray(x[2])
+        return engine.where(vals > 0.0, log_vals, engine.asarray(-np.inf))
+
     def __init__(self, sigma: float, name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
         if sigma <= 0.0 or not np.isfinite(sigma):
@@ -49,6 +103,32 @@ class RayleighDistribution(SequenceEncodableProbabilityDistribution):
         xx, xx2, lx = x
         rv = lx - self.log_sigma2 - xx2 / (2.0 * self.sigma2)
         return np.where(xx >= 0.0, rv, -np.inf)
+
+    @staticmethod
+    def backend_log_density_from_params(vals: Any, vals2: Any, log_vals: Any, sigma: Any, engine: Any) -> Any:
+        """Engine-neutral Rayleigh log-density from explicit parameters."""
+        sigma2 = sigma * sigma
+        rv = log_vals - engine.log(sigma2) - vals2 / (engine.asarray(2.0) * sigma2)
+        return engine.where(vals >= 0.0, rv, engine.asarray(-np.inf))
+
+    def backend_seq_log_density(self, x: Tuple[Any, Any, Any], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x[0]), engine.asarray(x[1]), engine.asarray(x[2]), engine.asarray(self.sigma), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['RayleighDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Rayleigh parameters for a homogeneous mixture kernel."""
+        return {'sigma': engine.asarray([d.sigma for d in dists])}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Any, Any, Any], params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Rayleigh log densities."""
+        vals = engine.asarray(x[0])
+        vals2 = engine.asarray(x[1])
+        log_vals = engine.asarray(x[2])
+        return cls.backend_log_density_from_params(
+            vals[:, None], vals2[:, None], log_vals[:, None], params['sigma'][None, :], engine)
 
     def sampler(self, seed: Optional[int] = None) -> 'RayleighSampler':
         """Return a sampler for drawing observations from this distribution."""

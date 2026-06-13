@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 
 from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution, \
-    SequenceEncodableStatisticAccumulator, StatisticAccumulatorFactory, DataSequenceEncoder, DistributionSampler
+    SequenceEncodableStatisticAccumulator
 
 from typing import Optional, Any, Sequence, Dict, TypeVar, Union, List, Tuple
 T = TypeVar('T')
@@ -37,12 +37,20 @@ VALIDATION_ALPHA = 0.5
 VALIDATION_VARIANCE_FLOOR = 1.0e-12
 
 
-def get_optional_estimator(est: ParameterEstimator, missing_value: Optional[Any] = None, use_bstats: bool = False):
+def _estimator_provider(use_bstats: bool = False):
     if use_bstats:
-        from pysp.bstats.optional import OptionalEstimator
-        return OptionalEstimator(est, missing_value=missing_value)
-    from pysp.stats.optional import OptionalEstimator
-    return OptionalEstimator(est, missing_value=missing_value)
+        import pysp.bstats as provider
+    else:
+        import pysp.stats as provider
+    return provider
+
+
+DictRecordDistribution = _estimator_provider(False).DictRecordDistribution
+DictRecordEstimator = _estimator_provider(False).DictRecordEstimator
+
+
+def get_optional_estimator(est: ParameterEstimator, missing_value: Optional[Any] = None, use_bstats: bool = False):
+    return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value)
 
 
 def get_length_estimator(len_dict: Dict[int, int], pseudo_count: Optional[float] = None,
@@ -59,8 +67,7 @@ def get_length_estimator(len_dict: Dict[int, int], pseudo_count: Optional[float]
         return get_integer_categorical_estimator(dict(len_dict), pseudo_count, emp_suff_stat,
                                                  use_bstats=use_bstats)
     if use_bstats:
-        from pysp.bstats.poisson import PoissonEstimator
-        return PoissonEstimator()
+        return _estimator_provider(True).PoissonEstimator()
     return get_poisson_estimator(dict(len_dict), pseudo_count, emp_suff_stat)
 
 
@@ -70,221 +77,26 @@ def get_sequence_estimator(est: ParameterEstimator, len_dict: Optional[Dict[int,
     len_est = None
     if len_dict:
         len_est = get_length_estimator(len_dict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
-    if use_bstats:
-        from pysp.bstats.sequence import SequenceEstimator
-        return SequenceEstimator(est) if len_est is None else SequenceEstimator(est, len_estimator=len_est)
-    from pysp.stats.sequence import SequenceEstimator
+    SequenceEstimator = _estimator_provider(use_bstats).SequenceEstimator
     return SequenceEstimator(est) if len_est is None else SequenceEstimator(est, len_estimator=len_est)
 
 
 def get_set_estimator(member_dict: Dict[Any, int], num_sets: int, pseudo_count: Optional[float] = None,
                       emp_suff_stat: bool = True, use_bstats: bool = False) -> 'ParameterEstimator':
     """Bernoulli set model with membership probabilities from observed sets."""
+    BernoulliSetEstimator = _estimator_provider(use_bstats).BernoulliSetEstimator
     if use_bstats:
-        from pysp.bstats.setdist import BernoulliSetEstimator
         return BernoulliSetEstimator()
-    from pysp.stats.setdist import BernoulliSetEstimator
     suff_stat = None
     if emp_suff_stat and num_sets > 0:
         suff_stat = {k: v / num_sets for k, v in member_dict.items()}
     return BernoulliSetEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat)
 
 def get_ignored_estimator(use_bstats: bool = False) -> 'ParameterEstimator':
-    if use_bstats:
-        from pysp.bstats.ignored import IgnoredEstimator
-        return IgnoredEstimator()
-    from pysp.stats.ignored import IgnoredEstimator
-    return IgnoredEstimator()
+    return _estimator_provider(use_bstats).IgnoredEstimator()
 
 def get_composite_estimator(ests: Sequence[ParameterEstimator], use_bstats: bool = False) -> 'ParameterEstimator':
-    if use_bstats:
-        from pysp.bstats.composite import CompositeEstimator
-        return CompositeEstimator(ests)
-    from pysp.stats.composite import CompositeEstimator
-    return CompositeEstimator(ests)
-
-
-class DictRecordDistribution(SequenceEncodableProbabilityDistribution):
-    """Product distribution over dict records with a fixed set of keys."""
-
-    def __init__(self, keys: Sequence[Any], dists: Sequence[SequenceEncodableProbabilityDistribution]) -> None:
-        self.keys = tuple(keys)
-        self.dists = tuple(dists)
-        self.count = len(self.keys)
-
-    def __str__(self) -> str:
-        pairs = ['%s: %s' % (repr(k), str(d)) for k, d in zip(self.keys, self.dists)]
-        return 'DictRecordDistribution({%s})' % ', '.join(pairs)
-
-    def density(self, x: Dict[Any, Any]) -> float:
-        return math.exp(self.log_density(x))
-
-    def log_density(self, x: Dict[Any, Any]) -> float:
-        if not isinstance(x, dict):
-            return -np.inf
-        rv = 0.0
-        for key, dist in zip(self.keys, self.dists):
-            rv += dist.log_density(x.get(key, None))
-        return rv
-
-    def seq_log_density(self, x: Tuple[Any, ...]) -> np.ndarray:
-        if self.count == 0:
-            if isinstance(x, tuple) and len(x) == 1 and isinstance(x[0], (int, np.integer)):
-                return np.zeros(int(x[0]), dtype=float)
-            return np.zeros(0, dtype=float)
-        rv = self.dists[0].seq_log_density(x[0])
-        for i in range(1, self.count):
-            rv += self.dists[i].seq_log_density(x[i])
-        return rv
-
-    def seq_ld_lambda(self) -> List[Any]:
-        return [self.seq_log_density]
-
-    def sampler(self, seed: Optional[int] = None) -> 'DictRecordSampler':
-        return DictRecordSampler(self, seed)
-
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'DictRecordEstimator':
-        return DictRecordEstimator(self.keys, [d.estimator(pseudo_count=pseudo_count) for d in self.dists])
-
-    def dist_to_encoder(self) -> 'DictRecordDataEncoder':
-        return DictRecordDataEncoder(self.keys, [d.dist_to_encoder() for d in self.dists])
-
-
-class DictRecordSampler(DistributionSampler):
-
-    def __init__(self, dist: DictRecordDistribution, seed: Optional[int] = None) -> None:
-        super().__init__(dist, seed)
-        self.dist = dist
-        self.samplers = [d.sampler(seed=self.new_seed()) for d in dist.dists]
-
-    def sample(self, size: Optional[int] = None):
-        if size is None:
-            return {key: sampler.sample() for key, sampler in zip(self.dist.keys, self.samplers)}
-        rows = [dict() for _ in range(size)]
-        for key, sampler in zip(self.dist.keys, self.samplers):
-            values = sampler.sample(size=size)
-            for i, value in enumerate(values):
-                rows[i][key] = value
-        return rows
-
-
-class DictRecordAccumulator(SequenceEncodableStatisticAccumulator):
-
-    def __init__(self, keys: Sequence[Any], accumulators: Sequence[SequenceEncodableStatisticAccumulator]) -> None:
-        self.keys = tuple(keys)
-        self.accumulators = list(accumulators)
-        self.count = len(self.keys)
-        self._init_rng = False
-        self._acc_rng: Optional[List[np.random.RandomState]] = None
-
-    def update(self, x: Dict[Any, Any], weight: float, estimate: Optional[DictRecordDistribution]) -> None:
-        row = x if isinstance(x, dict) else {}
-        for i, key in enumerate(self.keys):
-            child_estimate = None if estimate is None else estimate.dists[i]
-            self.accumulators[i].update(row.get(key, None), weight, child_estimate)
-
-    def _rng_initialize(self, rng: np.random.RandomState) -> None:
-        seeds = rng.randint(2 ** 31, size=self.count)
-        self._acc_rng = [np.random.RandomState(seed=int(seed)) for seed in seeds]
-        self._init_rng = True
-
-    def initialize(self, x: Dict[Any, Any], weight: float, rng: np.random.RandomState) -> None:
-        if not self._init_rng:
-            self._rng_initialize(rng)
-        row = x if isinstance(x, dict) else {}
-        for i, key in enumerate(self.keys):
-            self.accumulators[i].initialize(row.get(key, None), weight, self._acc_rng[i])
-
-    def seq_update(self, x: Tuple[Any, ...], weights: np.ndarray,
-                   estimate: Optional[DictRecordDistribution]) -> None:
-        for i in range(self.count):
-            child_estimate = None if estimate is None else estimate.dists[i]
-            self.accumulators[i].seq_update(x[i], weights, child_estimate)
-
-    def seq_initialize(self, x: Tuple[Any, ...], weights: np.ndarray, rng: np.random.RandomState) -> None:
-        if not self._init_rng:
-            self._rng_initialize(rng)
-        for i in range(self.count):
-            self.accumulators[i].seq_initialize(x[i], weights, self._acc_rng[i])
-
-    def get_seq_lambda(self) -> List[Any]:
-        rv = []
-        for acc in self.accumulators:
-            rv.extend(acc.get_seq_lambda())
-        return rv
-
-    def combine(self, suff_stat: Tuple[Any, ...]) -> 'DictRecordAccumulator':
-        for i in range(self.count):
-            self.accumulators[i].combine(suff_stat[i])
-        return self
-
-    def value(self) -> Tuple[Any, ...]:
-        return tuple(acc.value() for acc in self.accumulators)
-
-    def from_value(self, x: Tuple[Any, ...]) -> 'DictRecordAccumulator':
-        self.accumulators = [self.accumulators[i].from_value(x[i]) for i in range(len(x))]
-        self.count = len(x)
-        return self
-
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
-        for acc in self.accumulators:
-            acc.key_merge(stats_dict)
-
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
-        for acc in self.accumulators:
-            acc.key_replace(stats_dict)
-
-    def acc_to_encoder(self) -> 'DictRecordDataEncoder':
-        return DictRecordDataEncoder(self.keys, [acc.acc_to_encoder() for acc in self.accumulators])
-
-
-class DictRecordAccumulatorFactory(StatisticAccumulatorFactory):
-
-    def __init__(self, keys: Sequence[Any], factories: Sequence[StatisticAccumulatorFactory]) -> None:
-        self.keys = tuple(keys)
-        self.factories = tuple(factories)
-
-    def make(self) -> DictRecordAccumulator:
-        return DictRecordAccumulator(self.keys, [factory.make() for factory in self.factories])
-
-
-class DictRecordEstimator(ParameterEstimator):
-
-    def __init__(self, keys: Sequence[Any], estimators: Sequence[ParameterEstimator]) -> None:
-        self.keys = tuple(keys)
-        self.estimators = tuple(estimators)
-        self.count = len(self.keys)
-
-    def accumulator_factory(self) -> DictRecordAccumulatorFactory:
-        return DictRecordAccumulatorFactory(
-            self.keys, [est.accumulator_factory() for est in self.estimators])
-
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[Any, ...]) -> DictRecordDistribution:
-        return DictRecordDistribution(
-            self.keys, [est.estimate(nobs, ss) for est, ss in zip(self.estimators, suff_stat)])
-
-
-class DictRecordDataEncoder(DataSequenceEncoder):
-
-    def __init__(self, keys: Sequence[Any], encoders: Sequence[DataSequenceEncoder]) -> None:
-        self.keys = tuple(keys)
-        self.encoders = tuple(encoders)
-
-    def __str__(self) -> str:
-        parts = ['%s: %s' % (repr(k), str(e)) for k, e in zip(self.keys, self.encoders)]
-        return 'DictRecordDataEncoder({%s})' % ', '.join(parts)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, DictRecordDataEncoder) and \
-            self.keys == other.keys and self.encoders == other.encoders
-
-    def seq_encode(self, x: Sequence[Dict[Any, Any]]) -> Tuple[Any, ...]:
-        if len(self.keys) == 0:
-            return (len(x),)
-        encoded = []
-        for key, encoder in zip(self.keys, self.encoders):
-            encoded.append(encoder.seq_encode([u.get(key, None) if isinstance(u, dict) else None for u in x]))
-        return tuple(encoded)
+    return _estimator_provider(use_bstats).CompositeEstimator(ests)
 
 
 def get_dict_record_estimator(keys: Sequence[Any], ests: Sequence[ParameterEstimator]) -> 'ParameterEstimator':
@@ -292,13 +104,11 @@ def get_dict_record_estimator(keys: Sequence[Any], ests: Sequence[ParameterEstim
 
 def get_categorical_estimator(vdict: Dict[T, float], pseudo_count: Optional[float] = None, emp_suff_stat: bool = True,
                               use_bstats: bool = False) -> 'ParameterEstimator':
+    provider = _estimator_provider(use_bstats)
     if use_bstats:
-        from pysp.bstats.categorical import CategoricalEstimator
-        from pysp.bstats.catdirichlet import DictDirichletDistribution
         alpha = 1.0 if pseudo_count is None else pseudo_count
-        return CategoricalEstimator(prior=DictDirichletDistribution({k: alpha for k in vdict.keys()}))
-
-    from pysp.stats.categorical import CategoricalEstimator
+        return provider.CategoricalEstimator(
+            prior=provider.DictDirichletDistribution({k: alpha for k in vdict.keys()}))
 
     if emp_suff_stat:
         cnt = sum(vdict.values())
@@ -306,7 +116,7 @@ def get_categorical_estimator(vdict: Dict[T, float], pseudo_count: Optional[floa
     else:
         suff_stat = None
 
-    return CategoricalEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat)
+    return provider.CategoricalEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat)
 
 
 def _integer_range(vdict: Dict[Any, float]):
@@ -331,10 +141,7 @@ def get_integer_categorical_estimator(vdict: Dict[int, float], pseudo_count: Opt
     min_val, max_val, width = _integer_range(vdict)
 
     if use_bstats:
-        from pysp.bstats.intrange import IntegerCategoricalEstimator
-        return IntegerCategoricalEstimator(min_val=min_val, max_val=max_val)
-
-    from pysp.stats.intrange import IntegerCategoricalEstimator
+        return _estimator_provider(True).IntegerCategoricalEstimator(min_val=min_val, max_val=max_val)
 
     suff_stat = None
     if emp_suff_stat:
@@ -345,14 +152,12 @@ def get_integer_categorical_estimator(vdict: Dict[int, float], pseudo_count: Opt
                 p_vec[int(k) - min_val] = float(v) / cnt
         suff_stat = (min_val, p_vec)
 
-    return IntegerCategoricalEstimator(min_val=min_val, max_val=max_val,
-                                       pseudo_count=pseudo_count, suff_stat=suff_stat)
+    return _estimator_provider(False).IntegerCategoricalEstimator(
+        min_val=min_val, max_val=max_val, pseudo_count=pseudo_count, suff_stat=suff_stat)
 
 
 def get_poisson_estimator(vdict: Dict[int, float], pseudo_count: Optional[float] = None, emp_suff_stat: bool = True) \
         -> 'ParameterEstimator':
-
-    from pysp.stats.poisson import PoissonEstimator
 
     if emp_suff_stat:
         ss_0 = 0.0
@@ -371,7 +176,7 @@ def get_poisson_estimator(vdict: Dict[int, float], pseudo_count: Optional[float]
     else:
         ss_1 = None
 
-    return PoissonEstimator(pseudo_count=pseudo_count, suff_stat=ss_1)
+    return _estimator_provider(False).PoissonEstimator(pseudo_count=pseudo_count, suff_stat=ss_1)
 
 
 def get_gaussian_estimator(vdict: Dict[Union[np.floating, float], float], pseudo_count: Optional[float] = None,
@@ -397,27 +202,22 @@ def get_gaussian_estimator(vdict: Dict[Union[np.floating, float], float], pseudo
         ss_2 = None
 
     if use_bstats:
-        from pysp.bstats.gaussian import GaussianEstimator
-        from pysp.bstats.normgamma import NormalGammaDistribution
+        provider = _estimator_provider(True)
 
         # weakly data-informed normal-gamma prior centered on the empirical
         # moments (when available)
         mu0 = ss_1 if ss_1 is not None else 0.0
         v0 = ss_2 if (ss_2 is not None and ss_2 > 0) else 1.0
         a0 = 1.001
-        prior = NormalGammaDistribution(mu0, 1.0e-3, a0, a0*v0)
-        return GaussianEstimator(prior=prior)
+        prior = provider.NormalGammaDistribution(mu0, 1.0e-3, a0, a0*v0)
+        return provider.GaussianEstimator(prior=prior)
 
-    from pysp.stats.gaussian import GaussianEstimator
-    return GaussianEstimator(pseudo_count=(pseudo_count, pseudo_count), suff_stat=(ss_1, ss_2))
+    return _estimator_provider(False).GaussianEstimator(
+        pseudo_count=(pseudo_count, pseudo_count), suff_stat=(ss_1, ss_2))
 
 
 def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> 'ParameterEstimator':
-    if use_bstats:
-        from pysp.bstats.mvn import MultivariateGaussianEstimator
-        return MultivariateGaussianEstimator(dim=dim)
-    from pysp.stats.mvn import MultivariateGaussianEstimator
-    return MultivariateGaussianEstimator(dim=dim)
+    return _estimator_provider(use_bstats).MultivariateGaussianEstimator(dim=dim)
 
 
 @dataclass
@@ -1521,8 +1321,7 @@ class DatumNode(object):
                 return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
             if recommendation == 'poisson':
                 if use_bstats:
-                    from pysp.bstats.poisson import PoissonEstimator
-                    return PoissonEstimator()
+                    return _estimator_provider(True).PoissonEstimator()
                 return get_poisson_estimator(self.vdict, pseudo_count, emp_suff_stat)
             return get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
@@ -1709,7 +1508,7 @@ def get_dpm_mixture(data, rng=None, max_components: int = 20, max_its: int = 100
         DirichletProcessMixtureDistribution fit to the data.
     """
     import sys
-    from pysp.bstats.dpm import DirichletProcessMixtureEstimator
+    from pysp.bstats import DirichletProcessMixtureEstimator
     from pysp.bstats.bestimation import optimize
 
     if rng is None:

@@ -37,6 +37,29 @@ SS1 = TypeVar('SS1')
 SS2 = TypeVar('SS2')
 
 
+def _conditional_zero_stats(component_estimators: Sequence[Any], num_components: int) -> Tuple[Any, ...]:
+    """Return per-component zero-value legacy stats from child estimators."""
+    if len(component_estimators) != num_components or any(est is None for est in component_estimators):
+        return tuple(None for _ in range(num_components))
+    return tuple(est.accumulator_factory().make().value() for est in component_estimators)
+
+
+def _conditional_add_stats(left: Any, right: Any, engine: Any) -> Any:
+    """Add component-stacked child sufficient-stat payloads with matching structure."""
+    if left is None:
+        return right
+    if right is None:
+        return left
+    if isinstance(left, dict) and isinstance(right, dict):
+        keys = set(left.keys()) | set(right.keys())
+        return {key: _conditional_add_stats(left.get(key), right.get(key), engine) for key in keys}
+    if isinstance(left, tuple) and isinstance(right, tuple):
+        return tuple(_conditional_add_stats(a, b, engine) for a, b in zip(left, right))
+    if isinstance(left, list) and isinstance(right, list):
+        return [_conditional_add_stats(a, b, engine) for a, b in zip(left, right)]
+    return left + right
+
+
 class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
     """ConditionalDistribution models pairs (x0, x1) with density P_cond(x1 | x0) * P_given(x0),
     where the conditional distributions are looked up from a dictionary keyed by x0."""
@@ -95,6 +118,50 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         self.has_given = not isinstance(self.given_dist, NullDistribution)
         self.name = name
         self.keys = keys
+
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        children = list(self.dmap.values())
+        if self.has_default:
+            children.append(self.default_dist)
+        if self.has_given:
+            children.append(self.given_dist)
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(children)),
+                                        kernel_status='generic')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+        children = []
+        roles = []
+        for key, dist in self.dmap.items():
+            declaration = declaration_for(dist)
+            if declaration is not None:
+                children.append(declaration)
+                roles.append('condition_%s' % repr(key))
+        if self.has_default:
+            declaration = declaration_for(self.default_dist)
+            if declaration is not None:
+                children.append(declaration)
+                roles.append('default')
+        if self.has_given:
+            declaration = declaration_for(self.given_dist)
+            if declaration is not None:
+                children.append(declaration)
+                roles.append('given')
+        return DistributionDeclaration(
+            name='conditional',
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(
+                StatisticSpec('conditions', kind='mapping'),
+                StatisticSpec('default', kind='child_stat'),
+                StatisticSpec('given', kind='child_stat'),
+            ),
+            support='conditional_pair',
+            children=tuple(children),
+            child_roles=tuple(roles),
+            differentiable=all(child.differentiable for child in children),
+        )
 
     def __str__(self) -> str:
         """Returns string representation of ConditionalDistribution and member variables."""
@@ -184,6 +251,169 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
             rv += self.given_dist.seq_log_density(given_enc)
 
         return rv
+
+    def backend_seq_log_density(self, x: E0, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for grouped conditional encodings."""
+        from pysp.stats.backend import backend_seq_log_density
+        sz, cond_vals, eobs_vals, idx_vals, given_enc = x
+        rv = engine.zeros(sz)
+        for i in range(len(cond_vals)):
+            key = cond_vals[i]
+            idx = engine.asarray(idx_vals[i])
+            if key in self.dmap:
+                scores = backend_seq_log_density(self.dmap[key], eobs_vals[i], engine)
+            elif self.has_default:
+                scores = backend_seq_log_density(self.default_dist, eobs_vals[i], engine)
+            else:
+                scores = engine.zeros(len(idx_vals[i])) + float('-inf')
+            rv = engine.index_add(rv, idx, scores)
+
+        if self.has_given and given_enc is not None:
+            rv = rv + backend_seq_log_density(self.given_dist, given_enc, engine)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['ConditionalDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked child routes for homogeneous conditional mixtures."""
+        from pysp.stats.stacked import stacked_component_params
+        keys = tuple(dists[0].dmap.keys())
+        has_default = bool(dists[0].has_default)
+        has_given = bool(dists[0].has_given)
+        if any(tuple(dist.dmap.keys()) != keys or bool(dist.has_default) != has_default or
+               bool(dist.has_given) != has_given for dist in dists):
+            raise ValueError('Stacked ConditionalDistribution components require matching key/default/given layout.')
+
+        routes = {}
+        for key in keys:
+            child_dists = [dist.dmap[key] for dist in dists]
+            try:
+                routes[key] = stacked_component_params(child_dists, engine)
+            except ValueError as exc:
+                raise ValueError('Conditional key %s child %s is not stackable: %s' %
+                                 (repr(key), type(child_dists[0]).__name__, exc))
+
+        default_route = None
+        if has_default:
+            try:
+                default_route = stacked_component_params([dist.default_dist for dist in dists], engine)
+            except ValueError as exc:
+                raise ValueError('Conditional default child %s is not stackable: %s' %
+                                 (type(dists[0].default_dist).__name__, exc))
+
+        given_route = None
+        if has_given:
+            try:
+                given_route = stacked_component_params([dist.given_dist for dist in dists], engine)
+            except ValueError as exc:
+                raise ValueError('Conditional given child %s is not stackable: %s' %
+                                 (type(dists[0].given_dist).__name__, exc))
+
+        return {
+            'routes': routes,
+            'default_route': default_route,
+            'given_route': given_route,
+            'has_default': has_default,
+            'has_given': has_given,
+            'keys': keys,
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: E0, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of conditional log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        sz, cond_vals, eobs_vals, idx_vals, given_enc = x
+        rv = engine.zeros((sz, int(params['num_components'])))
+        for i in range(len(cond_vals)):
+            key = cond_vals[i]
+            idx = engine.asarray(idx_vals[i])
+            route = params['routes'].get(key, params['default_route'])
+            if route is None:
+                scores = engine.zeros((len(idx_vals[i]), int(params['num_components']))) + float('-inf')
+            else:
+                scores = stacked_component_log_density(eobs_vals[i], route, engine)
+            rv = engine.index_add(rv, idx, scores)
+
+        if params['given_route'] is not None and given_enc is not None:
+            rv = rv + stacked_component_log_density(given_enc, params['given_route'], engine)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E0, weights: Any,
+                                                            params: Dict[str, Any], engine: Any,
+                                                            estimator: Any) -> Tuple[Dict[Any, Any], Any, Any]:
+        """Return per-component legacy conditional sufficient statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
+            unstack_component_stats
+        sz, cond_vals, eobs_vals, idx_vals, given_enc = x
+        ww = engine.asarray(weights)
+        num_components = int(tuple(getattr(ww, 'shape', (0, 0)))[1])
+        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+        group_pos = {key: pos for pos, key in enumerate(cond_vals)}
+
+        per_key_stats: Dict[Any, Tuple[Any, ...]] = {}
+        for key, route in params['routes'].items():
+            component_estimators = tuple(
+                getattr(component_est, 'estimator_map', {}).get(key)
+                for component_est in outer_estimators
+            )
+            pos = group_pos.get(key)
+            if pos is None:
+                per_key_stats[key] = _conditional_zero_stats(component_estimators, num_components)
+                continue
+            child_estimator = StackedEstimatorView(component_estimators) \
+                if len(component_estimators) == num_components else None
+            child_weights = ww[engine.asarray(idx_vals[pos])]
+            child_stats = stacked_component_sufficient_statistics(
+                eobs_vals[pos], child_weights, route, engine, child_estimator)
+            per_key_stats[key] = unstack_component_stats(child_stats, num_components)
+
+        default_stats = None
+        if params['default_route'] is not None:
+            default_estimators = tuple(getattr(component_est, 'default_estimator', None)
+                                       for component_est in outer_estimators)
+            for pos, key in enumerate(cond_vals):
+                if key in params['routes']:
+                    continue
+                child_estimator = StackedEstimatorView(default_estimators) \
+                    if len(default_estimators) == num_components else None
+                child_weights = ww[engine.asarray(idx_vals[pos])]
+                child_stats = stacked_component_sufficient_statistics(
+                    eobs_vals[pos], child_weights, params['default_route'], engine, child_estimator)
+                default_stats = _conditional_add_stats(default_stats, child_stats, engine)
+            if default_stats is None:
+                default_by_component = _conditional_zero_stats(default_estimators, num_components)
+            else:
+                default_by_component = unstack_component_stats(default_stats, num_components)
+        else:
+            default_by_component = tuple(None for _ in range(num_components))
+
+        if params['given_route'] is not None and given_enc is not None:
+            given_estimators = tuple(getattr(component_est, 'given_estimator', None)
+                                     for component_est in outer_estimators)
+            given_estimator = StackedEstimatorView(given_estimators) \
+                if len(given_estimators) == num_components else None
+            given_stats = stacked_component_sufficient_statistics(
+                given_enc, ww, params['given_route'], engine, given_estimator)
+            given_by_component = unstack_component_stats(given_stats, num_components)
+        else:
+            given_by_component = tuple(None for _ in range(num_components))
+
+        return tuple((
+            {key: per_key_stats[key][component] for key in params['keys']},
+            default_by_component[component],
+            given_by_component[component],
+        ) for component in range(num_components))
+
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+        """Return distribution-owned state for autograd fitting."""
+        from pysp.stats.gradient import ConditionalGradientFitState
+        dmap = {key: recurse(child, engine, torch, leaves) for key, child in self.dmap.items()}
+        default_child = recurse(self.default_dist, engine, torch, leaves) if self.has_default else None
+        given_child = recurse(self.given_dist, engine, torch, leaves) if self.has_given else None
+        return ConditionalGradientFitState(self, dmap, default_child, given_child)
 
     def sampler(self, seed: Optional[int] = None) -> 'ConditionalDistributionSampler':
         """Creates ConditionalDistributionSampler object for sampling from ConditionalDistribution instance.
@@ -717,6 +947,15 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         if self.has_given and x[2] is not None:
             self.given_accumulator.from_value(x[2])
 
+        return self
+
+    def scale(self, c: float) -> 'ConditionalDistributionAccumulator':
+        for accumulator in self.accumulator_map.values():
+            accumulator.scale(c)
+        if self.has_default:
+            self.default_accumulator.scale(c)
+        if self.has_given:
+            self.given_accumulator.scale(c)
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

@@ -44,6 +44,40 @@ SS2 = TypeVar('SS2') ## suff-stat of length
 class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
     """Markov-chain distribution over integer-valued states."""
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        return DistributionCapabilities(engine_ready=intersect_engine_ready((self.init_dist, self.len_dist)),
+                                        kernel_status='generic_table')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        init = None if isinstance(self.init_dist, NullDistribution) else declaration_for(self.init_dist)
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = tuple(d for d in (init, length) if d is not None)
+        roles = []
+        if init is not None:
+            roles.append('initial')
+        if length is not None:
+            roles.append('length')
+        return DistributionDeclaration(
+            name='integer_markov_chain',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('num_values', constraint='integer', differentiable=False),
+                ParameterSpec('cond_dist', constraint='row_simplex_matrix'),
+                ParameterSpec('lag', constraint='integer', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('transition_counts', kind='mapping'),
+                StatisticSpec('initial', kind='child_stat'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='finite_integer_sequence',
+            children=children,
+            child_roles=tuple(roles),
+            differentiable=False,
+        )
+
     def __init__(self, num_values: int, cond_dist: Union[List[List[float]], np.ndarray],
                  lag: int = 1, init_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
@@ -189,6 +223,161 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             rv += self.len_dist.seq_log_density(len_enc)
 
         return rv
+
+    def backend_seq_log_density(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+                                               Optional[E1], Optional[E2]], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for grouped integer Markov-chain encodings."""
+        from pysp.stats.backend import backend_seq_log_density
+        seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc = x
+        rv = engine.zeros(len(seq_len))
+
+        if len(seq_idx) > 0:
+            left_idx = np.asarray([np.ravel_multi_index(u[0], [self.num_values] * self.lag)
+                                   for u in u_seq_values], dtype=np.int64)
+            right_idx = np.asarray([u[1] for u in u_seq_values], dtype=np.int64)
+            with np.errstate(divide='ignore'):
+                transition_scores = np.log(self.cond_dist[left_idx, right_idx])
+            transition_scores = transition_scores[u_seq_idx]
+            rv = engine.index_add(rv, engine.asarray(seq_idx), engine.asarray(transition_scores))
+
+        if self.init_dist is not None and init_enc is not None and len(init_idx) > 0:
+            rv = engine.index_add(rv, engine.asarray(init_idx),
+                                  backend_seq_log_density(self.init_dist, init_enc, engine))
+
+        if self.len_dist is not None and len_enc is not None:
+            rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['IntegerMarkovChainDistribution'],
+                               engine: Any) -> Dict[str, Any]:
+        """Return stacked integer Markov-chain parameters for shared support/lag."""
+        from pysp.stats.stacked import stacked_component_params
+        num_values = int(dists[0].num_values)
+        lag = int(dists[0].lag)
+        null_init_dist = isinstance(dists[0].init_dist, NullDistribution)
+        null_len_dist = isinstance(dists[0].len_dist, NullDistribution)
+        if any(int(dist.num_values) != num_values or int(dist.lag) != lag or
+               isinstance(dist.init_dist, NullDistribution) != null_init_dist or
+               isinstance(dist.len_dist, NullDistribution) != null_len_dist for dist in dists):
+            raise ValueError('Stacked IntegerMarkovChainDistribution components require shared support, lag, and '
+                             'child policies.')
+
+        init_route = None
+        if not null_init_dist:
+            try:
+                init_route = stacked_component_params([dist.init_dist for dist in dists], engine)
+            except ValueError as exc:
+                raise ValueError('IntegerMarkovChain initial child %s is not stackable: %s' %
+                                 (type(dists[0].init_dist).__name__, exc))
+
+        length_route = None
+        if not null_len_dist:
+            try:
+                length_route = stacked_component_params([dist.len_dist for dist in dists], engine)
+            except ValueError as exc:
+                raise ValueError('IntegerMarkovChain length child %s is not stackable: %s' %
+                                 (type(dists[0].len_dist).__name__, exc))
+
+        with np.errstate(divide='ignore'):
+            log_cond = np.stack([np.log(dist.cond_dist) for dist in dists], axis=2)
+
+        return {
+            '__pysp_component_axis__': {'log_cond': 2},
+            'num_values': num_values,
+            'lag': lag,
+            'log_cond': engine.asarray(log_cond),
+            'init_route': init_route,
+            'length_route': length_route,
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+                                                 Optional[E1], Optional[E2]],
+                                    params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of integer Markov-chain log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc = x
+        rv = engine.zeros((len(seq_len), int(params['num_components'])))
+
+        if len(seq_idx) > 0:
+            left_idx = np.asarray([np.ravel_multi_index(u[0], [params['num_values']] * params['lag'])
+                                   for u in u_seq_values], dtype=np.int64)
+            right_idx = np.asarray([u[1] for u in u_seq_values], dtype=np.int64)
+            transition_scores = params['log_cond'][engine.asarray(left_idx), engine.asarray(right_idx), :]
+            transition_scores = transition_scores[engine.asarray(u_seq_idx), :]
+            rv = engine.index_add(rv, engine.asarray(seq_idx), transition_scores)
+
+        if params['init_route'] is not None and init_enc is not None and len(init_idx) > 0:
+            rv = engine.index_add(rv, engine.asarray(init_idx),
+                                  stacked_component_log_density(init_enc, params['init_route'], engine))
+
+        if params['length_route'] is not None and len_enc is not None:
+            rv = rv + stacked_component_log_density(len_enc, params['length_route'], engine)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls,
+                                                            x: Tuple[np.ndarray, np.ndarray, np.ndarray,
+                                                                     np.ndarray, np.ndarray,
+                                                                     Optional[E1], Optional[E2]],
+                                                            weights: Any,
+                                                            params: Dict[str, Any], engine: Any,
+                                                            estimator: Any) -> Tuple[Any, ...]:
+        """Return per-component legacy ``(transition_counts, initial_stat, length_stat)`` statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
+            unstack_component_stats
+        seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc = x
+        ww = engine.asarray(weights)
+        num_components = int(params['num_components'])
+
+        if len(u_seq_values) > 0:
+            trans_weights = ww[engine.asarray(seq_idx)]
+            zero_rows = trans_weights * engine.asarray(0.0)
+            unique_idx = engine.asarray(u_seq_idx)
+            rows = []
+            for value_index in range(len(u_seq_values)):
+                mask = unique_idx == engine.asarray(value_index)
+                rows.append(engine.sum(engine.where(mask[:, None], trans_weights, zero_rows), axis=0))
+            trans_counts = np.asarray(engine.to_numpy(engine.stack(rows, axis=0)), dtype=np.float64)
+        else:
+            trans_counts = np.zeros((0, num_components), dtype=np.float64)
+
+        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+
+        if params['init_route'] is None or init_enc is None:
+            init_by_component = tuple(None for _ in range(num_components))
+        else:
+            init_estimators = tuple(getattr(component_est, 'init_estimator', None)
+                                    for component_est in outer_estimators)
+            init_estimator = StackedEstimatorView(init_estimators) \
+                if len(init_estimators) == num_components else None
+            init_stats = stacked_component_sufficient_statistics(
+                init_enc, ww[engine.asarray(init_idx)], params['init_route'], engine, init_estimator)
+            init_by_component = unstack_component_stats(init_stats, num_components)
+
+        if params['length_route'] is None or len_enc is None:
+            length_by_component = tuple(None for _ in range(num_components))
+        else:
+            length_estimators = tuple(getattr(component_est, 'len_estimator', None)
+                                      for component_est in outer_estimators)
+            length_estimator = StackedEstimatorView(length_estimators) \
+                if len(length_estimators) == num_components else None
+            length_stats = stacked_component_sufficient_statistics(
+                len_enc, ww, params['length_route'], engine, length_estimator)
+            length_by_component = unstack_component_stats(length_stats, num_components)
+
+        return tuple((
+            {
+                u_seq_values[value_index]: float(trans_counts[value_index, component])
+                for value_index in range(len(u_seq_values))
+            },
+            init_by_component[component],
+            length_by_component[component],
+        ) for component in range(num_components))
 
     def sampler(self, seed: Optional[int] = None) -> 'IntegerMarkovChainSampler':
         """Returns an IntegerMarkovChainSampler object."""
