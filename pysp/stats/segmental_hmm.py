@@ -24,6 +24,7 @@ from pysp.stats.null_dist import NullAccumulator, NullAccumulatorFactory, NullDa
 from pysp.stats.pdist import DataSequenceEncoder, DistributionSampler, ParameterEstimator, \
     SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
     StatisticAccumulatorFactory
+from pysp.utils.aliasing import coalesce_alias, require, MISSING
 
 
 def _forward_log(log_w: np.ndarray, log_a: np.ndarray, log_emit: np.ndarray) -> float:
@@ -122,10 +123,13 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
 
     def __init__(self,
                  emissions: Sequence[SequenceEncodableProbabilityDistribution],
-                 w: Union[Sequence[float], np.ndarray],
-                 transitions: Union[Sequence[Sequence[float]], np.ndarray],
+                 w: Union[Sequence[float], np.ndarray] = MISSING,
+                 transitions: Union[Sequence[Sequence[float]], np.ndarray] = MISSING,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 name: Optional[str] = None) -> None:
+                 name: Optional[str] = None,
+                 weights: Union[Sequence[float], np.ndarray] = MISSING) -> None:
+        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
+        transitions = require('transitions', transitions, default=MISSING)
         self.emissions = list(emissions)
         self.n_states = len(self.emissions)
         self.w = np.asarray(w, dtype=np.float64)
@@ -519,3 +523,10 @@ class SegmentalHiddenMarkovDataEncoder(DataSequenceEncoder):
 
 
 SegmentalHiddenMarkovDistribution = SegmentalHiddenMarkovModelDistribution
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+SegmentalHiddenMarkovModelAccumulator = SegmentalHiddenMarkovAccumulator
+SegmentalHiddenMarkovModelAccumulatorFactory = SegmentalHiddenMarkovAccumulatorFactory
+SegmentalHiddenMarkovModelDataEncoder = SegmentalHiddenMarkovDataEncoder
+SegmentalHiddenMarkovModelEstimator = SegmentalHiddenMarkovEstimator
+SegmentalHiddenMarkovModelSampler = SegmentalHiddenMarkovSampler

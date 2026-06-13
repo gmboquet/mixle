@@ -18,6 +18,7 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceE
 from numpy.random import RandomState
 import pysp.utils.vector as vec
 import numpy as np
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from numpy.random import RandomState
 
 from typing import Sequence, Optional, Dict, Any, Tuple, List, Union
@@ -84,8 +85,9 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         one = engine.sum(xx * 0.0, axis=1) + engine.asarray(1.0)
         return xx, xx * xx, one
 
-    def __init__(self, mu: Union[Sequence[float], np.ndarray], covar: Union[Sequence[float], np.ndarray],
-                 name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, mu: Union[Sequence[float], np.ndarray], covar: Union[Sequence[float], np.ndarray] = MISSING,
+                 name: Optional[str] = None, keys: Optional[str] = None,
+                 covariance: Union[Sequence[float], np.ndarray] = MISSING) -> None:
         """Create a DiagonalGaussianDistribution object with mean mu and covariance covar.
 
         Args:
@@ -106,6 +108,7 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
              key (Optional[str]): Key for merging sufficient statistics.
 
         """
+        covar = coalesce_alias('covar', covar, 'covariance', covariance, default=MISSING)
         self.dim = len(mu)
         self.mu = np.asarray(mu, dtype=float)
         self.covar = np.asarray(covar, dtype=float)

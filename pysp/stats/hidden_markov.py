@@ -30,6 +30,7 @@ list of floats where the rows sum to 1.0. (3) is represented by a numpy array of
 from pysp.utils.optional_deps import numba
 import numpy as np
 import math
+from pysp.utils.aliasing import coalesce_alias, require, MISSING
 from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
@@ -60,13 +61,14 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
     """Hidden Markov model distribution for variable-length observation sequences."""
     def __init__(self, topics: Sequence[SequenceEncodableProbabilityDistribution],
-                 w: Union[Sequence[float], np.ndarray],
-                 transitions: Union[List[List[float]], np.ndarray],
+                 w: Union[Sequence[float], np.ndarray] = MISSING,
+                 transitions: Union[List[List[float]], np.ndarray] = MISSING,
                  taus: Optional[Union[List[List[float]], np.ndarray]] = None,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  name: Optional[str] = None,
                  terminal_values: Optional[Set[T]] = None,
-                 use_numba: bool = False) -> None:
+                 use_numba: bool = False,
+                 weights: Union[Sequence[float], np.ndarray] = MISSING) -> None:
         """HiddenMarkovModelDistribution object defining HMM compatible with data type T.
 
         Defines an HMM with emission distributions in 'topics' (all must have the same data type T). If a length
@@ -103,6 +105,8 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             use_numba (bool): If True, use numba package for encoding and vectorized operations.
 
         """
+        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
+        transitions = require('transitions', transitions, default=MISSING)
         self.use_numba = use_numba
 
         with np.errstate(divide='ignore'):
@@ -2165,3 +2169,10 @@ def vec_bincount2(x, w, out):
     for j in range(len(x)):
         out[:, x[j]] += w[:, j]
     return out
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+HiddenMarkovModelAccumulator = HiddenMarkovAccumulator
+HiddenMarkovModelAccumulatorFactory = HiddenMarkovAccumulatorFactory
+HiddenMarkovModelDataEncoder = HiddenMarkovDataEncoder
+HiddenMarkovModelEstimator = HiddenMarkovEstimator
+HiddenMarkovModelSampler = HiddenMarkovSampler

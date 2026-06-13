@@ -23,6 +23,7 @@ from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEncodableProbabilityDistribution, \
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
     DistributionEnumerator, EnumerationError
+from pysp.utils.aliasing import coalesce_alias
 from pysp.arithmetic import maxrandint
 from pysp.stats.null_dist import NullDistribution, NullEstimator, NullDataEncoder, NullAccumulator, \
     NullAccumulatorFactory
@@ -72,7 +73,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     def __init__(self, min_val: int = 0, p_vec: List[float] = None,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 name: Optional[str] = None, keys: Optional[str] = None) -> None:
+                 name: Optional[str] = None, keys: Optional[str] = None, prob_vec: List[float] = None) -> None:
         """Create IntegerMultinomialDistribution object.
 
         Args:
@@ -96,6 +97,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         super().__init__()
+        p_vec = coalesce_alias('p_vec', p_vec, 'prob_vec', prob_vec, required=False, default=None)
         p_vec = np.empty(0, dtype=np.float64) if p_vec is None else p_vec
 
         with np.errstate(divide='ignore'):
