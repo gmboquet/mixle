@@ -21,6 +21,7 @@ from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEncodableProbabilityDistribution, \
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
     DistributionEnumerator, EnumerationError
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 from typing import List, Union, Tuple, Optional, Dict, Any, Sequence
 
@@ -51,7 +52,8 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             support='bounded_integer',
         )
 
-    def __init__(self, min_val: int, p_vec: Union[List[float], np.ndarray], name: Optional[str] = None) -> None:
+    def __init__(self, min_val: int, p_vec: Union[List[float], np.ndarray] = MISSING,
+                 name: Optional[str] = None, prob_vec: Union[List[float], np.ndarray] = MISSING) -> None:
         """IntegerCategoricalDistribution object defining an integer categorical distribution.
 
         Args:
@@ -68,6 +70,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             num_vals (int): Total number of values in support of IntegerCategoricalDistribution instance.
 
         """
+        p_vec = coalesce_alias('p_vec', p_vec, 'prob_vec', prob_vec, default=MISSING)
         with np.errstate(divide='ignore'):
             self.p_vec = np.asarray(p_vec, dtype=np.float64)
             self.min_val = min_val

@@ -19,6 +19,7 @@ import scipy.linalg
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
     ParameterEstimator, DataSequenceEncoder, StatisticAccumulatorFactory, DistributionSampler
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from numpy.random import RandomState
 import pysp.utils.vector as vec
 
@@ -93,8 +94,9 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         one = engine.sum(xx * 0.0, axis=1) + engine.asarray(1.0)
         return xx, xx[:, :, None] * xx[:, None, :], one
 
-    def __init__(self, mu: Union[List[float], np.ndarray], covar: Union[List[List[float]], np.ndarray],
-                 name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, mu: Union[List[float], np.ndarray], covar: Union[List[List[float]], np.ndarray] = MISSING,
+                 name: Optional[str] = None, keys: Optional[str] = None,
+                 covariance: Union[List[List[float]], np.ndarray] = MISSING) -> None:
         """MultivariateGaussianDistribution object for multivariate Gaussian with mean mu and covaraince 'covar'.
 
         Args:
@@ -114,6 +116,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             self.chol_const (float): det from covar if lstsq is to be used.
 
         """
+        covar = coalesce_alias('covar', covar, 'covariance', covariance, default=MISSING)
         self.dim = len(mu)
         self.mu = np.asarray(mu, dtype=float)
         self.covar = np.asarray(covar, dtype=float)

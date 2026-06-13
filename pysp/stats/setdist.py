@@ -25,6 +25,7 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceE
     ParameterEstimator, DataSequenceEncoder, StatisticAccumulatorFactory, DistributionSampler, \
     DistributionEnumerator, EnumerationError
 from pysp.utils.enumeration import BufferedStream, ProductEnumerator
+from pysp.utils.aliasing import coalesce_alias, MISSING
 
 from typing import Optional, Dict, Tuple, Any, Dict, List, Sequence, TypeVar, Union
 
@@ -55,8 +56,8 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
             differentiable=False,
         )
 
-    def __init__(self, pmap: Dict[Any, float], min_prob: float = 1.0e-128, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(self, pmap: Dict[Any, float] = MISSING, min_prob: float = 1.0e-128, name: Optional[str] = None,
+                 keys: Optional[str] = None, prob_map: Dict[Any, float] = MISSING) -> None:
         """BernoulliSetDistribution object for creating a Bernoulli set distribution.
 
         Args:
@@ -76,6 +77,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
             num_required (int): Number of required elements in a subset. Corrected if min_prob was non-zero.
 
         """
+        pmap = coalesce_alias('pmap', pmap, 'prob_map', prob_map, default=MISSING)
         self.key = keys
         self.name = name
         self.pmap = pmap
