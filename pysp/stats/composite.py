@@ -340,17 +340,20 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             truncated=truncated, getter=getter)
 
     def quantized_count_index(self, quantizer, max_fine_bucket: int):
-        """Structural count index: convolve the child count histograms (additive composition).
+        """Structural count index: the ADDITIVE law -- the carrier's n-ary product over children.
 
-        The complete log density is the sum of independent child log densities, so the joint
-        count histogram is the convolution of the child histograms. Children are consumed by their
-        *counts* and lazy unranker -- never drained -- so a child with astronomically large support
-        (e.g. a Sequence) composes without being materialized.
+        The complete log density is the sum of independent child log densities, so the joint count
+        histogram is the ``times``/``product`` (convolution) of the child histograms in the
+        witness-retaining count semiring (pysp.utils.quantization_semiring). Children are consumed
+        by their *counts* and lazy unranker -- never drained -- so a child with astronomically large
+        support (e.g. a Sequence) composes without being materialized. Swapping the carrier (e.g. a
+        tropical one) would reuse this same reduction.
         """
-        from pysp.utils.quantization import CountHistogram, CountIndex, convolve_indices
+        from pysp.utils.quantization_semiring import CountSemiring
 
+        semiring = CountSemiring()
         if self.count == 0:
-            return CountIndex(CountHistogram.delta(0, 1), lambda fb, off: ((), 0.0)), False
+            return semiring.one(), False
 
         children = []
         truncated = False
@@ -364,7 +367,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             children.append(child_index)
             truncated = truncated or child_truncated
 
-        return convolve_indices(children, quantizer, max_fine_bucket), truncated
+        return semiring.product(children, quantizer, max_fine_bucket), truncated
 
     def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
         """Build an aligned cross-bin view for compatible composite distributions."""
