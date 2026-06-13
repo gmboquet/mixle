@@ -8,7 +8,6 @@ __pycache__/
 *.so
 
 # Distribution / packaging
-.github/
 .idea
 .Python
 build/
