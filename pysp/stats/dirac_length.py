@@ -582,6 +582,43 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.comp_counts += ll_mat.sum(axis=0)
         self.accumulator.seq_update(enc_x, ll_mat[:, 0], estimate.len_dist)
 
+    def seq_update_engine(self, x, weights, estimate, engine):
+        """Engine-resident E-step: the length-distribution scoring (the heavy term) runs through the
+        active engine; the cheap two-component (length vs. Dirac) responsibility bookkeeping mirrors
+        the host seq_update exactly.
+        """
+        from pysp.stats.backend import backend_seq_log_density
+
+        sz, idx_v, idx_nv, enc_x = x
+        weights = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                             dtype=np.float64)
+        ll_mat = np.zeros((sz, 2), dtype=np.float64)
+
+        if len(idx_v) == 0:
+            ll_mat[:, 0] += weights
+        else:
+            len_score = np.asarray(engine.to_numpy(backend_seq_log_density(estimate.len_dist, enc_x, engine)),
+                                   dtype=np.float64)
+            ll_mat[:, 0] += len_score + estimate.log_p
+            ll_mat[idx_nv, 0] = weights[idx_nv].copy()
+
+            rv = ll_mat[idx_v, :]
+            rv[:, 1] += estimate.log_1p
+            rv_max = rv.max(axis=1, keepdims=True)
+            bad_rows = np.isinf(rv_max.flatten())
+            if np.any(bad_rows):
+                rv[bad_rows, :] = np.array([estimate.log_p, estimate.log_1p], dtype=np.float64)
+                rv_max[bad_rows] = np.max(np.asarray([estimate.log_p, estimate.log_1p]))
+            rv -= rv_max
+            np.exp(rv, out=rv)
+            np.sum(rv, axis=1, keepdims=True, out=rv_max)
+            np.divide(weights[idx_v, None], rv_max, out=rv_max)
+            rv *= rv_max
+            ll_mat[idx_v, :] = rv
+
+        self.comp_counts += ll_mat.sum(axis=0)
+        self.accumulator.seq_update(enc_x, ll_mat[:, 0], estimate.len_dist)
+
     def update(self, x: int, weight: float, estimate: 'DiracLengthMixtureDistribution') -> None:
         """Add one observation's posterior-weighted contribution to the sufficient statistics.
 
@@ -874,3 +911,32 @@ class DiracLengthMixtureDataEncoder(DataSequenceEncoder):
         xi_nv = np.flatnonzero(x != self.v).astype(np.int32)
 
         return len(x), xi_v, xi_nv, self.encoder.seq_encode(x)
+
+
+def _register_dirac_length_engine_kernel():
+    """Register the engine-resident dirac-length-mixture kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class DiracLengthMixtureKernel(GenericKernel):
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('DiracLengthMixtureKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class DiracLengthMixtureKernelFactory(KernelFactory):
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return DiracLengthMixtureKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(DiracLengthMixtureDistribution, DiracLengthMixtureKernelFactory())
+
+
+_register_dirac_length_engine_kernel()
