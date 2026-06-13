@@ -286,6 +286,24 @@ class SymbolicEngine(ComputeEngine):
         """Return a symbolic index-add operation node."""
         return SymbolicExpression.call('index_add', out, index, values)
 
+    @staticmethod
+    def to_sympy(x: Any) -> Any:
+        """Lower a symbolic expression (or object array) to a sympy expression."""
+        from pysp.engines.symbolic_export import to_sympy
+        return to_sympy(x)
+
+    @staticmethod
+    def to_sage(x: Any) -> Any:
+        """Lower a symbolic expression (or object array) to a sage expression."""
+        from pysp.engines.symbolic_export import to_sage
+        return to_sage(x)
+
+    @staticmethod
+    def to_latex(x: Any) -> str:
+        """Return a LaTeX string for a symbolic expression via sympy."""
+        from pysp.engines.symbolic_export import to_latex
+        return to_latex(x)
+
 
 def _sum_values(values: Any) -> SymbolicExpression:
     values = np.asarray(values, dtype=object).reshape(-1)
