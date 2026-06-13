@@ -723,6 +723,69 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             len_est = None if estimate is None else estimate.len_dist
             self.len_accumulator.seq_update(enc_len, weights, len_est)
 
+    def seq_update_engine(self, x, weights, estimate, engine):
+        """Engine-resident E-step: topic scoring and the outer/topic posterior arithmetic run on the
+        active engine (numpy or torch); component counts and per-item topic responsibilities are
+        produced on the engine and fed to the child accumulators. Matches host seq_update.
+        """
+        from pysp.stats.backend import backend_seq_log_density
+
+        sz, idx, cnt, enc_data, enc_len = x
+        tsz = len(idx)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        if tsz == 0:
+            if self.len_accumulator is not None:
+                self.len_accumulator.seq_update(enc_len, weights_np,
+                                                None if estimate is None else estimate.len_dist)
+            return
+
+        idx_e = engine.asarray(np.asarray(idx, dtype=np.int64))
+        neg = engine.asarray(-np.inf)
+        ll_mat = engine.stack([backend_seq_log_density(estimate.topics[i], enc_data, engine)
+                               for i in range(self.num_topics)], axis=1)          # (tsz, T)
+        ll_max = engine.max(ll_mat, axis=1)                                        # (tsz,)
+        finite = ll_max > engine.asarray(-1.0e308)
+        ll_exp = engine.where(finite[:, None], engine.exp(ll_mat - ll_max[:, None]),
+                              engine.asarray(0.0))                                 # (tsz, T)
+
+        taus_t = engine.asarray(np.asarray(estimate.taus, dtype=np.float64).T)     # (T, M)
+        ll_mat_t = engine.matmul(ll_exp, taus_t)                                   # (tsz, M)
+        pos = ll_mat_t > engine.asarray(0.0)
+        ll_mat_t2 = engine.where(pos, engine.log(engine.where(pos, ll_mat_t, engine.asarray(1.0))), neg)
+
+        ll_max_for_sum = engine.where(finite, ll_max, neg)
+        ll_max_sum = engine.index_add(engine.zeros(sz), idx_e, ll_max_for_sum)     # (sz,)
+        cols = [engine.index_add(engine.zeros(sz), idx_e, ll_mat_t2[:, i]) for i in range(self.num_mixtures)]
+        rv = engine.stack(cols, axis=1)
+        rv = rv + engine.asarray(estimate.log_w) + ll_max_sum[:, None]
+        rv = rv - engine.logsumexp(rv, axis=1, keepdims=True)
+        rv = engine.exp(rv)                                                        # outer posteriors (sz, M)
+
+        rv_items = rv[idx_e, :]                                                    # (tsz, M)
+        ww = engine.asarray(weights_np)[idx_e][:, None]
+        taus = engine.asarray(np.asarray(estimate.taus, dtype=np.float64))         # (M, T)
+        rv3 = engine.zeros((tsz, self.num_topics))
+        comp_counts = engine.zeros((self.num_mixtures, self.num_topics))
+        comp_rows = []
+        for i in range(self.num_mixtures):
+            valid = ll_mat_t[:, i] > 0.0
+            ratio = engine.where(valid, rv_items[:, i] / engine.where(valid, ll_mat_t[:, i],
+                                                                      engine.asarray(1.0)),
+                                 engine.asarray(0.0))
+            temp = taus[i][None, :] * ratio[:, None] * ll_exp * ww                 # (tsz, T)
+            rv3 = rv3 + temp
+            comp_rows.append(engine.sum(temp, axis=0))
+        comp_counts = engine.stack(comp_rows, axis=0)
+
+        self.comp_counts += np.asarray(engine.to_numpy(comp_counts))
+        rv3_np = np.asarray(engine.to_numpy(rv3))
+        for i in range(self.num_topics):
+            self.accumulators[i].seq_update(enc_data, rv3_np[:, i], estimate.topics[i])
+        if self.len_accumulator is not None:
+            self.len_accumulator.seq_update(enc_len, weights_np,
+                                            None if estimate is None else estimate.len_dist)
+
     def combine(self, suff_stat: Tuple[np.ndarray, Tuple[SS1, ...], Optional[SS2]]) -> 'HierarchicalMixtureEstimatorAccumulator':
         """Combine the sufficient statistics of 'suff_stat; with attribute variables.
 
@@ -1084,3 +1147,32 @@ class HierarchicalMixtureDataEncoder(DataSequenceEncoder):
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 HierarchicalMixtureAccumulator = HierarchicalMixtureEstimatorAccumulator
 HierarchicalMixtureAccumulatorFactory = HierarchicalMixtureEstimatorAccumulatorFactory
+
+
+def _register_hierarchical_mixture_engine_kernel():
+    """Register the engine-resident hierarchical-mixture kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class HierarchicalMixtureKernel(GenericKernel):
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('HierarchicalMixtureKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class HierarchicalMixtureKernelFactory(KernelFactory):
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return HierarchicalMixtureKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(HierarchicalMixtureDistribution, HierarchicalMixtureKernelFactory())
+
+
+_register_hierarchical_mixture_engine_kernel()
