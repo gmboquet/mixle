@@ -159,6 +159,19 @@ class LaplaceAccumulator(SequenceEncodableStatisticAccumulator):
             self.values.append(np.asarray(x[mask], dtype=np.float64))
             self.weights.append(np.asarray(weights[mask], dtype=np.float64))
 
+    def seq_update_engine(self, x: np.ndarray, weights: Any,
+                          estimate: Optional[LaplaceDistribution], engine: Any) -> None:
+        """Engine-aware accumulation. Laplace's MLE is a weighted median, so the sufficient
+        statistic is the (positively weighted) data itself; this path accepts engine (e.g. torch)
+        weights and stores host arrays. Matches seq_update.
+        """
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        mask = weights_np > 0.0
+        if np.any(mask):
+            self.values.append(np.asarray(np.asarray(x)[mask], dtype=np.float64))
+            self.weights.append(weights_np[mask])
+
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: Optional[RandomState]) -> None:
         self.seq_update(x, weights, None)
 

@@ -99,6 +99,12 @@ class GenericKernel(Kernel):
                 self.dist, getattr(enc, 'engine_payload', enc), weights, self.engine)
         accumulator = self.estimator.accumulator_factory().make()
         enc = getattr(enc, 'host_payload', enc)
+        # Engine-resident E-step: when the accumulator provides a backend update and we are off the
+        # numpy engine, run the sufficient-statistic accumulation on the active engine instead of
+        # falling back to the host seq_update path.
+        if self.engine.name != NUMPY_ENGINE.name and callable(getattr(accumulator, 'seq_update_engine', None)):
+            accumulator.seq_update_engine(enc, weights, self.dist, self.engine)
+            return accumulator.value()
         weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
         accumulator.seq_update(enc, weights, self.dist)
         return accumulator.value()
@@ -215,7 +221,8 @@ class GeneratedNumbaKernel(Kernel):
         """Accumulate generated sufficient statistics for leaves or mixtures."""
         if self.estimator is None:
             raise ValueError('GeneratedNumbaKernel.accumulate requires an estimator.')
-        from pysp.stats.declarations import generated_sufficient_statistics
+        from pysp.stats.declarations import (generated_sufficient_statistics,
+                                             generated_sufficient_statistics_available)
         enc = getattr(enc, 'engine_payload', enc)   # unwrap resident payloads
         if self.components is not None:
             row_weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
@@ -224,7 +231,15 @@ class GeneratedNumbaKernel(Kernel):
             component_stats = _generated_numba_component_stats(enc, gamma, self.components, self.engine)
             component_counts = gamma.sum(axis=0)
             return component_counts, _unstack_numba_component_stats(component_stats, len(component_counts))
-        return generated_sufficient_statistics(self.dist, enc, weights, self.engine)
+        if generated_sufficient_statistics_available(self.dist):
+            return generated_sufficient_statistics(self.dist, enc, weights, self.engine)
+        # Scorer-only leaf (numba scorer but no generated suff-stat hook): accumulate via the host
+        # accumulator so the M-step still receives its expected statistics.
+        accumulator = self.estimator.accumulator_factory().make()
+        host_enc = getattr(enc, 'host_payload', enc)
+        row_weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
+        accumulator.seq_update(host_enc, row_weights, self.dist)
+        return accumulator.value()
 
     def posteriors(self, enc: Any) -> np.ndarray:
         """Return normalized mixture posterior weights for generated mixtures."""
