@@ -1080,3 +1080,7 @@ class HierarchicalMixtureDataEncoder(DataSequenceEncoder):
         enc_data = self.topic_encoder.seq_encode(sx)
 
         return len(x), idx, cnt, enc_data, enc_len
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+HierarchicalMixtureAccumulator = HierarchicalMixtureEstimatorAccumulator
+HierarchicalMixtureAccumulatorFactory = HierarchicalMixtureEstimatorAccumulatorFactory

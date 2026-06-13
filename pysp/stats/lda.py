@@ -1381,3 +1381,7 @@ def seq_posterior(estimate: LDADistribution, x: Tuple[int, np.ndarray, np.ndarra
     mlpf = digamma(final_gammas) - digamma(np.sum(final_gammas, axis=1, keepdims=True))
 
     return log_density_gamma, final_gammas, per_topic_log_densities
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+LDAAccumulator = LDAEstimatorAccumulator
+LDAAccumulatorFactory = LDAEstimatorAccumulatorFactory

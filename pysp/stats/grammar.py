@@ -696,3 +696,6 @@ class GrammarDataEncoder(DataSequenceEncoder):
 
         """
         return x
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+GrammarAccumulator = GrammarEstimatorAccumulator

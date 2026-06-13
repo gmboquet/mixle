@@ -136,6 +136,11 @@ __all__ = [
     "ConditionalDistributionEstimator",
     "ConditionalDistributionDataEncoder",
     "ConditionalDistributionEnumerator",
+    "ConditionalEstimator",
+    "ConditionalAccumulator",
+    "ConditionalAccumulatorFactory",
+    "ConditionalDataEncoder",
+    "ConditionalEnumerator",
     "ChowLiuTreeDistribution",
     "ChowLiuTreeEstimator",
     "ChowLiuTreeSampler",
@@ -216,9 +221,15 @@ __all__ = [
     "HiddenMarkovEstimator",
     "HiddenMarkovDataEncoder",
     "HiddenMarkovModelEnumerator",
+    "HiddenMarkovModelSampler",
+    "HiddenMarkovModelEstimator",
+    "HiddenMarkovModelDataEncoder",
+    "HiddenMarkovModelAccumulator",
+    "HiddenMarkovModelAccumulatorFactory",
     "QuantizedHiddenMarkovModelDistribution",
     "QuantizedHiddenMarkovEstimator",
     "QuantizedHiddenMarkovModelEnumerator",
+    "QuantizedHiddenMarkovModelEstimator",
     "HierarchicalMixtureDistribution",
     "HierarchicalMixtureSampler",
     "HierarchicalMixtureEstimator",
@@ -336,6 +347,9 @@ __all__ = [
     "SegmentalHiddenMarkovSampler",
     "SegmentalHiddenMarkovEstimator",
     "SegmentalHiddenMarkovDataEncoder",
+    "SegmentalHiddenMarkovModelSampler",
+    "SegmentalHiddenMarkovModelEstimator",
+    "SegmentalHiddenMarkovModelDataEncoder",
     "BernoulliSetDistribution",
     "BernoulliSetSampler",
     "BernoulliSetEstimator",
@@ -357,6 +371,8 @@ __all__ = [
     "TreeHiddenMarkovModelDistribution",
     "TreeHiddenMarkovSampler",
     "TreeHiddenMarkovEstimator",
+    "TreeHiddenMarkovModelSampler",
+    "TreeHiddenMarkovModelEstimator",
     "TransformDistribution",
     "TransformSampler",
     "TransformEstimator",
@@ -479,7 +495,9 @@ from pysp.stats.composite import CompositeDistribution, CompositeSampler, Compos
     CompositeEnumerator
 
 from pysp.stats.conditional import ConditionalDistribution, ConditionalDistributionSampler, \
-    ConditionalDistributionEstimator, ConditionalDistributionDataEncoder, ConditionalDistributionEnumerator
+    ConditionalDistributionEstimator, ConditionalDistributionDataEncoder, ConditionalDistributionEnumerator, \
+    ConditionalEstimator, ConditionalAccumulator, ConditionalAccumulatorFactory, ConditionalDataEncoder, \
+    ConditionalEnumerator
 
 from pysp.stats.chow_liu_tree import ChowLiuTreeDistribution, ChowLiuTreeEstimator, ChowLiuTreeSampler, \
     ChowLiuTreeDataEncoder, ChowLiuTreeEnumerator
@@ -488,7 +506,8 @@ from pysp.stats.sequence import SequenceDistribution, SequenceSampler, SequenceE
     SequenceEnumerator
 
 from pysp.stats.segmental_hmm import SegmentalHiddenMarkovModelDistribution, SegmentalHiddenMarkovDistribution, \
-    SegmentalHiddenMarkovSampler, SegmentalHiddenMarkovEstimator, SegmentalHiddenMarkovDataEncoder
+    SegmentalHiddenMarkovSampler, SegmentalHiddenMarkovEstimator, SegmentalHiddenMarkovDataEncoder, \
+    SegmentalHiddenMarkovModelSampler, SegmentalHiddenMarkovModelEstimator, SegmentalHiddenMarkovModelDataEncoder
 
 from pysp.stats.ignored import IgnoredDistribution, IgnoredSampler, IgnoredEstimator, IgnoredDataEncoder
 
@@ -522,15 +541,17 @@ from pysp.stats.hidden_association import HiddenAssociationDistribution, HiddenA
     HiddenAssociationEstimator, HiddenAssociationDataEncoder
 
 from pysp.stats.hidden_markov import HiddenMarkovModelEnumerator, HiddenMarkovModelDistribution, HiddenMarkovSampler, HiddenMarkovEstimator, \
-    HiddenMarkovDataEncoder
+    HiddenMarkovDataEncoder, HiddenMarkovModelSampler, HiddenMarkovModelEstimator, HiddenMarkovModelDataEncoder, \
+    HiddenMarkovModelAccumulator, HiddenMarkovModelAccumulatorFactory
 
 from pysp.stats.quantized_hmm import QuantizedHiddenMarkovModelDistribution, QuantizedHiddenMarkovEstimator, \
-    QuantizedHiddenMarkovModelEnumerator
+    QuantizedHiddenMarkovModelEnumerator, QuantizedHiddenMarkovModelEstimator
 
 from pysp.stats.jmixture import JointMixtureDistribution, JointMixtureSampler, JointMixtureEstimator, \
     JointMixtureDataEncoder, JointMixtureEnumerator
 
-from pysp.stats.tree_hmm import TreeHiddenMarkovModelDistribution, TreeHiddenMarkovSampler, TreeHiddenMarkovEstimator
+from pysp.stats.tree_hmm import TreeHiddenMarkovModelDistribution, TreeHiddenMarkovSampler, TreeHiddenMarkovEstimator, \
+    TreeHiddenMarkovModelSampler, TreeHiddenMarkovModelEstimator
 from pysp.stats.lda import LDADistribution, LDASampler, LDAEstimator, LDADataEncoder
 
 from pysp.stats.ibp import IndianBuffetProcessDistribution, IndianBuffetProcessSampler, \

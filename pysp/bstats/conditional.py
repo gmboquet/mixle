@@ -414,3 +414,6 @@ class ConditionalDistributionEstimator(ParameterEstimator):
 
 
 		return ConditionalDistribution(dist_map, default_dist=default_dist)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+ConditionalDistributionAccumulator = ConditionalDistributionEstimatorAccumulator

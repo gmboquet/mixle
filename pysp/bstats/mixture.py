@@ -703,3 +703,7 @@ class MixtureEstimator(ParameterEstimator):
                 w = counts / counts.sum()
 
             return MixtureDistribution(components, w, name=self.name, prior=self.prior)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+MixtureAccumulator = MixtureEstimatorAccumulator
+MixtureAccumulatorFactory = MixtureEstimatorAccumulatorFactory
