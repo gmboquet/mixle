@@ -316,8 +316,7 @@ spellings work — the old names are kept as aliases — but new code should pre
   `*Accumulator`/`*AccumulatorFactory` aliases for families that historically used
   `*EstimatorAccumulator`.
 
-Passing both the legacy and preferred argument spelling raises `TypeError`. See
-`notes/distribution_api_naming_accounting.md` for the full target convention and migration plan.
+Passing both the legacy and preferred argument spelling raises `TypeError`.
 
 ## Examples
 
