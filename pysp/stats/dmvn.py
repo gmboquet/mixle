@@ -26,6 +26,64 @@ from typing import Sequence, Optional, Dict, Any, Tuple, List, Union
 class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
     """Multivariate Gaussian distribution with independent components (diagonal covariance matrix)."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='diagonal_gaussian',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('mu', constraint='real_vector'),
+                ParameterSpec('covar', constraint='positive_vector'),
+            ),
+            statistics=(
+                StatisticSpec('sum', kind='vector_moment'),
+                StatisticSpec('sum2', kind='vector_moment'),
+                StatisticSpec('count'),
+            ),
+            support='real_vector',
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            ),
+        )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> Tuple[Any, ...]:
+        """Return vector sufficient statistics for generated diagonal-Gaussian scoring."""
+        xx = engine.asarray(x)
+        return xx, xx * xx
+
+    @staticmethod
+    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return vector natural parameters for generated diagonal-Gaussian scoring."""
+        covar = params['covar']
+        return params['mu'] / covar, -0.5 / covar
+
+    @staticmethod
+    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+        """Return the diagonal-Gaussian log partition for generated scoring."""
+        mu = params['mu']
+        covar = params['covar']
+        return 0.5 * engine.sum(
+            engine.log(engine.asarray(2.0 * np.pi) * covar) + (mu * mu / covar),
+            axis=-1,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return row-wise legacy accumulator statistics for generated resident reductions."""
+        xx = engine.asarray(x)
+        one = engine.sum(xx * 0.0, axis=1) + engine.asarray(1.0)
+        return xx, xx * xx, one
+
     def __init__(self, mu: Union[Sequence[float], np.ndarray], covar: Union[Sequence[float], np.ndarray],
                  name: Optional[str] = None, keys: Optional[str] = None) -> None:
         """Create a DiagonalGaussianDistribution object with mean mu and covariance covar.
@@ -114,6 +172,43 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         rv += np.dot(x, self.cb)
         rv += self.cc
         return rv
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, mu: Any, covar: Any, engine: Any) -> Any:
+        """Engine-neutral diagonal Gaussian log-density from explicit parameters."""
+        dim = engine.asarray(float(tuple(getattr(covar, 'shape', (len(covar),)))[-1]))
+        log_c = -0.5 * (engine.log(engine.asarray(2.0 * np.pi)) * dim +
+                        engine.sum(engine.log(covar), axis=-1))
+        return log_c - 0.5 * engine.sum((x - mu) * (x - mu) / covar, axis=-1)
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x), engine.asarray(self.mu), engine.asarray(self.covar), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['DiagonalGaussianDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked diagonal-Gaussian parameters for a homogeneous mixture kernel."""
+        dim = dists[0].dim
+        if any(d.dim != dim for d in dists):
+            raise ValueError('Stacked DiagonalGaussianDistribution components require a shared dimension.')
+        return {
+            'mu': engine.asarray(np.stack([d.mu for d in dists], axis=0)),
+            'covar': engine.asarray(np.stack([d.covar for d in dists], axis=0)),
+            'dim': engine.asarray(float(dim)),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of diagonal-Gaussian log densities."""
+        xx = engine.asarray(x)
+        mu = params['mu']
+        covar = params['covar']
+        log_c = -0.5 * (engine.log(engine.asarray(2.0 * np.pi)) * params['dim'] +
+                        engine.sum(engine.log(covar), axis=1))
+        quad = engine.sum((xx[:, None, :] - mu[None, :, :]) *
+                          (xx[:, None, :] - mu[None, :, :]) / covar[None, :, :], axis=2)
+        return log_c[None, :] - 0.5 * quad
 
     def sampler(self, seed: Optional[int] = None) -> 'DiagonalGaussianSampler':
         """Create a DiagonalGaussianSampler for sampling from this distribution.
@@ -507,4 +602,3 @@ class DiagonalGaussianDataEncoder(DataSequenceEncoder):
             self.dim = len(x[0])
         xv = np.reshape(x, (-1, self.dim))
         return xv
-

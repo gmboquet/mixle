@@ -18,6 +18,29 @@ from pysp.stats.pdist import (
 class LogisticDistribution(SequenceEncodableProbabilityDistribution):
     """Logistic distribution with location loc and scale > 0."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='logistic',
+            distribution_type=cls,
+            parameters=(ParameterSpec('loc'), ParameterSpec('scale', constraint='positive')),
+            statistics=(StatisticSpec('sum'), StatisticSpec('sum2'), StatisticSpec('count')),
+            support='real',
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row Logistic sufficient statistics in accumulator order."""
+        xx = engine.asarray(x)
+        return xx, xx * xx, xx * 0.0 + engine.asarray(1.0)
+
     def __init__(self, loc: float = 0.0, scale: float = 1.0,
                  name: Optional[str] = None, keys: Optional[str] = None) -> None:
         if scale <= 0.0 or not np.isfinite(scale):
@@ -45,6 +68,35 @@ class LogisticDistribution(SequenceEncodableProbabilityDistribution):
         """Return vectorized log-density values for sequence-encoded observations."""
         z = (x - self.loc) / self.scale
         return -self.log_scale - z - 2.0 * np.logaddexp(0.0, -z)
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, loc: Any, scale: Any, engine: Any) -> Any:
+        """Engine-neutral logistic log-density from explicit parameters."""
+        z = (x - loc) / scale
+        log_scale = engine.log(scale)
+        pos = -log_scale - z - engine.asarray(2.0) * engine.log(engine.asarray(1.0) + engine.exp(-z))
+        neg = -log_scale + z - engine.asarray(2.0) * engine.log(engine.asarray(1.0) + engine.exp(z))
+        return engine.where(z >= 0.0, pos, neg)
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x), engine.asarray(self.loc), engine.asarray(self.scale), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['LogisticDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked logistic parameters for a homogeneous mixture kernel."""
+        return {
+            'loc': engine.asarray([d.loc for d in dists]),
+            'scale': engine.asarray([d.scale for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of logistic log densities."""
+        xx = engine.asarray(x)
+        return cls.backend_log_density_from_params(
+            xx[:, None], params['loc'][None, :], params['scale'][None, :], engine)
 
     def sampler(self, seed: Optional[int] = None) -> 'LogisticSampler':
         """Return a sampler for drawing observations from this distribution."""

@@ -351,6 +351,15 @@ class AutomaticScientificProfilingTestCase(unittest.TestCase):
         profile = analyze_structure(data, pairwise=False, use_bstats=True)
         self.assertTrue(any('bstats automatic estimator' in warning for warning in profile.warnings))
 
+    def test_bstats_gaussian_provider_uses_public_prior_export(self):
+        import pysp.bstats as bstats
+
+        est = get_estimator([1.0, 2.0, 3.0] * 20, use_bstats=True)
+
+        self.assertTrue(hasattr(bstats, 'NormalGammaDistribution'))
+        self.assertIsInstance(est, bstats.GaussianEstimator)
+        self.assertIsInstance(est.prior, bstats.NormalGammaDistribution)
+
     def test_stratified_pair_budget_can_find_late_field_dependency(self):
         rng = np.random.RandomState(15)
         data = []

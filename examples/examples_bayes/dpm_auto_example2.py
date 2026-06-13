@@ -1,3 +1,5 @@
+"""Infer a DPM mixture automatically for nested sequence/composite data."""
+
 from pysp.utils.automatic import get_dpm_mixture, get_estimator
 from pysp.bstats import *
 import numpy as np

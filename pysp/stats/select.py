@@ -72,6 +72,26 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         self.choice_function = choice_function
         self.count = len(dists)
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.dists)),
+                                        kernel_status='generic')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+        children = tuple(declaration_for(d) for d in self.dists)
+        children = tuple(d for d in children if d is not None)
+        return DistributionDeclaration(
+            name='select',
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(StatisticSpec('children', kind='choice_child_stats'),),
+            support='choice_partition',
+            children=children,
+            child_roles=tuple('choice_%d' % i for i in range(len(children))),
+            differentiable=all(child.differentiable for child in children),
+        )
+
     def __str__(self) -> str:
         """Returns string representation of SelectDistribution object."""
         return 'SelectDistribution(' + ','.join([str(u) for u in self.dists]) + ')'
@@ -123,6 +143,101 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         for i in range(len(idx)):
             rv[xi[i]] = self.dists[idx[i]].seq_log_density(enc_tuple[i])
         return rv
+
+    def backend_seq_log_density(self, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]],
+                                engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for choice-grouped encodings."""
+        from pysp.stats.backend import backend_seq_log_density
+        xi, idx, enc_tuple = x
+        sz = sum(len(u) for u in xi)
+        rv = engine.zeros(sz)
+        for i in range(len(idx)):
+            child_scores = backend_seq_log_density(self.dists[idx[i]], enc_tuple[i], engine)
+            rv = engine.index_add(rv, engine.asarray(xi[i]), child_scores)
+        return rv
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['SelectDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked child parameters for homogeneous select-wrapper mixtures."""
+        from pysp.stats.stacked import stacked_component_params
+        count = dists[0].count
+        choice_function = dists[0].choice_function
+        if any(d.count != count or d.choice_function is not choice_function for d in dists):
+            raise ValueError('Stacked SelectDistribution components require matching choice routing.')
+        children = []
+        for i in range(count):
+            child_dists = [d.dists[i] for d in dists]
+            try:
+                children.append(stacked_component_params(child_dists, engine))
+            except ValueError as exc:
+                raise ValueError('Select choice %d child %s is not stackable: %s' %
+                                 (i, type(child_dists[0]).__name__, exc))
+        return {'children': tuple(children), 'choice_function': choice_function, 'num_components': len(dists)}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]],
+                                    params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of choice-routed select log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        xi, idx, enc_tuple = x
+        sz = sum(len(u) for u in xi)
+        rv = engine.zeros((sz, int(params['num_components'])))
+        for i in range(len(idx)):
+            child_scores = stacked_component_log_density(enc_tuple[i], params['children'][idx[i]], engine)
+            rv = engine.index_add(rv, engine.asarray(xi[i]), child_scores)
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(
+            cls, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]], weights: Any,
+            params: Dict[str, Any], engine: Any, estimator: Any) -> Tuple[List[Tuple[Any, Any]], ...]:
+        """Return per-component legacy select sufficient statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
+            unstack_component_stats
+        xi, idx, enc_tuple = x
+        ww = engine.asarray(weights)
+        num_components = int(tuple(getattr(ww, 'shape', (0, 0)))[1])
+        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+        by_choice = {choice: pos for pos, choice in enumerate(idx)}
+        per_component: List[List[Tuple[Any, Any]]] = [
+            [None] * len(params['children']) for _ in range(num_components)
+        ]
+
+        for choice, route in enumerate(params['children']):
+            component_estimators = tuple(
+                getattr(component_est, 'estimators', ())[choice]
+                for component_est in outer_estimators
+                if len(getattr(component_est, 'estimators', ())) > choice
+            )
+            group_pos = by_choice.get(choice)
+            if group_pos is None:
+                child_counts = [0.0] * num_components
+                child_stats_by_component = tuple(
+                    _child_accumulator_factory(component_est).make().value()
+                    for component_est in component_estimators
+                )
+                if len(child_stats_by_component) != num_components:
+                    child_stats_by_component = tuple(None for _ in range(num_components))
+            else:
+                row_index = engine.asarray(xi[group_pos])
+                group_weights = ww[row_index]
+                child_counts = engine.sum(group_weights, axis=0)
+                child_estimator = StackedEstimatorView(component_estimators) \
+                    if len(component_estimators) == num_components else None
+                child_stats = stacked_component_sufficient_statistics(
+                    enc_tuple[group_pos], group_weights, route, engine, child_estimator)
+                child_stats_by_component = unstack_component_stats(child_stats, num_components)
+            for component in range(num_components):
+                per_component[component][choice] = (
+                    child_counts[component],
+                    child_stats_by_component[component],
+                )
+        return tuple(per_component)
+
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+        """Return distribution-owned state for autograd fitting."""
+        from pysp.stats.gradient import SelectGradientFitState
+        return SelectGradientFitState(self, [recurse(dist, engine, torch, leaves) for dist in self.dists])
 
     def sampler(self, seed: Optional[int] = None) -> 'SelectSampler':
         """Creates a SelectSampler object for sampling from the child distributions.
@@ -399,6 +514,12 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.weights[i] = u[0]
             self.accumulators[i].from_value(u[1])
 
+        return self
+
+    def scale(self, c: float) -> 'SelectEstimatorAccumulator':
+        for i in range(self.count):
+            self.weights[i] *= c
+            self.accumulators[i].scale(c)
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

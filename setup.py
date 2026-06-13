@@ -33,10 +33,11 @@ setup(
     extras_require={
         "numba": ["numba", "tbb"],
         "spark": ["pyspark"],
+        "dask": ["dask", "distributed"],
         "torch": ["torch"],
         "mpi": ["mpi4py"],
         "umap": ["umap-learn"],
         "test": ["pytest>=8"],
-        "all": ["numba", "tbb", "pyspark", "torch", "mpi4py", "umap-learn"],
+        "all": ["numba", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn"],
     },
 )

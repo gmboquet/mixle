@@ -1,3 +1,5 @@
+"""Fit a lookback HMM whose emissions depend on the previous integer state."""
+
 #import os
 
 import numpy as np

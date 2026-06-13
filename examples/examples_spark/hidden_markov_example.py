@@ -1,3 +1,5 @@
+"""Run hidden-Markov mixture estimation on Spark RDD partitions."""
+
 from pyspark import SparkContext, SparkConf
 from pysp.stats import *
 from pysp.stats.rdd_sampler import sample_rdd

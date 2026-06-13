@@ -8,6 +8,7 @@ import unittest
 
 import numpy as np
 
+from pysp.engines import NumpyEngine, TorchEngine, torch
 from pysp.stats import *
 from pysp.utils.enumeration import freeze
 
@@ -71,6 +72,63 @@ class FiniteEnumeratorCoverageTestCase(unittest.TestCase):
 
         self.assertIn("name='tree'", dist_str)
         self.assertNotIn("name=',t,r,e,e,'", dist_str)
+
+    def test_icltree_backend_metadata_and_scale(self):
+        dist = ICLTreeDistribution(
+            [None, 0],
+            [np.log([0.6, 0.4]),
+             np.log([[0.7, 0.3],
+                     [0.2, 0.8]])])
+        data = np.asarray([[0, 0], [0, 1], [1, 1], [1, 0], [1, 1]])
+        enc = dist.dist_to_encoder().seq_encode(data)
+        expected_scores = dist.seq_log_density(enc)
+
+        np.testing.assert_allclose(
+            backend_seq_log_density(dist, enc, NumpyEngine()),
+            expected_scores,
+            rtol=1.0e-12,
+            atol=1.0e-12)
+        if torch is not None:
+            scores = backend_seq_log_density(dist, enc, TorchEngine())
+            np.testing.assert_allclose(
+                TorchEngine().to_numpy(scores),
+                expected_scores,
+                rtol=1.0e-12,
+                atol=1.0e-12)
+
+        capabilities = capabilities_for(dist)
+        self.assertEqual(capabilities.engine_ready, ('numpy', 'torch'))
+        self.assertEqual(capabilities.kernel_status, 'generic_table')
+
+        declaration = declaration_for(dist)
+        self.assertEqual(declaration.name, 'integer_chow_liu_tree')
+        self.assertEqual(declaration.statistic_names,
+                         ('num_features', 'num_states', 'counts', 'marginal_counts'))
+        self.assertFalse(declaration.differentiable)
+
+        weights = np.linspace(0.5, 1.5, len(data))
+        c = 0.37
+        estimator = ICLTreeEstimator()
+        acc = estimator.accumulator_factory().make()
+        acc.seq_update(enc, weights, None)
+        self.assertIs(acc.scale(c), acc)
+
+        expected = estimator.accumulator_factory().make()
+        expected.seq_update(enc, weights * c, None)
+        actual_value = acc.value()
+        expected_value = expected.value()
+        self.assertEqual(actual_value[0], expected_value[0])
+        self.assertEqual(actual_value[1], expected_value[1])
+        np.testing.assert_allclose(actual_value[2], expected_value[2], rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(actual_value[3], expected_value[3], rtol=1.0e-12, atol=1.0e-12)
+
+        scaled_model = estimator.estimate(float(weights.sum() * c), actual_value)
+        expected_model = estimator.estimate(float(weights.sum() * c), expected_value)
+        np.testing.assert_allclose(
+            scaled_model.seq_log_density(scaled_model.dist_to_encoder().seq_encode(data)),
+            expected_model.seq_log_density(expected_model.dist_to_encoder().seq_encode(data)),
+            rtol=1.0e-10,
+            atol=1.0e-10)
 
     def test_integer_markov_chain_enumerator(self):
         init_dist = SequenceDistribution(

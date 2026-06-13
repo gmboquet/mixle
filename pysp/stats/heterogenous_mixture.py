@@ -37,6 +37,30 @@ T = TypeVar('T')
 class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     """Mixture distribution with component-specific observation encoders."""
+
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.components)),
+                                        kernel_status='generic_latent')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        children = tuple(declaration_for(component) for component in self.components)
+        children = tuple(child for child in children if child is not None)
+        return DistributionDeclaration(
+            name='heterogeneous_mixture',
+            distribution_type=type(self),
+            parameters=(ParameterSpec('w', constraint='simplex_vector'),),
+            statistics=(
+                StatisticSpec('component_counts'),
+                StatisticSpec('components', kind='tuple'),
+            ),
+            support='mixture',
+            children=children,
+            child_roles=tuple('component_%d' % i for i in range(len(children))),
+            differentiable=False,
+        )
+
     def __init__(self,
                  components: Sequence[SequenceEncodableProbabilityDistribution],
                  w: Union[List[float], np.ndarray],
@@ -279,6 +303,33 @@ class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution)
                     ll_mat[:, i] = temp
 
         return ll_mat
+
+    def backend_seq_component_log_density(self, x: Tuple[List[np.ndarray], List[Any]], engine: Any) -> Any:
+        """Engine-neutral component log densities for heterogeneous encoded data."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        tag_list, enc_data = x
+        comp_to_tag = {}
+        for tag, tag_idxs in enumerate(tag_list):
+            for i in tag_idxs:
+                comp_to_tag[int(i)] = tag
+
+        base_tag = comp_to_tag.get(0, 0)
+        base = backend_seq_log_density(self.components[0], enc_data[base_tag], engine)
+        ll_mat = engine.zeros((len(base), self.num_components)) + engine.asarray(-np.inf)
+
+        for tag, tag_idxs in enumerate(tag_list):
+            for i in tag_idxs:
+                i = int(i)
+                if not self.zw[i]:
+                    ll_mat[:, i] = backend_seq_log_density(self.components[i], enc_data[tag], engine)
+
+        return ll_mat
+
+    def backend_seq_log_density(self, x: Tuple[List[np.ndarray], List[Any]], engine: Any) -> Any:
+        """Engine-neutral heterogeneous-mixture log-density for encoded data."""
+        ll_mat = self.backend_seq_component_log_density(x, engine)
+        return engine.logsumexp(ll_mat + engine.asarray(self.log_w), axis=1)
 
     def seq_posterior(self, x: Tuple[List[np.ndarray], List[Any]]) -> np.ndarray:
         """Vectorized evaluation of posterior of HeterogeneousMixtureDistribution for encoded sequence x.

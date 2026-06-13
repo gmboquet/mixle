@@ -1,3 +1,5 @@
+"""Fit an integer hidden-association model to generated count-vector data."""
+
 import numpy as np
 import time
 from pysp.stats import *

@@ -20,6 +20,26 @@ E = TypeVar('E')
 class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
 
     """Distribution wrapper that assigns zero log-density while preserving an estimator interface."""
+
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import capabilities_for
+        return capabilities_for(self.dist)
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+        child = declaration_for(self.dist)
+        children = () if child is None else (child,)
+        return DistributionDeclaration(
+            name='ignored',
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(StatisticSpec('ignored', kind='none', additive=False, scales=False),),
+            support='delegated',
+            children=children,
+            child_roles=('ignored',) if child is not None else (),
+            differentiable=False,
+        )
+
     def __init__(self, dist: Optional[SequenceEncodableProbabilityDistribution], name: Optional[str] = None):
         """IgnoredDistribution object for using IgnoredDistributions in estimation.
 
@@ -61,6 +81,40 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
         """Return vectorized log-density values for sequence-encoded observations."""
         rv = self.dist.seq_log_density(x)
         return rv
+
+    def backend_seq_log_density(self, x: E, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density delegated to the wrapped distribution."""
+        from pysp.stats.backend import backend_seq_log_density
+        return backend_seq_log_density(self.dist, x, engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['IgnoredDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked child parameters for homogeneous ignored-wrapper mixtures."""
+        from pysp.stats.stacked import stacked_component_params
+        child_dists = [dist.dist for dist in dists]
+        if all(isinstance(dist, NullDistribution) for dist in child_dists):
+            return {'child_route': None, 'num_components': len(dists)}
+        try:
+            child_route = stacked_component_params(child_dists, engine)
+        except ValueError as exc:
+            raise ValueError('Ignored child %s is not stackable: %s' %
+                             (type(child_dists[0]).__name__, exc))
+        return {'child_route': child_route, 'num_components': len(dists)}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of delegated child log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        child_route = params['child_route']
+        if child_route is None:
+            return engine.zeros((int(x), int(params['num_components'])))
+        return stacked_component_log_density(x, child_route, engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: E, weights: Any,
+                                             params: Dict[str, Any], engine: Any) -> Any:
+        """Return empty legacy statistics for each ignored component."""
+        return tuple(None for _ in range(int(params['num_components'])))
 
     def sampler(self, seed: Optional[int] = None) -> 'IgnoredSampler':
         """Return a sampler for drawing observations from this distribution."""
@@ -192,8 +246,6 @@ class IgnoredDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[T]) -> Any:
         enc_data = self.encoder.seq_encode(x)
         return enc_data
-
-
 
 
 

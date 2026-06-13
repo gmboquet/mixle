@@ -46,6 +46,11 @@ SS1 = TypeVar('SS1') ## suff-stat of init_dist
 class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution):
     """Bernoulli edit set distribution: each integer independently transitions in/out between two sets."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_table')
+
     def __init__(self, log_edit_pmat: Union[Sequence[Tuple[float, float]], np.ndarray],
                  init_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  name: Optional[str] = None) -> None:
@@ -165,6 +170,107 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         rv += self.init_dist.seq_log_density(init_enc)
 
         return rv
+
+    def backend_seq_log_density(self, x: E, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded integer edit-set observations."""
+        from pysp.stats.backend import backend_seq_log_density
+        sz, idx, xs, ys, ym, init_enc = x
+        rv = engine.zeros(sz) + engine.asarray(self.log_nsum)
+
+        if len(idx) > 0:
+            contrib = engine.asarray(self.log_dvec)[engine.asarray(xs), engine.asarray(ys)]
+            rv = engine.index_add(rv, engine.asarray(idx), contrib)
+
+        rv = rv + backend_seq_log_density(self.init_dist, init_enc, engine)
+        return rv
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['IntegerBernoulliEditDistribution'],
+                               engine: Any) -> Dict[str, Any]:
+        """Return stacked integer edit-set parameters for shared support and init policy."""
+        from pysp.stats.stacked import stacked_component_params
+        num_vals = int(dists[0].num_vals)
+        null_init_dist = isinstance(dists[0].init_dist, NullDistribution)
+        if any(int(dist.num_vals) != num_vals or
+               isinstance(dist.init_dist, NullDistribution) != null_init_dist for dist in dists):
+            raise ValueError('Stacked IntegerBernoulliEditDistribution components require shared support and init '
+                             'policy.')
+
+        init_route = None
+        if not null_init_dist:
+            try:
+                init_route = stacked_component_params([dist.init_dist for dist in dists], engine)
+            except ValueError as exc:
+                raise ValueError('IntegerBernoulliEdit initial child %s is not stackable: %s' %
+                                 (type(dists[0].init_dist).__name__, exc))
+
+        return {
+            '__pysp_component_axis__': {'log_dvec': 2, 'log_nsum': 0},
+            'num_vals': num_vals,
+            'log_dvec': engine.asarray(np.stack([dist.log_dvec for dist in dists], axis=2)),
+            'log_nsum': engine.asarray([dist.log_nsum for dist in dists]),
+            'init_route': init_route,
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of integer edit-set component log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        sz, idx, xs, ys, ym, init_enc = x
+        rv = engine.zeros((sz, int(params['num_components']))) + params['log_nsum'][None, :]
+
+        if len(idx) > 0:
+            contrib = params['log_dvec'][engine.asarray(xs), engine.asarray(ys), :]
+            rv = engine.index_add(rv, engine.asarray(idx), contrib)
+
+        if params['init_route'] is not None:
+            rv = rv + stacked_component_log_density(init_enc, params['init_route'], engine)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any,
+                                                            params: Dict[str, Any], engine: Any,
+                                                            estimator: Any) -> Tuple[Any, ...]:
+        """Return per-component legacy ``(edit_counts, total_weight, init_stat)`` statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
+            unstack_component_stats
+        sz, idx, xs, ys, ym, init_enc = x
+        ww = engine.asarray(weights)
+        num_components = int(params['num_components'])
+        num_vals = int(params['num_vals'])
+
+        if len(idx) > 0 and num_vals > 0:
+            row_weights = ww[engine.asarray(idx)]
+            zero_rows = row_weights * engine.asarray(0.0)
+            by_type = []
+            for edit_type in range(3):
+                rows = []
+                for value_index in range(num_vals):
+                    mask = np.bitwise_and(xs == value_index, ys == edit_type)
+                    rows.append(engine.sum(engine.where(engine.asarray(mask)[:, None], row_weights, zero_rows), axis=0))
+                by_type.append(engine.stack(rows, axis=1))
+            edit_counts = engine.stack(by_type, axis=2)
+        else:
+            edit_counts = engine.zeros((num_components, num_vals, 3))
+
+        total_count = engine.sum(ww, axis=0)
+        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+
+        init_estimators = tuple(getattr(component_est, 'init_est', None)
+                                for component_est in outer_estimators)
+
+        if params['init_route'] is None or all(isinstance(init_est, NullEstimator) for init_est in init_estimators):
+            init_by_component = tuple(None for _ in range(num_components))
+        else:
+            init_estimator = StackedEstimatorView(init_estimators) \
+                if len(init_estimators) == num_components else None
+            init_stats = stacked_component_sufficient_statistics(
+                init_enc, ww, params['init_route'], engine, init_estimator)
+            init_by_component = unstack_component_stats(init_stats, num_components)
+
+        return tuple((edit_counts[i], total_count[i], init_by_component[i]) for i in range(num_components))
 
     def sampler(self, seed: Optional[int] = None) -> 'IntegerBernoulliEditSampler':
         """Create an IntegerBernoulliEditSampler object from this distribution.

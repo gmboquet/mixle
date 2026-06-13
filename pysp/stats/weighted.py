@@ -37,6 +37,25 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
 
     """
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import capabilities_for
+        return capabilities_for(self.dist)
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+        child = declaration_for(self.dist)
+        children = () if child is None else (child,)
+        return DistributionDeclaration(
+            name='weighted',
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(StatisticSpec('weighted_child', kind='child_stat'),),
+            support='weighted_observation',
+            children=children,
+            child_roles=('value',) if child is not None else (),
+            differentiable=False,
+        )
+
     def __init__(self, dist: SequenceEncodableProbabilityDistribution, name: Optional[str] = None):
         self.dist = dist
         self.name = name
@@ -83,6 +102,43 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         return self.dist.seq_log_density(x[0])
+
+    def backend_seq_log_density(self, x: Tuple[E, np.ndarray], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density delegated to the value distribution."""
+        from pysp.stats.backend import backend_seq_log_density
+        return backend_seq_log_density(self.dist, x[0], engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['WeightedDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked child parameters for homogeneous weighted-wrapper mixtures."""
+        from pysp.stats.stacked import stacked_component_params
+        child_dists = [dist.dist for dist in dists]
+        try:
+            child_route = stacked_component_params(child_dists, engine)
+        except ValueError as exc:
+            raise ValueError('Weighted child %s is not stackable: %s' %
+                             (type(child_dists[0]).__name__, exc))
+        return {'child_route': child_route, 'num_components': len(dists)}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[E, np.ndarray], params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of child log densities, ignoring attached weights."""
+        from pysp.stats.stacked import stacked_component_log_density
+        return stacked_component_log_density(x[0], params['child_route'], engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: Tuple[E, np.ndarray], weights: Any,
+                                                            params: Dict[str, Any], engine: Any,
+                                                            estimator: Any) -> Any:
+        """Return child legacy statistics with posterior weights scaled by observation weights."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics
+        ww = engine.asarray(weights) * engine.asarray(x[1])[:, None]
+        num_components = int(params['num_components'])
+        component_estimators = tuple(getattr(est, 'estimator', None)
+                                     for est in getattr(estimator, 'estimators', ()))
+        child_estimator = StackedEstimatorView(component_estimators) \
+            if len(component_estimators) == num_components else None
+        return stacked_component_sufficient_statistics(x[0], ww, params['child_route'], engine, child_estimator)
 
     def dist_to_encoder(self) -> 'WeightedDataEncoder':
         """Returns a WeightedDataEncoder for encoding sequences of (value, weight) observations."""
@@ -250,6 +306,11 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
         """Returns the base accumulator's sufficient statistics."""
         return self.accumulator.value()
 
+    def scale(self, c: float) -> 'WeightedAccumulator':
+        """Scale the child accumulator through its family-specific protocol."""
+        self.accumulator.scale(c)
+        return self
+
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
         """Merge keyed sufficient statistics of the base accumulator into stats_dict."""
         self.accumulator.key_merge(stats_dict)
@@ -355,5 +416,3 @@ class WeightedDataEncoder(DataSequenceEncoder):
 
         """
         return self.encoder.seq_encode([xx[0] for xx in x]), np.asarray([xx[1] for xx in x], dtype=float)
-
-

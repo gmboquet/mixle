@@ -85,6 +85,42 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.key = keys if keys is not None else (None, None)
 
+    def compute_capabilities(self):
+        """Return backend capability metadata for this concrete hidden association model."""
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+
+        return DistributionCapabilities(engine_ready=intersect_engine_ready((
+            self.cond_dist, self.given_dist, self.len_dist)),
+            kernel_status='generic_latent')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+        conditional = declaration_for(self.cond_dist)
+        given = None if isinstance(self.given_dist, NullDistribution) else declaration_for(self.given_dist)
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = tuple(child for child in (conditional, given, length) if child is not None)
+        roles = ()
+        if conditional is not None:
+            roles += ('conditional',)
+        if given is not None:
+            roles += ('given',)
+        if length is not None:
+            roles += ('length',)
+        return DistributionDeclaration(
+            name='hidden_association',
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(
+                StatisticSpec('conditional', kind='child_stat'),
+                StatisticSpec('given', kind='child_stat'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='hidden_association_grouped_counts',
+            children=children,
+            child_roles=roles,
+            differentiable=False,
+        )
+
     def __str__(self) -> str:
         """Returns string representation of HiddenAssociationDistribution object."""
         s1 = repr(self.cond_dist)
@@ -162,6 +198,53 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         return np.asarray([self.log_density(xx) for xx in x])
+
+    def backend_seq_log_density(self, x: Sequence[Tuple[List[Tuple[T, float]], List[Tuple[T, float]]]],
+                                engine: Any) -> Any:
+        """Evaluate encoded log-densities through distribution-owned backend composition."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        assoc_scores = []
+        emit_lengths = []
+
+        for given_obs, emitted_obs in x:
+            emit_counts = [c1 for _, c1 in emitted_obs]
+            emit_lengths.append(sum(emit_counts))
+
+            if not emitted_obs:
+                assoc_scores.append(engine.asarray(0.0))
+                continue
+            if not given_obs:
+                assoc_scores.append(engine.asarray(float('-inf')))
+                continue
+
+            pairs = []
+            given_counts = []
+            for x0, c0 in given_obs:
+                given_counts.append(c0)
+            for x1, _ in emitted_obs:
+                for x0, _ in given_obs:
+                    pairs.append((x0, x1))
+
+            cond_enc = self.cond_dist.dist_to_encoder().seq_encode(pairs)
+            pair_scores = backend_seq_log_density(self.cond_dist, cond_enc, engine)
+            pair_scores = pair_scores.reshape((len(emitted_obs), len(given_obs)))
+            given_count_array = engine.asarray(np.asarray(given_counts, dtype=np.float64))
+            emit_count_array = engine.asarray(np.asarray(emit_counts, dtype=np.float64))
+
+            weighted_scores = pair_scores + engine.log(given_count_array).reshape((1, -1))
+            per_emitted = engine.logsumexp(weighted_scores, axis=1) - engine.log(engine.sum(given_count_array))
+            assoc_scores.append(engine.sum(per_emitted * emit_count_array))
+
+        rv = engine.stack(assoc_scores) if assoc_scores else engine.zeros(0)
+
+        given_enc = self.given_dist.dist_to_encoder().seq_encode([xx[0] for xx in x])
+        rv = rv + backend_seq_log_density(self.given_dist, given_enc, engine)
+
+        len_enc = self.len_dist.dist_to_encoder().seq_encode(emit_lengths)
+        rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
+
+        return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'HiddenAssociationSampler':
         """Create a HiddenAssociationSampler object from this distribution.
@@ -453,6 +536,13 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
+    def scale(self, c: float) -> 'HiddenAssociationAccumulator':
+        """Scale sufficient statistics by delegating to child accumulators."""
+        self.cond_accumulator.scale(c)
+        self.given_accumulator.scale(c)
+        self.size_accumulator.scale(c)
+        return self
+
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
         """Merge keyed statistics of the conditional, given, and size accumulators into stats_dict.
 
@@ -612,9 +702,6 @@ class HiddenAssociationDataEncoder(DataSequenceEncoder):
 
         """
         return x
-
-
-
 
 
 

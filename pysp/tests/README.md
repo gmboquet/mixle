@@ -25,7 +25,8 @@ separately so they can be enabled in dedicated jobs.
 - `fisher`: Fisher views, sufficient statistics, and model metrics.
 - `htsne`: affinity construction and embedding behavior.
 - `hmm`, `pcfg`, `latent`, `bstats`, `automatic`: subsystem integration.
-- `kernel`, `torch`, `numba`, `parallel`, `mpi`: implementation backends.
+- `kernel`, `torch`, `numba`, `parallel`, `planner`, `mpi`: implementation
+  backends and resource-planning surfaces.
 - `stochastic`, `slow`, `benchmark`, `optional`: CI scheduling tiers.
 
 When adding a new file, add it to `FILE_MARKERS` in `conftest.py`.  If a single

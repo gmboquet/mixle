@@ -707,6 +707,18 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
 
         return self
 
+    def scale(self, c: float) -> 'LookbackHiddenMarkovEstimatorAccumulator':
+        self.init_counts *= c
+        self.state_counts *= c
+        self.trans_counts *= c
+        for acc in self.init_accumulators:
+            acc.scale(c)
+        for acc in self.seq_accumulators:
+            acc.scale(c)
+        if self.len_accumulator is not None:
+            self.len_accumulator.scale(c)
+        return self
+
     def key_merge(self, stats_dict):
         """Merge keyed sufficient statistics of this accumulator into stats_dict.
 

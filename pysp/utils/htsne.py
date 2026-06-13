@@ -21,9 +21,10 @@ are supported (the `affinity` argument):
   alone, and the pair distance is the sum over fields of per-field
   Bhattacharyya distances -log sum_k sqrt(z^f_ik z^f_jk), each Winsorized at
   `evidence_cap` nats. The per-field posteriors keep every field's structure
-  visible regardless of its likelihood scale (a 15-token sequence field
-  contributes ~17 nats of contrast per observation, an overlapping Gaussian
-  fractions of one - the joint posterior only ever sees the loudest field),
+  visible regardless of its likelihood scale (by default, a 15-token sequence
+  field contributes summed sequence evidence while length is a separate field;
+  if the sequence model was explicitly fit with len_normalized=True, the
+  sequence field instead contributes a per-token composition quotient),
   and the cap bounds each field's influence so one spuriously sharp field
   cannot veto a pair's similarity that every other field supports.
 
@@ -164,8 +165,10 @@ def _field_log_density_features(dists, items):
 
     - composite records recurse into their child fields (nested composites
       flatten all the way down),
-    - sequences score each child field summed over the sequence's elements,
-      with the length model contributing its own field,
+    - sequences score each child field by summed element log-likelihood by
+      default, or by mean element log-likelihood only when the fitted
+      SequenceDistribution has len_normalized=True; the length model
+      contributes its own field,
     - optional wrappers contribute a missing-ness field, with the inner
       distribution's fields scored only on rows where the value is present,
     - ignored/null distributions contribute nothing,
@@ -259,12 +262,11 @@ def balanced_factors(mix_model, data, field_weights=None):
     """Per-field Bhattacharyya affinity factors for heterogeneous models.
 
     The joint posterior is dominated by whichever field has the largest
-    log-likelihood contrast across components - sharp categorical or
-    token-sequence fields contribute many nats per observation while
-    overlapping continuous fields contribute fractions of one, or a collapsed
-    continuous component contributes thousands. The drowned fields'
-    relationships then become invisible to any affinity computed from the
-    joint posterior.
+    log-likelihood contrast across components - sharp categorical fields,
+    long token-sequence fields, or collapsed continuous components can
+    contribute many nats of contrast while overlapping continuous fields
+    contribute fractions of one. The drowned fields' relationships then become
+    invisible to any affinity computed from the joint posterior.
 
     'balanced' fixes the scale problem at the affinity level: a *field-
     restricted* posterior z^f is computed from each field's likelihoods alone
@@ -1780,6 +1782,13 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
         'coassign'   - co-assignment probability P(z_i = z_j | x); exact but
             near-binary when posteriors are sharp
         'likelihood' - predictive affinity sum_k p(x_i|theta_k) z_jk
+
+    variable_length is retained for backward compatibility and does not
+    rescale densities. Variable-length behavior is determined by the fitted
+    sequence model: ordinary SequenceDistribution leaves use summed element
+    log-likelihood with length as a separate field, while
+    SequenceDistribution(len_normalized=True) intentionally uses a per-token
+    composition quotient for the element field.
 
     evidence_cap (default 1.0 nats) bounds the dissimilarity evidence any
     single field may contribute to a pair's distance under multi-field

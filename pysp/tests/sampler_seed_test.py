@@ -167,6 +167,14 @@ def _stats_public_distribution_catalog():
             stats.CategoricalDistribution({'x': 0.5, 'y': 0.5}),
             stats.GaussianDistribution(0.0, 1.0),
         )),
+        'RecordDistribution': stats.RecordDistribution({
+            'x': stats.GaussianDistribution(0.0, 1.0),
+            'label': stats.CategoricalDistribution({'a': 0.4, 'b': 0.6}),
+        }),
+        'DictRecordDistribution': stats.DictRecordDistribution({
+            'x': stats.GaussianDistribution(1.0, 2.0),
+            'label': stats.CategoricalDistribution({'left': 0.3, 'right': 0.7}),
+        }),
         'ConditionalDistribution': cond_cat,
         'ChowLiuTreeDistribution': stats.ChowLiuTreeDistribution(
             [None, 0],
@@ -326,6 +334,7 @@ def _bstats_public_distribution_catalog():
             np.array([1.0, 1.5]),
             np.array([2.0, 3.0]),
             np.array([4.0, 5.0])),
+        'NormalGammaDistribution': bstats.NormalGammaDistribution(0.0, 1.0, 2.0, 3.0),
         'NormalWishartDistribution': bstats.NormalWishartDistribution(
             [0.0, 1.0], 2.0, [[2.0, 0.0], [0.0, 2.0]], 5.0),
         'NullDistribution': bstats.NullDistribution(),

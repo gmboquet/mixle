@@ -5,10 +5,11 @@ ConditionalSampler, and DistributionSampler for classes of the pysp.stats.
 """
 import itertools
 import math
+import sys
 import numpy as np
 from abc import abstractmethod
 from pysp.arithmetic import *
-from typing import TypeVar, Optional, Any, Generic, Dict, List, Tuple
+from typing import TypeVar, Optional, Any, Generic, Dict, List, Tuple, Set
 
 SS = TypeVar('SS')
 
@@ -30,6 +31,17 @@ class EnumerationError(NotImplementedError):
         if reason:
             msg += ': %s' % reason
         super().__init__(msg)
+
+
+class KeyValidationError(ValueError):
+    """Raised when keyed sufficient-statistic sites are incompatible.
+
+    A key denotes an equality constraint across model sites.  Sites sharing a
+    key must therefore have the same accumulator family and compatible estimator
+    settings before their sufficient statistics are pooled.
+    """
+
+    pass
 
 
 def child_enumerator(child: 'ProbabilityDistribution', path: str) -> 'DistributionEnumerator':
@@ -202,6 +214,18 @@ class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
     seq_initialize), enabling fast vectorized estimation over iid sequences.
     """
 
+    engine_ready = ('numpy',)
+
+    def supported_engines(self) -> Tuple[str, ...]:
+        """Return engine names this distribution can evaluate on directly."""
+        from pysp.stats.capabilities import capabilities_for
+        return capabilities_for(self).engine_ready
+
+    def supports_engine(self, engine: Any) -> bool:
+        """Return True when the distribution can safely use ``engine``."""
+        from pysp.stats.capabilities import capabilities_for
+        return capabilities_for(self).supports_engine(engine)
+
     def seq_ld_lambda(self):
         """Return vectorized log-density callables for encoded data."""
         pass
@@ -213,6 +237,11 @@ class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
     def seq_log_density_lambda(self):
         """Return vectorized log-density callables for encoded data."""
         return [self.seq_log_density]
+
+    def kernel(self, engine=None, estimator: Optional['ParameterEstimator'] = None):
+        """Return an engine-aware evaluation kernel for this distribution."""
+        from pysp.stats.kernel import kernel_for
+        return kernel_for(self, engine=engine, estimator=estimator)
 
     @abstractmethod
     def dist_to_encoder(self) -> 'DataSequenceEncoder':
@@ -319,6 +348,16 @@ class StatisticAccumulator(Generic[SS]):
     def from_value(self, x: SS) -> 'SequenceEncodableStatisticAccumulator':
         ...
 
+    def scale(self, c: float) -> 'StatisticAccumulator':
+        """Scale linear sufficient statistics in-place by ``c``.
+
+        The structural default is correct for ordinary weighted sums, nested
+        tuples/lists/dicts, and numeric arrays. Families whose ``value()``
+        payload includes non-linear metadata such as support bounds must
+        override this method and leave that metadata unscaled.
+        """
+        return self.from_value(scale_suff_stat(self.value(), c))
+
     @abstractmethod
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
         ...
@@ -347,6 +386,30 @@ class SequenceEncodableStatisticAccumulator(StatisticAccumulator[SS]):
 
     @abstractmethod
     def acc_to_encoder(self) -> 'DataSequenceEncoder': ...
+
+
+def scale_suff_stat(x: Any, c: float) -> Any:
+    """Return ``x`` with numeric sufficient-statistic leaves multiplied by ``c``."""
+    if x is None:
+        return None
+    if isinstance(x, np.ndarray):
+        if np.issubdtype(x.dtype, np.number) and not np.issubdtype(x.dtype, np.bool_):
+            return x * c
+        return x.copy()
+    if isinstance(x, dict):
+        return {k: scale_suff_stat(v, c) for k, v in x.items()}
+    if isinstance(x, tuple):
+        return tuple(scale_suff_stat(v, c) for v in x)
+    if isinstance(x, list):
+        return [scale_suff_stat(v, c) for v in x]
+    if isinstance(x, np.generic):
+        if np.issubdtype(type(x), np.number) and not np.issubdtype(type(x), np.bool_):
+            return x * c
+        return x
+    if isinstance(x, (int, float)) and not isinstance(x, bool):
+        return x * c
+    return x
+
 
 class StatisticAccumulatorFactory(object):
     """Factory whose make() returns a fresh, zeroed accumulator for one estimator."""
@@ -414,5 +477,206 @@ class DataSequenceEncoder:
         """Encode the iid observation sequence x for vectorized evaluation."""
         return x
 
+    def nbytes(self, x: Any) -> int:
+        """Return the approximate in-memory byte size of an encoded payload."""
+        return encoded_nbytes(x)
+
     @abstractmethod
     def __eq__(self, other: object) -> bool: ...
+
+
+def encoded_nbytes(x: Any) -> int:
+    """Return an approximate byte size for nested encoded array payloads.
+
+    Encoders mostly return arrays or tuples/lists/dicts of arrays. The helper
+    keeps accounting structural and deterministic; Python object overhead is
+    included only for scalar leaves where no array-native byte count exists.
+    """
+    return _encoded_nbytes(x, set())
+
+
+def _encoded_nbytes(x: Any, seen: Set[int]) -> int:
+    oid = id(x)
+    if oid in seen:
+        return 0
+
+    if isinstance(x, np.ndarray):
+        seen.add(oid)
+        return int(x.nbytes)
+
+    nbytes = getattr(x, 'nbytes', None)
+    if nbytes is not None and not isinstance(x, (bytes, bytearray, str)):
+        seen.add(oid)
+        return int(nbytes)
+
+    if hasattr(x, 'numel') and hasattr(x, 'element_size'):
+        seen.add(oid)
+        return int(x.numel() * x.element_size())
+
+    if isinstance(x, dict):
+        seen.add(oid)
+        return sum(_encoded_nbytes(k, seen) + _encoded_nbytes(v, seen) for k, v in x.items())
+
+    if isinstance(x, (list, tuple)):
+        seen.add(oid)
+        return sum(_encoded_nbytes(v, seen) for v in x)
+
+    if isinstance(x, (bytes, bytearray)):
+        return len(x)
+
+    if isinstance(x, str):
+        return len(x.encode('utf-8'))
+
+    return sys.getsizeof(x)
+
+
+_KEY_ATTRS = ('key', 'keys', 'weight_key', 'comp_key', 'init_key', 'trans_key', 'state_key')
+
+
+def _is_key_value(x: Any) -> bool:
+    """Return True for scalar key values used by accumulator key_merge methods."""
+    if x is None:
+        return False
+    if isinstance(x, (str, int, float, bytes)):
+        return True
+    return False
+
+
+def _freeze_for_signature(x: Any) -> Any:
+    """Convert common mutable/numpy values into a hashable compatibility shape."""
+    if isinstance(x, np.ndarray):
+        return ('ndarray', tuple(x.shape), str(x.dtype))
+    if isinstance(x, dict):
+        return ('dict', tuple(sorted((repr(k), _freeze_for_signature(v)) for k, v in x.items())))
+    if isinstance(x, (list, tuple)):
+        return (type(x).__name__, tuple(_freeze_for_signature(v) for v in x))
+    if isinstance(x, set):
+        return ('set', tuple(sorted(repr(v) for v in x)))
+    if isinstance(x, (str, int, float, bool, type(None))):
+        return (type(x).__name__, repr(x))
+    if hasattr(x, '__dict__'):
+        return _object_signature(x)
+    return (type(x).__module__, type(x).__qualname__, repr(x))
+
+
+def _object_signature(x: Any) -> Any:
+    """Best-effort structural signature for estimator compatibility checks."""
+    values = []
+    for name, value in sorted(vars(x).items()):
+        if name in ('name', 'key', 'keys', 'weight_key', 'comp_key', 'init_key', 'trans_key', 'state_key'):
+            continue
+        if name.startswith('_'):
+            continue
+        values.append((name, _freeze_for_signature(value)))
+    return (type(x).__module__, type(x).__qualname__, tuple(values))
+
+
+def _accumulator_signature(accumulator: StatisticAccumulator, role: str) -> Any:
+    try:
+        value_sig = _freeze_for_signature(accumulator.value())
+    except Exception as err:
+        value_sig = ('value-error', type(err).__name__, str(err))
+    return (type(accumulator).__module__, type(accumulator).__qualname__, role, value_sig)
+
+
+def _register_key(registry: Dict[Any, Tuple[Any, str]], key: Any, signature: Any, path: str) -> None:
+    old = registry.get(key)
+    if old is None:
+        registry[key] = (signature, path)
+        return
+    old_signature, old_path = old
+    if old_signature != signature:
+        raise KeyValidationError(
+            "Incompatible keyed sufficient-statistic sites for key %r: %s has %r, "
+            "but %s has %r." % (key, old_path, old_signature, path, signature)
+        )
+
+
+def _iter_children(x: Any) -> List[Any]:
+    if isinstance(x, dict):
+        return list(x.values())
+    if isinstance(x, (list, tuple)):
+        return list(x)
+    return []
+
+
+def _collect_estimator_keys(estimator: ParameterEstimator,
+                            registry: Dict[Any, Tuple[Any, str]],
+                            path: str,
+                            visited: Set[int]) -> None:
+    obj_id = id(estimator)
+    if obj_id in visited:
+        return
+    visited.add(obj_id)
+
+    estimator_sig = _object_signature(estimator)
+    for attr in _KEY_ATTRS:
+        if not hasattr(estimator, attr):
+            continue
+        keys = getattr(estimator, attr)
+        if _is_key_value(keys):
+            _register_key(registry, keys, (type(estimator).__module__, type(estimator).__qualname__, attr, estimator_sig),
+                          '%s.%s' % (path, attr))
+        elif isinstance(keys, (list, tuple)):
+            for i, key in enumerate(keys):
+                if _is_key_value(key):
+                    _register_key(
+                        registry,
+                        key,
+                        (type(estimator).__module__, type(estimator).__qualname__, '%s[%d]' % (attr, i), estimator_sig),
+                        '%s.%s[%d]' % (path, attr, i),
+                    )
+
+    for name, value in sorted(vars(estimator).items()):
+        for i, child in enumerate(_iter_children(value)):
+            if isinstance(child, ParameterEstimator):
+                _collect_estimator_keys(child, registry, '%s.%s[%d]' % (path, name, i), visited)
+        if isinstance(value, ParameterEstimator):
+            _collect_estimator_keys(value, registry, '%s.%s' % (path, name), visited)
+
+
+def _collect_accumulator_keys(accumulator: StatisticAccumulator,
+                              registry: Dict[Any, Tuple[Any, str]],
+                              path: str,
+                              visited: Set[int]) -> None:
+    obj_id = id(accumulator)
+    if obj_id in visited:
+        return
+    visited.add(obj_id)
+
+    for attr in _KEY_ATTRS:
+        if not hasattr(accumulator, attr):
+            continue
+        key = getattr(accumulator, attr)
+        if _is_key_value(key):
+            _register_key(registry, key, _accumulator_signature(accumulator, attr), '%s.%s' % (path, attr))
+
+    for name, value in sorted(vars(accumulator).items()):
+        if isinstance(value, StatisticAccumulator):
+            _collect_accumulator_keys(value, registry, '%s.%s' % (path, name), visited)
+        else:
+            for i, child in enumerate(_iter_children(value)):
+                if isinstance(child, StatisticAccumulator):
+                    _collect_accumulator_keys(child, registry, '%s.%s[%d]' % (path, name, i), visited)
+
+
+def validate_estimator_keys(estimator: ParameterEstimator) -> None:
+    """Validate keyed estimator and accumulator sites before EM folds stats.
+
+    The validator catches the classic keying footgun: two different families, or
+    two sites with incompatible estimator settings, accidentally sharing the same
+    key string.  Validation is intentionally protocol-level and best-effort; a
+    family can still perform stricter checks in its own factory if needed.
+    """
+    estimator_registry: Dict[Any, Tuple[Any, str]] = {}
+    _collect_estimator_keys(estimator, estimator_registry, type(estimator).__name__, set())
+
+    accumulator_registry: Dict[Any, Tuple[Any, str]] = {}
+    accumulator = estimator.accumulator_factory().make()
+    _collect_accumulator_keys(accumulator, accumulator_registry, type(accumulator).__name__, set())
+
+
+def validate_accumulator_keys(accumulator: StatisticAccumulator) -> None:
+    """Validate keyed sites in an already-created accumulator tree."""
+    accumulator_registry: Dict[Any, Tuple[Any, str]] = {}
+    _collect_accumulator_keys(accumulator, accumulator_registry, type(accumulator).__name__, set())
