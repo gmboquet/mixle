@@ -186,6 +186,9 @@ class TorchEngine(ComputeEngine):
 
     def index_add(self, out: Any, index: Any, values: Any) -> Any:
         """Add ``values`` into ``out`` along axis 0 using Torch ``index_add``."""
+        # index must be a long tensor on out's device; coerce defensively so a
+        # numpy index (or one on another device) does not raise a cryptic error
+        index = torch.as_tensor(index, dtype=torch.long, device=out.device)
         return out.index_add(0, index, values)
 
     def _replicate_tensor(self, x: Any) -> Any:

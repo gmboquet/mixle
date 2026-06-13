@@ -556,6 +556,44 @@ class GradientFitTestCase(unittest.TestCase):
                 self.assertIsInstance(fitted, type(dist))
                 self.assertTrue(np.isfinite(objective))
 
+    def test_fit_mle_accepts_chunked_seq_encode_format(self):
+        # pysp.stats.seq_encode returns the chunked [(size, payload), ...] form;
+        # the gradient fitter must accept it, not only an encoder's bare payload
+        from pysp.stats import seq_encode, seq_log_density_sum
+        model = MixtureDistribution([
+            CompositeDistribution((GaussianDistribution(-1.0, 1.0),
+                                   CategoricalDistribution({'a': 0.7, 'b': 0.3}))),
+            CompositeDistribution((GaussianDistribution(1.0, 1.0),
+                                   CategoricalDistribution({'a': 0.3, 'b': 0.7}))),
+        ], [0.5, 0.5])
+        data = model.sampler(seed=1).sample(400)
+        enc = seq_encode(data, model=model)               # chunked form
+        self.assertIsInstance(enc, list)
+        self.assertIsInstance(enc[0], tuple)
+        fitted, objective = fit_mle(enc, model, max_its=40, lr=0.05, print_iter=1000)
+        _, ll_start = seq_log_density_sum(enc, model)
+        _, ll_end = seq_log_density_sum(enc, fitted)
+        self.assertTrue(np.isfinite(objective))
+        self.assertGreater(ll_end, ll_start)
+
+    def test_backend_seq_log_density_is_autograd_safe(self):
+        # the converted backend bodies must not use in-place ops that break the
+        # torch autograd graph (spec hard rule); gradcheck on the leaf families
+        import torch
+        from pysp.stats.backend import backend_seq_log_density
+        from pysp.engines import TorchEngine
+        engine = TorchEngine(dtype=torch.float64)
+        cases = [
+            (GaussianDistribution(0.3, 1.7), torch.tensor([-1.0, 0.5, 2.0], dtype=torch.float64)),
+            (LogGaussianDistribution(0.1, 1.2), torch.tensor([0.2, 1.0, 2.5], dtype=torch.float64)),
+        ]
+        for dist, x in cases:
+            with self.subTest(dist=type(dist).__name__):
+                x = x.clone().requires_grad_(True)
+                out = backend_seq_log_density(dist, x, engine)
+                out.sum().backward()
+                self.assertTrue(torch.isfinite(x.grad).all())
+
 
 if __name__ == '__main__':
     unittest.main()

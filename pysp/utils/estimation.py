@@ -979,6 +979,21 @@ def _gradient_shadow_state(state, torch):
     raise GradientFitError('Unknown gradient fit state %s.' % kind)
 
 
+def _gradient_enc_chunks(enc):
+    """Normalize an encoded payload into a list of per-chunk payloads to score.
+
+    ``pysp.stats.seq_encode`` returns the chunked form ``[(size, payload), ...]``;
+    an encoder's own ``seq_encode`` returns a single bare payload. The gradient
+    objective sums log densities over observations, so either form reduces to a
+    list of payloads whose per-chunk score sums are added together.
+    """
+    if (isinstance(enc, list) and enc and
+            all(isinstance(c, tuple) and len(c) == 2 and
+                isinstance(c[0], (int, np.integer)) for c in enc)):
+        return [payload for _, payload in enc]
+    return [enc]
+
+
 def _gradient_score_state(state, enc, engine, torch):
     from pysp.stats.backend import backend_seq_log_density
 
@@ -1118,6 +1133,7 @@ def _fit_gradient(enc, model, engine, max_its, lr, optimizer, tol, out, print_it
     torch, engine = _torch_for_gradient_fit(engine, precision=precision)
     if hasattr(enc, 'payload'):
         enc = enc.payload
+    enc_chunks = _gradient_enc_chunks(enc)
 
     leaves: List[Any] = []
     state = _gradient_raw_state(model, engine, torch, leaves)
@@ -1132,7 +1148,11 @@ def _fit_gradient(enc, model, engine, max_its, lr, optimizer, tol, out, print_it
     opt = opt_classes[optimizer](leaves, lr=lr)
 
     def log_likelihood():
-        return engine.sum(_gradient_score_state(state, enc, engine, torch))
+        total = None
+        for chunk in enc_chunks:
+            part = engine.sum(_gradient_score_state(state, chunk, engine, torch))
+            total = part if total is None else total + part
+        return total
 
     def log_prior():
         if priors is not None or prior_strength != 0.0:

@@ -145,10 +145,12 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of log-density (float) of len(x).
 
         """
+        # out-of-place so torch tensors with requires_grad pass through the
+        # generic engine path without breaking the autograd graph
         rv = x - self.mu
-        rv *= rv
-        rv *= -0.5 / self.sigma2
-        rv += self.log_const
+        rv = rv * rv
+        rv = rv * (-0.5 / self.sigma2)
+        rv = rv + self.log_const
 
         return rv
 

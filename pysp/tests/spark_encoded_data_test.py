@@ -17,15 +17,19 @@ def _spark_context():
         return None
     os.environ.setdefault('PYSPARK_PYTHON', sys.executable)
     os.environ.setdefault('PYSPARK_DRIVER_PYTHON', sys.executable)
-    spark = (
-        SparkSession.builder
-        .master('local[2]')
-        .appName('pysparkplug-spark-encoded-data-test')
-        .config('spark.ui.enabled', 'false')
-        .config('spark.driver.host', '127.0.0.1')
-        .config('spark.sql.shuffle.partitions', '2')
-        .getOrCreate()
-    )
+    try:
+        spark = (
+            SparkSession.builder
+            .master('local[2]')
+            .appName('pysparkplug-spark-encoded-data-test')
+            .config('spark.ui.enabled', 'false')
+            .config('spark.driver.host', '127.0.0.1')
+            .config('spark.sql.shuffle.partitions', '2')
+            .getOrCreate()
+        )
+    except Exception:
+        # no usable JVM (e.g. Java not installed); treat as unavailable
+        return None
     return spark.sparkContext
 
 
@@ -35,7 +39,7 @@ class SparkEncodedDataTestCase(unittest.TestCase):
     def setUpClass(cls):
         cls.sc = _spark_context()
         if cls.sc is None:
-            raise unittest.SkipTest('pyspark is not installed')
+            raise unittest.SkipTest('pyspark or a usable JVM is not available')
         cls.sc.setLogLevel('ERROR')
 
     @classmethod
