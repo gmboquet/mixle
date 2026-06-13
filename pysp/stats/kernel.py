@@ -194,6 +194,7 @@ class GeneratedNumbaKernel(Kernel):
     def score(self, enc: Any) -> np.ndarray:
         """Return per-row log densities from declaration-generated numba code."""
         from pysp.stats.declarations import generated_numba_log_density
+        enc = getattr(enc, 'engine_payload', enc)   # unwrap resident payloads
         if self.components is not None:
             ll = self.component_scores(enc) + np.asarray(self.dist.log_w, dtype=np.float64).reshape(1, -1)
             mx = ll.max(axis=1, keepdims=True)
@@ -205,6 +206,7 @@ class GeneratedNumbaKernel(Kernel):
 
     def component_scores(self, enc: Any) -> np.ndarray:
         """Return generated component scores for homogeneous generated mixtures."""
+        enc = getattr(enc, 'engine_payload', enc)   # unwrap resident payloads
         if self.components is None:
             return super().component_scores(enc)
         return _generated_numba_component_scores(enc, self.components, self.engine)
@@ -214,6 +216,7 @@ class GeneratedNumbaKernel(Kernel):
         if self.estimator is None:
             raise ValueError('GeneratedNumbaKernel.accumulate requires an estimator.')
         from pysp.stats.declarations import generated_sufficient_statistics
+        enc = getattr(enc, 'engine_payload', enc)   # unwrap resident payloads
         if self.components is not None:
             row_weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
             gamma = self.posteriors(enc)
@@ -257,6 +260,33 @@ class NumbaKernelFactory(KernelFactory):
             if stacked is not None:
                 return stacked
             raise
+
+
+class GeneratedNumbaKernelFactory(KernelFactory):
+    """Default-safe factory that prefers declaration-generated numba kernels.
+
+    Unlike :class:`NumbaKernelFactory`, this never selects the fused
+    ``CompiledMixture`` adapter (whose columnar encoding is incompatible with
+    the legacy ``seq_encode`` payloads that the engine estimation path feeds
+    kernels) and never raises: when a generated numba scorer is unavailable, or
+    the engine is not numpy, it defers to a guaranteed fallback (the generic
+    kernel). That makes it safe to register as a default on the kernel
+    dispatch path while still accelerating mixtures of declared
+    exponential-family leaves on the numpy engine.
+    """
+
+    def __init__(self, fallback: Optional[KernelFactory] = None) -> None:
+        self.fallback = GenericKernelFactory() if fallback is None else fallback
+
+    def build(self, dist: SequenceEncodableProbabilityDistribution, engine: ComputeEngine,
+              estimator: Optional[ParameterEstimator] = None) -> Kernel:
+        """Build a generated numba kernel on numpy when available, else fall back."""
+        if engine.name == NUMPY_ENGINE.name and _generated_numba_kernel_available(dist):
+            try:
+                return GeneratedNumbaKernel(dist, engine=engine, estimator=estimator)
+            except ValueError:
+                pass
+        return self.fallback.build(dist, engine, estimator=estimator)
 
 
 def _stacked_kernel_after_numba_decline(dist: SequenceEncodableProbabilityDistribution,
@@ -503,6 +533,9 @@ def _numba_component_stat_value(value: Any, idx: int) -> Any:
 
 
 _GENERIC_FACTORY = GenericKernelFactory()
+# Default kernel for unregistered distributions: declaration-generated numba on
+# the numpy engine where available, generic everywhere else.
+_DEFAULT_FACTORY = GeneratedNumbaKernelFactory()
 _KERNEL_FACTORIES: Dict[Type[Any], KernelFactory] = {}
 
 
@@ -520,4 +553,4 @@ def kernel_for(dist: SequenceEncodableProbabilityDistribution,
         factory = _KERNEL_FACTORIES.get(cls)
         if factory is not None:
             return factory.build(dist, engine, estimator=estimator)
-    return _GENERIC_FACTORY.build(dist, engine, estimator=estimator)
+    return _DEFAULT_FACTORY.build(dist, engine, estimator=estimator)
