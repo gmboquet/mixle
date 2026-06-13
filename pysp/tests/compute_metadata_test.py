@@ -333,8 +333,9 @@ class ComputeMetadataTestCase(unittest.TestCase):
         self.assertEqual(capabilities_for(step_edit).kernel_status, 'generic_table')
 
     def test_permanent_numpy_only_capabilities_are_registered(self):
+        # HeterogeneousPCFG was reversed: its CKY inside DP now runs through ComputeEngine ops
+        # (numpy + torch). SparseMarkovAssociation remains NumPy/SciPy-only.
         expected = {
-            HeterogeneousPCFGDistribution,
             SparseMarkovAssociationDistribution,
         }
         self.assertEqual(set(numpy_only_distribution_types()), expected)
