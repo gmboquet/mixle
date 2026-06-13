@@ -37,6 +37,7 @@ setup(
         "torch": ["torch"],
         "mpi": ["mpi4py"],
         "umap": ["umap-learn"],
+        "sympy": ["sympy"],
         "test": ["pytest>=8"],
         "all": ["numba", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn"],
     },
