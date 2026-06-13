@@ -630,6 +630,264 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         marginal probability order."""
         return HiddenMarkovModelEnumerator(self)
 
+    _COUNT_INDEX_ITEM_CAP = 1 << 18
+
+    def quantized_count_index(self, quantizer, max_fine_bucket: int):
+        """BoundedCount for the MARGINAL HMM law: a forward count DP over the trellis with an
+        iterative emission-split unrank, reaching a 2**M budget structurally.
+
+        log p(x) = logsumexp over latent paths. We count (state-path, observation) PAIRS by their
+        joint cost  log w_{s0} + sum_t log trans(s_t|s_{t-1}) + sum_t log emit_{s_t}(x_t): the forward
+        DP pools paths into a per-(length, end-state) count histogram, where each step convolves the
+        prefix histogram with the emission's count index (choosing the emitted symbol). This is the
+        HMM analogue of the Mixture bound -- a conservative UPPER bound that does NOT deduplicate an
+        observation produced by multiple paths and bins by the joint (dominant-path / tropical) cost
+        rather than the exact logsumexp; every unranked value still carries its exact marginal
+        ``log_density``. Unranking is one iterative backward walk over t: each step does a local
+        times-split (recover the emitted symbol + bucket split) and a plus-choice (recover the
+        predecessor state) -- O(L), no recursion. Falls back to capped enumerate-and-bin for
+        non-plain HMMs (taus / terminal_values) or emissions that cannot count structurally.
+        """
+        from pysp.stats.pdist import EnumerationError
+        from pysp.utils.quantization import (CountHistogram, CountIndex, child_count_index,
+                                             leaf_count_index)
+
+        if isinstance(self.len_dist, NullDistribution):
+            raise EnumerationError(self, reason='no length distribution is modeled (len_dist is Null)')
+
+        def _fallback():
+            return leaf_count_index(self.enumerator(), quantizer, max_fine_bucket,
+                                    max_items=self._COUNT_INDEX_ITEM_CAP)
+
+        if getattr(self, 'taus', None) is not None or getattr(self, 'terminal_values', None):
+            return _fallback()
+
+        n = self.n_states
+        log_w = self.log_w
+        log_T = self.log_transitions  # log_T[s][s'] = log P(s'|s)
+
+        emit: List[Any] = []
+        truncated = False
+        for s in range(n):
+            try:
+                ci, tr = child_count_index(self.topics[s],
+                                           'HiddenMarkovModelDistribution.topics[%d]' % s,
+                                           quantizer, max_fine_bucket)
+            except EnumerationError:
+                return _fallback()
+            emit.append(ci)
+            truncated = truncated or tr
+
+        lengths: List[Tuple[int, float]] = []
+        _LEN_CAP = 1 << 24
+        for length, lp_len in child_enumerator(self.len_dist, 'HiddenMarkovModelDistribution.len_dist'):
+            if not isinstance(length, (int, np.integer)) or length < 0 or lp_len == -np.inf:
+                continue
+            if quantizer.fine_bucket(lp_len) > max_fine_bucket:
+                truncated = True
+                break
+            lengths.append((int(length), float(lp_len)))
+            if len(lengths) >= _LEN_CAP:
+                truncated = True
+                break
+        if not lengths:
+            return CountIndex(CountHistogram.empty(),
+                              lambda fb, off: (_ for _ in ()).throw(IndexError())), truncated
+
+        max_len = max(L for L, _ in lengths)
+        init_shift = [quantizer.fine_bucket(log_w[s]) if log_w[s] > -np.inf else None for s in range(n)]
+        # Predecessors into next-state s': (predecessor s, log trans, fine-bucket shift).
+        into: List[List[Tuple[int, float, int]]] = [[] for _ in range(n)]
+        for sp in range(n):
+            for s in range(n):
+                lt = float(log_T[s][sp])
+                if lt > -np.inf:
+                    into[sp].append((s, lt, quantizer.fine_bucket(lt)))
+
+        # alpha[t][s] = count histogram of (path, obs) prefixes of length t ending in state s;
+        # pooled[t][s] = the pre-emission prefix histogram (sum over predecessors), kept for unranking.
+        alpha: List[Dict[int, CountHistogram]] = [None, {}]
+        for s in range(n):
+            if init_shift[s] is None or emit[s].hist.is_empty():
+                continue
+            h = emit[s].hist.shift(init_shift[s]).truncate(max_fine_bucket)
+            if not h.is_empty():
+                alpha[1][s] = h
+        pooled: List[Dict[int, CountHistogram]] = [None, {}]
+        for t in range(2, max_len + 1):
+            prev = alpha[t - 1]
+            cur: Dict[int, CountHistogram] = {}
+            pcur: Dict[int, CountHistogram] = {}
+            for sp in range(n):
+                if emit[sp].hist.is_empty():
+                    continue
+                pool = CountHistogram.empty()
+                any_pred = False
+                for s, _lt, shift in into[sp]:
+                    ph = prev.get(s)
+                    if ph is not None and not ph.is_empty():
+                        pool = pool.add(ph.shift(shift).truncate(max_fine_bucket))
+                        any_pred = True
+                if not any_pred or pool.is_empty():
+                    continue
+                ah = quantizer.convolve(pool, emit[sp].hist, max_fine_bucket=max_fine_bucket)
+                if ah.is_empty():
+                    continue
+                pcur[sp] = pool
+                cur[sp] = ah
+            alpha.append(cur)
+            pooled.append(pcur)
+            if not cur:
+                truncated = True
+                break
+        built = len(alpha) - 1
+
+        total = CountHistogram.empty()
+        contributing: List[Tuple[int, int, float]] = []
+        for L, lp_len in lengths:
+            ls = quantizer.fine_bucket(lp_len)
+            if L == 0:
+                total = total.add(CountHistogram.delta(ls, 1))
+                contributing.append((0, ls, lp_len))
+                continue
+            if L > built or not alpha[L]:
+                truncated = True
+                continue
+            seqh = CountHistogram.empty()
+            for s in range(n):
+                h = alpha[L].get(s)
+                if h is not None:
+                    seqh = seqh.add(h)
+            piece = seqh.shift(ls).truncate(max_fine_bucket)
+            if piece.is_empty():
+                continue
+            total = total.add(piece)
+            contributing.append((L, ls, lp_len))
+
+        def unrank(L: int, s_end: int, b: int, o: int) -> Tuple[List[Any], float]:
+            seq: List[Any] = [None] * L
+            lp = 0.0
+            t, s = L, s_end
+            while t >= 2:
+                eh = emit[s].hist
+                pool = pooled[t][s]
+                picked = False
+                for be in range(eh.base, eh.base + len(eh.data)):
+                    ne = eh.count_at(be)
+                    if ne == 0:
+                        continue
+                    bp = b - be
+                    mp = pool.count_at(bp)
+                    if mp == 0:
+                        continue
+                    block = ne * mp
+                    if o < block:
+                        sym, slp = emit[s].get_in_bucket(be, o // mp)
+                        seq[t - 1] = sym
+                        lp += slp
+                        po = o % mp
+                        for s_prev, lt, shift in into[s]:
+                            ph = alpha[t - 1].get(s_prev)
+                            if ph is None:
+                                continue
+                            c = ph.count_at(bp - shift)
+                            if c == 0:
+                                continue
+                            if po < c:
+                                lp += lt
+                                s, b, t, o = s_prev, bp - shift, t - 1, po
+                                picked = True
+                                break
+                            po -= c
+                        if not picked:
+                            raise IndexError('offset outside hmm trellis')
+                        break
+                    o -= block
+                if not picked:
+                    raise IndexError('offset outside hmm trellis')
+            sym, slp = emit[s].get_in_bucket(b - init_shift[s], o)
+            seq[0] = sym
+            return seq, lp + slp + float(log_w[s])
+
+        def getter(fb: int, off: int) -> Tuple[Any, float]:
+            o = int(off)
+            for L, ls, lp_len in contributing:
+                if L == 0:
+                    if fb == ls:
+                        if o < 1:
+                            return [], lp_len
+                        o -= 1
+                    continue
+                target = fb - ls
+                cnt_L = 0
+                for s in range(n):
+                    h = alpha[L].get(s)
+                    if h is not None:
+                        cnt_L += h.count_at(target)
+                if o < cnt_L:
+                    for s in range(n):
+                        h = alpha[L].get(s)
+                        if h is None:
+                            continue
+                        c = h.count_at(target)
+                        if o < c:
+                            return unrank(L, s, target, o)
+                        o -= c
+                    raise IndexError('offset outside hmm fine bucket %d' % fb)
+                o -= cnt_L
+            raise IndexError('offset outside hmm fine bucket %d' % fb)
+
+        return CountIndex(total, getter), truncated
+
+    def is_canonical_copy(self, value, coarse_bin: int, quantizer) -> bool:
+        """Stateless dedup: keep an observation only at its min-cost (canonical) path's bin.
+
+        The structural index emits an observation once per state-path that can generate it; the
+        canonical copy is the one at the minimal joint fine bucket. A min-plus forward pass over the
+        trellis computes that minimum exactly (mirroring the count-index's fine-bucket sums), so the
+        check is O(L * n_states^2) with no state. Falls back to True for non-plain HMMs.
+        """
+        if getattr(self, 'taus', None) is not None or getattr(self, 'terminal_values', None):
+            return True
+        if not value:
+            return True  # empty observation: a single copy
+        n = self.n_states
+        log_w = self.log_w
+        log_T = self.log_transitions
+        INF = float('inf')
+
+        def emit_fb(o, s):
+            lp = self.topics[s].log_density(o)
+            return INF if lp == -np.inf else quantizer.fine_bucket(float(lp))
+
+        # v[s] = minimal joint fine bucket of a length-(t+1) path-prefix ending in state s.
+        v = []
+        for s in range(n):
+            e = emit_fb(value[0], s)
+            v.append(INF if (e == INF or log_w[s] == -np.inf)
+                     else quantizer.fine_bucket(float(log_w[s])) + e)
+        for t in range(1, len(value)):
+            nv = [INF] * n
+            for sp in range(n):
+                e = emit_fb(value[t], sp)
+                if e == INF:
+                    continue
+                best_in = INF
+                for s in range(n):
+                    if v[s] == INF or log_T[s][sp] == -np.inf:
+                        continue
+                    cand = v[s] + quantizer.fine_bucket(float(log_T[s][sp]))
+                    if cand < best_in:
+                        best_in = cand
+                if best_in != INF:
+                    nv[sp] = best_in + e
+            v = nv
+        min_fb = min(v)
+        if min_fb == INF:
+            return True
+        min_fb += quantizer.fine_bucket(float(self.len_dist.log_density(len(value))))
+        return coarse_bin == quantizer.coarse_bin(int(min_fb))
+
 
 class _HmmPrefix(object):
     """A concrete observation prefix in the HMM enumeration search.
@@ -2169,6 +2427,108 @@ def vec_bincount2(x, w, out):
     for j in range(len(x)):
         out[:, x[j]] += w[:, j]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Engine-routed HMM forward-backward (numpy + torch, GPU/autograd capable).
+#
+# A single log-space implementation expressed in ComputeEngine array ops, replacing the per-backend
+# Baum-Welch kernels for the engine path. Sequences are padded to a common length with a 0/1 mask;
+# the recursions freeze the carried state at padded steps so variable-length sequences need no
+# per-sequence Python loop (only a loop over time steps, which torch autograd unrolls).
+# ---------------------------------------------------------------------------
+
+def hmm_pad_log_emissions(log_emit_flat, sz):
+    """Pack per-sequence-contiguous (tot, S) log-emissions into padded (N, Tmax, S) + (N, Tmax) mask.
+
+    Args:
+        log_emit_flat (np.ndarray): (tot, S) log emission densities, ordered sequence-by-sequence.
+        sz (np.ndarray): (N,) sequence lengths summing to tot.
+
+    Returns:
+        Tuple of (padded (N, Tmax, S) float64, mask (N, Tmax) float64, offsets (N+1,) int).
+    """
+    sz = np.asarray(sz, dtype=np.int64)
+    n = len(sz)
+    tmax = int(sz.max()) if n > 0 else 0
+    num_states = log_emit_flat.shape[1]
+    padded = np.full((n, tmax, num_states), -np.inf, dtype=np.float64)
+    mask = np.zeros((n, tmax), dtype=np.float64)
+    offsets = np.concatenate([[0], np.cumsum(sz)]).astype(np.int64)
+    for i in range(n):
+        s0, s1 = offsets[i], offsets[i + 1]
+        if s1 > s0:
+            padded[i, :s1 - s0, :] = log_emit_flat[s0:s1, :]
+            mask[i, :s1 - s0] = 1.0
+    return padded, mask, offsets
+
+
+def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=None):
+    """Log-space forward-backward over padded sequences using ComputeEngine ops.
+
+    Args:
+        engine (ComputeEngine): Array backend (numpy or torch).
+        log_emit: (N, Tmax, S) log emission densities; padded slots may be -inf (masked out).
+        log_w: (S,) log initial-state probabilities.
+        log_a: (S, S) log transition matrix.
+        mask: (N, Tmax) 1.0 for real observations, 0.0 for padding.
+        weights: Optional (N,) per-sequence weights applied to gamma/xi/pi (E-step reweighting).
+
+    Returns:
+        Tuple of:
+            ll: (N,) per-sequence emission log-likelihood (add the length model separately).
+            gamma: (N, Tmax, S) posterior state probabilities (weighted; padded slots zero).
+            xi_sum: (S, S) expected transition counts over all sequences and steps (weighted).
+            pi: (N, S) initial-state posteriors (weighted).
+    """
+    mask_np = np.asarray(mask)
+    n, tmax = mask_np.shape[0], mask_np.shape[1]
+    log_emit = engine.asarray(log_emit)
+    log_w = engine.asarray(log_w)
+    log_a = engine.asarray(log_a)
+    m = engine.asarray(mask)
+    num_states = int(np.asarray(log_w).shape[0])
+
+    # forward pass (freeze alpha at padded steps so ll reads the last valid step)
+    alpha = log_w[None, :] + log_emit[:, 0, :]
+    alphas = [alpha]
+    for t in range(1, tmax):
+        cand = engine.logsumexp(alpha[:, :, None] + log_a[None, :, :], axis=1) + log_emit[:, t, :]
+        alpha = engine.where(m[:, t][:, None] > 0, cand, alpha)
+        alphas.append(alpha)
+    alpha_stack = engine.stack(alphas, axis=1)
+    ll = engine.logsumexp(alpha, axis=1)
+
+    # backward pass (carry beta unchanged across padded steps)
+    beta = engine.asarray(np.zeros((n, num_states)))
+    betas = [None] * tmax
+    betas[tmax - 1] = beta
+    for t in range(tmax - 2, -1, -1):
+        step = log_a[None, :, :] + (log_emit[:, t + 1, :] + beta)[:, None, :]
+        cand = engine.logsumexp(step, axis=2)
+        beta = engine.where(m[:, t + 1][:, None] > 0, cand, beta)
+        betas[t] = beta
+    beta_stack = engine.stack(betas, axis=1)
+
+    wvec = engine.asarray(np.ones(n)) if weights is None else engine.asarray(weights)
+
+    # gamma (posterior state probabilities)
+    ab = alpha_stack + beta_stack
+    log_gamma = ab - engine.logsumexp(ab, axis=2, keepdims=True)
+    gamma = engine.exp(log_gamma) * m[:, :, None] * wvec[:, None, None]
+    pi = gamma[:, 0, :]
+
+    # xi (expected transition counts) summed over valid transitions
+    xi_sum = engine.asarray(np.zeros((num_states, num_states)))
+    for t in range(tmax - 1):
+        log_xi = (alpha_stack[:, t, :][:, :, None] + log_a[None, :, :]
+                  + (log_emit[:, t + 1, :] + beta_stack[:, t + 1, :])[:, None, :]
+                  - ll[:, None, None])
+        contrib = engine.exp(log_xi) * (m[:, t + 1] * wvec)[:, None, None]
+        xi_sum = xi_sum + engine.sum(contrib, axis=0)
+
+    return ll, gamma, xi_sum, pi
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 HiddenMarkovModelAccumulator = HiddenMarkovAccumulator
