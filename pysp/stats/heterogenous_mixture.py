@@ -725,6 +725,54 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
                 self.comp_counts[i] += w_loc.sum()
                 self.accumulators[i].seq_update(enc_data[tag], w_loc, estimate.components[i])
 
+    def seq_update_engine(self, x, weights, estimate, engine):
+        """Engine-resident mixture E-step (numpy or torch).
+
+        Component log-densities are scored on the active engine and combined into the posterior
+        responsibilities with an engine softmax; per-component responsibilities are fed to the child
+        accumulators. Mirrors seq_update (heterogeneous components keep per-type encodings).
+        """
+        from pysp.stats.backend import backend_seq_log_density
+
+        tag_list, enc_data = x
+        num_comp = self.num_components
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+
+        cols = [None] * num_comp
+        for tag, tag_idxs in enumerate(tag_list):
+            for i in tag_idxs:
+                if not estimate.zw[i]:
+                    cols[i] = backend_seq_log_density(estimate.components[i], enc_data[tag], engine) \
+                        + engine.asarray(float(estimate.log_w[i]))
+        n = None
+        for c in cols:
+            if c is not None:
+                n = int(np.asarray(engine.to_numpy(c)).shape[0])
+                break
+        if n is None:
+            return
+
+        neg = engine.asarray(-np.inf)
+        col_list = [cols[i] if cols[i] is not None else (engine.zeros(n) + neg) for i in range(num_comp)]
+        ll_mat = engine.stack(col_list, axis=1)
+
+        log_w_e = engine.asarray(np.asarray(estimate.log_w, dtype=np.float64))
+        ll_max = engine.max(ll_mat, axis=1)
+        bad = engine.isinf(ll_max)
+        ll_mat = engine.where(bad[:, None], log_w_e[None, :], ll_mat)
+        ll_max = engine.where(bad, engine.asarray(float(np.max(estimate.log_w))), ll_max)
+        ll_mat = engine.exp(ll_mat - ll_max[:, None])
+        denom = engine.sum(ll_mat, axis=1)
+        ll_mat = ll_mat * (engine.asarray(weights_np) / denom)[:, None]
+
+        ll_np = np.asarray(engine.to_numpy(ll_mat))
+        for tag, tag_idxs in enumerate(tag_list):
+            for i in tag_idxs:
+                w_loc = ll_np[:, i]
+                self.comp_counts[i] += w_loc.sum()
+                self.accumulators[i].seq_update(enc_data[tag], w_loc, estimate.components[i])
+
     def combine(self, suff_stat: Tuple[np.ndarray, Tuple[Any, ...]]) -> 'HeterogeneousMixtureAccumulator':
         """Merge the sufficient statistics of suff_stat with HeterogeneousMixtureAccumulator instance.
 
