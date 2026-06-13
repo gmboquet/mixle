@@ -15,6 +15,13 @@ from pysp.stats import seq_estimate, seq_initialize
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.hidden_markov import HiddenMarkovModelDistribution
 from pysp.stats.null_dist import NullDistribution
+from pysp.engines import NUMPY_ENGINE
+
+try:
+    from pysp.engines import TorchEngine
+    _TORCH = TorchEngine(device='cpu', dtype='float64')
+except Exception:
+    _TORCH = None
 from pysp.stats.quantized_hmm import (
     QuantizedHiddenMarkovModelDistribution,
     QuantizedHiddenMarkovModelEnumerator,
@@ -270,6 +277,40 @@ class QuantizedHmmEstimationTestCase(unittest.TestCase):
         enc_np = dist_np.dist_to_encoder().seq_encode(data)
         self.assertTrue(np.allclose(dist_nb.seq_log_density(enc_nb),
                                     dist_np.seq_log_density(enc_np)))
+
+
+class QuantizedHmmEngineTestCase(unittest.TestCase):
+    """QuantizedHMM inherits the HMM engine scoring + engine-resident E-step (numpy + torch)."""
+
+    def setUp(self):
+        self.dist = QuantizedHiddenMarkovModelDistribution(
+            0.5, ['a', 'b', 'c'], [[0, 2], [3, 0]], [[0, 2, 4], [4, 2, 0]],
+            initial_exponents=[0, 1], len_dist=CategoricalDistribution({4: 0.5, 5: 0.5}),
+            use_numba=False)
+        self.data = self.dist.sampler(seed=2).sample(40)
+        self.engines = [('numpy', NUMPY_ENGINE)]
+        if _TORCH is not None:
+            self.engines.append(('torch', _TORCH))
+
+    def test_scoring_and_estep_parity(self):
+        from pysp.stats.backend import backend_seq_log_density
+        est = self.dist.estimator(pseudo_count=0.5)
+        enc = self.dist.dist_to_encoder().seq_encode(self.data)
+        ref = np.asarray(self.dist.seq_log_density(enc))
+        host = est.accumulator_factory().make()
+        host.seq_update(enc, np.ones(len(self.data)), self.dist)
+        host_value = host.value()
+        for name, engine in self.engines:
+            with self.subTest(engine=name):
+                self.assertTrue(self.dist.supports_engine(engine))
+                got = np.asarray(engine.to_numpy(backend_seq_log_density(self.dist, enc, engine)))
+                self.assertTrue(np.allclose(got, ref, atol=1.0e-9))
+                kernel = self.dist.kernel(engine=engine, estimator=est)
+                self.assertEqual(type(kernel).__name__, 'HiddenMarkovModelKernel')
+                value = kernel.accumulate(enc, np.ones(len(self.data)))
+                for k in (1, 2, 3):
+                    self.assertTrue(np.allclose(np.asarray(host_value[k]), np.asarray(value[k]),
+                                                atol=1.0e-8))
 
 
 if __name__ == '__main__':
