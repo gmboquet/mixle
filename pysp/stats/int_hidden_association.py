@@ -663,6 +663,77 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             self.prev_accumulator.seq_update(xv, weights, None if estimate is None else estimate.prev_dist)
             self.size_accumulator.seq_update(nn, weights, None if estimate is None else estimate.len_dist)
 
+    def seq_update_engine(self, x: E, weights: np.ndarray,
+                          estimate: IntegerHiddenAssociationDistribution, engine: Any) -> None:
+        """Engine-resident E-step for the pure (non-numba) blocked encoding.
+
+        Mirrors the numpy branch of ``seq_update``: for each observation the (given word x state x
+        emitted word) responsibility tensor is built and normalized with the alpha smoothing on the
+        active engine (numpy or torch), and the initial/weight/state counts are scattered into
+        engine-resident accumulators via ``index_add``. Only the per-observation orchestration runs
+        in Python; all tensor arithmetic and accumulation are on the engine.
+        """
+        if x[1] is not None or x[0] is None:
+            # numba encoding -> defer to the host numba path
+            self.seq_update(x, weights, estimate)
+            return
+
+        xx = x[0]
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+
+        num_states = estimate.num_states
+        num_vals = estimate.cond_weights.shape[0]
+        num_vals2 = estimate.state_prob_mat.shape[1]
+        a = float(estimate.alpha) / estimate.num_vals2
+        b = 1.0 - float(estimate.alpha)
+
+        cond_weights = engine.asarray(estimate.cond_weights)        # (num_vals, S)
+        state_prob_mat = engine.asarray(estimate.state_prob_mat)    # (S, num_vals2)
+        weight_acc = engine.zeros((num_vals, num_states))
+        state_acc_t = engine.zeros((num_vals2, num_states))         # transposed for axis-0 scatter
+        init_acc = engine.zeros(num_vals)
+        a_e = engine.asarray(a)
+        b_e = engine.asarray(b)
+        one = engine.asarray(1.0)
+        zero = engine.asarray(0.0)
+
+        for i, entry in enumerate(xx[0]):
+            vx, cx, vy, cy = entry
+            weight = float(weights_np[i])
+            vx_e = engine.asarray(np.asarray(vx, dtype=np.int64))
+            vy_e = engine.asarray(np.asarray(vy, dtype=np.int64))
+            cx_e = engine.asarray(np.asarray(cx, dtype=np.float64))
+            cy_e = engine.asarray(np.asarray(cy, dtype=np.float64))
+            nx = engine.sum(cx_e)
+
+            x_mat = cond_weights[vx_e, :] * (cx_e / nx).reshape((-1, 1))   # (gx, S)
+            y_mat = state_prob_mat[:, vy_e]                                # (S, gy)
+            z = x_mat[:, :, None] * y_mat[None, :, :]                      # (gx, S, gy)
+
+            ss = engine.sum(engine.sum(z, axis=0), axis=0)                 # (gy,)
+            denom = ss * b_e + a_e                                         # (gy,)
+            pos = denom > zero
+            scale = engine.where(pos, b_e / engine.where(pos, denom, one), zero)   # (gy,)
+            z = z * scale[None, None, :]
+
+            wc_contrib = engine.sum(z * cy_e[None, None, :], axis=2)       # (gx, S)
+            weight_acc = engine.index_add(weight_acc, vx_e, wc_contrib * engine.asarray(weight))
+
+            sc_contrib = engine.sum(z, axis=0) * cy_e[None, :] * engine.asarray(weight)  # (S, gy)
+            state_acc_t = engine.index_add(state_acc_t, vy_e, sc_contrib.T)              # (gy, S)
+
+            init_acc = engine.index_add(init_acc, vx_e, cx_e * engine.asarray(weight))
+
+        self.weight_count += np.asarray(engine.to_numpy(weight_acc))
+        self.state_count += np.asarray(engine.to_numpy(state_acc_t)).T
+        self.init_count += np.asarray(engine.to_numpy(init_acc))
+
+        self.prev_accumulator.seq_update(xx[1], weights_np,
+                                         None if estimate is None else estimate.prev_dist)
+        self.size_accumulator.seq_update(xx[2], weights_np,
+                                         None if estimate is None else estimate.len_dist)
+
     def combine(self, suff_stat: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1], Optional[SS2]]) \
             -> 'IntegerHiddenAssociationAccumulator':
         """Merge sufficient statistics of suff_stat into this accumulator.
@@ -1203,3 +1274,33 @@ def vec_bincount2(x, w, out):
     for j in range(len(x)):
         out[:, x[j]] += w[:, j]
     return out
+
+
+def _register_int_hidden_association_engine_kernel():
+    """Register the engine-resident integer-hidden-association kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class IntegerHiddenAssociationKernel(GenericKernel):
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('IntegerHiddenAssociationKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class IntegerHiddenAssociationKernelFactory(KernelFactory):
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return IntegerHiddenAssociationKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(IntegerHiddenAssociationDistribution,
+                            IntegerHiddenAssociationKernelFactory())
+
+
+_register_int_hidden_association_engine_kernel()
