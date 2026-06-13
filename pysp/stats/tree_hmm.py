@@ -1087,6 +1087,127 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             if len_enc is not None:
                 self.len_accumulator.seq_update(len_enc[1], weights[len_enc[0]], estimate.len_dist)
 
+    def seq_update_engine(self, x: E, weights: np.ndarray, estimate: TreeHiddenMarkovModelDistribution,
+                          engine: Any) -> None:
+        """Engine-resident E-step for the pure (non-numba) tree encoding.
+
+        Runs the upward-downward recursion entirely with engine ops (numpy or torch): emission
+        scoring, the level-by-level beta/eta upward pass, and the alpha/xi downward pass all live
+        on the active engine. Node posteriors and aggregated initial/state/transition counts are
+        produced on the engine and converted to host arrays only to feed the child accumulators.
+        Mirrors the numpy branch of ``seq_update``.
+        """
+        from pysp.stats.backend import backend_seq_log_density
+
+        if x[1] is None:
+            return
+        cnt, tz, (xln, xlnl, xlni), \
+            (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns, rni), enc_x, len_enc = x[1]
+
+        num_states = estimate.num_states
+        max_level = len(level_idx)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        w_eng = engine.asarray(weights_np)
+
+        a_mat = engine.asarray(estimate.transitions)
+        a_mat_t = engine.asarray(estimate.transitions.T)
+        p_levels = [engine.asarray(estimate.w)]
+        for _ in range(1, max_level + 1):
+            p_levels.append(engine.matmul(p_levels[-1], a_mat))
+        p_level = engine.stack(p_levels, axis=0)
+
+        emission_scores = [backend_seq_log_density(topic, enc_x, engine) for topic in estimate.topics]
+        log_pr_obs = engine.stack(emission_scores, axis=1)
+        pr_max0 = engine.max(log_pr_obs, axis=1)
+        pr_obs = engine.exp(log_pr_obs - pr_max0[:, None])
+
+        betas = engine.zeros((cnt, num_states)) + engine.asarray(1.0)
+        etas = engine.zeros((len(xbi), num_states))
+
+        # --- upward pass: betas (node->root) and etas (branch messages) ---
+        if len(xln):
+            leaf_idx = engine.asarray(xln)
+            leaf_level = engine.asarray(xlnl)
+            betas[leaf_idx, :] = pr_obs[leaf_idx, :] * p_level[leaf_level, :]
+            betas_sum = engine.sum(betas[leaf_idx, :], axis=1, keepdims=True)
+            betas[leaf_idx, :] = betas[leaf_idx, :] / betas_sum
+
+        for level in range(max_level - 1, -1, -1):
+            xbis = xbi[level_idx[level]]
+            xcs = xc[level_idx[level]]
+            if len(xbis) == 0:
+                continue
+            xbis_idx = engine.asarray(xbis)
+            child_idx = engine.asarray(xcs)
+            child_beta = betas[child_idx, :] / p_level[level + 1, :]
+            temp = engine.sum(a_mat_t[None, :, :] * child_beta[:, :, None], axis=1)
+            etas[xbis_idx, :] = etas[xbis_idx, :] + temp
+
+            log_eta_rows = engine.log(etas[xbis_idx, :])
+            log_eta_parts = [engine.sum(log_eta_rows[int(start):int(stop), :], axis=0)
+                             for start, stop in zip(eta_p[level][:-1], eta_p[level][1:])]
+            log_etas = engine.stack(log_eta_parts, axis=0) if log_eta_parts \
+                else engine.zeros((0, num_states))
+
+            parent_idx = engine.asarray(p_nxt[level])
+            betas[parent_idx, :] = (betas[parent_idx, :] * engine.exp(log_etas)
+                                    * pr_obs[parent_idx, :] * p_level[level, :])
+            betas_sum = engine.sum(betas[parent_idx, :], axis=1, keepdims=True)
+            betas[parent_idx, :] = betas[parent_idx, :] / betas_sum
+
+        # --- downward pass: alphas (node posteriors) and xi (transition) counts ---
+        alphas = engine.zeros((cnt, num_states))
+        rns_idx = engine.asarray(rns)
+        alphas[rns_idx, :] = alphas[rns_idx, :] + betas[rns_idx, :]
+        trans_acc = engine.zeros((num_states, num_states))
+        one = engine.asarray(1.0)
+        zero = engine.asarray(0.0)
+
+        for level in range(max_level):
+            lidx = level_idx[level]
+            idxs, xbis, xps, xcs = idx[lidx], xbi[lidx], xp[lidx], xc[lidx]
+            if len(xbis) == 0:
+                continue
+            xbis_idx = engine.asarray(xbis)
+            xps_idx = engine.asarray(xps)
+            xcs_idx = engine.asarray(xcs)
+            weights_loc = w_eng[engine.asarray(idxs)].reshape((-1, 1, 1))
+
+            xi0 = (alphas[xps_idx, :] / etas[xbis_idx, :]).reshape((-1, num_states, 1)) * a_mat
+            xi1 = (betas[xcs_idx, :] / p_level[level + 1, :]).reshape((-1, 1, num_states))
+            xi_loc = xi0 * xi1
+
+            xi_loc_sum = engine.sum(engine.sum(xi_loc, axis=1), axis=1).reshape((-1, 1, 1))
+            xi_loc_sum = engine.where(xi_loc_sum == 0, one, xi_loc_sum)
+
+            temp = engine.sum(xi_loc, axis=1)
+            temp_sum = engine.sum(temp, axis=1).reshape((-1, 1))
+            temp_sum = engine.where(temp_sum == 0, one, temp_sum)
+            temp = temp / temp_sum
+
+            xi_loc = xi_loc * (weights_loc / xi_loc_sum)
+            trans_acc = trans_acc + engine.sum(xi_loc, axis=0)
+            alphas[xcs_idx, :] = alphas[xcs_idx, :] + temp
+
+        node_w = w_eng[engine.asarray(np.asarray(len_enc[0], dtype=np.int64))]
+        alphas = alphas * node_w[:, None]
+
+        init_acc = engine.sum(alphas[rns_idx, :], axis=0)
+        state_acc = engine.sum(alphas, axis=0)
+
+        self.init_counts += np.asarray(engine.to_numpy(init_acc))
+        self.trans_counts += np.asarray(engine.to_numpy(trans_acc))
+        self.state_counts += np.asarray(engine.to_numpy(state_acc))
+
+        alphas_np = np.asarray(engine.to_numpy(alphas))
+        for i in range(num_states):
+            self.accumulators[i].seq_update(enc_x, alphas_np[:, i], estimate.topics[i])
+
+        if len_enc is not None:
+            self.len_accumulator.seq_update(len_enc[1], weights_np[np.asarray(len_enc[0])],
+                                            estimate.len_dist)
+
     def combine(self, suff_stat: Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[SS0], Optional[SS1]]) \
             -> 'TreeHiddenMarkovAccumulator':
         """Combine sufficient statistics from another accumulator into this one.
@@ -2101,6 +2222,35 @@ def level_state_prob(levels, num_states, tr_mat, init_prob, out):
         for i in range(num_states):
             for j in range(num_states):
                 out[k, i] += out[k-1, i]*tr_mat[i, j]
+
+def _register_tree_hmm_engine_kernel():
+    """Register the engine-resident tree-HMM kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class TreeHiddenMarkovKernel(GenericKernel):
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('TreeHiddenMarkovKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class TreeHiddenMarkovKernelFactory(KernelFactory):
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return TreeHiddenMarkovKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(TreeHiddenMarkovModelDistribution, TreeHiddenMarkovKernelFactory())
+
+
+_register_tree_hmm_engine_kernel()
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 TreeHiddenMarkovModelAccumulator = TreeHiddenMarkovAccumulator
