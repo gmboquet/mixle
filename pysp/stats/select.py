@@ -723,3 +723,7 @@ class SelectDataEncoder(DataSequenceEncoder):
             idx_enc_vals.append(self.encoders[keys].seq_encode(vals[1]))
 
         return tuple(idx_xi), tuple(idx_keys), tuple(idx_enc_vals)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+SelectAccumulator = SelectEstimatorAccumulator
+SelectAccumulatorFactory = SelectEstimatorAccumulatorFactory

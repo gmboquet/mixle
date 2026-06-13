@@ -15,6 +15,7 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, Parameter
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator, EnumerationError
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from numpy.random import RandomState
 
 T = TypeVar('T')
@@ -39,7 +40,8 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             support='finite_or_default_hashable',
         )
 
-    def __init__(self, pmap: Dict[Any, float], default_value: float = 0.0, name: Optional[str] = None) -> None:
+    def __init__(self, pmap: Dict[Any, float] = MISSING, default_value: float = 0.0, name: Optional[str] = None,
+                 prob_map: Dict[Any, float] = MISSING) -> None:
         """Defines a CategoricalDistribution object for data type T.
 
         Density: For n observations of any data type, with support {x_0,x_1,....,x_{n-1}} the probability of a
@@ -65,6 +67,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             log1p_default_value (float): log(1+default_value).
 
         """
+        pmap = coalesce_alias('pmap', pmap, 'prob_map', prob_map, default=MISSING)
         self.name = name
         self.pmap = pmap
         self.no_default = default_value != 0.0

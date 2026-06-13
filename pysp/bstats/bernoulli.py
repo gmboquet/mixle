@@ -452,3 +452,7 @@ class BernoulliEstimator(ParameterEstimator):
 
         else:
             return BernoulliDistribution(psum/(psum + nsum), name=self.name, prior=null_dist, keys=self.keys)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+BernoulliAccumulator = BernoulliEstimatorAccumulator
+BernoulliAccumulatorFactory = BernoulliEstimatorAccumulatorFactory

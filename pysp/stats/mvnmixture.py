@@ -24,6 +24,7 @@ from pysp.arithmetic import maxrandint
 from pysp.stats.pdist import (SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator,
                               ParameterEstimator, DistributionSampler, DataSequenceEncoder,
                               StatisticAccumulatorFactory)
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from pysp.stats.mvn import (MultivariateGaussianDistribution, MultivariateGaussianEstimator,
                             MultivariateGaussianDataEncoder)
 
@@ -55,8 +56,10 @@ class GaussianMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     def __init__(self, mu: Union[Sequence[Sequence[float]], np.ndarray],
                  sig2: Union[Sequence[Any], np.ndarray],
-                 w: Union[Sequence[float], np.ndarray],
-                 name: Optional[str] = None) -> None:
+                 w: Union[Sequence[float], np.ndarray] = MISSING,
+                 name: Optional[str] = None,
+                 weights: Union[Sequence[float], np.ndarray] = MISSING) -> None:
+        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
         self.mu = np.asarray(mu, dtype=float)
 
         num_comp = self.mu.shape[0]
@@ -785,3 +788,6 @@ class GaussianMixtureDataEncoder(DataSequenceEncoder):
 
         """
         return self.encoder.seq_encode(x)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+GaussianMixtureAccumulatorFactory = GaussianMixtureEstimatorAccumulatorFactory

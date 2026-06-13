@@ -24,6 +24,7 @@ from numpy.random import RandomState
 from math import exp
 from pysp.arithmetic import maxrandint
 import pysp.utils.vector as vec
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, StatisticAccumulatorFactory, \
     SequenceEncodableStatisticAccumulator, DataSequenceEncoder, DistributionSampler, ParameterEstimator, \
     DistributionEnumerator, child_enumerator
@@ -63,8 +64,9 @@ class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution)
 
     def __init__(self,
                  components: Sequence[SequenceEncodableProbabilityDistribution],
-                 w: Union[List[float], np.ndarray],
-                 name: Optional[str] = None) -> None:
+                 w: Union[List[float], np.ndarray] = MISSING,
+                 name: Optional[str] = None,
+                 weights: Union[List[float], np.ndarray] = MISSING) -> None:
         """HeterogeneousMixtureDistribution object defined by component distributions and weights.
 
         The args components (Sequence[SequenceEncodableProbabilityDistribution]) define the component distributions
@@ -87,9 +89,10 @@ class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution)
             num_components (int): Number of components in HeterogeneousMixtureDistribution instance.
 
         """
+        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
         self.w = np.asarray(w, dtype=float)
         self.zw = (self.w == 0.0)
-        self.log_w = np.log(w + self.zw)
+        self.log_w = np.log(self.w + self.zw)
         self.log_w[self.zw] = -np.inf
 
         self.components = components
