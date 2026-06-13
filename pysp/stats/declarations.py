@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import inspect
+import math
 from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple, Type
 
 import numpy as np
@@ -388,9 +389,20 @@ def generated_sufficient_statistics(dist: Any, enc: Any, weights: Any, engine: A
 
 
 def generated_numba_log_density_available(x: Any) -> bool:
-    """Return true when declarations can emit a generated numba leaf scorer."""
+    """Return true when declarations can emit a generated numba leaf scorer.
+
+    Exponential-family leaves use the stacked exp-family loop; other leaves with a
+    ``backend_log_density_from_params`` hook whose per-row formula lowers cleanly to a numba
+    scalar loop (single encoded array, supported ops, scalar parameters) use the generic
+    symbolic-to-numba compiler in :func:`_build_generic_numba_kernel`.
+    """
     declaration = declaration_for(x)
-    return declaration is not None and declaration.exponential_family is not None
+    if declaration is None:
+        return False
+    if declaration.exponential_family is not None:
+        return True
+    dist_type = x if isinstance(x, type) else type(x)
+    return _build_generic_numba_kernel(dist_type, declaration) is not None
 
 
 def generated_numba_stacked_available(x: Any) -> bool:
@@ -410,8 +422,10 @@ def generated_numba_log_density(dist: Any, enc: Any) -> np.ndarray:
     from pysp.engines import NUMPY_ENGINE
 
     declaration = declaration_for(dist)
-    if declaration is None or declaration.exponential_family is None:
-        raise ValueError('%s has no exponential-family declaration.' % type(dist).__name__)
+    if declaration is None:
+        raise ValueError('%s has no declaration.' % type(dist).__name__)
+    if declaration.exponential_family is None:
+        return _generated_generic_numba_log_density(dist, enc, declaration)
     params = _generated_scalar_params(dist, declaration, NUMPY_ENGINE)
     row_stats, base = _generated_numba_row_pieces(enc, params, declaration.exponential_family)
     eta = _generated_numba_eta_vector(params, declaration.exponential_family)
@@ -421,6 +435,190 @@ def generated_numba_log_density(dist: Any, enc: Any) -> np.ndarray:
         raise ValueError('generated numba statistic/natural-parameter widths differ.')
     out = np.empty(row_stats.shape[0], dtype=np.float64)
     _numba_exp_family_log_density(row_stats, base, eta, float(log_partition), out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Generic symbolic -> numba lowering for non-exponential-family leaves.
+#
+# Many leaves (Laplace, Logistic, StudentT, Weibull, Pareto, ...) are not fixed-base exponential
+# families, so they cannot use the stacked exp-family loop. They do own an engine-neutral
+# ``backend_log_density_from_params(data, *params, engine)`` whose per-row formula traces to a
+# SymbolicExpression. This compiler lowers that expression to a numba nopython scalar loop, giving
+# those families a real generated kernel without re-implementing their math.
+# ---------------------------------------------------------------------------
+
+class _UnsupportedNumbaLowering(Exception):
+    """Raised when a symbolic expression cannot be lowered to the numba scalar loop."""
+
+
+_NUMBA_INFIX_OPS = {
+    'add': '+', 'sub': '-', 'mul': '*', 'div': '/', 'pow': '**',
+    'lt': '<', 'le': '<=', 'gt': '>', 'ge': '>=', 'eq': '==', 'ne': '!=',
+}
+
+_NUMBA_FUNC_OPS = {
+    'log': 'math.log', 'exp': 'math.exp', 'sqrt': 'math.sqrt', 'abs': 'abs',
+    'floor': 'math.floor', 'gammaln': 'math.lgamma', 'erf': 'math.erf',
+    'isnan': 'math.isnan', 'isinf': 'math.isinf',
+}
+
+_GENERIC_NUMBA_KERNEL_CACHE: Dict[Type[Any], Optional[Tuple[Any, int, Tuple[str, ...]]]] = {}
+
+
+def _lower_symbolic_to_numba(expr: Any) -> str:
+    """Lower a SymbolicExpression to a numba-compatible Python expression string."""
+    op = expr.op
+    if op == 'symbol':
+        return str(expr.args[0])
+    if op == 'const':
+        value = expr.args[0]
+        if isinstance(value, bool):
+            return 'True' if value else 'False'
+        if value is None:
+            raise _UnsupportedNumbaLowering('None constant')
+        fvalue = float(value)
+        if math.isinf(fvalue):
+            return '_INF' if fvalue > 0 else '(-_INF)'
+        if math.isnan(fvalue):
+            return '_NAN'
+        return repr(fvalue)
+
+    sub = [_lower_symbolic_to_numba(arg) for arg in expr.args]
+
+    if op in _NUMBA_INFIX_OPS and len(sub) == 2:
+        return '(%s %s %s)' % (sub[0], _NUMBA_INFIX_OPS[op], sub[1])
+    if op == 'neg' and len(sub) == 1:
+        return '(-%s)' % sub[0]
+    if op == 'invert' and len(sub) == 1:
+        return '(not %s)' % sub[0]
+    if op == 'and' and len(sub) == 2:
+        return '(%s and %s)' % (sub[0], sub[1])
+    if op == 'or' and len(sub) == 2:
+        return '(%s or %s)' % (sub[0], sub[1])
+    if op == 'where' and len(sub) == 3:
+        return '(%s if %s else %s)' % (sub[1], sub[0], sub[2])
+    if op == 'max':
+        return '(max(%s))' % ', '.join(sub)
+    if op == 'betaln' and len(sub) == 2:
+        return '(math.lgamma(%s) + math.lgamma(%s) - math.lgamma((%s) + (%s)))' % (
+            sub[0], sub[1], sub[0], sub[1])
+    if op == 'clip' and len(sub) == 3:
+        result = sub[0]
+        lo, hi = expr.args[1], expr.args[2]
+        if not (lo.op == 'const' and lo.args[0] is None):
+            result = 'max(%s, %s)' % (result, sub[1])
+        if not (hi.op == 'const' and hi.args[0] is None):
+            result = 'min(%s, %s)' % (result, sub[2])
+        return '(%s)' % result
+    if op in _NUMBA_FUNC_OPS:
+        return '%s(%s)' % (_NUMBA_FUNC_OPS[op], ', '.join(sub))
+
+    raise _UnsupportedNumbaLowering(op)
+
+
+def _build_generic_numba_kernel(dist_type: Type[Any],
+                                declaration: 'DistributionDeclaration') -> Optional[Tuple[Any, int, Tuple[str, ...]]]:
+    """Compile (and cache) a numba scalar-loop kernel for a non-exp-family leaf, or None.
+
+    Returns ``(kernel, n_data, ordered_param_names)`` where the kernel has signature
+    ``kernel(*data_arrays, *param_scalars, out)``; returns ``None`` when the family cannot be
+    lowered (vector encoded data, a non-parameter call argument, or an unsupported operation).
+    """
+    if dist_type in _GENERIC_NUMBA_KERNEL_CACHE:
+        return _GENERIC_NUMBA_KERNEL_CACHE[dist_type]
+
+    result: Optional[Tuple[Any, int, Tuple[str, ...]]] = None
+    try:
+        from pysp.engines.symbolic_engine import SymbolicEngine
+
+        fn = getattr(dist_type, 'backend_log_density_from_params', None)
+        if not callable(fn):
+            raise _UnsupportedNumbaLowering('no backend_log_density_from_params')
+
+        encoded_names = _diagnostic_encoded_symbols(dist_type, declaration, None)
+        if not encoded_names or declaration.support.endswith('_vector'):
+            raise _UnsupportedNumbaLowering('non-scalar encoded data')
+        data_names = tuple(encoded_names)
+        n_data = len(data_names)
+
+        sig_names = tuple(inspect.signature(fn).parameters.keys())
+        if not sig_names or sig_names[-1] != 'engine':
+            raise _UnsupportedNumbaLowering('backend signature must end with engine')
+        call_names = sig_names[:-1]
+        param_names = set(declaration.parameter_names)
+        # The leading data arguments, then the parameters in call order.
+        ordered_params = tuple(call_names[n_data:])
+        for name in ordered_params:
+            if name not in param_names:
+                raise _UnsupportedNumbaLowering('non-parameter call argument %r' % name)
+
+        engine = SymbolicEngine()
+        param_symbols = _diagnostic_param_symbols(declaration, engine)
+        for name in ordered_params:
+            sym = param_symbols.get(name)
+            # scalar symbols only; vector/matrix params become numpy arrays and are unsupported here
+            if not hasattr(sym, 'op'):
+                raise _UnsupportedNumbaLowering('non-scalar parameter %r' % name)
+        encoded_values = tuple(engine.symbol(name) for name in data_names)
+        expr = _diagnostic_backend_log_density_expression(dist_type, param_symbols, encoded_values, engine)
+        body = _lower_symbolic_to_numba(expr)
+
+        data_args = tuple('_data%d' % k for k in range(n_data))
+        arg_list = ', '.join(data_args + ordered_params + ('out',))
+        bind_lines = ''.join('        %s = _data%d[_i]\n' % (name, k)
+                             for k, name in enumerate(data_names))
+        source = (
+            'def _generic_numba_kernel(%s):\n'
+            '    _n = out.shape[0]\n'
+            '    for _i in range(_n):\n'
+            '%s'
+            '        out[_i] = %s\n'
+        ) % (arg_list, bind_lines, body)
+
+        namespace: Dict[str, Any] = {'math': math, 'np': np, '_INF': np.inf, '_NAN': np.nan}
+        exec(compile(source, '<generated_numba:%s>' % dist_type.__name__, 'exec'), namespace)
+        kernel = numba.njit(cache=False)(namespace['_generic_numba_kernel'])
+        result = (kernel, n_data, ordered_params)
+    except _UnsupportedNumbaLowering:
+        result = None
+    except Exception:
+        result = None
+
+    _GENERIC_NUMBA_KERNEL_CACHE[dist_type] = result
+    return result
+
+
+def _generic_numba_data_arrays(enc: Any, n_data: int) -> Tuple[np.ndarray, ...]:
+    """Return the ``n_data`` per-row encoded arrays as contiguous 1-D float64 vectors."""
+    raw = (enc,) if n_data == 1 else tuple(enc[:n_data])
+    if len(raw) != n_data:
+        raise ValueError('encoded payload does not contain %d generated arrays.' % n_data)
+    arrays = []
+    for arg in raw:
+        arr = np.asarray(arg)
+        if arr.ndim != 1:
+            arr = arr.reshape(-1)
+        arrays.append(np.ascontiguousarray(arr, dtype=np.float64))
+    return tuple(arrays)
+
+
+def _generated_generic_numba_log_density(dist: Any, enc: Any,
+                                         declaration: 'DistributionDeclaration') -> np.ndarray:
+    built = _build_generic_numba_kernel(type(dist), declaration)
+    if built is None:
+        raise ValueError('%s has no generated numba kernel.' % type(dist).__name__)
+    kernel, n_data, ordered_params = built
+    param_values = []
+    for name in ordered_params:
+        value = getattr(dist, name, None)
+        if value is None or not isinstance(value, (bool, int, float, np.number)):
+            raise ValueError('%s parameter %r is not a scalar usable in the generated numba kernel.'
+                             % (type(dist).__name__, name))
+        param_values.append(float(value))
+    data_arrays = _generic_numba_data_arrays(enc, n_data)
+    out = np.empty(data_arrays[0].shape[0], dtype=np.float64)
+    kernel(*data_arrays, *param_values, out)
     return out
 
 
