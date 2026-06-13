@@ -496,6 +496,65 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         for xx, ww in zip(x, weights):
             self.update(xx, ww, estimate)
 
+    def seq_update_engine(self, x: Sequence[Tuple[List[Tuple[T, float]], List[Tuple[T, float]]]],
+                          weights: np.ndarray, estimate: HiddenAssociationDistribution, engine: Any) -> None:
+        """Engine-resident E-step for the hidden association model.
+
+        Builds the batched cross product of (given, emitted) pairs across the whole minibatch,
+        scores them through the conditional distribution's engine kernel, and forms the per-emitted
+        posterior over given values with a segmented softmax (global-max shift + ``index_add``) on
+        the active engine. The engine-computed posterior weights are fed to the conditional
+        accumulator; the given/size accumulators are updated per observation. Mirrors ``update``.
+        """
+        from pysp.stats.backend import backend_seq_log_density
+
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+
+        pairs = []
+        log_c0 = []
+        c1_list = []
+        w_list = []
+        group_id = []
+        emit_lengths = []
+        num_groups = 0
+        for o, (given_obs, emitted_obs) in enumerate(x):
+            emit_lengths.append(sum(c1 for _, c1 in emitted_obs))
+            if not emitted_obs or not given_obs:
+                continue
+            wo = float(weights_np[o])
+            log_gc = np.log(np.asarray([c0 for _, c0 in given_obs], dtype=np.float64))
+            for (x1, c1) in emitted_obs:
+                for k, (x0, _) in enumerate(given_obs):
+                    pairs.append((x0, x1))
+                    log_c0.append(log_gc[k])
+                    c1_list.append(c1)
+                    w_list.append(wo)
+                    group_id.append(num_groups)
+                num_groups += 1
+
+        if pairs:
+            cond_enc = estimate.cond_dist.dist_to_encoder().seq_encode(pairs)
+            pair_scores = backend_seq_log_density(estimate.cond_dist, cond_enc, engine)
+            scored = pair_scores + engine.asarray(np.asarray(log_c0, dtype=np.float64))
+            gid = engine.asarray(np.asarray(group_id, dtype=np.int64))
+            shift = engine.max(scored, axis=0)
+            e = engine.exp(scored - shift)
+            denom = engine.index_add(engine.zeros(num_groups), gid, e)
+            pv = e / denom[gid]
+            pair_w = pv * engine.asarray(np.asarray(c1_list, dtype=np.float64)) \
+                * engine.asarray(np.asarray(w_list, dtype=np.float64))
+            pair_w_np = np.asarray(engine.to_numpy(pair_w), dtype=np.float64)
+            self.cond_accumulator.seq_update(cond_enc, pair_w_np, estimate.cond_dist)
+
+        if not isinstance(self.given_accumulator, NullAccumulator):
+            given_enc = self.given_accumulator.acc_to_encoder().seq_encode([xx[0] for xx in x])
+            self.given_accumulator.seq_update(given_enc, weights_np, estimate.given_dist)
+
+        if not isinstance(self.size_accumulator, NullAccumulator):
+            size_enc = self.size_accumulator.acc_to_encoder().seq_encode(emit_lengths)
+            self.size_accumulator.seq_update(size_enc, weights_np, estimate.len_dist)
+
     def combine(self, suff_stat: Tuple[SS1, Optional[SS2], Optional[SS3]]) -> 'HiddenAssociationAccumulator':
         """Merge sufficient statistics of suff_stat into this accumulator.
 
@@ -702,6 +761,35 @@ class HiddenAssociationDataEncoder(DataSequenceEncoder):
 
         """
         return x
+
+
+def _register_hidden_association_engine_kernel():
+    """Register the engine-resident hidden-association kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class HiddenAssociationKernel(GenericKernel):
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('HiddenAssociationKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class HiddenAssociationKernelFactory(KernelFactory):
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return HiddenAssociationKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(HiddenAssociationDistribution, HiddenAssociationKernelFactory())
+
+
+_register_hidden_association_engine_kernel()
 
 
 
