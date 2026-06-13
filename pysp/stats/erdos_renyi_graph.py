@@ -32,7 +32,7 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy',), kernel_status='generic_object')
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_object')
 
     @classmethod
     def compute_declaration(cls):
@@ -91,6 +91,22 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, x: Sequence[GraphObservation]) -> np.ndarray:
         return np.asarray([self.log_density(obs) for obs in x], dtype=np.float64)
+
+    def backend_seq_log_density(self, x: Sequence[GraphObservation], engine: Any) -> Any:
+        """Engine-routed Bernoulli edge log-likelihood.
+
+        Per-graph edge opportunities/successes are extracted host-side (the graphs are ragged
+        object data), but the Bernoulli reduction runs on the active engine, so the model's scoring
+        math is engine-native (and differentiable in ``p`` on torch).
+        """
+        p = _clip_prob(self.p)
+        counts = np.asarray(
+            [_edge_counts(_extract_observation(o, directed=self.directed).adjacency,
+                          self.directed, self.self_loops) for o in x],
+            dtype=np.float64).reshape(-1, 2)
+        total = engine.asarray(counts[:, 0])
+        successes = engine.asarray(counts[:, 1])
+        return successes * engine.asarray(math.log(p)) + (total - successes) * engine.asarray(math.log1p(-p))
 
     def edge_probability(self, i: Optional[int] = None, j: Optional[int] = None,
                          context: Optional[Any] = None) -> float:
