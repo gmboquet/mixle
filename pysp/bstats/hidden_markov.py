@@ -759,6 +759,19 @@ class HiddenMarkovModelEstimator(ParameterEstimator):
             rv += est.model_log_density(topic)
         return rv
 
+    def scale_suff_stat(self, suff_stat, c):
+        """Scale HMM sufficient statistics, delegating topics and length."""
+        init_counts, trans_counts, topic_stats, len_val = suff_stat
+        scaled_topics = tuple(
+            est.scale_suff_stat(ss, c)
+            for est, ss in zip(self.estimators, topic_stats)
+        )
+        if isinstance(self.len_estimator, NullEstimator) or len_val is None:
+            scaled_len = len_val
+        else:
+            scaled_len = self.len_estimator.scale_suff_stat(len_val, c)
+        return init_counts * c, trans_counts * c, scaled_topics, scaled_len
+
     def estimate(self, suff_stat) -> HiddenMarkovModelDistribution:
         """Estimate a HiddenMarkovModelDistribution from sufficient statistics.
 

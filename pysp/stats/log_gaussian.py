@@ -12,11 +12,70 @@ from numpy.random import RandomState
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
-from typing import Optional, Tuple, List, Callable, Dict, Union, Any
+from typing import Optional, Tuple, List, Callable, Dict, Union, Any, Sequence
 
 
 class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
     """Log-normal distribution where ``log(X)`` is Gaussian with mean ``mu`` and variance ``sigma2``."""
+
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='log_gaussian',
+            distribution_type=cls,
+            parameters=(ParameterSpec('mu'), ParameterSpec('sigma2', constraint='positive')),
+            statistics=(
+                StatisticSpec('log_sum'),
+                StatisticSpec('log_sum2'),
+                StatisticSpec('count'),
+                StatisticSpec('count2'),
+            ),
+            support='positive_real',
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure=cls.exp_family_base_measure,
+                legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
+            ),
+        )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> Tuple[Any, ...]:
+        """Return log-Gaussian sufficient statistics for generated scoring."""
+        xx = engine.asarray(x)
+        return xx, xx * xx
+
+    @staticmethod
+    def exp_family_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row log-Gaussian sufficient statistics in accumulator order."""
+        xx = engine.asarray(x)
+        one = xx * 0.0 + engine.asarray(1.0)
+        return xx, xx * xx, one, one
+
+    @staticmethod
+    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return log-Gaussian natural parameters for generated scoring."""
+        sigma2 = params['sigma2']
+        return params['mu'] / sigma2, -0.5 / sigma2
+
+    @staticmethod
+    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+        """Return log-Gaussian log partition for generated scoring."""
+        mu = params['mu']
+        sigma2 = params['sigma2']
+        return 0.5 * engine.log(engine.asarray(2.0 * pi) * sigma2) + 0.5 * mu * mu / sigma2
+
+    @staticmethod
+    def exp_family_base_measure(x: Any, engine: Any) -> Any:
+        """Return log-Gaussian base measure for generated scoring."""
+        return -engine.asarray(x)
 
     def __init__(self, mu: float, sigma2: float, name: Optional[str] = None) -> None:
         """LogGaussianDistribution object defines Gaussian distribution with mean mu and variance sigma2.
@@ -99,6 +158,54 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
         rv -= x
 
         return rv
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, mu: Any, sigma2: Any, engine: Any) -> Any:
+        """Engine-neutral log-Gaussian log-density on log-encoded data."""
+        return -0.5 * engine.log(engine.asarray(2.0 * pi) * sigma2) - 0.5 * (x - mu) * (x - mu) / sigma2 - x
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for log-encoded data."""
+        xx = engine.asarray(x)
+        mu = engine.asarray(self.mu)
+        sigma2 = engine.asarray(self.sigma2)
+        return self.backend_log_density_from_params(xx, mu, sigma2, engine)
+
+    def gradient_log_prior(self, priors: Any, prior_strength: float, torch: Any, engine: Any) -> Any:
+        """Distribution-owned MAP prior contribution for log-Gaussian parameters."""
+        from pysp.stats.gradient import normal_gamma_log_prior
+        return normal_gamma_log_prior(self.mu, self.sigma2, priors, torch)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['LogGaussianDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked log-Gaussian parameters for a homogeneous mixture kernel."""
+        return {
+            'mu': engine.asarray([d.mu for d in dists]),
+            'sigma2': engine.asarray([d.sigma2 for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of log-Gaussian log densities."""
+        xx = engine.asarray(x)
+        return cls.backend_log_density_from_params(
+            xx[:, None], params['mu'][None, :], params['sigma2'][None, :], engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Any, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any, Any, Any]:
+        """Return stacked log-Gaussian sufficient statistics using engine-resident arrays."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        xx_col = xx[:, None]
+        count = engine.sum(ww, axis=0)
+        weighted_x = ww * xx_col
+        return (
+            engine.sum(weighted_x, axis=0),
+            engine.sum(weighted_x * xx_col, axis=0),
+            count,
+            count,
+        )
 
     def sampler(self, seed: Optional[int] = None) -> 'LogGaussianSampler':
         """Create an LogGaussianSampler object from parameters of LogGaussianDistribution instance.
@@ -481,4 +588,3 @@ class LogGaussianDataEncoder(DataSequenceEncoder):
         if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
             raise Exception('LogGaussianDistribution requires support x in (0,inf).')
         return rv
-

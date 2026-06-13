@@ -20,6 +20,143 @@ import numpy as np
 import sys
 import time
 from pysp.bstats import initialize, seq_estimate, seq_log_density_sum, seq_encode, seq_log_density
+from pysp.bstats import _accumulator_factory, _estimator_estimate
+
+
+def posterior_carry():
+	"""Return the exact recursive-conjugate bstats streaming mode name."""
+	return 'posterior_carry'
+
+
+def forgetting(rho):
+	"""Return a constant forgetting/power-prior schedule for bstats streams."""
+	if rho <= 0.0 or rho > 1.0:
+		raise ValueError('forgetting(rho) requires 0 < rho <= 1.')
+
+	def schedule(t):
+		return float(rho)
+
+	return schedule
+
+
+def _scale_suff_stat(x, c):
+	"""Scale linear sufficient-statistic payloads structurally."""
+	if x is None:
+		return None
+	if isinstance(x, np.ndarray):
+		return x * c
+	if isinstance(x, (float, int, complex, np.number)):
+		return x * c
+	if isinstance(x, tuple):
+		return tuple(_scale_suff_stat(v, c) for v in x)
+	if isinstance(x, list):
+		return [_scale_suff_stat(v, c) for v in x]
+	if isinstance(x, dict):
+		return {k: _scale_suff_stat(v, c) for k, v in x.items()}
+	raise TypeError('cannot scale bstats sufficient-statistic value of type %s' % type(x).__name__)
+
+
+def _scale_estimator_suff_stat(estimator, suff_stat, c):
+	"""Scale a sufficient-statistic payload, letting the estimator preserve metadata."""
+	hook = getattr(estimator, 'scale_suff_stat', None)
+	if callable(hook):
+		return hook(suff_stat, c)
+	return _scale_suff_stat(suff_stat, c)
+
+
+def _bstats_stream_accumulate(enc_data, estimator, model):
+	"""Return one encoded batch's globally tied bstats sufficient statistics."""
+	if hasattr(enc_data, 'pysp_bstats_stream_accumulate'):
+		return enc_data.pysp_bstats_stream_accumulate(estimator, model)
+
+	accumulator = _accumulator_factory(estimator).make()
+	nobs = 0.0
+	for sz, enc in enc_data:
+		nobs += sz
+		accumulator.seq_update(enc, np.ones(sz), model)
+
+	stats_dict = dict()
+	accumulator.key_merge(stats_dict)
+	accumulator.key_replace(stats_dict)
+	return nobs, accumulator.value()
+
+
+class BayesianStreamingEstimator(object):
+	"""Streaming/recursive Bayes driver over the bstats estimator protocol.
+
+	``mode='posterior_carry'`` treats each fitted posterior as the next batch's
+	prior. ``mode='forgetting'`` applies a power-prior step by scaling the
+	current batch's sufficient statistics before the ordinary conjugate
+	``estimate`` call.
+	"""
+
+	def __init__(self, estimator, mode='posterior_carry', schedule=None,
+	             model=None, init_estimator=None, init_p=0.1,
+	             rng=np.random.RandomState(), num_chunks=1):
+		self.estimator = estimator
+		self.init_estimator = estimator if init_estimator is None else init_estimator
+		self.mode = posterior_carry() if mode is None else mode
+		self.schedule = schedule
+		if self.mode == 'forgetting' and self.schedule is None:
+			self.schedule = forgetting(1.0)
+		if self.mode not in ('posterior_carry', 'forgetting'):
+			raise ValueError("mode must be 'posterior_carry' or 'forgetting'.")
+		self.model = model
+		self.init_p = init_p
+		self.rng = rng
+		self.num_chunks = num_chunks
+		self.step = 0
+		self.nobs = 0.0
+		if model is not None:
+			self._carry_prior_from(model)
+
+	def _carry_prior_from(self, model):
+		get_prior = getattr(model, 'get_prior', None)
+		set_prior = getattr(self.estimator, 'set_prior', None)
+		if callable(get_prior) and callable(set_prior):
+			set_prior(get_prior())
+		elif callable(getattr(model, 'estimator', None)):
+			self.estimator = model.estimator()
+
+	def _ensure_model(self, data):
+		if self.model is None:
+			if data is None:
+				raise ValueError('BayesianStreamingEstimator.update requires data for initialization.')
+			p = min(max(self.init_p, 0.0), 1.0) if self.init_p > 0.0 else 0.1
+			self.model = initialize(data, self.init_estimator, self.rng, p)
+			self._carry_prior_from(self.model)
+
+	def _encode_batch(self, data, enc_data):
+		if enc_data is not None:
+			return enc_data
+		if data is None:
+			raise ValueError('BayesianStreamingEstimator.update requires data or enc_data.')
+		return seq_encode(data, self.model, num_chunks=self.num_chunks)
+
+	def update(self, data=None, enc_data=None):
+		"""Consume one batch and return the updated bstats model."""
+		self._ensure_model(data)
+		enc_batch = self._encode_batch(data, enc_data)
+		batch_nobs, suff_stat = _bstats_stream_accumulate(enc_batch, self.estimator, self.model)
+
+		if self.mode == 'forgetting':
+			rho = float(self.schedule(self.step + 1))
+			if rho <= 0.0 or rho > 1.0:
+				raise ValueError('forgetting schedule returned %r; expected 0 < rho <= 1.' % rho)
+			suff_stat = _scale_estimator_suff_stat(self.estimator, suff_stat, rho)
+			batch_nobs *= rho
+
+		self.model = _estimator_estimate(self.estimator, batch_nobs, suff_stat)
+		self._carry_prior_from(self.model)
+		self.nobs += batch_nobs
+		self.step += 1
+		return self.model
+
+	def reset(self):
+		"""Drop the current model and stream counters."""
+		self.model = None
+		self.step = 0
+		self.nobs = 0.0
 
 def empirical_kl_divergence(dist1, dist2, enc_data):
 	"""Empirical KL divergence between two models on encoded data.

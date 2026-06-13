@@ -31,7 +31,7 @@ from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullDataEnco
     NullAccumulatorFactory
 
 from scipy.sparse import dok_matrix
-from typing import Optional, Dict, Union, Tuple, List, Any, TypeVar, Iterable
+from typing import Optional, Dict, Union, Tuple, List, Any, TypeVar, Iterable, Sequence
 
 T = TypeVar('T')  ### state type
 T1 = TypeVar('T1')  ### Type for length distribution sufficient statsitics value.
@@ -117,6 +117,36 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         self.init_log_pvec[0] = self.log_dv
         self.trans_log_pvec[:, 0] = self.log_dv
         self.trans_log_pvec[0, :] = self.log_dv - np.log(num_keys + 1)
+
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, capabilities_for
+        child = capabilities_for(self.len_dist)
+        return DistributionCapabilities(engine_ready=child.engine_ready,
+                                        kernel_status='generic',
+                                        numpy_only_reason=child.numpy_only_reason)
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = () if length is None else (length,)
+        return DistributionDeclaration(
+            name='markov_chain',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('init_prob_map', constraint='simplex_map'),
+                ParameterSpec('transition_map', constraint='row_simplex_map'),
+                ParameterSpec('default_value', constraint='unit_interval', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('initial_counts', kind='mapping'),
+                StatisticSpec('transition_counts', kind='mapping'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='finite_state_sequence',
+            children=children,
+            child_roles=('length',) if length is not None else (),
+            differentiable=all(child.differentiable for child in children),
+        )
 
     def __str__(self):
         """Return string representation of MarkovChainDistribution object."""
@@ -214,6 +244,162 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
+    def backend_seq_log_density(self, x: enc_data_type, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded Markov-chain sequences."""
+        from pysp.stats.backend import backend_seq_log_density
+        sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
+
+        loc_key_map = engine.asarray(np.asarray([self.key_map.get(u, 0) for u in inv_key_map], dtype=np.int64))
+        init_log_pvec = engine.asarray(self.init_log_pvec)
+        trans_log_pvec = engine.asarray(self.trans_log_pvec.toarray())
+        rv = engine.zeros(sz)
+
+        if len(idx1) > 0:
+            prev_idx = loc_key_map[engine.asarray(prev_x)]
+            next_idx = loc_key_map[engine.asarray(next_x)]
+            values = trans_log_pvec[prev_idx, next_idx] - self.log1p_dv
+            rv = engine.index_add(rv, engine.asarray(idx1), values)
+
+        if len(idx0) > 0:
+            init_idx = loc_key_map[engine.asarray(init_x)]
+            values = init_log_pvec[init_idx] - self.log1p_dv
+            rv = engine.index_add(rv, engine.asarray(idx0), values)
+
+        if len_enc is not None:
+            rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['MarkovChainDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked fixed-support Markov-chain parameters."""
+        from pysp.stats.stacked import stacked_component_params
+        labels = tuple(dists[0].inv_key_map)
+        null_len_dist = isinstance(dists[0].len_dist, NullDistribution)
+        if any(tuple(dist.inv_key_map) != labels or
+               isinstance(dist.len_dist, NullDistribution) != null_len_dist for dist in dists):
+            raise ValueError('Stacked MarkovChainDistribution components require shared states and length policy.')
+
+        length_route = None
+        if not null_len_dist:
+            try:
+                length_route = stacked_component_params([dist.len_dist for dist in dists], engine)
+            except ValueError as exc:
+                raise ValueError('MarkovChain length child %s is not stackable: %s' %
+                                 (type(dists[0].len_dist).__name__, exc))
+
+        return {
+            '__pysp_component_axis__': {'init_log_p': 1, 'trans_log_p': 2, 'log1p_dv': 0},
+            'labels': labels,
+            'init_log_p': engine.asarray(np.stack([dist.init_log_pvec for dist in dists], axis=1)),
+            'trans_log_p': engine.asarray(np.stack([dist.trans_log_pvec.toarray() for dist in dists], axis=2)),
+            'log1p_dv': engine.asarray(np.asarray([dist.log1p_dv for dist in dists], dtype=np.float64)),
+            'length_route': length_route,
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: enc_data_type, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Markov-chain sequence log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
+        label_to_idx = {label: i + 1 for i, label in enumerate(params['labels'])}
+        loc_key_map = np.asarray([label_to_idx.get(label, 0) for label in inv_key_map], dtype=np.int64)
+        rv = engine.zeros((sz, int(params['num_components'])))
+
+        if len(idx1) > 0:
+            prev_idx = loc_key_map[prev_x]
+            next_idx = loc_key_map[next_x]
+            values = params['trans_log_p'][engine.asarray(prev_idx), engine.asarray(next_idx), :] - \
+                params['log1p_dv'][None, :]
+            rv = engine.index_add(rv, engine.asarray(idx1), values)
+
+        if len(idx0) > 0:
+            init_idx = loc_key_map[init_x]
+            values = params['init_log_p'][engine.asarray(init_idx), :] - params['log1p_dv'][None, :]
+            rv = engine.index_add(rv, engine.asarray(idx0), values)
+
+        if params['length_route'] is not None and len_enc is not None:
+            rv = rv + stacked_component_log_density(len_enc, params['length_route'], engine)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: enc_data_type, weights: Any,
+                                                            params: Dict[str, Any], engine: Any,
+                                                            estimator: Any) -> Tuple[Any, ...]:
+        """Return per-component legacy ``(initial_counts, transition_counts, length_stat)`` statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
+            unstack_component_stats
+        sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
+        ww = engine.asarray(weights)
+        num_components = int(params['num_components'])
+
+        if len(idx0) > 0 and len(inv_key_map) > 0:
+            init_weights = ww[engine.asarray(idx0)]
+            zero_rows = init_weights * engine.asarray(0.0)
+            rows = []
+            init_engine = engine.asarray(init_x)
+            for value_index in range(len(inv_key_map)):
+                mask = init_engine == engine.asarray(value_index)
+                rows.append(engine.sum(engine.where(mask[:, None], init_weights, zero_rows), axis=0))
+            init_counts = np.asarray(engine.to_numpy(engine.stack(rows, axis=0)), dtype=np.float64)
+        else:
+            init_counts = np.zeros((len(inv_key_map), num_components), dtype=np.float64)
+
+        observed_pairs = list(dict.fromkeys((int(prev_x[i]), int(next_x[i])) for i in range(len(prev_x))))
+        if observed_pairs:
+            trans_weights = ww[engine.asarray(idx1)]
+            zero_rows = trans_weights * engine.asarray(0.0)
+            trans_rows = []
+            prev_engine = engine.asarray(prev_x)
+            next_engine = engine.asarray(next_x)
+            for prev_i, next_i in observed_pairs:
+                mask = (prev_engine == engine.asarray(prev_i)) & (next_engine == engine.asarray(next_i))
+                trans_rows.append(engine.sum(engine.where(mask[:, None], trans_weights, zero_rows), axis=0))
+            trans_counts = np.asarray(engine.to_numpy(engine.stack(trans_rows, axis=0)), dtype=np.float64)
+        else:
+            trans_counts = np.zeros((0, num_components), dtype=np.float64)
+
+        if params['length_route'] is None or len_enc is None:
+            length_by_component = tuple(None for _ in range(num_components))
+        else:
+            outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+            length_estimators = tuple(getattr(component_est, 'len_estimator', None)
+                                      for component_est in outer_estimators)
+            length_estimator = StackedEstimatorView(length_estimators) \
+                if len(length_estimators) == num_components else None
+            length_stats = stacked_component_sufficient_statistics(
+                len_enc, ww, params['length_route'], engine, length_estimator)
+            length_by_component = unstack_component_stats(length_stats, num_components)
+
+        return tuple((
+            {
+                inv_key_map[value_index]: float(init_counts[value_index, component])
+                for value_index in range(len(inv_key_map))
+                if init_counts[value_index, component] != 0.0
+            },
+            _markov_chain_transition_stats(inv_key_map, observed_pairs, trans_counts, component),
+            length_by_component[component],
+        ) for component in range(num_components))
+
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+        """Return distribution-owned state for fixed-support autograd fitting."""
+        init_keys = tuple(self.init_prob_map.keys())
+        init_logits = tensor_param([self.init_prob_map[key] for key in init_keys], engine, torch, transform='logits')
+        leaves.append(init_logits)
+
+        trans_keys = {key: tuple(row.keys()) for key, row in self.transition_map.items()}
+        trans_logits = {}
+        for key, row_keys in trans_keys.items():
+            logits = tensor_param([self.transition_map[key][row_key] for row_key in row_keys],
+                                  engine, torch, transform='logits')
+            trans_logits[key] = logits
+            leaves.append(logits)
+
+        len_child = None if isinstance(self.len_dist, NullDistribution) else recurse(self.len_dist, engine, torch, leaves)
+        return _MarkovChainGradientFitState(self, init_keys, init_logits, trans_keys, trans_logits, len_child)
+
     def sampler(self, seed: Optional[int] = None) -> 'MarkovChainSampler':
         """Create MarkovChainSampler from MarkovChainDistribution instance.
 
@@ -256,6 +442,129 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
     def enumerator(self) -> 'MarkovChainEnumerator':
         """Returns MarkovChainEnumerator iterating state sequences in descending probability order."""
         return MarkovChainEnumerator(self)
+
+
+class _MarkovChainGradientFitState(object):
+    """Autograd state for fixed-support MarkovChainDistribution fitting."""
+
+    def __init__(self, template: MarkovChainDistribution, init_keys: Tuple[Any, ...], init_logits: Any,
+                 trans_keys: Dict[Any, Tuple[Any, ...]], trans_logits: Dict[Any, Any], len_child: Any) -> None:
+        self.template = template
+        self.init_keys = init_keys
+        self.init_logits = init_logits
+        self.trans_keys = trans_keys
+        self.trans_logits = trans_logits
+        self.len_child = len_child
+
+    def shadow(self, torch, shadow_child):
+        shadow = object.__new__(type(self.template))
+        shadow.__dict__.update(getattr(self.template, '__dict__', {}))
+        shadow._gradient_init_keys = self.init_keys
+        shadow._gradient_init_log_probs = torch.log_softmax(self.init_logits, dim=0)
+        shadow._gradient_trans_keys = self.trans_keys
+        shadow._gradient_trans_log_probs = {
+            key: torch.log_softmax(logits, dim=0) for key, logits in self.trans_logits.items()
+        }
+        if self.len_child is not None:
+            shadow.len_dist = shadow_child(self.len_child, torch)
+        return shadow
+
+    def score(self, enc, engine, torch, score_child):
+        sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = enc
+        rv = engine.zeros(sz)
+        inv_values = list(inv_key_map)
+
+        if len(idx0) > 0:
+            init_pos = {key: i for i, key in enumerate(self.init_keys)}
+            positions = np.asarray([init_pos.get(inv_values[i], -1) for i in init_x], dtype=np.int64)
+            scores = engine.zeros(len(init_x)) + self.template.log_dv - self.template.log1p_dv
+            known = np.flatnonzero(positions >= 0)
+            if len(known) > 0:
+                log_probs = torch.log_softmax(self.init_logits, dim=0)
+                scores[engine.asarray(known)] = log_probs[engine.asarray(positions[known])] - self.template.log1p_dv
+            rv = engine.index_add(rv, engine.asarray(idx0), scores)
+
+        if len(idx1) > 0:
+            default_scores = []
+            for prev_i in prev_x:
+                prev_key = inv_values[prev_i]
+                if prev_key in self.trans_logits:
+                    default_scores.append(self.template.log_dv - self.template.log1p_dv)
+                else:
+                    default_scores.append(self.template.log_dtv - self.template.log1p_dv)
+            scores = engine.asarray(np.asarray(default_scores, dtype=np.float64))
+            for key, row_keys in self.trans_keys.items():
+                row_positions = np.flatnonzero(np.asarray([inv_values[i] == key for i in prev_x], dtype=bool))
+                if len(row_positions) == 0:
+                    continue
+                next_pos = {value: i for i, value in enumerate(row_keys)}
+                positions = np.asarray([next_pos.get(inv_values[next_x[i]], -1) for i in row_positions],
+                                       dtype=np.int64)
+                known = np.flatnonzero(positions >= 0)
+                if len(known) > 0:
+                    target = row_positions[known]
+                    log_probs = torch.log_softmax(self.trans_logits[key], dim=0)
+                    scores[engine.asarray(target)] = log_probs[engine.asarray(positions[known])] - \
+                        self.template.log1p_dv
+            rv = engine.index_add(rv, engine.asarray(idx1), scores)
+
+        if self.len_child is not None and len_enc is not None:
+            rv = rv + score_child(self.len_child, len_enc, engine, torch)
+        return rv
+
+    def build(self, torch, build_child, detach_value):
+        init_probs = torch.softmax(self.init_logits, dim=0).detach().cpu().numpy()
+        init_map = {key: float(prob) for key, prob in zip(self.init_keys, init_probs)}
+        trans_map = {}
+        for key, row_keys in self.trans_keys.items():
+            probs = torch.softmax(self.trans_logits[key], dim=0).detach().cpu().numpy()
+            trans_map[key] = {value: float(prob) for value, prob in zip(row_keys, probs)}
+        len_dist = getattr(self.template, 'len_dist', None) if self.len_child is None else \
+            build_child(self.len_child, torch)
+        return type(self.template)(init_map, trans_map, len_dist=len_dist,
+                                   default_value=getattr(self.template, 'default_value', 0.0),
+                                   name=getattr(self.template, 'name', None))
+
+    def log_prior(self, priors, prior_strength: float, torch, engine, initial_leaves_by_id, prior_child):
+        from pysp.stats.gradient import dirichlet_alpha_tensor, markov_chain_priors, prior_family, prior_zero
+        init_prior, trans_priors, len_prior = markov_chain_priors(priors, tuple(self.trans_keys.keys()))
+        rv = prior_zero(torch, engine, self.init_logits)
+
+        if prior_family(init_prior) == 'dirichlet':
+            alpha = dirichlet_alpha_tensor(init_prior.get('alpha'), self.init_keys, self.init_logits, engine, torch)
+            rv = rv + torch.sum((alpha - 1.0) * torch.log_softmax(self.init_logits, dim=0))
+        elif prior_strength != 0.0:
+            alpha = 1.0 + float(prior_strength) / max(1, self.init_logits.numel())
+            rv = rv + torch.sum((alpha - 1.0) * torch.log_softmax(self.init_logits, dim=0))
+
+        for key, logits in self.trans_logits.items():
+            prior = trans_priors.get(key)
+            labels = self.trans_keys[key]
+            if prior_family(prior) == 'dirichlet':
+                alpha = dirichlet_alpha_tensor(prior.get('alpha'), labels, logits, engine, torch)
+                rv = rv + torch.sum((alpha - 1.0) * torch.log_softmax(logits, dim=0))
+            elif prior_strength != 0.0:
+                alpha = 1.0 + float(prior_strength) / max(1, logits.numel())
+                rv = rv + torch.sum((alpha - 1.0) * torch.log_softmax(logits, dim=0))
+
+        if self.len_child is not None:
+            rv = rv + prior_child(self.len_child, len_prior, prior_strength, torch, engine, initial_leaves_by_id)
+        return rv
+
+
+def _markov_chain_transition_stats(inv_key_map: np.ndarray,
+                                   observed_pairs: Sequence[Tuple[int, int]],
+                                   counts: np.ndarray,
+                                   component: int) -> Dict[Any, Dict[Any, float]]:
+    """Return legacy nested transition-count maps for one stacked component."""
+    rv: Dict[Any, Dict[Any, float]] = {}
+    for pair_index, (prev_i, next_i) in enumerate(observed_pairs):
+        prev_key = inv_key_map[prev_i]
+        next_key = inv_key_map[next_i]
+        if prev_key not in rv:
+            rv[prev_key] = {}
+        rv[prev_key][next_key] = float(counts[pair_index, component])
+    return rv
 
 
 class MarkovChainEnumerator(DistributionEnumerator):
@@ -709,6 +1018,15 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
+    def scale(self, c: float) -> 'MarkovChainAccumulator':
+        for key in list(self.init_count_map.keys()):
+            self.init_count_map[key] *= c
+        for tmap in self.trans_count_map.values():
+            for key in list(tmap.keys()):
+                tmap[key] *= c
+        self.len_accumulator.scale(c)
+        return self
+
     def key_merge(self, stats_dict: Dict[str, 'MarkovChainAccumulator']) -> None:
         """Aggregate the sufficient statistics of MarkovChainAccumulator with member instance key in
             stats_dict.
@@ -1032,6 +1350,3 @@ class MarkovChainDataEncoder(DataSequenceEncoder):
 
         return len(x), entries_idx0, entries_idx1, init_entries, pair_entries[:, 0], pair_entries[:, 1], \
                inv_key_map, len_enc
-
-
-

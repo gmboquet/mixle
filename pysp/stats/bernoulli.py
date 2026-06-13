@@ -23,6 +23,51 @@ from pysp.stats.pdist import (
 class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
     """Bernoulli distribution over {False, True} with success probability p."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='bernoulli',
+            distribution_type=cls,
+            parameters=(ParameterSpec('p', constraint='unit_interval'),),
+            statistics=(StatisticSpec('count'), StatisticSpec('sum')),
+            support='boolean',
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
+            ),
+        )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> Tuple[Any, ...]:
+        """Return Bernoulli sufficient statistics for generated scoring."""
+        return (engine.asarray(x) * engine.asarray(1.0),)
+
+    @staticmethod
+    def exp_family_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row Bernoulli sufficient statistics in accumulator order."""
+        xx = engine.asarray(x) * engine.asarray(1.0)
+        return xx * 0.0 + engine.asarray(1.0), xx
+
+    @staticmethod
+    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Bernoulli natural parameters for generated scoring."""
+        p = params['p']
+        return (engine.log(p) - engine.log(engine.asarray(1.0) - p),)
+
+    @staticmethod
+    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+        """Return Bernoulli log partition for generated scoring."""
+        p = params['p']
+        return -engine.log(engine.asarray(1.0) - p)
+
     def __init__(self, p: float, name: Optional[str] = None, keys: Optional[str] = None) -> None:
         if p <= 0.0 or p >= 1.0:
             raise ValueError('BernoulliDistribution requires p in (0, 1).')
@@ -63,6 +108,36 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         return np.where(x, self.log_p, self.log_1p)
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, p: Any, engine: Any) -> Any:
+        """Engine-neutral Bernoulli log-mass from explicit parameters."""
+        return engine.where(x >= 0.5, engine.log(p), engine.log(engine.asarray(1.0) - p))
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        xx = engine.asarray(x)
+        p = engine.asarray(self.p)
+        return self.backend_log_density_from_params(xx, p, engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['BernoulliDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Bernoulli parameters for a homogeneous mixture kernel."""
+        return {'p': engine.asarray([d.p for d in dists])}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Bernoulli log masses."""
+        xx = engine.asarray(x)
+        return cls.backend_log_density_from_params(xx[:, None], params['p'][None, :], engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Any, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any]:
+        """Return stacked Bernoulli sufficient statistics using engine-resident arrays."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        return engine.sum(ww, axis=0), engine.sum(ww * xx[:, None], axis=0)
 
     def sampler(self, seed: Optional[int] = None) -> 'BernoulliSampler':
         """Return a sampler for drawing observations from this distribution."""

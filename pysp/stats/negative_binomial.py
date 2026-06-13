@@ -29,6 +29,33 @@ from pysp.utils.vector import gammaln
 class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
     """Negative binomial distribution over non-negative integer counts."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='negative_binomial',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('r', constraint='positive'),
+                ParameterSpec('p', constraint='unit_interval'),
+            ),
+            statistics=(StatisticSpec('count'), StatisticSpec('sum')),
+            support='non_negative_integer',
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Tuple[Any, Any],
+                                             params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row negative-binomial sufficient statistics in accumulator order."""
+        vals = engine.asarray(x[0])
+        return vals * 0.0 + engine.asarray(1.0), vals
+
     def __init__(self, r: float, p: float, name: Optional[str] = None, keys: Optional[str] = None) -> None:
         if r <= 0.0 or not np.isfinite(r):
             raise ValueError('NegativeBinomialDistribution requires r > 0.')
@@ -71,6 +98,37 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         xx, lgx1 = x
         return (gammaln(xx + self.r) - self.log_gamma_r - lgx1
                 + self.r * self.log_p + xx * self.log_1p)
+
+    @staticmethod
+    def backend_log_density_from_params(vals: Any, log_fact: Any, r: Any, p: Any, engine: Any) -> Any:
+        """Engine-neutral negative-binomial log-density from explicit parameters."""
+        rv = (engine.gammaln(vals + r) - engine.gammaln(r) - log_fact
+              + r * engine.log(p) + vals * engine.log(engine.asarray(1.0) - p))
+        good = (vals >= 0.0) & (engine.floor(vals) == vals)
+        return engine.where(good, rv, engine.asarray(-np.inf))
+
+    def backend_seq_log_density(self, x: Tuple[Any, Any], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        vals = engine.asarray(x[0])
+        log_fact = engine.asarray(x[1])
+        return self.backend_log_density_from_params(vals, log_fact, engine.asarray(self.r), engine.asarray(self.p),
+                                                    engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['NegativeBinomialDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked negative-binomial parameters for a homogeneous mixture kernel."""
+        return {
+            'r': engine.asarray([d.r for d in dists]),
+            'p': engine.asarray([d.p for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Any, Any], params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of negative-binomial log densities."""
+        vals = engine.asarray(x[0])
+        log_fact = engine.asarray(x[1])
+        return cls.backend_log_density_from_params(
+            vals[:, None], log_fact[:, None], params['r'][None, :], params['p'][None, :], engine)
 
     def sampler(self, seed: Optional[int] = None) -> 'NegativeBinomialSampler':
         """Return a sampler for drawing observations from this distribution."""

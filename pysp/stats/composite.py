@@ -28,6 +28,12 @@ SS = TypeVar('SS')
 class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
     """Product distribution over heterogeneous component variables."""
+
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.dists)),
+                                        kernel_status='numba_adapter')
+
     def __init__(self,
                  dists: Sequence[SequenceEncodableProbabilityDistribution]) -> None:
         """CompositeDistribution for modeling independent distributions of from (Dist_0,Dist_1,...,Dist_{n-1}).
@@ -47,6 +53,21 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """
         self.dists = dists
         self.count = len(dists)
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+        children = tuple(declaration_for(d) for d in self.dists)
+        children = tuple(d for d in children if d is not None)
+        return DistributionDeclaration(
+            name='composite',
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(StatisticSpec('components', kind='tuple'),),
+            support='product',
+            children=children,
+            child_roles=tuple('field_%d' % i for i in range(len(children))),
+            differentiable=all(child.differentiable for child in children),
+        )
 
     def __str__(self) -> str:
         """Returns str name of CompositeDistribution with each dist as well."""
@@ -113,6 +134,69 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             rv += self.dists[i].seq_log_density(x[i])
 
         return rv
+
+    def backend_seq_log_density(self, x: E, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density by composing child distributions."""
+        from pysp.stats.backend import backend_seq_log_density
+        rv = backend_seq_log_density(self.dists[0], x[0], engine)
+        for i in range(1, self.count):
+            rv = rv + backend_seq_log_density(self.dists[i], x[i], engine)
+        return rv
+
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+        """Return distribution-owned state for autograd fitting."""
+        from pysp.stats.gradient import CompositeGradientFitState
+        return CompositeGradientFitState(self, [recurse(dist, engine, torch, leaves) for dist in self.dists])
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['CompositeDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked child parameters for homogeneous composite mixtures."""
+        from pysp.stats.stacked import stacked_component_params
+        count = dists[0].count
+        if any(d.count != count for d in dists):
+            raise ValueError('Stacked CompositeDistribution components require equal arity.')
+        children = []
+        for i in range(count):
+            child_dists = [d.dists[i] for d in dists]
+            try:
+                children.append(stacked_component_params(child_dists, engine))
+            except ValueError as exc:
+                raise ValueError('Composite child %s is not stackable: %s' %
+                                 (type(child_dists[0]).__name__, exc))
+        return {'children': tuple(children)}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of composite log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        children = params['children']
+        rv = stacked_component_log_density(x[0], children[0], engine)
+        for i in range(1, len(children)):
+            rv = rv + stacked_component_log_density(x[i], children[i], engine)
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any,
+                                                            params: Dict[str, Any], engine: Any,
+                                                            estimator: Any) -> Tuple[Any, ...]:
+        """Return per-component legacy composite sufficient statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
+            unstack_component_stats
+        ww = engine.asarray(weights)
+        num_components = int(tuple(getattr(ww, 'shape', (0, 0)))[1])
+        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+        child_payloads = []
+        for i, route in enumerate(params['children']):
+            component_estimators = tuple(
+                getattr(component_est, 'estimators', ())[i]
+                for component_est in outer_estimators
+                if len(getattr(component_est, 'estimators', ())) > i
+            )
+            child_estimator = StackedEstimatorView(component_estimators) \
+                if len(component_estimators) == num_components else None
+            child_stats = stacked_component_sufficient_statistics(x[i], ww, route, engine, child_estimator)
+            child_payloads.append(unstack_component_stats(child_stats, num_components))
+        return tuple(tuple(child[i] for child in child_payloads) for i in range(num_components))
 
     def sampler(self, seed: Optional[int] = None) -> 'CompositeSampler':
         """Create CompositeSampler for sampling from CompositeDistribution instance.
@@ -530,6 +614,12 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulators = [self.accumulators[i].from_value(x[i]) for i in range(len(x))]
         self.count = len(x)
 
+        return self
+
+    def scale(self, c: float) -> 'CompositeAccumulator':
+        """Scale each child accumulator using its family-specific protocol."""
+        for acc in self.accumulators:
+            acc.scale(c)
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

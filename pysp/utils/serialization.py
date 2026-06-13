@@ -123,6 +123,8 @@ def ensure_pysp_serialization_registry() -> None:
                     register_serializable_class(cls)
                 elif cls.__module__ == "pysp.stats.transform" and cls.__name__.endswith("Transform"):
                     register_serializable_class(cls)
+                elif getattr(cls, "__pysp_serializable__", False):
+                    register_serializable_class(cls)
 
     try:
         automatic = importlib.import_module("pysp.utils.automatic")
@@ -249,12 +251,14 @@ def _encode_object(value: Any, active: Set[int]) -> Dict[str, Any]:
     if not hasattr(value, "__dict__"):
         raise SerializationError("registered class %s has no __dict__ state" % tid)
 
+    state_getter = getattr(value, "__pysp_getstate__", None)
     obj_id = _cycle_enter(value, active)
     try:
+        state = state_getter() if callable(state_getter) else dict(value.__dict__)
         return {
             TAG: "object",
             "type": tid,
-            "state": _encode(dict(value.__dict__), active),
+            "state": _encode(state, active),
         }
     finally:
         _cycle_leave(obj_id, active)
@@ -270,7 +274,11 @@ def _decode_object(payload: Dict[str, Any]) -> Any:
     if not isinstance(state, dict):
         raise SerializationError("serialized object state for %r is not a dict" % tid)
     obj = cls.__new__(cls)
-    obj.__dict__.update(state)
+    state_setter = getattr(obj, "__pysp_setstate__", None)
+    if callable(state_setter):
+        state_setter(state)
+    else:
+        obj.__dict__.update(state)
     return obj
 
 

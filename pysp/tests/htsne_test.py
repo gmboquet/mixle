@@ -851,6 +851,32 @@ class HTSNETestCase(unittest.TestCase):
                             + np.linalg.norm(long_ - long_.mean(0), axis=1).mean())
             self.assertLess(gap, 2.0 * spread)
 
+    def test_sequence_field_log_density_sums_unless_len_normalized(self):
+        from pysp.utils.htsne import _field_log_density_features
+
+        data = [[0], [0, 0, 0]]
+        len_dist = PoissonDistribution(2.0)
+        raw_components = [
+            SequenceDistribution(IntegerCategoricalDistribution(0, [0.8, 0.2]),
+                                 len_dist=len_dist, len_normalized=False),
+            SequenceDistribution(IntegerCategoricalDistribution(0, [0.2, 0.8]),
+                                 len_dist=len_dist, len_normalized=False),
+        ]
+        norm_components = [
+            SequenceDistribution(IntegerCategoricalDistribution(0, [0.8, 0.2]),
+                                 len_dist=len_dist, len_normalized=True),
+            SequenceDistribution(IntegerCategoricalDistribution(0, [0.2, 0.8]),
+                                 len_dist=len_dist, len_normalized=True),
+        ]
+
+        raw_terms = list(_field_log_density_features(raw_components, data))
+        norm_terms = list(_field_log_density_features(norm_components, data))
+        raw_element_ll = raw_terms[0][0]
+        norm_element_ll = norm_terms[0][0]
+
+        np.testing.assert_allclose(raw_element_ll[1], 3.0 * raw_element_ll[0], atol=1.0e-12)
+        np.testing.assert_allclose(norm_element_ll[1], norm_element_ll[0], atol=1.0e-12)
+
     @unittest.skipUnless(HAS_UMAP, "umap-learn is not installed")
     def test_varlen_humap(self):
         data, labels, model = self._varlen_data_and_model(120)

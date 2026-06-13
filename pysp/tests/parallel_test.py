@@ -15,7 +15,8 @@ from pysp.stats import (
     GaussianEstimator, CategoricalEstimator,
     seq_encode, seq_initialize, seq_estimate, seq_log_density_sum,
 )
-from pysp.utils.estimation import optimize
+from pysp.parallel import EncodedDataHandle, encoded_data, is_encoded_data_handle
+from pysp.utils.estimation import StreamingEstimator, constant, optimize
 from pysp.utils.parallel import MPEncodedData
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -62,6 +63,16 @@ class MultiprocessingBackendTestCase(unittest.TestCase):
         ll_ser = sum(m_ser.log_density(x) for x in self.data[:50])
         self.assertAlmostEqual(ll_par, ll_ser, places=8)
 
+    def test_shared_protocol_factory_can_build_multiprocessing_handle(self):
+        with encoded_data(self.data, estimator=self.est, backend='mp',
+                          num_workers=2) as enc:
+            self.assertIsInstance(enc, EncodedDataHandle)
+            self.assertIsInstance(enc, MPEncodedData)
+            self.assertTrue(is_encoded_data_handle(enc))
+            cnt, ll = seq_log_density_sum(enc, self.m0)
+        self.assertEqual(cnt, len(self.data))
+        self.assertTrue(np.isfinite(ll))
+
     def test_log_density_sum_matches_serial(self):
         with MPEncodedData(self.data, estimator=self.est, num_workers=4) as enc:
             cnt_p, ll_p = enc.pysp_seq_log_density_sum(self.m0)
@@ -91,6 +102,41 @@ class MultiprocessingBackendTestCase(unittest.TestCase):
         mus = sorted(c.dists[0].mu for c in model.components)
         self.assertAlmostEqual(mus[0], -3.0, delta=0.5)
         self.assertAlmostEqual(mus[1], 3.0, delta=0.5)
+
+    def test_optimize_can_build_multiprocessing_backend(self):
+        m_start = make_start_model()
+        model = optimize(self.data, self.est, max_its=30, prev_estimate=m_start,
+                         backend='mp', num_workers=2, out=io.StringIO())
+        _, ll_fit = seq_log_density_sum(self.enc_local, model)
+        _, ll_init = seq_log_density_sum(self.enc_local, m_start)
+        self.assertGreater(ll_fit, ll_init)
+        mus = sorted(c.dists[0].mu for c in model.components)
+        self.assertAlmostEqual(mus[0], -3.0, delta=0.5)
+        self.assertAlmostEqual(mus[1], 3.0, delta=0.5)
+
+    def test_streaming_estimator_can_use_multiprocessing_handle(self):
+        estimator = GaussianEstimator()
+        start = GaussianDistribution(0.0, 1.0)
+        batch1 = [-2.0, -1.0, 0.0, 1.0]
+        batch2 = [1.5, 2.0, 2.5]
+
+        serial = StreamingEstimator(estimator, schedule=constant(0.4), model=start)
+        serial.update(batch1)
+        serial.update(batch2)
+
+        parallel = StreamingEstimator(estimator, schedule=constant(0.4), model=start)
+        with encoded_data(batch1, estimator=estimator, model=start, backend='mp',
+                          num_workers=2) as enc:
+            model1 = parallel.update(enc_data=enc)
+        with encoded_data(batch2, estimator=estimator, model=model1, backend='mp',
+                          num_workers=2) as enc:
+            parallel.update(enc_data=enc)
+
+        np.testing.assert_allclose(np.asarray(parallel.value(), dtype=float),
+                                   np.asarray(serial.value(), dtype=float),
+                                   rtol=1.0e-12, atol=1.0e-12)
+        self.assertAlmostEqual(parallel.model.mu, serial.model.mu, places=12)
+        self.assertAlmostEqual(parallel.model.sigma2, serial.model.sigma2, places=12)
 
     def test_close_idempotent_and_len(self):
         enc = MPEncodedData(self.data, estimator=self.est, num_workers=2)

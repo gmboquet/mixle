@@ -1,3 +1,5 @@
+"""Fit a hierarchical topic mixture to the bundled Wikipedia example corpus."""
+
 import os
 import sys
 import time

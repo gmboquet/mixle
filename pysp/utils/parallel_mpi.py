@@ -34,6 +34,7 @@ from typing import Any, Optional, Sequence, Tuple
 
 import numpy as np
 
+from pysp.parallel import EncodedDataHandle
 from mpi4py import MPI
 
 __all__ = ['MPIEncodedData', 'mpi_out']
@@ -47,7 +48,7 @@ def mpi_out(comm: Optional['MPI.Comm'] = None, root: int = 0):
     return sys.stdout if comm.Get_rank() == root else io.StringIO()
 
 
-class MPIEncodedData:
+class MPIEncodedData(EncodedDataHandle):
     """Encoded-data handle sharded across MPI ranks (SPMD).
 
     Drop-in for the ``enc_data`` argument of ``optimize``/``best_of``/
@@ -134,6 +135,24 @@ class MPIEncodedData:
             model_b = None
         return pickle.loads(self.comm.bcast(model_b, root=self.root))
 
+    def _fold_value_and_share(self, estimator, local: Tuple[float, Any]) -> Tuple[float, Any]:
+        """Gather per-rank stats, fold/key-tie on root, broadcast folded value."""
+        gathered = self.comm.gather(pickle.dumps(local, protocol=_PROTO), root=self.root)
+        if self.rank == self.root:
+            accumulator = estimator.accumulator_factory().make()
+            nobs = 0.0
+            for raw in gathered:
+                count, stats = pickle.loads(raw)
+                nobs += count
+                accumulator.combine(stats)
+            stats_dict = dict()
+            accumulator.key_merge(stats_dict)
+            accumulator.key_replace(stats_dict)
+            payload_b = pickle.dumps((nobs, accumulator.value()), protocol=_PROTO)
+        else:
+            payload_b = None
+        return pickle.loads(self.comm.bcast(payload_b, root=self.root))
+
     # -- protocol recognized by pysp.stats dispatch -------------------------
 
     def pysp_seq_estimate(self, estimator, prev_estimate):
@@ -171,6 +190,12 @@ class MPIEncodedData:
             ll += estimate.seq_log_density(x).sum()
         return (self.comm.allreduce(cnt, op=MPI.SUM),
                 self.comm.allreduce(ll, op=MPI.SUM))
+
+    def pysp_stream_accumulate(self, estimator, model) -> Tuple[float, Any]:
+        """Globally folded batch sufficient statistics for streaming EM."""
+        model = pickle.loads(self.comm.bcast(
+            pickle.dumps(model, protocol=_PROTO), root=self.root))
+        return self._fold_value_and_share(estimator, self._local_update(estimator, model))
 
     def __len__(self) -> int:
         return int(self.size)

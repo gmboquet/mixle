@@ -23,6 +23,91 @@ E = Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]
 class BinomialDistribution(SequenceEncodableProbabilityDistribution):
     """Binomial distribution over ``min_val + {0, ..., n}`` with success probability ``p``."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='binomial',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('p', constraint='unit_interval'),
+                ParameterSpec('n', constraint='non_negative_integer', differentiable=False),
+                ParameterSpec('min_val', constraint='optional_integer', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('count'),
+                StatisticSpec('sum'),
+                StatisticSpec('min_val', kind='support_bound', additive=False, scales=False),
+                StatisticSpec('max_val', kind='support_bound', additive=False, scales=False),
+            ),
+            support='bounded_integer',
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure=cls.exp_family_base_measure,
+                sufficient_statistics_from_params=cls.exp_family_sufficient_statistics_from_params,
+                base_measure_from_params=cls.exp_family_base_measure_from_params,
+            ),
+        )
+
+    @staticmethod
+    def _exp_family_shifted_values(x: E, params: Dict[str, Any], engine: Any) -> Any:
+        ux, ix, _, _, _ = x
+        vals = engine.asarray(ux)
+        min_val = params.get('min_val')
+        if min_val is not None:
+            vals = vals - engine.asarray(min_val)
+        return vals[engine.asarray(ix)]
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: E, engine: Any) -> Tuple[Any, ...]:
+        """Return placeholder-free Binomial sufficient statistics.
+
+        The parameter-dependent support shift is handled by
+        ``exp_family_sufficient_statistics_from_params`` when generated scoring
+        supplies the declaration-stacked parameter bundle.
+        """
+        _, _, vals, _, _ = x
+        return (engine.asarray(vals),)
+
+    @staticmethod
+    def exp_family_sufficient_statistics_from_params(x: E, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Binomial sufficient statistics for generated scoring."""
+        return (BinomialDistribution._exp_family_shifted_values(x, params, engine),)
+
+    @staticmethod
+    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Binomial natural parameters for generated scoring."""
+        p = params['p']
+        return (engine.log(p) - engine.log(engine.asarray(1.0) - p),)
+
+    @staticmethod
+    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+        """Return Binomial log partition for generated scoring."""
+        p = params['p']
+        return -params['n'] * engine.log(engine.asarray(1.0) - p)
+
+    @staticmethod
+    def exp_family_base_measure(x: E, engine: Any) -> Any:
+        """Return placeholder-free Binomial base measure."""
+        return engine.asarray(x[2]) * 0.0
+
+    @staticmethod
+    def exp_family_base_measure_from_params(x: E, params: Dict[str, Any], engine: Any) -> Any:
+        """Return Binomial support/base measure for generated scoring."""
+        xx = BinomialDistribution._exp_family_shifted_values(x, params, engine)
+        n = params['n']
+        one = engine.asarray(1.0)
+        good = (xx >= 0.0) & (xx <= n) & (engine.floor(xx) == xx)
+        base = engine.gammaln(n + one) - engine.gammaln(xx + one) - engine.gammaln(n - xx + one)
+        return engine.where(good, base, engine.asarray(-np.inf))
+
     def __init__(self, p: float, n: int, min_val: Optional[int] = None, name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
         """BinomialDistribution object used for x~Binomial(n,p) with support (min_val, n-min_val-1).
@@ -137,6 +222,71 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         cc[good] = (gn - gammaln(xg + 1) - gammaln(n - xg + 1)) + self.log_1p * (n - xg) + self.log_p * xg
         return cc[ix]
 
+    @staticmethod
+    def backend_log_density_from_params(vals: Any, n: Any, p: Any, min_val: Optional[int], engine: Any) -> Any:
+        """Engine-neutral binomial log-density from explicit parameters."""
+        xx = vals - engine.asarray(min_val) if min_val is not None else vals
+        good = (xx >= 0.0) & (xx <= n) & (engine.floor(xx) == xx)
+        one = engine.asarray(1.0)
+        rv = (engine.gammaln(n + one) - engine.gammaln(xx + one) - engine.gammaln(n - xx + one)
+              + (n - xx) * engine.log(one - p) + xx * engine.log(p))
+        return engine.where(good, rv, engine.asarray(-np.inf))
+
+    def backend_seq_log_density(self, x: E, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        ux, ix, _, _, _ = x
+        vals = engine.asarray(ux)
+        scores = self.backend_log_density_from_params(vals, engine.asarray(float(self.n)), engine.asarray(self.p),
+                                                      self.min_val, engine)
+        return scores[engine.asarray(ix)]
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['BinomialDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked binomial parameters for a homogeneous mixture kernel.
+
+        A stacked binomial mixture requires components to share the same trial count
+        and shifted support. Mixtures with heterogeneous supports fall back to the
+        generic kernel.
+        """
+        n = dists[0].n
+        min_val = dists[0].min_val
+        if any(d.n != n or d.min_val != min_val for d in dists):
+            raise ValueError('Stacked BinomialDistribution components require shared n and min_val.')
+        return {
+            'p': engine.asarray([d.p for d in dists]),
+            'n': engine.asarray(float(n)),
+            'min_val': min_val,
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of binomial log densities."""
+        ux, ix, _, _, _ = x
+        vals = engine.asarray(ux)
+        scores = cls.backend_log_density_from_params(
+            vals[:, None], params['n'], params['p'][None, :], params['min_val'], engine)
+        return scores[engine.asarray(ix), :]
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any, params: Dict[str, Any],
+                                                            engine: Any, estimator: Any) -> Tuple[Any, Any, Any, Any]:
+        """Return stacked Binomial sufficient statistics using estimator-owned support bounds."""
+        _, _, xx, min_val, max_val = x
+        vals = engine.asarray(xx)
+        ww = engine.asarray(weights)
+        count = engine.sum(ww, axis=0)
+        obs_sum = engine.sum(ww * vals[:, None], axis=0)
+        init_min, init_max = _binomial_initial_bounds(estimator, len(np.asarray(engine.to_numpy(count))))
+        min_bounds = [
+            min_val if lo is None else min(lo, min_val)
+            for lo in init_min
+        ]
+        max_bounds = [
+            max_val if hi is None else max(hi, max_val)
+            for hi in init_max
+        ]
+        return count, obs_sum, engine.asarray(min_bounds), engine.asarray(max_bounds)
+
     def sampler(self, seed: Optional[int] = None) -> 'BinomialSampler':
         """Returns BinomialSampler for generating samples from BinomialDistribution(n,p,min_val).
 
@@ -224,6 +374,15 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
     def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
         """Build an exact aligned cross-bin view over two binomial supports."""
         return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
+
+
+def _binomial_initial_bounds(estimator: Any, num_components: int) -> Tuple[List[Optional[int]], List[Optional[int]]]:
+    estimators = tuple(getattr(estimator, 'estimators', ()))
+    if len(estimators) != num_components:
+        return [None] * num_components, [None] * num_components
+    min_bounds = [getattr(est, 'min_val', None) for est in estimators]
+    max_bounds = [getattr(est, 'max_val', None) for est in estimators]
+    return min_bounds, max_bounds
 
 
 class BinomialEnumerator(DistributionEnumerator):
@@ -478,6 +637,12 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.min_val = x[2]
         self.max_val = x[3]
 
+        return self
+
+    def scale(self, c: float) -> 'BinomialAccumulator':
+        """Scale linear count/sum statistics while preserving support bounds."""
+        self.count *= c
+        self.sum *= c
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

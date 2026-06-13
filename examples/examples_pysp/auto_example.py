@@ -1,3 +1,5 @@
+"""Infer an estimator automatically for a small heterogeneous Python dataset."""
+
 import numpy as np
 
 from pysp.stats import *
