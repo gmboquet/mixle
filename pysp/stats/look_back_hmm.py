@@ -292,6 +292,42 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
 
         return ll_ret
 
+    def compute_capabilities(self):
+        """Return backend capability metadata for this concrete lookback-HMM instance."""
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        children = tuple(self.topics)
+        if self.lag > 0 and self.init_dist is not None:
+            children = children + tuple(self.init_dist)
+        if self.len_dist is not None:
+            children = children + (self.len_dist,)
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
+                                        kernel_status='generic_latent')
+
+    def backend_seq_log_density(self, x, engine):
+        """Engine-neutral lookback-HMM scoring via the shared HMM forward pass."""
+        from pysp.stats.backend import backend_seq_log_density
+        from pysp.stats.hidden_markov import hmm_pad_log_emissions, hmm_engine_forward_backward
+
+        (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
+        num_states = self.num_states
+        tot_cnt = len(ids) + len(idi)
+        log_pr = np.zeros((tot_cnt, num_states), dtype=np.float64)
+        for i in range(num_states):
+            if self.lag > 0:
+                log_pr[imi, i] = np.asarray(engine.to_numpy(
+                    backend_seq_log_density(self.init_dist[i], enc_idata, engine)))
+            log_pr[ims, i] = np.asarray(engine.to_numpy(
+                backend_seq_log_density(self.topics[i], enc_sdata, engine)))
+
+        padded, mask, offsets = hmm_pad_log_emissions(log_pr, np.asarray(sz))
+        with np.errstate(divide='ignore'):
+            log_w = np.log(self.w)
+            log_a = np.log(self.transitions)
+        ll, _, _, _ = hmm_engine_forward_backward(engine, padded, log_w, log_a, mask)
+        if self.len_dist is not None:
+            ll = ll + backend_seq_log_density(self.len_dist, len_enc, engine)
+        return ll
+
     def seq_posterior(self, x):
         """Compute posterior hidden state probabilities for encoded sequences x.
 
@@ -640,6 +676,58 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
 
         if self.len_accumulator is not None:
             self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
+
+    def seq_update_engine(self, x, weights, estimate, engine):
+        """Engine-resident Baum-Welch E-step via the shared HMM forward-backward (numpy or torch).
+
+        Emissions (init segment + windowed topics) are scored on the active engine, the
+        forward-backward runs on the engine, and the resulting posteriors are routed to the init /
+        topic / length accumulators. Mirrors seq_update.
+        """
+        from pysp.stats.backend import backend_seq_log_density
+        from pysp.stats.hidden_markov import hmm_pad_log_emissions, hmm_engine_forward_backward
+
+        (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
+        num_states = estimate.num_states
+        tot_cnt = len(ids) + len(idi)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+
+        log_pr = np.zeros((tot_cnt, num_states), dtype=np.float64)
+        for i in range(num_states):
+            if self.lag > 0:
+                log_pr[imi, i] = np.asarray(engine.to_numpy(
+                    backend_seq_log_density(estimate.init_dist[i], enc_idata, engine)))
+            log_pr[ims, i] = np.asarray(engine.to_numpy(
+                backend_seq_log_density(estimate.topics[i], enc_sdata, engine)))
+
+        sz_np = np.asarray(sz)
+        padded, mask, offsets = hmm_pad_log_emissions(log_pr, sz_np)
+        with np.errstate(divide='ignore'):
+            log_w = np.log(estimate.w)
+            log_a = np.log(estimate.transitions)
+        _, gamma, xi_sum, pi = hmm_engine_forward_backward(
+            engine, padded, log_w, log_a, mask, weights=weights_np)
+        gamma = np.asarray(engine.to_numpy(gamma))
+        xi_sum = np.asarray(engine.to_numpy(xi_sum))
+        pi = np.asarray(engine.to_numpy(pi))
+
+        gamma_flat = np.zeros((tot_cnt, num_states), dtype=np.float64)
+        for i in range(len(sz_np)):
+            n = int(sz_np[i])
+            if n > 0:
+                gamma_flat[offsets[i]:offsets[i + 1], :] = gamma[i, :n, :]
+
+        self.init_counts += pi.sum(axis=0)
+        self.trans_counts += xi_sum
+        self.state_counts += gamma_flat.sum(axis=0)
+        for i in range(num_states):
+            if self.lag > 0:
+                self.init_accumulators[i].seq_update(enc_idata, gamma_flat[imi, i], estimate.init_dist[i])
+            self.seq_accumulators[i].seq_update(enc_sdata, gamma_flat[ims, i], estimate.topics[i])
+
+        if self.len_accumulator is not None:
+            self.len_accumulator.seq_update(len_enc, weights_np, estimate.len_dist)
 
     def combine(self, suff_stat):
         """Aggregate sufficient statistics from suff_stat (a value() tuple) into this accumulator.
