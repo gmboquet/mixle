@@ -957,3 +957,7 @@ class JointMixtureDataEncoder(DataSequenceEncoder):
         rv2 = self.encoder2.seq_encode([u[1] for u in x])
 
         return rv0, rv1, rv2
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+JointMixtureAccumulator = JointMixtureEstimatorAccumulator
+JointMixtureAccumulatorFactory = JointMixtureEstimatorAccumulatorFactory

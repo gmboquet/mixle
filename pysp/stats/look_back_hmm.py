@@ -35,6 +35,7 @@ LookbackHiddenMarkovDataEncoder constructor signatures also differ (here: encode
 import math
 
 from pysp.utils.optional_deps import numba
+from pysp.utils.aliasing import coalesce_alias, require, MISSING
 import numpy as np
 from numpy.random import RandomState
 
@@ -57,11 +58,12 @@ E1 = TypeVar('E1')
 class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution):
     """Hidden Markov model whose state emissions condition on the previous ``lag`` observations."""
 
-    def __init__(self, topics: Sequence[SequenceEncodableProbabilityDistribution], w: np.ndarray,
-                 transitions, lag: int = 0,
+    def __init__(self, topics: Sequence[SequenceEncodableProbabilityDistribution], w: np.ndarray = MISSING,
+                 transitions=MISSING, lag: int = 0,
                  init_dist: Optional[Sequence[SequenceEncodableProbabilityDistribution]] = None,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 name: Optional[str] = None) -> None:
+                 name: Optional[str] = None,
+                 weights: np.ndarray = MISSING) -> None:
         """LookbackHiddenMarkovDistribution object for sequences with lagged emission dependence.
 
         Args:
@@ -92,6 +94,8 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
             name (Optional[str]): Name of object instance.
 
         """
+        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
+        transitions = require('transitions', transitions, default=MISSING)
         with np.errstate(divide='ignore'):
             self.topics = topics
             self.init_dist = init_dist if init_dist is not None else [NullDistribution()]*len(w)
@@ -1305,3 +1309,7 @@ def numba_baum_welch_alphas(num_states, tz, prob_mat, init_pvec, tran_mat, weigh
 
             for i in range(num_states):
                 alpha_loc[s, i] /= alpha_sum
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+LookbackHiddenMarkovAccumulator = LookbackHiddenMarkovEstimatorAccumulator
+LookbackHiddenMarkovAccumulatorFactory = LookbackHiddenMarkovEstimatorAccumulatorFactory

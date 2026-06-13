@@ -21,6 +21,7 @@ from numpy.random import RandomState
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
     ParameterEstimator, DataSequenceEncoder, StatisticAccumulatorFactory, DistributionSampler, \
     DistributionEnumerator, EnumerationError
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 
@@ -372,9 +373,9 @@ class IntegerBernoulliSetAccumulatorFactory(StatisticAccumulatorFactory):
 
 class IntegerBernoulliSetEstimator(ParameterEstimator):
 
-    def __init__(self, num_vals: int, min_prob: float = 1.0e-128, pseudo_count: Optional[float] = None,
+    def __init__(self, num_vals: int = MISSING, min_prob: float = 1.0e-128, pseudo_count: Optional[float] = None,
                  suff_stat: Optional[np.ndarray] = None, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+                 keys: Optional[str] = None, num_values: int = MISSING) -> None:
         """IntegerBernoulliSetEstimator object for estimating integer Bernoulli set distributions from aggregated
             sufficient statistics.
 
@@ -395,7 +396,7 @@ class IntegerBernoulliSetEstimator(ParameterEstimator):
             min_prob (float): Minimum probability for an integer in range of set dist.
 
         """
-        self.num_vals = num_vals
+        self.num_vals = coalesce_alias('num_vals', num_vals, 'num_values', num_values, default=MISSING)
         self.keys = keys
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat

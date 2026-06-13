@@ -31,6 +31,7 @@ from pysp.stats.markovchain import MarkovChainDistribution
 from pysp.stats.mixture import MixtureDistribution
 from pysp.stats.null_dist import NullDataEncoder
 from pysp.utils.optional_deps import numba
+from pysp.utils.aliasing import coalesce_alias, require, MISSING
 import numpy as np
 import math
 
@@ -81,7 +82,7 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
 			differentiable=False,
 		)
 
-	def __init__(self, topics, w, transitions, taus, len_dist=None, name=None, terminal_values=None, use_numba=True):
+	def __init__(self, topics, w=MISSING, transitions=MISSING, taus=MISSING, len_dist=None, name=None, terminal_values=None, use_numba=True, weights=MISSING):
 		"""IndPiHiddenMarkovModelDistribution object defining an HMM with per-sequence initial state vectors.
 
 		Args:
@@ -114,6 +115,9 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
 			use_numba (bool): If True, use numba package for encoding and vectorized operations.
 
 		"""
+		w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
+		transitions = require('transitions', transitions, default=MISSING)
+		taus = require('taus', taus, default=MISSING)
 		self.use_numba = use_numba
 
 		with np.errstate(divide='ignore'):
@@ -1836,3 +1840,12 @@ def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, al
 		for i in range(num_states):
 #			if not np.isnan(alpha_loc[s0,i]):
 			pi_acc[n,i] += alpha_loc[s0,i]
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+IndPiHiddenMarkovAccumulator = IndPiHiddenMarkovEstimatorAccumulator
+IndPiHiddenMarkovAccumulatorFactory = IndPiHiddenMarkovEstimatorAccumulatorFactory
+IndPiHiddenMarkovModelAccumulator = IndPiHiddenMarkovEstimatorAccumulator
+IndPiHiddenMarkovModelAccumulatorFactory = IndPiHiddenMarkovEstimatorAccumulatorFactory
+IndPiHiddenMarkovModelDataEncoder = IndPiHiddenMarkovDataEncoder
+IndPiHiddenMarkovModelEstimator = IndPiHiddenMarkovEstimator
+IndPiHiddenMarkovModelSampler = IndPiHiddenMarkovSampler

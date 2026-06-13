@@ -40,6 +40,7 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceE
 from pysp.stats.markovchain import MarkovChainDistribution
 from pysp.stats.mixture import MixtureDistribution
 from pysp.utils.optional_deps import numba
+from pysp.utils.aliasing import coalesce_alias, require, MISSING
 import numpy as np
 import math
 from pysp.arithmetic import maxrandint
@@ -48,7 +49,8 @@ from pysp.arithmetic import maxrandint
 class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution):
     """Hidden Markov model whose state emissions condition on the previous ``lag`` observations."""
 
-    def __init__(self, topics, w, transitions, lag=0, init_dist=None, len_dist=None, name=None):
+    def __init__(self, topics, w=MISSING, transitions=MISSING, lag=0, init_dist=None, len_dist=None, name=None,
+                 weights=MISSING):
         """LookbackHiddenMarkovDistribution object for sequences with lagged emission dependence.
 
         Args:
@@ -80,6 +82,8 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
             name (Optional[str]): Name of object instance.
 
         """
+        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
+        transitions = require('transitions', transitions, default=MISSING)
         with np.errstate(divide='ignore'):
 
             self.topics           = topics
@@ -1283,3 +1287,7 @@ def numba_baum_welch_alphas(num_states, tz, prob_mat, init_pvec, tran_mat, weigh
 
 
 
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+LookbackHiddenMarkovAccumulator = LookbackHiddenMarkovEstimatorAccumulator
+LookbackHiddenMarkovAccumulatorFactory = LookbackHiddenMarkovEstimatorAccumulatorFactory

@@ -32,6 +32,7 @@ from pysp.arithmetic import maxrandint
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
     DistributionEnumerator, EnumerationError, child_enumerator
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
     NullAccumulatorFactory
 from pysp.utils.enumeration import BufferedStream, ProductEnumerator
@@ -699,10 +700,10 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
     """IntegerBernoulliEditEstimator object for estimating an IntegerBernoulliEditDistribution from aggregated
     sufficient statistics."""
 
-    def __init__(self, num_vals: int, init_estimator: Optional[ParameterEstimator] = NullEstimator(),
+    def __init__(self, num_vals: int = MISSING, init_estimator: Optional[ParameterEstimator] = NullEstimator(),
                  min_prob: float = 1.0e-128, pseudo_count: Optional[float] = None,
                  suff_stat: Optional[np.ndarray] = None, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+                 keys: Optional[str] = None, num_values: int = MISSING) -> None:
         """IntegerBernoulliEditEstimator object for estimating integer Bernoulli edit set distributions.
 
         Args:
@@ -724,7 +725,7 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
             init_est (ParameterEstimator): Estimator for the previous set x[0].
 
         """
-        self.num_vals = num_vals
+        self.num_vals = coalesce_alias('num_vals', num_vals, 'num_values', num_values, default=MISSING)
         self.keys = keys
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat

@@ -23,6 +23,7 @@ from typing import Optional, List, Tuple, Union, Sequence, Any, TypeVar, Dict
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
     NullAccumulatorFactory
 import numpy as np
@@ -635,10 +636,11 @@ class SparseMarkovAssociationAccumulatorFactory(StatisticAccumulatorFactory):
 class SparseMarkovAssociationEstimator(ParameterEstimator):
     """SparseMarkovAssociationEstimator object for estimating SparseMarkovAssociationDistribution objects."""
 
-    def __init__(self, num_vals: int, alpha: float = 0.0, len_estimator: Optional[ParameterEstimator] = NullEstimator(),
+    def __init__(self, num_vals: int = MISSING, alpha: float = 0.0,
+                 len_estimator: Optional[ParameterEstimator] = NullEstimator(),
                  suff_stat: Optional[Any] = None, pseudo_count: Optional[float] = None,
                  low_memory: bool = True,
-                 keys: Tuple[Optional[str], Optional[str]] = (None, None)) -> None:
+                 keys: Tuple[Optional[str], Optional[str]] = (None, None), num_values: int = MISSING) -> None:
         """SparseMarkovAssociationEstimator object for estimating SparseMarkovAssociationModel objects from aggregated
             sufficient statistics.
 
@@ -665,7 +667,7 @@ class SparseMarkovAssociationEstimator(ParameterEstimator):
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
-        self.num_vals = num_vals
+        self.num_vals = coalesce_alias('num_vals', num_vals, 'num_values', num_values, default=MISSING)
         self.alpha = alpha
         self.low_memory = low_memory
 

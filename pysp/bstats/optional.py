@@ -553,3 +553,7 @@ class OptionalEstimator(ParameterEstimator):
             new_p = self.fixed_prob
 
         return OptionalDistribution(dist, p=new_p, missing_value=self.missing_value, name=self.name, prior=new_prior, keys=self.keys)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+OptionalAccumulator = OptionalEstimatorAccumulator
+OptionalAccumulatorFactory = OptionalEstimatorAccumulatorFactory

@@ -1304,8 +1304,13 @@ class CompiledMixture(object):
 
     def fit(self, enc, estimator, max_its: int = 100, delta: float = 1.0e-8,
             rng: Optional[np.random.RandomState] = None, init_p: float = 0.1,
-            model=None, out=None):
-        """EM to convergence with fused kernels. Returns (model, log_likelihood)."""
+            model=None, out=None, max_iter: Optional[int] = None):
+        """EM to convergence with fused kernels. Returns (model, log_likelihood).
+
+        ``max_iter`` is the preferred spelling of ``max_its``; when given it overrides ``max_its``.
+        """
+        if max_iter is not None:
+            max_its = max_iter
         if model is None:
             model = self.initialize(enc, estimator, rng or np.random.RandomState(), p=init_p)
 
