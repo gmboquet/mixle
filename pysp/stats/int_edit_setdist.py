@@ -577,6 +577,40 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.init_acc.seq_update(init_enc, weights, estimate.init_dist)
 
+    def seq_update_engine(self, x: E, weights: Any,
+                          estimate: Optional[IntegerBernoulliEditDistribution], engine: Any) -> None:
+        """Engine-resident accumulation of removed/added/kept edit counts (numpy or torch).
+
+        The three weighted edit-type histograms are reduced on the active engine; the fixed-size
+        count matrix is host bookkeeping. The init child is routed through the engine. Matches
+        seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        sz, idx, xs, ys, ym, init_enc = x
+
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        w_eng = engine.asarray(weights_np)
+        xsv = np.asarray(xs)
+        idxv = np.asarray(idx, dtype=np.int64)
+
+        for col in range(3):
+            sel = np.asarray(ym[col], dtype=np.int64)
+            if sel.size == 0:
+                continue
+            col_vals = xsv[sel].astype(np.int64)
+            minlen = int(col_vals.max()) + 1
+            agg = np.asarray(engine.to_numpy(engine.bincount(
+                engine.asarray(col_vals),
+                weights=w_eng[idxv[sel]],
+                minlength=minlen)), dtype=np.float64)
+            self.pcnt[:len(agg), col] += agg
+
+        self.tot_sum += float(engine.to_numpy(engine.sum(w_eng)))
+
+        init_estimate = None if estimate is None else estimate.init_dist
+        child_seq_update(self.init_acc, init_enc, w_eng, init_estimate, engine)
+
     def seq_initialize(self, x: E, weights: np.ndarray, rng: np.random.RandomState) -> None:
         """Vectorized initialization of sufficient statistics from sequence encoded observations.
 

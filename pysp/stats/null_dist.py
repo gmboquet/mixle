@@ -263,6 +263,10 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         """
         pass
 
+    def seq_update_engine(self, x, weights, estimate, engine) -> None:
+        # NullDistribution has no parameters: accumulation is a no-op on every engine.
+        pass
+
     def initialize(self, x: Optional[Any], weight: float, rng: Optional['np.random.RandomState']) -> None:
         """No-op initialization for a single observation.
 

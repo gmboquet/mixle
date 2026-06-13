@@ -574,6 +574,25 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum += np.dot(weights, x[1])
         self.sum2 += np.dot(weights, x[2])
 
+    def seq_update_engine(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray], weights: Any,
+                          estimate: Optional[DirichletDistribution], engine: Any) -> None:
+        """Engine-resident accumulation of Dirichlet moment statistics (numpy or torch).
+
+        The weighted vector moments (sum of logs, sum, sum of squares) are reduced via a
+        weight-vector / observation-matrix product on the active engine. Matches seq_update.
+        """
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        w = engine.asarray(weights_np)
+        log_x = engine.asarray(np.asarray(x[0], dtype=np.float64))
+        xv = engine.asarray(np.asarray(x[1], dtype=np.float64))
+        xv2 = engine.asarray(np.asarray(x[2], dtype=np.float64))
+
+        self.sum_of_logs += np.asarray(engine.to_numpy(engine.matmul(w, log_x)))
+        self.counts += float(engine.to_numpy(engine.sum(w)))
+        self.sum += np.asarray(engine.to_numpy(engine.matmul(w, xv)))
+        self.sum2 += np.asarray(engine.to_numpy(engine.matmul(w, xv2)))
+
     def seq_initialize(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray,
                        rng: Optional[RandomState]) -> None:
         """Vectorized initialization of the accumulator. Calls seq_update().

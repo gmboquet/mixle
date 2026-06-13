@@ -567,6 +567,32 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         else:
             self.max_val = max_val
 
+    def seq_update_engine(self, x: E, weights: Any, estimate: Optional['BinomialDistribution'],
+                          engine: Any) -> None:
+        """Engine-resident accumulation of count/sum statistics (numpy or torch).
+
+        The weighted sum and count reductions run on the active engine; the scalar min/max
+        support bounds remain host bookkeeping. Matches seq_update.
+        """
+        _, _, xx, min_val, max_val = x
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        w = engine.asarray(weights_np)
+        xv = engine.asarray(np.asarray(xx, dtype=np.float64))
+
+        self.sum += float(engine.to_numpy(engine.sum(xv * w)))
+        self.count += float(engine.to_numpy(engine.sum(w)))
+
+        if self.min_val is not None:
+            self.min_val = min(self.min_val, min_val)
+        else:
+            self.min_val = min_val
+
+        if self.max_val is not None:
+            self.max_val = max(self.max_val, max_val)
+        else:
+            self.max_val = max_val
+
     def seq_initialize(self, x: E, weights: np.ndarray, rng: Optional[RandomState]) -> None:
         """Vectorized initialization of BinomialAccumulator sufficient statistics with weights.
 

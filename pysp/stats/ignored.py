@@ -157,6 +157,10 @@ class IgnoredAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_update(self, x: E, weights: np.ndarray, estimate: Optional[IgnoredDistribution]) -> None:
         pass
 
+    def seq_update_engine(self, x, weights, estimate, engine) -> None:
+        # IgnoredDistribution accumulates nothing: no-op on every engine.
+        pass
+
     def initialize(self, x: T, weight: float, rng: Optional[RandomState]) -> None:
         pass
 

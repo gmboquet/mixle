@@ -312,6 +312,30 @@ class IntegerBernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
         self.pcnt[:n] += agg_cnt
         self.tot_sum += weights.sum()
 
+    def seq_update_engine(self, x: Tuple[int, np.ndarray, np.ndarray], weights: Any,
+                          estimate: Optional[IntegerBernoulliSetDistribution], engine: Any) -> None:
+        """Engine-resident accumulation of per-integer inclusion counts (numpy or torch).
+
+        The weighted integer histogram is reduced on the active engine; the fixed-size count
+        vector is host bookkeeping. Matches seq_update.
+        """
+        sz, idx, xs = x
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        w_eng = engine.asarray(weights_np)
+
+        xsv = np.asarray(xs)
+        minlen = int(xsv.max()) + 1 if xsv.size > 0 else 0
+        if xsv.size > 0:
+            agg_cnt = np.asarray(engine.to_numpy(engine.bincount(
+                engine.asarray(xsv.astype(np.int64)),
+                weights=w_eng[np.asarray(idx, dtype=np.int64)],
+                minlength=minlen)), dtype=np.float64)
+            n = len(agg_cnt)
+            self.pcnt[:n] += agg_cnt
+
+        self.tot_sum += float(engine.to_numpy(engine.sum(w_eng)))
+
     def seq_initialize(self, x: Tuple[int, np.ndarray, np.ndarray], weights: np.ndarray,
                        rng: Optional[RandomState]) -> None:
         self.seq_update(x, weights, None)
