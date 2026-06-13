@@ -41,6 +41,35 @@ E = Tuple[int, np.ndarray, np.ndarray, np.ndarray, Optional[E0]]
 class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     """Multinomial distribution over integer-keyed count maps."""
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, capabilities_for
+        child = capabilities_for(self.len_dist)
+        return DistributionCapabilities(engine_ready=child.engine_ready,
+                                        kernel_status='generic_table',
+                                        numpy_only_reason=child.numpy_only_reason)
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = () if length is None else (length,)
+        return DistributionDeclaration(
+            name='integer_multinomial',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('min_val', constraint='integer', differentiable=False),
+                ParameterSpec('p_vec', constraint='simplex_vector'),
+            ),
+            statistics=(
+                StatisticSpec('min_val', kind='support_bound', additive=False, scales=False),
+                StatisticSpec('count_vec', kind='count_vector'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='bounded_integer_count_vector',
+            children=children,
+            child_roles=('length',) if length is not None else (),
+            differentiable=False,
+        )
+
     def __init__(self, min_val: int = 0, p_vec: List[float] = None,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  name: Optional[str] = None, keys: Optional[str] = None) -> None:
@@ -156,6 +185,124 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
             ll += self.len_dist.seq_log_density(tcnt)
 
         return ll
+
+    def backend_seq_log_density(self, x: E, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded integer count vectors."""
+        from pysp.stats.backend import backend_seq_log_density
+        sz, idx, cnt, val, tcnt = x
+        ll = engine.zeros(sz)
+
+        if len(idx) > 0:
+            v = val - self.min_val
+            valid = np.bitwise_and(v >= 0, v < self.num_vals)
+            if self.num_vals == 0:
+                contrib = engine.asarray(np.full(len(v), -np.inf))
+            else:
+                safe_v = np.clip(v, 0, self.num_vals - 1)
+                table = engine.asarray(self.log_p_vec)
+                contrib = table[engine.asarray(safe_v)] * engine.asarray(cnt)
+                contrib = engine.where(engine.asarray(valid), contrib, engine.asarray(np.full(len(v), -np.inf)))
+            ll = engine.index_add(ll, engine.asarray(idx), contrib)
+
+        if tcnt is not None:
+            ll = ll + backend_seq_log_density(self.len_dist, tcnt, engine)
+
+        return ll
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['IntegerMultinomialDistribution'],
+                               engine: Any) -> Dict[str, Any]:
+        """Return stacked integer-count-vector parameters for homogeneous mixture kernels."""
+        from pysp.stats.stacked import stacked_component_params
+        min_val = int(dists[0].min_val)
+        num_vals = int(dists[0].num_vals)
+        null_len_dist = isinstance(dists[0].len_dist, NullDistribution)
+        if any(int(dist.min_val) != min_val or int(dist.num_vals) != num_vals or
+               isinstance(dist.len_dist, NullDistribution) != null_len_dist for dist in dists):
+            raise ValueError('Stacked IntegerMultinomialDistribution components require shared support and length '
+                             'policy.')
+
+        length_route = None
+        if not null_len_dist:
+            try:
+                length_route = stacked_component_params([dist.len_dist for dist in dists], engine)
+            except ValueError as exc:
+                raise ValueError('IntegerMultinomial length child %s is not stackable: %s' %
+                                 (type(dists[0].len_dist).__name__, exc))
+
+        return {
+            '__pysp_component_axis__': {'log_p': 1},
+            'min_val': min_val,
+            'num_vals': num_vals,
+            'log_p': engine.asarray(np.stack([dist.log_p_vec for dist in dists], axis=1)),
+            'length_route': length_route,
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of integer-multinomial log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        sz, idx, cnt, val, tcnt = x
+        num_components = int(params['num_components'])
+        num_vals = int(params['num_vals'])
+        rv = engine.zeros((sz, num_components))
+
+        if len(idx) > 0:
+            rel = val - int(params['min_val'])
+            valid = np.bitwise_and(rel >= 0, rel < num_vals)
+            if num_vals == 0:
+                contrib = engine.zeros((len(rel), num_components)) + engine.asarray(-np.inf)
+            else:
+                safe_rel = np.clip(rel, 0, num_vals - 1)
+                contrib = params['log_p'][engine.asarray(safe_rel), :] * engine.asarray(cnt)[:, None]
+                contrib = engine.where(engine.asarray(valid)[:, None], contrib, engine.asarray(-np.inf))
+            rv = engine.index_add(rv, engine.asarray(idx), contrib)
+
+        if params['length_route'] is not None and tcnt is not None:
+            rv = rv + stacked_component_log_density(tcnt, params['length_route'], engine)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any,
+                                                            params: Dict[str, Any], engine: Any,
+                                                            estimator: Any) -> Tuple[Any, ...]:
+        """Return per-component legacy ``(min_val, count_vec, length_stat)`` statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
+            unstack_component_stats
+        sz, idx, cnt, val, tenc = x
+        ww = engine.asarray(weights)
+        num_components = int(tuple(getattr(ww, 'shape', (0, 0)))[1])
+        num_vals = int(params['num_vals'])
+
+        if len(idx) > 0 and num_vals > 0:
+            rel = val - int(params['min_val'])
+            valid = np.bitwise_and(rel >= 0, rel < num_vals)
+            row_weights = ww[engine.asarray(idx)] * engine.asarray(cnt)[:, None]
+            zero_rows = row_weights * engine.asarray(0.0)
+            rows = []
+            for value_index in range(num_vals):
+                mask = np.bitwise_and(valid, rel == value_index)
+                rows.append(engine.sum(engine.where(engine.asarray(mask)[:, None], row_weights, zero_rows), axis=0))
+            count_mat = engine.stack(rows, axis=1)
+        else:
+            count_mat = engine.zeros((num_components, num_vals))
+
+        if params['length_route'] is None or tenc is None:
+            length_by_component = tuple(None for _ in range(num_components))
+        else:
+            outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+            length_estimators = tuple(getattr(component_est, 'len_estimator', None)
+                                      for component_est in outer_estimators)
+            length_estimator = StackedEstimatorView(length_estimators) \
+                if len(length_estimators) == num_components else None
+            length_stats = stacked_component_sufficient_statistics(
+                tenc, ww, params['length_route'], engine, length_estimator)
+            length_by_component = unstack_component_stats(length_stats, num_components)
+
+        min_val = int(params['min_val'])
+        return tuple((min_val, count_mat[i], length_by_component[i]) for i in range(num_components))
 
     def sampler(self, seed: Optional[int] = None) -> 'IntegerMultinomialSampler':
         """Create an IntegerMultinomialSampler object for sampling from integer multinomial.
@@ -870,5 +1017,3 @@ class IntegerMultinomialDataEncoder(DataSequenceEncoder):
         tcnt = self.len_encoder.seq_encode(tcnt)
 
         return sz, idx, cnt, val, tcnt
-
-

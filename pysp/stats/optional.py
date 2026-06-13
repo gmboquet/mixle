@@ -27,6 +27,12 @@ SS = TypeVar('SS')
 class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
     """Mixture-style wrapper that models missing observations explicitly."""
+
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, capabilities_for
+        child = capabilities_for(self.dist)
+        return DistributionCapabilities(engine_ready=child.engine_ready, kernel_status='numba_adapter')
+
     def __init__(self, dist: SequenceEncodableProbabilityDistribution, p: Optional[float] = None,
                  missing_value: Any = None, name: Optional[str] = None) -> None:
         """OptionalDistribution for handling missing values in estimation.
@@ -58,6 +64,24 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         self.log1_p = np.log1p(self.p)
         self.missing_value = missing_value
         self.name = name
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        child = declaration_for(self.dist)
+        children = () if child is None else (child,)
+        return DistributionDeclaration(
+            name='optional',
+            distribution_type=type(self),
+            parameters=(ParameterSpec('p', constraint='unit_interval'),),
+            statistics=(
+                StatisticSpec('missing_observed_counts'),
+                StatisticSpec('observed', kind='child_stat'),
+            ),
+            support='optional',
+            children=children,
+            child_roles=('observed',) if children else (),
+            differentiable=all(child.differentiable for child in children),
+        )
 
     def __str__(self) -> str:
         s1 = str(self.dist)
@@ -133,6 +157,105 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             rv[nz_idx] = self.dist.seq_log_density(enc_data)
 
         return rv
+
+    def backend_seq_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, E], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for optional encoded data."""
+        from pysp.stats.backend import backend_seq_log_density
+        sz, z_idx, nz_idx, enc_data = x
+        rv = engine.zeros(sz)
+        if self.has_p and len(z_idx):
+            rv[engine.asarray(z_idx)] = engine.asarray(self.log_p)
+        if len(nz_idx):
+            nz_scores = backend_seq_log_density(self.dist, enc_data, engine)
+            if self.has_p:
+                nz_scores = nz_scores + engine.asarray(self.log_pn)
+            rv[engine.asarray(nz_idx)] = nz_scores
+        return rv
+
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+        """Return distribution-owned state for autograd fitting."""
+        from pysp.stats.gradient import OptionalGradientFitState
+        child = recurse(self.dist, engine, torch, leaves)
+        logit_p = None
+        if self.has_p:
+            logit_p = tensor_param(self.p, engine, torch, transform='logit')
+            leaves.append(logit_p)
+        return OptionalGradientFitState(self, child, logit_p)
+
+    @staticmethod
+    def _same_missing_value(a: 'OptionalDistribution', b: 'OptionalDistribution') -> bool:
+        if a.missing_value_is_nan or b.missing_value_is_nan:
+            return a.missing_value_is_nan and b.missing_value_is_nan
+        return a.missing_value == b.missing_value
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['OptionalDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked optional-wrapper parameters for homogeneous mixture kernels."""
+        from pysp.stats.stacked import stacked_component_params
+        if any(not cls._same_missing_value(dists[0], dist) for dist in dists[1:]):
+            raise ValueError('Stacked OptionalDistribution components require a shared missing value.')
+        child_dists = [dist.dist for dist in dists]
+        try:
+            child_route = stacked_component_params(child_dists, engine)
+        except ValueError as exc:
+            raise ValueError('Optional child %s is not stackable: %s' %
+                             (type(child_dists[0]).__name__, exc))
+        return {
+            '__pysp_component_axis__': {'has_p': 0, 'log_p': 0, 'log_pn': 0},
+            'child_route': child_route,
+            'has_p': engine.asarray([dist.has_p for dist in dists]),
+            'log_p': engine.asarray([dist.log_p for dist in dists]),
+            'log_pn': engine.asarray([dist.log_pn for dist in dists]),
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[int, np.ndarray, np.ndarray, E],
+                                    params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of optional-wrapper log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        sz, z_idx, nz_idx, enc_data = x
+        num_components = params['num_components']
+        rv = engine.zeros((sz, num_components))
+        has_p = params['has_p']
+        if len(z_idx):
+            missing_scores = engine.where(has_p, params['log_p'], engine.asarray(0.0))
+            rv[engine.asarray(z_idx), :] = missing_scores[None, :] + engine.zeros((len(z_idx), num_components))
+        if len(nz_idx):
+            child_scores = stacked_component_log_density(enc_data, params['child_route'], engine)
+            observed_scores = engine.where(has_p[None, :], child_scores + params['log_pn'][None, :], child_scores)
+            rv[engine.asarray(nz_idx), :] = observed_scores
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: Tuple[int, np.ndarray, np.ndarray, E],
+                                                            weights: Any, params: Dict[str, Any],
+                                                            engine: Any, estimator: Any) -> Tuple[Any, ...]:
+        """Return per-component legacy optional-wrapper sufficient statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
+            unstack_component_stats
+        _, z_idx, nz_idx, enc_data = x
+        ww = engine.asarray(weights)
+        num_components = int(params['num_components'])
+        if len(z_idx):
+            missing_counts = engine.sum(ww[engine.asarray(z_idx), :], axis=0)
+        else:
+            missing_counts = engine.zeros(num_components)
+        if len(nz_idx):
+            observed_weights = ww[engine.asarray(nz_idx), :]
+            observed_counts = engine.sum(observed_weights, axis=0)
+        else:
+            observed_weights = engine.zeros((0, num_components))
+            observed_counts = engine.zeros(num_components)
+        component_estimators = tuple(getattr(est, 'estimator', None)
+                                     for est in getattr(estimator, 'estimators', ()))
+        child_estimator = StackedEstimatorView(component_estimators) \
+            if len(component_estimators) == num_components else None
+        child_stats = stacked_component_sufficient_statistics(
+            enc_data, observed_weights, params['child_route'], engine, child_estimator)
+        child_values = unstack_component_stats(child_stats, num_components)
+        wrapper_counts = engine.stack((missing_counts, observed_counts), axis=1)
+        return tuple((wrapper_counts[i], child_values[i]) for i in range(num_components))
 
     def sampler(self, seed: Optional[int] = None) -> 'OptionalSampler':
         """Return a sampler for drawing observations from this distribution."""
@@ -298,6 +421,13 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.weights = x[0]
         self.accumulator.from_value(x[1])
 
+        return self
+
+    def scale(self, c: float) -> 'OptionalEstimatorAccumulator':
+        """Scale missing/observed weights and delegate observed statistics."""
+        self.weights[0] *= c
+        self.weights[1] *= c
+        self.accumulator.scale(c)
         return self
 
     def key_replace(self, stats_dict: Dict[str, Any]) -> None:

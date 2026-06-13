@@ -29,8 +29,8 @@ Notes:
       the numba cache is warm).
     - The M-step receives the true observation count (as the Spark path does),
       not ``None`` (as the in-process path does).
-    - ``CompiledMixture``/``TorchMixture`` engine objects are not picklable;
-      ship plain distributions/estimators (the handle does this for you).
+    - Runtime kernel/engine objects are not picklable; ship plain
+      distributions/estimators (the handle does this for you).
 """
 import multiprocessing as mp
 import pickle
@@ -38,6 +38,8 @@ import sys
 from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+from pysp.parallel import EncodedDataHandle
 
 __all__ = ['MPEncodedData']
 
@@ -113,7 +115,7 @@ def _worker_main(conn) -> None:
             conn.send(('err', '%s\n%s' % (e, traceback.format_exc())))
 
 
-class MPEncodedData:
+class MPEncodedData(EncodedDataHandle):
     """Encoded-data handle sharded across persistent local worker processes.
 
     Drop-in for the ``enc_data`` argument of ``optimize``/``best_of``/
@@ -227,6 +229,15 @@ class MPEncodedData:
         cnt = sum(r[0] for r in results)
         ll = sum(r[1] for r in results)
         return cnt, ll
+
+    def pysp_stream_accumulate(self, estimator, model) -> Tuple[float, Any]:
+        """Return globally folded batch sufficient statistics for streaming EM."""
+        payloads = self._broadcast_collect((
+            'update',
+            pickle.dumps(estimator, protocol=_PROTO),
+            pickle.dumps(model, protocol=_PROTO),
+        ))
+        return self._fold_stats(estimator, payloads)
 
     # -- lifecycle -----------------------------------------------------------
 

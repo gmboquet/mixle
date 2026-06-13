@@ -29,6 +29,59 @@ from typing import Tuple, List, Union, Optional, Any, Dict, Sequence
 class PoissonDistribution(SequenceEncodableProbabilityDistribution):
     """Poisson distribution over non-negative integer counts with rate ``lam``."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='poisson',
+            distribution_type=cls,
+            parameters=(ParameterSpec('lam', constraint='positive'),),
+            statistics=(StatisticSpec('count'), StatisticSpec('sum')),
+            support='non_negative_integer',
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure=cls.exp_family_base_measure,
+                legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
+            ),
+        )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Tuple[Any, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Poisson sufficient statistics for generated scoring."""
+        return (engine.asarray(x[0]),)
+
+    @staticmethod
+    def exp_family_legacy_sufficient_statistics(x: Tuple[Any, Any],
+                                                params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row Poisson sufficient statistics in accumulator order."""
+        vals = engine.asarray(x[0])
+        return vals * 0.0 + engine.asarray(1.0), vals
+
+    @staticmethod
+    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Poisson natural parameters for generated scoring."""
+        return (engine.log(params['lam']),)
+
+    @staticmethod
+    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+        """Return Poisson log partition for generated scoring."""
+        return params['lam']
+
+    @staticmethod
+    def exp_family_base_measure(x: Tuple[Any, Any], engine: Any) -> Any:
+        """Return Poisson base measure for generated scoring."""
+        vals = engine.asarray(x[0])
+        log_fact = engine.asarray(x[1])
+        good = (vals >= 0) & (engine.floor(vals) == vals)
+        return engine.where(good, -log_fact, engine.asarray(-np.inf))
+
     def __init__(self, lam: float, name: Optional[str] = None) -> None:
         """PoissonDistribution object defining Poisson distribution with mean lam > 0.0.
 
@@ -112,6 +165,41 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         good = np.isfinite(vals) & (vals >= 0) & (np.floor(vals) == vals)
         rv = np.where(good, rv, -np.inf)
         return rv
+
+    @staticmethod
+    def backend_log_density_from_params(vals: Any, log_fact: Any, lam: Any, engine: Any) -> Any:
+        """Engine-neutral Poisson log-density from explicit parameters."""
+        rv = vals * engine.log(lam) - log_fact - lam
+        good = (vals >= 0) & (engine.floor(vals) == vals)
+        return engine.where(good, rv, engine.asarray(-np.inf))
+
+    def backend_seq_log_density(self, x: Tuple[Any, Any], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        vals = engine.asarray(x[0])
+        log_fact = engine.asarray(x[1])
+        lam = engine.asarray(self.lam)
+        return self.backend_log_density_from_params(vals, log_fact, lam, engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['PoissonDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Poisson parameters for a homogeneous mixture kernel."""
+        return {'lam': engine.asarray([d.lam for d in dists])}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Any, Any], params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Poisson log densities."""
+        vals = engine.asarray(x[0])
+        log_fact = engine.asarray(x[1])
+        return cls.backend_log_density_from_params(
+            vals[:, None], log_fact[:, None], params['lam'][None, :], engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Tuple[Any, Any], weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any]:
+        """Return stacked Poisson sufficient statistics using engine-resident arrays."""
+        vals = engine.asarray(x[0])
+        ww = engine.asarray(weights)
+        return engine.sum(ww, axis=0), engine.sum(ww * vals[:, None], axis=0)
 
     def sampler(self, seed: Optional[int] = None) -> 'PoissonSampler':
         """Create PoissonSampler object with PoissonDistribution instance and seed (Optional[int]) passed.

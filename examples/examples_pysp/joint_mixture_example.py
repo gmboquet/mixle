@@ -1,3 +1,5 @@
+"""Fit a joint mixture model that couples two heterogeneous observation views."""
+
 import numpy as np
 from pysp.stats import *
 from pysp.utils.estimation import partition_data, best_of, empirical_kl_divergence
@@ -43,4 +45,3 @@ if __name__ == '__main__':
 	print('KL[Estimate||True | data] = %f'%(kl))
 
 	print(str(mm))
-

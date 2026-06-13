@@ -32,6 +32,30 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
     Data type: Union[Sequence[int], np.ndarray] (fixed-length vector of non-negative integers).
     """
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_table')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='integer_chow_liu_tree',
+            distribution_type=cls,
+            parameters=(ParameterSpec('conditional_log_densities',
+                                      constraint='log_probability_tables',
+                                      differentiable=False),),
+            statistics=(
+                StatisticSpec('num_features', kind='metadata', additive=False, scales=False),
+                StatisticSpec('num_states', kind='metadata', additive=False, scales=False),
+                StatisticSpec('counts', kind='pairwise_count_tensor'),
+                StatisticSpec('marginal_counts', kind='count_tensor'),
+            ),
+            support='fixed_integer_tuple_tree',
+            differentiable=False,
+        )
+
     def __init__(self, dependency_list: List[Tuple[int, Optional[int]]],
                  conditional_log_densities: Union[Sequence[float], np.ndarray],
                  feature_order: Optional[Sequence[int]] = None, name: Optional[str] = None) -> None:
@@ -124,6 +148,18 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
             else:
                 rv += self.conditional_log_densities[i][x[:, k], x[:, j]]
 
+        return rv
+
+    def backend_seq_log_density(self, x: np.ndarray, engine: Any) -> Any:
+        """Engine-neutral vectorized table lookup for fixed integer tree factors."""
+        xx = engine.asarray(x)
+        rv = engine.zeros(xx.shape[0])
+        for i, (j, k) in enumerate(self.dependency_list):
+            table = engine.asarray(self.conditional_log_densities[i])
+            if k is None:
+                rv = rv + table[xx[:, j]]
+            else:
+                rv = rv + table[xx[:, k], xx[:, j]]
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'ICLTreeSampler':
@@ -461,6 +497,13 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
+    def scale(self, c: float) -> 'ICLTreeAccumulator':
+        if self.counts is not None:
+            self.counts *= c
+        if self.marginal_counts is not None:
+            self.marginal_counts *= c
+        return self
+
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
         """No-op kept for interface consistency (keyed merging is not supported for ICLTreeAccumulator).
 
@@ -662,5 +705,4 @@ class ICLTreeDataEncoder(DataSequenceEncoder):
 
         """
         return np.asarray(x, dtype=int)
-
 

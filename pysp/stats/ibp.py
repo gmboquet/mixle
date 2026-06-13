@@ -119,6 +119,31 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         data_format: 'dense', 'sparse', or 'auto' input interpretation.
     """
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_table')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='indian_buffet_process',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('num_features', constraint='integer', differentiable=False),
+                ParameterSpec('alpha', constraint='positive'),
+                ParameterSpec('beta_params', constraint='positive_matrix'),
+            ),
+            statistics=(
+                StatisticSpec('feature_counts', kind='count_vector'),
+                StatisticSpec('total_count'),
+                StatisticSpec('alpha', kind='metadata', additive=False, scales=False),
+            ),
+            support='binary_feature_matrix',
+            differentiable=False,
+        )
+
     def __init__(self, num_features: int, alpha: float = 1.0,
                  beta_params: Optional[Union[Sequence[Sequence[float]], np.ndarray]] = None,
                  feature_probs: Optional[Union[Sequence[float], np.ndarray]] = None,
@@ -183,6 +208,40 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         """Return vectorized log-density values for sequence-encoded observations."""
         xx = np.asarray(x, dtype=np.float64)
         return self.log_nsum + np.dot(xx, self.log_dvec)
+
+    def backend_seq_log_density(self, x: np.ndarray, engine: Any) -> Any:
+        """Engine-neutral vectorized plug-in log-density for encoded feature rows."""
+        log_dvec = engine.asarray(self.log_dvec)
+        xx = engine.asarray(x, dtype=getattr(log_dvec, 'dtype', None))
+        return float(self.log_nsum) + engine.matmul(xx, log_dvec)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['IndianBuffetProcessDistribution'],
+                               engine: Any) -> Dict[str, Any]:
+        """Return stacked finite-IBP parameters for equal-feature mixtures."""
+        num_features = int(dists[0].num_features)
+        if any(int(dist.num_features) != num_features for dist in dists):
+            raise ValueError('Stacked IndianBuffetProcessDistribution components require equal feature dimension.')
+        return {
+            '__pysp_component_axis__': {'log_dvec': 1, 'log_nsum': 0, 'alpha': 0},
+            'log_dvec': engine.asarray(np.stack([dist.log_dvec for dist in dists], axis=1)),
+            'log_nsum': engine.asarray([dist.log_nsum for dist in dists]),
+            'alpha': engine.asarray([dist.alpha for dist in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: np.ndarray, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of finite-IBP component log densities."""
+        xx = engine.asarray(x, dtype=getattr(params['log_dvec'], 'dtype', None))
+        return engine.matmul(xx, params['log_dvec']) + params['log_nsum'][None, :]
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: np.ndarray, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any, Any]:
+        """Return component-stacked legacy ``(feature_counts, total_count, alpha)`` statistics."""
+        ww = engine.asarray(weights)
+        xx = engine.asarray(x, dtype=getattr(ww, 'dtype', None))
+        return engine.matmul(ww.T, xx), engine.sum(ww, axis=0), params['alpha']
 
     def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized expected log-density values for encoded observations."""
@@ -278,6 +337,12 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self.total_count = float(x[1])
         if x[2] is not None:
             self.alpha = float(x[2])
+        return self
+
+    def scale(self, c: float) -> 'IndianBuffetProcessAccumulator':
+        """Scale additive counts while preserving the IBP concentration metadata."""
+        self.feature_counts *= c
+        self.total_count *= c
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

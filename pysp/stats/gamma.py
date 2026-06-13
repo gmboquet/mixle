@@ -10,7 +10,7 @@ Data type: (float): The GammaDistribution with shape k > 0.0 and scale theta > 0
 import numpy as np
 import math
 from numpy.random import RandomState
-from typing import Tuple, List, Optional, Union, Dict, Any
+from typing import Tuple, List, Optional, Union, Dict, Any, Sequence
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
@@ -25,6 +25,69 @@ _MAX_GAMMA_SHAPE = 1.0e12
 class GammaDistribution(SequenceEncodableProbabilityDistribution):
 
     """Gamma distribution parameterized by shape and scale."""
+
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='gamma',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('k', constraint='positive'),
+                ParameterSpec('theta', constraint='positive'),
+            ),
+            statistics=(
+                StatisticSpec('count'),
+                StatisticSpec('sum'),
+                StatisticSpec('sum_of_logs'),
+            ),
+            support='positive_real',
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure=cls.exp_family_base_measure,
+                legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
+            ),
+        )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Tuple[Any, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Gamma sufficient statistics for generated scoring."""
+        vals, log_vals = x
+        return engine.asarray(log_vals), engine.asarray(vals)
+
+    @staticmethod
+    def exp_family_legacy_sufficient_statistics(x: Tuple[Any, Any],
+                                                params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row Gamma sufficient statistics in accumulator order."""
+        vals = engine.asarray(x[0])
+        log_vals = engine.asarray(x[1])
+        return vals * 0.0 + engine.asarray(1.0), vals, log_vals
+
+    @staticmethod
+    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Gamma natural parameters for generated scoring."""
+        return params['k'] - engine.asarray(1.0), -engine.asarray(1.0) / params['theta']
+
+    @staticmethod
+    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+        """Return Gamma log partition for generated scoring."""
+        k = params['k']
+        theta = params['theta']
+        return engine.gammaln(k) + k * engine.log(theta)
+
+    @staticmethod
+    def exp_family_base_measure(x: Tuple[Any, Any], engine: Any) -> Any:
+        """Return Gamma support base measure for generated scoring."""
+        vals = engine.asarray(x[0])
+        return engine.where(vals > 0.0, vals * 0.0, engine.asarray(-np.inf))
+
     def __init__(self, k: float, theta: float, name: Optional[str] = None) -> None:
         """GammaDistribution for shape k and scale theta.
 
@@ -116,6 +179,49 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         rv += self.log_const
 
         return np.where(np.isfinite(x[0]) & (x[0] > 0.0), rv, -np.inf)
+
+    @staticmethod
+    def backend_log_density_from_params(vals: Any, log_vals: Any, k: Any, theta: Any, engine: Any) -> Any:
+        """Engine-neutral gamma log-density from explicit parameters."""
+        rv = -engine.gammaln(k) - k * engine.log(theta) + (k - engine.asarray(1.0)) * log_vals - vals / theta
+        return engine.where(vals > 0.0, rv, engine.asarray(-np.inf))
+
+    def backend_seq_log_density(self, x: Tuple[Any, Any], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        vals = engine.asarray(x[0])
+        log_vals = engine.asarray(x[1])
+        k = engine.asarray(self.k)
+        theta = engine.asarray(self.theta)
+        return self.backend_log_density_from_params(vals, log_vals, k, theta, engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['GammaDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Gamma parameters for a homogeneous mixture kernel."""
+        return {
+            'k': engine.asarray([d.k for d in dists]),
+            'theta': engine.asarray([d.theta for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Any, Any], params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Gamma log densities."""
+        vals = engine.asarray(x[0])
+        log_vals = engine.asarray(x[1])
+        return cls.backend_log_density_from_params(
+            vals[:, None], log_vals[:, None], params['k'][None, :], params['theta'][None, :], engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Tuple[Any, Any], weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any, Any]:
+        """Return stacked Gamma sufficient statistics using engine-resident arrays."""
+        vals = engine.asarray(x[0])
+        log_vals = engine.asarray(x[1])
+        ww = engine.asarray(weights)
+        return (
+            engine.sum(ww, axis=0),
+            engine.sum(ww * vals[:, None], axis=0),
+            engine.sum(ww * log_vals[:, None], axis=0),
+        )
 
     def sampler(self, seed: Optional[int] = None) -> 'GammaSampler':
         """Create a GammaSampler object from GammaDistribution.

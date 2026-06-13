@@ -187,6 +187,28 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.keys = keys
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, capabilities_for
+        child = capabilities_for(self.dist)
+        return DistributionCapabilities(engine_ready=child.engine_ready,
+                                        kernel_status=child.kernel_status,
+                                        numpy_only_reason=child.numpy_only_reason)
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+        child = declaration_for(self.dist)
+        children = () if child is None else (child,)
+        return DistributionDeclaration(
+            name='transform',
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(StatisticSpec('base', kind='child_stat'),),
+            support='transformed',
+            children=children,
+            child_roles=('base',) if child is not None else (),
+            differentiable=all(c.differentiable for c in children),
+        )
+
     def __str__(self) -> str:
         return 'TransformDistribution(%s, transform=%s, density_correction=%s, name=%s, keys=%s)' % (
             str(self.dist), repr(self.transform), repr(self.density_correction),
@@ -214,6 +236,68 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
         if self.density_correction:
             rv = rv + log_jac
         return np.where(valid, rv, -np.inf)
+
+    def backend_seq_log_density(self, x: Tuple[Any, np.ndarray, np.ndarray], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for inverse-encoded observations."""
+        from pysp.stats.backend import backend_seq_log_density
+        child_enc, log_jac, valid = x
+        rv = backend_seq_log_density(self.dist, child_enc, engine)
+        if self.density_correction:
+            rv = rv + engine.asarray(log_jac)
+        invalid = engine.zeros(rv.shape) + float('-inf')
+        return engine.where(engine.asarray(valid), rv, invalid)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['TransformDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked child parameters for homogeneous fixed-transform mixtures."""
+        from pysp.stats.stacked import stacked_component_params
+        first = dists[0]
+        if any(dist.transform != first.transform or dist.density_correction != first.density_correction
+               for dist in dists[1:]):
+            raise ValueError('Stacked TransformDistribution components require a shared transform policy.')
+        child_dists = [dist.dist for dist in dists]
+        try:
+            child_route = stacked_component_params(child_dists, engine)
+        except ValueError as exc:
+            raise ValueError('Transform child %s is not stackable: %s' %
+                             (type(child_dists[0]).__name__, exc))
+        return {
+            'child_route': child_route,
+            'density_correction': bool(first.density_correction),
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Any, np.ndarray, np.ndarray],
+                                    params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of transformed child log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        child_enc, log_jac, valid = x
+        scores = stacked_component_log_density(child_enc, params['child_route'], engine)
+        if params['density_correction']:
+            scores = scores + engine.asarray(log_jac)[:, None]
+        invalid = engine.zeros(tuple(getattr(scores, 'shape', (0, 0)))) + float('-inf')
+        return engine.where(engine.asarray(valid)[:, None], scores, invalid)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: Tuple[Any, np.ndarray, np.ndarray],
+                                                            weights: Any, params: Dict[str, Any],
+                                                            engine: Any, estimator: Any) -> Any:
+        """Return child legacy statistics for valid inverse-transformed observations."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics
+        child_enc, _, valid = x
+        ww = engine.asarray(weights) * engine.asarray(valid)[:, None]
+        num_components = int(params['num_components'])
+        component_estimators = tuple(getattr(est, 'estimator', None)
+                                     for est in getattr(estimator, 'estimators', ()))
+        child_estimator = StackedEstimatorView(component_estimators) \
+            if len(component_estimators) == num_components else None
+        return stacked_component_sufficient_statistics(child_enc, ww, params['child_route'], engine, child_estimator)
+
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: Any, recurse: Any, tensor_param: Any) -> Any:
+        """Return distribution-owned state for autograd fitting."""
+        from pysp.stats.gradient import TransformGradientFitState
+        return TransformGradientFitState(self, recurse(self.dist, engine, torch, leaves))
 
     def sampler(self, seed: Optional[int] = None) -> 'TransformSampler':
         """Return a sampler for drawing observations from this distribution."""
@@ -307,6 +391,10 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: Any) -> 'TransformAccumulator':
         self.accumulator.from_value(x)
+        return self
+
+    def scale(self, c: float) -> 'TransformAccumulator':
+        self.accumulator.scale(c)
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

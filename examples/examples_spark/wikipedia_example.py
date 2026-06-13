@@ -1,3 +1,5 @@
+"""Run distributed topic-model estimation for the Wikipedia example corpus."""
+
 import os
 import sys
 import time

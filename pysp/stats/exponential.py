@@ -13,11 +13,61 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, Parameter
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder
 from numpy.random import RandomState
 import numpy as np
-from typing import List, Union, Dict, Any
+from typing import List, Union, Dict, Any, Sequence
 
 
 class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
     """Exponential distribution on non-negative real values with scale ``beta``."""
+
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='exponential',
+            distribution_type=cls,
+            parameters=(ParameterSpec('beta', constraint='positive'),),
+            statistics=(StatisticSpec('count'), StatisticSpec('sum')),
+            support='non_negative_real',
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure=cls.exp_family_base_measure,
+                legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
+            ),
+        )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> Tuple[Any, ...]:
+        """Return Exponential sufficient statistics for generated scoring."""
+        return (engine.asarray(x),)
+
+    @staticmethod
+    def exp_family_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row Exponential sufficient statistics in accumulator order."""
+        xx = engine.asarray(x)
+        return xx * 0.0 + engine.asarray(1.0), xx
+
+    @staticmethod
+    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Exponential natural parameters for generated scoring."""
+        return (-engine.asarray(1.0) / params['beta'],)
+
+    @staticmethod
+    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+        """Return Exponential log partition for generated scoring."""
+        return engine.log(params['beta'])
+
+    @staticmethod
+    def exp_family_base_measure(x: Any, engine: Any) -> Any:
+        """Return Exponential support base measure for generated scoring."""
+        xx = engine.asarray(x)
+        return engine.where(xx >= 0.0, xx * 0.0, engine.asarray(-np.inf))
 
     def __init__(self, beta: float, name: Optional[str] = None):
         """ExponentialDistribution object for scale beta, with mean beta.
@@ -94,6 +144,37 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         rv -= self.log_beta
         rv = np.where(x >= 0.0, rv, -np.inf)
         return rv
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, beta: Any, engine: Any) -> Any:
+        """Engine-neutral exponential log-density from explicit parameters."""
+        rv = -x / beta - engine.log(beta)
+        return engine.where(x >= 0.0, rv, engine.asarray(-np.inf))
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        xx = engine.asarray(x)
+        beta = engine.asarray(self.beta)
+        return self.backend_log_density_from_params(xx, beta, engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['ExponentialDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Exponential parameters for a homogeneous mixture kernel."""
+        return {'beta': engine.asarray([d.beta for d in dists])}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Exponential log densities."""
+        xx = engine.asarray(x)
+        return cls.backend_log_density_from_params(xx[:, None], params['beta'][None, :], engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Any, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any]:
+        """Return stacked Exponential sufficient statistics using engine-resident arrays."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        return engine.sum(ww, axis=0), engine.sum(ww * xx[:, None], axis=0)
 
     def sampler(self, seed: Optional[int] = None) -> 'ExponentialSampler':
         """Create an ExponentialSampler object with scale beta.

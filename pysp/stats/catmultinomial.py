@@ -43,6 +43,36 @@ SS2 = TypeVar('SS2') ## suff stat type for len_dist
 class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     """Multinomial distribution over count vectors."""
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        children = (self.dist,) if isinstance(self.len_dist, NullDistribution) else (self.dist, self.len_dist)
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
+                                        kernel_status='generic_table')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+        value = declaration_for(self.dist)
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = tuple(d for d in (value, length) if d is not None)
+        roles = []
+        if value is not None:
+            roles.append('value')
+        if length is not None:
+            roles.append('length')
+        return DistributionDeclaration(
+            name='multinomial',
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(
+                StatisticSpec('values', kind='child_stat'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='count_vector',
+            children=children,
+            child_roles=tuple(roles),
+            differentiable=False,
+        )
+
     def __init__(self, dist: SequenceEncodableProbabilityDistribution,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  len_normalized: bool = False,
@@ -165,6 +195,117 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             ll_sum += nll
 
         return ll_sum
+
+    def backend_seq_log_density(self, x, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded count-vector observations."""
+        from pysp.stats.backend import backend_seq_log_density
+        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
+        nseq = len(icnt)
+        ll_sum = engine.zeros(nseq)
+
+        if len(idx) > 0:
+            eidx = engine.asarray(idx)
+            counts = engine.asarray(enc_w)
+            elem_ll = backend_seq_log_density(self.dist, enc_seq, engine) * counts
+            if self.len_normalized:
+                elem_ll = elem_ll * engine.asarray(icnt)[eidx]
+            ll_sum = engine.index_add(ll_sum, eidx, elem_ll)
+
+        if enc_nseq is not None:
+            ll_sum = ll_sum + backend_seq_log_density(self.len_dist, enc_nseq, engine)
+
+        return ll_sum
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['MultinomialDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked child routes for homogeneous multinomial mixtures."""
+        from pysp.stats.stacked import stacked_component_params
+        len_normalized = bool(dists[0].len_normalized)
+        null_len_dist = isinstance(dists[0].len_dist, NullDistribution)
+        if any(bool(dist.len_normalized) != len_normalized or
+               isinstance(dist.len_dist, NullDistribution) != null_len_dist for dist in dists):
+            raise ValueError('Stacked MultinomialDistribution components require matching length policy.')
+        try:
+            value_route = stacked_component_params([dist.dist for dist in dists], engine)
+        except ValueError as exc:
+            raise ValueError('Multinomial value child %s is not stackable: %s' %
+                             (type(dists[0].dist).__name__, exc))
+        length_route = None
+        if not null_len_dist:
+            try:
+                length_route = stacked_component_params([dist.len_dist for dist in dists], engine)
+            except ValueError as exc:
+                raise ValueError('Multinomial length child %s is not stackable: %s' %
+                                 (type(dists[0].len_dist).__name__, exc))
+        return {
+            'value_route': value_route,
+            'length_route': length_route,
+            'len_normalized': len_normalized,
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Any, ...], params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of multinomial log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
+        nseq = len(icnt)
+        rv = engine.zeros((nseq, int(params['num_components'])))
+
+        if len(idx) > 0:
+            eidx = engine.asarray(idx)
+            scores = stacked_component_log_density(enc_seq, params['value_route'], engine)
+            scores = scores * engine.asarray(enc_w)[:, None]
+            if params['len_normalized']:
+                scores = scores * engine.asarray(icnt)[eidx, None]
+            rv = engine.index_add(rv, eidx, scores)
+
+        if params['length_route'] is not None and enc_nseq is not None:
+            rv = rv + stacked_component_log_density(enc_nseq, params['length_route'], engine)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: Tuple[Any, ...], weights: Any,
+                                                            params: Dict[str, Any], engine: Any,
+                                                            estimator: Any) -> Tuple[Any, ...]:
+        """Return per-component legacy multinomial sufficient statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
+            unstack_component_stats
+        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
+        ww = engine.asarray(weights)
+        num_components = int(tuple(getattr(ww, 'shape', (0, 0)))[1])
+        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+
+        value_estimators = tuple(getattr(component_est, 'estimator', None)
+                                 for component_est in outer_estimators)
+        value_estimator = StackedEstimatorView(value_estimators) \
+            if len(value_estimators) == num_components else None
+        if len(idx) > 0:
+            eidx = engine.asarray(idx)
+            value_weights = ww[eidx]
+            if params['len_normalized']:
+                value_weights = value_weights * engine.asarray(icnt)[eidx, None]
+            value_weights = value_weights * engine.asarray(enc_w)[:, None]
+        else:
+            value_weights = engine.zeros((0, num_components))
+        value_stats = stacked_component_sufficient_statistics(
+            enc_seq, value_weights, params['value_route'], engine, value_estimator)
+        value_by_component = unstack_component_stats(value_stats, num_components)
+
+        if params['length_route'] is None or enc_nseq is None:
+            length_by_component = tuple(None for _ in range(num_components))
+        else:
+            length_estimators = tuple(getattr(component_est, 'len_estimator', None)
+                                      for component_est in outer_estimators)
+            length_estimator = StackedEstimatorView(length_estimators) \
+                if len(length_estimators) == num_components else None
+            length_weights = ww * engine.asarray(enc_ww)[:, None]
+            length_stats = stacked_component_sufficient_statistics(
+                enc_nseq, length_weights, params['length_route'], engine, length_estimator)
+            length_by_component = unstack_component_stats(length_stats, num_components)
+
+        return tuple((value_by_component[i], length_by_component[i]) for i in range(num_components))
 
     def sampler(self, seed: Optional[int] = None) -> 'MultinomialSampler':
         """Create a MultinomialSampler object from MultinomialDistribution object instance.
@@ -572,6 +713,12 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
+    def scale(self, c: float) -> 'MultinomialAccumulator':
+        """Scale value and length sufficient statistics through their accumulators."""
+        self.accumulator.scale(c)
+        self.len_accumulator.scale(c)
+        return self
+
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
         """Merge the sufficient statistics of object instance with matching keys of stats_dict.
 
@@ -799,4 +946,3 @@ class MultinomialDataEncoder(DataSequenceEncoder):
             rv5 = None
 
         return rv1, rv2, rv3, rv4, rv5, rv6, rv7
-

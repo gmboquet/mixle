@@ -706,7 +706,7 @@ class MarkovTransformEstimator(ParameterEstimator):
             len_dist = None
         trans_count = trans_count.tocsc()
         row_sum = trans_count * csc_matrix(np.ones((trans_count.shape[1],1)))
-        
+
         init_prob  = init_count / np.sum(init_count)
         trans_prob = trans_count.multiply(row_sum.power(-1))
 
@@ -784,4 +784,3 @@ class MarkovTransformDataEncoder(DataSequenceEncoder):
             vv[i, :] = vvv[:]
 
         return rv, nn, vv
-

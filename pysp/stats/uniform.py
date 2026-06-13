@@ -18,6 +18,26 @@ from pysp.stats.pdist import (
 class UniformDistribution(SequenceEncodableProbabilityDistribution):
     """Continuous uniform distribution on [low, high]."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='uniform',
+            distribution_type=cls,
+            parameters=(ParameterSpec('low'), ParameterSpec('high', constraint='greater_than:low')),
+            statistics=(
+                StatisticSpec('count'),
+                StatisticSpec('min_val', kind='support_bound', additive=False, scales=False),
+                StatisticSpec('max_val', kind='support_bound', additive=False, scales=False),
+            ),
+            support='bounded_real',
+        )
+
     def __init__(self, low: float, high: float, name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
         if high <= low or not np.isfinite(low) or not np.isfinite(high):
@@ -43,6 +63,45 @@ class UniformDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         return np.where((x >= self.low) & (x <= self.high), self.log_density_value, -np.inf)
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, low: Any, high: Any, engine: Any) -> Any:
+        """Engine-neutral uniform log-density from explicit parameters."""
+        rv = -engine.log(high - low)
+        return engine.where((x >= low) & (x <= high), rv + x * 0.0, engine.asarray(-np.inf))
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x), engine.asarray(self.low), engine.asarray(self.high), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['UniformDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked uniform parameters for a homogeneous mixture kernel."""
+        return {
+            'low': engine.asarray([d.low for d in dists]),
+            'high': engine.asarray([d.high for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of uniform log densities."""
+        xx = engine.asarray(x)
+        return cls.backend_log_density_from_params(
+            xx[:, None], params['low'][None, :], params['high'][None, :], engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Any, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any, Any]:
+        """Return stacked Uniform sufficient statistics using engine-resident arrays."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        mask = ww > 0.0
+        vals = xx[:, None]
+        count = engine.sum(ww, axis=0)
+        min_val = -engine.max(engine.where(mask, -vals, engine.asarray(-np.inf)), axis=0)
+        max_val = engine.max(engine.where(mask, vals, engine.asarray(-np.inf)), axis=0)
+        return count, min_val, max_val
 
     def sampler(self, seed: Optional[int] = None) -> 'UniformSampler':
         """Return a sampler for drawing observations from this distribution."""
@@ -113,6 +172,11 @@ class UniformAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = x[0]
         self.min_val = x[1]
         self.max_val = x[2]
+        return self
+
+    def scale(self, c: float) -> 'UniformAccumulator':
+        """Scale observation count while preserving support bounds."""
+        self.count *= c
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

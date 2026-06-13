@@ -361,6 +361,28 @@ class ParameterEstimator(object):
 		"""Returns a factory whose make() creates compatible accumulators."""
 		pass
 
+	def scale_suff_stat(self, suff_stat, c):
+		"""Scale linear sufficient statistics by ``c`` for power-prior streams.
+
+		The structural default is correct for ordinary weighted sums. Estimators
+		whose accumulator payloads contain non-linear metadata such as support
+		offsets should override this method and leave that metadata unchanged.
+		"""
+		if suff_stat is None:
+			return None
+		if isinstance(suff_stat, np.ndarray):
+			return suff_stat * c
+		if isinstance(suff_stat, (float, int, complex, np.number)):
+			return suff_stat * c
+		if isinstance(suff_stat, tuple):
+			return tuple(self.scale_suff_stat(v, c) for v in suff_stat)
+		if isinstance(suff_stat, list):
+			return [self.scale_suff_stat(v, c) for v in suff_stat]
+		if isinstance(suff_stat, dict):
+			return {k: self.scale_suff_stat(v, c) for k, v in suff_stat.items()}
+		raise TypeError('cannot scale bstats sufficient-statistic value of type %s' %
+		                type(suff_stat).__name__)
+
 	def get_prior(self):
 		"""Returns the prior distribution over the estimated parameters (or
 		None)."""

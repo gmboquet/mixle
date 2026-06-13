@@ -118,6 +118,41 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         return 'JointMixtureDistribution([%s], [%s], [%s], [%s], [%s], [%s], name=%s)' % (s1, s2, s3, s4, s5, s6, s7)
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        children = tuple(self.components1) + tuple(self.components2)
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
+                                        kernel_status='generic_latent')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        children1 = tuple(declaration_for(component) for component in self.components1)
+        children2 = tuple(declaration_for(component) for component in self.components2)
+        children = tuple(child for child in children1 + children2 if child is not None)
+        roles = tuple('x1_component_%d' % i for i, child in enumerate(children1) if child is not None)
+        roles += tuple('x2_component_%d' % i for i, child in enumerate(children2) if child is not None)
+        return DistributionDeclaration(
+            name='joint_mixture',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('w1', constraint='simplex_vector'),
+                ParameterSpec('w2', constraint='simplex_vector'),
+                ParameterSpec('taus12', constraint='row_simplex_matrix'),
+                ParameterSpec('taus21', constraint='row_simplex_matrix'),
+            ),
+            statistics=(
+                StatisticSpec('component_counts1'),
+                StatisticSpec('component_counts2'),
+                StatisticSpec('joint_counts'),
+                StatisticSpec('components1', kind='tuple'),
+                StatisticSpec('components2', kind='tuple'),
+            ),
+            support='paired_mixture',
+            children=children,
+            child_roles=roles,
+            differentiable=False,
+        )
+
     def density(self, x: Tuple[T0, T1]) -> float:
         """Evaluate the density of a joint mixture observation x.
 
@@ -211,6 +246,26 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
         rv = np.log(ll_mat2.sum(axis=1)) + ll_max1[:, 0] + ll_max2[:, 0]
 
         return rv
+
+    def backend_seq_log_density(self, x: Tuple[int, E0, E1], engine: Any) -> Any:
+        """Engine-neutral log-density for encoded joint-mixture observations."""
+        from pysp.stats.backend import backend_seq_log_density
+        sz, enc_data1, enc_data2 = x
+        if sz == 0:
+            return engine.zeros(0)
+
+        ll1 = []
+        for i in range(self.num_components1):
+            ll1.append(backend_seq_log_density(self.components1[i], enc_data1, engine))
+        ll1 = engine.stack(ll1, axis=1) + engine.asarray(self.log_w1)
+
+        ll2 = []
+        for j in range(self.num_components2):
+            ll2.append(backend_seq_log_density(self.components2[j], enc_data2, engine))
+        ll2 = engine.stack(ll2, axis=1)
+
+        pair_scores = ll1[:, :, None] + engine.asarray(self.log_taus12)[None, :, :] + ll2[:, None, :]
+        return engine.logsumexp(pair_scores, axis=(1, 2))
 
     def sampler(self, seed: Optional[int] = None) -> 'JointMixtureSampler':
         """Create a JointMixtureSampler object for sampling from this distribution.
