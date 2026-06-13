@@ -22,6 +22,7 @@ from typing import Optional, List, Tuple
 from pysp.arithmetic import *
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
     ParameterEstimator, DistributionSampler, StatisticAccumulatorFactory, DataSequenceEncoder
+from pysp.utils.aliasing import coalesce_alias, MISSING
 import numpy as np
 import pysp.utils.vector as vec
 from collections import defaultdict
@@ -646,7 +647,8 @@ class MarkovTransformAccumulatorFactory(StatisticAccumulatorFactory):
 class MarkovTransformEstimator(ParameterEstimator):
     """MarkovTransformEstimator object for estimating MarkovTransformDistribution objects from statistics."""
 
-    def __init__(self, num_vals, alpha=0.0, len_estimator=None, suff_stat=None, pseudo_count=None, keys=(None, None)):
+    def __init__(self, num_vals=MISSING, alpha=0.0, len_estimator=None, suff_stat=None, pseudo_count=None,
+                 keys=(None, None), num_values=MISSING):
         """MarkovTransformEstimator object.
 
         Args:
@@ -670,7 +672,7 @@ class MarkovTransformEstimator(ParameterEstimator):
         self.len_estimator=len_estimator
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
-        self.num_vals = num_vals
+        self.num_vals = coalesce_alias('num_vals', num_vals, 'num_values', num_values, default=MISSING)
         self.alpha = alpha
 
     def accumulator_factory(self):
