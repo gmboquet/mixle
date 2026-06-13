@@ -767,6 +767,38 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist if estimate is not None else None)
 
+    def seq_update_engine(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+                                         Optional[E1], Optional[E2]],
+                          weights: Any,
+                          estimate: Optional[IntegerMarkovChainDistribution], engine: Any) -> None:
+        """Engine-resident E-step: per-unique-transition counts are reduced on the active engine
+        before being scattered into the sparse transition dict; the init/len children are routed
+        through the engine. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc = x
+
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        w_eng = engine.asarray(weights_np)
+
+        seq_cnt = np.asarray(engine.to_numpy(engine.bincount(
+            engine.asarray(np.asarray(u_seq_idx, dtype=np.int64)),
+            weights=w_eng[np.asarray(seq_idx, dtype=np.int64)],
+            minlength=len(u_seq_values))), dtype=np.float64)
+
+        if len(self.trans_count_map) == 0:
+            self.trans_count_map = dict(zip(u_seq_values, seq_cnt))
+        else:
+            for k, v in zip(u_seq_values, seq_cnt):
+                self.trans_count_map[k] = self.trans_count_map.get(k, 0) + v
+
+        init_estimate = None if estimate is None else estimate.init_dist
+        len_estimate = None if estimate is None else estimate.len_dist
+        child_seq_update(self.init_accumulator, init_enc,
+                         w_eng[np.asarray(init_idx, dtype=np.int64)], init_estimate, engine)
+        child_seq_update(self.len_accumulator, len_enc, w_eng, len_estimate, engine)
+
     def seq_initialize(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
                                       Optional[E1], Optional[E2]], weights: np.ndarray, rng: RandomState) -> None:
         """Vectorized initialization of sufficient statistics from an encoded sequence of observations in 'x'.
