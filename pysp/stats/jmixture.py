@@ -630,6 +630,45 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         for i in range(self.num_components2):
             self.accumulators2[i].seq_update(enc_data2, gamma_2[:, 0, i], estimate.components2[i])
 
+    def seq_update_engine(self, x, weights, estimate, engine):
+        """Engine-resident E-step: component scoring and the joint-posterior arithmetic run on the
+        active engine (numpy or torch); the marginal/joint counts and the per-component
+        responsibility weights match the host seq_update.
+        """
+        from pysp.stats.backend import backend_seq_log_density
+
+        sz, enc_data1, enc_data2 = x
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+
+        ll1 = engine.stack([backend_seq_log_density(estimate.components1[i], enc_data1, engine)
+                            for i in range(self.num_components1)], axis=1)         # (sz, C1)
+        ll1 = ll1 + engine.asarray(estimate.log_w1)
+        e1 = engine.exp(ll1 - engine.max(ll1, axis=1)[:, None])
+        ll2 = engine.stack([backend_seq_log_density(estimate.components2[i], enc_data2, engine)
+                            for i in range(self.num_components2)], axis=1)         # (sz, C2)
+        e2 = engine.exp(ll2 - engine.max(ll2, axis=1)[:, None])
+
+        taus12 = engine.asarray(estimate.taus12)                                   # (C1, C2)
+        ll_joint = e1[:, :, None] * e2[:, None, :] * taus12[None, :, :]            # (sz, C1, C2)
+        sf = engine.sum(engine.sum(ll_joint, axis=2), axis=1)                      # (sz,)
+        ww = engine.asarray(weights_np) / sf                                       # (sz,)
+
+        gamma_1 = engine.sum(ll_joint, axis=2) * ww[:, None]                       # (sz, C1)
+        gamma_2 = engine.sum(ll_joint, axis=1) * ww[:, None]                       # (sz, C2)
+        joint = ll_joint * ww[:, None, None]
+
+        self.comp_counts1 += np.asarray(engine.to_numpy(engine.sum(gamma_1, axis=0))).flatten()
+        self.comp_counts2 += np.asarray(engine.to_numpy(engine.sum(gamma_2, axis=0))).flatten()
+        self.joint_counts += np.asarray(engine.to_numpy(engine.sum(joint, axis=0)))
+
+        g1 = np.asarray(engine.to_numpy(gamma_1))
+        g2 = np.asarray(engine.to_numpy(gamma_2))
+        for i in range(self.num_components1):
+            self.accumulators1[i].seq_update(enc_data1, g1[:, i], estimate.components1[i])
+        for i in range(self.num_components2):
+            self.accumulators2[i].seq_update(enc_data2, g2[:, i], estimate.components2[i])
+
     def combine(self, suff_stat: Tuple[np.ndarray, np.ndarray, np.ndarray, Tuple[E0, ...], Tuple[E1, ...]]) \
             -> 'JointMixtureEstimatorAccumulator':
         """Combine the sufficient statistics of suff_stat with this accumulator.
@@ -961,3 +1000,32 @@ class JointMixtureDataEncoder(DataSequenceEncoder):
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 JointMixtureAccumulator = JointMixtureEstimatorAccumulator
 JointMixtureAccumulatorFactory = JointMixtureEstimatorAccumulatorFactory
+
+
+def _register_joint_mixture_engine_kernel():
+    """Register the engine-resident joint-mixture kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class JointMixtureKernel(GenericKernel):
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('JointMixtureKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class JointMixtureKernelFactory(KernelFactory):
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return JointMixtureKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(JointMixtureDistribution, JointMixtureKernelFactory())
+
+
+_register_joint_mixture_engine_kernel()
