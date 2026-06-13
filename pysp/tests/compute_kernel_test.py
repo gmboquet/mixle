@@ -9,7 +9,8 @@ from pysp.stats import AffineTransform, BetaDistribution, BinomialDistribution, 
     CategoricalEstimator, CompositeDistribution, CompositeEstimator, DiagonalGaussianDistribution, GaussianDistribution, \
     GaussianEstimator, \
     MixtureDistribution, MixtureEstimator, MultivariateGaussianDistribution, OptionalDistribution, PoissonDistribution, \
-    SequenceDistribution, TransformDistribution, WeightedDistribution, EncodedData, GeneratedNumbaKernel, \
+    SequenceDistribution, SpearmanRankingDistribution, TransformDistribution, WeightedDistribution, EncodedData, \
+    GeneratedNumbaKernel, \
     EngineNotSupportedError, NumbaKernelFactory, \
     encoded_nbytes, generated_log_density, generated_numba_log_density, generated_numba_stacked_log_density, \
     generated_stacked_log_density, generated_stacked_params, generated_sufficient_statistics, kernel_for, \
@@ -253,6 +254,30 @@ class ComputeKernelTestCase(unittest.TestCase):
         with self.assertRaises(EngineNotSupportedError):
             optimize(data, est, max_its=1, delta=None,
                      prev_estimate=numpy_only, engine=self.FakeTorchEngine(), out=io.StringIO())
+
+    def test_default_kernel_dispatch_selects_generated_numba_on_numpy(self):
+        # the default dispatch (model.kernel()) must auto-select generated numba
+        # on the numpy engine for mixtures of declared exp-family leaves, and the
+        # score must match the legacy seq path on the legacy seq_encode payload
+        # that the engine estimation path feeds kernels
+        from pysp.stats import seq_encode, seq_log_density_sum
+        from pysp.stats.kernel import GenericKernel
+        mix = MixtureDistribution([GaussianDistribution(-2.0, 1.0), GaussianDistribution(2.0, 1.0)], [0.5, 0.5])
+        comp = MixtureDistribution([
+            CompositeDistribution((GaussianDistribution(-2.0, 1.0), PoissonDistribution(3.0))),
+            CompositeDistribution((GaussianDistribution(2.0, 1.0), PoissonDistribution(8.0))),
+        ], [0.5, 0.5])
+        for model in (mix, comp):
+            kernel = model.kernel()
+            self.assertIsInstance(kernel, GeneratedNumbaKernel)
+            enc = seq_encode(model.sampler(seed=5).sample(60), model=model)
+            for _, payload in enc:
+                np.testing.assert_allclose(kernel.score(payload), model.seq_log_density(payload),
+                                           rtol=1.0e-10, atol=1.0e-10)
+
+        # a non-exponential-family model keeps the guaranteed generic fallback
+        spearman = SpearmanRankingDistribution(np.asarray([0.4, 0.35, 0.25]))
+        self.assertIsInstance(spearman.kernel(), GenericKernel)
 
     def test_numba_kernel_factory_prefers_generated_declarations(self):
         dist = MixtureDistribution(
