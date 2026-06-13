@@ -23,7 +23,7 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic')
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
 
     @classmethod
     def compute_declaration(cls):
@@ -53,9 +53,14 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def exp_family_sufficient_statistics(x: Tuple[Any, Any, Any, Any], engine: Any) -> Tuple[Any, ...]:
-        """Return Beta sufficient statistics for generated scoring."""
-        log_x, log1m_x, _, _ = x
-        return engine.asarray(log_x), engine.asarray(log1m_x)
+        """Return Beta sufficient statistics for generated scoring.
+
+        Scoring needs only ``log_x`` and ``log1m_x`` (the two natural-parameter partners). The
+        encoder emits the full ``(log_x, log1m_x, x, x**2)`` tuple for the M-step, while the
+        symbolic generator supplies just the two scoring symbols from
+        ``backend_log_density_from_params``; indexing the leading two works for both arities.
+        """
+        return engine.asarray(x[0]), engine.asarray(x[1])
 
     @staticmethod
     def exp_family_legacy_sufficient_statistics(x: Tuple[Any, Any, Any, Any],
