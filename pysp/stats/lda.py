@@ -688,6 +688,46 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             len_enc = self.len_accumulator.acc_to_encoder().seq_encode(doc_lens)
             self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
 
+    def seq_update_engine(self, x: Tuple[int, np.ndarray, np.ndarray, Optional[np.ndarray], E0],
+                          weights: np.ndarray, estimate: LDADistribution, engine: Any) -> None:
+        """Engine-resident LDA E-step.
+
+        The variational gamma loop (``_backend_seq_posterior``), the expected log topic
+        proportions, and the topic-count aggregations all run on the active engine (numpy or
+        torch); per-item topic responsibilities are produced on the engine and fed to the child
+        topic accumulators. Matches host ``seq_update``.
+        """
+        num_documents, idx, counts, old_gammas, enc_data = x
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        idx_np = np.asarray(idx, dtype=np.int64)
+
+        log_density_gamma, final_gammas, per_topic_log_densities = \
+            estimate._backend_seq_posterior(x, engine)
+
+        w_idx = engine.asarray(weights_np[idx_np]).reshape((-1, 1))
+        weighted_topic_counts = log_density_gamma * w_idx
+
+        gamma_sum = engine.sum(final_gammas, axis=1).reshape((-1, 1))
+        mlpf = engine.digamma(final_gammas) - engine.digamma(gamma_sum)
+        w_doc = engine.asarray(weights_np).reshape((-1, 1))
+        sum_of_logs = engine.sum(mlpf * w_doc, axis=0)
+        topic_counts = engine.sum(weighted_topic_counts, axis=0)
+
+        self.sum_of_logs += np.asarray(engine.to_numpy(sum_of_logs))
+        self.doc_counts += float(weights_np.sum())
+        self.topic_counts += np.asarray(engine.to_numpy(topic_counts))
+        self.prev_alpha = estimate.alpha
+
+        wtc_np = np.asarray(engine.to_numpy(weighted_topic_counts))
+        for i in range(self.num_topics):
+            self.accumulators[i].seq_update(enc_data, wtc_np[:, i], estimate.topics[i])
+
+        if not isinstance(self.len_accumulator, NullAccumulator):
+            doc_lens = np.bincount(idx_np, weights=counts, minlength=num_documents)
+            len_enc = self.len_accumulator.acc_to_encoder().seq_encode(doc_lens)
+            self.len_accumulator.seq_update(len_enc, weights_np, estimate.len_dist)
+
     # return num_documents, idx, counts, final_gammas, enc_data
 
     def combine(self, suff_stat: Tuple[Optional[np.ndarray], np.ndarray, float, np.ndarray, Sequence[SS0],
@@ -1381,6 +1421,35 @@ def seq_posterior(estimate: LDADistribution, x: Tuple[int, np.ndarray, np.ndarra
     mlpf = digamma(final_gammas) - digamma(np.sum(final_gammas, axis=1, keepdims=True))
 
     return log_density_gamma, final_gammas, per_topic_log_densities
+
+def _register_lda_engine_kernel():
+    """Register the engine-resident LDA kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class LDAKernel(GenericKernel):
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('LDAKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class LDAKernelFactory(KernelFactory):
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return LDAKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(LDADistribution, LDAKernelFactory())
+
+
+_register_lda_engine_kernel()
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 LDAAccumulator = LDAEstimatorAccumulator
