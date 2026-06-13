@@ -1074,7 +1074,11 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 			temp[temp == 0] = 1.0
 			alphas[band1[0]:band1[1], :] *= np.reshape(weights[good[:,0]], (-1, 1))/temp
 
-			self.init_counts += alphas[band1[0]:band1[1], :].sum(axis=0)
+			# Per-sequence initial-state counts (one row per sequence, matching the numba path and
+			# the estimator's per-sequence w). Sequences with no first observation stay zero.
+			init = np.zeros((num_seq, num_states), dtype=np.float64)
+			init[good[:, 0]] = alphas[band1[0]:band1[1], :]
+			self.init_counts = init
 
 			if self.len_accumulator is not None:
 				self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
@@ -1138,6 +1142,59 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 			if self.len_accumulator is not None:
 				self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
 
+	def seq_update_engine(self, x, weights, estimate, engine):
+		"""Engine-resident Baum-Welch E-step for the blocked encoding (numpy or torch).
+
+		Uses hmm_engine_forward_backward with a per-sequence initial vector (IndPi's defining
+		feature) and produces the same per-sequence initial-state counts, transition counts, state
+		counts, and emission statistics as the host blocked seq_update. Falls back to the host path
+		for the numba encoding.
+		"""
+		from pysp.stats.hidden_markov import hmm_engine_forward_backward
+
+		x0, x1 = x
+		if x1 is not None:
+			self.seq_update(x, weights, estimate)
+			return
+
+		(tot_cnt, idx_bands, has_next, len_vec, idx_mat, idx_vec, enc_data), len_enc = x0
+		num_states = estimate.nStates
+		idx_mat = np.asarray(idx_mat, dtype=np.int64)
+		n_seq, tmax = idx_mat.shape
+		w = estimate.w
+		if w.shape[0] != n_seq:
+			w = np.repeat((np.sum(w, axis=0) / float(len(w))).reshape(1, -1), n_seq, axis=0)
+
+		pr_obs = np.empty((tot_cnt, num_states), dtype=np.float64)
+		for i in range(num_states):
+			pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+
+		valid = idx_mat >= 0
+		padded = np.full((n_seq, tmax, num_states), -np.inf, dtype=np.float64)
+		padded[valid] = pr_obs[idx_mat[valid]]
+		mask = valid.astype(np.float64)
+		with np.errstate(divide='ignore'):
+			log_w = np.log(w)
+			log_a = np.log(estimate.transitions)
+		weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+		                        dtype=np.float64)
+
+		_, gamma, xi_sum, pi = hmm_engine_forward_backward(
+			engine, padded, log_w, log_a, mask, weights=weights_np)
+		gamma = np.asarray(engine.to_numpy(gamma))
+		xi_sum = np.asarray(engine.to_numpy(xi_sum))
+		pi = np.asarray(engine.to_numpy(pi))
+
+		gamma_flat = np.zeros((tot_cnt, num_states), dtype=np.float64)
+		gamma_flat[idx_mat[valid]] = gamma[valid]
+
+		self.init_counts = pi
+		self.trans_counts += xi_sum
+		self.state_counts += gamma_flat.sum(axis=0)
+		for i in range(num_states):
+			self.accumulators[i].seq_update(enc_data, gamma_flat[:, i], estimate.topics[i])
+		if self.len_accumulator is not None:
+			self.len_accumulator.seq_update(len_enc, weights_np, estimate.len_dist)
 
 	def combine(self, suff_stat):
 		"""Combine the sufficient statistics of the accumulator with the suff_stat arg.
@@ -1849,3 +1906,34 @@ IndPiHiddenMarkovModelAccumulatorFactory = IndPiHiddenMarkovEstimatorAccumulator
 IndPiHiddenMarkovModelDataEncoder = IndPiHiddenMarkovDataEncoder
 IndPiHiddenMarkovModelEstimator = IndPiHiddenMarkovEstimator
 IndPiHiddenMarkovModelSampler = IndPiHiddenMarkovSampler
+
+
+def _register_ind_pi_engine_kernel():
+	"""Register the engine-resident IndPi HMM kernel (idempotent; called at import)."""
+	from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+	                                register_kernel_factory)
+	from pysp.engines import NUMPY_ENGINE
+
+	class IndPiHiddenMarkovModelKernel(GenericKernel):
+		"""IndPi HMM kernel whose E-step runs the per-sequence-init forward-backward on the engine."""
+
+		def accumulate(self, enc, weights):
+			if self.estimator is None:
+				raise ValueError('IndPiHiddenMarkovModelKernel.accumulate requires an estimator.')
+			if self.engine.name == NUMPY_ENGINE.name:
+				return super().accumulate(enc, weights)
+			host_enc = getattr(enc, 'host_payload', enc)
+			accumulator = self.estimator.accumulator_factory().make()
+			accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+			return accumulator.value()
+
+	class IndPiHiddenMarkovModelKernelFactory(KernelFactory):
+		def build(self, dist, engine, estimator=None):
+			if not dist.supports_engine(engine):
+				return GenericKernelFactory().build(dist, engine, estimator=estimator)
+			return IndPiHiddenMarkovModelKernel(dist, engine=engine, estimator=estimator)
+
+	register_kernel_factory(IndPiHiddenMarkovModelDistribution, IndPiHiddenMarkovModelKernelFactory())
+
+
+_register_ind_pi_engine_kernel()
