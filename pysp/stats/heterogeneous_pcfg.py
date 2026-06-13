@@ -343,6 +343,86 @@ class HeterogeneousPCFGDistribution(SequenceEncodableProbabilityDistribution):
                 rv[i] = inside[0, int(n), self.start_idx]
         return rv
 
+    def compute_capabilities(self):
+        """Engine readiness intersected from the terminal emission distributions.
+
+        The CKY inside dynamic program is expressed in ComputeEngine ops (see
+        ``backend_seq_log_density``), so the grammar is engine-ready on whatever engines all of its
+        terminal emission leaves support (numpy plus, e.g., torch for autograd/GPU).
+        """
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        ready = intersect_engine_ready(tuple(self.emissions)) if self.emissions else ('numpy',)
+        return DistributionCapabilities(engine_ready=ready, kernel_status='generic_latent')
+
+    def _engine_inside_ll(self, engine, terminal_ld, n):
+        """Log-likelihood of one length-``n`` sequence via an engine-routed CKY inside chart.
+
+        ``terminal_ld`` is an (n, num_terminal_rules) engine array of per-position terminal
+        log-densities. Each chart cell collects every (binary rule, split) contribution and reduces
+        them with a single ``logsumexp`` per nonterminal - equivalent to the NumPy ``_inside``
+        logaddexp accumulation, but in engine ops so it runs on numpy and torch (autograd/GPU).
+        """
+        num_states = self.num_nonterminals
+        neg_inf = engine.asarray(-np.inf)
+        inside = {}
+        for i in range(n):
+            cells = []
+            for parent in range(num_states):
+                rules = self.terminal_by_parent[parent]
+                if rules:
+                    vals = engine.asarray(self.log_terminal_probs[rules]) + terminal_ld[i, rules]
+                    cells.append(engine.logsumexp(vals, axis=0))
+                else:
+                    cells.append(neg_inf)
+            inside[(i, i + 1)] = engine.stack(cells, axis=0)
+
+        for span in range(2, n + 1):
+            for i in range(n - span + 1):
+                j = i + span
+                contribs = [[] for _ in range(num_states)]
+                for rule_idx in range(self.num_binary_rules):
+                    parent = int(self.binary_parents[rule_idx])
+                    left = int(self.binary_left[rule_idx])
+                    right = int(self.binary_right[rule_idx])
+                    log_p = engine.asarray(self.log_binary_probs[rule_idx])
+                    for split in range(i + 1, j):
+                        contribs[parent].append(
+                            log_p + inside[(i, split)][left] + inside[(split, j)][right])
+                cells = []
+                for parent in range(num_states):
+                    if contribs[parent]:
+                        cells.append(engine.logsumexp(engine.stack(contribs[parent], axis=0), axis=0))
+                    else:
+                        cells.append(neg_inf)
+                inside[(i, j)] = engine.stack(cells, axis=0)
+
+        return inside[(0, n)][self.start_idx]
+
+    def backend_seq_log_density(self, x: EncodedPCFGData, engine) -> Any:
+        """Engine-routed CKY inside scoring (numpy + torch).
+
+        Terminal log-densities come from each emission leaf's own engine backend score, and the
+        inside dynamic program runs in ComputeEngine ops. Per-sequence charts are still a Python
+        loop (variable-length parses), so this trades the tuned NumPy ``_inside`` for engine
+        portability and differentiability rather than raw speed.
+        """
+        from pysp.stats.backend import backend_seq_log_density as _backend_sld
+
+        lengths, enc_by_rule = x
+        lengths = np.asarray(lengths)
+        terminal_cols = [_backend_sld(self.emissions[r], enc_by_rule[r], engine)
+                         for r in range(self.num_terminal_rules)]
+        terminal_ld = engine.stack(terminal_cols, axis=1) if terminal_cols else engine.zeros((0, 0))
+        offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(int)
+        out = []
+        for i, n in enumerate(lengths):
+            n = int(n)
+            if n == 0:
+                out.append(engine.asarray(-np.inf))
+            else:
+                out.append(self._engine_inside_ll(engine, terminal_ld[offsets[i]:offsets[i + 1]], n))
+        return engine.stack(out, axis=0)
+
     def sampler(self, seed: Optional[int] = None) -> 'HeterogeneousPCFGSampler':
         """Return a sampler for drawing observations from this distribution."""
         return HeterogeneousPCFGSampler(self, seed)
