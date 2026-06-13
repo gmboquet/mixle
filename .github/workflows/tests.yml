@@ -58,3 +58,5 @@ jobs:
           python -m pip install -e ".[test,numba,torch,umap]"
       - name: Run optional tests
         run: python -m pytest -m "optional or torch or numba"
+      - name: Run gated two-rank torchrun smoke
+        run: PYSPARKPLUG_RUN_TORCHRUN_SMOKE=1 python -m pytest pysp/tests/torchrun_encoded_data_test.py -q

@@ -1,3 +1,5 @@
+"""Fit a hidden-association model with latent alignments between token bags."""
+
 import numpy as np
 from pysp.stats import *
 from pysp.utils.estimation import optimize

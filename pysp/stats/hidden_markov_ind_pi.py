@@ -40,6 +40,47 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
 	Compatible with data type List[T], where T is the data type of the emission distributions.
 	"""
 
+	def compute_capabilities(self):
+		from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+		if self.use_numba or self.has_topics or self.terminal_values is not None:
+			return DistributionCapabilities(engine_ready=('numpy',), kernel_status='legacy_numpy')
+		children = tuple(self.topics)
+		if self.len_dist is not None:
+			children = children + (self.len_dist,)
+		return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
+		                                kernel_status='generic_latent')
+
+	def compute_declaration(self):
+		from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+		topic_children = tuple(declaration_for(topic) for topic in self.topics)
+		length = None if self.len_dist is None else declaration_for(self.len_dist)
+		children = tuple(child for child in topic_children + ((length,) if length is not None else ())
+		                 if child is not None)
+		roles = tuple('state_%d_emission' % i for i, child in enumerate(topic_children) if child is not None)
+		if length is not None:
+			roles += ('length',)
+		return DistributionDeclaration(
+			name='ind_pi_hidden_markov',
+			distribution_type=type(self),
+			parameters=(
+				ParameterSpec('w', constraint='row_simplex_matrix'),
+				ParameterSpec('transitions', constraint='row_simplex_matrix'),
+				ParameterSpec('taus', constraint='row_simplex_matrix', differentiable=False),
+			),
+			statistics=(
+				StatisticSpec('num_states', kind='metadata', additive=False, scales=False),
+				StatisticSpec('initial_counts'),
+				StatisticSpec('state_counts'),
+				StatisticSpec('transition_counts'),
+				StatisticSpec('emissions', kind='tuple'),
+				StatisticSpec('length', kind='child_stat'),
+			),
+			support='independent_initial_hidden_state_sequence',
+			children=children,
+			child_roles=roles,
+			differentiable=False,
+		)
+
 	def __init__(self, topics, w, transitions, taus, len_dist=None, name=None, terminal_values=None, use_numba=True):
 		"""IndPiHiddenMarkovModelDistribution object defining an HMM with per-sequence initial state vectors.
 
@@ -241,6 +282,9 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
 
 			max_len = len(idx_bands)
 			num_seq = idx_mat.shape[0]
+			if w.shape[0] != num_seq:
+				w_sum = np.sum(w, axis=0) / float(len(w))
+				w = np.repeat(w_sum.reshape(1, -1), num_seq, axis=0)
 
 			good = idx_mat >= 0
 
@@ -260,7 +304,8 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
 
 			# Vectorized alpha pass
 			band = idx_bands[0]
-			alphas_prev = np.multiply(pr_obs[band[0]:band[1], :], w)
+			first_rows = np.flatnonzero(good[:, 0])
+			alphas_prev = np.multiply(pr_obs[band[0]:band[1], :], w[first_rows, :])
 			temp = alphas_prev.sum(axis=1, keepdims=True)
 			#temp2 = temp.copy()
 			#temp2[temp2 == 0] = 1.0
@@ -332,6 +377,66 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
 				ll_ret += self.len_dist.seq_log_density(len_enc)
 
 			return ll_ret
+
+	def backend_seq_log_density(self, x, engine):
+		"""Engine-neutral scoring for the non-numba independent-initial-probability HMM layout."""
+		from pysp.stats.backend import BackendScoringError, backend_seq_log_density
+
+		x0, x1 = x
+		if self.has_topics:
+			if getattr(engine, 'name', None) == 'numpy':
+				return self.seq_log_density(x)
+			raise BackendScoringError('IndPi HMM backend scoring does not support topic-mixture emissions.')
+		if self.terminal_values is not None:
+			if getattr(engine, 'name', None) == 'numpy':
+				return self.seq_log_density(x)
+			raise BackendScoringError('IndPi HMM backend scoring does not support terminal-value semantics.')
+		if x1 is not None:
+			if getattr(engine, 'name', None) == 'numpy':
+				return self.seq_log_density(x)
+			raise BackendScoringError('IndPi HMM backend scoring requires the non-numba encoding.')
+		if x0 is None:
+			raise BackendScoringError('IndPi HMM backend scoring received an empty encoded layout.')
+
+		(tot_cnt, idx_bands, has_next, len_vec, idx_mat, idx_vec, enc_data), len_enc = x0
+		num_states = self.nStates
+		max_len = len(idx_bands)
+		num_seq = idx_mat.shape[0]
+		w = self.w
+		if w.shape[0] != num_seq:
+			w_sum = np.sum(w, axis=0) / float(len(w))
+			w = np.repeat(w_sum.reshape(1, -1), num_seq, axis=0)
+		ll_ret = engine.zeros(num_seq)
+
+		if max_len > 0 and tot_cnt > 0:
+			good = idx_mat >= 0
+			emission_scores = [backend_seq_log_density(topic, enc_data, engine) for topic in self.topics]
+			log_pr_obs = engine.stack(emission_scores, axis=1)
+			pr_max0 = engine.max(log_pr_obs, axis=1)
+			pr_obs = engine.exp(log_pr_obs - pr_max0[:, None])
+
+			band = idx_bands[0]
+			row_idx = np.flatnonzero(good[:, 0])
+			alphas_prev = pr_obs[band[0]:band[1], :] * engine.asarray(w[row_idx, :])
+			temp = engine.sum(alphas_prev, axis=1, keepdims=True)
+			alphas_prev = alphas_prev / temp
+			ll_ret[engine.asarray(row_idx)] = engine.log(temp[:, 0]) + pr_max0[band[0]:band[1]]
+
+			a_mat = engine.asarray(self.transitions)
+			for i in range(1, max_len):
+				band = idx_bands[i]
+				row_idx = np.flatnonzero(good[:, i])
+				alphas_next = engine.matmul(alphas_prev[engine.asarray(has_next[i-1]), :], a_mat)
+				alphas_next = alphas_next * pr_obs[band[0]:band[1], :]
+				pr_sum = engine.sum(alphas_next, axis=1, keepdims=True)
+				alphas_prev = alphas_next / pr_sum
+				ll_ret[engine.asarray(row_idx)] = ll_ret[engine.asarray(row_idx)] + \
+					engine.log(pr_sum[:, 0]) + pr_max0[band[0]:band[1]]
+
+		if self.len_dist is not None:
+			ll_ret = ll_ret + backend_seq_log_density(self.len_dist, len_enc, engine)
+
+		return ll_ret
 
 	def _seq_encode(self, x):
 		"""Deprecated: encode x with the numpy (non-numba) encoding.
@@ -863,6 +968,9 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 
 			max_len = len(idx_bands)
 			num_seq = idx_mat.shape[0]
+			if w.shape[0] != num_seq:
+				w_sum = np.sum(w, axis=0) / float(len(w))
+				w = np.repeat(w_sum.reshape(1, -1), num_seq, axis=0)
 
 			good = idx_mat >= 0
 
@@ -982,6 +1090,9 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 
 			init_pvec = estimate.w
 			tran_mat = estimate.transitions
+			if init_pvec.shape[0] != seq_cnt:
+				w_sum = np.sum(init_pvec, axis=0) / float(len(init_pvec))
+				init_pvec = np.repeat(w_sum.reshape(1, -1), seq_cnt, axis=0)
 
 			# Compute state likelihood vectors and scale the max to one
 			for i in range(num_states):
@@ -1109,6 +1220,16 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 		if self.len_accumulator is not None:
 			self.len_accumulator.from_value(len_acc)
 
+		return self
+
+	def scale(self, c):
+		self.init_counts *= c
+		self.state_counts *= c
+		self.trans_counts *= c
+		for acc in self.accumulators:
+			acc.scale(c)
+		if self.len_accumulator is not None:
+			self.len_accumulator.scale(c)
 		return self
 
 	def key_merge(self, stats_dict):

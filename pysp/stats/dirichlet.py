@@ -224,6 +224,28 @@ def find_alpha(current_alpha, mlp, thresh) -> Tuple[np.ndarray, int]:
 class DirichletDistribution(SequenceEncodableProbabilityDistribution):
     """Dirichlet distribution over probability vectors, with concentration parameters alpha."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='explicit_stacked')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='dirichlet',
+            distribution_type=cls,
+            parameters=(ParameterSpec('alpha', constraint='positive_vector'),),
+            statistics=(
+                StatisticSpec('count'),
+                StatisticSpec('sum_of_logs', kind='vector_moment'),
+                StatisticSpec('sum', kind='vector_moment'),
+                StatisticSpec('sum2', kind='vector_moment'),
+            ),
+            support='simplex',
+            differentiable=False,
+        )
+
     def __init__(self, alpha: Union[List[float], np.ndarray], name: Optional[str] = None, keys: Optional[str] = None) \
             -> None:
         """DirichletDistribution object defining Dirichlet distribution with parameter alpha.
@@ -330,6 +352,52 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         rv = np.dot(x[0], self.alpha - 1.0)
         rv -= self.log_const
         return rv
+
+    @staticmethod
+    def backend_log_density_from_params(log_x: Any, alpha: Any, log_const: Any, engine: Any) -> Any:
+        """Engine-neutral Dirichlet log-density from encoded log observations."""
+        return engine.sum(log_x * (alpha - engine.asarray(1.0)), axis=-1) - log_const
+
+    def backend_seq_log_density(self, x: Tuple[Any, Any, Any], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded Dirichlet observations."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x[0]),
+            engine.asarray(self.alpha),
+            engine.asarray(self.log_const),
+            engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['DirichletDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked parameters for equal-dimensional Dirichlet mixtures."""
+        dim = int(dists[0].dim)
+        if any(int(dist.dim) != dim for dist in dists):
+            raise ValueError('Stacked DirichletDistribution components require equal dimension.')
+        return {
+            'alpha': engine.asarray([dist.alpha for dist in dists]),
+            'log_const': engine.asarray([dist.log_const for dist in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Any, Any, Any], params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Dirichlet component log densities."""
+        return cls.backend_log_density_from_params(
+            engine.asarray(x[0])[:, None, :],
+            params['alpha'][None, :, :],
+            params['log_const'][None, :],
+            engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Tuple[Any, Any, Any], weights: Any,
+                                             params: Dict[str, Any], engine: Any) -> Tuple[Any, Any, Any, Any]:
+        """Return component-stacked legacy Dirichlet sufficient statistics."""
+        ww = engine.asarray(weights)
+        extra = (slice(None), slice(None), None)
+        return (
+            engine.sum(ww, axis=0),
+            engine.sum(ww[extra] * engine.asarray(x[0])[:, None, :], axis=0),
+            engine.sum(ww[extra] * engine.asarray(x[1])[:, None, :], axis=0),
+            engine.sum(ww[extra] * engine.asarray(x[2])[:, None, :], axis=0),
+        )
 
     def sampler(self, seed: Optional[int] = None) -> 'DirichletSampler':
         """Create a DirichletSampler for sampling from this distribution.
@@ -558,6 +626,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum_of_logs = x[1]
         self.sum = x[2]
         self.sum2 = x[3]
+        return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
         """Combine sufficient statistics with other accumulators sharing a matching key.

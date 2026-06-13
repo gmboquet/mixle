@@ -45,6 +45,34 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     """
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, capabilities_for
+        child = capabilities_for(self.len_dist)
+        return DistributionCapabilities(engine_ready=child.engine_ready,
+                                        kernel_status='generic_latent',
+                                        numpy_only_reason=child.numpy_only_reason)
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        length = declaration_for(self.len_dist)
+        children = () if length is None else (length,)
+        return DistributionDeclaration(
+            name='dirac_length_mixture',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('p', constraint='unit_interval'),
+                ParameterSpec('v', constraint='integer', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('component_counts'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='length_or_dirac',
+            children=children,
+            child_roles=('length',) if length is not None else (),
+            differentiable=False,
+        )
+
     def __init__(self, len_dist: SequenceEncodableProbabilityDistribution, p: float, v: int = 0,
                  name: Optional[str] = None):
         if not 0 < p <= 1:
@@ -209,6 +237,116 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
             rv[~good_rows] = -np.inf
 
             return rv
+
+    def backend_seq_component_log_density(self, x: E, engine: Any) -> Any:
+        """Engine-neutral component log densities for encoded length/dirac mixtures."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        sz, idx_v, idx_nv, enc_x = x
+        rv = engine.zeros((sz, 2))
+        rv[:, 0] = backend_seq_log_density(self.len_dist, enc_x, engine)
+        if len(idx_nv):
+            rv[engine.asarray(idx_nv), 1] = engine.asarray(-np.inf)
+        return rv
+
+    def backend_seq_log_density(self, x: E, engine: Any) -> Any:
+        """Engine-neutral mixture log-density for encoded length/dirac observations."""
+        ll_mat = self.backend_seq_component_log_density(x, engine)
+        return engine.logsumexp(ll_mat + engine.asarray([self.log_p, self.log_1p]), axis=1)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['DiracLengthMixtureDistribution'],
+                               engine: Any) -> Dict[str, Any]:
+        """Return stacked parameters for shared-dirac length mixtures."""
+        from pysp.stats.stacked import stacked_component_params
+        v = int(dists[0].v)
+        if any(int(dist.v) != v for dist in dists):
+            raise ValueError('Stacked DiracLengthMixtureDistribution components require shared dirac value.')
+        try:
+            length_route = stacked_component_params([dist.len_dist for dist in dists], engine)
+        except ValueError as exc:
+            raise ValueError('DiracLengthMixture length child %s is not stackable: %s' %
+                             (type(dists[0].len_dist).__name__, exc))
+        return {
+            '__pysp_component_axis__': {'log_p': 0, 'log_1p': 0},
+            'v': v,
+            'length_route': length_route,
+            'log_p': engine.asarray(np.asarray([dist.log_p for dist in dists], dtype=np.float64)),
+            'log_1p': engine.asarray(np.asarray([dist.log_1p for dist in dists], dtype=np.float64)),
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of length/dirac mixture log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        sz, idx_v, idx_nv, enc_x = x
+        num_components = int(params['num_components'])
+        length_scores = stacked_component_log_density(enc_x, params['length_route'], engine)
+        dirac_scores = engine.zeros((sz, num_components))
+        if len(idx_nv) > 0:
+            impossible = engine.zeros((len(idx_nv), num_components)) + engine.asarray(-np.inf)
+            dirac_scores = engine.index_add(dirac_scores, engine.asarray(idx_nv), impossible)
+        stacked = engine.stack((
+            length_scores + params['log_p'][None, :],
+            dirac_scores + params['log_1p'][None, :],
+        ), axis=2)
+        return engine.logsumexp(stacked, axis=2)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any,
+                                                            params: Dict[str, Any], engine: Any,
+                                                            estimator: Any) -> Tuple[Any, ...]:
+        """Return per-component legacy ``(component_counts, length_stat)`` statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_log_density, \
+            stacked_component_sufficient_statistics, unstack_component_stats
+        sz, idx_v, idx_nv, enc_x = x
+        ww = engine.asarray(weights)
+        num_components = int(params['num_components'])
+        length_scores = stacked_component_log_density(enc_x, params['length_route'], engine)
+        length_weights = ww
+        dirac_weights = engine.zeros((sz, num_components))
+
+        if len(idx_v) > 0:
+            eidx_v = engine.asarray(idx_v)
+            local_length = length_scores[eidx_v, :] + params['log_p'][None, :]
+            local_dirac = engine.zeros((len(idx_v), num_components)) + params['log_1p'][None, :]
+            local_scores = engine.stack((local_length, local_dirac), axis=2)
+            denom = engine.logsumexp(local_scores, axis=2)
+            bad_rows = engine.isinf(denom) & (denom < engine.asarray(0.0))
+            fallback = engine.stack((
+                engine.zeros((len(idx_v), num_components)) + params['log_p'][None, :],
+                engine.zeros((len(idx_v), num_components)) + params['log_1p'][None, :],
+            ), axis=2)
+            local_scores = engine.where(bad_rows[:, :, None], fallback, local_scores)
+            denom = engine.where(bad_rows, engine.asarray(0.0), denom)
+            local_post = engine.exp(local_scores - denom[:, :, None])
+            local_weights = ww[eidx_v, :, None] * local_post
+
+            length_at_v = engine.zeros((sz, num_components))
+            dirac_at_v = engine.zeros((sz, num_components))
+            length_at_v = engine.index_add(length_at_v, eidx_v, local_weights[:, :, 0])
+            dirac_at_v = engine.index_add(dirac_at_v, eidx_v, local_weights[:, :, 1])
+            non_v = np.ones(sz, dtype=bool)
+            non_v[idx_v] = False
+            length_weights = engine.where(engine.asarray(non_v)[:, None], ww, length_at_v)
+            dirac_weights = dirac_at_v
+
+        component_counts = engine.stack((
+            engine.sum(length_weights, axis=0),
+            engine.sum(dirac_weights, axis=0),
+        ), axis=1)
+
+        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+        length_estimators = tuple(getattr(component_est, 'estimator', None)
+                                  for component_est in outer_estimators)
+        length_estimator = StackedEstimatorView(length_estimators) \
+            if len(length_estimators) == num_components else None
+        length_stats = stacked_component_sufficient_statistics(
+            enc_x, length_weights, params['length_route'], engine, length_estimator)
+        length_by_component = unstack_component_stats(length_stats, num_components)
+
+        return tuple((component_counts[i], length_by_component[i]) for i in range(num_components))
 
     def seq_posterior(self, x: E) -> np.ndarray:
         """Vectorized component posterior probabilities at sequence encoded input x.

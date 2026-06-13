@@ -21,8 +21,68 @@ from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceE
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
     DistributionEnumerator
 import itertools
+from functools import lru_cache
 
 from typing import Optional, Sequence, Union, Any, Dict, List, Tuple
+
+
+@lru_cache(maxsize=None)
+def _permutation_array(dim: int) -> np.ndarray:
+    return np.asarray(list(itertools.permutations(range(dim))), dtype=np.float64)
+
+
+def _squared_distances_to_sigma(sigma: np.ndarray) -> np.ndarray:
+    perms = _permutation_array(len(sigma))
+    diff = perms - sigma
+    return np.sum(diff * diff, axis=1)
+
+
+def _log_partition(sigma: np.ndarray, rho: float) -> float:
+    d2 = _squared_distances_to_sigma(sigma)
+    z = -float(rho) * d2
+    m = float(np.max(z))
+    return m + np.log(np.exp(z - m).sum())
+
+
+def _expected_distance(distances: np.ndarray, rho: float) -> float:
+    z = -float(rho) * distances
+    m = float(np.max(z))
+    weights = np.exp(z - m)
+    return float(np.dot(weights, distances) / weights.sum())
+
+
+def _estimate_rho_from_mean_distance(distances: np.ndarray, mean_distance: float,
+                                     max_rho: float = 1.0e6,
+                                     tol: float = 1.0e-12,
+                                     max_iter: int = 100) -> float:
+    """Return the nonnegative MLE rho satisfying E_rho[D] = mean_distance."""
+    if mean_distance <= tol:
+        return float(max_rho)
+
+    uniform_mean = float(np.mean(distances))
+    if mean_distance >= uniform_mean - tol:
+        return 0.0
+
+    lo = 0.0
+    hi = 1.0
+    while hi < max_rho and _expected_distance(distances, hi) > mean_distance:
+        lo = hi
+        hi *= 2.0
+
+    if hi >= max_rho and _expected_distance(distances, max_rho) > mean_distance:
+        return float(max_rho)
+
+    hi = min(hi, max_rho)
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        if hi - lo <= tol * max(1.0, hi):
+            break
+        if _expected_distance(distances, mid) > mean_distance:
+            lo = mid
+        else:
+            hi = mid
+
+    return float(0.5 * (lo + hi))
 
 
 class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
@@ -30,6 +90,44 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
 
     Data type: List[int] (a permutation of the integers 0,1,...,K-1).
     """
+
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='spearman_ranking',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('sigma', constraint='real_vector'),
+                ParameterSpec('rho'),
+                ParameterSpec('log_const', constraint='real', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('count'),
+                StatisticSpec('sum', kind='vector_moment'),
+            ),
+            support='permutation',
+            differentiable=False,
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return row-wise legacy sufficient statistics for resident reductions."""
+        xx = engine.asarray(x)
+        one = engine.sum(xx * 0.0, axis=1) + engine.asarray(1.0)
+        return one, xx
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, sigma: Any, rho: Any, log_const: Any, engine: Any) -> Any:
+        """Engine-neutral Spearman ranking log-density from fitted parameters."""
+        diff = engine.asarray(x) - sigma
+        return -rho * engine.sum(diff * diff, axis=-1) - log_const
 
     def __init__(self, sigma: Union[Sequence[float], np.ndarray], rho: float = 1.0, name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
@@ -49,14 +147,13 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
             keys (Optional[str]): Set keys for object instance.
 
         """
-        self.sigma = np.asarray(sigma)
-        self.rho = rho
+        self.sigma = np.asarray(sigma, dtype=np.float64)
+        self.rho = float(rho)
         self.name = name
         self.dim = len(sigma)
         self.keys = keys
 
-        perms = map(np.asarray, map(list, itertools.permutations(range(self.dim))))
-        self.log_const = np.log(sum(map(lambda u: np.exp(-rho * np.dot(self.sigma - u, self.sigma - u)), perms)))
+        self.log_const = _log_partition(self.sigma, self.rho)
 
     def __str__(self) -> str:
         """Returns string representation of SpearmanRankingDistribution object."""
@@ -112,6 +209,42 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         rv -= self.log_const
         return rv
 
+    def backend_seq_log_density(self, x: np.ndarray, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded permutations."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x),
+            engine.asarray(self.sigma),
+            engine.asarray(self.rho),
+            engine.asarray(self.log_const),
+            engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['SpearmanRankingDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked parameters for equal-dimensional Spearman ranking mixtures."""
+        dim = int(dists[0].dim)
+        if any(int(dist.dim) != dim for dist in dists):
+            raise ValueError('Stacked SpearmanRankingDistribution components require equal dimension.')
+        return {
+            '__pysp_component_axis__': {'sigma': 0, 'rho': 0, 'log_const': 0},
+            'sigma': engine.asarray([dist.sigma for dist in dists]),
+            'rho': engine.asarray([dist.rho for dist in dists]),
+            'log_const': engine.asarray([dist.log_const for dist in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: np.ndarray, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Spearman ranking component log densities."""
+        diff = engine.asarray(x)[:, None, :] - params['sigma'][None, :, :]
+        return -params['rho'][None, :] * engine.sum(diff * diff, axis=2) - params['log_const'][None, :]
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: np.ndarray, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any]:
+        """Return component-stacked legacy ``(count, weighted_rank_sum)`` statistics."""
+        ww = engine.asarray(weights)
+        xx = engine.asarray(x, dtype=getattr(ww, 'dtype', None))
+        return engine.sum(ww, axis=0), engine.matmul(ww.T, xx)
+
     def sampler(self, seed: Optional[int] = None) -> 'SpearmanRankingSampler':
         """Create a SpearmanRankingSampler object from parameters of SpearmanRankingDistribution instance.
 
@@ -134,7 +267,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
             SpearmanRankingEstimator object.
 
         """
-        return SpearmanRankingEstimator(self.dim, rho=self.rho, pseudo_count=pseudo_count, name=self.name,
+        return SpearmanRankingEstimator(self.dim, rho=None, pseudo_count=pseudo_count, name=self.name,
                                         keys=self.keys)
 
     def dist_to_encoder(self) -> 'SpearmanRankingDataEncoder':
@@ -380,34 +513,39 @@ class SpearmanRankingAccumulatorFactory(StatisticAccumulatorFactory):
 class SpearmanRankingEstimator(ParameterEstimator):
     """Estimator for the SpearmanRankingDistribution from aggregated sufficient statistics.
 
-    The consensus ranking sigma is estimated by maximum likelihood, while the concentration
-    rho is held fixed at the configured value rather than estimated from the data.
+    The consensus ranking sigma and, by default, the concentration rho are estimated by
+    maximum likelihood. Pass a numeric rho to hold the concentration fixed.
     """
 
-    def __init__(self, dim: int, rho: float = 1.0, pseudo_count: Optional[float] = None,
+    def __init__(self, dim: int, rho: Optional[float] = None, pseudo_count: Optional[float] = None,
                  suff_stat: Optional[Tuple[float, np.ndarray]] = None,
                  name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+                 keys: Optional[str] = None,
+                 max_rho: float = 1.0e6) -> None:
         """SpearmanRankingEstimator object.
 
         Args:
             dim (int): Dimension K of the rank vectors.
-            rho (float): Fixed concentration for the estimated distribution. Must be positive.
+            rho (Optional[float]): Fixed concentration for the estimated distribution. If None, estimate rho by MLE.
             pseudo_count (Optional[float]): Used to inflate sufficient statistics.
             suff_stat (Optional[Tuple[float, np.ndarray]]): Tuple of count and component-wise rank sums.
             name (Optional[str]): Optional name for object instance.
             keys (Optional[str]): Optional key for merging sufficient statistics.
+            max_rho (float): Finite cap used when the MLE is at rho = infinity.
 
         """
-        if rho <= 0:
-            raise ValueError('SpearmanRankingEstimator requires rho > 0 (got %s).' % repr(rho))
+        if rho is not None and rho < 0:
+            raise ValueError('SpearmanRankingEstimator requires rho >= 0 or None (got %s).' % repr(rho))
+        if max_rho <= 0:
+            raise ValueError('SpearmanRankingEstimator requires max_rho > 0 (got %s).' % repr(max_rho))
 
-        self.rho = rho
+        self.rho = None if rho is None else float(rho)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.keys = keys
         self.name = name
         self.dim = dim
+        self.max_rho = float(max_rho)
 
     def accumulator_factory(self) -> 'SpearmanRankingAccumulatorFactory':
         """Returns a SpearmanRankingAccumulatorFactory for creating SpearmanRankingAccumulator objects."""
@@ -417,9 +555,9 @@ class SpearmanRankingEstimator(ParameterEstimator):
         """Estimate a SpearmanRankingDistribution from sufficient statistics.
 
         The consensus ranking sigma is the maximum likelihood estimate, given by the rank order
-        (argsort) of the component-wise rank sums. The concentration is not estimated from the
-        data; it is held fixed at the rho configured on the estimator. If no data was observed,
-        rho is set to 0.0.
+        (argsort) of the component-wise rank sums. When rho is None, the concentration is the
+        nonnegative MLE satisfying E_rho[||X-sigma||^2] = observed mean squared distance. If no
+        data was observed, rho is set to 0.0.
 
         Args:
             nobs (Optional[float]): Number of observations (unused).
@@ -430,10 +568,26 @@ class SpearmanRankingEstimator(ParameterEstimator):
 
         """
         count, vsum = suff_stat
+        count = float(count)
+        vsum = np.asarray(vsum, dtype=np.float64)
+
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            pcount, psum = self.suff_stat
+            count += float(self.pseudo_count) * float(pcount)
+            vsum = vsum + float(self.pseudo_count) * np.asarray(psum, dtype=np.float64)
 
         if count > 0:
             sigma = np.argsort(vsum)
-            rho = self.rho
+            if self.rho is None:
+                sigma_float = np.asarray(sigma, dtype=np.float64)
+                rank_norm2 = float(np.dot(np.arange(self.dim, dtype=np.float64),
+                                          np.arange(self.dim, dtype=np.float64)))
+                total_distance = 2.0 * count * rank_norm2 - 2.0 * float(np.dot(vsum, sigma_float))
+                mean_distance = max(0.0, total_distance / count)
+                distances = _squared_distances_to_sigma(sigma_float)
+                rho = _estimate_rho_from_mean_distance(distances, mean_distance, max_rho=self.max_rho)
+            else:
+                rho = self.rho
         else:
             sigma = vsum
             rho = 0.0

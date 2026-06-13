@@ -16,6 +16,83 @@ __all__ = [
     "dump_models",
     "DistributionEnumerator",
     "EnumerationError",
+    "KeyValidationError",
+    "validate_estimator_keys",
+    "encoded_nbytes",
+    "scale_suff_stat",
+    "EncodedData",
+    "ResidentEncodedPayload",
+    "as_encoded_data",
+    "move_encoded_payload",
+    "DistributionCapabilities",
+    "capabilities_for",
+    "numpy_only_distribution_types",
+    "register_capabilities",
+    "registered_capability_types",
+    "supported_engines",
+    "DistributionDeclaration",
+    "ExponentialFamilySpec",
+    "ParameterSpec",
+    "StatisticSpec",
+    "BackendScoringError",
+    "backend_log_density_sum",
+    "backend_seq_component_log_density",
+    "backend_seq_log_density",
+    "declaration_issues",
+    "declaration_for",
+    "declared_distribution_types",
+    "generated_log_density_diagnostics",
+    "generated_log_density",
+    "generated_stacked_available",
+    "generated_stacked_log_density",
+    "generated_stacked_params",
+    "generated_stacked_preferred",
+    "generated_stacked_strategy",
+    "generated_sufficient_statistics",
+    "generated_sufficient_statistics_available",
+    "generated_numba_log_density",
+    "generated_numba_log_density_available",
+    "generated_numba_stacked_log_density",
+    "generated_numba_stacked_available",
+    "generated_stacked_sufficient_statistics",
+    "generated_stacked_sufficient_statistics_available",
+    "register_declaration",
+    "statistic_layout_issues",
+    "validate_declaration",
+    "validate_statistic_layout",
+    "dataframe_records",
+    "seq_encode_dataframe",
+    "RecordDistribution",
+    "RecordEstimator",
+    "RecordSampler",
+    "RecordDataEncoder",
+    "DictRecordDistribution",
+    "DictRecordEstimator",
+    "DictRecordSampler",
+    "DictRecordDataEncoder",
+    "field",
+    "record",
+    "record_estimator",
+    "EngineNotSupportedError",
+    "Kernel",
+    "KernelFactory",
+    "GenericKernel",
+    "GenericKernelFactory",
+    "NumbaKernel",
+    "GeneratedNumbaKernel",
+    "NumbaKernelFactory",
+    "StackedComponentParams",
+    "StackedMixtureResidentStats",
+    "StackedMixtureShardEstimate",
+    "StackedMixtureKernel",
+    "StackedMixtureKernelFactory",
+    "stacked_component_log_density",
+    "stacked_component_params",
+    "stacked_component_strategy",
+    "estimate_component_shard_value",
+    "tie_component_shard_values",
+    "register_kernel_factory",
+    "kernel_for",
     "BernoulliDistribution",
     "BernoulliSampler",
     "BernoulliEstimator",
@@ -305,7 +382,30 @@ __all__ = [
 ### Abstract Classes
 from pysp.utils.optional_deps import pyspark, RDD_TYPES
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DataSequenceEncoder, \
-    DistributionSampler, DistributionEnumerator, EnumerationError
+    DistributionSampler, DistributionEnumerator, EnumerationError, KeyValidationError, encoded_nbytes, \
+    scale_suff_stat, validate_estimator_keys
+from pysp.stats.kernel import EngineNotSupportedError, Kernel, KernelFactory, GenericKernel, GenericKernelFactory, \
+    NumbaKernel, GeneratedNumbaKernel, NumbaKernelFactory, register_kernel_factory, kernel_for
+from pysp.stats.stacked import StackedComponentParams, StackedMixtureResidentStats, StackedMixtureShardEstimate, \
+    StackedMixtureKernel, StackedMixtureKernelFactory, stacked_component_log_density, stacked_component_params, \
+    stacked_component_strategy, estimate_component_shard_value, tie_component_shard_values
+from pysp.stats.encoded import EncodedData, ResidentEncodedPayload, as_encoded_data, move_encoded_payload
+from pysp.stats.capabilities import DistributionCapabilities, capabilities_for, numpy_only_distribution_types, \
+    register_capabilities, registered_capability_types, supported_engines
+from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec, \
+    declaration_for, declaration_issues, declared_distribution_types, generated_log_density_diagnostics, \
+    generated_log_density, generated_stacked_available, generated_stacked_log_density, generated_stacked_params, \
+    generated_stacked_preferred, generated_stacked_strategy, generated_sufficient_statistics, \
+    generated_sufficient_statistics_available, generated_numba_log_density, \
+    generated_numba_log_density_available, generated_numba_stacked_log_density, \
+    generated_numba_stacked_available, generated_stacked_sufficient_statistics, \
+    generated_stacked_sufficient_statistics_available, register_declaration, statistic_layout_issues, \
+    validate_declaration, validate_statistic_layout
+from pysp.stats.backend import BackendScoringError, backend_log_density_sum, backend_seq_component_log_density, \
+    backend_seq_log_density
+from pysp.stats.dataframe import dataframe_records, seq_encode_dataframe
+from pysp.stats.record import DictRecordDataEncoder, DictRecordDistribution, DictRecordEstimator, DictRecordSampler, \
+    RecordDataEncoder, RecordDistribution, RecordEstimator, RecordSampler, field, record, record_estimator
 
 ### Discrete base distributions
 from pysp.stats.bernoulli import BernoulliDistribution, BernoulliSampler, BernoulliEstimator, BernoulliDataEncoder, \
@@ -481,6 +581,68 @@ from pysp.stats.dirac_length import DiracLengthMixtureDistribution, DiracLengthM
     DiracLengthMixtureSampler, DiracLengthMixtureEnumerator
 
 
+def _register_builtin_compute_metadata() -> None:
+    numba_caps = DistributionCapabilities(engine_ready=('numpy',), kernel_status='numba_adapter')
+    backend_caps = DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+    legacy_numpy_caps = DistributionCapabilities(engine_ready=('numpy',), kernel_status='legacy_numpy')
+    for dist_type in (
+        GaussianDistribution, LogGaussianDistribution, GammaDistribution, BernoulliDistribution,
+        StudentTDistribution, LogisticDistribution, WeibullDistribution, RayleighDistribution,
+        ParetoDistribution, UniformDistribution, IntegerCategoricalDistribution,
+        PoissonDistribution, ExponentialDistribution, GeometricDistribution, BinomialDistribution,
+        NegativeBinomialDistribution, DiagonalGaussianDistribution,
+        BetaDistribution, LaplaceDistribution, MultivariateGaussianDistribution,
+        IntegerBernoulliEditDistribution, IntegerStepBernoulliEditDistribution,
+        SpearmanRankingDistribution, VonMisesFisherDistribution,
+    ):
+        register_capabilities(dist_type, backend_caps)
+
+    for dist_type in (
+        CategoricalDistribution, CompositeDistribution, SequenceDistribution,
+        OptionalDistribution, IgnoredDistribution, MixtureDistribution,
+    ):
+        register_capabilities(dist_type, numba_caps)
+
+    for dist_type in (
+        HiddenMarkovModelDistribution, QuantizedHiddenMarkovModelDistribution,
+        SegmentalHiddenMarkovModelDistribution, TreeHiddenMarkovModelDistribution,
+        HeterogeneousMixtureDistribution, HierarchicalMixtureDistribution,
+        JointMixtureDistribution, SemiSupervisedMixtureDistribution,
+        DiracLengthMixtureDistribution, HiddenAssociationDistribution,
+        IntegerHiddenAssociationDistribution, IntegerPLSIDistribution,
+        LDADistribution,
+    ):
+        register_capabilities(dist_type, legacy_numpy_caps)
+
+    numpy_only_reasons = {
+        HeterogeneousPCFGDistribution: 'grammar dynamic program is intentionally NumPy only',
+        SparseMarkovAssociationDistribution: 'sparse markov-transform family is intentionally NumPy/SciPy only',
+    }
+    for dist_type, reason in numpy_only_reasons.items():
+        register_capabilities(dist_type, DistributionCapabilities(
+            engine_ready=('numpy',), kernel_status='numpy_only', numpy_only_reason=reason))
+
+    for dist_type in (
+        GaussianDistribution, PoissonDistribution, ExponentialDistribution,
+        BernoulliDistribution, CategoricalDistribution, GammaDistribution,
+        LogGaussianDistribution, BinomialDistribution, NegativeBinomialDistribution,
+        GeometricDistribution, DiagonalGaussianDistribution, StudentTDistribution,
+        LogisticDistribution, WeibullDistribution, RayleighDistribution,
+        ParetoDistribution, UniformDistribution, IntegerCategoricalDistribution,
+        BetaDistribution, DirichletDistribution, LaplaceDistribution, MultivariateGaussianDistribution,
+        NullDistribution, PointMassDistribution, BernoulliSetDistribution,
+        IndianBuffetProcessDistribution, IntegerUniformSpikeDistribution,
+        IntegerBernoulliSetDistribution, SpearmanRankingDistribution,
+        VonMisesFisherDistribution,
+    ):
+        register_declaration(dist_type.compute_declaration())
+
+    register_kernel_factory(MixtureDistribution, StackedMixtureKernelFactory())
+
+
+_register_builtin_compute_metadata()
+
+
 ### imports
 import numpy as np
 import pickle
@@ -528,6 +690,8 @@ def initialize(data: Union[Sequence[T], pyspark.rdd.RDD],
         SequenceEncodableProbabilityDistribution object consistent with 'estimator'.
 
     """
+    validate_estimator_keys(estimator)
+
     if isinstance(data, RDD_TYPES):
         factory = estimator.accumulator_factory()
         sc = data.context
@@ -608,6 +772,8 @@ def estimate(data: Union[Sequence[T], pyspark.rdd.RDD],
         SequenceEncodableProbabilityDistribution object.
 
     """
+    validate_estimator_keys(estimator)
+
     # accumulators distinguish estimate-free updates with `estimate is None`;
     # substituting a NullDistribution here would defeat those guards
     if isinstance(prev_estimate, NullDistribution):
@@ -849,6 +1015,8 @@ def seq_estimate(enc_data: Union[List[Tuple[int, T]], 'pyspark.rdd.RDD'],
         SequenceEncodableProbabilityDistribution object.
 
     """
+    validate_estimator_keys(estimator)
+
     if hasattr(enc_data, 'pysp_seq_estimate'):
         # parallel-backend handle (pysp.utils.parallel / parallel_mpi)
         return enc_data.pysp_seq_estimate(estimator, prev_estimate)
@@ -947,6 +1115,8 @@ def seq_initialize(enc_data: Union[List[Tuple[int,T]], 'pyspark.rdd.RDD'],
         SequenceEncodableProbabilityDistribution object consistent with 'estimator'.
 
     """
+    validate_estimator_keys(estimator)
+
     if hasattr(enc_data, 'pysp_seq_initialize'):
         # parallel-backend handle (pysp.utils.parallel / parallel_mpi)
         return enc_data.pysp_seq_initialize(estimator, rng, p)

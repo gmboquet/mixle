@@ -567,6 +567,10 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         """Deprecated alias for accumulator_factory()."""
         return self.accumulator_factory()
 
+    def scale_suff_stat(self, suff_stat, c):
+        """Scale counts while preserving the integer support offset."""
+        return suff_stat[0], suff_stat[1] * c
+
     def estimate(self, suff_stat):
         """Estimate an IntegerCategoricalDistribution from sufficient statistics.
 

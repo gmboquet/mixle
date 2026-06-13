@@ -1,3 +1,5 @@
+"""Fit a Spearman ranking model with the standard optimize helper."""
+
 import numpy as np
 
 

@@ -50,6 +50,33 @@ def _shape_from_moments(mean: float, var: float, min_shape: float, max_shape: fl
 class WeibullDistribution(SequenceEncodableProbabilityDistribution):
     """Weibull distribution with shape > 0 and scale > 0 on x >= 0."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='weibull',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('shape', constraint='positive'),
+                ParameterSpec('scale', constraint='positive'),
+            ),
+            statistics=(StatisticSpec('sum'), StatisticSpec('sum2'), StatisticSpec('count')),
+            support='non_negative_real',
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Tuple[Any, Any],
+                                             params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row Weibull sufficient statistics in accumulator order."""
+        vals = engine.asarray(x[0])
+        return vals, vals * vals, vals * 0.0 + engine.asarray(1.0)
+
     def __init__(self, shape: float, scale: float, name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
         if shape <= 0.0 or scale <= 0.0 or not np.isfinite(shape) or not np.isfinite(scale):
@@ -96,6 +123,52 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
             rv = np.where(xx == 0.0, -np.inf, rv)
         else:
             rv = np.where(xx == 0.0, np.inf, rv)
+        return rv
+
+    @staticmethod
+    def backend_log_density_from_params(vals: Any, log_vals: Any, shape: Any, scale: Any, engine: Any) -> Any:
+        """Engine-neutral Weibull log-density from explicit parameters."""
+        z = vals / scale
+        rv = engine.log(shape) - engine.log(scale) + (shape - engine.asarray(1.0)) * (log_vals - engine.log(scale)) \
+            - (z ** shape)
+        return engine.where(vals < 0.0, engine.asarray(-np.inf), rv)
+
+    def backend_seq_log_density(self, x: Tuple[Any, Any], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        vals = engine.asarray(x[0])
+        log_vals = engine.asarray(x[1])
+        rv = self.backend_log_density_from_params(vals, log_vals, engine.asarray(self.shape), engine.asarray(self.scale),
+                                                  engine)
+        if engine.requires_grad(self.shape):
+            return rv
+        if self.shape == 1.0:
+            rv = engine.where(vals == 0.0, engine.asarray(-self.log_scale), rv)
+        elif self.shape > 1.0:
+            rv = engine.where(vals == 0.0, engine.asarray(-np.inf), rv)
+        else:
+            rv = engine.where(vals == 0.0, engine.asarray(np.inf), rv)
+        return rv
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['WeibullDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Weibull parameters for a homogeneous mixture kernel."""
+        return {
+            'shape': engine.asarray([d.shape for d in dists]),
+            'scale': engine.asarray([d.scale for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Any, Any], params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Weibull log densities."""
+        vals = engine.asarray(x[0])
+        log_vals = engine.asarray(x[1])
+        shape = params['shape'][None, :]
+        scale = params['scale'][None, :]
+        rv = cls.backend_log_density_from_params(vals[:, None], log_vals[:, None], shape, scale, engine)
+        is_zero = vals[:, None] == 0.0
+        rv = engine.where((shape == 1.0) & is_zero, -engine.log(scale), rv)
+        rv = engine.where((shape > 1.0) & is_zero, engine.asarray(-np.inf), rv)
+        rv = engine.where((shape < 1.0) & is_zero, engine.asarray(np.inf), rv)
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'WeibullSampler':

@@ -85,6 +85,39 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
         self.name        = name
         self.len_dist    = len_dist if len_dist is not None else NullDistribution()
 
+    def compute_capabilities(self):
+        """Return backend capability metadata for this concrete PLSI instance."""
+        from pysp.stats.capabilities import DistributionCapabilities, capabilities_for
+
+        child = capabilities_for(self.len_dist)
+        return DistributionCapabilities(engine_ready=child.engine_ready,
+                                        kernel_status='generic_latent',
+                                        numpy_only_reason=child.numpy_only_reason)
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = () if length is None else (length,)
+        return DistributionDeclaration(
+            name='integer_plsi',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('prob_mat', constraint='column_simplex_matrix'),
+                ParameterSpec('state_mat', constraint='row_simplex_matrix'),
+                ParameterSpec('doc_vec', constraint='simplex_vector'),
+            ),
+            statistics=(
+                StatisticSpec('word_counts'),
+                StatisticSpec('state_counts'),
+                StatisticSpec('document_counts'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='integer_document_bag',
+            children=children,
+            child_roles=('length',) if length is not None else (),
+            differentiable=False,
+        )
+
     def __str__(self) -> str:
         """Return string representation of object instance."""
         s1 = ','.join(['[' + ','.join(map(str, self.prob_mat[i, :])) + ']' for i in range(len(self.prob_mat))])
@@ -199,6 +232,33 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
 
         if self.len_dist is not None:
             rv += self.len_dist.seq_log_density(nn)
+
+        return rv
+
+    def backend_seq_log_density(self, x: Tuple[Optional[T1], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+                                                                   np.ndarray, np.ndarray]], engine: Any) -> Any:
+        """Evaluate encoded PLSI log densities using a backend-neutral compute engine."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        nn, (xv, xc, xd, xi, xn, xm) = x
+        cnt = len(xn)
+        value_ids = engine.asarray(xv)
+        count_values = engine.asarray(xc)
+        doc_ids = engine.asarray(xd)
+        obs_ids = engine.asarray(xi)
+        obs_doc_ids = engine.asarray(xm)
+
+        prob_mat = engine.asarray(self.prob_mat)
+        state_mat = engine.asarray(self.state_mat)
+        doc_log_probs = engine.asarray(self.log_doc_vec)
+
+        row_probs = engine.sum(prob_mat[value_ids, :] * state_mat[doc_ids, :], axis=1)
+        row_log_probs = engine.log(row_probs) * count_values
+        rv = engine.bincount(obs_ids, weights=row_log_probs, minlength=cnt)
+        rv = rv + doc_log_probs[obs_doc_ids]
+
+        if self.len_dist is not None:
+            rv = rv + backend_seq_log_density(self.len_dist, nn, engine)
 
         return rv
 
@@ -566,6 +626,14 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         self.doc_count = x[2]
         self.len_acc.from_value(x[3])
 
+        return self
+
+    def scale(self, c: float) -> 'IntegerPLSIAccumulator':
+        """Scale linear latent counts and delegate document-length statistics."""
+        self.word_count *= c
+        self.comp_count *= c
+        self.doc_count *= c
+        self.len_acc.scale(c)
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
@@ -1023,5 +1091,3 @@ def vec_bincount4(x, w, out):
     for j in range(len(x)):
         out[x[j], :] += w[:, j]
     return out
-
-

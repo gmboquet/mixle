@@ -26,6 +26,25 @@ def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
 class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
     """Laplace distribution with location mu and scale b > 0."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='laplace',
+            distribution_type=cls,
+            parameters=(ParameterSpec('mu'), ParameterSpec('b', constraint='positive')),
+            statistics=(
+                StatisticSpec('values', kind='raw_observations', scales=False),
+                StatisticSpec('weights', kind='weights'),
+            ),
+            support='real',
+        )
+
     def __init__(self, mu: float, b: float, name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
         if b <= 0.0 or not np.isfinite(b):
@@ -51,6 +70,44 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         return self.log_const - np.abs(x - self.mu) / self.b
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, mu: Any, b: Any, engine: Any) -> Any:
+        """Engine-neutral Laplace log-density from explicit parameters."""
+        return -engine.log(engine.asarray(2.0) * b) - engine.abs(x - mu) / b
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x), engine.asarray(self.mu), engine.asarray(self.b), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['LaplaceDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Laplace parameters for a homogeneous mixture kernel."""
+        return {
+            'mu': engine.asarray([d.mu for d in dists]),
+            'b': engine.asarray([d.b for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Laplace log densities."""
+        xx = engine.asarray(x)
+        return cls.backend_log_density_from_params(xx[:, None], params['mu'][None, :], params['b'][None, :], engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Any, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Tuple[Any, Any], ...]:
+        """Return per-component raw weighted observations using engine-resident arrays."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        counts = engine.to_numpy(engine.sum(ww, axis=0))
+        rv = []
+        for i in range(len(np.asarray(counts))):
+            w_loc = ww[:, i]
+            mask = w_loc > 0.0
+            rv.append((xx[mask], w_loc[mask]))
+        return tuple(rv)
 
     def sampler(self, seed: Optional[int] = None) -> 'LaplaceSampler':
         """Return a sampler for drawing observations from this distribution."""
@@ -123,6 +180,11 @@ class LaplaceAccumulator(SequenceEncodableStatisticAccumulator):
     def from_value(self, x: Tuple[np.ndarray, np.ndarray]) -> 'LaplaceAccumulator':
         self.values = [np.asarray(x[0], dtype=np.float64)]
         self.weights = [np.asarray(x[1], dtype=np.float64)]
+        return self
+
+    def scale(self, c: float) -> 'LaplaceAccumulator':
+        """Scale weights while preserving the raw observation payload."""
+        self.weights = [np.asarray(w, dtype=np.float64) * c for w in self.weights]
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

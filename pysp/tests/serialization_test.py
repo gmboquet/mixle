@@ -1,6 +1,7 @@
 import json
 import unittest
 
+import networkx as nx
 import numpy as np
 from scipy.sparse import csr_matrix
 
@@ -103,6 +104,24 @@ class DistributionSerializationTestCase(unittest.TestCase):
         )
         sparse_loaded = self.assert_stats_roundtrip(sparse, [([(0, 1.0)], [(1, 1.0)])])
         self.assertEqual(sparse_loaded.cond_prob_mat.getformat(), 'csr')
+
+    def test_grammar_distribution_json_round_trip(self):
+        from pysp.stats.grammar import GrammarDistribution, GrammarRule, VRG
+
+        graph = nx.Graph()
+        graph.add_node(0, label='A', node_color='')
+        graph.add_node(1, label='B', node_color='')
+        graph.add_edge(0, 1, weight=1.0, edge_color='')
+        grammar = VRG(name='json')
+        grammar.add_rule(GrammarRule(2, graph, frequency=3.0))
+
+        dist = GrammarDistribution(grammar, 0.01, orig_n=4)
+        loaded = GrammarDistribution.from_json(dist.to_json())
+
+        self.assertIsInstance(loaded.grammar, VRG)
+        self.assertEqual(loaded.grammar.name, 'json')
+        self.assertEqual(len(loaded.grammar.rule_list), 1)
+        self.assertAlmostEqual(loaded.log_density(grammar), dist.log_density(grammar), places=12)
 
     def test_bstats_json_round_trip_representative_models(self):
         cat = bstats.CategoricalDistribution({'x': 0.7, 'y': 0.3}, name='c')

@@ -75,6 +75,44 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
     Data type: Sequence[Tuple[Tuple[int, int], T]] (((node_id, parent_id), emission) per node, root parent -1).
     """
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        if self.use_numba:
+            return DistributionCapabilities(engine_ready=('numpy',), kernel_status='legacy_numpy')
+        children = tuple(self.topics) + ((self.len_dist,) if self.len_dist is not None else ())
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
+                                        kernel_status='generic_latent')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        topic_children = tuple(declaration_for(topic) for topic in self.topics)
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = tuple(child for child in topic_children + ((length,) if length is not None else ())
+                         if child is not None)
+        roles = tuple('state_%d_emission' % i for i, child in enumerate(topic_children) if child is not None)
+        if length is not None:
+            roles += ('length',)
+        return DistributionDeclaration(
+            name='tree_hidden_markov',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('w', constraint='simplex_vector'),
+                ParameterSpec('transitions', constraint='row_simplex_matrix'),
+            ),
+            statistics=(
+                StatisticSpec('num_states', kind='metadata', additive=False, scales=False),
+                StatisticSpec('initial_counts'),
+                StatisticSpec('state_counts'),
+                StatisticSpec('transition_counts'),
+                StatisticSpec('emissions', kind='tuple'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='tree_hidden_state_sequence',
+            children=children,
+            child_roles=roles,
+            differentiable=False,
+        )
+
     def __init__(self, topics: Sequence[SequenceEncodableProbabilityDistribution],
                  w: Union[Sequence[float], np.ndarray],
                  transitions: Union[List[List[float]], np.ndarray],
@@ -290,6 +328,85 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
                 ll_ret += np.bincount(len_enc[0], weights=len_ll, minlength=num_trees)
 
             return ll_ret
+
+    def backend_seq_log_density(self, x: E, engine: Any) -> Any:
+        """Engine-neutral tree-HMM scoring for the pure non-numba encoded layout."""
+        from pysp.stats.backend import BackendScoringError, backend_seq_log_density
+
+        if x[0] is not None:
+            if getattr(engine, 'name', None) == 'numpy':
+                return self.seq_log_density(x)
+            raise BackendScoringError('Tree HMM backend scoring requires the pure non-numba encoding.')
+        if x[1] is None:
+            raise BackendScoringError('Tree HMM backend scoring received an empty encoded layout.')
+
+        cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, _, _), enc_x, len_enc = x[1]
+
+        num_states = self.num_states
+        max_level = len(level_idx)
+        num_trees = len(tz) - 1
+
+        betas = engine.zeros((cnt, num_states)) + engine.asarray(1.0)
+        etas = engine.zeros((len(xbi), num_states))
+
+        a_mat = engine.asarray(self.transitions)
+        a_mat_t = engine.asarray(self.transitions.T)
+        p_levels = [engine.asarray(self.w)]
+        for _ in range(1, max_level + 1):
+            p_levels.append(engine.matmul(p_levels[-1], a_mat))
+        p_level = engine.stack(p_levels, axis=0)
+
+        emission_scores = [backend_seq_log_density(topic, enc_x, engine) for topic in self.topics]
+        log_pr_obs = engine.stack(emission_scores, axis=1)
+        pr_max0 = engine.max(log_pr_obs, axis=1)
+        pr_obs = engine.exp(log_pr_obs - pr_max0[:, None])
+        ll_ret = engine.zeros(num_trees)
+
+        if len(xln):
+            leaf_idx = engine.asarray(xln)
+            leaf_level = engine.asarray(xlnl)
+            leaf_beta = pr_obs[leaf_idx, :] * p_level[leaf_level, :]
+            betas[leaf_idx, :] = leaf_beta
+            betas_sum = engine.sum(betas[leaf_idx, :], axis=1, keepdims=True)
+            betas[leaf_idx, :] = betas[leaf_idx, :] / betas_sum
+            ll_ret = ll_ret + engine.bincount(
+                engine.asarray(xlni),
+                weights=engine.log(betas_sum[:, 0]) + pr_max0[leaf_idx],
+                minlength=num_trees)
+
+        for level in range(max_level - 1, -1, -1):
+            xbis = xbi[level_idx[level]]
+            xcs = xc[level_idx[level]]
+            if len(xbis) == 0:
+                continue
+
+            xbis_idx = engine.asarray(xbis)
+            child_idx = engine.asarray(xcs)
+            child_beta = betas[child_idx, :] / p_level[level + 1, :]
+            temp = engine.sum(a_mat_t[None, :, :] * child_beta[:, :, None], axis=1)
+            etas[xbis_idx, :] = etas[engine.asarray(xbis), :] + temp
+
+            log_eta_rows = engine.log(etas[xbis_idx, :])
+            log_eta_parts = []
+            for start, stop in zip(eta_p[level][:-1], eta_p[level][1:]):
+                log_eta_parts.append(engine.sum(log_eta_rows[int(start):int(stop), :], axis=0))
+            log_etas = engine.stack(log_eta_parts, axis=0) if log_eta_parts else engine.zeros((0, num_states))
+
+            parent_idx = engine.asarray(p_nxt[level])
+            parent_beta = betas[parent_idx, :] * engine.exp(log_etas) * pr_obs[parent_idx, :] * p_level[level, :]
+            betas[parent_idx, :] = parent_beta
+            betas_sum = engine.sum(betas[parent_idx, :], axis=1, keepdims=True)
+            betas[parent_idx, :] = betas[parent_idx, :] / betas_sum
+            ll_ret = ll_ret + engine.bincount(
+                engine.asarray(i_nxt[level]),
+                weights=engine.log(betas_sum[:, 0]) + pr_max0[parent_idx],
+                minlength=num_trees)
+
+        if len_enc is not None and len_enc[1] is not None:
+            len_ll = backend_seq_log_density(self.len_dist, len_enc[1], engine)
+            ll_ret = ll_ret + engine.bincount(engine.asarray(len_enc[0]), weights=len_ll, minlength=num_trees)
+
+        return ll_ret
 
     def seq_posterior(self, x: E) -> Optional[List[np.ndarray]]:
         """Posterior state membership probabilities for each node of each encoded tree.
@@ -1025,6 +1142,16 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         if self.len_accumulator is not None:
             self.len_accumulator.from_value(len_acc)
 
+        return self
+
+    def scale(self, c: float) -> 'TreeHiddenMarkovAccumulator':
+        self.init_counts *= c
+        self.state_counts *= c
+        self.trans_counts *= c
+        for acc in self.accumulators:
+            acc.scale(c)
+        if self.len_accumulator is not None:
+            self.len_accumulator.scale(c)
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
@@ -1970,5 +2097,3 @@ def level_state_prob(levels, num_states, tr_mat, init_prob, out):
         for i in range(num_states):
             for j in range(num_states):
                 out[k, i] += out[k-1, i]*tr_mat[i, j]
-
-

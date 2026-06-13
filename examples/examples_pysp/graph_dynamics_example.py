@@ -1,3 +1,5 @@
+"""Model evolving integer sets with lookback HMM graph-dynamics emissions."""
+
 #import os
 
 import numpy as np

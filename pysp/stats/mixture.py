@@ -56,6 +56,11 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     """
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.components)),
+                                        kernel_status='numba_adapter')
+
     def __init__(self,
                  components: Sequence[SequenceEncodableProbabilityDistribution],
                  w: Union[np.ndarray, List[float]],
@@ -71,6 +76,24 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         self.components = components
         self.num_components = len(components)
         self.name = name
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        children = tuple(declaration_for(d) for d in self.components)
+        children = tuple(d for d in children if d is not None)
+        return DistributionDeclaration(
+            name='mixture',
+            distribution_type=type(self),
+            parameters=(ParameterSpec('w', constraint='simplex'),),
+            statistics=(
+                StatisticSpec('component_counts'),
+                StatisticSpec('components', kind='tuple'),
+            ),
+            support='mixture',
+            children=children,
+            child_roles=tuple('component_%d' % i for i in range(len(children))),
+            differentiable=all(child.differentiable for child in children),
+        )
 
     def __str__(self) -> str:
         """Return string representation of MixtureDistribution object instance."""
@@ -261,6 +284,32 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             rv[~good_rows] = -np.inf
 
             return rv
+
+    def backend_seq_component_log_density(self, x: T1, engine: Any) -> Any:
+        """Engine-neutral component log densities for encoded data."""
+        from pysp.stats.backend import backend_seq_log_density
+        scores = []
+        for i in range(self.num_components):
+            if self.zw[i]:
+                base = backend_seq_log_density(self.components[0], x, engine)
+                scores.append(base * 0.0 + engine.asarray(-np.inf))
+            else:
+                scores.append(backend_seq_log_density(self.components[i], x, engine))
+        return engine.stack(scores, axis=1)
+
+    def backend_seq_log_density(self, x: T1, engine: Any) -> Any:
+        """Engine-neutral mixture log-density for encoded data."""
+        ll_mat = self.backend_seq_component_log_density(x, engine)
+        log_w = engine.asarray(self.log_w)
+        return engine.logsumexp(ll_mat + log_w, axis=1)
+
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+        """Return distribution-owned state for autograd fitting."""
+        from pysp.stats.gradient import MixtureGradientFitState
+        components = [recurse(component, engine, torch, leaves) for component in self.components]
+        w_logits = tensor_param(self.w, engine, torch, transform='logits')
+        leaves.append(w_logits)
+        return MixtureGradientFitState(self, components, w_logits)
 
     def seq_posterior(self, x: T1) -> np.ndarray:
         """Vectorized evaluation of posterior of MixtureDistribution for encoded sequence x.
@@ -773,6 +822,13 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.comp_counts = x[0]
         for i in range(self.num_components):
             self.accumulators[i].from_value(x[1][i])
+        return self
+
+    def scale(self, c: float) -> 'MixtureAccumulator':
+        """Scale component counts and delegate child sufficient statistics."""
+        self.comp_counts *= c
+        for acc in self.accumulators:
+            acc.scale(c)
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

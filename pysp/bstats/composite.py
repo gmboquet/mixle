@@ -471,6 +471,10 @@ class CompositeEstimator(ParameterEstimator):
 		"""
 		return self.get_prior().log_density(model.get_parameters())
 
+	def scale_suff_stat(self, suff_stat, c):
+		"""Scale per-field sufficient statistics through child estimators."""
+		return tuple(est.scale_suff_stat(ss, c) for est, ss in zip(self.estimators, suff_stat))
+
 	def estimate(self, suff_stat):
 		"""Estimate a CompositeDistribution from sufficient statistics.
 

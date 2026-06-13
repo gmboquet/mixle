@@ -65,6 +65,55 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
     when present, otherwise ``default_dists[i]`` if one was supplied.
     """
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        children = list(self.marginal_dists)
+        for dmap in self.conditional_dists:
+            children.extend(dmap.values())
+        children.extend(dist for dist in self.default_dists if dist is not None)
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(children)),
+                                        kernel_status='generic_composite')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+        children = []
+        roles = []
+
+        def add_child(role, dist):
+            declaration = declaration_for(dist)
+            if declaration is not None:
+                children.append(declaration)
+                roles.append(role)
+
+        for idx, dist in enumerate(self.marginal_dists):
+            add_child('marginal_%d' % idx, dist)
+        for child, dmap in enumerate(self.conditional_dists):
+            parent = self.parents[child]
+            for key, dist in sorted(dmap.items(), key=lambda item: repr(item[0])):
+                add_child('conditional_%d_given_%s=%s' % (child, parent, repr(key)), dist)
+        for idx, dist in enumerate(self.default_dists):
+            if dist is not None:
+                add_child('default_%d' % idx, dist)
+
+        return DistributionDeclaration(
+            name='chow_liu_tree',
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(
+                StatisticSpec('total_weight'),
+                StatisticSpec('num_features', kind='metadata', additive=False, scales=False),
+                StatisticSpec('marginal_counts', kind='count_maps'),
+                StatisticSpec('marginal_values', kind='metadata', additive=False, scales=False),
+                StatisticSpec('joint_counts', kind='count_maps'),
+                StatisticSpec('marginals', kind='child_stats'),
+                StatisticSpec('conditionals', kind='child_stats'),
+            ),
+            support='fixed_tuple_tree',
+            children=tuple(children),
+            child_roles=tuple(roles),
+            differentiable=False,
+        )
+
     def __init__(self,
                  parents: Sequence[Optional[int]],
                  marginal_dists: Sequence[SequenceEncodableProbabilityDistribution],
@@ -146,6 +195,40 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: Sequence[Sequence[Any]]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         return np.asarray([self.log_density(u) for u in x], dtype=float)
+
+    def backend_seq_log_density(self, x: Sequence[Sequence[Any]], engine: Any) -> Any:
+        """Engine-neutral grouped scoring for fixed Chow-Liu tree factors."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        rows = tuple(tuple(u) for u in x)
+        sz = len(rows)
+        rv = engine.zeros(sz)
+        if sz == 0:
+            return rv
+
+        root = self.feature_order[0]
+        root_values = [row[root] for row in rows]
+        root_enc = self.marginal_dists[root].dist_to_encoder().seq_encode(root_values)
+        rv = rv + backend_seq_log_density(self.marginal_dists[root], root_enc, engine)
+
+        for child in self.feature_order[1:]:
+            parent = self.parents[child]
+            if parent is None:
+                raise ValueError('feature_order contains a second root.')
+            groups = {}
+            for idx, row in enumerate(rows):
+                groups.setdefault(freeze(row[parent]), []).append(idx)
+            for parent_key, idxs in groups.items():
+                dist = self.conditional_dists[child].get(parent_key, self.default_dists[child])
+                idx_arr = np.asarray(idxs, dtype=np.int64)
+                if dist is None:
+                    scores = engine.zeros(len(idxs)) + float('-inf')
+                else:
+                    values = [rows[idx][child] for idx in idxs]
+                    enc = dist.dist_to_encoder().seq_encode(values)
+                    scores = backend_seq_log_density(dist, enc, engine)
+                rv = engine.index_add(rv, engine.asarray(idx_arr), scores)
+        return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'ChowLiuTreeSampler':
         """Return a sampler for drawing observations from this distribution."""
@@ -399,6 +482,23 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
                 acc = self.estimators[pair_key[1]].accumulator_factory().make()
                 acc.from_value(child_stat)
                 self.conditional_accumulators.setdefault(pair_key, {})[parent_key] = acc
+        return self
+
+    def scale(self, c: float) -> 'ChowLiuTreeAccumulator':
+        self.total_weight *= c
+        self.marginal_counts = [
+            {key: count * c for key, count in counts.items()}
+            for counts in self.marginal_counts
+        ]
+        self.joint_counts = {
+            pair_key: {value_key: count * c for value_key, count in counts.items()}
+            for pair_key, counts in self.joint_counts.items()
+        }
+        for acc in self.marginal_accumulators:
+            acc.scale(c)
+        for by_parent in self.conditional_accumulators.values():
+            for acc in by_parent.values():
+                acc.scale(c)
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

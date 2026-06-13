@@ -804,6 +804,18 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
 
         return self
 
+    def scale(self, c):
+        self.init_counts *= c
+        self.state_counts *= c
+        self.trans_counts *= c
+        for acc in self.init_accumulators:
+            acc.scale(c)
+        for acc in self.seq_accumulators:
+            acc.scale(c)
+        if self.len_accumulator is not None:
+            self.len_accumulator.scale(c)
+        return self
+
     def key_merge(self, stats_dict):
         """Merge keyed sufficient statistics of this accumulator into stats_dict.
 
@@ -1267,7 +1279,6 @@ def numba_baum_welch_alphas(num_states, tz, prob_mat, init_pvec, tran_mat, weigh
 
             for i in range(num_states):
                 alpha_loc[s, i] /= alpha_sum
-
 
 
 

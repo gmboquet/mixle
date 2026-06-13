@@ -19,6 +19,7 @@ from pysp.stats import (
     HiddenMarkovModelDistribution,
     IndianBuffetProcessDistribution,
     IntegerCategoricalDistribution,
+    JointMixtureDistribution,
     LogGaussianDistribution,
     MixtureDistribution,
     MultinomialDistribution,
@@ -419,6 +420,22 @@ class FisherViewTestCase(unittest.TestCase):
         self.assertEqual(info.shape, (10, 10))
         np.testing.assert_allclose(info, info.T, atol=1.0e-12)
         self.assertGreaterEqual(np.linalg.eigvalsh(info).min(), -1.0e-10)
+
+    def test_joint_mixture_fisher_uses_equivalent_pair_mixture(self):
+        dist = JointMixtureDistribution(
+            components1=[GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 1.5)],
+            components2=[GaussianDistribution(0.0, 2.0), GaussianDistribution(3.0, 0.75)],
+            w1=[0.4, 0.6], w2=[0.5, 0.5],
+            taus12=[[0.8, 0.2], [0.25, 0.75]],
+            taus21=[[0.64, 0.18181818181818182], [0.36, 0.8181818181818182]])
+        data = [(-1.2, -0.3), (0.0, 2.1), (2.6, 3.5)]
+        view = dist.to_fisher()
+
+        self.assertEqual(type(view).__name__, 'JointMixtureFisherView')
+        self.assertEqual(view.num_pairs, 4)
+        for x in data:
+            self.assertAlmostEqual(view.log_density(x), dist.log_density(x), places=12)
+        self.assert_data_and_encoded_match(dist, data)
 
     def test_observed_fisher_information_uses_score_covariance(self):
         dist = MixtureDistribution(

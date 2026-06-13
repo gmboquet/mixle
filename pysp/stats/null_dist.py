@@ -25,6 +25,23 @@ from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationInde
 class NullDistribution(SequenceEncodableProbabilityDistribution):
     """Place-holder distribution assigning density 1.0 (log-density 0.0) to any observation (Any data type)."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration
+        return DistributionDeclaration(
+            name='null',
+            distribution_type=cls,
+            parameters=(),
+            statistics=(),
+            support='any',
+            differentiable=False,
+        )
+
     def __init__(self, name: Optional[str] = None) -> None:
         """NullDistribution object.
 
@@ -78,6 +95,29 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         if isinstance(x, (int, np.integer)):
             return np.zeros(int(x), dtype=float)
         return np.zeros(0, dtype=float)
+
+    def backend_seq_log_density(self, x: Optional[Any], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density: zero for every encoded row."""
+        if isinstance(x, (int, np.integer)):
+            return engine.zeros(int(x))
+        return engine.zeros(0)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Tuple['NullDistribution', ...], engine: Any) -> Dict[str, Any]:
+        """Return stacked parameters for homogeneous null mixtures."""
+        return {'num_components': len(dists)}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Optional[Any], params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` zero matrix for null-component log densities."""
+        n = int(x) if isinstance(x, (int, np.integer)) else 0
+        return engine.zeros((n, int(params['num_components'])))
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Optional[Any], weights: Any,
+                                             params: Dict[str, Any], engine: Any) -> Tuple[None, ...]:
+        """Return empty legacy statistics for each null component."""
+        return tuple(None for _ in range(int(params['num_components'])))
 
     def sampler(self, seed: Optional[int] = None) -> 'NullSampler':
         """Create a NullSampler object.

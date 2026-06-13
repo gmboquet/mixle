@@ -147,6 +147,44 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         return 'HiddenMarkovModelDistribution([%s], %s, %s, %s, len_dist=%s, name=%s, terminal_values=%s, ' \
                'use_numba=%s)' % (s1, s2, s3, s4, s5, s6, s7, s8)
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        children = tuple(self.topics) + (() if isinstance(self.len_dist, NullDistribution) else (self.len_dist,))
+        if self.has_topics or self.terminal_values is not None or self.use_numba:
+            return DistributionCapabilities(engine_ready=('numpy',), kernel_status='legacy_numpy')
+        ready = intersect_engine_ready(children)
+        return DistributionCapabilities(engine_ready=ready, kernel_status='generic_latent')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        topic_children = tuple(declaration_for(topic) for topic in self.topics)
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = tuple(child for child in topic_children + ((length,) if length is not None else ()) if child is not None)
+        roles = tuple('state_%d_emission' % i for i, child in enumerate(topic_children) if child is not None)
+        if length is not None:
+            roles += ('length',)
+        return DistributionDeclaration(
+            name='hidden_markov',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('w', constraint='simplex_vector'),
+                ParameterSpec('transitions', constraint='row_simplex_matrix'),
+                ParameterSpec('taus', constraint='row_simplex_matrix', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('num_states', kind='metadata', additive=False, scales=False),
+                StatisticSpec('initial_counts'),
+                StatisticSpec('state_counts'),
+                StatisticSpec('transition_counts'),
+                StatisticSpec('emissions', kind='tuple'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='hidden_state_sequence',
+            children=children,
+            child_roles=roles,
+            differentiable=False,
+        )
+
     def density(self, x: List[T]) -> float:
         """Returns the density of HMM for an observed sequence x.
 
@@ -353,6 +391,80 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 ll_ret += self.len_dist.seq_log_density(len_enc)
 
             return ll_ret
+
+    def backend_seq_log_density(self, x: Union[E1, E2], engine: Any) -> Any:
+        """Engine-neutral forward scores for non-numba encoded HMM batches.
+
+        The compiled/numba encoding remains on the legacy NumPy path.  The
+        standard blocked encoding is converted through the active engine and
+        composes child distribution-owned backend scores.
+        """
+        from pysp.stats.backend import BackendScoringError, backend_seq_log_density
+
+        if self.has_topics:
+            if engine.name == 'numpy':
+                return self.seq_log_density(x)
+            raise BackendScoringError('HMM backend scoring does not support taus/topic-mixture emissions.')
+        if self.terminal_values is not None:
+            if engine.name == 'numpy':
+                return self.seq_log_density(x)
+            raise BackendScoringError('HMM backend scoring does not support terminal-value semantics.')
+
+        x0, x1 = x
+        if x1 is not None:
+            if engine.name == 'numpy':
+                return self.seq_log_density(x)
+            raise BackendScoringError('HMM backend scoring requires the standard non-numba encoding.')
+
+        num_states = self.n_states
+        (tot_cnt, idx_bands, has_next, len_vec, idx_mat, idx_vec, enc_data), _, len_enc = x0
+        num_seq = idx_mat.shape[0]
+        if tot_cnt == 0:
+            rv = engine.zeros(num_seq)
+            if self.len_dist is not None and len_enc is not None:
+                rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
+            return rv
+
+        pr_obs = []
+        for i in range(num_states):
+            pr_obs.append(backend_seq_log_density(self.topics[i], enc_data, engine))
+        pr_obs = engine.stack(pr_obs, axis=1)
+
+        pr_max0 = engine.max(pr_obs, axis=1)
+        pr_exp = engine.exp(pr_obs - pr_max0[:, None])
+
+        ll_ret = engine.zeros(num_seq)
+        w = engine.asarray(self.w)
+        a_mat = engine.asarray(self.transitions)
+
+        good0 = np.asarray(idx_mat[:, 0] >= 0, dtype=bool)
+        band = idx_bands[0]
+        alphas_prev = pr_exp[band[0]:band[1], :] * w
+        alpha_sum = engine.sum(alphas_prev, axis=1)
+        alphas_prev = alphas_prev / alpha_sum[:, None]
+        if np.any(good0):
+            values = engine.log(alpha_sum) + pr_max0[band[0]:band[1]]
+            ll_ret = engine.index_add(ll_ret, engine.asarray(np.flatnonzero(good0)), values)
+
+        for i in range(1, len(idx_bands)):
+            band = idx_bands[i]
+            has_next_loc = has_next[i - 1]
+            alphas_next = engine.matmul(alphas_prev[engine.asarray(has_next_loc)], a_mat)
+            alphas_next = alphas_next * pr_exp[band[0]:band[1], :]
+            alpha_sum = engine.sum(alphas_next, axis=1)
+            alphas_next = alphas_next / alpha_sum[:, None]
+            alphas_prev = alphas_next
+
+            good = np.asarray(idx_mat[:, i] >= 0, dtype=bool)
+            if np.any(good):
+                values = engine.log(alpha_sum) + pr_max0[band[0]:band[1]]
+                ll_ret = engine.index_add(ll_ret, engine.asarray(np.flatnonzero(good)), values)
+
+        ll_ret = engine.where(engine.isnan(ll_ret), engine.asarray(-np.inf), ll_ret)
+        if self.len_dist is not None and len_enc is not None:
+            ll_ret = ll_ret + backend_seq_log_density(self.len_dist, len_enc, engine)
+
+        return ll_ret
 
     def seq_posterior(self, x: E2) -> Optional[List[np.ndarray]]:
 
@@ -1334,6 +1446,17 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         if self.len_accumulator is not None:
             self.len_accumulator.from_value(len_acc)
 
+        return self
+
+    def scale(self, c: float) -> 'HiddenMarkovAccumulator':
+        """Scale linear HMM sufficient statistics while preserving metadata."""
+        self.init_counts *= c
+        self.state_counts *= c
+        self.trans_counts *= c
+        for acc in self.accumulators:
+            acc.scale(c)
+        if self.len_accumulator is not None:
+            self.len_accumulator.scale(c)
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
