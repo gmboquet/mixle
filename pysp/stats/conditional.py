@@ -1288,3 +1288,10 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
         given_enc = self.given_encoder.seq_encode(given_vals)
 
         return len(x), cond_vals, tuple(eobs_vals), tuple(idx_vals), given_enc
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+ConditionalAccumulator = ConditionalDistributionAccumulator
+ConditionalAccumulatorFactory = ConditionalDistributionAccumulatorFactory
+ConditionalDataEncoder = ConditionalDistributionDataEncoder
+ConditionalEnumerator = ConditionalDistributionEnumerator
+ConditionalEstimator = ConditionalDistributionEstimator

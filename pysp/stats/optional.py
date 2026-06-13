@@ -558,3 +558,7 @@ class OptionalDataEncoder(DataSequenceEncoder):
         z_idx = np.asarray(z_idx, dtype=int)
 
         return len(x), z_idx, nz_idx, enc_data
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+OptionalAccumulator = OptionalEstimatorAccumulator
+OptionalAccumulatorFactory = OptionalEstimatorAccumulatorFactory

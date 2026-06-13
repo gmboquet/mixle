@@ -494,3 +494,6 @@ class BinomialEstimator(ParameterEstimator):
         else:
             p = psum/(count*self.n) if count > 0 else 0.5
             return BinomialDistribution(self.n, p, name=self.name, keys=self.keys, prior=self.prior)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+BinomialAccumulatorFactory = BinomialEstimatorAccumulatorFactory

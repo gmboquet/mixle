@@ -842,3 +842,6 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
             theta, levels, exp_blocks[0], exp_blocks[1], initial_exponents=initial_exponents,
             init_mode=self.init_mode, k_max=self.k_max, len_dist=len_dist, name=self.name,
             use_numba=self.use_numba)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+QuantizedHiddenMarkovModelEstimator = QuantizedHiddenMarkovEstimator

@@ -20,6 +20,7 @@ parallelize over trees, and a pure-numpy implementation that batches nodes level
 
 """
 import math
+from pysp.utils.aliasing import coalesce_alias, require, MISSING
 from typing import List, Any, Tuple, Sequence, Union, Optional, TypeVar, Dict
 import itertools
 from pysp.utils.optional_deps import numba
@@ -114,12 +115,13 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         )
 
     def __init__(self, topics: Sequence[SequenceEncodableProbabilityDistribution],
-                 w: Union[Sequence[float], np.ndarray],
-                 transitions: Union[List[List[float]], np.ndarray],
+                 w: Union[Sequence[float], np.ndarray] = MISSING,
+                 transitions: Union[List[List[float]], np.ndarray] = MISSING,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  terminal_level: int = 10,
                  name: Optional[str] = None,
-                 use_numba: bool = False) -> None:
+                 use_numba: bool = False,
+                 weights: Union[Sequence[float], np.ndarray] = MISSING) -> None:
         """TreeHiddenMarkovModelDistribution for specifying an HMM on a rooted tree.
 
         Args:
@@ -146,6 +148,8 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             use_numba (bool): If true Numba used for computations.
 
         """
+        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
+        transitions = require('transitions', transitions, default=MISSING)
 
         with np.errstate(divide='ignore'):
             self.topics = topics
@@ -2097,3 +2101,10 @@ def level_state_prob(levels, num_states, tr_mat, init_prob, out):
         for i in range(num_states):
             for j in range(num_states):
                 out[k, i] += out[k-1, i]*tr_mat[i, j]
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+TreeHiddenMarkovModelAccumulator = TreeHiddenMarkovAccumulator
+TreeHiddenMarkovModelAccumulatorFactory = TreeHiddenMarkovAccumulatorFactory
+TreeHiddenMarkovModelDataEncoder = TreeHiddenMarkovDataEncoder
+TreeHiddenMarkovModelEstimator = TreeHiddenMarkovEstimator
+TreeHiddenMarkovModelSampler = TreeHiddenMarkovSampler

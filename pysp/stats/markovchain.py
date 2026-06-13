@@ -443,6 +443,158 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         """Returns MarkovChainEnumerator iterating state sequences in descending probability order."""
         return MarkovChainEnumerator(self)
 
+    def quantized_count_index(self, quantizer, max_fine_bucket: int):
+        """Structural count index: a forward DP carrying a count histogram per (length, end-state).
+
+        log p(x) = log p_init(x0) + sum_i log p_trans(x_i|x_{i-1}) + log p(len). The forward
+        recursion is lifted into the count semiring: alpha[t][s] is the histogram (over the fine
+        bucket of accumulated log probability) of length-t prefixes ending in state s, with
+        ``alpha[1][s] = delta(bucket(log p_init(s)))`` and
+        ``alpha[t+1][s'] = sum_s alpha[t][s].shift(bucket(log p_trans(s'|s)))``. Per length L the
+        sequence histogram pools the end states and shifts by the length term; the total pools
+        lengths. Sequences are unranked by choosing the end state, then walking the trellis
+        backward choosing predecessors by count.
+        """
+        from pysp.stats.pdist import EnumerationError
+        from pysp.utils.quantization import CountHistogram, CountIndex
+
+        if self.default_value != 0.0:
+            raise EnumerationError(self, reason='non-zero default_value gives an unbounded support')
+        if isinstance(self.len_dist, NullDistribution):
+            raise EnumerationError(self, reason='no length distribution is modeled (len_dist is Null)')
+
+        # Fixed iteration order over states; exact (default_value==0 makes the map values exact).
+        init_lp = {s: float(lp) for s, lp in self.loginit_prob_map.items() if lp > -np.inf}
+        state_order: List[Any] = list(init_lp.keys())
+        seen = set(state_order)
+        for s_prev, m in self.log_transition_map.items():
+            for s_next in m:
+                if s_next not in seen and m[s_next] > -np.inf:
+                    seen.add(s_next)
+                    state_order.append(s_next)
+        # Transitions into each next-state, in predecessor state_order.
+        into: Dict[Any, List[Tuple[Any, float, int]]] = {s: [] for s in state_order}
+        for s_prev in state_order:
+            m = self.log_transition_map.get(s_prev, {})
+            for s_next in state_order:
+                lp = m.get(s_next, -np.inf)
+                if lp > -np.inf:
+                    into[s_next].append((s_prev, float(lp), quantizer.fine_bucket(float(lp))))
+        init_fb = {s: quantizer.fine_bucket(lp) for s, lp in init_lp.items()}
+
+        truncated = False
+        lengths: List[Tuple[int, int]] = []
+        _LEN_CAP = 1 << 24
+        for length, lp_len in child_enumerator(self.len_dist, 'MarkovChainDistribution.len_dist'):
+            if not isinstance(length, (int, np.integer)) or length < 0 or lp_len == -np.inf:
+                continue
+            s_len = quantizer.fine_bucket(lp_len)
+            if s_len > max_fine_bucket:
+                truncated = True
+                break
+            lengths.append((int(length), s_len))
+            if len(lengths) >= _LEN_CAP:
+                truncated = True
+                break
+
+        if not lengths:
+            return CountIndex(CountHistogram.empty(), lambda fb, off: (_ for _ in ()).throw(IndexError())), truncated
+
+        max_len = max(L for L, _ in lengths)
+        # alpha[t] (1-based): dict state -> CountHistogram of length-t prefixes ending in state.
+        alpha: List[Dict[Any, CountHistogram]] = [None]  # index 0 unused
+        if max_len >= 1 and init_fb:
+            alpha.append({s: CountHistogram.delta(init_fb[s], 1) for s in state_order if s in init_fb})
+        else:
+            alpha.append({})
+        for t in range(2, max_len + 1):
+            prev = alpha[t - 1]
+            cur: Dict[Any, CountHistogram] = {}
+            for s_next in state_order:
+                acc = CountHistogram.empty()
+                for s_prev, _lp, shift in into[s_next]:
+                    ph = prev.get(s_prev)
+                    if ph is not None and not ph.is_empty():
+                        acc = acc.add(ph.shift(shift).truncate(max_fine_bucket))
+                if not acc.is_empty():
+                    cur[s_next] = acc
+            alpha.append(cur)
+            if not cur:
+                truncated = True
+                break
+        built_len = len(alpha) - 1
+
+        len0_lp = float(self.len_dist.log_density(0))
+
+        total = CountHistogram.empty()
+        contributing: List[Tuple[int, int]] = []
+        for L, s_len in lengths:
+            if L == 0:
+                piece = CountHistogram.delta(s_len, 1)
+                total = total.add(piece)
+                contributing.append((0, s_len))
+                continue
+            if L > built_len or not alpha[L]:
+                truncated = True
+                continue
+            pooled = CountHistogram.empty()
+            for s in state_order:
+                h = alpha[L].get(s)
+                if h is not None:
+                    pooled = pooled.add(h)
+            piece = pooled.shift(s_len).truncate(max_fine_bucket)
+            if piece.is_empty():
+                continue
+            total = total.add(piece)
+            contributing.append((L, s_len))
+
+        def unrank_alpha(t: int, s: Any, b: int, o: int) -> Tuple[List[Any], float]:
+            if t == 1:
+                return [s], init_lp[s]
+            for s_prev, lp_tr, shift in into[s]:
+                ph = alpha[t - 1].get(s_prev)
+                if ph is None:
+                    continue
+                cnt = ph.count_at(b - shift)
+                if cnt == 0:
+                    continue
+                if o < cnt:
+                    sub_seq, sub_lp = unrank_alpha(t - 1, s_prev, b - shift, o)
+                    sub_seq.append(s)
+                    return sub_seq, sub_lp + lp_tr
+                o -= cnt
+            raise IndexError('offset outside alpha[%d][%r] bucket %d' % (t, s, b))
+
+        def getter(fb: int, off: int) -> Tuple[Any, float]:
+            o = int(off)
+            for L, s_len in contributing:
+                if L == 0:
+                    if fb == s_len:
+                        if o < 1:
+                            return [], len0_lp
+                        o -= 1
+                    continue
+                target = fb - s_len
+                cnt_L = 0
+                for s in state_order:
+                    h = alpha[L].get(s)
+                    if h is not None:
+                        cnt_L += h.count_at(target)
+                if o < cnt_L:
+                    for s in state_order:
+                        h = alpha[L].get(s)
+                        if h is None:
+                            continue
+                        c = h.count_at(target)
+                        if o < c:
+                            return unrank_alpha(L, s, target, o)
+                        o -= c
+                    raise IndexError('offset outside markov fine bucket %d' % fb)
+                o -= cnt_L
+            raise IndexError('offset outside markov fine bucket %d' % fb)
+
+        return CountIndex(total, getter), truncated
+
 
 class _MarkovChainGradientFitState(object):
     """Autograd state for fixed-support MarkovChainDistribution fitting."""

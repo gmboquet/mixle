@@ -576,3 +576,6 @@ class GaussianEstimator(ParameterEstimator):
                 sigma2 = (sum_xx / nobs_loc2) - mu2*mu2
 
             return GaussianDistribution(mu, sigma2, name=self.name)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+GaussianAccumulatorFactory = GaussianEstimatorAccumulatorFactory

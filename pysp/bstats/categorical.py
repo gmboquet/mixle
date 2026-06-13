@@ -501,3 +501,7 @@ class CategoricalEstimator(ParameterEstimator):
 
 
 			return CategoricalDistribution(pMap, default_value=default_value, name=self.name)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+CategoricalAccumulator = CategoricalEstimatorAccumulator
+CategoricalAccumulatorFactory = CategoricalEstimatorAccumulatorFactory
