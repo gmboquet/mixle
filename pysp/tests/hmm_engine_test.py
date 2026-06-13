@@ -90,6 +90,31 @@ class HmmEngineForwardBackwardTestCase(unittest.TestCase):
                                 '%s transition counts differ' % name)
 
 
+class HmmEngineForwardBackwardInitTestCase(unittest.TestCase):
+    """hmm_engine_forward_backward accepts a per-sequence (N, S) initial vector (IndPi HMM)."""
+
+    def test_per_sequence_initial_vector(self):
+        rng = np.random.RandomState(0)
+        n_states, n_seq, tmax = 3, 4, 5
+        log_emit = np.log(rng.rand(n_seq, tmax, n_states) + 0.1)
+        mask = np.ones((n_seq, tmax))
+        mask[0, 4] = 0.0
+        mask[1, 3:] = 0.0
+        log_a = np.log(rng.dirichlet(np.ones(n_states), size=n_states))
+        log_w_seq = np.log(rng.dirichlet(np.ones(n_states), size=n_seq))
+        engines = [NUMPY_ENGINE] + ([_TORCH] if _TORCH is not None else [])
+        for engine in engines:
+            with self.subTest(engine=engine.name):
+                ll, _, _, _ = hmm_engine_forward_backward(engine, log_emit, log_w_seq, log_a, mask)
+                ll = np.asarray(engine.to_numpy(ll))
+                # each sequence's per-row init result equals running it alone with that shared init
+                for n in range(n_seq):
+                    one, _, _, _ = hmm_engine_forward_backward(
+                        engine, log_emit[n:n + 1], log_w_seq[n], log_a, mask[n:n + 1])
+                    self.assertAlmostEqual(float(np.asarray(engine.to_numpy(one))[0]), float(ll[n]),
+                                           places=10)
+
+
 class HmmEngineEStepTestCase(unittest.TestCase):
     """The engine-resident E-step (accumulator + kernel) matches the host Baum-Welch."""
 
