@@ -393,7 +393,19 @@ __all__ = [
     "VonMisesFisherDataEncoder",
     "WeightedDistribution",
     "WeightedDataEncoder",
-    "WeightedEstimator"
+    "WeightedEstimator",
+    "GraphDataEncoder",
+    "GraphObservation",
+    "ErdosRenyiGraphDistribution",
+    "ErdosRenyiGraphSampler",
+    "ErdosRenyiGraphAccumulator",
+    "ErdosRenyiGraphAccumulatorFactory",
+    "ErdosRenyiGraphEstimator",
+    "StochasticBlockGraphDistribution",
+    "StochasticBlockGraphSampler",
+    "StochasticBlockGraphAccumulator",
+    "StochasticBlockGraphAccumulatorFactory",
+    "StochasticBlockGraphEstimator"
 ]
 
 ### Abstract Classes
@@ -515,6 +527,11 @@ from pysp.stats.optional import OptionalDistribution, OptionalSampler, OptionalE
     OptionalEnumerator
 
 from pysp.stats.weighted import WeightedDistribution, WeightedEstimator, WeightedDataEncoder
+from pysp.stats.graph_data import GraphDataEncoder, GraphObservation
+from pysp.stats.erdos_renyi_graph import ErdosRenyiGraphDistribution, ErdosRenyiGraphSampler, \
+    ErdosRenyiGraphAccumulator, ErdosRenyiGraphAccumulatorFactory, ErdosRenyiGraphEstimator
+from pysp.stats.stochastic_block_graph import StochasticBlockGraphDistribution, StochasticBlockGraphSampler, \
+    StochasticBlockGraphAccumulator, StochasticBlockGraphAccumulatorFactory, StochasticBlockGraphEstimator
 
 from pysp.stats.select import SelectDistribution, SelectEstimator, SelectEnumerator
 
