@@ -207,6 +207,109 @@ class LLDADistribution(SequenceEncodableProbabilityDistribution):
 		return document_gammas
 
 
+	def compute_capabilities(self):
+		"""Return backend capability metadata for this concrete LLDA instance."""
+		from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+		return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.topics)),
+		                                kernel_status='generic_latent')
+
+	def _backend_seq_posterior(self, x, engine):
+		"""Engine-resident LLDA variational posterior (numpy or torch).
+
+		Returns (log_density_gamma, document_gammas, alphas_loc, per_topic_log_densities), mirroring
+		the host module-level seq_posterior but with a plain fixed-point loop on the active engine.
+		"""
+		from pysp.stats.backend import backend_seq_log_density
+
+		num_documents, idx, counts, gammas, enc_data, nbx, nbcnt, nbidx = x
+		num_topics = self.nTopics
+		alphas = engine.asarray(self.alphas)
+
+		idx_np = np.asarray(idx, dtype=np.int64)
+		idx_e = engine.asarray(idx_np)
+		counts_e = engine.asarray(np.asarray(counts, dtype=np.float64))
+		idx_full_np = (idx_np[:, None] * num_topics + np.arange(num_topics, dtype=np.int64)).reshape(-1)
+		idx_full = engine.asarray(idx_full_np)
+
+		nbx_e = engine.asarray(np.asarray(nbx, dtype=np.int64))
+		nbidx_e = engine.asarray(np.asarray(nbidx, dtype=np.int64))
+		# per-document mean of the label alphas (coupled prior)
+		ddd = engine.index_add(engine.zeros(num_documents), nbidx_e,
+		                       engine.asarray(np.ones(len(np.asarray(nbidx)), dtype=np.float64)))
+		alphas_loc = engine.index_add(engine.zeros((num_documents, num_topics)), nbidx_e, alphas[nbx_e, :])
+		alphas_loc = alphas_loc / ddd.reshape((-1, 1))
+
+		per_topic_log_densities = engine.stack(
+			[backend_seq_log_density(self.topics[i], enc_data, engine) for i in range(num_topics)], axis=1)
+		centered = per_topic_log_densities - engine.max(per_topic_log_densities, axis=1).reshape((-1, 1))
+		per_topic_weights = engine.exp(centered)
+
+		if gammas is None:
+			init_counts = engine.index_add(
+				engine.zeros(num_documents * num_topics), idx_full,
+				engine.asarray(np.ones(len(idx_full_np), dtype=np.float64))).reshape((num_documents, num_topics))
+			document_gammas = alphas_loc + init_counts / float(num_topics)
+		else:
+			document_gammas = engine.asarray(gammas)
+
+		for _ in range(10000):
+			dg = engine.digamma(document_gammas)
+			gw = engine.exp(dg - engine.max(dg, axis=1).reshape((-1, 1)))
+			row_weights = per_topic_weights * gw[idx_e, :]
+			row_sum = engine.sum(row_weights, axis=1).reshape((-1, 1))
+			log_density_gamma = row_weights / row_sum * counts_e.reshape((-1, 1))
+			gamma_updates = engine.index_add(
+				engine.zeros(num_documents * num_topics), idx_full,
+				log_density_gamma.reshape((-1,))).reshape((num_documents, num_topics))
+			gamma_updates = gamma_updates + alphas_loc
+			rel_diff = engine.sum(engine.abs(document_gammas - gamma_updates), axis=1) / \
+				engine.sum(gamma_updates, axis=1)
+			document_gammas = gamma_updates
+			if float(np.max(engine.to_numpy(rel_diff))) <= self.gamma_threshold:
+				break
+
+		# final responsibilities consistent with the converged gammas
+		dg = engine.digamma(document_gammas)
+		gw = engine.exp(dg - engine.max(dg, axis=1).reshape((-1, 1)))
+		row_weights = per_topic_weights * gw[idx_e, :]
+		row_sum = engine.sum(row_weights, axis=1).reshape((-1, 1))
+		log_density_gamma = row_weights / row_sum * counts_e.reshape((-1, 1))
+
+		return log_density_gamma, document_gammas, alphas_loc, per_topic_log_densities
+
+	def backend_seq_log_density(self, x, engine):
+		"""Backend-neutral LLDA variational lower-bound (ELBO) scoring."""
+		num_documents, idx, counts, _, enc_data, nbx, nbcnt, nbidx = x
+		num_topics = self.nTopics
+		idx_np = np.asarray(idx, dtype=np.int64)
+		idx_e = engine.asarray(idx_np)
+		counts_e = engine.asarray(np.asarray(counts, dtype=np.float64))
+		idx_full = engine.asarray(
+			(idx_np[:, None] * num_topics + np.arange(num_topics, dtype=np.int64)).reshape(-1))
+
+		log_density_gamma, document_gammas, document_alphas, per_topic_log_densities = \
+			self._backend_seq_posterior(x, engine)
+
+		tiny = sys.float_info.min
+		bad = engine.isnan(log_density_gamma) | engine.isinf(log_density_gamma) | (log_density_gamma <= 0)
+		log_density_gamma = engine.where(bad, engine.asarray(tiny), log_density_gamma)
+		bad_d = engine.isnan(document_gammas) | engine.isinf(document_gammas)
+		document_gammas = engine.where(bad_d, engine.asarray(tiny), document_gammas)
+
+		gamma_sum = engine.sum(document_gammas, axis=1).reshape((-1, 1))
+		elob0 = engine.digamma(document_gammas) - engine.digamma(gamma_sum)
+		elob1 = elob0[idx_e, :]
+		elob2 = log_density_gamma * (elob1 + per_topic_log_densities - engine.log(log_density_gamma)
+		                             + engine.log(counts_e.reshape((-1, 1))))
+		elob3 = engine.sum(elob0 * ((document_alphas - 1.0) - (document_gammas - 1.0)), axis=1)
+		elob4 = engine.index_add(engine.zeros(num_documents * num_topics), idx_full,
+		                         elob2.reshape((-1,))).reshape((num_documents, num_topics))
+		elob5 = engine.sum(elob4, axis=1)
+		elob6 = engine.sum(engine.gammaln(document_gammas), axis=1) - engine.gammaln(engine.sum(document_gammas, axis=1))
+		alpha_sum = engine.sum(document_alphas, axis=1)
+		elob7 = engine.gammaln(alpha_sum) - engine.sum(engine.gammaln(document_alphas), axis=1)
+		return elob3 + elob5 + elob6 + elob7
+
 	def sampler(self, seed=None):
 		"""Create an LLDASampler object with seed passed.
 
@@ -686,6 +789,54 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 		self.prev_alpha    = estimate.alphas
 
 		#return num_documents, idx, counts, final_gammas, enc_data
+
+	def seq_update_engine(self, x, weights, estimate, engine):
+		"""Engine-resident LLDA E-step (numpy or torch).
+
+		Runs the variational posterior and the per-label-set / topic-count aggregations on the active
+		engine, feeding engine-computed responsibilities to the topic accumulators. Mirrors seq_update.
+		"""
+		num_alphas = self.num_alphas
+		num_topics = self.num_topics
+		num_documents, idx, counts, old_gammas, enc_data, nbx, nbcnt, nbidx = x
+
+		weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+		                        dtype=np.float64)
+		idx_np = np.asarray(idx, dtype=np.int64)
+		nbx_np = np.asarray(nbx, dtype=np.int64)
+		nbidx_np = np.asarray(nbidx, dtype=np.int64)
+
+		log_density_gamma, final_gammas, doc_alphas, per_topic_log_densities = \
+			estimate._backend_seq_posterior(x, engine)
+
+		idx_e = engine.asarray(idx_np)
+		nbx_e = engine.asarray(nbx_np)
+		nbidx_e = engine.asarray(nbidx_np)
+		w_idx = engine.asarray(weights_np[idx_np]).reshape((-1, 1))
+		weighted_topic_counts = log_density_gamma * w_idx
+
+		gamma_sum = engine.sum(final_gammas, axis=1).reshape((-1, 1))
+		mlpf = engine.digamma(final_gammas) - engine.digamma(gamma_sum)
+
+		nbh_cnt = engine.index_add(engine.zeros(num_alphas), nbx_e,
+		                           engine.asarray(weights_np[nbidx_np]))
+		nbcnt_doc_e = engine.asarray(np.maximum(np.asarray(nbcnt)[nbidx_np].astype(np.float64), 1.0))
+		w_nbidx_e = engine.asarray(weights_np[nbidx_np])
+		nbh_tcols = []
+		for i in range(num_topics):
+			doc_tcnt = engine.index_add(engine.zeros(num_documents), idx_e, log_density_gamma[:, i])
+			label_weight = doc_tcnt[nbidx_e] * w_nbidx_e / nbcnt_doc_e
+			nbh_tcols.append(engine.index_add(engine.zeros(num_alphas), nbx_e, label_weight))
+		nbh_tcnt = engine.stack(nbh_tcols, axis=1)
+
+		wtc_np = np.asarray(engine.to_numpy(weighted_topic_counts))
+		for i in range(num_topics):
+			self.accumulators[i].seq_update(enc_data, wtc_np[:, i], estimate.topics[i])
+
+		self._accumulate_set_stats(np.asarray(engine.to_numpy(mlpf)), weights_np, nbx, nbcnt)
+		self.doc_counts   += np.asarray(engine.to_numpy(nbh_cnt)).reshape((-1, 1))
+		self.topic_counts += np.asarray(engine.to_numpy(nbh_tcnt))
+		self.prev_alpha    = estimate.alphas
 
 
 	def combine(self, suff_stat):
