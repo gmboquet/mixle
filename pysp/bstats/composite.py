@@ -486,3 +486,6 @@ class CompositeEstimator(ParameterEstimator):
 			CompositeDistribution of the per-component estimates.
 		"""
 		return CompositeDistribution(tuple([est.estimate(ss) for est, ss in zip(self.estimators, suff_stat)]), name=self.name, keys=self.keys)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+CompositeAccumulator = CompositeEstimatorAccumulator

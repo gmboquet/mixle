@@ -599,3 +599,7 @@ class SequenceEstimator(ParameterEstimator):
 			return SequenceDistribution(self.estimator.estimate(suff_stat[0]), None, len_normalized=self.len_normalized)
 		else:
 			return SequenceDistribution(self.estimator.estimate(suff_stat[0]), self.len_estimator.estimate(suff_stat[1]), len_normalized=self.len_normalized)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+SequenceAccumulator = SequenceEstimatorAccumulator
+SequenceAccumulatorFactory = SequenceEstimatorAccumulatorFactory

@@ -14,6 +14,7 @@ If component distribution P(Y|Z=k) has data type (T), then the Mixture distribut
 """
 import math
 import numpy as np
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator, child_enumerator, EnumerationError
@@ -63,8 +64,10 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     def __init__(self,
                  components: Sequence[SequenceEncodableProbabilityDistribution],
-                 w: Union[np.ndarray, List[float]],
-                 name: Optional[str] = None) -> None:
+                 w: Union[np.ndarray, List[float]] = MISSING,
+                 name: Optional[str] = None,
+                 weights: Union[np.ndarray, List[float]] = MISSING) -> None:
+        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
         if isinstance(w, np.ndarray):
             self.w = w
         else:

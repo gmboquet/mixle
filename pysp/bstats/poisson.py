@@ -485,3 +485,7 @@ class PoissonEstimator(ParameterEstimator):
         else:
             lam = psum/nobs if nobs > 0 else 1.0
             return PoissonDistribution(max(lam, 1.0e-128), name=self.name, prior=self.prior if self.has_prior else null_dist)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+PoissonAccumulator = PoissonEstimatorAccumulator
+PoissonAccumulatorFactory = PoissonEstimatorAccumulatorFactory

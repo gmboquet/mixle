@@ -315,3 +315,6 @@ class LogGaussianEstimator(GaussianEstimator):
         gd = super().estimate(suff_stat)
         sigma2 = gd.sigma2 if gd.sigma2 > 0 else 1.0
         return LogGaussianDistribution(gd.mu, sigma2, name=self.name, prior=gd.prior)
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+LogGaussianAccumulatorFactory = LogGaussianEstimatorAccumulatorFactory
