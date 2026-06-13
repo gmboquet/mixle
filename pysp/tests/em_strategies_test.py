@@ -263,6 +263,25 @@ class EMStrategiesTestCase(unittest.TestCase):
         fitted = run_em(self.enc, self.estimator, self.start, strategy=StandardEM(), max_its=3, delta=None)
         self.assertGreater(objective(fitted), before)
 
+    def test_optimize_accepts_em_strategy(self):
+        # the strategy hook lets em.py strategies drive optimize's loop; the
+        # default and an explicit StandardEM must reach the same fit, and a
+        # callable strategy must also be accepted
+        import io
+        from pysp.utils.estimation import optimize
+        default_fit = optimize(self.data, self.estimator, max_its=15,
+                               rng=np.random.RandomState(2), out=io.StringIO())
+        strategy_fit = optimize(self.data, self.estimator, max_its=15,
+                                rng=np.random.RandomState(2), out=io.StringIO(),
+                                strategy=StandardEM())
+        _assert_mixture_close(self, strategy_fit, default_fit)
+
+        callable_fit = optimize(self.data, self.estimator, max_its=5,
+                                rng=np.random.RandomState(2), out=io.StringIO(),
+                                strategy=lambda enc, est, model: seq_estimate(enc, est, model))
+        self.assertIsInstance(callable_fit, MixtureDistribution)
+        self.assertTrue(np.all(np.isfinite(callable_fit.w)))
+
 
 if __name__ == '__main__':
     unittest.main()

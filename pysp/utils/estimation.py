@@ -219,60 +219,32 @@ def best_of(data: Optional[Sequence[T]], vdata: Optional[Sequence[T]], est: Para
         Tuple of log-likelihood of best fitting model and the best fitting model from number of trials.
 
     """
-    rv_ll = -np.inf
-    rv_mm = None
-    i_est = est if init_estimator is None else init_estimator
-
     if data is None and enc_data is None:
         raise Exception('Optimization called with empty data or enc_data.')
 
-    if max_its < 1:
-        max_its = 1
+    max_its = max(1, max_its)
+    trials = max(1, trials)
+    i_est = est if init_estimator is None else init_estimator
 
-    if trials < 1:
-        trials = 1
-
-    for kk in range(trials):
-
-        if enc_data is None:
-            encoder = i_est.accumulator_factory().make().acc_to_encoder()
-            enc_data = seq_encode(data, encoder)
-
-            if enc_vdata is None and vdata is not None:
-                enc_vdata = seq_encode(vdata, encoder)
-        elif enc_vdata is None and vdata is not None:
-            encoder = i_est.accumulator_factory().make().acc_to_encoder()
+    # encode once and reuse across trials (each trial re-initializes from rng)
+    if enc_data is None:
+        encoder = _resolve_encoder(i_est)
+        enc_data = seq_encode(data, encoder)
+        if enc_vdata is None and vdata is not None:
             enc_vdata = seq_encode(vdata, encoder)
+    elif enc_vdata is None and vdata is not None:
+        enc_vdata = seq_encode(vdata, _resolve_encoder(i_est))
+    score_data = enc_data if enc_vdata is None else enc_vdata
 
-        if enc_vdata is None:
-            enc_vdata = enc_data
-
-        mm = seq_initialize(enc_data, i_est, rng, init_p)
-        _, old_ll = seq_log_density_sum(enc_data, mm)
-
-        for i in range(max_its):
-
-            mm_next = seq_estimate(enc_data, est, mm)
-            _, ll = seq_log_density_sum(enc_data, mm_next)
-            dll = ll - old_ll
-
-            if (i + 1) % print_iter == 0:
-                out.write('Iteration %d. LL=%f, delta LL=%e\n' % (i + 1, ll, dll))
-
-            if (dll >= 0) or (delta is None):
-                mm = mm_next
-
-            if (delta is not None) and (dll < delta):
-                break
-
-            old_ll = ll
-
-        _, vll = seq_log_density_sum(enc_vdata, mm)
+    rv_ll, rv_mm = -np.inf, None
+    for kk in range(trials):
+        mm = optimize(None, est, init_estimator=i_est, enc_data=enc_data, enc_vdata=enc_vdata,
+                      max_its=max_its, delta=delta, init_p=init_p, rng=rng, out=out,
+                      print_iter=print_iter)
+        _, vll = seq_log_density_sum(score_data, mm)
         out.write('Trial %d. VLL=%f\n' % (kk + 1, vll))
-
         if vll > rv_ll:
-            rv_mm = mm
-            rv_ll = vll
+            rv_ll, rv_mm = vll, mm
 
     return rv_ll, rv_mm
 
@@ -341,6 +313,114 @@ def _data_records_for_encoding(data: Any, fields: Any, estimator: Any, model: An
     return dataframe_records(data, fields=record_fields, as_dict=_recordish(model) or _recordish(estimator))
 
 
+# --- shared EM driver ------------------------------------------------------
+#
+# optimize/best_of/iterate (and em.run_em) all share the same skeleton: build an
+# encoder, encode the data, initialize (or reuse) a model, then iterate an E/M
+# step until convergence. The helpers below factor out that skeleton so each
+# entry point is a thin policy wrapper over one tested loop.
+
+def _resolve_encoder(estimator: ParameterEstimator,
+                     prev_estimate: Optional[SequenceEncodableProbabilityDistribution] = None) -> Any:
+    """Return the data encoder for a fitting run (model encoder if continuing)."""
+    if prev_estimate is not None:
+        return prev_estimate.dist_to_encoder()
+    return estimator.accumulator_factory().make().acc_to_encoder()
+
+
+def _ll_sum_fn(engine: Optional[Any]):
+    """Return a (enc, model) -> (count, log_likelihood) scorer for the engine."""
+    if engine is None:
+        return seq_log_density_sum
+    return lambda enc, model: _engine_seq_log_density_sum(enc, model, engine)
+
+
+def _em_step_fn(engine: Optional[Any], strategy: Optional[Any] = None):
+    """Return the per-iteration (enc, estimator, model) -> model update.
+
+    With ``strategy`` set, the update is delegated to an EM strategy object
+    (``pysp.utils.em``) or any callable, which is how alternative E-steps
+    (annealed, hard, Monte-Carlo, ...) plug into ``optimize`` without a circular
+    import. Otherwise the standard exact E/M step is used (engine-aware).
+    """
+    if strategy is not None:
+        step_method = getattr(strategy, 'step', None)
+        if callable(step_method):
+            def step(enc, estimator, model):
+                result = step_method(enc, estimator, model, engine=engine)
+                return getattr(result, 'model', result)
+            return step
+        if callable(strategy):
+            return lambda enc, estimator, model: strategy(enc, estimator, model)
+        raise TypeError('strategy must be an EM strategy with .step(...) or a callable '
+                        '(enc, estimator, model) -> model.')
+    if engine is None:
+        return seq_estimate
+    return lambda enc, estimator, model: _engine_seq_estimate(enc, estimator, model, engine)
+
+
+def _write_em_iter(out: Optional[IO], i: int, ll: float, dll: float, vll: float, has_vdata: bool) -> None:
+    """Write one EM progress line in the historical format."""
+    if out is None:
+        return
+    if has_vdata:
+        out.write('Iteration %d: ln[p_mat(Data|Model)]=%e, ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e, '
+                  'ln[p_mat(Valid Data|Model)]=%e\n' % (i, ll, dll, vll))
+    else:
+        out.write('Iteration %d: ln[p_mat(Data|Model)]=%e, '
+                  'ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e\n' % (i, ll, dll))
+
+
+def _em_loop(enc_data: Any, estimator: ParameterEstimator,
+             model: SequenceEncodableProbabilityDistribution,
+             step_fn: Any, ll_fn: Any, max_its: int, delta: Optional[float],
+             enc_vdata: Optional[Any] = None, out: Optional[IO] = sys.stdout,
+             print_iter: int = 1, monotone: bool = True,
+             track_best: bool = True) -> Tuple[SequenceEncodableProbabilityDistribution, float]:
+    """Canonical EM iteration shared by the public estimation entry points.
+
+    Args:
+        step_fn: ``(enc, estimator, model) -> model`` E/M (or strategy) update.
+        ll_fn: ``(enc, model) -> (count, log_likelihood)`` convergence objective.
+        delta: stop when the training log-likelihood gain drops below this;
+            ``None`` runs the full ``max_its`` iterations.
+        enc_vdata: optional encoded validation set used for best-model tracking.
+        monotone: when True only accept a step that does not decrease the
+            training log-likelihood (the historical ``optimize`` guard).
+        track_best: when True return the best-by-validation model seen; otherwise
+            the final accepted model.
+
+    Returns:
+        ``(chosen_model, best_validation_score)``.
+    """
+    _, old_ll = ll_fn(enc_data, model)
+    has_v = enc_vdata is not None
+    best_vll = ll_fn(enc_vdata, model)[1] if has_v else old_ll
+    best_model = model
+
+    for i in range(int(max_its)):
+        nxt = step_fn(enc_data, estimator, model)
+        _, ll = ll_fn(enc_data, nxt)
+        vll = ll_fn(enc_vdata, nxt)[1] if has_v else ll
+        dll = ll - old_ll
+
+        if (dll >= 0) or (delta is None) or (not monotone):
+            model = nxt
+
+        converged = (delta is not None) and (dll < delta)
+        if converged or ((i + 1) % print_iter == 0):
+            _write_em_iter(out, i + 1, ll, dll, vll, has_v)
+        if converged:
+            break
+
+        old_ll = ll
+        if track_best and best_vll < vll:
+            best_vll = vll
+            best_model = model
+
+    return (best_model if track_best else model), best_vll
+
+
 def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its: int = 10,
              delta: Optional[float] = 1.0e-9,
              init_estimator: Optional[ParameterEstimator] = None, init_p: float = 0.1,
@@ -362,7 +442,8 @@ def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its
              client: Optional[Any] = None,
              comm: Optional[Any] = None,
              root: int = 0,
-             root_only: bool = False) -> SequenceEncodableProbabilityDistribution:
+             root_only: bool = False,
+             strategy: Optional[Any] = None) -> SequenceEncodableProbabilityDistribution:
     """Estimation of 'estimator' via EM algorithm for max_its iterations or until
         new_loglikelihood - old_loglikelihood < delta.
 
@@ -408,6 +489,9 @@ def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its
         comm (Optional[Any]): MPI communicator for ``backend='mpi'``.
         root (int): MPI root rank for ``backend='mpi'``.
         root_only (bool): MPI root-only data mode for ``backend='mpi'``.
+        strategy (Optional[Any]): Optional EM strategy from ``pysp.utils.em`` (e.g. ``AnnealedEM``,
+            ``HardEM``, ``MonteCarloEM``) or any callable ``(enc, estimator, model) -> model`` to use
+            in place of the standard exact E/M step. ``None`` uses the standard step.
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
@@ -458,70 +542,16 @@ def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its
         else:
             mm = prev_estimate
 
-        if engine is None:
-            log_density_sum = seq_log_density_sum
-            estimate_step = seq_estimate
-        else:
-            log_density_sum = lambda enc_data, estimate: _engine_seq_log_density_sum(enc_data, estimate, engine)
-            estimate_step = lambda enc_data, estimator, prev_estimate: \
-                _engine_seq_estimate(enc_data, estimator, prev_estimate, engine)
-
-        _, old_ll = log_density_sum(enc_data=enc_data, estimate=mm)
-
         if enc_vdata is None and vdata is not None:
             vdata_for_encoding = _data_records_for_encoding(vdata, fields, est, mm)
             enc_vdata = seq_encode(vdata_for_encoding, data_encoder, num_chunks=num_chunks, chunk_size=chunk_size)
 
-        if enc_vdata is not None:
-            _, old_vll = log_density_sum(enc_vdata, mm)
-        else:
-            old_vll = old_ll
-
-        best_model = mm
-        best_vll = old_vll
-
-        for i in range(max_its):
-
-            mm_next = estimate_step(enc_data=enc_data, estimator=estimator, prev_estimate=mm)
-            cnt, ll = log_density_sum(enc_data=enc_data, estimate=mm_next)
-
-            if enc_vdata is not None:
-                _, vll = log_density_sum(enc_vdata, mm_next)
-            else:
-                vll = ll
-
-            dll = ll - old_ll
-
-            if (dll >= 0) or (delta is None):
-                mm = mm_next
-
-            if (delta is not None) and (dll < delta):
-                if enc_vdata is not None:
-                    out.write(
-                        'Iteration %d: ln[p_mat(Data|Model)]=%e, ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e, '
-                        'ln[p_mat(Valid Data|Model)]=%e\n' % (
-                        i + 1, ll, dll, vll))
-                else:
-                    out.write('Iteration %d: ln[p_mat(Data|Model)]=%e, '
-                              'ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e\n' %
-                              (i + 1, ll, dll))
-                break
-
-            if (i + 1) % print_iter == 0:
-                if enc_vdata is not None:
-                    out.write('Iteration %d: ln[p_mat(Data|Model)]=%e, '
-                              'ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e, '
-                              'ln[p_mat(Valid Data|Model)]=%e\n' % (i + 1, ll, dll, vll))
-                else:
-                    out.write('Iteration %d: ln[p_mat(Data|Model)]=%e, '
-                              'ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e\n' %
-                              (i + 1, ll, dll))
-
-            old_ll = ll
-
-            if best_vll < vll:
-                best_vll = vll
-                best_model = mm
+        best_model, _ = _em_loop(
+            enc_data, estimator, mm,
+            step_fn=_em_step_fn(engine, strategy),
+            ll_fn=_ll_sum_fn(engine),
+            max_its=max_its, delta=delta, enc_vdata=enc_vdata,
+            out=out, print_iter=print_iter)
 
         return best_model
     finally:
@@ -788,15 +818,9 @@ def iterate(data: List[T], estimator: Optional[ParameterEstimator], max_its: int
     i_est = estimator if init_estimator is None else init_estimator
 
     if enc_data is None:
-        encoder = estimator.accumulator_factory().make().acc_to_encoder()
-        enc_data = seq_encode(data, encoder)
+        enc_data = seq_encode(data, _resolve_encoder(estimator))
 
     if prev_estimate is None:
-        if init_p <= 0.0:
-            p = 0.1
-        else:
-            p = min(max(init_p, 0.0), 1.0)
-
         mm = seq_initialize(enc_data, i_est, rng, init_p)
     else:
         mm = prev_estimate
@@ -804,10 +828,11 @@ def iterate(data: List[T], estimator: Optional[ParameterEstimator], max_its: int
     if hasattr(enc_data, 'cache'):
         enc_data.cache()
 
+    # fixed-iteration stepping with timing only (no convergence/scoring): the
+    # lightweight path for callers that just want N EM steps
     t0 = time.time()
     for i in range(max_its):
         mm = seq_estimate(enc_data, estimator, mm)
-
         if (i + 1) % print_iter == 0:
             out.write('Iteration %d\t E[dT]=%f.\n' % (i + 1, (time.time() - t0) / float(i + 1)))
 
@@ -1142,11 +1167,6 @@ def _fit_gradient(enc, model, engine, max_its, lr, optimizer, tol, out, print_it
     initial_leaves_by_id = {id(leaf): leaf.detach().clone() for leaf in leaves}
     priors = as_prior_dict(priors)
 
-    opt_classes = {'adam': torch.optim.Adam, 'lbfgs': torch.optim.LBFGS}
-    if optimizer not in opt_classes:
-        raise ValueError('Unknown optimizer %s. Expected one of %s.' % (optimizer, ', '.join(sorted(opt_classes))))
-    opt = opt_classes[optimizer](leaves, lr=lr)
-
     def log_likelihood():
         total = None
         for chunk in enc_chunks:
@@ -1162,31 +1182,17 @@ def _fit_gradient(enc, model, engine, max_its, lr, optimizer, tol, out, print_it
     def objective():
         return log_likelihood() + log_prior()
 
-    iterations = max(1, int(max_its))
-    converged = False
-    history = [_tensor_scalar(objective())]
-    for i in range(iterations):
-        if optimizer == 'lbfgs':
-            def closure():
-                opt.zero_grad()
-                loss = -objective()
-                loss.backward()
-                return loss
-            loss = opt.step(closure)
-        else:
-            opt.zero_grad()
-            loss = -objective()
-            loss.backward()
-            opt.step()
-
-        cur = _tensor_scalar(objective())
-        history.append(cur)
-        if out is not None and (i + 1) % max(1, int(print_iter)) == 0:
-            out.write('%s iteration %d: objective=%e\n' % (tag, i + 1, cur))
-        if len(history) > 2 and abs(cur - history[-2]) < tol * max(1.0, abs(cur)):
-            iterations = i + 1
-            converged = True
-            break
+    # one gradient-descent loop, shared with objectives.optimize_torch_objective.
+    # restore_best=False keeps this fit's "return the final iterate" semantics
+    # (the leaves still hold the final values for the diagnostics below).
+    from pysp.utils.objectives import optimize_torch_objective
+    loop = optimize_torch_objective(
+        leaves, objective, engine=engine, max_its=max_its, lr=lr, optimizer=optimizer,
+        tol=tol, maximize=True, out=out, print_iter=print_iter,
+        restore_best=False, return_result=True)
+    history = list(loop.history)
+    iterations = loop.iterations
+    converged = loop.converged
 
     final_obj = history[-1]
     final_ll = _tensor_scalar(log_likelihood())
