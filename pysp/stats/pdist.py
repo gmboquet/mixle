@@ -199,6 +199,43 @@ class ProbabilityDistribution:
         return count_budget_index(self, budget_bits, bin_width_bits=bin_width_bits,
                                   oversample=oversample, num_workers=num_workers)
 
+    def count_budget_distinct(self, budget_bits: float, bin_width_bits: float = 1.0,
+                              oversample: int = 8, dedup: str = 'canonical',
+                              start: int = 0, stop: Optional[int] = None,
+                              max_entries: int = 1 << 16, num_workers: Optional[int] = None):
+        """Iterate DISTINCT (value, exact_log_prob) over the count-budget index, approx descending.
+
+        For exact-count families this equals the ordered index stream. For the over-counting
+        MARGINAL families (Mixture/HMM) it removes the component/path duplicates by one of two modes:
+
+          - ``dedup='canonical'`` (default): a STATELESS predicate (``is_canonical_copy``) keeps a
+            value only at its dominant copy (best-weighted component / min-cost path), evaluated by
+            scoring the model. O(1) memory, and -- crucially -- random-accessible: ``start``/``stop``
+            select an arbitrary STRUCTURAL rank range, so you can begin anywhere and the work
+            partitions across workers with no shared state. Exact except for genuine bin ties between
+            equally-dominant copies (rare; tightened by larger ``oversample``).
+          - ``dedup='window'``: a bounded ``max_entries`` LRU over the stream (catches every duplicate
+            within the window regardless of dominance, but is sequential -- ``start`` must be 0).
+
+        Note: ``start``/``stop`` index the STRUCTURAL enumeration, not the distinct rank. Jumping to
+        the k-th *distinct* value in O(1) is not possible -- it needs exact distinct per-bin counts,
+        which require the overlap structure this design deliberately avoids materializing.
+        """
+        from pysp.utils.quantization import distinct_budget_stream
+        return distinct_budget_stream(self, budget_bits, bin_width_bits=bin_width_bits,
+                                      oversample=oversample, dedup=dedup, start=start, stop=stop,
+                                      max_entries=max_entries, num_workers=num_workers)
+
+    def is_canonical_copy(self, value, coarse_bin: int, quantizer) -> bool:
+        """Return True if ``coarse_bin`` is ``value``'s dominant (canonical) bin in the count index.
+
+        Stateless deduplication hook for the over-counting MARGINAL families: a value that the
+        structural index emits once per component / state-path is kept only at the copy whose bin is
+        the minimal (most probable) one. The default returns True -- exact-count families
+        (Composite/Sequence/MarkovChain) never duplicate, so every copy is canonical.
+        """
+        return True
+
     def quantized_multi_cross_index(self, others: List['ProbabilityDistribution'], max_bits,
                                     bin_width_bits: float = 1.0):
         """Build an aligned bounded cross-bin view against other distributions.

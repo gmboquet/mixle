@@ -234,16 +234,18 @@ class CountIndex(object):
 
 
 def leaf_count_index(enum: Iterator[Tuple[Any, float]], quantizer: Quantizer,
-                     max_fine_bucket: int) -> Tuple[CountIndex, bool]:
+                     max_fine_bucket: int, max_items: Optional[int] = None) -> Tuple[CountIndex, bool]:
     """Build a CountIndex from an exact descending-probability enumerator, bounded by depth.
 
-    Pulls items until their fine bucket exceeds ``max_fine_bucket``. Cheap for closed-form or
-    small-support leaves (a geometric/Poisson has ~depth items within a depth bound). Returns
-    ``(index, truncated)`` where ``truncated`` is True if the enumerator had more in-bound items
-    than were taken (always False here -- it is exhausted to the depth bound) or items beyond it.
+    Pulls items until their fine bucket exceeds ``max_fine_bucket`` (or, if ``max_items`` is given,
+    until that many items have been taken). Cheap for closed-form or small-support leaves (a
+    geometric/Poisson has ~depth items within a depth bound); the ``max_items`` cap is the brake for
+    the enumerate-and-bin fallback over exponential-support families that cannot count structurally.
+    Returns ``(index, truncated)`` where ``truncated`` is True if in-bound items were left untaken.
     """
     by_bucket: Dict[int, List[Tuple[Any, float]]] = {}
     truncated = False
+    taken = 0
     for value, log_prob in enum:
         if log_prob == -math.inf:
             continue
@@ -252,6 +254,10 @@ def leaf_count_index(enum: Iterator[Tuple[Any, float]], quantizer: Quantizer,
             truncated = True
             break
         by_bucket.setdefault(fb, []).append((value, float(log_prob)))
+        taken += 1
+        if max_items is not None and taken >= max_items:
+            truncated = True
+            break
 
     if not by_bucket:
         return CountIndex(CountHistogram.empty(), lambda fb, off: (_ for _ in ()).throw(IndexError())), truncated
@@ -466,6 +472,50 @@ def count_budget_index(dist, budget_bits: float, bin_width_bits: float = 1.0,
     finally:
         if executor is not None:
             executor.close()
+
+
+def distinct_budget_stream(dist, budget_bits: float, bin_width_bits: float = 1.0,
+                           oversample: int = 8, dedup: str = 'canonical',
+                           start: int = 0, stop: Optional[int] = None,
+                           max_entries: int = 1 << 16,
+                           num_workers: Optional[int] = None) -> Iterator[Tuple[Any, float]]:
+    """Yield DISTINCT (value, exact_log_prob) from a count-budget index, in approx descending order.
+
+    Builds the budget index and removes repeats by one of two modes (see
+    ``ProbabilityDistribution.count_budget_distinct`` for the full contract):
+
+      - ``dedup='canonical'``: stateless per-item predicate (``dist.is_canonical_copy``), O(1)
+        memory and random-accessible -- ``start``/``stop`` choose a STRUCTURAL rank range, so the
+        distinct enumeration can begin anywhere and partition across workers with no shared state.
+      - ``dedup='window'``: a bounded O(max_entries) LRU over the stream (sequential; ``start`` must
+        be 0).
+
+    Exact-count families never duplicate, so either mode is a pass-through.
+    """
+    index = count_budget_index(dist, budget_bits, bin_width_bits=bin_width_bits,
+                               oversample=oversample, num_workers=num_workers)
+    n = index.total_count
+    stop = n if stop is None else min(int(stop), n)
+    start = max(0, int(start))
+
+    if dedup == 'window':
+        if start != 0:
+            raise ValueError("dedup='window' is sequential; start must be 0 (use 'canonical' to seek)")
+        from pysp.utils.quantization_semiring import bounded_dedup_stream
+        raw = (index.get(i) for i in range(start, stop))
+        return bounded_dedup_stream(raw, max_entries=max_entries)
+
+    if dedup != 'canonical':
+        raise ValueError("dedup must be 'canonical' or 'window'")
+    quantizer = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
+
+    def gen():
+        for i in range(start, stop):
+            coarse_bin, _off = index.bin_for_index(i)
+            value, lp = index.get(i)
+            if dist.is_canonical_copy(value, coarse_bin, quantizer):
+                yield value, lp
+    return gen()
 
 
 def _two_pow(bits: float) -> int:
