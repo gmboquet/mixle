@@ -173,6 +173,22 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum_of_logs += np.dot(lx, weights)
             self.min_val = min(self.min_val, float(np.min(xx[mask])))
 
+    def seq_update_engine(self, x: Tuple[np.ndarray, np.ndarray], weights: Any,
+                          estimate: Optional[ParetoDistribution], engine: Any) -> None:
+        """Engine-resident accumulation of the count and log-sum statistics (numpy or torch)."""
+        xx, lx = x
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        w = engine.asarray(weights_np)
+        lx_e = engine.asarray(np.asarray(lx, dtype=np.float64))
+        zero = engine.asarray(0.0)
+        pos = w > zero
+        self.count += float(engine.to_numpy(engine.sum(engine.where(pos, w, zero))))
+        self.sum_of_logs += float(engine.to_numpy(engine.sum(lx_e * w)))
+        mask_np = weights_np > 0.0
+        if np.any(mask_np):
+            self.min_val = min(self.min_val, float(np.min(np.asarray(xx)[mask_np])))
+
     def seq_initialize(self, x: Tuple[np.ndarray, np.ndarray], weights: np.ndarray,
                        rng: Optional[RandomState]) -> None:
         self.seq_update(x, weights, None)

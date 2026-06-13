@@ -162,6 +162,11 @@ class PointMassAccumulator(SequenceEncodableStatisticAccumulator):
                    estimate: Optional[PointMassDistribution]) -> None:
         pass
 
+    def seq_update_engine(self, x: np.ndarray, weights: Any,
+                          estimate: Optional[PointMassDistribution], engine: Any) -> None:
+        # PointMass carries no free parameters: accumulation is a no-op on every engine.
+        pass
+
     def initialize(self, x: Any, weight: float, rng: Optional[RandomState]) -> None:
         pass
 
