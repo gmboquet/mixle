@@ -465,9 +465,12 @@ class RestartEM(object):
     def __init__(self, initial_models: Sequence[SequenceEncodableProbabilityDistribution],
                  strategy: Optional[Any] = None,
                  max_its: int = 10,
-                 delta: Optional[float] = 1.0e-9) -> None:
+                 delta: Optional[float] = 1.0e-9,
+                 max_iter: Optional[int] = None) -> None:
         if len(initial_models) == 0:
             raise ValueError('RestartEM requires at least one initial model.')
+        if max_iter is not None:
+            max_its = max_iter
         self.initial_models = tuple(initial_models)
         self.strategy = StandardEM() if strategy is None else strategy
         self.max_its = int(max_its)
@@ -499,8 +502,14 @@ def run_em(enc_data: Any,
            max_its: int = 10,
            delta: Optional[float] = 1.0e-9,
            engine: Optional[Any] = None,
-           objective: Optional[Callable[[Any], float]] = None) -> SequenceEncodableProbabilityDistribution:
-    """Run an EM-family strategy until convergence or ``max_its``."""
+           objective: Optional[Callable[[Any], float]] = None,
+           max_iter: Optional[int] = None) -> SequenceEncodableProbabilityDistribution:
+    """Run an EM-family strategy until convergence or ``max_its``.
+
+    ``max_iter`` is the preferred spelling of ``max_its``; when given it overrides ``max_its``.
+    """
+    if max_iter is not None:
+        max_its = max_iter
     strategy = StandardEM() if strategy is None else strategy
     objective = observed_log_likelihood(enc_data, engine=engine) if objective is None else objective
     model = initial_model

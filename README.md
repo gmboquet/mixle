@@ -301,6 +301,24 @@ Estimators accept `pseudo_count` for regularization and `keys` for tying suffici
 
 Hidden-association models are the closest probabilistic analogue to attention in this library: they infer soft latent alignments between observed items and hidden explanatory slots, but the mechanism is a generative EM model rather than a transformer-style learned query/key/value layer.
 
+### API naming conventions
+
+The public API is converging on a single stem per family (`<Stem>Distribution`, `<Stem>Estimator`,
+`<Stem>Sampler`, `<Stem>Accumulator`, `<Stem>AccumulatorFactory`, `<Stem>DataEncoder`,
+`<Stem>Enumerator`) and descriptive constructor argument names. Both the legacy and preferred
+spellings work — the old names are kept as aliases — but new code should prefer:
+
+- Constructor arguments: `weights` (over `w`), `prob_map` (over `pmap`), `prob_vec` (over `p_vec`),
+  `covariance` (over `covar`), `num_values` (over `num_vals`), `max_iter` (over `max_its`).
+- Class names: e.g. `HiddenMarkovModelEstimator` (alias of `HiddenMarkovEstimator`),
+  `ConditionalEstimator`/`ConditionalAccumulator` (aliases of the `ConditionalDistribution*`
+  classes), `GrammarAccumulator` (alias of `GrammarEstimatorAccumulator`), and the
+  `*Accumulator`/`*AccumulatorFactory` aliases for families that historically used
+  `*EstimatorAccumulator`.
+
+Passing both the legacy and preferred argument spelling raises `TypeError`. See
+`notes/distribution_api_naming_accounting.md` for the full target convention and migration plan.
+
 ## Examples
 
 Local examples live in [examples/examples_pysp/](examples/examples_pysp/) (Bayesian counterparts in [examples/examples_bayes/](examples/examples_bayes/)) and run from that directory:

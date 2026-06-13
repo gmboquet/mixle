@@ -1552,3 +1552,7 @@ def seq_posterior(estimate, x):
 	mlpf = digamma(final_gammas) - digamma(np.sum(final_gammas, axis=1, keepdims=True))
 
 	return log_density_gamma, final_gammas, alphas_loc, per_topic_log_densities
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+LLDAAccumulator = LLDAEstimatorAccumulator
+LLDAAccumulatorFactory = LLDAEstimatorAccumulatorFactory

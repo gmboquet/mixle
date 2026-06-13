@@ -24,6 +24,7 @@ from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
     NullAccumulatorFactory
+from pysp.utils.aliasing import coalesce_alias, MISSING
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
     DistributionEnumerator, EnumerationError
@@ -85,7 +86,8 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
         )
 
     def __init__(self, components: Sequence[SequenceEncodableProbabilityDistribution],
-                 w: Union[List[float], np.ndarray], name: Optional[str] = None) -> None:
+                 w: Union[List[float], np.ndarray] = MISSING, name: Optional[str] = None,
+                 weights: Union[List[float], np.ndarray] = MISSING) -> None:
         """Create SemiSupervisedMixtureDistribution object.
 
         Args:
@@ -102,6 +104,7 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
             name (Optional[str]): Set name for object.
 
         """
+        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
         self.components = components
         self.num_components = len(components)
         self.w = np.asarray(w)
@@ -925,3 +928,7 @@ class SemiSupervisedMixtureDataEncoder(DataSequenceEncoder):
         has_prior = prior_sum != 0
 
         return len(x), self.encoder.seq_encode(data), (prior_mat, prior_sum, has_prior), x
+
+# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+SemiSupervisedMixtureAccumulator = SemiSupervisedMixtureEstimatorAccumulator
+SemiSupervisedMixtureAccumulatorFactory = SemiSupervisedMixtureEstimatorAccumulatorFactory
