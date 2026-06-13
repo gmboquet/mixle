@@ -20,6 +20,67 @@ from pysp.utils.special import digamma, gammaln
 class BetaDistribution(SequenceEncodableProbabilityDistribution):
     """Beta distribution with positive shape parameters a and b."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='beta',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('a', constraint='positive'),
+                ParameterSpec('b', constraint='positive'),
+            ),
+            statistics=(
+                StatisticSpec('count'),
+                StatisticSpec('sum_of_logs'),
+                StatisticSpec('sum_of_log1m'),
+                StatisticSpec('sum'),
+                StatisticSpec('sum2'),
+            ),
+            support='unit_interval_open',
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
+            ),
+        )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Tuple[Any, Any, Any, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Beta sufficient statistics for generated scoring."""
+        log_x, log1m_x, _, _ = x
+        return engine.asarray(log_x), engine.asarray(log1m_x)
+
+    @staticmethod
+    def exp_family_legacy_sufficient_statistics(x: Tuple[Any, Any, Any, Any],
+                                                params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return per-row Beta sufficient statistics in accumulator order."""
+        log_x, log1m_x, xx, xx2 = x
+        vals = engine.asarray(xx)
+        return (
+            vals * 0.0 + engine.asarray(1.0),
+            engine.asarray(log_x),
+            engine.asarray(log1m_x),
+            vals,
+            engine.asarray(xx2),
+        )
+
+    @staticmethod
+    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return Beta natural parameters for generated scoring."""
+        return params['a'] - engine.asarray(1.0), params['b'] - engine.asarray(1.0)
+
+    @staticmethod
+    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+        """Return Beta log partition for generated scoring."""
+        return engine.betaln(params['a'], params['b'])
+
     def __init__(self, a: float, b: float, name: Optional[str] = None, keys: Optional[str] = None) -> None:
         if a <= 0.0 or b <= 0.0 or not np.isfinite(a) or not np.isfinite(b):
             raise ValueError('BetaDistribution requires a > 0 and b > 0.')
@@ -51,6 +112,35 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         """Return vectorized log-density values for sequence-encoded observations."""
         lx, l1mx, _, _ = x
         return (self.a - 1.0) * lx + (self.b - 1.0) * l1mx - self.log_const
+
+    @staticmethod
+    def backend_log_density_from_params(log_x: Any, log1m_x: Any, a: Any, b: Any, engine: Any) -> Any:
+        """Engine-neutral Beta log-density from encoded logs and parameters."""
+        return (a - 1.0) * log_x + (b - 1.0) * log1m_x - engine.betaln(a, b)
+
+    def backend_seq_log_density(self, x: Tuple[Any, Any, Any, Any], engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        log_x, log1m_x, _, _ = x
+        return self.backend_log_density_from_params(
+            engine.asarray(log_x), engine.asarray(log1m_x),
+            engine.asarray(self.a), engine.asarray(self.b), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['BetaDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked Beta parameters for a homogeneous mixture kernel."""
+        return {
+            'a': engine.asarray([d.a for d in dists]),
+            'b': engine.asarray([d.b for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[Any, Any, Any, Any],
+                                    params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Beta log densities."""
+        log_x, log1m_x, _, _ = x
+        return cls.backend_log_density_from_params(
+            engine.asarray(log_x)[:, None], engine.asarray(log1m_x)[:, None],
+            params['a'][None, :], params['b'][None, :], engine)
 
     def sampler(self, seed: Optional[int] = None) -> 'BetaSampler':
         """Return a sampler for drawing observations from this distribution."""

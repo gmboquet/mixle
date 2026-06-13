@@ -108,6 +108,46 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         self.init_prob_vec = np.empty(0, dtype=np.float64)
         self.use_numba = use_numba
 
+    def compute_capabilities(self):
+        """Return backend capability metadata for this concrete integer association model."""
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+
+        if self.use_numba:
+            return DistributionCapabilities(engine_ready=('numpy',), kernel_status='legacy_numpy')
+        return DistributionCapabilities(engine_ready=intersect_engine_ready((self.prev_dist, self.len_dist)),
+                                        kernel_status='generic_latent')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        previous = None if isinstance(self.prev_dist, NullDistribution) else declaration_for(self.prev_dist)
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = tuple(child for child in (previous, length) if child is not None)
+        roles = ()
+        if previous is not None:
+            roles += ('previous',)
+        if length is not None:
+            roles += ('length',)
+        return DistributionDeclaration(
+            name='integer_hidden_association',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('state_prob_mat', constraint='row_simplex_matrix'),
+                ParameterSpec('cond_weights', constraint='row_simplex_matrix'),
+                ParameterSpec('alpha', constraint='unit_interval'),
+            ),
+            statistics=(
+                StatisticSpec('initial_counts'),
+                StatisticSpec('weight_counts'),
+                StatisticSpec('state_counts'),
+                StatisticSpec('previous', kind='child_stat'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='integer_hidden_association_grouped_counts',
+            children=children,
+            child_roles=roles,
+            differentiable=False,
+        )
+
     def __str__(self) -> str:
         """Returns string representation of IntegerHiddenAssociationDistribution object."""
         s1 = ','.join(
@@ -221,6 +261,45 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
             rv += self.prev_dist.seq_log_density(xv)
             rv += self.len_dist.seq_log_density(nn)
 
+        return rv
+
+    def backend_seq_log_density(self, x: E, engine: Any) -> Any:
+        """Evaluate encoded log-densities using a backend-neutral compute engine."""
+        from pysp.stats.backend import BackendScoringError, backend_seq_log_density
+
+        nw = self.num_vals2
+        a = self.alpha / nw
+        b = 1 - self.alpha
+
+        if x[1] is not None:
+            if getattr(engine, 'name', None) == 'numpy':
+                return self.seq_log_density(x)
+            raise BackendScoringError('IntegerHiddenAssociation numba-encoded scoring is NumPy-only.')
+
+        entries, prev_enc, len_enc = x[0]
+        if not entries:
+            rv = engine.zeros(0)
+        else:
+            cond_weights = engine.asarray(self.cond_weights)
+            state_probs = engine.asarray(self.state_prob_mat)
+            scores = []
+
+            for vx, cx, vy, cy in entries:
+                given_ids = engine.asarray(vx)
+                given_counts = engine.asarray(cx)
+                emitted_ids = engine.asarray(vy)
+                emitted_counts = engine.asarray(cy)
+
+                given_weights = given_counts / engine.sum(given_counts)
+                given_state = cond_weights[given_ids, :] * given_weights[:, None]
+                emitted_given = engine.matmul(given_state, state_probs[:, emitted_ids])
+                emitted_probs = b * engine.sum(emitted_given, axis=0) + a
+                scores.append(engine.sum(engine.log(emitted_probs) * emitted_counts))
+
+            rv = engine.stack(scores)
+
+        rv = rv + backend_seq_log_density(self.prev_dist, prev_enc, engine)
+        rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
         return rv
 
     def sampler(self, seed: Optional[int] = None) -> 'IntegerHiddenAssociationSampler':
@@ -637,6 +716,15 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
         return self
 
+    def scale(self, c: float) -> 'IntegerHiddenAssociationAccumulator':
+        """Scale linear association counts and delegate child accumulators."""
+        self.init_count *= c
+        self.weight_count *= c
+        self.state_count *= c
+        self.prev_accumulator.scale(c)
+        self.size_accumulator.scale(c)
+        return self
+
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
         """Merge this accumulator's weight and state counts into stats_dict under their keys, if keyed.
 
@@ -889,19 +977,19 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
     def _seq_encode(self, x: Sequence[Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]]) \
             -> Tuple[Tuple[List[Tuple[np.ndarray, ...]], Optional[Any], Optional[Any]], None]:
         """Sequence encoding for use with without numba.
-        
-        Returns 'rv' Tuple of 
-            rv[0] (List[Tuple[ndarray[int], ndarray[float], ndarray[int], ndarray[float]]]): List of Tuples containing 
-                Flattened numpy arrays of x0 values, x0 counts, x1 values, x1 counts. 
-            rv[1] (E1): Sequence encoded output from list of Tuples containing sum of counts for 
+
+        Returns 'rv' Tuple of
+            rv[0] (List[Tuple[ndarray[int], ndarray[float], ndarray[int], ndarray[float]]]): List of Tuples containing
+                Flattened numpy arrays of x0 values, x0 counts, x1 values, x1 counts.
+            rv[1] (E1): Sequence encoded output from list of Tuples containing sum of counts for
                 x0 and x1.
-            rv[2] (E2): Sequence encoding of x0 from prev_encoder. 
-        
+            rv[2] (E2): Sequence encoding of x0 from prev_encoder.
+
         Args:
-            x: Sequence of iid integer hidden association observations. 
+            x: Sequence of iid integer hidden association observations.
 
         Returns:
-            See rv above. 
+            See rv above.
 
         """
         rv = []

@@ -52,6 +52,38 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     """
 
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        children = tuple(self.topics) + ((self.len_dist,) if self.len_dist is not None else ())
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
+                                        kernel_status='generic_latent')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        topic_children = tuple(declaration_for(topic) for topic in self.topics)
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = tuple(child for child in topic_children + ((length,) if length is not None else ()) if child is not None)
+        roles = tuple('topic_%d' % i for i, child in enumerate(topic_children) if child is not None)
+        if length is not None:
+            roles += ('length',)
+        return DistributionDeclaration(
+            name='hierarchical_mixture',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('w', constraint='simplex_vector'),
+                ParameterSpec('taus', constraint='row_simplex_matrix'),
+            ),
+            statistics=(
+                StatisticSpec('component_counts'),
+                StatisticSpec('topics', kind='tuple'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='sequence_mixture',
+            children=children,
+            child_roles=roles,
+            differentiable=False,
+        )
+
     def __init__(self,
                  topics: Sequence[SequenceEncodableProbabilityDistribution],
                  mixture_weights: Union[List[float], np.ndarray],
@@ -285,6 +317,35 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
         if self.len_dist is not None:
             rv += self.len_dist.seq_log_density(enc_len)
 
+        return rv
+
+    def backend_seq_component_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, E1, Optional[E2]],
+                                          engine: Any) -> Any:
+        """Engine-neutral outer-component log densities for hierarchical-mixture encoded sequences."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        sz, idx, cnt, enc_data, enc_len = x
+        if sz == 0:
+            return engine.zeros((0, self.num_mixtures))
+        if np.all(cnt == 0):
+            return engine.zeros((sz, self.num_mixtures))
+
+        topic_scores = [backend_seq_log_density(topic, enc_data, engine) for topic in self.topics]
+        ll_topics = engine.stack(topic_scores, axis=1)
+        log_taus = engine.asarray(self.log_taus)
+        item_mix_scores = engine.logsumexp(ll_topics[:, None, :] + log_taus[None, :, :], axis=2)
+
+        rv = engine.zeros((sz, self.num_mixtures))
+        return engine.index_add(rv, engine.asarray(idx), item_mix_scores)
+
+    def backend_seq_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, E1, Optional[E2]], engine: Any) -> Any:
+        """Engine-neutral hierarchical-mixture log-density for encoded sequences."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        sz, idx, cnt, enc_data, enc_len = x
+        rv = engine.logsumexp(self.backend_seq_component_log_density(x, engine) + engine.asarray(self.log_w), axis=1)
+        if self.len_dist is not None:
+            rv = rv + backend_seq_log_density(self.len_dist, enc_len, engine)
         return rv
 
     def seq_posterior(self, x: Tuple[int, np.ndarray, np.ndarray, E1, Optional[E2]]) -> np.ndarray:
@@ -712,6 +773,14 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         return self
 
+    def scale(self, c: float) -> 'HierarchicalMixtureEstimatorAccumulator':
+        """Scale linear counts and delegate child/length sufficient statistics."""
+        self.comp_counts *= c
+        for acc in self.accumulators:
+            acc.scale(c)
+        self.len_accumulator.scale(c)
+        return self
+
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
         """Merge sufficient statistics of object instance with matching keys in stats_dict.
 
@@ -1011,4 +1080,3 @@ class HierarchicalMixtureDataEncoder(DataSequenceEncoder):
         enc_data = self.topic_encoder.seq_encode(sx)
 
         return len(x), idx, cnt, enc_data, enc_len
-

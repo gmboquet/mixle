@@ -1,3 +1,5 @@
+"""Infer a Bayesian DPM mixture automatically for simple Gaussian-vector data."""
+
 from pysp.utils.automatic import get_dpm_mixture, get_estimator
 from pysp.bstats import *
 import numpy as np

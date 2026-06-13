@@ -1022,6 +1022,186 @@ class MixtureFisherView(FixedFisherView):
         return out
 
 
+class _PairProductFisherView(FixedFisherView):
+    """Fisher view for a product of two component views."""
+
+    def __init__(self, left: FisherView, right: FisherView) -> None:
+        self.left = left
+        self.right = right
+        labels = [('0',) + label for label in left.vectorizer.labels]
+        labels.extend(('1',) + label for label in right.vectorizer.labels)
+        FixedFisherView.__init__(self, (left.dist, right.dist), labels)
+
+    def _refresh_labels(self) -> None:
+        labels = [('0',) + label for label in self.left.vectorizer.labels]
+        labels.extend(('1',) + label for label in self.right.vectorizer.labels)
+        self.labels = labels
+        self.vectorizer = SufficientStatisticVectorizer(self.labels)
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+        left_data = [x[0] for x in data]
+        right_data = [x[1] for x in data]
+        left_est = None if estimate is None else estimate[0]
+        right_est = None if estimate is None else estimate[1]
+        left = self.left.expected_statistics_matrix(data=left_data, estimate=left_est)
+        right = self.right.expected_statistics_matrix(data=right_data, estimate=right_est)
+        self._refresh_labels()
+        return np.hstack((left, right))
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+        left_est = None if estimate is None else estimate[0]
+        right_est = None if estimate is None else estimate[1]
+        left = self.left.seq_expected_statistics(enc_data[0], estimate=left_est)
+        right = self.right.seq_expected_statistics(enc_data[1], estimate=right_est)
+        self._refresh_labels()
+        return np.hstack((left, right))
+
+    def _model_mean(self) -> np.ndarray:
+        return np.concatenate((self.left.mean_statistics(), self.right.mean_statistics()))
+
+    def _model_fisher(self) -> np.ndarray:
+        blocks = [
+            np.asarray(self.left.fisher_information(ridge=0.0), dtype=np.float64),
+            np.asarray(self.right.fisher_information(ridge=0.0), dtype=np.float64),
+        ]
+        dim = sum(block.shape[0] for block in blocks)
+        out = np.zeros((dim, dim), dtype=np.float64)
+        pos = 0
+        for block in blocks:
+            n = block.shape[0]
+            out[pos:pos + n, pos:pos + n] = block
+            pos += n
+        return out
+
+
+class JointMixtureFisherView(MixtureFisherView):
+    """Complete-data Fisher view for joint mixtures without concrete proxies."""
+
+    def __init__(self, dist: Any) -> None:
+        self.pair_indices: List[Tuple[int, int]] = []
+        weights = []
+        child_views = []
+        for i, component1 in enumerate(dist.components1):
+            if float(dist.w1[i]) <= 0.0:
+                continue
+            for j, component2 in enumerate(dist.components2):
+                weight = float(dist.w1[i]) * float(dist.taus12[i, j])
+                if weight <= 0.0:
+                    continue
+                self.pair_indices.append((i, j))
+                weights.append(weight)
+                child_views.append(_PairProductFisherView(to_fisher(component1), to_fisher(component2)))
+        if not child_views:
+            raise ValueError('JointMixtureFisherView requires at least one positive-weight component pair.')
+        self.child_views = child_views
+        self._pair_weights = np.asarray(weights, dtype=np.float64)
+        self._pair_weights /= self._pair_weights.sum()
+        labels = self._labels_from_children()
+        FixedFisherView.__init__(self, dist, labels)
+
+    @property
+    def num_pairs(self) -> int:
+        return len(self.pair_indices)
+
+    def _pair_log_scores_from_data(self, data: Sequence[Any]) -> np.ndarray:
+        rows = []
+        for x in data:
+            scores = []
+            for i, j in self.pair_indices:
+                scores.append(self.dist.log_w1[i] + self.dist.log_taus12[i, j] +
+                              self.dist.components1[i].log_density(x[0]) +
+                              self.dist.components2[j].log_density(x[1]))
+            rows.append(scores)
+        return np.asarray(rows, dtype=np.float64)
+
+    def _pair_log_scores_from_encoded(self, enc_data: Any) -> np.ndarray:
+        sz, enc1, enc2 = enc_data
+        scores = np.zeros((int(sz), len(self.pair_indices)), dtype=np.float64)
+        left_cache: Dict[int, np.ndarray] = {}
+        right_cache: Dict[int, np.ndarray] = {}
+        for k, (i, j) in enumerate(self.pair_indices):
+            if i not in left_cache:
+                left_cache[i] = np.asarray(self.dist.components1[i].seq_log_density(enc1), dtype=np.float64)
+            if j not in right_cache:
+                right_cache[j] = np.asarray(self.dist.components2[j].seq_log_density(enc2), dtype=np.float64)
+            scores[:, k] = self.dist.log_w1[i] + self.dist.log_taus12[i, j] + left_cache[i] + right_cache[j]
+        return scores
+
+    @staticmethod
+    def _posterior_from_scores(scores: np.ndarray) -> np.ndarray:
+        mx = np.max(scores, axis=1, keepdims=True)
+        weights = np.exp(scores - mx)
+        return weights / np.sum(weights, axis=1, keepdims=True)
+
+    def _posterior_from_data(self, data: Sequence[Any]) -> np.ndarray:
+        return self._posterior_from_scores(self._pair_log_scores_from_data(data))
+
+    def _posterior_from_encoded(self, enc_data: Any) -> np.ndarray:
+        return self._posterior_from_scores(self._pair_log_scores_from_encoded(enc_data))
+
+    def log_density(self, x: Any) -> float:
+        scores = self._pair_log_scores_from_data([x])[0]
+        mx = float(np.max(scores))
+        return float(mx + np.log(np.exp(scores - mx).sum()))
+
+    def _component_stats_from_data(self, data: Sequence[Any]) -> List[np.ndarray]:
+        return [view.expected_statistics_matrix(data=data) for view in self.child_views]
+
+    def _component_stats_from_encoded(self, enc_data: Any) -> List[np.ndarray]:
+        _, enc1, enc2 = enc_data
+        return [view.seq_expected_statistics((enc1, enc2)) for view in self.child_views]
+
+    def structured_statistics(self, x: Any, estimate: Optional[Any] = None, weight: float = 1.0) -> Any:
+        if estimate is not None and estimate is not self.dist:
+            return to_fisher(estimate).structured_statistics(x, weight=weight)
+        z = self._posterior_from_data([x])[0]
+        child_values = tuple(
+            z[k] * self.child_views[k].sufficient_statistics(x)
+            for k in range(len(self.child_views)))
+        return weight * z, child_values
+
+    def _model_mean(self) -> np.ndarray:
+        w = self._pair_weights
+        means = self._component_means()
+        return np.concatenate([w] + [w[k] * means[k] for k in range(len(means))])
+
+    def _model_fisher(self) -> np.ndarray:
+        w = self._pair_weights
+        means, infos = self._component_moments()
+        k_count = len(means)
+        dims = [len(mu) for mu in means]
+        offsets = []
+        pos = k_count
+        for dim in dims:
+            offsets.append(pos)
+            pos += dim
+
+        out = np.zeros((pos, pos), dtype=np.float64)
+        out[:k_count, :k_count] = np.diag(w) - np.outer(w, w)
+
+        for i in range(k_count):
+            for k in range(k_count):
+                cov = ((w[k] if i == k else 0.0) - w[i] * w[k]) * means[k]
+                s = offsets[k]
+                e = s + dims[k]
+                out[i, s:e] = cov
+                out[s:e, i] = cov
+
+        for k in range(k_count):
+            sk = offsets[k]
+            ek = sk + dims[k]
+            muk = means[k]
+            out[sk:ek, sk:ek] = w[k] * infos[k] + w[k] * (1.0 - w[k]) * np.outer(muk, muk)
+            for l in range(k + 1, k_count):
+                sl = offsets[l]
+                el = sl + dims[l]
+                block = -w[k] * w[l] * np.outer(muk, means[l])
+                out[sk:ek, sl:el] = block
+                out[sl:el, sk:ek] = block.T
+
+        return out
+
+
 def _is_null_dist(dist: Any) -> bool:
     return dist is None or type(dist).__name__ == 'NullDistribution'
 
@@ -2312,20 +2492,6 @@ def to_fisher(dist: Any, **kwargs: Any) -> FisherView:
         return to_fisher(dist.to_mixture(), **kwargs)
 
     if tname == 'JointMixtureDistribution' and hasattr(dist, 'components1') and hasattr(dist, 'components2'):
-        try:
-            from pysp.stats.composite import CompositeDistribution
-            from pysp.stats.mixture import MixtureDistribution
-            components = []
-            weights = []
-            for i, c1 in enumerate(dist.components1):
-                for j, c2 in enumerate(dist.components2):
-                    w = float(dist.w1[i]) * float(dist.taus12[i, j])
-                    if w > 0.0:
-                        components.append(CompositeDistribution((c1, c2)))
-                        weights.append(w)
-            if components:
-                return to_fisher(MixtureDistribution(components, np.asarray(weights) / np.sum(weights)), **kwargs)
-        except Exception:
-            pass
+        return JointMixtureFisherView(dist)
 
     return FisherView(dist, **kwargs)

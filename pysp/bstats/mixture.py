@@ -13,6 +13,10 @@ pysparkplug. With a (symmetric) Dirichlet prior on the weights, estimation is
 MAP (counts + alpha - 1, clamped at the simplex boundary) and the posterior
 Dirichlet is carried forward as the new prior. expected_log_density uses the
 digamma expectations E[ln w_k] = psi(alpha_k) - psi(sum alpha).
+
+Use ``mixture_prior(weight_prior, component_priors)`` when you want to pass a
+single joint prior containing both the weight prior and one conjugate prior per
+component.
 """
 from typing import TypeVar, Optional, Generic, List, Mapping
 
@@ -28,6 +32,70 @@ from scipy.special import gammaln, digamma
 
 
 default_prior = SymmetricDirichletDistribution(1)
+
+
+def mixture_prior(weight_prior, component_priors):
+    """Build the joint prior form used by bstats mixtures.
+
+    Args:
+        weight_prior: Prior on the mixture weights, typically a
+            DirichletDistribution or SymmetricDirichletDistribution.
+        component_priors: Sequence of one conjugate prior per component.
+
+    Returns:
+        CompositeDistribution containing ``(weight_prior,
+        CompositeDistribution(component_priors))``.
+    """
+    return CompositeDistribution((weight_prior, CompositeDistribution(tuple(component_priors))))
+
+
+def _default_weight_prior(num_components: int):
+    return DirichletDistribution(np.ones(num_components))
+
+
+def _component_prior_tuple(component_priors, num_components: int):
+    if component_priors is None:
+        return None
+    if isinstance(component_priors, CompositeDistribution):
+        rv = tuple(component_priors.dists)
+    elif isinstance(component_priors, (list, tuple)):
+        rv = tuple(component_priors)
+    elif num_components == 1:
+        rv = (component_priors,)
+    else:
+        raise TypeError('mixture component priors must be a sequence or CompositeDistribution.')
+    if len(rv) != num_components:
+        raise ValueError('expected %d component priors, got %d.' % (num_components, len(rv)))
+    return rv
+
+
+def _split_mixture_prior(prior, num_components: int):
+    if prior is None:
+        return None, None
+    if isinstance(prior, CompositeDistribution) and len(prior.dists) == 2 and \
+            isinstance(prior.dists[1], CompositeDistribution):
+        return prior.dists[0], _component_prior_tuple(prior.dists[1], num_components)
+    if isinstance(prior, Mapping) and ('weights' in prior or 'weight_prior' in prior or
+                                      'components' in prior or 'component_priors' in prior):
+        weight_prior = prior.get('weights', prior.get('weight_prior'))
+        component_priors = prior.get('components', prior.get('component_priors'))
+        if weight_prior is None:
+            weight_prior = _default_weight_prior(num_components)
+        return weight_prior, _component_prior_tuple(component_priors, num_components)
+    if isinstance(prior, (list, tuple)) and len(prior) == 2 and \
+            isinstance(prior[1], (list, tuple, CompositeDistribution)):
+        return prior[0], _component_prior_tuple(prior[1], num_components)
+    return prior, None
+
+
+def _dirichlet_expectations(prior, num_components: int):
+    if isinstance(prior, DirichletDistribution):
+        alpha = prior.get_parameters()
+        return alpha, digamma(alpha) - digamma(np.sum(alpha))
+    if isinstance(prior, SymmetricDirichletDistribution):
+        alpha = np.ones(num_components) * prior.get_parameters()
+        return alpha, digamma(alpha) - digamma(np.sum(alpha))
+    return None, None
 
 class MixtureDistribution(ProbabilityDistribution):
     """Finite mixture of component distributions with mixing weights w."""
@@ -45,30 +113,19 @@ class MixtureDistribution(ProbabilityDistribution):
         """
         self.set_name(name)
 
-        if prior is None:
-            prior = DirichletDistribution(np.ones(len(w)))
-
         self.components = components
         self.num_components = len(components)
         self.w = np.asarray(w)
         self.zw = (self.w == 0.0)
-        self.log_w = np.log(w+self.zw)
+        self.log_w = np.log(self.w + self.zw)
         self.log_w[self.zw] = -np.inf
-        self.prior = prior
+        self.prior = None
 
         #self.parents = []
         #for d in self.components:
         #    d.add_parent(self)
 
-        if isinstance(self.prior, DirichletDistribution):
-            self.conj_prior_params = self.prior.get_parameters()
-            self.expected_nparams  = digamma(self.conj_prior_params) - digamma(np.sum(self.conj_prior_params))
-        elif isinstance(self.prior, SymmetricDirichletDistribution):
-            self.conj_prior_params = np.ones(self.num_components)*self.prior.get_parameters()
-            self.expected_nparams = digamma(self.conj_prior_params) - digamma(np.sum(self.conj_prior_params))
-        else:
-            self.conj_prior_params = None
-            self.expected_nparams  = None
+        self.set_prior(_default_weight_prior(self.num_components) if prior is None else prior)
 
     def __str__(self):
         return 'MixtureDistribution([%s], [%s], name=%s, prior=%s)' % (','.join([str(u) for u in self.components]), ','.join(map(str, self.w)), str(self.name), str(self.prior))
@@ -79,26 +136,19 @@ class MixtureDistribution(ProbabilityDistribution):
         return CompositeDistribution((self.prior, CompositeDistribution([d.get_prior() for d in self.components])))
 
     def set_prior(self, prior):
-        """Set the joint prior from a CompositeDistribution of (weight prior,
-        CompositeDistribution of component priors).
+        """Set a weight prior or a joint weight/component prior.
 
         Args:
-            prior: CompositeDistribution matching the structure returned by
-                get_prior().
+            prior: Weight prior, ``mixture_prior(...)`` result,
+                ``(weight_prior, component_priors)`` pair, or a mapping with
+                ``weights``/``components`` entries.
         """
-        self.prior = prior.dists[0]
-        for d,p in zip(self.components, prior.dists[1].dists):
-            d.set_prior(p)
-
-        if isinstance(self.prior, DirichletDistribution):
-            self.conj_prior_params = self.prior.get_parameters()
-            self.expected_nparams  =  digamma(self.conj_prior_params) - digamma(np.sum(self.conj_prior_params))
-        elif isinstance(self.prior, SymmetricDirichletDistribution):
-            self.conj_prior_params = np.ones(self.num_components)*self.prior.get_parameters()
-            self.expected_nparams = digamma(self.conj_prior_params) - digamma(np.sum(self.conj_prior_params))
-        else:
-            self.conj_prior_params = None
-            self.expected_nparams  = None
+        weight_prior, component_priors = _split_mixture_prior(prior, self.num_components)
+        self.prior = _default_weight_prior(self.num_components) if weight_prior is None else weight_prior
+        if component_priors is not None:
+            for d, p in zip(self.components, component_priors):
+                d.set_prior(p)
+        self.conj_prior_params, self.expected_nparams = _dirichlet_expectations(self.prior, self.num_components)
 
     def get_parameters(self):
         """Return (w, [component parameters])."""
@@ -539,16 +589,18 @@ class MixtureEstimator(ParameterEstimator):
             estimators: List of per-component ParameterEstimator objects.
             fixed_w: Optional fixed mixture weights (skips weight estimation).
             name (Optional[str]): Name of the estimated distribution.
-            prior: Prior on the mixture weights.
+            prior: Prior on the mixture weights, or a joint prior produced by
+                ``mixture_prior(weight_prior, component_priors)``.
             keys: Tuple (weight_key, comp_key) for sharing statistics.
         """
 
         self.num_components = len(estimators)
         self.estimators = estimators
-        self.prior = prior
+        self.prior = None
         self.keys = keys
         self.name = name
         self.fixed_w = None if fixed_w is None else np.copy(fixed_w)
+        self.set_prior(prior)
 
     def accumulator_factory(self):
         """Return a MixtureEstimatorAccumulatorFactory for this estimator."""
@@ -561,15 +613,18 @@ class MixtureEstimator(ParameterEstimator):
         return CompositeDistribution((self.prior, CompositeDistribution([d.get_prior() for d in self.estimators], name=self.keys[1])))
 
     def set_prior(self, prior):
-        """Set the joint prior from a CompositeDistribution of (weight prior,
-        CompositeDistribution of component priors).
+        """Set a weight prior or a joint weight/component prior.
 
         Args:
-            prior: CompositeDistribution matching get_prior() structure.
+            prior: Weight prior, ``mixture_prior(...)`` result,
+                ``(weight_prior, component_priors)`` pair, or a mapping with
+                ``weights``/``components`` entries.
         """
-        self.prior = prior.dists[0]
-        for d,p in zip(self.estimators, prior.dists[1].dists):
-            d.set_prior(p)
+        weight_prior, component_priors = _split_mixture_prior(prior, self.num_components)
+        self.prior = _default_weight_prior(self.num_components) if weight_prior is None else weight_prior
+        if component_priors is not None:
+            for d, p in zip(self.estimators, component_priors):
+                d.set_prior(p)
 
     def model_log_density(self, model: MixtureDistribution) -> float:
         """Log density of the model parameters under this estimator's prior.
@@ -591,6 +646,19 @@ class MixtureEstimator(ParameterEstimator):
 
         return rv
 
+    def scale_suff_stat(self, suff_stat, c):
+        """Scale mixture sufficient statistics, delegating component payloads.
+
+        Component estimators may carry non-linear metadata such as integer
+        support offsets, so the mixture must not structurally scale child
+        payloads itself.
+        """
+        counts, comp_suff_stats = suff_stat
+        return counts * c, tuple(
+            est.scale_suff_stat(ss, c)
+            for est, ss in zip(self.estimators, comp_suff_stats)
+        )
+
     def estimate(self, suff_stat):
         """Estimate a MixtureDistribution from sufficient statistics.
 
@@ -609,7 +677,7 @@ class MixtureEstimator(ParameterEstimator):
         components = [self.estimators[i].estimate(comp_suff_stats[i]) for i in range(num_components)]
 
         if self.fixed_w is not None:
-            return MixtureDistribution(components, self.fixed_w)
+            return MixtureDistribution(components, self.fixed_w, name=self.name, prior=self.prior)
 
 
         if isinstance(self.prior, (DirichletDistribution, SymmetricDirichletDistribution)):
@@ -634,4 +702,4 @@ class MixtureEstimator(ParameterEstimator):
             else:
                 w = counts / counts.sum()
 
-            return MixtureDistribution(components, w, name=self.name)
+            return MixtureDistribution(components, w, name=self.name, prior=self.prior)

@@ -22,12 +22,35 @@ from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEnco
     ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
     DistributionEnumerator, EnumerationError
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
-from typing import List, Union, Tuple, Optional, Dict, Any
+from typing import List, Union, Tuple, Optional, Dict, Any, Sequence
 
 
 class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
     """Categorical distribution over a bounded integer range."""
+
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='integer_categorical',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('min_val', constraint='integer', differentiable=False),
+                ParameterSpec('p_vec', constraint='simplex_vector'),
+            ),
+            statistics=(
+                StatisticSpec('min_val', kind='support_bound', additive=False, scales=False),
+                StatisticSpec('count_vec', kind='count_vector'),
+            ),
+            support='bounded_integer',
+        )
+
     def __init__(self, min_val: int, p_vec: Union[List[float], np.ndarray], name: Optional[str] = None) -> None:
         """IntegerCategoricalDistribution object defining an integer categorical distribution.
 
@@ -106,6 +129,62 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         rv[u] = self.log_p_vec[v[u]]
 
         return rv
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, min_val: int, log_p_vec: Any, engine: Any) -> Any:
+        """Engine-neutral integer-categorical log-density from explicit parameters."""
+        v = x - engine.asarray(min_val)
+        good = (v >= 0) & (v < len(log_p_vec))
+        safe_v = engine.clip(v, 0, len(log_p_vec) - 1)
+        return engine.where(good, log_p_vec[safe_v], engine.asarray(-np.inf))
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        xx = engine.asarray(x)
+        return self.backend_log_density_from_params(xx, self.min_val, engine.asarray(self.log_p_vec), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['IntegerCategoricalDistribution'],
+                               engine: Any) -> Dict[str, Any]:
+        """Return stacked integer-categorical parameters for a homogeneous mixture kernel."""
+        min_val = dists[0].min_val
+        num_vals = dists[0].num_vals
+        if any(d.min_val != min_val or d.num_vals != num_vals for d in dists):
+            raise ValueError('Stacked IntegerCategoricalDistribution components require shared support.')
+        return {
+            '__pysp_component_axis__': {'log_p': 1},
+            'min_val': min_val,
+            'num_vals': num_vals,
+            'log_p': engine.asarray(np.stack([d.log_p_vec for d in dists], axis=1)),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of integer-categorical log densities."""
+        xx = engine.asarray(x)
+        v = xx - engine.asarray(params['min_val'])
+        good = (v >= 0) & (v < params['num_vals'])
+        safe_v = engine.clip(v, 0, params['num_vals'] - 1)
+        rv = params['log_p'][safe_v, :]
+        return engine.where(good[:, None], rv, engine.asarray(-np.inf))
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Any, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any]:
+        """Return component-stacked legacy ``(min_val, count_vec)`` statistics."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        rel = xx - engine.asarray(params['min_val'])
+        rows = []
+        for i in range(int(params['num_vals'])):
+            mask = rel == engine.asarray(i)
+            rows.append(engine.sum(ww * mask[:, None], axis=0))
+        if rows:
+            count_mat = engine.stack(rows, axis=1)
+        else:
+            count_mat = engine.zeros((tuple(getattr(ww, 'shape', (0, 0)))[1], 0))
+        min_vals = engine.asarray(np.full(int(tuple(getattr(ww, 'shape', (0, 0)))[1]), int(params['min_val'])))
+        return min_vals, count_mat
 
     def sampler(self, seed: Optional[int] = None) -> 'IntegerCategoricalSampler':
         """IntegerCategoricalSampler object for sampling from IntegerCategoricalDistribution instance.
@@ -453,6 +532,12 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         self.max_val = x[0] + len(x[1]) - 1
         self.count_vec = x[1]
 
+        return self
+
+    def scale(self, c: float) -> 'IntegerCategoricalAccumulator':
+        """Scale count vector while preserving integer support metadata."""
+        if self.count_vec is not None:
+            self.count_vec *= c
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

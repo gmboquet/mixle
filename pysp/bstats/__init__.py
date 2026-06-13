@@ -37,14 +37,16 @@ __all__ = ['BernoulliDistribution', 'BernoulliEstimator', 'BernoulliSampler',
            'IntegerCategoricalDistribution', 'IntegerCategoricalEstimator', 'IntegerCategoricalSampler',
            'LogGaussianDistribution', 'LogGaussianEstimator', 'LogGaussianSampler',
            'MarkovChainDistribution', 'MarkovChainEstimator', 'MarkovChainSampler',
-           'MixtureDistribution', 'MixtureEstimator', 'MixtureSampler',
+           'MixtureDistribution', 'MixtureEstimator', 'MixtureSampler', 'mixture_prior',
            'MultivariateGaussianDistribution', 'MultivariateGaussianEstimator', 'MultivariateGaussianSampler',
            'MultivariateNormalGammaDistribution', 'MultivariateNormalGammaSampler',
+           'NormalGammaDistribution', 'NormalGammaSampler',
            'NormalWishartDistribution', 'NormalWishartSampler',
            'NullDistribution', 'NullEstimator', 'NullSampler',
            'OptionalDistribution', 'OptionalEstimator', 'OptionalSampler',
            'PoissonDistribution', 'PoissonEstimator', 'PoissonSampler',
            'SequenceDistribution', 'SequenceEstimator', 'SequenceSampler',
+           'BayesianStreamingEstimator', 'posterior_carry', 'forgetting',
            'estimate', 'seq_estimate', 'initialize', 'seq_log_density_sum', 'seq_encode', 'seq_log_density',
            'load_models', 'dump_models']
 
@@ -71,9 +73,10 @@ from pysp.bstats.hdpm         import (HierarchicalDirichletProcessMixtureDistrib
                                       HierarchicalDirichletProcessMixtureEstimator,
                                       HierarchicalDirichletProcessMixtureSampler)
 from pysp.bstats.hidden_markov import HiddenMarkovModelDistribution, HiddenMarkovModelEstimator, HiddenMarkovModelSampler
-from pysp.bstats.mixture      import MixtureDistribution, MixtureEstimator, MixtureSampler
+from pysp.bstats.mixture      import MixtureDistribution, MixtureEstimator, MixtureSampler, mixture_prior
 from pysp.bstats.mvn          import MultivariateGaussianDistribution, MultivariateGaussianEstimator, MultivariateGaussianSampler
 from pysp.bstats.mvngamma     import MultivariateNormalGammaDistribution, MultivariateNormalGammaSampler
+from pysp.bstats.normgamma    import NormalGammaDistribution, NormalGammaSampler
 from pysp.bstats.normwishart  import NormalWishartDistribution, NormalWishartSampler
 from pysp.bstats.nulldist     import NullDistribution, NullEstimator, NullSampler
 from pysp.bstats.optional     import OptionalDistribution, OptionalEstimator, OptionalSampler
@@ -450,7 +453,6 @@ def seq_estimate(enc_data, estimator, prev_estimate):
 
         return _estimator_estimate(estimator, nobs, accumulator.value())
 
-
 def initialize(data, estimator, rng, p):
     """Initialize a model by accumulating a random subsample of data.
 
@@ -527,3 +529,6 @@ def initialize(data, estimator, rng, p):
         accumulator.key_replace(stats_dict)
 
         return _estimator_estimate(estimator, nobs, accumulator.value())
+
+
+from pysp.bstats.bestimation import BayesianStreamingEstimator, posterior_carry, forgetting

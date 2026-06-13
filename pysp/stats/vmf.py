@@ -104,6 +104,44 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
     Data type: Union[Sequence[float], np.ndarray] (a unit-norm vector in R^p).
     """
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='von_mises_fisher',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('mu', constraint='real_vector'),
+                ParameterSpec('kappa'),
+                ParameterSpec('log_const', constraint='real', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('count'),
+                StatisticSpec('sum', kind='vector_moment'),
+            ),
+            support='unit_vector',
+            differentiable=False,
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return row-wise legacy sufficient statistics for resident reductions."""
+        xx = engine.asarray(x)
+        one = engine.sum(xx * 0.0, axis=1) + engine.asarray(1.0)
+        return one, xx
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, mu: Any, kappa: Any, log_const: Any, engine: Any) -> Any:
+        """Engine-neutral von Mises-Fisher log-density from fitted parameters."""
+        xx = engine.asarray(x)
+        return engine.sum(xx * mu, axis=-1) * kappa + log_const
+
     def __init__(self, mu: Union[Sequence[float], np.ndarray], kappa: float, name: Optional[str] = None,
                  keys: Optional[str] = None) -> None:
         """VonMisesFisherDistribution object.
@@ -193,6 +231,42 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         return np.dot(x, self.mu) * self.kappa + self.log_const
+
+    def backend_seq_log_density(self, x: np.ndarray, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded unit-vector observations."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x),
+            engine.asarray(self.mu),
+            engine.asarray(self.kappa),
+            engine.asarray(self.log_const),
+            engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['VonMisesFisherDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked parameters for equal-dimensional von Mises-Fisher mixtures."""
+        dim = int(dists[0].dim)
+        if any(int(dist.dim) != dim for dist in dists):
+            raise ValueError('Stacked VonMisesFisherDistribution components require equal dimension.')
+        return {
+            '__pysp_component_axis__': {'mu': 0, 'kappa': 0, 'log_const': 0},
+            'mu': engine.asarray([dist.mu for dist in dists]),
+            'kappa': engine.asarray([dist.kappa for dist in dists]),
+            'log_const': engine.asarray([dist.log_const for dist in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: np.ndarray, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of von Mises-Fisher component log densities."""
+        xx = engine.asarray(x)
+        return engine.matmul(xx, params['mu'].T) * params['kappa'][None, :] + params['log_const'][None, :]
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: np.ndarray, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any]:
+        """Return component-stacked legacy ``(count, weighted_vector_sum)`` statistics."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        return engine.sum(ww, axis=0), engine.matmul(ww.T, xx)
 
     def sampler(self, seed: Optional[int] = None) -> 'VonMisesFisherSampler':
         """Create a VonMisesFisherSampler object from parameters of VonMisesFisherDistribution instance.
@@ -422,6 +496,8 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.ssum = x[1]
         self.count = x[0]
+        self.dim = None if self.ssum is None else len(self.ssum)
+        return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:
         """Merge sufficient statistics of object instance with suff stats containing matching keys.

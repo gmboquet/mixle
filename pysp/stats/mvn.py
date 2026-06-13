@@ -28,6 +28,71 @@ from typing import Union, List, Dict, Optional, Any, Sequence, Tuple
 class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution):
     """Multivariate normal distribution with mean vector mu and full covariance matrix covar."""
 
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='multivariate_gaussian',
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec('mu', constraint='real_vector'),
+                ParameterSpec('inv_covar', constraint='positive_matrix', differentiable=False),
+                ParameterSpec('log_det', differentiable=False),
+                ParameterSpec('dim', constraint='fixed', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('sum', kind='vector_moment'),
+                StatisticSpec('sum2', kind='matrix_moment'),
+                StatisticSpec('count'),
+            ),
+            support='real_vector',
+            differentiable=False,
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            ),
+        )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> Tuple[Any, ...]:
+        """Return vector/matrix sufficient statistics for generated MVN scoring."""
+        xx = engine.asarray(x)
+        return xx, xx[:, :, None] * xx[:, None, :]
+
+    @staticmethod
+    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return natural parameters for generated MVN scoring."""
+        mu = params['mu']
+        inv_covar = params['inv_covar']
+        eta1 = engine.matmul(inv_covar, mu[..., None])[..., 0]
+        eta2 = engine.asarray(-0.5) * inv_covar
+        return eta1, eta2
+
+    @staticmethod
+    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+        """Return the full-covariance Gaussian log partition."""
+        mu = params['mu']
+        eta1 = engine.matmul(params['inv_covar'], mu[..., None])[..., 0]
+        quad = engine.sum(mu * eta1, axis=-1)
+        return engine.asarray(0.5) * (
+            quad + params['log_det'] +
+            engine.asarray(float(params['dim'])) * engine.log(engine.asarray(2.0 * pi))
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return row-wise legacy accumulator statistics for generated resident reductions."""
+        xx = engine.asarray(x)
+        one = engine.sum(xx * 0.0, axis=1) + engine.asarray(1.0)
+        return xx, xx[:, :, None] * xx[:, None, :], one
+
     def __init__(self, mu: Union[List[float], np.ndarray], covar: Union[List[List[float]], np.ndarray],
                  name: Optional[str] = None, keys: Optional[str] = None) -> None:
         """MultivariateGaussianDistribution object for multivariate Gaussian with mean mu and covaraince 'covar'.
@@ -61,7 +126,9 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             raise RuntimeError('Cannot obtain Choleskey factorization for covariance matrix.')
         else:
             self.use_lstsq = False
-            self.chol_const = -0.5 * (len(self.mu) * np.log(2.0 * pi) + 2.0 * np.log(vec.diag(self.chol[0])).sum())
+            self.log_det = float(2.0 * np.log(vec.diag(self.chol[0])).sum())
+            self.inv_covar = scipy.linalg.cho_solve(self.chol, np.eye(self.dim))
+            self.chol_const = -0.5 * (len(self.mu) * np.log(2.0 * pi) + self.log_det)
 
     def __str__(self) -> str:
         """Returns string representation of MultivariateGaussianDistribution object."""
@@ -124,6 +191,57 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             soln = scipy.linalg.cho_solve(self.chol, diff.T).T
             rv = self.chol_const - 0.5 * ((diff * soln).sum(axis=1))
             return rv
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, mu: Any, inv_covar: Any, log_det: Any, engine: Any) -> Any:
+        """Engine-neutral multivariate Gaussian log-density from inverse covariance."""
+        diff = engine.asarray(x) - mu
+        soln = engine.matmul(diff, inv_covar)
+        quad = engine.sum(diff * soln, axis=-1)
+        dim = float(mu.shape[-1])
+        return -0.5 * (engine.asarray(dim) * engine.log(engine.asarray(2.0 * pi)) + log_det + quad)
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x), engine.asarray(self.mu), engine.asarray(self.inv_covar),
+            engine.asarray(self.log_det), engine)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['MultivariateGaussianDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked full-covariance Gaussian parameters for a homogeneous mixture kernel."""
+        dim = dists[0].dim
+        if any(d.dim != dim for d in dists):
+            raise ValueError('Stacked MultivariateGaussianDistribution components require a shared dimension.')
+        return {
+            '__pysp_component_axis__': {'mu': 0, 'inv_covar': 0, 'log_det': 0},
+            'mu': np.stack([d.mu for d in dists], axis=0),
+            'inv_covar': np.stack([d.inv_covar for d in dists], axis=0),
+            'log_det': np.asarray([d.log_det for d in dists], dtype=float),
+            'dim': dim,
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of full-covariance Gaussian log densities."""
+        xx = engine.asarray(x)
+        diff = xx[:, None, :] - params['mu'][None, :, :]
+        soln = engine.matmul(diff[:, :, None, :], params['inv_covar'][None, :, :, :])[:, :, 0, :]
+        quad = engine.sum(diff * soln, axis=2)
+        return -0.5 * (engine.asarray(float(params['dim'])) * engine.log(engine.asarray(2.0 * pi)) +
+                       params['log_det'][None, :] + quad)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Any, weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+        """Return component-stacked legacy sufficient statistics on the active engine."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        sum_x = engine.sum(ww[:, :, None] * xx[:, None, :], axis=0)
+        outer = xx[:, :, None] * xx[:, None, :]
+        sum_xx = engine.sum(ww[:, :, None, None] * outer[:, None, :, :], axis=0)
+        counts = engine.sum(ww, axis=0)
+        return sum_x, sum_xx, counts
 
     def sampler(self, seed: Optional[int] = None):
         """Create a MultivariateGaussianSampler for sampling from this distribution.

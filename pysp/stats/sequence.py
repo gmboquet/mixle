@@ -39,6 +39,13 @@ E = Tuple[np.ndarray, np.ndarray, np.ndarray, E1, Optional[E2]]
 class SequenceDistribution(SequenceEncodableProbabilityDistribution):
 
     """Independent sequence distribution built from a component observation distribution."""
+
+    def compute_capabilities(self):
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        children = (self.dist,) if self.null_len_dist else (self.dist, self.len_dist)
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
+                                        kernel_status='numba_adapter')
+
     def __init__(self, dist: SequenceEncodableProbabilityDistribution,
                  len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
                  len_normalized: Optional[bool] = False, name: Optional[str] = None) -> None:
@@ -66,6 +73,30 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
 
         self.null_len_dist = isinstance(self.len_dist, NullDistribution)
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+        base = declaration_for(self.dist)
+        length = None if self.null_len_dist else declaration_for(self.len_dist)
+        children = tuple(d for d in (base, length) if d is not None)
+        roles = []
+        if base is not None:
+            roles.append('element')
+        if length is not None:
+            roles.append('length')
+        return DistributionDeclaration(
+            name='sequence',
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(
+                StatisticSpec('elements', kind='child_stat'),
+                StatisticSpec('lengths', kind='child_stat'),
+            ),
+            support='sequence',
+            children=children,
+            child_roles=tuple(roles),
+            differentiable=all(child.differentiable for child in children),
+        )
 
     def __str__(self) -> str:
         """Return string representation of SequenceDistribution instance."""
@@ -173,6 +204,119 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             ll_sum += nll
 
         return ll_sum
+
+    def backend_seq_log_density(self, x: E, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded sequences."""
+        from pysp.stats.backend import backend_seq_log_density
+        idx, icnt, inz, enc_seq, enc_nseq = x
+        nseq = len(icnt)
+        ll_sum = engine.zeros(nseq)
+
+        if len(idx) > 0:
+            elem_ll = backend_seq_log_density(self.dist, enc_seq, engine)
+            eidx = engine.asarray(idx)
+            if self.len_normalized:
+                elem_ll = elem_ll * engine.asarray(icnt)[eidx]
+            ll_sum = engine.index_add(ll_sum, eidx, elem_ll)
+
+        if not self.null_len_dist and enc_nseq is not None:
+            ll_sum = ll_sum + backend_seq_log_density(self.len_dist, enc_nseq, engine)
+
+        return ll_sum
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['SequenceDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked child routes for homogeneous sequence mixtures."""
+        from pysp.stats.stacked import stacked_component_params
+        len_normalized = bool(dists[0].len_normalized)
+        null_len_dist = bool(dists[0].null_len_dist)
+        if any(bool(d.len_normalized) != len_normalized or bool(d.null_len_dist) != null_len_dist for d in dists):
+            raise ValueError('Stacked SequenceDistribution components require matching length policy.')
+        try:
+            element_route = stacked_component_params([d.dist for d in dists], engine)
+        except ValueError as exc:
+            raise ValueError('Sequence element child %s is not stackable: %s' %
+                             (type(dists[0].dist).__name__, exc))
+        length_route = None
+        if not null_len_dist:
+            try:
+                length_route = stacked_component_params([d.len_dist for d in dists], engine)
+            except ValueError as exc:
+                raise ValueError('Sequence length child %s is not stackable: %s' %
+                                 (type(dists[0].len_dist).__name__, exc))
+        return {
+            'element_route': element_route,
+            'length_route': length_route,
+            'len_normalized': len_normalized,
+            'num_components': len(dists),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of sequence log densities."""
+        from pysp.stats.stacked import stacked_component_log_density
+        idx, icnt, inz, enc_seq, enc_nseq = x
+        nseq = len(icnt)
+        rv = engine.zeros((nseq, int(params['num_components'])))
+
+        if len(idx) > 0:
+            eidx = engine.asarray(idx)
+            element_scores = stacked_component_log_density(enc_seq, params['element_route'], engine)
+            if params['len_normalized']:
+                element_scores = element_scores * engine.asarray(icnt)[eidx, None]
+            rv = engine.index_add(rv, eidx, element_scores)
+
+        if params['length_route'] is not None and enc_nseq is not None:
+            rv = rv + stacked_component_log_density(enc_nseq, params['length_route'], engine)
+
+        return rv
+
+    @classmethod
+    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any,
+                                                            params: Dict[str, Any], engine: Any,
+                                                            estimator: Any) -> Tuple[Any, ...]:
+        """Return per-component legacy sequence sufficient statistics."""
+        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
+            unstack_component_stats
+        idx, icnt, inz, enc_seq, enc_nseq = x
+        ww = engine.asarray(weights)
+        num_components = int(tuple(getattr(ww, 'shape', (0, 0)))[1])
+        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+
+        element_estimators = tuple(
+            getattr(component_est, 'estimator', None) for component_est in outer_estimators)
+        element_estimator = StackedEstimatorView(element_estimators) \
+            if len(element_estimators) == num_components else None
+        if len(idx) > 0:
+            eidx = engine.asarray(idx)
+            element_weights = ww[eidx]
+            if params['len_normalized']:
+                element_weights = element_weights * engine.asarray(icnt)[eidx, None]
+        else:
+            element_weights = engine.zeros((0, num_components))
+        element_stats = stacked_component_sufficient_statistics(
+            enc_seq, element_weights, params['element_route'], engine, element_estimator)
+        element_by_component = unstack_component_stats(element_stats, num_components)
+
+        if params['length_route'] is None or enc_nseq is None:
+            length_by_component = tuple(None for _ in range(num_components))
+        else:
+            length_estimators = tuple(
+                getattr(component_est, 'len_estimator', None) for component_est in outer_estimators)
+            length_estimator = StackedEstimatorView(length_estimators) \
+                if len(length_estimators) == num_components else None
+            length_stats = stacked_component_sufficient_statistics(
+                enc_nseq, ww, params['length_route'], engine, length_estimator)
+            length_by_component = unstack_component_stats(length_stats, num_components)
+
+        return tuple((element_by_component[i], length_by_component[i]) for i in range(num_components))
+
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+        """Return distribution-owned state for autograd fitting."""
+        from pysp.stats.gradient import SequenceGradientFitState
+        child = recurse(self.dist, engine, torch, leaves)
+        len_child = None if self.null_len_dist else recurse(self.len_dist, engine, torch, leaves)
+        return SequenceGradientFitState(self, child, len_child)
 
     def sampler(self, seed: Optional[int] = None) -> 'SequenceSampler':
         """Create a SequenceSampler object from instance of SequenceDistribution.
@@ -510,6 +654,13 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
+    def scale(self, c: float) -> 'SequenceAccumulator':
+        """Scale element and length sufficient statistics through their accumulators."""
+        self.accumulator.scale(c)
+        if not self.null_len_accumulator:
+            self.len_accumulator.scale(c)
+        return self
+
     def get_seq_lambda(self):
         rv = self.accumulator.get_seq_lambda()
 
@@ -778,4 +929,3 @@ class SequenceDataEncoder(DataSequenceEncoder):
         rv5 = self.len_encoder.seq_encode(nx)
 
         return rv1, rv2, rv3, rv4, rv5
-

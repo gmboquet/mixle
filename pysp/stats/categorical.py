@@ -10,7 +10,7 @@ If Data type is int, consider using pysp.stats.intrange (IntegerCategoricalDistr
 """
 import numpy as np
 import math
-from typing import Dict, Optional, Tuple, Any, TypeVar, Union, List
+from typing import Dict, Optional, Tuple, Any, TypeVar, Union, List, Sequence
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
     StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
     DistributionEnumerator, EnumerationError
@@ -22,6 +22,23 @@ T = TypeVar('T')
 class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
     """Categorical distribution over hashable labels."""
+
+    @classmethod
+    def compute_capabilities(cls):
+        from pysp.stats.capabilities import DistributionCapabilities
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+    @classmethod
+    def compute_declaration(cls):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        return DistributionDeclaration(
+            name='categorical',
+            distribution_type=cls,
+            parameters=(ParameterSpec('pmap', constraint='simplex_map'),),
+            statistics=(StatisticSpec('count_map', kind='count_map'),),
+            support='finite_or_default_hashable',
+        )
+
     def __init__(self, pmap: Dict[Any, float], default_value: float = 0.0, name: Optional[str] = None) -> None:
         """Defines a CategoricalDistribution object for data type T.
 
@@ -121,6 +138,85 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             rv = mapped_log_prob[xs]
 
         return rv
+
+    def backend_seq_log_density(self, x: Tuple[np.ndarray, np.ndarray], engine: Any) -> Any:
+        """Engine-neutral log-density for encoded object categories.
+
+        The object-to-index lookup remains Python-side at the encoding boundary;
+        the selected log-probability vector is an engine tensor, so simplex-map
+        parameters can still participate in autograd.
+        """
+        xs, val_map_inv = x
+        if hasattr(self, '_backend_labels'):
+            label_to_idx = {label: i for i, label in enumerate(self._backend_labels)}
+            default = getattr(self, '_backend_log_default', -np.inf)
+            mapped = [label_to_idx.get(label, -1) for label in val_map_inv]
+            mapped = np.asarray(mapped, dtype=np.int64)
+            good = mapped >= 0
+            safe = np.clip(mapped, 0, max(0, len(self._backend_labels) - 1))
+            vals = self._backend_log_probs[engine.asarray(safe)]
+            vals = engine.where(engine.asarray(good), vals, engine.asarray(default))
+            return vals[engine.asarray(xs)]
+
+        probs = np.asarray([self.pmap.get(u, self.default_value) for u in val_map_inv], dtype=np.float64)
+        with np.errstate(divide='ignore'):
+            log_probs = np.log(probs) - self.log1p_default_value
+        return engine.asarray(log_probs)[engine.asarray(xs)]
+
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+        """Return distribution-owned state for autograd fitting."""
+        from pysp.stats.gradient import CategoricalGradientFitState
+        labels = tuple(self.pmap.keys())
+        probs = [self.pmap[label] for label in labels]
+        logits = tensor_param(probs, engine, torch, transform='logits')
+        leaves.append(logits)
+        return CategoricalGradientFitState(self, labels, logits)
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence['CategoricalDistribution'], engine: Any) -> Dict[str, Any]:
+        """Return stacked categorical probabilities for shared finite supports."""
+        labels = tuple(dists[0].pmap.keys())
+        if any(tuple(d.pmap.keys()) != labels or d.default_value != dists[0].default_value for d in dists):
+            raise ValueError('Stacked CategoricalDistribution components require shared support/defaults.')
+        with np.errstate(divide='ignore'):
+            log_p = np.asarray([[np.log(d.pmap[label]) - d.log1p_default_value for d in dists]
+                                for label in labels], dtype=np.float64)
+        return {'__pysp_component_axis__': {'log_p': 1},
+                'labels': labels, 'log_p': engine.asarray(log_p),
+                'default': dists[0].log_default_value - dists[0].log1p_default_value}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Tuple[np.ndarray, np.ndarray],
+                                    params: Dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of categorical log densities."""
+        xs, val_map_inv = x
+        label_to_idx = {label: i for i, label in enumerate(params['labels'])}
+        mapped = np.asarray([label_to_idx.get(label, -1) for label in val_map_inv], dtype=np.int64)
+        good = mapped >= 0
+        safe = np.clip(mapped, 0, max(0, len(params['labels']) - 1))
+        scores = params['log_p'][engine.asarray(safe), :]
+        scores = engine.where(engine.asarray(good)[:, None], scores, engine.asarray(params['default']))
+        return scores[engine.asarray(xs), :]
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(cls, x: Tuple[np.ndarray, np.ndarray], weights: Any,
+                                              params: Dict[str, Any], engine: Any) -> Tuple[Dict[Any, float], ...]:
+        """Return per-component legacy count maps from engine-resident posterior weights."""
+        xs, val_map_inv = x
+        xx = engine.asarray(xs)
+        ww = engine.asarray(weights)
+        count_rows = []
+        for i in range(len(val_map_inv)):
+            mask = xx == engine.asarray(i)
+            count_rows.append(engine.sum(ww * mask[:, None], axis=0))
+        if count_rows:
+            counts = np.asarray(engine.to_numpy(engine.stack(count_rows, axis=0)), dtype=np.float64)
+        else:
+            counts = np.zeros((0, int(np.asarray(engine.to_numpy(engine.sum(ww, axis=0))).shape[0])), dtype=np.float64)
+        return tuple({
+            val_map_inv[j]: float(counts[j, k])
+            for j in range(len(val_map_inv))
+        } for k in range(counts.shape[1]))
 
     def sampler(self, seed: Optional[int] = None) -> 'CategoricalSampler':
         """Creates CategoricalSampler for sampling from CategoricalDistribution.

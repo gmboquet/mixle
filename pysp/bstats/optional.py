@@ -514,6 +514,11 @@ class OptionalEstimator(ParameterEstimator):
         prior of the wrapped estimator)."""
         return CompositeDistribution((self.prior, self.estimator.get_prior()))
 
+    def scale_suff_stat(self, suff_stat, c):
+        """Scale missing/observed weights and delegate wrapped statistics."""
+        psum, nsum, dist_suff_stat = suff_stat
+        return psum * c, nsum * c, self.estimator.scale_suff_stat(dist_suff_stat, c)
+
     def estimate(self, suff_stat: (float, float)) -> OptionalDistribution:
         """Estimate an OptionalDistribution from sufficient statistics.
 

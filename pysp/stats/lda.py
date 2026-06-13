@@ -73,6 +73,47 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         self.len_dist = len_dist
         self.gamma_threshold = gamma_threshold
 
+    def compute_capabilities(self):
+        """Return backend capability metadata for this concrete LDA instance."""
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+
+        children = tuple(self.topics)
+        if self.len_dist is not None and not isinstance(self.len_dist, NullDistribution):
+            children = children + (self.len_dist,)
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
+                                        kernel_status='generic_latent')
+
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        topic_children = tuple(declaration_for(topic) for topic in self.topics)
+        length = None if self.len_dist is None or isinstance(self.len_dist, NullDistribution) \
+            else declaration_for(self.len_dist)
+        children = tuple(child for child in topic_children + ((length,) if length is not None else ())
+                         if child is not None)
+        roles = tuple('topic_%d' % i for i, child in enumerate(topic_children) if child is not None)
+        if length is not None:
+            roles += ('length',)
+        return DistributionDeclaration(
+            name='lda',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('alpha', constraint='positive_vector'),
+                ParameterSpec('gamma_threshold', constraint='positive', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('previous_alpha', kind='metadata', additive=False, scales=False),
+                StatisticSpec('sum_of_logs'),
+                StatisticSpec('document_count'),
+                StatisticSpec('topic_counts'),
+                StatisticSpec('topics', kind='tuple'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='lda_document_bag',
+            children=children,
+            child_roles=roles,
+            differentiable=False,
+        )
+
     def __str__(self) -> str:
         """Return string representation of LDADistribution object."""
         return 'LDADistribution([%s], [%s])' % (','.join([str(u) for u in self.topics]), ','.join(map(str, self.alpha)))
@@ -162,6 +203,109 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
 
         return elob
 
+    def _backend_seq_posterior(self, x: Tuple[int, np.ndarray, np.ndarray, Optional[np.ndarray], E0], engine: Any) \
+            -> Tuple[Any, Any, Any]:
+        """Run LDA's variational posterior update using the active backend."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        alpha = engine.asarray(self.alpha)
+        num_documents, idx, counts, gammas, enc_data = x
+        num_topics = self.n_topics
+        idx_np = np.asarray(idx, dtype=np.int64)
+        idx_full_np = (idx_np[:, None] * num_topics + np.arange(num_topics, dtype=np.int64)).reshape(-1)
+        idx_full = engine.asarray(idx_full_np)
+        idx_backend = engine.asarray(idx_np)
+        counts_backend = engine.asarray(counts)
+
+        per_topic_scores = [
+            backend_seq_log_density(topic, enc_data, engine)
+            for topic in self.topics
+        ]
+        per_topic_log_densities = engine.stack(per_topic_scores, axis=1)
+        centered_topic_log_densities = per_topic_log_densities - \
+            engine.max(per_topic_log_densities, axis=1).reshape((-1, 1))
+        per_topic_weights = engine.exp(centered_topic_log_densities)
+
+        if gammas is None:
+            init_counts = engine.bincount(
+                idx_full,
+                weights=engine.asarray(np.ones(len(idx_full_np), dtype=np.float64)),
+                minlength=num_documents * num_topics,
+            ).reshape((num_documents, num_topics))
+            document_gammas = init_counts / float(num_topics) + alpha
+        else:
+            document_gammas = engine.asarray(gammas)
+
+        for _ in range(10000):
+            digamma_gammas = engine.digamma(document_gammas)
+            centered_gammas = digamma_gammas - engine.max(digamma_gammas, axis=1).reshape((-1, 1))
+            gamma_weights = engine.exp(centered_gammas)
+            row_weights = per_topic_weights * gamma_weights[idx_backend, :]
+            row_weight_sum = engine.sum(row_weights, axis=1).reshape((-1, 1))
+            log_density_gamma = row_weights / row_weight_sum * counts_backend.reshape((-1, 1))
+            gamma_updates = engine.bincount(
+                idx_full,
+                weights=log_density_gamma.reshape((-1,)),
+                minlength=num_documents * num_topics,
+            ).reshape((num_documents, num_topics))
+            gamma_updates = gamma_updates + alpha
+            rel_diff = engine.sum(engine.abs(document_gammas - gamma_updates), axis=1) / \
+                engine.sum(gamma_updates, axis=1)
+            document_gammas = gamma_updates
+            if float(np.max(engine.to_numpy(rel_diff))) <= self.gamma_threshold:
+                break
+
+        return log_density_gamma, document_gammas, per_topic_log_densities
+
+    def backend_seq_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, Optional[np.ndarray], E0],
+                                engine: Any) -> Any:
+        """Backend-neutral LDA variational lower-bound scoring."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        alpha = engine.asarray(self.alpha)
+        num_topics = self.n_topics
+        num_documents, idx, counts, _, _ = x
+        idx_backend = engine.asarray(idx)
+        counts_backend = engine.asarray(counts)
+        idx_full_np = (np.asarray(idx, dtype=np.int64)[:, None] * num_topics
+                       + np.arange(num_topics, dtype=np.int64)).reshape(-1)
+
+        log_density_gamma, document_gammas, per_topic_log_densities = self._backend_seq_posterior(x, engine)
+
+        tiny = 1.0e-30 if getattr(engine, 'precision', 'default') in ('float16', 'float32', 'bfloat16') \
+            else sys.float_info.min
+        bad_gamma = engine.isnan(log_density_gamma) | engine.isinf(log_density_gamma) | (log_density_gamma <= 0)
+        log_density_gamma = engine.where(bad_gamma, engine.asarray(tiny), log_density_gamma)
+        bad_docs = engine.isnan(document_gammas) | engine.isinf(document_gammas)
+        document_gammas = engine.where(bad_docs, engine.asarray(tiny), document_gammas)
+
+        gamma_sum = engine.sum(document_gammas, axis=1).reshape((-1, 1))
+        elob0 = engine.digamma(document_gammas) - engine.digamma(gamma_sum)
+        elob1 = elob0[idx_backend, :]
+        elob2 = log_density_gamma * (
+            elob1 + per_topic_log_densities - engine.log(log_density_gamma)
+            + engine.log(counts_backend.reshape((-1, 1)))
+        )
+        elob3 = engine.sum(elob0 * ((alpha - 1.0) - (document_gammas - 1.0)), axis=1)
+        elob4 = engine.bincount(
+            engine.asarray(idx_full_np),
+            weights=elob2.reshape((-1,)),
+            minlength=num_documents * num_topics,
+        ).reshape((num_documents, num_topics))
+        elob5 = engine.sum(elob4, axis=1)
+        elob6 = engine.sum(engine.gammaln(document_gammas), axis=1) - \
+            engine.gammaln(engine.sum(document_gammas, axis=1))
+        elob7 = engine.gammaln(engine.sum(alpha)) - engine.sum(engine.gammaln(alpha))
+
+        elob = elob3 + elob5 + elob6 + elob7
+
+        if self.len_dist is not None and not isinstance(self.len_dist, NullDistribution):
+            doc_lens = engine.bincount(idx_backend, weights=counts_backend, minlength=num_documents)
+            len_enc = self.len_dist.dist_to_encoder().seq_encode(engine.to_numpy(doc_lens))
+            elob = elob + backend_seq_log_density(self.len_dist, len_enc, engine)
+
+        return elob
+
     def seq_component_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, Optional[np.ndarray], E0]) -> np.ndarray:
         """Vectorized evaluation of the per-topic log-density of each document in encoded corpus x.
 
@@ -188,6 +332,20 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
             rv[:, i] = np.bincount(idx, weights=ll_mat[:, i] * counts, minlength=num_documents)
 
         return rv
+
+    def backend_seq_component_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, Optional[np.ndarray], E0],
+                                          engine: Any) -> Any:
+        """Backend-neutral per-topic document scores."""
+        from pysp.stats.backend import backend_seq_log_density
+
+        num_documents, idx, counts, _, enc_data = x
+        idx_backend = engine.asarray(idx)
+        counts_backend = engine.asarray(counts)
+        topic_scores = []
+        for topic in self.topics:
+            row_scores = backend_seq_log_density(topic, enc_data, engine) * counts_backend
+            topic_scores.append(engine.bincount(idx_backend, weights=row_scores, minlength=num_documents))
+        return engine.stack(topic_scores, axis=1)
 
     def seq_posterior(self, x: Tuple[int, np.ndarray, np.ndarray, Optional[np.ndarray], E0]) -> np.ndarray:
         """Vectorized evaluation of the posterior topic proportions for each document in encoded corpus x.
@@ -597,6 +755,16 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         if len_suff_stat is not None:
             self.len_accumulator.from_value(len_suff_stat)
 
+        return self
+
+    def scale(self, c: float) -> 'LDAEstimatorAccumulator':
+        """Scale linear variational sufficient statistics while preserving previous alpha metadata."""
+        self.sum_of_logs *= c
+        self.doc_counts *= c
+        self.topic_counts *= c
+        for acc in self.accumulators:
+            acc.scale(c)
+        self.len_accumulator.scale(c)
         return self
 
     def key_merge(self, stats_dict: Dict[str, Any]) -> None:

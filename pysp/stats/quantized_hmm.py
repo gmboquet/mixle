@@ -385,6 +385,36 @@ def _stationary_distribution(transitions: np.ndarray) -> np.ndarray:
 class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
 
     """Hidden Markov model distribution with quantized observation summaries."""
+    def compute_declaration(self):
+        from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        children = () if length is None else (length,)
+        return DistributionDeclaration(
+            name='quantized_hidden_markov',
+            distribution_type=type(self),
+            parameters=(
+                ParameterSpec('theta', constraint='unit_interval'),
+                ParameterSpec('levels', constraint='metadata', differentiable=False),
+                ParameterSpec('transition_exponents', constraint='integer_matrix', differentiable=False),
+                ParameterSpec('emission_exponents', constraint='integer_matrix', differentiable=False),
+                ParameterSpec('initial_exponents', constraint='integer_vector', differentiable=False),
+                ParameterSpec('init_mode', constraint='metadata', differentiable=False),
+                ParameterSpec('k_max', constraint='optional_integer', differentiable=False),
+            ),
+            statistics=(
+                StatisticSpec('num_states', kind='metadata', additive=False, scales=False),
+                StatisticSpec('initial_counts'),
+                StatisticSpec('state_counts'),
+                StatisticSpec('transition_counts'),
+                StatisticSpec('emissions', kind='tuple'),
+                StatisticSpec('length', kind='child_stat'),
+            ),
+            support='quantized_hidden_state_sequence',
+            children=children,
+            child_roles=('length',) if length is not None else (),
+            differentiable=False,
+        )
+
     def __init__(self, theta: float,
                  levels: Sequence[Any],
                  transition_exponents: Union[Sequence[Sequence[int]], np.ndarray],
