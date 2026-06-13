@@ -1532,9 +1532,15 @@ def _object_nbytes(x: Any, seen: set, depth: int, max_depth: int) -> int:
 
 
 def _kernel_or_none(model: Any, engine: Any, estimator: Optional[Any] = None) -> Any:
+    # Only a genuinely kernel-less model falls back to the legacy seq path;
+    # a real failure inside a kernel factory must surface, not silently
+    # degrade to the slow path.
+    from pysp.stats.backend import BackendScoringError
+    if not hasattr(model, 'kernel'):
+        return None
     try:
         return model.kernel(engine=engine, estimator=estimator)
-    except Exception:
+    except (NotImplementedError, BackendScoringError):
         return None
 
 

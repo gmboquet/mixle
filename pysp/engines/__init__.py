@@ -8,7 +8,7 @@ import numpy as np
 from pysp.engines.base import ComputeEngine
 from pysp.engines.numpy_engine import NUMPY_ENGINE, NumpyEngine
 from pysp.engines.precision import engine_with_precision, normalize_numpy_dtype, normalize_torch_dtype, precision_name
-from pysp.engines.symbolic_engine import SymbolicEngine, SymbolicExpression
+from pysp.engines.symbolic_engine import SYMBOLIC_ENGINE, SymbolicEngine, SymbolicExpression, is_symbolic_payload
 from pysp.engines.torch_engine import TorchEngine, torch
 
 __all__ = [
@@ -16,6 +16,7 @@ __all__ = [
     'NumpyEngine',
     'SymbolicEngine',
     'SymbolicExpression',
+    'SYMBOLIC_ENGINE',
     'TorchEngine',
     'NUMPY_ENGINE',
     'engine_of',
@@ -54,6 +55,10 @@ def _direct_engine(x: Any) -> Optional[ComputeEngine]:
     explicit = getattr(x, '__pysp_engine__', None)
     if explicit is not None:
         return explicit
+    # object arrays of symbolic nodes are ndarrays, so they must be routed to
+    # the symbolic engine before the np.ndarray -> NumpyEngine registry rule
+    if is_symbolic_payload(x):
+        return SYMBOLIC_ENGINE
     for cls, engine in _ARRAY_ENGINE_REGISTRY.items():
         if isinstance(x, cls):
             if torch is not None and cls is torch.Tensor and isinstance(engine, TorchEngine):

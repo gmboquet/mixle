@@ -151,11 +151,12 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of log-density (float) of len(x).
 
         """
+        # out-of-place so torch tensors with requires_grad pass through cleanly
         rv = x - self.mu
-        rv *= rv
-        rv *= -0.5 / self.sigma2
-        rv += self.log_const
-        rv -= x
+        rv = rv * rv
+        rv = rv * (-0.5 / self.sigma2)
+        rv = rv + self.log_const
+        rv = rv - x
 
         return rv
 

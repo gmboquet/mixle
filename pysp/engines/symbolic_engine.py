@@ -447,3 +447,19 @@ _EVAL_OPS: Dict[str, Callable[..., Any]] = {
     'isinf': math.isinf,
     'betaln': lambda x, y: math.lgamma(x) + math.lgamma(y) - math.lgamma(x + y),
 }
+
+
+#: Shared symbolic engine; arithmetic on symbolic nodes/object arrays dispatches here.
+SYMBOLIC_ENGINE = SymbolicEngine()
+
+# Tag scalar expression nodes so pysp.arithmetic recovers the symbolic engine.
+SymbolicExpression.__pysp_engine__ = SYMBOLIC_ENGINE
+
+
+def is_symbolic_payload(x: Any) -> bool:
+    """Return True for a symbolic node or a NumPy object array of symbolic nodes."""
+    if isinstance(x, SymbolicExpression):
+        return True
+    if isinstance(x, np.ndarray) and x.dtype == object and x.size:
+        return isinstance(x.flat[0], SymbolicExpression)
+    return False

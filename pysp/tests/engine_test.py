@@ -131,6 +131,22 @@ class EngineTestCase(unittest.TestCase):
             np.asarray(engine.evaluate(arr_expr, {'x': 1.5, 'y': 3.0}), dtype=float),
             np.asarray([1.5, 0.0]))
 
+    def test_symbolic_payloads_dispatch_through_arithmetic(self):
+        from pysp.engines import SYMBOLIC_ENGINE
+        # a scalar node and an object array of nodes both recover the symbolic
+        # engine through engine_of, while ordinary numpy arrays stay numpy
+        node = SymbolicExpression.symbol('x')
+        self.assertIs(engine_of(node), SYMBOLIC_ENGINE)
+        arr = SYMBOLIC_ENGINE.asarray(['x', 'y'])
+        self.assertIs(engine_of(arr), SYMBOLIC_ENGINE)
+        self.assertEqual(engine_of(np.array([1.0, 2.0])).name, 'numpy')
+
+        # pysp.arithmetic dispatches symbolic inputs to the symbolic engine
+        expr = ar.log(ar.exp(node) + 1.0)
+        self.assertIsInstance(expr, SymbolicExpression)
+        self.assertAlmostEqual(
+            float(SYMBOLIC_ENGINE.evaluate(expr, {'x': 0.0})), np.log(2.0))
+
     @unittest.skipUnless(HAS_TORCH, 'torch is not installed')
     def test_torch_engine_recovery_and_arithmetic(self):
         x = torch.tensor([1.0, 4.0, 9.0], dtype=torch.float64)
