@@ -469,6 +469,38 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
         min_diff = min_x - self.min_val
         self.count_vec[min_diff:(min_diff + len(loc_cnt))] += loc_cnt
 
+    def seq_update_engine(self, x: np.ndarray, weights: Any,
+                          estimate: Optional['IntegerUniformSpikeDistribution'], engine: Any) -> None:
+        """Engine-resident accumulation: the weighted value histogram is reduced on the active
+        engine (numpy or torch); the dynamic support range is host bookkeeping. Matches seq_update.
+        """
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        xv = np.asarray(x)
+        min_x = int(xv.min())
+        max_x = int(xv.max())
+
+        idx = engine.asarray((xv - min_x).astype(np.int64))
+        loc_cnt = np.asarray(engine.to_numpy(engine.bincount(
+            idx, weights=engine.asarray(weights_np), minlength=max_x - min_x + 1)), dtype=np.float64)
+
+        if self.count_vec is None:
+            self.count_vec = np.zeros(max_x - min_x + 1)
+            self.min_val = min_x
+            self.max_val = max_x
+
+        if self.min_val > min_x or self.max_val < max_x:
+            prev_min = self.min_val
+            self.min_val = min(min_x, self.min_val)
+            self.max_val = max(max_x, self.max_val)
+            temp = self.count_vec
+            prev_diff = prev_min - self.min_val
+            self.count_vec = np.zeros(self.max_val - self.min_val + 1)
+            self.count_vec[prev_diff:(prev_diff + len(temp))] = temp
+
+        min_diff = min_x - self.min_val
+        self.count_vec[min_diff:(min_diff + len(loc_cnt))] += loc_cnt
+
     def combine(self, suff_stat: Tuple[int, np.ndarray]) -> 'IntegerUniformSpikeAccumulator':
         """Combine sufficient statistics (min_val, count_vec) with this accumulator, aligning ranges.
 

@@ -156,6 +156,24 @@ class UniformAccumulator(SequenceEncodableStatisticAccumulator):
             self.min_val = min(self.min_val, float(np.min(x[mask])))
             self.max_val = max(self.max_val, float(np.max(x[mask])))
 
+    def seq_update_engine(self, x: np.ndarray, weights: Any,
+                          estimate: Optional[UniformDistribution], engine: Any) -> None:
+        """Engine-resident accumulation of the weighted count (numpy or torch).
+
+        The support min/max are host scalar bookkeeping over the observed values.
+        """
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        w = engine.asarray(weights_np)
+        zero = engine.asarray(0.0)
+        pos = w > zero
+        self.count += float(engine.to_numpy(engine.sum(engine.where(pos, w, zero))))
+        mask_np = weights_np > 0.0
+        if np.any(mask_np):
+            xv = np.asarray(x)[mask_np]
+            self.min_val = min(self.min_val, float(np.min(xv)))
+            self.max_val = max(self.max_val, float(np.max(xv)))
+
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: Optional[RandomState]) -> None:
         self.seq_update(x, weights, None)
 
