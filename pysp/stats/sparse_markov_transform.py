@@ -179,6 +179,61 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
 
         return rv
 
+    def compute_capabilities(self):
+        """Engine readiness for the dense scoring tail (numpy + torch).
+
+        The large word-by-word transition matrix is sliced/gathered host-side with SciPy sparse ops,
+        but the per-pair smoothing, log, and segment reductions run on the active engine (see
+        ``backend_seq_log_density``), so the model composes on numpy and torch.
+        """
+        from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+        ready = ('numpy', 'torch')
+        if not isinstance(self.len_dist, NullDistribution):
+            ready = intersect_engine_ready((self.len_dist,))
+            if 'numpy' not in ready:
+                ready = ('numpy',)
+        return DistributionCapabilities(engine_ready=ready, kernel_status='generic_object')
+
+    def backend_seq_log_density(self, x, engine) -> Any:
+        """Engine-routed sparse-association scoring.
+
+        The conditional probabilities for the observed word pairs are gathered host-side from the
+        SciPy sparse matrix; the smoothing ``p*b + a``, the logs, and the segment-sum reductions
+        (initial-state and association terms) run on the active engine via ``index_add``. Falls back
+        to the engine-lifted NumPy path for the low-memory encoding that lacks the flat pair index.
+        """
+        if x[3] is None:
+            return engine.asarray(self.seq_log_density(x))
+
+        from pysp.stats.backend import backend_seq_log_density as _backend_sld
+
+        nw = self.num_vals
+        a = self.alpha / nw
+        b = 1.0 - self.alpha
+        xlen = len(x[0])
+        (obsidx, seqidx, pairidx, cxvec, cyvec, fsqxvec, fvxvec, fcxvec,
+         fsqyvec, fcyvec) = x[3]
+        vv = x[2]
+
+        p_host = np.asarray(self.cond_prob_mat[vv[:, 0], vv[:, 1]]).flatten()
+        p = engine.asarray(p_host) * engine.asarray(b) + engine.asarray(a)
+
+        n_seq = int(np.asarray(fcyvec).shape[0])
+        contrib = p[engine.asarray(np.asarray(pairidx, dtype=np.int64))] * engine.asarray(cxvec)
+        sval = engine.index_add(engine.zeros(n_seq), engine.asarray(np.asarray(seqidx, dtype=np.int64)),
+                                contrib)
+        sval = engine.log(sval) * engine.asarray(fcyvec)
+        rv = engine.index_add(engine.zeros(xlen), engine.asarray(np.asarray(fsqyvec, dtype=np.int64)), sval)
+
+        init_term = engine.log(engine.asarray(self.init_prob_vec[fvxvec]) * engine.asarray(b)
+                               + engine.asarray(a)) * engine.asarray(fcxvec)
+        rv = rv + engine.index_add(engine.zeros(xlen),
+                                   engine.asarray(np.asarray(fsqxvec, dtype=np.int64)), init_term)
+
+        if not isinstance(self.len_dist, NullDistribution):
+            rv = rv + _backend_sld(self.len_dist, x[1], engine)
+        return rv
+
     def sampler(self, seed: Optional[int] = None) -> 'SparseMarkovAssociationSampler':
         """Create a SparseMarkovAssociationSampler object from this instance.
 

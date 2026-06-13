@@ -654,9 +654,7 @@ def _register_builtin_compute_metadata() -> None:
     ):
         register_capabilities(dist_type, legacy_numpy_caps)
 
-    numpy_only_reasons = {
-        SparseMarkovAssociationDistribution: 'sparse markov-transform family is intentionally NumPy/SciPy only',
-    }
+    numpy_only_reasons = {}
     for dist_type, reason in numpy_only_reasons.items():
         register_capabilities(dist_type, DistributionCapabilities(
             engine_ready=('numpy',), kernel_status='numpy_only', numpy_only_reason=reason))
