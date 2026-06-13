@@ -370,6 +370,17 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator.seq_update(child_enc, weights * valid.astype(float),
                                     None if estimate is None else estimate.dist)
 
+    def seq_update_engine(self, x: Tuple[Any, np.ndarray, np.ndarray], weights: Any,
+                          estimate: Optional[TransformDistribution], engine: Any) -> None:
+        """Engine-resident E-step: the validity-masked weights are formed on the active engine and
+        the child accumulator is routed through the engine. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        child_enc, _, valid = x
+        w = engine.asarray(weights) * engine.asarray(np.asarray(valid, dtype=np.float64))
+        child_seq_update(self.accumulator, child_enc, w,
+                         None if estimate is None else estimate.dist, engine)
+
     def initialize(self, x: Any, weight: float, rng: Optional[RandomState]) -> None:
         try:
             inv = self.transform.inverse(x)

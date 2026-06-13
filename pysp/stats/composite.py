@@ -610,6 +610,16 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         for i in range(self.count):
             self.accumulators[i].seq_update(x[i], weights, estimate.dists[i] if estimate is not None else None)
 
+    def seq_update_engine(self, x: Tuple[Any, ...], weights: Any,
+                          estimate: Optional['CompositeDistribution'], engine: Any) -> None:
+        """Engine-resident E-step: route each component accumulator through the active engine so
+        nested families stay resident. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        for i in range(self.count):
+            child_seq_update(self.accumulators[i], x[i], weights,
+                             estimate.dists[i] if estimate is not None else None, engine)
+
     def combine(self, suff_stat: SS) -> 'CompositeAccumulator':
         """Aggregate the sufficient statistics of CompositeAccumulator with input suff_stat.
 

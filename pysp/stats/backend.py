@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 from pysp.engines import NUMPY_ENGINE, ComputeEngine
 
 
@@ -10,6 +12,24 @@ class BackendScoringError(NotImplementedError):
     """Raised when a distribution has no backend scoring hook."""
 
     pass
+
+
+def child_seq_update(accumulator: Any, enc: Any, weights: Any, estimate: Any,
+                     engine: ComputeEngine) -> None:
+    """Route a child accumulator's E-step through the active engine when possible.
+
+    Structural distributions (sequence, composite, optional, ...) delegate accumulation to child
+    accumulators. On a non-numpy engine this prefers the child's ``seq_update_engine`` so nested
+    families stay engine-resident; otherwise it falls back to the host ``seq_update`` with numpy
+    weights. This is the recursion that pushes engine residency down a model tree.
+    """
+    if engine.name != NUMPY_ENGINE.name and callable(getattr(accumulator, 'seq_update_engine', None)):
+        accumulator.seq_update_engine(enc, weights, estimate, engine)
+        return
+    w = weights
+    if hasattr(engine, 'to_numpy'):
+        w = np.asarray(engine.to_numpy(weights), dtype=np.float64)
+    accumulator.seq_update(enc, w, estimate)
 
 
 def backend_seq_log_density(dist: Any, enc: Any, engine: ComputeEngine = NUMPY_ENGINE) -> Any:
