@@ -140,8 +140,9 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of log-density (float) of len(x).
 
         """
+        # out-of-place arithmetic keeps the autograd graph intact under torch
         rv = x * (-1.0 / self.beta)
-        rv -= self.log_beta
+        rv = rv - self.log_beta
         rv = np.where(x >= 0.0, rv, -np.inf)
         return rv
 

@@ -159,9 +159,10 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         vals, log_fact = x
+        # out-of-place arithmetic keeps the autograd graph intact under torch
         rv = vals * self.log_lambda
-        rv -= log_fact
-        rv -= self.lam
+        rv = rv - log_fact
+        rv = rv - self.lam
         good = np.isfinite(vals) & (vals >= 0) & (np.floor(vals) == vals)
         rv = np.where(good, rv, -np.inf)
         return rv
