@@ -455,7 +455,13 @@ class StackedMixtureKernelFactory(KernelFactory):
     """Factory for homogeneous mixtures with distribution-owned stacked math."""
 
     def __init__(self, fallback: Optional[KernelFactory] = None) -> None:
-        self.fallback = GenericKernelFactory() if fallback is None else fallback
+        # numpy mixtures fall through to generated numba (legacy-enc compatible);
+        # GeneratedNumbaKernelFactory itself defers to the generic kernel when no
+        # generated scorer exists, so this remains a guaranteed fallback chain
+        if fallback is None:
+            from pysp.stats.kernel import GeneratedNumbaKernelFactory
+            fallback = GeneratedNumbaKernelFactory()
+        self.fallback = fallback
 
     def build(self, dist: SequenceEncodableProbabilityDistribution, engine: ComputeEngine,
               estimator: Optional[ParameterEstimator] = None) -> Kernel:
