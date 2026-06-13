@@ -17,6 +17,8 @@ import pysp.stats as s
 from pysp.stats import (
     BetaDistribution, BinomialDistribution, GaussianDistribution, PoissonDistribution,
     ExponentialDistribution, GammaDistribution, GeometricDistribution,
+    LaplaceDistribution, LogisticDistribution, StudentTDistribution, WeibullDistribution,
+    ParetoDistribution, UniformDistribution,
 )
 
 
@@ -29,6 +31,12 @@ def _samples(rng, kind):
         'exponential': lambda: list(rng.exponential(2.0, size=400)),
         'gamma': lambda: list(rng.gamma(2.0, 2.0, size=400)),
         'geometric': lambda: [int(v) + 1 for v in rng.geometric(0.3, size=400)],
+        'laplace': lambda: list(rng.laplace(0.5, 1.3, size=400)),
+        'logistic': lambda: list(rng.logistic(0.0, 1.0, size=400)),
+        'studentt': lambda: list(rng.standard_t(5.0, size=400)),
+        'weibull': lambda: [abs(v) + 1.0e-3 for v in rng.weibull(1.5, size=400) * 2.0],
+        'pareto': lambda: [(v + 1.0) for v in rng.pareto(2.5, size=400)],
+        'uniform': lambda: list(rng.uniform(-1.0, 2.0, size=400)),
     }[kind]()
 
 
@@ -41,6 +49,13 @@ CASES = [
     ('exponential', ExponentialDistribution(2.0), 'exponential'),
     ('gamma', GammaDistribution(2.0, 2.0), 'gamma'),
     ('geometric', GeometricDistribution(0.3), 'geometric'),
+    # non-exp-family leaves lit up by the generic symbolic->numba compiler
+    ('laplace', LaplaceDistribution(0.5, 1.3), 'laplace'),
+    ('logistic', LogisticDistribution(0.0, 1.0), 'logistic'),
+    ('studentt', StudentTDistribution(5.0, 0.0, 1.0), 'studentt'),
+    ('weibull', WeibullDistribution(1.5, 2.0), 'weibull'),
+    ('pareto', ParetoDistribution(1.0, 2.5), 'pareto'),
+    ('uniform', UniformDistribution(-1.0, 2.0), 'uniform'),
 ]
 
 
@@ -71,6 +86,19 @@ class GeneratedKernelParityTestCase(unittest.TestCase):
         self.assertEqual(diag.get('strategy'), 'exp_family')
         self.assertIsNone(diag.get('fallback_reason'))
         self.assertEqual(s.capabilities_for(type(dist)).kernel_status, 'numba_adapter')
+
+    def test_non_exp_family_leaves_have_generic_numba_kernel(self):
+        # Regression for the generic symbolic->numba compiler: these leaves are not exponential
+        # families, so they only get a generated kernel through the lowered backend formula.
+        non_exp = [
+            LaplaceDistribution(0.5, 1.3), LogisticDistribution(0.0, 1.0),
+            StudentTDistribution(5.0, 0.0, 1.0), WeibullDistribution(1.5, 2.0),
+            ParetoDistribution(1.0, 2.5), UniformDistribution(-1.0, 2.0),
+        ]
+        for dist in non_exp:
+            with self.subTest(family=type(dist).__name__):
+                self.assertTrue(s.generated_numba_log_density_available(dist))
+                self.assertEqual(s.capabilities_for(type(dist)).kernel_status, 'numba_adapter')
 
     def test_generated_benchmark_informational(self):
         # Not asserted - just records generated-vs-legacy timing so regressions in the harness

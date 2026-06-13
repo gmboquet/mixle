@@ -29,7 +29,7 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic')
+        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
 
     @classmethod
     def compute_declaration(cls):
