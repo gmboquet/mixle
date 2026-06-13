@@ -462,6 +462,31 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.tot_sum += weights.sum()
 
+    def seq_update_engine(self, x: Tuple[int, np.ndarray, np.ndarray, np.ndarray], weights: Any,
+                          estimate: Optional[BernoulliSetDistribution], engine: Any) -> None:
+        """Engine-resident accumulation of per-element inclusion counts (numpy or torch).
+
+        The weighted element histogram is reduced on the active engine; the object-keyed count
+        dict is host bookkeeping. Matches seq_update.
+        """
+        sz, idx, val_map_inv, xs = x
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        w_eng = engine.asarray(weights_np)
+
+        if len(xs) > 0:
+            agg_cnt = np.asarray(engine.to_numpy(engine.bincount(
+                engine.asarray(np.asarray(xs, dtype=np.int64)),
+                weights=w_eng[np.asarray(idx, dtype=np.int64)],
+                minlength=len(val_map_inv))), dtype=np.float64)
+        else:
+            agg_cnt = np.zeros(len(val_map_inv), dtype=np.float64)
+
+        for i, v in enumerate(agg_cnt):
+            self.pmap[val_map_inv[i]] += v
+
+        self.tot_sum += float(engine.to_numpy(engine.sum(w_eng)))
+
     def seq_initialize(self, x: Tuple[int, np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray,
                        rng: np.random.RandomState) -> None:
         """Vectorized initialization of sufficient statistics. Calls seq_update().

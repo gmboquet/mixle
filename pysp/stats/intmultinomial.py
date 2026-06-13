@@ -594,6 +594,49 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             else:
                 self.len_accumulator.seq_update(tenc, weights, estimate.len_dist)
 
+    def seq_update_engine(self, x: E, weights: Any, estimate: Optional[IntegerMultinomialDistribution],
+                          engine: Any) -> None:
+        """Engine-resident accumulation of integer-multinomial count statistics (numpy or torch).
+
+        The weighted category histogram is reduced on the active engine; the dynamic support
+        range is host bookkeeping. The length child is routed through the engine via
+        child_seq_update. Matches seq_update.
+        """
+        from pysp.stats.backend import child_seq_update
+        sz, idx, cnt, val, tenc = x
+
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        valv = np.asarray(val)
+        min_x = int(valv.min())
+        max_x = int(valv.max())
+
+        row_weights = np.asarray(cnt, dtype=np.float64) * weights_np[np.asarray(idx)]
+        bidx = engine.asarray((valv - min_x).astype(np.int64))
+        loc_cnt = np.asarray(engine.to_numpy(engine.bincount(
+            bidx, weights=engine.asarray(row_weights), minlength=max_x - min_x + 1)), dtype=np.float64)
+
+        if self.count_vec is None:
+            self.count_vec = np.zeros(max_x - min_x + 1)
+            self.min_val = min_x
+            self.max_val = max_x
+
+        if self.min_val > min_x or self.max_val < max_x:
+            prev_min = self.min_val
+            self.min_val = min(min_x, self.min_val)
+            self.max_val = max(max_x, self.max_val)
+            temp = self.count_vec
+            prev_diff = prev_min - self.min_val
+            self.count_vec = np.zeros(self.max_val - self.min_val + 1)
+            self.count_vec[prev_diff:(prev_diff + len(temp))] = temp
+
+        min_diff = min_x - self.min_val
+        self.count_vec[min_diff:(min_diff + len(loc_cnt))] += loc_cnt
+
+        if self.len_accumulator is not None:
+            len_estimate = None if estimate is None else estimate.len_dist
+            child_seq_update(self.len_accumulator, tenc, weights, len_estimate, engine)
+
     def seq_initialize(self, x: E, weights: np.ndarray, rng: Optional[RandomState]) -> None:
         """Vectorized initialization of sufficient statistics from encoded sequence of iid observations 'x'.
 

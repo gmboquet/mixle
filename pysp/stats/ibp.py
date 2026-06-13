@@ -319,6 +319,22 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self.feature_counts += np.dot(np.asarray(weights, dtype=np.float64), xx)
         self.total_count += float(np.sum(weights))
 
+    def seq_update_engine(self, x: np.ndarray, weights: Any,
+                          estimate: Optional[IndianBuffetProcessDistribution], engine: Any) -> None:
+        """Engine-resident accumulation of weighted feature-use counts (numpy or torch).
+
+        The weighted feature counts are reduced via a weight-vector / binary-matrix product on the
+        active engine; the alpha metadata is host bookkeeping. Matches seq_update.
+        """
+        if estimate is not None:
+            self.alpha = estimate.alpha
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+        w = engine.asarray(weights_np)
+        xx = engine.asarray(np.asarray(x, dtype=np.float64))
+        self.feature_counts += np.asarray(engine.to_numpy(engine.matmul(w, xx)), dtype=np.float64)
+        self.total_count += float(engine.to_numpy(engine.sum(w)))
+
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: Optional[RandomState]) -> None:
         self.seq_update(x, weights, None)
 
