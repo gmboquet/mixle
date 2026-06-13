@@ -359,6 +359,49 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[k].seq_update(enc_by_state[k], gamma_all[:, k], estimate.emissions[k])
         self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
 
+    def seq_update_engine(self, x, weights, estimate, engine):
+        """Engine-resident Baum-Welch E-step (numpy or torch).
+
+        Reuses hmm_engine_forward_backward over the sequence-contiguous segment encoding, producing
+        the same initial/state/transition/emission statistics as the host seq_update.
+        """
+        from pysp.stats.hidden_markov import hmm_engine_forward_backward, hmm_pad_log_emissions
+
+        idx, sz, enc_by_state, len_enc = x
+        sz = np.asarray(sz)
+        total = len(idx)
+        num_states = self.num_states
+
+        log_emit_flat = np.empty((total, num_states), dtype=np.float64)
+        for k, dist in enumerate(estimate.emissions):
+            log_emit_flat[:, k] = dist.seq_log_density(enc_by_state[k])
+
+        padded, mask, offsets = hmm_pad_log_emissions(log_emit_flat, sz)
+        with np.errstate(divide='ignore'):
+            log_w = estimate.log_w
+            log_a = estimate.log_transitions
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
+                                dtype=np.float64)
+
+        _, gamma, xi_sum, pi = hmm_engine_forward_backward(
+            engine, padded, log_w, log_a, mask, weights=weights_np)
+        gamma = np.asarray(engine.to_numpy(gamma))
+        xi_sum = np.asarray(engine.to_numpy(xi_sum))
+        pi = np.asarray(engine.to_numpy(pi))
+
+        gamma_flat = np.zeros((total, num_states), dtype=np.float64)
+        for i in range(len(sz)):
+            n = int(sz[i])
+            if n > 0:
+                gamma_flat[offsets[i]:offsets[i + 1], :] = gamma[i, :n, :]
+
+        self.init_counts += pi.sum(axis=0)
+        self.state_counts += gamma_flat.sum(axis=0)
+        self.trans_counts += xi_sum
+        for k in range(num_states):
+            self.accumulators[k].seq_update(enc_by_state[k], gamma_flat[:, k], estimate.emissions[k])
+        self.len_accumulator.seq_update(len_enc, weights_np, estimate.len_dist)
+
     def combine(self, suff_stat: Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Optional[Any]]) \
             -> 'SegmentalHiddenMarkovAccumulator':
         _, init_counts, state_counts, trans_counts, acc_values, len_value = suff_stat
@@ -530,3 +573,35 @@ SegmentalHiddenMarkovModelAccumulatorFactory = SegmentalHiddenMarkovAccumulatorF
 SegmentalHiddenMarkovModelDataEncoder = SegmentalHiddenMarkovDataEncoder
 SegmentalHiddenMarkovModelEstimator = SegmentalHiddenMarkovEstimator
 SegmentalHiddenMarkovModelSampler = SegmentalHiddenMarkovSampler
+
+
+def _register_segmental_engine_kernel():
+    """Register the engine-resident segmental-HMM kernel (idempotent; called at import)."""
+    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
+                                    register_kernel_factory)
+    from pysp.engines import NUMPY_ENGINE
+
+    class SegmentalHiddenMarkovModelKernel(GenericKernel):
+        """Segmental-HMM kernel whose E-step runs the forward-backward on the active engine."""
+
+        def accumulate(self, enc, weights):
+            if self.estimator is None:
+                raise ValueError('SegmentalHiddenMarkovModelKernel.accumulate requires an estimator.')
+            if self.engine.name == NUMPY_ENGINE.name:
+                return super().accumulate(enc, weights)
+            host_enc = getattr(enc, 'host_payload', enc)
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
+            return accumulator.value()
+
+    class SegmentalHiddenMarkovModelKernelFactory(KernelFactory):
+        def build(self, dist, engine, estimator=None):
+            if not dist.supports_engine(engine):
+                return GenericKernelFactory().build(dist, engine, estimator=estimator)
+            return SegmentalHiddenMarkovModelKernel(dist, engine=engine, estimator=estimator)
+
+    register_kernel_factory(SegmentalHiddenMarkovModelDistribution,
+                            SegmentalHiddenMarkovModelKernelFactory())
+
+
+_register_segmental_engine_kernel()
