@@ -27,6 +27,20 @@ from pysp.utils.enumeration import BufferedStream, LazyQuantizedEnumerationIndex
     best_first_union
 
 
+def _logsumexp_1d(vals: np.ndarray) -> float:
+    """Fast log-sum-exp over a small 1-D array.
+
+    scipy.special.logsumexp carries large per-call overhead (dtype promotion, array-API shims).
+    The inside/inside-outside dynamic program calls it once per chart cell, so for many short
+    parses that overhead dominates; this inline version is numerically equivalent for the 1-D,
+    real-valued inputs used here.
+    """
+    m = vals.max()
+    if m == -np.inf:
+        return -np.inf
+    return float(m + np.log(np.exp(vals - m).sum()))
+
+
 BinaryRuleInput = Union[Dict[Any, Sequence[Tuple[Any, Any, float]]],
                         Sequence[Tuple[Any, Any, Any, float]]]
 TerminalRuleInput = Union[Dict[Any, Sequence[Tuple[Any, float]]],
@@ -217,7 +231,7 @@ class HeterogeneousPCFGDistribution(SequenceEncodableProbabilityDistribution):
                 rules = self.terminal_by_parent[parent]
                 if rules:
                     vals = self.log_terminal_probs[rules] + terminal_log_density[i, rules]
-                    inside[i, i + 1, parent] = logsumexp(vals)
+                    inside[i, i + 1, parent] = _logsumexp_1d(vals)
 
         for span in range(2, n + 1):
             for i in range(n - span + 1):
@@ -227,7 +241,7 @@ class HeterogeneousPCFGDistribution(SequenceEncodableProbabilityDistribution):
                     left = self.binary_left[rule_idx]
                     right = self.binary_right[rule_idx]
                     vals = inside[i, i + 1:j, left] + inside[i + 1:j, j, right]
-                    score = logsumexp(vals)
+                    score = _logsumexp_1d(vals)
                     if np.isfinite(score):
                         inside[i, j, parent] = np.logaddexp(
                             inside[i, j, parent], self.log_binary_probs[rule_idx] + score)

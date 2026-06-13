@@ -604,10 +604,21 @@ def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.nd
         else:
             enc_data = mix_model.seq_encode(data)
 
-    if hasattr(mix_model, 'seq_component_log_density') and hasattr(mix_model, 'seq_posterior'):
+    if hasattr(mix_model, 'seq_component_log_density'):
         ll_mat = np.asarray(mix_model.seq_component_log_density(enc_data), dtype=np.float64)
-        z_mat = np.asarray(mix_model.seq_posterior(enc_data), dtype=np.float64)
-        return z_mat, ll_mat
+        log_w = getattr(mix_model, 'log_w', None)
+        if log_w is not None:
+            # The component posterior is softmax(ll + log_w); deriving it here avoids a second
+            # full model evaluation. seq_posterior re-scores every component, which doubles the
+            # work for expensive components (HMM forward-backward, PCFG inside-outside).
+            z_mat = ll_mat + np.asarray(log_w, dtype=np.float64).reshape(1, -1)
+            z_mat -= z_mat.max(axis=1, keepdims=True)
+            np.exp(z_mat, out=z_mat)
+            z_mat /= z_mat.sum(axis=1, keepdims=True)
+            return z_mat, ll_mat
+        if hasattr(mix_model, 'seq_posterior'):
+            z_mat = np.asarray(mix_model.seq_posterior(enc_data), dtype=np.float64)
+            return z_mat, ll_mat
 
     ll_mat = np.asarray([u.seq_log_density(enc_data) for u in mix_model.components], dtype=np.float64).T
     log_w = np.asarray(mix_model.log_w, dtype=np.float64).reshape(1, -1)
