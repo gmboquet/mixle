@@ -2554,10 +2554,13 @@ def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=No
     log_w = engine.asarray(log_w)
     log_a = engine.asarray(log_a)
     m = engine.asarray(mask)
-    num_states = int(np.asarray(log_w).shape[0])
+    # log_w is either a shared (S,) initial vector or a per-sequence (N, S) vector (IndPi HMM).
+    log_w_2d = np.asarray(log_w).ndim == 2
+    num_states = int(np.asarray(log_w).shape[-1])
 
     # forward pass (freeze alpha at padded steps so ll reads the last valid step)
-    alpha = log_w[None, :] + log_emit[:, 0, :]
+    init = log_w if log_w_2d else log_w[None, :]
+    alpha = init + log_emit[:, 0, :]
     alphas = [alpha]
     for t in range(1, tmax):
         cand = engine.logsumexp(alpha[:, :, None] + log_a[None, :, :], axis=1) + log_emit[:, t, :]
