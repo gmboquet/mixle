@@ -42,6 +42,36 @@ class AutoPrecisionTestCase(unittest.TestCase):
         self.assertEqual(auto_precision(docs, engine=_FakeGPUEngine()), "float64")
         self.assertEqual(auto_precision(None, engine=_FakeGPUEngine()), "float64")
 
+    def test_optimize_precision_auto_matches_default_on_cpu(self):
+        # 'auto' on CPU resolves to float64 (keeps the default host path) -> identical fit.
+        import io
+
+        from pysp.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator
+        from pysp.utils.estimation import optimize
+
+        truth = MixtureDistribution(
+            [GaussianDistribution(-3.0, 1.0), GaussianDistribution(0.0, 1.0), GaussianDistribution(4.0, 1.0)],
+            [0.4, 0.3, 0.3],
+        )
+        data = truth.sampler(1).sample(6000)
+
+        def mk():
+            return MixtureEstimator([GaussianEstimator()] * 3)
+
+        d = optimize(data, mk(), max_its=12, rng=np.random.RandomState(1), out=io.StringIO())
+        a = optimize(data, mk(), max_its=12, rng=np.random.RandomState(1), out=io.StringIO(), precision="auto")
+        self.assertTrue(np.allclose(d.w, a.w, atol=1.0e-12))
+
+    def test_plan_precision_auto_resolves(self):
+        from pysp.planner import plan
+        from pysp.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution
+
+        truth = MixtureDistribution([GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)], [0.5, 0.5])
+        data = truth.sampler(1).sample(2000)
+        p = plan(data=data, model=truth, precision="auto")
+        # CPU planning -> float64 sizing.
+        self.assertEqual(p.dtype_bytes, 8)
+
     def test_numeric_sample_extraction(self):
         self.assertIsNone(_numeric_data_sample(None))
         self.assertIsNone(_numeric_data_sample(["x", "y"]))
