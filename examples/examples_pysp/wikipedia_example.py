@@ -1,96 +1,60 @@
-"""Fit an LDA to data from wikipedia."""
-import os
+"""Fit an LDA topic model to a self-contained synthetic corpus.
+
+A "corpus" of integer-encoded documents is sampled from a known LDADistribution (each topic favors a
+contiguous block of the vocabulary), then recovered with an LDAEstimator over IntegerCategorical
+topics. Demonstrates the manual sequence-EM loop (seq_encode / seq_initialize / seq_estimate /
+seq_log_density_sum) and ranking the top words per learned topic. No external corpus required.
+"""
 import sys
-import time
 
 import numpy as np
 
 import pysp.utils.optsutil as ops
 from pysp.stats import *
 
-data_loc = os.path.join(os.path.dirname(os.path.realpath(__file__)), '../../data')
-
-
-def load_wiki_data():
-    sword_loc = os.path.join(data_loc, 'stop_words')
-    sword = set([''])
-    for f in [os.path.join(sword_loc, 'mallet.txt')]:
-        fin = open(os.path.join(sword_loc, f), 'rt')
-        sword.update(fin.read().split('\n'))
-        fin.close()
-
-    wiki_loc = os.path.join(data_loc, 'wiki_example')
-    files = [os.path.join(wiki_loc, u) for u in filter(lambda v: v.endswith('.txt'), os.listdir(wiki_loc))]
-    data = ops.flatMap(lambda x: x,
-                       [list(map(lambda u: list(filter(lambda v: v not in sword, u.split(' '))), ops.textFile(f))) for f
-                        in files])
-    data = list(filter(lambda u: len(u) > 0, data))
-
-    words = sorted(set([u for v in data for u in v]))
-
-    return data, words
-
-
 if __name__ == '__main__':
-
-    num_topics = 10
-    print_cnt = 10
-    rng = np.random.RandomState(2)
-    # out = open('/Users/boquet1/PycharmProjects/wiki_debug.log', 'wt')
+    num_topics = 6
+    num_words = 60
+    num_docs = 800
+    words_per_doc = 80
     out = sys.stdout
 
-    data, words = load_wiki_data()
+    # True topic model: topic i puts most of its mass on a contiguous block of the vocabulary.
+    rng = np.random.RandomState(1)
+    block = num_words // num_topics
+    true_topics = []
+    for i in range(num_topics):
+        p = np.full(num_words, 0.2)
+        p[i * block:(i + 1) * block] += 5.0
+        true_topics.append(IntegerCategoricalDistribution(0, p / p.sum()))
+    true_lda = LDADistribution(true_topics, alpha=np.ones(num_topics) * 0.2,
+                               len_dist=CategoricalDistribution({words_per_doc: 1.0}))
 
-    avg_size = np.mean([len(u) for u in data])
+    documents = true_lda.sampler(seed=2).sample(num_docs)
+    data = [list(ops.count_by_value(doc).items()) for doc in documents]
+    out.write('#docs=%d  vocab=%d  words/doc=%d\n' % (num_docs, num_words, words_per_doc))
 
-    out.write('#words = %d / #docs = %d / avg w/doc = %f\n' % (len(words), len(data), avg_size))
+    # Estimator: one IntegerCategorical topic per latent topic, fit by sequence EM.
+    topic_est = IntegerCategoricalEstimator(min_val=0, max_val=num_words - 1, pseudo_count=0.01)
+    estimator = LDAEstimator([topic_est] * num_topics, gamma_threshold=1.0e-6)
 
-    word_map = dict()
-    data = [ops.map_to_integers(u, word_map) for u in data]
-    data_cnt = [list(ops.count_by_value(u).items()) for u in data]
+    enc_data = seq_encode(data, estimator=estimator)
+    model = seq_initialize(enc_data, estimator, rng=np.random.RandomState(3), p=0.1)
 
-    word_map_inv = ops.get_inv_map(word_map)
+    count, ll_sum = seq_log_density_sum(enc_data, model)
+    prev = ll_sum / count
+    for it in range(40):
+        model = seq_estimate(enc_data, estimator, prev_estimate=model)
+        count, ll_sum = seq_log_density_sum(enc_data, model)
+        elbo = ll_sum / count
+        if it % 10 == 0 or abs(elbo - prev) < 1.0e-6:
+            out.write('iteration %3d  E[LB]=%e  delta=%e\n' % (it + 1, elbo, elbo - prev))
+        if abs(elbo - prev) < 1.0e-6:
+            break
+        prev = elbo
 
-    # estimator0 = CategoricalEstimator(pseudo_count=0.001, suff_stat={w : 1.0/len(words) for w in words})
-    estimator0 = IntegerCategoricalEstimator(min_val=0, max_val=(len(word_map) - 1), pseudo_count=0.001)
-    estimator1 = LDAEstimator([estimator0] * num_topics, keys=(None, 'topics'), gamma_threshold=1.0e-8)
-    # estimator  = MixtureEstimator([estimator1]*2, pseudo_count=1.0)
-    estimator = estimator1
-
-    enc_data = seq_encode(data_cnt, estimator=estimator, num_chunks=1)
-
-    imm = seq_initialize(enc_data, estimator, p=0.1, rng=np.random.RandomState(1))
-    prev_model = imm
-
-    dcnt, lob_sum = seq_log_density_sum(enc_data, imm)
-    old_elob = lob_sum / dcnt
-
-    for kk in range(300):
-
-        t0 = time.time()
-        mm = seq_estimate(enc_data, estimator, prev_estimate=prev_model)
-        t1 = time.time()
-        dcnt, lob_sum = seq_log_density_sum(enc_data, mm)
-        elob = lob_sum / dcnt
-
-        prev_model = mm
-        out.write(
-            'Iteration %d\tE[LoB]=%e\tdelta E[LoB]=%e\tdelta time=%f\n' % (kk + 1, elob, elob - old_elob, t1 - t0))
-
-        old_elob = elob
-
-        if (kk + 1) % print_cnt == 0:
-
-            # out.write('Weights = %s\n'%(str(','.join(map(str, mm.w)))))
-            # out.write('Alpha_2 = %s\n'%(str(','.join(map(str, mm.components[0].alpha)))))
-            # out.write('Alpha_1 = %s\n'%(str(','.join(map(str, mm.components[1].alpha)))))
-            # topics = mm.components[0].topics
-
-            topics = mm.topics
-
-            for i in np.argsort(-mm.alpha):
-                sidx = np.argsort(-topics[i].log_p_vec)
-                top_words = ', '.join(['%s (%f)' % (word_map_inv[j], np.exp(topics[i].log_p_vec[j])) for j in sidx[:10]])
-                out.write('Topic %d [%f]: %s\n' % (i, mm.alpha[i], top_words))
-
-        out.flush()
+    for i in np.argsort(-model.alpha):
+        log_p = model.topics[i].log_p_vec
+        top = np.argsort(-log_p)[:block]
+        out.write('topic %d [alpha=%.3f]: %s\n'
+                  % (i, model.alpha[i], ', '.join('w%d(%.2f)' % (w, np.exp(log_p[w])) for w in top)))
