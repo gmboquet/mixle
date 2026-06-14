@@ -114,6 +114,15 @@ class FusedEMTestCase(unittest.TestCase):
         _, llf = seq_log_density_sum(enc, fb)
         self.assertAlmostEqual(lls, llf, places=6)
 
+    def test_best_of_reuse_estep_ll(self):
+        # best_of forwards reuse_estep_ll to each trial's optimize; same trials/seed -> same result.
+        from pysp.utils.estimation import best_of
+        std = best_of(self.data, None, self._mk(), 3, 20, 0.1, None,
+                      np.random.RandomState(1), out=io.StringIO())
+        fused = best_of(self.data, None, self._mk(), 3, 20, 0.1, None,
+                        np.random.RandomState(1), out=io.StringIO(), reuse_estep_ll=True)
+        self.assertAlmostEqual(std[0], fused[0], places=6)
+
     def test_default_off_unchanged(self):
         # Default (reuse_estep_ll=False) must not set the tracking flag or alter results.
         m = optimize(self.data, self._mk(), max_its=10, rng=np.random.RandomState(4), out=io.StringIO())
