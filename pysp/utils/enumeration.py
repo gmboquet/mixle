@@ -33,6 +33,7 @@ __all__ = [
     "LengthFrontierMerge",
     "best_first_union",
     "best_first_union_max",
+    "rerank_by_density",
     "bounded_best_first_union_index",
     "QuantizedEnumerationIndex",
     "LazyQuantizedEnumerationIndex",
@@ -971,3 +972,57 @@ def best_first_union_max(
     probability for markov/HMM enumerators.
     """
     return _best_first_union(streams, log_offsets, exact_log_density, np.max, tol)
+
+
+def rerank_by_density(stream: Iterator[tuple[Any, float]], window: int) -> Iterator[tuple[Any, float]]:
+    """Re-sort an approximately-descending ``(value, log_prob)`` stream into true descending order.
+
+    The count-budget seek index orders values by a *quantized, structural* cost. For the
+    non-decomposable marginal families it is the **tropical (dominant-path) cost**: an HMM
+    observation is binned by its best state path, but its exact ``log_density`` is the logsumexp over
+    all paths, which is at least as large, so an item lands no earlier than its true rank -- the
+    stream is "pessimistic". Every emitted pair already carries the *exact* marginal ``log_prob``
+    (the index recomputes ``log_density`` on unranking), so true descending order is recovered by a
+    bounded look-ahead: hold a ``window`` of buffered items and always emit the current
+    highest-probability one.
+
+    This is exact wherever no item's true rank is more than ``window`` positions ahead of where it
+    appears in ``stream`` -- i.e. ``window`` must exceed the maximum tropical-vs-marginal rank
+    displacement (empirically small; bounded by the per-item path-count gap). It turns the seek
+    index's O(1) arbitrary-index access into true-marginal-ordered access at O(window) extra work,
+    without the full best-first search.
+
+    The window also de-duplicates: a value already buffered is dropped on arrival. The marginal
+    count index over-counts -- it emits an observation once per contributing path -- and its
+    stateless canonical filter still leaks copies that share the minimal tropical fine bucket, so
+    co-located identical copies would otherwise corrupt the order. Dedup is bounded to the window
+    (co-located copies are caught; copies farther apart than ``window`` are not), matching the
+    O(window) memory budget. The result is distinct values in true descending probability order.
+    """
+    if window < 1:
+        raise ValueError("window must be a positive integer.")
+    counter = itertools.count()
+    heap: list[tuple[float, int, Hashable, Any]] = []
+    buffered: set[Hashable] = set()  # freeze-keys currently in the heap, to drop co-located repeats
+    it = iter(stream)
+
+    def push(value: Any, log_prob: float) -> None:
+        key = freeze(value)
+        if key in buffered:
+            return
+        buffered.add(key)
+        heapq.heappush(heap, (-float(log_prob), next(counter), key, value))
+
+    for value, log_prob in it:
+        push(value, log_prob)
+        if len(heap) >= window:
+            break
+    while heap:
+        neg_lp, _, key, value = heapq.heappop(heap)
+        buffered.discard(key)
+        yield value, -neg_lp
+        try:
+            v2, lp2 = next(it)
+        except StopIteration:
+            continue
+        push(v2, lp2)
