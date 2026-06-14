@@ -151,7 +151,10 @@ python mixture_example.py
 python hidden_markov_example.py
 ```
 
-Most examples generate their own data; `set_example.py` and `wikipedia_*` need external corpora.
+Every script is self-contained: it samples its own random data from a known model, then refits and
+recovers it — no external corpora or downloads required. The `gallery_*_example.py` scripts tour the
+distribution families in bulk (univariate, multivariate/set, combinators, and structured/latent
+models); the remaining scripts focus on individual models end to end.
 
 ### Running on Spark
 
