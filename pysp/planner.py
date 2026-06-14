@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 
-from pysp.engines import NUMPY_ENGINE, NumpyEngine, engine_with_precision, precision_name
+from pysp.engines import NUMPY_ENGINE, NumpyEngine, auto_precision, engine_with_precision, precision_name
 from pysp.stats import ResidentEncodedPayload, move_encoded_payload
 from pysp.stats.pdist import DataSequenceEncoder, encoded_nbytes
 
@@ -1220,6 +1220,8 @@ def plan(
     safety_factor: float = 1.25,
 ) -> Placement:
     """Return an advisory placement for local or distributed orchestration."""
+    if precision == "auto":
+        precision = auto_precision(data, engine=engine, sample_size=sample_size)
     if resources is None:
         resources = Resources.single_cpu(precision=precision)
     if sub_chunks <= 0:
