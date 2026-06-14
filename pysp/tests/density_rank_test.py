@@ -5,15 +5,19 @@ fallback (forced via a tiny max_exact, checked within a few standard errors of t
 and the HMM case where the head is exact and deep tails fall back to sampling.
 """
 
+import itertools
 import math
 import unittest
 
 import numpy as np
 
+from pysp.stats.composite import CompositeDistribution
 from pysp.stats.hidden_markov import HiddenMarkovModelDistribution
 from pysp.stats.int_range import IntegerCategoricalDistribution
 from pysp.stats.mixture import MixtureDistribution
-from pysp.utils.density_rank import density_rank
+from pysp.stats.poisson import PoissonDistribution
+from pysp.stats.sequence import SequenceDistribution
+from pysp.utils.density_rank import count_dp_rank, density_rank
 
 
 class DensityRankTestCase(unittest.TestCase):
@@ -71,6 +75,38 @@ class DensityRankTestCase(unittest.TestCase):
         self.assertEqual(deep.method, "sampling")
         self.assertGreaterEqual(deep.cumulative_probability, 0.0)
         self.assertLessEqual(deep.cumulative_probability, 1.0)
+
+
+class CountDPRankTestCase(unittest.TestCase):
+    def test_exact_rank_matches_brute_force_for_composite(self):
+        rng = np.random.RandomState(0)
+        sizes = (5, 4, 6)
+        dist = CompositeDistribution(
+            tuple(IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(s)))) for s in sizes)
+        )
+        support = [list(t) for t in itertools.product(*[range(s) for s in sizes])]
+        lp = {tuple(x): dist.log_density(x) for x in support}
+
+        def brute(x):
+            t = lp[tuple(x)]
+            return sum(1 for y in support if lp[tuple(y)] > t + 1e-12)
+
+        for x in support:
+            r = count_dp_rank(dist, x, oversample=32)
+            self.assertLessEqual(r.window_lower, brute(x))
+            self.assertLessEqual(brute(x), r.window_upper)
+            self.assertEqual(r.rank, brute(x), "rank mismatch at %s" % x)
+
+    def test_deep_rank_without_enumeration(self):
+        # A long iid sequence: support ~ sum_L 4^L is far too large to enumerate, but the count DP
+        # returns a finite rank for a deep low-probability observation, bracketed by its window.
+        seq = SequenceDistribution(
+            IntegerCategoricalDistribution(0, [0.4, 0.3, 0.2, 0.1]), len_dist=PoissonDistribution(8.0)
+        )
+        r = count_dp_rank(seq, [3] * 12, oversample=16)
+        self.assertGreater(r.rank, 10**6)  # deep
+        self.assertLessEqual(r.window_lower, r.rank)
+        self.assertLessEqual(r.rank, r.window_upper)
 
 
 if __name__ == "__main__":
