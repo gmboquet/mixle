@@ -449,6 +449,12 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
         self.comp_counts = np.zeros(self.num_components, dtype=float)
         self.weight_key, self.comp_key = keys if keys is not None else (None, None)
         self.name = name
+        # Data log-likelihood accumulated as a byproduct of the E-step (the posterior normalizer),
+        # only when _track_ll is enabled. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
+        # pays nothing.
+        self._track_ll = False
+        self._seq_ll = 0.0
 
         self._init_rng = False
         self._acc_rng = None
@@ -588,6 +594,18 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
         ll_mat -= ll_max
         np.exp(ll_mat, out=ll_mat)
         ll_sum = np.sum(ll_mat, axis=1, keepdims=True)
+
+        # Capture per-row data log-likelihood (== seq_log_density) by reusing the posterior
+        # normalizer already computed here: row_ll = rowmax + log(rowsum), with -inf for the bad
+        # rows seq_log_density would also return -inf for. Free except an O(n) log/dot, and only
+        # when the fused-EM fast path requests it (_track_ll).
+        if self._track_ll:
+            with np.errstate(divide='ignore'):
+                row_ll = ll_max[:, 0] + np.log(ll_sum[:, 0])
+            if np.any(bad_rows):
+                row_ll[bad_rows] = -np.inf
+            self._seq_ll += float(np.dot(weights, row_ll))
+
         ll_mat /= ll_sum
 
         for i in range(self.num_components):

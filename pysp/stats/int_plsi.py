@@ -414,6 +414,13 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         self.wc_key, self.sc_key, self.dc_key = keys if keys is not None else (None, None, None)
         self.len_acc    = len_acc if len_acc is not None else NullAccumulator()
 
+        # Per-document data log-likelihood accumulated as a byproduct of the E-step, only when
+        # _track_ll is enabled. Equals seq_log_density_sum(enc, dist)[1] and is consumed by the
+        # fused-EM fast path in optimize(reuse_estep_ll=True); not part of value(). Off by default
+        # so the standard path pays nothing.
+        self._track_ll = False
+        self._seq_ll = 0.0
+
         ### Initializer seeds
         self._init_rng: bool = False
         self._acc_rng: Optional[RandomState] = None
@@ -567,6 +574,25 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
             self.comp_count[:,i] += np.bincount(xd, weights=update[:,i], minlength=self.num_docs)
         self.doc_count += np.bincount(xm, weights=weights, minlength=self.num_docs)
         '''
+
+        # Fused-EM fast path: recover the per-document data log-likelihood that
+        # estimate.seq_log_density would return. PLSI's seq_log_density is the exact (non-variational)
+        # marginal -- no posterior loop to reuse -- so we reproduce its per-word row probabilities,
+        # log/count weighting, per-document bincount, the document-prior term, and the optional
+        # length term. Gated; standard path untouched.
+        if self._track_ll:
+            cnt = len(xn)
+            w_ll = np.zeros(len(xv), dtype=np.float64)
+            index_dot(estimate.prob_mat, xv, estimate.state_mat, xd, w_ll)
+            np.log(w_ll, out=w_ll)
+            w_ll *= xc
+            rv = np.zeros(cnt, dtype=np.float64)
+            bincount(xi, w_ll, rv)
+            rv += estimate.log_doc_vec[xm]
+            if estimate.len_dist is not None:
+                rv = rv + estimate.len_dist.seq_log_density(nn)
+            self._seq_ll += float(np.dot(weights, rv))
+
         self.len_acc.seq_update(nn, weights, estimate.len_dist)
 
     def seq_update_engine(self, x, weights, estimate, engine):

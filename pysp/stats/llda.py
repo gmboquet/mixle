@@ -573,6 +573,13 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 		self.alpha_key    = keys[0]
 		self.topics_key   = keys[1]
 
+		# Per-document variational lower bound (ELBO) accumulated as a byproduct of the E-step,
+		# only when _track_ll is enabled. Equals seq_log_density_sum(enc, dist)[1] and is consumed
+		# by the fused-EM fast path in optimize(reuse_estep_ll=True); not part of value(). Off by
+		# default so the standard path pays nothing.
+		self._track_ll = False
+		self._seq_ll = 0.0
+
 		# protected for seq_initialize consistency.
 		self._init_rng = False
 		self._rng_theta = None
@@ -787,6 +794,34 @@ class LLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 		self.doc_counts   += nbh_cnt
 		self.topic_counts += nbh_tcnt
 		self.prev_alpha    = estimate.alphas
+
+		# Fused-EM fast path: recover the per-document ELBO that estimate.seq_log_density would
+		# return, reusing the variational quantities the E-step already produced -- no second
+		# variational loop and no re-scoring of topics. Mirrors LLDADistribution.seq_log_density
+		# exactly (LLDA's ELBO has no length/label-set term). Gated; standard path untouched.
+		if self._track_ll:
+			idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
+			idx_full *= num_topics
+			idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
+
+			ldg = log_density_gamma.copy()
+			dg = final_gammas.copy()
+			ldg[np.bitwise_or(np.isnan(ldg), np.isinf(ldg))] = sys.float_info.min
+			ldg[ldg <= 0] = sys.float_info.min
+			dg[np.bitwise_or(np.isnan(dg), np.isinf(dg))] = sys.float_info.min
+
+			elob0 = digamma(dg) - digamma(np.sum(dg, axis=1, keepdims=True))
+			elob1 = elob0[idx, :]
+			elob2 = ldg * (elob1 + per_topic_log_densities - np.log(ldg)
+			               + np.log(np.reshape(counts, (-1, 1))))
+			elob3 = np.sum(elob0 * ((doc_alphas - 1.0) - (dg - 1.0)), axis=1)
+			elob4 = np.bincount(idx_full.flat, weights=elob2.flat)
+			elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
+			elob6 = np.sum(gammaln(dg), axis=1) - gammaln(dg.sum(axis=1))
+			elob7 = gammaln(doc_alphas.sum(axis=1)) - gammaln(doc_alphas).sum(axis=1)
+
+			elob = elob3 + elob5 + elob6 + elob7
+			self._seq_ll += float(np.dot(weights, elob))
 
 		#return num_documents, idx, counts, final_gammas, enc_data
 

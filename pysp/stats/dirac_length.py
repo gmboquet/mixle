@@ -536,6 +536,12 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.comp_key = keys[1]
         self.v = v
         self.name = name
+        # Data log-likelihood accumulated as a byproduct of the E-step (the posterior normalizer),
+        # only when _track_ll is enabled. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
+        # pays nothing.
+        self._track_ll = False
+        self._seq_ll = 0.0
 
         ### Initializer seeds
         self._init_rng: bool = False
@@ -554,11 +560,22 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         sz, idx_v, idx_nv, enc_x = x
         ll_mat = np.zeros((sz, 2), dtype=np.float64)
 
+        # The fused-EM fast path wants the per-row data log-likelihood (== seq_log_density). The
+        # length-distribution score is the only emission term; compute it once here and reuse it for
+        # both the posteriors below and the tracked likelihood. Only when _track_ll is requested do
+        # we score it in the len(idx_v)==0 branch (which otherwise takes a weights-only shortcut).
+        len_ll = None
+        if self._track_ll:
+            len_ll = np.asarray(estimate.len_dist.seq_log_density(enc_x), dtype=np.float64)
+
         if len(idx_v) == 0:
             ll_mat[:, 0] += weights
 
         else:
-            ll_mat[:, 0] += estimate.len_dist.seq_log_density(enc_x) + estimate.log_p
+            if len_ll is not None:
+                ll_mat[:, 0] += len_ll + estimate.log_p
+            else:
+                ll_mat[:, 0] += estimate.len_dist.seq_log_density(enc_x) + estimate.log_p
             ll_mat[idx_nv, 0] = weights[idx_nv].copy()
 
             rv = ll_mat[idx_v, :]
@@ -578,6 +595,24 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             rv *= rv_max
 
             ll_mat[idx_v, :] = rv
+
+        # Reconstruct the per-row log-likelihood exactly as seq_log_density: comp0 = len_ll + log_p
+        # for every row, comp1 = log_1p on Dirac-valued rows and -inf elsewhere, then row logsumexp
+        # (with -inf for the rows seq_log_density also reports as -inf).
+        if self._track_ll:
+            row_mat = np.empty((sz, 2), dtype=np.float64)
+            row_mat[:, 0] = len_ll + estimate.log_p
+            row_mat[:, 1] = -np.inf
+            row_mat[idx_v, 1] = estimate.log_1p
+            r_max = row_mat.max(axis=1)
+            r_bad = np.isinf(r_max)
+            row_ll = np.full(sz, -np.inf, dtype=np.float64)
+            good = ~r_bad
+            if np.any(good):
+                with np.errstate(divide='ignore'):
+                    row_ll[good] = r_max[good] + np.log(
+                        np.exp(row_mat[good, :] - r_max[good, None]).sum(axis=1))
+            self._seq_ll += float(np.dot(weights, row_ll))
 
         self.comp_counts += ll_mat.sum(axis=0)
         self.accumulator.seq_update(enc_x, ll_mat[:, 0], estimate.len_dist)

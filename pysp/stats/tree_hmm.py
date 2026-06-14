@@ -809,6 +809,12 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self.name = name
         self.use_numba = use_numba
 
+        # When _track_ll is enabled, seq_update accumulates the per-tree data
+        # log-likelihood into _seq_ll. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); default path is unchanged and zero-cost.
+        self._track_ll = False
+        self._seq_ll = 0.0
+
         # protected for initialization.
         self._init_rng: bool = False
         self._len_rng: Optional[RandomState] = None
@@ -965,6 +971,24 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             pr_obs -= pr_max0[:, None]
             np.exp(pr_obs, out=pr_obs)
 
+            # When the fused-EM fast path requests it, compute the per-tree data log-likelihood
+            # from the already-scored emissions via the (read-only) forward kernel, reusing pr_obs
+            # so no emissions are re-scored. Done before Baum-Welch. Matches seq_log_density exactly.
+            if self._track_ll:
+                ll_ret = np.zeros(num_trees, dtype=np.float64)
+                ll_betas = np.ones_like(pr_obs, dtype=np.float64)
+                ll_etas = np.zeros((len(xbi), num_states), dtype=np.float64)
+                numba_seq_log_density(num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, xlnl,
+                                      pr_obs, p_level, a_mat, pr_max0, ll_betas, ll_etas, ll_ret)
+                single_ll = np.flatnonzero(np.diff(tz) == 1)
+                if single_ll.size > 0:
+                    r = tz[single_ll]
+                    ll_ret[single_ll] += np.log(np.dot(pr_obs[r, :], w)) + pr_max0[r]
+                if len_enc is not None and len_enc[1] is not None:
+                    len_ll = estimate.len_dist.seq_log_density(len_enc[1])
+                    ll_ret = ll_ret + np.bincount(len_enc[0], weights=len_ll, minlength=num_trees)
+                self._seq_ll += float(np.dot(weights, ll_ret))
+
             betas = np.zeros((tot_cnt, num_states), dtype=np.float64)
             etas = np.zeros((len(xbi), num_states), dtype=np.float64)
             alphas = np.zeros((tot_cnt, num_states), dtype=np.float64)
@@ -1025,10 +1049,20 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             pr_obs -= pr_max0[:, None]
             np.exp(pr_obs, out=pr_obs)
 
+            # When the fused-EM fast path requests it, accumulate the per-tree data log-likelihood
+            # inline during the (existing) upward beta pass from the betas_sum normalizers + emission
+            # max, matching seq_log_density exactly. The standard path skips this entirely.
+            track_ll = self._track_ll
+            ll_ret = np.zeros(num_trees, dtype=np.float64) if track_ll else None
+
             #  set the leaf nodes
             betas[xln, :] *= pr_obs[xln, :] * p_level[xlnl, :]
             betas_sum = np.sum(betas[xln, :], axis=1, keepdims=True)
             betas[xln, :] /= betas_sum
+
+            if track_ll:
+                ll_ret += np.bincount(xlni, weights=np.log(betas_sum.flatten()) + pr_max0[xln],
+                                      minlength=num_trees)
 
             #  upward pass on betas
             for level in range(len(level_idx) - 1, -1, -1):
@@ -1049,6 +1083,17 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 betas_sum = np.sum(betas[p_nxt[level], :], axis=1, keepdims=True)
 
                 betas[p_nxt[level], :] /= betas_sum
+
+                if track_ll:
+                    ll_ret += np.bincount(i_nxt[level],
+                                          weights=np.log(betas_sum.flatten()) + pr_max0[p_nxt[level]],
+                                          minlength=num_trees)
+
+            if track_ll:
+                if len_enc is not None and len_enc[1] is not None:
+                    len_ll = estimate.len_dist.seq_log_density(len_enc[1])
+                    ll_ret = ll_ret + np.bincount(len_enc[0], weights=len_ll, minlength=num_trees)
+                self._seq_ll += float(np.dot(weights, ll_ret))
 
             ## alpha (upward pass) set the root nodes
             alphas[rns, :] += betas[rns, :]
