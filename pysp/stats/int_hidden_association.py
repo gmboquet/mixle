@@ -24,44 +24,59 @@ graphical models like a mixture model.
 Note: This is the k-rank equivalent of SparseMarkovAssociationModel.
 
 """
+
 import math
-from pysp.utils.optional_deps import numba
+from collections.abc import Sequence
+from typing import Any, TypeVar
+
 import numpy as np
 
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
-from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
-    NullAccumulatorFactory
+from pysp.stats.null_dist import (
+    NullAccumulator,
+    NullAccumulatorFactory,
+    NullDistribution,
+    NullEstimator,
+)
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
+from pysp.utils.optional_deps import numba
 from pysp.utils.optsutil import count_by_value
 
-from typing import Optional, List, Tuple, Optional, Any, Dict, Union, Sequence, TypeVar
+E0 = tuple[tuple[list[tuple[np.ndarray, ...]], Any | None, Any | None], None]
 
-E0 = Tuple[Tuple[List[Tuple[np.ndarray, ...]], Optional[Any], Optional[Any]], None]
+E1 = TypeVar("E1")  # Encoded prev
+E2 = TypeVar("E2")  # Encoded lengths
+E3 = tuple[tuple[list[tuple[np.ndarray, ...]], E2 | None, E1 | None], None]
+E4 = tuple[None, tuple[tuple[np.ndarray, ...], E1 | None, E2 | None]]
+E = E3 | E4
 
-E1 = TypeVar('E1')  # Encoded prev
-E2 = TypeVar('E2')  # Encoded lengths
-E3 = Tuple[Tuple[List[Tuple[np.ndarray, ...]], Optional[E2], Optional[E1]], None]
-E4 = Tuple[None, Tuple[Tuple[np.ndarray, ...], Optional[E1], Optional[E2]]]
-E = Union[E3, E4]
-
-SS1 = TypeVar('SS1')  # suff stat prev
-SS2 = TypeVar('SS2')  # suff stat len
+SS1 = TypeVar("SS1")  # suff stat prev
+SS2 = TypeVar("SS2")  # suff stat len
 
 
 class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
     """Integer hidden association model: words of a second set are emitted through hidden states conditioned
     on words of a first set."""
 
-    def __init__(self, state_prob_mat: Union[List[List[float]], np.ndarray],
-                 cond_weights: Union[List[List[float]], np.ndarray],
-                 alpha: float = 0.0,
-                 prev_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 name: Optional[str] = None,
-                 keys: Tuple[Optional[str], Optional[str]] = (None, None),
-                 use_numba: bool = False) -> None:
+    def __init__(
+        self,
+        state_prob_mat: list[list[float]] | np.ndarray,
+        cond_weights: list[list[float]] | np.ndarray,
+        alpha: float = 0.0,
+        prev_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        name: str | None = None,
+        keys: tuple[str | None, str | None] = (None, None),
+        use_numba: bool = False,
+    ) -> None:
         """IntegerHiddenAssociationDistribution object for specifying integer Hidden association distribution.
 
         Args:
@@ -113,36 +128,38 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
 
         if self.use_numba:
-            return DistributionCapabilities(engine_ready=('numpy',), kernel_status='legacy_numpy')
-        return DistributionCapabilities(engine_ready=intersect_engine_ready((self.prev_dist, self.len_dist)),
-                                        kernel_status='generic_latent')
+            return DistributionCapabilities(engine_ready=("numpy",), kernel_status="legacy_numpy")
+        return DistributionCapabilities(
+            engine_ready=intersect_engine_ready((self.prev_dist, self.len_dist)), kernel_status="generic_latent"
+        )
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+
         previous = None if isinstance(self.prev_dist, NullDistribution) else declaration_for(self.prev_dist)
         length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
         children = tuple(child for child in (previous, length) if child is not None)
         roles = ()
         if previous is not None:
-            roles += ('previous',)
+            roles += ("previous",)
         if length is not None:
-            roles += ('length',)
+            roles += ("length",)
         return DistributionDeclaration(
-            name='integer_hidden_association',
+            name="integer_hidden_association",
             distribution_type=type(self),
             parameters=(
-                ParameterSpec('state_prob_mat', constraint='row_simplex_matrix'),
-                ParameterSpec('cond_weights', constraint='row_simplex_matrix'),
-                ParameterSpec('alpha', constraint='unit_interval'),
+                ParameterSpec("state_prob_mat", constraint="row_simplex_matrix"),
+                ParameterSpec("cond_weights", constraint="row_simplex_matrix"),
+                ParameterSpec("alpha", constraint="unit_interval"),
             ),
             statistics=(
-                StatisticSpec('initial_counts'),
-                StatisticSpec('weight_counts'),
-                StatisticSpec('state_counts'),
-                StatisticSpec('previous', kind='child_stat'),
-                StatisticSpec('length', kind='child_stat'),
+                StatisticSpec("initial_counts"),
+                StatisticSpec("weight_counts"),
+                StatisticSpec("state_counts"),
+                StatisticSpec("previous", kind="child_stat"),
+                StatisticSpec("length", kind="child_stat"),
             ),
-            support='integer_hidden_association_grouped_counts',
+            support="integer_hidden_association_grouped_counts",
             children=children,
             child_roles=roles,
             differentiable=False,
@@ -150,19 +167,22 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
 
     def __str__(self) -> str:
         """Returns string representation of IntegerHiddenAssociationDistribution object."""
-        s1 = ','.join(
-            ['[' + ','.join(map(str, self.state_prob_mat[i, :])) + ']' for i in range(len(self.state_prob_mat))])
-        s2 = ','.join(['[' + ','.join(map(str, self.cond_weights[i, :])) + ']' for i in range(len(self.cond_weights))])
+        s1 = ",".join(
+            ["[" + ",".join(map(str, self.state_prob_mat[i, :])) + "]" for i in range(len(self.state_prob_mat))]
+        )
+        s2 = ",".join(["[" + ",".join(map(str, self.cond_weights[i, :])) + "]" for i in range(len(self.cond_weights))])
         s3 = str(self.alpha)
         s4 = repr(self.prev_dist) if self.prev_dist is None else str(self.prev_dist)
         s5 = str(self.len_dist)
         s6 = repr(self.name)
         s7 = repr(self.keys)
 
-        return 'IntegerHiddenAssociationDistribution([%s], [%s], alpha=%s, prev_dist=%s, len_dist=%s, name=%s, ' \
-               'keys=%s)' % (s1, s2, s3, s4, s5, s6, s7)
+        return (
+            "IntegerHiddenAssociationDistribution([%s], [%s], alpha=%s, prev_dist=%s, len_dist=%s, name=%s, "
+            "keys=%s)" % (s1, s2, s3, s4, s5, s6, s7)
+        )
 
-    def density(self, x: Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]) -> float:
+    def density(self, x: tuple[list[tuple[int, float]], list[tuple[int, float]]]) -> float:
         """Density of the integer hidden association model at observation x.
 
         See log_density() for details.
@@ -177,7 +197,7 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         """
         return exp(self.log_density(x))
 
-    def log_density(self, x: Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]) -> float:
+    def log_density(self, x: tuple[list[tuple[int, float]], list[tuple[int, float]]]) -> float:
         """Log-density of the integer hidden association model at observation x.
 
         For each emitted word in x[1], marginalizes over the given words in x[0] (weighted by count)
@@ -206,7 +226,7 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
 
         ll = self.cond_weights[vx, :].T * (cx / np.sum(cx))
         ll = np.dot(ll.T, self.state_prob_mat[:, vy])
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             log_sum_x = np.log(b * np.sum(ll, axis=0) + a)
         rv = float(np.dot(log_sum_x, cy))
         # rv += np.dot(np.log(self.init_prob_vec[vx]), cx)
@@ -232,7 +252,6 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         b = 1 - self.alpha
 
         if x[1] is None:
-
             xx = x[0]
             rv = np.zeros(len(xx[0]), dtype=np.float64)
 
@@ -241,7 +260,7 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
 
                 x_mat = self.cond_weights[vx, :].T * (cx / np.sum(cx))
                 x_mat = np.dot(x_mat.T, self.state_prob_mat[:, vy])
-                with np.errstate(divide='ignore'):
+                with np.errstate(divide="ignore"):
                     rv[i] = np.dot(np.log(b * np.sum(x_mat, axis=0) + a), cy)
                 # rv[i] += np.dot(np.log(self.init_prob_vec[vx]), cx)
 
@@ -255,8 +274,23 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
             t0 = np.concatenate([[0], s0]).cumsum().astype(np.int32)
             t1 = np.concatenate([[0], s1]).cumsum().astype(np.int32)
             max_len = s0.max()
-            numba_seq_log_density(self.num_states, max_len, t0, t1, x0, x1, c0, c1, w0, self.cond_weights,
-                                  self.state_prob_mat, self.init_prob_vec, a, b, rv)
+            numba_seq_log_density(
+                self.num_states,
+                max_len,
+                t0,
+                t1,
+                x0,
+                x1,
+                c0,
+                c1,
+                w0,
+                self.cond_weights,
+                self.state_prob_mat,
+                self.init_prob_vec,
+                a,
+                b,
+                rv,
+            )
 
             rv += self.prev_dist.seq_log_density(xv)
             rv += self.len_dist.seq_log_density(nn)
@@ -272,9 +306,9 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         b = 1 - self.alpha
 
         if x[1] is not None:
-            if getattr(engine, 'name', None) == 'numpy':
+            if getattr(engine, "name", None) == "numpy":
                 return self.seq_log_density(x)
-            raise BackendScoringError('IntegerHiddenAssociation numba-encoded scoring is NumPy-only.')
+            raise BackendScoringError("IntegerHiddenAssociation numba-encoded scoring is NumPy-only.")
 
         entries, prev_enc, len_enc = x[0]
         if not entries:
@@ -302,7 +336,7 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
         return rv
 
-    def sampler(self, seed: Optional[int] = None) -> 'IntegerHiddenAssociationSampler':
+    def sampler(self, seed: int | None = None) -> "IntegerHiddenAssociationSampler":
         """Create an IntegerHiddenAssociationSampler object from this distribution.
 
         Requires non-null prev_dist and len_dist.
@@ -315,12 +349,12 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
 
         """
         if isinstance(self.prev_dist, NullDistribution):
-            raise Exception('HiddenAssociationSampler requires attribute dist.prev_dist.')
+            raise Exception("HiddenAssociationSampler requires attribute dist.prev_dist.")
         if isinstance(self.len_dist, NullDistribution):
-            raise Exception('HiddenAssociationSampler requires attribute dist.size_dist.')
+            raise Exception("HiddenAssociationSampler requires attribute dist.size_dist.")
         return IntegerHiddenAssociationSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'IntegerHiddenAssociationEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "IntegerHiddenAssociationEstimator":
         """Create an IntegerHiddenAssociationEstimator with matching dimensions and component estimators.
 
         Args:
@@ -334,21 +368,29 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         prev_est = self.prev_dist.estimator()
         len_est = self.len_dist.estimator()
 
-        return IntegerHiddenAssociationEstimator(num_vals=n_vals, num_states=self.num_states, alpha=self.alpha,
-                                                 prev_estimator=prev_est, len_estimator=len_est, name=self.name,
-                                                 keys=self.keys, use_numba=self.use_numba)
+        return IntegerHiddenAssociationEstimator(
+            num_vals=n_vals,
+            num_states=self.num_states,
+            alpha=self.alpha,
+            prev_estimator=prev_est,
+            len_estimator=len_est,
+            name=self.name,
+            keys=self.keys,
+            use_numba=self.use_numba,
+        )
 
-    def dist_to_encoder(self) -> 'IntegerHiddenAssociationDataEncoder':
+    def dist_to_encoder(self) -> "IntegerHiddenAssociationDataEncoder":
         """Returns an IntegerHiddenAssociationDataEncoder object for encoding sequences of data."""
         prev_encoder = self.prev_dist.dist_to_encoder()
         len_encoder = self.len_dist.dist_to_encoder()
         return IntegerHiddenAssociationDataEncoder(prev_encoder, len_encoder, self.use_numba)
 
+
 class IntegerHiddenAssociationSampler(DistributionSampler):
     """IntegerHiddenAssociationSampler object for drawing grouped-count word set pairs from an
     IntegerHiddenAssociationDistribution instance."""
 
-    def __init__(self, dist: IntegerHiddenAssociationDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: IntegerHiddenAssociationDistribution, seed: int | None = None) -> None:
         """IntegerHiddenAssociationSampler object for sampling from an IntegerHiddenAssociationDistribution.
 
         Args:
@@ -367,16 +409,16 @@ class IntegerHiddenAssociationSampler(DistributionSampler):
         self.dist = dist
 
         if isinstance(self.dist.prev_dist, NullDistribution):
-            raise Exception('HiddenAssociationSampler requires attribute dist.prev_dist.')
+            raise Exception("HiddenAssociationSampler requires attribute dist.prev_dist.")
         else:
             self.prev_sampler = self.dist.prev_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
         if isinstance(self.dist.len_dist, NullDistribution):
-            raise Exception('HiddenAssociationSampler requires attribute dist.size_dist.')
+            raise Exception("HiddenAssociationSampler requires attribute dist.size_dist.")
         else:
             self.size_sampler = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample_given(self, x: List[Tuple[int, float]]) -> List[Tuple[int, float]]:
+    def sample_given(self, x: list[tuple[int, float]]) -> list[tuple[int, float]]:
         """Draw an emitted grouped-count word set conditioned on the given word set x.
 
         Args:
@@ -404,7 +446,6 @@ class IntegerHiddenAssociationSampler(DistributionSampler):
         nw = self.dist.num_vals2
 
         for zz1 in z1:
-
             if rng.rand() >= self.dist.alpha:
                 u = rng.choice(ns, p=self.dist.cond_weights[x0[zz1], :])
                 v2.append(rng.choice(nw, p=self.dist.state_prob_mat[u, :]))
@@ -413,7 +454,7 @@ class IntegerHiddenAssociationSampler(DistributionSampler):
 
         return list(count_by_value(v2).items())
 
-    def sample(self, size: Optional[int] = None) -> Union[Sequence[List[Tuple[int, float]]], List[Tuple[int, float]]]:
+    def sample(self, size: int | None = None) -> Sequence[list[tuple[int, float]]] | list[tuple[int, float]]:
         """Draw iid grouped-count observations from the integer hidden association model.
 
         Args:
@@ -435,11 +476,16 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
     """IntegerHiddenAssociationAccumulator object for accumulating state and emission counts from observed
     word set pairs."""
 
-    def __init__(self, num_vals1: int, num_vals2: int, num_states: int,
-                 prev_acc: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
-                 size_acc: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
-                 use_numba: bool = False,
-                 keys: Optional[Tuple[Optional[str], Optional[str]]] = (None, None)) -> None:
+    def __init__(
+        self,
+        num_vals1: int,
+        num_vals2: int,
+        num_states: int,
+        prev_acc: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
+        size_acc: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
+        use_numba: bool = False,
+        keys: tuple[str | None, str | None] | None = (None, None),
+    ) -> None:
         """IntegerHiddenAssociationAccumulator object for accumulating sufficient statistics from observed data.
 
         Args:
@@ -490,8 +536,12 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         self._rng_weight = None
         self._rng_state = None
 
-    def update(self, x: Tuple[List[Tuple[int, float]], List[Tuple[int, float]]], weight: float,
-               estimate: IntegerHiddenAssociationDistribution) -> None:
+    def update(
+        self,
+        x: tuple[list[tuple[int, float]], list[tuple[int, float]]],
+        weight: float,
+        estimate: IntegerHiddenAssociationDistribution,
+    ) -> None:
         """Update sufficient statistics with posterior word/state assignments for the observation.
 
         Args:
@@ -538,8 +588,9 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             self._rng_size = np.random.RandomState(seed=seeds[3])
             self._init_rng = True
 
-    def initialize(self, x: Tuple[List[Tuple[int, float]], List[Tuple[int, float]]], weight: float,
-                   rng: np.random.RandomState) -> None:
+    def initialize(
+        self, x: tuple[list[tuple[int, float]], list[tuple[int, float]]], weight: float, rng: np.random.RandomState
+    ) -> None:
         """Initialize sufficient statistics with random (Dirichlet) state assignments.
 
         Args:
@@ -583,8 +634,9 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
                 vx, cx, vy, cy = entry
 
                 self.weight_count[vx, :] += self._rng_weight.dirichlet(np.ones(self.num_states), size=len(vx)) * weight
-                self.state_count[:, vy] += self._rng_state.dirichlet(np.ones(self.num_states), size=len(vy)).T * cy * \
-                                           weight
+                self.state_count[:, vy] += (
+                    self._rng_state.dirichlet(np.ones(self.num_states), size=len(vy)).T * cy * weight
+                )
                 self.init_count[vx] += cx * weight
 
             self.prev_accumulator.seq_initialize(xx[1], weights, self._rng_prev)
@@ -596,8 +648,8 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             weights_1 = []
 
             for i in range(len(s0)):
-                weights_0.extend([weights[i]]*s0[i]*self.num_states)
-                weights_1.extend([weights[i]]*s1[i])
+                weights_0.extend([weights[i]] * s0[i] * self.num_states)
+                weights_1.extend([weights[i]] * s1[i])
 
             weights_0 = np.asarray(weights_0)
             weights_1 = np.asarray(weights_1)
@@ -607,12 +659,15 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             self.weight_count += vec_bincount1(x=x0, w=ww0, out=np.zeros_like(self.weight_count, dtype=np.float64))
 
             ww1 = self._rng_state.dirichlet(np.ones(self.num_states), size=len(x1)).T
-            ww1 *= np.reshape(c1*weights_1, (-1, len(x1)))
+            ww1 *= np.reshape(c1 * weights_1, (-1, len(x1)))
 
             self.state_count += vec_bincount2(x=x1, w=ww1, out=np.zeros_like(self.state_count, dtype=np.float64))
 
-            self.init_count += np.bincount(x0, weights=c0*weights_0[np.arange(0, len(weights_0), self.num_states)],
-                                           minlength=len(self.init_count))
+            self.init_count += np.bincount(
+                x0,
+                weights=c0 * weights_0[np.arange(0, len(weights_0), self.num_states)],
+                minlength=len(self.init_count),
+            )
 
             self.prev_accumulator.seq_initialize(xv, weights, self._rng_prev)
             self.size_accumulator.seq_initialize(nn, weights, self._rng_size)
@@ -649,7 +704,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
                     # Per-observation log-density (== IntegerHiddenAssociation.log_density assoc term),
                     # reusing ``denom`` (the per-emitted-word mixture mass) before it is consumed by the
                     # responsibility normalization below.
-                    with np.errstate(divide='ignore'):
+                    with np.errstate(divide="ignore"):
                         obs_ll[i] = float(np.dot(np.log(denom.reshape(-1)), cy))
                 scale = np.zeros_like(denom)
                 np.divide(b, denom, out=scale, where=denom > 0.0)
@@ -667,7 +722,6 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
                 obs_ll += estimate.len_dist.seq_log_density(xx[2])
                 self._seq_ll += float(np.dot(np.asarray(weights, dtype=np.float64), obs_ll))
         else:
-
             if self._track_ll:
                 # The numba kernel does not expose the per-observation normalizer; signal the
                 # fused-EM caller to fall back to a separate scoring pass instead of reporting a
@@ -683,15 +737,32 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             a = estimate.alpha / estimate.num_vals2
             b = 1 - estimate.alpha
 
-            numba_seq_update(self.num_states, max_len, t0, t1, x0, x1, c0, c1, w0, estimate.cond_weights,
-                             estimate.state_prob_mat, self.weight_count, self.state_count, self.init_count, weights,
-                             a, b)
+            numba_seq_update(
+                self.num_states,
+                max_len,
+                t0,
+                t1,
+                x0,
+                x1,
+                c0,
+                c1,
+                w0,
+                estimate.cond_weights,
+                estimate.state_prob_mat,
+                self.weight_count,
+                self.state_count,
+                self.init_count,
+                weights,
+                a,
+                b,
+            )
 
             self.prev_accumulator.seq_update(xv, weights, None if estimate is None else estimate.prev_dist)
             self.size_accumulator.seq_update(nn, weights, None if estimate is None else estimate.len_dist)
 
-    def seq_update_engine(self, x: E, weights: np.ndarray,
-                          estimate: IntegerHiddenAssociationDistribution, engine: Any) -> None:
+    def seq_update_engine(
+        self, x: E, weights: np.ndarray, estimate: IntegerHiddenAssociationDistribution, engine: Any
+    ) -> None:
         """Engine-resident E-step for the pure (non-numba) blocked encoding.
 
         Mirrors the numpy branch of ``seq_update``: for each observation the (given word x state x
@@ -706,8 +777,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             return
 
         xx = x[0]
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
 
         num_states = estimate.num_states
         num_vals = estimate.cond_weights.shape[0]
@@ -715,10 +785,10 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         a = float(estimate.alpha) / estimate.num_vals2
         b = 1.0 - float(estimate.alpha)
 
-        cond_weights = engine.asarray(estimate.cond_weights)        # (num_vals, S)
-        state_prob_mat = engine.asarray(estimate.state_prob_mat)    # (S, num_vals2)
+        cond_weights = engine.asarray(estimate.cond_weights)  # (num_vals, S)
+        state_prob_mat = engine.asarray(estimate.state_prob_mat)  # (S, num_vals2)
         weight_acc = engine.zeros((num_vals, num_states))
-        state_acc_t = engine.zeros((num_vals2, num_states))         # transposed for axis-0 scatter
+        state_acc_t = engine.zeros((num_vals2, num_states))  # transposed for axis-0 scatter
         init_acc = engine.zeros(num_vals)
         a_e = engine.asarray(a)
         b_e = engine.asarray(b)
@@ -734,21 +804,21 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             cy_e = engine.asarray(np.asarray(cy, dtype=np.float64))
             nx = engine.sum(cx_e)
 
-            x_mat = cond_weights[vx_e, :] * (cx_e / nx).reshape((-1, 1))   # (gx, S)
-            y_mat = state_prob_mat[:, vy_e]                                # (S, gy)
-            z = x_mat[:, :, None] * y_mat[None, :, :]                      # (gx, S, gy)
+            x_mat = cond_weights[vx_e, :] * (cx_e / nx).reshape((-1, 1))  # (gx, S)
+            y_mat = state_prob_mat[:, vy_e]  # (S, gy)
+            z = x_mat[:, :, None] * y_mat[None, :, :]  # (gx, S, gy)
 
-            ss = engine.sum(engine.sum(z, axis=0), axis=0)                 # (gy,)
-            denom = ss * b_e + a_e                                         # (gy,)
+            ss = engine.sum(engine.sum(z, axis=0), axis=0)  # (gy,)
+            denom = ss * b_e + a_e  # (gy,)
             pos = denom > zero
-            scale = engine.where(pos, b_e / engine.where(pos, denom, one), zero)   # (gy,)
+            scale = engine.where(pos, b_e / engine.where(pos, denom, one), zero)  # (gy,)
             z = z * scale[None, None, :]
 
-            wc_contrib = engine.sum(z * cy_e[None, None, :], axis=2)       # (gx, S)
+            wc_contrib = engine.sum(z * cy_e[None, None, :], axis=2)  # (gx, S)
             weight_acc = engine.index_add(weight_acc, vx_e, wc_contrib * engine.asarray(weight))
 
             sc_contrib = engine.sum(z, axis=0) * cy_e[None, :] * engine.asarray(weight)  # (S, gy)
-            state_acc_t = engine.index_add(state_acc_t, vy_e, sc_contrib.T)              # (gy, S)
+            state_acc_t = engine.index_add(state_acc_t, vy_e, sc_contrib.T)  # (gy, S)
 
             init_acc = engine.index_add(init_acc, vx_e, cx_e * engine.asarray(weight))
 
@@ -756,13 +826,12 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         self.state_count += np.asarray(engine.to_numpy(state_acc_t)).T
         self.init_count += np.asarray(engine.to_numpy(init_acc))
 
-        self.prev_accumulator.seq_update(xx[1], weights_np,
-                                         None if estimate is None else estimate.prev_dist)
-        self.size_accumulator.seq_update(xx[2], weights_np,
-                                         None if estimate is None else estimate.len_dist)
+        self.prev_accumulator.seq_update(xx[1], weights_np, None if estimate is None else estimate.prev_dist)
+        self.size_accumulator.seq_update(xx[2], weights_np, None if estimate is None else estimate.len_dist)
 
-    def combine(self, suff_stat: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1], Optional[SS2]]) \
-            -> 'IntegerHiddenAssociationAccumulator':
+    def combine(
+        self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None, SS2 | None]
+    ) -> "IntegerHiddenAssociationAccumulator":
         """Merge sufficient statistics of suff_stat into this accumulator.
 
         Args:
@@ -784,15 +853,16 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
         return self
 
-    def value(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[Any], Optional[Any]]:
+    def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, Any | None, Any | None]:
         """Returns the sufficient statistics: (init counts, weight counts, state counts, prev, size)."""
         pval = self.prev_accumulator.value()
         sval = self.size_accumulator.value()
 
         return self.init_count, self.weight_count, self.state_count, pval, sval
 
-    def from_value(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1], Optional[SS2]]) \
-            -> 'IntegerHiddenAssociationAccumulator':
+    def from_value(
+        self, x: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None, SS2 | None]
+    ) -> "IntegerHiddenAssociationAccumulator":
         """Set the sufficient statistics of this accumulator from x.
 
         Args:
@@ -814,7 +884,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
         return self
 
-    def scale(self, c: float) -> 'IntegerHiddenAssociationAccumulator':
+    def scale(self, c: float) -> "IntegerHiddenAssociationAccumulator":
         """Scale linear association counts and delegate child accumulators."""
         self.init_count *= c
         self.weight_count *= c
@@ -823,7 +893,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         self.size_accumulator.scale(c)
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge this accumulator's weight and state counts into stats_dict under their keys, if keyed.
 
         Args:
@@ -845,7 +915,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         self.prev_accumulator.key_merge(stats_dict)
         self.size_accumulator.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace this accumulator's weight and state counts with the keyed statistics in stats_dict, if keyed.
 
         Args:
@@ -863,7 +933,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         self.prev_accumulator.key_replace(stats_dict)
         self.size_accumulator.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'DataSequenceEncoder':
+    def acc_to_encoder(self) -> "DataSequenceEncoder":
         """Returns an IntegerHiddenAssociationDataEncoder object for encoding sequences of data."""
         prev_encoder = self.prev_accumulator.acc_to_encoder()
         len_encoder = self.size_accumulator.acc_to_encoder()
@@ -873,11 +943,16 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 class IntegerHiddenAssociationAccumulatorFactory(StatisticAccumulatorFactory):
     """IntegerHiddenAssociationAccumulatorFactory object for creating IntegerHiddenAssociationAccumulator objects."""
 
-    def __init__(self, num_vals1: int, num_vals2: int, num_states: int,
-                 prev_factory: Optional[StatisticAccumulatorFactory] = NullAccumulatorFactory(),
-                 len_factory: Optional[StatisticAccumulatorFactory] = NullAccumulatorFactory(),
-                 use_numba: bool = False,
-                 keys: Tuple[Optional[str], Optional[str]] = (None, None)) -> None:
+    def __init__(
+        self,
+        num_vals1: int,
+        num_vals2: int,
+        num_states: int,
+        prev_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
+        len_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
+        use_numba: bool = False,
+        keys: tuple[str | None, str | None] = (None, None),
+    ) -> None:
         """IntegerHiddenAssociationAccumulatorFactory for creating IntegerHiddenAssociationAccumulator objects.
 
         Args:
@@ -907,27 +982,38 @@ class IntegerHiddenAssociationAccumulatorFactory(StatisticAccumulatorFactory):
         self.num_vals2 = num_vals2
         self.num_states = num_states
 
-    def make(self) -> 'IntegerHiddenAssociationAccumulator':
+    def make(self) -> "IntegerHiddenAssociationAccumulator":
         """Returns a new IntegerHiddenAssociationAccumulator object."""
         len_acc = self.len_factory.make()
         prev_acc = self.prev_factory.make()
-        return IntegerHiddenAssociationAccumulator(num_vals1=self.num_vals1, num_vals2=self.num_vals2,
-                                                   num_states=self.num_states, prev_acc=prev_acc, size_acc=len_acc,
-                                                   use_numba=self.use_numba, keys=self.keys)
+        return IntegerHiddenAssociationAccumulator(
+            num_vals1=self.num_vals1,
+            num_vals2=self.num_vals2,
+            num_states=self.num_states,
+            prev_acc=prev_acc,
+            size_acc=len_acc,
+            use_numba=self.use_numba,
+            keys=self.keys,
+        )
 
 
 class IntegerHiddenAssociationEstimator(ParameterEstimator):
     """IntegerHiddenAssociationEstimator object for estimating an IntegerHiddenAssociationDistribution from
     aggregated sufficient statistics."""
 
-    def __init__(self, num_vals: Union[List[int], Tuple[int, int], int], num_states: int, alpha: float = 0.0,
-                 prev_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 len_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 suff_stat: Optional[Any] = None,
-                 pseudo_count: Optional[float] = None,
-                 use_numba: bool = False,
-                 name: Optional[str] = None,
-                 keys: Optional[Tuple[Optional[str], Optional[str]]] = (None, None)) -> None:
+    def __init__(
+        self,
+        num_vals: list[int] | tuple[int, int] | int,
+        num_states: int,
+        alpha: float = 0.0,
+        prev_estimator: ParameterEstimator | None = NullEstimator(),
+        len_estimator: ParameterEstimator | None = NullEstimator(),
+        suff_stat: Any | None = None,
+        pseudo_count: float | None = None,
+        use_numba: bool = False,
+        name: str | None = None,
+        keys: tuple[str | None, str | None] | None = (None, None),
+    ) -> None:
         """IntegerHiddenAssociationEstimator object for estimating IntegerHiddenAssociationDistribution from aggregated
             sufficient statistics.
 
@@ -986,17 +1072,18 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
             self.num_vals1 = num_vals
             self.num_vals2 = num_vals
 
-    def accumulator_factory(self) -> 'IntegerHiddenAssociationAccumulatorFactory':
+    def accumulator_factory(self) -> "IntegerHiddenAssociationAccumulatorFactory":
         """Returns an IntegerHiddenAssociationAccumulatorFactory for creating accumulator objects."""
         len_factory = self.len_estimator.accumulator_factory()
         prev_factory = self.prev_estimator.accumulator_factory()
 
-        return IntegerHiddenAssociationAccumulatorFactory(self.num_vals1, self.num_vals2, self.num_states, prev_factory,
-                                                          len_factory, self.use_numba, self.keys)
+        return IntegerHiddenAssociationAccumulatorFactory(
+            self.num_vals1, self.num_vals2, self.num_states, prev_factory, len_factory, self.use_numba, self.keys
+        )
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[np.ndarray, np.ndarray, np.ndarray,
-                                                               Optional[SS1], Optional[SS2]]) \
-            -> 'IntegerHiddenAssociationDistribution':
+    def estimate(
+        self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None, SS2 | None]
+    ) -> "IntegerHiddenAssociationDistribution":
         """Estimate an IntegerHiddenAssociationDistribution from aggregated sufficient statistics.
 
         Args:
@@ -1029,9 +1116,16 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
         state_prob = state_count / ssum
 
         # return IntegerHiddenAssociationDistribution(init_prob, state_prob, weight_prob, self.alpha, len_dist)
-        return IntegerHiddenAssociationDistribution(state_prob_mat=state_prob, cond_weights=weight_prob,
-                                                    alpha=self.alpha, prev_dist=prev_dist, use_numba=self.use_numba,
-                                                    len_dist=len_dist, name=self.name, keys=self.keys)
+        return IntegerHiddenAssociationDistribution(
+            state_prob_mat=state_prob,
+            cond_weights=weight_prob,
+            alpha=self.alpha,
+            prev_dist=prev_dist,
+            use_numba=self.use_numba,
+            len_dist=len_dist,
+            name=self.name,
+            keys=self.keys,
+        )
 
 
 class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
@@ -1058,8 +1152,8 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns string representation of IntegerHiddenAssociationDataEncoder object."""
-        s = 'IntegerHiddenAssociationDataEncoder(prev_encoder=' + str(self.prev_encoder) + ',len_encoder='
-        s += str(self.len_encoder) + ',use_numba=' + str(self.use_numba) + ')'
+        s = "IntegerHiddenAssociationDataEncoder(prev_encoder=" + str(self.prev_encoder) + ",len_encoder="
+        s += str(self.len_encoder) + ",use_numba=" + str(self.use_numba) + ")"
         return s
 
     def __eq__(self, other: object) -> bool:
@@ -1072,8 +1166,9 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
         else:
             return False
 
-    def _seq_encode(self, x: Sequence[Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]]) \
-            -> Tuple[Tuple[List[Tuple[np.ndarray, ...]], Optional[Any], Optional[Any]], None]:
+    def _seq_encode(
+        self, x: Sequence[tuple[list[tuple[int, float]], list[tuple[int, float]]]]
+    ) -> tuple[tuple[list[tuple[np.ndarray, ...]], Any | None, Any | None], None]:
         """Sequence encoding for use with without numba.
 
         Returns 'rv' Tuple of
@@ -1108,9 +1203,12 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
 
         return (rv, xv, nn), None
 
-    def seq_encode(self, x: Sequence[Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]]) \
-            -> Union[Tuple[Tuple[List[Tuple[np.ndarray, ...]], Optional[Any], Optional[Any]], None],
-                     Tuple[None, Tuple[np.ndarray, ...], Optional[Any], Optional[Any]]]:
+    def seq_encode(
+        self, x: Sequence[tuple[list[tuple[int, float]], list[tuple[int, float]]]]
+    ) -> (
+        tuple[tuple[list[tuple[np.ndarray, ...]], Any | None, Any | None], None]
+        | tuple[None, tuple[np.ndarray, ...], Any | None, Any | None]
+    ):
         """Sequence encoding for integer hidden association observations.
 
         If numba is not used see _seq_encode(). Else the following is returned a Tuple of the following form is returned
@@ -1176,20 +1274,23 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
 
         return enc_rv
 
+
 @numba.njit(
-    'void(int64, int64, int32[:], int32[:], int32[:], int32[:], float64[:], float64[:], float64[:], float64[:,:], '
-    'float64[:,:], float64[:], float64, float64, float64[:])', cache=True)
-def numba_seq_log_density(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weights, state_prob_mat, init_prob_vec,
-                          a, b, out):
+    "void(int64, int64, int32[:], int32[:], int32[:], int32[:], float64[:], float64[:], float64[:], float64[:,:], "
+    "float64[:,:], float64[:], float64, float64, float64[:])",
+    cache=True,
+)
+def numba_seq_log_density(
+    num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weights, state_prob_mat, init_prob_vec, a, b, out
+):
     """Numba kernel computing per-observation log-densities into out from flattened encodings."""
     x_mat = np.zeros((max_len1, num_states), dtype=np.float64)
 
     for i in range(len(t0) - 1):
-
-        vx = x0[t0[i]:t0[i + 1]]
-        cx = c0[t0[i]:t0[i + 1]]
-        vy = x1[t1[i]:t1[i + 1]]
-        cy = c1[t1[i]:t1[i + 1]]
+        vx = x0[t0[i] : t0[i + 1]]
+        cx = c0[t0[i] : t0[i + 1]]
+        vy = x1[t1[i] : t1[i + 1]]
+        cy = c1[t1[i] : t1[i + 1]]
         sx = w0[i]
 
         l1 = t0[i + 1] - t0[i]
@@ -1215,21 +1316,39 @@ def numba_seq_log_density(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond
 
 
 @numba.njit(
-    'void(int64, int64, int32[:], int32[:], int32[:], int32[:], float64[:], float64[:], float64[:], float64[:,:], '
-    'float64[:,:], float64[:,:], float64[:,:], float64[:], float64[:], float64, float64)', cache=True)
-def numba_seq_update(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weights, state_prob_mat, weight_count,
-                     state_count, init_count, weights, a, b):
+    "void(int64, int64, int32[:], int32[:], int32[:], int32[:], float64[:], float64[:], float64[:], float64[:,:], "
+    "float64[:,:], float64[:,:], float64[:,:], float64[:], float64[:], float64, float64)",
+    cache=True,
+)
+def numba_seq_update(
+    num_states,
+    max_len1,
+    t0,
+    t1,
+    x0,
+    x1,
+    c0,
+    c1,
+    w0,
+    cond_weights,
+    state_prob_mat,
+    weight_count,
+    state_count,
+    init_count,
+    weights,
+    a,
+    b,
+):
     """Numba kernel accumulating posterior weight/state counts in place from flattened encodings."""
     x_mat = np.zeros((max_len1, num_states), dtype=np.float64)
     z_mat = np.zeros((max_len1, num_states), dtype=np.float64)
 
     for i in range(len(t0) - 1):
-
         weight = weights[i]
-        vx = x0[t0[i]:t0[i + 1]]
-        cx = c0[t0[i]:t0[i + 1]]
-        vy = x1[t1[i]:t1[i + 1]]
-        cy = c1[t1[i]:t1[i + 1]]
+        vx = x0[t0[i] : t0[i + 1]]
+        cx = c0[t0[i] : t0[i + 1]]
+        vy = x1[t1[i] : t1[i + 1]]
+        cy = c1[t1[i] : t1[i + 1]]
 
         l1 = t0[i + 1] - t0[i]
         l2 = t1[i + 1] - t1[i]
@@ -1263,7 +1382,7 @@ def numba_seq_update(num_states, max_len1, t0, t1, x0, x1, c0, c1, w0, cond_weig
                     state_count[k, wid] += temp
 
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
+@numba.njit("float64[:,:](int32[:], float64[:,:], float64[:,:])", cache=True)
 def vec_bincount1(x, w, out):
     """Numba bincount on the rows of matrix w for groups x.
 
@@ -1281,7 +1400,7 @@ def vec_bincount1(x, w, out):
     return out
 
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
+@numba.njit("float64[:,:](int32[:], float64[:,:], float64[:,:])", cache=True)
 def vec_bincount2(x, w, out):
     """Numba bincount on the rows of matrix w for groups x.
 
@@ -1305,17 +1424,16 @@ def vec_bincount2(x, w, out):
 
 def _register_int_hidden_association_engine_kernel():
     """Register the engine-resident integer-hidden-association kernel (idempotent; called at import)."""
-    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
-                                    register_kernel_factory)
     from pysp.engines import NUMPY_ENGINE
+    from pysp.stats.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
     class IntegerHiddenAssociationKernel(GenericKernel):
         def accumulate(self, enc, weights):
             if self.estimator is None:
-                raise ValueError('IntegerHiddenAssociationKernel.accumulate requires an estimator.')
+                raise ValueError("IntegerHiddenAssociationKernel.accumulate requires an estimator.")
             if self.engine.name == NUMPY_ENGINE.name:
                 return super().accumulate(enc, weights)
-            host_enc = getattr(enc, 'host_payload', enc)
+            host_enc = getattr(enc, "host_payload", enc)
             accumulator = self.estimator.accumulator_factory().make()
             accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
             return accumulator.value()
@@ -1326,8 +1444,7 @@ def _register_int_hidden_association_engine_kernel():
                 return GenericKernelFactory().build(dist, engine, estimator=estimator)
             return IntegerHiddenAssociationKernel(dist, engine=engine, estimator=estimator)
 
-    register_kernel_factory(IntegerHiddenAssociationDistribution,
-                            IntegerHiddenAssociationKernelFactory())
+    register_kernel_factory(IntegerHiddenAssociationDistribution, IntegerHiddenAssociationKernelFactory())
 
 
 _register_int_hidden_association_engine_kernel()

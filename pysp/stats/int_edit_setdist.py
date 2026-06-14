@@ -24,25 +24,38 @@ defining probabilities for an integer 0<=k<N being in a set (Generally a Bernoul
 
 import heapq
 import itertools
+from collections.abc import Iterator, Sequence
+from typing import Any, TypeVar
+
 import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
-    DistributionEnumerator, EnumerationError, child_enumerator
-from pysp.utils.aliasing import coalesce_alias, MISSING
-from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
-    NullAccumulatorFactory
+from pysp.stats.null_dist import (
+    NullAccumulator,
+    NullAccumulatorFactory,
+    NullDistribution,
+    NullEstimator,
+)
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+    child_enumerator,
+)
+from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.enumeration import BufferedStream, ProductEnumerator
-from typing import Sequence, Optional, Union, Any, Tuple, List, TypeVar, Dict, Iterator, Set
 
+T = tuple[Sequence[int] | np.ndarray, Sequence[int] | np.ndarray]
+E1 = TypeVar("E1")  ## encoded type for init
+E = tuple[int, np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray], E1 | None]
+SS1 = TypeVar("SS1")  ## suff-stat of init_dist
 
-T = Tuple[Union[Sequence[int], np.ndarray], Union[Sequence[int], np.ndarray]]
-E1 = TypeVar('E1') ## encoded type for init
-E = Tuple[int, np.ndarray, np.ndarray, np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray], Optional[E1]]
-SS1 = TypeVar('SS1') ## suff-stat of init_dist
 
 class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution):
     """Bernoulli edit set distribution: each integer independently transitions in/out between two sets."""
@@ -50,11 +63,15 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_table')
 
-    def __init__(self, log_edit_pmat: Union[Sequence[Tuple[float, float]], np.ndarray],
-                 init_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 name: Optional[str] = None) -> None:
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_table")
+
+    def __init__(
+        self,
+        log_edit_pmat: Sequence[tuple[float, float]] | np.ndarray,
+        init_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        name: str | None = None,
+    ) -> None:
         """IntegerBernoulliEditDistribution object defining edit probabilities between integer sets.
 
         Args:
@@ -97,16 +114,18 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         self.orig_log_edit_pmat = pmat
         self.log_edit_pmat = log_pmat
         self.log_nsum = self.log_edit_pmat[
-            np.isfinite(self.log_edit_pmat[:, 0]), 0].sum()  # sum [ln p_mat(missing | missing)]
-        self.log_dvec = self.log_edit_pmat[:, 1:] - self.log_edit_pmat[:, 0,
-                                                    None]  # ln p_mat (?? | ??) - ln p_mat(missing | missing)
+            np.isfinite(self.log_edit_pmat[:, 0]), 0
+        ].sum()  # sum [ln p_mat(missing | missing)]
+        self.log_dvec = (
+            self.log_edit_pmat[:, 1:] - self.log_edit_pmat[:, 0, None]
+        )  # ln p_mat (?? | ??) - ln p_mat(missing | missing)
 
     def __str__(self) -> str:
         """Returns string representation of IntegerBernoulliEditDistribution object."""
         s1 = repr(list(map(list, self.orig_log_edit_pmat)))
         s2 = repr(self.init_dist)
         s3 = repr(self.name)
-        return 'IntegerBernoulliEditDistribution(%s, init_dist=%s, name=%s)' % (s1, s2, s3)
+        return "IntegerBernoulliEditDistribution(%s, init_dist=%s, name=%s)" % (s1, s2, s3)
 
     def density(self, x: T) -> float:
         """Density of the Bernoulli edit set distribution at observation x.
@@ -175,6 +194,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
     def backend_seq_log_density(self, x: E, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded integer edit-set observations."""
         from pysp.stats.backend import backend_seq_log_density
+
         sz, idx, xs, ys, ym, init_enc = x
         rv = engine.zeros(sz) + engine.asarray(self.log_nsum)
 
@@ -186,61 +206,71 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         return rv
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['IntegerBernoulliEditDistribution'],
-                               engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["IntegerBernoulliEditDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked integer edit-set parameters for shared support and init policy."""
         from pysp.stats.stacked import stacked_component_params
+
         num_vals = int(dists[0].num_vals)
         null_init_dist = isinstance(dists[0].init_dist, NullDistribution)
-        if any(int(dist.num_vals) != num_vals or
-               isinstance(dist.init_dist, NullDistribution) != null_init_dist for dist in dists):
-            raise ValueError('Stacked IntegerBernoulliEditDistribution components require shared support and init '
-                             'policy.')
+        if any(
+            int(dist.num_vals) != num_vals or isinstance(dist.init_dist, NullDistribution) != null_init_dist
+            for dist in dists
+        ):
+            raise ValueError(
+                "Stacked IntegerBernoulliEditDistribution components require shared support and init policy."
+            )
 
         init_route = None
         if not null_init_dist:
             try:
                 init_route = stacked_component_params([dist.init_dist for dist in dists], engine)
             except ValueError as exc:
-                raise ValueError('IntegerBernoulliEdit initial child %s is not stackable: %s' %
-                                 (type(dists[0].init_dist).__name__, exc))
+                raise ValueError(
+                    "IntegerBernoulliEdit initial child %s is not stackable: %s"
+                    % (type(dists[0].init_dist).__name__, exc)
+                )
 
         return {
-            '__pysp_component_axis__': {'log_dvec': 2, 'log_nsum': 0},
-            'num_vals': num_vals,
-            'log_dvec': engine.asarray(np.stack([dist.log_dvec for dist in dists], axis=2)),
-            'log_nsum': engine.asarray([dist.log_nsum for dist in dists]),
-            'init_route': init_route,
-            'num_components': len(dists),
+            "__pysp_component_axis__": {"log_dvec": 2, "log_nsum": 0},
+            "num_vals": num_vals,
+            "log_dvec": engine.asarray(np.stack([dist.log_dvec for dist in dists], axis=2)),
+            "log_nsum": engine.asarray([dist.log_nsum for dist in dists]),
+            "init_route": init_route,
+            "num_components": len(dists),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: E, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of integer edit-set component log densities."""
         from pysp.stats.stacked import stacked_component_log_density
+
         sz, idx, xs, ys, ym, init_enc = x
-        rv = engine.zeros((sz, int(params['num_components']))) + params['log_nsum'][None, :]
+        rv = engine.zeros((sz, int(params["num_components"]))) + params["log_nsum"][None, :]
 
         if len(idx) > 0:
-            contrib = params['log_dvec'][engine.asarray(xs), engine.asarray(ys), :]
+            contrib = params["log_dvec"][engine.asarray(xs), engine.asarray(ys), :]
             rv = engine.index_add(rv, engine.asarray(idx), contrib)
 
-        if params['init_route'] is not None:
-            rv = rv + stacked_component_log_density(init_enc, params['init_route'], engine)
+        if params["init_route"] is not None:
+            rv = rv + stacked_component_log_density(init_enc, params["init_route"], engine)
 
         return rv
 
     @classmethod
-    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any,
-                                                            params: Dict[str, Any], engine: Any,
-                                                            estimator: Any) -> Tuple[Any, ...]:
+    def backend_stacked_sufficient_statistics_with_estimator(
+        cls, x: E, weights: Any, params: dict[str, Any], engine: Any, estimator: Any
+    ) -> tuple[Any, ...]:
         """Return per-component legacy ``(edit_counts, total_weight, init_stat)`` statistics."""
-        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
-            unstack_component_stats
+        from pysp.stats.stacked import (
+            StackedEstimatorView,
+            stacked_component_sufficient_statistics,
+            unstack_component_stats,
+        )
+
         sz, idx, xs, ys, ym, init_enc = x
         ww = engine.asarray(weights)
-        num_components = int(params['num_components'])
-        num_vals = int(params['num_vals'])
+        num_components = int(params["num_components"])
+        num_vals = int(params["num_vals"])
 
         if len(idx) > 0 and num_vals > 0:
             row_weights = ww[engine.asarray(idx)]
@@ -257,23 +287,22 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
             edit_counts = engine.zeros((num_components, num_vals, 3))
 
         total_count = engine.sum(ww, axis=0)
-        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+        outer_estimators = tuple(getattr(estimator, "estimators", ()))
 
-        init_estimators = tuple(getattr(component_est, 'init_est', None)
-                                for component_est in outer_estimators)
+        init_estimators = tuple(getattr(component_est, "init_est", None) for component_est in outer_estimators)
 
-        if params['init_route'] is None or all(isinstance(init_est, NullEstimator) for init_est in init_estimators):
+        if params["init_route"] is None or all(isinstance(init_est, NullEstimator) for init_est in init_estimators):
             init_by_component = tuple(None for _ in range(num_components))
         else:
-            init_estimator = StackedEstimatorView(init_estimators) \
-                if len(init_estimators) == num_components else None
+            init_estimator = StackedEstimatorView(init_estimators) if len(init_estimators) == num_components else None
             init_stats = stacked_component_sufficient_statistics(
-                init_enc, ww, params['init_route'], engine, init_estimator)
+                init_enc, ww, params["init_route"], engine, init_estimator
+            )
             init_by_component = unstack_component_stats(init_stats, num_components)
 
         return tuple((edit_counts[i], total_count[i], init_by_component[i]) for i in range(num_components))
 
-    def sampler(self, seed: Optional[int] = None) -> 'IntegerBernoulliEditSampler':
+    def sampler(self, seed: int | None = None) -> "IntegerBernoulliEditSampler":
         """Create an IntegerBernoulliEditSampler object from this distribution.
 
         Args:
@@ -285,7 +314,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         """
         return IntegerBernoulliEditSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'IntegerBernoulliEditEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "IntegerBernoulliEditEstimator":
         """Create an IntegerBernoulliEditEstimator with matching num_vals.
 
         Args:
@@ -297,11 +326,11 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         """
         return IntegerBernoulliEditEstimator(self.num_vals, pseudo_count=pseudo_count, name=self.name)
 
-    def dist_to_encoder(self) -> 'IntegerBernoulliEditDataEncoder':
+    def dist_to_encoder(self) -> "IntegerBernoulliEditDataEncoder":
         """Returns an IntegerBernoulliEditDataEncoder object for encoding sequences of data."""
         return IntegerBernoulliEditDataEncoder(init_encoder=self.init_dist.dist_to_encoder())
 
-    def enumerator(self) -> 'IntegerBernoulliEditEnumerator':
+    def enumerator(self) -> "IntegerBernoulliEditEnumerator":
         """Returns IntegerBernoulliEditEnumerator iterating set-pairs in descending probability order."""
         return IntegerBernoulliEditEnumerator(self)
 
@@ -323,23 +352,23 @@ class IntegerBernoulliEditEnumerator(DistributionEnumerator):
         super().__init__(dist)
         self._prev_stream = BufferedStream(self._prev_iterator())
         self._next_rank = 0
-        self._heap: List[Tuple[float, int, int]] = []
-        self._heads: Dict[int, Tuple[Any, float]] = {}
-        self._streams: Dict[int, Iterator[Tuple[Any, float]]] = {}
+        self._heap: list[tuple[float, int, int]] = []
+        self._heads: dict[int, tuple[Any, float]] = {}
+        self._streams: dict[int, Iterator[tuple[Any, float]]] = {}
         self._counter = itertools.count()
 
-    def _prev_iterator(self) -> Iterator[Tuple[List[int], float]]:
+    def _prev_iterator(self) -> Iterator[tuple[list[int], float]]:
         if isinstance(self.dist.init_dist, NullDistribution):
             choices = [(False, 0.0), (True, 0.0)]
             streams = [BufferedStream(iter(choices)) for _ in range(self.dist.num_vals)]
 
-            def combine(flags: Tuple[bool, ...]) -> List[int]:
+            def combine(flags: tuple[bool, ...]) -> list[int]:
                 return [k for k, flag in enumerate(flags) if flag]
 
             return iter(ProductEnumerator(streams, combine=combine))
-        return iter(child_enumerator(self.dist.init_dist, 'IntegerBernoulliEditDistribution.init_dist'))
+        return iter(child_enumerator(self.dist.init_dist, "IntegerBernoulliEditDistribution.init_dist"))
 
-    def _valid_prev(self, value: Any) -> Optional[List[int]]:
+    def _valid_prev(self, value: Any) -> list[int] | None:
         if not isinstance(value, (list, tuple, np.ndarray, set, frozenset)):
             return None
         try:
@@ -350,26 +379,24 @@ class IntegerBernoulliEditEnumerator(DistributionEnumerator):
             return None
         return vals
 
-    def _next_stream(self, prev: List[int], lp_prev: float) -> Iterator[Tuple[Any, float]]:
-        prev_set: Set[int] = set(prev)
+    def _next_stream(self, prev: list[int], lp_prev: float) -> Iterator[tuple[Any, float]]:
+        prev_set: set[int] = set(prev)
         streams = []
         for k in range(self.dist.num_vals):
             if k in prev_set:
-                choices = [(False, float(self.dist.log_edit_pmat[k, 1])),
-                           (True, float(self.dist.log_edit_pmat[k, 3]))]
+                choices = [(False, float(self.dist.log_edit_pmat[k, 1])), (True, float(self.dist.log_edit_pmat[k, 3]))]
             else:
-                choices = [(False, float(self.dist.log_edit_pmat[k, 0])),
-                           (True, float(self.dist.log_edit_pmat[k, 2]))]
+                choices = [(False, float(self.dist.log_edit_pmat[k, 0])), (True, float(self.dist.log_edit_pmat[k, 2]))]
             choices = [(flag, lp) for flag, lp in choices if lp > -np.inf]
             choices.sort(key=lambda u: -u[1])
             streams.append(BufferedStream(iter(choices)))
 
-        def combine(flags: Tuple[bool, ...]) -> Tuple[List[int], List[int]]:
+        def combine(flags: tuple[bool, ...]) -> tuple[list[int], list[int]]:
             return (list(prev), [k for k, flag in enumerate(flags) if flag])
 
         return iter(ProductEnumerator(streams, combine=combine, offset=lp_prev))
 
-    def _pop(self) -> Tuple[Any, float]:
+    def _pop(self) -> tuple[Any, float]:
         _, _, sid = heapq.heappop(self._heap)
         value, lp = self._heads.pop(sid)
         try:
@@ -380,7 +407,7 @@ class IntegerBernoulliEditEnumerator(DistributionEnumerator):
             del self._streams[sid]
         return (value, lp)
 
-    def __next__(self) -> Tuple[Any, float]:
+    def __next__(self) -> tuple[Any, float]:
         while True:
             frontier = None
             while frontier is None:
@@ -417,7 +444,7 @@ class IntegerBernoulliEditSampler(DistributionSampler):
     """IntegerBernoulliEditSampler object for drawing (prev set, next set) pairs from an
     IntegerBernoulliEditDistribution instance."""
 
-    def __init__(self, dist: IntegerBernoulliEditDistribution, seed: Optional[int] = None):
+    def __init__(self, dist: IntegerBernoulliEditDistribution, seed: int | None = None):
         """IntegerBernoulliEditSampler object for sampling from an IntegerBernoulliEditDistribution instance.
 
         Args:
@@ -436,8 +463,7 @@ class IntegerBernoulliEditSampler(DistributionSampler):
         self.init_rng = dist.init_dist.sampler(self.rng.randint(0, maxrandint))
         self.next_rng = np.random.RandomState(self.rng.randint(0, maxrandint))
 
-    def sample(self, size: Optional[int] = None)\
-            -> Union[List[Tuple[List[int], List[int]]], Tuple[List[int], List[int]]]:
+    def sample(self, size: int | None = None) -> list[tuple[list[int], list[int]]] | tuple[list[int], list[int]]:
         """Draw iid (prev set, next set) observations from the distribution.
 
         Args:
@@ -463,7 +489,7 @@ class IntegerBernoulliEditSampler(DistributionSampler):
                 rv.append(self.sample())
             return rv
 
-    def sample_given(self, x: Sequence[Sequence[int]]) -> List[int]:
+    def sample_given(self, x: Sequence[Sequence[int]]) -> list[int]:
         """Draw a next set conditioned on the last set in x.
 
         Args:
@@ -487,8 +513,12 @@ class IntegerBernoulliEditSampler(DistributionSampler):
 class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
     """IntegerBernoulliEditAccumulator object for accumulating removed/added/kept counts from observed set pairs."""
 
-    def __init__(self, num_vals: int, init_acc: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        num_vals: int,
+        init_acc: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
+        keys: str | None = None,
+    ) -> None:
         """IntegerBernoulliEditAccumulator object for accumulating sufficient statistics from observed data.
 
         Args:
@@ -510,7 +540,7 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
         self.init_acc = init_acc if init_acc is not None else NullAccumulator()
         self.tot_sum = 0.0
 
-    def update(self, x: T, weight: float, estimate: Optional[IntegerBernoulliEditDistribution]) -> None:
+    def update(self, x: T, weight: float, estimate: IntegerBernoulliEditDistribution | None) -> None:
         """Add weight to the removed/added/kept counts for the observed (prev set, next set) pair.
 
         Args:
@@ -554,7 +584,7 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
         self.tot_sum += weight
         self.init_acc.initialize(x[0], weight, rng)
 
-    def seq_update(self, x: E, weights: np.ndarray, estimate: Optional[IntegerBernoulliEditDistribution]) -> None:
+    def seq_update(self, x: E, weights: np.ndarray, estimate: IntegerBernoulliEditDistribution | None) -> None:
         """Vectorized update of sufficient statistics from sequence encoded observations.
 
         Args:
@@ -570,15 +600,16 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
         agg_cnt1 = np.bincount(xs[ym[1]], weights=weights[idx[ym[1]]])
         agg_cnt2 = np.bincount(xs[ym[2]], weights=weights[idx[ym[2]]])
 
-        self.pcnt[:len(agg_cnt0), 0] += agg_cnt0
-        self.pcnt[:len(agg_cnt1), 1] += agg_cnt1
-        self.pcnt[:len(agg_cnt2), 2] += agg_cnt2
+        self.pcnt[: len(agg_cnt0), 0] += agg_cnt0
+        self.pcnt[: len(agg_cnt1), 1] += agg_cnt1
+        self.pcnt[: len(agg_cnt2), 2] += agg_cnt2
         self.tot_sum += weights.sum()
 
         self.init_acc.seq_update(init_enc, weights, estimate.init_dist)
 
-    def seq_update_engine(self, x: E, weights: Any,
-                          estimate: Optional[IntegerBernoulliEditDistribution], engine: Any) -> None:
+    def seq_update_engine(
+        self, x: E, weights: Any, estimate: IntegerBernoulliEditDistribution | None, engine: Any
+    ) -> None:
         """Engine-resident accumulation of removed/added/kept edit counts (numpy or torch).
 
         The three weighted edit-type histograms are reduced on the active engine; the fixed-size
@@ -586,10 +617,10 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
         seq_update.
         """
         from pysp.stats.backend import child_seq_update
+
         sz, idx, xs, ys, ym, init_enc = x
 
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         w_eng = engine.asarray(weights_np)
         xsv = np.asarray(xs)
         idxv = np.asarray(idx, dtype=np.int64)
@@ -600,11 +631,11 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
                 continue
             col_vals = xsv[sel].astype(np.int64)
             minlen = int(col_vals.max()) + 1
-            agg = np.asarray(engine.to_numpy(engine.bincount(
-                engine.asarray(col_vals),
-                weights=w_eng[idxv[sel]],
-                minlength=minlen)), dtype=np.float64)
-            self.pcnt[:len(agg), col] += agg
+            agg = np.asarray(
+                engine.to_numpy(engine.bincount(engine.asarray(col_vals), weights=w_eng[idxv[sel]], minlength=minlen)),
+                dtype=np.float64,
+            )
+            self.pcnt[: len(agg), col] += agg
 
         self.tot_sum += float(engine.to_numpy(engine.sum(w_eng)))
 
@@ -627,14 +658,14 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
         agg_cnt1 = np.bincount(xs[ym[1]], weights=weights[idx[ym[1]]])
         agg_cnt2 = np.bincount(xs[ym[2]], weights=weights[idx[ym[2]]])
 
-        self.pcnt[:len(agg_cnt0), 0] += agg_cnt0
-        self.pcnt[:len(agg_cnt1), 1] += agg_cnt1
-        self.pcnt[:len(agg_cnt2), 2] += agg_cnt2
+        self.pcnt[: len(agg_cnt0), 0] += agg_cnt0
+        self.pcnt[: len(agg_cnt1), 1] += agg_cnt1
+        self.pcnt[: len(agg_cnt2), 2] += agg_cnt2
         self.tot_sum += weights.sum()
 
         self.init_acc.seq_initialize(init_enc, weights, rng)
 
-    def combine(self, suff_stat: Tuple[np.ndarray, float, Optional[SS1]]) -> 'IntegerBernoulliEditAccumulator':
+    def combine(self, suff_stat: tuple[np.ndarray, float, SS1 | None]) -> "IntegerBernoulliEditAccumulator":
         """Merge sufficient statistics of suff_stat into this accumulator.
 
         Args:
@@ -650,11 +681,11 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def value(self) -> Tuple[np.ndarray, float, Optional[Any]]:
+    def value(self) -> tuple[np.ndarray, float, Any | None]:
         """Returns the sufficient statistics: (edit counts, total weight, init suff stats)."""
         return self.pcnt, self.tot_sum, self.init_acc.value()
 
-    def from_value(self, x: Tuple[np.ndarray, float, Optional[SS1]]) -> 'IntegerBernoulliEditAccumulator':
+    def from_value(self, x: tuple[np.ndarray, float, SS1 | None]) -> "IntegerBernoulliEditAccumulator":
         """Set the sufficient statistics of this accumulator from x.
 
         Args:
@@ -669,7 +700,7 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
         self.init_acc.from_value(x[2])
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge this accumulator's statistics into stats_dict under its key, if keyed.
 
         Args:
@@ -685,7 +716,7 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.init_acc.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace this accumulator's statistics with the keyed statistics in stats_dict, if keyed.
 
         Args:
@@ -698,7 +729,7 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.init_acc.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'IntegerBernoulliEditDataEncoder':
+    def acc_to_encoder(self) -> "IntegerBernoulliEditDataEncoder":
         """Returns an IntegerBernoulliEditDataEncoder object for encoding sequences of data."""
         return IntegerBernoulliEditDataEncoder(init_encoder=self.init_acc.acc_to_encoder())
 
@@ -706,8 +737,9 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
 class IntegerBernoulliEditAccumulatorFactory(StatisticAccumulatorFactory):
     """IntegerBernoulliEditAccumulatorFactory object for creating IntegerBernoulliEditAccumulator objects."""
 
-    def __init__(self, num_vals: int, init_factory: Optional[StatisticAccumulatorFactory] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self, num_vals: int, init_factory: StatisticAccumulatorFactory | None = None, keys: str | None = None
+    ) -> None:
         """IntegerBernoulliEditAccumulatorFactory for creating IntegerBernoulliEditAccumulator objects.
 
         Args:
@@ -725,7 +757,7 @@ class IntegerBernoulliEditAccumulatorFactory(StatisticAccumulatorFactory):
         self.init_factory = init_factory if init_factory is not None else NullAccumulatorFactory()
         self.num_vals = num_vals
 
-    def make(self) -> 'IntegerBernoulliEditAccumulator':
+    def make(self) -> "IntegerBernoulliEditAccumulator":
         """Returns a new IntegerBernoulliEditAccumulator object."""
         return IntegerBernoulliEditAccumulator(self.num_vals, init_acc=self.init_factory.make(), keys=self.keys)
 
@@ -734,10 +766,17 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
     """IntegerBernoulliEditEstimator object for estimating an IntegerBernoulliEditDistribution from aggregated
     sufficient statistics."""
 
-    def __init__(self, num_vals: int = MISSING, init_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 min_prob: float = 1.0e-128, pseudo_count: Optional[float] = None,
-                 suff_stat: Optional[np.ndarray] = None, name: Optional[str] = None,
-                 keys: Optional[str] = None, num_values: int = MISSING) -> None:
+    def __init__(
+        self,
+        num_vals: int = MISSING,
+        init_estimator: ParameterEstimator | None = NullEstimator(),
+        min_prob: float = 1.0e-128,
+        pseudo_count: float | None = None,
+        suff_stat: np.ndarray | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+        num_values: int = MISSING,
+    ) -> None:
         """IntegerBernoulliEditEstimator object for estimating integer Bernoulli edit set distributions.
 
         Args:
@@ -759,7 +798,7 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
             init_est (ParameterEstimator): Estimator for the previous set x[0].
 
         """
-        self.num_vals = coalesce_alias('num_vals', num_vals, 'num_values', num_values, default=MISSING)
+        self.num_vals = coalesce_alias("num_vals", num_vals, "num_values", num_values, default=MISSING)
         self.keys = keys
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
@@ -767,12 +806,13 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
         self.min_prob = min_prob
         self.init_est = init_estimator if init_estimator is not None else NullEstimator()
 
-    def accumulator_factory(self) -> 'IntegerBernoulliEditAccumulatorFactory':
+    def accumulator_factory(self) -> "IntegerBernoulliEditAccumulatorFactory":
         """Returns an IntegerBernoulliEditAccumulatorFactory for creating IntegerBernoulliEditAccumulator objects."""
         return IntegerBernoulliEditAccumulatorFactory(self.num_vals, self.init_est.accumulator_factory(), self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[np.ndarray, float, Optional[SS1]]) \
-            -> 'IntegerBernoulliEditDistribution':
+    def estimate(
+        self, nobs: float | None, suff_stat: tuple[np.ndarray, float, SS1 | None]
+    ) -> "IntegerBernoulliEditDistribution":
         """Estimate an IntegerBernoulliEditDistribution from aggregated sufficient statistics.
 
         Args:
@@ -787,12 +827,11 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
         count_mat, tot_sum, _ = suff_stat
 
         if self.pseudo_count is not None and self.suff_stat is not None:
-
             p = self.pseudo_count
             s = self.suff_stat
 
             s1 = count_mat[:, 0] + count_mat[:, 2]
-            s0 = (tot_sum - s1)
+            s0 = tot_sum - s1
 
             log_s1 = np.log(s1 + p * (s[:, 1] + s[:, 3]))
             log_s0 = np.log(s0 + p * (s[:, 0] + s[:, 2]))
@@ -805,7 +844,6 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
             log_pmat[:, 3] = np.log(count_mat[:, 2] + p * s[:, 3]) - log_s1
 
         elif self.pseudo_count is not None and self.suff_stat is None:
-
             p = self.pseudo_count
 
             s1 = count_mat[:, 0] + count_mat[:, 2]
@@ -822,12 +860,10 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
             log_pmat[:, 1] = np.log(count_mat[:, 0] + (p / 4.0)) - log_s1
 
         else:
-
             if suff_stat[1] == 0:
                 log_pmat = np.zeros((self.num_vals, 4), dtype=np.float64) + np.log(0.5)
 
             elif (self.min_prob is not None) and (self.min_prob > 0):
-
                 s1 = count_mat[:, 0] + count_mat[:, 2]
                 s0 = tot_sum - s1
 
@@ -851,14 +887,13 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
                 p3[nz1] /= z1
 
                 log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-                with np.errstate(divide='ignore'):
+                with np.errstate(divide="ignore"):
                     log_pmat[:, 0] = np.log(p0)
                     log_pmat[:, 1] = np.log(p1)
                     log_pmat[:, 2] = np.log(p2)
                     log_pmat[:, 3] = np.log(p3)
 
             else:
-
                 s1 = count_mat[:, 0] + count_mat[:, 2]
                 s0 = tot_sum - s1
 
@@ -876,13 +911,14 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
                 p3[nz1] = count_mat[nz1, 2] / s1[nz1]
 
                 log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-                with np.errstate(divide='ignore'):
+                with np.errstate(divide="ignore"):
                     log_pmat[:, 0] = np.log(p0)
                     log_pmat[:, 1] = np.log(p1)
                     log_pmat[:, 2] = np.log(p2)
                     log_pmat[:, 3] = np.log(p3)
 
         return IntegerBernoulliEditDistribution(log_pmat, init_dist=init_dist, name=self.name)
+
 
 class IntegerBernoulliEditDataEncoder(DataSequenceEncoder):
     """IntegerBernoulliEditDataEncoder object for encoding sequences of iid (prev set, next set) observations."""
@@ -901,7 +937,7 @@ class IntegerBernoulliEditDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns string representation of IntegerBernoulliEditDataEncoder object."""
-        return 'IntegerBernoulliEditDataEncoder(init_encoder=' + str(self.init_encoder) + ')'
+        return "IntegerBernoulliEditDataEncoder(init_encoder=" + str(self.init_encoder) + ")"
 
     def __eq__(self, other: object) -> bool:
         """Checks if other object is an equivalent IntegerBernoulliEditDataEncoder."""
@@ -910,8 +946,9 @@ class IntegerBernoulliEditDataEncoder(DataSequenceEncoder):
         else:
             return False
 
-    def seq_encode(self, x: Sequence[T]) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray,
-                                                  Tuple[np.ndarray, np.ndarray, np.ndarray], Optional[Any]]:
+    def seq_encode(
+        self, x: Sequence[T]
+    ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray], Any | None]:
         """Encode a sequence of iid (prev set, next set) observations for vectorized calculations.
 
         Return value 'rv' is a Tuple of length 6 containing:

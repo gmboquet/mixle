@@ -5,6 +5,7 @@ same per-label statistics), the coupled multi-label update (objective increase, 
 space, positivity), the label-set sufficient-statistic plumbing (combine/value/from_value), and an
 estimate -> distribution -> seq_posterior round trip.
 """
+
 import unittest
 
 import numpy as np
@@ -22,13 +23,15 @@ from pysp.stats.llda import (
     update_alpha_coupled,
 )
 
-VOCAB = ['w0', 'w1', 'w2', 'w3']
+VOCAB = ["w0", "w1", "w2", "w3"]
 PMATS = [[0.4, 0.4, 0.1, 0.1], [0.1, 0.1, 0.4, 0.4]]
 
 
 def make_model(alphas):
-    topics = [CategoricalDistribution({'w0': 0.4, 'w1': 0.4, 'w2': 0.1, 'w3': 0.1}),
-              CategoricalDistribution({'w0': 0.1, 'w1': 0.1, 'w2': 0.4, 'w3': 0.4})]
+    topics = [
+        CategoricalDistribution({"w0": 0.4, "w1": 0.4, "w2": 0.1, "w3": 0.1}),
+        CategoricalDistribution({"w0": 0.1, "w1": 0.1, "w2": 0.4, "w3": 0.4}),
+    ]
     return LLDADistribution(topics, np.asarray(alphas, dtype=float))
 
 
@@ -47,8 +50,9 @@ def make_data(label_sets, n, seed):
 
 
 def make_estimator(num_alphas, pseudo_count=None):
-    return LLDAEstimator([CategoricalEstimator(), CategoricalEstimator()], num_alphas=num_alphas,
-                         pseudo_count=pseudo_count)
+    return LLDAEstimator(
+        [CategoricalEstimator(), CategoricalEstimator()], num_alphas=num_alphas, pseudo_count=pseudo_count
+    )
 
 
 def accumulate(model, est, data):
@@ -59,7 +63,6 @@ def accumulate(model, est, data):
 
 
 class LLDASingleLabelAlphaTestCase(unittest.TestCase):
-
     def setUp(self):
         self.model = make_model([[2.0, 0.5], [0.5, 2.0]])
         self.data = make_data([(0,), (1,)], n=30, seed=5)
@@ -79,8 +82,9 @@ class LLDASingleLabelAlphaTestCase(unittest.TestCase):
             sum_of_logs[:, i] = np.bincount(labels, weights=mlpf[:, i], minlength=2)
         doc_counts = np.bincount(labels, weights=np.ones(len(labels)), minlength=2)
 
-        old_alpha = update_alpha(self.model.alphas, sum_of_logs / np.reshape(doc_counts, (-1, 1)),
-                                 self.est.alpha_threshold)
+        old_alpha = update_alpha(
+            self.model.alphas, sum_of_logs / np.reshape(doc_counts, (-1, 1)), self.est.alpha_threshold
+        )
 
         fitted = self.est.estimate(None, self.ss)
         self.assertTrue(np.allclose(fitted.alphas, old_alpha, rtol=1.0e-8, atol=1.0e-10))
@@ -94,14 +98,12 @@ class LLDASingleLabelAlphaTestCase(unittest.TestCase):
         rows = np.asarray([u[0] for u in label_sets], dtype=int)
 
         a_fp = update_alpha(self.model.alphas[rows, :], mean_logs, 1.0e-10)
-        a_gd = update_alpha_coupled(self.model.alphas, label_sets, set_n, mean_logs, 1.0e-10,
-                                    max_its=20000)
+        a_gd = update_alpha_coupled(self.model.alphas, label_sets, set_n, mean_logs, 1.0e-10, max_its=20000)
 
         self.assertTrue(np.allclose(a_gd[rows, :], a_fp, rtol=1.0e-6, atol=1.0e-6))
 
 
 class LLDAMultiLabelAlphaTestCase(unittest.TestCase):
-
     def setUp(self):
         self.model = make_model([[2.0, 0.5], [0.5, 2.0], [1.0, 1.0]])
         self.data = make_data([(0,), (0, 1), (1, 2), (2,), (0, 2), (1,)], n=48, seed=7)
@@ -216,5 +218,5 @@ class LLDAMultiLabelAlphaTestCase(unittest.TestCase):
             self.assertAlmostEqual(sum(suff_stat.values()), expected[:, topic_idx].sum(), places=10)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

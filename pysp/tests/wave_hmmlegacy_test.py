@@ -3,6 +3,7 @@
 Covers import, DataSequenceEncoder round-trips, scalar vs vectorized agreement, and short
 seq_estimate smoke runs on tiny synthetic data with fixed seeds.
 """
+
 import unittest
 
 import numpy as np
@@ -11,16 +12,16 @@ from numpy.random import RandomState
 from pysp.stats import seq_estimate, seq_initialize
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.hidden_markov_ind_pi import (
-    IndPiHiddenMarkovModelDistribution,
-    IndPiHiddenMarkovSampler,
     IndPiHiddenMarkovDataEncoder,
     IndPiHiddenMarkovEstimator,
     IndPiHiddenMarkovEstimatorAccumulator,
     IndPiHiddenMarkovEstimatorAccumulatorFactory,
+    IndPiHiddenMarkovModelDistribution,
+    IndPiHiddenMarkovSampler,
 )
 from pysp.stats.llda import (
-    LLDADistribution,
     LLDADataEncoder,
+    LLDADistribution,
     LLDAEstimator,
     LLDAEstimatorAccumulator,
     LLDAEstimatorAccumulatorFactory,
@@ -28,26 +29,26 @@ from pysp.stats.llda import (
 
 
 def make_ind_pi_dist(use_numba=True, n_rows=2):
-    topics = [CategoricalDistribution({'a': 0.7, 'b': 0.2, 'c': 0.1}),
-              CategoricalDistribution({'a': 0.1, 'b': 0.2, 'c': 0.7})]
+    topics = [
+        CategoricalDistribution({"a": 0.7, "b": 0.2, "c": 0.1}),
+        CategoricalDistribution({"a": 0.1, "b": 0.2, "c": 0.7}),
+    ]
     if n_rows == 2:
         w = [[0.8, 0.2], [0.3, 0.7]]
     else:
         w = [[0.55, 0.45]] * n_rows
     transitions = [[0.9, 0.1], [0.2, 0.8]]
     len_dist = CategoricalDistribution({3: 0.5, 4: 0.5})
-    return IndPiHiddenMarkovModelDistribution(topics, w, transitions, None, len_dist=len_dist,
-                                              use_numba=use_numba)
+    return IndPiHiddenMarkovModelDistribution(topics, w, transitions, None, len_dist=len_dist, use_numba=use_numba)
 
 
 def make_ind_pi_estimator():
-    return IndPiHiddenMarkovEstimator([CategoricalEstimator(), CategoricalEstimator()],
-                                      len_estimator=CategoricalEstimator(),
-                                      pseudo_count=(1.0, 1.0))
+    return IndPiHiddenMarkovEstimator(
+        [CategoricalEstimator(), CategoricalEstimator()], len_estimator=CategoricalEstimator(), pseudo_count=(1.0, 1.0)
+    )
 
 
 class IndPiHiddenMarkovTestCase(unittest.TestCase):
-
     def setUp(self):
         self.dist = make_ind_pi_dist()
         self.data = self.dist.sampler(seed=1).sample(30)
@@ -59,14 +60,14 @@ class IndPiHiddenMarkovTestCase(unittest.TestCase):
         for seq in self.data:
             self.assertIn(len(seq), (3, 4))
             for v in seq:
-                self.assertIn(v, ('a', 'b', 'c'))
+                self.assertIn(v, ("a", "b", "c"))
 
     def test_encoder_equality_and_str(self):
         enc1 = self.dist.dist_to_encoder()
         enc2 = self.dist.dist_to_encoder()
         self.assertIsInstance(enc1, IndPiHiddenMarkovDataEncoder)
         self.assertEqual(enc1, enc2)
-        self.assertIn('IndPiHiddenMarkovDataEncoder', str(enc1))
+        self.assertIn("IndPiHiddenMarkovDataEncoder", str(enc1))
 
         est = make_ind_pi_estimator()
         acc = est.accumulator_factory().make()
@@ -142,15 +143,17 @@ class IndPiHiddenMarkovTestCase(unittest.TestCase):
 
 
 def make_llda_model():
-    topics = [CategoricalDistribution({'w0': 0.4, 'w1': 0.4, 'w2': 0.1, 'w3': 0.1}),
-              CategoricalDistribution({'w0': 0.1, 'w1': 0.1, 'w2': 0.4, 'w3': 0.4})]
+    topics = [
+        CategoricalDistribution({"w0": 0.4, "w1": 0.4, "w2": 0.1, "w3": 0.1}),
+        CategoricalDistribution({"w0": 0.1, "w1": 0.1, "w2": 0.4, "w3": 0.4}),
+    ]
     alphas = np.asarray([[2.0, 0.5], [0.5, 2.0]])
     return LLDADistribution(topics, alphas)
 
 
 def make_llda_data(n=30, seed=5):
     rng = RandomState(seed)
-    vocab = ['w0', 'w1', 'w2', 'w3']
+    vocab = ["w0", "w1", "w2", "w3"]
     pmats = [[0.4, 0.4, 0.1, 0.1], [0.1, 0.1, 0.4, 0.4]]
     data = []
     for i in range(n):
@@ -169,7 +172,6 @@ def make_llda_estimator():
 
 
 class LLDATestCase(unittest.TestCase):
-
     def setUp(self):
         self.model = make_llda_model()
         self.data = make_llda_data(n=30, seed=5)
@@ -179,7 +181,7 @@ class LLDATestCase(unittest.TestCase):
         enc2 = self.model.dist_to_encoder()
         self.assertIsInstance(enc1, LLDADataEncoder)
         self.assertEqual(enc1, enc2)
-        self.assertIn('LLDADataEncoder', str(enc1))
+        self.assertIn("LLDADataEncoder", str(enc1))
 
         est = make_llda_estimator()
         acc = est.accumulator_factory().make()
@@ -264,5 +266,5 @@ class LLDATestCase(unittest.TestCase):
         self.assertIsInstance(f2, LLDAEstimatorAccumulatorFactory)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

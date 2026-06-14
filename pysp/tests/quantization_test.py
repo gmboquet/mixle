@@ -6,16 +6,15 @@ log densities, descending-probability ordering); the 128-bit scale target; nesti
 a Sequence child); and the parallel/distributed layer (determinism vs serial, distributed unranking
 order).
 """
+
 import math
 import unittest
 
 from pysp.stats import *
 from pysp.utils.enumeration import freeze
-from pysp.utils.quantization import (Quantizer, CountHistogram, leaf_count_index, convolve_indices,
-                                     count_budget_index)
+from pysp.utils.quantization import CountHistogram, Quantizer, convolve_indices, leaf_count_index
 from pysp.utils.quantization_parallel import distributed_unrank
-from pysp.utils.quantization_semiring import (CountSemiring, enumerate_and_bin,
-                                              ordered_stream_from_count_index)
+from pysp.utils.quantization_semiring import CountSemiring, enumerate_and_bin, ordered_stream_from_count_index
 
 
 def _collect(index):
@@ -27,7 +26,6 @@ def _norm(items):
 
 
 class CountSemiringTestCase(unittest.TestCase):
-
     def test_convolve_matches_brute_force(self):
         a = CountHistogram(2, [1, 3, 0, 5])
         b = CountHistogram(-1, [2, 0, 4])
@@ -42,11 +40,11 @@ class CountSemiringTestCase(unittest.TestCase):
 
     def test_convolution_unranker_matches_brute_force(self):
         q = Quantizer(bin_width_bits=1.0, oversample=8)
-        d1 = [('a', math.log(0.5)), ('b', math.log(0.3)), ('c', math.log(0.2))]
+        d1 = [("a", math.log(0.5)), ("b", math.log(0.3)), ("c", math.log(0.2))]
         d2 = [(0, math.log(0.6)), (1, math.log(0.4))]
-        i1, _ = leaf_count_index(iter(d1), q, 10 ** 6)
-        i2, _ = leaf_count_index(iter(d2), q, 10 ** 6)
-        conv = convolve_indices([i1, i2], q, 10 ** 6)
+        i1, _ = leaf_count_index(iter(d1), q, 10**6)
+        i2, _ = leaf_count_index(iter(d2), q, 10**6)
+        conv = convolve_indices([i1, i2], q, 10**6)
         got = []
         h = conv.hist
         for i, c in enumerate(h.data):
@@ -62,11 +60,11 @@ class SemiringContractTestCase(unittest.TestCase):
     def setUp(self):
         self.q = Quantizer(bin_width_bits=1.0, oversample=8)
         self.sr = CountSemiring()
-        self.d1 = [('a', math.log(0.5)), ('b', math.log(0.3)), ('c', math.log(0.2))]
+        self.d1 = [("a", math.log(0.5)), ("b", math.log(0.3)), ("c", math.log(0.2))]
         self.d2 = [(0, math.log(0.6)), (1, math.log(0.4))]
 
     def _enum(self, items):
-        return self.sr.from_enumerator(iter(items), self.q, 10 ** 6)[0]
+        return self.sr.from_enumerator(iter(items), self.q, 10**6)[0]
 
     def _all(self, idx):
         out = []
@@ -78,20 +76,20 @@ class SemiringContractTestCase(unittest.TestCase):
 
     def test_times_matches_independent_product(self):
         i1, i2 = self._enum(self.d1), self._enum(self.d2)
-        prod = self.sr.times(i1, i2, self.q, 10 ** 6)
+        prod = self.sr.times(i1, i2, self.q, 10**6)
         truth = [((v1, v2), lp1 + lp2) for v1, lp1 in self.d1 for v2, lp2 in self.d2]
         self.assertEqual(_norm(self._all(prod)), _norm(truth))
 
     def test_product_equals_convolve_indices(self):
         # The retrofit must be equivalent to the previous hand-written path: identical histogram.
         i1, i2 = self._enum(self.d1), self._enum(self.d2)
-        a = self.sr.product([i1, i2], self.q, 10 ** 6)
-        b = convolve_indices([i1, i2], self.q, 10 ** 6)
+        a = self.sr.product([i1, i2], self.q, 10**6)
+        b = convolve_indices([i1, i2], self.q, 10**6)
         self.assertEqual(a.hist.base, b.hist.base)
         self.assertEqual(a.hist.data, b.hist.data)
 
     def test_plus_pools_alternatives(self):
-        d3 = [('x', math.log(0.6)), ('y', math.log(0.4))]  # disjoint, same value space as d1
+        d3 = [("x", math.log(0.6)), ("y", math.log(0.4))]  # disjoint, same value space as d1
         i1, i3 = self._enum(self.d1), self._enum(d3)
         pooled = self.sr.plus(i1, i3)
         self.assertEqual(pooled.hist.total(), len(self.d1) + len(d3))
@@ -105,9 +103,9 @@ class SemiringContractTestCase(unittest.TestCase):
         self.assertEqual(lp, 0.0)
 
     def test_bridges_round_trip(self):
-        cat = CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2})
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
         # Axis B -> A: enumerate-and-bin equals the leaf count index.
-        idx_bridge, _ = enumerate_and_bin(cat.enumerator(), self.q, 10 ** 6)
+        idx_bridge, _ = enumerate_and_bin(cat.enumerator(), self.q, 10**6)
         self.assertEqual(_norm(self._all(idx_bridge)), _norm(list(cat.enumerator())))
         # Axis A -> B: unrank a built budget index back into a stream of the same value set.
         built = cat.count_budget_index(budget_bits=10, oversample=8)
@@ -132,23 +130,23 @@ class BudgetIndexVsEnumeratorTestCase(unittest.TestCase):
             self.assertGreaterEqual(lps[i], lps[i + 1] - 1.0)
 
     def test_leaf_categorical(self):
-        self._check_finite(CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2}))
+        self._check_finite(CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2}))
 
     def test_composite(self):
-        cat3 = CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2})
+        cat3 = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
         intcat = IntegerCategoricalDistribution(2, [0.1, 0.0, 0.6, 0.3])
         self._check_finite(CompositeDistribution((cat3, intcat)))
 
     def test_sequence_finite_length(self):
-        cat = CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2})
-        self._check_finite(SequenceDistribution(
-            cat, len_dist=IntegerCategoricalDistribution(0, [0.2, 0.5, 0.3])))
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
+        self._check_finite(SequenceDistribution(cat, len_dist=IntegerCategoricalDistribution(0, [0.2, 0.5, 0.3])))
 
     def test_markov_chain_finite_length(self):
         mc = MarkovChainDistribution(
-            {'x': 0.6, 'y': 0.4},
-            {'x': {'x': 0.8, 'y': 0.2}, 'y': {'x': 0.5, 'y': 0.5}},
-            len_dist=IntegerCategoricalDistribution(0, [0.1, 0.3, 0.4, 0.2]))
+            {"x": 0.6, "y": 0.4},
+            {"x": {"x": 0.8, "y": 0.2}, "y": {"x": 0.5, "y": 0.5}},
+            len_dist=IntegerCategoricalDistribution(0, [0.1, 0.3, 0.4, 0.2]),
+        )
         self._check_finite(mc)
 
 
@@ -157,28 +155,28 @@ class ScaleTestCase(unittest.TestCase):
 
     def _check_scale(self, dist, budget_bits=128):
         index = dist.count_budget_index(budget_bits=budget_bits, oversample=4)
-        self.assertGreaterEqual(index.total_count, 2 ** budget_bits)
+        self.assertGreaterEqual(index.total_count, 2**budget_bits)
         for i in [0, 1, 137, index.total_count // 2, index.total_count - 1]:
             if i < index.total_count:
                 v, lp = index.get(i)
                 self.assertAlmostEqual(lp, dist.log_density(v), places=9)
 
     def test_sequence_128_bits(self):
-        cat = CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2})
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
         self._check_scale(SequenceDistribution(cat, len_dist=GeometricDistribution(0.4)))
 
     def test_markov_128_bits(self):
         mc = MarkovChainDistribution(
-            {'x': 0.6, 'y': 0.4},
-            {'x': {'x': 0.8, 'y': 0.2}, 'y': {'x': 0.5, 'y': 0.5}},
-            len_dist=GeometricDistribution(0.3))
+            {"x": 0.6, "y": 0.4},
+            {"x": {"x": 0.8, "y": 0.2}, "y": {"x": 0.5, "y": 0.5}},
+            len_dist=GeometricDistribution(0.3),
+        )
         self._check_scale(mc)
 
     def test_nested_composite_over_sequence_128_bits(self):
-        cat = CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2})
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
         seq = SequenceDistribution(cat, len_dist=GeometricDistribution(0.4))
-        comp = CompositeDistribution((CategoricalDistribution({'x': 0.7, 'y': 0.3}),
-                                      seq, GeometricDistribution(0.5)))
+        comp = CompositeDistribution((CategoricalDistribution({"x": 0.7, "y": 0.3}), seq, GeometricDistribution(0.5)))
         self._check_scale(comp)
 
 
@@ -187,10 +185,12 @@ class RecursiveLawDepthTestCase(unittest.TestCase):
 
     def test_deep_markov_no_recursion_overflow(self):
         mc = MarkovChainDistribution(
-            {'x': 0.55, 'y': 0.45}, {'x': {'x': 0.7, 'y': 0.3}, 'y': {'x': 0.4, 'y': 0.6}},
-            len_dist=GeometricDistribution(0.2))
+            {"x": 0.55, "y": 0.45},
+            {"x": {"x": 0.7, "y": 0.3}, "y": {"x": 0.4, "y": 0.6}},
+            len_dist=GeometricDistribution(0.2),
+        )
         idx = mc.count_budget_index(budget_bits=160, oversample=4)
-        self.assertGreaterEqual(idx.total_count, 2 ** 160)
+        self.assertGreaterEqual(idx.total_count, 2**160)
         n = idx.total_count
         deepest_v, deepest_lp = idx.get(n - 1)  # longest sequence -> deepest trellis walk
         self.assertGreater(len(deepest_v), 100)
@@ -203,8 +203,9 @@ class MarginalLawTestCase(unittest.TestCase):
     def test_disjoint_mixture_is_exact(self):
         # Disjoint component supports => no overlap => the pooled count index is exact.
         m = MixtureDistribution(
-            [IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]),
-             IntegerCategoricalDistribution(10, [0.4, 0.6])], [0.6, 0.4])
+            [IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]), IntegerCategoricalDistribution(10, [0.4, 0.6])],
+            [0.6, 0.4],
+        )
         idx = m.count_budget_index(budget_bits=20, oversample=8)
         got = [idx.get(i) for i in range(idx.total_count)]
         self.assertEqual(_norm(got), _norm(list(m.enumerator())))
@@ -215,14 +216,15 @@ class MarginalLawTestCase(unittest.TestCase):
         # Overlapping supports => upper-bound counts (a shared value is counted per component),
         # but the value set covers the true support and every reported log-prob is exact.
         m = MixtureDistribution(
-            [IntegerCategoricalDistribution(0, [0.7, 0.2, 0.1]),
-             IntegerCategoricalDistribution(0, [0.2, 0.3, 0.5])], [0.5, 0.5])
+            [IntegerCategoricalDistribution(0, [0.7, 0.2, 0.1]), IntegerCategoricalDistribution(0, [0.2, 0.3, 0.5])],
+            [0.5, 0.5],
+        )
         true = m.enumerator()
         true_set = set(freeze(v) for v, _ in true)
         idx = m.count_budget_index(budget_bits=20, oversample=8)
         got = [idx.get(i) for i in range(idx.total_count)]
         got_set = set(freeze(v) for v, _ in got)
-        self.assertTrue(true_set.issubset(got_set))           # covers the true support
+        self.assertTrue(true_set.issubset(got_set))  # covers the true support
         self.assertGreaterEqual(idx.total_count, len(true_set))  # conservative (>= distinct)
         for v, lp in got:
             self.assertAlmostEqual(lp, m.log_density(v), places=9)  # exact mixture log-prob
@@ -232,10 +234,11 @@ class MarginalLawTestCase(unittest.TestCase):
         # produced by several paths is counted per path (conservative upper bound). The value set
         # covers the true support and every reported log-prob is the exact marginal.
         hmm = HiddenMarkovModelDistribution(
-            topics=[CategoricalDistribution({'a': 0.8, 'b': 0.2}),
-                    CategoricalDistribution({'b': 0.6, 'c': 0.4})],
-            w=[0.7, 0.3], transitions=[[0.9, 0.1], [0.4, 0.6]],
-            len_dist=IntegerCategoricalDistribution(0, [0.1, 0.3, 0.4, 0.2]))
+            topics=[CategoricalDistribution({"a": 0.8, "b": 0.2}), CategoricalDistribution({"b": 0.6, "c": 0.4})],
+            w=[0.7, 0.3],
+            transitions=[[0.9, 0.1], [0.4, 0.6]],
+            len_dist=IntegerCategoricalDistribution(0, [0.1, 0.3, 0.4, 0.2]),
+        )
         true_set = set(freeze(v) for v, _ in hmm.enumerator())
         idx = hmm.count_budget_index(budget_bits=16, oversample=8)
         got = [idx.get(i) for i in range(idx.total_count)]
@@ -249,12 +252,16 @@ class MarginalLawTestCase(unittest.TestCase):
         # Geometric length -> the trellis reaches a deep budget structurally (no enumeration),
         # with exact marginal log-density on deep unranked observations and no recursion overflow.
         hmm = HiddenMarkovModelDistribution(
-            topics=[CategoricalDistribution({'a': 0.6, 'b': 0.3, 'c': 0.1}),
-                    CategoricalDistribution({'a': 0.2, 'b': 0.3, 'c': 0.5})],
-            w=[0.5, 0.5], transitions=[[0.7, 0.3], [0.4, 0.6]],
-            len_dist=GeometricDistribution(0.3))
+            topics=[
+                CategoricalDistribution({"a": 0.6, "b": 0.3, "c": 0.1}),
+                CategoricalDistribution({"a": 0.2, "b": 0.3, "c": 0.5}),
+            ],
+            w=[0.5, 0.5],
+            transitions=[[0.7, 0.3], [0.4, 0.6]],
+            len_dist=GeometricDistribution(0.3),
+        )
         idx = hmm.count_budget_index(budget_bits=64, oversample=4)
-        self.assertGreaterEqual(idx.total_count, 2 ** 64)
+        self.assertGreaterEqual(idx.total_count, 2**64)
         for i in [0, 1, idx.total_count // 2, idx.total_count - 1]:
             v, lp = idx.get(i)
             self.assertAlmostEqual(lp, hmm.log_density(v), places=9)
@@ -265,21 +272,23 @@ class MarginalDedupTestCase(unittest.TestCase):
 
     def _overlapping_mixture(self):
         return MixtureDistribution(
-            [IntegerCategoricalDistribution(0, [0.7, 0.2, 0.1]),
-             IntegerCategoricalDistribution(0, [0.2, 0.3, 0.5])], [0.5, 0.5])
+            [IntegerCategoricalDistribution(0, [0.7, 0.2, 0.1]), IntegerCategoricalDistribution(0, [0.2, 0.3, 0.5])],
+            [0.5, 0.5],
+        )
 
     def _finite_hmm(self):
         return HiddenMarkovModelDistribution(
-            topics=[CategoricalDistribution({'a': 0.8, 'b': 0.2}),
-                    CategoricalDistribution({'b': 0.6, 'c': 0.4})],
-            w=[0.7, 0.3], transitions=[[0.9, 0.1], [0.4, 0.6]],
-            len_dist=IntegerCategoricalDistribution(0, [0.1, 0.3, 0.4, 0.2]))
+            topics=[CategoricalDistribution({"a": 0.8, "b": 0.2}), CategoricalDistribution({"b": 0.6, "c": 0.4})],
+            w=[0.7, 0.3],
+            transitions=[[0.9, 0.1], [0.4, 0.6]],
+            len_dist=IntegerCategoricalDistribution(0, [0.1, 0.3, 0.4, 0.2]),
+        )
 
     def test_canonical_mixture_dedups_to_distinct_support(self):
         m = self._overlapping_mixture()
-        got = list(m.count_budget_distinct(budget_bits=20, oversample=8, dedup='canonical'))
+        got = list(m.count_budget_distinct(budget_bits=20, oversample=8, dedup="canonical"))
         keys = [freeze(v) for v, _ in got]
-        self.assertEqual(len(keys), len(set(keys)))                  # no duplicates (no bin ties here)
+        self.assertEqual(len(keys), len(set(keys)))  # no duplicates (no bin ties here)
         self.assertEqual(set(keys), set(freeze(v) for v, _ in m.enumerator()))
         for v, lp in got:
             self.assertAlmostEqual(lp, m.log_density(v), places=9)
@@ -290,22 +299,20 @@ class MarginalDedupTestCase(unittest.TestCase):
         m = self._overlapping_mixture()
         idx = m.count_budget_index(budget_bits=20, oversample=8)
         n = idx.total_count
-        full = list(m.count_budget_distinct(budget_bits=20, oversample=8, dedup='canonical'))
+        full = list(m.count_budget_distinct(budget_bits=20, oversample=8, dedup="canonical"))
         parts = []
         for a, b in [(0, n // 3), (n // 3, 2 * n // 3), (2 * n // 3, n)]:
-            parts += list(m.count_budget_distinct(budget_bits=20, oversample=8,
-                                                  dedup='canonical', start=a, stop=b))
-        self.assertEqual([(freeze(v), round(lp, 9)) for v, lp in parts],
-                         [(freeze(v), round(lp, 9)) for v, lp in full])
+            parts += list(m.count_budget_distinct(budget_bits=20, oversample=8, dedup="canonical", start=a, stop=b))
+        self.assertEqual([(freeze(v), round(lp, 9)) for v, lp in parts], [(freeze(v), round(lp, 9)) for v, lp in full])
 
     def test_canonical_hmm_covers_distinct_support(self):
         hmm = self._finite_hmm()
         true_set = set(freeze(v) for v, _ in hmm.enumerator())
         structural_total = hmm.count_budget_index(budget_bits=24, oversample=8).total_count
-        got = list(hmm.count_budget_distinct(budget_bits=24, oversample=8, dedup='canonical'))
+        got = list(hmm.count_budget_distinct(budget_bits=24, oversample=8, dedup="canonical"))
         keys = [freeze(v) for v, _ in got]
-        self.assertEqual(set(keys), true_set)                 # covers exactly the distinct support
-        self.assertLess(len(keys), structural_total)          # path-copies substantially collapsed
+        self.assertEqual(set(keys), true_set)  # covers exactly the distinct support
+        self.assertLess(len(keys), structural_total)  # path-copies substantially collapsed
         # Min-cost-path dedup is exact up to coarse-bin ties (>=2 paths sharing the min bin), which
         # are rare and shrink with finer bins; allow a small residual rather than asserting zero.
         self.assertLessEqual(len(keys) - len(true_set), 2)
@@ -314,16 +321,19 @@ class MarginalDedupTestCase(unittest.TestCase):
 
     def test_window_mode_dedups_sequentially(self):
         m = self._overlapping_mixture()
-        got = list(m.count_budget_distinct(budget_bits=20, oversample=8,
-                                           dedup='window', max_entries=1000))
+        got = list(m.count_budget_distinct(budget_bits=20, oversample=8, dedup="window", max_entries=1000))
         keys = [freeze(v) for v, _ in got]
         self.assertEqual(set(keys), set(freeze(v) for v, _ in m.enumerator()))
         with self.assertRaises(ValueError):  # window mode cannot seek
-            list(m.count_budget_distinct(budget_bits=20, dedup='window', start=5))
+            list(m.count_budget_distinct(budget_bits=20, dedup="window", start=5))
 
     def test_exact_family_dedup_is_noop(self):
-        comp = CompositeDistribution((CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2}),
-                                      IntegerCategoricalDistribution(2, [0.1, 0.0, 0.6, 0.3])))
+        comp = CompositeDistribution(
+            (
+                CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2}),
+                IntegerCategoricalDistribution(2, [0.1, 0.0, 0.6, 0.3]),
+            )
+        )
         idx = comp.count_budget_index(budget_bits=20, oversample=8)
         distinct = list(comp.count_budget_distinct(budget_bits=20, oversample=8))
         self.assertEqual(len(distinct), idx.total_count)
@@ -331,9 +341,8 @@ class MarginalDedupTestCase(unittest.TestCase):
 
 
 class ParallelTestCase(unittest.TestCase):
-
     def setUp(self):
-        cat = CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2, 'd': 0.05, 'e': 0.05})
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2, "d": 0.05, "e": 0.05})
         self.seq = SequenceDistribution(cat, len_dist=GeometricDistribution(0.5))
 
     def test_parallel_quantization_is_deterministic(self):
@@ -351,12 +360,14 @@ class ParallelTestCase(unittest.TestCase):
     def test_distributed_unranking_matches_serial_order(self):
         index = self.seq.count_budget_index(budget_bits=96, oversample=8)
         serial = [index.get(i) for i in range(2000)]
-        dist_items = distributed_unrank(self.seq, budget_bits=96, start=0, count=2000,
-                                        oversample=8, num_workers=4, backend='local')
+        dist_items = distributed_unrank(
+            self.seq, budget_bits=96, start=0, count=2000, oversample=8, num_workers=4, backend="local"
+        )
         self.assertEqual(len(dist_items), 2000)
-        self.assertEqual([(freeze(v), round(lp, 9)) for v, lp in serial],
-                         [(freeze(v), round(lp, 9)) for v, lp in dist_items])
+        self.assertEqual(
+            [(freeze(v), round(lp, 9)) for v, lp in serial], [(freeze(v), round(lp, 9)) for v, lp in dist_items]
+        )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

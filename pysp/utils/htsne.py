@@ -75,16 +75,28 @@ Two t-SNE engines are provided:
 
 humap embeds the same model-based kNN graph with UMAP (umap-learn).
 """
+
 import sys
-from typing import Optional, Tuple
 
 import numpy as np
 import scipy.sparse
+
 from pysp.utils.optional_deps import HAS_NUMBA, numba
 
-__all__ = ['htsne', 'humap', 'dpmsne', 'model_log_affinity', 'sparse_model_distances',
-           'approx_sparse_model_distances', 'model_knn', 'get_pmat', 'balanced_factors',
-           'local_factors', 'fisher_factors', 'tsne_barnes_hut']
+__all__ = [
+    "htsne",
+    "humap",
+    "dpmsne",
+    "model_log_affinity",
+    "sparse_model_distances",
+    "approx_sparse_model_distances",
+    "model_knn",
+    "get_pmat",
+    "balanced_factors",
+    "local_factors",
+    "fisher_factors",
+    "tsne_barnes_hut",
+]
 
 
 def _affinity_factors(posterior_mat, ll_mat, affinity):
@@ -98,22 +110,21 @@ def _affinity_factors(posterior_mat, ll_mat, affinity):
         factors = list(affinity)
         if not factors:
             raise ValueError("affinity factor list must not be empty.")
-        return factors                       # pre-built factor list
+        return factors  # pre-built factor list
 
-    if affinity == 'fisher':
-        raise ValueError("affinity='fisher' requires fisher_factors(model, data=...) "
-                         "or htsne/humap with a model.")
+    if affinity == "fisher":
+        raise ValueError("affinity='fisher' requires fisher_factors(model, data=...) or htsne/humap with a model.")
 
     z = np.asarray(posterior_mat, dtype=np.float64)
     if z.ndim != 2:
         raise ValueError("posterior_mat must be a two-dimensional array.")
 
-    if affinity == 'coassign':
+    if affinity == "coassign":
         return [(z, z)]
-    if affinity == 'bhattacharyya':
+    if affinity == "bhattacharyya":
         zs = np.sqrt(z)
         return [(zs, zs)]
-    if affinity == 'likelihood':
+    if affinity == "likelihood":
         if ll_mat is None:
             raise ValueError("affinity='likelihood' requires the component log-likelihood matrix.")
         l = np.asarray(ll_mat, dtype=np.float64)
@@ -121,8 +132,10 @@ def _affinity_factors(posterior_mat, ll_mat, affinity):
             raise ValueError("ll_mat must have the same shape as posterior_mat.")
         return [(np.exp(l - l.max(axis=1, keepdims=True)), z)]
 
-    raise ValueError("affinity must be 'coassign', 'bhattacharyya', 'likelihood', "
-                     "'local', 'balanced', 'fisher', or a pre-built factor list.")
+    raise ValueError(
+        "affinity must be 'coassign', 'bhattacharyya', 'likelihood', "
+        "'local', 'balanced', 'fisher', or a pre-built factor list."
+    )
 
 
 def _is_prebuilt_affinity(affinity) -> bool:
@@ -138,22 +151,21 @@ def _leaf_feature_matrix(dists, items):
     """
     tname = type(dists[0]).__name__
     try:
-        if tname == 'GaussianDistribution':
+        if tname == "GaussianDistribution":
             return np.asarray(items, dtype=np.float64).reshape(-1, 1)
-        if tname == 'DiagonalGaussianDistribution':
+        if tname == "DiagonalGaussianDistribution":
             return np.asarray(items, dtype=np.float64)
-        if tname == 'LogGaussianDistribution':
+        if tname == "LogGaussianDistribution":
             x = np.asarray(items, dtype=np.float64)
             if np.any(x <= 0):
                 return None
             return np.log(x).reshape(-1, 1)
-        if tname == 'GammaDistribution':
+        if tname == "GammaDistribution":
             x = np.asarray(items, dtype=np.float64)
             if np.any(x <= 0):
                 return None
             return np.column_stack((x, np.log(x)))
-        if tname in ('PoissonDistribution', 'ExponentialDistribution',
-                     'GeometricDistribution', 'BinomialDistribution'):
+        if tname in ("PoissonDistribution", "ExponentialDistribution", "GeometricDistribution", "BinomialDistribution"):
             return np.asarray(items, dtype=np.float64).reshape(-1, 1)
     except (TypeError, ValueError):
         return None
@@ -178,16 +190,15 @@ def _field_log_density_features(dists, items):
     tname = type(dists[0]).__name__
     n, K = len(items), len(dists)
 
-    if 'Ignored' in tname or 'Null' in tname:
+    if "Ignored" in tname or "Null" in tname:
         return
 
-    if 'Composite' in tname and hasattr(dists[0], 'dists'):
+    if "Composite" in tname and hasattr(dists[0], "dists"):
         for f in range(len(dists[0].dists)):
-            yield from _field_log_density_features([d.dists[f] for d in dists],
-                                                   [x[f] for x in items])
+            yield from _field_log_density_features([d.dists[f] for d in dists], [x[f] for x in items])
         return
 
-    if 'Sequence' in tname and hasattr(dists[0], 'dist') and hasattr(dists[0], 'len_dist'):
+    if "Sequence" in tname and hasattr(dists[0], "dist") and hasattr(dists[0], "len_dist"):
         lens = [len(x) for x in items]
         elems = [e for x in items for e in x]
         if elems:
@@ -195,7 +206,7 @@ def _field_log_density_features(dists, items):
             for l_e, x_e in _field_log_density_features([d.dist for d in dists], elems):
                 l_f = np.zeros((n, K))
                 np.add.at(l_f, seg, l_e)
-                if getattr(dists[0], 'len_normalized', False):
+                if getattr(dists[0], "len_normalized", False):
                     denom = np.asarray(lens, dtype=np.float64)
                     mask = denom > 0
                     l_f[mask] /= denom[mask, None]
@@ -212,22 +223,23 @@ def _field_log_density_features(dists, items):
             yield from _field_log_density_features(len_dists, lens)
         return
 
-    if 'Optional' in tname and hasattr(dists[0], 'dist'):
-        mv = getattr(dists[0], 'missing_value', None)
+    if "Optional" in tname and hasattr(dists[0], "dist"):
+        mv = getattr(dists[0], "missing_value", None)
         mv_is_nan = isinstance(mv, float) and np.isnan(mv)
-        miss = np.asarray([x is None or x is mv or
-                           (mv_is_nan and isinstance(x, float) and np.isnan(x))
-                           for x in items])
-        has_gate = [getattr(d, 'has_p', True) for d in dists]
+        miss = np.asarray([x is None or x is mv or (mv_is_nan and isinstance(x, float) and np.isnan(x)) for x in items])
+        has_gate = [getattr(d, "has_p", True) for d in dists]
         if any(has_gate):
-            lp0 = np.asarray([
-                getattr(d, 'log_p0', getattr(d, 'log_p', 0.0)) if has_p else 0.0
-                for d, has_p in zip(dists, has_gate)
-            ], dtype=np.float64)                  # log P(missing)
-            lp1 = np.asarray([
-                getattr(d, 'log_p1', getattr(d, 'log_pn', 0.0)) if has_p else 0.0
-                for d, has_p in zip(dists, has_gate)
-            ], dtype=np.float64)                  # log P(present)
+            lp0 = np.asarray(
+                [getattr(d, "log_p0", getattr(d, "log_p", 0.0)) if has_p else 0.0 for d, has_p in zip(dists, has_gate)],
+                dtype=np.float64,
+            )  # log P(missing)
+            lp1 = np.asarray(
+                [
+                    getattr(d, "log_p1", getattr(d, "log_pn", 0.0)) if has_p else 0.0
+                    for d, has_p in zip(dists, has_gate)
+                ],
+                dtype=np.float64,
+            )  # log P(present)
             yield np.where(miss[:, None], lp0[None, :], lp1[None, :]), None
         if (~miss).any():
             fill = items[int(np.argmax(~miss))]
@@ -237,9 +249,9 @@ def _field_log_density_features(dists, items):
                 yield np.where(keep > 0.0, l_in, 0.0), None
         return
 
-    if hasattr(dists[0], 'dist_to_encoder'):
+    if hasattr(dists[0], "dist_to_encoder"):
         enc = dists[0].dist_to_encoder().seq_encode(items)
-    elif hasattr(dists[0], 'seq_encode'):
+    elif hasattr(dists[0], "seq_encode"):
         enc = dists[0].seq_encode(items)
     else:
         enc = None
@@ -289,8 +301,10 @@ def balanced_factors(mix_model, data, field_weights=None):
     if field_weights is None:
         field_weights = [1.0] * len(l_fields)
     elif len(field_weights) != len(l_fields):
-        raise ValueError('field_weights has %d entries but the model flattens to %d '
-                         'leaf fields.' % (len(field_weights), len(l_fields)))
+        raise ValueError(
+            "field_weights has %d entries but the model flattens to %d "
+            "leaf fields." % (len(field_weights), len(l_fields))
+        )
 
     factors = []
     for l_f, w_f in zip(l_fields, field_weights):
@@ -375,8 +389,9 @@ def local_factors(mix_model, data, field_weights=None):
     if field_weights is None:
         field_weights = [1.0] * len(terms)
     elif len(field_weights) != len(terms):
-        raise ValueError('field_weights has %d entries but the model flattens to %d '
-                         'leaf fields.' % (len(field_weights), len(terms)))
+        raise ValueError(
+            "field_weights has %d entries but the model flattens to %d leaf fields." % (len(field_weights), len(terms))
+        )
 
     factors = []
     for (l_f, x_f), w_f in zip(terms, field_weights):
@@ -395,25 +410,32 @@ def local_factors(mix_model, data, field_weights=None):
             factors.append((sq, sq) if w_f == 1.0 else (sq, sq, float(w_f)))
         else:
             x_f = np.asarray(x_f, dtype=np.float64)
-            factors.append({
-                'kind': 'local',
-                'sqrt_z': sq,
-                'x': x_f,
-                'inv_cov': _component_inv_covariances(x_f, z_f),
-                'weight': float(w_f),
-            })
+            factors.append(
+                {
+                    "kind": "local",
+                    "sqrt_z": sq,
+                    "x": x_f,
+                    "inv_cov": _component_inv_covariances(x_f, z_f),
+                    "weight": float(w_f),
+                }
+            )
 
     return factors
 
 
 def _observed_fisher_vectors(view, stats: np.ndarray, metric: str, ridge: float) -> np.ndarray:
-    return view.observed_fisher_vectors(stats=np.asarray(stats, dtype=np.float64),
-                                        metric=metric, ridge=ridge)
+    return view.observed_fisher_vectors(stats=np.asarray(stats, dtype=np.float64), metric=metric, ridge=ridge)
 
 
-def fisher_factors(model, data=None, enc_data=None, metric: str = 'diagonal',
-                   ridge: float = 1.0e-8, weight: float = 1.0,
-                   information: str = 'observed'):
+def fisher_factors(
+    model,
+    data=None,
+    enc_data=None,
+    metric: str = "diagonal",
+    ridge: float = 1.0e-8,
+    weight: float = 1.0,
+    information: str = "observed",
+):
     """Fisher-vector affinity factor for a model and observations.
 
     The model supplies posterior-expected sufficient statistics through
@@ -428,7 +450,7 @@ def fisher_factors(model, data=None, enc_data=None, metric: str = 'diagonal',
         raise ValueError("pass only one of data or enc_data for affinity='fisher'.")
     if weight < 0:
         raise ValueError("fisher affinity weight must be non-negative.")
-    if information not in ('observed', 'model'):
+    if information not in ("observed", "model"):
         raise ValueError("information must be 'observed' or 'model'.")
 
     view = model.to_fisher()
@@ -436,20 +458,22 @@ def fisher_factors(model, data=None, enc_data=None, metric: str = 'diagonal',
         stats = view.expected_statistics_matrix(data=list(data))
     else:
         stats = view.seq_expected_statistics(enc_data)
-    if information == 'observed':
+    if information == "observed":
         x = _observed_fisher_vectors(view, stats=stats, metric=metric, ridge=ridge)
     else:
         x = view.fisher_vectors(stats=stats, metric=metric, ridge=ridge)
     x = np.nan_to_num(np.asarray(x, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
 
-    return [{
-        'kind': 'fisher',
-        'x': x,
-        'weight': float(weight),
-        'metric': metric,
-        'ridge': float(ridge),
-        'information': information,
-    }]
+    return [
+        {
+            "kind": "fisher",
+            "x": x,
+            "weight": float(weight),
+            "metric": metric,
+            "ridge": float(ridge),
+            "information": information,
+        }
+    ]
 
 
 def _factor_parts(factor):
@@ -469,31 +493,31 @@ def _factor_parts(factor):
 
 
 def _is_local_factor(factor) -> bool:
-    return isinstance(factor, dict) and factor.get('kind') == 'local'
+    return isinstance(factor, dict) and factor.get("kind") == "local"
 
 
 def _is_fisher_factor(factor) -> bool:
-    return isinstance(factor, dict) and factor.get('kind') == 'fisher'
+    return isinstance(factor, dict) and factor.get("kind") == "fisher"
 
 
 def _factor_n(factor) -> int:
     if _is_local_factor(factor):
-        return int(factor['sqrt_z'].shape[0])
+        return int(factor["sqrt_z"].shape[0])
     if _is_fisher_factor(factor):
-        return int(factor['x'].shape[0])
+        return int(factor["x"].shape[0])
     return int(_factor_parts(factor)[0].shape[0])
 
 
 def _factor_weight(factor) -> float:
     if _is_local_factor(factor) or _is_fisher_factor(factor):
-        return float(factor.get('weight', 1.0))
+        return float(factor.get("weight", 1.0))
     return _factor_parts(factor)[2]
 
 
 def _local_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) -> np.ndarray:
-    sq = np.asarray(factor['sqrt_z'], dtype=np.float64)
-    x = np.asarray(factor['x'], dtype=np.float64)
-    inv_cov = np.asarray(factor['inv_cov'], dtype=np.float64)
+    sq = np.asarray(factor["sqrt_z"], dtype=np.float64)
+    x = np.asarray(factor["x"], dtype=np.float64)
+    inv_cov = np.asarray(factor["inv_cov"], dtype=np.float64)
 
     zr, zc = sq[row_idx], sq[col_idx]
     xr, xc = x[row_idx], x[col_idx]
@@ -506,7 +530,7 @@ def _local_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) ->
         if not np.any(gate > 0):
             continue
         if sqdiff1 is None:
-            delta = np.einsum('...d,de,...e->...', diff, inv_cov[k], diff)
+            delta = np.einsum("...d,de,...e->...", diff, inv_cov[k], diff)
         else:
             delta = sqdiff1 * inv_cov[k, 0, 0]
         delta = np.maximum(delta, 0.0)
@@ -516,7 +540,7 @@ def _local_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) ->
 
 
 def _fisher_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) -> np.ndarray:
-    x = np.asarray(factor['x'], dtype=np.float64)
+    x = np.asarray(factor["x"], dtype=np.float64)
     xr = x[row_idx]
     xc = x[col_idx]
 
@@ -527,7 +551,7 @@ def _fisher_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) -
     return np.exp(-0.5 * np.minimum(d2, 1400.0))
 
 
-def _factor_similarity_block(factor, row_idx: np.ndarray, col_idx: Optional[np.ndarray] = None) -> np.ndarray:
+def _factor_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray | None = None) -> np.ndarray:
     row_idx = np.asarray(row_idx, dtype=np.int64)
     if col_idx is None:
         col_idx = np.arange(_factor_n(factor), dtype=np.int64)
@@ -554,9 +578,16 @@ def _factor_similarity_candidates(factor, i: int, candidates: np.ndarray) -> np.
     return np.dot(h[candidates], g[i])
 
 
-def _resolve_affinity(affinity, mix_model, data, field_weights, enc_data=None,
-                      fisher_metric: str = 'diagonal', fisher_ridge: float = 1.0e-8,
-                      fisher_information: str = 'observed'):
+def _resolve_affinity(
+    affinity,
+    mix_model,
+    data,
+    field_weights,
+    enc_data=None,
+    fisher_metric: str = "diagonal",
+    fisher_ridge: float = 1.0e-8,
+    fisher_information: str = "observed",
+):
     """Resolve named affinity modes to a concrete affinity for the model.
 
     'auto' uses local statistical factors whenever raw data is available to
@@ -564,34 +595,39 @@ def _resolve_affinity(affinity, mix_model, data, field_weights, enc_data=None,
     no raw data was given) it falls back to 'bhattacharyya' on the joint
     posterior.
     """
-    if affinity == 'auto':
-        if getattr(mix_model, 'components', None) is not None and data is not None:
+    if affinity == "auto":
+        if getattr(mix_model, "components", None) is not None and data is not None:
             try:
                 return local_factors(mix_model, data, field_weights=field_weights)
             except Exception:
-                return 'bhattacharyya'
-        return 'bhattacharyya'
+                return "bhattacharyya"
+        return "bhattacharyya"
 
-    if affinity == 'local':
+    if affinity == "local":
         if data is None:
             raise ValueError("affinity='local' requires the raw data to extract local field coordinates.")
         return local_factors(mix_model, data, field_weights=field_weights)
 
-    if affinity == 'balanced':
+    if affinity == "balanced":
         if data is None:
             raise ValueError("affinity='balanced' requires the raw data to extract per-field values.")
         return balanced_factors(mix_model, data, field_weights=field_weights)
 
-    if affinity == 'fisher':
+    if affinity == "fisher":
         f_data = None if enc_data is not None else data
-        return fisher_factors(mix_model, data=f_data, enc_data=enc_data,
-                              metric=fisher_metric, ridge=fisher_ridge,
-                              information=fisher_information)
+        return fisher_factors(
+            mix_model,
+            data=f_data,
+            enc_data=enc_data,
+            metric=fisher_metric,
+            ridge=fisher_ridge,
+            information=fisher_information,
+        )
 
     return affinity
 
 
-def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.ndarray, np.ndarray]:
+def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> tuple[np.ndarray, np.ndarray]:
     """Return (posterior_mat, component_log_like_mat), each n x K, for a mixture-like model.
 
     Uses the model's seq_posterior/seq_component_log_density when available and
@@ -599,14 +635,14 @@ def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.nd
     which covers pysp.stats mixtures and pysp.bstats DPM models alike.
     """
     if enc_data is None:
-        if hasattr(mix_model, 'dist_to_encoder'):
+        if hasattr(mix_model, "dist_to_encoder"):
             enc_data = mix_model.dist_to_encoder().seq_encode(data)
         else:
             enc_data = mix_model.seq_encode(data)
 
-    if hasattr(mix_model, 'seq_component_log_density'):
+    if hasattr(mix_model, "seq_component_log_density"):
         ll_mat = np.asarray(mix_model.seq_component_log_density(enc_data), dtype=np.float64)
-        log_w = getattr(mix_model, 'log_w', None)
+        log_w = getattr(mix_model, "log_w", None)
         if log_w is not None:
             # The component posterior is softmax(ll + log_w); deriving it here avoids a second
             # full model evaluation. seq_posterior re-scores every component, which doubles the
@@ -616,7 +652,7 @@ def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.nd
             np.exp(z_mat, out=z_mat)
             z_mat /= z_mat.sum(axis=1, keepdims=True)
             return z_mat, ll_mat
-        if hasattr(mix_model, 'seq_posterior'):
+        if hasattr(mix_model, "seq_posterior"):
             z_mat = np.asarray(mix_model.seq_posterior(enc_data), dtype=np.float64)
             return z_mat, ll_mat
 
@@ -631,9 +667,12 @@ def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> Tuple[np.nd
     return z_mat, ll_mat
 
 
-def model_log_affinity(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None,
-                       affinity: str = 'bhattacharyya',
-                       evidence_cap: Optional[float] = None) -> np.ndarray:
+def model_log_affinity(
+    posterior_mat: np.ndarray,
+    ll_mat: np.ndarray | None = None,
+    affinity: str = "bhattacharyya",
+    evidence_cap: float | None = None,
+) -> np.ndarray:
     """Dense n x n matrix of log affinities (see module docstring) with -inf diagonal.
 
     Rows are comparable up to a per-row shift, which both the row-conditional
@@ -653,7 +692,7 @@ def model_log_affinity(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] =
     cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
 
     log_s = np.zeros((n, n))
-    with np.errstate(divide='ignore'):
+    with np.errstate(divide="ignore"):
         idx = np.arange(n, dtype=np.int64)
         for factor in factors:
             weight = _factor_weight(factor)
@@ -670,7 +709,7 @@ def model_log_affinity(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] =
     return log_s
 
 
-def _hbeta(neg_d: np.ndarray, beta: float) -> Tuple[float, np.ndarray]:
+def _hbeta(neg_d: np.ndarray, beta: float) -> tuple[float, np.ndarray]:
     """Entropy (nats) and probabilities of p_j ~ exp(neg_d_j * beta) for one row."""
     p = neg_d * beta
     p -= p.max()
@@ -680,8 +719,9 @@ def _hbeta(neg_d: np.ndarray, beta: float) -> Tuple[float, np.ndarray]:
     return h, p
 
 
-def _calibrate_row(neg_d: np.ndarray, target_entropy: float, tol: float = 1.0e-5,
-                   max_iter: int = 64, beta_cap: float = 1.0e12) -> np.ndarray:
+def _calibrate_row(
+    neg_d: np.ndarray, target_entropy: float, tol: float = 1.0e-5, max_iter: int = 64, beta_cap: float = 1.0e12
+) -> np.ndarray:
     """Binary-search a precision beta so the row entropy hits target_entropy.
 
     Model-based affinities can contain large groups of (near-)ties, in which
@@ -709,7 +749,7 @@ def _calibrate_row(neg_d: np.ndarray, target_entropy: float, tol: float = 1.0e-5
     return p
 
 
-def conditional_pmat(log_aff: np.ndarray, perplexity: Optional[float] = None) -> np.ndarray:
+def conditional_pmat(log_aff: np.ndarray, perplexity: float | None = None) -> np.ndarray:
     """Row-conditional probabilities p_{j|i} from log affinities (diagonal -inf).
 
     With perplexity set, each row is calibrated so its entropy equals
@@ -755,8 +795,14 @@ def conditional_pmat(log_aff: np.ndarray, perplexity: Optional[float] = None) ->
     return p
 
 
-def get_pmat(posterior_mat, ll_mat=None, targ_perplexity=None, vlen=False, affinity: str = 'bhattacharyya',
-             evidence_cap: Optional[float] = None):
+def get_pmat(
+    posterior_mat,
+    ll_mat=None,
+    targ_perplexity=None,
+    vlen=False,
+    affinity: str = "bhattacharyya",
+    evidence_cap: float | None = None,
+):
     """Symmetrized t-SNE input probabilities from model posteriors (and optionally
     component log-likelihoods, for affinity='likelihood').
 
@@ -768,9 +814,14 @@ def get_pmat(posterior_mat, ll_mat=None, targ_perplexity=None, vlen=False, affin
     return p
 
 
-def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k: int = 90,
-                           block_size: int = 1024, affinity: str = 'bhattacharyya',
-                           evidence_cap: Optional[float] = None) -> scipy.sparse.csr_matrix:
+def sparse_model_distances(
+    posterior_mat: np.ndarray,
+    ll_mat: np.ndarray | None = None,
+    k: int = 90,
+    block_size: int = 1024,
+    affinity: str = "bhattacharyya",
+    evidence_cap: float | None = None,
+) -> scipy.sparse.csr_matrix:
     """Sparse n x n matrix of model distances d_ij = -log s_ij.
 
     Keeps the k nearest neighbors (largest affinity) per row. Built blockwise so
@@ -793,7 +844,7 @@ def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarra
         s1 = min(s0 + block_size, n)
         row_idx = np.arange(s0, s1, dtype=np.int64)
         log_s = np.zeros((s1 - s0, n))
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             for factor in factors:
                 weight = _factor_weight(factor)
                 if weight == 0.0:
@@ -812,14 +863,14 @@ def sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarra
             c = nbr[bi]
             d = -log_s[bi, c]
             np.maximum(d, 0.0, out=d)
-            cols[i * k:(i + 1) * k] = c
-            vals[i * k:(i + 1) * k] = d
+            cols[i * k : (i + 1) * k] = c
+            vals[i * k : (i + 1) * k] = d
 
     return scipy.sparse.csr_matrix((vals, (rows, cols)), shape=(n, n))
 
 
 class _RPTreeNode:
-    __slots__ = ('idx', 'direction', 'threshold', 'left', 'right')
+    __slots__ = ("idx", "direction", "threshold", "left", "right")
 
     def __init__(self, idx=None, direction=None, threshold=None, left=None, right=None):
         self.idx = idx
@@ -829,7 +880,7 @@ class _RPTreeNode:
         self.right = right
 
 
-def _candidate_features(factors) -> Tuple[np.ndarray, np.ndarray]:
+def _candidate_features(factors) -> tuple[np.ndarray, np.ndarray]:
     """Feature coordinates used only for approximate neighbor proposals."""
     row_blocks = []
     col_blocks = []
@@ -841,8 +892,8 @@ def _candidate_features(factors) -> Tuple[np.ndarray, np.ndarray]:
             continue
 
         if _is_local_factor(factor):
-            sq = np.asarray(factor['sqrt_z'], dtype=np.float64)
-            x = np.asarray(factor['x'], dtype=np.float64)
+            sq = np.asarray(factor["sqrt_z"], dtype=np.float64)
+            x = np.asarray(factor["x"], dtype=np.float64)
             mu = np.nanmean(np.where(np.isfinite(x), x, np.nan), axis=0)
             mu = np.where(np.isfinite(mu), mu, 0.0)
             x = np.where(np.isfinite(x), x, mu)
@@ -851,7 +902,7 @@ def _candidate_features(factors) -> Tuple[np.ndarray, np.ndarray]:
             rg = np.hstack((sq, 0.25 * x))
             ch = rg
         elif _is_fisher_factor(factor):
-            x = np.asarray(factor['x'], dtype=np.float64)
+            x = np.asarray(factor["x"], dtype=np.float64)
             rg = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
             ch = rg
             scale = np.sqrt(weight)
@@ -879,8 +930,9 @@ def _candidate_features(factors) -> Tuple[np.ndarray, np.ndarray]:
     return np.hstack(row_blocks), np.hstack(col_blocks)
 
 
-def _build_rp_tree(X: np.ndarray, idx: np.ndarray, leaf_size: int,
-                   rng: np.random.RandomState, max_depth: int) -> _RPTreeNode:
+def _build_rp_tree(
+    X: np.ndarray, idx: np.ndarray, leaf_size: int, rng: np.random.RandomState, max_depth: int
+) -> _RPTreeNode:
     if len(idx) <= leaf_size or max_depth <= 0:
         return _RPTreeNode(idx=idx)
 
@@ -910,8 +962,7 @@ def _query_rp_tree(node: _RPTreeNode, x: np.ndarray) -> np.ndarray:
     return node.idx
 
 
-def _augment_candidates(candidates: np.ndarray, i: int, n: int, target: int,
-                        rng: np.random.RandomState) -> np.ndarray:
+def _augment_candidates(candidates: np.ndarray, i: int, n: int, target: int, rng: np.random.RandomState) -> np.ndarray:
     target = min(max(target, 0), n - 1)
     candidates = np.unique(candidates)
     candidates = candidates[candidates != i]
@@ -948,10 +999,9 @@ def _augment_candidates(candidates: np.ndarray, i: int, n: int, target: int,
     return np.asarray(sorted(seen), dtype=np.int64)
 
 
-def _candidate_log_affinity(factors, i: int, candidates: np.ndarray,
-                            cap: Optional[float]) -> np.ndarray:
+def _candidate_log_affinity(factors, i: int, candidates: np.ndarray, cap: float | None) -> np.ndarray:
     log_s = np.zeros(len(candidates), dtype=np.float64)
-    with np.errstate(divide='ignore'):
+    with np.errstate(divide="ignore"):
         for factor in factors:
             weight = _factor_weight(factor)
             if weight == 0.0:
@@ -963,11 +1013,17 @@ def _candidate_log_affinity(factors, i: int, candidates: np.ndarray,
     return log_s
 
 
-def approx_sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None,
-                                  k: int = 90, affinity: str = 'bhattacharyya',
-                                  evidence_cap: Optional[float] = None, n_trees: int = 8,
-                                  leaf_size: Optional[int] = None, candidate_multiplier: int = 8,
-                                  seed: Optional[int] = None) -> scipy.sparse.csr_matrix:
+def approx_sparse_model_distances(
+    posterior_mat: np.ndarray,
+    ll_mat: np.ndarray | None = None,
+    k: int = 90,
+    affinity: str = "bhattacharyya",
+    evidence_cap: float | None = None,
+    n_trees: int = 8,
+    leaf_size: int | None = None,
+    candidate_multiplier: int = 8,
+    seed: int | None = None,
+) -> scipy.sparse.csr_matrix:
     """Approximate sparse model distances without all-pairs graph construction.
 
     A random-projection forest proposes candidate neighbors in normalized
@@ -1013,15 +1069,20 @@ def approx_sparse_model_distances(posterior_mat: np.ndarray, ll_mat: Optional[np
         np.maximum(d, 0.0, out=d)
 
         s = i * k
-        cols[s:s + k] = c
-        vals[s:s + k] = d
+        cols[s : s + k] = c
+        vals[s : s + k] = d
 
     return scipy.sparse.csr_matrix((vals, (rows, cols)), shape=(n, n))
 
 
-def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k: int = 15,
-              block_size: int = 1024, affinity: str = 'bhattacharyya',
-              evidence_cap: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
+def model_knn(
+    posterior_mat: np.ndarray,
+    ll_mat: np.ndarray | None = None,
+    k: int = 15,
+    block_size: int = 1024,
+    affinity: str = "bhattacharyya",
+    evidence_cap: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """k-nearest-neighbor arrays under the model distance d_ij = -log s_ij.
 
     Returns (indices, distances), each n x k, sorted ascending per row with
@@ -1048,7 +1109,7 @@ def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k:
         s1 = min(s0 + block_size, n)
         row_idx = np.arange(s0, s1, dtype=np.int64)
         log_s = np.zeros((s1 - s0, n))
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             for factor in factors:
                 weight = _factor_weight(factor)
                 if weight == 0.0:
@@ -1073,7 +1134,7 @@ def model_knn(posterior_mat: np.ndarray, ll_mat: Optional[np.ndarray] = None, k:
     return knn_idx, knn_dist
 
 
-def t_kernel(tx: np.ndarray, alpha: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def t_kernel(tx: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Heavy-tailed student-t kernel on embedding tx.
 
     Returns (Q, num, d2): normalized probabilities Q, the gradient weights
@@ -1095,8 +1156,9 @@ def t_kernel(tx: np.ndarray, alpha: float) -> Tuple[np.ndarray, np.ndarray, np.n
     return q, num, d2
 
 
-def _exact_tsne_gradient(P: np.ndarray, Y: np.ndarray, alpha: float,
-                         min_value: float = 1.0e-128) -> Tuple[np.ndarray, np.ndarray]:
+def _exact_tsne_gradient(
+    P: np.ndarray, Y: np.ndarray, alpha: float, min_value: float = 1.0e-128
+) -> tuple[np.ndarray, np.ndarray]:
     """Gradient of KL(P || Q(Y)) for the dense heavy-tailed t-SNE kernel."""
     Q, num, _ = t_kernel(Y, alpha)
     np.maximum(Q, min_value, out=Q)
@@ -1106,9 +1168,17 @@ def _exact_tsne_gradient(P: np.ndarray, Y: np.ndarray, alpha: float,
     return dC, Q
 
 
-def update_embed(P: np.ndarray, Y: np.ndarray, iY: np.ndarray, gains: np.ndarray,
-                 momentum: float, eta: float, alpha: float, min_gain: float,
-                 min_value: float = 1.0e-128) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def update_embed(
+    P: np.ndarray,
+    Y: np.ndarray,
+    iY: np.ndarray,
+    gains: np.ndarray,
+    momentum: float,
+    eta: float,
+    alpha: float,
+    min_gain: float,
+    min_value: float = 1.0e-128,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """One delta-bar-delta gradient step of KL(P || Q) on the embedding Y.
 
     Gradient of the heavy-tailed kernel:
@@ -1133,9 +1203,17 @@ def _kl(P: np.ndarray, Q: np.ndarray) -> float:
     return float(np.dot(P[m], np.log(P[m]) - np.log(Q[m])))
 
 
-def update_alpha(P: np.ndarray, Y: np.ndarray, alpha: float, min_alpha: float,
-                 min_value: float, max_its: int = 30, step: float = 0.1,
-                 eps: float = 1.0e-6, max_alpha: float = 1.0e6) -> float:
+def update_alpha(
+    P: np.ndarray,
+    Y: np.ndarray,
+    alpha: float,
+    min_alpha: float,
+    min_value: float,
+    max_its: int = 30,
+    step: float = 0.1,
+    eps: float = 1.0e-6,
+    max_alpha: float = 1.0e6,
+) -> float:
     """Optimize the kernel tail parameter alpha by guarded Newton steps.
 
     d(-log q~_ij)/d(alpha) = 0.5 log(1 + d2/alpha) - (alpha+1) d2 / (2 alpha^2 (1 + d2/alpha)),
@@ -1173,12 +1251,27 @@ def update_alpha(P: np.ndarray, Y: np.ndarray, alpha: float, min_alpha: float,
     return alpha
 
 
-def tsne_exact(P: np.ndarray, emb_dim: int = 2, alpha: float = 1.0, Y: Optional[np.ndarray] = None,
-               max_its: int = 1000, eta: Optional[float] = None, momentum: float = 0.8,
-               early_exaggeration: float = 12.0, early_its: int = 250, min_gain: float = 0.01,
-               min_value: float = 1.0e-128, optimize_alpha: bool = False, min_alpha: float = 1.0e-6,
-               max_alpha_its: int = 3, tol: float = 1.0e-7, check_every: int = 50,
-               print_iter: int = 100, seed: Optional[int] = None, out=None) -> np.ndarray:
+def tsne_exact(
+    P: np.ndarray,
+    emb_dim: int = 2,
+    alpha: float = 1.0,
+    Y: np.ndarray | None = None,
+    max_its: int = 1000,
+    eta: float | None = None,
+    momentum: float = 0.8,
+    early_exaggeration: float = 12.0,
+    early_its: int = 250,
+    min_gain: float = 0.01,
+    min_value: float = 1.0e-128,
+    optimize_alpha: bool = False,
+    min_alpha: float = 1.0e-6,
+    max_alpha_its: int = 3,
+    tol: float = 1.0e-7,
+    check_every: int = 50,
+    print_iter: int = 100,
+    seed: int | None = None,
+    out=None,
+) -> np.ndarray:
     """Full-matrix t-SNE on symmetrized probabilities P with convergence stopping."""
     if out is None:
         out = sys.stdout
@@ -1216,7 +1309,7 @@ def tsne_exact(P: np.ndarray, emb_dim: int = 2, alpha: float = 1.0, Y: Optional[
             alpha = update_alpha(P, Y, alpha, min_alpha, min_value, max_alpha_its)
 
         if (i % print_iter) == 0:
-            out.write('Iteration %d: alpha = %f, KL(P||Q)=%f\n' % (i, alpha, _kl(P, Q)))
+            out.write("Iteration %d: alpha = %f, KL(P||Q)=%f\n" % (i, alpha, _kl(P, Q)))
 
         if i > early_its and (i % check_every) == 0:
             kl = _kl(P, Q)
@@ -1227,8 +1320,7 @@ def tsne_exact(P: np.ndarray, emb_dim: int = 2, alpha: float = 1.0, Y: Optional[
     return Y
 
 
-def _sparse_conditional_pmat(dist_csr: scipy.sparse.csr_matrix,
-                             perplexity: float) -> scipy.sparse.csr_matrix:
+def _sparse_conditional_pmat(dist_csr: scipy.sparse.csr_matrix, perplexity: float) -> scipy.sparse.csr_matrix:
     """Row-conditional probabilities on a sparse model-neighbor graph.
 
     dist_csr stores D_ij = -log s_ij, so calibration is performed on -D_ij,
@@ -1269,8 +1361,7 @@ def _csr_without_diagonal(mat: scipy.sparse.spmatrix) -> scipy.sparse.csr_matrix
     return rv
 
 
-def _sparse_joint_pmat(dist_csr: scipy.sparse.csr_matrix,
-                       perplexity: float) -> scipy.sparse.csr_matrix:
+def _sparse_joint_pmat(dist_csr: scipy.sparse.csr_matrix, perplexity: float) -> scipy.sparse.csr_matrix:
     """Symmetrized sparse t-SNE input probabilities from model distances."""
     p_cond = _sparse_conditional_pmat(dist_csr, perplexity)
     p = _csr_without_diagonal(p_cond + p_cond.T)
@@ -1282,7 +1373,7 @@ def _sparse_joint_pmat(dist_csr: scipy.sparse.csr_matrix,
 
 
 class _BHNode:
-    __slots__ = ('idx', 'bmin', 'bmax', 'center', 'width', 'mass', 'children')
+    __slots__ = ("idx", "bmin", "bmax", "center", "width", "mass", "children")
 
     def __init__(self, idx, bmin, bmax, center, width, children):
         self.idx = idx
@@ -1307,7 +1398,7 @@ def _build_bh_tree(Y: np.ndarray, idx: np.ndarray, leaf_size: int) -> _BHNode:
     mid = 0.5 * (bmin + bmax)
     codes = np.zeros(len(idx), dtype=np.int64)
     for d in range(Y.shape[1]):
-        codes |= ((pts[:, d] > mid[d]).astype(np.int64) << d)
+        codes |= (pts[:, d] > mid[d]).astype(np.int64) << d
 
     children = []
     for code in np.unique(codes):
@@ -1381,10 +1472,9 @@ def _flatten_bh_tree(root: _BHNode, emb_dim: int):
 
 
 @numba.njit(cache=True, parallel=True)
-def _numba_barnes_hut_negative_forces(Y, bmin, bmax, center, width, mass,
-                                      child_start, child_count, child_index,
-                                      leaf_start, leaf_count, leaf_index,
-                                      theta):
+def _numba_barnes_hut_negative_forces(
+    Y, bmin, bmax, center, width, mass, child_start, child_count, child_index, leaf_start, leaf_count, leaf_index, theta
+):
     n, emb_dim = Y.shape
     forces = np.zeros((n, emb_dim), dtype=np.float64)
     z_terms = np.zeros(n, dtype=np.float64)
@@ -1453,8 +1543,9 @@ def _numba_barnes_hut_negative_forces(Y, bmin, bmax, center, width, mass,
     return forces, max(float(np.sum(z_terms)), 1.0e-300)
 
 
-def _python_barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5,
-                                       leaf_size: int = 16) -> Tuple[np.ndarray, float]:
+def _python_barnes_hut_negative_forces(
+    Y: np.ndarray, theta: float = 0.5, leaf_size: int = 16
+) -> tuple[np.ndarray, float]:
     """Pure-Python Barnes-Hut traversal used as the no-numba fallback."""
     Y = np.ascontiguousarray(Y, dtype=np.float64)
     n, emb_dim = Y.shape
@@ -1509,8 +1600,7 @@ def _python_barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5,
     return forces, max(float(z_sum), 1.0e-300)
 
 
-def _barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5,
-                                leaf_size: int = 16) -> Tuple[np.ndarray, float]:
+def _barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5, leaf_size: int = 16) -> tuple[np.ndarray, float]:
     """Approximate t-SNE repulsive forces and normalization with Barnes-Hut.
 
     Returns (F, Z) where
@@ -1535,7 +1625,7 @@ def _barnes_hut_negative_forces(Y: np.ndarray, theta: float = 0.5,
     return _numba_barnes_hut_negative_forces(Y, *_flatten_bh_tree(root, emb_dim), theta)
 
 
-def _exact_negative_forces(Y: np.ndarray) -> Tuple[np.ndarray, float]:
+def _exact_negative_forces(Y: np.ndarray) -> tuple[np.ndarray, float]:
     """Exact t-SNE repulsive forces, vectorized over all pairs."""
     rsum = np.sum(Y * Y, axis=1, keepdims=True)
     d2 = -2.0 * np.dot(Y, Y.T)
@@ -1551,20 +1641,22 @@ def _exact_negative_forces(Y: np.ndarray) -> Tuple[np.ndarray, float]:
     return forces, max(z_sum, 1.0e-300)
 
 
-def _negative_forces(Y: np.ndarray, theta: float, leaf_size: int,
-                     repulsion_method: str, exact_threshold: int) -> Tuple[np.ndarray, float]:
+def _negative_forces(
+    Y: np.ndarray, theta: float, leaf_size: int, repulsion_method: str, exact_threshold: int
+) -> tuple[np.ndarray, float]:
     method = repulsion_method
-    if method == 'auto':
-        method = 'exact' if Y.shape[0] <= exact_threshold else 'barnes_hut'
-    if method == 'exact':
+    if method == "auto":
+        method = "exact" if Y.shape[0] <= exact_threshold else "barnes_hut"
+    if method == "exact":
         return _exact_negative_forces(Y)
-    if method == 'barnes_hut':
+    if method == "barnes_hut":
         return _barnes_hut_negative_forces(Y, theta=theta, leaf_size=leaf_size)
     raise ValueError("repulsion_method must be 'auto', 'exact', or 'barnes_hut'.")
 
 
-def _sparse_positive_forces_from_edges(rows: np.ndarray, cols: np.ndarray, data: np.ndarray,
-                                       Y: np.ndarray, scale: float = 1.0) -> np.ndarray:
+def _sparse_positive_forces_from_edges(
+    rows: np.ndarray, cols: np.ndarray, data: np.ndarray, Y: np.ndarray, scale: float = 1.0
+) -> np.ndarray:
     """Exact attractive t-SNE forces over sparse probability edges."""
     if len(data) == 0:
         return np.zeros_like(Y)
@@ -1578,8 +1670,9 @@ def _sparse_positive_forces_from_edges(rows: np.ndarray, cols: np.ndarray, data:
     return forces
 
 
-def _sparse_positive_forces_symmetric_from_edges(rows: np.ndarray, cols: np.ndarray, data: np.ndarray,
-                                                 Y: np.ndarray, scale: float = 1.0) -> np.ndarray:
+def _sparse_positive_forces_symmetric_from_edges(
+    rows: np.ndarray, cols: np.ndarray, data: np.ndarray, Y: np.ndarray, scale: float = 1.0
+) -> np.ndarray:
     """Exact attractive forces for upper-triangular edges from a symmetric P."""
     if len(data) == 0:
         return np.zeros_like(Y)
@@ -1594,15 +1687,13 @@ def _sparse_positive_forces_symmetric_from_edges(rows: np.ndarray, cols: np.ndar
     return forces
 
 
-def _sparse_positive_forces(P: scipy.sparse.csr_matrix,
-                            Y: np.ndarray) -> np.ndarray:
+def _sparse_positive_forces(P: scipy.sparse.csr_matrix, Y: np.ndarray) -> np.ndarray:
     """Exact attractive t-SNE forces over nonzero sparse probabilities."""
     p = P.tocoo()
     return _sparse_positive_forces_from_edges(p.row, p.col, p.data, Y)
 
 
-def _sparse_tsne_kl(P: scipy.sparse.csr_matrix, Y: np.ndarray,
-                    z_sum: Optional[float] = None) -> float:
+def _sparse_tsne_kl(P: scipy.sparse.csr_matrix, Y: np.ndarray, z_sum: float | None = None) -> float:
     p = P.tocoo()
     if p.nnz == 0:
         return 0.0
@@ -1611,8 +1702,9 @@ def _sparse_tsne_kl(P: scipy.sparse.csr_matrix, Y: np.ndarray,
     return _sparse_tsne_kl_from_edges(p.row, p.col, p.data, Y, z_sum)
 
 
-def _sparse_tsne_kl_from_edges(rows: np.ndarray, cols: np.ndarray, data: np.ndarray,
-                               Y: np.ndarray, z_sum: float) -> float:
+def _sparse_tsne_kl_from_edges(
+    rows: np.ndarray, cols: np.ndarray, data: np.ndarray, Y: np.ndarray, z_sum: float
+) -> float:
     if len(data) == 0:
         return 0.0
     diff = Y[rows] - Y[cols]
@@ -1622,15 +1714,26 @@ def _sparse_tsne_kl_from_edges(rows: np.ndarray, cols: np.ndarray, data: np.ndar
     return float(np.dot(pdata, np.log(pdata) - np.log(q)))
 
 
-def _tsne_barnes_hut_from_p(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
-                            max_its: int = 1000, eta: Optional[float] = None,
-                            momentum: float = 0.8, early_exaggeration: float = 12.0,
-                            early_its: int = 250, min_gain: float = 0.01,
-                            tol: float = 1.0e-7, check_every: int = 50,
-                            print_iter: int = 100, theta: float = 0.5,
-                            leaf_size: int = 16, repulsion_method: str = 'auto',
-                            exact_repulsion_threshold: int = 5000, seed: Optional[int] = None,
-                            Y: Optional[np.ndarray] = None, out=None) -> np.ndarray:
+def _tsne_barnes_hut_from_p(
+    P: scipy.sparse.csr_matrix,
+    emb_dim: int = 2,
+    max_its: int = 1000,
+    eta: float | None = None,
+    momentum: float = 0.8,
+    early_exaggeration: float = 12.0,
+    early_its: int = 250,
+    min_gain: float = 0.01,
+    tol: float = 1.0e-7,
+    check_every: int = 50,
+    print_iter: int = 100,
+    theta: float = 0.5,
+    leaf_size: int = 16,
+    repulsion_method: str = "auto",
+    exact_repulsion_threshold: int = 5000,
+    seed: int | None = None,
+    Y: np.ndarray | None = None,
+    out=None,
+) -> np.ndarray:
     """Barnes-Hut t-SNE on a sparse symmetric probability matrix."""
     if out is None:
         out = sys.stdout
@@ -1668,9 +1771,13 @@ def _tsne_barnes_hut_from_p(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
         exaggeration = early_exaggeration if it <= early_its else 1.0
 
         pos = _sparse_positive_forces_symmetric_from_edges(pos_rows, pos_cols, pos_data, Y, exaggeration)
-        neg, z_sum = _negative_forces(Y, theta=theta, leaf_size=leaf_size,
-                                      repulsion_method=repulsion_method,
-                                      exact_threshold=exact_repulsion_threshold)
+        neg, z_sum = _negative_forces(
+            Y,
+            theta=theta,
+            leaf_size=leaf_size,
+            repulsion_method=repulsion_method,
+            exact_threshold=exact_repulsion_threshold,
+        )
         dC = 4.0 * (pos - neg / z_sum)
 
         inc = (dC > 0) != (iY > 0)
@@ -1683,16 +1790,24 @@ def _tsne_barnes_hut_from_p(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
         Y -= np.mean(Y, axis=0, keepdims=True)
 
         if (it % print_iter) == 0:
-            _, kl_z_sum = _negative_forces(Y, theta=theta, leaf_size=leaf_size,
-                                           repulsion_method=repulsion_method,
-                                           exact_threshold=exact_repulsion_threshold)
+            _, kl_z_sum = _negative_forces(
+                Y,
+                theta=theta,
+                leaf_size=leaf_size,
+                repulsion_method=repulsion_method,
+                exact_threshold=exact_repulsion_threshold,
+            )
             kl = _sparse_tsne_kl_from_edges(p_rows, p_cols, p_data, Y, kl_z_sum)
-            out.write('Iteration %d: KL(P||Q)=%f\n' % (it, kl))
+            out.write("Iteration %d: KL(P||Q)=%f\n" % (it, kl))
 
         if it > early_its and (it % check_every) == 0:
-            _, kl_z_sum = _negative_forces(Y, theta=theta, leaf_size=leaf_size,
-                                           repulsion_method=repulsion_method,
-                                           exact_threshold=exact_repulsion_threshold)
+            _, kl_z_sum = _negative_forces(
+                Y,
+                theta=theta,
+                leaf_size=leaf_size,
+                repulsion_method=repulsion_method,
+                exact_threshold=exact_repulsion_threshold,
+            )
             kl = _sparse_tsne_kl_from_edges(p_rows, p_cols, p_data, Y, kl_z_sum)
             if last_kl - kl < tol * max(1.0, abs(last_kl)):
                 break
@@ -1701,60 +1816,131 @@ def _tsne_barnes_hut_from_p(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
     return Y
 
 
-def _tsne_barnes_hut(dist_csr: scipy.sparse.csr_matrix, emb_dim: int, perplexity: float,
-                     max_its: int, eta, momentum: float, early_exaggeration: float,
-                     min_gain: float, tol: float, print_iter: int, seed: Optional[int],
-                     Y: Optional[np.ndarray], out=None, theta: float = 0.5,
-                     leaf_size: int = 16, repulsion_method: str = 'auto',
-                     exact_repulsion_threshold: int = 5000) -> np.ndarray:
+def _tsne_barnes_hut(
+    dist_csr: scipy.sparse.csr_matrix,
+    emb_dim: int,
+    perplexity: float,
+    max_its: int,
+    eta,
+    momentum: float,
+    early_exaggeration: float,
+    min_gain: float,
+    tol: float,
+    print_iter: int,
+    seed: int | None,
+    Y: np.ndarray | None,
+    out=None,
+    theta: float = 0.5,
+    leaf_size: int = 16,
+    repulsion_method: str = "auto",
+    exact_repulsion_threshold: int = 5000,
+) -> np.ndarray:
     P = _sparse_joint_pmat(dist_csr, perplexity)
-    return _tsne_barnes_hut_from_p(P, emb_dim=emb_dim, max_its=max_its, eta=eta,
-                                  momentum=momentum, early_exaggeration=early_exaggeration,
-                                  min_gain=min_gain, tol=tol, print_iter=print_iter,
-                                  theta=theta, leaf_size=leaf_size,
-                                  repulsion_method=repulsion_method,
-                                  exact_repulsion_threshold=exact_repulsion_threshold,
-                                  seed=seed, Y=Y, out=out)
+    return _tsne_barnes_hut_from_p(
+        P,
+        emb_dim=emb_dim,
+        max_its=max_its,
+        eta=eta,
+        momentum=momentum,
+        early_exaggeration=early_exaggeration,
+        min_gain=min_gain,
+        tol=tol,
+        print_iter=print_iter,
+        theta=theta,
+        leaf_size=leaf_size,
+        repulsion_method=repulsion_method,
+        exact_repulsion_threshold=exact_repulsion_threshold,
+        seed=seed,
+        Y=Y,
+        out=out,
+    )
 
 
-def tsne_barnes_hut(P: scipy.sparse.csr_matrix, emb_dim: int = 2,
-                    max_its: int = 1000, eta: Optional[float] = None,
-                    momentum: float = 0.8, early_exaggeration: float = 12.0,
-                    min_gain: float = 0.01, tol: float = 1.0e-7,
-                    print_iter: int = 100, theta: float = 0.5,
-                    leaf_size: int = 16, repulsion_method: str = 'auto',
-                    exact_repulsion_threshold: int = 5000, seed: Optional[int] = None,
-                    Y: Optional[np.ndarray] = None, out=None) -> np.ndarray:
+def tsne_barnes_hut(
+    P: scipy.sparse.csr_matrix,
+    emb_dim: int = 2,
+    max_its: int = 1000,
+    eta: float | None = None,
+    momentum: float = 0.8,
+    early_exaggeration: float = 12.0,
+    min_gain: float = 0.01,
+    tol: float = 1.0e-7,
+    print_iter: int = 100,
+    theta: float = 0.5,
+    leaf_size: int = 16,
+    repulsion_method: str = "auto",
+    exact_repulsion_threshold: int = 5000,
+    seed: int | None = None,
+    Y: np.ndarray | None = None,
+    out=None,
+) -> np.ndarray:
     """Embed a precomputed sparse t-SNE probability matrix with Barnes-Hut.
 
     P must be a symmetric, non-negative affinity/probability matrix. It is
     normalized internally. This function is self-contained and does not call
     sklearn.
     """
-    return _tsne_barnes_hut_from_p(P, emb_dim=emb_dim, max_its=max_its, eta=eta,
-                                  momentum=momentum, early_exaggeration=early_exaggeration,
-                                  min_gain=min_gain, tol=tol, print_iter=print_iter,
-                                  theta=theta, leaf_size=leaf_size,
-                                  repulsion_method=repulsion_method,
-                                  exact_repulsion_threshold=exact_repulsion_threshold,
-                                  seed=seed, Y=Y, out=out)
+    return _tsne_barnes_hut_from_p(
+        P,
+        emb_dim=emb_dim,
+        max_its=max_its,
+        eta=eta,
+        momentum=momentum,
+        early_exaggeration=early_exaggeration,
+        min_gain=min_gain,
+        tol=tol,
+        print_iter=print_iter,
+        theta=theta,
+        leaf_size=leaf_size,
+        repulsion_method=repulsion_method,
+        exact_repulsion_threshold=exact_repulsion_threshold,
+        seed=seed,
+        Y=Y,
+        out=out,
+    )
 
 
-def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
-          Y: Optional[np.ndarray] = None, perplexity: Optional[float] = 30.0,
-          max_its: int = 1000, print_iter: int = 100, eta: Optional[float] = None,
-          momentum: float = 0.8, min_gain: float = 0.01, min_value: float = 1.0e-128,
-          optimize_alpha: bool = False, min_alpha: float = 1.0e-6, max_alpha_its: int = 3,
-          seed: Optional[int] = None, mix_model=None, enc_data=None, method: str = 'auto',
-          early_exaggeration: float = 12.0, tol: float = 1.0e-7, dpm_max_its: int = 200,
-          affinity='auto', field_weights=None, evidence_cap: Optional[float] = 1.0,
-          fisher_metric: str = 'diagonal', fisher_ridge: float = 1.0e-8,
-          fisher_information: str = 'observed',
-          out=None, variable_length: bool = False, barnes_hut_theta: float = 0.5,
-          barnes_hut_leaf_size: int = 16, neighbor_method: str = 'auto',
-          neighbor_threshold: int = 5000, neighbor_trees: int = 8,
-          neighbor_leaf_size: Optional[int] = None, candidate_multiplier: int = 8,
-          repulsion_method: str = 'auto', exact_repulsion_threshold: int = 5000):
+def htsne(
+    data,
+    emb_dim: int = 2,
+    alpha: float = 1.0,
+    max_components: int = 50,
+    Y: np.ndarray | None = None,
+    perplexity: float | None = 30.0,
+    max_its: int = 1000,
+    print_iter: int = 100,
+    eta: float | None = None,
+    momentum: float = 0.8,
+    min_gain: float = 0.01,
+    min_value: float = 1.0e-128,
+    optimize_alpha: bool = False,
+    min_alpha: float = 1.0e-6,
+    max_alpha_its: int = 3,
+    seed: int | None = None,
+    mix_model=None,
+    enc_data=None,
+    method: str = "auto",
+    early_exaggeration: float = 12.0,
+    tol: float = 1.0e-7,
+    dpm_max_its: int = 200,
+    affinity="auto",
+    field_weights=None,
+    evidence_cap: float | None = 1.0,
+    fisher_metric: str = "diagonal",
+    fisher_ridge: float = 1.0e-8,
+    fisher_information: str = "observed",
+    out=None,
+    variable_length: bool = False,
+    barnes_hut_theta: float = 0.5,
+    barnes_hut_leaf_size: int = 16,
+    neighbor_method: str = "auto",
+    neighbor_threshold: int = 5000,
+    neighbor_trees: int = 8,
+    neighbor_leaf_size: int | None = None,
+    candidate_multiplier: int = 8,
+    repulsion_method: str = "auto",
+    exact_repulsion_threshold: int = 5000,
+):
     """Embed heterogeneous data with model-based t-SNE.
 
     A mixture model is fit to the data (a Dirichlet process mixture with
@@ -1827,68 +2013,126 @@ def htsne(data, emb_dim: int = 2, alpha: float = 1.0, max_components: int = 50,
 
     if mix_model is None and not _is_prebuilt_affinity(affinity):
         from pysp.utils.automatic import get_dpm_mixture
-        mix_model = get_dpm_mixture(data, rng=np.random.RandomState(seed),
-                                    max_components=max_components, max_its=dpm_max_its,
-                                    print_iter=print_iter, out=out)
+
+        mix_model = get_dpm_mixture(
+            data,
+            rng=np.random.RandomState(seed),
+            max_components=max_components,
+            max_its=dpm_max_its,
+            print_iter=print_iter,
+            out=out,
+        )
 
     if mix_model is not None:
-        affinity = _resolve_affinity(affinity, mix_model, data, field_weights,
-                                     enc_data=enc_data, fisher_metric=fisher_metric,
-                                     fisher_ridge=fisher_ridge,
-                                     fisher_information=fisher_information)
+        affinity = _resolve_affinity(
+            affinity,
+            mix_model,
+            data,
+            field_weights,
+            enc_data=enc_data,
+            fisher_metric=fisher_metric,
+            fisher_ridge=fisher_ridge,
+            fisher_information=fisher_information,
+        )
 
     if _is_prebuilt_affinity(affinity):
         z_ij, l_ij = None, None
         n = _factor_n(_affinity_factors(None, None, affinity)[0])
         if data is not None and len(data) != n:
-            raise ValueError('pre-built affinity row count does not match data length.')
+            raise ValueError("pre-built affinity row count does not match data length.")
     else:
         z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
         n = z_ij.shape[0]
 
-    if method == 'auto':
-        method = 'exact' if (optimize_alpha or n <= 10) else 'barnes_hut'
+    if method == "auto":
+        method = "exact" if (optimize_alpha or n <= 10) else "barnes_hut"
 
-    if method == 'barnes_hut':
+    if method == "barnes_hut":
         px = 30.0 if perplexity is None else float(perplexity)
         px = min(px, max(1.0, n - 1.0))
         k = min(n - 1, int(3.0 * px) + 5)
         graph_method = neighbor_method
-        if graph_method == 'auto':
-            graph_method = 'approx' if n >= neighbor_threshold else 'exact'
-        if graph_method == 'exact':
-            dist_csr = sparse_model_distances(z_ij, l_ij, k=k, affinity=affinity,
-                                              evidence_cap=evidence_cap)
-        elif graph_method == 'approx':
+        if graph_method == "auto":
+            graph_method = "approx" if n >= neighbor_threshold else "exact"
+        if graph_method == "exact":
+            dist_csr = sparse_model_distances(z_ij, l_ij, k=k, affinity=affinity, evidence_cap=evidence_cap)
+        elif graph_method == "approx":
             dist_csr = approx_sparse_model_distances(
-                z_ij, l_ij, k=k, affinity=affinity, evidence_cap=evidence_cap,
-                n_trees=neighbor_trees, leaf_size=neighbor_leaf_size,
-                candidate_multiplier=candidate_multiplier, seed=seed)
+                z_ij,
+                l_ij,
+                k=k,
+                affinity=affinity,
+                evidence_cap=evidence_cap,
+                n_trees=neighbor_trees,
+                leaf_size=neighbor_leaf_size,
+                candidate_multiplier=candidate_multiplier,
+                seed=seed,
+            )
         else:
             raise ValueError("neighbor_method must be 'auto', 'exact', or 'approx'.")
-        return _tsne_barnes_hut(dist_csr, emb_dim, px, max_its, eta, momentum,
-                                early_exaggeration, min_gain, tol, print_iter, seed, Y,
-                                out=out, theta=barnes_hut_theta,
-                                leaf_size=barnes_hut_leaf_size,
-                                repulsion_method=repulsion_method,
-                                exact_repulsion_threshold=exact_repulsion_threshold)
+        return _tsne_barnes_hut(
+            dist_csr,
+            emb_dim,
+            px,
+            max_its,
+            eta,
+            momentum,
+            early_exaggeration,
+            min_gain,
+            tol,
+            print_iter,
+            seed,
+            Y,
+            out=out,
+            theta=barnes_hut_theta,
+            leaf_size=barnes_hut_leaf_size,
+            repulsion_method=repulsion_method,
+            exact_repulsion_threshold=exact_repulsion_threshold,
+        )
 
-    P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity, affinity=affinity,
-                 evidence_cap=evidence_cap)
-    return tsne_exact(P, emb_dim=emb_dim, alpha=alpha, Y=Y, max_its=max_its, eta=eta,
-                      momentum=momentum, early_exaggeration=early_exaggeration,
-                      min_gain=min_gain, min_value=min_value, optimize_alpha=optimize_alpha,
-                      min_alpha=min_alpha, max_alpha_its=max_alpha_its, tol=tol,
-                      print_iter=print_iter, seed=seed, out=out)
+    P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity, affinity=affinity, evidence_cap=evidence_cap)
+    return tsne_exact(
+        P,
+        emb_dim=emb_dim,
+        alpha=alpha,
+        Y=Y,
+        max_its=max_its,
+        eta=eta,
+        momentum=momentum,
+        early_exaggeration=early_exaggeration,
+        min_gain=min_gain,
+        min_value=min_value,
+        optimize_alpha=optimize_alpha,
+        min_alpha=min_alpha,
+        max_alpha_its=max_alpha_its,
+        tol=tol,
+        print_iter=print_iter,
+        seed=seed,
+        out=out,
+    )
 
 
-def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
-          max_components: int = 50, seed: Optional[int] = None, mix_model=None,
-          enc_data=None, dpm_max_its: int = 200, print_iter: int = 100,
-          affinity='auto', field_weights=None, evidence_cap: Optional[float] = 1.0,
-          fisher_metric: str = 'diagonal', fisher_ridge: float = 1.0e-8,
-          fisher_information: str = 'observed',
-          n_epochs: Optional[int] = None, out=None, **umap_kwargs):
+def humap(
+    data,
+    emb_dim: int = 2,
+    n_neighbors: int = 15,
+    min_dist: float = 0.1,
+    max_components: int = 50,
+    seed: int | None = None,
+    mix_model=None,
+    enc_data=None,
+    dpm_max_its: int = 200,
+    print_iter: int = 100,
+    affinity="auto",
+    field_weights=None,
+    evidence_cap: float | None = 1.0,
+    fisher_metric: str = "diagonal",
+    fisher_ridge: float = 1.0e-8,
+    fisher_information: str = "observed",
+    n_epochs: int | None = None,
+    out=None,
+    **umap_kwargs,
+):
     """Embed heterogeneous data with model-based UMAP.
 
     The same mixture-model affinities as htsne (see the affinity and
@@ -1902,65 +2146,110 @@ def humap(data, emb_dim: int = 2, n_neighbors: int = 15, min_dist: float = 0.1,
     """
     try:
         import warnings
+
         with warnings.catch_warnings():
             warnings.filterwarnings(
-                'ignore',
-                message='Tensorflow not installed; ParametricUMAP will be unavailable',
-                category=ImportWarning)
+                "ignore", message="Tensorflow not installed; ParametricUMAP will be unavailable", category=ImportWarning
+            )
             import umap
     except ImportError:
         from pysp.utils.optional_deps import require
-        require('umap-learn', 'umap')
+
+        require("umap-learn", "umap")
 
     if out is None:
         out = sys.stdout
 
     if mix_model is None and not _is_prebuilt_affinity(affinity):
         from pysp.utils.automatic import get_dpm_mixture
-        mix_model = get_dpm_mixture(data, rng=np.random.RandomState(seed),
-                                    max_components=max_components, max_its=dpm_max_its,
-                                    print_iter=print_iter, out=out)
+
+        mix_model = get_dpm_mixture(
+            data,
+            rng=np.random.RandomState(seed),
+            max_components=max_components,
+            max_its=dpm_max_its,
+            print_iter=print_iter,
+            out=out,
+        )
 
     if mix_model is not None:
-        affinity = _resolve_affinity(affinity, mix_model, data, field_weights,
-                                     enc_data=enc_data, fisher_metric=fisher_metric,
-                                     fisher_ridge=fisher_ridge,
-                                     fisher_information=fisher_information)
+        affinity = _resolve_affinity(
+            affinity,
+            mix_model,
+            data,
+            field_weights,
+            enc_data=enc_data,
+            fisher_metric=fisher_metric,
+            fisher_ridge=fisher_ridge,
+            fisher_information=fisher_information,
+        )
 
     if _is_prebuilt_affinity(affinity):
         z_ij, l_ij = None, None
         n = _factor_n(_affinity_factors(None, None, affinity)[0])
         if data is not None and len(data) != n:
-            raise ValueError('pre-built affinity row count does not match data length.')
+            raise ValueError("pre-built affinity row count does not match data length.")
     else:
         z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
         n = z_ij.shape[0]
     k = min(n_neighbors, n - 1)
 
-    knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k, affinity=affinity,
-                                  evidence_cap=evidence_cap)
+    knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k, affinity=affinity, evidence_cap=evidence_cap)
 
-    reducer = umap.UMAP(n_components=emb_dim, n_neighbors=k, min_dist=min_dist,
-                        precomputed_knn=(knn_idx, knn_dist), random_state=seed,
-                        n_epochs=n_epochs, **umap_kwargs)
+    reducer = umap.UMAP(
+        n_components=emb_dim,
+        n_neighbors=k,
+        min_dist=min_dist,
+        precomputed_knn=(knn_idx, knn_dist),
+        random_state=seed,
+        n_epochs=n_epochs,
+        **umap_kwargs,
+    )
 
     with warnings.catch_warnings():
         # expected with precomputed knn / fixed seed; not actionable here
-        warnings.filterwarnings('ignore', message='.*knn_search_index.*')
-        warnings.filterwarnings('ignore', message='.*n_jobs value.*overridden.*')
+        warnings.filterwarnings("ignore", message=".*knn_search_index.*")
+        warnings.filterwarnings("ignore", message=".*n_jobs value.*overridden.*")
         return reducer.fit_transform(np.zeros((n, 1), dtype=np.float32))
 
 
-def dpmsne(P=None, emb_dim: int = 2, alpha: float = 1.0, Y: Optional[np.ndarray] = None,
-           max_its: int = 1000, print_iter: int = 100, eta: Optional[float] = None,
-           momentum: float = 0.8, min_gain: float = 0.01, min_value: float = 1.0e-128,
-           optimize_alpha: bool = False, min_alpha: float = 1.0e-6, max_alpha_its: int = 3,
-           seed: Optional[int] = None, early_exaggeration: float = 12.0, tol: float = 1.0e-7,
-           out=None, **_compat_kwargs):
+def dpmsne(
+    P=None,
+    emb_dim: int = 2,
+    alpha: float = 1.0,
+    Y: np.ndarray | None = None,
+    max_its: int = 1000,
+    print_iter: int = 100,
+    eta: float | None = None,
+    momentum: float = 0.8,
+    min_gain: float = 0.01,
+    min_value: float = 1.0e-128,
+    optimize_alpha: bool = False,
+    min_alpha: float = 1.0e-6,
+    max_alpha_its: int = 3,
+    seed: int | None = None,
+    early_exaggeration: float = 12.0,
+    tol: float = 1.0e-7,
+    out=None,
+    **_compat_kwargs,
+):
     """Embed a precomputed (symmetric, non-negative) affinity matrix P with exact t-SNE."""
-    return tsne_exact(np.asarray(P, dtype=np.float64), emb_dim=emb_dim, alpha=alpha, Y=Y,
-                      max_its=max_its, eta=eta, momentum=momentum,
-                      early_exaggeration=early_exaggeration, min_gain=min_gain,
-                      min_value=min_value, optimize_alpha=optimize_alpha, min_alpha=min_alpha,
-                      max_alpha_its=max_alpha_its, tol=tol, print_iter=print_iter,
-                      seed=seed, out=out)
+    return tsne_exact(
+        np.asarray(P, dtype=np.float64),
+        emb_dim=emb_dim,
+        alpha=alpha,
+        Y=Y,
+        max_its=max_its,
+        eta=eta,
+        momentum=momentum,
+        early_exaggeration=early_exaggeration,
+        min_gain=min_gain,
+        min_value=min_value,
+        optimize_alpha=optimize_alpha,
+        min_alpha=min_alpha,
+        max_alpha_its=max_alpha_its,
+        tol=tol,
+        print_iter=print_iter,
+        seed=seed,
+        out=out,
+    )

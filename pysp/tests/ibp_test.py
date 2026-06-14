@@ -1,4 +1,5 @@
 """Tests for the finite-truncated Indian buffet process implementation."""
+
 import unittest
 
 import numpy as np
@@ -12,14 +13,13 @@ from pysp.stats import (
 
 
 class IndianBuffetProcessTestCase(unittest.TestCase):
-
     def test_vb_posterior_update_dense(self):
         data = [
             [1, 0, 1],
             [0, 1, 1],
             [1, 1, 0],
         ]
-        est = IndianBuffetProcessEstimator(3, alpha=1.5, estimate_alpha=False, data_format='dense')
+        est = IndianBuffetProcessEstimator(3, alpha=1.5, estimate_alpha=False, data_format="dense")
 
         enc = seq_encode(data, estimator=est)
         model = seq_initialize(enc, est, np.random.RandomState(1), p=1.0)
@@ -38,8 +38,7 @@ class IndianBuffetProcessTestCase(unittest.TestCase):
             [1, 0, 0],
             [0, 0, 0],
         ]
-        est = IndianBuffetProcessEstimator(3, alpha=3.0, pseudo_count=2.0,
-                                           estimate_alpha=False, data_format='dense')
+        est = IndianBuffetProcessEstimator(3, alpha=3.0, pseudo_count=2.0, estimate_alpha=False, data_format="dense")
         enc = seq_encode(data, estimator=est)
         model = seq_initialize(enc, est, np.random.RandomState(2), p=1.0)
 
@@ -51,8 +50,8 @@ class IndianBuffetProcessTestCase(unittest.TestCase):
 
     def test_pseudocount_with_suff_stat_uses_supplied_probabilities(self):
         est = IndianBuffetProcessEstimator(
-            3, alpha=3.0, pseudo_count=5.0, suff_stat=[0.8, 0.1, 0.3],
-            estimate_alpha=False, data_format='dense')
+            3, alpha=3.0, pseudo_count=5.0, suff_stat=[0.8, 0.1, 0.3], estimate_alpha=False, data_format="dense"
+        )
 
         model = est.estimate(None, (np.zeros(3), 0.0, 3.0))
 
@@ -64,8 +63,8 @@ class IndianBuffetProcessTestCase(unittest.TestCase):
 
     def test_scalar_and_vectorized_scoring_match_mixed_inputs(self):
         dist = IndianBuffetProcessDistribution(
-            4, alpha=2.0,
-            beta_params=[[2.0, 3.0], [4.0, 2.0], [1.5, 5.0], [3.0, 1.0]])
+            4, alpha=2.0, beta_params=[[2.0, 3.0], [4.0, 2.0], [1.5, 5.0], [3.0, 1.0]]
+        )
         data = [
             [1, 0, 0, 1],
             [1, 3],
@@ -75,11 +74,10 @@ class IndianBuffetProcessTestCase(unittest.TestCase):
 
         enc = dist.dist_to_encoder().seq_encode(data)
         np.testing.assert_allclose(dist.seq_log_density(enc), [dist.log_density(x) for x in data])
-        np.testing.assert_allclose(dist.seq_expected_log_density(enc),
-                                   [dist.expected_log_density(x) for x in data])
+        np.testing.assert_allclose(dist.seq_expected_log_density(enc), [dist.expected_log_density(x) for x in data])
 
     def test_sparse_accumulator_matches_vectorized_path(self):
-        dist = IndianBuffetProcessDistribution(3, alpha=2.0, data_format='sparse')
+        dist = IndianBuffetProcessDistribution(3, alpha=2.0, data_format="sparse")
         est = dist.estimator()
         factory = est.accumulator_factory()
         data = [[0, 2], [1], [], [0, 1, 2]]
@@ -101,8 +99,8 @@ class IndianBuffetProcessTestCase(unittest.TestCase):
 
     def test_sampler_repeat_and_eval_round_trip(self):
         dist = IndianBuffetProcessDistribution(
-            3, alpha=1.0, beta_params=[[2.0, 3.0], [4.0, 1.0], [1.0, 5.0]],
-            data_format='sparse')
+            3, alpha=1.0, beta_params=[[2.0, 3.0], [4.0, 1.0], [1.0, 5.0]], data_format="sparse"
+        )
 
         self.assertEqual(dist.sampler(seed=7).sample(size=10), dist.sampler(seed=7).sample(size=10))
 
@@ -110,11 +108,10 @@ class IndianBuffetProcessTestCase(unittest.TestCase):
         self.assertEqual(str(copy), str(dist))
 
     def test_model_log_density_is_finite(self):
-        dist = IndianBuffetProcessDistribution(3, alpha=1.2,
-                                               beta_params=[[2.0, 3.0], [1.5, 4.0], [3.0, 2.0]])
+        dist = IndianBuffetProcessDistribution(3, alpha=1.2, beta_params=[[2.0, 3.0], [1.5, 4.0], [3.0, 2.0]])
         est = dist.estimator()
         self.assertTrue(np.isfinite(est.model_log_density(dist)))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

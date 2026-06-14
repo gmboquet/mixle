@@ -1,8 +1,10 @@
 """Array compute-engine protocol used by backend-neutral kernels."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 class ComputeEngine(ABC):
@@ -13,20 +15,21 @@ class ComputeEngine(ABC):
     surface when it wants backend-neutral arrays.
     """
 
-    name = 'base'
+    name = "base"
     supports_autograd = False
     dtype = None
-    device = 'cpu'
+    device = "cpu"
 
     @property
     def precision(self) -> str:
         """Return the engine dtype policy as a stable user-facing name."""
         from pysp.engines.precision import precision_name
+
         return precision_name(self.dtype)
 
-    def with_precision(self, precision: Any) -> 'ComputeEngine':
+    def with_precision(self, precision: Any) -> ComputeEngine:
         """Return an equivalent engine with a different floating-point policy."""
-        raise TypeError('%s does not support precision adjustment.' % type(self).__name__)
+        raise TypeError("%s does not support precision adjustment." % type(self).__name__)
 
     @abstractmethod
     def asarray(self, x: Any, dtype: Any = None) -> Any:

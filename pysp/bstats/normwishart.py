@@ -8,30 +8,36 @@ nu > d - 1. This is the conjugate prior for the multivariate Gaussian and the
 d-dimensional generalization of NormalGammaDistribution (d=1: nu = 2a,
 W = 1/(2b)).
 """
-from typing import Optional
 
 import numpy as np
-from scipy.special import gammaln, digamma
+from scipy.special import digamma, gammaln
 
 from pysp.bstats.pdist import ProbabilityDistribution
 
 
 def _multigammaln(a: float, d: int) -> float:
     """Log of the d-dimensional multivariate gamma function at a."""
-    return d*(d - 1)/4.0*np.log(np.pi) + sum(gammaln(a + (1.0 - i)/2.0) for i in range(1, d + 1))
+    return d * (d - 1) / 4.0 * np.log(np.pi) + sum(gammaln(a + (1.0 - i) / 2.0) for i in range(1, d + 1))
 
 
 def _multidigamma(a: float, d: int) -> float:
     """Derivative of _multigammaln with respect to a."""
-    return sum(digamma(a + (1.0 - i)/2.0) for i in range(1, d + 1))
+    return sum(digamma(a + (1.0 - i) / 2.0) for i in range(1, d + 1))
 
 
 class NormalWishartDistribution(ProbabilityDistribution):
     """Normal-Wishart distribution over (mu, Lambda); conjugate prior for the
     multivariate Gaussian with unknown mean and precision matrix."""
 
-    def __init__(self, mu, kappa: float, w_mat, nu: float, name: Optional[str] = None,
-                 prior: Optional[ProbabilityDistribution] = None):
+    def __init__(
+        self,
+        mu,
+        kappa: float,
+        w_mat,
+        nu: float,
+        name: str | None = None,
+        prior: ProbabilityDistribution | None = None,
+    ):
         """NormalWishartDistribution object.
 
         Args:
@@ -49,10 +55,16 @@ class NormalWishartDistribution(ProbabilityDistribution):
         self.set_parameters((mu, kappa, w_mat, nu))
 
     def __str__(self):
-        mu = ','.join(map(str, self.mu.tolist()))
-        w = ','.join(map(str, self.w_mat.flatten().tolist()))
-        return 'NormalWishartDistribution([%s], %f, [%s], %f, name=%s, prior=%s)' % (
-            mu, self.kappa, w, self.nu, self.name, str(self.prior))
+        mu = ",".join(map(str, self.mu.tolist()))
+        w = ",".join(map(str, self.w_mat.flatten().tolist()))
+        return "NormalWishartDistribution([%s], %f, [%s], %f, name=%s, prior=%s)" % (
+            mu,
+            self.kappa,
+            w,
+            self.nu,
+            self.name,
+            str(self.prior),
+        )
 
     def get_parameters(self):
         """Returns the parameter tuple (mu, kappa, w_mat, nu)."""
@@ -75,22 +87,24 @@ class NormalWishartDistribution(ProbabilityDistribution):
         self.dim = len(self.mu)
 
         d = self.dim
-        assert self.nu > d - 1, 'NormalWishart requires nu > dim - 1.'
+        assert self.nu > d - 1, "NormalWishart requires nu > dim - 1."
 
         sgn, self.log_det_w = np.linalg.slogdet(self.w_mat)
-        assert sgn > 0, 'NormalWishart scale matrix must be positive definite.'
+        assert sgn > 0, "NormalWishart scale matrix must be positive definite."
         self.w_inv = np.linalg.inv(self.w_mat)
 
         # log normalizer of the Wishart factor
-        self.log_z = (self.nu*d/2.0)*np.log(2.0) + (self.nu/2.0)*self.log_det_w + _multigammaln(self.nu/2.0, d)
+        self.log_z = (
+            (self.nu * d / 2.0) * np.log(2.0) + (self.nu / 2.0) * self.log_det_w + _multigammaln(self.nu / 2.0, d)
+        )
 
     def expected_log_det(self) -> float:
         """E[ln |Lambda|] under the Wishart factor."""
-        return _multidigamma(self.nu/2.0, self.dim) + self.dim*np.log(2.0) + self.log_det_w
+        return _multidigamma(self.nu / 2.0, self.dim) + self.dim * np.log(2.0) + self.log_det_w
 
     def expected_precision(self) -> np.ndarray:
         """E[Lambda] = nu * W."""
-        return self.nu*self.w_mat
+        return self.nu * self.w_mat
 
     def density(self, x) -> float:
         """Density at x = (mu, Lambda); see log_density().
@@ -125,9 +139,12 @@ class NormalWishartDistribution(ProbabilityDistribution):
             return -np.inf
 
         diff = mu - self.mu
-        c_norm = (d/2.0)*np.log(self.kappa/(2.0*np.pi)) + 0.5*log_det_lam \
-                 - 0.5*self.kappa*float(np.dot(diff, np.dot(lam, diff)))
-        c_wish = ((self.nu - d - 1.0)/2.0)*log_det_lam - 0.5*float(np.trace(np.dot(self.w_inv, lam))) - self.log_z
+        c_norm = (
+            (d / 2.0) * np.log(self.kappa / (2.0 * np.pi))
+            + 0.5 * log_det_lam
+            - 0.5 * self.kappa * float(np.dot(diff, np.dot(lam, diff)))
+        )
+        c_wish = ((self.nu - d - 1.0) / 2.0) * log_det_lam - 0.5 * float(np.trace(np.dot(self.w_inv, lam))) - self.log_z
 
         return c_norm + c_wish
 
@@ -144,8 +161,9 @@ class NormalWishartDistribution(ProbabilityDistribution):
         """
         if not isinstance(dist, NormalWishartDistribution):
             raise NotImplementedError(
-                'NormalWishartDistribution.cross_entropy is only implemented for NormalWishart arguments (got %s).'
-                % type(dist).__name__)
+                "NormalWishartDistribution.cross_entropy is only implemented for NormalWishart arguments (got %s)."
+                % type(dist).__name__
+            )
 
         d = self.dim
         e_log_det = self.expected_log_det()
@@ -153,10 +171,10 @@ class NormalWishartDistribution(ProbabilityDistribution):
 
         # E[(mu - m_p)' Lambda (mu - m_p)] under self
         diff = self.mu - dist.mu
-        e_quad = d/self.kappa + self.nu*float(np.dot(diff, np.dot(self.w_mat, diff)))
+        e_quad = d / self.kappa + self.nu * float(np.dot(diff, np.dot(self.w_mat, diff)))
 
-        c_norm = (d/2.0)*np.log(dist.kappa/(2.0*np.pi)) + 0.5*e_log_det - 0.5*dist.kappa*e_quad
-        c_wish = ((dist.nu - d - 1.0)/2.0)*e_log_det - 0.5*float(np.trace(np.dot(dist.w_inv, e_lam))) - dist.log_z
+        c_norm = (d / 2.0) * np.log(dist.kappa / (2.0 * np.pi)) + 0.5 * e_log_det - 0.5 * dist.kappa * e_quad
+        c_wish = ((dist.nu - d - 1.0) / 2.0) * e_log_det - 0.5 * float(np.trace(np.dot(dist.w_inv, e_lam))) - dist.log_z
 
         return -(c_norm + c_wish)
 
@@ -164,7 +182,7 @@ class NormalWishartDistribution(ProbabilityDistribution):
         """Returns the entropy of the Normal-Wishart distribution (in nats)."""
         return self.cross_entropy(self)
 
-    def sampler(self, seed: Optional[int] = None):
+    def sampler(self, seed: int | None = None):
         """Create a NormalWishartSampler for this distribution.
 
         Args:
@@ -177,10 +195,10 @@ class NormalWishartDistribution(ProbabilityDistribution):
         return NormalWishartSampler(self, seed)
 
 
-class NormalWishartSampler(object):
+class NormalWishartSampler:
     """Draws (mu, Lambda) samples from a NormalWishartDistribution."""
 
-    def __init__(self, dist: NormalWishartDistribution, seed: Optional[int] = None):
+    def __init__(self, dist: NormalWishartDistribution, seed: int | None = None):
         """NormalWishartSampler object.
 
         Args:
@@ -207,7 +225,7 @@ class NormalWishartSampler(object):
         if size is None:
             d = self.dist.dim
             lam = scipy_wishart_sample(self.rng, self.dist.nu, self.dist.w_mat)
-            covar = np.linalg.inv(lam*self.dist.kappa)
+            covar = np.linalg.inv(lam * self.dist.kappa)
             mu = self.rng.multivariate_normal(self.dist.mu, covar)
             return mu, lam
         else:

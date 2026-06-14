@@ -1,13 +1,13 @@
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution
-from pysp.stats import *
-from pysp.utils.estimation import empirical_kl_divergence
-import numpy as np
 import unittest
 
+import numpy as np
+
+from pysp.stats import *
 from pysp.stats.int_spike import *
+from pysp.utils.estimation import empirical_kl_divergence
+
 
 class BaseDistributionTestCase(unittest.TestCase):
-
     def setUp(self) -> None:
         dists = []
         # dists.append(BinomialDistribution(p=0.4,n=10,min_val=1,name='a',keys='test_keys'))
@@ -22,7 +22,7 @@ class BaseDistributionTestCase(unittest.TestCase):
         # dists.append(ExponentialDistribution(10.8, name='a'))
         # dists.append(GammaDistribution(k=1.0, theta=10.0, name='a'))
         # dists.append(GaussianDistribution(mu=1.0, sigma2=1.0,name='a'))
-        #dists.append(GeometricDistribution(p=0.20,name='a'))
+        # dists.append(GeometricDistribution(p=0.20,name='a'))
 
         #### needs more samples on estimate tests
         # comps = [GaussianDistribution(mu=100, sigma2=1.0), ExponentialDistribution(beta=1.0)]
@@ -64,7 +64,7 @@ class BaseDistributionTestCase(unittest.TestCase):
         # conditional_log_densities = np.ones(len(dependency_list))/len(dependency_list)
         # dists.append(ICLTreeDistribution(dependency_list=dependency_list, conditional_log_densities=conditional_log_densities))
 
-        #dists.append(IgnoredDistribution(GeometricDistribution(0.8)))
+        # dists.append(IgnoredDistribution(GeometricDistribution(0.8)))
         # dists.append(
         #     IntegerBernoulliSetDistribution(np.log([0.9, 0.8, 0.7, 0.6, 0.5]), np.log([0.1, 0.2, 0.3, 0.4, 0.5]),
         #                                     name='a'))
@@ -94,7 +94,7 @@ class BaseDistributionTestCase(unittest.TestCase):
         # dists.append(IntegerMultinomialDistribution(0, [0.1, 0.4, 0.3, 0.2], len_dist=CategoricalDistribution({4: 1.0}),
         #                                             name='a'))
         # dists.append(IntegerCategoricalDistribution(0, [0.1, 0.4, 0.3, 0.2], name='a'))
-        #dists.append(IntegerBernoulliSetDistribution(np.log([0.9, 0.8, 0.7, 0.6, 0.5]), name='a'))
+        # dists.append(IntegerBernoulliSetDistribution(np.log([0.9, 0.8, 0.7, 0.6, 0.5]), name='a'))
 
         ### need to increase number of samples in est comparison
         # d11 = CompositeDistribution(
@@ -159,13 +159,13 @@ class BaseDistributionTestCase(unittest.TestCase):
         # dist = SemiSupervisedMixtureDistribution([c1, c2, c3], [0.6, 0.3, 0.1], name='a')
         #
         # dists.append(VonMisesFisherDistribution([1.1,2.1,3.1,4.1,5.1], 2.0, name='a'))
-        #dists.append(IntegerUniformSpikeDistribution(k=3, min_val=0, num_vals=10, p=0.6, name='a'))
+        # dists.append(IntegerUniformSpikeDistribution(k=3, min_val=0, num_vals=10, p=0.6, name='a'))
         # dists.append(NegativeBinomialDistribution(r=3, p=0.45, name='a'))
 
         num_states = 3
         rng = np.random.RandomState(1)
 
-        p = [[0.7, 0.20, .10], [0.10, 0.70, .20], [0.20, 0.10, .70]]
+        p = [[0.7, 0.20, 0.10], [0.10, 0.70, 0.20], [0.20, 0.10, 0.70]]
         topics = []
 
         for s in range(num_states):
@@ -179,10 +179,10 @@ class BaseDistributionTestCase(unittest.TestCase):
         w = np.ones(num_states) / num_states
         len_dist = IntegerCategoricalDistribution(min_val=0, p_vec=len_probs)
 
-        d = TreeHiddenMarkovModelDistribution(topics=topics, w=w, transitions=trans_mat, len_dist=len_dist,
-                                              terminal_level=4)
+        d = TreeHiddenMarkovModelDistribution(
+            topics=topics, w=w, transitions=trans_mat, len_dist=len_dist, terminal_level=4
+        )
         dists.append(d)
-
 
         self.dists = dists
 
@@ -221,9 +221,10 @@ class BaseDistributionTestCase(unittest.TestCase):
     def test_estimation_same_name(self):
         for dist in self.dists:
             res = estimation_same_name_test(dist)
-            #if not res[0]:
+            # if not res[0]:
             #    print(str(dist))
-            self.assertTrue(res[0], str((dist,res[1])))
+            self.assertTrue(res[0], str((dist, res[1])))
+
 
 def sampler_repeat_test(dist):
 
@@ -231,10 +232,9 @@ def sampler_repeat_test(dist):
     sz = 20
     rv = []
     for seed in seeds:
-
-        s  = dist.sampler(seed)
+        s = dist.sampler(seed)
         d1 = s.sample(size=sz)
-        s  = dist.sampler(seed)
+        s = dist.sampler(seed)
         d2 = s.sample(size=sz)
 
         is_same = [u[0] == u[1] for u in zip(map(str, d1), map(str, d2))]
@@ -243,9 +243,11 @@ def sampler_repeat_test(dist):
 
     return all(rv), rv
 
+
 def string_match_test(dist):
     sdist = eval(str(dist))
-    return str(sdist) == str(dist), '__str__ is not idempotent.'
+    return str(sdist) == str(dist), "__str__ is not idempotent."
+
 
 def string_eval_test(dist):
 
@@ -253,27 +255,26 @@ def string_eval_test(dist):
     sz = 5
     rv = []
     for seed in seeds:
-
-        s  = dist.sampler(seed)
+        s = dist.sampler(seed)
         data = s.sample(size=sz)
 
         sdist = eval(str(dist))
 
         enc_data = dist.dist_to_encoder().seq_encode(data)
-        seq_ll0  = dist.seq_log_density(enc_data)
-        seq_ll1  = sdist.seq_log_density(enc_data)
-        seq_dll  = np.zeros(sz, dtype=np.float64)
+        seq_ll0 = dist.seq_log_density(enc_data)
+        seq_ll1 = sdist.seq_log_density(enc_data)
+        seq_dll = np.zeros(sz, dtype=np.float64)
 
         for i in range(sz):
-
             if seq_ll0[i] == 0:
                 seq_dll[i] = np.abs(seq_ll1[i])
             else:
-                seq_dll[i] = np.abs(seq_ll0[i] - seq_ll1[i])/np.abs(seq_ll0[i])
+                seq_dll[i] = np.abs(seq_ll0[i] - seq_ll1[i]) / np.abs(seq_ll0[i])
 
         rv.append(np.max(seq_dll))
 
     return max(rv) < 1.0e-15, max(rv)
+
 
 def log_density_test(dist):
 
@@ -281,17 +282,15 @@ def log_density_test(dist):
     sz = 20
     rv = []
     for seed in seeds:
-
-        s  = dist.sampler(seed)
+        s = dist.sampler(seed)
         data = s.sample(size=sz)
 
         seq_ll = dist.seq_log_density(dist.dist_to_encoder().seq_encode(data))
         for i in range(sz):
-
             if seq_ll[i] == 0:
                 seq_ll[i] = np.abs(dist.log_density(data[i]))
             else:
-                seq_ll[i] = np.abs(seq_ll[i] - dist.log_density(data[i]))/np.abs(seq_ll[i])
+                seq_ll[i] = np.abs(seq_ll[i] - dist.log_density(data[i])) / np.abs(seq_ll[i])
 
         rv.append(max(seq_ll))
 
@@ -314,20 +313,18 @@ def estimation_test(dist):
 
     seeds = [1, 2, 3, 4]
     szs = [50, 150, 300]
-    rv  = []
+    rv = []
 
     akld = []
     for seed in seeds:
-
         kld = []
         better = []
         for sz in szs:
-
-            data  = dist.sampler(seed).sample(size=sz)
-            est   = dist.estimator()
+            data = dist.sampler(seed).sample(size=sz)
+            est = dist.estimator()
             enc_data = seq_encode(data, encoder=dist.dist_to_encoder())
             init = initialize(data, est, rng=np.random.RandomState(1), p=1.0)
-            est_dist = em_fit(est, init, enc_data, lambda e, m: estimate(data, e, m))
+            est_dist = em_fit(est, init, enc_data, lambda e, m: estimate(data, e, m))  # noqa: B023  -- invoked synchronously within the loop iteration
 
             emp_kld, _, _ = empirical_kl_divergence(dist, est_dist, enc_data)
 
@@ -342,25 +339,24 @@ def estimation_test(dist):
     rv = np.all(akld_mean[1:] <= akld_mean[:-1])
 
     return rv, akld
+
 
 def seq_estimation_test(dist):
 
     seeds = [1, 2, 3, 4]
     szs = [2000]
-    rv  = []
+    rv = []
 
     akld = []
     for seed in seeds:
-
         kld = []
         better = []
         for sz in szs:
-
-            data  = dist.sampler(seed).sample(size=sz)
-            est   = dist.estimator()
+            data = dist.sampler(seed).sample(size=sz)
+            est = dist.estimator()
             enc_data = seq_encode(data, model=dist)
             init = seq_initialize(enc_data, est, np.random.RandomState(1), p=1.0)
-            est_dist = em_fit(est, init, enc_data, lambda e, m: seq_estimate(enc_data, e, m))
+            est_dist = em_fit(est, init, enc_data, lambda e, m: seq_estimate(enc_data, e, m))  # noqa: B023  -- invoked synchronously within the loop iteration
 
             emp_kld, _, _ = empirical_kl_divergence(dist, est_dist, enc_data)
 
@@ -376,10 +372,11 @@ def seq_estimation_test(dist):
 
     return rv, akld
 
+
 def estimation_same_name_test(dist):
 
-    if not hasattr(dist, 'name'):
-        return True, ''
+    if not hasattr(dist, "name"):
+        return True, ""
 
     seed = 1
     data = dist.sampler(seed).sample(50)
@@ -388,7 +385,8 @@ def estimation_same_name_test(dist):
     init = seq_initialize(enc_data=enc_data, estimator=est, rng=np.random.RandomState(1), p=1.0)
     model = seq_estimate(enc_data, est, init)
 
-    return model.name is dist.name, ''
+    return model.name is dist.name, ""
+
 
 def evaluate_dists(dists):
 
@@ -404,13 +402,13 @@ def evaluate_dists(dists):
             all_res2.append((test.__name__, res))
         passed = all(all_res1)
         if passed:
-            print('Passed All Tests')
+            print("Passed All Tests")
         else:
             for t in all_res2:
                 if not t[1][0]:
                     print(t)
-        print('-'*10)
+        print("-" * 10)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

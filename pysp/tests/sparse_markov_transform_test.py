@@ -5,6 +5,7 @@ transition mass instead of reading the all-zero trans_count), agreement
 between the fast and low-memory initialization paths, and scalar vs
 vectorized update parity.
 """
+
 import unittest
 import warnings
 
@@ -16,7 +17,6 @@ from pysp.stats.sparse_markov_transform import (
     SparseMarkovAssociationDataEncoder,
     SparseMarkovAssociationEstimator,
 )
-
 
 NUM_VALS = 6
 
@@ -52,13 +52,12 @@ def encode(data, low_memory):
 
 
 class SparseMarkovAssociationSeqInitializeTestCase(unittest.TestCase):
-
     def test_seq_initialize_fast_path_is_finite_and_warning_free(self):
         acc = make_accumulator(low_memory=False)
         enc = encode(DATA, low_memory=False)
 
         with warnings.catch_warnings():
-            warnings.simplefilter('error')
+            warnings.simplefilter("error")
             acc.seq_initialize(enc, WEIGHTS.copy(), np.random.RandomState(1))
 
         trans = acc.trans_count.toarray()
@@ -114,5 +113,5 @@ class SparseMarkovAssociationSeqInitializeTestCase(unittest.TestCase):
         self.assertTrue(np.allclose(acc_scalar.trans_count.toarray(), acc_seq.trans_count.toarray()))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -14,29 +14,36 @@ Covers:
   - setdist.py: estimate() preserves name/prior; real accumulator factory,
   - composite.py: get_prior/set_prior symmetry with a count check.
 """
+
 import unittest
 
 import numpy as np
 import pandas as pd
 
+from pysp.bstats.beta import BetaDistribution
 from pysp.bstats.categorical import CategoricalEstimatorAccumulator
 from pysp.bstats.composite import (
-    CompositeAccumulatorFactory, CompositeDistribution, CompositeEstimator,
+    CompositeAccumulatorFactory,
+    CompositeDistribution,
+    CompositeEstimator,
 )
 from pysp.bstats.exponential import ExponentialDistribution, ExponentialEstimator
 from pysp.bstats.gamma import GammaDistribution
-from pysp.bstats.beta import BetaDistribution
 from pysp.bstats.mixture import MixtureDistribution
 from pysp.bstats.nulldist import null_dist
 from pysp.bstats.poisson import (
-    PoissonDistribution, PoissonEstimator, PoissonEstimatorAccumulator,
+    PoissonDistribution,
+    PoissonEstimator,
+    PoissonEstimatorAccumulator,
 )
 from pysp.bstats.sequence import (
-    SequenceEstimator, SequenceEstimatorAccumulator,
+    SequenceEstimator,
+    SequenceEstimatorAccumulator,
     SequenceEstimatorAccumulatorFactory,
 )
 from pysp.bstats.setdist import (
-    BernoulliSetAccumulator, BernoulliSetAccumulatorFactory,
+    BernoulliSetAccumulator,
+    BernoulliSetAccumulatorFactory,
     BernoulliSetEstimator,
 )
 
@@ -57,8 +64,7 @@ class MixtureSeqExpectedLogDensityTestCase(unittest.TestCase):
         self.assertTrue(np.allclose(seq_vals, item_vals))
 
     def test_seq_expected_log_density_without_conjugate_weight_prior(self):
-        m = MixtureDistribution([PoissonDistribution(2.0), PoissonDistribution(9.0)],
-                                [0.4, 0.6], prior=null_dist)
+        m = MixtureDistribution([PoissonDistribution(2.0), PoissonDistribution(9.0)], [0.4, 0.6], prior=null_dist)
 
         data = [0, 2, 5]
         enc = m.seq_encode(data)
@@ -73,24 +79,24 @@ class CategoricalDataFrameUpdateTestCase(unittest.TestCase):
     """df_update must aggregate weighted counts per category."""
 
     def test_df_update_counts(self):
-        df = pd.DataFrame({'col': ['a', 'b', 'a', 'c', 'b']})
+        df = pd.DataFrame({"col": ["a", "b", "a", "c", "b"]})
         weights = [1.0, 2.0, 3.0, 4.0, 5.0]
 
-        acc = CategoricalEstimatorAccumulator('col', (None,))
+        acc = CategoricalEstimatorAccumulator("col", (None,))
         acc.df_update(df, weights, None)
 
-        self.assertAlmostEqual(acc.count_map['a'], 4.0)
-        self.assertAlmostEqual(acc.count_map['b'], 7.0)
-        self.assertAlmostEqual(acc.count_map['c'], 4.0)
+        self.assertAlmostEqual(acc.count_map["a"], 4.0)
+        self.assertAlmostEqual(acc.count_map["b"], 7.0)
+        self.assertAlmostEqual(acc.count_map["c"], 4.0)
         self.assertAlmostEqual(acc.count_sum, 15.0)
 
     def test_df_initialize_delegates(self):
-        df = pd.DataFrame({'col': ['x', 'x', 'y']})
-        acc = CategoricalEstimatorAccumulator('col', (None,))
+        df = pd.DataFrame({"col": ["x", "x", "y"]})
+        acc = CategoricalEstimatorAccumulator("col", (None,))
         acc.df_initialize(df, np.ones(3), None)
 
-        self.assertAlmostEqual(acc.count_map['x'], 2.0)
-        self.assertAlmostEqual(acc.count_map['y'], 1.0)
+        self.assertAlmostEqual(acc.count_map["x"], 2.0)
+        self.assertAlmostEqual(acc.count_map["y"], 1.0)
 
 
 class SequenceEstimatorPriorTestCase(unittest.TestCase):
@@ -122,10 +128,10 @@ class SequenceEstimatorPriorTestCase(unittest.TestCase):
             acc.update(x, 1.0, None)
 
         entry_stats, len_stats = acc.value()
-        self.assertAlmostEqual(entry_stats[0], 6.0)   # six entries
+        self.assertAlmostEqual(entry_stats[0], 6.0)  # six entries
         self.assertAlmostEqual(entry_stats[1], 11.0)  # sum of entries
-        self.assertAlmostEqual(len_stats[0], 3.0)     # three sequences
-        self.assertAlmostEqual(len_stats[1], 6.0)     # sum of lengths
+        self.assertAlmostEqual(len_stats[0], 3.0)  # three sequences
+        self.assertAlmostEqual(len_stats[1], 6.0)  # sum of lengths
 
         d = est.estimate(acc.value())
         self.assertGreater(d.dist.lam, 0.0)
@@ -163,7 +169,6 @@ class ExponentialExpectedLogDensityTestCase(unittest.TestCase):
 
 
 class PoissonFixesTestCase(unittest.TestCase):
-
     def test_cross_entropy_returns_value(self):
         d1 = PoissonDistribution(3.0)
         d2 = PoissonDistribution(4.5)
@@ -193,32 +198,32 @@ class PoissonFixesTestCase(unittest.TestCase):
         data = [1, 0, 3, 2, 4]
         weights = [1.0, 0.5, 2.0, 1.0, 0.25]
 
-        acc = PoissonEstimatorAccumulator('p', None)
+        acc = PoissonEstimatorAccumulator("p", None)
         for x, w in zip(data, weights):
             acc.update(x, w, None)
 
         count, psum = acc.value()
         self.assertAlmostEqual(count, sum(weights))
-        self.assertAlmostEqual(psum, sum(x*w for x, w in zip(data, weights)))
+        self.assertAlmostEqual(psum, sum(x * w for x, w in zip(data, weights)))
 
         # seq path must produce the same sufficient statistics
         d = PoissonDistribution(2.0)
-        acc2 = PoissonEstimatorAccumulator('p', None)
+        acc2 = PoissonEstimatorAccumulator("p", None)
         acc2.seq_update(d.seq_encode(data), np.asarray(weights), None)
         self.assertTrue(np.allclose(acc2.value(), acc.value()))
 
         # combine/from_value agree with value()
-        acc3 = PoissonEstimatorAccumulator('p', None)
+        acc3 = PoissonEstimatorAccumulator("p", None)
         acc3.from_value(acc.value())
         acc3.combine(acc2.value())
-        self.assertTrue(np.allclose(acc3.value(), (2*count, 2*psum)))
+        self.assertTrue(np.allclose(acc3.value(), (2 * count, 2 * psum)))
 
         # the suff stat feeds estimate() directly
         est = PoissonEstimator(prior=GammaDistribution(2.0, 0.5))
         fit = est.estimate(acc.value())
         k_n = 2.0 + psum
-        theta_n = 0.5/(count*0.5 + 1.0)
-        self.assertAlmostEqual(fit.lam, (k_n - 1.0)*theta_n, places=10)
+        theta_n = 0.5 / (count * 0.5 + 1.0)
+        self.assertAlmostEqual(fit.lam, (k_n - 1.0) * theta_n, places=10)
 
 
 class BernoulliSetEstimateTestCase(unittest.TestCase):
@@ -226,32 +231,32 @@ class BernoulliSetEstimateTestCase(unittest.TestCase):
 
     def test_estimate_preserves_name_and_prior(self):
         prior = BetaDistribution(2.0, 3.0)
-        est = BernoulliSetEstimator(name='tags', prior=prior)
+        est = BernoulliSetEstimator(name="tags", prior=prior)
 
         factory = est.accumulator_factory()
         self.assertIsInstance(factory, BernoulliSetAccumulatorFactory)
 
         acc = factory.make()
         self.assertIsInstance(acc, BernoulliSetAccumulator)
-        for x in [['a', 'b'], ['a'], ['b', 'c'], []]:
+        for x in [["a", "b"], ["a"], ["b", "c"], []]:
             acc.update(x, 1.0, None)
 
         d = est.estimate(acc.value())
-        self.assertEqual(d.name, 'tags')
+        self.assertEqual(d.name, "tags")
         self.assertIs(d.prior, prior)
-        for k in 'abc':
+        for k in "abc":
             self.assertIn(k, d.pmap)
 
     def test_estimate_preserves_name_and_prior_without_conjugacy(self):
-        est = BernoulliSetEstimator(name='s', prior=null_dist)
+        est = BernoulliSetEstimator(name="s", prior=null_dist)
         acc = est.accumulator_factory().make()
-        acc.update(['a'], 1.0, None)
+        acc.update(["a"], 1.0, None)
         acc.update([], 1.0, None)
 
         d = est.estimate(acc.value())
-        self.assertEqual(d.name, 's')
+        self.assertEqual(d.name, "s")
         self.assertIs(d.prior, null_dist)
-        self.assertAlmostEqual(d.pmap['a'], 0.5)
+        self.assertAlmostEqual(d.pmap["a"], 0.5)
 
 
 class CompositePriorSymmetryTestCase(unittest.TestCase):
@@ -305,5 +310,5 @@ class CompositePriorSymmetryTestCase(unittest.TestCase):
         self.assertTrue(np.isfinite(d.log_density(data[0])))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

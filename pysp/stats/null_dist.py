@@ -11,14 +11,21 @@ Notes:
     Sequence encodings return None for any input.
 
 """
-from typing import Any, Optional, Dict, Tuple
+
+from typing import Any, Optional
 
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
-    DistributionEnumerator
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 
 
@@ -28,21 +35,23 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic')
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
         from pysp.stats.declarations import DistributionDeclaration
+
         return DistributionDeclaration(
-            name='null',
+            name="null",
             distribution_type=cls,
             parameters=(),
             statistics=(),
-            support='any',
+            support="any",
             differentiable=False,
         )
 
-    def __init__(self, name: Optional[str] = None) -> None:
+    def __init__(self, name: str | None = None) -> None:
         """NullDistribution object.
 
         Args:
@@ -56,9 +65,9 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         """Returns string representation of NullDistribution object."""
-        return 'NullDistribution(name=%s)' % repr(self.name)
+        return "NullDistribution(name=%s)" % repr(self.name)
 
-    def density(self, x: Optional[Any]) -> float:
+    def density(self, x: Any | None) -> float:
         """Density of NullDistribution. Always 1.0.
 
         Args:
@@ -70,7 +79,7 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         """
         return 1.0
 
-    def log_density(self, x: Optional[Any]) -> float:
+    def log_density(self, x: Any | None) -> float:
         """Log-density of NullDistribution. Always 0.0.
 
         Args:
@@ -82,7 +91,7 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         """
         return 0.0
 
-    def seq_log_density(self, x: Optional[Any]) -> np.ndarray:
+    def seq_log_density(self, x: Any | None) -> np.ndarray:
         """Vectorized log-density evaluated at sequence encoded input x. Always 0.0.
 
         Args:
@@ -96,30 +105,31 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
             return np.zeros(int(x), dtype=float)
         return np.zeros(0, dtype=float)
 
-    def backend_seq_log_density(self, x: Optional[Any], engine: Any) -> Any:
+    def backend_seq_log_density(self, x: Any | None, engine: Any) -> Any:
         """Engine-neutral vectorized log-density: zero for every encoded row."""
         if isinstance(x, (int, np.integer)):
             return engine.zeros(int(x))
         return engine.zeros(0)
 
     @classmethod
-    def backend_stacked_params(cls, dists: Tuple['NullDistribution', ...], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: tuple["NullDistribution", ...], engine: Any) -> dict[str, Any]:
         """Return stacked parameters for homogeneous null mixtures."""
-        return {'num_components': len(dists)}
+        return {"num_components": len(dists)}
 
     @classmethod
-    def backend_stacked_log_density(cls, x: Optional[Any], params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: Any | None, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` zero matrix for null-component log densities."""
         n = int(x) if isinstance(x, (int, np.integer)) else 0
-        return engine.zeros((n, int(params['num_components'])))
+        return engine.zeros((n, int(params["num_components"])))
 
     @classmethod
-    def backend_stacked_sufficient_statistics(cls, x: Optional[Any], weights: Any,
-                                             params: Dict[str, Any], engine: Any) -> Tuple[None, ...]:
+    def backend_stacked_sufficient_statistics(
+        cls, x: Any | None, weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[None, ...]:
         """Return empty legacy statistics for each null component."""
-        return tuple(None for _ in range(int(params['num_components'])))
+        return tuple(None for _ in range(int(params["num_components"])))
 
-    def sampler(self, seed: Optional[int] = None) -> 'NullSampler':
+    def sampler(self, seed: int | None = None) -> "NullSampler":
         """Create a NullSampler object.
 
         Args:
@@ -131,7 +141,7 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         """
         return NullSampler(dist=self, seed=seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'NullEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "NullEstimator":
         """Create a NullEstimator object.
 
         Args:
@@ -147,19 +157,19 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         else:
             return NullEstimator(pseudo_count=pseudo_count, name=self.name)
 
-    def dist_to_encoder(self) -> 'NullDataEncoder':
+    def dist_to_encoder(self) -> "NullDataEncoder":
         """Returns a NullDataEncoder object for encoding sequences of data."""
         return NullDataEncoder()
 
-    def enumerator(self) -> 'NullEnumerator':
+    def enumerator(self) -> "NullEnumerator":
         """Returns a NullEnumerator object enumerating the support of the NullDistribution."""
         return NullEnumerator(self)
 
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
         """Build the single-item bounded bit-quantized index for NullDistribution."""
         return QuantizedEnumerationIndex.from_items(
-            [(None, 0.0)], max_bits=max_bits, bin_width_bits=bin_width_bits,
-            sorted_items=True, truncated=False)
+            [(None, 0.0)], max_bits=max_bits, bin_width_bits=bin_width_bits, sorted_items=True, truncated=False
+        )
 
     def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
         """Build an exact aligned cross-bin view for null distributions."""
@@ -167,8 +177,8 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         if any(not isinstance(dist, NullDistribution) for dist in dists):
             return super().quantized_multi_cross_index(others, max_bits=max_bits, bin_width_bits=bin_width_bits)
         return QuantizedCrossIndex.from_items(
-            [(None, tuple([0.0] * len(dists)))], max_bits=max_bits,
-            bin_width_bits=bin_width_bits, truncated=False)
+            [(None, tuple([0.0] * len(dists)))], max_bits=max_bits, bin_width_bits=bin_width_bits, truncated=False
+        )
 
     def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
         """Build an exact aligned cross-bin view for two null distributions."""
@@ -178,7 +188,7 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
 class NullEnumerator(DistributionEnumerator):
     """Yields the single value None with probability one, matching NullSampler.sample()."""
 
-    def __init__(self, dist: 'NullDistribution') -> None:
+    def __init__(self, dist: "NullDistribution") -> None:
         """NullEnumerator object.
 
         Args:
@@ -188,7 +198,7 @@ class NullEnumerator(DistributionEnumerator):
         super().__init__(dist)
         self._done = False
 
-    def __next__(self) -> Tuple[None, float]:
+    def __next__(self) -> tuple[None, float]:
         """Returns the single (None, 0.0) pair, then raises StopIteration."""
         if self._done:
             raise StopIteration
@@ -199,7 +209,7 @@ class NullEnumerator(DistributionEnumerator):
 class NullSampler(DistributionSampler):
     """Sampler for the NullDistribution. Always returns None."""
 
-    def __init__(self, dist: 'NullDistribution', seed: Optional[int] = None) -> None:
+    def __init__(self, dist: "NullDistribution", seed: int | None = None) -> None:
         """NullSampler object.
 
         Args:
@@ -210,7 +220,7 @@ class NullSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: Optional[int] = None) -> None:
+    def sample(self, size: int | None = None) -> None:
         """Returns None for any requested size.
 
         Args:
@@ -226,7 +236,7 @@ class NullSampler(DistributionSampler):
 class NullAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for NullDistribution. Accumulates no sufficient statistics."""
 
-    def __init__(self, keys: Optional[str] = None) -> None:
+    def __init__(self, keys: str | None = None) -> None:
         """NullAccumulator object.
 
         Args:
@@ -238,7 +248,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.key = keys
 
-    def update(self, x: Optional[Any], weight: float, estimate: Optional['NullDistribution']) -> None:
+    def update(self, x: Any | None, weight: float, estimate: Optional["NullDistribution"]) -> None:
         """No-op update. Nothing is accumulated for the NullDistribution.
 
         Args:
@@ -249,10 +259,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         """
         pass
 
-    def seq_update(self,
-                   x: Optional[Any],
-                   weights: np.ndarray,
-                   estimate: Optional['NullDistribution']) -> None:
+    def seq_update(self, x: Any | None, weights: np.ndarray, estimate: Optional["NullDistribution"]) -> None:
         """No-op vectorized update. Nothing is accumulated for the NullDistribution.
 
         Args:
@@ -267,7 +274,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         # NullDistribution has no parameters: accumulation is a no-op on every engine.
         pass
 
-    def initialize(self, x: Optional[Any], weight: float, rng: Optional['np.random.RandomState']) -> None:
+    def initialize(self, x: Any | None, weight: float, rng: Optional["np.random.RandomState"]) -> None:
         """No-op initialization for a single observation.
 
         Args:
@@ -278,10 +285,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.update(x, weight, None)
 
-    def seq_initialize(self,
-                       x: Optional[Any],
-                       weights: np.ndarray,
-                       rng: np.random.RandomState) -> None:
+    def seq_initialize(self, x: Any | None, weights: np.ndarray, rng: np.random.RandomState) -> None:
         """No-op vectorized initialization.
 
         Args:
@@ -292,7 +296,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: Optional[Any]) -> 'NullAccumulator':
+    def combine(self, suff_stat: Any | None) -> "NullAccumulator":
         """Combine sufficient statistics (no-op).
 
         Args:
@@ -308,7 +312,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         """Returns None (the NullAccumulator has no sufficient statistics)."""
         return None
 
-    def from_value(self, x: Optional[Any]) -> 'NullAccumulator':
+    def from_value(self, x: Any | None) -> "NullAccumulator":
         """Set accumulator from sufficient statistics (no-op).
 
         Args:
@@ -320,7 +324,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         """
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Register the key in stats_dict (the NullAccumulator stores no sufficient statistics).
 
         Args:
@@ -336,7 +340,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
             else:
                 stats_dict[self.key] = None
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """No-op kept for interface consistency (the NullAccumulator stores no sufficient statistics).
 
         Args:
@@ -348,7 +352,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         """
         pass
 
-    def acc_to_encoder(self) -> 'NullDataEncoder':
+    def acc_to_encoder(self) -> "NullDataEncoder":
         """Returns a NullDataEncoder object for encoding sequences of data."""
         return NullDataEncoder()
 
@@ -356,7 +360,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
 class NullAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for creating NullAccumulator objects."""
 
-    def __init__(self, keys: Optional[str] = None) -> None:
+    def __init__(self, keys: str | None = None) -> None:
         """NullAccumulatorFactory object.
 
         Args:
@@ -368,7 +372,7 @@ class NullAccumulatorFactory(StatisticAccumulatorFactory):
         """
         self.keys = keys
 
-    def make(self) -> 'NullAccumulator':
+    def make(self) -> "NullAccumulator":
         """Returns a new NullAccumulator object."""
         return NullAccumulator(keys=self.keys)
 
@@ -376,11 +380,13 @@ class NullAccumulatorFactory(StatisticAccumulatorFactory):
 class NullEstimator(ParameterEstimator):
     """Estimator that always produces a NullDistribution regardless of the data."""
 
-    def __init__(self,
-                 pseudo_count: Optional[float] = None,
-                 suff_stat: Optional[Any] = None,
-                 name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: Any | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """NullEstimator object.
 
         Args:
@@ -401,11 +407,11 @@ class NullEstimator(ParameterEstimator):
         self.keys = keys
         self.name = name
 
-    def accumulator_factory(self) -> 'NullAccumulatorFactory':
+    def accumulator_factory(self) -> "NullAccumulatorFactory":
         """Returns a NullAccumulatorFactory for creating NullAccumulator objects."""
         return NullAccumulatorFactory(self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Optional[Any] = None) -> 'NullDistribution':
+    def estimate(self, nobs: float | None, suff_stat: Any | None = None) -> "NullDistribution":
         """Returns a NullDistribution; arguments are ignored.
 
         Args:
@@ -424,7 +430,7 @@ class NullDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns string representation of NullDataEncoder object."""
-        return 'NullDataEncoder'
+        return "NullDataEncoder"
 
     def __eq__(self, other) -> bool:
         """Checks if other object is an instance of a NullDataEncoder.

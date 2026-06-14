@@ -11,17 +11,18 @@ requires sympy or sage.  Array inputs (NumPy object arrays of expression
 nodes) are mapped elementwise into a NumPy object array of backend
 expressions, preserving shape.
 """
+
 from __future__ import annotations
 
-from typing import Any, Callable, Dict
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
 from pysp.engines.symbolic_engine import SymbolicExpression
 
-
 #: Ops that have no symbolic meaning (data-dependent index/tabulation kernels).
-_NON_SYMBOLIC_OPS = frozenset({'bincount', 'unique', 'searchsorted', 'index_add'})
+_NON_SYMBOLIC_OPS = frozenset({"bincount", "unique", "searchsorted", "index_add"})
 
 
 def _import_sympy():
@@ -29,8 +30,9 @@ def _import_sympy():
         import sympy  # noqa: F401
     except ImportError as exc:  # pragma: no cover - exercised only without sympy
         raise ImportError(
-            'sympy is required for to_sympy/to_latex; install it with '
-            "`pip install sympy` (or `pip install pysparkplug[sympy]`).") from exc
+            "sympy is required for to_sympy/to_latex; install it with "
+            "`pip install sympy` (or `pip install pysparkplug[sympy]`)."
+        ) from exc
     return sympy
 
 
@@ -39,8 +41,8 @@ def _import_sage():
         import sage.all as sage  # noqa: F401
     except ImportError as exc:  # pragma: no cover - sage is not installed here
         raise ImportError(
-            'sagemath is required for to_sage; install Sage and run under its '
-            'Python interpreter.') from exc
+            "sagemath is required for to_sage; install Sage and run under its Python interpreter."
+        ) from exc
     return sage
 
 
@@ -60,37 +62,38 @@ def _map_array(x: np.ndarray, convert: Callable[[Any], Any]) -> np.ndarray:
 # sympy backend
 # ---------------------------------------------------------------------------
 
-def _sympy_ops(sympy) -> Dict[str, Callable[..., Any]]:
+
+def _sympy_ops(sympy) -> dict[str, Callable[..., Any]]:
     return {
-        'add': lambda a, b: a + b,
-        'sub': lambda a, b: a - b,
-        'mul': lambda a, b: a * b,
-        'div': lambda a, b: a / b,
-        'pow': lambda a, b: a ** b,
-        'neg': lambda a: -a,
-        'lt': lambda a, b: sympy.Lt(a, b),
-        'le': lambda a, b: sympy.Le(a, b),
-        'gt': lambda a, b: sympy.Gt(a, b),
-        'ge': lambda a, b: sympy.Ge(a, b),
-        'eq': lambda a, b: sympy.Eq(a, b),
-        'ne': lambda a, b: sympy.Ne(a, b),
-        'and': lambda a, b: sympy.And(a, b),
-        'or': lambda a, b: sympy.Or(a, b),
-        'invert': lambda a: sympy.Not(a),
-        'log': sympy.log,
-        'exp': sympy.exp,
-        'sqrt': sympy.sqrt,
-        'abs': sympy.Abs,
-        'floor': sympy.floor,
-        'gammaln': sympy.loggamma,
-        'digamma': sympy.digamma,
-        'erf': sympy.erf,
-        'betaln': lambda a, b: sympy.loggamma(a) + sympy.loggamma(b) - sympy.loggamma(a + b),
-        'isnan': lambda a: sympy.Function('isnan')(a),
-        'isinf': lambda a: sympy.Function('isinf')(a),
-        'max': lambda *xs: sympy.Max(*xs),
-        'where': lambda cond, a, b: sympy.Piecewise((a, cond), (b, True)),
-        'clip': lambda x, a_min, a_max: _sympy_clip(sympy, x, a_min, a_max),
+        "add": lambda a, b: a + b,
+        "sub": lambda a, b: a - b,
+        "mul": lambda a, b: a * b,
+        "div": lambda a, b: a / b,
+        "pow": lambda a, b: a**b,
+        "neg": lambda a: -a,
+        "lt": lambda a, b: sympy.Lt(a, b),
+        "le": lambda a, b: sympy.Le(a, b),
+        "gt": lambda a, b: sympy.Gt(a, b),
+        "ge": lambda a, b: sympy.Ge(a, b),
+        "eq": lambda a, b: sympy.Eq(a, b),
+        "ne": lambda a, b: sympy.Ne(a, b),
+        "and": lambda a, b: sympy.And(a, b),
+        "or": lambda a, b: sympy.Or(a, b),
+        "invert": lambda a: sympy.Not(a),
+        "log": sympy.log,
+        "exp": sympy.exp,
+        "sqrt": sympy.sqrt,
+        "abs": sympy.Abs,
+        "floor": sympy.floor,
+        "gammaln": sympy.loggamma,
+        "digamma": sympy.digamma,
+        "erf": sympy.erf,
+        "betaln": lambda a, b: sympy.loggamma(a) + sympy.loggamma(b) - sympy.loggamma(a + b),
+        "isnan": lambda a: sympy.Function("isnan")(a),
+        "isinf": lambda a: sympy.Function("isinf")(a),
+        "max": lambda *xs: sympy.Max(*xs),
+        "where": lambda cond, a, b: sympy.Piecewise((a, cond), (b, True)),
+        "clip": lambda x, a_min, a_max: _sympy_clip(sympy, x, a_min, a_max),
     }
 
 
@@ -116,17 +119,15 @@ def to_sympy(expr: Any) -> Any:
 
     def convert(node: Any) -> Any:
         if isinstance(node, SymbolicExpression):
-            if node.op == 'symbol':
+            if node.op == "symbol":
                 return sympy.Symbol(node.args[0])
-            if node.op == 'const':
+            if node.op == "const":
                 return _sympy_const(sympy, node.args[0])
             if node.op in _NON_SYMBOLIC_OPS:
-                raise NotImplementedError(
-                    "symbolic op %r has no sympy representation" % node.op)
+                raise NotImplementedError("symbolic op %r has no sympy representation" % node.op)
             handler = ops.get(node.op)
             if handler is None:
-                raise NotImplementedError(
-                    "symbolic op %r is not supported by to_sympy" % node.op)
+                raise NotImplementedError("symbolic op %r is not supported by to_sympy" % node.op)
             return handler(*[convert(arg) for arg in node.args])
         if _is_array(node):
             return _map_array(node, convert)
@@ -159,37 +160,38 @@ def to_latex(expr: Any) -> str:
 # sage backend
 # ---------------------------------------------------------------------------
 
-def _sage_ops(sage) -> Dict[str, Callable[..., Any]]:
+
+def _sage_ops(sage) -> dict[str, Callable[..., Any]]:
     return {
-        'add': lambda a, b: a + b,
-        'sub': lambda a, b: a - b,
-        'mul': lambda a, b: a * b,
-        'div': lambda a, b: a / b,
-        'pow': lambda a, b: a ** b,
-        'neg': lambda a: -a,
-        'lt': lambda a, b: a < b,
-        'le': lambda a, b: a <= b,
-        'gt': lambda a, b: a > b,
-        'ge': lambda a, b: a >= b,
-        'eq': lambda a, b: a == b,
-        'ne': lambda a, b: a != b,
-        'and': lambda a, b: a & b,
-        'or': lambda a, b: a | b,
-        'invert': lambda a: ~a,
-        'log': sage.log,
-        'exp': sage.exp,
-        'sqrt': sage.sqrt,
-        'abs': sage.abs_symbolic,
-        'floor': sage.floor,
-        'gammaln': sage.log_gamma,
-        'digamma': sage.psi,
-        'erf': sage.erf,
-        'betaln': lambda a, b: sage.log_gamma(a) + sage.log_gamma(b) - sage.log_gamma(a + b),
-        'isnan': lambda a: sage.function('isnan')(a),
-        'isinf': lambda a: sage.function('isinf')(a),
-        'max': lambda *xs: sage.max_symbolic(*xs),
-        'where': lambda cond, a, b: _sage_where(sage, cond, a, b),
-        'clip': lambda x, a_min, a_max: _sage_clip(sage, x, a_min, a_max),
+        "add": lambda a, b: a + b,
+        "sub": lambda a, b: a - b,
+        "mul": lambda a, b: a * b,
+        "div": lambda a, b: a / b,
+        "pow": lambda a, b: a**b,
+        "neg": lambda a: -a,
+        "lt": lambda a, b: a < b,
+        "le": lambda a, b: a <= b,
+        "gt": lambda a, b: a > b,
+        "ge": lambda a, b: a >= b,
+        "eq": lambda a, b: a == b,
+        "ne": lambda a, b: a != b,
+        "and": lambda a, b: a & b,
+        "or": lambda a, b: a | b,
+        "invert": lambda a: ~a,
+        "log": sage.log,
+        "exp": sage.exp,
+        "sqrt": sage.sqrt,
+        "abs": sage.abs_symbolic,
+        "floor": sage.floor,
+        "gammaln": sage.log_gamma,
+        "digamma": sage.psi,
+        "erf": sage.erf,
+        "betaln": lambda a, b: sage.log_gamma(a) + sage.log_gamma(b) - sage.log_gamma(a + b),
+        "isnan": lambda a: sage.function("isnan")(a),
+        "isinf": lambda a: sage.function("isinf")(a),
+        "max": lambda *xs: sage.max_symbolic(*xs),
+        "where": lambda cond, a, b: _sage_where(sage, cond, a, b),
+        "clip": lambda x, a_min, a_max: _sage_clip(sage, x, a_min, a_max),
     }
 
 
@@ -222,17 +224,15 @@ def to_sage(expr: Any) -> Any:
 
     def convert(node: Any) -> Any:
         if isinstance(node, SymbolicExpression):
-            if node.op == 'symbol':
+            if node.op == "symbol":
                 return sage.var(node.args[0])
-            if node.op == 'const':
+            if node.op == "const":
                 return sage.SR(node.args[0])
             if node.op in _NON_SYMBOLIC_OPS:
-                raise NotImplementedError(
-                    "symbolic op %r has no sage representation" % node.op)
+                raise NotImplementedError("symbolic op %r has no sage representation" % node.op)
             handler = ops.get(node.op)
             if handler is None:
-                raise NotImplementedError(
-                    "symbolic op %r is not supported by to_sage" % node.op)
+                raise NotImplementedError("symbolic op %r is not supported by to_sage" % node.op)
             return handler(*[convert(arg) for arg in node.args])
         if _is_array(node):
             return _map_array(node, convert)

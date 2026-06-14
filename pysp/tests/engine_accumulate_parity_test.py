@@ -4,16 +4,18 @@ Drives every torch-ready distribution from the backend-scoring catalog through b
 seq_update and the engine kernel accumulate, asserting identical sufficient statistics. This is the
 end-to-end check that structural wrappers keep nested families engine-resident.
 """
+
 import unittest
 
 import numpy as np
 
-from pysp.tests.backend_scoring_test import BackendScoringTestCase
 from pysp.engines import NUMPY_ENGINE
+from pysp.tests.backend_scoring_test import BackendScoringTestCase
 
 try:
     from pysp.engines import TorchEngine
-    _TORCH = TorchEngine(device='cpu', dtype='float64')
+
+    _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
 
@@ -46,7 +48,7 @@ def _flatten(v):
 
 def _catalog():
     cases = []
-    for meth in ['backend_leaf_cases', 'stacked_mixture_cases']:
+    for meth in ["backend_leaf_cases", "stacked_mixture_cases"]:
         fn = getattr(BackendScoringTestCase, meth, None)
         if fn is None:
             continue
@@ -57,12 +59,11 @@ def _catalog():
 
 
 class EngineAccumulateParityTestCase(unittest.TestCase):
-
     def test_catalog_parity(self):
-        engines = [('numpy', NUMPY_ENGINE)] + ([('torch', _TORCH)] if _TORCH is not None else [])
+        engines = [("numpy", NUMPY_ENGINE)] + ([("torch", _TORCH)] if _TORCH is not None else [])
         checked = 0
         for name, dist, data in _catalog():
-            if 'torch' not in dist.supported_engines():
+            if "torch" not in dist.supported_engines():
                 continue
             try:
                 est = dist.estimator()
@@ -77,13 +78,13 @@ class EngineAccumulateParityTestCase(unittest.TestCase):
                 with self.subTest(dist=name, engine=ename):
                     kernel = dist.kernel(engine=engine, estimator=est)
                     value = _flatten(kernel.accumulate(enc, weights))
-                    self.assertEqual(hv.shape, value.shape,
-                                     '%s/%s suff-stat shape mismatch' % (name, ename))
-                    self.assertTrue(np.allclose(hv, value, atol=1.0e-6, rtol=1.0e-6),
-                                    '%s/%s suff-stats differ' % (name, ename))
+                    self.assertEqual(hv.shape, value.shape, "%s/%s suff-stat shape mismatch" % (name, ename))
+                    self.assertTrue(
+                        np.allclose(hv, value, atol=1.0e-6, rtol=1.0e-6), "%s/%s suff-stats differ" % (name, ename)
+                    )
             checked += 1
-        self.assertGreater(checked, 20, 'expected to exercise many catalog distributions')
+        self.assertGreater(checked, 20, "expected to exercise many catalog distributions")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -7,32 +7,42 @@ distribution whose contribution is added to the document log-density, (2) the de
 an explicit length model, and (3) LDADistribution.estimator() propagates the length
 model class.
 """
+
 import unittest
 
 import numpy as np
 
-from pysp.stats import (LDADistribution, LDAEstimator, CategoricalEstimator, PoissonEstimator,
-                        PoissonDistribution, NullDistribution, NullEstimator, seq_encode,
-                        seq_initialize, seq_estimate)
+from pysp.stats import (
+    CategoricalEstimator,
+    LDADistribution,
+    LDAEstimator,
+    NullDistribution,
+    NullEstimator,
+    PoissonDistribution,
+    PoissonEstimator,
+    seq_encode,
+    seq_estimate,
+    seq_initialize,
+)
 from pysp.stats.categorical import CategoricalDistribution
 from pysp.stats.lda import seq_posterior
 from pysp.utils.optsutil import count_by_value
 
 DOCS = [
-    ['a', 'a', 'b'],
-    ['b', 'c', 'c', 'c'],
-    ['a', 'd', 'd'],
-    ['c', 'c', 'd', 'd', 'd'],
-    ['a', 'b', 'c', 'd'],
-    ['a', 'a', 'a', 'b', 'b', 'c'],
-    ['d', 'd'],
-    ['b', 'b', 'c', 'd'],
+    ["a", "a", "b"],
+    ["b", "c", "c", "c"],
+    ["a", "d", "d"],
+    ["c", "c", "d", "d", "d"],
+    ["a", "b", "c", "d"],
+    ["a", "a", "a", "b", "b", "c"],
+    ["d", "d"],
+    ["b", "b", "c", "d"],
 ]
 
 
 def fit_lda(data, len_estimator=None, n_iter=10):
     """Fit a 2-topic LDA on data with a fixed seed; optionally with a length estimator."""
-    topic_est = CategoricalEstimator(pseudo_count=0.001, suff_stat={w: 0.25 for w in 'abcd'})
+    topic_est = CategoricalEstimator(pseudo_count=0.001, suff_stat={w: 0.25 for w in "abcd"})
     est = LDAEstimator([topic_est] * 2, len_estimator=len_estimator, gamma_threshold=1.0e-8)
 
     enc_data = seq_encode(data, estimator=est)
@@ -44,7 +54,6 @@ def fit_lda(data, len_estimator=None, n_iter=10):
 
 
 class LDALenTestCase(unittest.TestCase):
-
     def setUp(self) -> None:
         self.data = [sorted(count_by_value(u).items()) for u in DOCS]
         self.doc_lens = [sum(cnt for _, cnt in doc) for doc in self.data]
@@ -99,19 +108,18 @@ class LDALenTestCase(unittest.TestCase):
 
 
 class LDASufficientStatisticWeightingTestCase(unittest.TestCase):
-
     def test_seq_update_uses_weighted_expected_counts_once(self):
         topics = [
-            CategoricalDistribution({'a': 0.7, 'b': 0.2, 'c': 0.1}),
-            CategoricalDistribution({'a': 0.1, 'b': 0.3, 'c': 0.6}),
+            CategoricalDistribution({"a": 0.7, "b": 0.2, "c": 0.1}),
+            CategoricalDistribution({"a": 0.1, "b": 0.3, "c": 0.6}),
         ]
         model = LDADistribution(topics, np.asarray([1.4, 0.8]), gamma_threshold=1.0e-10)
         est = LDAEstimator([CategoricalEstimator(), CategoricalEstimator()], gamma_threshold=1.0e-10)
 
         docs = [
-            [('a', 3.0), ('b', 1.0)],
-            [('b', 2.0), ('c', 4.0)],
-            [('a', 1.0), ('c', 2.0)],
+            [("a", 3.0), ("b", 1.0)],
+            [("b", 2.0), ("c", 4.0)],
+            [("a", 1.0), ("c", 2.0)],
         ]
         weights = np.asarray([1.0, 0.25, 2.0])
         flat_words = [word for doc in docs for word, _ in doc]
@@ -133,5 +141,5 @@ class LDASufficientStatisticWeightingTestCase(unittest.TestCase):
             self.assertAlmostEqual(sum(suff_stat.values()), topic_counts[topic_idx], places=10)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

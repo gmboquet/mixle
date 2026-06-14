@@ -23,19 +23,22 @@ q(theta_k). seq_local_elbo provides the per-observation data terms of the
 ELBO; the data-independent terms live in
 DirichletProcessMixtureEstimator.model_log_density.
 """
-from pysp.arithmetic import *
-from pysp.bstats.pdist import ProbabilityDistribution, StatisticAccumulator, ParameterEstimator
-from pysp.utils.special import digamma, gammaln, betaln
-from pysp.bstats.gamma import GammaDistribution
-from pysp.bstats.beta import BetaDistribution
-from pysp.bstats.sequence import SequenceDistribution
-from pysp.bstats.composite import CompositeDistribution
-from pysp.bstats.nulldist import null_dist
-from numpy.random import RandomState
-import numpy as np
-import pysp.utils.vector as vec
 
-def cbg(x,s1,s2):
+import numpy as np
+from numpy.random import RandomState
+
+import pysp.utils.vector as vec
+from pysp.arithmetic import *
+from pysp.bstats.beta import BetaDistribution
+from pysp.bstats.composite import CompositeDistribution
+from pysp.bstats.gamma import GammaDistribution
+from pysp.bstats.nulldist import null_dist
+from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, StatisticAccumulator
+from pysp.bstats.sequence import SequenceDistribution
+from pysp.utils.special import betaln, digamma
+
+
+def cbg(x, s1, s2):
     """Log-density of a compound Beta-Gamma stick fraction: x = 1 - exp(-y)
     with y ~ Exponential(alpha) and alpha ~ Gamma(s1, 1/s2), marginalized
     over alpha.
@@ -49,10 +52,11 @@ def cbg(x,s1,s2):
         Log-density at x.
 
     """
-    return np.log(s1) + s1*np.log(s2) - (s1+1)*np.log(s2-np.log1p(-x)) - np.log1p(-x)
+    return np.log(s1) + s1 * np.log(s2) - (s1 + 1) * np.log(s2 - np.log1p(-x)) - np.log1p(-x)
 
-default_prior = GammaDistribution(2,1)
-#default_prior = null_dist
+
+default_prior = GammaDistribution(2, 1)
+# default_prior = null_dist
 
 
 def _expected_log_stick_weights(gam):
@@ -106,7 +110,13 @@ class DirichletProcessMixtureDistribution(ProbabilityDistribution):
         self.component_priors = component_priors
 
     def __str__(self):
-        return 'DirichletProcessMixtureDistribution([%s], [%s], %s, name=%s, prior=%s)' % (','.join([str(u) for u in self.components]), ','.join(map(str, self.v)), str(self.a), str(self.name), str(self.prior))
+        return "DirichletProcessMixtureDistribution([%s], [%s], %s, name=%s, prior=%s)" % (
+            ",".join([str(u) for u in self.components]),
+            ",".join(map(str, self.v)),
+            str(self.a),
+            str(self.name),
+            str(self.prior),
+        )
 
     def get_prior(self):
         """Returns the composite prior (alpha hyper-prior, stick-fraction
@@ -125,7 +135,7 @@ class DirichletProcessMixtureDistribution(ProbabilityDistribution):
 
         """
         self.prior = prior.dists[0]
-        for u,p in zip(self.components, prior.dists[2]):
+        for u, p in zip(self.components, prior.dists[2]):
             u.set_prior(p)
 
     def get_parameters(self):
@@ -140,10 +150,10 @@ class DirichletProcessMixtureDistribution(ProbabilityDistribution):
 
         """
         a, w, components = params
-        #w = np.zeros(len(v))
-        #w[0]  = v[0]
-        #w[1:] = np.exp(np.log(v[1:]) + np.cumsum(np.log1p(-v[:-1])))
-        #w /= w.sum()
+        # w = np.zeros(len(v))
+        # w[0]  = v[0]
+        # w[1:] = np.exp(np.log(v[1:]) + np.cumsum(np.log1p(-v[:-1])))
+        # w /= w.sum()
 
         self.components = components
         self.max_components = len(components)
@@ -233,10 +243,10 @@ class DirichletProcessMixtureDistribution(ProbabilityDistribution):
         DirichletProcessMixtureEstimator.model_log_density.
         """
 
-        exp_ll  = np.asarray([u.seq_expected_log_density(x) for u in self.components]).T + self.log_w
+        exp_ll = np.asarray([u.seq_expected_log_density(x) for u in self.components]).T + self.log_w
         max_ell = exp_ll.max(axis=1, keepdims=True)
 
-        phi  = np.exp(exp_ll - max_ell)
+        phi = np.exp(exp_ll - max_ell)
         phi /= phi.sum(axis=1, keepdims=True)
 
         # E_q[log p(z_i | v)] via truncated stick-breaking expectations.
@@ -301,12 +311,15 @@ class DirichletProcessMixtureDistribution(ProbabilityDistribution):
 
         """
         if pseudo_count is not None:
-            return DirichletProcessMixtureEstimator([u.estimator(pseudo_count=1.0/self.num_components) for u in self.components], pseudo_count=pseudo_count)
+            return DirichletProcessMixtureEstimator(
+                [u.estimator(pseudo_count=1.0 / self.num_components) for u in self.components],
+                pseudo_count=pseudo_count,
+            )
         else:
             return DirichletProcessMixtureEstimator([u.estimator() for u in self.components])
 
 
-class DirichletProcessMixtureSampler(object):
+class DirichletProcessMixtureSampler:
     """Draws samples from a DirichletProcessMixtureDistribution."""
 
     def __init__(self, dist, seed=None):
@@ -339,9 +352,9 @@ class DirichletProcessMixtureSampler(object):
         compState = self.rng.choice(range(0, len(self.dist.w)), size=size, replace=True, p=self.dist.w)
 
         if size is None:
-                return self.compSamplers[compState].sample()
+            return self.compSamplers[compState].sample()
         else:
-                return [self.compSamplers[i].sample() for i in compState]
+            return [self.compSamplers[i].sample() for i in compState]
 
 
 class DirichletProcessMixtureAccumulator(StatisticAccumulator):
@@ -361,7 +374,7 @@ class DirichletProcessMixtureAccumulator(StatisticAccumulator):
         self.num_components = len(accumulators)
         self.comp_counts = np.zeros(self.num_components, dtype=float)
         self.beta_counts = np.zeros((self.num_components, 2), dtype=float)
-        self.prev_nw = np.log(0.5)*(self.num_components-1)
+        self.prev_nw = np.log(0.5) * (self.num_components - 1)
         self.a = 1.0
         self.weight_key = keys[0]
         self.comp_key = keys[1]
@@ -391,7 +404,7 @@ class DirichletProcessMixtureAccumulator(StatisticAccumulator):
         self.comp_counts += phi * weight
         self.beta_counts[:, 0] += phi * weight
         self.beta_counts[:, 1] += (1 - np.cumsum(phi)) * weight
-        #self.prev_nw = estimate.expected_log_nw
+        # self.prev_nw = estimate.expected_log_nw
 
         for i in range(self.num_components):
             self.accumulators[i].update(x, phi[i] * weight, estimate.components[i])
@@ -421,7 +434,7 @@ class DirichletProcessMixtureAccumulator(StatisticAccumulator):
         self.beta_counts[:, 1] += cs_loc
 
         for i in range(self.num_components):
-            self.accumulators[i].seq_update(x, phi[i,:] * weights, estimate.components[i])
+            self.accumulators[i].seq_update(x, phi[i, :] * weights, estimate.components[i])
 
     def initialize(self, x, weight, rng):
         """Initialize with a random Dirichlet assignment of observation x.
@@ -432,12 +445,12 @@ class DirichletProcessMixtureAccumulator(StatisticAccumulator):
             rng (RandomState): Random number generator for the assignment.
 
         """
-        #v = rng.beta(1,self.a,size=self.num_components)
-        #lv = np.log(v)
-        #lv[1:] += np.cumsum(np.log(1-v[:-1]))
-        #lv -= np.max(lv)
-        #p = np.exp(lv)
-        #p /= p.sum()
+        # v = rng.beta(1,self.a,size=self.num_components)
+        # lv = np.log(v)
+        # lv[1:] += np.cumsum(np.log(1-v[:-1]))
+        # lv -= np.max(lv)
+        # p = np.exp(lv)
+        # p /= p.sum()
 
         p = rng.dirichlet(np.ones(self.num_components))
 
@@ -532,7 +545,8 @@ class DirichletProcessMixtureAccumulator(StatisticAccumulator):
         for u in self.accumulators:
             u.key_replace(stats_dict)
 
-class DirichletProcessMixtureAccumulatorFactory(object):
+
+class DirichletProcessMixtureAccumulatorFactory:
     """Factory that creates DirichletProcessMixtureAccumulator objects."""
 
     def __init__(self, factories, dim, keys):
@@ -586,7 +600,7 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
     def get_prior(self):
         """Returns the composite prior (alpha hyper-prior, stick-fraction
         prior at the prior-mean alpha, component priors)."""
-        vprior = SequenceDistribution(BetaDistribution(1,(self.prior.k-1)*self.prior.theta), null_dist)
+        vprior = SequenceDistribution(BetaDistribution(1, (self.prior.k - 1) * self.prior.theta), null_dist)
         cprior = CompositeDistribution([u.get_prior() for u in self.estimators])
         return CompositeDistribution((self.prior, vprior, cprior))
 
@@ -600,7 +614,7 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
 
         """
         self.prior = prior.dists[0]
-        for e,p in zip(self.estimators, prior.dists[2]):
+        for e, p in zip(self.estimators, prior.dists[2]):
             e.set_prior(p)
 
     def model_log_density(self, model):
@@ -620,7 +634,7 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
 
         """
         gam = model.g[:-1, :] if model.g.shape[0] > 1 else model.g[:0, :]
-        gams = gam[:,0]+gam[:,1]
+        gams = gam[:, 0] + gam[:, 1]
         a = model.a
 
         # cross entropy of beta and variational betas
@@ -628,9 +642,13 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
             temp1 = 0.0
             temp41 = 0.0
         else:
-            temp1 = np.sum(-betaln(1,a) + (digamma(gam[:,1])-digamma(gams))*(a-1))
+            temp1 = np.sum(-betaln(1, a) + (digamma(gam[:, 1]) - digamma(gams)) * (a - 1))
             # entropy of variational betas
-            temp41 = -(betaln(gam[:,0],gam[:,1]).sum() - ((gam-1)*digamma(gam)).sum() + ((gams-2)*digamma(gams)).sum())
+            temp41 = -(
+                betaln(gam[:, 0], gam[:, 1]).sum()
+                - ((gam - 1) * digamma(gam)).sum()
+                + ((gams - 2) * digamma(gams)).sum()
+            )
 
         # cross entropy of component priors and variational priors
         temp2 = 0
@@ -641,11 +659,11 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
         # entropy of variational component priors
         temp42 = np.sum([-u.get_prior().entropy() for u in model.components])
         # entropy of sample variational multinomials
-        #temp43 = np.sum(np.log(phi[phi > 0])*phi[phi > 0])
+        # temp43 = np.sum(np.log(phi[phi > 0])*phi[phi > 0])
         temp4 = temp41 + temp42
 
         return temp1 + temp2 - temp4
-        #return 0
+        # return 0
 
     def estimate(self, suff_stat):
         """Estimate a DirichletProcessMixtureDistribution by one VB M-step.
@@ -686,9 +704,9 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
 
         #
 
-        #gammas = np.copy(beta_counts)
-        #gammas[:,0] += 1
-        #gammas[:,1] += alpha
+        # gammas = np.copy(beta_counts)
+        # gammas[:,0] += 1
+        # gammas[:,1] += alpha
 
         #
 
@@ -699,7 +717,7 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
 
         elif isinstance(self.prior, GammaDistribution):
             s1 = self.prior.k
-            s2 = 1/self.prior.theta
+            s2 = 1 / self.prior.theta
 
         else:
             s1 = 0.0
@@ -724,14 +742,16 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
             new_alpha = gw1 / max(gw2, 1.0e-300)
 
             if isinstance(self.prior, GammaDistribution):
-                hyper_posterior = GammaDistribution(gw1, 1/gw2)
+                hyper_posterior = GammaDistribution(gw1, 1 / gw2)
 
         gammas = np.copy(beta_counts)
-        gammas[:,0] += 1
-        gammas[:,1] += new_alpha
+        gammas[:, 0] += 1
+        gammas[:, 1] += new_alpha
 
         expected_log_w = _expected_log_stick_weights(gammas)
         w = np.exp(expected_log_w - np.max(expected_log_w))
         w /= w.sum()
 
-        return DirichletProcessMixtureDistribution(components, w, new_alpha, gammas, component_priors, prior=hyper_posterior)
+        return DirichletProcessMixtureDistribution(
+            components, w, new_alpha, gammas, component_priors, prior=hyper_posterior
+        )

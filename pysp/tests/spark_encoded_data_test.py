@@ -15,16 +15,15 @@ def _spark_context():
         from pyspark.sql import SparkSession
     except ImportError:
         return None
-    os.environ.setdefault('PYSPARK_PYTHON', sys.executable)
-    os.environ.setdefault('PYSPARK_DRIVER_PYTHON', sys.executable)
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
     try:
         spark = (
-            SparkSession.builder
-            .master('local[2]')
-            .appName('pysparkplug-spark-encoded-data-test')
-            .config('spark.ui.enabled', 'false')
-            .config('spark.driver.host', '127.0.0.1')
-            .config('spark.sql.shuffle.partitions', '2')
+            SparkSession.builder.master("local[2]")
+            .appName("pysparkplug-spark-encoded-data-test")
+            .config("spark.ui.enabled", "false")
+            .config("spark.driver.host", "127.0.0.1")
+            .config("spark.sql.shuffle.partitions", "2")
             .getOrCreate()
         )
     except Exception:
@@ -34,17 +33,16 @@ def _spark_context():
 
 
 class SparkEncodedDataTestCase(unittest.TestCase):
-
     @classmethod
     def setUpClass(cls):
         cls.sc = _spark_context()
         if cls.sc is None:
-            raise unittest.SkipTest('pyspark or a usable JVM is not available')
-        cls.sc.setLogLevel('ERROR')
+            raise unittest.SkipTest("pyspark or a usable JVM is not available")
+        cls.sc.setLogLevel("ERROR")
 
     @classmethod
     def tearDownClass(cls):
-        if getattr(cls, 'sc', None) is not None:
+        if getattr(cls, "sc", None) is not None:
             cls.sc.stop()
 
     def test_spark_handle_matches_local_scoring_and_estimate(self):
@@ -74,13 +72,13 @@ class SparkEncodedDataTestCase(unittest.TestCase):
         start = GaussianDistribution(1.0, 4.0)
         estimator = GaussianEstimator()
 
-        with encoded_data(rdd, model=start, estimator=estimator, backend='spark') as enc:
+        with encoded_data(rdd, model=start, estimator=estimator, backend="spark") as enc:
             self.assertIsInstance(enc, SparkEncodedData)
 
-        fitted = optimize(rdd, estimator, prev_estimate=start, backend='spark',
-                          max_its=2, delta=None, out=io.StringIO())
-        local = optimize(data, estimator, prev_estimate=start, max_its=2,
-                         delta=None, out=io.StringIO())
+        fitted = optimize(
+            rdd, estimator, prev_estimate=start, backend="spark", max_its=2, delta=None, out=io.StringIO()
+        )
+        local = optimize(data, estimator, prev_estimate=start, max_its=2, delta=None, out=io.StringIO())
 
         self.assertAlmostEqual(fitted.mu, local.mu, places=10)
         self.assertAlmostEqual(fitted.sigma2, local.sigma2, places=10)
@@ -107,5 +105,5 @@ class SparkEncodedDataTestCase(unittest.TestCase):
         self.assertAlmostEqual(fitted_h.sigma2, fitted_l.sigma2, places=10)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

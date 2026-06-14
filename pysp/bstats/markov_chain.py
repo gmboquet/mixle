@@ -11,16 +11,17 @@ falling back to the posterior mean when degenerate), carrying the posterior
 Dirichlets as the new prior. expected_log_density uses the standard digamma
 expectations E[ln p_k] = psi(alpha_k) - psi(sum alpha).
 """
-from typing import List, Optional, Sequence, Tuple
+
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma
 
-from pysp.bstats.pdist import ProbabilityDistribution, StatisticAccumulator, ParameterEstimator
-from pysp.bstats.dirichlet import DirichletDistribution
 from pysp.bstats.composite import CompositeDistribution
-from pysp.bstats.nulldist import null_dist, NullDistribution, NullEstimator, NullAccumulator
+from pysp.bstats.dirichlet import DirichletDistribution
+from pysp.bstats.nulldist import NullAccumulator, NullDistribution, NullEstimator, null_dist
+from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, StatisticAccumulator
 
 
 def default_prior(num_states: int):
@@ -34,8 +35,10 @@ def default_prior(num_states: int):
         Tuple (DirichletDistribution, list of S DirichletDistribution).
 
     """
-    return (DirichletDistribution(np.ones(num_states)),
-            [DirichletDistribution(np.ones(num_states)) for _ in range(num_states)])
+    return (
+        DirichletDistribution(np.ones(num_states)),
+        [DirichletDistribution(np.ones(num_states)) for _ in range(num_states)],
+    )
 
 
 def _map_probs(counts: np.ndarray, alpha: np.ndarray) -> np.ndarray:
@@ -43,9 +46,9 @@ def _map_probs(counts: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     num = np.maximum(counts + alpha - 1.0, 0.0)
     tot = num.sum()
     if tot > 0:
-        return num/tot
+        return num / tot
     cpp = counts + alpha
-    return cpp/cpp.sum()
+    return cpp / cpp.sum()
 
 
 def _unpack_chain_prior(prior):
@@ -67,8 +70,14 @@ class MarkovChainDistribution(ProbabilityDistribution):
     probabilities and a transition matrix, optionally carrying conjugate
     Dirichlet priors on each."""
 
-    def __init__(self, init_prob_vec, transition_mat, name: Optional[str] = None,
-                 prior=None, len_dist: ProbabilityDistribution = null_dist):
+    def __init__(
+        self,
+        init_prob_vec,
+        transition_mat,
+        name: str | None = None,
+        prior=None,
+        len_dist: ProbabilityDistribution = null_dist,
+    ):
         """MarkovChainDistribution object.
 
         Args:
@@ -88,12 +97,11 @@ class MarkovChainDistribution(ProbabilityDistribution):
         self.set_prior(prior if prior is not None else default_prior(self.num_states))
 
     def __str__(self):
-        pstr = ','.join(map(str, self.init_prob_vec.tolist()))
-        tstr = ','.join(map(str, self.transition_mat.flatten().tolist()))
-        return 'MarkovChainDistribution([%s], [%s], name=%s, len_dist=%s)' % (
-            pstr, tstr, self.name, str(self.len_dist))
+        pstr = ",".join(map(str, self.init_prob_vec.tolist()))
+        tstr = ",".join(map(str, self.transition_mat.flatten().tolist()))
+        return "MarkovChainDistribution([%s], [%s], name=%s, len_dist=%s)" % (pstr, tstr, self.name, str(self.len_dist))
 
-    def get_parameters(self) -> Tuple[np.ndarray, np.ndarray]:
+    def get_parameters(self) -> tuple[np.ndarray, np.ndarray]:
         """Returns the parameter tuple (init_prob_vec, transition_mat)."""
         return self.init_prob_vec, self.transition_mat
 
@@ -106,7 +114,7 @@ class MarkovChainDistribution(ProbabilityDistribution):
         """
         init_prob_vec, transition_mat = params
 
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             self.init_prob_vec = np.asarray(init_prob_vec, dtype=float)
             self.transition_mat = np.asarray(transition_mat, dtype=float)
             self.num_states = len(self.init_prob_vec)
@@ -134,8 +142,9 @@ class MarkovChainDistribution(ProbabilityDistribution):
         """
         self.init_prior, self.row_priors, _ = _unpack_chain_prior(prior)
 
-        if isinstance(self.init_prior, DirichletDistribution) and \
-                all(isinstance(u, DirichletDistribution) for u in self.row_priors):
+        if isinstance(self.init_prior, DirichletDistribution) and all(
+            isinstance(u, DirichletDistribution) for u in self.row_priors
+        ):
             a0 = np.asarray(self.init_prior.get_parameters(), dtype=float)
             self.e_log_init = digamma(a0) - digamma(a0.sum())
 
@@ -221,8 +230,12 @@ class MarkovChainDistribution(ProbabilityDistribution):
         init_states = np.asarray([u[0] for u in x], dtype=int)
 
         pair_seq_idx = np.repeat(np.arange(len(x)), np.maximum(lengths - 1, 0))
-        prev_states = np.concatenate([np.asarray(u[:-1], dtype=int) for u in x]) if len(x) > 0 else np.zeros(0, dtype=int)
-        next_states = np.concatenate([np.asarray(u[1:], dtype=int) for u in x]) if len(x) > 0 else np.zeros(0, dtype=int)
+        prev_states = (
+            np.concatenate([np.asarray(u[:-1], dtype=int) for u in x]) if len(x) > 0 else np.zeros(0, dtype=int)
+        )
+        next_states = (
+            np.concatenate([np.asarray(u[1:], dtype=int) for u in x]) if len(x) > 0 else np.zeros(0, dtype=int)
+        )
 
         if isinstance(self.len_dist, NullDistribution) or self.len_dist is None:
             len_enc = None
@@ -269,7 +282,7 @@ class MarkovChainDistribution(ProbabilityDistribution):
 
         return rv
 
-    def sampler(self, seed: Optional[int] = None):
+    def sampler(self, seed: int | None = None):
         """Create a MarkovChainSampler for this distribution.
 
         Args:
@@ -290,14 +303,15 @@ class MarkovChainDistribution(ProbabilityDistribution):
 
         """
         len_est = NullEstimator() if isinstance(self.len_dist, NullDistribution) else self.len_dist.estimator()
-        return MarkovChainEstimator(self.num_states, name=self.name,
-                                    prior=(self.init_prior, self.row_priors), len_estimator=len_est)
+        return MarkovChainEstimator(
+            self.num_states, name=self.name, prior=(self.init_prior, self.row_priors), len_estimator=len_est
+        )
 
 
-class MarkovChainSampler(object):
+class MarkovChainSampler:
     """Draws state sequences from a MarkovChainDistribution."""
 
-    def __init__(self, dist: MarkovChainDistribution, seed: Optional[int] = None):
+    def __init__(self, dist: MarkovChainDistribution, seed: int | None = None):
         """MarkovChainSampler object.
 
         Args:
@@ -313,7 +327,7 @@ class MarkovChainSampler(object):
         else:
             self.len_sampler = dist.len_dist.sampler(seed=rng.randint(0, 2**31 - 1))
 
-    def sample_seq(self, n: Optional[int] = None) -> List[int]:
+    def sample_seq(self, n: int | None = None) -> list[int]:
         """Draw a single state sequence.
 
         Args:
@@ -326,7 +340,7 @@ class MarkovChainSampler(object):
         """
         if n is None:
             if self.len_sampler is None:
-                raise Exception('MarkovChainSampler requires a len_dist (or explicit n) to sample sequences.')
+                raise Exception("MarkovChainSampler requires a len_dist (or explicit n) to sample sequences.")
             n = int(self.len_sampler.sample())
 
         if n == 0:
@@ -491,7 +505,7 @@ class MarkovChainAccumulator(StatisticAccumulator):
                 self.from_value(stats_dict[self.key].value())
 
 
-class MarkovChainAccumulatorFactory(object):
+class MarkovChainAccumulatorFactory:
     """Factory that creates MarkovChainAccumulator objects."""
 
     def __init__(self, num_states, len_factory, name, keys):
@@ -519,8 +533,14 @@ class MarkovChainEstimator(ParameterEstimator):
     """Estimates a MarkovChainDistribution from sufficient statistics, using
     clamped Dirichlet MAP updates when the priors allow it."""
 
-    def __init__(self, num_states: int, name: Optional[str] = None, keys: Optional[str] = None,
-                 prior=None, len_estimator: ParameterEstimator = NullEstimator()):
+    def __init__(
+        self,
+        num_states: int,
+        name: str | None = None,
+        keys: str | None = None,
+        prior=None,
+        len_estimator: ParameterEstimator = NullEstimator(),
+    ):
         """MarkovChainEstimator object.
 
         Args:
@@ -542,7 +562,9 @@ class MarkovChainEstimator(ParameterEstimator):
 
     def accumulator_factory(self):
         """Returns a MarkovChainAccumulatorFactory for this estimator."""
-        len_factory = None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.accumulator_factory()
+        len_factory = (
+            None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.accumulator_factory()
+        )
         return MarkovChainAccumulatorFactory(self.num_states, len_factory, self.name, self.keys)
 
     def get_prior(self):
@@ -559,8 +581,9 @@ class MarkovChainEstimator(ParameterEstimator):
 
         """
         self.init_prior, self.row_priors, _ = _unpack_chain_prior(prior)
-        self.has_conj_prior = isinstance(self.init_prior, DirichletDistribution) and \
-            all(isinstance(u, DirichletDistribution) for u in self.row_priors)
+        self.has_conj_prior = isinstance(self.init_prior, DirichletDistribution) and all(
+            isinstance(u, DirichletDistribution) for u in self.row_priors
+        )
 
     def model_log_density(self, model) -> float:
         """Log-density of the model's probabilities under the Dirichlet priors.
@@ -613,7 +636,6 @@ class MarkovChainEstimator(ParameterEstimator):
             len_dist = self.len_estimator.estimate(len_val)
 
         if self.has_conj_prior:
-
             a0 = np.asarray(self.init_prior.get_parameters(), dtype=float)
             init_probs = _map_probs(init_counts, a0)
             init_posterior = DirichletDistribution(init_counts + a0)
@@ -625,13 +647,13 @@ class MarkovChainEstimator(ParameterEstimator):
                 trans_mat[i, :] = _map_probs(trans_counts[i, :], ai)
                 row_posteriors.append(DirichletDistribution(trans_counts[i, :] + ai))
 
-            return MarkovChainDistribution(init_probs, trans_mat, name=self.name,
-                                           prior=(init_posterior, row_posteriors), len_dist=len_dist)
+            return MarkovChainDistribution(
+                init_probs, trans_mat, name=self.name, prior=(init_posterior, row_posteriors), len_dist=len_dist
+            )
 
         else:
-
-            init_probs = init_counts/init_counts.sum() if init_counts.sum() > 0 else np.ones(s)/s
+            init_probs = init_counts / init_counts.sum() if init_counts.sum() > 0 else np.ones(s) / s
             row_sums = trans_counts.sum(axis=1, keepdims=True)
-            trans_mat = np.where(row_sums > 0, trans_counts/np.maximum(row_sums, 1.0), 1.0/s)
+            trans_mat = np.where(row_sums > 0, trans_counts / np.maximum(row_sums, 1.0), 1.0 / s)
 
             return MarkovChainDistribution(init_probs, trans_mat, name=self.name, len_dist=len_dist)

@@ -11,15 +11,23 @@ else -inf. In above,
     log(Const) = sum_{k=0}^{K-1} log(Gamma(alpha_k)) - log(Gamma(sum_{k=0}^{K-1} alpha_k)).
 
 """
-import numpy as np
+
 import sys
+from collections.abc import Callable, Sequence
+from typing import Any, Optional
+
+import numpy as np
 from numpy.random import RandomState
+
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
 from pysp.utils.special import *
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler,\
-    SequenceEncodableStatisticAccumulator, DataSequenceEncoder, StatisticAccumulatorFactory
-
-from typing import Union, List, Any, Optional, Dict, Sequence, Tuple, Callable
-
 
 _MIN_DIRICHLET_ALPHA = 1.0e-10
 _MAX_DIRICHLET_ALPHA = 1.0e10
@@ -54,9 +62,9 @@ def _mean_from_mean_log(mean_log_p: np.ndarray, dim: int) -> np.ndarray:
     return _safe_simplex_mean(rv, dim)
 
 
-def _initial_dirichlet_alpha(mean_v: np.ndarray,
-                             mean_v2: Optional[np.ndarray] = None,
-                             mean_log_p: Optional[np.ndarray] = None) -> np.ndarray:
+def _initial_dirichlet_alpha(
+    mean_v: np.ndarray, mean_v2: np.ndarray | None = None, mean_log_p: np.ndarray | None = None
+) -> np.ndarray:
     mean = _safe_simplex_mean(mean_v, len(mean_v))
     alpha0 = 1.0
 
@@ -64,8 +72,7 @@ def _initial_dirichlet_alpha(mean_v: np.ndarray,
         second = np.asarray(mean_v2, dtype=float).copy()
         second[~np.isfinite(second)] = np.nan
         var = second - mean * mean
-        good = (mean > _MIN_DIRICHLET_ALPHA) & (mean < 1.0 - _MIN_DIRICHLET_ALPHA) \
-            & np.isfinite(var) & (var > 0.0)
+        good = (mean > _MIN_DIRICHLET_ALPHA) & (mean < 1.0 - _MIN_DIRICHLET_ALPHA) & np.isfinite(var) & (var > 0.0)
         if np.any(good):
             cand = mean[good] * (1.0 - mean[good]) / var[good] - 1.0
             cand = cand[np.isfinite(cand) & (cand > 0.0)]
@@ -84,13 +91,14 @@ def _initial_dirichlet_alpha(mean_v: np.ndarray,
     return np.clip(alpha, _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
 
 
-def _valid_alpha(alpha: np.ndarray, dim: Optional[int] = None) -> bool:
+def _valid_alpha(alpha: np.ndarray, dim: int | None = None) -> bool:
     arr = np.asarray(alpha, dtype=float)
     return (dim is None or arr.size == dim) and np.all(np.isfinite(arr)) and np.all(arr > 0.0)
 
 
-def dirichlet_param_solve(alpha: np.ndarray, mean_log_p: np.ndarray, delta: float,
-                          max_iter: int = _MAX_DIRICHLET_ITERATIONS) -> Tuple[np.ndarray, int]:
+def dirichlet_param_solve(
+    alpha: np.ndarray, mean_log_p: np.ndarray, delta: float, max_iter: int = _MAX_DIRICHLET_ITERATIONS
+) -> tuple[np.ndarray, int]:
     """Iteratively solve for alpha of a Dirichlet distribution.
 
     Args:
@@ -139,8 +147,9 @@ def dirichlet_param_solve(alpha: np.ndarray, mean_log_p: np.ndarray, delta: floa
     return alpha, max_iter
 
 
-def mpe(x0: np.ndarray, f: Callable[[np.ndarray], np.ndarray], eps: float,
-        max_iter: int = 1000) -> Tuple[np.ndarray, int]:
+def mpe(
+    x0: np.ndarray, f: Callable[[np.ndarray], np.ndarray], eps: float, max_iter: int = 1000
+) -> tuple[np.ndarray, int]:
     """Minimal polynomial extrapolation for accelerating the fixed-point iteration x_{n+1} = f(x_n).
 
     Args:
@@ -196,13 +205,14 @@ def alpha_seq_lambda(mean_log_p: np.ndarray) -> Callable[[np.ndarray], np.ndarra
         Callable mapping the current alpha to the next alpha iterate.
 
     """
+
     def next_alpha(current_alpha):
         return digammainv(mean_log_p + digamma(current_alpha.sum()))
 
     return next_alpha
 
 
-def find_alpha(current_alpha, mlp, thresh) -> Tuple[np.ndarray, int]:
+def find_alpha(current_alpha, mlp, thresh) -> tuple[np.ndarray, int]:
     """Solve for the Dirichlet alpha with MPE-accelerated fixed-point iteration.
 
     Args:
@@ -227,27 +237,28 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='explicit_stacked')
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="explicit_stacked")
 
     @classmethod
     def compute_declaration(cls):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
         return DistributionDeclaration(
-            name='dirichlet',
+            name="dirichlet",
             distribution_type=cls,
-            parameters=(ParameterSpec('alpha', constraint='positive_vector'),),
+            parameters=(ParameterSpec("alpha", constraint="positive_vector"),),
             statistics=(
-                StatisticSpec('count'),
-                StatisticSpec('sum_of_logs', kind='vector_moment'),
-                StatisticSpec('sum', kind='vector_moment'),
-                StatisticSpec('sum2', kind='vector_moment'),
+                StatisticSpec("count"),
+                StatisticSpec("sum_of_logs", kind="vector_moment"),
+                StatisticSpec("sum", kind="vector_moment"),
+                StatisticSpec("sum2", kind="vector_moment"),
             ),
-            support='simplex',
+            support="simplex",
             differentiable=False,
         )
 
-    def __init__(self, alpha: Union[List[float], np.ndarray], name: Optional[str] = None, keys: Optional[str] = None) \
-            -> None:
+    def __init__(self, alpha: list[float] | np.ndarray, name: str | None = None, keys: str | None = None) -> None:
         """DirichletDistribution object defining Dirichlet distribution with parameter alpha.
 
         Args:
@@ -266,9 +277,13 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         temp_alpha = np.asarray(alpha, dtype=float)
-        if temp_alpha.ndim != 1 or temp_alpha.size == 0 or not np.all(np.isfinite(temp_alpha)) \
-                or not np.all(temp_alpha > 0.0):
-            raise ValueError('DirichletDistribution requires a non-empty vector of positive finite alpha values.')
+        if (
+            temp_alpha.ndim != 1
+            or temp_alpha.size == 0
+            or not np.all(np.isfinite(temp_alpha))
+            or not np.all(temp_alpha > 0.0)
+        ):
+            raise ValueError("DirichletDistribution requires a non-empty vector of positive finite alpha values.")
         temp_mask = temp_alpha <= 0
 
         self.dim = len(temp_alpha)
@@ -284,9 +299,9 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         s1 = repr(list(self.alpha))
         s2 = repr(self.name)
         s3 = repr(self.key)
-        return 'DirichletDistribution(%s, name=%s, keys=%s)' % (s1, s2, s3)
+        return "DirichletDistribution(%s, name=%s, keys=%s)" % (s1, s2, s3)
 
-    def density(self, x: Union[List[float], np.ndarray]) -> float:
+    def density(self, x: list[float] | np.ndarray) -> float:
         """Evaluate the density of a dirichlet observation.
 
         See log_density() for details.
@@ -300,7 +315,7 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         """
         return exp(self.log_density(x))
 
-    def log_density(self, x: Union[List[float], np.ndarray]) -> float:
+    def log_density(self, x: list[float] | np.ndarray) -> float:
         """Evaluate the log-density of a dirichlet observation.
 
         The log-density of a Dirichlet with dim = K, is given by
@@ -337,7 +352,7 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         rv -= self.log_const
         return rv
 
-    def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
+    def seq_log_density(self, x: tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
         """Vectorized evaluation of the log-density at a sequence-encoded input x.
 
         Args:
@@ -358,37 +373,34 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral Dirichlet log-density from encoded log observations."""
         return engine.sum(log_x * (alpha - engine.asarray(1.0)), axis=-1) - log_const
 
-    def backend_seq_log_density(self, x: Tuple[Any, Any, Any], engine: Any) -> Any:
+    def backend_seq_log_density(self, x: tuple[Any, Any, Any], engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded Dirichlet observations."""
         return self.backend_log_density_from_params(
-            engine.asarray(x[0]),
-            engine.asarray(self.alpha),
-            engine.asarray(self.log_const),
-            engine)
+            engine.asarray(x[0]), engine.asarray(self.alpha), engine.asarray(self.log_const), engine
+        )
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['DirichletDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["DirichletDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked parameters for equal-dimensional Dirichlet mixtures."""
         dim = int(dists[0].dim)
         if any(int(dist.dim) != dim for dist in dists):
-            raise ValueError('Stacked DirichletDistribution components require equal dimension.')
+            raise ValueError("Stacked DirichletDistribution components require equal dimension.")
         return {
-            'alpha': engine.asarray([dist.alpha for dist in dists]),
-            'log_const': engine.asarray([dist.log_const for dist in dists]),
+            "alpha": engine.asarray([dist.alpha for dist in dists]),
+            "log_const": engine.asarray([dist.log_const for dist in dists]),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: Tuple[Any, Any, Any], params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: tuple[Any, Any, Any], params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of Dirichlet component log densities."""
         return cls.backend_log_density_from_params(
-            engine.asarray(x[0])[:, None, :],
-            params['alpha'][None, :, :],
-            params['log_const'][None, :],
-            engine)
+            engine.asarray(x[0])[:, None, :], params["alpha"][None, :, :], params["log_const"][None, :], engine
+        )
 
     @classmethod
-    def backend_stacked_sufficient_statistics(cls, x: Tuple[Any, Any, Any], weights: Any,
-                                             params: Dict[str, Any], engine: Any) -> Tuple[Any, Any, Any, Any]:
+    def backend_stacked_sufficient_statistics(
+        cls, x: tuple[Any, Any, Any], weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[Any, Any, Any, Any]:
         """Return component-stacked legacy Dirichlet sufficient statistics."""
         ww = engine.asarray(weights)
         extra = (slice(None), slice(None), None)
@@ -399,7 +411,7 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
             engine.sum(ww[extra] * engine.asarray(x[2])[:, None, :], axis=0),
         )
 
-    def sampler(self, seed: Optional[int] = None) -> 'DirichletSampler':
+    def sampler(self, seed: int | None = None) -> "DirichletSampler":
         """Create a DirichletSampler for sampling from this distribution.
 
         Args:
@@ -411,7 +423,7 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         """
         return DirichletSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'DirichletEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "DirichletEstimator":
         """Create a DirichletEstimator for estimating this distribution.
 
         If pseudo_count is passed, the current normalized alpha is used to regularize the estimate.
@@ -426,17 +438,19 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         if pseudo_count is None:
             return DirichletEstimator(dim=self.dim, name=self.name)
         else:
-            return DirichletEstimator(dim=self.dim, pseudo_count=pseudo_count,
-                                      suff_stat=log(self.alpha / sum(self.alpha)), name=self.name)
+            return DirichletEstimator(
+                dim=self.dim, pseudo_count=pseudo_count, suff_stat=log(self.alpha / sum(self.alpha)), name=self.name
+            )
 
-    def dist_to_encoder(self) -> 'DirichletDataEncoder':
+    def dist_to_encoder(self) -> "DirichletDataEncoder":
         """Create DirichletDataEncoder object for encoding sequences of iid Dirichlet observations."""
         return DirichletDataEncoder()
+
 
 class DirichletSampler(DistributionSampler):
     """DirichletSampler object for sampling from a DirichletDistribution."""
 
-    def __init__(self, dist: DirichletDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: DirichletDistribution, seed: int | None = None) -> None:
         """DirichletSampler object.
 
         Args:
@@ -451,7 +465,7 @@ class DirichletSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: Optional[int] = None) -> np.ndarray:
+    def sample(self, size: int | None = None) -> np.ndarray:
         """Draw iid samples from the Dirichlet distribution.
 
         Entries with non-positive alpha are fixed at zero and the remaining entries are sampled
@@ -484,7 +498,7 @@ class DirichletSampler(DistributionSampler):
 class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
     """DirichletAccumulator object for aggregating sufficient statistics from iid observations."""
 
-    def __init__(self, dim: int, keys: Optional[str] = None) -> None:
+    def __init__(self, dim: int, keys: str | None = None) -> None:
         """DirichletAccumulator object.
 
         Args:
@@ -507,8 +521,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         self.counts = 0
         self.key = keys
 
-    def update(self, x: Union[np.ndarray, List[float]], weight: float, estimate: Optional['DirichletDistribution'])\
-            -> None:
+    def update(self, x: np.ndarray | list[float], weight: float, estimate: Optional["DirichletDistribution"]) -> None:
         """Update sufficient statistics with a single weighted observation.
 
         Zero-valued entries of x are excluded from the sum of logs.
@@ -536,7 +549,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum2 += weight * x * x
             self.counts += weight
 
-    def initialize(self, x: Union[np.ndarray, List[float]], weight: float, estimate: Optional[RandomState]) -> None:
+    def initialize(self, x: np.ndarray | list[float], weight: float, estimate: RandomState | None) -> None:
         """Initialize the accumulator with a weighted observation. Calls update().
 
         Args:
@@ -555,8 +568,12 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         """Returns a list containing the seq_update member function."""
         return [self.seq_update]
 
-    def seq_update(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray,
-                   estimate: Optional[DirichletDistribution]) -> None:
+    def seq_update(
+        self,
+        x: tuple[np.ndarray, np.ndarray, np.ndarray],
+        weights: np.ndarray,
+        estimate: DirichletDistribution | None,
+    ) -> None:
         """Vectorized update of sufficient statistics with an encoded sequence of observations.
 
         Args:
@@ -574,15 +591,19 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum += np.dot(weights, x[1])
         self.sum2 += np.dot(weights, x[2])
 
-    def seq_update_engine(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray], weights: Any,
-                          estimate: Optional[DirichletDistribution], engine: Any) -> None:
+    def seq_update_engine(
+        self,
+        x: tuple[np.ndarray, np.ndarray, np.ndarray],
+        weights: Any,
+        estimate: DirichletDistribution | None,
+        engine: Any,
+    ) -> None:
         """Engine-resident accumulation of Dirichlet moment statistics (numpy or torch).
 
         The weighted vector moments (sum of logs, sum, sum of squares) are reduced via a
         weight-vector / observation-matrix product on the active engine. Matches seq_update.
         """
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         w = engine.asarray(weights_np)
         log_x = engine.asarray(np.asarray(x[0], dtype=np.float64))
         xv = engine.asarray(np.asarray(x[1], dtype=np.float64))
@@ -593,8 +614,9 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum += np.asarray(engine.to_numpy(engine.matmul(w, xv)))
         self.sum2 += np.asarray(engine.to_numpy(engine.matmul(w, xv2)))
 
-    def seq_initialize(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray,
-                       rng: Optional[RandomState]) -> None:
+    def seq_initialize(
+        self, x: tuple[np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None
+    ) -> None:
         """Vectorized initialization of the accumulator. Calls seq_update().
 
         Args:
@@ -609,7 +631,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: Tuple[int, np.ndarray, np.ndarray, np.ndarray]) -> 'DirichletAccumulator':
+    def combine(self, suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray]) -> "DirichletAccumulator":
         """Merge the sufficient statistics of suff_stat into this accumulator.
 
         Args:
@@ -626,11 +648,11 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         self.counts += suff_stat[0]
         return self
 
-    def value(self) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+    def value(self) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
         """Returns the sufficient statistics (counts, sum of logs, sum, sum of squares) of the accumulator."""
         return self.counts, self.sum_of_logs, self.sum, self.sum2
 
-    def from_value(self, x: Tuple[int, np.ndarray, np.ndarray, np.ndarray]):
+    def from_value(self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray]):
         """Set the sufficient statistics of the accumulator to x.
 
         Args:
@@ -647,7 +669,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 = x[3]
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Combine sufficient statistics with other accumulators sharing a matching key.
 
         Args:
@@ -663,7 +685,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace sufficient statistics with values from stats_dict for a matching key.
 
         Args:
@@ -677,14 +699,15 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
             if self.key in stats_dict:
                 self.from_value(stats_dict[self.key].value())
 
-    def acc_to_encoder(self) -> 'DirichletDataEncoder':
+    def acc_to_encoder(self) -> "DirichletDataEncoder":
         """Create DirichletDataEncoder object for encoding sequences of iid Dirichlet observations."""
         return DirichletDataEncoder()
+
 
 class DirichletAccumulatorFactory(StatisticAccumulatorFactory):
     """DirichletAccumulatorFactory object for creating DirichletAccumulator objects."""
 
-    def __init__(self, dim: int, keys: Optional[str] = None) -> None:
+    def __init__(self, dim: int, keys: str | None = None) -> None:
         """DirichletAccumulatorFactory object.
 
         Args:
@@ -699,7 +722,7 @@ class DirichletAccumulatorFactory(StatisticAccumulatorFactory):
         self.dim = dim
         self.keys = keys
 
-    def make(self) -> 'DirichletAccumulator':
+    def make(self) -> "DirichletAccumulator":
         """Returns a new DirichletAccumulator with the factory's dim and keys."""
         return DirichletAccumulator(dim=self.dim, keys=self.keys)
 
@@ -707,9 +730,16 @@ class DirichletAccumulatorFactory(StatisticAccumulatorFactory):
 class DirichletEstimator(ParameterEstimator):
     """DirichletEstimator object for estimating a Dirichlet distribution from aggregated sufficient statistics."""
 
-    def __init__(self, dim: int, pseudo_count: Optional[float] = None, suff_stat: Optional[np.ndarray] = None,
-                 delta: Optional[float] = 1.0e-8, keys: Optional[str] = None,
-                 use_mpe: bool = False, name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        dim: int,
+        pseudo_count: float | None = None,
+        suff_stat: np.ndarray | None = None,
+        delta: float | None = 1.0e-8,
+        keys: str | None = None,
+        use_mpe: bool = False,
+        name: str | None = None,
+    ) -> None:
         """DirichletEstimator object.
 
         Args:
@@ -740,12 +770,13 @@ class DirichletEstimator(ParameterEstimator):
         self.use_mpe = use_mpe
         self.name = name
 
-    def accumulator_factory(self) -> 'DirichletAccumulatorFactory':
+    def accumulator_factory(self) -> "DirichletAccumulatorFactory":
         """Create DirichletAccumulator object from attributes variables."""
         return DirichletAccumulatorFactory(dim=self.dim, keys=self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[int, np.ndarray, np.ndarray, np.ndarray])\
-            -> DirichletDistribution:
+    def estimate(
+        self, nobs: float | None, suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray]
+    ) -> DirichletDistribution:
         """Estimate a Dirichlet distribution from aggregated sufficient statistics.
 
         Suff_stat is a Tuple of size 4 containing:
@@ -821,14 +852,12 @@ class DirichletEstimator(ParameterEstimator):
             mean_log_p = sum_of_logs / nobs
 
         if not np.all(np.isfinite(mean_log_p)):
-            mean_log_p = np.where(
-                np.isfinite(mean_log_p), mean_log_p, digamma(one) - digamma(dim))
+            mean_log_p = np.where(np.isfinite(mean_log_p), mean_log_p, digamma(one) - digamma(dim))
 
         if nobs <= 1.0 and self.pseudo_count is None:
             return DirichletDistribution(initial_estimate, name=self.name)
 
         else:
-
             if self.use_mpe:
                 alpha, its_cnt = find_alpha(np.asarray(initial_estimate), mean_log_p, self.delta)
             else:
@@ -836,12 +865,13 @@ class DirichletEstimator(ParameterEstimator):
 
             return DirichletDistribution(alpha, name=self.name)
 
+
 class DirichletDataEncoder(DataSequenceEncoder):
     """DirichletDataEncoder object for encoding sequences of iid Dirichlet observations."""
 
     def __str__(self) -> str:
         """Returns string representation of DirichletDataEncoder object."""
-        return 'DirichletDataEncoder'
+        return "DirichletDataEncoder"
 
     def __eq__(self, other: object) -> bool:
         """Checks if other object is a DirichletDataEncoder.

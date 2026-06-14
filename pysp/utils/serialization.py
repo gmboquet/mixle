@@ -5,6 +5,7 @@ their repr strings.  This module instead serializes distribution state as a
 small tagged JSON value graph and reconstructs only classes registered from
 pysp's own distribution modules.
 """
+
 from __future__ import annotations
 
 import base64
@@ -13,8 +14,8 @@ import inspect
 import json
 import math
 import pkgutil
-from collections.abc import Callable
-from typing import Any, Dict, Iterable, Optional, Set, Type
+from collections.abc import Callable, Iterable
+from typing import Any
 
 import numpy as np
 
@@ -26,10 +27,10 @@ except Exception:  # pragma: no cover - scipy is a package dependency in normal 
 
 TAG = "__pysp_type__"
 
-_CLASS_REGISTRY: Dict[str, Type[Any]] = {}
-_CLASS_IDS: Dict[Type[Any], str] = {}
-_CALLABLE_REGISTRY: Dict[str, Callable[..., Any]] = {}
-_CALLABLE_IDS: Dict[Callable[..., Any], str] = {}
+_CLASS_REGISTRY: dict[str, type[Any]] = {}
+_CLASS_IDS: dict[type[Any], str] = {}
+_CALLABLE_REGISTRY: dict[str, Callable[..., Any]] = {}
+_CALLABLE_IDS: dict[Callable[..., Any], str] = {}
 _REGISTRY_READY = False
 _OPTIONAL_IMPORT_NAMES = {"torch", "umap", "pyspark"}
 
@@ -38,11 +39,11 @@ class SerializationError(ValueError):
     """Raised when an object cannot be serialized or decoded safely."""
 
 
-def _type_id(cls: Type[Any]) -> str:
+def _type_id(cls: type[Any]) -> str:
     return "%s.%s" % (cls.__module__, cls.__name__)
 
 
-def register_serializable_class(cls: Type[Any], type_id: Optional[str] = None) -> Type[Any]:
+def register_serializable_class(cls: type[Any], type_id: str | None = None) -> type[Any]:
     """Register a class that may be reconstructed from serialized state.
 
     Deserialization never imports a class named in the payload.  The class must
@@ -58,8 +59,7 @@ def register_serializable_class(cls: Type[Any], type_id: Optional[str] = None) -
     return cls
 
 
-def register_serializable_callable(fn: Callable[..., Any],
-                                   callable_id: Optional[str] = None) -> Callable[..., Any]:
+def register_serializable_callable(fn: Callable[..., Any], callable_id: str | None = None) -> Callable[..., Any]:
     """Register a callable that may appear inside a serialized distribution.
 
     This is intentionally explicit.  Arbitrary lambdas or local functions
@@ -81,7 +81,7 @@ def register_serializable_callable(fn: Callable[..., Any],
     return fn
 
 
-def serializable_class_ids() -> Set[str]:
+def serializable_class_ids() -> set[str]:
     """Return the registered class ids, primarily for diagnostics/tests."""
     ensure_pysp_serialization_registry()
     return set(_CLASS_REGISTRY.keys())
@@ -109,10 +109,10 @@ def ensure_pysp_serialization_registry() -> None:
     if _REGISTRY_READY:
         return
 
-    from pysp.stats.pdist import ProbabilityDistribution as StatsDistribution
-    from pysp.stats.pdist import ParameterEstimator as StatsEstimator
-    from pysp.bstats.pdist import ProbabilityDistribution as BStatsDistribution
     from pysp.bstats.pdist import ParameterEstimator as BStatsEstimator
+    from pysp.bstats.pdist import ProbabilityDistribution as BStatsDistribution
+    from pysp.stats.pdist import ParameterEstimator as StatsEstimator
+    from pysp.stats.pdist import ProbabilityDistribution as StatsDistribution
 
     for package_name in ("pysp.stats", "pysp.bstats"):
         for module in _iter_distribution_modules(package_name):
@@ -139,7 +139,7 @@ def ensure_pysp_serialization_registry() -> None:
     _REGISTRY_READY = True
 
 
-def _cycle_enter(value: Any, active: Set[int]) -> int:
+def _cycle_enter(value: Any, active: set[int]) -> int:
     obj_id = id(value)
     if obj_id in active:
         raise SerializationError("cyclic object graph cannot be serialized")
@@ -147,7 +147,7 @@ def _cycle_enter(value: Any, active: Set[int]) -> int:
     return obj_id
 
 
-def _cycle_leave(obj_id: int, active: Set[int]) -> None:
+def _cycle_leave(obj_id: int, active: set[int]) -> None:
     active.remove(obj_id)
 
 
@@ -174,7 +174,7 @@ def _sort_key(value: Any) -> str:
     return "%s.%s:%r" % (type(value).__module__, type(value).__qualname__, value)
 
 
-def _encode_ndarray(value: np.ndarray, active: Set[int]) -> Dict[str, Any]:
+def _encode_ndarray(value: np.ndarray, active: set[int]) -> dict[str, Any]:
     obj_id = _cycle_enter(value, active)
     try:
         return {
@@ -187,14 +187,14 @@ def _encode_ndarray(value: np.ndarray, active: Set[int]) -> Dict[str, Any]:
         _cycle_leave(obj_id, active)
 
 
-def _decode_ndarray(payload: Dict[str, Any]) -> np.ndarray:
+def _decode_ndarray(payload: dict[str, Any]) -> np.ndarray:
     dtype = np.dtype(payload["dtype"])
     shape = tuple(int(u) for u in payload["shape"])
     data = _decode(payload["data"])
     return np.asarray(data, dtype=dtype).reshape(shape)
 
 
-def _encode_sparse(value: Any, active: Set[int]) -> Dict[str, Any]:
+def _encode_sparse(value: Any, active: set[int]) -> dict[str, Any]:
     obj_id = _cycle_enter(value, active)
     try:
         coo = value.tocoo()
@@ -211,7 +211,7 @@ def _encode_sparse(value: Any, active: Set[int]) -> Dict[str, Any]:
         _cycle_leave(obj_id, active)
 
 
-def _decode_sparse(payload: Dict[str, Any]) -> Any:
+def _decode_sparse(payload: dict[str, Any]) -> Any:
     if sp is None:
         raise SerializationError("scipy.sparse is required to decode sparse matrices")
     row = np.asarray(_decode(payload["row"]), dtype=np.int64)
@@ -221,7 +221,7 @@ def _decode_sparse(payload: Dict[str, Any]) -> Any:
     return sp.coo_matrix((data, (row, col)), shape=shape).asformat(payload["format"])
 
 
-def _encode_dict(value: Dict[Any, Any], active: Set[int]) -> Dict[str, Any]:
+def _encode_dict(value: dict[Any, Any], active: set[int]) -> dict[str, Any]:
     obj_id = _cycle_enter(value, active)
     try:
         items = sorted(value.items(), key=lambda u: _sort_key(u[0]))
@@ -233,16 +233,16 @@ def _encode_dict(value: Dict[Any, Any], active: Set[int]) -> Dict[str, Any]:
         _cycle_leave(obj_id, active)
 
 
-def _decode_dict(payload: Dict[str, Any]) -> Dict[Any, Any]:
+def _decode_dict(payload: dict[str, Any]) -> dict[Any, Any]:
     return {_decode(k): _decode(v) for k, v in payload["items"]}
 
 
-def _encode_sequence(tag: str, value: Iterable[Any], active: Set[int]) -> Dict[str, Any]:
+def _encode_sequence(tag: str, value: Iterable[Any], active: set[int]) -> dict[str, Any]:
     value_list = list(value)
     return {TAG: tag, "items": [_encode(v, active) for v in value_list]}
 
 
-def _encode_object(value: Any, active: Set[int]) -> Dict[str, Any]:
+def _encode_object(value: Any, active: set[int]) -> dict[str, Any]:
     ensure_pysp_serialization_registry()
     cls = value.__class__
     tid = _CLASS_IDS.get(cls)
@@ -264,7 +264,7 @@ def _encode_object(value: Any, active: Set[int]) -> Dict[str, Any]:
         _cycle_leave(obj_id, active)
 
 
-def _decode_object(payload: Dict[str, Any]) -> Any:
+def _decode_object(payload: dict[str, Any]) -> Any:
     ensure_pysp_serialization_registry()
     tid = payload["type"]
     cls = _CLASS_REGISTRY.get(tid)
@@ -282,15 +282,14 @@ def _decode_object(payload: Dict[str, Any]) -> Any:
     return obj
 
 
-def _encode_callable(value: Callable[..., Any]) -> Dict[str, Any]:
+def _encode_callable(value: Callable[..., Any]) -> dict[str, Any]:
     callable_id = _CALLABLE_IDS.get(value)
     if callable_id is None:
-        raise SerializationError(
-            "callable %r is not registered; use register_serializable_callable()" % (value,))
+        raise SerializationError("callable %r is not registered; use register_serializable_callable()" % (value,))
     return {TAG: "callable", "id": callable_id}
 
 
-def _decode_callable(payload: Dict[str, Any]) -> Callable[..., Any]:
+def _decode_callable(payload: dict[str, Any]) -> Callable[..., Any]:
     callable_id = payload["id"]
     fn = _CALLABLE_REGISTRY.get(callable_id)
     if fn is None:
@@ -298,7 +297,7 @@ def _decode_callable(payload: Dict[str, Any]) -> Callable[..., Any]:
     return fn
 
 
-def _encode(value: Any, active: Set[int]) -> Any:
+def _encode(value: Any, active: set[int]) -> Any:
     if value is None or isinstance(value, (bool, str, int)):
         return value
     if isinstance(value, float):

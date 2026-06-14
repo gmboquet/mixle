@@ -17,16 +17,16 @@ likelihood estimate psum/(psum + nsum) is returned. expected_log_density
 evaluates the variational Bayes expectation E_q[log p(x | p)] via digamma
 terms.
 """
-from typing import Optional, Any, Dict, Union
-from numpy.random import RandomState
-from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, StatisticAccumulator
+
+from typing import Any
+
+import numpy as np
+from scipy.optimize import minimize_scalar
+from scipy.special import digamma
+
 from pysp.bstats.beta import BetaDistribution
 from pysp.bstats.nulldist import NullDistribution, null_dist
-import numpy as np
-from scipy.special import gammaln, digamma, exp1
-from scipy.optimize import minimize_scalar
-import scipy.integrate
-
+from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, StatisticAccumulator
 
 default_prior = BetaDistribution(1.000001, 1.000001)
 
@@ -35,7 +35,13 @@ class BernoulliDistribution(ProbabilityDistribution):
     """Bernoulli distribution with success probability p, optionally carrying
     a Beta conjugate prior on p."""
 
-    def __init__(self, p: float, name: Optional[str] = None, prior: ProbabilityDistribution = default_prior, keys: Optional[str] = None):
+    def __init__(
+        self,
+        p: float,
+        name: str | None = None,
+        prior: ProbabilityDistribution = default_prior,
+        keys: str | None = None,
+    ):
         """BernoulliDistribution object with success probability p.
 
         Args:
@@ -56,7 +62,12 @@ class BernoulliDistribution(ProbabilityDistribution):
         self.set_prior(prior)
 
     def __str__(self) -> str:
-        return 'BernoulliDistribution(%s, name=%s, prior=%s, keys=%s)' % (repr(self.p), repr(self.name), str(self.prior), repr(self.keys))
+        return "BernoulliDistribution(%s, name=%s, prior=%s, keys=%s)" % (
+            repr(self.p),
+            repr(self.name),
+            str(self.prior),
+            repr(self.keys),
+        )
 
     def get_parameters(self) -> float:
         """Returns the success probability p."""
@@ -92,7 +103,7 @@ class BernoulliDistribution(ProbabilityDistribution):
 
         if isinstance(prior, BetaDistribution):
             a, b = self.prior.get_parameters()
-            self.conj_prior_params = (digamma(a), digamma(b), digamma(a+b))
+            self.conj_prior_params = (digamma(a), digamma(b), digamma(a + b))
             self.has_conj_prior = True
             self.has_prior = True
         elif isinstance(prior, NullDistribution) or prior is None:
@@ -165,7 +176,7 @@ class BernoulliDistribution(ProbabilityDistribution):
         """
         a = dist.log_density(True)
         b = dist.log_density(False)
-        return -((a-b)*self.p + b)
+        return -((a - b) * self.p + b)
 
     def entropy(self) -> float:
         """Returns the entropy -p log(p) - (1-p) log(1-p) in nats."""
@@ -217,7 +228,7 @@ class BernoulliDistribution(ProbabilityDistribution):
         """
         return np.asarray(x, dtype=bool)
 
-    def sampler(self, seed: Optional[int] = None):
+    def sampler(self, seed: int | None = None):
         """Return a BernoulliSampler for this distribution.
 
         Args:
@@ -230,7 +241,7 @@ class BernoulliDistribution(ProbabilityDistribution):
         return BernoulliEstimator(name=self.name, keys=self.keys, prior=self.prior)
 
 
-class BernoulliSampler(object):
+class BernoulliSampler:
     """Draws boolean observations from a BernoulliDistribution."""
 
     def __init__(self, dist, seed=None):
@@ -240,7 +251,7 @@ class BernoulliSampler(object):
             dist (BernoulliDistribution): Distribution to sample from.
             seed (Optional[int]): Seed for the random number generator.
         """
-        self.rng  = np.random.RandomState(seed)
+        self.rng = np.random.RandomState(seed)
         self.dist = dist
 
     def sample(self, size=None):
@@ -269,10 +280,10 @@ class BernoulliEstimatorAccumulator(StatisticAccumulator):
             name (Optional[str]): Name of the accumulated statistics.
             keys (Optional[str]): Key for sharing sufficient statistics.
         """
-        self.name  = name
-        self.key   = keys
-        self.psum  = 0.0
-        self.nsum  = 0.0
+        self.name = name
+        self.key = keys
+        self.psum = 0.0
+        self.nsum = 0.0
         self.count = 0.0
 
     def initialize(self, x, weight, rng):
@@ -341,7 +352,7 @@ class BernoulliEstimatorAccumulator(StatisticAccumulator):
         self.psum = x[0]
         self.nsum = x[1]
 
-    def key_merge(self, stats_dict: Dict[str, Any]):
+    def key_merge(self, stats_dict: dict[str, Any]):
         """Merge this accumulator into stats_dict under its key (if keyed)."""
         if self.key is not None:
             if self.key in stats_dict:
@@ -349,14 +360,14 @@ class BernoulliEstimatorAccumulator(StatisticAccumulator):
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]):
+    def key_replace(self, stats_dict: dict[str, Any]):
         """Replace this accumulator's statistics from stats_dict (if keyed)."""
         if self.key is not None:
             if self.key in stats_dict:
                 self.from_value(stats_dict[self.key].value())
 
 
-class BernoulliEstimatorAccumulatorFactory(object):
+class BernoulliEstimatorAccumulatorFactory:
     """Factory for creating BernoulliEstimatorAccumulator objects."""
 
     def __init__(self, name, keys):
@@ -378,7 +389,9 @@ class BernoulliEstimator(ParameterEstimator):
     """Estimates a BernoulliDistribution from accumulated true/false counts,
     using the Beta posterior mode when a conjugate prior is set."""
 
-    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None, prior: ProbabilityDistribution = default_prior):
+    def __init__(
+        self, name: str | None = None, keys: str | None = None, prior: ProbabilityDistribution = default_prior
+    ):
         """BernoulliEstimator object.
 
         Args:
@@ -389,8 +402,8 @@ class BernoulliEstimator(ParameterEstimator):
         """
 
         self.prior = prior
-        self.name  = name
-        self.keys  = keys
+        self.name = name
+        self.keys = keys
         self.has_conj_prior = isinstance(prior, BetaDistribution)
         self.has_prior = not isinstance(prior, NullDistribution) and prior is not None
 
@@ -440,18 +453,18 @@ class BernoulliEstimator(ParameterEstimator):
             a, b = self.prior.get_parameters()
             new_a = a + psum
             new_b = b + nsum
-            p = (psum + a - 1.0)/(psum + nsum + a + b - 2.0)
+            p = (psum + a - 1.0) / (psum + nsum + a + b - 2.0)
             return BernoulliDistribution(p, name=self.name, prior=BetaDistribution(new_a, new_b), keys=self.keys)
 
         elif self.has_prior:
-
-            ll_fun = lambda x: np.log(x)*psum + np.log1p(-x)*nsum + self.prior.log_density(x)
+            ll_fun = lambda x: np.log(x) * psum + np.log1p(-x) * nsum + self.prior.log_density(x)
             eps = np.sqrt(np.finfo(float).eps)
-            sol = minimize_scalar(lambda x: -ll_fun(x), bounds=(eps, 1.0 - eps), method='bounded')
+            sol = minimize_scalar(lambda x: -ll_fun(x), bounds=(eps, 1.0 - eps), method="bounded")
             return BernoulliDistribution(float(sol.x), name=self.name, prior=self.prior, keys=self.keys)
 
         else:
-            return BernoulliDistribution(psum/(psum + nsum), name=self.name, prior=null_dist, keys=self.keys)
+            return BernoulliDistribution(psum / (psum + nsum), name=self.name, prior=null_dist, keys=self.keys)
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 BernoulliAccumulator = BernoulliEstimatorAccumulator

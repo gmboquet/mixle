@@ -14,16 +14,26 @@ for x in {0,1,2,...}, and
 else.
 
 """
+
 import math
+from collections.abc import Sequence
+from math import log
+from typing import Any, Optional
+
 import numpy as np
 from numpy.random import RandomState
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
-    DistributionEnumerator
+
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.utils.vector import gammaln
-from math import log
-from typing import Tuple, List, Union, Optional, Any, Dict, Sequence
 
 
 class PoissonDistribution(SequenceEncodableProbabilityDistribution):
@@ -32,17 +42,19 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
         from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+
         return DistributionDeclaration(
-            name='poisson',
+            name="poisson",
             distribution_type=cls,
-            parameters=(ParameterSpec('lam', constraint='positive'),),
-            statistics=(StatisticSpec('count'), StatisticSpec('sum')),
-            support='non_negative_integer',
+            parameters=(ParameterSpec("lam", constraint="positive"),),
+            statistics=(StatisticSpec("count"), StatisticSpec("sum")),
+            support="non_negative_integer",
             exponential_family=ExponentialFamilySpec(
                 sufficient_statistics=cls.exp_family_sufficient_statistics,
                 natural_parameters=cls.exp_family_natural_parameters,
@@ -53,36 +65,37 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     @staticmethod
-    def exp_family_sufficient_statistics(x: Tuple[Any, Any], engine: Any) -> Tuple[Any, ...]:
+    def exp_family_sufficient_statistics(x: tuple[Any, Any], engine: Any) -> tuple[Any, ...]:
         """Return Poisson sufficient statistics for generated scoring."""
         return (engine.asarray(x[0]),)
 
     @staticmethod
-    def exp_family_legacy_sufficient_statistics(x: Tuple[Any, Any],
-                                                params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+    def exp_family_legacy_sufficient_statistics(
+        x: tuple[Any, Any], params: dict[str, Any], engine: Any
+    ) -> tuple[Any, ...]:
         """Return per-row Poisson sufficient statistics in accumulator order."""
         vals = engine.asarray(x[0])
         return vals * 0.0 + engine.asarray(1.0), vals
 
     @staticmethod
-    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Return Poisson natural parameters for generated scoring."""
-        return (engine.log(params['lam']),)
+        return (engine.log(params["lam"]),)
 
     @staticmethod
-    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
         """Return Poisson log partition for generated scoring."""
-        return params['lam']
+        return params["lam"]
 
     @staticmethod
-    def exp_family_base_measure(x: Tuple[Any, Any], engine: Any) -> Any:
+    def exp_family_base_measure(x: tuple[Any, Any], engine: Any) -> Any:
         """Return Poisson base measure for generated scoring."""
         vals = engine.asarray(x[0])
         log_fact = engine.asarray(x[1])
         good = (vals >= 0) & (engine.floor(vals) == vals)
         return engine.where(good, -log_fact, engine.asarray(-np.inf))
 
-    def __init__(self, lam: float, name: Optional[str] = None) -> None:
+    def __init__(self, lam: float, name: str | None = None) -> None:
         """PoissonDistribution object defining Poisson distribution with mean lam > 0.0.
 
         Args:
@@ -95,14 +108,14 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
             log_lambda (float): Log of attribute lam.
         """
         if lam <= 0.0 or not np.isfinite(lam):
-            raise ValueError('PoissonDistribution requires lam > 0.')
+            raise ValueError("PoissonDistribution requires lam > 0.")
         self.lam = float(lam)
         self.log_lambda = log(self.lam)
         self.name = name
 
     def __str__(self) -> str:
         """Returns string representation of PoissonDistribution object."""
-        return 'PoissonDistribution(%s, name=%s)' % (repr(self.lam), repr(self.name))
+        return "PoissonDistribution(%s, name=%s)" % (repr(self.lam), repr(self.name))
 
     def density(self, x: int) -> float:
         """Evaluate the density of Poisson distribution at observation x.
@@ -143,7 +156,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         else:
             return xx * self.log_lambda - gammaln(xx + 1.0) - self.lam
 
-    def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Vectorized log-density evaluated on sequence encoded x.
 
         Arg value x (Tuple[np.ndarray[int], np.ndarray[float]]) is seq_encoded Poisson data from
@@ -174,7 +187,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         good = (vals >= 0) & (engine.floor(vals) == vals)
         return engine.where(good, rv, engine.asarray(-np.inf))
 
-    def backend_seq_log_density(self, x: Tuple[Any, Any], engine: Any) -> Any:
+    def backend_seq_log_density(self, x: tuple[Any, Any], engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
         vals = engine.asarray(x[0])
         log_fact = engine.asarray(x[1])
@@ -182,27 +195,27 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         return self.backend_log_density_from_params(vals, log_fact, lam, engine)
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['PoissonDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["PoissonDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked Poisson parameters for a homogeneous mixture kernel."""
-        return {'lam': engine.asarray([d.lam for d in dists])}
+        return {"lam": engine.asarray([d.lam for d in dists])}
 
     @classmethod
-    def backend_stacked_log_density(cls, x: Tuple[Any, Any], params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: tuple[Any, Any], params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of Poisson log densities."""
         vals = engine.asarray(x[0])
         log_fact = engine.asarray(x[1])
-        return cls.backend_log_density_from_params(
-            vals[:, None], log_fact[:, None], params['lam'][None, :], engine)
+        return cls.backend_log_density_from_params(vals[:, None], log_fact[:, None], params["lam"][None, :], engine)
 
     @classmethod
-    def backend_stacked_sufficient_statistics(cls, x: Tuple[Any, Any], weights: Any,
-                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any]:
+    def backend_stacked_sufficient_statistics(
+        cls, x: tuple[Any, Any], weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[Any, Any]:
         """Return stacked Poisson sufficient statistics using engine-resident arrays."""
         vals = engine.asarray(x[0])
         ww = engine.asarray(weights)
         return engine.sum(ww, axis=0), engine.sum(ww * vals[:, None], axis=0)
 
-    def sampler(self, seed: Optional[int] = None) -> 'PoissonSampler':
+    def sampler(self, seed: int | None = None) -> "PoissonSampler":
         """Create PoissonSampler object with PoissonDistribution instance and seed (Optional[int]) passed.
 
         Args:
@@ -214,7 +227,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         """
         return PoissonSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'PoissonEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "PoissonEstimator":
         """Creates PoissonEstimator object.
 
         Args:
@@ -230,20 +243,20 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         else:
             return PoissonEstimator(pseudo_count=pseudo_count, suff_stat=self.lam, name=self.name)
 
-    def dist_to_encoder(self) -> 'PoissonDataEncoder':
+    def dist_to_encoder(self) -> "PoissonDataEncoder":
         """Return PoissonDataEncoder object."""
         return PoissonDataEncoder()
 
-    def enumerator(self) -> 'PoissonEnumerator':
+    def enumerator(self) -> "PoissonEnumerator":
         """Returns PoissonEnumerator iterating the support {0, 1, ...} in descending probability order."""
         return PoissonEnumerator(self)
 
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
         """Build a bounded bit-quantized index by walking the Poisson mode outward."""
         if max_bits < 0:
-            raise ValueError('max_bits must be non-negative.')
+            raise ValueError("max_bits must be non-negative.")
         if bin_width_bits <= 0:
-            raise ValueError('bin_width_bits must be positive.')
+            raise ValueError("bin_width_bits must be positive.")
 
         mode = int(np.floor(self.lam))
         left = mode
@@ -251,7 +264,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         lp_left = self.log_density(left)
         lp_right = self.log_density(right)
         limit_lp = -(float(max_bits) + 1.0e-12) * math.log(2.0)
-        items: List[Tuple[int, float]] = []
+        items: list[tuple[int, float]] = []
 
         while (left >= 0 and lp_left >= limit_lp) or lp_right >= limit_lp:
             if left >= 0 and lp_left >= lp_right:
@@ -264,8 +277,8 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
                 lp_right = self.log_density(right)
 
         return QuantizedEnumerationIndex.from_items(
-            items, max_bits=max_bits, bin_width_bits=bin_width_bits,
-            sorted_items=True, truncated=True)
+            items, max_bits=max_bits, bin_width_bits=bin_width_bits, sorted_items=True, truncated=True
+        )
 
     def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
         """Build an aligned cross-bin view over bounded Poisson high-mass regions."""
@@ -279,7 +292,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         else:
             max_bits_tuple = tuple([float(max_bits)] * len(dists))
         if len(max_bits_tuple) != len(dists):
-            raise ValueError('max_bits length must match the number of distributions.')
+            raise ValueError("max_bits length must match the number of distributions.")
 
         values = set()
         for dist, bit_bound in zip(dists, max_bits_tuple):
@@ -288,10 +301,10 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
             index = dist.quantized_index(max_bits=bit_bound, bin_width_bits=bin_width_bits)
             values.update(value for value, _ in index.iter_from())
 
-        items = [(value, tuple(float(dist.log_density(value)) for dist in dists))
-                 for value in sorted(values)]
+        items = [(value, tuple(float(dist.log_density(value)) for dist in dists)) for value in sorted(values)]
         return QuantizedCrossIndex.from_items(
-            items, max_bits=max_bits_tuple, bin_width_bits=bin_width_bits, truncated=True)
+            items, max_bits=max_bits_tuple, bin_width_bits=bin_width_bits, truncated=True
+        )
 
     def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
         """Build an aligned cross-bin view over two bounded Poisson high-mass regions."""
@@ -299,7 +312,6 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class PoissonEnumerator(DistributionEnumerator):
-
     def __init__(self, dist: PoissonDistribution) -> None:
         """Enumerates the support {0, 1, 2, ...} of a PoissonDistribution.
 
@@ -317,9 +329,9 @@ class PoissonEnumerator(DistributionEnumerator):
         self._right = mode + 1
         self._lp_left = dist.log_density(self._left) if self._left >= 0 else -np.inf
         self._lp_right = dist.log_density(self._right)
-        self._head: Optional[Tuple[int, float]] = (mode, dist.log_density(mode))
+        self._head: tuple[int, float] | None = (mode, dist.log_density(mode))
 
-    def __next__(self) -> Tuple[int, float]:
+    def __next__(self) -> tuple[int, float]:
         if self._head is not None:
             rv = self._head
             self._head = None
@@ -336,8 +348,7 @@ class PoissonEnumerator(DistributionEnumerator):
 
 
 class PoissonSampler(DistributionSampler):
-
-    def __init__(self, dist: 'PoissonDistribution', seed: Optional[int] = None) -> None:
+    def __init__(self, dist: "PoissonDistribution", seed: int | None = None) -> None:
         """PoissonSampler object used to draw samples from PoissonDistribution.
 
         Args:
@@ -352,7 +363,7 @@ class PoissonSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: Optional[int] = None) -> Union[int, np.ndarray]:
+    def sample(self, size: int | None = None) -> int | np.ndarray:
         """Generate iid samples from Poisson distribution.
 
         Generates a single Poisson sample (int) if size is None, else a numpy array of integers of length size
@@ -369,8 +380,7 @@ class PoissonSampler(DistributionSampler):
 
 
 class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
-
-    def __init__(self, keys: Optional[str] = None) -> None:
+    def __init__(self, keys: str | None = None) -> None:
         """PoissonAccumulator object used to accumulate sufficient statistics from observed data.
 
         Args:
@@ -386,7 +396,7 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = 0.0
         self.key = keys
 
-    def initialize(self, x: int, weight: float, rng: Optional[np.random.RandomState] = None) -> None:
+    def initialize(self, x: int, weight: float, rng: np.random.RandomState | None = None) -> None:
         """Initialize PoissonAccumulator object with weighted observation.
 
         Note: Just calls update().
@@ -402,8 +412,9 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.update(x, weight, None)
 
-    def seq_initialize(self, x: Tuple[np.ndarray, np.ndarray], weights: np.ndarray,
-                       rng: Optional[np.random.RandomState] = None) -> None:
+    def seq_initialize(
+        self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: np.random.RandomState | None = None
+    ) -> None:
         """Vectorized initialization of PoissonAccumulator sufficient statistics with weighted observations.
 
         Note: Just calls seq_update().
@@ -424,7 +435,7 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.seq_update(x, weights, None)
 
-    def update(self, x: int, weight: float, estimate: Optional['PoissonDistribution'] = None) -> None:
+    def update(self, x: int, weight: float, estimate: Optional["PoissonDistribution"] = None) -> None:
         """Update sufficient statistics for PoissonAccumulator with one weighted observation.
 
         Args:
@@ -440,8 +451,9 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum += x * weight
         self.count += weight
 
-    def seq_update(self, x: Tuple[np.ndarray, np.ndarray], weights: np.ndarray,
-                   estimate: Optional['PoissonDistribution'] = None) -> None:
+    def seq_update(
+        self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: Optional["PoissonDistribution"] = None
+    ) -> None:
         """Vectorized update of PoissonAccumulator sufficient statistics with weighted observations.
 
         Arg value x (Tuple[np.ndarray[int], np.ndarray[float]]) is seq_encoded Poisson data from
@@ -461,7 +473,7 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum += np.dot(x[0], weights)
         self.count += weights.sum()
 
-    def combine(self, suff_stat: Tuple[float, float]) -> 'PoissonAccumulator':
+    def combine(self, suff_stat: tuple[float, float]) -> "PoissonAccumulator":
         """Combine aggregated sufficient statistics with sufficient statistics of PoissonAccumulator instance.
 
         Input suff_stat is Tuple[float, float] with:
@@ -480,11 +492,11 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def value(self) -> Tuple[float, float]:
+    def value(self) -> tuple[float, float]:
         """Returns sufficient statistics Tuple[float, float] of PoissonAccumulator instance."""
         return self.count, self.sum
 
-    def from_value(self, x: Tuple[float, float]) -> 'PoissonAccumulator':
+    def from_value(self, x: tuple[float, float]) -> "PoissonAccumulator":
         """Sets PoissonAccumulator instance sufficient statistic member variables to x.
 
         Args:
@@ -499,7 +511,7 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merges PoissonAccumulator sufficient statistics with sufficient statistics contained in suff_stat dict
         that share the same key.
 
@@ -517,7 +529,7 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set the sufficient statistics of PoissonAccumulator to stats_key sufficient statistics if key is in
             stats_dict.
 
@@ -533,14 +545,13 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
             if self.key in stats_dict:
                 self.from_value(stats_dict[self.key].value())
 
-    def acc_to_encoder(self) -> 'PoissonDataEncoder':
+    def acc_to_encoder(self) -> "PoissonDataEncoder":
         """Return PoissonDataEncoder object."""
         return PoissonDataEncoder()
 
 
 class PoissonAccumulatorFactory(StatisticAccumulatorFactory):
-
-    def __init__(self, keys: Optional[str] = None) -> None:
+    def __init__(self, keys: str | None = None) -> None:
         """PoissonAccumulatorFactory object used for constructing PoissonAccumulator objects.
 
         Args:
@@ -553,15 +564,19 @@ class PoissonAccumulatorFactory(StatisticAccumulatorFactory):
         """
         self.keys = keys
 
-    def make(self) -> 'PoissonAccumulator':
+    def make(self) -> "PoissonAccumulator":
         """Returns PoissonAccumulator object with keys passed."""
         return PoissonAccumulator(keys=self.keys)
 
 
 class PoissonEstimator(ParameterEstimator):
-
-    def __init__(self, pseudo_count: Optional[float] = None, suff_stat: Optional[float] = None,
-                 name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """PoissonEstimator object for estimating PoissonDistribution object from aggregated sufficient statistics.
 
         Args:
@@ -582,11 +597,11 @@ class PoissonEstimator(ParameterEstimator):
         self.name = name
         self.keys = keys
 
-    def accumulator_factory(self) -> 'PoissonAccumulatorFactory':
+    def accumulator_factory(self) -> "PoissonAccumulatorFactory":
         """Return PoissonAccumulatorFactory object with name and keys passed."""
         return PoissonAccumulatorFactory(self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[float, float]) -> 'PoissonDistribution':
+    def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "PoissonDistribution":
         """Estimate lambda of PoissonDistribution from aggregated sufficient statistcs suff_stat.
 
         Arg passed suff_stat is a Tuple of two floats containing:
@@ -617,7 +632,7 @@ class PoissonDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns string representation of PoissonDataEncoder object."""
-        return 'PoissonDataEncoder'
+        return "PoissonDataEncoder"
 
     def __eq__(self, other) -> bool:
         """Checks if object is equivalent to PoissonDataEncoder instance.
@@ -631,7 +646,7 @@ class PoissonDataEncoder(DataSequenceEncoder):
         """
         return isinstance(other, PoissonDataEncoder)
 
-    def seq_encode(self, x: Union[np.ndarray, Sequence[int]]) -> Tuple[np.ndarray, np.ndarray]:
+    def seq_encode(self, x: np.ndarray | Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
         """Encode iid sequence of Poisson observations for vectorized "seq_" function calls.
 
         Data type must be int. Values must be non-negative integers.
@@ -647,7 +662,7 @@ class PoissonDataEncoder(DataSequenceEncoder):
         rv1 = np.asarray(x)
 
         if np.any(rv1 < 0) or np.any(np.isnan(rv1)) or np.any(np.floor(rv1) != rv1):
-            raise ValueError('Poisson requires non-negative integer values of x.')
+            raise ValueError("Poisson requires non-negative integer values of x.")
         else:
             rv2 = gammaln(rv1 + 1.0)
             return rv1, rv2

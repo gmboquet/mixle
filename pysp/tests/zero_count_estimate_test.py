@@ -4,18 +4,18 @@ Estimating from aggregated sufficient statistics whose total weight is zero
 (no observations, or every observation weighted 0.0) must return finite,
 valid default parameters rather than nan/inf.
 """
+
 import unittest
 
 import numpy as np
 
 from pysp.stats.gamma import GammaEstimator
 from pysp.stats.geometric import GeometricEstimator
-from pysp.stats.intmultinomial import IntegerMultinomialEstimator
+from pysp.stats.int_multinomial import IntegerMultinomialEstimator
 from pysp.stats.poisson import PoissonEstimator
 
 
 class PoissonZeroCountTestCase(unittest.TestCase):
-
     def test_estimate_from_empty_suff_stats(self):
         dist = PoissonEstimator().estimate(None, (0.0, 0.0))
         self.assertTrue(np.isfinite(dist.lam))
@@ -35,7 +35,6 @@ class PoissonZeroCountTestCase(unittest.TestCase):
 
 
 class GeometricZeroCountTestCase(unittest.TestCase):
-
     def test_estimate_from_empty_suff_stats(self):
         dist = GeometricEstimator().estimate(None, (0.0, 0.0))
         self.assertTrue(np.isfinite(dist.p))
@@ -55,7 +54,6 @@ class GeometricZeroCountTestCase(unittest.TestCase):
 
 
 class IntegerMultinomialZeroCountTestCase(unittest.TestCase):
-
     def test_estimate_from_zero_counts_ml(self):
         dist = IntegerMultinomialEstimator().estimate(None, (0, np.zeros(3), None))
         np.testing.assert_allclose(dist.p_vec, np.ones(3) / 3.0)
@@ -81,14 +79,13 @@ class IntegerMultinomialZeroCountTestCase(unittest.TestCase):
 
 
 class GammaZeroCountTestCase(unittest.TestCase):
-
     def test_estimate_from_empty_suff_stats(self):
-        dist = GammaEstimator(name='g').estimate(None, (0.0, 0.0, 0.0))
+        dist = GammaEstimator(name="g").estimate(None, (0.0, 0.0, 0.0))
         self.assertTrue(np.isfinite(dist.k))
         self.assertTrue(np.isfinite(dist.theta))
         self.assertGreater(dist.k, 0.0)
         self.assertGreater(dist.theta, 0.0)
-        self.assertEqual(dist.name, 'g')
+        self.assertEqual(dist.name, "g")
 
     def test_estimate_from_all_zero_weights(self):
         acc = GammaEstimator().accumulator_factory().make()
@@ -122,5 +119,5 @@ class GammaZeroCountTestCase(unittest.TestCase):
         self.assertAlmostEqual(dist.k * dist.theta, adj_mean, places=10)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

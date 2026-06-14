@@ -1,4 +1,5 @@
 """Generic backend scoring dispatch over distribution-owned math hooks."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -14,8 +15,7 @@ class BackendScoringError(NotImplementedError):
     pass
 
 
-def child_seq_update(accumulator: Any, enc: Any, weights: Any, estimate: Any,
-                     engine: ComputeEngine) -> None:
+def child_seq_update(accumulator: Any, enc: Any, weights: Any, estimate: Any, engine: ComputeEngine) -> None:
     """Route a child accumulator's E-step through the active engine when possible.
 
     Structural distributions (sequence, composite, optional, ...) delegate accumulation to child
@@ -23,36 +23,37 @@ def child_seq_update(accumulator: Any, enc: Any, weights: Any, estimate: Any,
     families stay engine-resident; otherwise it falls back to the host ``seq_update`` with numpy
     weights. This is the recursion that pushes engine residency down a model tree.
     """
-    if engine.name != NUMPY_ENGINE.name and callable(getattr(accumulator, 'seq_update_engine', None)):
+    if engine.name != NUMPY_ENGINE.name and callable(getattr(accumulator, "seq_update_engine", None)):
         accumulator.seq_update_engine(enc, weights, estimate, engine)
         return
     w = weights
-    if hasattr(engine, 'to_numpy'):
+    if hasattr(engine, "to_numpy"):
         w = np.asarray(engine.to_numpy(weights), dtype=np.float64)
     accumulator.seq_update(enc, w, estimate)
 
 
 def backend_seq_log_density(dist: Any, enc: Any, engine: ComputeEngine = NUMPY_ENGINE) -> Any:
     """Return per-row log densities using ``engine`` and distribution-local math."""
-    enc = getattr(enc, 'engine_payload', enc)
-    fn = getattr(dist, 'backend_seq_log_density', None)
+    enc = getattr(enc, "engine_payload", enc)
+    fn = getattr(dist, "backend_seq_log_density", None)
     if callable(fn):
         return fn(enc, engine)
     try:
         from pysp.stats.declarations import generated_log_density
+
         return generated_log_density(dist, enc, engine)
     except Exception as exc:
         raise BackendScoringError(
-            '%s does not implement backend_seq_log_density and could not be generated: %s' %
-            (type(dist).__name__, exc)) from exc
+            "%s does not implement backend_seq_log_density and could not be generated: %s" % (type(dist).__name__, exc)
+        ) from exc
 
 
 def backend_seq_component_log_density(dist: Any, enc: Any, engine: ComputeEngine = NUMPY_ENGINE) -> Any:
     """Return component log densities when a distribution exposes them."""
-    enc = getattr(enc, 'engine_payload', enc)
-    fn = getattr(dist, 'backend_seq_component_log_density', None)
+    enc = getattr(enc, "engine_payload", enc)
+    fn = getattr(dist, "backend_seq_component_log_density", None)
     if not callable(fn):
-        raise BackendScoringError('%s does not implement backend_seq_component_log_density.' % type(dist).__name__)
+        raise BackendScoringError("%s does not implement backend_seq_component_log_density." % type(dist).__name__)
     return fn(enc, engine)
 
 

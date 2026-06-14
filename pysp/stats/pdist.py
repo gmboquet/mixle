@@ -3,15 +3,18 @@ ProbabilityDistribution, StatisticAccumulator, StatisticAccumulatorFactory, Data
 ConditionalSampler, and DistributionSampler for classes of the pysp.stats.
 
 """
+
 import itertools
 import math
 import sys
-import numpy as np
 from abc import abstractmethod
-from pysp.arithmetic import *
-from typing import TypeVar, Optional, Any, Generic, Dict, List, Tuple, Set
+from typing import Any, Generic, Optional, TypeVar
 
-SS = TypeVar('SS')
+import numpy as np
+
+from pysp.arithmetic import *
+
+SS = TypeVar("SS")
 
 
 class EnumerationError(NotImplementedError):
@@ -21,15 +24,15 @@ class EnumerationError(NotImplementedError):
     'CompositeDistribution.dists[1]'.
     """
 
-    def __init__(self, dist: Any, path: str = '', reason: str = '') -> None:
+    def __init__(self, dist: Any, path: str = "", reason: str = "") -> None:
         self.leaf = dist
         self.path = path
         self.reason = reason
-        msg = '%s does not support enumeration' % type(dist).__name__
+        msg = "%s does not support enumeration" % type(dist).__name__
         if path:
-            msg = '%s -> %s' % (path, msg)
+            msg = "%s -> %s" % (path, msg)
         if reason:
-            msg += ': %s' % reason
+            msg += ": %s" % reason
         super().__init__(msg)
 
 
@@ -44,7 +47,7 @@ class KeyValidationError(ValueError):
     pass
 
 
-def child_enumerator(child: 'ProbabilityDistribution', path: str) -> 'DistributionEnumerator':
+def child_enumerator(child: "ProbabilityDistribution", path: str) -> "DistributionEnumerator":
     """Construct child.enumerator(), annotating EnumerationError with the child's path.
 
     Combinator enumerators use this so a failure deep in a nested model reports the
@@ -54,7 +57,7 @@ def child_enumerator(child: 'ProbabilityDistribution', path: str) -> 'Distributi
     try:
         return child.enumerator()
     except EnumerationError as e:
-        new_path = path if not e.path else '%s -> %s' % (path, e.path)
+        new_path = path if not e.path else "%s -> %s" % (path, e.path)
         raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
 
 
@@ -73,32 +76,36 @@ class ProbabilityDistribution:
     def __repr__(self) -> str:
         return self.__str__()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return a safe JSON-compatible representation of this distribution."""
         from pysp.utils.serialization import to_serializable
+
         return to_serializable(self)
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> 'ProbabilityDistribution':
+    def from_dict(cls, payload: dict[str, Any]) -> "ProbabilityDistribution":
         """Reconstruct a distribution from ``to_dict`` output."""
         from pysp.utils.serialization import from_serializable
+
         rv = from_serializable(payload)
         if not isinstance(rv, cls):
-            raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+            raise TypeError("decoded object is %s, not %s" % (type(rv).__name__, cls.__name__))
         return rv
 
     def to_json(self, **kwargs: Any) -> str:
         """Serialize this distribution as safe strict JSON."""
         from pysp.utils.serialization import to_json
+
         return to_json(self, **kwargs)
 
     @classmethod
-    def from_json(cls, text: str) -> 'ProbabilityDistribution':
+    def from_json(cls, text: str) -> "ProbabilityDistribution":
         """Deserialize a distribution from ``to_json`` output."""
         from pysp.utils.serialization import from_json
+
         rv = from_json(text)
         if not isinstance(rv, cls):
-            raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+            raise TypeError("decoded object is %s, not %s" % (type(rv).__name__, cls.__name__))
         return rv
 
     @abstractmethod
@@ -112,12 +119,12 @@ class ProbabilityDistribution:
         ...
 
     @abstractmethod
-    def sampler(self, seed: Optional[int] = None) -> 'DistributionSampler':
+    def sampler(self, seed: int | None = None) -> "DistributionSampler":
         """Return a sampler for drawing observations from this distribution."""
         ...
 
     @abstractmethod
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'ParameterEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "ParameterEstimator":
         """Return an estimator for fitting this distribution from data."""
         ...
 
@@ -129,9 +136,10 @@ class ProbabilityDistribution:
         distributions may override this with faster or more canonical views.
         """
         from pysp.utils.fisher import to_fisher
+
         return to_fisher(self)
 
-    def enumerator(self) -> 'DistributionEnumerator':
+    def enumerator(self) -> "DistributionEnumerator":
         """Return a DistributionEnumerator over this distribution's support.
 
         Distributions with an enumerable (discrete) support override this; the
@@ -175,10 +183,12 @@ class ProbabilityDistribution:
 
         """
         from pysp.utils.quantization import leaf_count_index
+
         return leaf_count_index(self.enumerator(), quantizer, max_fine_bucket)
 
-    def count_budget_index(self, budget_bits: float, bin_width_bits: float = 1.0,
-                           oversample: int = 8, num_workers: Optional[int] = None):
+    def count_budget_index(
+        self, budget_bits: float, bin_width_bits: float = 1.0, oversample: int = 8, num_workers: int | None = None
+    ):
         """Build a budget-bounded quantized seek index covering the top ``2**budget_bits`` values.
 
         Computes per-bin counts structurally (never enumerating the domain) and accumulates coarse
@@ -196,13 +206,22 @@ class ProbabilityDistribution:
 
         """
         from pysp.utils.quantization import count_budget_index
-        return count_budget_index(self, budget_bits, bin_width_bits=bin_width_bits,
-                                  oversample=oversample, num_workers=num_workers)
 
-    def count_budget_distinct(self, budget_bits: float, bin_width_bits: float = 1.0,
-                              oversample: int = 8, dedup: str = 'canonical',
-                              start: int = 0, stop: Optional[int] = None,
-                              max_entries: int = 1 << 16, num_workers: Optional[int] = None):
+        return count_budget_index(
+            self, budget_bits, bin_width_bits=bin_width_bits, oversample=oversample, num_workers=num_workers
+        )
+
+    def count_budget_distinct(
+        self,
+        budget_bits: float,
+        bin_width_bits: float = 1.0,
+        oversample: int = 8,
+        dedup: str = "canonical",
+        start: int = 0,
+        stop: int | None = None,
+        max_entries: int = 1 << 16,
+        num_workers: int | None = None,
+    ):
         """Iterate DISTINCT (value, exact_log_prob) over the count-budget index, approx descending.
 
         For exact-count families this equals the ordered index stream. For the over-counting
@@ -222,9 +241,18 @@ class ProbabilityDistribution:
         which require the overlap structure this design deliberately avoids materializing.
         """
         from pysp.utils.quantization import distinct_budget_stream
-        return distinct_budget_stream(self, budget_bits, bin_width_bits=bin_width_bits,
-                                      oversample=oversample, dedup=dedup, start=start, stop=stop,
-                                      max_entries=max_entries, num_workers=num_workers)
+
+        return distinct_budget_stream(
+            self,
+            budget_bits,
+            bin_width_bits=bin_width_bits,
+            oversample=oversample,
+            dedup=dedup,
+            start=start,
+            stop=stop,
+            max_entries=max_entries,
+            num_workers=num_workers,
+        )
 
     def is_canonical_copy(self, value, coarse_bin: int, quantizer) -> bool:
         """Return True if ``coarse_bin`` is ``value``'s dominant (canonical) bin in the count index.
@@ -236,8 +264,9 @@ class ProbabilityDistribution:
         """
         return True
 
-    def quantized_multi_cross_index(self, others: List['ProbabilityDistribution'], max_bits,
-                                    bin_width_bits: float = 1.0):
+    def quantized_multi_cross_index(
+        self, others: list["ProbabilityDistribution"], max_bits, bin_width_bits: float = 1.0
+    ):
         """Build an aligned bounded cross-bin view against other distributions.
 
         The generic implementation is a bounded candidate join: it unions the bounded
@@ -255,9 +284,9 @@ class ProbabilityDistribution:
         else:
             max_bits_tuple = tuple([float(max_bits)] * len(dists))
         if len(max_bits_tuple) != len(dists):
-            raise ValueError('max_bits length must match the number of distributions.')
+            raise ValueError("max_bits length must match the number of distributions.")
         if bin_width_bits <= 0:
-            raise ValueError('bin_width_bits must be positive.')
+            raise ValueError("bin_width_bits must be positive.")
 
         seen = set()
         values = []
@@ -278,11 +307,10 @@ class ProbabilityDistribution:
         for value in values:
             items.append((value, tuple(float(dist.log_density(value)) for dist in dists)))
         return QuantizedCrossIndex.from_items(
-            items, max_bits=max_bits_tuple, bin_width_bits=bin_width_bits,
-            truncated=truncated)
+            items, max_bits=max_bits_tuple, bin_width_bits=bin_width_bits, truncated=truncated
+        )
 
-    def quantized_cross_index(self, other: 'ProbabilityDistribution', max_bits,
-                              bin_width_bits: float = 1.0):
+    def quantized_cross_index(self, other: "ProbabilityDistribution", max_bits, bin_width_bits: float = 1.0):
         """Build an aligned bounded cross-bin view against another distribution."""
         return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
@@ -295,16 +323,18 @@ class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
     seq_initialize), enabling fast vectorized estimation over iid sequences.
     """
 
-    engine_ready = ('numpy',)
+    engine_ready = ("numpy",)
 
-    def supported_engines(self) -> Tuple[str, ...]:
+    def supported_engines(self) -> tuple[str, ...]:
         """Return engine names this distribution can evaluate on directly."""
         from pysp.stats.capabilities import capabilities_for
+
         return capabilities_for(self).engine_ready
 
     def supports_engine(self, engine: Any) -> bool:
         """Return True when the distribution can safely use ``engine``."""
         from pysp.stats.capabilities import capabilities_for
+
         return capabilities_for(self).supports_engine(engine)
 
     def seq_ld_lambda(self):
@@ -319,25 +349,26 @@ class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
         """Return vectorized log-density callables for encoded data."""
         return [self.seq_log_density]
 
-    def kernel(self, engine=None, estimator: Optional['ParameterEstimator'] = None):
+    def kernel(self, engine=None, estimator: Optional["ParameterEstimator"] = None):
         """Return an engine-aware evaluation kernel for this distribution."""
         from pysp.stats.kernel import kernel_for
+
         return kernel_for(self, engine=engine, estimator=estimator)
 
     @abstractmethod
-    def dist_to_encoder(self) -> 'DataSequenceEncoder':
+    def dist_to_encoder(self) -> "DataSequenceEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         ...
 
 
-class DistributionSampler(object):
+class DistributionSampler:
     """Draws iid observations from a distribution using a seeded RandomState.
 
     sample(size=None) returns a single observation of the distribution's data type;
     sample(size=n) returns a length-n collection of observations.
     """
 
-    def __init__(self, dist: SequenceEncodableProbabilityDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: SequenceEncodableProbabilityDistribution, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
@@ -346,10 +377,10 @@ class DistributionSampler(object):
         return self.rng.randint(0, maxrandint)
 
     @abstractmethod
-    def sample(self, size: Optional[int] = None) -> Any: ...
+    def sample(self, size: int | None = None) -> Any: ...
 
 
-class DistributionEnumerator(object):
+class DistributionEnumerator:
     """Lazy iterator over the support of dist in non-increasing probability order.
 
     Yields (value, log_prob) pairs, possibly infinitely many. Contract:
@@ -364,13 +395,13 @@ class DistributionEnumerator(object):
     def __init__(self, dist: SequenceEncodableProbabilityDistribution) -> None:
         self.dist = dist
 
-    def __iter__(self) -> 'DistributionEnumerator':
+    def __iter__(self) -> "DistributionEnumerator":
         return self
 
     @abstractmethod
-    def __next__(self) -> Tuple[Any, float]: ...
+    def __next__(self) -> tuple[Any, float]: ...
 
-    def top_k(self, k: int) -> List[Tuple[Any, float]]:
+    def top_k(self, k: int) -> list[tuple[Any, float]]:
         """Return the k most probable (value, log_prob) pairs (fewer if the support is smaller)."""
         return list(itertools.islice(self, k))
 
@@ -390,11 +421,11 @@ class DistributionEnumerator(object):
 
         """
         from pysp.utils.enumeration import QuantizedEnumerationIndex
-        return QuantizedEnumerationIndex.from_enumerator(self, max_bits=max_bits,
-                                                         bin_width_bits=bin_width_bits)
+
+        return QuantizedEnumerationIndex.from_enumerator(self, max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
-class ConditionalSampler(object):
+class ConditionalSampler:
     """Sampler mixin for conditional draws: sample_given(x) draws from P(. | x)."""
 
     @abstractmethod
@@ -411,25 +442,21 @@ class StatisticAccumulator(Generic[SS]):
     a stats_dict keyed by the accumulator's key.
     """
 
-    def update(self, x: Any, weight: float, estimate) -> None:
-        ...
+    def update(self, x: Any, weight: float, estimate) -> None: ...
 
     def initialize(self, x: Any, weight: float, rng: np.random.RandomState) -> None:
         self.update(x, weight, estimate=None)
 
     @abstractmethod
-    def combine(self, suff_stat: SS) -> 'StatisticAccumulator':
-        ...
+    def combine(self, suff_stat: SS) -> "StatisticAccumulator": ...
 
     @abstractmethod
-    def value(self) -> SS:
-        ...
+    def value(self) -> SS: ...
 
     @abstractmethod
-    def from_value(self, x: SS) -> 'SequenceEncodableStatisticAccumulator':
-        ...
+    def from_value(self, x: SS) -> "SequenceEncodableStatisticAccumulator": ...
 
-    def scale(self, c: float) -> 'StatisticAccumulator':
+    def scale(self, c: float) -> "StatisticAccumulator":
         """Scale linear sufficient statistics in-place by ``c``.
 
         The structural default is correct for ordinary weighted sums, nested
@@ -440,12 +467,10 @@ class StatisticAccumulator(Generic[SS]):
         return self.from_value(scale_suff_stat(self.value(), c))
 
     @abstractmethod
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
-        ...
+    def key_merge(self, stats_dict: dict[str, Any]) -> None: ...
 
     @abstractmethod
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
-        ...
+    def key_replace(self, stats_dict: dict[str, Any]) -> None: ...
 
 
 class SequenceEncodableStatisticAccumulator(StatisticAccumulator[SS]):
@@ -466,7 +491,7 @@ class SequenceEncodableStatisticAccumulator(StatisticAccumulator[SS]):
     def seq_initialize(self, x, weights: np.ndarray, rng: np.random.RandomState) -> None: ...
 
     @abstractmethod
-    def acc_to_encoder(self) -> 'DataSequenceEncoder': ...
+    def acc_to_encoder(self) -> "DataSequenceEncoder": ...
 
 
 def scale_suff_stat(x: Any, c: float) -> Any:
@@ -492,11 +517,11 @@ def scale_suff_stat(x: Any, c: float) -> Any:
     return x
 
 
-class StatisticAccumulatorFactory(object):
+class StatisticAccumulatorFactory:
     """Factory whose make() returns a fresh, zeroed accumulator for one estimator."""
 
     @abstractmethod
-    def make(self) -> 'SequenceEncodableStatisticAccumulator': ...
+    def make(self) -> "SequenceEncodableStatisticAccumulator": ...
 
 
 class ParameterEstimator(Generic[SS]):
@@ -507,39 +532,43 @@ class ParameterEstimator(Generic[SS]):
     regularization configured on the estimator) to a new distribution.
     """
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return a safe JSON-compatible representation of this estimator."""
         from pysp.utils.serialization import to_serializable
+
         return to_serializable(self)
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> 'ParameterEstimator':
+    def from_dict(cls, payload: dict[str, Any]) -> "ParameterEstimator":
         """Reconstruct an estimator from ``to_dict`` output."""
         from pysp.utils.serialization import from_serializable
+
         rv = from_serializable(payload)
         if not isinstance(rv, cls):
-            raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+            raise TypeError("decoded object is %s, not %s" % (type(rv).__name__, cls.__name__))
         return rv
 
     def to_json(self, **kwargs: Any) -> str:
         """Serialize this estimator as safe strict JSON."""
         from pysp.utils.serialization import to_json
+
         return to_json(self, **kwargs)
 
     @classmethod
-    def from_json(cls, text: str) -> 'ParameterEstimator':
+    def from_json(cls, text: str) -> "ParameterEstimator":
         """Deserialize an estimator from ``to_json`` output."""
         from pysp.utils.serialization import from_json
+
         rv = from_json(text)
         if not isinstance(rv, cls):
-            raise TypeError('decoded object is %s, not %s' % (type(rv).__name__, cls.__name__))
+            raise TypeError("decoded object is %s, not %s" % (type(rv).__name__, cls.__name__))
         return rv
 
     @abstractmethod
-    def estimate(self, nobs: Optional[float], suff_stat: SS) -> 'SequenceEncodableProbabilityDistribution': ...
+    def estimate(self, nobs: float | None, suff_stat: SS) -> "SequenceEncodableProbabilityDistribution": ...
 
     @abstractmethod
-    def accumulator_factory(self) -> 'StatisticAccumulatorFactory': ...
+    def accumulator_factory(self) -> "StatisticAccumulatorFactory": ...
 
 
 class DataSequenceEncoder:
@@ -576,7 +605,7 @@ def encoded_nbytes(x: Any) -> int:
     return _encoded_nbytes(x, set())
 
 
-def _encoded_nbytes(x: Any, seen: Set[int]) -> int:
+def _encoded_nbytes(x: Any, seen: set[int]) -> int:
     oid = id(x)
     if oid in seen:
         return 0
@@ -585,12 +614,12 @@ def _encoded_nbytes(x: Any, seen: Set[int]) -> int:
         seen.add(oid)
         return int(x.nbytes)
 
-    nbytes = getattr(x, 'nbytes', None)
+    nbytes = getattr(x, "nbytes", None)
     if nbytes is not None and not isinstance(x, (bytes, bytearray, str)):
         seen.add(oid)
         return int(nbytes)
 
-    if hasattr(x, 'numel') and hasattr(x, 'element_size'):
+    if hasattr(x, "numel") and hasattr(x, "element_size"):
         seen.add(oid)
         return int(x.numel() * x.element_size())
 
@@ -606,12 +635,12 @@ def _encoded_nbytes(x: Any, seen: Set[int]) -> int:
         return len(x)
 
     if isinstance(x, str):
-        return len(x.encode('utf-8'))
+        return len(x.encode("utf-8"))
 
     return sys.getsizeof(x)
 
 
-_KEY_ATTRS = ('key', 'keys', 'weight_key', 'comp_key', 'init_key', 'trans_key', 'state_key')
+_KEY_ATTRS = ("key", "keys", "weight_key", "comp_key", "init_key", "trans_key", "state_key")
 
 
 def _is_key_value(x: Any) -> bool:
@@ -626,16 +655,16 @@ def _is_key_value(x: Any) -> bool:
 def _freeze_for_signature(x: Any) -> Any:
     """Convert common mutable/numpy values into a hashable compatibility shape."""
     if isinstance(x, np.ndarray):
-        return ('ndarray', tuple(x.shape), str(x.dtype))
+        return ("ndarray", tuple(x.shape), str(x.dtype))
     if isinstance(x, dict):
-        return ('dict', tuple(sorted((repr(k), _freeze_for_signature(v)) for k, v in x.items())))
+        return ("dict", tuple(sorted((repr(k), _freeze_for_signature(v)) for k, v in x.items())))
     if isinstance(x, (list, tuple)):
         return (type(x).__name__, tuple(_freeze_for_signature(v) for v in x))
     if isinstance(x, set):
-        return ('set', tuple(sorted(repr(v) for v in x)))
+        return ("set", tuple(sorted(repr(v) for v in x)))
     if isinstance(x, (str, int, float, bool, type(None))):
         return (type(x).__name__, repr(x))
-    if hasattr(x, '__dict__'):
+    if hasattr(x, "__dict__"):
         return _object_signature(x)
     return (type(x).__module__, type(x).__qualname__, repr(x))
 
@@ -644,9 +673,9 @@ def _object_signature(x: Any) -> Any:
     """Best-effort structural signature for estimator compatibility checks."""
     values = []
     for name, value in sorted(vars(x).items()):
-        if name in ('name', 'key', 'keys', 'weight_key', 'comp_key', 'init_key', 'trans_key', 'state_key'):
+        if name in ("name", "key", "keys", "weight_key", "comp_key", "init_key", "trans_key", "state_key"):
             continue
-        if name.startswith('_'):
+        if name.startswith("_"):
             continue
         values.append((name, _freeze_for_signature(value)))
     return (type(x).__module__, type(x).__qualname__, tuple(values))
@@ -656,11 +685,11 @@ def _accumulator_signature(accumulator: StatisticAccumulator, role: str) -> Any:
     try:
         value_sig = _freeze_for_signature(accumulator.value())
     except Exception as err:
-        value_sig = ('value-error', type(err).__name__, str(err))
+        value_sig = ("value-error", type(err).__name__, str(err))
     return (type(accumulator).__module__, type(accumulator).__qualname__, role, value_sig)
 
 
-def _register_key(registry: Dict[Any, Tuple[Any, str]], key: Any, signature: Any, path: str) -> None:
+def _register_key(registry: dict[Any, tuple[Any, str]], key: Any, signature: Any, path: str) -> None:
     old = registry.get(key)
     if old is None:
         registry[key] = (signature, path)
@@ -673,7 +702,7 @@ def _register_key(registry: Dict[Any, Tuple[Any, str]], key: Any, signature: Any
         )
 
 
-def _iter_children(x: Any) -> List[Any]:
+def _iter_children(x: Any) -> list[Any]:
     if isinstance(x, dict):
         return list(x.values())
     if isinstance(x, (list, tuple)):
@@ -681,10 +710,9 @@ def _iter_children(x: Any) -> List[Any]:
     return []
 
 
-def _collect_estimator_keys(estimator: ParameterEstimator,
-                            registry: Dict[Any, Tuple[Any, str]],
-                            path: str,
-                            visited: Set[int]) -> None:
+def _collect_estimator_keys(
+    estimator: ParameterEstimator, registry: dict[Any, tuple[Any, str]], path: str, visited: set[int]
+) -> None:
     obj_id = id(estimator)
     if obj_id in visited:
         return
@@ -696,30 +724,33 @@ def _collect_estimator_keys(estimator: ParameterEstimator,
             continue
         keys = getattr(estimator, attr)
         if _is_key_value(keys):
-            _register_key(registry, keys, (type(estimator).__module__, type(estimator).__qualname__, attr, estimator_sig),
-                          '%s.%s' % (path, attr))
+            _register_key(
+                registry,
+                keys,
+                (type(estimator).__module__, type(estimator).__qualname__, attr, estimator_sig),
+                "%s.%s" % (path, attr),
+            )
         elif isinstance(keys, (list, tuple)):
             for i, key in enumerate(keys):
                 if _is_key_value(key):
                     _register_key(
                         registry,
                         key,
-                        (type(estimator).__module__, type(estimator).__qualname__, '%s[%d]' % (attr, i), estimator_sig),
-                        '%s.%s[%d]' % (path, attr, i),
+                        (type(estimator).__module__, type(estimator).__qualname__, "%s[%d]" % (attr, i), estimator_sig),
+                        "%s.%s[%d]" % (path, attr, i),
                     )
 
     for name, value in sorted(vars(estimator).items()):
         for i, child in enumerate(_iter_children(value)):
             if isinstance(child, ParameterEstimator):
-                _collect_estimator_keys(child, registry, '%s.%s[%d]' % (path, name, i), visited)
+                _collect_estimator_keys(child, registry, "%s.%s[%d]" % (path, name, i), visited)
         if isinstance(value, ParameterEstimator):
-            _collect_estimator_keys(value, registry, '%s.%s' % (path, name), visited)
+            _collect_estimator_keys(value, registry, "%s.%s" % (path, name), visited)
 
 
-def _collect_accumulator_keys(accumulator: StatisticAccumulator,
-                              registry: Dict[Any, Tuple[Any, str]],
-                              path: str,
-                              visited: Set[int]) -> None:
+def _collect_accumulator_keys(
+    accumulator: StatisticAccumulator, registry: dict[Any, tuple[Any, str]], path: str, visited: set[int]
+) -> None:
     obj_id = id(accumulator)
     if obj_id in visited:
         return
@@ -730,15 +761,15 @@ def _collect_accumulator_keys(accumulator: StatisticAccumulator,
             continue
         key = getattr(accumulator, attr)
         if _is_key_value(key):
-            _register_key(registry, key, _accumulator_signature(accumulator, attr), '%s.%s' % (path, attr))
+            _register_key(registry, key, _accumulator_signature(accumulator, attr), "%s.%s" % (path, attr))
 
     for name, value in sorted(vars(accumulator).items()):
         if isinstance(value, StatisticAccumulator):
-            _collect_accumulator_keys(value, registry, '%s.%s' % (path, name), visited)
+            _collect_accumulator_keys(value, registry, "%s.%s" % (path, name), visited)
         else:
             for i, child in enumerate(_iter_children(value)):
                 if isinstance(child, StatisticAccumulator):
-                    _collect_accumulator_keys(child, registry, '%s.%s[%d]' % (path, name, i), visited)
+                    _collect_accumulator_keys(child, registry, "%s.%s[%d]" % (path, name, i), visited)
 
 
 def validate_estimator_keys(estimator: ParameterEstimator) -> None:
@@ -749,15 +780,15 @@ def validate_estimator_keys(estimator: ParameterEstimator) -> None:
     key string.  Validation is intentionally protocol-level and best-effort; a
     family can still perform stricter checks in its own factory if needed.
     """
-    estimator_registry: Dict[Any, Tuple[Any, str]] = {}
+    estimator_registry: dict[Any, tuple[Any, str]] = {}
     _collect_estimator_keys(estimator, estimator_registry, type(estimator).__name__, set())
 
-    accumulator_registry: Dict[Any, Tuple[Any, str]] = {}
+    accumulator_registry: dict[Any, tuple[Any, str]] = {}
     accumulator = estimator.accumulator_factory().make()
     _collect_accumulator_keys(accumulator, accumulator_registry, type(accumulator).__name__, set())
 
 
 def validate_accumulator_keys(accumulator: StatisticAccumulator) -> None:
     """Validate keyed sites in an already-created accumulator tree."""
-    accumulator_registry: Dict[Any, Tuple[Any, str]] = {}
+    accumulator_registry: dict[Any, tuple[Any, str]] = {}
     _collect_accumulator_keys(accumulator, accumulator_registry, type(accumulator).__name__, set())

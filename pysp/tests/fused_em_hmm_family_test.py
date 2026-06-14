@@ -12,28 +12,33 @@ For each family this verifies two things:
 Families covered: SegmentalHiddenMarkov, TreeHiddenMarkov (numpy + numba encodings),
 IndPiHiddenMarkov (numpy + numba encodings), LookbackHiddenMarkov (both module variants).
 """
+
 import io
 import unittest
 
 import numpy as np
 
-from pysp.stats import (GaussianDistribution, GaussianEstimator, CategoricalDistribution,
-                        CategoricalEstimator, SequenceDistribution, SequenceEstimator,
-                        seq_encode, seq_log_density_sum)
-from pysp.stats.intrange import IntegerCategoricalDistribution, IntegerCategoricalEstimator
-from pysp.stats.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-from pysp.stats.segmental_hmm import (SegmentalHiddenMarkovModelDistribution,
-                                      SegmentalHiddenMarkovEstimator)
-from pysp.stats.tree_hmm import (TreeHiddenMarkovModelDistribution, TreeHiddenMarkovEstimator)
-from pysp.stats.hidden_markov_ind_pi import (IndPiHiddenMarkovModelDistribution,
-                                             IndPiHiddenMarkovEstimator)
 import pysp.stats.look_back_hmm as look_back_mod
 import pysp.stats.lookback_hmm as lookback_mod
+from pysp.stats import (
+    CategoricalDistribution,
+    CategoricalEstimator,
+    GaussianDistribution,
+    GaussianEstimator,
+    SequenceDistribution,
+    SequenceEstimator,
+    seq_encode,
+    seq_log_density_sum,
+)
+from pysp.stats.hidden_markov_ind_pi import IndPiHiddenMarkovEstimator, IndPiHiddenMarkovModelDistribution
+from pysp.stats.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
+from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.segmental_hmm import SegmentalHiddenMarkovModelDistribution
+from pysp.stats.tree_hmm import TreeHiddenMarkovEstimator, TreeHiddenMarkovModelDistribution
 from pysp.utils.estimation import optimize
 
 
 class FusedEMHmmFamilyTestCase(unittest.TestCase):
-
     def _parity(self, dist, est, data):
         enc = seq_encode(data, model=dist)
         _, ref = seq_log_density_sum(enc, dist)
@@ -44,10 +49,18 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
         self.assertAlmostEqual(acc._seq_ll, ref, delta=1e-5 * max(1.0, abs(ref)))
 
     def _fused(self, est, data, max_its=200):
-        std = optimize(data, est, max_its=max_its, delta=1e-8, rng=np.random.RandomState(7),
-                       out=io.StringIO(), reuse_estep_ll=False)
-        fused = optimize(data, est, max_its=max_its, delta=1e-8, rng=np.random.RandomState(7),
-                         out=io.StringIO(), reuse_estep_ll=True)
+        std = optimize(
+            data,
+            est,
+            max_its=max_its,
+            delta=1e-8,
+            rng=np.random.RandomState(7),
+            out=io.StringIO(),
+            reuse_estep_ll=False,
+        )
+        fused = optimize(
+            data, est, max_its=max_its, delta=1e-8, rng=np.random.RandomState(7), out=io.StringIO(), reuse_estep_ll=True
+        )
         _, ls = seq_log_density_sum(seq_encode(data, model=std), std)
         _, lf = seq_log_density_sum(seq_encode(data, model=fused), fused)
         self.assertAlmostEqual(ls, lf, delta=1e-4 * max(1.0, abs(ls)))
@@ -62,8 +75,10 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
     def _segmental(self):
         dist = SegmentalHiddenMarkovModelDistribution(
             [GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 1.0)],
-            [0.6, 0.4], [[0.7, 0.3], [0.4, 0.6]],
-            len_dist=CategoricalDistribution({3: 0.5, 4: 0.5}))
+            [0.6, 0.4],
+            [[0.7, 0.3], [0.4, 0.6]],
+            len_dist=CategoricalDistribution({3: 0.5, 4: 0.5}),
+        )
         return dist, dist.estimator(pseudo_count=1e-6), dist.sampler(seed=1).sample(25)
 
     def test_segmental(self):
@@ -75,14 +90,21 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
     # ------------------------------------------------------------------- ind_pi
 
     def _ind_pi(self, use_numba):
-        topics = [CategoricalDistribution({'a': 0.7, 'b': 0.3}),
-                  CategoricalDistribution({'a': 0.2, 'b': 0.8})]
+        topics = [CategoricalDistribution({"a": 0.7, "b": 0.3}), CategoricalDistribution({"a": 0.2, "b": 0.8})]
         dist = IndPiHiddenMarkovModelDistribution(
-            topics, [[0.6, 0.4], [0.3, 0.7]], [[0.7, 0.3], [0.4, 0.6]], None,
-            len_dist=CategoricalDistribution({3: 0.5, 4: 0.5}), use_numba=use_numba)
-        est = IndPiHiddenMarkovEstimator([CategoricalEstimator(), CategoricalEstimator()],
-                                         len_estimator=CategoricalEstimator(),
-                                         pseudo_count=(1.0, 1.0), use_numba=use_numba)
+            topics,
+            [[0.6, 0.4], [0.3, 0.7]],
+            [[0.7, 0.3], [0.4, 0.6]],
+            None,
+            len_dist=CategoricalDistribution({3: 0.5, 4: 0.5}),
+            use_numba=use_numba,
+        )
+        est = IndPiHiddenMarkovEstimator(
+            [CategoricalEstimator(), CategoricalEstimator()],
+            len_estimator=CategoricalEstimator(),
+            pseudo_count=(1.0, 1.0),
+            use_numba=use_numba,
+        )
         return dist, est, dist.sampler(seed=1).sample(25)
 
     def test_ind_pi_numba(self):
@@ -110,28 +132,40 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
     def _tree_gauss_dist(self, use_numba):
         topics = [GaussianDistribution(mu=0.0, sigma2=1.0), GaussianDistribution(mu=10.0, sigma2=1.0)]
         return TreeHiddenMarkovModelDistribution(
-            topics=topics, w=np.array([0.6, 0.4]), transitions=np.array([[0.7, 0.3], [0.2, 0.8]]),
+            topics=topics,
+            w=np.array([0.6, 0.4]),
+            transitions=np.array([[0.7, 0.3], [0.2, 0.8]]),
             len_dist=CategoricalDistribution({0: 0.3, 1: 0.4, 2: 0.3}),
-            terminal_level=6, use_numba=use_numba)
+            terminal_level=6,
+            use_numba=use_numba,
+        )
 
     def _tree_gauss_est(self, use_numba):
         ge = lambda: GaussianEstimator(pseudo_count=(1.0, 1.0), suff_stat=(0.0, 1.0))
-        return TreeHiddenMarkovEstimator([ge(), ge()],
-                                         len_estimator=CategoricalEstimator(pseudo_count=0.1),
-                                         use_numba=use_numba)
+        return TreeHiddenMarkovEstimator(
+            [ge(), ge()], len_estimator=CategoricalEstimator(pseudo_count=0.1), use_numba=use_numba
+        )
 
     def _tree_cat_dist(self, use_numba):
-        topics = [CategoricalDistribution({'a': 0.8, 'b': 0.1, 'c': 0.1}),
-                  CategoricalDistribution({'a': 0.1, 'b': 0.1, 'c': 0.8})]
+        topics = [
+            CategoricalDistribution({"a": 0.8, "b": 0.1, "c": 0.1}),
+            CategoricalDistribution({"a": 0.1, "b": 0.1, "c": 0.8}),
+        ]
         return TreeHiddenMarkovModelDistribution(
-            topics=topics, w=np.array([0.6, 0.4]), transitions=np.array([[0.7, 0.3], [0.2, 0.8]]),
+            topics=topics,
+            w=np.array([0.6, 0.4]),
+            transitions=np.array([[0.7, 0.3], [0.2, 0.8]]),
             len_dist=CategoricalDistribution({0: 0.3, 1: 0.4, 2: 0.3}),
-            terminal_level=5, use_numba=use_numba)
+            terminal_level=5,
+            use_numba=use_numba,
+        )
 
     def _tree_cat_est(self, use_numba):
         return TreeHiddenMarkovEstimator(
             [CategoricalEstimator(pseudo_count=0.5), CategoricalEstimator(pseudo_count=0.5)],
-            len_estimator=CategoricalEstimator(pseudo_count=0.1), use_numba=use_numba)
+            len_estimator=CategoricalEstimator(pseudo_count=0.1),
+            use_numba=use_numba,
+        )
 
     def test_tree_numpy(self):
         # Parity (bit-for-bit) on the curated trees; fused on categorical-emission sampled trees,
@@ -160,16 +194,22 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
         len_dist = CategoricalDistribution({7: 0.5, 8: 0.25, 9: 0.25})
         transition = [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]
         w = [0.4, 0.3, 0.3]
-        return mod.LookbackHiddenMarkovDistribution(states, w=w, transitions=transition, lag=1,
-                                                    init_dist=init_dists, len_dist=len_dist)
+        return mod.LookbackHiddenMarkovDistribution(
+            states, w=w, transitions=transition, lag=1, init_dist=init_dists, len_dist=len_dist
+        )
 
     def _lookback_est(self, mod):
-        est0 = SequenceEstimator(IntegerCategoricalEstimator(pseudo_count=0.1),
-                                 len_estimator=CategoricalEstimator(pseudo_count=0.1))
+        est0 = SequenceEstimator(
+            IntegerCategoricalEstimator(pseudo_count=0.1), len_estimator=CategoricalEstimator(pseudo_count=0.1)
+        )
         est1 = IntegerMarkovChainEstimator(3, pseudo_count=0.1)
-        return mod.LookbackHiddenMarkovEstimator([est1] * 3, lag=1, init_estimators=[est0] * 3,
-                                                 len_estimator=CategoricalEstimator(pseudo_count=0.1),
-                                                 pseudo_count=(1.0, 1.0))
+        return mod.LookbackHiddenMarkovEstimator(
+            [est1] * 3,
+            lag=1,
+            init_estimators=[est0] * 3,
+            len_estimator=CategoricalEstimator(pseudo_count=0.1),
+            pseudo_count=(1.0, 1.0),
+        )
 
     def test_lookback_original(self):
         dist = self._lookback_dist(lookback_mod)
@@ -186,5 +226,5 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
         self._default_off(self._lookback_est(look_back_mod))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

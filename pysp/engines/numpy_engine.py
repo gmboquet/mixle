@@ -1,4 +1,5 @@
 """NumPy implementation of the ComputeEngine protocol."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -13,15 +14,15 @@ from pysp.engines.precision import normalize_numpy_dtype
 class NumpyEngine(ComputeEngine):
     """Host NumPy/SciPy engine used by the default local execution path."""
 
-    name = 'numpy'
+    name = "numpy"
     supports_autograd = False
 
-    device = 'cpu'
+    device = "cpu"
 
     def __init__(self, dtype: Any = None) -> None:
         self.dtype = normalize_numpy_dtype(dtype)
 
-    def with_precision(self, precision: Any) -> 'NumpyEngine':
+    def with_precision(self, precision: Any) -> NumpyEngine:
         """Return a NumPy engine using ``precision`` for floating arrays."""
         return NumpyEngine(dtype=precision)
 
@@ -29,7 +30,7 @@ class NumpyEngine(ComputeEngine):
         """Convert ``x`` to a NumPy ndarray under the engine dtype policy."""
         arr = np.asarray(x)
         dt = dtype
-        if dt is None and self.dtype is not None and arr.dtype.kind == 'f':
+        if dt is None and self.dtype is not None and arr.dtype.kind == "f":
             dt = self.dtype
         return np.asarray(x, dtype=dt)
 
@@ -43,8 +44,8 @@ class NumpyEngine(ComputeEngine):
 
     def arange(self, *args: Any, **kwargs: Any) -> np.ndarray:
         """Return ``np.arange`` with float ranges honoring the precision policy."""
-        if self.dtype is not None and 'dtype' not in kwargs and _has_float_arg(args):
-            kwargs['dtype'] = self.dtype
+        if self.dtype is not None and "dtype" not in kwargs and _has_float_arg(args):
+            kwargs["dtype"] = self.dtype
         return np.arange(*args, **kwargs)
 
     def to_numpy(self, x: Any) -> np.ndarray:

@@ -5,45 +5,53 @@ stationary init mode), agreement with the dense HiddenMarkovModelDistribution, s
 estimation smoke runs (free theta, fixed theta, k_max caps) on tiny synthetic data with fixed
 seeds.
 """
+
 import itertools
 import unittest
 
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.engines import NUMPY_ENGINE
 from pysp.stats import seq_estimate, seq_initialize
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.hidden_markov import HiddenMarkovModelDistribution
 from pysp.stats.null_dist import NullDistribution
-from pysp.engines import NUMPY_ENGINE
 
 try:
     from pysp.engines import TorchEngine
-    _TORCH = TorchEngine(device='cpu', dtype='float64')
+
+    _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
 from pysp.stats.quantized_hmm import (
+    QuantizedHiddenMarkovEstimator,
     QuantizedHiddenMarkovModelDistribution,
     QuantizedHiddenMarkovModelEnumerator,
-    QuantizedHiddenMarkovEstimator,
     _split_collapsed_states,
 )
 from pysp.utils.enumeration import freeze
 
 
-def make_quantized_dist(init_mode='quantized', use_numba=False, theta=0.5):
-    levels = ['a', 'b', 'c']
+def make_quantized_dist(init_mode="quantized", use_numba=False, theta=0.5):
+    levels = ["a", "b", "c"]
     trans_exp = [[0, 1], [2, 0]]
     emis_exp = [[0, 1, 2], [2, 1, 0]]
-    init_exp = [0, 1] if init_mode == 'quantized' else None
+    init_exp = [0, 1] if init_mode == "quantized" else None
     len_dist = CategoricalDistribution({3: 0.5, 4: 0.5})
     return QuantizedHiddenMarkovModelDistribution(
-        theta, levels, trans_exp, emis_exp, initial_exponents=init_exp, init_mode=init_mode,
-        len_dist=len_dist, use_numba=use_numba)
+        theta,
+        levels,
+        trans_exp,
+        emis_exp,
+        initial_exponents=init_exp,
+        init_mode=init_mode,
+        len_dist=len_dist,
+        use_numba=use_numba,
+    )
 
 
 class QuantizedHmmParameterizationTestCase(unittest.TestCase):
-
     def setUp(self):
         self.dist = make_quantized_dist()
 
@@ -64,32 +72,40 @@ class QuantizedHmmParameterizationTestCase(unittest.TestCase):
 
     def test_structural_zero_probability(self):
         dist = QuantizedHiddenMarkovModelDistribution(
-            0.5, ['a', 'b'], [[0, -1], [1, 0]], [[0, 1], [-1, 0]], initial_exponents=[0, 0],
-            len_dist=CategoricalDistribution({2: 1.0}))
+            0.5,
+            ["a", "b"],
+            [[0, -1], [1, 0]],
+            [[0, 1], [-1, 0]],
+            initial_exponents=[0, 0],
+            len_dist=CategoricalDistribution({2: 1.0}),
+        )
         self.assertEqual(dist.transitions[0, 1], 0.0)
         self.assertEqual(dist.transitions[0, 0], 1.0)
-        self.assertEqual(dist.topics[1].pmap['a'], 0.0)
+        self.assertEqual(dist.topics[1].pmap["a"], 0.0)
 
     def test_invalid_args_raise(self):
         with self.assertRaises(ValueError):
             make_quantized_dist(theta=1.5)
         with self.assertRaises(ValueError):
-            QuantizedHiddenMarkovModelDistribution(
-                0.5, ['a'], [[-1]], [[0]], initial_exponents=[0])
+            QuantizedHiddenMarkovModelDistribution(0.5, ["a"], [[-1]], [[0]], initial_exponents=[0])
         with self.assertRaises(ValueError):
             QuantizedHiddenMarkovModelDistribution(
-                0.5, ['a', 'b'], [[0, 0], [0, 0]], [[0, 0], [0, 0]], init_mode='quantized')
+                0.5, ["a", "b"], [[0, 0], [0, 0]], [[0, 0], [0, 0]], init_mode="quantized"
+            )
 
     def test_stationary_init_mode(self):
-        dist = make_quantized_dist(init_mode='stationary')
+        dist = make_quantized_dist(init_mode="stationary")
         self.assertIsNone(dist.initial_exponents)
         self.assertTrue(np.allclose(dist.w @ dist.transitions, dist.w))
 
     def test_matches_dense_hmm(self):
         data = self.dist.sampler(seed=3).sample(20)
         dense = HiddenMarkovModelDistribution(
-            topics=list(self.dist.topics), w=self.dist.w.copy(),
-            transitions=self.dist.transitions.copy(), len_dist=self.dist.len_dist)
+            topics=list(self.dist.topics),
+            w=self.dist.w.copy(),
+            transitions=self.dist.transitions.copy(),
+            len_dist=self.dist.len_dist,
+        )
         for seq in data:
             self.assertAlmostEqual(self.dist.log_density(seq), dense.log_density(seq), places=10)
 
@@ -102,9 +118,9 @@ class QuantizedHmmParameterizationTestCase(unittest.TestCase):
 
     def test_str_eval_round_trip(self):
         namespace = {
-            'QuantizedHiddenMarkovModelDistribution': QuantizedHiddenMarkovModelDistribution,
-            'CategoricalDistribution': CategoricalDistribution,
-            'NullDistribution': NullDistribution,
+            "QuantizedHiddenMarkovModelDistribution": QuantizedHiddenMarkovModelDistribution,
+            "CategoricalDistribution": CategoricalDistribution,
+            "NullDistribution": NullDistribution,
         }
         dist2 = eval(str(self.dist), namespace)
         self.assertEqual(dist2.theta, self.dist.theta)
@@ -122,7 +138,6 @@ class QuantizedHmmParameterizationTestCase(unittest.TestCase):
 
 
 class QuantizedHmmEnumeratorTestCase(unittest.TestCase):
-
     def setUp(self):
         self.dist = make_quantized_dist()
 
@@ -156,7 +171,6 @@ class QuantizedHmmEnumeratorTestCase(unittest.TestCase):
 
 
 class QuantizedHmmEstimationTestCase(unittest.TestCase):
-
     def setUp(self):
         self.gen = make_quantized_dist(theta=0.5)
         self.data = self.gen.sampler(seed=11).sample(150)
@@ -174,8 +188,7 @@ class QuantizedHmmEstimationTestCase(unittest.TestCase):
         return model, ll_first, ll_last
 
     def test_seq_estimate_smoke(self):
-        est = QuantizedHiddenMarkovEstimator(
-            2, pseudo_count=0.5, k_max=12, len_estimator=CategoricalEstimator())
+        est = QuantizedHiddenMarkovEstimator(2, pseudo_count=0.5, k_max=12, len_estimator=CategoricalEstimator())
         model, ll_first, ll_last = self._fit(est)
 
         self.assertIsInstance(model, QuantizedHiddenMarkovModelDistribution)
@@ -183,8 +196,7 @@ class QuantizedHmmEstimationTestCase(unittest.TestCase):
         self.assertTrue(np.issubdtype(model.transition_exponents.dtype, np.integer))
         self.assertTrue(np.issubdtype(model.emission_exponents.dtype, np.integer))
         # with a pseudo count there are no structural zeros, and k_max caps the exponents
-        for exps in (model.transition_exponents, model.emission_exponents,
-                     model.initial_exponents):
+        for exps in (model.transition_exponents, model.emission_exponents, model.initial_exponents):
             self.assertTrue(np.all(exps >= 0))
             self.assertTrue(np.all(exps <= 12))
         self.assertTrue(np.isfinite(ll_last))
@@ -192,16 +204,16 @@ class QuantizedHmmEstimationTestCase(unittest.TestCase):
 
     def test_fixed_theta(self):
         est = QuantizedHiddenMarkovEstimator(
-            2, pseudo_count=0.5, k_max=12, fixed_theta=0.5,
-            len_estimator=CategoricalEstimator())
+            2, pseudo_count=0.5, k_max=12, fixed_theta=0.5, len_estimator=CategoricalEstimator()
+        )
         model, _, ll_last = self._fit(est, its=5)
         self.assertEqual(model.theta, 0.5)
         self.assertTrue(np.isfinite(ll_last))
 
     def test_stationary_init_mode_fit(self):
         est = QuantizedHiddenMarkovEstimator(
-            2, pseudo_count=0.5, k_max=12, init_mode='stationary',
-            len_estimator=CategoricalEstimator())
+            2, pseudo_count=0.5, k_max=12, init_mode="stationary", len_estimator=CategoricalEstimator()
+        )
         model, _, ll_last = self._fit(est, its=5)
         self.assertIsNone(model.initial_exponents)
         self.assertTrue(np.allclose(model.w @ model.transitions, model.w))
@@ -209,13 +221,13 @@ class QuantizedHmmEstimationTestCase(unittest.TestCase):
 
     def test_structural_zero_for_unseen_level(self):
         est = QuantizedHiddenMarkovEstimator(
-            2, levels=['a', 'b', 'c', 'd'], pseudo_count=None, k_max=12,
-            len_estimator=CategoricalEstimator())
+            2, levels=["a", "b", "c", "d"], pseudo_count=None, k_max=12, len_estimator=CategoricalEstimator()
+        )
         model, _, _ = self._fit(est, its=3)
-        d_col = model.levels.index('d')
+        d_col = model.levels.index("d")
         self.assertTrue(np.all(model.emission_exponents[:, d_col] == -1))
         for topic in model.topics:
-            self.assertEqual(topic.pmap['d'], 0.0)
+            self.assertEqual(topic.pmap["d"], 0.0)
 
     def test_estimator_round_trip_from_distribution(self):
         est = self.gen.estimator(pseudo_count=0.5)
@@ -233,23 +245,27 @@ class QuantizedHmmEstimationTestCase(unittest.TestCase):
         emit_counts = np.asarray([[12.0, 8.0], [8.0, 12.0]])
         log_theta = np.log(0.5)
 
-        n = _split_collapsed_states(trans_exp, emit_exp, trans_counts, emit_counts, 16,
-                                    log_theta, np.log(2.0))
+        n = _split_collapsed_states(trans_exp, emit_exp, trans_counts, emit_counts, 16, log_theta, np.log(2.0))
         self.assertEqual(n, 1)
         # state 1 should now be one ln(2) gap less likely on symbol 0 than state 0
         self.assertEqual(emit_exp[1, 0], emit_exp[0, 0] + 1)
 
     def test_split_escapes_collapsed_fixed_point(self):
         gen = QuantizedHiddenMarkovModelDistribution(
-            0.5, ['a', 'b', 'c'], [[0, 2], [3, 0]], [[0, 2, 4], [4, 2, 0]],
-            initial_exponents=[0, 1], len_dist=CategoricalDistribution({8: 0.5, 9: 0.5}))
+            0.5,
+            ["a", "b", "c"],
+            [[0, 2], [3, 0]],
+            [[0, 2, 4], [4, 2, 0]],
+            initial_exponents=[0, 1],
+            len_dist=CategoricalDistribution({8: 0.5, 9: 0.5}),
+        )
         data = gen.sampler(seed=2).sample(500)
 
         lls = {}
         for split in (False, True):
             est = QuantizedHiddenMarkovEstimator(
-                2, pseudo_count=0.25, k_max=16, len_estimator=CategoricalEstimator(),
-                split_collapsed=split)
+                2, pseudo_count=0.25, k_max=16, len_estimator=CategoricalEstimator(), split_collapsed=split
+            )
             encoder = est.accumulator_factory().make().acc_to_encoder()
             enc_data = [(len(data), encoder.seq_encode(data))]
             enc_eval = encoder.seq_encode(data)
@@ -275,8 +291,7 @@ class QuantizedHmmEstimationTestCase(unittest.TestCase):
         data = dist_np.sampler(seed=5).sample(20)
         enc_nb = dist_nb.dist_to_encoder().seq_encode(data)
         enc_np = dist_np.dist_to_encoder().seq_encode(data)
-        self.assertTrue(np.allclose(dist_nb.seq_log_density(enc_nb),
-                                    dist_np.seq_log_density(enc_np)))
+        self.assertTrue(np.allclose(dist_nb.seq_log_density(enc_nb), dist_np.seq_log_density(enc_np)))
 
 
 class QuantizedHmmEngineTestCase(unittest.TestCase):
@@ -284,16 +299,22 @@ class QuantizedHmmEngineTestCase(unittest.TestCase):
 
     def setUp(self):
         self.dist = QuantizedHiddenMarkovModelDistribution(
-            0.5, ['a', 'b', 'c'], [[0, 2], [3, 0]], [[0, 2, 4], [4, 2, 0]],
-            initial_exponents=[0, 1], len_dist=CategoricalDistribution({4: 0.5, 5: 0.5}),
-            use_numba=False)
+            0.5,
+            ["a", "b", "c"],
+            [[0, 2], [3, 0]],
+            [[0, 2, 4], [4, 2, 0]],
+            initial_exponents=[0, 1],
+            len_dist=CategoricalDistribution({4: 0.5, 5: 0.5}),
+            use_numba=False,
+        )
         self.data = self.dist.sampler(seed=2).sample(40)
-        self.engines = [('numpy', NUMPY_ENGINE)]
+        self.engines = [("numpy", NUMPY_ENGINE)]
         if _TORCH is not None:
-            self.engines.append(('torch', _TORCH))
+            self.engines.append(("torch", _TORCH))
 
     def test_scoring_and_estep_parity(self):
         from pysp.stats.backend import backend_seq_log_density
+
         est = self.dist.estimator(pseudo_count=0.5)
         enc = self.dist.dist_to_encoder().seq_encode(self.data)
         ref = np.asarray(self.dist.seq_log_density(enc))
@@ -306,12 +327,11 @@ class QuantizedHmmEngineTestCase(unittest.TestCase):
                 got = np.asarray(engine.to_numpy(backend_seq_log_density(self.dist, enc, engine)))
                 self.assertTrue(np.allclose(got, ref, atol=1.0e-9))
                 kernel = self.dist.kernel(engine=engine, estimator=est)
-                self.assertEqual(type(kernel).__name__, 'HiddenMarkovModelKernel')
+                self.assertEqual(type(kernel).__name__, "HiddenMarkovModelKernel")
                 value = kernel.accumulate(enc, np.ones(len(self.data)))
                 for k in (1, 2, 3):
-                    self.assertTrue(np.allclose(np.asarray(host_value[k]), np.asarray(value[k]),
-                                                atol=1.0e-8))
+                    self.assertTrue(np.allclose(np.asarray(host_value[k]), np.asarray(value[k]), atol=1.0e-8))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -4,25 +4,35 @@ Verifies that the mixture accumulator's reported batch log-likelihood matches se
 that fixed-iteration fused EM matches the standard loop exactly, that delta-based convergence reaches
 the same optimum, and that models which can't report the LL (top-level HMM) fall back cleanly.
 """
+
 import io
 import unittest
 
 import numpy as np
 
-from pysp.stats import (MixtureDistribution, GaussianDistribution, MixtureEstimator, GaussianEstimator,
-                        HiddenMarkovModelDistribution, HiddenMarkovEstimator,
-                        PoissonDistribution, PoissonEstimator,
-                        SequenceDistribution, SequenceEstimator,
-                        seq_encode, seq_log_density_sum)
+from pysp.stats import (
+    GaussianDistribution,
+    GaussianEstimator,
+    HiddenMarkovEstimator,
+    HiddenMarkovModelDistribution,
+    MixtureDistribution,
+    MixtureEstimator,
+    PoissonDistribution,
+    PoissonEstimator,
+    SequenceDistribution,
+    SequenceEstimator,
+    seq_encode,
+    seq_log_density_sum,
+)
 from pysp.utils.estimation import optimize
 
 
 class FusedEMTestCase(unittest.TestCase):
-
     def setUp(self):
         self.truth = MixtureDistribution(
             [GaussianDistribution(-3.0, 1.0), GaussianDistribution(0.0, 1.0), GaussianDistribution(4.0, 1.0)],
-            [0.4, 0.3, 0.3])
+            [0.4, 0.3, 0.3],
+        )
         self.data = self.truth.sampler(1).sample(8000)
 
     def _mk(self):
@@ -38,10 +48,16 @@ class FusedEMTestCase(unittest.TestCase):
         self.assertAlmostEqual(acc._seq_ll, ref, places=6)
 
     def test_fixed_iters_identical_to_standard(self):
-        std = optimize(self.data, self._mk(), max_its=30, delta=None,
-                       rng=np.random.RandomState(1), out=io.StringIO())
-        fused = optimize(self.data, self._mk(), max_its=30, delta=None,
-                         rng=np.random.RandomState(1), out=io.StringIO(), reuse_estep_ll=True)
+        std = optimize(self.data, self._mk(), max_its=30, delta=None, rng=np.random.RandomState(1), out=io.StringIO())
+        fused = optimize(
+            self.data,
+            self._mk(),
+            max_its=30,
+            delta=None,
+            rng=np.random.RandomState(1),
+            out=io.StringIO(),
+            reuse_estep_ll=True,
+        )
         # Fixed iteration count, same init -> identical fit.
         self.assertTrue(np.allclose(std.w, fused.w, atol=1.0e-10))
         for cs, cf in zip(std.components, fused.components):
@@ -50,10 +66,18 @@ class FusedEMTestCase(unittest.TestCase):
 
     def test_delta_convergence_matches(self):
         enc = seq_encode(self.data, model=self.truth)
-        std = optimize(self.data, self._mk(), max_its=300, delta=1.0e-7,
-                       rng=np.random.RandomState(2), out=io.StringIO())
-        fused = optimize(self.data, self._mk(), max_its=300, delta=1.0e-7,
-                         rng=np.random.RandomState(2), out=io.StringIO(), reuse_estep_ll=True)
+        std = optimize(
+            self.data, self._mk(), max_its=300, delta=1.0e-7, rng=np.random.RandomState(2), out=io.StringIO()
+        )
+        fused = optimize(
+            self.data,
+            self._mk(),
+            max_its=300,
+            delta=1.0e-7,
+            rng=np.random.RandomState(2),
+            out=io.StringIO(),
+            reuse_estep_ll=True,
+        )
         _, lls = seq_log_density_sum(enc, std)
         _, llf = seq_log_density_sum(enc, fused)
         # Same optimum (the one-iteration convergence lag may stop a hair earlier/later).
@@ -66,8 +90,9 @@ class FusedEMTestCase(unittest.TestCase):
             hmm = HiddenMarkovModelDistribution(topics, [1 / 3.0] * 3, A, len_dist=PoissonDistribution(8.0))
             data = hmm.sampler(1).sample(1000)
             enc = seq_encode(data, model=hmm)
-            est = HiddenMarkovEstimator([GaussianEstimator()] * 3, len_estimator=PoissonEstimator(),
-                                        use_numba=use_numba)
+            est = HiddenMarkovEstimator(
+                [GaussianEstimator()] * 3, len_estimator=PoissonEstimator(), use_numba=use_numba
+            )
             with self.subTest(use_numba=use_numba):
                 # E-step reported LL == seq_log_density_sum.
                 acc = est.accumulator_factory().make()
@@ -78,8 +103,15 @@ class FusedEMTestCase(unittest.TestCase):
                 self.assertAlmostEqual(acc._seq_ll, ref, places=5)
                 # Fixed-iteration fused == standard.
                 std = optimize(data, est, max_its=12, delta=None, rng=np.random.RandomState(3), out=io.StringIO())
-                fused = optimize(data, est, max_its=12, delta=None, rng=np.random.RandomState(3),
-                                 out=io.StringIO(), reuse_estep_ll=True)
+                fused = optimize(
+                    data,
+                    est,
+                    max_its=12,
+                    delta=None,
+                    rng=np.random.RandomState(3),
+                    out=io.StringIO(),
+                    reuse_estep_ll=True,
+                )
                 _, ls = seq_log_density_sum(enc, std)
                 _, lf = seq_log_density_sum(enc, fused)
                 self.assertAlmostEqual(ls, lf, places=6)
@@ -91,12 +123,10 @@ class FusedEMTestCase(unittest.TestCase):
         # standard loops must still produce the same result.
         # (Note: hmixture, HMMs, and the other latent families now DO report _seq_ll and take the
         # fused fast path -- they're covered by the tests above; this one exercises the fallback.)
-        inner = MixtureDistribution(
-            [GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)], [0.5, 0.5])
+        inner = MixtureDistribution([GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)], [0.5, 0.5])
         truth = SequenceDistribution(inner, len_dist=PoissonDistribution(5.0))
         data = truth.sampler(1).sample(400)
-        est = SequenceEstimator(MixtureEstimator([GaussianEstimator()] * 2),
-                                len_estimator=PoissonEstimator())
+        est = SequenceEstimator(MixtureEstimator([GaussianEstimator()] * 2), len_estimator=PoissonEstimator())
 
         # Confirm the top-level accumulator genuinely does NOT report _seq_ll, so the fallback runs.
         enc = seq_encode(data, model=truth)
@@ -104,11 +134,12 @@ class FusedEMTestCase(unittest.TestCase):
         acc._track_ll = True
         for sz, x in enc:
             acc.seq_update(x, np.ones(sz), truth)
-        self.assertIsNone(getattr(acc, '_seq_ll', None))
+        self.assertIsNone(getattr(acc, "_seq_ll", None))
 
         std = optimize(data, est, max_its=15, delta=None, rng=np.random.RandomState(4), out=io.StringIO())
-        fb = optimize(data, est, max_its=15, delta=None, rng=np.random.RandomState(4),
-                      out=io.StringIO(), reuse_estep_ll=True)
+        fb = optimize(
+            data, est, max_its=15, delta=None, rng=np.random.RandomState(4), out=io.StringIO(), reuse_estep_ll=True
+        )
         enc = seq_encode(data, model=std)
         _, lls = seq_log_density_sum(enc, std)
         _, llf = seq_log_density_sum(enc, fb)
@@ -117,10 +148,20 @@ class FusedEMTestCase(unittest.TestCase):
     def test_best_of_reuse_estep_ll(self):
         # best_of forwards reuse_estep_ll to each trial's optimize; same trials/seed -> same result.
         from pysp.utils.estimation import best_of
-        std = best_of(self.data, None, self._mk(), 3, 20, 0.1, None,
-                      np.random.RandomState(1), out=io.StringIO())
-        fused = best_of(self.data, None, self._mk(), 3, 20, 0.1, None,
-                        np.random.RandomState(1), out=io.StringIO(), reuse_estep_ll=True)
+
+        std = best_of(self.data, None, self._mk(), 3, 20, 0.1, None, np.random.RandomState(1), out=io.StringIO())
+        fused = best_of(
+            self.data,
+            None,
+            self._mk(),
+            3,
+            20,
+            0.1,
+            None,
+            np.random.RandomState(1),
+            out=io.StringIO(),
+            reuse_estep_ll=True,
+        )
         self.assertAlmostEqual(std[0], fused[0], places=6)
 
     def test_default_off_unchanged(self):
@@ -131,5 +172,5 @@ class FusedEMTestCase(unittest.TestCase):
         self.assertTrue(np.isclose(sum(m.w), 1.0))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 """Regression tests for small pysp.utils helpers."""
+
 import io
 import unittest
 
@@ -12,13 +13,12 @@ from pysp.utils.vector import sorted_dict_merge_add
 
 
 class UtilsTestCase(unittest.TestCase):
-
     def test_least_occurring_modern_dict_items(self):
-        rare = list(least_occurring(['a', 'a', 'b', 'c', 'c', 'd'], count=2, keep_freq=True))
-        self.assertEqual(set(rare), {'b', 'd'})
+        rare = list(least_occurring(["a", "a", "b", "c", "c", "d"], count=2, keep_freq=True))
+        self.assertEqual(set(rare), {"b", "d"})
 
-        rare_values = least_occurring(['a', 'a', 'b', 'c', 'c', 'd'], count=2, keep_freq=False)
-        self.assertEqual(set(rare_values), {'b', 'd'})
+        rare_values = least_occurring(["a", "a", "b", "c", "c", "d"], count=2, keep_freq=False)
+        self.assertEqual(set(rare_values), {"b", "d"})
 
     def test_sorted_dict_merge_add_keeps_counts_aligned(self):
         keys, counts = sorted_dict_merge_add(
@@ -62,5 +62,5 @@ class UtilsTestCase(unittest.TestCase):
         self.assertTrue(np.isfinite(model.log_density(0.0)))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

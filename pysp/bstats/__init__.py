@@ -16,91 +16,163 @@ estimate(nobs, suff_stat). The drivers below dispatch to whichever form an
 estimator provides, preferring the bstats snake_case API.
 """
 
-__all__ = ['BernoulliDistribution', 'BernoulliEstimator', 'BernoulliSampler',
-           'BernoulliSetDistribution', 'BernoulliSetEstimator', 'BernoulliSetSampler',
-           'BetaDistribution', 'BetaSampler',
-           'BinomialDistribution', 'BinomialEstimator', 'BinomialSampler',
-           'CategoricalDistribution', 'CategoricalEstimator', 'CategoricalSampler',
-           'CompositeDistribution', 'CompositeEstimator', 'CompositeSampler',
-           'DiagonalGaussianDistribution', 'DiagonalGaussianEstimator', 'DiagonalGaussianSampler',
-           'DictDirichletDistribution',
-           'DirichletDistribution', 'DirichletEstimator', 'DirichletSampler',
-           'DirichletProcessMixtureDistribution', 'DirichletProcessMixtureEstimator', 'DirichletProcessMixtureSampler',
-           'ExponentialDistribution', 'ExponentialEstimator', 'ExponentialSampler',
-           'GaussianDistribution', 'GaussianEstimator', 'GaussianSampler',
-           'GammaDistribution', 'GammaEstimator', 'GammaSampler',
-           'GeometricDistribution', 'GeometricEstimator', 'GeometricSampler',
-           'HiddenMarkovModelDistribution', 'HiddenMarkovModelEstimator', 'HiddenMarkovModelSampler',
-           'HierarchicalDirichletProcessMixtureDistribution', 'HierarchicalDirichletProcessMixtureEstimator',
-           'HierarchicalDirichletProcessMixtureSampler',
-           'IgnoredDistribution', 'IgnoredEstimator', 'IgnoredSampler',
-           'IntegerCategoricalDistribution', 'IntegerCategoricalEstimator', 'IntegerCategoricalSampler',
-           'LogGaussianDistribution', 'LogGaussianEstimator', 'LogGaussianSampler',
-           'MarkovChainDistribution', 'MarkovChainEstimator', 'MarkovChainSampler',
-           'MixtureDistribution', 'MixtureEstimator', 'MixtureSampler', 'mixture_prior',
-           'MultivariateGaussianDistribution', 'MultivariateGaussianEstimator', 'MultivariateGaussianSampler',
-           'MultivariateNormalGammaDistribution', 'MultivariateNormalGammaSampler',
-           'NormalGammaDistribution', 'NormalGammaSampler',
-           'NormalWishartDistribution', 'NormalWishartSampler',
-           'NullDistribution', 'NullEstimator', 'NullSampler',
-           'OptionalDistribution', 'OptionalEstimator', 'OptionalSampler',
-           'PoissonDistribution', 'PoissonEstimator', 'PoissonSampler',
-           'SequenceDistribution', 'SequenceEstimator', 'SequenceSampler',
-           'BayesianStreamingEstimator', 'posterior_carry', 'forgetting',
-           'estimate', 'seq_estimate', 'initialize', 'seq_log_density_sum', 'seq_encode', 'seq_log_density',
-           'load_models', 'dump_models']
-
-
-from pysp.arithmetic import *
-
-from pysp.bstats.beta         import BetaDistribution, BetaSampler
-from pysp.bstats.bernoulli    import BernoulliDistribution, BernoulliEstimator, BernoulliSampler
-from pysp.bstats.binomial     import BinomialDistribution, BinomialEstimator, BinomialSampler
-from pysp.bstats.categorical  import CategoricalDistribution, CategoricalEstimator, CategoricalSampler
-from pysp.bstats.composite    import CompositeDistribution, CompositeEstimator, CompositeSampler
-from pysp.bstats.catdirichlet import DictDirichletDistribution
-from pysp.bstats.dirichlet    import DirichletDistribution, DirichletEstimator, DirichletSampler
-from pysp.bstats.dmvn         import DiagonalGaussianDistribution, DiagonalGaussianEstimator, DiagonalGaussianSampler
-from pysp.bstats.exponential  import ExponentialDistribution, ExponentialEstimator, ExponentialSampler
-from pysp.bstats.gaussian     import GaussianDistribution, GaussianEstimator, GaussianSampler
-from pysp.bstats.gamma        import GammaDistribution, GammaEstimator, GammaSampler
-from pysp.bstats.geometric    import GeometricDistribution, GeometricEstimator, GeometricSampler
-from pysp.bstats.ignored      import IgnoredDistribution, IgnoredEstimator, IgnoredSampler
-from pysp.bstats.intrange     import IntegerCategoricalDistribution, IntegerCategoricalEstimator, IntegerCategoricalSampler
-from pysp.bstats.log_gaussian import LogGaussianDistribution, LogGaussianEstimator, LogGaussianSampler
-from pysp.bstats.markovchain  import MarkovChainDistribution, MarkovChainEstimator, MarkovChainSampler
-from pysp.bstats.hdpm         import (HierarchicalDirichletProcessMixtureDistribution,
-                                      HierarchicalDirichletProcessMixtureEstimator,
-                                      HierarchicalDirichletProcessMixtureSampler)
-from pysp.bstats.hidden_markov import HiddenMarkovModelDistribution, HiddenMarkovModelEstimator, HiddenMarkovModelSampler
-from pysp.bstats.mixture      import MixtureDistribution, MixtureEstimator, MixtureSampler, mixture_prior
-from pysp.bstats.mvn          import MultivariateGaussianDistribution, MultivariateGaussianEstimator, MultivariateGaussianSampler
-from pysp.bstats.mvngamma     import MultivariateNormalGammaDistribution, MultivariateNormalGammaSampler
-from pysp.bstats.normgamma    import NormalGammaDistribution, NormalGammaSampler
-from pysp.bstats.normwishart  import NormalWishartDistribution, NormalWishartSampler
-from pysp.bstats.nulldist     import NullDistribution, NullEstimator, NullSampler
-from pysp.bstats.optional     import OptionalDistribution, OptionalEstimator, OptionalSampler
-from pysp.bstats.poisson      import PoissonDistribution, PoissonEstimator, PoissonSampler
-from pysp.bstats.sequence     import SequenceDistribution, SequenceEstimator, SequenceSampler
-from pysp.bstats.setdist      import BernoulliSetDistribution, BernoulliSetEstimator, BernoulliSetSampler
-
-from pysp.bstats.dpm import DirichletProcessMixtureDistribution, DirichletProcessMixtureEstimator, DirichletProcessMixtureSampler
+__all__ = [
+    "BernoulliDistribution",
+    "BernoulliEstimator",
+    "BernoulliSampler",
+    "BernoulliSetDistribution",
+    "BernoulliSetEstimator",
+    "BernoulliSetSampler",
+    "BetaDistribution",
+    "BetaSampler",
+    "BinomialDistribution",
+    "BinomialEstimator",
+    "BinomialSampler",
+    "CategoricalDistribution",
+    "CategoricalEstimator",
+    "CategoricalSampler",
+    "CompositeDistribution",
+    "CompositeEstimator",
+    "CompositeSampler",
+    "DiagonalGaussianDistribution",
+    "DiagonalGaussianEstimator",
+    "DiagonalGaussianSampler",
+    "DictDirichletDistribution",
+    "DirichletDistribution",
+    "DirichletEstimator",
+    "DirichletSampler",
+    "DirichletProcessMixtureDistribution",
+    "DirichletProcessMixtureEstimator",
+    "DirichletProcessMixtureSampler",
+    "ExponentialDistribution",
+    "ExponentialEstimator",
+    "ExponentialSampler",
+    "GaussianDistribution",
+    "GaussianEstimator",
+    "GaussianSampler",
+    "GammaDistribution",
+    "GammaEstimator",
+    "GammaSampler",
+    "GeometricDistribution",
+    "GeometricEstimator",
+    "GeometricSampler",
+    "HiddenMarkovModelDistribution",
+    "HiddenMarkovModelEstimator",
+    "HiddenMarkovModelSampler",
+    "HierarchicalDirichletProcessMixtureDistribution",
+    "HierarchicalDirichletProcessMixtureEstimator",
+    "HierarchicalDirichletProcessMixtureSampler",
+    "IgnoredDistribution",
+    "IgnoredEstimator",
+    "IgnoredSampler",
+    "IntegerCategoricalDistribution",
+    "IntegerCategoricalEstimator",
+    "IntegerCategoricalSampler",
+    "LogGaussianDistribution",
+    "LogGaussianEstimator",
+    "LogGaussianSampler",
+    "MarkovChainDistribution",
+    "MarkovChainEstimator",
+    "MarkovChainSampler",
+    "MixtureDistribution",
+    "MixtureEstimator",
+    "MixtureSampler",
+    "mixture_prior",
+    "MultivariateGaussianDistribution",
+    "MultivariateGaussianEstimator",
+    "MultivariateGaussianSampler",
+    "MultivariateNormalGammaDistribution",
+    "MultivariateNormalGammaSampler",
+    "NormalGammaDistribution",
+    "NormalGammaSampler",
+    "NormalWishartDistribution",
+    "NormalWishartSampler",
+    "NullDistribution",
+    "NullEstimator",
+    "NullSampler",
+    "OptionalDistribution",
+    "OptionalEstimator",
+    "OptionalSampler",
+    "PoissonDistribution",
+    "PoissonEstimator",
+    "PoissonSampler",
+    "SequenceDistribution",
+    "SequenceEstimator",
+    "SequenceSampler",
+    "BayesianStreamingEstimator",
+    "posterior_carry",
+    "forgetting",
+    "estimate",
+    "seq_estimate",
+    "initialize",
+    "seq_log_density_sum",
+    "seq_encode",
+    "seq_log_density",
+    "load_models",
+    "dump_models",
+]
 
 
 import inspect
+import pickle
 
 import numpy as np
-import _pickle
-import pickle
+
+from pysp.arithmetic import *
+from pysp.bstats.bernoulli import BernoulliDistribution, BernoulliEstimator, BernoulliSampler
+from pysp.bstats.beta import BetaDistribution, BetaSampler
+from pysp.bstats.binomial import BinomialDistribution, BinomialEstimator, BinomialSampler
+from pysp.bstats.catdirichlet import DictDirichletDistribution
+from pysp.bstats.categorical import CategoricalDistribution, CategoricalEstimator, CategoricalSampler
+from pysp.bstats.composite import CompositeDistribution, CompositeEstimator, CompositeSampler
+from pysp.bstats.dirichlet import DirichletDistribution, DirichletEstimator, DirichletSampler
+from pysp.bstats.dmvn import DiagonalGaussianDistribution, DiagonalGaussianEstimator, DiagonalGaussianSampler
+from pysp.bstats.dpm import (
+    DirichletProcessMixtureDistribution,
+    DirichletProcessMixtureEstimator,
+    DirichletProcessMixtureSampler,
+)
+from pysp.bstats.exponential import ExponentialDistribution, ExponentialEstimator, ExponentialSampler
+from pysp.bstats.gamma import GammaDistribution, GammaEstimator, GammaSampler
+from pysp.bstats.gaussian import GaussianDistribution, GaussianEstimator, GaussianSampler
+from pysp.bstats.geometric import GeometricDistribution, GeometricEstimator, GeometricSampler
+from pysp.bstats.hdpm import (
+    HierarchicalDirichletProcessMixtureDistribution,
+    HierarchicalDirichletProcessMixtureEstimator,
+    HierarchicalDirichletProcessMixtureSampler,
+)
+from pysp.bstats.hidden_markov import (
+    HiddenMarkovModelDistribution,
+    HiddenMarkovModelEstimator,
+    HiddenMarkovModelSampler,
+)
+from pysp.bstats.ignored import IgnoredDistribution, IgnoredEstimator, IgnoredSampler
+from pysp.bstats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator, IntegerCategoricalSampler
+from pysp.bstats.log_gaussian import LogGaussianDistribution, LogGaussianEstimator, LogGaussianSampler
+from pysp.bstats.markov_chain import MarkovChainDistribution, MarkovChainEstimator, MarkovChainSampler
+from pysp.bstats.mixture import MixtureDistribution, MixtureEstimator, MixtureSampler, mixture_prior
+from pysp.bstats.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator, MultivariateGaussianSampler
+from pysp.bstats.mvngamma import MultivariateNormalGammaDistribution, MultivariateNormalGammaSampler
+from pysp.bstats.normgamma import NormalGammaDistribution, NormalGammaSampler
+from pysp.bstats.normwishart import NormalWishartDistribution, NormalWishartSampler
+from pysp.bstats.nulldist import NullDistribution, NullEstimator, NullSampler
+from pysp.bstats.optional import OptionalDistribution, OptionalEstimator, OptionalSampler
+from pysp.bstats.poisson import PoissonDistribution, PoissonEstimator, PoissonSampler
+from pysp.bstats.sequence import SequenceDistribution, SequenceEstimator, SequenceSampler
+from pysp.bstats.setdist import BernoulliSetDistribution, BernoulliSetEstimator, BernoulliSetSampler
+
 
 def load_models(x):
     """Reconstruct a model or collection of models from dump_models() JSON."""
     from pysp.utils.serialization import from_json
+
     return from_json(x)
+
 
 def dump_models(x):
     """Serialize a bstats model or collection of models to safe strict JSON."""
     from pysp.utils.serialization import to_json
+
     return to_json(x)
 
 
@@ -119,7 +191,7 @@ def _is_pandas_dataframe(data):
         bool: True when data is a pandas DataFrame.
     """
     t = type(data)
-    return t.__name__ == 'DataFrame' and t.__module__.split('.', 1)[0] == 'pandas'
+    return t.__name__ == "DataFrame" and t.__module__.split(".", 1)[0] == "pandas"
 
 
 def _accumulator_factory(estimator):
@@ -134,9 +206,9 @@ def _accumulator_factory(estimator):
     Returns:
         Factory object with a make() method producing accumulators.
     """
-    factory_fn = getattr(estimator, 'accumulator_factory', None)
+    factory_fn = getattr(estimator, "accumulator_factory", None)
     if factory_fn is None:
-        factory_fn = getattr(estimator, 'accumulatorFactory')
+        factory_fn = estimator.accumulatorFactory
     return factory_fn()
 
 
@@ -159,8 +231,7 @@ def _estimator_estimate(estimator, nobs, suff_stat):
     """
     try:
         params = inspect.signature(estimator.estimate).parameters
-        npos = len([p for p in params.values()
-                    if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
+        npos = len([p for p in params.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
     except (TypeError, ValueError):
         npos = 1
 
@@ -215,31 +286,30 @@ def estimate(data, estimator, prev_estimate=None):
     Returns:
         The estimated distribution.
     """
-    if 'pyspark.rdd' in str(type(data)):
-
+    if "pyspark.rdd" in str(type(data)):
         sc = data.context
-        factory          = _accumulator_factory(estimator)
+        factory = _accumulator_factory(estimator)
         estimatorBroadcast = sc.broadcast(estimator)
 
-        temp_estimate  = pickle.dumps(prev_estimate, protocol=0)
+        temp_estimate = pickle.dumps(prev_estimate, protocol=0)
         temp_estimateB = sc.broadcast(temp_estimate)
 
         def acc(splitIndex, itr):
             accumulatorForSplit = _accumulator_factory(estimatorBroadcast.value).make()
-            countsForSplit      = 0.0
-            loc_prev_estimate   = pickle.loads(temp_estimateB.value)
+            countsForSplit = 0.0
+            loc_prev_estimate = pickle.loads(temp_estimateB.value)
 
             for x in itr:
                 countsForSplit = countsForSplit + 1.0
                 accumulatorForSplit.update(x, 1.0, estimate=loc_prev_estimate)
 
-            return(iter([(countsForSplit, accumulatorForSplit.value())])	)
+            return iter([(countsForSplit, accumulatorForSplit.value())])
 
         temp = data.mapPartitionsWithIndex(acc, True)
         nobs = 0.0
         accumulator = factory.make()
 
-        for nobsForSplit,statsForSplit in temp.collect():
+        for nobsForSplit, statsForSplit in temp.collect():
             nobs = nobs + nobsForSplit
             accumulator.combine(statsForSplit)
 
@@ -254,8 +324,9 @@ def estimate(data, estimator, prev_estimate=None):
         accumulator.df_update(data, np.ones(len(data)), estimate=prev_estimate)
         return _estimator_estimate(estimator, None, accumulator.value())
 
-    elif(hasattr(data, '__iter__')):
+    elif hasattr(data, "__iter__"):
         return _local_estimate(data, estimator, prev_estimate)
+
 
 def seq_encode(data, model, num_chunks=1, chunk_size=None):
     """Sequence-encode data with model.seq_encode for vectorized updates.
@@ -271,26 +342,28 @@ def seq_encode(data, model, num_chunks=1, chunk_size=None):
         For local data, a list of (count, encoded_chunk) pairs; for RDDs, an
         RDD of (count, encoded_partition) pairs.
     """
-    if 'pyspark.rdd' in str(type(data)):
+    if "pyspark.rdd" in str(type(data)):
         sc = data.context
 
         temp_model = pickle.dumps(model, protocol=0)
         modelBroadcast = sc.broadcast(temp_model)
 
-        enc_data = data.glom().map(lambda x: list(x)).map(lambda x: (len(x), pickle.loads(modelBroadcast.value).seq_encode(x)))
+        enc_data = (
+            data.glom().map(lambda x: list(x)).map(lambda x: (len(x), pickle.loads(modelBroadcast.value).seq_encode(x)))
+        )
 
         return enc_data
 
     else:
         sz = len(data)
         if chunk_size is not None:
-            num_chunks_loc = int(np.ceil(float(sz)/float(chunk_size)))
+            num_chunks_loc = int(np.ceil(float(sz) / float(chunk_size)))
         else:
             num_chunks_loc = num_chunks
 
         rv = []
         for i in range(num_chunks_loc):
-            data_loc = [data[i] for i in range(i,sz,num_chunks_loc)]
+            data_loc = [data[i] for i in range(i, sz, num_chunks_loc)]
             enc_data = model.seq_encode(data_loc)
             rv.append((len(data_loc), enc_data))
 
@@ -308,7 +381,7 @@ def seq_log_density_sum(enc_data, estimate):
     Returns:
         Tuple (count, total_log_density) summed over all chunks.
     """
-    if 'pyspark.rdd' in str(type(enc_data)):
+    if "pyspark.rdd" in str(type(enc_data)):
         sc = enc_data.context
         estimate_broadcast = sc.broadcast(pickle.dumps(estimate, protocol=0))
 
@@ -323,12 +396,10 @@ def seq_log_density_sum(enc_data, estimate):
 
             return [(cnt, rv)]
 
-        return enc_data.mapPartitions(acc).reduce(lambda a,b : (a[0]+b[0], a[1]+b[1]))
+        return enc_data.mapPartitions(acc).reduce(lambda a, b: (a[0] + b[0], a[1] + b[1]))
 
     else:
-
         return sum([u[0] for u in enc_data]), sum([estimate.seq_log_density(u[1]).sum() for u in enc_data])
-
 
 
 def seq_log_density(enc_data, estimate, is_list=False):
@@ -345,7 +416,7 @@ def seq_log_density(enc_data, estimate, is_list=False):
     Returns:
         List of per-chunk numpy arrays of log-densities.
     """
-    if 'pyspark.rdd' in str(type(enc_data)):
+    if "pyspark.rdd" in str(type(enc_data)):
         sc = enc_data.context
         temp_estimate = pickle.dumps(estimate, protocol=0)
         estimateBroadcast = sc.broadcast(temp_estimate)
@@ -355,17 +426,15 @@ def seq_log_density(enc_data, estimate, is_list=False):
             if is_list:
                 return [np.asarray([ee.seq_log_density(x) for ee in loc_estimate]) for sz, x in itr]
             else:
-                return [loc_estimate.seq_log_density(x) for sz,x in itr]
+                return [loc_estimate.seq_log_density(x) for sz, x in itr]
 
         return enc_data.mapPartitions(acc).collect()
 
     else:
-
         if is_list:
             return [np.asarray([ee.seq_log_density(u[1]) for ee in estimate]) for u in enc_data]
         else:
             return [estimate.seq_log_density(u[1]) for u in enc_data]
-
 
 
 def seq_estimate(enc_data, estimator, prev_estimate):
@@ -381,11 +450,11 @@ def seq_estimate(enc_data, estimator, prev_estimate):
     Returns:
         The estimated distribution.
     """
-    if 'pyspark.rdd' in str(type(enc_data)):
+    if "pyspark.rdd" in str(type(enc_data)):
         sc = enc_data.context
 
         estimatorBroadcast = sc.broadcast(estimator)
-        estimateBroadcast  = sc.broadcast(pickle.dumps(prev_estimate, protocol=0))
+        estimateBroadcast = sc.broadcast(pickle.dumps(prev_estimate, protocol=0))
 
         def acc(splitIndex, itr):
             accumulatorForSplit = _accumulator_factory(estimatorBroadcast.value).make()
@@ -397,7 +466,7 @@ def seq_estimate(enc_data, estimator, prev_estimate):
                 accumulatorForSplit.seq_update(x, np.ones(sz), local_estimate)
 
             rv = pickle.dumps((countsForSplit, accumulatorForSplit.value()), protocol=0)
-            #return [(countsForSplit, accumulatorForSplit.value())]
+            # return [(countsForSplit, accumulatorForSplit.value())]
             return [rv]
 
         def red(x, y):
@@ -407,9 +476,8 @@ def seq_estimate(enc_data, estimator, prev_estimate):
             nobs = xx[0] + yy[0]
             vals = accumulator.from_value(xx[1]).combine(yy[1]).value()
             rv = pickle.dumps((nobs, vals))
-            #return (nobs, vals)
+            # return (nobs, vals)
             return rv
-
 
         temp = enc_data.mapPartitionsWithIndex(acc, True).cache()
 
@@ -421,11 +489,9 @@ def seq_estimate(enc_data, estimator, prev_estimate):
             nobs = nobs + nobsForSplit
             accumulator.combine(statsForSplit)
 
-
         stats_dict = dict()
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
-
 
         estimateBroadcast.destroy()
         estimatorBroadcast.destroy()
@@ -435,23 +501,23 @@ def seq_estimate(enc_data, estimator, prev_estimate):
         return _estimator_estimate(estimator, nobs, accumulator.value())
 
     else:
-
         accumulator = _accumulator_factory(estimator).make()
-        nobs        = 0.0
+        nobs = 0.0
 
         data_update = []
 
         for sz, x in enc_data:
             nobs += sz
             accumulator.seq_update(x, np.ones(sz), prev_estimate)
-            #x_update = accumulator.seq_update(x, np.ones(sz), prev_estimate)
-            #data_update.append((sz, x_update))
+            # x_update = accumulator.seq_update(x, np.ones(sz), prev_estimate)
+            # data_update.append((sz, x_update))
 
         stats_dict = dict()
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
 
         return _estimator_estimate(estimator, nobs, accumulator.value())
+
 
 def initialize(data, estimator, rng, p):
     """Initialize a model by accumulating a random subsample of data.
@@ -470,7 +536,7 @@ def initialize(data, estimator, rng, p):
     Returns:
         The initialized distribution estimate.
     """
-    if 'pyspark.rdd' in str(type(data)):
+    if "pyspark.rdd" in str(type(data)):
         factory = _accumulator_factory(estimator)
         sc = data.context
 
@@ -480,10 +546,9 @@ def initialize(data, estimator, rng, p):
         estimatorBroadcast = sc.broadcast(estimator)
         seedsBroadcast = sc.broadcast(seeds)
 
-
         def acc(splitIndex, itr):
             accumulatorForSplit = _accumulator_factory(estimatorBroadcast.value).make()
-            countsForSplit      = zero
+            countsForSplit = zero
             rng_loc = np.random.RandomState(seedsBroadcast.value[splitIndex])
 
             for x in itr:
@@ -497,10 +562,9 @@ def initialize(data, estimator, rng, p):
         nobs = zero
         accumulator = factory.make()
 
-        for nobsForSplit,statsForSplit in temp.collect():
+        for nobsForSplit, statsForSplit in temp.collect():
             nobs = nobs + nobsForSplit
             accumulator.combine(statsForSplit)
-
 
         stats_dict = dict()
         accumulator.key_merge(stats_dict)
@@ -513,16 +577,15 @@ def initialize(data, estimator, rng, p):
         accumulator.df_initialize(data, rng.rand(len(data)) * p, rng)
         return _estimator_estimate(estimator, None, accumulator.value())
 
-    elif(hasattr(data, '__iter__')):
-        idata       = iter(data)
+    elif hasattr(data, "__iter__"):
+        idata = iter(data)
         accumulator = _accumulator_factory(estimator).make()
-        nobs        = 0.0
+        nobs = 0.0
 
         for x in idata:
             w = 1.0 if rng.rand() <= p else 0.0
             nobs += w
             accumulator.initialize(x, w, rng)
-
 
         stats_dict = dict()
         accumulator.key_merge(stats_dict)
@@ -531,4 +594,4 @@ def initialize(data, estimator, rng, p):
         return _estimator_estimate(estimator, nobs, accumulator.value())
 
 
-from pysp.bstats.bestimation import BayesianStreamingEstimator, posterior_carry, forgetting
+from pysp.bstats.bestimation import BayesianStreamingEstimator, forgetting, posterior_carry

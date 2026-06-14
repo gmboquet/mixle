@@ -1,24 +1,27 @@
 """Engine-resident E-step parity for the dirac-length mixture (numpy + torch)."""
+
 import unittest
+
 import numpy as np
-from pysp.stats import DiracLengthMixtureDistribution, CategoricalDistribution
+
 from pysp.engines import NUMPY_ENGINE
+from pysp.stats import CategoricalDistribution, DiracLengthMixtureDistribution
+
 try:
     from pysp.engines import TorchEngine
-    _TORCH = TorchEngine(device='cpu', dtype='float64')
+
+    _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
 
 
 class DiracLengthEngineTestCase(unittest.TestCase):
-
     def setUp(self):
-        self.dist = DiracLengthMixtureDistribution(CategoricalDistribution({2: 0.3, 3: 0.3, 4: 0.4}),
-                                                   p=0.6, v=0)
+        self.dist = DiracLengthMixtureDistribution(CategoricalDistribution({2: 0.3, 3: 0.3, 4: 0.4}), p=0.6, v=0)
         self.data = self.dist.sampler(seed=1).sample(40)
         self.weights = np.linspace(0.5, 1.5, len(self.data))
         self.est = self.dist.estimator()
-        self.engines = [('numpy', NUMPY_ENGINE)] + ([('torch', _TORCH)] if _TORCH is not None else [])
+        self.engines = [("numpy", NUMPY_ENGINE)] + ([("torch", _TORCH)] if _TORCH is not None else [])
 
     def test_engine_estep_parity(self):
         enc = self.dist.dist_to_encoder().seq_encode(self.data)
@@ -28,10 +31,10 @@ class DiracLengthEngineTestCase(unittest.TestCase):
         for name, engine in self.engines:
             with self.subTest(engine=name):
                 kernel = self.dist.kernel(engine=engine, estimator=self.est)
-                self.assertEqual(type(kernel).__name__, 'DiracLengthMixtureKernel')
+                self.assertEqual(type(kernel).__name__, "DiracLengthMixtureKernel")
                 value = kernel.accumulate(enc, self.weights)
                 self.assertTrue(np.allclose(np.asarray(hv[0]), np.asarray(value[0]), atol=1.0e-8))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

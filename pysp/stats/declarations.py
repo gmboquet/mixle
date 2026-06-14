@@ -1,10 +1,12 @@
 """Declarative metadata for distribution parameters and sufficient statistics."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
 import inspect
 import math
-from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple, Type
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -23,7 +25,7 @@ class ParameterSpec:
     """
 
     name: str
-    constraint: str = 'real'
+    constraint: str = "real"
     differentiable: bool = True
 
 
@@ -32,7 +34,7 @@ class StatisticSpec:
     """A sufficient-statistic entry produced by accumulation."""
 
     name: str
-    kind: str = 'moment'
+    kind: str = "moment"
     additive: bool = True
     scales: bool = True
 
@@ -41,13 +43,13 @@ class StatisticSpec:
 class ExponentialFamilySpec:
     """Conditional exponential-family pieces for generated scalar scoring."""
 
-    sufficient_statistics: Callable[[Any, Any], Tuple[Any, ...]]
-    natural_parameters: Callable[[Dict[str, Any], Any], Tuple[Any, ...]]
-    log_partition: Callable[[Dict[str, Any], Any], Any]
-    base_measure: Optional[Callable[[Any, Any], Any]] = None
-    sufficient_statistics_from_params: Optional[Callable[[Any, Dict[str, Any], Any], Tuple[Any, ...]]] = None
-    base_measure_from_params: Optional[Callable[[Any, Dict[str, Any], Any], Any]] = None
-    legacy_sufficient_statistics: Optional[Callable[[Any, Dict[str, Any], Any], Tuple[Any, ...]]] = None
+    sufficient_statistics: Callable[[Any, Any], tuple[Any, ...]]
+    natural_parameters: Callable[[dict[str, Any], Any], tuple[Any, ...]]
+    log_partition: Callable[[dict[str, Any], Any], Any]
+    base_measure: Callable[[Any, Any], Any] | None = None
+    sufficient_statistics_from_params: Callable[[Any, dict[str, Any], Any], tuple[Any, ...]] | None = None
+    base_measure_from_params: Callable[[Any, dict[str, Any], Any], Any] | None = None
+    legacy_sufficient_statistics: Callable[[Any, dict[str, Any], Any], tuple[Any, ...]] | None = None
 
 
 @dataclass(frozen=True)
@@ -55,41 +57,42 @@ class DistributionDeclaration:
     """Metadata needed by generated kernels and future autograd paths."""
 
     name: str
-    distribution_type: Type[Any]
-    parameters: Tuple[ParameterSpec, ...]
-    statistics: Tuple[StatisticSpec, ...]
+    distribution_type: type[Any]
+    parameters: tuple[ParameterSpec, ...]
+    statistics: tuple[StatisticSpec, ...]
     support: str
-    children: Tuple['DistributionDeclaration', ...] = ()
-    child_roles: Tuple[str, ...] = ()
+    children: tuple[DistributionDeclaration, ...] = ()
+    child_roles: tuple[str, ...] = ()
     differentiable: bool = True
-    exponential_family: Optional[ExponentialFamilySpec] = None
-    legacy_sufficient_statistics: Optional[Callable[[Any, Dict[str, Any], Any], Tuple[Any, ...]]] = None
+    exponential_family: ExponentialFamilySpec | None = None
+    legacy_sufficient_statistics: Callable[[Any, dict[str, Any], Any], tuple[Any, ...]] | None = None
 
-    def parameter_values(self, dist: Any) -> Dict[str, Any]:
+    def parameter_values(self, dist: Any) -> dict[str, Any]:
         """Extract declared parameter values from a distribution instance."""
         if not isinstance(dist, self.distribution_type):
-            raise TypeError('expected %s, got %s' %
-                            (self.distribution_type.__name__, type(dist).__name__))
+            raise TypeError("expected %s, got %s" % (self.distribution_type.__name__, type(dist).__name__))
         return {spec.name: getattr(dist, spec.name) for spec in self.parameters}
 
-    def statistic_values(self, suff_stat: Any) -> Dict[str, Any]:
+    def statistic_values(self, suff_stat: Any) -> dict[str, Any]:
         """Map a legacy accumulator value into declared statistic names."""
         if not self.statistics:
             return {}
         if len(self.statistics) == 1:
             return {self.statistics[0].name: suff_stat}
         if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != len(self.statistics):
-            raise ValueError('%s expected %d statistic entries, got %s.' %
-                             (self.name, len(self.statistics), type(suff_stat).__name__))
+            raise ValueError(
+                "%s expected %d statistic entries, got %s."
+                % (self.name, len(self.statistics), type(suff_stat).__name__)
+            )
         return {spec.name: value for spec, value in zip(self.statistics, suff_stat)}
 
     @property
-    def parameter_names(self) -> Tuple[str, ...]:
+    def parameter_names(self) -> tuple[str, ...]:
         """Return declared parameter names in storage order."""
         return tuple(spec.name for spec in self.parameters)
 
     @property
-    def statistic_names(self) -> Tuple[str, ...]:
+    def statistic_names(self) -> tuple[str, ...]:
         """Return declared sufficient-statistic names in accumulator order."""
         return tuple(spec.name for spec in self.statistics)
 
@@ -99,7 +102,7 @@ class DistributionDeclaration:
         return self.exponential_family is not None
 
 
-_DECLARATIONS: Dict[Type[Any], DistributionDeclaration] = {}
+_DECLARATIONS: dict[type[Any], DistributionDeclaration] = {}
 
 
 def register_declaration(declaration: DistributionDeclaration) -> None:
@@ -107,10 +110,14 @@ def register_declaration(declaration: DistributionDeclaration) -> None:
     _DECLARATIONS[declaration.distribution_type] = declaration
 
 
-def declaration_for(x: Any) -> Optional[DistributionDeclaration]:
+def declaration_for(x: Any) -> DistributionDeclaration | None:
     """Return a declaration for a distribution instance or class, if present."""
     cls = x if isinstance(x, type) else type(x)
-    hook = getattr(x, 'compute_declaration', None) if not isinstance(x, type) else getattr(cls, 'compute_declaration', None)
+    hook = (
+        getattr(x, "compute_declaration", None)
+        if not isinstance(x, type)
+        else getattr(cls, "compute_declaration", None)
+    )
     if callable(hook):
         try:
             return hook()
@@ -125,12 +132,12 @@ def declaration_for(x: Any) -> Optional[DistributionDeclaration]:
     return None
 
 
-def declared_distribution_types() -> Iterable[Type[Any]]:
+def declared_distribution_types() -> Iterable[type[Any]]:
     """Return classes that currently have declarations."""
     return tuple(_DECLARATIONS.keys())
 
 
-def declaration_issues(x: Any) -> Tuple[str, ...]:
+def declaration_issues(x: Any) -> tuple[str, ...]:
     """Return structural issues in a distribution declaration.
 
     This is intentionally schema-level validation: it checks names,
@@ -140,8 +147,8 @@ def declaration_issues(x: Any) -> Tuple[str, ...]:
     declaration = x if isinstance(x, DistributionDeclaration) else declaration_for(x)
     if declaration is None:
         cls = x if isinstance(x, type) else type(x)
-        return ('%s has no declaration.' % cls.__name__,)
-    return tuple(_declaration_issues(declaration, path=declaration.name or '<unnamed>'))
+        return ("%s has no declaration." % cls.__name__,)
+    return tuple(_declaration_issues(declaration, path=declaration.name or "<unnamed>"))
 
 
 def validate_declaration(x: Any) -> DistributionDeclaration:
@@ -149,11 +156,11 @@ def validate_declaration(x: Any) -> DistributionDeclaration:
     declaration = x if isinstance(x, DistributionDeclaration) else declaration_for(x)
     issues = declaration_issues(declaration if declaration is not None else x)
     if issues:
-        raise ValueError('Invalid distribution declaration: %s' % '; '.join(issues))
+        raise ValueError("Invalid distribution declaration: %s" % "; ".join(issues))
     return declaration
 
 
-def statistic_layout_issues(x: Any, suff_stat: Any) -> Tuple[str, ...]:
+def statistic_layout_issues(x: Any, suff_stat: Any) -> tuple[str, ...]:
     """Return issues mapping a legacy sufficient-statistic payload to a declaration.
 
     This validates the top-level ``statistic_values(...)`` arity and, when a
@@ -164,8 +171,8 @@ def statistic_layout_issues(x: Any, suff_stat: Any) -> Tuple[str, ...]:
     declaration = x if isinstance(x, DistributionDeclaration) else declaration_for(x)
     if declaration is None:
         cls = x if isinstance(x, type) else type(x)
-        return ('%s has no declaration.' % cls.__name__,)
-    return tuple(_statistic_layout_issues(declaration, suff_stat, declaration.name or '<unnamed>'))
+        return ("%s has no declaration." % cls.__name__,)
+    return tuple(_statistic_layout_issues(declaration, suff_stat, declaration.name or "<unnamed>"))
 
 
 def validate_statistic_layout(x: Any, suff_stat: Any) -> DistributionDeclaration:
@@ -173,11 +180,11 @@ def validate_statistic_layout(x: Any, suff_stat: Any) -> DistributionDeclaration
     declaration = x if isinstance(x, DistributionDeclaration) else declaration_for(x)
     issues = statistic_layout_issues(declaration if declaration is not None else x, suff_stat)
     if issues:
-        raise ValueError('Invalid statistic layout: %s' % '; '.join(issues))
+        raise ValueError("Invalid statistic layout: %s" % "; ".join(issues))
     return declaration
 
 
-def generated_stacked_available(dist_type: Type[Any]) -> bool:
+def generated_stacked_available(dist_type: type[Any]) -> bool:
     """Return true when declarations can generate stacked leaf scoring."""
     declaration = declaration_for(dist_type)
     if declaration is None:
@@ -187,25 +194,25 @@ def generated_stacked_available(dist_type: Type[Any]) -> bool:
     return _generated_backend_hook_supported(dist_type, declaration)
 
 
-def generated_stacked_preferred(dist_type: Type[Any]) -> bool:
+def generated_stacked_preferred(dist_type: type[Any]) -> bool:
     """Return true when a family explicitly opts into declaration-generated scoring."""
     declaration = declaration_for(dist_type)
     return declaration is not None and declaration.exponential_family is not None
 
 
-def generated_stacked_strategy(dist_type: Type[Any]) -> str:
+def generated_stacked_strategy(dist_type: type[Any]) -> str:
     """Describe the declaration-generated stacked scoring route for a family."""
     declaration = declaration_for(dist_type)
     if declaration is None:
-        return 'none'
+        return "none"
     if declaration.exponential_family is not None:
-        return 'exp_family'
+        return "exp_family"
     if _generated_backend_hook_supported(dist_type, declaration):
-        return 'backend_log_density_from_params'
-    return 'none'
+        return "backend_log_density_from_params"
+    return "none"
 
 
-def generated_log_density_diagnostics(x: Any, encoded_symbols: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+def generated_log_density_diagnostics(x: Any, encoded_symbols: Sequence[str] | None = None) -> dict[str, Any]:
     """Trace a generated scalar log-density formula with the symbolic engine.
 
     The returned dictionary contains the symbolic expression string, referenced
@@ -218,7 +225,7 @@ def generated_log_density_diagnostics(x: Any, encoded_symbols: Optional[Sequence
     declaration = declaration_for(x)
     if declaration is None:
         cls = x if isinstance(x, type) else type(x)
-        raise ValueError('%s has no compute declaration.' % cls.__name__)
+        raise ValueError("%s has no compute declaration." % cls.__name__)
     dist_type = declaration.distribution_type
     engine = SymbolicEngine()
     encoded_names = _diagnostic_encoded_symbols(dist_type, declaration, encoded_symbols)
@@ -230,31 +237,33 @@ def generated_log_density_diagnostics(x: Any, encoded_symbols: Optional[Sequence
     if declaration.exponential_family is not None:
         try:
             expr = _generated_exp_family_scalar_expression(enc, params, declaration.exponential_family, engine)
-            strategy = 'exp_family'
+            strategy = "exp_family"
         except Exception as exc:
-            fn = getattr(dist_type, 'backend_log_density_from_params', None)
+            fn = getattr(dist_type, "backend_log_density_from_params", None)
             if not callable(fn):
                 raise
-            fallback_reason = '%s: %s' % (type(exc).__name__, exc)
+            fallback_reason = "%s: %s" % (type(exc).__name__, exc)
             expr = _diagnostic_backend_log_density_expression(dist_type, params, encoded_values, engine)
-            strategy = 'backend_log_density_from_params'
+            strategy = "backend_log_density_from_params"
     else:
         expr = _diagnostic_backend_log_density_expression(dist_type, params, encoded_values, engine)
-        strategy = 'backend_log_density_from_params'
+        strategy = "backend_log_density_from_params"
 
     rv = engine.diagnostics(expr)
-    rv.update({
-        'expression': str(expr),
-        'strategy': strategy,
-        'encoded_symbols': tuple(encoded_names),
-        'parameter_symbols': declaration.parameter_names,
-    })
+    rv.update(
+        {
+            "expression": str(expr),
+            "strategy": strategy,
+            "encoded_symbols": tuple(encoded_names),
+            "parameter_symbols": declaration.parameter_names,
+        }
+    )
     if fallback_reason is not None:
-        rv['fallback_reason'] = fallback_reason
+        rv["fallback_reason"] = fallback_reason
     return rv
 
 
-def generated_stacked_params(dists: Sequence[Any], engine: Any) -> Dict[str, Any]:
+def generated_stacked_params(dists: Sequence[Any], engine: Any) -> dict[str, Any]:
     """Stack declared distribution parameters for generated homogeneous-mixture scoring.
 
     The generated path is intentionally conservative: it supports scalar,
@@ -264,19 +273,19 @@ def generated_stacked_params(dists: Sequence[Any], engine: Any) -> Dict[str, Any
     explicit ``backend_stacked_*`` route.
     """
     if not dists:
-        raise ValueError('generated_stacked_params requires at least one component.')
+        raise ValueError("generated_stacked_params requires at least one component.")
     dist_type = type(dists[0])
     if any(type(dist) is not dist_type for dist in dists):
-        raise ValueError('generated stacked scoring requires homogeneous component types.')
+        raise ValueError("generated stacked scoring requires homogeneous component types.")
     declaration = declaration_for(dists[0])
     if declaration is None:
-        raise ValueError('%s has no declaration.' % dist_type.__name__)
+        raise ValueError("%s has no declaration." % dist_type.__name__)
     if declaration.exponential_family is None and not _generated_backend_hook_supported(dist_type, declaration):
-        raise ValueError('%s has no generated stacked scoring hook.' % dist_type.__name__)
+        raise ValueError("%s has no generated stacked scoring hook." % dist_type.__name__)
 
-    params: Dict[str, Any] = {
-        '__pysp_dist_type__': dist_type,
-        '__pysp_param_names__': tuple(spec.name for spec in declaration.parameters),
+    params: dict[str, Any] = {
+        "__pysp_dist_type__": dist_type,
+        "__pysp_param_names__": tuple(spec.name for spec in declaration.parameters),
     }
     for spec in declaration.parameters:
         values = [getattr(dist, spec.name) for dist in dists]
@@ -284,49 +293,47 @@ def generated_stacked_params(dists: Sequence[Any], engine: Any) -> Dict[str, Any
             if _all_same(values):
                 params[spec.name] = values[0]
                 continue
-            raise ValueError('generated stacked fixed parameter %s must match across components.' % spec.name)
-        if _all_same(values) and spec.constraint in ('fixed', 'optional_integer'):
+            raise ValueError("generated stacked fixed parameter %s must match across components." % spec.name)
+        if _all_same(values) and spec.constraint in ("fixed", "optional_integer"):
             params[spec.name] = values[0]
             continue
         arr = np.asarray(values)
-        if arr.dtype.kind in ('O', 'U', 'S'):
+        if arr.dtype.kind in ("O", "U", "S"):
             if _all_same(values):
                 params[spec.name] = values[0]
                 continue
-            raise ValueError('generated stacked parameter %s is not numeric.' % spec.name)
+            raise ValueError("generated stacked parameter %s is not numeric." % spec.name)
         max_ndim = 3 if declaration.exponential_family is not None else 2
         if arr.ndim > max_ndim:
-            raise ValueError('generated stacked parameter %s has unsupported rank %d.' %
-                             (spec.name, arr.ndim))
+            raise ValueError("generated stacked parameter %s has unsupported rank %d." % (spec.name, arr.ndim))
         params[spec.name] = engine.asarray(arr)
     return params
 
 
-def generated_stacked_log_density(enc: Any, params: Dict[str, Any], engine: Any) -> Any:
+def generated_stacked_log_density(enc: Any, params: dict[str, Any], engine: Any) -> Any:
     """Return an ``(n, k)`` log-density matrix from declaration-stacked params."""
-    dist_type = params['__pysp_dist_type__']
+    dist_type = params["__pysp_dist_type__"]
     declaration = declaration_for(dist_type)
     if declaration is not None and declaration.exponential_family is not None:
         return _generated_exp_family_log_density(enc, params, declaration.exponential_family, engine)
-    fn = getattr(dist_type, 'backend_log_density_from_params')
+    fn = dist_type.backend_log_density_from_params
     sig_names = tuple(inspect.signature(fn).parameters.keys())
-    if not sig_names or sig_names[-1] != 'engine':
-        raise ValueError('%s backend_log_density_from_params must end with engine.' % dist_type.__name__)
+    if not sig_names or sig_names[-1] != "engine":
+        raise ValueError("%s backend_log_density_from_params must end with engine." % dist_type.__name__)
     call_names = sig_names[:-1]
-    param_names = set(params.get('__pysp_param_names__', ()))
+    param_names = set(params.get("__pysp_param_names__", ()))
     data_count = 0
     for name in call_names:
         if name in param_names:
             break
         data_count += 1
     if data_count <= 0:
-        raise ValueError('%s generated scorer could not infer encoded arguments.' % dist_type.__name__)
+        raise ValueError("%s generated scorer could not infer encoded arguments." % dist_type.__name__)
 
     args = list(_generated_data_args(enc, data_count, engine))
     for name in call_names[data_count:]:
         if name not in param_names:
-            raise ValueError('%s generated scorer requires undeclared parameter %s.' %
-                             (dist_type.__name__, name))
+            raise ValueError("%s generated scorer requires undeclared parameter %s." % (dist_type.__name__, name))
         args.append(_generated_param_arg(params[name], engine))
     args.append(engine)
     return fn(*args)
@@ -343,7 +350,7 @@ def generated_log_density(dist: Any, enc: Any, engine: Any) -> Any:
     """
     declaration = declaration_for(dist)
     if declaration is None:
-        raise ValueError('%s has no declaration.' % type(dist).__name__)
+        raise ValueError("%s has no declaration." % type(dist).__name__)
     params = _generated_scalar_params(dist, declaration, engine)
     if declaration.exponential_family is not None:
         return _generated_exp_family_scalar_expression(enc, params, declaration.exponential_family, engine)
@@ -352,7 +359,7 @@ def generated_log_density(dist: Any, enc: Any, engine: Any) -> Any:
 
 def generated_stacked_sufficient_statistics_available(x: Any) -> bool:
     """Return true when a declaration can generate resident stacked stats."""
-    dist_type = x.get('__pysp_dist_type__') if isinstance(x, dict) else x
+    dist_type = x.get("__pysp_dist_type__") if isinstance(x, dict) else x
     declaration = declaration_for(dist_type)
     return declaration is not None and callable(_legacy_sufficient_statistics_fn(declaration))
 
@@ -363,7 +370,7 @@ def generated_sufficient_statistics_available(x: Any) -> bool:
     return declaration is not None and callable(_legacy_sufficient_statistics_fn(declaration))
 
 
-def generated_sufficient_statistics(dist: Any, enc: Any, weights: Any, engine: Any) -> Tuple[Any, ...]:
+def generated_sufficient_statistics(dist: Any, enc: Any, weights: Any, engine: Any) -> tuple[Any, ...]:
     """Return legacy sufficient statistics from declaration-owned row stats.
 
     This is the single-distribution analogue of
@@ -374,18 +381,22 @@ def generated_sufficient_statistics(dist: Any, enc: Any, weights: Any, engine: A
     """
     declaration = declaration_for(dist)
     if declaration is None:
-        raise ValueError('%s has no declaration.' % type(dist).__name__)
+        raise ValueError("%s has no declaration." % type(dist).__name__)
     stats_fn = _legacy_sufficient_statistics_fn(declaration)
     if not callable(stats_fn):
-        raise ValueError('%s has no generated legacy sufficient-statistic hook.' % type(dist).__name__)
+        raise ValueError("%s has no generated legacy sufficient-statistic hook." % type(dist).__name__)
     params = _generated_scalar_params(dist, declaration, engine)
     row_stats = tuple(stats_fn(enc, params, engine))
     if len(row_stats) != len(declaration.statistics):
-        raise ValueError('%s generated %d legacy statistics for %d declared statistics.' %
-                         (type(dist).__name__, len(row_stats), len(declaration.statistics)))
+        raise ValueError(
+            "%s generated %d legacy statistics for %d declared statistics."
+            % (type(dist).__name__, len(row_stats), len(declaration.statistics))
+        )
     ww = engine.asarray(weights)
-    return tuple(_host_legacy_value(_weighted_row_sum(stat, spec, ww, engine), engine)
-                 for spec, stat in zip(declaration.statistics, row_stats))
+    return tuple(
+        _host_legacy_value(_weighted_row_sum(stat, spec, ww, engine), engine)
+        for spec, stat in zip(declaration.statistics, row_stats)
+    )
 
 
 def generated_numba_log_density_available(x: Any) -> bool:
@@ -423,16 +434,17 @@ def generated_numba_log_density(dist: Any, enc: Any) -> np.ndarray:
 
     declaration = declaration_for(dist)
     if declaration is None:
-        raise ValueError('%s has no declaration.' % type(dist).__name__)
+        raise ValueError("%s has no declaration." % type(dist).__name__)
     if declaration.exponential_family is None:
         return _generated_generic_numba_log_density(dist, enc, declaration)
     params = _generated_scalar_params(dist, declaration, NUMPY_ENGINE)
     row_stats, base = _generated_numba_row_pieces(enc, params, declaration.exponential_family)
     eta = _generated_numba_eta_vector(params, declaration.exponential_family)
-    log_partition = _generated_numba_scalar(declaration.exponential_family.log_partition(params, NUMPY_ENGINE),
-                                            'log_partition')
+    log_partition = _generated_numba_scalar(
+        declaration.exponential_family.log_partition(params, NUMPY_ENGINE), "log_partition"
+    )
     if eta.shape[0] != row_stats.shape[1]:
-        raise ValueError('generated numba statistic/natural-parameter widths differ.')
+        raise ValueError("generated numba statistic/natural-parameter widths differ.")
     out = np.empty(row_stats.shape[0], dtype=np.float64)
     _numba_exp_family_log_density(row_stats, base, eta, float(log_partition), out)
     return out
@@ -448,77 +460,93 @@ def generated_numba_log_density(dist: Any, enc: Any) -> np.ndarray:
 # those families a real generated kernel without re-implementing their math.
 # ---------------------------------------------------------------------------
 
+
 class _UnsupportedNumbaLowering(Exception):
     """Raised when a symbolic expression cannot be lowered to the numba scalar loop."""
 
 
 _NUMBA_INFIX_OPS = {
-    'add': '+', 'sub': '-', 'mul': '*', 'div': '/', 'pow': '**',
-    'lt': '<', 'le': '<=', 'gt': '>', 'ge': '>=', 'eq': '==', 'ne': '!=',
+    "add": "+",
+    "sub": "-",
+    "mul": "*",
+    "div": "/",
+    "pow": "**",
+    "lt": "<",
+    "le": "<=",
+    "gt": ">",
+    "ge": ">=",
+    "eq": "==",
+    "ne": "!=",
 }
 
 _NUMBA_FUNC_OPS = {
-    'log': 'math.log', 'exp': 'math.exp', 'sqrt': 'math.sqrt', 'abs': 'abs',
-    'floor': 'math.floor', 'gammaln': 'math.lgamma', 'erf': 'math.erf',
-    'isnan': 'math.isnan', 'isinf': 'math.isinf',
+    "log": "math.log",
+    "exp": "math.exp",
+    "sqrt": "math.sqrt",
+    "abs": "abs",
+    "floor": "math.floor",
+    "gammaln": "math.lgamma",
+    "erf": "math.erf",
+    "isnan": "math.isnan",
+    "isinf": "math.isinf",
 }
 
-_GENERIC_NUMBA_KERNEL_CACHE: Dict[Type[Any], Optional[Tuple[Any, int, Tuple[str, ...]]]] = {}
+_GENERIC_NUMBA_KERNEL_CACHE: dict[type[Any], tuple[Any, int, tuple[str, ...]] | None] = {}
 
 
 def _lower_symbolic_to_numba(expr: Any) -> str:
     """Lower a SymbolicExpression to a numba-compatible Python expression string."""
     op = expr.op
-    if op == 'symbol':
+    if op == "symbol":
         return str(expr.args[0])
-    if op == 'const':
+    if op == "const":
         value = expr.args[0]
         if isinstance(value, bool):
-            return 'True' if value else 'False'
+            return "True" if value else "False"
         if value is None:
-            raise _UnsupportedNumbaLowering('None constant')
+            raise _UnsupportedNumbaLowering("None constant")
         fvalue = float(value)
         if math.isinf(fvalue):
-            return '_INF' if fvalue > 0 else '(-_INF)'
+            return "_INF" if fvalue > 0 else "(-_INF)"
         if math.isnan(fvalue):
-            return '_NAN'
+            return "_NAN"
         return repr(fvalue)
 
     sub = [_lower_symbolic_to_numba(arg) for arg in expr.args]
 
     if op in _NUMBA_INFIX_OPS and len(sub) == 2:
-        return '(%s %s %s)' % (sub[0], _NUMBA_INFIX_OPS[op], sub[1])
-    if op == 'neg' and len(sub) == 1:
-        return '(-%s)' % sub[0]
-    if op == 'invert' and len(sub) == 1:
-        return '(not %s)' % sub[0]
-    if op == 'and' and len(sub) == 2:
-        return '(%s and %s)' % (sub[0], sub[1])
-    if op == 'or' and len(sub) == 2:
-        return '(%s or %s)' % (sub[0], sub[1])
-    if op == 'where' and len(sub) == 3:
-        return '(%s if %s else %s)' % (sub[1], sub[0], sub[2])
-    if op == 'max':
-        return '(max(%s))' % ', '.join(sub)
-    if op == 'betaln' and len(sub) == 2:
-        return '(math.lgamma(%s) + math.lgamma(%s) - math.lgamma((%s) + (%s)))' % (
-            sub[0], sub[1], sub[0], sub[1])
-    if op == 'clip' and len(sub) == 3:
+        return "(%s %s %s)" % (sub[0], _NUMBA_INFIX_OPS[op], sub[1])
+    if op == "neg" and len(sub) == 1:
+        return "(-%s)" % sub[0]
+    if op == "invert" and len(sub) == 1:
+        return "(not %s)" % sub[0]
+    if op == "and" and len(sub) == 2:
+        return "(%s and %s)" % (sub[0], sub[1])
+    if op == "or" and len(sub) == 2:
+        return "(%s or %s)" % (sub[0], sub[1])
+    if op == "where" and len(sub) == 3:
+        return "(%s if %s else %s)" % (sub[1], sub[0], sub[2])
+    if op == "max":
+        return "(max(%s))" % ", ".join(sub)
+    if op == "betaln" and len(sub) == 2:
+        return "(math.lgamma(%s) + math.lgamma(%s) - math.lgamma((%s) + (%s)))" % (sub[0], sub[1], sub[0], sub[1])
+    if op == "clip" and len(sub) == 3:
         result = sub[0]
         lo, hi = expr.args[1], expr.args[2]
-        if not (lo.op == 'const' and lo.args[0] is None):
-            result = 'max(%s, %s)' % (result, sub[1])
-        if not (hi.op == 'const' and hi.args[0] is None):
-            result = 'min(%s, %s)' % (result, sub[2])
-        return '(%s)' % result
+        if not (lo.op == "const" and lo.args[0] is None):
+            result = "max(%s, %s)" % (result, sub[1])
+        if not (hi.op == "const" and hi.args[0] is None):
+            result = "min(%s, %s)" % (result, sub[2])
+        return "(%s)" % result
     if op in _NUMBA_FUNC_OPS:
-        return '%s(%s)' % (_NUMBA_FUNC_OPS[op], ', '.join(sub))
+        return "%s(%s)" % (_NUMBA_FUNC_OPS[op], ", ".join(sub))
 
     raise _UnsupportedNumbaLowering(op)
 
 
-def _build_generic_numba_kernel(dist_type: Type[Any],
-                                declaration: 'DistributionDeclaration') -> Optional[Tuple[Any, int, Tuple[str, ...]]]:
+def _build_generic_numba_kernel(
+    dist_type: type[Any], declaration: DistributionDeclaration
+) -> tuple[Any, int, tuple[str, ...]] | None:
     """Compile (and cache) a numba scalar-loop kernel for a non-exp-family leaf, or None.
 
     Returns ``(kernel, n_data, ordered_param_names)`` where the kernel has signature
@@ -528,57 +556,52 @@ def _build_generic_numba_kernel(dist_type: Type[Any],
     if dist_type in _GENERIC_NUMBA_KERNEL_CACHE:
         return _GENERIC_NUMBA_KERNEL_CACHE[dist_type]
 
-    result: Optional[Tuple[Any, int, Tuple[str, ...]]] = None
+    result: tuple[Any, int, tuple[str, ...]] | None = None
     try:
         from pysp.engines.symbolic_engine import SymbolicEngine
 
-        fn = getattr(dist_type, 'backend_log_density_from_params', None)
+        fn = getattr(dist_type, "backend_log_density_from_params", None)
         if not callable(fn):
-            raise _UnsupportedNumbaLowering('no backend_log_density_from_params')
+            raise _UnsupportedNumbaLowering("no backend_log_density_from_params")
 
         encoded_names = _diagnostic_encoded_symbols(dist_type, declaration, None)
-        if not encoded_names or declaration.support.endswith('_vector'):
-            raise _UnsupportedNumbaLowering('non-scalar encoded data')
+        if not encoded_names or declaration.support.endswith("_vector"):
+            raise _UnsupportedNumbaLowering("non-scalar encoded data")
         data_names = tuple(encoded_names)
         n_data = len(data_names)
 
         sig_names = tuple(inspect.signature(fn).parameters.keys())
-        if not sig_names or sig_names[-1] != 'engine':
-            raise _UnsupportedNumbaLowering('backend signature must end with engine')
+        if not sig_names or sig_names[-1] != "engine":
+            raise _UnsupportedNumbaLowering("backend signature must end with engine")
         call_names = sig_names[:-1]
         param_names = set(declaration.parameter_names)
         # The leading data arguments, then the parameters in call order.
         ordered_params = tuple(call_names[n_data:])
         for name in ordered_params:
             if name not in param_names:
-                raise _UnsupportedNumbaLowering('non-parameter call argument %r' % name)
+                raise _UnsupportedNumbaLowering("non-parameter call argument %r" % name)
 
         engine = SymbolicEngine()
         param_symbols = _diagnostic_param_symbols(declaration, engine)
         for name in ordered_params:
             sym = param_symbols.get(name)
             # scalar symbols only; vector/matrix params become numpy arrays and are unsupported here
-            if not hasattr(sym, 'op'):
-                raise _UnsupportedNumbaLowering('non-scalar parameter %r' % name)
+            if not hasattr(sym, "op"):
+                raise _UnsupportedNumbaLowering("non-scalar parameter %r" % name)
         encoded_values = tuple(engine.symbol(name) for name in data_names)
         expr = _diagnostic_backend_log_density_expression(dist_type, param_symbols, encoded_values, engine)
         body = _lower_symbolic_to_numba(expr)
 
-        data_args = tuple('_data%d' % k for k in range(n_data))
-        arg_list = ', '.join(data_args + ordered_params + ('out',))
-        bind_lines = ''.join('        %s = _data%d[_i]\n' % (name, k)
-                             for k, name in enumerate(data_names))
+        data_args = tuple("_data%d" % k for k in range(n_data))
+        arg_list = ", ".join(data_args + ordered_params + ("out",))
+        bind_lines = "".join("        %s = _data%d[_i]\n" % (name, k) for k, name in enumerate(data_names))
         source = (
-            'def _generic_numba_kernel(%s):\n'
-            '    _n = out.shape[0]\n'
-            '    for _i in range(_n):\n'
-            '%s'
-            '        out[_i] = %s\n'
+            "def _generic_numba_kernel(%s):\n    _n = out.shape[0]\n    for _i in range(_n):\n%s        out[_i] = %s\n"
         ) % (arg_list, bind_lines, body)
 
-        namespace: Dict[str, Any] = {'math': math, 'np': np, '_INF': np.inf, '_NAN': np.nan}
-        exec(compile(source, '<generated_numba:%s>' % dist_type.__name__, 'exec'), namespace)
-        kernel = numba.njit(cache=False)(namespace['_generic_numba_kernel'])
+        namespace: dict[str, Any] = {"math": math, "np": np, "_INF": np.inf, "_NAN": np.nan}
+        exec(compile(source, "<generated_numba:%s>" % dist_type.__name__, "exec"), namespace)
+        kernel = numba.njit(cache=False)(namespace["_generic_numba_kernel"])
         result = (kernel, n_data, ordered_params)
     except _UnsupportedNumbaLowering:
         result = None
@@ -589,11 +612,11 @@ def _build_generic_numba_kernel(dist_type: Type[Any],
     return result
 
 
-def _generic_numba_data_arrays(enc: Any, n_data: int) -> Tuple[np.ndarray, ...]:
+def _generic_numba_data_arrays(enc: Any, n_data: int) -> tuple[np.ndarray, ...]:
     """Return the ``n_data`` per-row encoded arrays as contiguous 1-D float64 vectors."""
     raw = (enc,) if n_data == 1 else tuple(enc[:n_data])
     if len(raw) != n_data:
-        raise ValueError('encoded payload does not contain %d generated arrays.' % n_data)
+        raise ValueError("encoded payload does not contain %d generated arrays." % n_data)
     arrays = []
     for arg in raw:
         arr = np.asarray(arg)
@@ -603,18 +626,18 @@ def _generic_numba_data_arrays(enc: Any, n_data: int) -> Tuple[np.ndarray, ...]:
     return tuple(arrays)
 
 
-def _generated_generic_numba_log_density(dist: Any, enc: Any,
-                                         declaration: 'DistributionDeclaration') -> np.ndarray:
+def _generated_generic_numba_log_density(dist: Any, enc: Any, declaration: DistributionDeclaration) -> np.ndarray:
     built = _build_generic_numba_kernel(type(dist), declaration)
     if built is None:
-        raise ValueError('%s has no generated numba kernel.' % type(dist).__name__)
+        raise ValueError("%s has no generated numba kernel." % type(dist).__name__)
     kernel, n_data, ordered_params = built
     param_values = []
     for name in ordered_params:
         value = getattr(dist, name, None)
         if value is None or not isinstance(value, (bool, int, float, np.number)):
-            raise ValueError('%s parameter %r is not a scalar usable in the generated numba kernel.'
-                             % (type(dist).__name__, name))
+            raise ValueError(
+                "%s parameter %r is not a scalar usable in the generated numba kernel." % (type(dist).__name__, name)
+            )
         param_values.append(float(value))
     data_arrays = _generic_numba_data_arrays(enc, n_data)
     out = np.empty(data_arrays[0].shape[0], dtype=np.float64)
@@ -622,84 +645,96 @@ def _generated_generic_numba_log_density(dist: Any, enc: Any,
     return out
 
 
-def generated_numba_stacked_log_density(enc: Any, params: Dict[str, Any]) -> np.ndarray:
+def generated_numba_stacked_log_density(enc: Any, params: dict[str, Any]) -> np.ndarray:
     """Return an ``(n, k)`` score matrix from a declaration-generated numba loop."""
-    dist_type = params['__pysp_dist_type__']
+    dist_type = params["__pysp_dist_type__"]
     declaration = declaration_for(dist_type)
     if declaration is None or declaration.exponential_family is None:
-        raise ValueError('%s has no exponential-family declaration.' % dist_type.__name__)
+        raise ValueError("%s has no exponential-family declaration." % dist_type.__name__)
     row_stats, base = _generated_numba_row_pieces(enc, params, declaration.exponential_family)
     eta = _generated_numba_eta_matrix(params, declaration.exponential_family)
     log_partition = _generated_numba_vector(
         declaration.exponential_family.log_partition(params, _numpy_engine()),
-        'log_partition',
+        "log_partition",
     )
     if eta.shape[0] != log_partition.shape[0]:
-        raise ValueError('generated numba eta/log-partition component counts differ.')
+        raise ValueError("generated numba eta/log-partition component counts differ.")
     if eta.shape[1] != row_stats.shape[1]:
-        raise ValueError('generated numba statistic/natural-parameter widths differ.')
+        raise ValueError("generated numba statistic/natural-parameter widths differ.")
     out = np.empty((row_stats.shape[0], eta.shape[0]), dtype=np.float64)
     _numba_stacked_exp_family_log_density(row_stats, base, eta, log_partition, out)
     return out
 
 
-def generated_stacked_sufficient_statistics(enc: Any, weights: Any,
-                                            params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+def generated_stacked_sufficient_statistics(
+    enc: Any, weights: Any, params: dict[str, Any], engine: Any
+) -> tuple[Any, ...]:
     """Return component-stacked legacy sufficient statistics from declarations."""
-    dist_type = params['__pysp_dist_type__']
+    dist_type = params["__pysp_dist_type__"]
     declaration = declaration_for(dist_type)
     if declaration is None:
-        raise ValueError('%s has no declaration.' % dist_type.__name__)
+        raise ValueError("%s has no declaration." % dist_type.__name__)
     stats_fn = _legacy_sufficient_statistics_fn(declaration)
     if not callable(stats_fn):
-        raise ValueError('%s has no generated legacy sufficient-statistic hook.' % dist_type.__name__)
+        raise ValueError("%s has no generated legacy sufficient-statistic hook." % dist_type.__name__)
     row_stats = tuple(stats_fn(enc, params, engine))
     if len(row_stats) != len(declaration.statistics):
-        raise ValueError('%s generated %d legacy statistics for %d declared statistics.' %
-                         (dist_type.__name__, len(row_stats), len(declaration.statistics)))
+        raise ValueError(
+            "%s generated %d legacy statistics for %d declared statistics."
+            % (dist_type.__name__, len(row_stats), len(declaration.statistics))
+        )
     ww = engine.asarray(weights)
-    return tuple(_weighted_component_sum(stat, spec, ww, engine)
-                 for spec, stat in zip(declaration.statistics, row_stats))
+    return tuple(
+        _weighted_component_sum(stat, spec, ww, engine) for spec, stat in zip(declaration.statistics, row_stats)
+    )
 
 
-def _generated_exp_family_log_density(enc: Any, params: Dict[str, Any],
-                                      spec: ExponentialFamilySpec, engine: Any) -> Any:
+def _generated_exp_family_log_density(
+    enc: Any, params: dict[str, Any], spec: ExponentialFamilySpec, engine: Any
+) -> Any:
     if spec.sufficient_statistics_from_params is not None:
         statistics = tuple(spec.sufficient_statistics_from_params(enc, params, engine))
     else:
         statistics = tuple(spec.sufficient_statistics(enc, engine))
     natural = tuple(spec.natural_parameters(params, engine))
     if len(statistics) != len(natural):
-        raise ValueError('exponential-family statistic/natural-parameter arity mismatch.')
+        raise ValueError("exponential-family statistic/natural-parameter arity mismatch.")
     if not statistics:
-        raise ValueError('exponential-family declarations require at least one statistic.')
+        raise ValueError("exponential-family declarations require at least one statistic.")
     if spec.base_measure_from_params is not None:
         base = spec.base_measure_from_params(enc, params, engine)
     else:
-        base = spec.base_measure(enc, engine) if spec.base_measure is not None else \
-            _generated_exp_family_zero_base(statistics[0], engine)
+        base = (
+            spec.base_measure(enc, engine)
+            if spec.base_measure is not None
+            else _generated_exp_family_zero_base(statistics[0], engine)
+        )
     rv = base[:, None]
     for stat, eta in zip(statistics, natural):
         rv = rv + _generated_exp_family_pair_term(stat, eta, engine, stacked=True)
     return rv - _generated_param_arg(spec.log_partition(params, engine), engine)
 
 
-def _generated_exp_family_scalar_expression(enc: Any, params: Dict[str, Any],
-                                            spec: ExponentialFamilySpec, engine: Any) -> Any:
+def _generated_exp_family_scalar_expression(
+    enc: Any, params: dict[str, Any], spec: ExponentialFamilySpec, engine: Any
+) -> Any:
     if spec.sufficient_statistics_from_params is not None:
         statistics = tuple(spec.sufficient_statistics_from_params(enc, params, engine))
     else:
         statistics = tuple(spec.sufficient_statistics(enc, engine))
     natural = tuple(spec.natural_parameters(params, engine))
     if len(statistics) != len(natural):
-        raise ValueError('exponential-family statistic/natural-parameter arity mismatch.')
+        raise ValueError("exponential-family statistic/natural-parameter arity mismatch.")
     if not statistics:
-        raise ValueError('exponential-family declarations require at least one statistic.')
+        raise ValueError("exponential-family declarations require at least one statistic.")
     if spec.base_measure_from_params is not None:
         base = spec.base_measure_from_params(enc, params, engine)
     else:
-        base = spec.base_measure(enc, engine) if spec.base_measure is not None else \
-            _generated_exp_family_zero_base(statistics[0], engine)
+        base = (
+            spec.base_measure(enc, engine)
+            if spec.base_measure is not None
+            else _generated_exp_family_zero_base(statistics[0], engine)
+        )
     rv = base
     for stat, eta in zip(statistics, natural):
         rv = rv + _generated_exp_family_pair_term(stat, eta, engine, stacked=False)
@@ -710,84 +745,98 @@ def _generated_exp_family_pair_term(stat: Any, eta: Any, engine: Any, stacked: b
     stat_arr = engine.asarray(stat)
     eta_arr = _generated_param_arg(eta, engine) if stacked else eta
     product = stat_arr[:, None] * eta_arr if stacked else stat_arr * eta_arr
-    shape = tuple(getattr(product, 'shape', ()))
+    shape = tuple(getattr(product, "shape", ()))
     if stacked:
         while len(shape) > 2:
             product = engine.sum(product, axis=-1)
-            shape = tuple(getattr(product, 'shape', ()))
+            shape = tuple(getattr(product, "shape", ()))
     else:
         while len(shape) > 1:
             product = engine.sum(product, axis=-1)
-            shape = tuple(getattr(product, 'shape', ()))
+            shape = tuple(getattr(product, "shape", ()))
     return product
 
 
 def _generated_exp_family_zero_base(stat: Any, engine: Any) -> Any:
     base = engine.asarray(stat) * engine.asarray(0.0)
-    shape = tuple(getattr(base, 'shape', ()))
+    shape = tuple(getattr(base, "shape", ()))
     while len(shape) > 1:
         base = engine.sum(base, axis=-1)
-        shape = tuple(getattr(base, 'shape', ()))
+        shape = tuple(getattr(base, "shape", ()))
     return base
 
 
-def _diagnostic_encoded_symbols(dist_type: Type[Any], declaration: DistributionDeclaration,
-                                encoded_symbols: Optional[Sequence[str]]) -> Tuple[str, ...]:
+def _diagnostic_encoded_symbols(
+    dist_type: type[Any], declaration: DistributionDeclaration, encoded_symbols: Sequence[str] | None
+) -> tuple[str, ...]:
     if encoded_symbols is not None:
         if isinstance(encoded_symbols, str):
             return (encoded_symbols,)
         return tuple(str(name) for name in encoded_symbols)
-    fn = getattr(dist_type, 'backend_log_density_from_params', None)
+    fn = getattr(dist_type, "backend_log_density_from_params", None)
     if not callable(fn):
-        return ('x',)
+        return ("x",)
     sig_names = tuple(inspect.signature(fn).parameters.keys())
-    if not sig_names or sig_names[-1] != 'engine':
-        return ('x',)
+    if not sig_names or sig_names[-1] != "engine":
+        return ("x",)
     param_names = set(declaration.parameter_names)
     data_names = []
     for name in sig_names[:-1]:
         if name in param_names:
             break
         data_names.append(name)
-    return tuple(data_names) if data_names else ('x',)
+    return tuple(data_names) if data_names else ("x",)
 
 
-def _diagnostic_encoded_values(encoded_names: Sequence[str], engine: Any,
-                               declaration: DistributionDeclaration) -> Tuple[Any, ...]:
-    if len(encoded_names) == 1 and declaration.support.endswith('_vector'):
-        return (np.asarray([
-            engine.symbol('%s_0' % encoded_names[0]),
-            engine.symbol('%s_1' % encoded_names[0]),
-        ], dtype=object),)
+def _diagnostic_encoded_values(
+    encoded_names: Sequence[str], engine: Any, declaration: DistributionDeclaration
+) -> tuple[Any, ...]:
+    if len(encoded_names) == 1 and declaration.support.endswith("_vector"):
+        return (
+            np.asarray(
+                [
+                    engine.symbol("%s_0" % encoded_names[0]),
+                    engine.symbol("%s_1" % encoded_names[0]),
+                ],
+                dtype=object,
+            ),
+        )
     return tuple(engine.symbol(name) for name in encoded_names)
 
 
-def _diagnostic_param_symbols(declaration: DistributionDeclaration, engine: Any) -> Dict[str, Any]:
+def _diagnostic_param_symbols(declaration: DistributionDeclaration, engine: Any) -> dict[str, Any]:
     params = {}
     for spec in declaration.parameters:
-        if spec.constraint in ('real_vector', 'positive_vector'):
-            params[spec.name] = np.asarray([
-                engine.symbol('%s_0' % spec.name),
-                engine.symbol('%s_1' % spec.name),
-            ], dtype=object)
-        elif spec.constraint in ('positive_matrix',):
-            params[spec.name] = np.asarray([
-                [engine.symbol('%s_00' % spec.name), engine.symbol('%s_01' % spec.name)],
-                [engine.symbol('%s_10' % spec.name), engine.symbol('%s_11' % spec.name)],
-            ], dtype=object)
+        if spec.constraint in ("real_vector", "positive_vector"):
+            params[spec.name] = np.asarray(
+                [
+                    engine.symbol("%s_0" % spec.name),
+                    engine.symbol("%s_1" % spec.name),
+                ],
+                dtype=object,
+            )
+        elif spec.constraint in ("positive_matrix",):
+            params[spec.name] = np.asarray(
+                [
+                    [engine.symbol("%s_00" % spec.name), engine.symbol("%s_01" % spec.name)],
+                    [engine.symbol("%s_10" % spec.name), engine.symbol("%s_11" % spec.name)],
+                ],
+                dtype=object,
+            )
         else:
             params[spec.name] = engine.symbol(spec.name)
     return params
 
 
-def _diagnostic_backend_log_density_expression(dist_type: Type[Any], params: Dict[str, Any],
-                                               encoded_values: Sequence[Any], engine: Any) -> Any:
-    fn = getattr(dist_type, 'backend_log_density_from_params', None)
+def _diagnostic_backend_log_density_expression(
+    dist_type: type[Any], params: dict[str, Any], encoded_values: Sequence[Any], engine: Any
+) -> Any:
+    fn = getattr(dist_type, "backend_log_density_from_params", None)
     if not callable(fn):
-        raise ValueError('%s has no generated log-density hook.' % dist_type.__name__)
+        raise ValueError("%s has no generated log-density hook." % dist_type.__name__)
     sig_names = tuple(inspect.signature(fn).parameters.keys())
-    if not sig_names or sig_names[-1] != 'engine':
-        raise ValueError('%s backend_log_density_from_params must end with engine.' % dist_type.__name__)
+    if not sig_names or sig_names[-1] != "engine":
+        raise ValueError("%s backend_log_density_from_params must end with engine." % dist_type.__name__)
     args = []
     encoded_iter = iter(encoded_values)
     for name in sig_names[:-1]:
@@ -803,8 +852,9 @@ def _diagnostic_backend_log_density_expression(dist_type: Type[Any], params: Dic
 
 
 @numba.njit(cache=True)
-def _numba_exp_family_log_density(row_stats: np.ndarray, base: np.ndarray, eta: np.ndarray,
-                                  log_partition: float, out: np.ndarray) -> None:
+def _numba_exp_family_log_density(
+    row_stats: np.ndarray, base: np.ndarray, eta: np.ndarray, log_partition: float, out: np.ndarray
+) -> None:
     n, m = row_stats.shape
     for i in range(n):
         value = base[i]
@@ -814,9 +864,9 @@ def _numba_exp_family_log_density(row_stats: np.ndarray, base: np.ndarray, eta: 
 
 
 @numba.njit(cache=True)
-def _numba_stacked_exp_family_log_density(row_stats: np.ndarray, base: np.ndarray,
-                                          eta: np.ndarray, log_partition: np.ndarray,
-                                          out: np.ndarray) -> None:
+def _numba_stacked_exp_family_log_density(
+    row_stats: np.ndarray, base: np.ndarray, eta: np.ndarray, log_partition: np.ndarray, out: np.ndarray
+) -> None:
     n, m = row_stats.shape
     k_count = eta.shape[0]
     for i in range(n):
@@ -829,11 +879,13 @@ def _numba_stacked_exp_family_log_density(row_stats: np.ndarray, base: np.ndarra
 
 def _numpy_engine() -> Any:
     from pysp.engines import NUMPY_ENGINE
+
     return NUMPY_ENGINE
 
 
-def _generated_numba_row_pieces(enc: Any, params: Dict[str, Any],
-                                spec: ExponentialFamilySpec) -> Tuple[np.ndarray, np.ndarray]:
+def _generated_numba_row_pieces(
+    enc: Any, params: dict[str, Any], spec: ExponentialFamilySpec
+) -> tuple[np.ndarray, np.ndarray]:
     engine = _numpy_engine()
     if spec.sufficient_statistics_from_params is not None:
         statistics = tuple(spec.sufficient_statistics_from_params(enc, params, engine))
@@ -846,23 +898,23 @@ def _generated_numba_row_pieces(enc: Any, params: Dict[str, Any],
         base_value = spec.base_measure(enc, engine)
     else:
         base_value = np.zeros(row_stats.shape[0], dtype=np.float64)
-    base = _generated_numba_row_vector(base_value, row_stats.shape[0], 'base_measure')
+    base = _generated_numba_row_vector(base_value, row_stats.shape[0], "base_measure")
     return row_stats, base
 
 
 def _generated_numba_row_matrix(statistics: Sequence[Any]) -> np.ndarray:
     if not statistics:
-        raise ValueError('generated numba scoring requires at least one row statistic.')
+        raise ValueError("generated numba scoring requires at least one row statistic.")
     columns = []
     row_count = None
     for idx, stat in enumerate(statistics):
         arr = np.asarray(_numpy_engine().to_numpy(stat), dtype=np.float64)
         if arr.ndim < 1:
-            raise ValueError('generated numba statistic %d must have a row axis.' % idx)
+            raise ValueError("generated numba statistic %d must have a row axis." % idx)
         if row_count is None:
             row_count = arr.shape[0]
         elif arr.shape[0] != row_count:
-            raise ValueError('generated numba row statistics have inconsistent lengths.')
+            raise ValueError("generated numba row statistics have inconsistent lengths.")
         columns.append(arr.reshape((arr.shape[0], -1)))
     return np.ascontiguousarray(np.concatenate(columns, axis=1), dtype=np.float64)
 
@@ -872,33 +924,30 @@ def _generated_numba_row_vector(value: Any, row_count: int, name: str) -> np.nda
     if arr.ndim == 0:
         return np.full(row_count, float(arr), dtype=np.float64)
     if arr.ndim != 1 or arr.shape[0] != row_count:
-        raise ValueError('generated numba %s must be scalar or a row vector.' % name)
+        raise ValueError("generated numba %s must be scalar or a row vector." % name)
     return np.ascontiguousarray(arr, dtype=np.float64)
 
 
-def _generated_numba_eta_vector(params: Dict[str, Any], spec: ExponentialFamilySpec) -> np.ndarray:
+def _generated_numba_eta_vector(params: dict[str, Any], spec: ExponentialFamilySpec) -> np.ndarray:
     natural = tuple(spec.natural_parameters(params, _numpy_engine()))
     if not natural:
-        raise ValueError('generated numba scoring requires at least one natural parameter.')
-    parts = [
-        _generated_numba_flat_vector(value, 'natural_parameter_%d' % idx)
-        for idx, value in enumerate(natural)
-    ]
+        raise ValueError("generated numba scoring requires at least one natural parameter.")
+    parts = [_generated_numba_flat_vector(value, "natural_parameter_%d" % idx) for idx, value in enumerate(natural)]
     return np.ascontiguousarray(np.concatenate(parts), dtype=np.float64)
 
 
-def _generated_numba_eta_matrix(params: Dict[str, Any], spec: ExponentialFamilySpec) -> np.ndarray:
+def _generated_numba_eta_matrix(params: dict[str, Any], spec: ExponentialFamilySpec) -> np.ndarray:
     natural = tuple(spec.natural_parameters(params, _numpy_engine()))
     if not natural:
-        raise ValueError('generated numba scoring requires at least one natural parameter.')
+        raise ValueError("generated numba scoring requires at least one natural parameter.")
     columns = []
     component_count = None
     for idx, value in enumerate(natural):
-        arr = _generated_numba_component_matrix(value, 'natural_parameter_%d' % idx)
+        arr = _generated_numba_component_matrix(value, "natural_parameter_%d" % idx)
         if component_count is None:
             component_count = arr.shape[0]
         elif arr.shape[0] != component_count:
-            raise ValueError('generated numba natural-parameter component counts differ.')
+            raise ValueError("generated numba natural-parameter component counts differ.")
         columns.append(arr)
     return np.ascontiguousarray(np.concatenate(columns, axis=1), dtype=np.float64)
 
@@ -906,7 +955,7 @@ def _generated_numba_eta_matrix(params: Dict[str, Any], spec: ExponentialFamilyS
 def _generated_numba_scalar(value: Any, name: str) -> float:
     arr = np.asarray(_numpy_engine().to_numpy(value), dtype=np.float64)
     if arr.ndim != 0:
-        raise ValueError('generated numba %s must be scalar.' % name)
+        raise ValueError("generated numba %s must be scalar." % name)
     return float(arr)
 
 
@@ -915,7 +964,7 @@ def _generated_numba_vector(value: Any, name: str) -> np.ndarray:
     if arr.ndim == 0:
         return np.asarray([float(arr)], dtype=np.float64)
     if arr.ndim != 1:
-        raise ValueError('generated numba %s must be scalar or one-dimensional.' % name)
+        raise ValueError("generated numba %s must be scalar or one-dimensional." % name)
     return np.ascontiguousarray(arr, dtype=np.float64)
 
 
@@ -935,8 +984,8 @@ def _generated_numba_component_matrix(value: Any, name: str) -> np.ndarray:
     return np.ascontiguousarray(arr.reshape((arr.shape[0], -1)), dtype=np.float64)
 
 
-def _generated_scalar_params(dist: Any, declaration: DistributionDeclaration, engine: Any) -> Dict[str, Any]:
-    params: Dict[str, Any] = {}
+def _generated_scalar_params(dist: Any, declaration: DistributionDeclaration, engine: Any) -> dict[str, Any]:
+    params: dict[str, Any] = {}
     for spec in declaration.parameters:
         value = getattr(dist, spec.name)
         if value is None or isinstance(value, (str, bytes, bool, int, float, np.number, type)):
@@ -946,15 +995,16 @@ def _generated_scalar_params(dist: Any, declaration: DistributionDeclaration, en
     return params
 
 
-def _generated_backend_log_density(dist: Any, enc: Any, params: Dict[str, Any],
-                                   declaration: DistributionDeclaration, engine: Any) -> Any:
+def _generated_backend_log_density(
+    dist: Any, enc: Any, params: dict[str, Any], declaration: DistributionDeclaration, engine: Any
+) -> Any:
     dist_type = type(dist)
-    fn = getattr(dist_type, 'backend_log_density_from_params', None)
+    fn = getattr(dist_type, "backend_log_density_from_params", None)
     if not callable(fn):
-        raise ValueError('%s has no generated log-density hook.' % dist_type.__name__)
+        raise ValueError("%s has no generated log-density hook." % dist_type.__name__)
     sig_names = tuple(inspect.signature(fn).parameters.keys())
-    if not sig_names or sig_names[-1] != 'engine':
-        raise ValueError('%s backend_log_density_from_params must end with engine.' % dist_type.__name__)
+    if not sig_names or sig_names[-1] != "engine":
+        raise ValueError("%s backend_log_density_from_params must end with engine." % dist_type.__name__)
     call_names = sig_names[:-1]
     param_names = set(declaration.parameter_names)
     data_count = 0
@@ -963,61 +1013,60 @@ def _generated_backend_log_density(dist: Any, enc: Any, params: Dict[str, Any],
             break
         data_count += 1
     if data_count <= 0:
-        raise ValueError('%s generated scorer could not infer encoded arguments.' % dist_type.__name__)
+        raise ValueError("%s generated scorer could not infer encoded arguments." % dist_type.__name__)
 
     args = list(_generated_scalar_data_args(enc, data_count, engine))
     for name in call_names[data_count:]:
         if name not in param_names:
-            raise ValueError('%s generated scorer requires undeclared parameter %s.' %
-                             (dist_type.__name__, name))
+            raise ValueError("%s generated scorer requires undeclared parameter %s." % (dist_type.__name__, name))
         args.append(params[name])
     args.append(engine)
     return fn(*args)
 
 
-def _generated_scalar_data_args(enc: Any, count: int, engine: Any) -> Tuple[Any, ...]:
+def _generated_scalar_data_args(enc: Any, count: int, engine: Any) -> tuple[Any, ...]:
     raw_args = (enc,) if count == 1 else tuple(enc[:count])
     if len(raw_args) != count:
-        raise ValueError('encoded payload does not contain %d generated arguments.' % count)
+        raise ValueError("encoded payload does not contain %d generated arguments." % count)
     return tuple(engine.asarray(arg) for arg in raw_args)
 
 
 _KNOWN_PARAMETER_CONSTRAINTS = {
-    'real',
-    'real_vector',
-    'positive',
-    'positive_vector',
-    'positive_matrix',
-    'unit_interval',
-    'simplex',
-    'simplex_vector',
-    'simplex_map',
-    'row_simplex_matrix',
-    'row_simplex_map',
-    'column_simplex_matrix',
-    'integer',
-    'integer_vector',
-    'integer_matrix',
-    'positive_integer',
-    'non_negative_integer',
-    'optional_integer',
-    'fixed',
-    'metadata',
-    'log_probability_tables',
-    'log_unit_interval_vector',
-    'optional_log_unit_interval_vector',
+    "real",
+    "real_vector",
+    "positive",
+    "positive_vector",
+    "positive_matrix",
+    "unit_interval",
+    "simplex",
+    "simplex_vector",
+    "simplex_map",
+    "row_simplex_matrix",
+    "row_simplex_map",
+    "column_simplex_matrix",
+    "integer",
+    "integer_vector",
+    "integer_matrix",
+    "positive_integer",
+    "non_negative_integer",
+    "optional_integer",
+    "fixed",
+    "metadata",
+    "log_probability_tables",
+    "log_unit_interval_vector",
+    "optional_log_unit_interval_vector",
 }
 
 
 _SHARED_STACKED_PARAMETER_CONSTRAINTS = {
-    'fixed',
-    'metadata',
-    'integer',
-    'integer_vector',
-    'integer_matrix',
-    'positive_integer',
-    'non_negative_integer',
-    'optional_integer',
+    "fixed",
+    "metadata",
+    "integer",
+    "integer_vector",
+    "integer_matrix",
+    "positive_integer",
+    "non_negative_integer",
+    "optional_integer",
 }
 
 
@@ -1025,172 +1074,169 @@ def _generated_stacked_requires_shared_param(spec: ParameterSpec) -> bool:
     return spec.constraint in _SHARED_STACKED_PARAMETER_CONSTRAINTS
 
 
-def _declaration_issues(declaration: DistributionDeclaration, path: str) -> Tuple[str, ...]:
+def _declaration_issues(declaration: DistributionDeclaration, path: str) -> tuple[str, ...]:
     issues = []
     if not declaration.name:
-        issues.append('%s has an empty name.' % path)
+        issues.append("%s has an empty name." % path)
     if not isinstance(declaration.distribution_type, type):
-        issues.append('%s has a non-type distribution_type.' % path)
+        issues.append("%s has a non-type distribution_type." % path)
 
     param_names = []
     seen_params = set()
     for spec in declaration.parameters:
         if not spec.name:
-            issues.append('%s has an empty parameter name.' % path)
+            issues.append("%s has an empty parameter name." % path)
             continue
         if spec.name in seen_params:
-            issues.append('%s has duplicate parameter %s.' % (path, spec.name))
+            issues.append("%s has duplicate parameter %s." % (path, spec.name))
         constraint = str(spec.constraint)
         if _is_ordered_constraint(constraint):
             anchor = _ordered_constraint_anchor(constraint)
             if anchor not in seen_params:
-                issues.append('%s parameter %s references missing or later anchor %s.' %
-                              (path, spec.name, anchor))
+                issues.append("%s parameter %s references missing or later anchor %s." % (path, spec.name, anchor))
         elif constraint not in _KNOWN_PARAMETER_CONSTRAINTS:
-            issues.append('%s parameter %s has unknown constraint %s.' %
-                          (path, spec.name, constraint))
+            issues.append("%s parameter %s has unknown constraint %s." % (path, spec.name, constraint))
         seen_params.add(spec.name)
         param_names.append(spec.name)
 
     stat_names = set()
     for spec in declaration.statistics:
         if not spec.name:
-            issues.append('%s has an empty statistic name.' % path)
+            issues.append("%s has an empty statistic name." % path)
             continue
         if spec.name in stat_names:
-            issues.append('%s has duplicate statistic %s.' % (path, spec.name))
+            issues.append("%s has duplicate statistic %s." % (path, spec.name))
         stat_names.add(spec.name)
 
     if declaration.child_roles and len(declaration.child_roles) != len(declaration.children):
-        issues.append('%s has %d child roles for %d children.' %
-                      (path, len(declaration.child_roles), len(declaration.children)))
+        issues.append(
+            "%s has %d child roles for %d children." % (path, len(declaration.child_roles), len(declaration.children))
+        )
     for i, child in enumerate(declaration.children):
         role = declaration.child_roles[i] if i < len(declaration.child_roles) else str(i)
-        child_path = '%s.%s' % (path, role)
+        child_path = "%s.%s" % (path, role)
         if child is None:
-            issues.append('%s child declaration is missing.' % child_path)
+            issues.append("%s child declaration is missing." % child_path)
         elif not isinstance(child, DistributionDeclaration):
-            issues.append('%s child is not a DistributionDeclaration.' % child_path)
+            issues.append("%s child is not a DistributionDeclaration." % child_path)
         else:
             issues.extend(_declaration_issues(child, path=child_path))
 
     if declaration.exponential_family is not None:
         spec = declaration.exponential_family
         if not callable(spec.sufficient_statistics):
-            issues.append('%s exponential-family sufficient_statistics is not callable.' % path)
+            issues.append("%s exponential-family sufficient_statistics is not callable." % path)
         if not callable(spec.natural_parameters):
-            issues.append('%s exponential-family natural_parameters is not callable.' % path)
+            issues.append("%s exponential-family natural_parameters is not callable." % path)
         if not callable(spec.log_partition):
-            issues.append('%s exponential-family log_partition is not callable.' % path)
+            issues.append("%s exponential-family log_partition is not callable." % path)
         if spec.base_measure is not None and not callable(spec.base_measure):
-            issues.append('%s exponential-family base_measure is not callable.' % path)
-        if spec.sufficient_statistics_from_params is not None and \
-                not callable(spec.sufficient_statistics_from_params):
-            issues.append('%s exponential-family sufficient_statistics_from_params is not callable.' % path)
+            issues.append("%s exponential-family base_measure is not callable." % path)
+        if spec.sufficient_statistics_from_params is not None and not callable(spec.sufficient_statistics_from_params):
+            issues.append("%s exponential-family sufficient_statistics_from_params is not callable." % path)
         if spec.base_measure_from_params is not None and not callable(spec.base_measure_from_params):
-            issues.append('%s exponential-family base_measure_from_params is not callable.' % path)
+            issues.append("%s exponential-family base_measure_from_params is not callable." % path)
         if spec.legacy_sufficient_statistics is not None and not callable(spec.legacy_sufficient_statistics):
-            issues.append('%s exponential-family legacy_sufficient_statistics is not callable.' % path)
+            issues.append("%s exponential-family legacy_sufficient_statistics is not callable." % path)
     if declaration.legacy_sufficient_statistics is not None and not callable(declaration.legacy_sufficient_statistics):
-        issues.append('%s legacy_sufficient_statistics is not callable.' % path)
+        issues.append("%s legacy_sufficient_statistics is not callable." % path)
     return tuple(issues)
 
 
-def _statistic_layout_issues(declaration: DistributionDeclaration, suff_stat: Any, path: str) -> Tuple[str, ...]:
+def _statistic_layout_issues(declaration: DistributionDeclaration, suff_stat: Any, path: str) -> tuple[str, ...]:
     issues = []
     try:
         values = declaration.statistic_values(suff_stat)
     except Exception as exc:
-        return ('%s statistics do not match declaration: %s' % (path, exc),)
+        return ("%s statistics do not match declaration: %s" % (path, exc),)
 
     names = tuple(values.keys())
     if names != declaration.statistic_names:
-        issues.append('%s statistic names %r do not match declaration names %r.' %
-                      (path, names, declaration.statistic_names))
+        issues.append(
+            "%s statistic names %r do not match declaration names %r." % (path, names, declaration.statistic_names)
+        )
 
     for spec in declaration.statistics:
         if spec.name not in values:
             continue
-        issues.extend(_statistic_value_issues(
-            declaration, spec, values[spec.name], '%s.%s' % (path, spec.name)))
+        issues.extend(_statistic_value_issues(declaration, spec, values[spec.name], "%s.%s" % (path, spec.name)))
     return tuple(issues)
 
 
-def _statistic_value_issues(declaration: DistributionDeclaration, spec: StatisticSpec,
-                            value: Any, path: str) -> Tuple[str, ...]:
+def _statistic_value_issues(
+    declaration: DistributionDeclaration, spec: StatisticSpec, value: Any, path: str
+) -> tuple[str, ...]:
     child_indices = _child_indices_for_stat(declaration, spec)
     if not child_indices:
         return ()
 
-    if spec.kind == 'child_stat':
+    if spec.kind == "child_stat":
         if len(child_indices) != 1:
-            return ('%s maps to %d child declarations; expected one.' % (path, len(child_indices)),)
+            return ("%s maps to %d child declarations; expected one." % (path, len(child_indices)),)
         return _child_statistic_issues(declaration, child_indices[0], value, path)
 
-    if spec.kind == 'choice_child_stats':
+    if spec.kind == "choice_child_stats":
         if not isinstance(value, (tuple, list)):
-            return ('%s expected a sequence of per-choice child statistics.' % path,)
+            return ("%s expected a sequence of per-choice child statistics." % path,)
         issues = []
         if len(value) != len(child_indices):
-            issues.append('%s expected %d child statistics, got %d.' %
-                          (path, len(child_indices), len(value)))
-        for i, child_idx in enumerate(child_indices[:len(value)]):
+            issues.append("%s expected %d child statistics, got %d." % (path, len(child_indices), len(value)))
+        for i, child_idx in enumerate(child_indices[: len(value)]):
             child_value = value[i]
             if isinstance(child_value, (tuple, list)) and len(child_value) == 2:
                 child_value = child_value[1]
-            issues.extend(_child_statistic_issues(declaration, child_idx, child_value, '%s[%d]' % (path, i)))
+            issues.extend(_child_statistic_issues(declaration, child_idx, child_value, "%s[%d]" % (path, i)))
         return tuple(issues)
 
-    if spec.kind == 'mapping' and isinstance(value, dict):
+    if spec.kind == "mapping" and isinstance(value, dict):
         return _mapping_statistic_issues(declaration, spec, value, path)
 
-    if spec.kind in ('tuple', 'mapping', 'choice_child_stats'):
+    if spec.kind in ("tuple", "mapping", "choice_child_stats"):
         if not isinstance(value, (tuple, list)):
-            return ('%s expected a sequence of child statistics.' % path,)
+            return ("%s expected a sequence of child statistics." % path,)
         issues = []
         if len(value) != len(child_indices):
-            issues.append('%s expected %d child statistics, got %d.' %
-                          (path, len(child_indices), len(value)))
-        for i, child_idx in enumerate(child_indices[:len(value)]):
-            issues.extend(_child_statistic_issues(declaration, child_idx, value[i], '%s[%d]' % (path, i)))
+            issues.append("%s expected %d child statistics, got %d." % (path, len(child_indices), len(value)))
+        for i, child_idx in enumerate(child_indices[: len(value)]):
+            issues.extend(_child_statistic_issues(declaration, child_idx, value[i], "%s[%d]" % (path, i)))
         return tuple(issues)
 
     return ()
 
 
-def _mapping_statistic_issues(declaration: DistributionDeclaration, spec: StatisticSpec,
-                              value: Dict[Any, Any], path: str) -> Tuple[str, ...]:
+def _mapping_statistic_issues(
+    declaration: DistributionDeclaration, spec: StatisticSpec, value: dict[Any, Any], path: str
+) -> tuple[str, ...]:
     issues = []
     role_to_idx = {role: i for i, role in enumerate(declaration.child_roles)}
-    if spec.name == 'conditions':
+    if spec.name == "conditions":
         for key, child_value in value.items():
-            role = 'condition_%r' % key
+            role = "condition_%r" % key
             child_idx = role_to_idx.get(role)
             if child_idx is None:
-                issues.append('%s has no child declaration for condition key %r.' % (path, key))
+                issues.append("%s has no child declaration for condition key %r." % (path, key))
             else:
-                issues.extend(_child_statistic_issues(declaration, child_idx, child_value,
-                                                      '%s[%r]' % (path, key)))
+                issues.extend(_child_statistic_issues(declaration, child_idx, child_value, "%s[%r]" % (path, key)))
         return tuple(issues)
 
     child_indices = _child_indices_for_stat(declaration, spec)
     if value and len(value) != len(child_indices):
-        issues.append('%s expected %d mapped child statistics, got %d.' %
-                      (path, len(child_indices), len(value)))
+        issues.append("%s expected %d mapped child statistics, got %d." % (path, len(child_indices), len(value)))
     for role, child_idx in zip(declaration.child_roles, child_indices):
         if role in value:
-            issues.extend(_child_statistic_issues(declaration, child_idx, value[role], '%s[%r]' % (path, role)))
+            issues.extend(_child_statistic_issues(declaration, child_idx, value[role], "%s[%r]" % (path, role)))
     return tuple(issues)
 
 
-def _child_statistic_issues(declaration: DistributionDeclaration, child_idx: int,
-                            value: Any, path: str) -> Tuple[str, ...]:
+def _child_statistic_issues(
+    declaration: DistributionDeclaration, child_idx: int, value: Any, path: str
+) -> tuple[str, ...]:
     child = declaration.children[child_idx]
     role = declaration.child_roles[child_idx] if child_idx < len(declaration.child_roles) else str(child_idx)
-    return _statistic_layout_issues(child, value, '%s->%s' % (path, role))
+    return _statistic_layout_issues(child, value, "%s->%s" % (path, role))
 
 
-def _child_indices_for_stat(declaration: DistributionDeclaration, spec: StatisticSpec) -> Tuple[int, ...]:
+def _child_indices_for_stat(declaration: DistributionDeclaration, spec: StatisticSpec) -> tuple[int, ...]:
     if not declaration.children:
         return ()
     roles = tuple(declaration.child_roles)
@@ -1202,17 +1248,20 @@ def _child_indices_for_stat(declaration: DistributionDeclaration, spec: Statisti
     component_digit = _trailing_digit(spec.name)
     if component_digit is not None:
         stem = _normalized_statistic_role(spec.name[:-1])
-        prefix = 'x%d_%s' % (component_digit, stem)
-        digit_matches = tuple(i for i, role in enumerate(roles)
-                              if role.startswith(prefix) or role.endswith('_%s' % stem))
+        prefix = "x%d_%s" % (component_digit, stem)
+        digit_matches = tuple(
+            i for i, role in enumerate(roles) if role.startswith(prefix) or role.endswith("_%s" % stem)
+        )
         if digit_matches:
             return digit_matches
 
-    if spec.kind in ('tuple', 'choice_child_stats') or spec.name == 'fields':
+    if spec.kind in ("tuple", "choice_child_stats") or spec.name == "fields":
         stem = normalized
-        matches = tuple(i for i, role in enumerate(roles)
-                        if role == stem or role.startswith('%s_' % stem) or
-                        role.endswith('_%s' % stem) or ('_%s_' % stem) in role)
+        matches = tuple(
+            i
+            for i, role in enumerate(roles)
+            if role == stem or role.startswith("%s_" % stem) or role.endswith("_%s" % stem) or ("_%s_" % stem) in role
+        )
         if matches:
             return matches
         return tuple(range(len(declaration.children)))
@@ -1222,44 +1271,44 @@ def _child_indices_for_stat(declaration: DistributionDeclaration, spec: Statisti
 
 def _normalized_statistic_role(name: str) -> str:
     aliases = {
-        'children': 'choice',
-        'components': 'component',
-        'emissions': 'emission',
-        'elements': 'element',
-        'fields': 'field',
-        'lengths': 'length',
-        'topics': 'topic',
-        'values': 'value',
+        "children": "choice",
+        "components": "component",
+        "emissions": "emission",
+        "elements": "element",
+        "fields": "field",
+        "lengths": "length",
+        "topics": "topic",
+        "values": "value",
     }
     if name in aliases:
         return aliases[name]
-    if name.endswith('ies') and len(name) > 3:
-        return name[:-3] + 'y'
-    if name.endswith('s') and len(name) > 1:
+    if name.endswith("ies") and len(name) > 3:
+        return name[:-3] + "y"
+    if name.endswith("s") and len(name) > 1:
         return name[:-1]
     return name
 
 
-def _trailing_digit(name: str) -> Optional[int]:
+def _trailing_digit(name: str) -> int | None:
     if name and name[-1].isdigit():
         return int(name[-1])
     return None
 
 
 def _is_ordered_constraint(constraint: str) -> bool:
-    return constraint.startswith('greater_than:') or constraint.startswith('less_than:')
+    return constraint.startswith("greater_than:") or constraint.startswith("less_than:")
 
 
 def _ordered_constraint_anchor(constraint: str) -> str:
-    return constraint.split(':', 1)[1] if ':' in constraint else ''
+    return constraint.split(":", 1)[1] if ":" in constraint else ""
 
 
-def _generated_backend_hook_supported(dist_type: Type[Any], declaration: DistributionDeclaration) -> bool:
-    fn = getattr(dist_type, 'backend_log_density_from_params', None)
+def _generated_backend_hook_supported(dist_type: type[Any], declaration: DistributionDeclaration) -> bool:
+    fn = getattr(dist_type, "backend_log_density_from_params", None)
     if not callable(fn):
         return False
     sig_names = tuple(inspect.signature(fn).parameters.keys())
-    if not sig_names or sig_names[-1] != 'engine':
+    if not sig_names or sig_names[-1] != "engine":
         return False
     param_names = set(declaration.parameter_names)
     data_count = 0
@@ -1272,16 +1321,16 @@ def _generated_backend_hook_supported(dist_type: Type[Any], declaration: Distrib
     return all(name in param_names for name in sig_names[data_count:-1])
 
 
-def _generated_data_args(enc: Any, count: int, engine: Any) -> Tuple[Any, ...]:
+def _generated_data_args(enc: Any, count: int, engine: Any) -> tuple[Any, ...]:
     raw_args = (enc,) if count == 1 else tuple(enc[:count])
     if len(raw_args) != count:
-        raise ValueError('encoded payload does not contain %d generated arguments.' % count)
+        raise ValueError("encoded payload does not contain %d generated arguments." % count)
     rv = []
     for arg in raw_args:
         arr = engine.asarray(arg)
-        shape = tuple(getattr(arr, 'shape', ()))
+        shape = tuple(getattr(arr, "shape", ()))
         if len(shape) == 0:
-            raise ValueError('generated stacked scoring requires per-row encoded arrays.')
+            raise ValueError("generated stacked scoring requires per-row encoded arrays.")
         rv.append(arr[:, None] if len(shape) == 1 else arr[:, None, ...])
     return tuple(rv)
 
@@ -1292,7 +1341,7 @@ def _generated_param_arg(value: Any, engine: Any) -> Any:
     if isinstance(value, (str, bytes, bool, int, float, np.number)):
         return value
     arr = engine.asarray(value)
-    shape = tuple(getattr(arr, 'shape', ()))
+    shape = tuple(getattr(arr, "shape", ()))
     if len(shape) == 0:
         return arr
     if len(shape) == 1:
@@ -1301,31 +1350,33 @@ def _generated_param_arg(value: Any, engine: Any) -> Any:
         return arr[None, :, :]
     if len(shape) == 3:
         return arr[None, :, :, :]
-    raise ValueError('generated stacked scoring currently supports scalar/vector/matrix per-component parameters only.')
+    raise ValueError("generated stacked scoring currently supports scalar/vector/matrix per-component parameters only.")
 
 
 def _weighted_component_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any) -> Any:
     arr = engine.asarray(stat)
-    shape = tuple(getattr(arr, 'shape', ()))
-    weights_shape = tuple(getattr(weights, 'shape', ()))
+    shape = tuple(getattr(arr, "shape", ()))
+    weights_shape = tuple(getattr(weights, "shape", ()))
     if len(shape) == 1:
         arr = arr[:, None]
-    elif spec.kind in ('vector_moment', 'matrix_moment'):
+    elif spec.kind in ("vector_moment", "matrix_moment"):
         if not weights_shape or shape[0] != weights_shape[0]:
-            raise ValueError('generated %s statistics must have a row axis.' % spec.kind)
+            raise ValueError("generated %s statistics must have a row axis." % spec.kind)
         extra_axes = (None,) * (len(shape) - 1)
         return engine.sum(weights[(slice(None), slice(None)) + extra_axes] * arr[:, None, ...], axis=0)
     elif len(shape) != 2 or shape != weights_shape:
-        raise ValueError('generated sufficient statistics must be row, row-component, or declared vector/matrix arrays.')
+        raise ValueError(
+            "generated sufficient statistics must be row, row-component, or declared vector/matrix arrays."
+        )
     return engine.sum(weights * arr, axis=0)
 
 
 def _weighted_row_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any) -> Any:
     arr = engine.asarray(stat)
-    shape = tuple(getattr(arr, 'shape', ()))
-    weights_shape = tuple(getattr(weights, 'shape', ()))
+    shape = tuple(getattr(arr, "shape", ()))
+    weights_shape = tuple(getattr(weights, "shape", ()))
     if not shape or not weights_shape or shape[0] != weights_shape[0]:
-        raise ValueError('generated %s statistics must have a row axis.' % spec.kind)
+        raise ValueError("generated %s statistics must have a row axis." % spec.kind)
     if len(shape) == 1:
         return engine.sum(weights * arr, axis=0)
     extra_axes = (None,) * (len(shape) - 1)
@@ -1342,11 +1393,12 @@ def _host_legacy_value(value: Any, engine: Any) -> Any:
     return arr
 
 
-def _legacy_sufficient_statistics_fn(declaration: DistributionDeclaration) -> Optional[Callable]:
+def _legacy_sufficient_statistics_fn(declaration: DistributionDeclaration) -> Callable | None:
     if callable(declaration.legacy_sufficient_statistics):
         return declaration.legacy_sufficient_statistics
-    if declaration.exponential_family is not None and \
-            callable(declaration.exponential_family.legacy_sufficient_statistics):
+    if declaration.exponential_family is not None and callable(
+        declaration.exponential_family.legacy_sufficient_statistics
+    ):
         return declaration.exponential_family.legacy_sufficient_statistics
     return None
 

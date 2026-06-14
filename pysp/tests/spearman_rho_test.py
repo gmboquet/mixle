@@ -1,4 +1,5 @@
 """Tests for SpearmanRankingEstimator concentration (rho) estimation."""
+
 import itertools
 import unittest
 
@@ -15,7 +16,6 @@ def _estimate(est, data):
 
 
 class SpearmanRankingEstimatorRhoTestCase(unittest.TestCase):
-
     data = [[0, 1, 2, 3], [0, 1, 3, 2], [1, 0, 2, 3], [0, 1, 2, 3]]
 
     def test_default_rho_is_estimated(self):
@@ -33,7 +33,7 @@ class SpearmanRankingEstimatorRhoTestCase(unittest.TestCase):
             SpearmanRankingEstimator(4, max_rho=0.0)
 
     def test_distribution_estimator_estimates_rho_by_default(self):
-        dist = SpearmanRankingDistribution([0.0, 1.0, 2.0, 3.0], rho=3.5, name='s')
+        dist = SpearmanRankingDistribution([0.0, 1.0, 2.0, 3.0], rho=3.5, name="s")
         est = dist.estimator()
         self.assertIsNone(est.rho)
         refit = _estimate(est, self.data)
@@ -68,5 +68,5 @@ class SpearmanRankingEstimatorRhoTestCase(unittest.TestCase):
         self.assertEqual(dist.rho, 0.0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

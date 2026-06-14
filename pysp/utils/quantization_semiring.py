@@ -28,13 +28,14 @@ This module is the contract; the witness-retaining semiring is the engine for ev
 count-shaped, and a future tropical carrier will add Viterbi bounds (BoundedCount) for the
 non-decomposable families (HMM/Mixture) by swapping only the carrier.
 """
+
 import abc
-from typing import Any, Callable, Iterator, Optional, Sequence, Tuple, TypeVar
+from collections.abc import Callable, Iterator, Sequence
+from typing import Any, TypeVar
 
-from pysp.utils.quantization import (CountHistogram, CountIndex, Quantizer,
-                                     convolve_indices, leaf_count_index)
+from pysp.utils.quantization import CountHistogram, CountIndex, Quantizer, convolve_indices, leaf_count_index
 
-E = TypeVar('E')
+E = TypeVar("E")
 
 
 class DecomposableSemiring(abc.ABC):
@@ -72,7 +73,7 @@ class DecomposableSemiring(abc.ABC):
         return acc
 
 
-class _CNode(object):
+class _CNode:
     """A reified carrier element: a node in the composition tree with an eager count histogram.
 
     Reifying ``plus``/``scale``/``map_values``/``leaf`` (instead of nesting Python closures) lets a
@@ -83,7 +84,7 @@ class _CNode(object):
     such a child opaquely through its ``get_in_bucket``.
     """
 
-    __slots__ = ('kind', 'hist', 'a', 'b', 'child', 'lp', 'shift', 'fn', 'value')
+    __slots__ = ("kind", "hist", "a", "b", "child", "lp", "shift", "fn", "value")
 
     def __init__(self, kind, hist, a=None, b=None, child=None, lp=0.0, shift=0, fn=None, value=None):
         self.kind = kind
@@ -99,11 +100,11 @@ class _CNode(object):
     def total(self) -> int:
         return self.hist.total()
 
-    def get_in_bucket(self, fine_bucket: int, offset: int) -> Tuple[Any, float]:
+    def get_in_bucket(self, fine_bucket: int, offset: int) -> tuple[Any, float]:
         return _unrank(self, fine_bucket, offset)
 
 
-def _unrank(node, fb: int, off: int) -> Tuple[Any, float]:
+def _unrank(node, fb: int, off: int) -> tuple[Any, float]:
     """Iterative interpreter for a carrier node chain (no Python recursion over the chain depth).
 
     Descends linear ``scale``/``map_values``/``plus`` nodes in a loop, accumulating the log-prob
@@ -118,17 +119,17 @@ def _unrank(node, fb: int, off: int) -> Tuple[Any, float]:
             value, lp = cur.get_in_bucket(fb, off)
             break
         k = cur.kind
-        if k == 'leaf':
+        if k == "leaf":
             value, lp = cur.value, cur.lp
             break
-        if k == 'scale':
+        if k == "scale":
             fb -= cur.shift
             lp_add += cur.lp
             cur = cur.child
-        elif k == 'mapv':
+        elif k == "mapv":
             transforms.append(cur.fn)
             cur = cur.child
-        elif k == 'plus':
+        elif k == "plus":
             na = cur.a.hist.count_at(fb)
             if off < na:
                 cur = cur.a
@@ -136,7 +137,7 @@ def _unrank(node, fb: int, off: int) -> Tuple[Any, float]:
                 off -= na
                 cur = cur.b
         else:
-            raise IndexError('offset outside carrier node')
+            raise IndexError("offset outside carrier node")
     for fn in reversed(transforms):
         value = fn(value)
     return value, lp + lp_add
@@ -153,34 +154,33 @@ class CountSemiring(DecomposableSemiring):
     """
 
     def zero(self) -> _CNode:
-        return _CNode('empty', CountHistogram.empty())
+        return _CNode("empty", CountHistogram.empty())
 
     def one(self) -> _CNode:
-        return _CNode('leaf', CountHistogram.delta(0, 1), value=(), lp=0.0)
+        return _CNode("leaf", CountHistogram.delta(0, 1), value=(), lp=0.0)
 
     def leaf(self, value: Any, log_prob: float, quantizer: Quantizer) -> _CNode:
         fb = quantizer.fine_bucket(log_prob)
-        return _CNode('leaf', CountHistogram.delta(fb, 1), value=value, lp=float(log_prob))
+        return _CNode("leaf", CountHistogram.delta(fb, 1), value=value, lp=float(log_prob))
 
-    def from_enumerator(self, enum: Iterator[Tuple[Any, float]], quantizer: Quantizer,
-                        max_fine_bucket: int) -> Tuple[CountIndex, bool]:
+    def from_enumerator(
+        self, enum: Iterator[tuple[Any, float]], quantizer: Quantizer, max_fine_bucket: int
+    ) -> tuple[CountIndex, bool]:
         """Lift an atomic distribution's exact enumerator into a carrier element (depth-bounded)."""
         return leaf_count_index(enum, quantizer, max_fine_bucket)
 
     def plus(self, a, b) -> _CNode:
-        return _CNode('plus', a.hist.add(b.hist), a=a, b=b)
+        return _CNode("plus", a.hist.add(b.hist), a=a, b=b)
 
     def times(self, a, b, quantizer: Quantizer, max_fine_bucket: int) -> CountIndex:
         return convolve_indices([a, b], quantizer, max_fine_bucket)
 
-    def product(self, elements: Sequence[Any], quantizer: Quantizer,
-                max_fine_bucket: int) -> CountIndex:
+    def product(self, elements: Sequence[Any], quantizer: Quantizer, max_fine_bucket: int) -> CountIndex:
         # Flat n-ary convolution (suffix-histogram unranker) -- identical bin counts and within-bucket
         # order to the previous hand-written composite path.
         return convolve_indices(list(elements), quantizer, max_fine_bucket)
 
-    def scale(self, a, log_prob: float, quantizer: Quantizer,
-              max_fine_bucket: Optional[int] = None) -> _CNode:
+    def scale(self, a, log_prob: float, quantizer: Quantizer, max_fine_bucket: int | None = None) -> _CNode:
         """Multiply by a constant probability factor: shift buckets by the factor, value unchanged.
 
         This is the action of the base log-prob monoid on the carrier (e.g. a sequence length term,
@@ -190,14 +190,15 @@ class CountSemiring(DecomposableSemiring):
         hist = a.hist.shift(shift)
         if max_fine_bucket is not None:
             hist = hist.truncate(max_fine_bucket)
-        return _CNode('scale', hist, child=a, lp=float(log_prob), shift=shift)
+        return _CNode("scale", hist, child=a, lp=float(log_prob), shift=shift)
 
     def map_values(self, a, fn: Callable[[Any], Any]) -> _CNode:
         """Relabel values (pushforward) without touching counts or buckets -- e.g. tuple -> list."""
-        return _CNode('mapv', a.hist, child=a, fn=fn)
+        return _CNode("mapv", a.hist, child=a, fn=fn)
 
-    def power_prefix(self, a: CountIndex, max_k: int, quantizer: Quantizer,
-                     max_fine_bucket: int) -> Sequence[CountIndex]:
+    def power_prefix(
+        self, a: CountIndex, max_k: int, quantizer: Quantizer, max_fine_bucket: int
+    ) -> Sequence[CountIndex]:
         """Return [a^(times 0), ..., a^(times K)] (K <= max_k), the k-fold self-products.
 
         The histograms are built incrementally (O(max_k) convolutions, shared), so this is the
@@ -215,12 +216,13 @@ class CountSemiring(DecomposableSemiring):
                 break
 
             def make_getter(kk: int):
-                def getter(fb: int, off: int) -> Tuple[Any, float]:
+                def getter(fb: int, off: int) -> tuple[Any, float]:
                     ci = cache.get(kk)
                     if ci is None:
                         ci = convolve_indices([a] * kk, quantizer, max_fine_bucket)
                         cache[kk] = ci
                     return ci.get_in_bucket(fb, off)
+
                 return getter
 
             prefix.append(CountIndex(hist_k, make_getter(k)))
@@ -229,14 +231,14 @@ class CountSemiring(DecomposableSemiring):
 
 # --- Axis B: ordered search (the existing enumerator), named for symmetry -------------------
 
-OrderedStream = Iterator[Tuple[Any, float]]
+OrderedStream = Iterator[tuple[Any, float]]
 """Exact strict-descending lazy stream of ``(value, log_prob)`` -- produced by ``enumerator()``."""
 
 
 # --- Bridges between the axes ---------------------------------------------------------------
 
-def enumerate_and_bin(stream: OrderedStream, quantizer: Quantizer,
-                      max_fine_bucket: int) -> Tuple[CountIndex, bool]:
+
+def enumerate_and_bin(stream: OrderedStream, quantizer: Quantizer, max_fine_bucket: int) -> tuple[CountIndex, bool]:
     """Axis B -> Axis A: tabulate an ordered stream into a bounded count index.
 
     The universal fallback for distributions that can only enumerate. O(number of in-bound values),
@@ -245,8 +247,9 @@ def enumerate_and_bin(stream: OrderedStream, quantizer: Quantizer,
     return leaf_count_index(stream, quantizer, max_fine_bucket)
 
 
-def bounded_dedup_stream(stream: OrderedStream, max_entries: int = 1 << 16,
-                         key: Optional[Callable[[Any], Any]] = None) -> OrderedStream:
+def bounded_dedup_stream(
+    stream: OrderedStream, max_entries: int = 1 << 16, key: Callable[[Any], Any] | None = None
+) -> OrderedStream:
     """Deduplicate an (approximately) descending ``(value, log_prob)`` stream in O(max_entries) memory.
 
     The structural BoundedCount index for a MARGINAL family (Mixture / HMM) emits a value once per
@@ -260,9 +263,10 @@ def bounded_dedup_stream(stream: OrderedStream, max_entries: int = 1 << 16,
     ``max_entries`` to bound how far apart duplicates can be and still be removed.
     """
     from collections import OrderedDict
+
     if key is None:
         from pysp.utils.enumeration import freeze as key
-    seen: 'OrderedDict' = OrderedDict()
+    seen: OrderedDict = OrderedDict()
     for value, lp in stream:
         k = key(value)
         if k in seen:
@@ -274,7 +278,7 @@ def bounded_dedup_stream(stream: OrderedStream, max_entries: int = 1 << 16,
         yield value, lp
 
 
-def ordered_stream_from_count_index(index, max_items: Optional[int] = None) -> OrderedStream:
+def ordered_stream_from_count_index(index, max_items: int | None = None) -> OrderedStream:
     """Axis A -> Axis B: unrank a built count index in coarse-bin order (approximately descending).
 
     ``index`` is a built LazyQuantizedEnumerationIndex (from ``count_budget_index``). The order is

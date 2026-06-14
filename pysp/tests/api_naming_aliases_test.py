@@ -4,56 +4,58 @@ Covers step 1 (backward-compatible class-name aliases), step 2 (constructor keyw
 aliases), and the pysp.utils.aliasing helper. Alias constructors must produce models identical to
 the legacy spelling, and passing both spellings (or neither, for required arguments) must raise.
 """
+
 import unittest
 
 import numpy as np
 
-from pysp.utils.aliasing import coalesce_alias, require, MISSING
+from pysp.utils.aliasing import MISSING, coalesce_alias, require
 
 
 class CoalesceAliasHelperTestCase(unittest.TestCase):
-
     def test_prefers_either_supplied(self):
-        self.assertEqual(coalesce_alias('w', 5, 'weights', MISSING, default=MISSING), 5)
-        self.assertEqual(coalesce_alias('w', MISSING, 'weights', 9, default=MISSING), 9)
+        self.assertEqual(coalesce_alias("w", 5, "weights", MISSING, default=MISSING), 5)
+        self.assertEqual(coalesce_alias("w", MISSING, "weights", 9, default=MISSING), 9)
 
     def test_both_supplied_raises(self):
         with self.assertRaises(TypeError):
-            coalesce_alias('w', 5, 'weights', 9, default=MISSING)
+            coalesce_alias("w", 5, "weights", 9, default=MISSING)
 
     def test_neither_supplied(self):
         with self.assertRaises(TypeError):
-            coalesce_alias('w', MISSING, 'weights', MISSING, default=MISSING)
-        self.assertIsNone(coalesce_alias('p_vec', None, 'prob_vec', None, required=False, default=None))
+            coalesce_alias("w", MISSING, "weights", MISSING, default=MISSING)
+        self.assertIsNone(coalesce_alias("p_vec", None, "prob_vec", None, required=False, default=None))
 
     def test_none_is_a_valid_value_with_missing_sentinel(self):
         # None is a legitimate explicit value when MISSING marks "not supplied"
-        self.assertIsNone(coalesce_alias('x', None, 'y', MISSING, default=MISSING))
+        self.assertIsNone(coalesce_alias("x", None, "y", MISSING, default=MISSING))
 
     def test_require(self):
-        self.assertEqual(require('transitions', 3, default=MISSING), 3)
+        self.assertEqual(require("transitions", 3, default=MISSING), 3)
         with self.assertRaises(TypeError):
-            require('transitions', MISSING, default=MISSING)
+            require("transitions", MISSING, default=MISSING)
 
 
 class ClassNameAliasTestCase(unittest.TestCase):
-
     def test_estimator_accumulator_aliases(self):
-        from pysp.stats import lda, hmixture, jmixture, select, ss_mixture, optional
+        from pysp.stats import hmixture, jmixture, lda, optional, select, ss_mixture
+
         self.assertIs(lda.LDAAccumulator, lda.LDAEstimatorAccumulator)
         self.assertIs(lda.LDAAccumulatorFactory, lda.LDAEstimatorAccumulatorFactory)
-        self.assertIs(hmixture.HierarchicalMixtureAccumulator,
-                      hmixture.HierarchicalMixtureEstimatorAccumulator)
-        self.assertIs(jmixture.JointMixtureAccumulatorFactory,
-                      jmixture.JointMixtureEstimatorAccumulatorFactory)
+        self.assertIs(hmixture.HierarchicalMixtureAccumulator, hmixture.HierarchicalMixtureEstimatorAccumulator)
+        self.assertIs(jmixture.JointMixtureAccumulatorFactory, jmixture.JointMixtureEstimatorAccumulatorFactory)
         self.assertIs(select.SelectAccumulator, select.SelectEstimatorAccumulator)
-        self.assertIs(ss_mixture.SemiSupervisedMixtureAccumulator,
-                      ss_mixture.SemiSupervisedMixtureEstimatorAccumulator)
+        self.assertIs(ss_mixture.SemiSupervisedMixtureAccumulator, ss_mixture.SemiSupervisedMixtureEstimatorAccumulator)
         self.assertIs(optional.OptionalAccumulatorFactory, optional.OptionalEstimatorAccumulatorFactory)
 
     def test_family_stem_aliases(self):
-        from pysp.stats import hidden_markov as hm, conditional as cond, grammar, quantized_hmm as qhmm
-        from pysp.stats import mvnmixture, segmental_hmm as seg, tree_hmm as tree
+        from pysp.stats import conditional as cond
+        from pysp.stats import grammar, mvnmixture
+        from pysp.stats import hidden_markov as hm
+        from pysp.stats import quantized_hmm as qhmm
+        from pysp.stats import segmental_hmm as seg
+        from pysp.stats import tree_hmm as tree
+
         self.assertIs(hm.HiddenMarkovModelEstimator, hm.HiddenMarkovEstimator)
         self.assertIs(hm.HiddenMarkovModelSampler, hm.HiddenMarkovSampler)
         self.assertIs(hm.HiddenMarkovModelAccumulatorFactory, hm.HiddenMarkovAccumulatorFactory)
@@ -61,41 +63,59 @@ class ClassNameAliasTestCase(unittest.TestCase):
         self.assertIs(cond.ConditionalEnumerator, cond.ConditionalDistributionEnumerator)
         self.assertIs(grammar.GrammarAccumulator, grammar.GrammarEstimatorAccumulator)
         self.assertIs(qhmm.QuantizedHiddenMarkovModelEstimator, qhmm.QuantizedHiddenMarkovEstimator)
-        self.assertIs(mvnmixture.GaussianMixtureAccumulatorFactory,
-                      mvnmixture.GaussianMixtureEstimatorAccumulatorFactory)
+        self.assertIs(
+            mvnmixture.GaussianMixtureAccumulatorFactory, mvnmixture.GaussianMixtureEstimatorAccumulatorFactory
+        )
         self.assertIs(seg.SegmentalHiddenMarkovModelEstimator, seg.SegmentalHiddenMarkovEstimator)
         self.assertIs(tree.TreeHiddenMarkovModelEstimator, tree.TreeHiddenMarkovEstimator)
 
     def test_bstats_accumulator_aliases(self):
-        from pysp.bstats import categorical, mixture, poisson, bernoulli
+        from pysp.bstats import bernoulli, categorical, mixture, poisson
+
         self.assertIs(categorical.CategoricalAccumulator, categorical.CategoricalEstimatorAccumulator)
         self.assertIs(mixture.MixtureAccumulatorFactory, mixture.MixtureEstimatorAccumulatorFactory)
         self.assertIs(poisson.PoissonAccumulator, poisson.PoissonEstimatorAccumulator)
         self.assertIs(bernoulli.BernoulliAccumulatorFactory, bernoulli.BernoulliEstimatorAccumulatorFactory)
 
     def test_aliases_exported_from_package(self):
-        from pysp.stats import (HiddenMarkovModelEstimator, HiddenMarkovModelSampler,
-                                 QuantizedHiddenMarkovModelEstimator, ConditionalEstimator,
-                                 ConditionalEnumerator, SegmentalHiddenMarkovModelEstimator,
-                                 TreeHiddenMarkovModelEstimator)
-        self.assertTrue(all(callable(c) for c in [
-            HiddenMarkovModelEstimator, HiddenMarkovModelSampler, QuantizedHiddenMarkovModelEstimator,
-            ConditionalEstimator, ConditionalEnumerator, SegmentalHiddenMarkovModelEstimator,
-            TreeHiddenMarkovModelEstimator]))
+        from pysp.stats import (
+            ConditionalEnumerator,
+            ConditionalEstimator,
+            HiddenMarkovModelEstimator,
+            HiddenMarkovModelSampler,
+            QuantizedHiddenMarkovModelEstimator,
+            SegmentalHiddenMarkovModelEstimator,
+            TreeHiddenMarkovModelEstimator,
+        )
+
+        self.assertTrue(
+            all(
+                callable(c)
+                for c in [
+                    HiddenMarkovModelEstimator,
+                    HiddenMarkovModelSampler,
+                    QuantizedHiddenMarkovModelEstimator,
+                    ConditionalEstimator,
+                    ConditionalEnumerator,
+                    SegmentalHiddenMarkovModelEstimator,
+                    TreeHiddenMarkovModelEstimator,
+                ]
+            )
+        )
 
 
 class WeightsAliasTestCase(unittest.TestCase):
-
     def _components(self):
         from pysp.stats.categorical import CategoricalDistribution
-        return [CategoricalDistribution({'a': 1.0}), CategoricalDistribution({'a': 0.5, 'b': 0.5})]
+
+        return [CategoricalDistribution({"a": 1.0}), CategoricalDistribution({"a": 0.5, "b": 0.5})]
 
     def test_mixture_family_weights(self):
+        from pysp.stats.heterogeneous_mixture import HeterogeneousMixtureDistribution
         from pysp.stats.mixture import MixtureDistribution
-        from pysp.stats.heterogenous_mixture import HeterogeneousMixtureDistribution
         from pysp.stats.ss_mixture import SemiSupervisedMixtureDistribution
-        for cls in (MixtureDistribution, HeterogeneousMixtureDistribution,
-                    SemiSupervisedMixtureDistribution):
+
+        for cls in (MixtureDistribution, HeterogeneousMixtureDistribution, SemiSupervisedMixtureDistribution):
             comps = self._components()
             a = cls(comps, [0.3, 0.7])
             b = cls(comps, weights=[0.3, 0.7])
@@ -107,6 +127,7 @@ class WeightsAliasTestCase(unittest.TestCase):
 
     def test_gaussian_mixture_weights(self):
         from pysp.stats.mvnmixture import GaussianMixtureDistribution
+
         mu = [[0.0, 0.0], [3.0, 3.0]]
         sig2 = [[1.0, 1.0], [1.0, 1.0]]
         a = GaussianMixtureDistribution(mu, sig2, [0.4, 0.6])
@@ -115,6 +136,7 @@ class WeightsAliasTestCase(unittest.TestCase):
 
     def test_hmm_family_weights_and_transitions(self):
         from pysp.stats.hidden_markov import HiddenMarkovModelDistribution
+
         comps = self._components()
         trans = [[0.5, 0.5], [0.2, 0.8]]
         a = HiddenMarkovModelDistribution(comps, [0.5, 0.5], trans)
@@ -128,60 +150,84 @@ class WeightsAliasTestCase(unittest.TestCase):
 
 
 class ProbMapVecCovarAliasTestCase(unittest.TestCase):
-
     def test_prob_map(self):
         from pysp.stats.categorical import CategoricalDistribution
         from pysp.stats.setdist import BernoulliSetDistribution
-        self.assertEqual(CategoricalDistribution(prob_map={'a': 0.6, 'b': 0.4}).pmap,
-                         CategoricalDistribution({'a': 0.6, 'b': 0.4}).pmap)
-        self.assertEqual(BernoulliSetDistribution(prob_map={'a': 0.5}).pmap,
-                         BernoulliSetDistribution({'a': 0.5}).pmap)
+
+        self.assertEqual(
+            CategoricalDistribution(prob_map={"a": 0.6, "b": 0.4}).pmap,
+            CategoricalDistribution({"a": 0.6, "b": 0.4}).pmap,
+        )
+        self.assertEqual(BernoulliSetDistribution(prob_map={"a": 0.5}).pmap, BernoulliSetDistribution({"a": 0.5}).pmap)
         with self.assertRaises(TypeError):
-            CategoricalDistribution({'a': 1.0}, prob_map={'a': 1.0})
+            CategoricalDistribution({"a": 1.0}, prob_map={"a": 1.0})
 
     def test_prob_vec(self):
-        from pysp.stats.intrange import IntegerCategoricalDistribution
-        from pysp.stats.intmultinomial import IntegerMultinomialDistribution
-        self.assertTrue(np.allclose(IntegerCategoricalDistribution(0, prob_vec=[0.5, 0.5]).p_vec,
-                                    IntegerCategoricalDistribution(0, [0.5, 0.5]).p_vec))
-        self.assertTrue(np.allclose(IntegerMultinomialDistribution(0, prob_vec=[0.3, 0.7]).p_vec,
-                                    IntegerMultinomialDistribution(0, [0.3, 0.7]).p_vec))
+        from pysp.stats.int_multinomial import IntegerMultinomialDistribution
+        from pysp.stats.int_range import IntegerCategoricalDistribution
+
+        self.assertTrue(
+            np.allclose(
+                IntegerCategoricalDistribution(0, prob_vec=[0.5, 0.5]).p_vec,
+                IntegerCategoricalDistribution(0, [0.5, 0.5]).p_vec,
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                IntegerMultinomialDistribution(0, prob_vec=[0.3, 0.7]).p_vec,
+                IntegerMultinomialDistribution(0, [0.3, 0.7]).p_vec,
+            )
+        )
 
     def test_covariance(self):
-        from pysp.stats.mvn import MultivariateGaussianDistribution
         from pysp.stats.dmvn import DiagonalGaussianDistribution
+        from pysp.stats.mvn import MultivariateGaussianDistribution
+
         cov = [[2.0, 0.0], [0.0, 3.0]]
-        self.assertTrue(np.allclose(MultivariateGaussianDistribution([0, 0], covariance=cov).covar,
-                                    MultivariateGaussianDistribution([0, 0], cov).covar))
-        self.assertTrue(np.allclose(DiagonalGaussianDistribution([0, 0], covariance=[2.0, 3.0]).covar,
-                                    DiagonalGaussianDistribution([0, 0], [2.0, 3.0]).covar))
+        self.assertTrue(
+            np.allclose(
+                MultivariateGaussianDistribution([0, 0], covariance=cov).covar,
+                MultivariateGaussianDistribution([0, 0], cov).covar,
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                DiagonalGaussianDistribution([0, 0], covariance=[2.0, 3.0]).covar,
+                DiagonalGaussianDistribution([0, 0], [2.0, 3.0]).covar,
+            )
+        )
         with self.assertRaises(TypeError):
             MultivariateGaussianDistribution([0, 0], cov, covariance=cov)
 
 
 class NumValuesMaxIterAliasTestCase(unittest.TestCase):
-
     def test_num_values(self):
-        from pysp.stats.markov_transform import MarkovTransformEstimator
-        from pysp.stats.sparse_markov_transform import SparseMarkovAssociationEstimator
-        from pysp.stats.intsetdist import IntegerBernoulliSetEstimator
         from pysp.stats.int_edit_setdist import IntegerBernoulliEditEstimator
         from pysp.stats.int_edit_stepsetdist import IntegerStepBernoulliEditEstimator
-        for cls in (MarkovTransformEstimator, SparseMarkovAssociationEstimator,
-                    IntegerBernoulliSetEstimator, IntegerBernoulliEditEstimator,
-                    IntegerStepBernoulliEditEstimator):
+        from pysp.stats.int_setdist import IntegerBernoulliSetEstimator
+        from pysp.stats.markov_transform import MarkovTransformEstimator
+        from pysp.stats.sparse_markov_transform import SparseMarkovAssociationEstimator
+
+        for cls in (
+            MarkovTransformEstimator,
+            SparseMarkovAssociationEstimator,
+            IntegerBernoulliSetEstimator,
+            IntegerBernoulliEditEstimator,
+            IntegerStepBernoulliEditEstimator,
+        ):
             self.assertEqual(cls(num_values=6).num_vals, 6, cls.__name__)
             self.assertEqual(cls(6).num_vals, 6, cls.__name__)
             with self.assertRaises(TypeError):
                 cls(6, num_values=6)
 
     def test_max_iter(self):
-        from pysp.utils.em import RestartEM
         from pysp.stats.categorical import CategoricalDistribution
-        model = CategoricalDistribution({'a': 1.0})
+        from pysp.utils.em import RestartEM
+
+        model = CategoricalDistribution({"a": 1.0})
         self.assertEqual(RestartEM([model], max_iter=13).max_its, 13)
         self.assertEqual(RestartEM([model], max_its=4).max_its, 4)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

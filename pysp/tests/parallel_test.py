@@ -1,4 +1,5 @@
 """Tests for the multiprocessing and MPI estimation backends."""
+
 import io
 import os
 import shutil
@@ -9,13 +10,21 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import (
-    MixtureDistribution, GaussianDistribution, CategoricalDistribution,
-    CompositeDistribution, MixtureEstimator, CompositeEstimator,
-    GaussianEstimator, CategoricalEstimator,
-    seq_encode, seq_initialize, seq_estimate, seq_log_density_sum,
-)
 from pysp.parallel import EncodedDataHandle, encoded_data, is_encoded_data_handle
+from pysp.stats import (
+    CategoricalDistribution,
+    CategoricalEstimator,
+    CompositeDistribution,
+    CompositeEstimator,
+    GaussianDistribution,
+    GaussianEstimator,
+    MixtureDistribution,
+    MixtureEstimator,
+    seq_encode,
+    seq_estimate,
+    seq_initialize,
+    seq_log_density_sum,
+)
 from pysp.utils.estimation import StreamingEstimator, constant, optimize
 from pysp.utils.parallel import MPEncodedData
 
@@ -23,30 +32,34 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 
 def make_data(n=400, seed=1):
-    dist = MixtureDistribution([
-        CompositeDistribution((GaussianDistribution(-3.0, 1.0), CategoricalDistribution({'a': 0.8, 'b': 0.2}))),
-        CompositeDistribution((GaussianDistribution(3.0, 1.0), CategoricalDistribution({'a': 0.1, 'b': 0.9}))),
-    ], [0.6, 0.4])
+    dist = MixtureDistribution(
+        [
+            CompositeDistribution((GaussianDistribution(-3.0, 1.0), CategoricalDistribution({"a": 0.8, "b": 0.2}))),
+            CompositeDistribution((GaussianDistribution(3.0, 1.0), CategoricalDistribution({"a": 0.1, "b": 0.9}))),
+        ],
+        [0.6, 0.4],
+    )
     return dist.sampler(seed=seed).sample(n)
 
 
 def make_estimator():
-    return MixtureEstimator([CompositeEstimator((GaussianEstimator(),
-                                                 CategoricalEstimator(pseudo_count=0.5)))] * 2)
+    return MixtureEstimator([CompositeEstimator((GaussianEstimator(), CategoricalEstimator(pseudo_count=0.5)))] * 2)
 
 
 def make_start_model():
     # deliberately perturbed starting point: EM separates quickly from here,
     # whereas a symmetric initialization stalls near the saddle for many
     # iterations (not what these tests are about)
-    return MixtureDistribution([
-        CompositeDistribution((GaussianDistribution(-1.0, 4.0), CategoricalDistribution({'a': 0.6, 'b': 0.4}))),
-        CompositeDistribution((GaussianDistribution(1.0, 4.0), CategoricalDistribution({'a': 0.4, 'b': 0.6}))),
-    ], [0.5, 0.5])
+    return MixtureDistribution(
+        [
+            CompositeDistribution((GaussianDistribution(-1.0, 4.0), CategoricalDistribution({"a": 0.6, "b": 0.4}))),
+            CompositeDistribution((GaussianDistribution(1.0, 4.0), CategoricalDistribution({"a": 0.4, "b": 0.6}))),
+        ],
+        [0.5, 0.5],
+    )
 
 
 class MultiprocessingBackendTestCase(unittest.TestCase):
-
     @classmethod
     def setUpClass(cls):
         cls.data = make_data()
@@ -64,8 +77,7 @@ class MultiprocessingBackendTestCase(unittest.TestCase):
         self.assertAlmostEqual(ll_par, ll_ser, places=8)
 
     def test_shared_protocol_factory_can_build_multiprocessing_handle(self):
-        with encoded_data(self.data, estimator=self.est, backend='mp',
-                          num_workers=2) as enc:
+        with encoded_data(self.data, estimator=self.est, backend="mp", num_workers=2) as enc:
             self.assertIsInstance(enc, EncodedDataHandle)
             self.assertIsInstance(enc, MPEncodedData)
             self.assertTrue(is_encoded_data_handle(enc))
@@ -94,8 +106,7 @@ class MultiprocessingBackendTestCase(unittest.TestCase):
     def test_optimize_with_handle(self):
         m_start = make_start_model()
         with MPEncodedData(self.data, estimator=self.est, num_workers=2) as enc:
-            model = optimize(None, self.est, enc_data=enc, max_its=30,
-                             prev_estimate=m_start, out=io.StringIO())
+            model = optimize(None, self.est, enc_data=enc, max_its=30, prev_estimate=m_start, out=io.StringIO())
             _, ll_fit = enc.pysp_seq_log_density_sum(model)
         _, ll_init = seq_log_density_sum(self.enc_local, m_start)
         self.assertGreater(ll_fit, ll_init)
@@ -105,8 +116,9 @@ class MultiprocessingBackendTestCase(unittest.TestCase):
 
     def test_optimize_can_build_multiprocessing_backend(self):
         m_start = make_start_model()
-        model = optimize(self.data, self.est, max_its=30, prev_estimate=m_start,
-                         backend='mp', num_workers=2, out=io.StringIO())
+        model = optimize(
+            self.data, self.est, max_its=30, prev_estimate=m_start, backend="mp", num_workers=2, out=io.StringIO()
+        )
         _, ll_fit = seq_log_density_sum(self.enc_local, model)
         _, ll_init = seq_log_density_sum(self.enc_local, m_start)
         self.assertGreater(ll_fit, ll_init)
@@ -125,16 +137,17 @@ class MultiprocessingBackendTestCase(unittest.TestCase):
         serial.update(batch2)
 
         parallel = StreamingEstimator(estimator, schedule=constant(0.4), model=start)
-        with encoded_data(batch1, estimator=estimator, model=start, backend='mp',
-                          num_workers=2) as enc:
+        with encoded_data(batch1, estimator=estimator, model=start, backend="mp", num_workers=2) as enc:
             model1 = parallel.update(enc_data=enc)
-        with encoded_data(batch2, estimator=estimator, model=model1, backend='mp',
-                          num_workers=2) as enc:
+        with encoded_data(batch2, estimator=estimator, model=model1, backend="mp", num_workers=2) as enc:
             parallel.update(enc_data=enc)
 
-        np.testing.assert_allclose(np.asarray(parallel.value(), dtype=float),
-                                   np.asarray(serial.value(), dtype=float),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            np.asarray(parallel.value(), dtype=float),
+            np.asarray(serial.value(), dtype=float),
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
         self.assertAlmostEqual(parallel.model.mu, serial.model.mu, places=12)
         self.assertAlmostEqual(parallel.model.sigma2, serial.model.sigma2, places=12)
 
@@ -145,7 +158,7 @@ class MultiprocessingBackendTestCase(unittest.TestCase):
         enc.close()
 
 
-MPI_SCRIPT = r'''
+MPI_SCRIPT = r"""
 import io, sys
 import numpy as np
 sys.path.insert(0, %(repo)r)
@@ -179,30 +192,30 @@ all_w = MPI.COMM_WORLD.gather(tuple(model.w), root=0)
 if MPI.COMM_WORLD.Get_rank() == 0:
     assert all(w == all_w[0] for w in all_w), all_w
     print('MPI-BACKEND-OK')
-'''
+"""
 
 
 class MPIBackendTestCase(unittest.TestCase):
-
     def test_mpi_backend_two_ranks(self):
         try:
             import mpi4py  # noqa: F401
         except ImportError:
-            self.skipTest('mpi4py not installed')
-        mpiexec = shutil.which('mpiexec') or shutil.which('mpirun')
+            self.skipTest("mpi4py not installed")
+        mpiexec = shutil.which("mpiexec") or shutil.which("mpirun")
         if mpiexec is None:
-            self.skipTest('no MPI launcher on PATH')
+            self.skipTest("no MPI launcher on PATH")
 
         with tempfile.TemporaryDirectory() as td:
-            script = os.path.join(td, 'mpi_check.py')
-            with open(script, 'w') as f:
-                f.write(MPI_SCRIPT % {'repo': REPO})
+            script = os.path.join(td, "mpi_check.py")
+            with open(script, "w") as f:
+                f.write(MPI_SCRIPT % {"repo": REPO})
             env = dict(os.environ, PYTHONPATH=REPO)
-            res = subprocess.run([mpiexec, '-n', '2', sys.executable, script],
-                                 capture_output=True, text=True, timeout=600, env=env)
-        self.assertEqual(res.returncode, 0, 'mpiexec failed:\n%s\n%s' % (res.stdout, res.stderr))
-        self.assertIn('MPI-BACKEND-OK', res.stdout)
+            res = subprocess.run(
+                [mpiexec, "-n", "2", sys.executable, script], capture_output=True, text=True, timeout=600, env=env
+            )
+        self.assertEqual(res.returncode, 0, "mpiexec failed:\n%s\n%s" % (res.stdout, res.stderr))
+        self.assertIn("MPI-BACKEND-OK", res.stdout)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -3,8 +3,10 @@
 Data type: bool or values in {0, 1}. The distribution has success
 probability p and log-density log(p) for True/1 and log(1-p) for False/0.
 """
+
 import math
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -26,17 +28,19 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
         from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+
         return DistributionDeclaration(
-            name='bernoulli',
+            name="bernoulli",
             distribution_type=cls,
-            parameters=(ParameterSpec('p', constraint='unit_interval'),),
-            statistics=(StatisticSpec('count'), StatisticSpec('sum')),
-            support='boolean',
+            parameters=(ParameterSpec("p", constraint="unit_interval"),),
+            statistics=(StatisticSpec("count"), StatisticSpec("sum")),
+            support="boolean",
             exponential_family=ExponentialFamilySpec(
                 sufficient_statistics=cls.exp_family_sufficient_statistics,
                 natural_parameters=cls.exp_family_natural_parameters,
@@ -46,31 +50,31 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     @staticmethod
-    def exp_family_sufficient_statistics(x: Any, engine: Any) -> Tuple[Any, ...]:
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
         """Return Bernoulli sufficient statistics for generated scoring."""
         return (engine.asarray(x) * engine.asarray(1.0),)
 
     @staticmethod
-    def exp_family_legacy_sufficient_statistics(x: Any, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+    def exp_family_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Return per-row Bernoulli sufficient statistics in accumulator order."""
         xx = engine.asarray(x) * engine.asarray(1.0)
         return xx * 0.0 + engine.asarray(1.0), xx
 
     @staticmethod
-    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Return Bernoulli natural parameters for generated scoring."""
-        p = params['p']
+        p = params["p"]
         return (engine.log(p) - engine.log(engine.asarray(1.0) - p),)
 
     @staticmethod
-    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
         """Return Bernoulli log partition for generated scoring."""
-        p = params['p']
+        p = params["p"]
         return -engine.log(engine.asarray(1.0) - p)
 
-    def __init__(self, p: float, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, p: float, name: str | None = None, keys: str | None = None) -> None:
         if p <= 0.0 or p >= 1.0:
-            raise ValueError('BernoulliDistribution requires p in (0, 1).')
+            raise ValueError("BernoulliDistribution requires p in (0, 1).")
         self.p = float(p)
         self.log_p = math.log(self.p)
         self.log_1p = math.log1p(-self.p)
@@ -78,11 +82,10 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        return 'BernoulliDistribution(%s, name=%s, keys=%s)' % (
-            repr(self.p), repr(self.name), repr(self.keys))
+        return "BernoulliDistribution(%s, name=%s, keys=%s)" % (repr(self.p), repr(self.name), repr(self.keys))
 
     @staticmethod
-    def _as_bool(x: Any) -> Optional[bool]:
+    def _as_bool(x: Any) -> bool | None:
         if isinstance(x, (bool, np.bool_)):
             return bool(x)
         try:
@@ -94,11 +97,11 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
             return None
         return None
 
-    def density(self, x: Union[bool, int]) -> float:
+    def density(self, x: bool | int) -> float:
         """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
-    def log_density(self, x: Union[bool, int]) -> float:
+    def log_density(self, x: bool | int) -> float:
         """Return the log-density or log-mass at a single observation."""
         xx = self._as_bool(x)
         if xx is None:
@@ -121,40 +124,40 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         return self.backend_log_density_from_params(xx, p, engine)
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['BernoulliDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["BernoulliDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked Bernoulli parameters for a homogeneous mixture kernel."""
-        return {'p': engine.asarray([d.p for d in dists])}
+        return {"p": engine.asarray([d.p for d in dists])}
 
     @classmethod
-    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: Any, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of Bernoulli log masses."""
         xx = engine.asarray(x)
-        return cls.backend_log_density_from_params(xx[:, None], params['p'][None, :], engine)
+        return cls.backend_log_density_from_params(xx[:, None], params["p"][None, :], engine)
 
     @classmethod
-    def backend_stacked_sufficient_statistics(cls, x: Any, weights: Any,
-                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any]:
+    def backend_stacked_sufficient_statistics(
+        cls, x: Any, weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[Any, Any]:
         """Return stacked Bernoulli sufficient statistics using engine-resident arrays."""
         xx = engine.asarray(x)
         ww = engine.asarray(weights)
         return engine.sum(ww, axis=0), engine.sum(ww * xx[:, None], axis=0)
 
-    def sampler(self, seed: Optional[int] = None) -> 'BernoulliSampler':
+    def sampler(self, seed: int | None = None) -> "BernoulliSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BernoulliSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'BernoulliEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "BernoulliEstimator":
         """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return BernoulliEstimator(name=self.name, keys=self.keys)
-        return BernoulliEstimator(pseudo_count=pseudo_count, suff_stat=self.p,
-                                  name=self.name, keys=self.keys)
+        return BernoulliEstimator(pseudo_count=pseudo_count, suff_stat=self.p, name=self.name, keys=self.keys)
 
-    def dist_to_encoder(self) -> 'BernoulliDataEncoder':
+    def dist_to_encoder(self) -> "BernoulliDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return BernoulliDataEncoder()
 
-    def enumerator(self) -> 'BernoulliEnumerator':
+    def enumerator(self) -> "BernoulliEnumerator":
         """Return an enumerator over the distribution support when available."""
         return BernoulliEnumerator(self)
 
@@ -168,7 +171,7 @@ class BernoulliEnumerator(DistributionEnumerator):
         self._entries.sort(key=lambda u: -u[1])
         self._pos = 0
 
-    def __next__(self) -> Tuple[bool, float]:
+    def __next__(self) -> tuple[bool, float]:
         if self._pos >= len(self._entries):
             raise StopIteration
         rv = self._entries[self._pos]
@@ -179,11 +182,11 @@ class BernoulliEnumerator(DistributionEnumerator):
 class BernoulliSampler(DistributionSampler):
     """Draw iid Bernoulli observations."""
 
-    def __init__(self, dist: BernoulliDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: BernoulliDistribution, seed: int | None = None) -> None:
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: Optional[int] = None) -> Union[bool, Sequence[bool]]:
+    def sample(self, size: int | None = None) -> bool | Sequence[bool]:
         rv = self.rng.rand() < self.dist.p if size is None else self.rng.rand(size) < self.dist.p
         return bool(rv) if size is None else rv.tolist()
 
@@ -191,61 +194,61 @@ class BernoulliSampler(DistributionSampler):
 class BernoulliAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted success and observation counts."""
 
-    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.sum = 0.0
         self.count = 0.0
         self.name = name
         self.key = keys
 
-    def update(self, x: Union[bool, int], weight: float, estimate: Optional[BernoulliDistribution]) -> None:
+    def update(self, x: bool | int, weight: float, estimate: BernoulliDistribution | None) -> None:
         xx = BernoulliDistribution._as_bool(x)
         if xx is None:
-            raise ValueError('BernoulliDistribution requires observations in {False, True} or {0, 1}.')
+            raise ValueError("BernoulliDistribution requires observations in {False, True} or {0, 1}.")
         self.sum += float(xx) * weight
         self.count += weight
 
-    def initialize(self, x: Union[bool, int], weight: float, rng: Optional[RandomState]) -> None:
+    def initialize(self, x: bool | int, weight: float, rng: RandomState | None) -> None:
         self.update(x, weight, None)
 
-    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Optional[BernoulliDistribution]) -> None:
+    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: BernoulliDistribution | None) -> None:
         self.sum += np.dot(x.astype(np.float64), weights)
         self.count += np.sum(weights, dtype=np.float64)
 
-    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: Optional[RandomState]) -> None:
+    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: Tuple[float, float]) -> 'BernoulliAccumulator':
+    def combine(self, suff_stat: tuple[float, float]) -> "BernoulliAccumulator":
         self.count += suff_stat[0]
         self.sum += suff_stat[1]
         return self
 
-    def value(self) -> Tuple[float, float]:
+    def value(self) -> tuple[float, float]:
         return self.count, self.sum
 
-    def from_value(self, x: Tuple[float, float]) -> 'BernoulliAccumulator':
+    def from_value(self, x: tuple[float, float]) -> "BernoulliAccumulator":
         self.count = x[0]
         self.sum = x[1]
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None:
             if self.key in stats_dict:
                 stats_dict[self.key].combine(self.value())
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None and self.key in stats_dict:
             self.from_value(stats_dict[self.key].value())
 
-    def acc_to_encoder(self) -> 'BernoulliDataEncoder':
+    def acc_to_encoder(self) -> "BernoulliDataEncoder":
         return BernoulliDataEncoder()
 
 
 class BernoulliAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for BernoulliAccumulator."""
 
-    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.name = name
         self.keys = keys
 
@@ -256,8 +259,13 @@ class BernoulliAccumulatorFactory(StatisticAccumulatorFactory):
 class BernoulliEstimator(ParameterEstimator):
     """Estimate a Bernoulli distribution from weighted success counts."""
 
-    def __init__(self, pseudo_count: Optional[float] = None, suff_stat: Optional[float] = None,
-                 name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.name = name
@@ -266,7 +274,7 @@ class BernoulliEstimator(ParameterEstimator):
     def accumulator_factory(self) -> BernoulliAccumulatorFactory:
         return BernoulliAccumulatorFactory(name=self.name, keys=self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[float, float]) -> BernoulliDistribution:
+    def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> BernoulliDistribution:
         count, psum = suff_stat
         if self.pseudo_count is not None:
             prior_p = 0.5 if self.suff_stat is None else self.suff_stat
@@ -281,14 +289,14 @@ class BernoulliDataEncoder(DataSequenceEncoder):
     """Encode Bernoulli observations as a boolean numpy array."""
 
     def __str__(self) -> str:
-        return 'BernoulliDataEncoder'
+        return "BernoulliDataEncoder"
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, BernoulliDataEncoder)
 
-    def seq_encode(self, x: Sequence[Union[bool, int]]) -> np.ndarray:
+    def seq_encode(self, x: Sequence[bool | int]) -> np.ndarray:
         rv = np.asarray(x)
         valid = (rv == 0) | (rv == 1)
         if not np.all(valid):
-            raise ValueError('BernoulliDistribution requires observations in {False, True} or {0, 1}.')
+            raise ValueError("BernoulliDistribution requires observations in {False, True} or {0, 1}.")
         return rv.astype(bool)

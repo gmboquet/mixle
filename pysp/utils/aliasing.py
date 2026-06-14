@@ -17,7 +17,7 @@ legacy argument keeps its position. Passing both raises ``TypeError``; passing n
 
 from typing import Any
 
-__all__ = ['coalesce_alias', 'require', 'MISSING']
+__all__ = ["coalesce_alias", "require", "MISSING"]
 
 
 class _Missing:
@@ -31,7 +31,7 @@ class _Missing:
         return cls._instance
 
     def __repr__(self):
-        return '<MISSING>'
+        return "<MISSING>"
 
 
 MISSING = _Missing()
@@ -45,12 +45,19 @@ def require(name: str, value: Any, *, default: Any = MISSING) -> Any:
     follow a defaulted one).
     """
     if value is default:
-        raise TypeError('missing required argument %r' % name)
+        raise TypeError("missing required argument %r" % name)
     return value
 
 
-def coalesce_alias(canonical_name: str, canonical_value: Any, alias_name: str, alias_value: Any,
-                   *, required: bool = True, default: Any = None) -> Any:
+def coalesce_alias(
+    canonical_name: str,
+    canonical_value: Any,
+    alias_name: str,
+    alias_value: Any,
+    *,
+    required: bool = True,
+    default: Any = None,
+) -> Any:
     """Reconcile a canonical (legacy) argument with its preferred alias.
 
     Args:
@@ -74,8 +81,7 @@ def coalesce_alias(canonical_name: str, canonical_value: Any, alias_name: str, a
     canonical_given = canonical_value is not default
 
     if alias_given and canonical_given:
-        raise TypeError("%r and its alias %r are mutually exclusive; pass only one"
-                        % (canonical_name, alias_name))
+        raise TypeError("%r and its alias %r are mutually exclusive; pass only one" % (canonical_name, alias_name))
 
     if alias_given:
         return alias_value
@@ -84,7 +90,6 @@ def coalesce_alias(canonical_name: str, canonical_value: Any, alias_name: str, a
         return canonical_value
 
     if required:
-        raise TypeError("missing required argument %r (or its alias %r)"
-                        % (canonical_name, alias_name))
+        raise TypeError("missing required argument %r (or its alias %r)" % (canonical_name, alias_name))
 
     return default

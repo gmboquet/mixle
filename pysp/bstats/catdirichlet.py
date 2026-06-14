@@ -15,19 +15,20 @@ pysp.bstats. This distribution is the conjugate prior used by
 pysp.bstats.categorical, so its log_density feeds every
 CategoricalEstimator.model_log_density evaluation.
 """
-from typing import Optional, Union, List, Dict, Any
 
-from pysp.bstats.pdist import ProbabilityDistribution
-from pysp.utils.special import gammaln, digamma
+from typing import Any
+
 import numpy as np
 
+from pysp.bstats.pdist import ProbabilityDistribution
+from pysp.utils.special import digamma, gammaln
 
 
 class DictDirichletDistribution(ProbabilityDistribution):
     """Dirichlet distribution over probability maps keyed by arbitrary values;
     a scalar alpha denotes a symmetric Dirichlet of unspecified dimension."""
 
-    def __init__(self, alpha: Union[Dict[Any, float], float]):
+    def __init__(self, alpha: dict[Any, float] | float):
         """DictDirichletDistribution object.
 
         Args:
@@ -38,13 +39,13 @@ class DictDirichletDistribution(ProbabilityDistribution):
         self.set_parameters(alpha)
 
     def __str__(self):
-        return 'DictDirichletDistribution(%s)'%(str(self.alpha))
+        return "DictDirichletDistribution(%s)" % (str(self.alpha))
 
-    def get_parameters(self) -> Union[Dict, float]:
+    def get_parameters(self) -> dict | float:
         """Returns the concentration parameters (dict, or scalar if unbounded)."""
         return self.alpha
 
-    def set_parameters(self, params: Union[Dict[Any, float], float]) -> None:
+    def set_parameters(self, params: dict[Any, float] | float) -> None:
         """Sets the concentration parameters.
 
         Args:
@@ -54,7 +55,7 @@ class DictDirichletDistribution(ProbabilityDistribution):
         self.alpha = params
         self.is_unbounded = isinstance(params, float)
 
-    def density(self, x: Dict[Any, float]) -> float:
+    def density(self, x: dict[Any, float]) -> float:
         """Density at the probability map x (exp of log_density).
 
         Args:
@@ -65,7 +66,7 @@ class DictDirichletDistribution(ProbabilityDistribution):
         """
         return np.exp(self.log_density(x))
 
-    def log_density(self, x: Dict[Any, float]) -> float:
+    def log_density(self, x: dict[Any, float]) -> float:
         """Log-density of the Dirichlet at the probability map x.
 
         With scalar alpha the dimension is len(x); with dict alpha the
@@ -80,17 +81,17 @@ class DictDirichletDistribution(ProbabilityDistribution):
         if self.is_unbounded:
             a = self.alpha
             n = len(x)
-            c = (gammaln(a)*n - gammaln(a*n))
+            c = gammaln(a) * n - gammaln(a * n)
             if a == 1:
                 return -c
             else:
-                return np.sum(np.log(list(x.values())))*(a-1) - c
+                return np.sum(np.log(list(x.values()))) * (a - 1) - c
         else:
             rv = 0.0
             asum = 0.0
-            for k,v in x.items():
-                a   = self.alpha[k]
-                rv += np.log(v)*(a-1) - gammaln(a)
+            for k, v in x.items():
+                a = self.alpha[k]
+                rv += np.log(v) * (a - 1) - gammaln(a)
                 asum += a
             return rv + gammaln(asum)
 
@@ -113,12 +114,15 @@ class DictDirichletDistribution(ProbabilityDistribution):
                 aa = dist.alpha * np.ones(len(a))
             else:
                 keys = list(self.alpha.keys())
-                a    = np.asarray([self.alpha.get(k) for k in keys])
-                aa   = np.asarray([dist.alpha.get(k,0.0) for k in keys])
+                a = np.asarray([self.alpha.get(k) for k in keys])
+                aa = np.asarray([dist.alpha.get(k, 0.0) for k in keys])
 
-            return -((gammaln(np.sum(aa)) - np.sum(gammaln(aa))) + np.dot(digamma(a)-digamma(np.sum(a)), aa - 1))
+            return -((gammaln(np.sum(aa)) - np.sum(gammaln(aa))) + np.dot(digamma(a) - digamma(np.sum(a)), aa - 1))
         else:
-            raise NotImplementedError('DictDirichletDistribution.cross_entropy is only implemented for DictDirichlet arguments (got %s).' % type(dist).__name__)
+            raise NotImplementedError(
+                "DictDirichletDistribution.cross_entropy is only implemented for DictDirichlet arguments (got %s)."
+                % type(dist).__name__
+            )
 
     def entropy(self):
         """Returns the differential entropy in nats (dict alpha only)."""
@@ -126,9 +130,7 @@ class DictDirichletDistribution(ProbabilityDistribution):
         a0 = np.sum(a)
         return -((gammaln(a0) - np.sum(gammaln(a))) + np.dot(digamma(a) - digamma(a0), a - 1))
 
-
-
-    def sampler(self, seed: Optional[int] = None):
+    def sampler(self, seed: int | None = None):
         """Returns a DictDirichletSampler for this distribution.
 
         Args:
@@ -137,11 +139,11 @@ class DictDirichletDistribution(ProbabilityDistribution):
         return DictDirichletSampler(self, seed)
 
 
-class DictDirichletSampler(object):
+class DictDirichletSampler:
     """Draws probability maps from a DictDirichletDistribution with dict-valued
     concentration parameters."""
 
-    def __init__(self, dist: DictDirichletDistribution, seed: Optional[int] = None):
+    def __init__(self, dist: DictDirichletDistribution, seed: int | None = None):
         """DictDirichletSampler object.
 
         Args:
@@ -149,9 +151,9 @@ class DictDirichletSampler(object):
             seed (Optional[int]): Seed for the random number generator.
         """
         self.dist = dist
-        self.rng  = np.random.RandomState(seed)
+        self.rng = np.random.RandomState(seed)
 
-    def sample(self, size: Optional[int] = None) -> Union[Dict, List[Dict]]:
+    def sample(self, size: int | None = None) -> dict | list[dict]:
         """Draw Dirichlet-distributed probability maps over the alpha keys.
 
         Args:
@@ -166,9 +168,11 @@ class DictDirichletSampler(object):
                 since the sample dimension is then unspecified.
         """
         if self.dist.is_unbounded:
-            raise ValueError('DictDirichletSampler cannot sample from a DictDirichletDistribution with scalar alpha (unspecified dimension).')
+            raise ValueError(
+                "DictDirichletSampler cannot sample from a DictDirichletDistribution with scalar alpha (unspecified dimension)."
+            )
 
-        keys  = list(self.dist.alpha.keys())
+        keys = list(self.dist.alpha.keys())
         alpha = np.asarray([self.dist.alpha[k] for k in keys], dtype=float)
 
         if size is None:

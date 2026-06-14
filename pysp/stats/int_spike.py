@@ -14,16 +14,22 @@ on integer value k with probability p, is given by
 
 """
 
-from typing import List, Union, Tuple, Optional, Dict, Any
+from typing import Any, Optional
 
 import numpy as np
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
-from pysp.stats.pdist import SequenceEncodableStatisticAccumulator, SequenceEncodableProbabilityDistribution, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
-    DistributionEnumerator
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 
 
@@ -33,30 +39,31 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_table')
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_table")
 
     @classmethod
     def compute_declaration(cls):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
         return DistributionDeclaration(
-            name='integer_uniform_spike',
+            name="integer_uniform_spike",
             distribution_type=cls,
             parameters=(
-                ParameterSpec('k', constraint='integer', differentiable=False),
-                ParameterSpec('num_vals', constraint='positive_integer', differentiable=False),
-                ParameterSpec('p', constraint='unit_interval'),
-                ParameterSpec('min_val', constraint='integer', differentiable=False),
+                ParameterSpec("k", constraint="integer", differentiable=False),
+                ParameterSpec("num_vals", constraint="positive_integer", differentiable=False),
+                ParameterSpec("p", constraint="unit_interval"),
+                ParameterSpec("min_val", constraint="integer", differentiable=False),
             ),
             statistics=(
-                StatisticSpec('min_val', kind='metadata', additive=False, scales=False),
-                StatisticSpec('count_vec'),
+                StatisticSpec("min_val", kind="metadata", additive=False, scales=False),
+                StatisticSpec("count_vec"),
             ),
-            support='bounded_integer_spike',
+            support="bounded_integer_spike",
             differentiable=False,
         )
 
-    def __init__(self, k: int, num_vals: int,  p: float, min_val: Optional[int] = 0, name: Optional[str] = None) \
-            -> None:
+    def __init__(self, k: int, num_vals: int, p: float, min_val: int | None = 0, name: str | None = None) -> None:
         """IntegerUniformSpikeDistribution object for creating a uniform integer distribution with a spike on k.
 
         Args:
@@ -82,13 +89,13 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
         self.max_val = min_val + num_vals - 1
 
         if not self.min_val <= k <= self.max_val:
-            raise Exception('Spike value k must be between [%s, %s].' % (repr(self.min_val), repr(self.max_val)))
+            raise Exception("Spike value k must be between [%s, %s]." % (repr(self.min_val), repr(self.max_val)))
         else:
             self.k = k
 
         self.log_p = np.log(p)
         self.num_vals = num_vals
-        self.log_1p = np.log1p(-self.p) - np.log(self.num_vals-1)
+        self.log_1p = np.log1p(-self.p) - np.log(self.num_vals - 1)
         self.name = name
 
     def __str__(self) -> str:
@@ -98,7 +105,7 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
         s4 = repr(self.k)
         s5 = repr(self.name)
 
-        return 'IntegerUniformSpikeDistribution(p=%s, min_val=%s, num_vals=%s,k=%s, name=%s)' % (s3, s1, s2, s4, s5)
+        return "IntegerUniformSpikeDistribution(p=%s, min_val=%s, num_vals=%s,k=%s, name=%s)" % (s3, s1, s2, s4, s5)
 
     def density(self, x: int) -> float:
         """Density of the integer uniform spike distribution at observation x.
@@ -161,55 +168,57 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
         xx = engine.asarray(x)
         in_range = (xx >= self.min_val) & (xx <= self.max_val)
         is_spike = xx == self.k
-        return engine.where(in_range,
-                            engine.where(is_spike, engine.asarray(self.log_p), engine.asarray(self.log_1p)),
-                            engine.asarray(-np.inf))
+        return engine.where(
+            in_range,
+            engine.where(is_spike, engine.asarray(self.log_p), engine.asarray(self.log_1p)),
+            engine.asarray(-np.inf),
+        )
 
     @classmethod
-    def backend_stacked_params(cls, dists: List['IntegerUniformSpikeDistribution'],
-                               engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: list["IntegerUniformSpikeDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked integer-uniform-spike parameters for a shared support."""
         min_val = int(dists[0].min_val)
         num_vals = int(dists[0].num_vals)
         if any(int(dist.min_val) != min_val or int(dist.num_vals) != num_vals for dist in dists):
-            raise ValueError('Stacked IntegerUniformSpikeDistribution components require shared support.')
+            raise ValueError("Stacked IntegerUniformSpikeDistribution components require shared support.")
         return {
-            '__pysp_component_axis__': {'k': 0, 'log_p': 0, 'log_1p': 0},
-            'min_val': min_val,
-            'max_val': min_val + num_vals - 1,
-            'num_vals': num_vals,
-            'k': engine.asarray(np.asarray([dist.k for dist in dists], dtype=np.int64)),
-            'log_p': engine.asarray(np.asarray([dist.log_p for dist in dists], dtype=np.float64)),
-            'log_1p': engine.asarray(np.asarray([dist.log_1p for dist in dists], dtype=np.float64)),
-            'num_components': len(dists),
+            "__pysp_component_axis__": {"k": 0, "log_p": 0, "log_1p": 0},
+            "min_val": min_val,
+            "max_val": min_val + num_vals - 1,
+            "num_vals": num_vals,
+            "k": engine.asarray(np.asarray([dist.k for dist in dists], dtype=np.int64)),
+            "log_p": engine.asarray(np.asarray([dist.log_p for dist in dists], dtype=np.float64)),
+            "log_1p": engine.asarray(np.asarray([dist.log_1p for dist in dists], dtype=np.float64)),
+            "num_components": len(dists),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: np.ndarray, params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: np.ndarray, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of integer-uniform-spike log densities."""
         xx = engine.asarray(x)
-        in_range = (xx >= params['min_val']) & (xx <= params['max_val'])
-        is_spike = xx[:, None] == params['k'][None, :]
-        rv = engine.where(is_spike, params['log_p'][None, :], params['log_1p'][None, :])
+        in_range = (xx >= params["min_val"]) & (xx <= params["max_val"])
+        is_spike = xx[:, None] == params["k"][None, :]
+        rv = engine.where(is_spike, params["log_p"][None, :], params["log_1p"][None, :])
         return engine.where(in_range[:, None], rv, engine.asarray(-np.inf))
 
     @classmethod
-    def backend_stacked_sufficient_statistics(cls, x: np.ndarray, weights: Any,
-                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any]:
+    def backend_stacked_sufficient_statistics(
+        cls, x: np.ndarray, weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[Any, Any]:
         """Return component-stacked legacy ``(min_val, count_vec)`` statistics."""
         xx = engine.asarray(x)
         ww = engine.asarray(weights)
-        rel = xx - engine.asarray(params['min_val'])
+        rel = xx - engine.asarray(params["min_val"])
         rows = []
         zero_rows = ww * engine.asarray(0.0)
-        for value_index in range(int(params['num_vals'])):
+        for value_index in range(int(params["num_vals"])):
             mask = rel == engine.asarray(value_index)
             rows.append(engine.sum(engine.where(mask[:, None], ww, zero_rows), axis=0))
         count_mat = engine.stack(rows, axis=1)
-        min_vals = engine.asarray(np.full(int(params['num_components']), int(params['min_val'])))
+        min_vals = engine.asarray(np.full(int(params["num_components"]), int(params["min_val"])))
         return min_vals, count_mat
 
-    def sampler(self, seed: Optional[int] = None) -> 'IntegerUniformSpikeSampler':
+    def sampler(self, seed: int | None = None) -> "IntegerUniformSpikeSampler":
         """Create an IntegerUniformSpikeSampler from parameters of this distribution.
 
         Args:
@@ -221,7 +230,7 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
         """
         return IntegerUniformSpikeSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'IntegerUniformSpikeEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "IntegerUniformSpikeEstimator":
         """Create an IntegerUniformSpikeEstimator for the current integer range.
 
         Args:
@@ -235,14 +244,15 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
             return IntegerUniformSpikeEstimator(min_val=self.min_val, max_val=self.max_val, name=self.name)
 
         else:
-            return IntegerUniformSpikeEstimator(min_val=self.min_val, max_val=self.max_val,
-                                                pseudo_count=pseudo_count, name=self.name)
+            return IntegerUniformSpikeEstimator(
+                min_val=self.min_val, max_val=self.max_val, pseudo_count=pseudo_count, name=self.name
+            )
 
-    def dist_to_encoder(self) -> 'IntegerUniformSpikeDataEncoder':
+    def dist_to_encoder(self) -> "IntegerUniformSpikeDataEncoder":
         """Returns an IntegerUniformSpikeDataEncoder for encoding sequences of iid integer observations."""
         return IntegerUniformSpikeDataEncoder()
 
-    def enumerator(self) -> 'IntegerUniformSpikeEnumerator':
+    def enumerator(self) -> "IntegerUniformSpikeEnumerator":
         """Returns an IntegerUniformSpikeEnumerator iterating the support in descending probability order."""
         return IntegerUniformSpikeEnumerator(self)
 
@@ -299,7 +309,7 @@ class IntegerUniformSpikeEnumerator(DistributionEnumerator):
             self._items = spike + rest
         self._pos = 0
 
-    def __next__(self) -> Tuple[int, float]:
+    def __next__(self) -> tuple[int, float]:
         if self._pos >= len(self._items):
             raise StopIteration
         item = self._items[self._pos]
@@ -317,7 +327,7 @@ class IntegerUniformSpikeSampler(DistributionSampler):
 
     """
 
-    def __init__(self, dist: 'IntegerUniformSpikeDistribution', seed: Optional[int] = None) -> None:
+    def __init__(self, dist: "IntegerUniformSpikeDistribution", seed: int | None = None) -> None:
         """IntegerUniformSpikeSampler object.
 
         Args:
@@ -329,7 +339,7 @@ class IntegerUniformSpikeSampler(DistributionSampler):
         self.dist = dist
         self.non_k = np.delete(np.arange(self.dist.min_val, self.dist.max_val + 1), self.dist.k - self.dist.min_val)
 
-    def sample(self, size: Optional[int] = None) -> Union[int, np.array]:
+    def sample(self, size: int | None = None) -> int | np.ndarray:
         """Draw iid samples from the integer uniform spike distribution.
 
         Args:
@@ -347,7 +357,6 @@ class IntegerUniformSpikeSampler(DistributionSampler):
             else:
                 return self.rng.choice(self.non_k)
         else:
-
             rv = np.zeros(size, dtype=int)
             rv.fill(self.dist.k)
             z = self.rng.binomial(n=1, p=self.dist.p, size=size)
@@ -357,6 +366,7 @@ class IntegerUniformSpikeSampler(DistributionSampler):
                 rv[idx] = self.rng.choice(self.non_k, replace=True, size=len(idx))
 
             return rv
+
 
 class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
     """IntegerUniformSpikeAccumulator object for accumulating weighted integer counts over a growing range.
@@ -371,8 +381,9 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
 
     """
 
-    def __init__(self, min_val: Optional[int], max_val: Optional[int], keys: Optional[str] = None,
-                 name: Optional[str] = None) -> None:
+    def __init__(
+        self, min_val: int | None, max_val: int | None, keys: str | None = None, name: str | None = None
+    ) -> None:
         """IntegerUniformSpikeAccumulator object.
 
         Args:
@@ -387,7 +398,7 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
 
         if self.min_val is not None and self.max_val is not None:
             self.num_vals = self.max_val - self.min_val + 1
-            self.count_vec = np.zeros(self.max_val-self.min_val + 1, dtype=float)
+            self.count_vec = np.zeros(self.max_val - self.min_val + 1, dtype=float)
         else:
             self.count_vec = None
 
@@ -395,7 +406,7 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
         self.key = keys
         self.name = name
 
-    def update(self, x: int, weight: float, estimate: Optional['IntegerUniformSpikeDistribution']) -> None:
+    def update(self, x: int, weight: float, estimate: Optional["IntegerUniformSpikeDistribution"]) -> None:
         """Add weight to the count for integer x, growing the count vector if x is out of range.
 
         Args:
@@ -414,7 +425,7 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
             temp_vec = self.count_vec
             self.max_val = x
             self.count_vec = np.zeros(self.max_val - self.min_val + 1)
-            self.count_vec[:len(temp_vec)] = temp_vec
+            self.count_vec[: len(temp_vec)] = temp_vec
             self.count_vec[x - self.min_val] += weight
 
         elif self.min_val > x:
@@ -432,12 +443,13 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize the accumulator with observation x and weight (delegates to update)."""
         return self.update(x, weight, None)
 
-    def seq_initialize(self, x: Tuple[int, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState) -> None:
+    def seq_initialize(self, x: tuple[int, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState) -> None:
         """Vectorized initialization from encoded observations x (delegates to seq_update)."""
         return self.seq_update(x, weights, None)
 
-    def seq_update(self, x: np.ndarray, weights: np.ndarray,
-                   estimate: Optional['IntegerUniformSpikeDistribution']) -> None:
+    def seq_update(
+        self, x: np.ndarray, weights: np.ndarray, estimate: Optional["IntegerUniformSpikeDistribution"]
+    ) -> None:
         """Vectorized accumulation of weighted counts from encoded observations x.
 
         Args:
@@ -464,25 +476,27 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
             temp = self.count_vec
             prev_diff = prev_min - self.min_val
             self.count_vec = np.zeros(self.max_val - self.min_val + 1)
-            self.count_vec[prev_diff:(prev_diff + len(temp))] = temp
+            self.count_vec[prev_diff : (prev_diff + len(temp))] = temp
 
         min_diff = min_x - self.min_val
-        self.count_vec[min_diff:(min_diff + len(loc_cnt))] += loc_cnt
+        self.count_vec[min_diff : (min_diff + len(loc_cnt))] += loc_cnt
 
-    def seq_update_engine(self, x: np.ndarray, weights: Any,
-                          estimate: Optional['IntegerUniformSpikeDistribution'], engine: Any) -> None:
+    def seq_update_engine(
+        self, x: np.ndarray, weights: Any, estimate: Optional["IntegerUniformSpikeDistribution"], engine: Any
+    ) -> None:
         """Engine-resident accumulation: the weighted value histogram is reduced on the active
         engine (numpy or torch); the dynamic support range is host bookkeeping. Matches seq_update.
         """
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         xv = np.asarray(x)
         min_x = int(xv.min())
         max_x = int(xv.max())
 
         idx = engine.asarray((xv - min_x).astype(np.int64))
-        loc_cnt = np.asarray(engine.to_numpy(engine.bincount(
-            idx, weights=engine.asarray(weights_np), minlength=max_x - min_x + 1)), dtype=np.float64)
+        loc_cnt = np.asarray(
+            engine.to_numpy(engine.bincount(idx, weights=engine.asarray(weights_np), minlength=max_x - min_x + 1)),
+            dtype=np.float64,
+        )
 
         if self.count_vec is None:
             self.count_vec = np.zeros(max_x - min_x + 1)
@@ -496,12 +510,12 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
             temp = self.count_vec
             prev_diff = prev_min - self.min_val
             self.count_vec = np.zeros(self.max_val - self.min_val + 1)
-            self.count_vec[prev_diff:(prev_diff + len(temp))] = temp
+            self.count_vec[prev_diff : (prev_diff + len(temp))] = temp
 
         min_diff = min_x - self.min_val
-        self.count_vec[min_diff:(min_diff + len(loc_cnt))] += loc_cnt
+        self.count_vec[min_diff : (min_diff + len(loc_cnt))] += loc_cnt
 
-    def combine(self, suff_stat: Tuple[int, np.ndarray]) -> 'IntegerUniformSpikeAccumulator':
+    def combine(self, suff_stat: tuple[int, np.ndarray]) -> "IntegerUniformSpikeAccumulator":
         """Combine sufficient statistics (min_val, count_vec) with this accumulator, aligning ranges.
 
         Args:
@@ -540,11 +554,11 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def value(self) -> Tuple[int, np.ndarray]:
+    def value(self) -> tuple[int, np.ndarray]:
         """Returns sufficient statistics as a tuple (min_val, count_vec)."""
         return self.min_val, self.count_vec
 
-    def from_value(self, x: Tuple[int, np.ndarray]) -> 'IntegerUniformSpikeAccumulator':
+    def from_value(self, x: tuple[int, np.ndarray]) -> "IntegerUniformSpikeAccumulator":
         """Set sufficient statistics from a (min_val, count_vec) tuple.
 
         Args:
@@ -560,14 +574,14 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> 'IntegerUniformSpikeAccumulator':
+    def scale(self, c: float) -> "IntegerUniformSpikeAccumulator":
         """Scale linear counts while preserving the integer support offset."""
         if self.count_vec is not None:
             self.count_vec *= c
         self.count *= c
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge this accumulator's sufficient statistics into stats_dict under its key."""
         if self.key is not None:
             if self.key in stats_dict:
@@ -575,13 +589,13 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace this accumulator's sufficient statistics from stats_dict under its key."""
         if self.key is not None:
             if self.key in stats_dict:
                 self.from_value(stats_dict[self.key].value())
 
-    def acc_to_encoder(self) -> 'IntegerUniformSpikeDataEncoder':
+    def acc_to_encoder(self) -> "IntegerUniformSpikeDataEncoder":
         """Returns an IntegerUniformSpikeDataEncoder for encoding sequences of iid integer observations."""
         return IntegerUniformSpikeDataEncoder()
 
@@ -603,28 +617,37 @@ class IntegerUniformSpikeAccumulatorFactory(StatisticAccumulatorFactory):
 
     """
 
-    def __init__(self, min_val: Optional[int] = None, max_val: Optional[int] = None, keys: Optional[str] = None,
-                 name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        min_val: int | None = None,
+        max_val: int | None = None,
+        keys: str | None = None,
+        name: str | None = None,
+    ) -> None:
         self.min_val = min_val
         self.max_val = max_val
         self.keys = keys
         self.name = name
 
-    def make(self) -> 'IntegerUniformSpikeAccumulator':
+    def make(self) -> "IntegerUniformSpikeAccumulator":
         """Returns a new IntegerUniformSpikeAccumulator object."""
-        return IntegerUniformSpikeAccumulator(min_val=self.min_val, max_val=self.max_val, keys=self.keys,
-                                              name=self.name)
+        return IntegerUniformSpikeAccumulator(
+            min_val=self.min_val, max_val=self.max_val, keys=self.keys, name=self.name
+        )
 
 
 class IntegerUniformSpikeEstimator(ParameterEstimator):
     """IntegerUniformSpikeEstimator object for estimating IntegerUniformSpikeDistribution objects from counts."""
 
-    def __init__(self, min_val: Optional[int] = None,
-                 max_val: Optional[int] = None,
-                 pseudo_count: Optional[float] = None,
-                 suff_stat: Optional[Tuple[int, Optional[float]]] = None,
-                 name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        min_val: int | None = None,
+        max_val: int | None = None,
+        pseudo_count: float | None = None,
+        suff_stat: tuple[int, float | None] | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """IntegerUniformSpikeEstimator object instance for estimating IntegerUniformSpikeDistribution objects.
 
         Args:
@@ -650,12 +673,13 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
         self.keys = keys
         self.name = name
 
-    def accumulator_factory(self) -> 'IntegerUniformSpikeAccumulatorFactory':
+    def accumulator_factory(self) -> "IntegerUniformSpikeAccumulatorFactory":
         """Returns an IntegerUniformSpikeAccumulatorFactory consistent with this estimator."""
-        return IntegerUniformSpikeAccumulatorFactory(min_val=self.min_val, max_val=self.max_val,
-                                                     keys=self.keys, name=self.name)
+        return IntegerUniformSpikeAccumulatorFactory(
+            min_val=self.min_val, max_val=self.max_val, keys=self.keys, name=self.name
+        )
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[int, np.ndarray]) -> 'IntegerUniformSpikeDistribution':
+    def estimate(self, nobs: float | None, suff_stat: tuple[int, np.ndarray]) -> "IntegerUniformSpikeDistribution":
         """Estimate an IntegerUniformSpikeDistribution by maximizing the spike location and weight.
 
         The spike location k is chosen to maximize the likelihood of the accumulated counts
@@ -671,20 +695,24 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
         """
         min_val, count_vec = suff_stat
 
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             if self.pseudo_count is None:
                 count = np.sum(count_vec)
                 p_vec = count_vec / count
                 ll = np.log1p(-p_vec)
-                ll -= np.log(len(count_vec)-1)
-                ll *= (count-count_vec)
-                ll += count_vec*np.log(p_vec)
+                ll -= np.log(len(count_vec) - 1)
+                ll *= count - count_vec
+                ll += count_vec * np.log(p_vec)
                 k = np.argmax(ll)
                 p = p_vec[k]
 
-                return IntegerUniformSpikeDistribution(k=k if min_val is None else k+min_val,
-                                                       min_val=min_val, num_vals=len(count_vec),
-                                                       p=p, name=self.name)
+                return IntegerUniformSpikeDistribution(
+                    k=k if min_val is None else k + min_val,
+                    min_val=min_val,
+                    num_vals=len(count_vec),
+                    p=p,
+                    name=self.name,
+                )
             if self.pseudo_count is not None:
                 if self.suff_stat[0] is not None and self.suff_stat[1] is None:
                     k_pseudo = self.suff_stat[0] if min_val is None else self.suff_stat[0] - min_val
@@ -693,44 +721,56 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
                     p_vec = count_vec / count
                     ll = np.log1p(-p_vec)
                     ll -= np.log(len(count_vec) - 1)
-                    ll *= (count - count_vec)
+                    ll *= count - count_vec
                     ll += count_vec * np.log(p_vec)
                     k = np.argmax(ll)
                     p = p_vec[k]
 
-                    return IntegerUniformSpikeDistribution(k=k if min_val is None else k + min_val,
-                                                           min_val=min_val, num_vals=len(count_vec),
-                                                           p=p, name=self.name)
+                    return IntegerUniformSpikeDistribution(
+                        k=k if min_val is None else k + min_val,
+                        min_val=min_val,
+                        num_vals=len(count_vec),
+                        p=p,
+                        name=self.name,
+                    )
 
                 elif self.suff_stat[0] is not None and self.suff_stat[1] is not None:
                     k_pseudo = self.suff_stat[0] if min_val is None else self.suff_stat[0] - min_val
-                    count_vec[k_pseudo] += self.pseudo_count*self.suff_stat[1]
+                    count_vec[k_pseudo] += self.pseudo_count * self.suff_stat[1]
                     count = np.sum(count_vec)
                     p_vec = count_vec / count
                     ll = np.log1p(-p_vec)
                     ll -= np.log(len(count_vec) - 1)
-                    ll *= (count - count_vec)
+                    ll *= count - count_vec
                     ll += count_vec * np.log(p_vec)
                     k = np.argmax(ll)
                     p = p_vec[k]
 
-                    return IntegerUniformSpikeDistribution(k=k if min_val is None else k + min_val,
-                                                           min_val=min_val, num_vals=len(count_vec),
-                                                           p=p, name=self.name)
+                    return IntegerUniformSpikeDistribution(
+                        k=k if min_val is None else k + min_val,
+                        min_val=min_val,
+                        num_vals=len(count_vec),
+                        p=p,
+                        name=self.name,
+                    )
                 else:
                     count_vec += self.pseudo_count
                     count = np.sum(count_vec)
                     p_vec = count_vec / count
                     ll = np.log1p(-p_vec)
                     ll -= np.log(len(count_vec) - 1)
-                    ll *= (count - count_vec)
+                    ll *= count - count_vec
                     ll += count_vec * np.log(p_vec)
                     k = np.argmax(ll)
                     p = p_vec[k]
 
-                    return IntegerUniformSpikeDistribution(k=k if min_val is None else k + min_val,
-                                                           min_val=min_val, num_vals=len(count_vec),
-                                                           p=p, name=self.name)
+                    return IntegerUniformSpikeDistribution(
+                        k=k if min_val is None else k + min_val,
+                        min_val=min_val,
+                        num_vals=len(count_vec),
+                        p=p,
+                        name=self.name,
+                    )
 
 
 class IntegerUniformSpikeDataEncoder(DataSequenceEncoder):
@@ -738,13 +778,13 @@ class IntegerUniformSpikeDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns string representation of IntegerUniformSpikeDataEncoder object."""
-        return 'IntegerUniformSpikeDataEncoder'
+        return "IntegerUniformSpikeDataEncoder"
 
     def __eq__(self, other: object) -> bool:
         """Return True if other is an IntegerUniformSpikeDataEncoder, False is else."""
         return True if isinstance(other, IntegerUniformSpikeDataEncoder) else False
 
-    def seq_encode(self, x: Union[List[int], np.ndarray]) -> np.ndarray:
+    def seq_encode(self, x: list[int] | np.ndarray) -> np.ndarray:
         """Encode a sequence of iid integer observations as a numpy integer array.
 
         Args:

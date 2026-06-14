@@ -16,16 +16,18 @@ data, use `observed_fisher_information()` / `observed_fisher_vectors()`: these
 center posterior-expected complete-data statistics into observed score vectors
 and use their observed covariance as the metric.
 """
+
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
 
 import numpy as np
+
 from pysp.utils.special import digamma, trigamma
 
-
-Path = Tuple[str, ...]
+Path = tuple[str, ...]
 
 
 class SufficientStatisticVectorizer:
@@ -36,8 +38,8 @@ class SufficientStatisticVectorizer:
     and then maps each structure into the same numeric coordinate system.
     """
 
-    def __init__(self, labels: Optional[Sequence[Path]] = None) -> None:
-        self.labels: List[Path] = list(labels) if labels is not None else []
+    def __init__(self, labels: Sequence[Path] | None = None) -> None:
+        self.labels: list[Path] = list(labels) if labels is not None else []
         self._index = {k: i for i, k in enumerate(self.labels)}
 
     @staticmethod
@@ -45,7 +47,7 @@ class SufficientStatisticVectorizer:
         return repr(key)
 
     @classmethod
-    def _items(cls, value: Any, path: Path = ()) -> Iterable[Tuple[Path, float]]:
+    def _items(cls, value: Any, path: Path = ()) -> Iterable[tuple[Path, float]]:
         if value is None:
             return
 
@@ -71,11 +73,11 @@ class SufficientStatisticVectorizer:
             return
 
         try:
-            yield (path if path else ('value',)), float(value)
+            yield (path if path else ("value",)), float(value)
         except (TypeError, ValueError):
             return
 
-    def fit(self, values: Sequence[Any]) -> 'SufficientStatisticVectorizer':
+    def fit(self, values: Sequence[Any]) -> SufficientStatisticVectorizer:
         labels = []
         seen = set()
         for value in values:
@@ -87,7 +89,7 @@ class SufficientStatisticVectorizer:
         self._index = {k: i for i, k in enumerate(labels)}
         return self
 
-    def partial_fit(self, values: Sequence[Any]) -> 'SufficientStatisticVectorizer':
+    def partial_fit(self, values: Sequence[Any]) -> SufficientStatisticVectorizer:
         for value in values:
             for label, _ in self._items(value):
                 if label not in self._index:
@@ -108,12 +110,12 @@ class SufficientStatisticVectorizer:
         return mat
 
     def fit_transform(self, values: Sequence[Any]) -> np.ndarray:
-        rows: List[List[Tuple[int, float]]] = []
-        labels: List[Path] = []
-        index: Dict[Path, int] = {}
+        rows: list[list[tuple[int, float]]] = []
+        labels: list[Path] = []
+        index: dict[Path, int] = {}
 
         for value in values:
-            row: List[Tuple[int, float]] = []
+            row: list[tuple[int, float]] = []
             for label, v in self._items(value):
                 j = index.get(label)
                 if j is None:
@@ -132,8 +134,8 @@ class SufficientStatisticVectorizer:
                 mat[i, j] = v
         return mat
 
-    def label_strings(self) -> List[str]:
-        return ['.'.join(p) for p in self.labels]
+    def label_strings(self) -> list[str]:
+        return [".".join(p) for p in self.labels]
 
 
 class FisherView:
@@ -151,7 +153,7 @@ class FisherView:
         to_fisher() with direct seq_expected_statistics kernels.
     """
 
-    def __init__(self, dist: Any, estimator: Optional[Any] = None) -> None:
+    def __init__(self, dist: Any, estimator: Any | None = None) -> None:
         self.dist = dist
         self.estimator = estimator if estimator is not None else self._make_estimator(dist)
         self.vectorizer = SufficientStatisticVectorizer()
@@ -160,18 +162,17 @@ class FisherView:
     def _make_estimator(dist: Any) -> Any:
         estimator = dist.estimator()
         if estimator is None:
-            raise NotImplementedError('%s does not provide an estimator for Fisher statistics'
-                                      % type(dist).__name__)
+            raise NotImplementedError("%s does not provide an estimator for Fisher statistics" % type(dist).__name__)
         return estimator
 
     def _make_accumulator(self) -> Any:
         factory = self.estimator.accumulator_factory()
         return factory.make()
 
-    def _default_estimate(self, estimate: Optional[Any]) -> Any:
+    def _default_estimate(self, estimate: Any | None) -> Any:
         return self.dist if estimate is None else estimate
 
-    def structured_statistics(self, x: Any, estimate: Optional[Any] = None, weight: float = 1.0) -> Any:
+    def structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
         """Structured sufficient stats for one observation.
 
         For latent-variable distributions, this is the posterior-expected
@@ -182,27 +183,28 @@ class FisherView:
         acc.update(x, weight, self._default_estimate(estimate))
         return acc.value()
 
-    def expected_structured_statistics(self, x: Any, estimate: Optional[Any] = None,
-                                       weight: float = 1.0) -> Any:
+    def expected_structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
         return self.structured_statistics(x, estimate=estimate, weight=weight)
 
-    def sufficient_statistics(self, x: Any, estimate: Optional[Any] = None,
-                              vectorizer: Optional[SufficientStatisticVectorizer] = None) -> np.ndarray:
+    def sufficient_statistics(
+        self, x: Any, estimate: Any | None = None, vectorizer: SufficientStatisticVectorizer | None = None
+    ) -> np.ndarray:
         ss = self.structured_statistics(x, estimate=estimate)
         vec = vectorizer if vectorizer is not None else SufficientStatisticVectorizer().fit([ss])
         return vec.transform([ss])[0]
 
-    def expected_sufficient_statistics(self, x: Any, estimate: Optional[Any] = None,
-                                       vectorizer: Optional[SufficientStatisticVectorizer] = None) -> np.ndarray:
+    def expected_sufficient_statistics(
+        self, x: Any, estimate: Any | None = None, vectorizer: SufficientStatisticVectorizer | None = None
+    ) -> np.ndarray:
         return self.sufficient_statistics(x, estimate=estimate, vectorizer=vectorizer)
 
-    def _n_encoded(self, enc_data: Any, estimate: Optional[Any]) -> int:
+    def _n_encoded(self, enc_data: Any, estimate: Any | None) -> int:
         model = self._default_estimate(estimate)
-        if hasattr(model, 'seq_log_density'):
+        if hasattr(model, "seq_log_density"):
             return int(len(model.seq_log_density(enc_data)))
-        raise ValueError('encoded statistics require a model with seq_log_density')
+        raise ValueError("encoded statistics require a model with seq_log_density")
 
-    def _encode_data(self, data: Sequence[Any], estimate: Optional[Any]) -> Optional[Any]:
+    def _encode_data(self, data: Sequence[Any], estimate: Any | None) -> Any | None:
         model = self._default_estimate(estimate)
         try:
             return _seq_encode_model(model, data)
@@ -210,7 +212,7 @@ class FisherView:
             pass
         return None
 
-    def seq_structured_statistics(self, enc_data: Any, estimate: Optional[Any] = None) -> List[Any]:
+    def seq_structured_statistics(self, enc_data: Any, estimate: Any | None = None) -> list[Any]:
         """Structured per-row stats from encoded data.
 
         This generic implementation is intentionally conservative and may be
@@ -228,15 +230,19 @@ class FisherView:
             values.append(acc.value())
         return values
 
-    def statistics_matrix(self, data: Optional[Sequence[Any]] = None, enc_data: Optional[Any] = None,
-                          estimate: Optional[Any] = None,
-                          vectorizer: Optional[SufficientStatisticVectorizer] = None,
-                          fit: bool = True) -> np.ndarray:
+    def statistics_matrix(
+        self,
+        data: Sequence[Any] | None = None,
+        enc_data: Any | None = None,
+        estimate: Any | None = None,
+        vectorizer: SufficientStatisticVectorizer | None = None,
+        fit: bool = True,
+    ) -> np.ndarray:
         """Return an n x d matrix of per-observation sufficient statistics."""
         if data is None and enc_data is None:
-            raise ValueError('statistics_matrix requires data or enc_data')
+            raise ValueError("statistics_matrix requires data or enc_data")
         if data is not None and enc_data is not None:
-            raise ValueError('pass only one of data or enc_data')
+            raise ValueError("pass only one of data or enc_data")
 
         if data is not None:
             data_values = list(data)
@@ -249,32 +255,38 @@ class FisherView:
             return vec.fit_transform(values)
         return vec.transform(values)
 
-    def expected_statistics_matrix(self, data: Optional[Sequence[Any]] = None, enc_data: Optional[Any] = None,
-                                   estimate: Optional[Any] = None,
-                                   vectorizer: Optional[SufficientStatisticVectorizer] = None,
-                                   fit: bool = True) -> np.ndarray:
-        return self.statistics_matrix(data=data, enc_data=enc_data, estimate=estimate,
-                                      vectorizer=vectorizer, fit=fit)
+    def expected_statistics_matrix(
+        self,
+        data: Sequence[Any] | None = None,
+        enc_data: Any | None = None,
+        estimate: Any | None = None,
+        vectorizer: SufficientStatisticVectorizer | None = None,
+        fit: bool = True,
+    ) -> np.ndarray:
+        return self.statistics_matrix(data=data, enc_data=enc_data, estimate=estimate, vectorizer=vectorizer, fit=fit)
 
-    def seq_expected_statistics(self, enc_data: Any, estimate: Optional[Any] = None,
-                                vectorizer: Optional[SufficientStatisticVectorizer] = None,
-                                fit: bool = True) -> np.ndarray:
-        return self.expected_statistics_matrix(enc_data=enc_data, estimate=estimate,
-                                               vectorizer=vectorizer, fit=fit)
+    def seq_expected_statistics(
+        self,
+        enc_data: Any,
+        estimate: Any | None = None,
+        vectorizer: SufficientStatisticVectorizer | None = None,
+        fit: bool = True,
+    ) -> np.ndarray:
+        return self.expected_statistics_matrix(enc_data=enc_data, estimate=estimate, vectorizer=vectorizer, fit=fit)
 
     @staticmethod
-    def _center(stats: np.ndarray, center: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+    def _center(stats: np.ndarray, center: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
         x = np.asarray(stats, dtype=np.float64)
         mu = x.mean(axis=0) if center is None else np.asarray(center, dtype=np.float64)
         return x - mu.reshape((1, -1)), mu
 
-    def mean_statistics(self, stats: Optional[np.ndarray] = None, **kwargs: Any) -> np.ndarray:
+    def mean_statistics(self, stats: np.ndarray | None = None, **kwargs: Any) -> np.ndarray:
         if stats is None:
             stats = self.statistics_matrix(**kwargs)
         return np.asarray(stats, dtype=np.float64).mean(axis=0)
 
-    def score_center(self, stats: Optional[np.ndarray] = None, **kwargs: Any) -> np.ndarray:
-        model_mean = getattr(self, '_model_mean', None)
+    def score_center(self, stats: np.ndarray | None = None, **kwargs: Any) -> np.ndarray:
+        model_mean = getattr(self, "_model_mean", None)
         if model_mean is not None:
             try:
                 return np.asarray(model_mean(), dtype=np.float64)
@@ -284,8 +296,9 @@ class FisherView:
             stats = self.expected_statistics_matrix(**kwargs)
         return np.asarray(stats, dtype=np.float64).mean(axis=0)
 
-    def fisher_information(self, stats: Optional[np.ndarray] = None, diagonal: bool = False,
-                           ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
         """Empirical Fisher approximation from per-observation statistic vectors."""
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
@@ -295,9 +308,15 @@ class FisherView:
             return np.mean(centered * centered, axis=0) + ridge
         return np.dot(centered.T, centered) / float(n) + np.eye(centered.shape[1]) * ridge
 
-    def fisher_vectors(self, stats: Optional[np.ndarray] = None, metric: str = 'diagonal',
-                       center: Optional[np.ndarray] = None, fisher: Optional[np.ndarray] = None,
-                       ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
         """Return centered/whitened sufficient-statistic vectors.
 
         metric='identity' returns centered statistics, 'diagonal' divides by
@@ -308,14 +327,14 @@ class FisherView:
             stats = self.expected_statistics_matrix(**kwargs)
         centered, _ = self._center(stats, center=center)
 
-        if metric == 'identity':
+        if metric == "identity":
             return centered
 
-        if metric == 'diagonal':
+        if metric == "diagonal":
             diag = fisher if fisher is not None else np.mean(centered * centered, axis=0)
             return centered / np.sqrt(np.asarray(diag, dtype=np.float64).reshape((1, -1)) + ridge)
 
-        if metric == 'full':
+        if metric == "full":
             info = fisher if fisher is not None else self.fisher_information(stats, diagonal=False, ridge=0.0)
             vals, vecs = np.linalg.eigh(np.asarray(info, dtype=np.float64))
             vals = np.maximum(vals, ridge)
@@ -323,9 +342,14 @@ class FisherView:
 
         raise ValueError("metric must be 'identity', 'diagonal', or 'full'")
 
-    def observed_fisher_information(self, stats: Optional[np.ndarray] = None, diagonal: bool = False,
-                                    center: Optional[np.ndarray] = None, ridge: float = 1.0e-8,
-                                    **kwargs: Any) -> np.ndarray:
+    def observed_fisher_information(
+        self,
+        stats: np.ndarray | None = None,
+        diagonal: bool = False,
+        center: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
         """Observed Fisher estimate from score vectors for observed data.
 
         For latent models the statistic rows are posterior-expected
@@ -344,43 +368,62 @@ class FisherView:
             return np.mean(centered * centered, axis=0) + ridge
         return np.dot(centered.T, centered) / float(n) + np.eye(centered.shape[1]) * ridge
 
-    def observed_fisher_vectors(self, stats: Optional[np.ndarray] = None, metric: str = 'diagonal',
-                                center: Optional[np.ndarray] = None, fisher: Optional[np.ndarray] = None,
-                                ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def observed_fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         mu = self.score_center(stats=stats) if center is None else np.asarray(center, dtype=np.float64)
 
-        if metric == 'identity':
+        if metric == "identity":
             return np.asarray(stats, dtype=np.float64) - mu.reshape((1, -1))
 
-        if metric == 'diagonal':
-            diag = fisher if fisher is not None else self.observed_fisher_information(
-                stats=stats, diagonal=True, center=mu, ridge=0.0)
+        if metric == "diagonal":
+            diag = (
+                fisher
+                if fisher is not None
+                else self.observed_fisher_information(stats=stats, diagonal=True, center=mu, ridge=0.0)
+            )
             return self.fisher_vectors(stats=stats, metric=metric, center=mu, fisher=diag, ridge=ridge)
 
-        if metric == 'full':
-            info = fisher if fisher is not None else self.observed_fisher_information(
-                stats=stats, diagonal=False, center=mu, ridge=0.0)
+        if metric == "full":
+            info = (
+                fisher
+                if fisher is not None
+                else self.observed_fisher_information(stats=stats, diagonal=False, center=mu, ridge=0.0)
+            )
             return self.fisher_vectors(stats=stats, metric=metric, center=mu, fisher=info, ridge=ridge)
 
         raise ValueError("metric must be 'identity', 'diagonal', or 'full'")
 
-    def fisher_vector(self, x: Any, estimate: Optional[Any] = None, metric: str = 'diagonal',
-                      center: Optional[np.ndarray] = None, fisher: Optional[np.ndarray] = None,
-                      vectorizer: Optional[SufficientStatisticVectorizer] = None,
-                      ridge: float = 1.0e-8) -> np.ndarray:
+    def fisher_vector(
+        self,
+        x: Any,
+        estimate: Any | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        vectorizer: SufficientStatisticVectorizer | None = None,
+        ridge: float = 1.0e-8,
+    ) -> np.ndarray:
         if vectorizer is None and not self.vectorizer.labels:
             stat = self.expected_sufficient_statistics(x, estimate=estimate)
         else:
             vec = vectorizer if vectorizer is not None else self.vectorizer
             stat = self.expected_sufficient_statistics(x, estimate=estimate, vectorizer=vec)
-        return self.fisher_vectors(stats=np.reshape(stat, (1, -1)), metric=metric,
-                                   center=center, fisher=fisher, ridge=ridge)[0]
+        return self.fisher_vectors(
+            stats=np.reshape(stat, (1, -1)), metric=metric, center=center, fisher=fisher, ridge=ridge
+        )[0]
 
     def natural_parameters(self) -> Any:
         """Return natural parameters when a specialized view provides them."""
-        raise NotImplementedError('generic Fisher views do not expose canonical natural parameters')
+        raise NotImplementedError("generic Fisher views do not expose canonical natural parameters")
 
 
 class FixedFisherView(FisherView):
@@ -392,8 +435,9 @@ class FixedFisherView(FisherView):
         self.labels = list(labels)
         self.vectorizer = SufficientStatisticVectorizer(self.labels)
 
-    def _project_matrix(self, mat: np.ndarray, vectorizer: Optional[SufficientStatisticVectorizer],
-                        fit: bool) -> np.ndarray:
+    def _project_matrix(
+        self, mat: np.ndarray, vectorizer: SufficientStatisticVectorizer | None, fit: bool
+    ) -> np.ndarray:
         if vectorizer is None:
             return mat
         if fit:
@@ -408,31 +452,36 @@ class FixedFisherView(FisherView):
                 out[:, k] = mat[:, j]
         return out
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         raise NotImplementedError
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         raise NotImplementedError
 
-    def structured_statistics(self, x: Any, estimate: Optional[Any] = None, weight: float = 1.0) -> Any:
+    def structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
         return self._statistics_from_data([x], estimate=estimate)[0] * weight
 
-    def sufficient_statistics(self, x: Any, estimate: Optional[Any] = None,
-                              vectorizer: Optional[SufficientStatisticVectorizer] = None) -> np.ndarray:
+    def sufficient_statistics(
+        self, x: Any, estimate: Any | None = None, vectorizer: SufficientStatisticVectorizer | None = None
+    ) -> np.ndarray:
         mat = self._statistics_from_data([x], estimate=estimate)
         return self._project_matrix(mat, vectorizer, fit=vectorizer is None)[0]
 
-    def seq_structured_statistics(self, enc_data: Any, estimate: Optional[Any] = None) -> List[Any]:
+    def seq_structured_statistics(self, enc_data: Any, estimate: Any | None = None) -> list[Any]:
         return [row for row in self._statistics_from_encoded(enc_data, estimate=estimate)]
 
-    def statistics_matrix(self, data: Optional[Sequence[Any]] = None, enc_data: Optional[Any] = None,
-                          estimate: Optional[Any] = None,
-                          vectorizer: Optional[SufficientStatisticVectorizer] = None,
-                          fit: bool = True) -> np.ndarray:
+    def statistics_matrix(
+        self,
+        data: Sequence[Any] | None = None,
+        enc_data: Any | None = None,
+        estimate: Any | None = None,
+        vectorizer: SufficientStatisticVectorizer | None = None,
+        fit: bool = True,
+    ) -> np.ndarray:
         if data is None and enc_data is None:
-            raise ValueError('statistics_matrix requires data or enc_data')
+            raise ValueError("statistics_matrix requires data or enc_data")
         if data is not None and enc_data is not None:
-            raise ValueError('pass only one of data or enc_data')
+            raise ValueError("pass only one of data or enc_data")
         if data is not None:
             mat = self._statistics_from_data(list(data), estimate=estimate)
         else:
@@ -445,35 +494,42 @@ class FixedFisherView(FisherView):
     def _model_fisher(self) -> np.ndarray:
         raise NotImplementedError
 
-    def mean_statistics(self, stats: Optional[np.ndarray] = None, model: bool = True, **kwargs: Any) -> np.ndarray:
+    def mean_statistics(self, stats: np.ndarray | None = None, model: bool = True, **kwargs: Any) -> np.ndarray:
         if model or stats is None:
             return self._model_mean()
         return np.asarray(stats, dtype=np.float64).mean(axis=0)
 
-    def fisher_information(self, stats: Optional[np.ndarray] = None, diagonal: bool = False,
-                           ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
         info = np.asarray(self._model_fisher(), dtype=np.float64)
         if diagonal:
             return np.diag(info) + ridge
         return info + np.eye(info.shape[0]) * ridge
 
-    def fisher_vectors(self, stats: Optional[np.ndarray] = None, metric: str = 'diagonal',
-                       center: Optional[np.ndarray] = None, fisher: Optional[np.ndarray] = None,
-                       ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         centered = np.asarray(stats, dtype=np.float64)
         mu = self._model_mean() if center is None else np.asarray(center, dtype=np.float64)
         centered = centered - mu.reshape((1, -1))
 
-        if metric == 'identity':
+        if metric == "identity":
             return centered
 
-        if metric == 'diagonal':
+        if metric == "diagonal":
             diag = np.diag(self._model_fisher()) if fisher is None else np.asarray(fisher, dtype=np.float64)
             return centered / np.sqrt(np.maximum(diag.reshape((1, -1)), 0.0) + ridge)
 
-        if metric == 'full':
+        if metric == "full":
             info = self._model_fisher() if fisher is None else np.asarray(fisher, dtype=np.float64)
             vals, vecs = np.linalg.eigh(info)
             vals = np.maximum(vals, ridge)
@@ -484,7 +540,7 @@ class FixedFisherView(FisherView):
 
 class GaussianFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
-        super().__init__(dist, [('sum',), ('sum2',), ('count',), ('count2',)])
+        super().__init__(dist, [("sum",), ("sum2",), ("count",), ("count2",)])
 
     @staticmethod
     def _matrix(x: Any) -> np.ndarray:
@@ -492,10 +548,10 @@ class GaussianFisherView(FixedFisherView):
         one = np.ones_like(xx, dtype=np.float64)
         return np.column_stack((xx, xx * xx, one, one))
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         return self._matrix(data)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         return self._matrix(enc_data)
 
     def _model_mean(self) -> np.ndarray:
@@ -509,7 +565,7 @@ class GaussianFisherView(FixedFisherView):
         ex1 = mu
         ex2 = mu * mu + var
         ex3 = mu * mu * mu + 3.0 * mu * var
-        ex4 = mu ** 4 + 6.0 * mu * mu * var + 3.0 * var * var
+        ex4 = mu**4 + 6.0 * mu * mu * var + 3.0 * var * var
         info = np.zeros((4, 4), dtype=np.float64)
         info[0, 0] = ex2 - ex1 * ex1
         info[0, 1] = ex3 - ex1 * ex2
@@ -519,9 +575,14 @@ class GaussianFisherView(FixedFisherView):
 
 
 class CountFisherView(FixedFisherView):
-    def __init__(self, dist: Any, mean_var_fn: Callable[[Any], Tuple[float, float]],
-                 data_fn: Callable[[Any], np.ndarray], enc_fn: Callable[[Any], np.ndarray]) -> None:
-        super().__init__(dist, [('count',), ('sum',)])
+    def __init__(
+        self,
+        dist: Any,
+        mean_var_fn: Callable[[Any], tuple[float, float]],
+        data_fn: Callable[[Any], np.ndarray],
+        enc_fn: Callable[[Any], np.ndarray],
+    ) -> None:
+        super().__init__(dist, [("count",), ("sum",)])
         self._mean_var_fn = mean_var_fn
         self._data_fn = data_fn
         self._enc_fn = enc_fn
@@ -531,10 +592,10 @@ class CountFisherView(FixedFisherView):
         xx = np.asarray(x, dtype=np.float64).reshape(-1)
         return np.column_stack((np.ones_like(xx, dtype=np.float64), xx))
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         return self._matrix(self._data_fn(data))
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         return self._matrix(self._enc_fn(enc_data))
 
     def _model_mean(self) -> np.ndarray:
@@ -551,13 +612,13 @@ class CountFisherView(FixedFisherView):
 class CategoricalFisherView(FixedFisherView):
     def __init__(self, dist: Any, keys: Sequence[Any], probs: Sequence[float]) -> None:
         self.keys = list(keys)
-        self.key_index: Dict[Any, int] = {k: i for i, k in enumerate(self.keys)}
+        self.key_index: dict[Any, int] = {k: i for i, k in enumerate(self.keys)}
         p = np.asarray(probs, dtype=np.float64)
         total = p.sum()
         self.probs = p / total if total > 0.0 else np.ones(len(self.keys), dtype=np.float64) / max(len(self.keys), 1)
         super().__init__(dist, [(repr(k),) for k in self.keys])
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         mat = np.zeros((len(data), len(self.keys)), dtype=np.float64)
         for i, x in enumerate(data):
             j = self.key_index.get(x)
@@ -565,7 +626,7 @@ class CategoricalFisherView(FixedFisherView):
                 mat[i, j] = 1.0
         return mat
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         xs, values = enc_data
         value_to_col = np.asarray([self.key_index.get(v, -1) for v in values], dtype=np.int64)
         cols = value_to_col[np.asarray(xs, dtype=np.int64)]
@@ -584,15 +645,15 @@ class CategoricalFisherView(FixedFisherView):
 
 class IntegerCategoricalFisherView(CategoricalFisherView):
     def __init__(self, dist: Any) -> None:
-        min_val = int(getattr(dist, 'min_val', getattr(dist, 'min_index', 0)))
-        max_val = int(getattr(dist, 'max_val', getattr(dist, 'max_index', min_val)))
-        probs = np.asarray(dist.p_vec if hasattr(dist, 'p_vec') else dist.prob_vec, dtype=np.float64)
+        min_val = int(getattr(dist, "min_val", getattr(dist, "min_index", 0)))
+        max_val = int(getattr(dist, "max_val", getattr(dist, "max_index", min_val)))
+        probs = np.asarray(dist.p_vec if hasattr(dist, "p_vec") else dist.prob_vec, dtype=np.float64)
         keys = list(range(min_val, max_val + 1))
         super().__init__(dist, keys, probs)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         x = np.asarray(enc_data, dtype=np.int64)
-        min_val = int(getattr(self.dist, 'min_val', getattr(self.dist, 'min_index', 0)))
+        min_val = int(getattr(self.dist, "min_val", getattr(self.dist, "min_index", 0)))
         cols = x - min_val
         mat = np.zeros((len(x), len(self.keys)), dtype=np.float64)
         rows = np.arange(len(x), dtype=np.int64)
@@ -603,20 +664,20 @@ class IntegerCategoricalFisherView(CategoricalFisherView):
 
 class DiagonalGaussianFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
-        self.dim = int(dist.dim if hasattr(dist, 'dim') else len(dist.mu))
-        labels = [('sum', str(i)) for i in range(self.dim)]
-        labels.extend(('sum2', str(i)) for i in range(self.dim))
-        labels.append(('count',))
+        self.dim = int(dist.dim if hasattr(dist, "dim") else len(dist.mu))
+        labels = [("sum", str(i)) for i in range(self.dim)]
+        labels.extend(("sum2", str(i)) for i in range(self.dim))
+        labels.append(("count",))
         super().__init__(dist, labels)
 
     def _as_matrix(self, data: Any) -> np.ndarray:
         return np.asarray(data, dtype=np.float64).reshape((-1, self.dim))
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         x = self._as_matrix(data)
         return np.hstack((x, x * x, np.ones((x.shape[0], 1), dtype=np.float64)))
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         x = enc_data[0] if isinstance(enc_data, tuple) else enc_data
         return self._statistics_from_data(np.asarray(x, dtype=np.float64), estimate=estimate)
 
@@ -640,23 +701,23 @@ class DiagonalGaussianFisherView(FixedFisherView):
 
 class MultivariateGaussianFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
-        self.dim = int(dist.dim if hasattr(dist, 'dim') else len(dist.mu))
+        self.dim = int(dist.dim if hasattr(dist, "dim") else len(dist.mu))
         self._tri = np.triu_indices(self.dim)
-        labels = [('sum', str(i)) for i in range(self.dim)]
-        labels.extend(('sum2', str(i), str(j)) for i, j in zip(self._tri[0], self._tri[1]))
-        labels.append(('count',))
+        labels = [("sum", str(i)) for i in range(self.dim)]
+        labels.extend(("sum2", str(i), str(j)) for i, j in zip(self._tri[0], self._tri[1]))
+        labels.append(("count",))
         super().__init__(dist, labels)
 
     def _as_matrix(self, data: Any) -> np.ndarray:
         return np.asarray(data, dtype=np.float64).reshape((-1, self.dim))
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         x = self._as_matrix(data)
         i, j = self._tri
         xx = x[:, i] * x[:, j]
         return np.hstack((x, xx, np.ones((x.shape[0], 1), dtype=np.float64)))
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         return self._statistics_from_data(np.asarray(enc_data, dtype=np.float64), estimate=estimate)
 
     def _model_mean(self) -> np.ndarray:
@@ -685,9 +746,12 @@ class MultivariateGaussianFisherView(FixedFisherView):
             for b, (k, l) in enumerate(pairs):
                 ib = dim + b
                 out[ia, ib] = (
-                    cov[i, k] * cov[j, l] + cov[i, l] * cov[j, k]
-                    + mu[i] * mu[k] * cov[j, l] + mu[i] * mu[l] * cov[j, k]
-                    + mu[j] * mu[k] * cov[i, l] + mu[j] * mu[l] * cov[i, k]
+                    cov[i, k] * cov[j, l]
+                    + cov[i, l] * cov[j, k]
+                    + mu[i] * mu[k] * cov[j, l]
+                    + mu[i] * mu[l] * cov[j, k]
+                    + mu[j] * mu[k] * cov[i, l]
+                    + mu[j] * mu[l] * cov[i, k]
                 )
 
         return 0.5 * (out + out.T)
@@ -695,7 +759,7 @@ class MultivariateGaussianFisherView(FixedFisherView):
 
 class LogGaussianFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
-        super().__init__(dist, [('log_sum',), ('log_sum2',), ('count',), ('count2',)])
+        super().__init__(dist, [("log_sum",), ("log_sum2",), ("count",), ("count2",)])
 
     @staticmethod
     def _matrix(x: Any, already_log: bool = False) -> np.ndarray:
@@ -705,10 +769,10 @@ class LogGaussianFisherView(FixedFisherView):
         one = np.ones_like(xx, dtype=np.float64)
         return np.column_stack((xx, xx * xx, one, one))
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         return self._matrix(data, already_log=False)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         return self._matrix(enc_data, already_log=True)
 
     def _model_mean(self) -> np.ndarray:
@@ -722,7 +786,7 @@ class LogGaussianFisherView(FixedFisherView):
         ex1 = mu
         ex2 = mu * mu + var
         ex3 = mu * mu * mu + 3.0 * mu * var
-        ex4 = mu ** 4 + 6.0 * mu * mu * var + 3.0 * var * var
+        ex4 = mu**4 + 6.0 * mu * mu * var + 3.0 * var * var
         info = np.zeros((4, 4), dtype=np.float64)
         info[0, 0] = ex2 - ex1 * ex1
         info[0, 1] = ex3 - ex1 * ex2
@@ -733,18 +797,18 @@ class LogGaussianFisherView(FixedFisherView):
 
 class GammaFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
-        super().__init__(dist, [('count',), ('sum_log',), ('sum',)])
+        super().__init__(dist, [("count",), ("sum_log",), ("sum",)])
 
     @staticmethod
-    def _matrix_from_values(x: Any, log_x: Optional[Any] = None) -> np.ndarray:
+    def _matrix_from_values(x: Any, log_x: Any | None = None) -> np.ndarray:
         xx = np.asarray(x, dtype=np.float64).reshape(-1)
         lx = np.log(xx) if log_x is None else np.asarray(log_x, dtype=np.float64).reshape(-1)
         return np.column_stack((np.ones_like(xx, dtype=np.float64), lx, xx))
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         return self._matrix_from_values(data)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         if isinstance(enc_data, tuple):
             return self._matrix_from_values(enc_data[0], enc_data[1])
         return self._matrix_from_values(enc_data)
@@ -767,19 +831,19 @@ class GammaFisherView(FixedFisherView):
 
 class BetaFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
-        super().__init__(dist, [('count',), ('log_x',), ('log1m_x',)])
+        super().__init__(dist, [("count",), ("log_x",), ("log1m_x",)])
 
     @staticmethod
-    def _matrix_from_values(x: Any, log_x: Optional[Any] = None, log1m_x: Optional[Any] = None) -> np.ndarray:
+    def _matrix_from_values(x: Any, log_x: Any | None = None, log1m_x: Any | None = None) -> np.ndarray:
         xx = np.asarray(x, dtype=np.float64).reshape(-1)
         lx = np.log(xx) if log_x is None else np.asarray(log_x, dtype=np.float64).reshape(-1)
         l1 = np.log1p(-xx) if log1m_x is None else np.asarray(log1m_x, dtype=np.float64).reshape(-1)
         return np.column_stack((np.ones_like(xx, dtype=np.float64), lx, l1))
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         return self._matrix_from_values(data)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         if isinstance(enc_data, tuple):
             x = enc_data[2] if len(enc_data) > 2 else None
             if x is None:
@@ -810,11 +874,11 @@ class DirichletFisherView(FixedFisherView):
         alpha = np.asarray(dist.alpha, dtype=np.float64).reshape(-1)
         self.alpha = alpha
         self.dim = len(alpha)
-        labels = [('log', str(i)) for i in range(self.dim)]
-        labels.append(('count',))
+        labels = [("log", str(i)) for i in range(self.dim)]
+        labels.append(("count",))
         super().__init__(dist, labels)
 
-    def _matrix_from_values(self, values: Any, log_values: Optional[Any] = None) -> np.ndarray:
+    def _matrix_from_values(self, values: Any, log_values: Any | None = None) -> np.ndarray:
         if log_values is None:
             x = np.asarray(values, dtype=np.float64).reshape((-1, self.dim))
             log_x = np.log(np.maximum(x, np.finfo(np.float64).tiny))
@@ -822,10 +886,10 @@ class DirichletFisherView(FixedFisherView):
             log_x = np.asarray(log_values, dtype=np.float64).reshape((-1, self.dim))
         return np.hstack((log_x, np.ones((log_x.shape[0], 1), dtype=np.float64)))
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         return self._matrix_from_values(data)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         if isinstance(enc_data, tuple):
             return self._matrix_from_values(None, enc_data[0])
         return self._matrix_from_values(enc_data)
@@ -838,20 +902,20 @@ class DirichletFisherView(FixedFisherView):
         a0 = float(np.sum(self.alpha))
         cov = np.diag(trigamma(self.alpha)) - trigamma(a0)
         out = np.zeros((self.dim + 1, self.dim + 1), dtype=np.float64)
-        out[:self.dim, :self.dim] = cov
+        out[: self.dim, : self.dim] = cov
         return out
 
 
 class IndianBuffetProcessFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
         self.num_features = int(dist.num_features)
-        super().__init__(dist, [('feature', str(i)) for i in range(self.num_features)])
+        super().__init__(dist, [("feature", str(i)) for i in range(self.num_features)])
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         enc = self.dist.dist_to_encoder().seq_encode(list(data))
         return self._statistics_from_encoded(enc, estimate=estimate)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         return np.asarray(enc_data, dtype=np.float64).reshape((-1, self.num_features))
 
     def _model_mean(self) -> np.ndarray:
@@ -865,19 +929,19 @@ class IndianBuffetProcessFisherView(FixedFisherView):
 class CompositeFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
         self.child_views = [to_fisher(d) for d in dist.dists]
-        labels: List[Path] = []
+        labels: list[Path] = []
         for i, view in enumerate(self.child_views):
             labels.extend((str(i),) + label for label in view.vectorizer.labels)
         super().__init__(dist, labels)
 
     def _refresh_labels(self) -> None:
-        labels: List[Path] = []
+        labels: list[Path] = []
         for i, view in enumerate(self.child_views):
             labels.extend((str(i),) + label for label in view.vectorizer.labels)
         self.labels = labels
         self.vectorizer = SufficientStatisticVectorizer(self.labels)
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         mats = []
         ests = [None] * len(self.child_views) if estimate is None else estimate.dists
         for i, view in enumerate(self.child_views):
@@ -886,7 +950,7 @@ class CompositeFisherView(FixedFisherView):
         self._refresh_labels()
         return np.hstack(mats) if mats else np.zeros((len(data), 0), dtype=np.float64)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         mats = []
         ests = [None] * len(self.child_views) if estimate is None else estimate.dists
         for i, view in enumerate(self.child_views):
@@ -905,7 +969,7 @@ class CompositeFisherView(FixedFisherView):
         pos = 0
         for block in blocks:
             n = block.shape[0]
-            out[pos:pos + n, pos:pos + n] = block
+            out[pos : pos + n, pos : pos + n] = block
             pos += n
         return out
 
@@ -923,10 +987,10 @@ class MixtureFisherView(FixedFisherView):
         labels = self._labels_from_children()
         super().__init__(dist, labels)
 
-    def _labels_from_children(self) -> List[Path]:
-        labels: List[Path] = [('component', str(k)) for k in range(len(self.child_views))]
+    def _labels_from_children(self) -> list[Path]:
+        labels: list[Path] = [("component", str(k)) for k in range(len(self.child_views))]
         for k, view in enumerate(self.child_views):
-            labels.extend(('component_stat', str(k)) + label for label in view.vectorizer.labels)
+            labels.extend(("component_stat", str(k)) + label for label in view.vectorizer.labels)
         return labels
 
     def _refresh_labels(self) -> None:
@@ -939,10 +1003,10 @@ class MixtureFisherView(FixedFisherView):
     def _posterior_from_encoded(self, enc_data: Any) -> np.ndarray:
         return np.asarray(self.dist.seq_posterior(enc_data), dtype=np.float64)
 
-    def _component_stats_from_data(self, data: Sequence[Any]) -> List[np.ndarray]:
+    def _component_stats_from_data(self, data: Sequence[Any]) -> list[np.ndarray]:
         return [view.expected_statistics_matrix(data=data) for view in self.child_views]
 
-    def _component_stats_from_encoded(self, enc_data: Any) -> List[np.ndarray]:
+    def _component_stats_from_encoded(self, enc_data: Any) -> list[np.ndarray]:
         return [view.seq_expected_statistics(enc_data) for view in self.child_views]
 
     @staticmethod
@@ -952,30 +1016,28 @@ class MixtureFisherView(FixedFisherView):
             blocks.append(z[:, [k]] * stats)
         return np.hstack(blocks)
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         values = list(data)
         z = self._posterior_from_data(values)
         mats = self._component_stats_from_data(values)
         self._refresh_labels()
         return self._join_stats(z, mats)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         z = self._posterior_from_encoded(enc_data)
         mats = self._component_stats_from_encoded(enc_data)
         self._refresh_labels()
         return self._join_stats(z, mats)
 
-    def structured_statistics(self, x: Any, estimate: Optional[Any] = None, weight: float = 1.0) -> Any:
+    def structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
         z = self.dist.posterior(x) if estimate is None else estimate.posterior(x)
-        child_values = tuple(
-            z[k] * self.child_views[k].sufficient_statistics(x)
-            for k in range(len(self.child_views)))
+        child_values = tuple(z[k] * self.child_views[k].sufficient_statistics(x) for k in range(len(self.child_views)))
         return weight * z, child_values
 
-    def _component_means(self) -> List[np.ndarray]:
+    def _component_means(self) -> list[np.ndarray]:
         return [np.asarray(view.mean_statistics(), dtype=np.float64) for view in self.child_views]
 
-    def _component_moments(self) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    def _component_moments(self) -> tuple[list[np.ndarray], list[np.ndarray]]:
         means = self._component_means()
         infos = [np.asarray(view.fisher_information(ridge=0.0), dtype=np.float64) for view in self.child_views]
         return means, infos
@@ -1028,17 +1090,17 @@ class _PairProductFisherView(FixedFisherView):
     def __init__(self, left: FisherView, right: FisherView) -> None:
         self.left = left
         self.right = right
-        labels = [('0',) + label for label in left.vectorizer.labels]
-        labels.extend(('1',) + label for label in right.vectorizer.labels)
+        labels = [("0",) + label for label in left.vectorizer.labels]
+        labels.extend(("1",) + label for label in right.vectorizer.labels)
         FixedFisherView.__init__(self, (left.dist, right.dist), labels)
 
     def _refresh_labels(self) -> None:
-        labels = [('0',) + label for label in self.left.vectorizer.labels]
-        labels.extend(('1',) + label for label in self.right.vectorizer.labels)
+        labels = [("0",) + label for label in self.left.vectorizer.labels]
+        labels.extend(("1",) + label for label in self.right.vectorizer.labels)
         self.labels = labels
         self.vectorizer = SufficientStatisticVectorizer(self.labels)
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         left_data = [x[0] for x in data]
         right_data = [x[1] for x in data]
         left_est = None if estimate is None else estimate[0]
@@ -1048,7 +1110,7 @@ class _PairProductFisherView(FixedFisherView):
         self._refresh_labels()
         return np.hstack((left, right))
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         left_est = None if estimate is None else estimate[0]
         right_est = None if estimate is None else estimate[1]
         left = self.left.seq_expected_statistics(enc_data[0], estimate=left_est)
@@ -1069,7 +1131,7 @@ class _PairProductFisherView(FixedFisherView):
         pos = 0
         for block in blocks:
             n = block.shape[0]
-            out[pos:pos + n, pos:pos + n] = block
+            out[pos : pos + n, pos : pos + n] = block
             pos += n
         return out
 
@@ -1078,7 +1140,7 @@ class JointMixtureFisherView(MixtureFisherView):
     """Complete-data Fisher view for joint mixtures without concrete proxies."""
 
     def __init__(self, dist: Any) -> None:
-        self.pair_indices: List[Tuple[int, int]] = []
+        self.pair_indices: list[tuple[int, int]] = []
         weights = []
         child_views = []
         for i, component1 in enumerate(dist.components1):
@@ -1092,7 +1154,7 @@ class JointMixtureFisherView(MixtureFisherView):
                 weights.append(weight)
                 child_views.append(_PairProductFisherView(to_fisher(component1), to_fisher(component2)))
         if not child_views:
-            raise ValueError('JointMixtureFisherView requires at least one positive-weight component pair.')
+            raise ValueError("JointMixtureFisherView requires at least one positive-weight component pair.")
         self.child_views = child_views
         self._pair_weights = np.asarray(weights, dtype=np.float64)
         self._pair_weights /= self._pair_weights.sum()
@@ -1108,17 +1170,20 @@ class JointMixtureFisherView(MixtureFisherView):
         for x in data:
             scores = []
             for i, j in self.pair_indices:
-                scores.append(self.dist.log_w1[i] + self.dist.log_taus12[i, j] +
-                              self.dist.components1[i].log_density(x[0]) +
-                              self.dist.components2[j].log_density(x[1]))
+                scores.append(
+                    self.dist.log_w1[i]
+                    + self.dist.log_taus12[i, j]
+                    + self.dist.components1[i].log_density(x[0])
+                    + self.dist.components2[j].log_density(x[1])
+                )
             rows.append(scores)
         return np.asarray(rows, dtype=np.float64)
 
     def _pair_log_scores_from_encoded(self, enc_data: Any) -> np.ndarray:
         sz, enc1, enc2 = enc_data
         scores = np.zeros((int(sz), len(self.pair_indices)), dtype=np.float64)
-        left_cache: Dict[int, np.ndarray] = {}
-        right_cache: Dict[int, np.ndarray] = {}
+        left_cache: dict[int, np.ndarray] = {}
+        right_cache: dict[int, np.ndarray] = {}
         for k, (i, j) in enumerate(self.pair_indices):
             if i not in left_cache:
                 left_cache[i] = np.asarray(self.dist.components1[i].seq_log_density(enc1), dtype=np.float64)
@@ -1144,20 +1209,18 @@ class JointMixtureFisherView(MixtureFisherView):
         mx = float(np.max(scores))
         return float(mx + np.log(np.exp(scores - mx).sum()))
 
-    def _component_stats_from_data(self, data: Sequence[Any]) -> List[np.ndarray]:
+    def _component_stats_from_data(self, data: Sequence[Any]) -> list[np.ndarray]:
         return [view.expected_statistics_matrix(data=data) for view in self.child_views]
 
-    def _component_stats_from_encoded(self, enc_data: Any) -> List[np.ndarray]:
+    def _component_stats_from_encoded(self, enc_data: Any) -> list[np.ndarray]:
         _, enc1, enc2 = enc_data
         return [view.seq_expected_statistics((enc1, enc2)) for view in self.child_views]
 
-    def structured_statistics(self, x: Any, estimate: Optional[Any] = None, weight: float = 1.0) -> Any:
+    def structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
         if estimate is not None and estimate is not self.dist:
             return to_fisher(estimate).structured_statistics(x, weight=weight)
         z = self._posterior_from_data([x])[0]
-        child_values = tuple(
-            z[k] * self.child_views[k].sufficient_statistics(x)
-            for k in range(len(self.child_views)))
+        child_values = tuple(z[k] * self.child_views[k].sufficient_statistics(x) for k in range(len(self.child_views)))
         return weight * z, child_values
 
     def _model_mean(self) -> np.ndarray:
@@ -1203,15 +1266,15 @@ class JointMixtureFisherView(MixtureFisherView):
 
 
 def _is_null_dist(dist: Any) -> bool:
-    return dist is None or type(dist).__name__ == 'NullDistribution'
+    return dist is None or type(dist).__name__ == "NullDistribution"
 
 
 def _seq_encode_model(model: Any, data: Sequence[Any]) -> Any:
-    if hasattr(model, 'dist_to_encoder'):
+    if hasattr(model, "dist_to_encoder"):
         return model.dist_to_encoder().seq_encode(data)
-    if hasattr(model, 'seq_encode'):
+    if hasattr(model, "seq_encode"):
         return model.seq_encode(data)
-    raise NotImplementedError('%s does not provide sequence encoding' % type(model).__name__)
+    raise NotImplementedError("%s does not provide sequence encoding" % type(model).__name__)
 
 
 def _diag_info_from_view(view: FisherView) -> np.ndarray:
@@ -1261,7 +1324,7 @@ def _structured_values_matrix(view: FisherView, values: Sequence[Any]) -> np.nda
     return vec.transform(values)
 
 
-def _finite_support_from_log_density(dist: Any, lo: int, hi: int) -> Tuple[np.ndarray, np.ndarray]:
+def _finite_support_from_log_density(dist: Any, lo: int, hi: int) -> tuple[np.ndarray, np.ndarray]:
     values = np.arange(lo, hi + 1, dtype=np.int64)
     lp = np.asarray([dist.log_density(int(v)) for v in values], dtype=np.float64)
     good = np.isfinite(lp)
@@ -1275,24 +1338,24 @@ def _finite_support_from_log_density(dist: Any, lo: int, hi: int) -> Tuple[np.nd
     return values.astype(np.float64), p
 
 
-def _length_support(dist: Any, tol: float = 1.0e-12, max_terms: int = 20000) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+def _length_support(dist: Any, tol: float = 1.0e-12, max_terms: int = 20000) -> tuple[np.ndarray, np.ndarray] | None:
     if _is_null_dist(dist):
         return None
     tname = type(dist).__name__
 
-    if tname == 'IntegerCategoricalDistribution' and hasattr(dist, 'p_vec'):
+    if tname == "IntegerCategoricalDistribution" and hasattr(dist, "p_vec"):
         values = np.arange(int(dist.min_val), int(dist.max_val) + 1, dtype=np.float64)
         probs = np.asarray(dist.p_vec, dtype=np.float64)
         total = probs.sum()
         return values, probs / total if total > 0.0 else np.ones_like(probs) / max(len(probs), 1)
 
-    if tname == 'IntegerCategoricalDistribution' and hasattr(dist, 'prob_vec'):
+    if tname == "IntegerCategoricalDistribution" and hasattr(dist, "prob_vec"):
         values = np.arange(int(dist.min_index), int(dist.max_index) + 1, dtype=np.float64)
         probs = np.asarray(dist.prob_vec, dtype=np.float64)
         total = probs.sum()
         return values, probs / total if total > 0.0 else np.ones_like(probs) / max(len(probs), 1)
 
-    if tname == 'CategoricalDistribution' and hasattr(dist, 'pmap') and not getattr(dist, 'no_default', False):
+    if tname == "CategoricalDistribution" and hasattr(dist, "pmap") and not getattr(dist, "no_default", False):
         try:
             items = sorted(((float(k), float(v)) for k, v in dist.pmap.items()), key=lambda u: u[0])
         except (TypeError, ValueError):
@@ -1302,7 +1365,7 @@ def _length_support(dist: Any, tol: float = 1.0e-12, max_terms: int = 20000) -> 
         total = probs.sum()
         return values, probs / total if total > 0.0 else np.ones_like(probs) / max(len(probs), 1)
 
-    if tname == 'CategoricalDistribution' and hasattr(dist, 'prob_map'):
+    if tname == "CategoricalDistribution" and hasattr(dist, "prob_map"):
         try:
             items = sorted(((float(k), float(v)) for k, v in dist.prob_map.items()), key=lambda u: u[0])
         except (TypeError, ValueError):
@@ -1312,15 +1375,15 @@ def _length_support(dist: Any, tol: float = 1.0e-12, max_terms: int = 20000) -> 
         total = probs.sum()
         return values, probs / total if total > 0.0 else np.ones_like(probs) / max(len(probs), 1)
 
-    if tname == 'BernoulliDistribution' and hasattr(dist, 'p'):
+    if tname == "BernoulliDistribution" and hasattr(dist, "p"):
         p = float(dist.p)
         return np.asarray([0.0, 1.0]), np.asarray([1.0 - p, p])
 
-    if tname == 'BinomialDistribution' and hasattr(dist, 'n'):
-        shift = 0 if getattr(dist, 'min_val', None) is None else int(dist.min_val)
+    if tname == "BinomialDistribution" and hasattr(dist, "n"):
+        shift = 0 if getattr(dist, "min_val", None) is None else int(dist.min_val)
         return _finite_support_from_log_density(dist, shift, shift + int(dist.n))
 
-    if tname == 'PoissonDistribution' and hasattr(dist, 'lam'):
+    if tname == "PoissonDistribution" and hasattr(dist, "lam"):
         lam = float(dist.lam)
         hi = int(max(32.0, math.ceil(lam + 12.0 * math.sqrt(max(lam, 1.0)) + 32.0)))
         while hi < max_terms:
@@ -1336,7 +1399,7 @@ def _length_support(dist: Any, tol: float = 1.0e-12, max_terms: int = 20000) -> 
             hi *= 2
         return _finite_support_from_log_density(dist, 0, max_terms)
 
-    if tname == 'GeometricDistribution' and hasattr(dist, 'p'):
+    if tname == "GeometricDistribution" and hasattr(dist, "p"):
         p = float(dist.p)
         q = 1.0 - p
         if q <= 0.0:
@@ -1353,24 +1416,30 @@ def _length_support(dist: Any, tol: float = 1.0e-12, max_terms: int = 20000) -> 
 class EmpiricalMetricFixedFisherView(FixedFisherView):
     """Fixed-coordinate view whose whitening falls back to empirical Fisher."""
 
-    def mean_statistics(self, stats: Optional[np.ndarray] = None, **kwargs: Any) -> np.ndarray:
+    def mean_statistics(self, stats: np.ndarray | None = None, **kwargs: Any) -> np.ndarray:
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         return np.asarray(stats, dtype=np.float64).mean(axis=0)
 
-    def fisher_information(self, stats: Optional[np.ndarray] = None, diagonal: bool = False,
-                           ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         return FisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge)
 
-    def fisher_vectors(self, stats: Optional[np.ndarray] = None, metric: str = 'diagonal',
-                       center: Optional[np.ndarray] = None, fisher: Optional[np.ndarray] = None,
-                       ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
-        return FisherView.fisher_vectors(self, stats=stats, metric=metric, center=center,
-                                         fisher=fisher, ridge=ridge)
+        return FisherView.fisher_vectors(self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge)
 
 
 class SequenceFisherView(FixedFisherView):
@@ -1378,13 +1447,13 @@ class SequenceFisherView(FixedFisherView):
 
     def __init__(self, dist: Any) -> None:
         self.child_view = to_fisher(dist.dist)
-        self.len_view = None if _is_null_dist(getattr(dist, 'len_dist', None)) else to_fisher(dist.len_dist)
+        self.len_view = None if _is_null_dist(getattr(dist, "len_dist", None)) else to_fisher(dist.len_dist)
         super().__init__(dist, self._labels_from_children())
 
-    def _labels_from_children(self) -> List[Path]:
-        labels = [('element',) + label for label in self.child_view.vectorizer.labels]
+    def _labels_from_children(self) -> list[Path]:
+        labels = [("element",) + label for label in self.child_view.vectorizer.labels]
         if self.len_view is not None:
-            labels.extend(('length',) + label for label in self.len_view.vectorizer.labels)
+            labels.extend(("length",) + label for label in self.len_view.vectorizer.labels)
         return labels
 
     def _refresh_labels(self) -> None:
@@ -1399,7 +1468,9 @@ class SequenceFisherView(FixedFisherView):
         lengths[nz] = np.rint(1.0 / np.asarray(inv_len, dtype=np.float64)[nz]).astype(np.int64)
         return lengths
 
-    def _aggregate_flat(self, flat_stats: np.ndarray, idx: np.ndarray, n: int, inv_len: Optional[np.ndarray]) -> np.ndarray:
+    def _aggregate_flat(
+        self, flat_stats: np.ndarray, idx: np.ndarray, n: int, inv_len: np.ndarray | None
+    ) -> np.ndarray:
         out = np.zeros((n, flat_stats.shape[1]), dtype=np.float64)
         if len(idx) == 0:
             return out
@@ -1410,11 +1481,11 @@ class SequenceFisherView(FixedFisherView):
             np.add.at(out, idx, flat_stats * weights[:, None])
         return out
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         enc = _seq_encode_model(self.dist if estimate is None else estimate, list(data))
         return self._statistics_from_encoded(enc, estimate=estimate)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         idx, inv_len, _, enc_seq, enc_len = enc_data
         n = len(inv_len)
         if len(idx):
@@ -1428,10 +1499,10 @@ class SequenceFisherView(FixedFisherView):
         self._refresh_labels()
         return np.hstack(blocks) if blocks else np.zeros((n, 0), dtype=np.float64)
 
-    def _sequence_model_mean_cov(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _sequence_model_mean_cov(self) -> tuple[np.ndarray, np.ndarray]:
         support = _length_support(self.dist.len_dist)
         if support is None:
-            raise NotImplementedError('sequence model Fisher requires a supported length distribution')
+            raise NotImplementedError("sequence model Fisher requires a supported length distribution")
         lengths, probs = support
         child_mu = np.asarray(self.child_view.mean_statistics(), dtype=np.float64)
         child_cov = _full_info_from_view(self.child_view)
@@ -1489,24 +1560,33 @@ class SequenceFisherView(FixedFisherView):
     def _model_fisher(self) -> np.ndarray:
         return self._sequence_model_mean_cov()[1]
 
-    def fisher_information(self, stats: Optional[np.ndarray] = None, diagonal: bool = False,
-                           ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
         try:
             return super().fisher_information(stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
         except NotImplementedError:
             return FisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
 
-    def fisher_vectors(self, stats: Optional[np.ndarray] = None, metric: str = 'diagonal',
-                       center: Optional[np.ndarray] = None, fisher: Optional[np.ndarray] = None,
-                       ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
         try:
-            return super().fisher_vectors(stats=stats, metric=metric, center=center,
-                                          fisher=fisher, ridge=ridge, **kwargs)
+            return super().fisher_vectors(
+                stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs
+            )
         except NotImplementedError:
             if stats is None:
                 stats = self.expected_statistics_matrix(**kwargs)
-            return FisherView.fisher_vectors(self, stats=stats, metric=metric, center=center,
-                                             fisher=fisher, ridge=ridge)
+            return FisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge
+            )
 
 
 class MultinomialFisherView(SequenceFisherView):
@@ -1519,14 +1599,15 @@ class MultinomialFisherView(SequenceFisherView):
     accumulator statistic.
     """
 
-    def _labels_from_children(self) -> List[Path]:
-        labels = [('value',) + label for label in self.child_view.vectorizer.labels]
+    def _labels_from_children(self) -> list[Path]:
+        labels = [("value",) + label for label in self.child_view.vectorizer.labels]
         if self.len_view is not None:
-            labels.extend(('length',) + label for label in self.len_view.vectorizer.labels)
+            labels.extend(("length",) + label for label in self.len_view.vectorizer.labels)
         return labels
 
-    def _aggregate_weighted_flat(self, flat_stats: np.ndarray, idx: np.ndarray,
-                                 counts: np.ndarray, totals: np.ndarray) -> np.ndarray:
+    def _aggregate_weighted_flat(
+        self, flat_stats: np.ndarray, idx: np.ndarray, counts: np.ndarray, totals: np.ndarray
+    ) -> np.ndarray:
         out = np.zeros((len(totals), flat_stats.shape[1]), dtype=np.float64)
         if len(idx) == 0:
             return out
@@ -1540,7 +1621,7 @@ class MultinomialFisherView(SequenceFisherView):
         np.add.at(out, idx, flat_stats * weights[:, None])
         return out
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         idx, _, _, enc_seq, enc_len, counts, totals = enc_data
         idx = np.asarray(idx, dtype=np.int64)
         totals = np.asarray(totals, dtype=np.float64)
@@ -1559,20 +1640,20 @@ class MultinomialFisherView(SequenceFisherView):
 class OptionalFisherView(EmpiricalMetricFixedFisherView):
     def __init__(self, dist: Any) -> None:
         self.child_view = to_fisher(dist.dist)
-        self.has_gate = getattr(dist, 'has_p', getattr(dist, 'p', None) is not None)
-        self._encoded_missing_first = hasattr(dist, 'missing_value_is_nan')
+        self.has_gate = getattr(dist, "has_p", getattr(dist, "p", None) is not None)
+        self._encoded_missing_first = hasattr(dist, "missing_value_is_nan")
         labels = []
         if self.has_gate:
-            labels.extend([('missing',), ('present',)])
-        labels.extend(('present_stat',) + label for label in self.child_view.vectorizer.labels)
+            labels.extend([("missing",), ("present",)])
+        labels.extend(("present_stat",) + label for label in self.child_view.vectorizer.labels)
         super().__init__(dist, labels)
 
     def _is_missing(self, x: Any) -> bool:
-        if getattr(self.dist, 'missing_value_is_nan', getattr(self.dist, 'mv_is_nan', False)):
+        if getattr(self.dist, "missing_value_is_nan", getattr(self.dist, "mv_is_nan", False)):
             return isinstance(x, (np.floating, float)) and np.isnan(x)
         return x == self.dist.missing_value or x is self.dist.missing_value
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         n = len(data)
         d = len(self.child_view.vectorizer.labels)
         child = np.zeros((n, d), dtype=np.float64)
@@ -1587,10 +1668,12 @@ class OptionalFisherView(EmpiricalMetricFixedFisherView):
                 present_idx.append(i)
                 present_values.append(x)
         if present_values:
-            child[np.asarray(present_idx, dtype=np.int64)] = self.child_view.expected_statistics_matrix(data=present_values)
+            child[np.asarray(present_idx, dtype=np.int64)] = self.child_view.expected_statistics_matrix(
+                data=present_values
+            )
         return np.hstack((gate, child)) if gate is not None else child
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         n, idx_a, idx_b, enc_child = enc_data
         z_idx, nz_idx = (idx_a, idx_b) if self._encoded_missing_first else (idx_b, idx_a)
         d = len(self.child_view.vectorizer.labels)
@@ -1629,29 +1712,39 @@ class OptionalFisherView(EmpiricalMetricFixedFisherView):
         out[2:, 2:] = q * info + p * q * np.outer(mu, mu)
         return out
 
-    def mean_statistics(self, stats: Optional[np.ndarray] = None, model: bool = True, **kwargs: Any) -> np.ndarray:
+    def mean_statistics(self, stats: np.ndarray | None = None, model: bool = True, **kwargs: Any) -> np.ndarray:
         try:
             return FixedFisherView.mean_statistics(self, stats=stats, model=model, **kwargs)
         except NotImplementedError:
             return EmpiricalMetricFixedFisherView.mean_statistics(self, stats=stats, **kwargs)
 
-    def fisher_information(self, stats: Optional[np.ndarray] = None, diagonal: bool = False,
-                           ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
         try:
             return FixedFisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
         except NotImplementedError:
-            return EmpiricalMetricFixedFisherView.fisher_information(self, stats=stats, diagonal=diagonal,
-                                                                     ridge=ridge, **kwargs)
+            return EmpiricalMetricFixedFisherView.fisher_information(
+                self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs
+            )
 
-    def fisher_vectors(self, stats: Optional[np.ndarray] = None, metric: str = 'diagonal',
-                       center: Optional[np.ndarray] = None, fisher: Optional[np.ndarray] = None,
-                       ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
         try:
-            return FixedFisherView.fisher_vectors(self, stats=stats, metric=metric, center=center,
-                                                  fisher=fisher, ridge=ridge, **kwargs)
+            return FixedFisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs
+            )
         except NotImplementedError:
-            return EmpiricalMetricFixedFisherView.fisher_vectors(self, stats=stats, metric=metric, center=center,
-                                                                 fisher=fisher, ridge=ridge, **kwargs)
+            return EmpiricalMetricFixedFisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs
+            )
 
 
 class WeightedFisherView(FixedFisherView):
@@ -1659,12 +1752,12 @@ class WeightedFisherView(FixedFisherView):
         self.child_view = to_fisher(dist.dist)
         super().__init__(dist, list(self.child_view.vectorizer.labels))
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         values = [x[0] for x in data]
         weights = np.asarray([x[1] for x in data], dtype=np.float64)
         return self.child_view.expected_statistics_matrix(data=values) * weights[:, None]
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         enc_child, weights = enc_data
         return self.child_view.seq_expected_statistics(enc_child) * np.asarray(weights, dtype=np.float64)[:, None]
 
@@ -1674,7 +1767,7 @@ class WeightedFisherView(FixedFisherView):
     def _model_fisher(self) -> np.ndarray:
         return np.asarray(self.child_view.fisher_information(ridge=0.0), dtype=np.float64)
 
-    def score_center(self, stats: Optional[np.ndarray] = None, **kwargs: Any) -> np.ndarray:
+    def score_center(self, stats: np.ndarray | None = None, **kwargs: Any) -> np.ndarray:
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         return np.asarray(stats, dtype=np.float64).mean(axis=0)
@@ -1683,15 +1776,15 @@ class WeightedFisherView(FixedFisherView):
 class SelectFisherView(EmpiricalMetricFixedFisherView):
     def __init__(self, dist: Any) -> None:
         self.child_views = [to_fisher(d) for d in dist.dists]
-        labels: List[Path] = []
+        labels: list[Path] = []
         for i, view in enumerate(self.child_views):
-            labels.extend(('choice', str(i)) + label for label in view.vectorizer.labels)
+            labels.extend(("choice", str(i)) + label for label in view.vectorizer.labels)
         super().__init__(dist, labels)
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         n = len(data)
         blocks = [np.zeros((n, len(view.vectorizer.labels)), dtype=np.float64) for view in self.child_views]
-        grouped: Dict[int, List[Tuple[int, Any]]] = {}
+        grouped: dict[int, list[tuple[int, Any]]] = {}
         for i, x in enumerate(data):
             grouped.setdefault(int(self.dist.choice_function(x)), []).append((i, x))
         for k, pairs in grouped.items():
@@ -1700,7 +1793,7 @@ class SelectFisherView(EmpiricalMetricFixedFisherView):
             blocks[k][idx] = self.child_views[k].expected_statistics_matrix(data=vals)
         return np.hstack(blocks) if blocks else np.zeros((n, 0), dtype=np.float64)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         xi, idx, enc_tuple = enc_data
         n = sum(len(u) for u in xi)
         blocks = [np.zeros((n, len(view.vectorizer.labels)), dtype=np.float64) for view in self.child_views]
@@ -1727,14 +1820,14 @@ class HeterogeneousPCFGFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
         self.dist = dist
         self.child_views = [to_fisher(d) for d in dist.emissions]
-        self._model_cache: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._model_cache: tuple[np.ndarray, np.ndarray] | None = None
         super().__init__(dist, self._labels_from_children())
 
-    def _labels_from_children(self) -> List[Path]:
-        labels: List[Path] = [('terminal_rule', str(r)) for r in range(self.dist.num_terminal_rules)]
-        labels.extend(('binary_rule', str(r)) for r in range(self.dist.num_binary_rules))
+    def _labels_from_children(self) -> list[Path]:
+        labels: list[Path] = [("terminal_rule", str(r)) for r in range(self.dist.num_terminal_rules)]
+        labels.extend(("binary_rule", str(r)) for r in range(self.dist.num_binary_rules))
         for r, view in enumerate(self.child_views):
-            labels.extend(('terminal_emission', str(r)) + label for label in view.vectorizer.labels)
+            labels.extend(("terminal_emission", str(r)) + label for label in view.vectorizer.labels)
         return labels
 
     def _refresh_labels(self) -> None:
@@ -1757,12 +1850,12 @@ class HeterogeneousPCFGFisherView(FixedFisherView):
         self._refresh_labels()
         return np.hstack(blocks)
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         model = self.dist if estimate is None else estimate
         enc = _seq_encode_model(model, list(data))
         return self._statistics_from_encoded(enc, estimate=model)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         model = self.dist if estimate is None else estimate
         lengths, enc_by_rule = enc_data
         lengths = np.asarray(lengths, dtype=np.int64)
@@ -1770,12 +1863,11 @@ class HeterogeneousPCFGFisherView(FixedFisherView):
         total = int(lengths.sum())
 
         terminal_ld = np.empty((total, model.num_terminal_rules), dtype=np.float64)
-        child_stats: List[np.ndarray] = []
+        child_stats: list[np.ndarray] = []
         for r, dist in enumerate(model.emissions):
             if total > 0:
                 terminal_ld[:, r] = dist.seq_log_density(enc_by_rule[r])
-                child_stats.append(self.child_views[r].seq_expected_statistics(
-                    enc_by_rule[r], estimate=dist))
+                child_stats.append(self.child_views[r].seq_expected_statistics(enc_by_rule[r], estimate=dist))
             else:
                 terminal_ld = np.empty((0, model.num_terminal_rules), dtype=np.float64)
                 child_stats.append(np.zeros((0, len(self.child_views[r].vectorizer.labels)), dtype=np.float64))
@@ -1783,10 +1875,7 @@ class HeterogeneousPCFGFisherView(FixedFisherView):
         self._refresh_labels()
         terminal_counts = np.zeros((nobs, model.num_terminal_rules), dtype=np.float64)
         binary_counts = np.zeros((nobs, model.num_binary_rules), dtype=np.float64)
-        emission_blocks = [
-            np.zeros((nobs, stats.shape[1]), dtype=np.float64)
-            for stats in child_stats
-        ]
+        emission_blocks = [np.zeros((nobs, stats.shape[1]), dtype=np.float64) for stats in child_stats]
 
         offsets = np.concatenate(([0], np.cumsum(lengths))).astype(np.int64)
         for i, n in enumerate(lengths):
@@ -1805,12 +1894,12 @@ class HeterogeneousPCFGFisherView(FixedFisherView):
         blocks.extend(emission_blocks)
         return np.hstack(blocks) if blocks else np.zeros((nobs, 0), dtype=np.float64)
 
-    def _enumerated_model_mean_cov(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _enumerated_model_mean_cov(self) -> tuple[np.ndarray, np.ndarray]:
         if self._model_cache is not None:
             return self._model_cache
 
-        values: List[Any] = []
-        probs: List[float] = []
+        values: list[Any] = []
+        probs: list[float] = []
         try:
             iterator = iter(self.dist.enumerator())
             exhausted = False
@@ -1825,21 +1914,22 @@ class HeterogeneousPCFGFisherView(FixedFisherView):
                     probs.append(float(math.exp(log_prob)))
             if not exhausted:
                 raise NotImplementedError(
-                    'PCFG model Fisher requires finite enumerable support; use observed_fisher_information().')
+                    "PCFG model Fisher requires finite enumerable support; use observed_fisher_information()."
+                )
         except NotImplementedError:
             raise
         except Exception as exc:
             raise NotImplementedError(
-                'PCFG model Fisher requires finite enumerable support; use observed_fisher_information().') from exc
+                "PCFG model Fisher requires finite enumerable support; use observed_fisher_information()."
+            ) from exc
 
         if not values:
-            raise NotImplementedError('PCFG model Fisher requires non-empty finite support.')
+            raise NotImplementedError("PCFG model Fisher requires non-empty finite support.")
 
         weights = np.asarray(probs, dtype=np.float64)
         total = float(weights.sum())
         if total <= 0.0 or not np.isfinite(total) or abs(total - 1.0) > self._model_mass_tol:
-            raise NotImplementedError(
-                'PCFG finite support did not sum to one; use observed_fisher_information().')
+            raise NotImplementedError("PCFG finite support did not sum to one; use observed_fisher_information().")
         weights /= total
 
         stats = self.expected_statistics_matrix(data=values)
@@ -1858,8 +1948,9 @@ class HeterogeneousPCFGFisherView(FixedFisherView):
     def _model_fisher(self) -> np.ndarray:
         return self._enumerated_model_mean_cov()[1]
 
-    def fisher_information(self, stats: Optional[np.ndarray] = None, diagonal: bool = False,
-                           ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
         try:
             return FixedFisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
         except NotImplementedError:
@@ -1867,17 +1958,25 @@ class HeterogeneousPCFGFisherView(FixedFisherView):
                 return FisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge)
             raise
 
-    def fisher_vectors(self, stats: Optional[np.ndarray] = None, metric: str = 'diagonal',
-                       center: Optional[np.ndarray] = None, fisher: Optional[np.ndarray] = None,
-                       ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
         try:
-            return FixedFisherView.fisher_vectors(self, stats=stats, metric=metric, center=center,
-                                                  fisher=fisher, ridge=ridge, **kwargs)
+            return FixedFisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs
+            )
         except NotImplementedError:
             if stats is None:
                 raise
-            return FisherView.fisher_vectors(self, stats=stats, metric=metric, center=center,
-                                             fisher=fisher, ridge=ridge)
+            return FisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge
+            )
 
 
 class HiddenMarkovFisherView(FixedFisherView):
@@ -1899,28 +1998,28 @@ class HiddenMarkovFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
         self.dist = dist
         self.topic_views = [to_fisher(d) for d in dist.topics]
-        self.len_view = None if _is_null_dist(getattr(dist, 'len_dist', None)) else to_fisher(dist.len_dist)
+        self.len_view = None if _is_null_dist(getattr(dist, "len_dist", None)) else to_fisher(dist.len_dist)
         self._estimator = dist.estimator()
-        self._has_state_counts = hasattr(dist, 'n_states')
-        self._model_cache: Optional[Tuple[np.ndarray, np.ndarray]] = None
-        self._diag_model_cache: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._has_state_counts = hasattr(dist, "n_states")
+        self._model_cache: tuple[np.ndarray, np.ndarray] | None = None
+        self._diag_model_cache: tuple[np.ndarray, np.ndarray] | None = None
         super().__init__(dist, self._labels_from_children())
 
     def _num_states(self) -> int:
-        if hasattr(self.dist, 'n_states'):
+        if hasattr(self.dist, "n_states"):
             return int(self.dist.n_states)
         return int(self.dist.num_states)
 
-    def _labels_from_children(self) -> List[Path]:
+    def _labels_from_children(self) -> list[Path]:
         k = self._num_states()
-        labels: List[Path] = [('init', str(i)) for i in range(k)]
+        labels: list[Path] = [("init", str(i)) for i in range(k)]
         if self._has_state_counts:
-            labels.extend(('state', str(i)) for i in range(k))
-        labels.extend(('transition', str(i), str(j)) for i in range(k) for j in range(k))
+            labels.extend(("state", str(i)) for i in range(k))
+        labels.extend(("transition", str(i), str(j)) for i in range(k) for j in range(k))
         for i, view in enumerate(self.topic_views):
-            labels.extend(('emission', str(i)) + label for label in view.vectorizer.labels)
+            labels.extend(("emission", str(i)) + label for label in view.vectorizer.labels)
         if self.len_view is not None:
-            labels.extend(('length',) + label for label in self.len_view.vectorizer.labels)
+            labels.extend(("length",) + label for label in self.len_view.vectorizer.labels)
         return labels
 
     def _refresh_labels(self) -> None:
@@ -1929,7 +2028,7 @@ class HiddenMarkovFisherView(FixedFisherView):
         self._model_cache = None
         self._diag_model_cache = None
 
-    def _accumulator_value_rows(self, enc_data: Any, model: Optional[Any] = None) -> List[Any]:
+    def _accumulator_value_rows(self, enc_data: Any, model: Any | None = None) -> list[Any]:
         model = self.dist if model is None else model
         n = self._n_encoded(enc_data, model)
         values = []
@@ -1945,8 +2044,9 @@ class HiddenMarkovFisherView(FixedFisherView):
         if not values:
             return np.zeros((0, len(self.labels)), dtype=np.float64)
 
-        init_idx, state_idx, trans_idx, topic_idx, len_idx = (1, 2, 3, 4, 5) if self._has_state_counts else (
-            0, None, 1, 2, 3)
+        init_idx, state_idx, trans_idx, topic_idx, len_idx = (
+            (1, 2, 3, 4, 5) if self._has_state_counts else (0, None, 1, 2, 3)
+        )
         init = np.vstack([np.asarray(v[init_idx], dtype=np.float64) for v in values])
         trans = np.vstack([np.asarray(v[trans_idx], dtype=np.float64).reshape(-1) for v in values])
         blocks = [init]
@@ -1966,8 +2066,9 @@ class HiddenMarkovFisherView(FixedFisherView):
         return np.hstack(blocks)
 
     @staticmethod
-    def _sequence_forward_backward(log_b: np.ndarray, init: np.ndarray,
-                                   transition: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _sequence_forward_backward(
+        log_b: np.ndarray, init: np.ndarray, transition: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         n, k = log_b.shape
         gamma = np.zeros((n, k), dtype=np.float64)
         trans = np.zeros((k, k), dtype=np.float64)
@@ -1977,7 +2078,7 @@ class HiddenMarkovFisherView(FixedFisherView):
 
         row_max = np.max(log_b, axis=1, keepdims=True)
         safe_max = np.where(np.isfinite(row_max), row_max, 0.0)
-        with np.errstate(over='ignore', invalid='ignore'):
+        with np.errstate(over="ignore", invalid="ignore"):
             obs = np.exp(log_b - safe_max)
         obs[~np.isfinite(obs)] = 0.0
 
@@ -2015,12 +2116,17 @@ class HiddenMarkovFisherView(FixedFisherView):
 
     def _emission_log_matrix(self, enc_obs: Any, model: Any) -> np.ndarray:
         k = self._num_states()
-        return np.asarray([model.topics[i].seq_log_density(enc_obs) for i in range(k)],
-                          dtype=np.float64).T
+        return np.asarray([model.topics[i].seq_log_density(enc_obs) for i in range(k)], dtype=np.float64).T
 
-    def _hmm_rows_from_indexed_encoding(self, lengths: np.ndarray, enc_obs: Any,
-                                        len_enc: Any, row_indices: Sequence[np.ndarray],
-                                        flat_to_row: np.ndarray, model: Any) -> np.ndarray:
+    def _hmm_rows_from_indexed_encoding(
+        self,
+        lengths: np.ndarray,
+        enc_obs: Any,
+        len_enc: Any,
+        row_indices: Sequence[np.ndarray],
+        flat_to_row: np.ndarray,
+        model: Any,
+    ) -> np.ndarray:
         lengths = np.asarray(lengths, dtype=np.int64)
         n = len(lengths)
         k = self._num_states()
@@ -2036,8 +2142,7 @@ class HiddenMarkovFisherView(FixedFisherView):
                 rows = np.asarray(rows, dtype=np.int64)
                 if len(rows) == 0:
                     continue
-                init_i, gamma_i, trans_i = self._sequence_forward_backward(
-                    log_b_all[rows], model.w, model.transitions)
+                init_i, gamma_i, trans_i = self._sequence_forward_backward(log_b_all[rows], model.w, model.transitions)
                 init[i] = init_i
                 gamma[rows] = gamma_i
                 trans[i] = trans_i
@@ -2058,8 +2163,7 @@ class HiddenMarkovFisherView(FixedFisherView):
                 if flat_stats.shape[1] != d:
                     d = flat_stats.shape[1]
                     emission = np.zeros((n, d), dtype=np.float64)
-                np.add.at(emission, np.asarray(flat_to_row, dtype=np.int64),
-                          gamma[:, [s]] * flat_stats)
+                np.add.at(emission, np.asarray(flat_to_row, dtype=np.int64), gamma[:, [s]] * flat_stats)
             blocks.append(emission)
 
         if self.len_view is not None:
@@ -2074,23 +2178,26 @@ class HiddenMarkovFisherView(FixedFisherView):
             (tot_cnt, _, _, len_vec, idx_mat, idx_vec, enc_obs), _, len_enc = x0
             row_indices = [idx_mat[i, idx_mat[i] >= 0] for i in range(idx_mat.shape[0])]
             return self._hmm_rows_from_indexed_encoding(
-                np.asarray(len_vec, dtype=np.int64), enc_obs, len_enc, row_indices,
-                np.asarray(idx_vec, dtype=np.int64), model)
+                np.asarray(len_vec, dtype=np.int64),
+                enc_obs,
+                len_enc,
+                row_indices,
+                np.asarray(idx_vec, dtype=np.int64),
+                model,
+            )
 
         (idx, sz, enc_obs), len_enc = x1
         offsets = np.concatenate(([0], np.cumsum(np.asarray(sz, dtype=np.int64))))
-        row_indices = [np.arange(offsets[i], offsets[i + 1], dtype=np.int64)
-                       for i in range(len(sz))]
+        row_indices = [np.arange(offsets[i], offsets[i + 1], dtype=np.int64) for i in range(len(sz))]
         return self._hmm_rows_from_indexed_encoding(
-            np.asarray(sz, dtype=np.int64), enc_obs, len_enc, row_indices,
-            np.asarray(idx, dtype=np.int64), model)
+            np.asarray(sz, dtype=np.int64), enc_obs, len_enc, row_indices, np.asarray(idx, dtype=np.int64), model
+        )
 
     def _bstats_hmm_rows_from_encoded(self, enc_data: Any, model: Any) -> np.ndarray:
         lengths, offsets, enc_obs, len_enc = enc_data
         lengths = np.asarray(lengths, dtype=np.int64)
         offsets = np.asarray(offsets, dtype=np.int64)
-        row_indices = [np.arange(offsets[i], offsets[i + 1], dtype=np.int64)
-                       for i in range(len(lengths))]
+        row_indices = [np.arange(offsets[i], offsets[i + 1], dtype=np.int64) for i in range(len(lengths))]
         flat_to_row = np.repeat(np.arange(len(lengths), dtype=np.int64), lengths)
         return self._hmm_rows_from_indexed_encoding(lengths, enc_obs, len_enc, row_indices, flat_to_row, model)
 
@@ -2101,18 +2208,18 @@ class HiddenMarkovFisherView(FixedFisherView):
             return self._bstats_hmm_rows_from_encoded(enc_data, model)
         raise NotImplementedError
 
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         enc = _seq_encode_model(self.dist if estimate is None else estimate, list(data))
         return self._statistics_from_encoded(enc, estimate=estimate)
 
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Optional[Any] = None) -> np.ndarray:
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
         model = self.dist if estimate is None else estimate
         try:
             return self._fast_statistics_from_encoded(enc_data, model)
         except NotImplementedError:
             return self._matrix_from_values(self._accumulator_value_rows(enc_data, model))
 
-    def structured_statistics(self, x: Any, estimate: Optional[Any] = None, weight: float = 1.0) -> Any:
+    def structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
         model = self.dist if estimate is None else estimate
         enc = _seq_encode_model(model, [x])
         weights = np.asarray([weight], dtype=np.float64)
@@ -2120,16 +2227,23 @@ class HiddenMarkovFisherView(FixedFisherView):
         acc.seq_update(enc, weights, model)
         return acc.value()
 
-    def _layout(self) -> Tuple[int, List[int], Optional[int], int]:
+    def _layout(self) -> tuple[int, list[int], int | None, int]:
         k = self._num_states()
         dims = [len(view.mean_statistics()) for view in self.topic_views]
         len_offset = k + (k if self._has_state_counts else 0) + k * k + sum(dims)
         total = len_offset + (0 if self.len_view is None else len(self.len_view.mean_statistics()))
         return k, dims, len_offset if self.len_view is not None else None, total
 
-    def _inc_state(self, state: int, init: bool, prev_state: Optional[int], total: int,
-                   offsets: Sequence[int], emission_mu: Sequence[np.ndarray],
-                   emission_second: Sequence[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    def _inc_state(
+        self,
+        state: int,
+        init: bool,
+        prev_state: int | None,
+        total: int,
+        offsets: Sequence[int],
+        emission_mu: Sequence[np.ndarray],
+        emission_second: Sequence[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray]:
         k = self._num_states()
         inc = np.zeros(total, dtype=np.float64)
         inc2 = np.zeros(total, dtype=np.float64)
@@ -2151,9 +2265,14 @@ class HiddenMarkovFisherView(FixedFisherView):
         inc2[s0:s1] = emission_second[state]
         return inc, inc2
 
-    def _path_moments_for_length(self, n: int, total_no_len: int,
-                                 offsets: Sequence[int], emission_mu: Sequence[np.ndarray],
-                                 emission_second: Sequence[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    def _path_moments_for_length(
+        self,
+        n: int,
+        total_no_len: int,
+        offsets: Sequence[int],
+        emission_mu: Sequence[np.ndarray],
+        emission_second: Sequence[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray]:
         k = self._num_states()
         if n <= 0:
             return np.zeros(total_no_len, dtype=np.float64), np.zeros(total_no_len, dtype=np.float64)
@@ -2179,8 +2298,7 @@ class HiddenMarkovFisherView(FixedFisherView):
                     a = trans[prev, s]
                     if a <= 0.0:
                         continue
-                    inc, inc2 = self._inc_state(s, False, prev, total_no_len, offsets,
-                                                emission_mu, emission_second)
+                    inc, inc2 = self._inc_state(s, False, prev, total_no_len, offsets, emission_mu, emission_second)
                     next_p[s] += p_state[prev] * a
                     next_first[s] += a * (first[prev] + p_state[prev] * inc)
                     next_second[s] += a * (second[prev] + 2.0 * inc * first[prev] + p_state[prev] * inc2)
@@ -2190,13 +2308,13 @@ class HiddenMarkovFisherView(FixedFisherView):
 
         return first.sum(axis=0), second.sum(axis=0)
 
-    def _diagonal_model_moments(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _diagonal_model_moments(self) -> tuple[np.ndarray, np.ndarray]:
         if self._diag_model_cache is not None:
             return self._diag_model_cache
 
         support = _length_support(self.dist.len_dist)
         if support is None:
-            raise NotImplementedError('HMM model Fisher requires a supported length distribution')
+            raise NotImplementedError("HMM model Fisher requires a supported length distribution")
         lengths, probs = support
         k, dims, len_offset, total = self._layout()
         offsets = []
@@ -2231,12 +2349,12 @@ class HiddenMarkovFisherView(FixedFisherView):
         self._diag_model_cache = (mean, np.maximum(second - mean * mean, 0.0))
         return self._diag_model_cache
 
-    def _enumerated_model_mean_cov(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _enumerated_model_mean_cov(self) -> tuple[np.ndarray, np.ndarray]:
         if self._model_cache is not None:
             return self._model_cache
 
-        values: List[Any] = []
-        probs: List[float] = []
+        values: list[Any] = []
+        probs: list[float] = []
         try:
             iterator = iter(self.dist.enumerator())
             exhausted = False
@@ -2251,21 +2369,22 @@ class HiddenMarkovFisherView(FixedFisherView):
                     probs.append(float(math.exp(log_prob)))
             if not exhausted:
                 raise NotImplementedError(
-                    'HMM full model Fisher requires finite enumerable support; use observed_fisher_information().')
+                    "HMM full model Fisher requires finite enumerable support; use observed_fisher_information()."
+                )
         except NotImplementedError:
             raise
         except Exception as exc:
             raise NotImplementedError(
-                'HMM full model Fisher requires finite enumerable support; use observed_fisher_information().') from exc
+                "HMM full model Fisher requires finite enumerable support; use observed_fisher_information()."
+            ) from exc
 
         if not values:
-            raise NotImplementedError('HMM full model Fisher requires non-empty finite support.')
+            raise NotImplementedError("HMM full model Fisher requires non-empty finite support.")
 
         weights = np.asarray(probs, dtype=np.float64)
         total = float(weights.sum())
         if total <= 0.0 or not np.isfinite(total) or abs(total - 1.0) > self._model_mass_tol:
-            raise NotImplementedError(
-                'HMM finite support did not sum to one; use observed_fisher_information().')
+            raise NotImplementedError("HMM finite support did not sum to one; use observed_fisher_information().")
         weights /= total
 
         stats = self.expected_statistics_matrix(data=values)
@@ -2290,8 +2409,9 @@ class HiddenMarkovFisherView(FixedFisherView):
         except NotImplementedError:
             return np.diag(self._diagonal_model_moments()[1])
 
-    def fisher_information(self, stats: Optional[np.ndarray] = None, diagonal: bool = False,
-                           ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
         if not diagonal:
             try:
                 info = self._enumerated_model_mean_cov()[1]
@@ -2299,75 +2419,87 @@ class HiddenMarkovFisherView(FixedFisherView):
             except NotImplementedError:
                 if stats is not None:
                     return FisherView.fisher_information(self, stats=stats, diagonal=False, ridge=ridge)
-                raise NotImplementedError('HMM full model Fisher requires finite enumerable support; '
-                                          'use diagonal=True or observed_fisher_information().')
+                raise NotImplementedError(
+                    "HMM full model Fisher requires finite enumerable support; "
+                    "use diagonal=True or observed_fisher_information()."
+                )
         try:
             return FixedFisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
         except NotImplementedError:
             return FisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
 
-    def fisher_vectors(self, stats: Optional[np.ndarray] = None, metric: str = 'diagonal',
-                       center: Optional[np.ndarray] = None, fisher: Optional[np.ndarray] = None,
-                       ridge: float = 1.0e-8, **kwargs: Any) -> np.ndarray:
-        if metric == 'full' and fisher is None:
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        if metric == "full" and fisher is None:
             try:
                 mean, info = self._enumerated_model_mean_cov()
             except NotImplementedError:
                 if stats is not None:
-                    raise NotImplementedError('HMM full model Fisher vectors require finite enumerable support; '
-                                              'use metric="diagonal" or observed_fisher_vectors().')
+                    raise NotImplementedError(
+                        "HMM full model Fisher vectors require finite enumerable support; "
+                        'use metric="diagonal" or observed_fisher_vectors().'
+                    )
                 raise
             if stats is None:
                 stats = self.expected_statistics_matrix(**kwargs)
-            return FisherView.fisher_vectors(self, stats=stats, metric='full',
-                                             center=mean if center is None else center,
-                                             fisher=info, ridge=ridge)
+            return FisherView.fisher_vectors(
+                self, stats=stats, metric="full", center=mean if center is None else center, fisher=info, ridge=ridge
+            )
         try:
-            return FixedFisherView.fisher_vectors(self, stats=stats, metric=metric, center=center,
-                                                  fisher=fisher, ridge=ridge, **kwargs)
+            return FixedFisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs
+            )
         except NotImplementedError:
             if stats is None:
                 stats = self.expected_statistics_matrix(**kwargs)
-            return FisherView.fisher_vectors(self, stats=stats, metric=metric, center=center,
-                                             fisher=fisher, ridge=ridge)
+            return FisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge
+            )
 
 
 def _as_float_array(data: Any) -> np.ndarray:
     return np.asarray(data, dtype=np.float64)
 
 
-def _poisson_mean_var(dist: Any) -> Tuple[float, float]:
+def _poisson_mean_var(dist: Any) -> tuple[float, float]:
     lam = float(dist.lam)
     return lam, lam
 
 
-def _exponential_mean_var(dist: Any) -> Tuple[float, float]:
-    if hasattr(dist, 'beta'):
+def _exponential_mean_var(dist: Any) -> tuple[float, float]:
+    if hasattr(dist, "beta"):
         mean = float(dist.beta)
     else:
         mean = 1.0 / float(dist.lam)
     return mean, mean * mean
 
 
-def _negative_binomial_mean_var(dist: Any) -> Tuple[float, float]:
+def _negative_binomial_mean_var(dist: Any) -> tuple[float, float]:
     r = float(dist.r)
     p = float(dist.p)
     return r * (1.0 - p) / p, r * (1.0 - p) / (p * p)
 
 
-def _geometric_mean_var(dist: Any) -> Tuple[float, float]:
+def _geometric_mean_var(dist: Any) -> tuple[float, float]:
     p = float(dist.p)
     return 1.0 / p, (1.0 - p) / (p * p)
 
 
-def _binomial_mean_var(dist: Any) -> Tuple[float, float]:
-    shift = 0.0 if getattr(dist, 'min_val', None) is None else float(dist.min_val)
+def _binomial_mean_var(dist: Any) -> tuple[float, float]:
+    shift = 0.0 if getattr(dist, "min_val", None) is None else float(dist.min_val)
     n = float(dist.n)
     p = float(dist.p)
     return shift + n * p, n * p * (1.0 - p)
 
 
-def _bernoulli_mean_var(dist: Any) -> Tuple[float, float]:
+def _bernoulli_mean_var(dist: Any) -> tuple[float, float]:
     p = float(dist.p)
     return p, p * (1.0 - p)
 
@@ -2401,97 +2533,102 @@ def _identity_encoded(enc_data: Any) -> np.ndarray:
 def to_fisher(dist: Any, **kwargs: Any) -> FisherView:
     tname = type(dist).__name__
 
-    if tname == 'GaussianDistribution' and hasattr(dist, 'mu') and hasattr(dist, 'sigma2'):
+    if tname == "GaussianDistribution" and hasattr(dist, "mu") and hasattr(dist, "sigma2"):
         return GaussianFisherView(dist)
 
-    if tname == 'DiagonalGaussianDistribution' and hasattr(dist, 'mu') and hasattr(dist, 'covar'):
+    if tname == "DiagonalGaussianDistribution" and hasattr(dist, "mu") and hasattr(dist, "covar"):
         return DiagonalGaussianFisherView(dist)
 
-    if tname == 'MultivariateGaussianDistribution' and hasattr(dist, 'mu') and hasattr(dist, 'covar'):
+    if tname == "MultivariateGaussianDistribution" and hasattr(dist, "mu") and hasattr(dist, "covar"):
         return MultivariateGaussianFisherView(dist)
 
-    if tname == 'LogGaussianDistribution' and hasattr(dist, 'mu') and hasattr(dist, 'sigma2'):
+    if tname == "LogGaussianDistribution" and hasattr(dist, "mu") and hasattr(dist, "sigma2"):
         return LogGaussianFisherView(dist)
 
-    if tname == 'CategoricalDistribution' and hasattr(dist, 'pmap') and not getattr(dist, 'no_default', False):
+    if tname == "CategoricalDistribution" and hasattr(dist, "pmap") and not getattr(dist, "no_default", False):
         keys = sorted(dist.pmap.keys(), key=repr)
-        probs = [dist.pmap[k] / (1.0 + getattr(dist, 'default_value', 0.0)) for k in keys]
+        probs = [dist.pmap[k] / (1.0 + getattr(dist, "default_value", 0.0)) for k in keys]
         return CategoricalFisherView(dist, keys, probs)
 
-    if tname == 'CategoricalDistribution' and hasattr(dist, 'prob_map') \
-            and getattr(dist, 'default_value', 0.0) == 0.0:
+    if tname == "CategoricalDistribution" and hasattr(dist, "prob_map") and getattr(dist, "default_value", 0.0) == 0.0:
         keys = sorted(dist.prob_map.keys(), key=repr)
-        probs = [dist.prob_map[k] / (1.0 + getattr(dist, 'default_value', 0.0)) for k in keys]
+        probs = [dist.prob_map[k] / (1.0 + getattr(dist, "default_value", 0.0)) for k in keys]
         return CategoricalFisherView(dist, keys, probs)
 
-    if tname == 'IntegerCategoricalDistribution' and (hasattr(dist, 'p_vec') or hasattr(dist, 'prob_vec')):
+    if tname == "IntegerCategoricalDistribution" and (hasattr(dist, "p_vec") or hasattr(dist, "prob_vec")):
         return IntegerCategoricalFisherView(dist)
 
-    if tname == 'BernoulliDistribution' and hasattr(dist, 'p'):
+    if tname == "BernoulliDistribution" and hasattr(dist, "p"):
         return CountFisherView(dist, _bernoulli_mean_var, _count_data, _identity_encoded)
 
-    if tname == 'PoissonDistribution' and hasattr(dist, 'lam'):
+    if tname == "PoissonDistribution" and hasattr(dist, "lam"):
         return CountFisherView(dist, _poisson_mean_var, _count_data, _poisson_encoded)
 
-    if tname == 'ExponentialDistribution' and (hasattr(dist, 'beta') or hasattr(dist, 'lam')):
+    if tname == "ExponentialDistribution" and (hasattr(dist, "beta") or hasattr(dist, "lam")):
         return CountFisherView(dist, _exponential_mean_var, _count_data, _identity_encoded)
 
-    if tname == 'GammaDistribution' and hasattr(dist, 'k') and hasattr(dist, 'theta'):
+    if tname == "GammaDistribution" and hasattr(dist, "k") and hasattr(dist, "theta"):
         return GammaFisherView(dist)
 
-    if tname == 'NegativeBinomialDistribution' and hasattr(dist, 'r') and hasattr(dist, 'p'):
+    if tname == "NegativeBinomialDistribution" and hasattr(dist, "r") and hasattr(dist, "p"):
         return CountFisherView(dist, _negative_binomial_mean_var, _count_data, _first_encoded)
 
-    if tname == 'BetaDistribution' and hasattr(dist, 'a') and hasattr(dist, 'b'):
+    if tname == "BetaDistribution" and hasattr(dist, "a") and hasattr(dist, "b"):
         return BetaFisherView(dist)
 
-    if tname == 'DirichletDistribution' and hasattr(dist, 'alpha'):
+    if tname == "DirichletDistribution" and hasattr(dist, "alpha"):
         alpha = np.asarray(dist.alpha, dtype=np.float64)
         if alpha.ndim > 0 and np.all(np.isfinite(alpha)) and np.all(alpha > 0.0):
             return DirichletFisherView(dist)
 
-    if tname == 'IndianBuffetProcessDistribution' and hasattr(dist, 'feature_probs'):
+    if tname == "IndianBuffetProcessDistribution" and hasattr(dist, "feature_probs"):
         return IndianBuffetProcessFisherView(dist)
 
-    if tname == 'GeometricDistribution' and hasattr(dist, 'p'):
+    if tname == "GeometricDistribution" and hasattr(dist, "p"):
         return CountFisherView(dist, _geometric_mean_var, _count_data, _identity_encoded)
 
-    if tname == 'BinomialDistribution' and hasattr(dist, 'p') and hasattr(dist, 'n'):
+    if tname == "BinomialDistribution" and hasattr(dist, "p") and hasattr(dist, "n"):
         return CountFisherView(dist, _binomial_mean_var, _count_data, _binomial_encoded)
 
-    if tname == 'SequenceDistribution' and hasattr(dist, 'dist'):
+    if tname == "SequenceDistribution" and hasattr(dist, "dist"):
         return SequenceFisherView(dist)
 
-    if tname == 'MultinomialDistribution' and hasattr(dist, 'dist') and hasattr(dist, 'len_dist'):
+    if tname == "MultinomialDistribution" and hasattr(dist, "dist") and hasattr(dist, "len_dist"):
         return MultinomialFisherView(dist)
 
-    if tname == 'OptionalDistribution' and hasattr(dist, 'dist'):
+    if tname == "OptionalDistribution" and hasattr(dist, "dist"):
         return OptionalFisherView(dist)
 
-    if tname == 'WeightedDistribution' and hasattr(dist, 'dist'):
+    if tname == "WeightedDistribution" and hasattr(dist, "dist"):
         return WeightedFisherView(dist)
 
-    if tname == 'SelectDistribution' and hasattr(dist, 'dists'):
+    if tname == "SelectDistribution" and hasattr(dist, "dists"):
         return SelectFisherView(dist)
 
-    if tname in ('HiddenMarkovModelDistribution', 'QuantizedHiddenMarkovModelDistribution') \
-            and hasattr(dist, 'topics') and hasattr(dist, 'transitions'):
+    if (
+        tname in ("HiddenMarkovModelDistribution", "QuantizedHiddenMarkovModelDistribution")
+        and hasattr(dist, "topics")
+        and hasattr(dist, "transitions")
+    ):
         return HiddenMarkovFisherView(dist)
 
-    if tname == 'HeterogeneousPCFGDistribution' and hasattr(dist, 'terminal_rules') \
-            and hasattr(dist, '_inside_outside'):
+    if (
+        tname == "HeterogeneousPCFGDistribution"
+        and hasattr(dist, "terminal_rules")
+        and hasattr(dist, "_inside_outside")
+    ):
         return HeterogeneousPCFGFisherView(dist)
 
-    if tname == 'CompositeDistribution' and hasattr(dist, 'dists'):
+    if tname == "CompositeDistribution" and hasattr(dist, "dists"):
         return CompositeFisherView(dist)
 
-    if tname == 'MixtureDistribution' and hasattr(dist, 'components') and hasattr(dist, 'w'):
+    if tname == "MixtureDistribution" and hasattr(dist, "components") and hasattr(dist, "w"):
         return MixtureFisherView(dist)
 
-    if tname == 'HierarchicalMixtureDistribution' and hasattr(dist, 'to_mixture'):
+    if tname == "HierarchicalMixtureDistribution" and hasattr(dist, "to_mixture"):
         return to_fisher(dist.to_mixture(), **kwargs)
 
-    if tname == 'JointMixtureDistribution' and hasattr(dist, 'components1') and hasattr(dist, 'components2'):
+    if tname == "JointMixtureDistribution" and hasattr(dist, "components1") and hasattr(dist, "components2"):
         return JointMixtureFisherView(dist)
 
     return FisherView(dist, **kwargs)

@@ -1,6 +1,8 @@
 """Create, estimate, and sample from a Laplace distribution."""
+
 import math
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -20,7 +22,7 @@ def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
     xv = values[idx]
     wv = weights[idx]
     cutoff = 0.5 * np.sum(wv)
-    return float(xv[np.searchsorted(np.cumsum(wv), cutoff, side='left')])
+    return float(xv[np.searchsorted(np.cumsum(wv), cutoff, side="left")])
 
 
 class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
@@ -29,26 +31,27 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
         return DistributionDeclaration(
-            name='laplace',
+            name="laplace",
             distribution_type=cls,
-            parameters=(ParameterSpec('mu'), ParameterSpec('b', constraint='positive')),
+            parameters=(ParameterSpec("mu"), ParameterSpec("b", constraint="positive")),
             statistics=(
-                StatisticSpec('values', kind='raw_observations', scales=False),
-                StatisticSpec('weights', kind='weights'),
+                StatisticSpec("values", kind="raw_observations", scales=False),
+                StatisticSpec("weights", kind="weights"),
             ),
-            support='real',
+            support="real",
         )
 
-    def __init__(self, mu: float, b: float, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(self, mu: float, b: float, name: str | None = None, keys: str | None = None) -> None:
         if b <= 0.0 or not np.isfinite(b):
-            raise ValueError('LaplaceDistribution requires b > 0.')
+            raise ValueError("LaplaceDistribution requires b > 0.")
         self.mu = float(mu)
         self.b = float(b)
         self.log_const = -math.log(2.0 * self.b)
@@ -56,8 +59,12 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        return 'LaplaceDistribution(%s, %s, name=%s, keys=%s)' % (
-            repr(self.mu), repr(self.b), repr(self.name), repr(self.keys))
+        return "LaplaceDistribution(%s, %s, name=%s, keys=%s)" % (
+            repr(self.mu),
+            repr(self.b),
+            repr(self.name),
+            repr(self.keys),
+        )
 
     def density(self, x: float) -> float:
         """Return the probability density or mass at a single observation."""
@@ -79,25 +86,27 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
         return self.backend_log_density_from_params(
-            engine.asarray(x), engine.asarray(self.mu), engine.asarray(self.b), engine)
+            engine.asarray(x), engine.asarray(self.mu), engine.asarray(self.b), engine
+        )
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['LaplaceDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["LaplaceDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked Laplace parameters for a homogeneous mixture kernel."""
         return {
-            'mu': engine.asarray([d.mu for d in dists]),
-            'b': engine.asarray([d.b for d in dists]),
+            "mu": engine.asarray([d.mu for d in dists]),
+            "b": engine.asarray([d.b for d in dists]),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: Any, params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: Any, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of Laplace log densities."""
         xx = engine.asarray(x)
-        return cls.backend_log_density_from_params(xx[:, None], params['mu'][None, :], params['b'][None, :], engine)
+        return cls.backend_log_density_from_params(xx[:, None], params["mu"][None, :], params["b"][None, :], engine)
 
     @classmethod
-    def backend_stacked_sufficient_statistics(cls, x: Any, weights: Any,
-                                              params: Dict[str, Any], engine: Any) -> Tuple[Tuple[Any, Any], ...]:
+    def backend_stacked_sufficient_statistics(
+        cls, x: Any, weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[tuple[Any, Any], ...]:
         """Return per-component raw weighted observations using engine-resident arrays."""
         xx = engine.asarray(x)
         ww = engine.asarray(weights)
@@ -109,18 +118,17 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
             rv.append((xx[mask], w_loc[mask]))
         return tuple(rv)
 
-    def sampler(self, seed: Optional[int] = None) -> 'LaplaceSampler':
+    def sampler(self, seed: int | None = None) -> "LaplaceSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LaplaceSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'LaplaceEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "LaplaceEstimator":
         """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return LaplaceEstimator(name=self.name, keys=self.keys)
-        return LaplaceEstimator(pseudo_count=pseudo_count, suff_stat=(self.mu, self.b),
-                                name=self.name, keys=self.keys)
+        return LaplaceEstimator(pseudo_count=pseudo_count, suff_stat=(self.mu, self.b), name=self.name, keys=self.keys)
 
-    def dist_to_encoder(self) -> 'LaplaceDataEncoder':
+    def dist_to_encoder(self) -> "LaplaceDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return LaplaceDataEncoder()
 
@@ -128,51 +136,49 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
 class LaplaceSampler(DistributionSampler):
     """Draw iid Laplace observations."""
 
-    def __init__(self, dist: LaplaceDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: LaplaceDistribution, seed: int | None = None) -> None:
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: Optional[int] = None) -> Union[float, np.ndarray]:
+    def sample(self, size: int | None = None) -> float | np.ndarray:
         return self.rng.laplace(loc=self.dist.mu, scale=self.dist.b, size=size)
 
 
 class LaplaceAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted observations for exact weighted-median M-step."""
 
-    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.values = []
         self.weights = []
         self.name = name
         self.key = keys
 
-    def update(self, x: float, weight: float, estimate: Optional[LaplaceDistribution]) -> None:
+    def update(self, x: float, weight: float, estimate: LaplaceDistribution | None) -> None:
         if weight > 0.0:
             self.values.append(float(x))
             self.weights.append(float(weight))
 
-    def initialize(self, x: float, weight: float, rng: Optional[RandomState]) -> None:
+    def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         self.update(x, weight, None)
 
-    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Optional[LaplaceDistribution]) -> None:
+    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: LaplaceDistribution | None) -> None:
         mask = weights > 0.0
         if np.any(mask):
             self.values.append(np.asarray(x[mask], dtype=np.float64))
             self.weights.append(np.asarray(weights[mask], dtype=np.float64))
 
-    def seq_update_engine(self, x: np.ndarray, weights: Any,
-                          estimate: Optional[LaplaceDistribution], engine: Any) -> None:
+    def seq_update_engine(self, x: np.ndarray, weights: Any, estimate: LaplaceDistribution | None, engine: Any) -> None:
         """Engine-aware accumulation. Laplace's MLE is a weighted median, so the sufficient
         statistic is the (positively weighted) data itself; this path accepts engine (e.g. torch)
         weights and stores host arrays. Matches seq_update.
         """
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         mask = weights_np > 0.0
         if np.any(mask):
             self.values.append(np.asarray(np.asarray(x)[mask], dtype=np.float64))
             self.weights.append(weights_np[mask])
 
-    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: Optional[RandomState]) -> None:
+    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         self.seq_update(x, weights, None)
 
     @staticmethod
@@ -181,44 +187,44 @@ class LaplaceAccumulator(SequenceEncodableStatisticAccumulator):
             return np.asarray([], dtype=np.float64)
         return np.concatenate([np.asarray(u, dtype=np.float64).reshape(-1) for u in items])
 
-    def combine(self, suff_stat: Tuple[np.ndarray, np.ndarray]) -> 'LaplaceAccumulator':
+    def combine(self, suff_stat: tuple[np.ndarray, np.ndarray]) -> "LaplaceAccumulator":
         if len(suff_stat[0]):
             self.values.append(suff_stat[0])
             self.weights.append(suff_stat[1])
         return self
 
-    def value(self) -> Tuple[np.ndarray, np.ndarray]:
+    def value(self) -> tuple[np.ndarray, np.ndarray]:
         return self._flatten(self.values), self._flatten(self.weights)
 
-    def from_value(self, x: Tuple[np.ndarray, np.ndarray]) -> 'LaplaceAccumulator':
+    def from_value(self, x: tuple[np.ndarray, np.ndarray]) -> "LaplaceAccumulator":
         self.values = [np.asarray(x[0], dtype=np.float64)]
         self.weights = [np.asarray(x[1], dtype=np.float64)]
         return self
 
-    def scale(self, c: float) -> 'LaplaceAccumulator':
+    def scale(self, c: float) -> "LaplaceAccumulator":
         """Scale weights while preserving the raw observation payload."""
         self.weights = [np.asarray(w, dtype=np.float64) * c for w in self.weights]
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None:
             if self.key in stats_dict:
                 stats_dict[self.key].combine(self.value())
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None and self.key in stats_dict:
             self.from_value(stats_dict[self.key].value())
 
-    def acc_to_encoder(self) -> 'LaplaceDataEncoder':
+    def acc_to_encoder(self) -> "LaplaceDataEncoder":
         return LaplaceDataEncoder()
 
 
 class LaplaceAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for LaplaceAccumulator."""
 
-    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.name = name
         self.keys = keys
 
@@ -229,10 +235,14 @@ class LaplaceAccumulatorFactory(StatisticAccumulatorFactory):
 class LaplaceEstimator(ParameterEstimator):
     """Exact weighted-MLE estimator for Laplace location and scale."""
 
-    def __init__(self, pseudo_count: Optional[float] = None,
-                 suff_stat: Optional[Tuple[float, float]] = None,
-                 min_scale: float = 1.0e-8, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: tuple[float, float] | None = None,
+        min_scale: float = 1.0e-8,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.min_scale = min_scale
@@ -242,7 +252,7 @@ class LaplaceEstimator(ParameterEstimator):
     def accumulator_factory(self) -> LaplaceAccumulatorFactory:
         return LaplaceAccumulatorFactory(name=self.name, keys=self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[np.ndarray, np.ndarray]) -> LaplaceDistribution:
+    def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> LaplaceDistribution:
         values, weights = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             mu0, _ = self.suff_stat
@@ -262,7 +272,7 @@ class LaplaceDataEncoder(DataSequenceEncoder):
     """Encode Laplace observations as a float array."""
 
     def __str__(self) -> str:
-        return 'LaplaceDataEncoder'
+        return "LaplaceDataEncoder"
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, LaplaceDataEncoder)
@@ -270,5 +280,5 @@ class LaplaceDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and np.any(np.isnan(rv)):
-            raise ValueError('LaplaceDistribution requires finite or infinite real-valued observations.')
+            raise ValueError("LaplaceDistribution requires finite or infinite real-valued observations.")
         return rv

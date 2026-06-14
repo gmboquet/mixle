@@ -1,13 +1,20 @@
 """Grammar-learning experiment helpers."""
+
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 import numpy as np
 
-from pysp.stats import HeterogeneousPCFGDistribution, InducedHeterogeneousPCFGEstimator, seq_encode, seq_estimate, \
-    seq_initialize
+from pysp.stats import (
+    HeterogeneousPCFGDistribution,
+    InducedHeterogeneousPCFGEstimator,
+    seq_encode,
+    seq_estimate,
+    seq_initialize,
+)
 from pysp.stats.pdist import ParameterEstimator
 
 
@@ -16,8 +23,8 @@ class GrammarLearningResult:
     """Fitted PCFG plus training and optional validation log-likelihood history."""
 
     model: HeterogeneousPCFGDistribution
-    history: List[float]
-    validation_history: Optional[List[float]] = None
+    history: list[float]
+    validation_history: list[float] | None = None
 
 
 @dataclass
@@ -25,40 +32,42 @@ class PCFGParseNode:
     """Node in a Viterbi parse tree."""
 
     label: Any
-    span: Tuple[int, int]
+    span: tuple[int, int]
     log_prob: float
     rule_index: int
     rule_type: str
-    children: Tuple['PCFGParseNode', ...] = ()
+    children: tuple[PCFGParseNode, ...] = ()
     value: Any = None
 
-    def leaves(self) -> List[Any]:
+    def leaves(self) -> list[Any]:
         """Return terminal observations under this node."""
-        if self.rule_type == 'terminal':
+        if self.rule_type == "terminal":
             return [self.value]
-        rv: List[Any] = []
+        rv: list[Any] = []
         for child in self.children:
             rv.extend(child.leaves())
         return rv
 
 
-def fit_induced_pcfg(data: Sequence[Sequence[Any]],
-                     terminal_estimators: Sequence[ParameterEstimator],
-                     max_nonterminals: int,
-                     initial_model: Optional[HeterogeneousPCFGDistribution] = None,
-                     vdata: Optional[Sequence[Sequence[Any]]] = None,
-                     max_its: int = 10,
-                     init_p: float = 1.0,
-                     seed: Optional[int] = None,
-                     terminal_rule_mass: float = 0.5,
-                     rule_pseudo_count: Optional[float] = 1.0e-3,
-                     prune_threshold: float = 0.0,
-                     min_rule_prob: float = 0.0,
-                     start: Any = 'S',
-                     name: Optional[str] = None) -> GrammarLearningResult:
+def fit_induced_pcfg(
+    data: Sequence[Sequence[Any]],
+    terminal_estimators: Sequence[ParameterEstimator],
+    max_nonterminals: int,
+    initial_model: HeterogeneousPCFGDistribution | None = None,
+    vdata: Sequence[Sequence[Any]] | None = None,
+    max_its: int = 10,
+    init_p: float = 1.0,
+    seed: int | None = None,
+    terminal_rule_mass: float = 0.5,
+    rule_pseudo_count: float | None = 1.0e-3,
+    prune_threshold: float = 0.0,
+    min_rule_prob: float = 0.0,
+    start: Any = "S",
+    name: str | None = None,
+) -> GrammarLearningResult:
     """Fit an induced heterogeneous PCFG and track train/validation likelihoods."""
     if len(data) == 0:
-        raise ValueError('fit_induced_pcfg requires at least one sequence.')
+        raise ValueError("fit_induced_pcfg requires at least one sequence.")
     estimator = InducedHeterogeneousPCFGEstimator(
         max_nonterminals=max_nonterminals,
         terminal_estimators=terminal_estimators,
@@ -67,7 +76,8 @@ def fit_induced_pcfg(data: Sequence[Sequence[Any]],
         rule_pseudo_count=rule_pseudo_count,
         prune_threshold=prune_threshold,
         min_rule_prob=min_rule_prob,
-        name=name)
+        name=name,
+    )
     rng = np.random.RandomState(seed)
     if initial_model is None:
         enc_data = seq_encode(data, estimator=estimator)
@@ -87,8 +97,7 @@ def fit_induced_pcfg(data: Sequence[Sequence[Any]],
     return GrammarLearningResult(model, history, validation_history)
 
 
-def pcfg_log_likelihood(model: HeterogeneousPCFGDistribution,
-                        data: Sequence[Sequence[Any]]) -> float:
+def pcfg_log_likelihood(model: HeterogeneousPCFGDistribution, data: Sequence[Sequence[Any]]) -> float:
     """Return total PCFG log likelihood on raw sequences."""
     if len(data) == 0:
         return 0.0
@@ -96,22 +105,21 @@ def pcfg_log_likelihood(model: HeterogeneousPCFGDistribution,
     return float(np.sum(model.seq_log_density(enc)))
 
 
-def viterbi_parse(model: HeterogeneousPCFGDistribution,
-                  sequence: Sequence[Any]) -> PCFGParseNode:
+def viterbi_parse(model: HeterogeneousPCFGDistribution, sequence: Sequence[Any]) -> PCFGParseNode:
     """Return the maximum-probability CKY parse under a heterogeneous PCFG."""
     n = len(sequence)
     if n == 0:
-        raise ValueError('viterbi_parse requires a non-empty sequence.')
+        raise ValueError("viterbi_parse requires a non-empty sequence.")
     k = model.num_nonterminals
     scores = np.full((n, n + 1, k), -np.inf, dtype=np.float64)
-    back: Dict[Tuple[int, int, int], Tuple[Any, ...]] = {}
+    back: dict[tuple[int, int, int], tuple[Any, ...]] = {}
 
     for i, token in enumerate(sequence):
         for rule_idx, (parent, emission, _) in enumerate(model.terminal_rules):
             score = float(model.log_terminal_probs[rule_idx] + emission.log_density(token))
             if score > scores[i, i + 1, parent]:
                 scores[i, i + 1, parent] = score
-                back[(i, i + 1, parent)] = ('terminal', rule_idx, token)
+                back[(i, i + 1, parent)] = ("terminal", rule_idx, token)
 
     for span in range(2, n + 1):
         for i in range(n - span + 1):
@@ -125,53 +133,60 @@ def viterbi_parse(model: HeterogeneousPCFGDistribution,
                     score = rule_lp + scores[i, split, left] + scores[split, j, right]
                     if score > scores[i, j, parent]:
                         scores[i, j, parent] = score
-                        back[(i, j, parent)] = ('binary', rule_idx, split, left, right)
+                        back[(i, j, parent)] = ("binary", rule_idx, split, left, right)
 
     root_score = float(scores[0, n, model.start_idx])
     if not np.isfinite(root_score):
-        raise ValueError('sequence has zero probability under the grammar.')
+        raise ValueError("sequence has zero probability under the grammar.")
     return _build_parse_node(model, back, scores, 0, n, model.start_idx)
 
 
-def grammar_rule_table(model: HeterogeneousPCFGDistribution) -> List[Dict[str, Any]]:
+def grammar_rule_table(model: HeterogeneousPCFGDistribution) -> list[dict[str, Any]]:
     """Return a flat, inspectable rule table for learned PCFGs."""
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for idx, (parent, left, right, prob) in enumerate(model.binary_rules):
-        rows.append({
-            'type': 'binary',
-            'rule_index': idx,
-            'parent': model.nonterminals[parent],
-            'left': model.nonterminals[left],
-            'right': model.nonterminals[right],
-            'probability': float(prob),
-        })
+        rows.append(
+            {
+                "type": "binary",
+                "rule_index": idx,
+                "parent": model.nonterminals[parent],
+                "left": model.nonterminals[left],
+                "right": model.nonterminals[right],
+                "probability": float(prob),
+            }
+        )
     for idx, (parent, emission, prob) in enumerate(model.terminal_rules):
-        rows.append({
-            'type': 'terminal',
-            'rule_index': idx,
-            'parent': model.nonterminals[parent],
-            'emission': emission,
-            'probability': float(prob),
-        })
+        rows.append(
+            {
+                "type": "terminal",
+                "rule_index": idx,
+                "parent": model.nonterminals[parent],
+                "emission": emission,
+                "probability": float(prob),
+            }
+        )
     return rows
 
 
-def _build_parse_node(model: HeterogeneousPCFGDistribution,
-                      back: Dict[Tuple[int, int, int], Tuple[Any, ...]],
-                      scores: np.ndarray,
-                      i: int,
-                      j: int,
-                      nt: int) -> PCFGParseNode:
+def _build_parse_node(
+    model: HeterogeneousPCFGDistribution,
+    back: dict[tuple[int, int, int], tuple[Any, ...]],
+    scores: np.ndarray,
+    i: int,
+    j: int,
+    nt: int,
+) -> PCFGParseNode:
     entry = back[(i, j, nt)]
-    if entry[0] == 'terminal':
+    if entry[0] == "terminal":
         _, rule_idx, token = entry
         return PCFGParseNode(
             label=model.nonterminals[nt],
             span=(i, j),
             log_prob=float(scores[i, j, nt]),
             rule_index=int(rule_idx),
-            rule_type='terminal',
-            value=token)
+            rule_type="terminal",
+            value=token,
+        )
     _, rule_idx, split, left, right = entry
     left_node = _build_parse_node(model, back, scores, i, int(split), int(left))
     right_node = _build_parse_node(model, back, scores, int(split), j, int(right))
@@ -180,5 +195,6 @@ def _build_parse_node(model: HeterogeneousPCFGDistribution,
         span=(i, j),
         log_prob=float(scores[i, j, nt]),
         rule_index=int(rule_idx),
-        rule_type='binary',
-        children=(left_node, right_node))
+        rule_type="binary",
+        children=(left_node, right_node),
+    )

@@ -7,20 +7,21 @@ from pysp.models import ErdosRenyiGraphModel, StochasticBlockGraphModel
 
 
 class GraphDistributionTestCase(unittest.TestCase):
-
     def test_erdos_renyi_matches_legacy_model_and_estimates_probability(self):
-        adj = np.asarray([
-            [0, 1, 0, 1],
-            [1, 0, 1, 0],
-            [0, 1, 0, 0],
-            [1, 0, 0, 0],
-        ])
+        adj = np.asarray(
+            [
+                [0, 1, 0, 1],
+                [1, 0, 1, 0],
+                [0, 1, 0, 0],
+                [1, 0, 0, 0],
+            ]
+        )
         dist = stats.ErdosRenyiGraphDistribution(0.35)
         legacy = ErdosRenyiGraphModel(0.35)
 
         self.assertAlmostEqual(dist.log_density(adj), legacy.log_likelihood(adj), places=12)
 
-        enc = dist.dist_to_encoder().seq_encode([adj, {'edges': [(0, 1), (1, 2)], 'num_nodes': 3}])
+        enc = dist.dist_to_encoder().seq_encode([adj, {"edges": [(0, 1), (1, 2)], "num_nodes": 3}])
         seq_ll = dist.seq_log_density(enc)
         self.assertEqual(seq_ll.shape, (2,))
         self.assertAlmostEqual(seq_ll[0], dist.log_density(adj), places=12)
@@ -49,12 +50,14 @@ class GraphDistributionTestCase(unittest.TestCase):
 
     def test_stochastic_block_matches_legacy_model_and_estimates_probabilities(self):
         assignments = np.asarray([0, 0, 1, 1])
-        adj = np.asarray([
-            [0, 1, 0, 0],
-            [1, 0, 1, 0],
-            [0, 1, 0, 1],
-            [0, 0, 1, 0],
-        ])
+        adj = np.asarray(
+            [
+                [0, 1, 0, 0],
+                [1, 0, 1, 0],
+                [0, 1, 0, 1],
+                [0, 0, 1, 0],
+            ]
+        )
         block_probs = np.asarray([[0.8, 0.2], [0.2, 0.7]])
         dist = stats.StochasticBlockGraphDistribution(block_probs, assignments)
         legacy = StochasticBlockGraphModel(block_probs, assignments)
@@ -74,14 +77,14 @@ class GraphDistributionTestCase(unittest.TestCase):
 
         loaded = stats.StochasticBlockGraphDistribution.from_json(fitted.to_json())
         self.assertIsInstance(loaded, stats.StochasticBlockGraphDistribution)
-        self.assertAlmostEqual(loaded.log_density((adj, assignments)), fitted.log_density((adj, assignments)),
-                               places=12)
+        self.assertAlmostEqual(
+            loaded.log_density((adj, assignments)), fitted.log_density((adj, assignments)), places=12
+        )
 
     def test_stochastic_block_sampler_bridge_and_prior_predictive_marginals(self):
         block_probs = np.asarray([[0.8, 0.2], [0.2, 0.6]])
         block_prior = np.asarray([0.25, 0.75])
-        dist = stats.StochasticBlockGraphDistribution(
-            block_probs, block_prior=block_prior, self_loops=True)
+        dist = stats.StochasticBlockGraphDistribution(block_probs, block_prior=block_prior, self_loops=True)
 
         sample, assignments = dist.sampler(seed=3).sample(num_nodes=6, return_assignments=True)
         self.assertEqual(sample.shape, (6, 6))
@@ -105,7 +108,8 @@ class GraphDistributionTestCase(unittest.TestCase):
 
     def test_stochastic_block_estimator_json_round_trip(self):
         estimator = stats.StochasticBlockGraphEstimator(
-            num_blocks=2, pseudo_count=1.0, block_prior=[0.4, 0.6], include_assignment_prior=True)
+            num_blocks=2, pseudo_count=1.0, block_prior=[0.4, 0.6], include_assignment_prior=True
+        )
         loaded = stats.StochasticBlockGraphEstimator.from_json(estimator.to_json())
 
         self.assertIsInstance(loaded, stats.StochasticBlockGraphEstimator)
@@ -128,8 +132,8 @@ class GraphDistributionTestCase(unittest.TestCase):
             dist.link_probability(0, 1, [0, 2])
 
         with self.assertRaises(ValueError):
-            stats.ErdosRenyiGraphDistribution(0.5).log_density({'edges': [(0, 3)], 'num_nodes': 3})
+            stats.ErdosRenyiGraphDistribution(0.5).log_density({"edges": [(0, 3)], "num_nodes": 3})
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

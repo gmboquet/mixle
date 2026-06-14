@@ -19,28 +19,35 @@ simplex boundary, posterior mean when degenerate) and the posterior Dirichlet
 is carried forward as the new prior. expected_log_density evaluates the
 variational Bayes expectation E_q[log p(x)] via digamma terms.
 """
-from typing import Optional, List, Union, Tuple
+
+import numpy as np
+import scipy.sparse as sp
 from numpy.random import RandomState
+from scipy.special import digamma
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
-from pysp.bstats.pdist import ProbabilityDistribution, SequenceEncodableAccumulator, ParameterEstimator
-from pysp.bstats.symdirichlet import SymmetricDirichletDistribution
 from pysp.bstats.dirichlet import DirichletDistribution
-import numpy as np
-from scipy.special import gammaln, digamma
-import scipy.sparse as sp
+from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, SequenceEncodableAccumulator
+from pysp.bstats.symdirichlet import SymmetricDirichletDistribution
 
 default_prior = DirichletDistribution(1.0 + 1.0e-12)
+
 
 class IntegerCategoricalDistribution(ProbabilityDistribution):
     """Categorical distribution on the integers [min_index, min_index + n - 1],
     optionally carrying a Dirichlet conjugate prior on the probabilities."""
 
-    def __init__(self, prob_vec: Union[np.ndarray, List[float], sp.spmatrix, int] = None,
-                 default_value: Union[float, np.ndarray, List[float]] = 0.0, min_index: int = 0,
-                 name: Optional[str] = None, prior: ProbabilityDistribution = default_prior,
-                 min_val: Optional[int] = None, p_vec=None):
+    def __init__(
+        self,
+        prob_vec: np.ndarray | list[float] | sp.spmatrix | int = None,
+        default_value: float | np.ndarray | list[float] = 0.0,
+        min_index: int = 0,
+        name: str | None = None,
+        prior: ProbabilityDistribution = default_prior,
+        min_val: int | None = None,
+        p_vec=None,
+    ):
         """Accepts both calling conventions:
 
             IntegerCategoricalDistribution(min_val, p_vec)   # pysp.stats order
@@ -70,18 +77,21 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
 
         self.min_index = min_index
         self.name = name
-        self.set_parameters(prob_vec)#, default_value, min_index))
+        self.set_parameters(prob_vec)  # , default_value, min_index))
         self.set_prior(prior)
 
-
     def __str__(self):
-        pstr = ','.join(map(str, self.prob_vec))
-        astr = 'default_value=%s, min_index=%s, prior=%s'%(str(self.default_value), str(self.min_index), str(self.prior))
-        return 'IntegerRangeDistribution([%s], %s)' % (pstr, astr)
+        pstr = ",".join(map(str, self.prob_vec))
+        astr = "default_value=%s, min_index=%s, prior=%s" % (
+            str(self.default_value),
+            str(self.min_index),
+            str(self.prior),
+        )
+        return "IntegerRangeDistribution([%s], %s)" % (pstr, astr)
 
     def get_parameters(self):
         """Returns the probability vector."""
-        return self.prob_vec#, self.default_value, self.min_index
+        return self.prob_vec  # , self.default_value, self.min_index
 
     def set_parameters(self, params):
         """Sets the probability vector and refreshes the cached log terms.
@@ -90,17 +100,16 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
             params: Probability vector over the supported range.
         """
 
-        with np.errstate(divide='ignore'):
-
-            self.prob_vec      = params
-            #self.default_value = params[1]
-            #self.min_index     = int(params[2])
+        with np.errstate(divide="ignore"):
+            self.prob_vec = params
+            # self.default_value = params[1]
+            # self.min_index     = int(params[2])
             self.default_value = 0.0
-            #self.min_index = 0
-            self.max_index     = int(self.min_index + len(self.prob_vec) - 1)
+            # self.min_index = 0
+            self.max_index = int(self.min_index + len(self.prob_vec) - 1)
 
-            self.num_vals      = len(self.prob_vec)
-            self.log_prob_vec  = np.log(self.prob_vec)
+            self.num_vals = len(self.prob_vec)
+            self.log_prob_vec = np.log(self.prob_vec)
             self.log_default_value = np.log(self.default_value)
             self.log_const = np.log1p(self.default_value)
 
@@ -116,11 +125,11 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
         if isinstance(self.prior, DirichletDistribution):
             cpp = prior.get_parameters()
             if np.ndim(cpp) == 0:
-                cpp = np.ones(self.num_vals)*cpp
+                cpp = np.ones(self.num_vals) * cpp
             self.conj_prior_params = cpp
             self.expected_nparams = digamma(self.conj_prior_params) - digamma(np.sum(self.conj_prior_params))
         elif isinstance(self.prior, SymmetricDirichletDistribution):
-            self.conj_prior_params = np.ones(self.num_vals)*prior.get_parameters()
+            self.conj_prior_params = np.ones(self.num_vals) * prior.get_parameters()
             self.expected_nparams = digamma(self.conj_prior_params) - digamma(np.sum(self.conj_prior_params))
         else:
             self.conj_prior_params = None
@@ -160,9 +169,9 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
             return -np.dot(p[g], log_p[gg])
         else:
             rv = 0
-            for x,p in enumerate(self.prob_vec):
+            for x, p in enumerate(self.prob_vec):
                 if p > 0:
-                    rv += dist.log_density(x+self.min_index) * p
+                    rv += dist.log_density(x + self.min_index) * p
             return -rv
 
     def moment(self, p, o=0):
@@ -172,7 +181,7 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
             p: Moment order.
             o: Offset subtracted from the values (default 0).
         """
-        return np.dot(np.power(np.arange(self.min_index, self.max_index+1)-o, p), self.prob_vec)
+        return np.dot(np.power(np.arange(self.min_index, self.max_index + 1) - o, p), self.prob_vec)
 
     def log_density(self, x: int) -> float:
         """Log-density at observation x.
@@ -207,7 +216,7 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
             return self.log_density(x)
 
         # E[ params ]*x
-        #e_x = digamma(self.conj_prior_params[idx]) - digamma(np.sum(self.conj_prior_params))
+        # e_x = digamma(self.conj_prior_params[idx]) - digamma(np.sum(self.conj_prior_params))
         # E[ A(params) ] = 0
         # E[ ln(B(x)) ] = 0
 
@@ -227,8 +236,8 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
             Numpy array of log-densities, one entry per observation.
         """
 
-        v  = x - self.min_index
-        u  = np.bitwise_and(v >= 0, v < self.num_vals)
+        v = x - self.min_index
+        u = np.bitwise_and(v >= 0, v < self.num_vals)
         rv = np.zeros(len(x))
         rv.fill(self.log_default_value)
         rv[u] = self.log_prob_vec[v[u]]
@@ -269,7 +278,7 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
         """
         return np.asarray(x, dtype=int)
 
-    def sampler(self, seed: Optional[int] = None):
+    def sampler(self, seed: int | None = None):
         """Return an IntegerCategoricalSampler for this distribution.
 
         Args:
@@ -282,18 +291,17 @@ class IntegerCategoricalDistribution(ProbabilityDistribution):
         return IntegerCategoricalEstimator(name=self.name, prior=self.prior)
 
 
-
-class IntegerCategoricalSampler(object):
+class IntegerCategoricalSampler:
     """Draws integer observations from an IntegerCategoricalDistribution."""
 
-    def __init__(self, dist: IntegerCategoricalDistribution, seed: Optional[int] = None):
+    def __init__(self, dist: IntegerCategoricalDistribution, seed: int | None = None):
         """IntegerCategoricalSampler object.
 
         Args:
             dist (IntegerCategoricalDistribution): Distribution to sample from.
             seed (Optional[int]): Seed for the random number generator.
         """
-        self.rng  = RandomState(seed)
+        self.rng = RandomState(seed)
         self.dist = dist
 
     def sample(self, size=None):
@@ -307,16 +315,18 @@ class IntegerCategoricalSampler(object):
         """
 
         if size is None:
-            return self.rng.choice(range(self.dist.min_index, self.dist.max_index+1), p=self.dist.prob_vec)
+            return self.rng.choice(range(self.dist.min_index, self.dist.max_index + 1), p=self.dist.prob_vec)
         else:
-            return self.rng.choice(range(self.dist.min_index, self.dist.max_index + 1), p=self.dist.prob_vec, size=size).tolist()
+            return self.rng.choice(
+                range(self.dist.min_index, self.dist.max_index + 1), p=self.dist.prob_vec, size=size
+            ).tolist()
 
 
 class IntegerCategoricalAccumulator(SequenceEncodableAccumulator):
     """Accumulates per-value counts on a (growable) integer range for
     categorical estimation."""
 
-    def __init__(self, min_val: int, max_val: int, keys: Tuple[str,]):
+    def __init__(self, min_val: int, max_val: int, keys: tuple[str,]):
         """IntegerCategoricalAccumulator object.
 
         Args:
@@ -332,7 +342,7 @@ class IntegerCategoricalAccumulator(SequenceEncodableAccumulator):
         self.maxVal = max_val
 
         if min_val is not None and max_val is not None:
-            self.countVec = vec.zeros(max_val-min_val+1)
+            self.countVec = vec.zeros(max_val - min_val + 1)
         else:
             self.countVec = None
 
@@ -348,26 +358,25 @@ class IntegerCategoricalAccumulator(SequenceEncodableAccumulator):
         """
 
         if self.countVec is None:
-            self.minVal   = x
-            self.maxVal   = x
+            self.minVal = x
+            self.maxVal = x
             self.countVec = vec.make([weight])
 
         elif self.maxVal < x:
             tempVec = self.countVec
-            self.maxVal   = x
+            self.maxVal = x
             self.countVec = vec.zeros(self.maxVal - self.minVal + 1)
-            self.countVec[:len(tempVec)] = tempVec
-            self.countVec[x-self.minVal] += weight
+            self.countVec[: len(tempVec)] = tempVec
+            self.countVec[x - self.minVal] += weight
         elif self.minVal > x:
-            tempVec  = self.countVec
+            tempVec = self.countVec
             tempDiff = self.minVal - x
-            self.minVal   = x
+            self.minVal = x
             self.countVec = vec.zeros(self.maxVal - self.minVal + 1)
             self.countVec[tempDiff:] = tempVec
-            self.countVec[x-self.minVal] += weight
+            self.countVec[x - self.minVal] += weight
         else:
-            self.countVec[x-self.minVal] += weight
-
+            self.countVec[x - self.minVal] += weight
 
     def seq_update(self, x, weights, estimate):
         """Vectorized update from sequence-encoded data.
@@ -381,24 +390,24 @@ class IntegerCategoricalAccumulator(SequenceEncodableAccumulator):
         min_x = x.min()
         max_x = x.max()
 
-        loc_cnt = np.bincount(x-min_x, weights=weights)
+        loc_cnt = np.bincount(x - min_x, weights=weights)
 
         if self.countVec is None:
-            self.countVec = np.zeros(max_x-min_x+1)
+            self.countVec = np.zeros(max_x - min_x + 1)
             self.minVal = min_x
             self.maxVal = max_x
 
         if self.minVal > min_x or self.maxVal < max_x:
-            prev_min    = self.minVal
+            prev_min = self.minVal
             self.minVal = min(min_x, self.minVal)
             self.maxVal = max(max_x, self.maxVal)
-            temp        = self.countVec
-            prev_diff   = prev_min - self.minVal
+            temp = self.countVec
+            prev_diff = prev_min - self.minVal
             self.countVec = np.zeros(self.maxVal - self.minVal + 1)
-            self.countVec[prev_diff:(prev_diff + len(temp))] = temp
+            self.countVec[prev_diff : (prev_diff + len(temp))] = temp
 
         min_diff = min_x - self.minVal
-        self.countVec[min_diff:(min_diff+len(loc_cnt))] += loc_cnt
+        self.countVec[min_diff : (min_diff + len(loc_cnt))] += loc_cnt
 
     def seq_initialize(self, x, weights, rng):
         """Vectorized initialization (delegates to seq_update).
@@ -421,12 +430,11 @@ class IntegerCategoricalAccumulator(SequenceEncodableAccumulator):
         """
 
         if self.countVec is None and suff_stat[1] is not None:
-            self.minVal   = suff_stat[0]
-            self.maxVal   = suff_stat[0] + len(suff_stat[1]) - 1
+            self.minVal = suff_stat[0]
+            self.maxVal = suff_stat[0] + len(suff_stat[1]) - 1
             self.countVec = suff_stat[1]
 
         elif self.countVec is not None and suff_stat[1] is not None:
-
             if self.minVal == suff_stat[0] and len(self.countVec) == len(suff_stat[1]):
                 self.countVec += suff_stat[1]
 
@@ -434,7 +442,7 @@ class IntegerCategoricalAccumulator(SequenceEncodableAccumulator):
                 minVal = min(self.minVal, suff_stat[0])
                 maxVal = max(self.maxVal, suff_stat[0] + len(suff_stat[1]) - 1)
 
-                countVec = vec.zeros(maxVal-minVal+1)
+                countVec = vec.zeros(maxVal - minVal + 1)
 
                 i0 = self.minVal - minVal
                 i1 = self.maxVal - minVal + 1
@@ -444,8 +452,8 @@ class IntegerCategoricalAccumulator(SequenceEncodableAccumulator):
                 i1 = (suff_stat[0] + len(suff_stat[1]) - 1) - minVal + 1
                 countVec[i0:i1] += suff_stat[1]
 
-                self.minVal   = minVal
-                self.maxVal   = maxVal
+                self.minVal = minVal
+                self.maxVal = maxVal
                 self.countVec = countVec
 
         return self
@@ -460,10 +468,9 @@ class IntegerCategoricalAccumulator(SequenceEncodableAccumulator):
         Args:
             x: Tuple (min value, count vector).
         """
-        self.minVal   = x[0]
-        self.maxVal   = x[0] + len(x[1]) - 1
+        self.minVal = x[0]
+        self.maxVal = x[0] + len(x[1]) - 1
         self.countVec = x[1]
-
 
     def key_merge(self, stats_dict):
         """Merge this accumulator into stats_dict under its key (if keyed)."""
@@ -480,10 +487,10 @@ class IntegerCategoricalAccumulator(SequenceEncodableAccumulator):
                 self.from_value(stats_dict[self.key].value())
 
 
-class IntegerCategoricalAccumulatorFactory(object):
+class IntegerCategoricalAccumulatorFactory:
     """Factory for creating IntegerCategoricalAccumulator objects."""
 
-    def __init__(self, min_val, max_val, keys: Tuple[Optional[str],] = (None,)):
+    def __init__(self, min_val, max_val, keys: tuple[str | None,] = (None,)):
         """IntegerCategoricalAccumulatorFactory object.
 
         Args:
@@ -507,8 +514,17 @@ class IntegerCategoricalEstimator(ParameterEstimator):
     """Estimates an IntegerCategoricalDistribution from accumulated counts,
     using Dirichlet MAP probabilities when a conjugate prior is set."""
 
-    def __init__(self, min_index: Optional[int] = None, max_index: Optional[int] = None, default_value: float = 0.0, name: Optional[str] = None, prior: ProbabilityDistribution = default_prior, keys: Tuple[Optional[str], ] = (None,),
-                 min_val: Optional[int] = None, max_val: Optional[int] = None):
+    def __init__(
+        self,
+        min_index: int | None = None,
+        max_index: int | None = None,
+        default_value: float = 0.0,
+        name: str | None = None,
+        prior: ProbabilityDistribution = default_prior,
+        keys: tuple[str | None,] = (None,),
+        min_val: int | None = None,
+        max_val: int | None = None,
+    ):
         """IntegerCategoricalEstimator object.
 
         Args:
@@ -532,11 +548,11 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         if max_val is not None:
             max_index = max_val
 
-        self.minVal        = min_index
-        self.maxVal        = max_index
+        self.minVal = min_index
+        self.maxVal = max_index
         self.default_value = default_value
-        self.keys          = keys
-        self.name          = name
+        self.keys = keys
+        self.name = name
 
         self.set_prior(prior)
 
@@ -557,7 +573,6 @@ class IntegerCategoricalEstimator(ParameterEstimator):
             self.has_conj_prior = True
         else:
             self.has_conj_prior = False
-
 
     def accumulator_factory(self):
         """Returns an IntegerCategoricalAccumulatorFactory for this estimator."""
@@ -588,7 +603,6 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         """
 
         if self.has_conj_prior:
-
             min_val, count_vec = suff_stat
             alpha0 = self.prior.get_parameters()
             if np.ndim(alpha0) == 0:
@@ -608,8 +622,11 @@ class IntegerCategoricalEstimator(ParameterEstimator):
 
             hyper_posterior = DirichletDistribution(posterior_params)
 
-            return IntegerCategoricalDistribution(prob_vec, min_index=min_val, default_value=self.default_value, name=self.name, prior=hyper_posterior)
+            return IntegerCategoricalDistribution(
+                prob_vec, min_index=min_val, default_value=self.default_value, name=self.name, prior=hyper_posterior
+            )
 
         else:
-
-            return IntegerCategoricalDistribution(suff_stat[0], suff_stat[1] / (suff_stat[1].sum()), name=self.name, prior=self.prior)
+            return IntegerCategoricalDistribution(
+                suff_stat[0], suff_stat[1] / (suff_stat[1].sum()), name=self.name, prior=self.prior
+            )

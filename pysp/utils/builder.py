@@ -1,9 +1,9 @@
 from pysp.stats import *
-from typing import Optional, Tuple
+
 
 def read_index_csv(filename: str):
-    fin = open(filename, 'r')
-    lines = map(lambda v: v.split('#', 1)[0].split(',', 3), fin.read().split('\n'))
+    fin = open(filename)
+    lines = map(lambda v: v.split("#", 1)[0].split(",", 3), fin.read().split("\n"))
     fin.close()
     lines = filter(lambda v: len(v) == 4, lines)
 
@@ -15,8 +15,8 @@ def get_indexed_rdd_pne(field_info=None, filename=None):
         field_info = read_index_csv(filename)
 
     def entry_lambda(idx, map_str):
-        if map_str != '':
-            temp_lambda0 = eval('lambda x: ' + map_str)
+        if map_str != "":
+            temp_lambda0 = eval("lambda x: " + map_str)
             temp_lambda = lambda u: temp_lambda0(u[idx])
         else:
             temp_lambda = lambda u: u[idx]
@@ -42,7 +42,7 @@ def get_indexed_rdd_pne(field_info=None, filename=None):
             max_idx = idx_i if idx_i > max_idx else max_idx
 
     def line_parser(line: str):
-        parts = line.split(',')
+        parts = line.split(",")
         if len(parts) < (max_idx + 1):
             return None
         else:

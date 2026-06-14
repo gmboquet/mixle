@@ -3,23 +3,28 @@
 Parity is checked against the legacy seq_* path on CPU float64; the gradient
 MLE path is checked for likelihood improvement and parameter recovery.
 """
-import io
+
 import importlib
+import io
 import unittest
 
 import numpy as np
 
-HAS_TORCH = importlib.util.find_spec('torch') is not None
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 if HAS_TORCH:
     import torch
 else:
     torch = None
 
 from pysp.stats import (
-    CategoricalDistribution, CategoricalEstimator, CompositeDistribution,
-    GaussianDistribution, IntegerCategoricalDistribution, MixtureDistribution,
-    PoissonDistribution, SequenceDistribution, seq_encode, seq_estimate,
+    CategoricalDistribution,
+    CompositeDistribution,
+    GaussianDistribution,
+    MixtureDistribution,
+    seq_encode,
+    seq_estimate,
 )
+
 if HAS_TORCH:
     from pysp.stats.torch_engine import TorchMixture
 else:
@@ -27,9 +32,8 @@ else:
 from pysp.tests.kernels_test import make_estimator, make_mixture
 
 
-@unittest.skipUnless(HAS_TORCH, 'torch is not installed')
+@unittest.skipUnless(HAS_TORCH, "torch is not installed")
 class TorchEngineTestCase(unittest.TestCase):
-
     @classmethod
     def setUpClass(cls):
         cls.model = make_mixture()
@@ -44,8 +48,10 @@ class TorchEngineTestCase(unittest.TestCase):
         ll_k = self.tm.seq_component_log_density(self.enc)
         for k, comp in enumerate(self.model.components):
             ll_legacy = comp.seq_log_density(comp.dist_to_encoder().seq_encode(self.data))
-            self.assertTrue(np.allclose(ll_k[:, k], ll_legacy, atol=1.0e-10),
-                            'component %d max err %g' % (k, np.abs(ll_k[:, k] - ll_legacy).max()))
+            self.assertTrue(
+                np.allclose(ll_k[:, k], ll_legacy, atol=1.0e-10),
+                "component %d max err %g" % (k, np.abs(ll_k[:, k] - ll_legacy).max()),
+            )
 
     def test_mixture_log_density_parity(self):
         ll = self.tm.seq_log_density(self.enc)
@@ -78,15 +84,14 @@ class TorchEngineTestCase(unittest.TestCase):
 
             ll_t = self.tm.seq_log_density(self.enc, model=m_torch)
             ll_l = m_legacy.seq_log_density(self.legacy_enc)
-            self.assertTrue(np.allclose(ll_t, ll_l, atol=1.0e-8),
-                            'EM diverged: max err %g' % np.abs(ll_t - ll_l).max())
-            self.assertTrue(np.allclose(np.asarray(m_torch.w, dtype=float),
-                                        np.asarray(m_legacy.w, dtype=float), atol=1.0e-10))
+            self.assertTrue(np.allclose(ll_t, ll_l, atol=1.0e-8), "EM diverged: max err %g" % np.abs(ll_t - ll_l).max())
+            self.assertTrue(
+                np.allclose(np.asarray(m_torch.w, dtype=float), np.asarray(m_legacy.w, dtype=float), atol=1.0e-10)
+            )
 
     def test_fit_converges(self):
         est = make_estimator()
-        model, ll = self.tm.fit(self.enc, est, max_its=60, delta=1.0e-7,
-                                rng=np.random.RandomState(5), init_p=1.0)
+        model, ll = self.tm.fit(self.enc, est, max_its=60, delta=1.0e-7, rng=np.random.RandomState(5), init_p=1.0)
         ll0 = self.tm.seq_log_density(self.enc, model=self.model).sum()
         self.assertTrue(np.isfinite(ll))
         self.assertGreater(ll, ll0 - 0.05 * abs(ll0))
@@ -98,8 +103,9 @@ class TorchEngineTestCase(unittest.TestCase):
         comps = []
         for c in self.model.components:
             g = c.dists[0]
-            comps.append(CompositeDistribution((GaussianDistribution(g.mu + 2.0, g.sigma2 * 3.0),)
-                                               + tuple(c.dists[1:])))
+            comps.append(
+                CompositeDistribution((GaussianDistribution(g.mu + 2.0, g.sigma2 * 3.0),) + tuple(c.dists[1:]))
+            )
         start = MixtureDistribution(comps, [1.0 / 3] * 3)
 
         tm = TorchMixture(start)
@@ -116,13 +122,21 @@ class TorchEngineTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(ll_check)))
 
     def test_fit_mle_recovers_gaussian_parameters(self):
-        truth = MixtureDistribution([CompositeDistribution((GaussianDistribution(-5.0, 1.0),)),
-                                     CompositeDistribution((GaussianDistribution(5.0, 2.0),))],
-                                    [0.3, 0.7])
+        truth = MixtureDistribution(
+            [
+                CompositeDistribution((GaussianDistribution(-5.0, 1.0),)),
+                CompositeDistribution((GaussianDistribution(5.0, 2.0),)),
+            ],
+            [0.3, 0.7],
+        )
         data = truth.sampler(seed=7).sample(size=3000)
-        start = MixtureDistribution([CompositeDistribution((GaussianDistribution(-1.0, 4.0),)),
-                                     CompositeDistribution((GaussianDistribution(1.0, 4.0),))],
-                                    [0.5, 0.5])
+        start = MixtureDistribution(
+            [
+                CompositeDistribution((GaussianDistribution(-1.0, 4.0),)),
+                CompositeDistribution((GaussianDistribution(1.0, 4.0),)),
+            ],
+            [0.5, 0.5],
+        )
         tm = TorchMixture(start)
         enc = tm.encode(data)
         fitted, _ = tm.fit_mle(enc, max_its=800, lr=0.05, out=io.StringIO())
@@ -136,13 +150,21 @@ class TorchEngineTestCase(unittest.TestCase):
     # -- gradient MAP --------------------------------------------------------------
 
     def test_fit_map_zero_strength_equals_mle(self):
-        truth = MixtureDistribution([CompositeDistribution((GaussianDistribution(-4.0, 1.0),)),
-                                     CompositeDistribution((GaussianDistribution(4.0, 1.0),))],
-                                    [0.5, 0.5])
+        truth = MixtureDistribution(
+            [
+                CompositeDistribution((GaussianDistribution(-4.0, 1.0),)),
+                CompositeDistribution((GaussianDistribution(4.0, 1.0),)),
+            ],
+            [0.5, 0.5],
+        )
         data = truth.sampler(seed=3).sample(size=500)
-        start = MixtureDistribution([CompositeDistribution((GaussianDistribution(-1.0, 4.0),)),
-                                     CompositeDistribution((GaussianDistribution(1.0, 4.0),))],
-                                    [0.5, 0.5])
+        start = MixtureDistribution(
+            [
+                CompositeDistribution((GaussianDistribution(-1.0, 4.0),)),
+                CompositeDistribution((GaussianDistribution(1.0, 4.0),)),
+            ],
+            [0.5, 0.5],
+        )
         tm = TorchMixture(start)
         enc = tm.encode(data)
         m_mle, ll_mle = tm.fit_mle(enc, max_its=400, lr=0.05, out=io.StringIO())
@@ -157,7 +179,7 @@ class TorchEngineTestCase(unittest.TestCase):
         tm = TorchMixture(start)
         enc = tm.encode(data)
         m_mle, _ = tm.fit_mle(enc, max_its=2000, lr=0.05, out=io.StringIO())
-        prior = {'family': 'normalgamma', 'mu0': 0.0, 'kappa': 1.0e-3, 'a': 3.0, 'b': 2.0}
+        prior = {"family": "normalgamma", "mu0": 0.0, "kappa": 1.0e-3, "a": 3.0, "b": 2.0}
         m_map, _ = tm.fit_map(enc, priors=prior, max_its=2000, lr=0.05, out=io.StringIO())
 
         self.assertLess(m_mle.sigma2, 0.01)
@@ -173,14 +195,14 @@ class TorchEngineTestCase(unittest.TestCase):
     def test_fit_map_smooths_unseen_categories(self):
         # vocabulary contains 'c' but the data never does: MAP with a Dirichlet
         # prior keeps visibly more mass on 'c' than MLE
-        comp = CompositeDistribution((CategoricalDistribution({'a': 0.6, 'b': 0.3, 'c': 0.1}),))
-        data = [('a',)] * 60 + [('b',)] * 40
+        comp = CompositeDistribution((CategoricalDistribution({"a": 0.6, "b": 0.3, "c": 0.1}),))
+        data = [("a",)] * 60 + [("b",)] * 40
         tm = TorchMixture(comp)
         enc = tm.encode(data)
         m_mle, _ = tm.fit_mle(enc, max_its=1500, lr=0.1, out=io.StringIO())
         m_map, _ = tm.fit_map(enc, prior_strength=30.0, max_its=1500, lr=0.1, out=io.StringIO())
-        p_mle = m_mle.dists[0].pmap['c']
-        p_map = m_map.dists[0].pmap['c']
+        p_mle = m_mle.dists[0].pmap["c"]
+        p_map = m_map.dists[0].pmap["c"]
         self.assertGreater(p_map, 5.0 * max(p_mle, 1.0e-12))
         self.assertGreater(p_map, 0.01)
 
@@ -202,9 +224,9 @@ class TorchEngineTestCase(unittest.TestCase):
         rel = np.abs(ll - ll_legacy) / np.maximum(np.abs(ll_legacy), 1.0)
         self.assertLess(rel.max(), 1.0e-4)
 
-    @unittest.skipUnless(HAS_TORCH and torch.backends.mps.is_available(), 'MPS not available')
+    @unittest.skipUnless(HAS_TORCH and torch.backends.mps.is_available(), "MPS not available")
     def test_mps_smoke(self):
-        tm = TorchMixture(self.model, device='mps', dtype=torch.float32)
+        tm = TorchMixture(self.model, device="mps", dtype=torch.float32)
         enc = tm.encode(self.data)
         ll = tm.seq_log_density(enc)
         ll_legacy = self.model.seq_log_density(self.legacy_enc)
@@ -215,5 +237,5 @@ class TorchEngineTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(tm.seq_log_density(enc, model=m))))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

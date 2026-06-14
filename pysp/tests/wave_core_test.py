@@ -2,6 +2,7 @@
 int_spike and dirac_length enumerators, DiagonalGaussianSampler export, and the
 DataSequenceEncoder.__str__ recursion fix.
 """
+
 import unittest
 
 import numpy as np
@@ -9,8 +10,8 @@ import numpy as np
 from pysp.stats import DiagonalGaussianSampler, DistributionSampler
 from pysp.stats.dirac_length import DiracLengthMixtureDistribution
 from pysp.stats.gaussian import GaussianDistribution
+from pysp.stats.int_range import IntegerCategoricalDistribution
 from pysp.stats.int_spike import IntegerUniformSpikeDistribution
-from pysp.stats.intrange import IntegerCategoricalDistribution
 from pysp.stats.pdist import DataSequenceEncoder, EnumerationError
 from pysp.stats.poisson import PoissonDistribution
 from pysp.stats.weighted import WeightedDistribution, WeightedSampler
@@ -23,16 +24,15 @@ def check_enumeration_invariants(test, dist, items):
     """Assert non-increasing order, exact dedup, and log_prob == log_density for items."""
     lps = [lp for _, lp in items]
     for i in range(len(lps) - 1):
-        test.assertGreaterEqual(lps[i], lps[i + 1] - TOL, 'order violated at %d' % i)
+        test.assertGreaterEqual(lps[i], lps[i + 1] - TOL, "order violated at %d" % i)
     keys = [freeze(v) for v, _ in items]
-    test.assertEqual(len(keys), len(set(keys)), 'duplicate values yielded')
-    with np.errstate(divide='ignore'):
+    test.assertEqual(len(keys), len(set(keys)), "duplicate values yielded")
+    with np.errstate(divide="ignore"):
         for v, lp in items:
-            test.assertAlmostEqual(lp, dist.log_density(v), delta=TOL, msg='lp mismatch at %r' % (v,))
+            test.assertAlmostEqual(lp, dist.log_density(v), delta=TOL, msg="lp mismatch at %r" % (v,))
 
 
 class WeightedCombineTestCase(unittest.TestCase):
-
     def test_combine_adds_sufficient_statistics(self):
         dist = WeightedDistribution(GaussianDistribution(1.0, 2.0))
         factory = dist.estimator().accumulator_factory()
@@ -51,12 +51,12 @@ class WeightedCombineTestCase(unittest.TestCase):
 
         acc1.combine(acc2.value())
 
-        np.testing.assert_allclose(np.asarray(acc1.value(), dtype=float),
-                                   np.asarray(acc_all.value(), dtype=float), rtol=0, atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(acc1.value(), dtype=float), np.asarray(acc_all.value(), dtype=float), rtol=0, atol=1e-12
+        )
 
 
 class WeightedSamplerTestCase(unittest.TestCase):
-
     def test_sampler_type_and_shape(self):
         dist = WeightedDistribution(GaussianDistribution(0.0, 1.0))
         sampler = dist.sampler(seed=11)
@@ -99,7 +99,6 @@ class WeightedSamplerTestCase(unittest.TestCase):
 
 
 class IntegerUniformSpikeEnumeratorTestCase(unittest.TestCase):
-
     def test_spike_first_full_support(self):
         dist = IntegerUniformSpikeDistribution(k=3, num_vals=10, p=0.6, min_val=0)
         items = list(dist.enumerator())
@@ -127,7 +126,6 @@ class IntegerUniformSpikeEnumeratorTestCase(unittest.TestCase):
 
 
 class DiracLengthMixtureEnumeratorTestCase(unittest.TestCase):
-
     def test_scalar_component_log_density_matches_vectorized_path(self):
         len_dist = IntegerCategoricalDistribution(0, [0.2, 0.5, 0.3])
         dist = DiracLengthMixtureDistribution(len_dist=len_dist, p=0.7, v=0)
@@ -151,8 +149,7 @@ class DiracLengthMixtureEnumeratorTestCase(unittest.TestCase):
         vectorized = dist.seq_posterior(enc)
 
         np.testing.assert_allclose(scalar, vectorized, rtol=0.0, atol=1e-12)
-        np.testing.assert_allclose(scalar[0], [0.7 * 0.2 / (0.7 * 0.2 + 0.3),
-                                               0.3 / (0.7 * 0.2 + 0.3)])
+        np.testing.assert_allclose(scalar[0], [0.7 * 0.2 / (0.7 * 0.2 + 0.3), 0.3 / (0.7 * 0.2 + 0.3)])
         np.testing.assert_allclose(scalar[1:], [[1.0, 0.0], [1.0, 0.0]])
 
     def test_posterior_when_dirac_point_is_outside_length_support(self):
@@ -200,41 +197,43 @@ class DiracLengthMixtureEnumeratorTestCase(unittest.TestCase):
 
 
 class ExportsTestCase(unittest.TestCase):
-
     def test_diagonal_gaussian_sampler_export(self):
         from pysp.stats.dmvn import DiagonalGaussianSampler as DmvnSampler
+
         self.assertIs(DiagonalGaussianSampler, DmvnSampler)
 
     def test_distribution_sampler_still_exported(self):
         from pysp.stats.pdist import DistributionSampler as PdistSampler
+
         self.assertIs(DistributionSampler, PdistSampler)
 
     def test_select_exports(self):
         import pysp.stats as stats
-        self.assertTrue(hasattr(stats, 'SelectDistribution'))
-        self.assertTrue(hasattr(stats, 'SelectEstimator'))
-        self.assertIn('SelectDistribution', stats.__all__)
-        self.assertIn('SelectEstimator', stats.__all__)
-        self.assertIn('DiagonalGaussianSampler', stats.__all__)
+
+        self.assertTrue(hasattr(stats, "SelectDistribution"))
+        self.assertTrue(hasattr(stats, "SelectEstimator"))
+        self.assertIn("SelectDistribution", stats.__all__)
+        self.assertIn("SelectEstimator", stats.__all__)
+        self.assertIn("DiagonalGaussianSampler", stats.__all__)
 
     def test_all_names_resolve(self):
         import pysp.stats as stats
+
         missing = [name for name in stats.__all__ if not hasattr(stats, name)]
         self.assertEqual(missing, [])
 
 
 class DataSequenceEncoderStrTestCase(unittest.TestCase):
-
     def test_base_str_no_recursion(self):
-        self.assertEqual(str(DataSequenceEncoder()), 'DataSequenceEncoder')
+        self.assertEqual(str(DataSequenceEncoder()), "DataSequenceEncoder")
 
     def test_subclass_default_str_uses_class_name(self):
         class DummyEncoder(DataSequenceEncoder):
             def __eq__(self, other):
                 return isinstance(other, DummyEncoder)
 
-        self.assertEqual(str(DummyEncoder()), 'DummyEncoder')
+        self.assertEqual(str(DummyEncoder()), "DummyEncoder")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

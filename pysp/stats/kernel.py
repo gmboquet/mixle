@@ -4,10 +4,11 @@ The generic kernel is a thin adapter over the existing seq_* protocol.  It is
 the guaranteed fallback for engine-aware orchestration; specialized factories
 can override code shape for performance without changing estimators.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Type
+from typing import Any
 
 import numpy as np
 
@@ -31,7 +32,7 @@ class Kernel(ABC):
 
     def component_scores(self, enc: Any) -> Any:
         """Return per-row, per-component log densities where meaningful."""
-        raise NotImplementedError('%s has no component_scores implementation.' % type(self).__name__)
+        raise NotImplementedError("%s has no component_scores implementation." % type(self).__name__)
 
     @abstractmethod
     def accumulate(self, enc: Any, weights: Any) -> Any:
@@ -48,8 +49,12 @@ class KernelFactory(ABC):
     """Factory that builds a Kernel for a distribution and engine."""
 
     @abstractmethod
-    def build(self, dist: SequenceEncodableProbabilityDistribution, engine: ComputeEngine,
-              estimator: Optional[ParameterEstimator] = None) -> Kernel:
+    def build(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        engine: ComputeEngine,
+        estimator: ParameterEstimator | None = None,
+    ) -> Kernel:
         """Return a kernel for ``dist`` on ``engine``.
 
         ``estimator`` is optional for pure scoring and required for kernels
@@ -61,17 +66,21 @@ class KernelFactory(ABC):
 class GenericKernel(Kernel):
     """Fallback kernel over distribution-owned backend hooks or existing seq_* methods."""
 
-    def __init__(self, dist: SequenceEncodableProbabilityDistribution,
-                 engine: ComputeEngine = NUMPY_ENGINE,
-                 estimator: Optional[ParameterEstimator] = None) -> None:
+    def __init__(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        engine: ComputeEngine = NUMPY_ENGINE,
+        estimator: ParameterEstimator | None = None,
+    ) -> None:
         self.dist = dist
         self.engine = engine
         self.estimator = estimator
 
     def score(self, enc: Any) -> Any:
         """Return per-row log densities using backend hooks when available."""
-        enc = getattr(enc, 'engine_payload', enc)
+        enc = getattr(enc, "engine_payload", enc)
         from pysp.stats.backend import BackendScoringError, backend_seq_log_density
+
         try:
             return backend_seq_log_density(self.dist, enc, self.engine)
         except BackendScoringError:
@@ -81,28 +90,29 @@ class GenericKernel(Kernel):
 
     def component_scores(self, enc: Any) -> Any:
         """Return per-row component log densities for mixture-like models."""
-        enc = getattr(enc, 'engine_payload', enc)
-        if callable(getattr(self.dist, 'backend_seq_component_log_density', None)):
+        enc = getattr(enc, "engine_payload", enc)
+        if callable(getattr(self.dist, "backend_seq_component_log_density", None)):
             from pysp.stats.backend import backend_seq_component_log_density
+
             return backend_seq_component_log_density(self.dist, enc, self.engine)
-        if hasattr(self.dist, 'seq_component_log_density'):
+        if hasattr(self.dist, "seq_component_log_density"):
             return self.dist.seq_component_log_density(enc)
         return super().component_scores(enc)
 
     def accumulate(self, enc: Any, weights: Any) -> Any:
         """Accumulate weighted sufficient statistics in estimator-owned format."""
         if self.estimator is None:
-            raise ValueError('GenericKernel.accumulate requires an estimator.')
+            raise ValueError("GenericKernel.accumulate requires an estimator.")
         from pysp.stats.declarations import generated_sufficient_statistics, generated_sufficient_statistics_available
+
         if generated_sufficient_statistics_available(self.dist):
-            return generated_sufficient_statistics(
-                self.dist, getattr(enc, 'engine_payload', enc), weights, self.engine)
+            return generated_sufficient_statistics(self.dist, getattr(enc, "engine_payload", enc), weights, self.engine)
         accumulator = self.estimator.accumulator_factory().make()
-        enc = getattr(enc, 'host_payload', enc)
+        enc = getattr(enc, "host_payload", enc)
         # Engine-resident E-step: when the accumulator provides a backend update and we are off the
         # numpy engine, run the sufficient-statistic accumulation on the active engine instead of
         # falling back to the host seq_update path.
-        if self.engine.name != NUMPY_ENGINE.name and callable(getattr(accumulator, 'seq_update_engine', None)):
+        if self.engine.name != NUMPY_ENGINE.name and callable(getattr(accumulator, "seq_update_engine", None)):
             accumulator.seq_update_engine(enc, weights, self.dist, self.engine)
             return accumulator.value()
         weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
@@ -117,14 +127,18 @@ class GenericKernel(Kernel):
 class GenericKernelFactory(KernelFactory):
     """Guaranteed fallback factory for distributions that support the engine."""
 
-    def build(self, dist: SequenceEncodableProbabilityDistribution, engine: ComputeEngine,
-              estimator: Optional[ParameterEstimator] = None) -> GenericKernel:
+    def build(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        engine: ComputeEngine,
+        estimator: ParameterEstimator | None = None,
+    ) -> GenericKernel:
         """Build a generic kernel or fail fast when the engine is unsupported."""
         if not dist.supports_engine(engine):
             raise EngineNotSupportedError(
-                '%s does not declare support for the %s engine. Register a specialized '
-                'KernelFactory or keep this model on a supported engine: %s.' %
-                (type(dist).__name__, engine.name, ', '.join(dist.supported_engines()))
+                "%s does not declare support for the %s engine. Register a specialized "
+                "KernelFactory or keep this model on a supported engine: %s."
+                % (type(dist).__name__, engine.name, ", ".join(dist.supported_engines()))
             )
         return GenericKernel(dist, engine=engine, estimator=estimator)
 
@@ -138,12 +152,16 @@ class NumbaKernel(Kernel):
     same score/accumulate/refresh surface as other engines.
     """
 
-    def __init__(self, dist: SequenceEncodableProbabilityDistribution,
-                 engine: ComputeEngine = NUMPY_ENGINE,
-                 estimator: Optional[ParameterEstimator] = None) -> None:
+    def __init__(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        engine: ComputeEngine = NUMPY_ENGINE,
+        estimator: ParameterEstimator | None = None,
+    ) -> None:
         if engine.name != NUMPY_ENGINE.name:
-            raise ValueError('NumbaKernel currently supports only the numpy engine.')
+            raise ValueError("NumbaKernel currently supports only the numpy engine.")
         from pysp.stats.kernels import CompiledMixture
+
         self.dist = dist
         self.engine = engine
         self.estimator = estimator
@@ -164,10 +182,10 @@ class NumbaKernel(Kernel):
     def accumulate(self, enc: Any, weights: Any) -> Any:
         """Use fused posteriors plus row weights to produce legacy statistics."""
         if self.estimator is None:
-            raise ValueError('NumbaKernel.accumulate requires an estimator.')
+            raise ValueError("NumbaKernel.accumulate requires an estimator.")
         row_weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
         if row_weights.ndim != 1:
-            raise ValueError('NumbaKernel.accumulate expects per-row weights with shape (n,).')
+            raise ValueError("NumbaKernel.accumulate expects per-row weights with shape (n,).")
         gamma = self.compiled.posteriors(enc, model=self.dist)
         gamma *= row_weights.reshape(-1, 1)
         return self.compiled.weighted_suff_stats(enc, gamma, model=self.dist)
@@ -181,13 +199,16 @@ class NumbaKernel(Kernel):
 class GeneratedNumbaKernel(Kernel):
     """Generated numba kernel from declaration exponential-family metadata."""
 
-    def __init__(self, dist: SequenceEncodableProbabilityDistribution,
-                 engine: ComputeEngine = NUMPY_ENGINE,
-                 estimator: Optional[ParameterEstimator] = None) -> None:
+    def __init__(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        engine: ComputeEngine = NUMPY_ENGINE,
+        estimator: ParameterEstimator | None = None,
+    ) -> None:
         if engine.name != NUMPY_ENGINE.name:
-            raise ValueError('GeneratedNumbaKernel currently supports only the numpy engine.')
+            raise ValueError("GeneratedNumbaKernel currently supports only the numpy engine.")
         if not _generated_numba_kernel_available(dist):
-            raise ValueError('%s has no declaration-generated numba scorer.' % type(dist).__name__)
+            raise ValueError("%s has no declaration-generated numba scorer." % type(dist).__name__)
         self.dist = dist
         self.engine = engine
         self.estimator = estimator
@@ -200,7 +221,8 @@ class GeneratedNumbaKernel(Kernel):
     def score(self, enc: Any) -> np.ndarray:
         """Return per-row log densities from declaration-generated numba code."""
         from pysp.stats.declarations import generated_numba_log_density
-        enc = getattr(enc, 'engine_payload', enc)   # unwrap resident payloads
+
+        enc = getattr(enc, "engine_payload", enc)  # unwrap resident payloads
         if self.components is not None:
             ll = self.component_scores(enc) + np.asarray(self.dist.log_w, dtype=np.float64).reshape(1, -1)
             mx = ll.max(axis=1, keepdims=True)
@@ -212,7 +234,7 @@ class GeneratedNumbaKernel(Kernel):
 
     def component_scores(self, enc: Any) -> np.ndarray:
         """Return generated component scores for homogeneous generated mixtures."""
-        enc = getattr(enc, 'engine_payload', enc)   # unwrap resident payloads
+        enc = getattr(enc, "engine_payload", enc)  # unwrap resident payloads
         if self.components is None:
             return super().component_scores(enc)
         return _generated_numba_component_scores(enc, self.components, self.engine)
@@ -220,10 +242,10 @@ class GeneratedNumbaKernel(Kernel):
     def accumulate(self, enc: Any, weights: Any) -> Any:
         """Accumulate generated sufficient statistics for leaves or mixtures."""
         if self.estimator is None:
-            raise ValueError('GeneratedNumbaKernel.accumulate requires an estimator.')
-        from pysp.stats.declarations import (generated_sufficient_statistics,
-                                             generated_sufficient_statistics_available)
-        enc = getattr(enc, 'engine_payload', enc)   # unwrap resident payloads
+            raise ValueError("GeneratedNumbaKernel.accumulate requires an estimator.")
+        from pysp.stats.declarations import generated_sufficient_statistics, generated_sufficient_statistics_available
+
+        enc = getattr(enc, "engine_payload", enc)  # unwrap resident payloads
         if self.components is not None:
             row_weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
             try:
@@ -237,14 +259,14 @@ class GeneratedNumbaKernel(Kernel):
                 # a width mismatch): fall back to the host mixture accumulator, which handles any
                 # component family.
                 accumulator = self.estimator.accumulator_factory().make()
-                accumulator.seq_update(getattr(enc, 'host_payload', enc), row_weights, self.dist)
+                accumulator.seq_update(getattr(enc, "host_payload", enc), row_weights, self.dist)
                 return accumulator.value()
         if generated_sufficient_statistics_available(self.dist):
             return generated_sufficient_statistics(self.dist, enc, weights, self.engine)
         # Scorer-only leaf (numba scorer but no generated suff-stat hook): accumulate via the host
         # accumulator so the M-step still receives its expected statistics.
         accumulator = self.estimator.accumulator_factory().make()
-        host_enc = getattr(enc, 'host_payload', enc)
+        host_enc = getattr(enc, "host_payload", enc)
         row_weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
         accumulator.seq_update(host_enc, row_weights, self.dist)
         return accumulator.value()
@@ -263,7 +285,7 @@ class GeneratedNumbaKernel(Kernel):
     def refresh(self, dist: SequenceEncodableProbabilityDistribution) -> None:
         """Refresh the distribution and regenerated component metadata."""
         if not _generated_numba_kernel_available(dist):
-            raise ValueError('%s has no declaration-generated numba scorer.' % type(dist).__name__)
+            raise ValueError("%s has no declaration-generated numba scorer." % type(dist).__name__)
         self.dist = dist
         self.components = _generated_numba_components(dist)
 
@@ -271,8 +293,12 @@ class GeneratedNumbaKernel(Kernel):
 class NumbaKernelFactory(KernelFactory):
     """Factory for generated declaration numba kernels with legacy fused fallback."""
 
-    def build(self, dist: SequenceEncodableProbabilityDistribution, engine: ComputeEngine,
-              estimator: Optional[ParameterEstimator] = None) -> Kernel:
+    def build(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        engine: ComputeEngine,
+        estimator: ParameterEstimator | None = None,
+    ) -> Kernel:
         """Prefer generated numba kernels, then fused kernels, then stacked fallback."""
         if _generated_numba_kernel_available(dist):
             return GeneratedNumbaKernel(dist, engine=engine, estimator=estimator)
@@ -298,11 +324,15 @@ class GeneratedNumbaKernelFactory(KernelFactory):
     exponential-family leaves on the numpy engine.
     """
 
-    def __init__(self, fallback: Optional[KernelFactory] = None) -> None:
+    def __init__(self, fallback: KernelFactory | None = None) -> None:
         self.fallback = GenericKernelFactory() if fallback is None else fallback
 
-    def build(self, dist: SequenceEncodableProbabilityDistribution, engine: ComputeEngine,
-              estimator: Optional[ParameterEstimator] = None) -> Kernel:
+    def build(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        engine: ComputeEngine,
+        estimator: ParameterEstimator | None = None,
+    ) -> Kernel:
         """Build a generated numba kernel on numpy when available, else fall back."""
         if engine.name == NUMPY_ENGINE.name and _generated_numba_kernel_available(dist):
             try:
@@ -312,17 +342,18 @@ class GeneratedNumbaKernelFactory(KernelFactory):
         return self.fallback.build(dist, engine, estimator=estimator)
 
 
-def _stacked_kernel_after_numba_decline(dist: SequenceEncodableProbabilityDistribution,
-                                        engine: ComputeEngine,
-                                        estimator: Optional[ParameterEstimator]) -> Optional[Kernel]:
+def _stacked_kernel_after_numba_decline(
+    dist: SequenceEncodableProbabilityDistribution, engine: ComputeEngine, estimator: ParameterEstimator | None
+) -> Kernel | None:
     if engine.name != NUMPY_ENGINE.name:
         return None
-    components = getattr(dist, 'components', None)
-    log_w = getattr(dist, 'log_w', None)
+    components = getattr(dist, "components", None)
+    log_w = getattr(dist, "log_w", None)
     if components is None or log_w is None:
         return None
     try:
         from pysp.stats.stacked import StackedMixtureKernel
+
         return StackedMixtureKernel(dist, engine=engine, estimator=estimator)
     except ValueError:
         return None
@@ -330,6 +361,7 @@ def _stacked_kernel_after_numba_decline(dist: SequenceEncodableProbabilityDistri
 
 def _generated_numba_kernel_available(dist: SequenceEncodableProbabilityDistribution) -> bool:
     from pysp.stats.declarations import generated_numba_log_density_available
+
     if generated_numba_log_density_available(dist):
         return True
     components = _generated_numba_components(dist)
@@ -338,9 +370,9 @@ def _generated_numba_kernel_available(dist: SequenceEncodableProbabilityDistribu
     return _generated_numba_components_available(components)
 
 
-def _generated_numba_components(dist: SequenceEncodableProbabilityDistribution) -> Optional[tuple]:
-    components = getattr(dist, 'components', None)
-    log_w = getattr(dist, 'log_w', None)
+def _generated_numba_components(dist: SequenceEncodableProbabilityDistribution) -> tuple | None:
+    components = getattr(dist, "components", None)
+    log_w = getattr(dist, "log_w", None)
     if components is None or log_w is None:
         return None
     components = tuple(components)
@@ -354,6 +386,7 @@ def _generated_numba_components_available(components: tuple) -> bool:
     if not all(type(component) is component_type for component in components):
         return False
     from pysp.stats.declarations import generated_numba_stacked_available, generated_stacked_params
+
     if generated_numba_stacked_available(components[0]):
         try:
             generated_stacked_params(components, NUMPY_ENGINE)
@@ -363,8 +396,9 @@ def _generated_numba_components_available(components: tuple) -> bool:
     sequence_child_sets = _generated_numba_sequence_child_sets(components)
     if sequence_child_sets is not None:
         element_set, length_set = sequence_child_sets
-        return _generated_numba_components_available(element_set) and \
-            (length_set is None or _generated_numba_components_available(length_set))
+        return _generated_numba_components_available(element_set) and (
+            length_set is None or _generated_numba_components_available(length_set)
+        )
     optional_child_set = _generated_numba_optional_child_set(components)
     if optional_child_set is not None:
         return _generated_numba_components_available(optional_child_set)
@@ -372,48 +406,55 @@ def _generated_numba_components_available(components: tuple) -> bool:
     return bool(child_sets) and all(_generated_numba_components_available(child_set) for child_set in child_sets)
 
 
-def _generated_numba_child_component_sets(components: tuple) -> Optional[tuple]:
-    child_count = getattr(components[0], 'count', None)
-    child_dists = getattr(components[0], 'dists', None)
+def _generated_numba_child_component_sets(components: tuple) -> tuple | None:
+    child_count = getattr(components[0], "count", None)
+    child_dists = getattr(components[0], "dists", None)
     if child_count is None or child_dists is None:
         return None
     child_count = int(child_count)
-    if any(getattr(component, 'count', None) != child_count for component in components):
+    if any(getattr(component, "count", None) != child_count for component in components):
         return None
     return tuple(tuple(component.dists[i] for component in components) for i in range(child_count))
 
 
-def _generated_numba_sequence_child_sets(components: tuple) -> Optional[tuple]:
-    required = ('dist', 'len_dist', 'len_normalized', 'null_len_dist')
+def _generated_numba_sequence_child_sets(components: tuple) -> tuple | None:
+    required = ("dist", "len_dist", "len_normalized", "null_len_dist")
     if any(not all(hasattr(component, name) for name in required) for component in components):
         return None
     len_normalized = bool(components[0].len_normalized)
     null_len_dist = bool(components[0].null_len_dist)
-    if any(bool(component.len_normalized) != len_normalized or
-           bool(component.null_len_dist) != null_len_dist for component in components):
+    if any(
+        bool(component.len_normalized) != len_normalized or bool(component.null_len_dist) != null_len_dist
+        for component in components
+    ):
         return None
     element_set = tuple(component.dist for component in components)
     length_set = None if null_len_dist else tuple(component.len_dist for component in components)
     return element_set, length_set
 
 
-def _generated_numba_optional_child_set(components: tuple) -> Optional[tuple]:
-    required = ('dist', 'has_p', 'log_p', 'log_pn', 'missing_value', 'missing_value_is_nan')
+def _generated_numba_optional_child_set(components: tuple) -> tuple | None:
+    required = ("dist", "has_p", "log_p", "log_pn", "missing_value", "missing_value_is_nan")
     if any(not all(hasattr(component, name) for name in required) for component in components):
         return None
     first = components[0]
     if first.missing_value_is_nan:
         if any(not component.missing_value_is_nan for component in components):
             return None
-    elif any(component.missing_value_is_nan or component.missing_value != first.missing_value
-             for component in components):
+    elif any(
+        component.missing_value_is_nan or component.missing_value != first.missing_value for component in components
+    ):
         return None
     return tuple(component.dist for component in components)
 
 
 def _generated_numba_component_scores(enc: Any, components: tuple, engine: ComputeEngine) -> np.ndarray:
-    from pysp.stats.declarations import generated_numba_stacked_available, generated_numba_stacked_log_density, \
-        generated_stacked_params
+    from pysp.stats.declarations import (
+        generated_numba_stacked_available,
+        generated_numba_stacked_log_density,
+        generated_stacked_params,
+    )
+
     if generated_numba_stacked_available(components[0]):
         params = generated_stacked_params(components, engine)
         return generated_numba_stacked_log_density(enc, params)
@@ -425,8 +466,7 @@ def _generated_numba_component_scores(enc: Any, components: tuple, engine: Compu
         return _generated_numba_optional_component_scores(enc, components, optional_child_set, engine)
     child_sets = _generated_numba_child_component_sets(components)
     if child_sets is None:
-        raise ValueError('%s has no declaration-generated numba component scorer.' %
-                         type(components[0]).__name__)
+        raise ValueError("%s has no declaration-generated numba component scorer." % type(components[0]).__name__)
     scores = _generated_numba_component_scores(enc[0], child_sets[0], engine)
     for idx in range(1, len(child_sets)):
         scores = scores + _generated_numba_component_scores(enc[idx], child_sets[idx], engine)
@@ -434,8 +474,12 @@ def _generated_numba_component_scores(enc: Any, components: tuple, engine: Compu
 
 
 def _generated_numba_component_stats(enc: Any, weights: Any, components: tuple, engine: ComputeEngine) -> Any:
-    from pysp.stats.declarations import generated_numba_stacked_available, generated_stacked_params, \
-        generated_stacked_sufficient_statistics
+    from pysp.stats.declarations import (
+        generated_numba_stacked_available,
+        generated_stacked_params,
+        generated_stacked_sufficient_statistics,
+    )
+
     if generated_numba_stacked_available(components[0]):
         params = generated_stacked_params(components, engine)
         return generated_stacked_sufficient_statistics(enc, weights, params, engine)
@@ -447,16 +491,16 @@ def _generated_numba_component_stats(enc: Any, weights: Any, components: tuple, 
         return _generated_numba_optional_component_stats(enc, weights, components, optional_child_set, engine)
     child_sets = _generated_numba_child_component_sets(components)
     if child_sets is None:
-        raise ValueError('%s has no declaration-generated numba component-stat route.' %
-                         type(components[0]).__name__)
+        raise ValueError("%s has no declaration-generated numba component-stat route." % type(components[0]).__name__)
     return tuple(
         _generated_numba_component_stats(enc[idx], weights, child_set, engine)
         for idx, child_set in enumerate(child_sets)
     )
 
 
-def _generated_numba_sequence_component_scores(enc: Any, components: tuple, child_sets: tuple,
-                                               engine: ComputeEngine) -> np.ndarray:
+def _generated_numba_sequence_component_scores(
+    enc: Any, components: tuple, child_sets: tuple, engine: ComputeEngine
+) -> np.ndarray:
     idx, icnt, _inz, enc_seq, enc_nseq = enc
     element_components, length_components = child_sets
     num_components = len(components)
@@ -473,8 +517,9 @@ def _generated_numba_sequence_component_scores(enc: Any, components: tuple, chil
     return rv
 
 
-def _generated_numba_sequence_component_stats(enc: Any, weights: Any, components: tuple,
-                                              child_sets: tuple, engine: ComputeEngine) -> Any:
+def _generated_numba_sequence_component_stats(
+    enc: Any, weights: Any, components: tuple, child_sets: tuple, engine: ComputeEngine
+) -> Any:
     idx, icnt, _inz, enc_seq, enc_nseq = enc
     element_components, length_components = child_sets
     ww = np.asarray(engine.to_numpy(weights), dtype=np.float64)
@@ -495,8 +540,9 @@ def _generated_numba_sequence_component_stats(enc: Any, weights: Any, components
     return element_stats, length_stats
 
 
-def _generated_numba_optional_component_scores(enc: Any, components: tuple, child_components: tuple,
-                                               engine: ComputeEngine) -> np.ndarray:
+def _generated_numba_optional_component_scores(
+    enc: Any, components: tuple, child_components: tuple, engine: ComputeEngine
+) -> np.ndarray:
     sz, z_idx, nz_idx, enc_data = enc
     num_components = len(components)
     rv = np.zeros((int(sz), num_components), dtype=np.float64)
@@ -508,12 +554,14 @@ def _generated_numba_optional_component_scores(enc: Any, components: tuple, chil
     if len(nz_idx):
         child_scores = _generated_numba_component_scores(enc_data, child_components, engine)
         rv[np.asarray(nz_idx, dtype=np.int64), :] = np.where(
-            has_p.reshape(1, -1), child_scores + log_pn.reshape(1, -1), child_scores)
+            has_p.reshape(1, -1), child_scores + log_pn.reshape(1, -1), child_scores
+        )
     return rv
 
 
-def _generated_numba_optional_component_stats(enc: Any, weights: Any, components: tuple,
-                                              child_components: tuple, engine: ComputeEngine) -> Any:
+def _generated_numba_optional_component_stats(
+    enc: Any, weights: Any, components: tuple, child_components: tuple, engine: ComputeEngine
+) -> Any:
     _, z_idx, nz_idx, enc_data = enc
     ww = np.asarray(engine.to_numpy(weights), dtype=np.float64)
     num_components = len(components)
@@ -533,10 +581,7 @@ def _generated_numba_optional_component_stats(enc: Any, weights: Any, components
 
 
 def _unstack_numba_component_stats(stats: Any, count: int) -> tuple:
-    return tuple(
-        tuple(_numba_component_stat_value(stat, idx) for stat in stats)
-        for idx in range(count)
-    )
+    return tuple(tuple(_numba_component_stat_value(stat, idx) for stat in stats) for idx in range(count))
 
 
 def _numba_component_stat_value(value: Any, idx: int) -> Any:
@@ -559,17 +604,19 @@ _GENERIC_FACTORY = GenericKernelFactory()
 # Default kernel for unregistered distributions: declaration-generated numba on
 # the numpy engine where available, generic everywhere else.
 _DEFAULT_FACTORY = GeneratedNumbaKernelFactory()
-_KERNEL_FACTORIES: Dict[Type[Any], KernelFactory] = {}
+_KERNEL_FACTORIES: dict[type[Any], KernelFactory] = {}
 
 
-def register_kernel_factory(dist_type: Type[Any], factory: KernelFactory) -> None:
+def register_kernel_factory(dist_type: type[Any], factory: KernelFactory) -> None:
     """Register a specialized kernel factory for a distribution class."""
     _KERNEL_FACTORIES[dist_type] = factory
 
 
-def kernel_for(dist: SequenceEncodableProbabilityDistribution,
-               engine: Optional[ComputeEngine] = None,
-               estimator: Optional[ParameterEstimator] = None) -> Kernel:
+def kernel_for(
+    dist: SequenceEncodableProbabilityDistribution,
+    engine: ComputeEngine | None = None,
+    estimator: ParameterEstimator | None = None,
+) -> Kernel:
     """Build the best registered kernel for ``dist`` and ``engine``."""
     engine = NUMPY_ENGINE if engine is None else engine
     for cls in type(dist).mro():

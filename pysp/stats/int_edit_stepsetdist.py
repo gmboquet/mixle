@@ -22,22 +22,35 @@ levels (a high level for the top-ranked elements and a low level for the rest), 
 Bernoulli likelihood of the per-element estimates.
 
 """
+
+from collections.abc import Sequence
+from typing import Any, TypeVar
+
 import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory
-from pysp.utils.aliasing import coalesce_alias, MISSING
-from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
-    NullAccumulatorFactory
 from pysp.stats.int_edit_setdist import IntegerBernoulliEditEnumerator
-from typing import Sequence, Optional, Union, Any, Tuple, List, TypeVar, Dict
+from pysp.stats.null_dist import (
+    NullAccumulator,
+    NullAccumulatorFactory,
+    NullDistribution,
+    NullEstimator,
+)
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
+from pysp.utils.aliasing import MISSING, coalesce_alias
 
-T = Tuple[Union[Sequence[int], np.ndarray], Union[Sequence[int], np.ndarray]]
-E1 = TypeVar('E1') ## encoded type for init
-E = Tuple[int, np.ndarray, np.ndarray, np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray], Optional[E1]]
-SS1 = TypeVar('SS1') ## suff-stat of init_dist
+T = tuple[Sequence[int] | np.ndarray, Sequence[int] | np.ndarray]
+E1 = TypeVar("E1")  ## encoded type for init
+E = tuple[int, np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray], E1 | None]
+SS1 = TypeVar("SS1")  ## suff-stat of init_dist
 
 
 class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribution):
@@ -46,11 +59,15 @@ class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribut
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_table')
 
-    def __init__(self, log_edit_pmat: Union[Sequence[Tuple[float, float]], np.ndarray],
-                 init_dist: Optional[SequenceEncodableProbabilityDistribution] = None,
-                 name: Optional[str] = None) -> None:
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_table")
+
+    def __init__(
+        self,
+        log_edit_pmat: Sequence[tuple[float, float]] | np.ndarray,
+        init_dist: SequenceEncodableProbabilityDistribution | None = None,
+        name: str | None = None,
+    ) -> None:
         """IntegerStepBernoulliEditDistribution object defining edit probabilities between integer sets.
 
         Args:
@@ -93,16 +110,18 @@ class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribut
         self.orig_log_edit_pmat = pmat
         self.log_edit_pmat = log_pmat
         self.log_nsum = self.log_edit_pmat[
-            np.isfinite(self.log_edit_pmat[:, 0]), 0].sum()  # sum [ln p_mat(missing | missing)]
-        self.log_dvec = self.log_edit_pmat[:, 1:] - self.log_edit_pmat[:, 0,
-                                                    None]  # ln p_mat (?? | ??) - ln p_mat(missing | missing)
+            np.isfinite(self.log_edit_pmat[:, 0]), 0
+        ].sum()  # sum [ln p_mat(missing | missing)]
+        self.log_dvec = (
+            self.log_edit_pmat[:, 1:] - self.log_edit_pmat[:, 0, None]
+        )  # ln p_mat (?? | ??) - ln p_mat(missing | missing)
 
     def __str__(self) -> str:
         """Returns string representation of IntegerStepBernoulliEditDistribution object."""
         s1 = repr(list(map(list, self.orig_log_edit_pmat)))
         s2 = repr(self.init_dist)
         s3 = repr(self.name)
-        return 'IntegerStepBernoulliEditDistribution(%s, init_dist=%s, name=%s)' % (s1, s2, s3)
+        return "IntegerStepBernoulliEditDistribution(%s, init_dist=%s, name=%s)" % (s1, s2, s3)
 
     def density(self, x: T) -> float:
         """Density of the step Bernoulli edit set distribution at observation x.
@@ -172,6 +191,7 @@ class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribut
     def backend_seq_log_density(self, x: E, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded step edit-set observations."""
         from pysp.stats.backend import backend_seq_log_density
+
         sz, idx, xs, ys, ym, init_enc = x
         rv = engine.zeros(sz) + engine.asarray(self.log_nsum)
 
@@ -183,61 +203,73 @@ class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribut
         return rv
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['IntegerStepBernoulliEditDistribution'],
-                               engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(
+        cls, dists: Sequence["IntegerStepBernoulliEditDistribution"], engine: Any
+    ) -> dict[str, Any]:
         """Return stacked step edit-set parameters for shared support and init policy."""
         from pysp.stats.stacked import stacked_component_params
+
         num_vals = int(dists[0].num_vals)
         null_init_dist = isinstance(dists[0].init_dist, NullDistribution)
-        if any(int(dist.num_vals) != num_vals or
-               isinstance(dist.init_dist, NullDistribution) != null_init_dist for dist in dists):
-            raise ValueError('Stacked IntegerStepBernoulliEditDistribution components require shared support and init '
-                             'policy.')
+        if any(
+            int(dist.num_vals) != num_vals or isinstance(dist.init_dist, NullDistribution) != null_init_dist
+            for dist in dists
+        ):
+            raise ValueError(
+                "Stacked IntegerStepBernoulliEditDistribution components require shared support and init policy."
+            )
 
         init_route = None
         if not null_init_dist:
             try:
                 init_route = stacked_component_params([dist.init_dist for dist in dists], engine)
             except ValueError as exc:
-                raise ValueError('IntegerStepBernoulliEdit initial child %s is not stackable: %s' %
-                                 (type(dists[0].init_dist).__name__, exc))
+                raise ValueError(
+                    "IntegerStepBernoulliEdit initial child %s is not stackable: %s"
+                    % (type(dists[0].init_dist).__name__, exc)
+                )
 
         return {
-            '__pysp_component_axis__': {'log_dvec': 2, 'log_nsum': 0},
-            'num_vals': num_vals,
-            'log_dvec': engine.asarray(np.stack([dist.log_dvec for dist in dists], axis=2)),
-            'log_nsum': engine.asarray([dist.log_nsum for dist in dists]),
-            'init_route': init_route,
-            'num_components': len(dists),
+            "__pysp_component_axis__": {"log_dvec": 2, "log_nsum": 0},
+            "num_vals": num_vals,
+            "log_dvec": engine.asarray(np.stack([dist.log_dvec for dist in dists], axis=2)),
+            "log_nsum": engine.asarray([dist.log_nsum for dist in dists]),
+            "init_route": init_route,
+            "num_components": len(dists),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: E, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of step edit-set component log densities."""
         from pysp.stats.stacked import stacked_component_log_density
+
         sz, idx, xs, ys, ym, init_enc = x
-        rv = engine.zeros((sz, int(params['num_components']))) + params['log_nsum'][None, :]
+        rv = engine.zeros((sz, int(params["num_components"]))) + params["log_nsum"][None, :]
 
         if len(idx) > 0:
-            contrib = params['log_dvec'][engine.asarray(xs), engine.asarray(ys), :]
+            contrib = params["log_dvec"][engine.asarray(xs), engine.asarray(ys), :]
             rv = engine.index_add(rv, engine.asarray(idx), contrib)
 
-        if params['init_route'] is not None:
-            rv = rv + stacked_component_log_density(init_enc, params['init_route'], engine)
+        if params["init_route"] is not None:
+            rv = rv + stacked_component_log_density(init_enc, params["init_route"], engine)
 
         return rv
 
     @classmethod
-    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any,
-                                                            params: Dict[str, Any], engine: Any,
-                                                            estimator: Any) -> Tuple[Any, ...]:
+    def backend_stacked_sufficient_statistics_with_estimator(
+        cls, x: E, weights: Any, params: dict[str, Any], engine: Any, estimator: Any
+    ) -> tuple[Any, ...]:
         """Return per-component legacy ``(edit_counts, total_weight, init_stat)`` statistics."""
-        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
-            unstack_component_stats
+        from pysp.stats.stacked import (
+            StackedEstimatorView,
+            stacked_component_sufficient_statistics,
+            unstack_component_stats,
+        )
+
         sz, idx, xs, ys, ym, init_enc = x
         ww = engine.asarray(weights)
-        num_components = int(params['num_components'])
-        num_vals = int(params['num_vals'])
+        num_components = int(params["num_components"])
+        num_vals = int(params["num_vals"])
 
         if len(idx) > 0 and num_vals > 0:
             row_weights = ww[engine.asarray(idx)]
@@ -254,22 +286,21 @@ class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribut
             edit_counts = engine.zeros((num_components, num_vals, 3))
 
         total_count = engine.sum(ww, axis=0)
-        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
-        init_estimators = tuple(getattr(component_est, 'init_est', None)
-                                for component_est in outer_estimators)
+        outer_estimators = tuple(getattr(estimator, "estimators", ()))
+        init_estimators = tuple(getattr(component_est, "init_est", None) for component_est in outer_estimators)
 
-        if params['init_route'] is None or all(isinstance(init_est, NullEstimator) for init_est in init_estimators):
+        if params["init_route"] is None or all(isinstance(init_est, NullEstimator) for init_est in init_estimators):
             init_by_component = tuple(None for _ in range(num_components))
         else:
-            init_estimator = StackedEstimatorView(init_estimators) \
-                if len(init_estimators) == num_components else None
+            init_estimator = StackedEstimatorView(init_estimators) if len(init_estimators) == num_components else None
             init_stats = stacked_component_sufficient_statistics(
-                init_enc, ww, params['init_route'], engine, init_estimator)
+                init_enc, ww, params["init_route"], engine, init_estimator
+            )
             init_by_component = unstack_component_stats(init_stats, num_components)
 
         return tuple((edit_counts[i], total_count[i], init_by_component[i]) for i in range(num_components))
 
-    def sampler(self, seed: Optional[int] = None) -> 'IntegerStepBernoulliEditSampler':
+    def sampler(self, seed: int | None = None) -> "IntegerStepBernoulliEditSampler":
         """Create an IntegerStepBernoulliEditSampler object from this distribution.
 
         Args:
@@ -281,7 +312,7 @@ class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribut
         """
         return IntegerStepBernoulliEditSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'IntegerStepBernoulliEditEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "IntegerStepBernoulliEditEstimator":
         """Create an IntegerStepBernoulliEditEstimator with matching num_vals.
 
         Args:
@@ -293,12 +324,11 @@ class IntegerStepBernoulliEditDistribution(SequenceEncodableProbabilityDistribut
         """
         return IntegerStepBernoulliEditEstimator(self.num_vals, pseudo_count=pseudo_count, name=self.name)
 
-    def dist_to_encoder(self) -> 'IntegerStepBernoulliEditDataEncoder':
+    def dist_to_encoder(self) -> "IntegerStepBernoulliEditDataEncoder":
         """Returns an IntegerStepBernoulliEditDataEncoder object for encoding sequences of data."""
         return IntegerStepBernoulliEditDataEncoder(init_encoder=self.init_dist.dist_to_encoder())
 
-
-    def enumerator(self) -> 'IntegerStepBernoulliEditEnumerator':
+    def enumerator(self) -> "IntegerStepBernoulliEditEnumerator":
         """Returns IntegerStepBernoulliEditEnumerator iterating set-pairs in descending probability order."""
         return IntegerStepBernoulliEditEnumerator(self)
 
@@ -311,7 +341,7 @@ class IntegerStepBernoulliEditSampler(DistributionSampler):
     """IntegerStepBernoulliEditSampler object for drawing (prev set, next set) pairs from an
     IntegerStepBernoulliEditDistribution instance."""
 
-    def __init__(self, dist: IntegerStepBernoulliEditDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: IntegerStepBernoulliEditDistribution, seed: int | None = None) -> None:
         """IntegerStepBernoulliEditSampler object for sampling from an IntegerStepBernoulliEditDistribution instance.
 
         Args:
@@ -330,8 +360,7 @@ class IntegerStepBernoulliEditSampler(DistributionSampler):
         self.init_rng = dist.init_dist.sampler(self.rng.randint(0, maxrandint))
         self.next_rng = np.random.RandomState(self.rng.randint(0, maxrandint))
 
-    def sample(self, size: Optional[int] = None) \
-            -> Union[List[Tuple[List[int], List[int]]], Tuple[List[int], List[int]]]:
+    def sample(self, size: int | None = None) -> list[tuple[list[int], list[int]]] | tuple[list[int], list[int]]:
         """Draw iid (prev set, next set) observations from the distribution.
 
         Args:
@@ -342,7 +371,6 @@ class IntegerStepBernoulliEditSampler(DistributionSampler):
 
         """
         if size is None:
-
             temp = np.log(self.rng.rand(self.dist.num_vals))
             rv = np.zeros(self.dist.num_vals, dtype=bool)
             prev_ob = np.asarray(self.init_rng.sample(), dtype=int)
@@ -381,8 +409,12 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
     """IntegerStepBernoulliEditAccumulator object for accumulating removed/added/kept counts from observed
     set pairs."""
 
-    def __init__(self, num_vals: int, init_acc: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        num_vals: int,
+        init_acc: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
+        keys: str | None = None,
+    ) -> None:
         """IntegerStepBernoulliEditAccumulator object for accumulating sufficient statistics from observed data.
 
         Args:
@@ -407,7 +439,7 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
         self._acc_rng = None
         self._init_rng = False
 
-    def update(self, x: T, weight: float, estimate: Optional[IntegerStepBernoulliEditDistribution]) -> None:
+    def update(self, x: T, weight: float, estimate: IntegerStepBernoulliEditDistribution | None) -> None:
         """Add weight to the removed/added/kept counts for the observed (prev set, next set) pair.
 
         Args:
@@ -465,7 +497,7 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
         self.tot_sum += weight
         self.init_acc.initialize(x[0], weight, rng)
 
-    def seq_update(self, x: E, weights: np.ndarray, estimate: Optional[IntegerStepBernoulliEditDistribution]) -> None:
+    def seq_update(self, x: E, weights: np.ndarray, estimate: IntegerStepBernoulliEditDistribution | None) -> None:
         """Vectorized update of sufficient statistics from sequence encoded observations.
 
         Args:
@@ -482,15 +514,16 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
         agg_cnt1 = np.bincount(xs[ym[1]], weights=weights[idx[ym[1]]])
         agg_cnt2 = np.bincount(xs[ym[2]], weights=weights[idx[ym[2]]])
 
-        self.pcnt[:len(agg_cnt0), 0] += agg_cnt0
-        self.pcnt[:len(agg_cnt1), 1] += agg_cnt1
-        self.pcnt[:len(agg_cnt2), 2] += agg_cnt2
+        self.pcnt[: len(agg_cnt0), 0] += agg_cnt0
+        self.pcnt[: len(agg_cnt1), 1] += agg_cnt1
+        self.pcnt[: len(agg_cnt2), 2] += agg_cnt2
         self.tot_sum += weights.sum()
 
         self.init_acc.seq_update(init_enc, weights, estimate.init_dist)
 
-    def seq_update_engine(self, x: E, weights: Any,
-                          estimate: Optional[IntegerStepBernoulliEditDistribution], engine: Any) -> None:
+    def seq_update_engine(
+        self, x: E, weights: Any, estimate: IntegerStepBernoulliEditDistribution | None, engine: Any
+    ) -> None:
         """Engine-resident accumulation of removed/added/kept edit counts (numpy or torch).
 
         The three weighted edit-type histograms are reduced on the active engine; the fixed-size
@@ -498,10 +531,10 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
         seq_update.
         """
         from pysp.stats.backend import child_seq_update
+
         sz, idx, xs, ys, ym, init_enc = x
 
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         w_eng = engine.asarray(weights_np)
         xsv = np.asarray(xs)
         idxv = np.asarray(idx, dtype=np.int64)
@@ -512,11 +545,11 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
                 continue
             col_vals = xsv[sel].astype(np.int64)
             minlen = int(col_vals.max()) + 1
-            agg = np.asarray(engine.to_numpy(engine.bincount(
-                engine.asarray(col_vals),
-                weights=w_eng[idxv[sel]],
-                minlength=minlen)), dtype=np.float64)
-            self.pcnt[:len(agg), col] += agg
+            agg = np.asarray(
+                engine.to_numpy(engine.bincount(engine.asarray(col_vals), weights=w_eng[idxv[sel]], minlength=minlen)),
+                dtype=np.float64,
+            )
+            self.pcnt[: len(agg), col] += agg
 
         self.tot_sum += float(engine.to_numpy(engine.sum(w_eng)))
 
@@ -542,14 +575,14 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
         agg_cnt1 = np.bincount(xs[ym[1]], weights=weights[idx[ym[1]]])
         agg_cnt2 = np.bincount(xs[ym[2]], weights=weights[idx[ym[2]]])
 
-        self.pcnt[:len(agg_cnt0), 0] += agg_cnt0
-        self.pcnt[:len(agg_cnt1), 1] += agg_cnt1
-        self.pcnt[:len(agg_cnt2), 2] += agg_cnt2
+        self.pcnt[: len(agg_cnt0), 0] += agg_cnt0
+        self.pcnt[: len(agg_cnt1), 1] += agg_cnt1
+        self.pcnt[: len(agg_cnt2), 2] += agg_cnt2
         self.tot_sum += weights.sum()
 
         self.init_acc.seq_initialize(init_enc, weights, rng)
 
-    def combine(self, suff_stat: Tuple[np.ndarray, float, Optional[SS1]]) -> 'IntegerStepBernoulliEditAccumulator':
+    def combine(self, suff_stat: tuple[np.ndarray, float, SS1 | None]) -> "IntegerStepBernoulliEditAccumulator":
         """Merge sufficient statistics of suff_stat into this accumulator.
 
         Args:
@@ -565,11 +598,11 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
 
         return self
 
-    def value(self) -> Tuple[np.ndarray, float, Optional[Any]]:
+    def value(self) -> tuple[np.ndarray, float, Any | None]:
         """Returns the sufficient statistics: (edit counts, total weight, init suff stats)."""
         return self.pcnt, self.tot_sum, self.init_acc.value()
 
-    def from_value(self, x: Tuple[np.ndarray, float, Optional[SS1]]) -> 'IntegerStepBernoulliEditAccumulator':
+    def from_value(self, x: tuple[np.ndarray, float, SS1 | None]) -> "IntegerStepBernoulliEditAccumulator":
         """Set the sufficient statistics of this accumulator from x.
 
         Args:
@@ -585,7 +618,7 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
 
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge this accumulator's statistics into stats_dict under its key, if keyed.
 
         Args:
@@ -601,7 +634,7 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
 
         self.init_acc.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace this accumulator's statistics with the keyed statistics in stats_dict, if keyed.
 
         Args:
@@ -614,15 +647,17 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
 
         self.init_acc.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'IntegerStepBernoulliEditDataEncoder':
+    def acc_to_encoder(self) -> "IntegerStepBernoulliEditDataEncoder":
         """Returns an IntegerStepBernoulliEditDataEncoder object for encoding sequences of data."""
         return IntegerStepBernoulliEditDataEncoder(init_encoder=self.init_acc.acc_to_encoder())
+
 
 class IntegerStepBernoulliEditAccumulatorFactory(StatisticAccumulatorFactory):
     """IntegerStepBernoulliEditAccumulatorFactory object for creating IntegerStepBernoulliEditAccumulator objects."""
 
-    def __init__(self, num_vals: int, init_factory: Optional[StatisticAccumulatorFactory] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self, num_vals: int, init_factory: StatisticAccumulatorFactory | None = None, keys: str | None = None
+    ) -> None:
         """IntegerStepBernoulliEditAccumulatorFactory for creating IntegerStepBernoulliEditAccumulator objects.
 
         Args:
@@ -640,7 +675,7 @@ class IntegerStepBernoulliEditAccumulatorFactory(StatisticAccumulatorFactory):
         self.init_factory = init_factory if init_factory is not None else NullAccumulatorFactory()
         self.num_vals = num_vals
 
-    def make(self) -> 'IntegerStepBernoulliEditAccumulator':
+    def make(self) -> "IntegerStepBernoulliEditAccumulator":
         """Returns a new IntegerStepBernoulliEditAccumulator object."""
         return IntegerStepBernoulliEditAccumulator(self.num_vals, init_acc=self.init_factory.make(), keys=self.keys)
 
@@ -649,10 +684,17 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
     """IntegerStepBernoulliEditEstimator object for estimating an IntegerStepBernoulliEditDistribution from
     aggregated sufficient statistics, with a two-level step fit to the edit probabilities."""
 
-    def __init__(self, num_vals: int = MISSING, init_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 min_prob: float = 1.0e-128, pseudo_count: Optional[float] = None,
-                 suff_stat: Optional[np.ndarray] = None, name: Optional[str] = None,
-                 keys: Optional[str] = None, num_values: int = MISSING) -> None:
+    def __init__(
+        self,
+        num_vals: int = MISSING,
+        init_estimator: ParameterEstimator | None = NullEstimator(),
+        min_prob: float = 1.0e-128,
+        pseudo_count: float | None = None,
+        suff_stat: np.ndarray | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+        num_values: int = MISSING,
+    ) -> None:
         """IntegerStepBernoulliEditEstimator object for estimating integer step Bernoulli edit set distributions.
 
         Args:
@@ -674,7 +716,7 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
             init_est (ParameterEstimator): Estimator for the previous set x[0].
 
         """
-        self.num_vals = coalesce_alias('num_vals', num_vals, 'num_values', num_values, default=MISSING)
+        self.num_vals = coalesce_alias("num_vals", num_vals, "num_values", num_values, default=MISSING)
         self.keys = keys
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
@@ -682,7 +724,7 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
         self.min_prob = min_prob
         self.init_est = init_estimator if init_estimator is not None else NullEstimator()
 
-    def accumulator_factory(self) -> 'IntegerStepBernoulliEditAccumulatorFactory':
+    def accumulator_factory(self) -> "IntegerStepBernoulliEditAccumulatorFactory":
         """Returns an IntegerStepBernoulliEditAccumulatorFactory for creating accumulator objects."""
         init_factory = self.init_est.accumulator_factory()
         return IntegerStepBernoulliEditAccumulatorFactory(self.num_vals, init_factory, self.keys)
@@ -738,12 +780,13 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
         p, q, k = max_params
 
         arr = np.full(N, tot_s / tot_t)
-        arr[sidx[:k + 1]] = p
-        arr[sidx[k + 1:]] = q
+        arr[sidx[: k + 1]] = p
+        arr[sidx[k + 1 :]] = q
         return arr
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[np.ndarray, float, Optional[SS1]]) \
-            -> 'IntegerStepBernoulliEditDistribution':
+    def estimate(
+        self, nobs: float | None, suff_stat: tuple[np.ndarray, float, SS1 | None]
+    ) -> "IntegerStepBernoulliEditDistribution":
         """Estimate an IntegerStepBernoulliEditDistribution from aggregated sufficient statistics.
 
         Per-element edit probabilities are estimated as in the non-step edit estimator, then the
@@ -761,12 +804,11 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
         count_mat, tot_sum, _ = suff_stat
 
         if self.pseudo_count is not None and self.suff_stat is not None:
-
             p = self.pseudo_count
             s = self.suff_stat
 
             s1 = count_mat[:, 0] + count_mat[:, 2]
-            s0 = (tot_sum - s1)
+            s0 = tot_sum - s1
 
             log_s1 = np.log(s1 + p * (s[:, 1] + s[:, 3]))
             log_s0 = np.log(s0 + p * (s[:, 0] + s[:, 2]))
@@ -800,7 +842,6 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
                 log_pmat = np.zeros((self.num_vals, 4), dtype=np.float64) + np.log(0.5)
 
             elif (self.min_prob is not None) and (self.min_prob > 0):
-
                 s1 = count_mat[:, 0] + count_mat[:, 2]
                 s0 = tot_sum - s1
 
@@ -824,14 +865,13 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
                 p3[nz1] /= z1
 
                 log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-                with np.errstate(divide='ignore'):
+                with np.errstate(divide="ignore"):
                     log_pmat[:, 0] = np.log(p0)
                     log_pmat[:, 1] = np.log(p1)
                     log_pmat[:, 2] = np.log(p2)
                     log_pmat[:, 3] = np.log(p3)
 
             else:
-
                 s1 = count_mat[:, 0] + count_mat[:, 2]
                 s0 = tot_sum - s1
 
@@ -849,7 +889,7 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
                 p3[nz1] = count_mat[nz1, 2] / s1[nz1]
 
                 log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-                with np.errstate(divide='ignore'):
+                with np.errstate(divide="ignore"):
                     log_pmat[:, 0] = np.log(p0)
                     log_pmat[:, 1] = np.log(p1)
                     log_pmat[:, 2] = np.log(p2)
@@ -861,13 +901,14 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
         arr1 = self.__get_pqk(count_mat[:, 0], s1)
         arr2 = self.__get_pqk(count_mat[:, 1], s0)
 
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             log_pmat[:, 2] = np.log(arr2)
             log_pmat[:, 0] = np.log(1 - arr2)
             log_pmat[:, 1] = np.log(arr1)
             log_pmat[:, 3] = np.log(1 - arr1)
 
         return IntegerStepBernoulliEditDistribution(log_pmat, init_dist=init_dist, name=self.name)
+
 
 class IntegerStepBernoulliEditDataEncoder(DataSequenceEncoder):
     """IntegerStepBernoulliEditDataEncoder object for encoding sequences of iid (prev set, next set) observations."""
@@ -886,7 +927,7 @@ class IntegerStepBernoulliEditDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns string representation of IntegerStepBernoulliEditDataEncoder object."""
-        return 'IntegerBernoulliEditDataEncoder(init_encoder=' + str(self.init_encoder) + ')'
+        return "IntegerBernoulliEditDataEncoder(init_encoder=" + str(self.init_encoder) + ")"
 
     def __eq__(self, other: object) -> bool:
         """Checks if other object is an equivalent IntegerStepBernoulliEditDataEncoder."""
@@ -895,8 +936,9 @@ class IntegerStepBernoulliEditDataEncoder(DataSequenceEncoder):
         else:
             return False
 
-    def seq_encode(self, x: Sequence[T]) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray,
-                                                  Tuple[np.ndarray, np.ndarray, np.ndarray], Optional[Any]]:
+    def seq_encode(
+        self, x: Sequence[T]
+    ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray], Any | None]:
         """Encode a sequence of iid (prev set, next set) observations for vectorized calculations.
 
         Return value 'rv' is a Tuple of length 6 containing:

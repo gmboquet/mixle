@@ -27,22 +27,24 @@ other ranks so iteration logging is printed once. Log-density sums are
 mpi4py is an optional dependency (``pip install pysparkplug[mpi]``); importing
 this module without it raises ImportError.
 """
+
 import io
 import pickle
 import sys
-from typing import Any, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any, Optional
 
 import numpy as np
-
-from pysp.parallel import EncodedDataHandle
 from mpi4py import MPI
 
-__all__ = ['MPIEncodedData', 'mpi_out']
+from pysp.parallel import EncodedDataHandle
+
+__all__ = ["MPIEncodedData", "mpi_out"]
 
 _PROTO = pickle.HIGHEST_PROTOCOL
 
 
-def mpi_out(comm: Optional['MPI.Comm'] = None, root: int = 0):
+def mpi_out(comm: Optional["MPI.Comm"] = None, root: int = 0):
     """sys.stdout on the root rank, a discarded buffer elsewhere."""
     comm = MPI.COMM_WORLD if comm is None else comm
     return sys.stdout if comm.Get_rank() == root else io.StringIO()
@@ -69,9 +71,16 @@ class MPIEncodedData(EncodedDataHandle):
         root (int): Driver rank for the combine/M-step.
     """
 
-    def __init__(self, data: Optional[Sequence[Any]], estimator=None, encoder=None,
-                 sub_chunks: int = 1, comm: Optional['MPI.Comm'] = None,
-                 root: int = 0, root_only: bool = False):
+    def __init__(
+        self,
+        data: Sequence[Any] | None,
+        estimator=None,
+        encoder=None,
+        sub_chunks: int = 1,
+        comm: Optional["MPI.Comm"] = None,
+        root: int = 0,
+        root_only: bool = False,
+    ):
         self.comm = MPI.COMM_WORLD if comm is None else comm
         self.root = root
         self.rank = self.comm.Get_rank()
@@ -79,21 +88,20 @@ class MPIEncodedData(EncodedDataHandle):
 
         if encoder is None:
             if estimator is None:
-                raise ValueError('MPIEncodedData requires an estimator or an explicit encoder.')
+                raise ValueError("MPIEncodedData requires an estimator or an explicit encoder.")
             encoder = estimator.accumulator_factory().make().acc_to_encoder()
 
         if root_only:
             if self.rank == self.root:
                 if data is None:
-                    raise ValueError('root_only=True requires data on the root rank.')
-                shards = [[data[j] for j in range(i, len(data), self.world)]
-                          for i in range(self.world)]
+                    raise ValueError("root_only=True requires data on the root rank.")
+                shards = [[data[j] for j in range(i, len(data), self.world)] for i in range(self.world)]
             else:
                 shards = None
             shard = self.comm.scatter(shards, root=self.root)
         else:
             if data is None:
-                raise ValueError('every rank must pass data when root_only=False.')
+                raise ValueError("every rank must pass data when root_only=False.")
             shard = [data[j] for j in range(self.rank, len(data), self.world)]
 
         n = len(shard)
@@ -108,7 +116,7 @@ class MPIEncodedData(EncodedDataHandle):
 
     # -- local accumulation --------------------------------------------------
 
-    def _local_update(self, estimator, model) -> Tuple[float, Any]:
+    def _local_update(self, estimator, model) -> tuple[float, Any]:
         accumulator = estimator.accumulator_factory().make()
         count = 0.0
         for sz, x in self._enc_chunks:
@@ -116,7 +124,7 @@ class MPIEncodedData(EncodedDataHandle):
             accumulator.seq_update(x, np.ones(sz), model)
         return count, accumulator.value()
 
-    def _fold_and_share(self, estimator, local: Tuple[float, Any]):
+    def _fold_and_share(self, estimator, local: tuple[float, Any]):
         """Gather per-rank stats, fold+M-step on the root, broadcast the model."""
         gathered = self.comm.gather(pickle.dumps(local, protocol=_PROTO), root=self.root)
         if self.rank == self.root:
@@ -129,13 +137,12 @@ class MPIEncodedData(EncodedDataHandle):
             stats_dict = dict()
             accumulator.key_merge(stats_dict)
             accumulator.key_replace(stats_dict)
-            model_b = pickle.dumps(estimator.estimate(nobs, accumulator.value()),
-                                   protocol=_PROTO)
+            model_b = pickle.dumps(estimator.estimate(nobs, accumulator.value()), protocol=_PROTO)
         else:
             model_b = None
         return pickle.loads(self.comm.bcast(model_b, root=self.root))
 
-    def _fold_value_and_share(self, estimator, local: Tuple[float, Any]) -> Tuple[float, Any]:
+    def _fold_value_and_share(self, estimator, local: tuple[float, Any]) -> tuple[float, Any]:
         """Gather per-rank stats, fold/key-tie on root, broadcast folded value."""
         gathered = self.comm.gather(pickle.dumps(local, protocol=_PROTO), root=self.root)
         if self.rank == self.root:
@@ -159,19 +166,18 @@ class MPIEncodedData(EncodedDataHandle):
         """One distributed EM step; every rank returns the identical model."""
         # broadcast the root's model so all ranks accumulate against the same
         # floating-point parameters even if a caller diverged
-        model = pickle.loads(self.comm.bcast(
-            pickle.dumps(prev_estimate, protocol=_PROTO), root=self.root))
+        model = pickle.loads(self.comm.bcast(pickle.dumps(prev_estimate, protocol=_PROTO), root=self.root))
         return self._fold_and_share(estimator, self._local_update(estimator, model))
 
     def pysp_seq_initialize(self, estimator, rng: np.random.RandomState, p: float):
         """Distributed randomized initialization; identical model on all ranks."""
         if self.rank == self.root:
-            seeds = [int(s) for s in rng.randint(2 ** 31, size=self.world)]
+            seeds = [int(s) for s in rng.randint(2**31, size=self.world)]
         else:
             seeds = None
         seed = self.comm.scatter(seeds, root=self.root)
         rng_loc = np.random.RandomState(seed)
-        rng_w = np.random.RandomState(seed=rng_loc.randint(2 ** 31))
+        rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
 
         accumulator = estimator.accumulator_factory().make()
         count = 0.0
@@ -182,19 +188,17 @@ class MPIEncodedData(EncodedDataHandle):
             accumulator.seq_initialize(x, w, rng_loc)
         return self._fold_and_share(estimator, (count, accumulator.value()))
 
-    def pysp_seq_log_density_sum(self, estimate) -> Tuple[float, float]:
+    def pysp_seq_log_density_sum(self, estimate) -> tuple[float, float]:
         """Allreduced (count, log-density sum) - identical on every rank."""
         cnt, ll = 0.0, 0.0
         for sz, x in self._enc_chunks:
             cnt += sz
             ll += estimate.seq_log_density(x).sum()
-        return (self.comm.allreduce(cnt, op=MPI.SUM),
-                self.comm.allreduce(ll, op=MPI.SUM))
+        return (self.comm.allreduce(cnt, op=MPI.SUM), self.comm.allreduce(ll, op=MPI.SUM))
 
-    def pysp_stream_accumulate(self, estimator, model) -> Tuple[float, Any]:
+    def pysp_stream_accumulate(self, estimator, model) -> tuple[float, Any]:
         """Globally folded batch sufficient statistics for streaming EM."""
-        model = pickle.loads(self.comm.bcast(
-            pickle.dumps(model, protocol=_PROTO), root=self.root))
+        model = pickle.loads(self.comm.bcast(pickle.dumps(model, protocol=_PROTO), root=self.root))
         return self._fold_value_and_share(estimator, self._local_update(estimator, model))
 
     def __len__(self) -> int:

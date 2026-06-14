@@ -24,25 +24,35 @@ Further,
     alpha_i | U=l ~ f_l(theta_l), for i = 1,2,3,...,N.
 
 """
+
+from collections.abc import Sequence
+from typing import Any, TypeVar
+
 import numpy as np
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
-    DistributionEnumerator, child_enumerator
-from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullAccumulatorFactory, NullEstimator
-from pysp.utils.enumeration import BufferedStream, best_first_union
-from pysp.arithmetic import maxrandint
-import pysp.utils.vector as vec
 from numpy.random import RandomState
+
+import pysp.utils.vector as vec
+from pysp.arithmetic import maxrandint
 from pysp.stats.mixture import MixtureDistribution
+from pysp.stats.null_dist import NullAccumulator, NullAccumulatorFactory, NullDistribution, NullEstimator
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+    child_enumerator,
+)
 from pysp.stats.sequence import SequenceDistribution
+from pysp.utils.enumeration import BufferedStream, best_first_union
 
-from typing import Optional, List, Union, Any, Tuple, Sequence, TypeVar, Dict
-
-T = TypeVar('T') ## Data type for topics
-E1 = TypeVar('E1') ## Encoded sequence from topic encoder.
-E2 = TypeVar('E2') ## Encoded sequence from length encoder.
-SS1 = TypeVar('SS1') ### Suff stat type for topics.
-SS2 = TypeVar('SS2') ## Suff stat type for length distribution.
+T = TypeVar("T")  ## Data type for topics
+E1 = TypeVar("E1")  ## Encoded sequence from topic encoder.
+E2 = TypeVar("E2")  ## Encoded sequence from length encoder.
+SS1 = TypeVar("SS1")  ### Suff stat type for topics.
+SS2 = TypeVar("SS2")  ## Suff stat type for length distribution.
 
 
 class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
@@ -54,43 +64,48 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+
         children = tuple(self.topics) + ((self.len_dist,) if self.len_dist is not None else ())
-        return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
-                                        kernel_status='generic_latent')
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children), kernel_status="generic_latent")
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+
         topic_children = tuple(declaration_for(topic) for topic in self.topics)
         length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
-        children = tuple(child for child in topic_children + ((length,) if length is not None else ()) if child is not None)
-        roles = tuple('topic_%d' % i for i, child in enumerate(topic_children) if child is not None)
+        children = tuple(
+            child for child in topic_children + ((length,) if length is not None else ()) if child is not None
+        )
+        roles = tuple("topic_%d" % i for i, child in enumerate(topic_children) if child is not None)
         if length is not None:
-            roles += ('length',)
+            roles += ("length",)
         return DistributionDeclaration(
-            name='hierarchical_mixture',
+            name="hierarchical_mixture",
             distribution_type=type(self),
             parameters=(
-                ParameterSpec('w', constraint='simplex_vector'),
-                ParameterSpec('taus', constraint='row_simplex_matrix'),
+                ParameterSpec("w", constraint="simplex_vector"),
+                ParameterSpec("taus", constraint="row_simplex_matrix"),
             ),
             statistics=(
-                StatisticSpec('component_counts'),
-                StatisticSpec('topics', kind='tuple'),
-                StatisticSpec('length', kind='child_stat'),
+                StatisticSpec("component_counts"),
+                StatisticSpec("topics", kind="tuple"),
+                StatisticSpec("length", kind="child_stat"),
             ),
-            support='sequence_mixture',
+            support="sequence_mixture",
             children=children,
             child_roles=roles,
             differentiable=False,
         )
 
-    def __init__(self,
-                 topics: Sequence[SequenceEncodableProbabilityDistribution],
-                 mixture_weights: Union[List[float], np.ndarray],
-                 topic_weights: Union[List[List[float]], np.ndarray],
-                 len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 name: Optional[str] = None,
-                 keys: Optional[Tuple[Optional[str], Optional[str]]] = (None, None)) -> None:
+    def __init__(
+        self,
+        topics: Sequence[SequenceEncodableProbabilityDistribution],
+        mixture_weights: list[float] | np.ndarray,
+        topic_weights: list[list[float]] | np.ndarray,
+        len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        name: str | None = None,
+        keys: tuple[str | None, str | None] | None = (None, None),
+    ) -> None:
         """HierarchicalMixtureDistribution object defining a hierarchical mixture distribution.
 
         Args:
@@ -120,7 +135,7 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
             keys (Tuple[Optional[str], Optional[str]]): Keys for the weights and topics.
 
         """
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             self.topics = topics
             self.num_topics = len(topics)
             self.num_mixtures = len(mixture_weights)
@@ -134,13 +149,13 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         """Return a string representation for the object instance."""
-        s1 = '[' + ','.join([str(u) for u in self.topics]) + ']'
+        s1 = "[" + ",".join([str(u) for u in self.topics]) + "]"
         s2 = repr(list(self.w))
         s3 = repr(list(map(list, self.taus)))
         s4 = repr(self.len_dist) if self.len_dist is None else str(self.len_dist)
         s5 = repr(self.name)
         s6 = repr(self.keys)
-        return 'HierarchicalMixtureDistribution(%s, %s, %s, len_dist=%s, name=%s, keys=%s)' % (s1, s2, s3, s4, s5, s6)
+        return "HierarchicalMixtureDistribution(%s, %s, %s, len_dist=%s, name=%s, keys=%s)" % (s1, s2, s3, s4, s5, s6)
 
     def density(self, x: Sequence[T]) -> float:
         """Evaluate the density of an observation from hierarchical mixture distribution.
@@ -182,7 +197,6 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
         enc_x = self.dist_to_encoder().seq_encode([x])
         return self.seq_posterior(enc_x)[0]
 
-
     def component_log_density(self, x: Sequence[T]) -> np.ndarray:
         """Evaluate the component-wise log-density for an observation from a hierarchical mixture model.
 
@@ -216,12 +230,14 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def to_mixture(self) -> MixtureDistribution:
-        """Returns a MixtureDistribution object created from object instance. """
-        topics = [SequenceDistribution(MixtureDistribution(self.topics, self.taus[i, :]), len_dist=self.len_dist) for i
-                  in range(self.num_mixtures)]
+        """Returns a MixtureDistribution object created from object instance."""
+        topics = [
+            SequenceDistribution(MixtureDistribution(self.topics, self.taus[i, :]), len_dist=self.len_dist)
+            for i in range(self.num_mixtures)
+        ]
         return MixtureDistribution(topics, self.w)
 
-    def seq_component_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, E1, Optional[E2]]) -> np.ndarray:
+    def seq_component_log_density(self, x: tuple[int, np.ndarray, np.ndarray, E1, E2 | None]) -> np.ndarray:
         """Vectorized evaluation of the outer-mixture component-wise log-density for an encoded sequence x.
 
         This returns a numpy array with shape (rv[0], 'num_mixtures').
@@ -265,7 +281,7 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
             ll_exp[good_rows, :] = np.exp(ll_mat[good_rows, :] - ll_max[good_rows, None])
 
         # Compute ln p_mat(data | mixture)
-        ll_mix = np.dot(ll_exp, self.taus.T) ### (tsz, num_mixtures)
+        ll_mix = np.dot(ll_exp, self.taus.T)  ### (tsz, num_mixtures)
         ll_mat = np.full_like(ll_mix, -np.inf)
         pos = ll_mix > 0.0
         ll_mat[pos] = np.log(ll_mix[pos])
@@ -277,7 +293,7 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
-    def seq_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, E1, Optional[E2]]) -> np.ndarray:
+    def seq_log_density(self, x: tuple[int, np.ndarray, np.ndarray, E1, E2 | None]) -> np.ndarray:
         """Vectorized evaluation of the log-density for an encoded sequence of observations in x.
 
         Encoded sequence 'x' is a Tuple of length 5 containing:
@@ -319,8 +335,9 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
-    def backend_seq_component_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, E1, Optional[E2]],
-                                          engine: Any) -> Any:
+    def backend_seq_component_log_density(
+        self, x: tuple[int, np.ndarray, np.ndarray, E1, E2 | None], engine: Any
+    ) -> Any:
         """Engine-neutral outer-component log densities for hierarchical-mixture encoded sequences."""
         from pysp.stats.backend import backend_seq_log_density
 
@@ -338,7 +355,7 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
         rv = engine.zeros((sz, self.num_mixtures))
         return engine.index_add(rv, engine.asarray(idx), item_mix_scores)
 
-    def backend_seq_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, E1, Optional[E2]], engine: Any) -> Any:
+    def backend_seq_log_density(self, x: tuple[int, np.ndarray, np.ndarray, E1, E2 | None], engine: Any) -> Any:
         """Engine-neutral hierarchical-mixture log-density for encoded sequences."""
         from pysp.stats.backend import backend_seq_log_density
 
@@ -348,7 +365,7 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
             rv = rv + backend_seq_log_density(self.len_dist, enc_len, engine)
         return rv
 
-    def seq_posterior(self, x: Tuple[int, np.ndarray, np.ndarray, E1, Optional[E2]]) -> np.ndarray:
+    def seq_posterior(self, x: tuple[int, np.ndarray, np.ndarray, E1, E2 | None]) -> np.ndarray:
         """Vectorized evaluation of the posterior over each outer-mixture component for an encoded sequence x.
 
         Encoded sequence 'x' is a Tuple of length 5 containing:
@@ -386,11 +403,11 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
-    def sampler(self, seed: Optional[int] = None) -> 'HierarchicalMixtureSampler':
+    def sampler(self, seed: int | None = None) -> "HierarchicalMixtureSampler":
         """Return HierarchicalMixtureSampler object created from attribute variables."""
         return HierarchicalMixtureSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'HierarchicalMixtureEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "HierarchicalMixtureEstimator":
         """Create an HierarchicalMixtureEstimator object from attributes variables.
 
         Args:
@@ -403,16 +420,22 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
         len_est = self.len_dist.estimator(pseudo_count=pseudo_count)
         comp_est = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
 
-        return HierarchicalMixtureEstimator(comp_est, self.num_mixtures, len_estimator=len_est,
-                                            pseudo_count=pseudo_count, name=self.name, keys=self.keys)
+        return HierarchicalMixtureEstimator(
+            comp_est,
+            self.num_mixtures,
+            len_estimator=len_est,
+            pseudo_count=pseudo_count,
+            name=self.name,
+            keys=self.keys,
+        )
 
-    def dist_to_encoder(self) -> 'HierarchicalMixtureDataEncoder':
-        """Return an HierarchicalMixtureDataEncoder object for encoding sequences of iid observations. """
+    def dist_to_encoder(self) -> "HierarchicalMixtureDataEncoder":
+        """Return an HierarchicalMixtureDataEncoder object for encoding sequences of iid observations."""
         topic_encoder = self.topics[0].dist_to_encoder()
         len_encoder = self.len_dist.dist_to_encoder()
         return HierarchicalMixtureDataEncoder(topic_encoder=topic_encoder, len_encoder=len_encoder)
 
-    def enumerator(self) -> 'HierarchicalMixtureEnumerator':
+    def enumerator(self) -> "HierarchicalMixtureEnumerator":
         """Returns a HierarchicalMixtureEnumerator iterating sequences in descending probability order."""
         return HierarchicalMixtureEnumerator(self)
 
@@ -443,24 +466,23 @@ class HierarchicalMixtureEnumerator(DistributionEnumerator):
             if dist.w[k] <= 0.0:
                 continue
             comp = SequenceDistribution(MixtureDistribution(dist.topics, dist.taus[k, :]), len_dist=dist.len_dist)
-            streams.append(BufferedStream(
-                child_enumerator(comp, 'HierarchicalMixtureDistribution.component[%d]' % k)))
+            streams.append(BufferedStream(child_enumerator(comp, "HierarchicalMixtureDistribution.component[%d]" % k)))
             log_offsets.append(dist.log_w[k])
 
         def exact_log_density(x):
-            with np.errstate(divide='ignore'):
+            with np.errstate(divide="ignore"):
                 return float(dist.log_density(x))
 
         self._union = best_first_union(streams, log_offsets, exact_log_density)
 
-    def __next__(self) -> Tuple[Any, float]:
+    def __next__(self) -> tuple[Any, float]:
         return next(self._union)
 
 
 class HierarchicalMixtureSampler(DistributionSampler):
     """HierarchicalMixtureSampler object for sampling sequences from a HierarchicalMixtureDistribution."""
 
-    def __init__(self, dist: HierarchicalMixtureDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: HierarchicalMixtureDistribution, seed: int | None = None) -> None:
         """HierarchicalMixtureSampler object for sampling from a hierarchical mixture model.
 
         Args:
@@ -477,7 +499,7 @@ class HierarchicalMixtureSampler(DistributionSampler):
         self.dist = dist
         self.sampler = dist.to_mixture().sampler(seed)
 
-    def sample(self, size: Optional[int] = None) -> Union[Sequence[Any], Any]:
+    def sample(self, size: int | None = None) -> Sequence[Any] | Any:
         """Returns samples from MixtureSampler."""
         return self.sampler.sample(size=size)
 
@@ -485,9 +507,13 @@ class HierarchicalMixtureSampler(DistributionSampler):
 class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
     """HierarchicalMixtureEstimatorAccumulator object for aggregating sufficient statistics of observed data."""
 
-    def __init__(self, accumulators: Sequence[SequenceEncodableStatisticAccumulator], num_mixtures: int,
-                 len_accumulator: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
-                 keys: Optional[Tuple[Optional[str], Optional[str]]] = (None, None)) -> None:
+    def __init__(
+        self,
+        accumulators: Sequence[SequenceEncodableStatisticAccumulator],
+        num_mixtures: int,
+        len_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
+        keys: tuple[str | None, str | None] | None = (None, None),
+    ) -> None:
         """HierarchicalMixtureEstimatorAccumulator object.
 
         Args:
@@ -536,10 +562,10 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         ### Initializer seeds
         self._init_rng: bool = False
-        self._topic_rng: Optional[List[RandomState]] = None
-        self._w_rng: Optional[RandomState] = None
-        self._tau_rng: Optional[RandomState] = None
-        self._len_rng: Optional[RandomState] = None
+        self._topic_rng: list[RandomState] | None = None
+        self._w_rng: RandomState | None = None
+        self._tau_rng: RandomState | None = None
+        self._len_rng: RandomState | None = None
 
     def update(self, x, weight, estimate) -> None:
         """Update sufficient statistics with an observation x.
@@ -604,8 +630,9 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         self.len_accumulator.initialize(len(x), weight, self._len_rng)
 
-    def seq_initialize(self, x: Tuple[int, np.ndarray, np.ndarray, E1, Optional[E2]], weights: np.ndarray,
-                       rng: RandomState) -> None:
+    def seq_initialize(
+        self, x: tuple[int, np.ndarray, np.ndarray, E1, E2 | None], weights: np.ndarray, rng: RandomState
+    ) -> None:
         """Vectorized initialization of sufficient statistics from an encoded sequence of observations in x.
 
         Note: Calls _rng_initialize() to ensure equivalence between seq_initialize() and initialize().
@@ -632,7 +659,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         if not self._init_rng:
             self._rng_initialize(rng)
 
-        idx1 = self._w_rng.choice(self.num_mixtures, size=sz, replace=True)   # draw component
+        idx1 = self._w_rng.choice(self.num_mixtures, size=sz, replace=True)  # draw component
         idx2 = self._tau_rng.choice(self.num_topics, size=tsz, replace=True)  # draw seqeucne mixture in component
         ww = weights[idx]
 
@@ -643,12 +670,16 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
             self.accumulators[i].seq_initialize(enc_data, w, self._topic_rng[i])
             self.comp_counts[:, i] = np.bincount(idx1[idx], w)
-            #self.comp_counts[idx1, i] += np.sum(w)
+            # self.comp_counts[idx1, i] += np.sum(w)
 
         self.len_accumulator.seq_initialize(enc_len, weights, self._len_rng)
 
-    def seq_update(self, x: Tuple[int, np.ndarray, np.ndarray, E1, Optional[E2]], weights: np.ndarray,
-                   estimate: HierarchicalMixtureDistribution) -> None:
+    def seq_update(
+        self,
+        x: tuple[int, np.ndarray, np.ndarray, E1, E2 | None],
+        weights: np.ndarray,
+        estimate: HierarchicalMixtureDistribution,
+    ) -> None:
         """Vectorized update of sufficient statistics from an encoded sequence x.
 
         Encoded sequence 'x' is a Tuple of length 5 containing:
@@ -713,7 +744,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         # sequences seq_log_density would also return -inf for, plus the length-distribution term.
         # Only when the fused-EM fast path requests it (_track_ll); standard path is unaffected.
         if self._track_ll:
-            with np.errstate(divide='ignore'):
+            with np.errstate(divide="ignore"):
                 row_ll = ll_max2[:, 0] + np.log(ll_sum[:, 0])
             if np.any(bad_seq):
                 row_ll[bad_seq] = -np.inf
@@ -729,8 +760,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             temp = np.zeros((tsz, self.num_topics), dtype=np.float64)
             valid = ll_mat_t[:, i] > 0.0
             if np.any(valid):
-                temp[valid, :] = estimate.taus[i, None, :] * (
-                    rv[valid, i, None] / ll_mat_t[valid, i, None])
+                temp[valid, :] = estimate.taus[i, None, :] * (rv[valid, i, None] / ll_mat_t[valid, i, None])
                 temp[valid, :] *= ll_exp[valid, :]
             temp *= ww
             rv3 += temp
@@ -752,48 +782,46 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         sz, idx, cnt, enc_data, enc_len = x
         tsz = len(idx)
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         if tsz == 0:
             if self.len_accumulator is not None:
-                self.len_accumulator.seq_update(enc_len, weights_np,
-                                                None if estimate is None else estimate.len_dist)
+                self.len_accumulator.seq_update(enc_len, weights_np, None if estimate is None else estimate.len_dist)
             return
 
         idx_e = engine.asarray(np.asarray(idx, dtype=np.int64))
         neg = engine.asarray(-np.inf)
-        ll_mat = engine.stack([backend_seq_log_density(estimate.topics[i], enc_data, engine)
-                               for i in range(self.num_topics)], axis=1)          # (tsz, T)
-        ll_max = engine.max(ll_mat, axis=1)                                        # (tsz,)
+        ll_mat = engine.stack(
+            [backend_seq_log_density(estimate.topics[i], enc_data, engine) for i in range(self.num_topics)], axis=1
+        )  # (tsz, T)
+        ll_max = engine.max(ll_mat, axis=1)  # (tsz,)
         finite = ll_max > engine.asarray(-1.0e308)
-        ll_exp = engine.where(finite[:, None], engine.exp(ll_mat - ll_max[:, None]),
-                              engine.asarray(0.0))                                 # (tsz, T)
+        ll_exp = engine.where(finite[:, None], engine.exp(ll_mat - ll_max[:, None]), engine.asarray(0.0))  # (tsz, T)
 
-        taus_t = engine.asarray(np.asarray(estimate.taus, dtype=np.float64).T)     # (T, M)
-        ll_mat_t = engine.matmul(ll_exp, taus_t)                                   # (tsz, M)
+        taus_t = engine.asarray(np.asarray(estimate.taus, dtype=np.float64).T)  # (T, M)
+        ll_mat_t = engine.matmul(ll_exp, taus_t)  # (tsz, M)
         pos = ll_mat_t > engine.asarray(0.0)
         ll_mat_t2 = engine.where(pos, engine.log(engine.where(pos, ll_mat_t, engine.asarray(1.0))), neg)
 
         ll_max_for_sum = engine.where(finite, ll_max, neg)
-        ll_max_sum = engine.index_add(engine.zeros(sz), idx_e, ll_max_for_sum)     # (sz,)
+        ll_max_sum = engine.index_add(engine.zeros(sz), idx_e, ll_max_for_sum)  # (sz,)
         cols = [engine.index_add(engine.zeros(sz), idx_e, ll_mat_t2[:, i]) for i in range(self.num_mixtures)]
         rv = engine.stack(cols, axis=1)
         rv = rv + engine.asarray(estimate.log_w) + ll_max_sum[:, None]
         rv = rv - engine.logsumexp(rv, axis=1, keepdims=True)
-        rv = engine.exp(rv)                                                        # outer posteriors (sz, M)
+        rv = engine.exp(rv)  # outer posteriors (sz, M)
 
-        rv_items = rv[idx_e, :]                                                    # (tsz, M)
+        rv_items = rv[idx_e, :]  # (tsz, M)
         ww = engine.asarray(weights_np)[idx_e][:, None]
-        taus = engine.asarray(np.asarray(estimate.taus, dtype=np.float64))         # (M, T)
+        taus = engine.asarray(np.asarray(estimate.taus, dtype=np.float64))  # (M, T)
         rv3 = engine.zeros((tsz, self.num_topics))
         comp_counts = engine.zeros((self.num_mixtures, self.num_topics))
         comp_rows = []
         for i in range(self.num_mixtures):
             valid = ll_mat_t[:, i] > 0.0
-            ratio = engine.where(valid, rv_items[:, i] / engine.where(valid, ll_mat_t[:, i],
-                                                                      engine.asarray(1.0)),
-                                 engine.asarray(0.0))
-            temp = taus[i][None, :] * ratio[:, None] * ll_exp * ww                 # (tsz, T)
+            ratio = engine.where(
+                valid, rv_items[:, i] / engine.where(valid, ll_mat_t[:, i], engine.asarray(1.0)), engine.asarray(0.0)
+            )
+            temp = taus[i][None, :] * ratio[:, None] * ll_exp * ww  # (tsz, T)
             rv3 = rv3 + temp
             comp_rows.append(engine.sum(temp, axis=0))
         comp_counts = engine.stack(comp_rows, axis=0)
@@ -803,10 +831,11 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         for i in range(self.num_topics):
             self.accumulators[i].seq_update(enc_data, rv3_np[:, i], estimate.topics[i])
         if self.len_accumulator is not None:
-            self.len_accumulator.seq_update(enc_len, weights_np,
-                                            None if estimate is None else estimate.len_dist)
+            self.len_accumulator.seq_update(enc_len, weights_np, None if estimate is None else estimate.len_dist)
 
-    def combine(self, suff_stat: Tuple[np.ndarray, Tuple[SS1, ...], Optional[SS2]]) -> 'HierarchicalMixtureEstimatorAccumulator':
+    def combine(
+        self, suff_stat: tuple[np.ndarray, tuple[SS1, ...], SS2 | None]
+    ) -> "HierarchicalMixtureEstimatorAccumulator":
         """Combine the sufficient statistics of 'suff_stat; with attribute variables.
 
         Arg suff_stat is a Tuple of length 3 containing,
@@ -829,11 +858,13 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         return self
 
-    def value(self) -> Tuple[np.ndarray, Tuple[Any, ...], Optional[Any]]:
+    def value(self) -> tuple[np.ndarray, tuple[Any, ...], Any | None]:
         """Returns sufficient statistics of type Tuple[np.ndarray, Tuple[SS1,...], Optional[SS2]]."""
         return self.comp_counts, tuple([u.value() for u in self.accumulators]), self.len_accumulator.value()
 
-    def from_value(self, x: Tuple[np.ndarray, Tuple[SS1, ...], Optional[SS2]]) -> 'HierarchicalMixtureEstimatorAccumulator':
+    def from_value(
+        self, x: tuple[np.ndarray, tuple[SS1, ...], SS2 | None]
+    ) -> "HierarchicalMixtureEstimatorAccumulator":
         """Set the attribute variables for sufficient statistics to arg 'x'.
 
         Arg 'x' is a Tuple of length 3 containing,
@@ -856,7 +887,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         return self
 
-    def scale(self, c: float) -> 'HierarchicalMixtureEstimatorAccumulator':
+    def scale(self, c: float) -> "HierarchicalMixtureEstimatorAccumulator":
         """Scale linear counts and delegate child/length sufficient statistics."""
         self.comp_counts *= c
         for acc in self.accumulators:
@@ -864,7 +895,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         self.len_accumulator.scale(c)
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge sufficient statistics of object instance with matching keys in stats_dict.
 
         Merges comp_counts if weight_key is set and found in stats_dict.
@@ -898,7 +929,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         self.len_accumulator.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace the sufficient statistics of object instance with those containing matching keys in 'stats_dict'.
 
         Replaces comp_counts if weight_key is set and found in stats_dict.
@@ -927,8 +958,8 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         self.len_accumulator.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'HierarchicalMixtureDataEncoder':
-        """Return an HierarchicalMixtureDataEncoder object for encoding sequences of iid observations. """
+    def acc_to_encoder(self) -> "HierarchicalMixtureDataEncoder":
+        """Return an HierarchicalMixtureDataEncoder object for encoding sequences of iid observations."""
         topic_encoder = self.accumulators[0].acc_to_encoder()
         len_encoder = self.len_accumulator.acc_to_encoder()
         return HierarchicalMixtureDataEncoder(topic_encoder=topic_encoder, len_encoder=len_encoder)
@@ -936,11 +967,15 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
 class HierarchicalMixtureEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
     """HierarchicalMixtureEstimatorAccumulatorFactory object for creating HierarchicalMixtureEstimatorAccumulator
-        objects."""
+    objects."""
 
-    def __init__(self, factories: Sequence[StatisticAccumulatorFactory], num_mixtures: int,
-                 len_factory: Optional[StatisticAccumulatorFactory] = NullAccumulatorFactory(),
-                 keys: Optional[Tuple[Optional[str], Optional[str]]] = (None, None)):
+    def __init__(
+        self,
+        factories: Sequence[StatisticAccumulatorFactory],
+        num_mixtures: int,
+        len_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
+        keys: tuple[str | None, str | None] | None = (None, None),
+    ):
         """HierarchicalMixtureEstimatorAccumulatorFactory object for creating HierarchicalMixtureEstimatorAccumulator
             objects.
 
@@ -968,22 +1003,28 @@ class HierarchicalMixtureEstimatorAccumulatorFactory(StatisticAccumulatorFactory
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
         self.keys = keys if keys is not None else (None, None)
 
-    def make(self) -> 'HierarchicalMixtureEstimatorAccumulator':
+    def make(self) -> "HierarchicalMixtureEstimatorAccumulator":
         """Returns an HierarchicalMixtureEstimatorAccumulator object from attributes variables."""
-        return HierarchicalMixtureEstimatorAccumulator([self.factories[i].make() for i in range(self.dim)],
-                                                       self.num_mixtures, self.len_factory.make(), self.keys)
+        return HierarchicalMixtureEstimatorAccumulator(
+            [self.factories[i].make() for i in range(self.dim)], self.num_mixtures, self.len_factory.make(), self.keys
+        )
+
 
 class HierarchicalMixtureEstimator(ParameterEstimator):
     """HierarchicalMixtureEstimator object for estimating a HierarchicalMixtureDistribution from sufficient
-        statistics."""
+    statistics."""
 
-    def __init__(self, estimators: Sequence[ParameterEstimator], num_mixtures: int,
-                 len_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 len_dist: Optional[SequenceEncodableProbabilityDistribution] = None,
-                 suff_stat: Optional[np.ndarray] = None,
-                 pseudo_count: Optional[float] = None,
-                 name: Optional[str] = None,
-                 keys: Optional[Tuple[Optional[str], Optional[str]]] = (None, None)) -> None:
+    def __init__(
+        self,
+        estimators: Sequence[ParameterEstimator],
+        num_mixtures: int,
+        len_estimator: ParameterEstimator | None = NullEstimator(),
+        len_dist: SequenceEncodableProbabilityDistribution | None = None,
+        suff_stat: np.ndarray | None = None,
+        pseudo_count: float | None = None,
+        name: str | None = None,
+        keys: tuple[str | None, str | None] | None = (None, None),
+    ) -> None:
         """HierarchicalMixtureEstimator object for estimating hierarchical mixture distribution for aggregated
             sufficient statistics.
 
@@ -1027,14 +1068,15 @@ class HierarchicalMixtureEstimator(ParameterEstimator):
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         self.name = name
 
-    def accumulator_factory(self) -> 'HierarchicalMixtureEstimatorAccumulatorFactory':
+    def accumulator_factory(self) -> "HierarchicalMixtureEstimatorAccumulatorFactory":
         """Create an HierarchicalMixtureEstimatorAccumulator from object instance."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         len_factory = self.len_estimator.accumulator_factory()
         return HierarchicalMixtureEstimatorAccumulatorFactory(est_factories, self.num_mixtures, len_factory, self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[np.ndarray, SS1, Optional[SS2]]) \
-            -> 'HierarchicalMixtureDistribution':
+    def estimate(
+        self, nobs: float | None, suff_stat: tuple[np.ndarray, SS1, SS2 | None]
+    ) -> "HierarchicalMixtureDistribution":
         """Estimate HierarchicalMixtureDistribution from aggregated sufficient statistics.
 
         Arg suff_stat is a Tuple of length 3 containing,
@@ -1066,7 +1108,7 @@ class HierarchicalMixtureEstimator(ParameterEstimator):
             w = w.flatten()
 
         elif self.pseudo_count is not None and self.suff_stat is not None:
-            taus = (counts + self.suff_stat*self.pseudo_count) / (counts.sum() + self.pseudo_count)
+            taus = (counts + self.suff_stat * self.pseudo_count) / (counts.sum() + self.pseudo_count)
             w = taus.sum(axis=1, keepdims=True)
             taus /= w
             w /= w.sum()
@@ -1086,6 +1128,7 @@ class HierarchicalMixtureEstimator(ParameterEstimator):
                 w = (w / w_sum).flatten()
 
         return HierarchicalMixtureDistribution(components, w, taus, len_dist=len_dist, name=self.name, keys=self.keys)
+
 
 class HierarchicalMixtureDataEncoder(DataSequenceEncoder):
     """HierarchicalMixtureDataEncoder object for encoding sequences of iid hierarchical mixture observations."""
@@ -1109,8 +1152,8 @@ class HierarchicalMixtureDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Return string representation of object instance."""
-        rv = 'HierarchicalMixtureDataEncoder(topic_encoder=' + str(self.topic_encoder) + ','
-        rv += 'len_encoder=' + str(self.len_encoder) + ')'
+        rv = "HierarchicalMixtureDataEncoder(topic_encoder=" + str(self.topic_encoder) + ","
+        rv += "len_encoder=" + str(self.len_encoder) + ")"
         return rv
 
     def __eq__(self, other: object) -> bool:
@@ -1130,7 +1173,7 @@ class HierarchicalMixtureDataEncoder(DataSequenceEncoder):
         else:
             return False
 
-    def seq_encode(self, x: Sequence[Sequence[T]]) -> Tuple[int, np.ndarray, np.ndarray, Any, Optional[Any]]:
+    def seq_encode(self, x: Sequence[Sequence[T]]) -> tuple[int, np.ndarray, np.ndarray, Any, Any | None]:
         """Encode a sequence of iid observations from a hierarchical mixture model.
 
         Returns 'rv' as a Tuple of length 5 containing:
@@ -1164,6 +1207,7 @@ class HierarchicalMixtureDataEncoder(DataSequenceEncoder):
 
         return len(x), idx, cnt, enc_data, enc_len
 
+
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 HierarchicalMixtureAccumulator = HierarchicalMixtureEstimatorAccumulator
 HierarchicalMixtureAccumulatorFactory = HierarchicalMixtureEstimatorAccumulatorFactory
@@ -1171,17 +1215,16 @@ HierarchicalMixtureAccumulatorFactory = HierarchicalMixtureEstimatorAccumulatorF
 
 def _register_hierarchical_mixture_engine_kernel():
     """Register the engine-resident hierarchical-mixture kernel (idempotent; called at import)."""
-    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
-                                    register_kernel_factory)
     from pysp.engines import NUMPY_ENGINE
+    from pysp.stats.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
     class HierarchicalMixtureKernel(GenericKernel):
         def accumulate(self, enc, weights):
             if self.estimator is None:
-                raise ValueError('HierarchicalMixtureKernel.accumulate requires an estimator.')
+                raise ValueError("HierarchicalMixtureKernel.accumulate requires an estimator.")
             if self.engine.name == NUMPY_ENGINE.name:
                 return super().accumulate(enc, weights)
-            host_enc = getattr(enc, 'host_payload', enc)
+            host_enc = getattr(enc, "host_payload", enc)
             accumulator = self.estimator.accumulator_factory().make()
             accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
             return accumulator.value()
