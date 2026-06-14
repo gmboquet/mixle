@@ -615,6 +615,8 @@ def optimize(
         engine (Optional[Any]): Optional ComputeEngine for local kernel scoring/accumulation. Distributed engine
             placement is intentionally deferred to the orchestrator/planner layer.
         precision (Optional[Any]): Optional floating-point precision such as ``'float32'`` or ``np.float64``.
+            Pass ``'auto'`` to let ``pysp.engines.auto_precision`` choose from the data and engine:
+            float32 only on a GPU torch engine with well-conditioned numeric data, else float64.
         fields (Optional[Any]): DataFrame column/field selection. A single field yields scalar observations; several
             fields yield tuple observations unless the estimator/model is record-shaped, in which case dict records
             are produced by source column name.
@@ -651,6 +653,14 @@ def optimize(
             is met.
 
     """
+    if precision == "auto":
+        from pysp.engines import auto_precision
+
+        precision = auto_precision(data, engine=engine)
+        # When 'auto' settles on float64 with no explicit engine, keep the default host path
+        # (already float64 and fastest on CPU) rather than forcing the engine path.
+        if engine is None and precision == "float64":
+            precision = None
     if precision is not None:
         from pysp.engines import engine_with_precision
 
