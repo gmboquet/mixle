@@ -14,7 +14,7 @@ import numpy as np
 from pysp.stats import *
 from pysp.stats.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
 from pysp.stats.pdist import EnumerationError
-from pysp.utils.enumeration import freeze, rerank_by_density, supports_enumeration
+from pysp.utils.enumeration import freeze, rerank_by_density, stable_top_k, supports_enumeration
 
 TOL = 1e-9
 
@@ -213,6 +213,35 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
         self.assertEqual(lp_tiers(exact), lp_tiers(reranked), "reranked tier values != true marginal")
         # Non-vacuous: the raw tropical order really is out of order vs the true marginal here.
         self.assertNotEqual(lp_tiers(raw[:k]), lp_tiers(exact), "test vacuous: raw order already exact")
+
+    def test_stable_top_k_recovers_exact_without_window_tuning(self):
+        # stable_top_k grows the rerank window to a fixed point, recovering the exact true-marginal
+        # top-k from the approximate seek-index stream for both an HMM and a mixture, no window arg.
+        hmm = HiddenMarkovModelDistribution(
+            [
+                IntegerCategoricalDistribution(0, [0.5, 0.25, 0.15, 0.1]),
+                IntegerCategoricalDistribution(0, [0.1, 0.2, 0.3, 0.4]),
+            ],
+            [0.6, 0.4],
+            [[0.7, 0.3], [0.4, 0.6]],
+            len_dist=IntegerCategoricalDistribution(1, [0.4, 0.3, 0.2, 0.1]),
+        )
+        mix = MixtureDistribution(
+            [IntegerCategoricalDistribution(0, [0.7, 0.2, 0.1]), IntegerCategoricalDistribution(1, [0.5, 0.5])],
+            [0.6, 0.4],
+        )
+
+        def tiers(pairs):
+            out = {}
+            for v, lp in pairs:
+                out.setdefault(round(lp, 8), set()).add(freeze(v))
+            return out
+
+        for name, dist, k in (("hmm", hmm, 10), ("mixture", mix, 5)):
+            exact = list(itertools.islice(dist.enumerator(), k))
+            got = stable_top_k(lambda d=dist: d.count_budget_distinct(budget_bits=30), k)
+            self.assertEqual(len(got), len(exact), "%s: size" % name)
+            self.assertEqual(tiers(got), tiers(exact), "%s: stable_top_k != exact enumerator" % name)
 
     def test_mixture_overlapping(self):
         dist = MixtureDistribution(
