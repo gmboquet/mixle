@@ -1,16 +1,15 @@
-"""Engine scoring + E-step parity for the lookback HMMs (numpy + torch), both module variants."""
+"""Engine scoring + E-step parity for the lookback HMM (numpy + torch)."""
 
 import unittest
 
 import numpy as np
 
 import pysp.stats.look_back_hmm as new_mod
-import pysp.stats.lookback_hmm as old_mod
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats.backend import backend_seq_log_density
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
-from pysp.stats.null_dist import NullDistribution, NullEstimator
+from pysp.stats.null_dist import NullEstimator
 from pysp.stats.sequence import SequenceDistribution, SequenceEstimator
 
 try:
@@ -30,7 +29,7 @@ def _make_dist(mod, len_dist):
         SequenceDistribution(IntegerCategoricalDistribution(0, p), len_dist=CategoricalDistribution({1: 1.0}))
         for p in EMISSION_PROBS
     ]
-    init_dist = [NullDistribution()] * 2 if mod is old_mod else None
+    init_dist = None
     return mod.LookbackHiddenMarkovDistribution(
         topics, w=W, transitions=TRANSITIONS, lag=0, init_dist=init_dist, len_dist=len_dist
     )
@@ -98,9 +97,6 @@ class LookbackHmmEngineTestCase(unittest.TestCase):
             val = _flatten(kernel.accumulate(enc, weights))
             self.assertEqual(hv.shape, val.shape, "%s/%s shape" % (mod.__name__, name))
             self.assertTrue(np.allclose(hv, val, atol=1.0e-6), "%s/%s E-step differs" % (mod.__name__, name))
-
-    def test_old_module(self):
-        self._run(old_mod)
 
     def test_new_module(self):
         self._run(new_mod)

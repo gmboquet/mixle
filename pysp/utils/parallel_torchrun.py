@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from pysp.parallel import EncodedDataHandle
+from pysp.planner import EncodedDataHandle
 
 __all__ = ["TorchRunEncodedData", "torchrun_out"]
 

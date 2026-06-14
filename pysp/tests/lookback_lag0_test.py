@@ -1,7 +1,7 @@
 """Tests that lag=0 lookback hidden Markov models behave as consistent ordinary HMMs.
 
-Covers both pysp.stats.lookback_hmm (the original module) and pysp.stats.look_back_hmm (the typed
-rewrite). With lag=0 there is no initial segment: the number of hidden positions is len(x), the first
+Covers pysp.stats.look_back_hmm (the typed lookback HMM). With lag=0 there is no initial segment:
+the number of hidden positions is len(x), the first
 state is drawn from w and emits the window x[0:1], and a sampled length n yields exactly n emissions.
 Checks log_density against a hand-computed ordinary-HMM forward pass and against
 pysp.stats.hidden_markov.HiddenMarkovModelDistribution, that sampled sequence lengths match the
@@ -14,7 +14,6 @@ import numpy as np
 from numpy.random import RandomState
 
 import pysp.stats.look_back_hmm as new_mod
-import pysp.stats.lookback_hmm as old_mod
 from pysp.arithmetic import maxrandint
 from pysp.stats import seq_encode, seq_estimate, seq_initialize, seq_log_density_sum
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
@@ -23,7 +22,7 @@ from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategori
 from pysp.stats.null_dist import NullDistribution, NullEstimator
 from pysp.stats.sequence import SequenceDistribution, SequenceEstimator
 
-MODULES = [old_mod, new_mod]
+MODULES = [new_mod]
 
 W = [0.6, 0.4]
 TRANSITIONS = [[0.8, 0.2], [0.3, 0.7]]
@@ -61,7 +60,7 @@ def make_lag0_dist(mod, len_dist):
         SequenceDistribution(IntegerCategoricalDistribution(0, p), len_dist=CategoricalDistribution({1: 1.0}))
         for p in EMISSION_PROBS
     ]
-    init_dist = [NullDistribution()] * 2 if mod is old_mod else None
+    init_dist = None
 
     return mod.LookbackHiddenMarkovDistribution(
         topics, w=W, transitions=TRANSITIONS, lag=0, init_dist=init_dist, len_dist=len_dist
@@ -77,7 +76,7 @@ def make_lag0_estimator(mod, with_len=True):
     if with_len:
         len_est = CategoricalEstimator(pseudo_count=0.1)
     else:
-        len_est = None if mod is old_mod else NullEstimator()
+        len_est = NullEstimator()
 
     return mod.LookbackHiddenMarkovEstimator(
         [topic_est] * 2, lag=0, init_estimators=[NullEstimator()] * 2, len_estimator=len_est, pseudo_count=(1.0, 1.0)

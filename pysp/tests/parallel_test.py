@@ -10,7 +10,7 @@ import unittest
 
 import numpy as np
 
-from pysp.parallel import EncodedDataHandle, encoded_data, is_encoded_data_handle
+from pysp.planner import EncodedDataHandle, encoded_data, is_encoded_data_handle
 from pysp.stats import (
     CategoricalDistribution,
     CategoricalEstimator,

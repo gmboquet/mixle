@@ -5,7 +5,7 @@ Indian Buffet Process feature-allocation model, a Chow-Liu tree and an ICL tree 
 features, Erdos-Renyi and stochastic-block random graphs, a quantized HMM (theta^k
 parameterization), a tree-structured HMM, a segmental HMM, and named-field Record / DictRecord
 models. Self-contained random data only. Other structured models have their own focused scripts
-(hidden_markov, lda, lookback_hmm, association, set_edit, ...); the grammar (HeterogeneousPCFG) and
+(hidden_markov, lda, look_back_hmm, association, set_edit, ...); the grammar (HeterogeneousPCFG) and
 sparse-association (SparseMarkovAssociation) models are exercised in pysp/tests.
 """
 import numpy as np

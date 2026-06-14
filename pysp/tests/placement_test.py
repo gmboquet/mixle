@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from pysp.parallel import (
+from pysp.planner import (
     CalibrationCatalog,
     DeviceSpec,
     EncodedDataHandle,

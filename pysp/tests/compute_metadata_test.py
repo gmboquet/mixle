@@ -462,13 +462,13 @@ class ComputeMetadataTestCase(unittest.TestCase):
     def test_high_level_compute_utilities_do_not_import_concrete_distributions(self):
         pysp_root = Path(__file__).resolve().parents[1]
         targets = [
-            pysp_root / "stats" / "torch_engine.py",
+            pysp_root / "stats" / "torch_mixture.py",
             pysp_root / "utils" / "estimation.py",
             pysp_root / "utils" / "objectives.py",
             pysp_root / "utils" / "em.py",
             pysp_root / "utils" / "automatic.py",
             pysp_root / "utils" / "fisher.py",
-            pysp_root / "parallel.py",
+            pysp_root / "planner.py",
         ] + sorted((pysp_root / "engines").glob("*.py"))
         allowed_modules = {
             "pysp.stats",
@@ -509,9 +509,9 @@ class ComputeMetadataTestCase(unittest.TestCase):
                         violations.append("%s imports %s" % (path.relative_to(pysp_root), module))
         self.assertEqual(violations, [])
 
-    def test_torch_engine_remains_a_compatibility_shim_not_an_omni_file(self):
-        torch_engine_path = Path(__file__).resolve().parents[1] / "stats" / "torch_engine.py"
-        tree = ast.parse(torch_engine_path.read_text(), filename=str(torch_engine_path))
+    def test_torch_mixture_remains_a_compatibility_shim_not_an_omni_file(self):
+        torch_mixture_path = Path(__file__).resolve().parents[1] / "stats" / "torch_mixture.py"
+        tree = ast.parse(torch_mixture_path.read_text(), filename=str(torch_mixture_path))
         class_names = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
         exports = []
         for node in tree.body:

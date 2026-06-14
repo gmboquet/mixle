@@ -1,10 +1,9 @@
-"""Smoke tests for the duplicate lookback hidden Markov modules.
+"""Smoke tests for the lookback hidden Markov module.
 
-Covers both pysp.stats.lookback_hmm (the original module, kept for the example scripts) and
-pysp.stats.look_back_hmm (the typed rewrite). Checks that both import, that a tiny fixed-seed
-sample -> seq_initialize -> seq_estimate loop runs, that the data encoders round-trip
-(dist_to_encoder == acc_to_encoder, vectorized log-densities match per-item log_density), and
-that the two modules agree numerically on the same data.
+Covers pysp.stats.look_back_hmm (the typed lookback HMM). Checks that it imports, that a tiny
+fixed-seed sample -> seq_initialize -> seq_estimate loop runs, and that the data encoders
+round-trip (dist_to_encoder == acc_to_encoder, vectorized log-densities match per-item
+log_density).
 """
 
 import unittest
@@ -13,14 +12,13 @@ import numpy as np
 from numpy.random import RandomState
 
 import pysp.stats.look_back_hmm as new_mod
-import pysp.stats.lookback_hmm as old_mod
 from pysp.stats import seq_encode, seq_estimate, seq_initialize, seq_log_density_sum
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
 from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 from pysp.stats.sequence import SequenceDistribution, SequenceEstimator
 
-MODULES = [old_mod, new_mod]
+MODULES = [new_mod]
 
 
 def make_dist(mod):
@@ -110,18 +108,6 @@ class LookbackHmmEncoderTestCase(unittest.TestCase):
                 self.assertTrue(np.all(np.isfinite(ld_item)))
                 self.assertTrue(np.allclose(ld_enc_d, ld_item))
                 self.assertTrue(np.allclose(ld_enc_d, ld_enc_a))
-
-    def test_modules_agree_on_sampling_and_density(self):
-        old_dist = make_dist(old_mod)
-        new_dist = make_dist(new_mod)
-
-        old_data = old_dist.sampler(seed=3).sample(15)
-        new_data = new_dist.sampler(seed=3).sample(15)
-        self.assertEqual(old_data, new_data)
-
-        old_ld = old_dist.seq_log_density(old_dist.seq_encode(old_data))
-        new_ld = new_dist.seq_log_density(new_dist.seq_encode(old_data))
-        self.assertTrue(np.allclose(old_ld, new_ld))
 
 
 class LookbackHmmEstimationTestCase(unittest.TestCase):
