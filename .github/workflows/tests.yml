@@ -8,6 +8,28 @@ on:
     - cron: "17 9 * * 1"
 
 jobs:
+  lint:
+    name: lint (ruff enforced, mypy advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install lint tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[lint]"
+      # ruff is enforced: the tree is formatted and lint-clean under the rules in pyproject.toml.
+      - name: ruff format --check
+        run: ruff format --check pysp
+      - name: ruff check
+        run: ruff check pysp
+      # mypy stays advisory until the type-checking backlog is addressed (config in pyproject.toml).
+      - name: mypy
+        continue-on-error: true
+        run: mypy
+
   fast:
     name: fast / py${{ matrix.python-version }}
     runs-on: ubuntu-latest

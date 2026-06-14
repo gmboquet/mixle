@@ -1,0 +1,136 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pysparkplug"
+version = "0.2.0.0"
+description = "A package for estimating heterogeneous probability density functions."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Grant Boquet", email = "grant.boquet@gmail.com" }]
+keywords = [
+    "machine learning",
+    "density estimation",
+    "statistics",
+    "heterogeneous data",
+]
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+]
+# Base install covers all distributions and local (numpy) estimation; acceleration,
+# distribution, and embedding back-ends are opt-in extras (see [project.optional-dependencies]).
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "mpmath",
+    "networkx",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+numba = ["numba", "tbb"]
+spark = ["pyspark"]
+dask = ["dask", "distributed"]
+torch = ["torch"]
+mpi = ["mpi4py"]
+umap = ["umap-learn"]
+sympy = ["sympy"]
+test = ["pytest>=8"]
+# ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
+lint = ["ruff==0.15.17", "mypy"]
+all = ["numba", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn"]
+
+[project.urls]
+Homepage = "https://github.com/gmboquet/pysparkplug"
+Repository = "https://github.com/gmboquet/pysparkplug"
+
+[tool.setuptools.packages.find]
+include = ["pysp*"]
+
+[tool.pytest.ini_options]
+testpaths = ["pysp/tests"]
+python_files = ["*_test.py"]
+python_classes = ["*Test", "*TestCase"]
+python_functions = ["test_*"]
+addopts = "-ra --strict-markers"
+markers = [
+    "fast: quick correctness tests suitable for every commit.",
+    "slow: heavier stochastic, integration, or exhaustive tests for full CI.",
+    "optional: tests that require optional extras or external executables.",
+    "benchmark: timing-oriented tests; not part of correctness gates.",
+    "stochastic: tests whose assertions depend on random sampling.",
+    "integration: end-to-end workflow tests across multiple modules.",
+    "distribution: distribution interface, density, sampler, estimator, and encoder tests.",
+    "bstats: Bayesian stats distribution and optimizer tests.",
+    "automatic: automatic model detection/profiling tests.",
+    "enumeration: support enumeration and quantized-index tests.",
+    "fisher: Fisher information/view tests.",
+    "htsne: HTSNE affinity and embedding tests.",
+    "graph: random graph and graph-structured model tests.",
+    "knowledge_graph: knowledge graph model tests.",
+    "pomdp: partially observable Markov decision process tests.",
+    "causal: conditional dependence and causal structure learning tests.",
+    "grammar: grammar learning and PCFG tests.",
+    "kernel: fused kernel/compiled path tests.",
+    "em: expectation-maximization strategy tests.",
+    "torch: torch engine tests.",
+    "numba: numba-accelerated path tests.",
+    "mpi: MPI backend tests.",
+    "dask: dask.distributed backend tests.",
+    "spark: Spark backend tests.",
+    "torchrun: torch.distributed/torchrun backend tests.",
+    "parallel: multiprocessing or distributed backend tests.",
+    "planner: resource and placement planning tests.",
+    "serialization: JSON serialization tests.",
+    "hmm: HMM, segmental HMM, tree HMM, and lookback HMM tests.",
+    "pcfg: grammar and PCFG tests.",
+    "latent: mixture, DPM, LDA, LLDA, and hidden-association tests.",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+# Demo scripts under examples/ are illustrative and not held to library lint rules.
+extend-exclude = ["examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "F403", # `from pysp.arithmetic import *` is an intentional dispatch namespace
+    "F405", #   (pysp.arithmetic defines __all__); the star is deliberate, not accidental.
+    "E501", # line length is governed by the formatter, not flagged by the linter.
+    "B008", # immutable sentinel instances as defaults (e.g. NullDistribution()) are intentional.
+    # The rules below are deliberately not enforced over this scientific codebase; they are
+    # either stylistic or risky to retrofit in bulk. Revisit case-by-case rather than globally.
+    "UP031", # printf-style `%` formatting is valid and pervasive; mechanical f-string rewrites risk behavior changes.
+    "B905",  # `zip(..., strict=...)` retrofit changes runtime behavior (raises on length mismatch).
+    "B904",  # explicit `raise ... from` exception chaining; cosmetic here.
+    "B007",  # unused loop control variables are often intentional in numeric loops.
+    "E741",  # single-letter names (l, I, O) are idiomatic for indices/matrices in the math code.
+    "E731",  # lambda assignment is used deliberately for small local closures.
+    "E402",  # several modules do deliberate late/conditional (optional-backend) imports.
+    "F841",  # unused locals are frequently intermediate scientific results kept for clarity.
+]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["pysp"]
+# Strictness is intentionally relaxed for a large, partially-typed scientific codebase;
+# tighten incrementally (e.g. per-module overrides) as annotations are completed.
+ignore_missing_imports = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "pysp.tests.*"
+ignore_errors = true
