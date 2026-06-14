@@ -39,7 +39,7 @@ from pysp.stats import (
     seq_encode,
 )
 from pysp.stats.geometric import GeometricEstimator
-from pysp.utils.estimation import empirical_kl_divergence
+from pysp.utils.evaluation import empirical_kl_divergence
 from pysp.utils.special import digammainv, logpdet, trigamma
 from pysp.utils.vector import (
     log_posterior,

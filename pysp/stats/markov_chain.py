@@ -503,7 +503,7 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         backward choosing predecessors by count.
         """
         from pysp.stats.pdist import EnumerationError
-        from pysp.utils.quantization_semiring import CountSemiring
+        from pysp.utils.quantization.semiring import CountSemiring
 
         if self.default_value != 0.0:
             raise EnumerationError(self, reason="non-zero default_value gives an unbounded support")

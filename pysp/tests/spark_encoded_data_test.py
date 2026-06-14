@@ -7,7 +7,8 @@ import numpy as np
 
 from pysp.planner import SparkEncodedData, encoded_data, is_encoded_data_handle
 from pysp.stats import GaussianDistribution, GaussianEstimator, seq_encode, seq_estimate, seq_log_density_sum
-from pysp.utils.estimation import StreamingEstimator, constant, optimize, streaming_accumulate
+from pysp.utils.estimation import constant, optimize
+from pysp.utils.streaming import StreamingEstimator, streaming_accumulate
 
 
 def _spark_context():

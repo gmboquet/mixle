@@ -14,8 +14,9 @@ with the identical fit. mpi_out() routes iteration logging to rank 0 only.
 import numpy as np
 
 from pysp.stats import *
-from pysp.utils.estimation import optimize, partition_data
-from pysp.utils.parallel_mpi import MPIEncodedData, mpi_out
+from pysp.utils.estimation import optimize
+from pysp.utils.evaluation import partition_data
+from pysp.utils.parallel.mpi import MPIEncodedData, mpi_out
 from mpi4py import MPI
 
 if __name__ == '__main__':

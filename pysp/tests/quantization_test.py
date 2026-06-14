@@ -1,4 +1,4 @@
-"""Tests for structural quantized enumeration (pysp.utils.quantization).
+"""Tests for structural quantized enumeration (pysp.utils.quantization.core).
 
 Covers the count semiring against brute force; the count-budget index for the additive families
 (Composite/Sequence/MarkovChain) against the exact enumerator on finite supports (value set, exact
@@ -12,9 +12,9 @@ import unittest
 
 from pysp.stats import *
 from pysp.utils.enumeration import freeze
-from pysp.utils.quantization import CountHistogram, Quantizer, convolve_indices, leaf_count_index
-from pysp.utils.quantization_parallel import distributed_unrank
-from pysp.utils.quantization_semiring import CountSemiring, enumerate_and_bin, ordered_stream_from_count_index
+from pysp.utils.quantization.core import CountHistogram, Quantizer, convolve_indices, leaf_count_index
+from pysp.utils.quantization.parallel import distributed_unrank
+from pysp.utils.quantization.semiring import CountSemiring, enumerate_and_bin, ordered_stream_from_count_index
 
 
 def _collect(index):

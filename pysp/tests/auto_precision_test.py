@@ -64,7 +64,7 @@ class AutoPrecisionTestCase(unittest.TestCase):
 
     def test_plan_precision_auto_resolves(self):
         from pysp.planner import plan
-        from pysp.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution
+        from pysp.stats import GaussianDistribution, MixtureDistribution
 
         truth = MixtureDistribution([GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)], [0.5, 0.5])
         data = truth.sampler(1).sample(2000)

@@ -26,7 +26,8 @@ from pysp.utils.em import (
     observed_log_likelihood,
     run_em,
 )
-from pysp.utils.estimation import IncrementalEstimator, StreamingEstimator, constant
+from pysp.utils.estimation import constant
+from pysp.utils.streaming import IncrementalEstimator, StreamingEstimator
 
 
 def _assert_mixture_close(test_case, actual, expected):

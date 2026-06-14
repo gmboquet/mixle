@@ -674,7 +674,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         non-plain HMMs (taus / terminal_values) or emissions that cannot count structurally.
         """
         from pysp.stats.pdist import EnumerationError
-        from pysp.utils.quantization import CountHistogram, CountIndex, child_count_index, leaf_count_index
+        from pysp.utils.quantization.core import CountHistogram, CountIndex, child_count_index, leaf_count_index
 
         if isinstance(self.len_dist, NullDistribution):
             raise EnumerationError(self, reason="no length distribution is modeled (len_dist is Null)")

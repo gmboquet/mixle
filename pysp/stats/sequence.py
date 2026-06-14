@@ -407,8 +407,8 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         the contributing length, then the per-position element buckets via the convolution unranker.
         """
         from pysp.stats.pdist import EnumerationError
-        from pysp.utils.quantization import child_count_index
-        from pysp.utils.quantization_semiring import CountSemiring
+        from pysp.utils.quantization.core import child_count_index
+        from pysp.utils.quantization.semiring import CountSemiring
 
         if self.null_len_dist:
             raise EnumerationError(self, reason="no length distribution is modeled (len_dist is Null)")

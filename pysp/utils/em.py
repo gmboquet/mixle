@@ -361,7 +361,7 @@ class OnlineEM:
 
     def _ensure_stream(self, estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution) -> Any:
         if self._stream is None:
-            from pysp.utils.estimation import StreamingEstimator
+            from pysp.utils.streaming import StreamingEstimator
 
             self._stream = StreamingEstimator(
                 estimator,
@@ -456,7 +456,7 @@ class IncrementalEM:
         self, estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution
     ) -> Any:
         if self._incremental is None:
-            from pysp.utils.estimation import IncrementalEstimator
+            from pysp.utils.streaming import IncrementalEstimator
 
             self._incremental = IncrementalEstimator(
                 estimator,

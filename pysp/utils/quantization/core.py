@@ -63,7 +63,7 @@ class Quantizer:
             raise ValueError("oversample must be a positive integer.")
         self.bin_width_bits = float(bin_width_bits)
         self.oversample = int(oversample)
-        # Optional convolution executor (see pysp.utils.quantization_parallel). Lives only in the
+        # Optional convolution executor (see pysp.utils.quantization.parallel). Lives only in the
         # building process; the count-DP routes its heavy convolutions through it when present.
         self.executor = executor
 
@@ -460,7 +460,7 @@ def count_budget_index(
     """
     executor = None
     if num_workers is not None and int(num_workers) > 1:
-        from pysp.utils.quantization_parallel import ConvolutionExecutor
+        from pysp.utils.quantization.parallel import ConvolutionExecutor
 
         executor = ConvolutionExecutor(num_workers=num_workers)
     try:
@@ -520,7 +520,7 @@ def distinct_budget_stream(
     if dedup == "window":
         if start != 0:
             raise ValueError("dedup='window' is sequential; start must be 0 (use 'canonical' to seek)")
-        from pysp.utils.quantization_semiring import bounded_dedup_stream
+        from pysp.utils.quantization.semiring import bounded_dedup_stream
 
         raw = (index.get(i) for i in range(start, stop))
         return bounded_dedup_stream(raw, max_entries=max_entries)

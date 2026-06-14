@@ -10,13 +10,14 @@ import numpy as np
 
 from pysp.planner import Resources, encoded_data, is_encoded_data_handle
 from pysp.stats import GaussianDistribution, GaussianEstimator, seq_encode, seq_estimate, seq_log_density_sum
-from pysp.utils.estimation import optimize, streaming_accumulate
+from pysp.utils.estimation import optimize
+from pysp.utils.streaming import streaming_accumulate
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 if HAS_TORCH:
-    from pysp.utils.parallel_torchrun import TorchRunEncodedData
+    from pysp.utils.parallel.torchrun import TorchRunEncodedData
 else:
     TorchRunEncodedData = None
 
@@ -89,8 +90,9 @@ sys.path.insert(0, %(repo)r)
 from pysp.engines import TorchEngine
 from pysp.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator, \
     estimate_component_shard_value, seq_encode, seq_estimate, seq_log_density_sum, tie_component_shard_values
-from pysp.utils.estimation import StreamingEstimator, constant, optimize, streaming_accumulate
-from pysp.utils.parallel_torchrun import TorchRunEncodedData, torchrun_out
+from pysp.utils.estimation import constant, optimize
+from pysp.utils.streaming import StreamingEstimator, streaming_accumulate
+from pysp.utils.parallel.torchrun import TorchRunEncodedData, torchrun_out
 
 import torch
 from torch.distributed.tensor import DTensor, DeviceMesh, Shard

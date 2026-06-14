@@ -533,8 +533,8 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         budget builder). For an exact small-budget index (best-first union with dedup), use
         ``quantized_index``. Components that cannot count structurally raise EnumerationError.
         """
-        from pysp.utils.quantization import child_count_index
-        from pysp.utils.quantization_semiring import CountSemiring
+        from pysp.utils.quantization.core import child_count_index
+        from pysp.utils.quantization.semiring import CountSemiring
 
         sr = CountSemiring()
         total = sr.zero()
