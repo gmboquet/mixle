@@ -621,7 +621,7 @@ def optimize(
         resources (Optional[Any]): Optional planner resources. When supplied with raw data, optimize encodes through
             the shared encoded-data factory so placement, sub-chunks, and per-shard engines use the orchestrator
             contract.
-        placement (Optional[Any]): Optional explicit placement produced by ``pysp.parallel.plan``.
+        placement (Optional[Any]): Optional explicit placement produced by ``pysp.planner.plan``.
         sub_chunks (int): Number of sub-chunks per placement shard when ``resources`` or ``placement`` is supplied.
         chunk_size (Optional[int]): Approximate chunk size for ordinary local sequence encoding.
         backend (str): Encoded-data backend for raw data. ``'local'`` keeps the historical local encoding unless
@@ -673,7 +673,7 @@ def optimize(
     if enc_data is None:
         data_for_encoding = _data_records_for_encoding(data, fields, est, encode_model)
         if resources is not None or placement is not None or backend_name != "local":
-            from pysp.parallel import encoded_data, is_encoded_data_handle
+            from pysp.planner import encoded_data, is_encoded_data_handle
 
             close_created_enc_data = not is_encoded_data_handle(data_for_encoding)
             enc_data = encoded_data(

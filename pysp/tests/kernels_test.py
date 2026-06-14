@@ -1,4 +1,4 @@
-"""Tests for the fused numba kernel estimation path (pysp.stats.kernels).
+"""Tests for the fused numba kernel estimation path (pysp.stats.fused_kernels).
 
 Every result is checked against the legacy vectorized seq_* path: component
 log-densities, mixture log-densities, posteriors, and full EM trajectories
@@ -30,7 +30,7 @@ from pysp.stats import (
     seq_encode,
     seq_estimate,
 )
-from pysp.stats.kernels import CompiledMixture, build_kernel
+from pysp.stats.fused_kernels import CompiledMixture, build_kernel
 
 
 def make_mixture(K=3):

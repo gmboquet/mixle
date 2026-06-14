@@ -3,7 +3,7 @@
 #import os
 
 import numpy as np
-from pysp.stats.lookback_hmm import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
+from pysp.stats.look_back_hmm import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
 from pysp.stats.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
 from pysp.stats import *
 from pysp.utils.estimation import optimize

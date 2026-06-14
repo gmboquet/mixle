@@ -10,7 +10,7 @@ For each family this verifies two things:
     fixed iteration count.
 
 Families covered: SegmentalHiddenMarkov, TreeHiddenMarkov (numpy + numba encodings),
-IndPiHiddenMarkov (numpy + numba encodings), LookbackHiddenMarkov (both module variants).
+IndPiHiddenMarkov (numpy + numba encodings), LookbackHiddenMarkov.
 """
 
 import io
@@ -19,7 +19,6 @@ import unittest
 import numpy as np
 
 import pysp.stats.look_back_hmm as look_back_mod
-import pysp.stats.lookback_hmm as lookback_mod
 from pysp.stats import (
     CategoricalDistribution,
     CategoricalEstimator,
@@ -210,13 +209,6 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
             len_estimator=CategoricalEstimator(pseudo_count=0.1),
             pseudo_count=(1.0, 1.0),
         )
-
-    def test_lookback_original(self):
-        dist = self._lookback_dist(lookback_mod)
-        data = dist.sampler(seed=1).sample(60)
-        self._parity(dist, self._lookback_est(lookback_mod), data)
-        self._fused(self._lookback_est(lookback_mod), data)
-        self._default_off(self._lookback_est(lookback_mod))
 
     def test_lookback_typed(self):
         dist = self._lookback_dist(look_back_mod)

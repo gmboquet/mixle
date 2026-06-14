@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from pysp.parallel import DaskEncodedData, encoded_data, is_encoded_data_handle
+from pysp.planner import DaskEncodedData, encoded_data, is_encoded_data_handle
 from pysp.stats import GaussianDistribution, GaussianEstimator, seq_encode, seq_estimate, seq_log_density_sum
 from pysp.utils.estimation import StreamingEstimator, constant, optimize, streaming_accumulate
 

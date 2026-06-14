@@ -34,7 +34,7 @@ class TorchMixture:
     New code should prefer ``dist.kernel(engine=TorchEngine(...))``,
     ``optimize(..., engine=...)``, ``fit_mle`` / ``fit_map``, or
     ``pysp.utils.objectives`` directly.  This class exists so older code and
-    compatibility tests importing ``pysp.stats.torch_engine.TorchMixture`` keep
+    compatibility tests importing ``pysp.stats.torch_mixture.TorchMixture`` keep
     working while distribution math remains distribution-owned.
     """
 

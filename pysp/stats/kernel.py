@@ -160,7 +160,7 @@ class NumbaKernel(Kernel):
     ) -> None:
         if engine.name != NUMPY_ENGINE.name:
             raise ValueError("NumbaKernel currently supports only the numpy engine.")
-        from pysp.stats.kernels import CompiledMixture
+        from pysp.stats.fused_kernels import CompiledMixture
 
         self.dist = dist
         self.engine = engine

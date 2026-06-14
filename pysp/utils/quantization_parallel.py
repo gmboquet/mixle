@@ -1,7 +1,7 @@
 """Parallel quantization and distributed enumeration for the count-semiring index.
 
 Two capabilities, both built on the existing resource/chunking layer
-(:mod:`pysp.parallel` ``Resources`` and ``_split_range``):
+(:mod:`pysp.planner` ``Resources`` and ``_split_range``):
 
   - **Parallel quantization** (:class:`ConvolutionExecutor`): the count-DP's cost is dominated
     by big-integer convolutions of count histograms (sequence power chains, composite suffix
@@ -24,7 +24,7 @@ problems the serial path is used automatically to avoid pickling overhead.
 import os
 from typing import Any
 
-from pysp.parallel import _split_range
+from pysp.planner import _split_range
 
 
 def _mp_context():
@@ -48,7 +48,7 @@ def resolve_workers(num_workers: int | None = None) -> int:
     if num_workers is not None:
         return max(1, int(num_workers))
     try:
-        from pysp.parallel import Resources
+        from pysp.planner import Resources
 
         n = len(Resources.local().devices)
         if n >= 1:

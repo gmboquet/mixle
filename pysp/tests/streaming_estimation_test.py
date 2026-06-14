@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from pysp.parallel import LocalEncodedData, Resources
+from pysp.planner import LocalEncodedData, Resources
 from pysp.stats import (
     BinomialDistribution,
     BinomialEstimator,
@@ -139,8 +139,6 @@ class StreamingEstimatorTestCase(unittest.TestCase):
         from pysp.stats.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
         from pysp.stats.int_range import IntegerCategoricalDistribution
         from pysp.stats.look_back_hmm import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
-        from pysp.stats.lookback_hmm import LookbackHiddenMarkovDistribution as LegacyLookbackHiddenMarkovDistribution
-        from pysp.stats.lookback_hmm import LookbackHiddenMarkovEstimator as LegacyLookbackHiddenMarkovEstimator
         from pysp.stats.sequence import SequenceDistribution, SequenceEstimator
         from pysp.stats.tree_hmm import TreeHiddenMarkovModelDistribution
 
@@ -160,10 +158,7 @@ class StreamingEstimatorTestCase(unittest.TestCase):
             len_estimator=CategoricalEstimator(pseudo_count=0.1),
         )
         lookback_data = [[0, 1, 1, 2, 2, 0], [2, 2, 1, 1, 0], [0, 0, 1, 2, 1, 0]]
-        for dist_cls, est_cls in (
-            (LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator),
-            (LegacyLookbackHiddenMarkovDistribution, LegacyLookbackHiddenMarkovEstimator),
-        ):
+        for dist_cls, est_cls in ((LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator),):
             with self.subTest(dist=dist_cls.__module__):
                 dist = dist_cls(
                     lookback_topics,
