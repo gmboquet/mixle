@@ -6,6 +6,7 @@ KeyError. This is the path taken by incremental update() implementations
 that delegate to seq_update batch-by-batch (e.g. lookback HMM length
 accumulators).
 """
+
 import unittest
 
 import numpy as np
@@ -14,7 +15,6 @@ from pysp.stats.categorical import CategoricalDataEncoder, CategoricalEstimator
 
 
 class CategoricalSeqUpdateTestCase(unittest.TestCase):
-
     def test_seq_update_disjoint_batches(self):
         enc = CategoricalDataEncoder()
         acc = CategoricalEstimator().accumulator_factory().make()
@@ -25,9 +25,9 @@ class CategoricalSeqUpdateTestCase(unittest.TestCase):
     def test_seq_update_overlapping_batches(self):
         enc = CategoricalDataEncoder()
         acc = CategoricalEstimator().accumulator_factory().make()
-        acc.seq_update(enc.seq_encode(['a', 'b', 'a']), np.ones(3), None)
-        acc.seq_update(enc.seq_encode(['b', 'c']), np.asarray([2.0, 0.5]), None)
-        self.assertEqual(acc.count_map, {'a': 2.0, 'b': 3.0, 'c': 0.5})
+        acc.seq_update(enc.seq_encode(["a", "b", "a"]), np.ones(3), None)
+        acc.seq_update(enc.seq_encode(["b", "c"]), np.asarray([2.0, 0.5]), None)
+        self.assertEqual(acc.count_map, {"a": 2.0, "b": 3.0, "c": 0.5})
 
     def test_seq_update_matches_update(self):
         rng = np.random.RandomState(3)
@@ -48,5 +48,5 @@ class CategoricalSeqUpdateTestCase(unittest.TestCase):
             self.assertAlmostEqual(seq_acc.count_map[k], v, places=12)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

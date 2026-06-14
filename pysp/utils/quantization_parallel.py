@@ -20,9 +20,9 @@ Two capabilities, both built on the existing resource/chunking layer
 Use parallel quantization when histograms are large (deep budgets / high oversample); for small
 problems the serial path is used automatically to avoid pickling overhead.
 """
-import math
+
 import os
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 from pysp.parallel import _split_range
 
@@ -36,18 +36,20 @@ def _mp_context():
     Windows), which requires the caller's entry module to be import-guarded.
     """
     import multiprocessing as mp
+
     try:
-        return mp.get_context('fork')
+        return mp.get_context("fork")
     except ValueError:
         return mp.get_context()
 
 
-def resolve_workers(num_workers: Optional[int] = None) -> int:
+def resolve_workers(num_workers: int | None = None) -> int:
     """Resolve a worker count from an explicit request, Resources, or the CPU count."""
     if num_workers is not None:
         return max(1, int(num_workers))
     try:
         from pysp.parallel import Resources
+
         n = len(Resources.local().devices)
         if n >= 1:
             return n
@@ -58,7 +60,8 @@ def resolve_workers(num_workers: Optional[int] = None) -> int:
 
 # --- Parallel quantization: chunked convolution -----------------------------------------------
 
-def _conv_chunk(a_data: List[int], b_data: List[int], lo: int, hi: int) -> List[int]:
+
+def _conv_chunk(a_data: list[int], b_data: list[int], lo: int, hi: int) -> list[int]:
     """Compute output buckets [lo, hi) of conv(a_data, b_data) (0-indexed in the result)."""
     na, nb = len(a_data), len(b_data)
     out = [0] * (hi - lo)
@@ -76,7 +79,7 @@ def _conv_chunk(a_data: List[int], b_data: List[int], lo: int, hi: int) -> List[
     return out
 
 
-class ConvolutionExecutor(object):
+class ConvolutionExecutor:
     """Process-pool executor for big-integer histogram convolutions (parallel quantization).
 
     A context manager holding a reusable pool. ``convolve(a, b, max_fine_bucket)`` returns a
@@ -84,12 +87,12 @@ class ConvolutionExecutor(object):
     serial when the output is small or only one worker is available.
     """
 
-    def __init__(self, num_workers: Optional[int] = None, min_parallel_width: int = 2048) -> None:
+    def __init__(self, num_workers: int | None = None, min_parallel_width: int = 2048) -> None:
         self.num_workers = resolve_workers(num_workers)
         self.min_parallel_width = int(min_parallel_width)
         self._pool = None
 
-    def __enter__(self) -> 'ConvolutionExecutor':
+    def __enter__(self) -> "ConvolutionExecutor":
         if self.num_workers > 1:
             self._pool = _mp_context().Pool(self.num_workers)
         return self
@@ -103,8 +106,9 @@ class ConvolutionExecutor(object):
             self._pool.join()
             self._pool = None
 
-    def convolve(self, a, b, max_fine_bucket: Optional[int] = None):
+    def convolve(self, a, b, max_fine_bucket: int | None = None):
         from pysp.utils.quantization import CountHistogram
+
         if not a.data or not b.data:
             return CountHistogram.empty()
         base = a.base + b.base
@@ -119,7 +123,7 @@ class ConvolutionExecutor(object):
         ranges = _split_range(0, width, self.num_workers)
         tasks = [(a.data, b.data, lo, hi) for lo, hi in ranges]
         parts = self._pool.starmap(_conv_chunk, tasks)
-        data: List[int] = []
+        data: list[int] = []
         for part in parts:
             data.extend(part)
         return CountHistogram(base, data)
@@ -127,18 +131,27 @@ class ConvolutionExecutor(object):
 
 # --- Distributed unranking --------------------------------------------------------------------
 
-def _unrank_chunk(dist, budget_bits: float, bin_width_bits: float, oversample: int,
-                  lo: int, hi: int) -> List[Tuple[Any, float]]:
+
+def _unrank_chunk(
+    dist, budget_bits: float, bin_width_bits: float, oversample: int, lo: int, hi: int
+) -> list[tuple[Any, float]]:
     """Rebuild the budget index on the worker and unrank ranks [lo, hi)."""
     index = dist.count_budget_index(budget_bits, bin_width_bits=bin_width_bits, oversample=oversample)
     top = min(hi, index.total_count)
     return [index.get(i) for i in range(lo, top)]
 
 
-def distributed_unrank(dist, budget_bits: float, start: int = 0, count: Optional[int] = None,
-                       bin_width_bits: float = 1.0, oversample: int = 8,
-                       num_workers: Optional[int] = None, backend: str = 'local',
-                       spark_context=None) -> List[Tuple[Any, float]]:
+def distributed_unrank(
+    dist,
+    budget_bits: float,
+    start: int = 0,
+    count: int | None = None,
+    bin_width_bits: float = 1.0,
+    oversample: int = 8,
+    num_workers: int | None = None,
+    backend: str = "local",
+    spark_context=None,
+) -> list[tuple[Any, float]]:
     """Unrank the rank range [start, start+count) in parallel, returning items in rank order.
 
     Each worker rebuilds the index from ``dist`` (picklable) and unranks its assigned sub-range.
@@ -153,7 +166,7 @@ def distributed_unrank(dist, budget_bits: float, start: int = 0, count: Optional
     stop = start + count
     ranges = _split_range(start, stop, workers)
 
-    if backend == 'spark':
+    if backend == "spark":
         if spark_context is None:
             raise ValueError("backend='spark' requires spark_context")
         bb, bw, ov = budget_bits, bin_width_bits, oversample
@@ -162,7 +175,7 @@ def distributed_unrank(dist, budget_bits: float, start: int = 0, count: Optional
         return pairs
 
     if workers <= 1 or len(ranges) <= 1:
-        out: List[Tuple[Any, float]] = []
+        out: list[tuple[Any, float]] = []
         for lo, hi in ranges:
             out.extend(_unrank_chunk(dist, budget_bits, bin_width_bits, oversample, lo, hi))
         return out

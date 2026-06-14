@@ -1,20 +1,26 @@
 """Regression tests for IntegerHiddenAssociation's uniform-background gate."""
+
 import unittest
 
 import numpy as np
 
 from pysp.stats.int_hidden_association import IntegerHiddenAssociationDistribution
 
+COND_WEIGHTS = np.asarray(
+    [
+        [0.80, 0.20],
+        [0.25, 0.75],
+    ],
+    dtype=float,
+)
 
-COND_WEIGHTS = np.asarray([
-    [0.80, 0.20],
-    [0.25, 0.75],
-], dtype=float)
-
-STATE_PROB = np.asarray([
-    [0.90, 0.10],
-    [0.20, 0.80],
-], dtype=float)
+STATE_PROB = np.asarray(
+    [
+        [0.90, 0.10],
+        [0.20, 0.80],
+    ],
+    dtype=float,
+)
 
 DATA = (
     [(0, 2.0), (1, 1.0)],
@@ -60,7 +66,6 @@ def expected_structured_total(alpha, datum, weight):
 
 
 class IntegerHiddenAssociationGateTestCase(unittest.TestCase):
-
     def test_log_density_uses_one_normalized_uniform_component(self):
         alpha = 0.35
         dist = make_dist(alpha=alpha)
@@ -108,5 +113,5 @@ class IntegerHiddenAssociationGateTestCase(unittest.TestCase):
             self.assertAlmostEqual(float(state_count.sum()), expected, places=12)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

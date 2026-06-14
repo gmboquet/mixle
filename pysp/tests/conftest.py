@@ -4,16 +4,16 @@ The tests are still ordinary ``unittest.TestCase`` tests.  Pytest is used as
 the collection and CI harness so we can attach stable markers without rewriting
 hundreds of existing tests at once.
 """
+
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, Set, Tuple
 
 import pytest
 
+MarkerTuple = tuple[str, ...]
 
-MarkerTuple = Tuple[str, ...]
 
-
-FILE_MARKERS: Dict[str, MarkerTuple] = {
+FILE_MARKERS: dict[str, MarkerTuple] = {
     "automatic_scientific_test.py": ("automatic", "integration", "slow"),
     "automatic_test.py": ("automatic", "distribution"),
     "base_dist_test.py": ("distribution", "integration", "slow"),
@@ -78,7 +78,7 @@ FILE_MARKERS: Dict[str, MarkerTuple] = {
 }
 
 
-NODEID_MARKERS: Tuple[Tuple[str, MarkerTuple], ...] = (
+NODEID_MARKERS: tuple[tuple[str, MarkerTuple], ...] = (
     ("Benchmark", ("benchmark", "slow")),
     ("Torch", ("torch", "optional")),
     ("MPIBackend", ("mpi", "optional", "parallel")),
@@ -88,7 +88,7 @@ NODEID_MARKERS: Tuple[Tuple[str, MarkerTuple], ...] = (
 )
 
 
-def _add_markers(item: pytest.Item, names: Iterable[str], assigned: Set[str]) -> None:
+def _add_markers(item: pytest.Item, names: Iterable[str], assigned: set[str]) -> None:
     for name in names:
         item.add_marker(getattr(pytest.mark, name))
         assigned.add(name)
@@ -103,7 +103,7 @@ def pytest_collection_modifyitems(items) -> None:
     gate automatically.
     """
     for item in items:
-        assigned: Set[str] = set()
+        assigned: set[str] = set()
         filename = Path(str(item.fspath)).name
         _add_markers(item, FILE_MARKERS.get(filename, ()), assigned)
 

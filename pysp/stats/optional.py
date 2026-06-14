@@ -10,31 +10,47 @@ The OptionalDistribution allows for potentially missing data. The value p (the p
 must be specified to sample from the distribution.
 
 """
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
-    DistributionEnumerator, EnumerationError, child_enumerator
-from pysp.utils.enumeration import freeze, merge_enumerators
+
+from collections.abc import Sequence
+from typing import Any, TypeVar
+
 import numpy as np
 from numpy.random import RandomState
 
-from typing import Optional, Any, Tuple, Dict, TypeVar, Sequence, List
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    EnumerationError,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+    child_enumerator,
+)
+from pysp.utils.enumeration import freeze, merge_enumerators
 
-T = TypeVar('T')
-E = TypeVar('E')
-SS = TypeVar('SS')
+T = TypeVar("T")
+E = TypeVar("E")
+SS = TypeVar("SS")
 
 
 class OptionalDistribution(SequenceEncodableProbabilityDistribution):
-
     """Mixture-style wrapper that models missing observations explicitly."""
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import DistributionCapabilities, capabilities_for
-        child = capabilities_for(self.dist)
-        return DistributionCapabilities(engine_ready=child.engine_ready, kernel_status='numba_adapter')
 
-    def __init__(self, dist: SequenceEncodableProbabilityDistribution, p: Optional[float] = None,
-                 missing_value: Any = None, name: Optional[str] = None) -> None:
+        child = capabilities_for(self.dist)
+        return DistributionCapabilities(engine_ready=child.engine_ready, kernel_status="numba_adapter")
+
+    def __init__(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        p: float | None = None,
+        missing_value: Any = None,
+        name: str | None = None,
+    ) -> None:
         """OptionalDistribution for handling missing values in estimation.
 
         Args:
@@ -67,19 +83,20 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+
         child = declaration_for(self.dist)
         children = () if child is None else (child,)
         return DistributionDeclaration(
-            name='optional',
+            name="optional",
             distribution_type=type(self),
-            parameters=(ParameterSpec('p', constraint='unit_interval'),),
+            parameters=(ParameterSpec("p", constraint="unit_interval"),),
             statistics=(
-                StatisticSpec('missing_observed_counts'),
-                StatisticSpec('observed', kind='child_stat'),
+                StatisticSpec("missing_observed_counts"),
+                StatisticSpec("observed", kind="child_stat"),
             ),
-            support='optional',
+            support="optional",
             children=children,
-            child_roles=('observed',) if children else (),
+            child_roles=("observed",) if children else (),
             differentiable=all(child.differentiable for child in children),
         )
 
@@ -91,7 +108,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         else:
             s3 = repr(self.missing_value)
         s4 = repr(self.name)
-        return 'OptionalDistribution(%s, p=%s, missing_value=%s, name=%s)' % (s1, s2, s3, s4)
+        return "OptionalDistribution(%s, p=%s, missing_value=%s, name=%s)" % (s1, s2, s3, s4)
 
     def density(self, x: T) -> float:
         """Evaluate the density of the Optional distribution at x.
@@ -144,7 +161,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             else:
                 return 0.0
 
-    def seq_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, E]) -> np.ndarray:
+    def seq_log_density(self, x: tuple[int, np.ndarray, np.ndarray, E]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         sz, z_idx, nz_idx, enc_data = x
 
@@ -158,9 +175,10 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
-    def backend_seq_log_density(self, x: Tuple[int, np.ndarray, np.ndarray, E], engine: Any) -> Any:
+    def backend_seq_log_density(self, x: tuple[int, np.ndarray, np.ndarray, E], engine: Any) -> Any:
         """Engine-neutral vectorized log-density for optional encoded data."""
         from pysp.stats.backend import backend_seq_log_density
+
         sz, z_idx, nz_idx, enc_data = x
         rv = engine.zeros(sz)
         if self.has_p and len(z_idx):
@@ -172,71 +190,78 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             rv[engine.asarray(nz_idx)] = nz_scores
         return rv
 
-    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: list[Any], recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for autograd fitting."""
         from pysp.stats.gradient import OptionalGradientFitState
+
         child = recurse(self.dist, engine, torch, leaves)
         logit_p = None
         if self.has_p:
-            logit_p = tensor_param(self.p, engine, torch, transform='logit')
+            logit_p = tensor_param(self.p, engine, torch, transform="logit")
             leaves.append(logit_p)
         return OptionalGradientFitState(self, child, logit_p)
 
     @staticmethod
-    def _same_missing_value(a: 'OptionalDistribution', b: 'OptionalDistribution') -> bool:
+    def _same_missing_value(a: "OptionalDistribution", b: "OptionalDistribution") -> bool:
         if a.missing_value_is_nan or b.missing_value_is_nan:
             return a.missing_value_is_nan and b.missing_value_is_nan
         return a.missing_value == b.missing_value
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['OptionalDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["OptionalDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked optional-wrapper parameters for homogeneous mixture kernels."""
         from pysp.stats.stacked import stacked_component_params
+
         if any(not cls._same_missing_value(dists[0], dist) for dist in dists[1:]):
-            raise ValueError('Stacked OptionalDistribution components require a shared missing value.')
+            raise ValueError("Stacked OptionalDistribution components require a shared missing value.")
         child_dists = [dist.dist for dist in dists]
         try:
             child_route = stacked_component_params(child_dists, engine)
         except ValueError as exc:
-            raise ValueError('Optional child %s is not stackable: %s' %
-                             (type(child_dists[0]).__name__, exc))
+            raise ValueError("Optional child %s is not stackable: %s" % (type(child_dists[0]).__name__, exc))
         return {
-            '__pysp_component_axis__': {'has_p': 0, 'log_p': 0, 'log_pn': 0},
-            'child_route': child_route,
-            'has_p': engine.asarray([dist.has_p for dist in dists]),
-            'log_p': engine.asarray([dist.log_p for dist in dists]),
-            'log_pn': engine.asarray([dist.log_pn for dist in dists]),
-            'num_components': len(dists),
+            "__pysp_component_axis__": {"has_p": 0, "log_p": 0, "log_pn": 0},
+            "child_route": child_route,
+            "has_p": engine.asarray([dist.has_p for dist in dists]),
+            "log_p": engine.asarray([dist.log_p for dist in dists]),
+            "log_pn": engine.asarray([dist.log_pn for dist in dists]),
+            "num_components": len(dists),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: Tuple[int, np.ndarray, np.ndarray, E],
-                                    params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(
+        cls, x: tuple[int, np.ndarray, np.ndarray, E], params: dict[str, Any], engine: Any
+    ) -> Any:
         """Return an ``(n, k)`` matrix of optional-wrapper log densities."""
         from pysp.stats.stacked import stacked_component_log_density
+
         sz, z_idx, nz_idx, enc_data = x
-        num_components = params['num_components']
+        num_components = params["num_components"]
         rv = engine.zeros((sz, num_components))
-        has_p = params['has_p']
+        has_p = params["has_p"]
         if len(z_idx):
-            missing_scores = engine.where(has_p, params['log_p'], engine.asarray(0.0))
+            missing_scores = engine.where(has_p, params["log_p"], engine.asarray(0.0))
             rv[engine.asarray(z_idx), :] = missing_scores[None, :] + engine.zeros((len(z_idx), num_components))
         if len(nz_idx):
-            child_scores = stacked_component_log_density(enc_data, params['child_route'], engine)
-            observed_scores = engine.where(has_p[None, :], child_scores + params['log_pn'][None, :], child_scores)
+            child_scores = stacked_component_log_density(enc_data, params["child_route"], engine)
+            observed_scores = engine.where(has_p[None, :], child_scores + params["log_pn"][None, :], child_scores)
             rv[engine.asarray(nz_idx), :] = observed_scores
         return rv
 
     @classmethod
-    def backend_stacked_sufficient_statistics_with_estimator(cls, x: Tuple[int, np.ndarray, np.ndarray, E],
-                                                            weights: Any, params: Dict[str, Any],
-                                                            engine: Any, estimator: Any) -> Tuple[Any, ...]:
+    def backend_stacked_sufficient_statistics_with_estimator(
+        cls, x: tuple[int, np.ndarray, np.ndarray, E], weights: Any, params: dict[str, Any], engine: Any, estimator: Any
+    ) -> tuple[Any, ...]:
         """Return per-component legacy optional-wrapper sufficient statistics."""
-        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
-            unstack_component_stats
+        from pysp.stats.stacked import (
+            StackedEstimatorView,
+            stacked_component_sufficient_statistics,
+            unstack_component_stats,
+        )
+
         _, z_idx, nz_idx, enc_data = x
         ww = engine.asarray(weights)
-        num_components = int(params['num_components'])
+        num_components = int(params["num_components"])
         if len(z_idx):
             missing_counts = engine.sum(ww[engine.asarray(z_idx), :], axis=0)
         else:
@@ -247,38 +272,43 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         else:
             observed_weights = engine.zeros((0, num_components))
             observed_counts = engine.zeros(num_components)
-        component_estimators = tuple(getattr(est, 'estimator', None)
-                                     for est in getattr(estimator, 'estimators', ()))
-        child_estimator = StackedEstimatorView(component_estimators) \
-            if len(component_estimators) == num_components else None
+        component_estimators = tuple(getattr(est, "estimator", None) for est in getattr(estimator, "estimators", ()))
+        child_estimator = (
+            StackedEstimatorView(component_estimators) if len(component_estimators) == num_components else None
+        )
         child_stats = stacked_component_sufficient_statistics(
-            enc_data, observed_weights, params['child_route'], engine, child_estimator)
+            enc_data, observed_weights, params["child_route"], engine, child_estimator
+        )
         child_values = unstack_component_stats(child_stats, num_components)
         wrapper_counts = engine.stack((missing_counts, observed_counts), axis=1)
         return tuple((wrapper_counts[i], child_values[i]) for i in range(num_components))
 
-    def sampler(self, seed: Optional[int] = None) -> 'OptionalSampler':
+    def sampler(self, seed: int | None = None) -> "OptionalSampler":
         """Return a sampler for drawing observations from this distribution."""
         return OptionalSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'OptionalEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "OptionalEstimator":
         """Return an estimator for fitting this distribution from data."""
-        return OptionalEstimator(self.dist.estimator(pseudo_count=pseudo_count), missing_value=self.missing_value,
-                                 pseudo_count=pseudo_count, est_prob=self.has_p, name=self.name)
+        return OptionalEstimator(
+            self.dist.estimator(pseudo_count=pseudo_count),
+            missing_value=self.missing_value,
+            pseudo_count=pseudo_count,
+            est_prob=self.has_p,
+            name=self.name,
+        )
 
-    def dist_to_encoder(self) -> 'OptionalDataEncoder':
+    def dist_to_encoder(self) -> "OptionalDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return OptionalDataEncoder(encoder=self.dist.dist_to_encoder(), missing_value=self.missing_value)
 
-    def enumerator(self) -> 'OptionalEnumerator':
+    def enumerator(self) -> "OptionalEnumerator":
         """Returns an OptionalEnumerator iterating the support (including the missing value) in
         descending probability order."""
         return OptionalEnumerator(self)
 
 
 class OptionalEnumerator(DistributionEnumerator):
-
-    def __init__(self, dist: 'OptionalDistribution') -> None:
+    def __init__(self, dist: "OptionalDistribution") -> None:
         """Enumerates the base support scaled by (1-p), merged with the missing value at p.
 
         Base-support entries equal to the missing value are filtered out: log_density routes
@@ -291,32 +321,31 @@ class OptionalEnumerator(DistributionEnumerator):
         """
         super().__init__(dist)
         if not dist.has_p:
-            raise EnumerationError(dist, reason='no missing probability p given; '
-                                                'total mass exceeds one in this legacy mode')
+            raise EnumerationError(
+                dist, reason="no missing probability p given; total mass exceeds one in this legacy mode"
+            )
         missing_key = freeze(dist.missing_value)
         if dist.p >= 1.0:
             self._merged = iter([(dist.missing_value, 0.0)])
             return
-        base = child_enumerator(dist.dist, 'OptionalDistribution.dist')
+        base = child_enumerator(dist.dist, "OptionalDistribution.dist")
         base = ((v, lp) for v, lp in base if freeze(v) != missing_key)
         if dist.p <= 0.0:
             self._merged = ((v, lp) for v, lp in base)
             return
-        self._merged = merge_enumerators(
-            [iter([(dist.missing_value, 0.0)]), base], [dist.log_p, dist.log_pn])
+        self._merged = merge_enumerators([iter([(dist.missing_value, 0.0)]), base], [dist.log_p, dist.log_pn])
 
-    def __next__(self) -> Tuple[Any, float]:
+    def __next__(self) -> tuple[Any, float]:
         return next(self._merged)
 
 
 class OptionalSampler(DistributionSampler):
-
-    def __init__(self, dist: 'OptionalDistribution', seed: Optional[int] = None) -> None:
+    def __init__(self, dist: "OptionalDistribution", seed: int | None = None) -> None:
         super().__init__(dist, seed)
         self.dist = dist
         self.sampler = self.dist.dist.sampler(self.new_seed())
 
-    def sample(self, size: Optional[int] = None):
+    def sample(self, size: int | None = None):
 
         sampler = self.sampler
 
@@ -349,9 +378,13 @@ class OptionalSampler(DistributionSampler):
 
 
 class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
-
-    def __init__(self, accumulator: SequenceEncodableStatisticAccumulator, missing_value: Any = None,
-                 name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        accumulator: SequenceEncodableStatisticAccumulator,
+        missing_value: Any = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         self.accumulator = accumulator
         self.weights = [0.0, 0.0]
         self.missing_value = missing_value
@@ -388,8 +421,9 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                 self.accumulator.initialize(x, weight, rng)
                 self.weights[1] += weight
 
-    def seq_update(self, x: Tuple[int, np.ndarray, np.ndarray, E], weights: np.ndarray,
-                   estimate: OptionalDistribution) -> None:
+    def seq_update(
+        self, x: tuple[int, np.ndarray, np.ndarray, E], weights: np.ndarray, estimate: OptionalDistribution
+    ) -> None:
         sz, z_idx, nz_idx, enc_data = x
         nz_weights = weights[nz_idx]
         z_weights = weights[z_idx]
@@ -398,12 +432,14 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.weights[1] += np.sum(nz_weights)
         self.accumulator.seq_update(enc_data, nz_weights, estimate.dist if estimate is not None else None)
 
-    def seq_update_engine(self, x: Tuple[int, np.ndarray, np.ndarray, E], weights: Any,
-                          estimate: OptionalDistribution, engine: Any) -> None:
+    def seq_update_engine(
+        self, x: tuple[int, np.ndarray, np.ndarray, E], weights: Any, estimate: OptionalDistribution, engine: Any
+    ) -> None:
         """Engine-resident E-step: missing/observed mass is summed on the active engine and the
         observed child accumulator is routed through the engine. Matches seq_update.
         """
         from pysp.stats.backend import child_seq_update
+
         sz, z_idx, nz_idx, enc_data = x
         w_eng = engine.asarray(weights)
         nz_weights = w_eng[np.asarray(nz_idx, dtype=np.int64)]
@@ -411,10 +447,11 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.weights[0] += float(engine.to_numpy(engine.sum(z_weights)))
         self.weights[1] += float(engine.to_numpy(engine.sum(nz_weights)))
-        child_seq_update(self.accumulator, enc_data, nz_weights,
-                         estimate.dist if estimate is not None else None, engine)
+        child_seq_update(
+            self.accumulator, enc_data, nz_weights, estimate.dist if estimate is not None else None, engine
+        )
 
-    def seq_initialize(self, x: Tuple[int, np.ndarray, np.ndarray, E], weights: np.ndarray, rng: RandomState) -> None:
+    def seq_initialize(self, x: tuple[int, np.ndarray, np.ndarray, E], weights: np.ndarray, rng: RandomState) -> None:
         sz, z_idx, nz_idx, enc_data = x
         nz_weights = weights[nz_idx]
         z_weights = weights[z_idx]
@@ -423,66 +460,76 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.weights[1] += np.sum(nz_weights)
         self.accumulator.seq_initialize(enc_data, nz_weights, rng)
 
-    def combine(self, suff_stat: Tuple[List[float], SS]) -> 'OptionalEstimatorAccumulator':
+    def combine(self, suff_stat: tuple[list[float], SS]) -> "OptionalEstimatorAccumulator":
         self.weights[0] += suff_stat[0][0]
         self.weights[1] += suff_stat[0][1]
         self.accumulator.combine(suff_stat[1])
 
         return self
 
-    def value(self) -> Tuple[List[float], Any]:
+    def value(self) -> tuple[list[float], Any]:
         return self.weights, self.accumulator.value()
 
-    def from_value(self, x: Tuple[List[float], SS]) -> 'OptionalEstimatorAccumulator':
+    def from_value(self, x: tuple[list[float], SS]) -> "OptionalEstimatorAccumulator":
         self.weights = x[0]
         self.accumulator.from_value(x[1])
 
         return self
 
-    def scale(self, c: float) -> 'OptionalEstimatorAccumulator':
+    def scale(self, c: float) -> "OptionalEstimatorAccumulator":
         """Scale missing/observed weights and delegate observed statistics."""
         self.weights[0] *= c
         self.weights[1] *= c
         self.accumulator.scale(c)
         return self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].from_value(self.value())
             else:
                 stats_dict[self.keys] = self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
             else:
                 stats_dict[self.keys] = self
 
-    def acc_to_encoder(self) -> 'OptionalDataEncoder':
+    def acc_to_encoder(self) -> "OptionalDataEncoder":
         return OptionalDataEncoder(encoder=self.accumulator.acc_to_encoder(), missing_value=self.missing_value)
 
 
 class OptionalEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
-
-    def __init__(self, estimator: ParameterEstimator, missing_value: Any = None, keys: Optional[str] = None,
-                 name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        estimator: ParameterEstimator,
+        missing_value: Any = None,
+        keys: str | None = None,
+        name: str | None = None,
+    ) -> None:
         self.estimator = estimator
         self.missing_value = missing_value
         self.keys = keys
         self.name = name
 
-    def make(self) -> 'OptionalEstimatorAccumulator':
-        return OptionalEstimatorAccumulator(self.estimator.accumulator_factory().make(), self.missing_value,
-                                            keys=self.keys, name=self.name)
+    def make(self) -> "OptionalEstimatorAccumulator":
+        return OptionalEstimatorAccumulator(
+            self.estimator.accumulator_factory().make(), self.missing_value, keys=self.keys, name=self.name
+        )
 
 
 class OptionalEstimator(ParameterEstimator):
-
-    def __init__(self, estimator: ParameterEstimator, missing_value: Any = None, est_prob: bool = False,
-                 pseudo_count: Optional[float] = None, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        estimator: ParameterEstimator,
+        missing_value: Any = None,
+        est_prob: bool = False,
+        pseudo_count: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """OptionalEstimator for estimating OptionalDistribution from sufficient statistics.
 
         Args:
@@ -509,19 +556,21 @@ class OptionalEstimator(ParameterEstimator):
         self.keys = keys
         self.name = name
 
-    def accumulator_factory(self) -> 'OptionalEstimatorAccumulatorFactory':
+    def accumulator_factory(self) -> "OptionalEstimatorAccumulatorFactory":
         return OptionalEstimatorAccumulatorFactory(self.estimator, self.missing_value, keys=self.keys, name=self.name)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Optional[Tuple[List[float], SS]]) -> 'OptionalDistribution':
+    def estimate(self, nobs: float | None, suff_stat: tuple[list[float], SS] | None) -> "OptionalDistribution":
         dist = self.estimator.estimate(suff_stat[0][1], suff_stat[1])
 
         if self.pseudo_count is not None and self.est_prob:
-            return OptionalDistribution(dist, (suff_stat[0][0] + self.pseudo_count) / (
-                        (2 * self.pseudo_count) + suff_stat[0][0] + suff_stat[0][1]), missing_value=self.missing_value,
-                                        name=self.name)
+            return OptionalDistribution(
+                dist,
+                (suff_stat[0][0] + self.pseudo_count) / ((2 * self.pseudo_count) + suff_stat[0][0] + suff_stat[0][1]),
+                missing_value=self.missing_value,
+                name=self.name,
+            )
 
         elif self.est_prob:
-
             nobs_loc = suff_stat[0][0] + suff_stat[0][1]
             z_nobs = suff_stat[0][0]
 
@@ -534,7 +583,6 @@ class OptionalEstimator(ParameterEstimator):
 
 
 class OptionalDataEncoder(DataSequenceEncoder):
-
     def __init__(self, encoder: DataSequenceEncoder, missing_value: Any = None) -> None:
         self.encoder = encoder
         self.missing_value = missing_value
@@ -548,7 +596,7 @@ class OptionalDataEncoder(DataSequenceEncoder):
         else:
             return False
 
-    def seq_encode(self, x: Sequence[T]) -> Tuple[int, np.ndarray, np.ndarray, Any]:
+    def seq_encode(self, x: Sequence[T]) -> tuple[int, np.ndarray, np.ndarray, Any]:
         nz_idx = []
         nz_val = []
         z_idx = []
@@ -574,6 +622,7 @@ class OptionalDataEncoder(DataSequenceEncoder):
         z_idx = np.asarray(z_idx, dtype=int)
 
         return len(x), z_idx, nz_idx, enc_data
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 OptionalAccumulator = OptionalEstimatorAccumulator

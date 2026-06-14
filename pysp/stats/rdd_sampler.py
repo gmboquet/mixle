@@ -1,16 +1,18 @@
 try:
-    from pyspark import SparkContext, SparkConf
+    from pyspark import SparkConf, SparkContext
 except ImportError:
     SparkContext = SparkConf = None  # pip install pysparkplug[spark]
-from numpy.random import RandomState
-from pysp.arithmetic import *
-import numpy as np
 import pickle
+from typing import Any
+
+import numpy as np
+from numpy.random import RandomState
+
+from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
-from typing import Any, Optional
 
 
-def take_sample(rdd: Any, with_replacement: bool, n: int, seed: Optional[int] = None):
+def take_sample(rdd: Any, with_replacement: bool, n: int, seed: int | None = None):
     rng = RandomState(seed)
     sample = rdd.zipWithUniqueId().takeSample(with_replacement, n, rng.randint(0, maxrandint))
     sidx = np.argsort([u[1] for u in sample])

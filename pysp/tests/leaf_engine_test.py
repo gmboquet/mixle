@@ -3,20 +3,22 @@
 These leaves have no exponential-family generated-suff-stat path; this checks that their
 seq_update_engine produces statistics identical to the host seq_update on numpy and torch.
 """
+
 import unittest
 
 import numpy as np
 
-from pysp.stats.pareto import ParetoDistribution
-from pysp.stats.uniform import UniformDistribution
-from pysp.stats.laplace import LaplaceDistribution
-from pysp.stats.int_spike import IntegerUniformSpikeDistribution
-from pysp.stats.point_mass import PointMassDistribution
 from pysp.engines import NUMPY_ENGINE
+from pysp.stats.int_spike import IntegerUniformSpikeDistribution
+from pysp.stats.laplace import LaplaceDistribution
+from pysp.stats.pareto import ParetoDistribution
+from pysp.stats.point_mass import PointMassDistribution
+from pysp.stats.uniform import UniformDistribution
 
 try:
     from pysp.engines import TorchEngine
-    _TORCH = TorchEngine(device='cpu', dtype='float64')
+
+    _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
 
@@ -37,9 +39,8 @@ def _flatten(v):
 
 
 class LeafEngineTestCase(unittest.TestCase):
-
     def _check(self, dist, data, atol=1.0e-9):
-        engines = [('numpy', NUMPY_ENGINE)] + ([('torch', _TORCH)] if _TORCH is not None else [])
+        engines = [("numpy", NUMPY_ENGINE)] + ([("torch", _TORCH)] if _TORCH is not None else [])
         est = dist.estimator()
         enc = dist.dist_to_encoder().seq_encode(data)
         weights = np.linspace(0.5, 1.5, len(data))
@@ -50,8 +51,9 @@ class LeafEngineTestCase(unittest.TestCase):
             with self.subTest(dist=type(dist).__name__, engine=name):
                 kernel = dist.kernel(engine=engine, estimator=est)
                 value = kernel.accumulate(enc, weights)
-                self.assertTrue(np.allclose(hv, _flatten(value), atol=atol),
-                                '%s %s suff-stats differ' % (type(dist).__name__, name))
+                self.assertTrue(
+                    np.allclose(hv, _flatten(value), atol=atol), "%s %s suff-stats differ" % (type(dist).__name__, name)
+                )
 
     def test_pareto(self):
         d = ParetoDistribution(xm=1.0, alpha=2.5)
@@ -74,5 +76,5 @@ class LeafEngineTestCase(unittest.TestCase):
         self._check(d, [7.0] * 20)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

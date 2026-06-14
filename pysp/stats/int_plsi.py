@@ -23,29 +23,47 @@ author 'd'.
 Note: To use this distribution, convert your words and authors of the corpus to unique integer keys.
 
 """
-from pysp.utils.optional_deps import numba
+
+from collections.abc import Sequence
+from typing import Any, TypeVar
+
 import numpy as np
 from numpy.random import RandomState
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, StatisticAccumulatorFactory, \
-    SequenceEncodableStatisticAccumulator, DataSequenceEncoder, DistributionSampler, ParameterEstimator
-from pysp.stats.null_dist import NullDistribution, NullEstimator, NullDataEncoder, NullAccumulator, \
-    NullAccumulatorFactory
-from pysp.utils.optsutil import count_by_value
+
 from pysp.arithmetic import maxrandint
+from pysp.stats.null_dist import (
+    NullAccumulator,
+    NullAccumulatorFactory,
+    NullDataEncoder,
+    NullDistribution,
+    NullEstimator,
+)
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
+from pysp.utils.optional_deps import numba
+from pysp.utils.optsutil import count_by_value
 
-from typing import List, Optional, Sequence, Tuple, Union, Any, TypeVar, Dict
-
-T1 = TypeVar('T1') ## type for encoded sequence of lengths.
-SS1 = TypeVar('SS1') ### type for value of length dist sufficient statistics.
+T1 = TypeVar("T1")  ## type for encoded sequence of lengths.
+SS1 = TypeVar("SS1")  ### type for value of length dist sufficient statistics.
 
 
 class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
-
     """Integer-valued probabilistic latent semantic indexing distribution."""
-    def __init__(self, state_word_mat: Union[List[List[float]], np.ndarray],
-                 doc_state_mat: Union[List[List[float]], np.ndarray], doc_vec: Union[List[float], np.ndarray],
-                 len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 name: Optional[str] = None) -> None:
+
+    def __init__(
+        self,
+        state_word_mat: list[list[float]] | np.ndarray,
+        doc_state_mat: list[list[float]] | np.ndarray,
+        doc_vec: list[float] | np.ndarray,
+        len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        name: str | None = None,
+    ) -> None:
         """IntegerPLSIDistribution object defining an Integer PLSI distribution.
 
         Args:
@@ -75,59 +93,60 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
                 document. Defaults to the NullDistribution if None is passed.
 
         """
-        self.prob_mat    = np.asarray(state_word_mat, dtype=np.float64)
-        self.state_mat   = np.asarray(doc_state_mat, dtype=np.float64)
-        self.doc_vec     = np.asarray(doc_vec, dtype=np.float64)
+        self.prob_mat = np.asarray(state_word_mat, dtype=np.float64)
+        self.state_mat = np.asarray(doc_state_mat, dtype=np.float64)
+        self.doc_vec = np.asarray(doc_vec, dtype=np.float64)
         self.log_doc_vec = np.log(self.doc_vec)
-        self.num_vals    = self.prob_mat.shape[0]
-        self.num_states  = self.prob_mat.shape[1]
-        self.num_docs    = self.state_mat.shape[0]
-        self.name        = name
-        self.len_dist    = len_dist if len_dist is not None else NullDistribution()
+        self.num_vals = self.prob_mat.shape[0]
+        self.num_states = self.prob_mat.shape[1]
+        self.num_docs = self.state_mat.shape[0]
+        self.name = name
+        self.len_dist = len_dist if len_dist is not None else NullDistribution()
 
     def compute_capabilities(self):
         """Return backend capability metadata for this concrete PLSI instance."""
         from pysp.stats.capabilities import DistributionCapabilities, capabilities_for
 
         child = capabilities_for(self.len_dist)
-        return DistributionCapabilities(engine_ready=child.engine_ready,
-                                        kernel_status='generic_latent',
-                                        numpy_only_reason=child.numpy_only_reason)
+        return DistributionCapabilities(
+            engine_ready=child.engine_ready, kernel_status="generic_latent", numpy_only_reason=child.numpy_only_reason
+        )
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+
         length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
         children = () if length is None else (length,)
         return DistributionDeclaration(
-            name='integer_plsi',
+            name="integer_plsi",
             distribution_type=type(self),
             parameters=(
-                ParameterSpec('prob_mat', constraint='column_simplex_matrix'),
-                ParameterSpec('state_mat', constraint='row_simplex_matrix'),
-                ParameterSpec('doc_vec', constraint='simplex_vector'),
+                ParameterSpec("prob_mat", constraint="column_simplex_matrix"),
+                ParameterSpec("state_mat", constraint="row_simplex_matrix"),
+                ParameterSpec("doc_vec", constraint="simplex_vector"),
             ),
             statistics=(
-                StatisticSpec('word_counts'),
-                StatisticSpec('state_counts'),
-                StatisticSpec('document_counts'),
-                StatisticSpec('length', kind='child_stat'),
+                StatisticSpec("word_counts"),
+                StatisticSpec("state_counts"),
+                StatisticSpec("document_counts"),
+                StatisticSpec("length", kind="child_stat"),
             ),
-            support='integer_document_bag',
+            support="integer_document_bag",
             children=children,
-            child_roles=('length',) if length is not None else (),
+            child_roles=("length",) if length is not None else (),
             differentiable=False,
         )
 
     def __str__(self) -> str:
         """Return string representation of object instance."""
-        s1 = ','.join(['[' + ','.join(map(str, self.prob_mat[i, :])) + ']' for i in range(len(self.prob_mat))])
-        s2 = ','.join(['[' + ','.join(map(str, self.state_mat[i, :])) + ']' for i in range(len(self.state_mat))])
-        s3 = ','.join(map(str, self.doc_vec))
+        s1 = ",".join(["[" + ",".join(map(str, self.prob_mat[i, :])) + "]" for i in range(len(self.prob_mat))])
+        s2 = ",".join(["[" + ",".join(map(str, self.state_mat[i, :])) + "]" for i in range(len(self.state_mat))])
+        s3 = ",".join(map(str, self.doc_vec))
         s4 = repr(self.name)
         s5 = str(self.len_dist)
-        return 'IntegerPLSIDistribution([%s], [%s], [%s], name=%s, len_dist=%s)'%(s1, s2, s3, s4, s5)
+        return "IntegerPLSIDistribution([%s], [%s], [%s], name=%s, len_dist=%s)" % (s1, s2, s3, s4, s5)
 
-    def density(self, x: Tuple[int, Sequence[Tuple[int, float]]]) -> float:
+    def density(self, x: tuple[int, Sequence[tuple[int, float]]]) -> float:
         """Evaluate the density of PLSI model for an observation x.
 
         See log_density() for details on the density evaluation.
@@ -141,7 +160,7 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
         """
         return np.exp(self.log_density(x))
 
-    def log_density(self, x: Tuple[int, Sequence[Tuple[int, float]]]) -> float:
+    def log_density(self, x: tuple[int, Sequence[tuple[int, float]]]) -> float:
         """Evaluate the log-density of PLSI model for an observation of x.
 
         Consider an Integer PLSI model for a corpus of documents with S states, V word values, and D documents ids
@@ -177,7 +196,7 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
-    def component_log_density(self, x: Tuple[int, Sequence[Tuple[int, float]]]) -> np.ndarray:
+    def component_log_density(self, x: tuple[int, Sequence[tuple[int, float]]]) -> np.ndarray:
         """Evaluate the log-density for each state in the PLSI.
 
         Returns count*log(p_mat(W|S)) for each word-count pair in the document. Returned value is S by 1 where S is the
@@ -196,8 +215,9 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
 
         return np.dot(np.log(self.prob_mat[xv, :]).T, xc)
 
-    def seq_log_density(self, x: Tuple[Optional[T1], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-                                                           np.ndarray]]) -> np.ndarray:
+    def seq_log_density(
+        self, x: tuple[T1 | None, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
+    ) -> np.ndarray:
         """Vectorized evaluation of the log-density for an encoded sequence of iid observation from a PLSI model.
 
         See log_density() function for details on the log-likelihood.
@@ -235,8 +255,11 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
-    def backend_seq_log_density(self, x: Tuple[Optional[T1], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-                                                                   np.ndarray, np.ndarray]], engine: Any) -> Any:
+    def backend_seq_log_density(
+        self,
+        x: tuple[T1 | None, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+        engine: Any,
+    ) -> Any:
         """Evaluate encoded PLSI log densities using a backend-neutral compute engine."""
         from pysp.stats.backend import backend_seq_log_density
 
@@ -262,8 +285,9 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
-    def seq_component_log_density(self, x: Tuple[Optional[T1], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-                                                                     np.ndarray, np.ndarray]]) -> np.ndarray:
+    def seq_component_log_density(
+        self, x: tuple[T1 | None, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
+    ) -> np.ndarray:
         """Vectorized evaluation of the component log-density for each observation in an encoded sequence of iid PLSI
             observations.
 
@@ -286,16 +310,16 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         nn, (xv, xc, xd, xi, xn, xm) = x
-        rv = np.zeros((xi[-1]+1, self.num_states), dtype=np.float64)
+        rv = np.zeros((xi[-1] + 1, self.num_states), dtype=np.float64)
         w_mat = self.prob_mat
         fast_seq_component_log_density(xv, xc, xd, xi, xm, w_mat, rv)
         return rv
 
-    def sampler(self, seed: Optional[int] = None) -> 'IntegerPLSISampler':
+    def sampler(self, seed: int | None = None) -> "IntegerPLSISampler":
         """Return an IntegerPLSISampler object from IntegerPLSIDistribution instance."""
         return IntegerPLSISampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'IntegerPLSIEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "IntegerPLSIEstimator":
         """Create an IntegerPLSIEstimator object from IntegerPLSIDistribution instance.
 
         Args:
@@ -306,23 +330,32 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return IntegerPLSIEstimator(num_vals=self.num_vals, num_states=self.num_states,num_docs=self.num_docs,
-                                        len_estimator=self.len_dist.estimator(),name=self.name)
+            return IntegerPLSIEstimator(
+                num_vals=self.num_vals,
+                num_states=self.num_states,
+                num_docs=self.num_docs,
+                len_estimator=self.len_dist.estimator(),
+                name=self.name,
+            )
         else:
             pseudo_count = (pseudo_count, pseudo_count, pseudo_count)
-            return IntegerPLSIEstimator(num_vals=self.num_vals, num_states=self.num_states, num_docs=self.num_docs,
-                                        pseudo_count = pseudo_count,
-                                        suff_stat=(self.prob_mat.T, self.state_mat, self.doc_vec),
-                                        len_estimator=self.len_dist.estimator(), name=self.name)
+            return IntegerPLSIEstimator(
+                num_vals=self.num_vals,
+                num_states=self.num_states,
+                num_docs=self.num_docs,
+                pseudo_count=pseudo_count,
+                suff_stat=(self.prob_mat.T, self.state_mat, self.doc_vec),
+                len_estimator=self.len_dist.estimator(),
+                name=self.name,
+            )
 
-    def dist_to_encoder(self) -> 'IntegerPLSIDataEncoder':
+    def dist_to_encoder(self) -> "IntegerPLSIDataEncoder":
         """Returns IntegerPLSIDataEncoder object."""
         return IntegerPLSIDataEncoder(len_encoder=self.len_dist.dist_to_encoder())
 
 
 class IntegerPLSISampler(DistributionSampler):
-
-    def __init__(self, dist: IntegerPLSIDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: IntegerPLSIDistribution, seed: int | None = None) -> None:
         """IntegerPLSISampler object for sampling from IntegerPLSIDistribution.
 
         Args:
@@ -339,8 +372,9 @@ class IntegerPLSISampler(DistributionSampler):
         self.dist = dist
         self.size_rng = self.dist.len_dist.sampler(self.rng.randint(0, maxrandint))
 
-    def sample(self, size: Optional[int] = None) \
-            -> Union[Tuple[int, Sequence[Tuple[int, float]]], Sequence[Tuple[int, Sequence[Tuple[int, float]]]]]:
+    def sample(
+        self, size: int | None = None
+    ) -> tuple[int, Sequence[tuple[int, float]]] | Sequence[tuple[int, Sequence[tuple[int, float]]]]:
         """Generate iid samples from PLSI model.
 
         Args:
@@ -366,11 +400,15 @@ class IntegerPLSISampler(DistributionSampler):
 
 
 class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
-
-    def __init__(self, num_vals: int, num_states: int, num_docs: int,
-                 len_acc: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
-                 name: Optional[str] = None,
-                 keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None)) -> None:
+    def __init__(
+        self,
+        num_vals: int,
+        num_states: int,
+        num_docs: int,
+        len_acc: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
+        name: str | None = None,
+        keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
+    ) -> None:
         """IntegerPLSIAccumulator object for aggregating sufficient statistics from observed data.
 
         Note: Keys in order, words/values, states, documents.
@@ -404,15 +442,15 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
             _len_rng (Optional[RandomState]): RandomState object for initializing the length accumulator.
 
         """
-        self.num_vals   = num_vals
+        self.num_vals = num_vals
         self.num_states = num_states
-        self.num_docs   = num_docs
+        self.num_docs = num_docs
         self.word_count = np.zeros((num_states, num_vals), dtype=np.float64)
         self.comp_count = np.zeros((num_docs, num_states), dtype=np.float64)
-        self.doc_count  = np.zeros(num_docs, dtype=np.float64)
-        self.name       = name
+        self.doc_count = np.zeros(num_docs, dtype=np.float64)
+        self.name = name
         self.wc_key, self.sc_key, self.dc_key = keys if keys is not None else (None, None, None)
-        self.len_acc    = len_acc if len_acc is not None else NullAccumulator()
+        self.len_acc = len_acc if len_acc is not None else NullAccumulator()
 
         # Per-document data log-likelihood accumulated as a byproduct of the E-step, only when
         # _track_ll is enabled. Equals seq_log_density_sum(enc, dist)[1] and is consumed by the
@@ -423,11 +461,12 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
 
         ### Initializer seeds
         self._init_rng: bool = False
-        self._acc_rng: Optional[RandomState] = None
-        self._len_rng: Optional[RandomState] = None
+        self._acc_rng: RandomState | None = None
+        self._len_rng: RandomState | None = None
 
-    def update(self, x: Tuple[int, Sequence[Tuple[int, float]]], weight: float, estimate: IntegerPLSIDistribution) \
-            -> None:
+    def update(
+        self, x: tuple[int, Sequence[tuple[int, float]]], weight: float, estimate: IntegerPLSIDistribution
+    ) -> None:
         """Update the sufficient statistics of object instance for a single observation x.
 
         Args:
@@ -444,7 +483,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         xc = np.asarray([u[1] for u in x[1]])
 
         update = (estimate.prob_mat[xv, :] * estimate.state_mat[d_id, :]).T
-        update *= xc*weight/np.sum(update, axis=0)
+        update *= xc * weight / np.sum(update, axis=0)
         self.comp_count[d_id, :] += np.sum(update, axis=1)
         self.word_count[:, xv] += update
         self.doc_count[d_id] += weight
@@ -468,7 +507,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         self._len_rng = RandomState(seed=seeds[1])
         self._init_rng = True
 
-    def initialize(self, x: Tuple[int, Sequence[Tuple[int, float]]], weight: float, rng: RandomState) -> None:
+    def initialize(self, x: tuple[int, Sequence[tuple[int, float]]], weight: float, rng: RandomState) -> None:
         """Initialize sufficient statistics of object instance with observation x.
 
         Args:
@@ -487,16 +526,20 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         xv = np.asarray([u[0] for u in x[1]])
         xc = np.asarray([u[1] for u in x[1]])
 
-        update = self._acc_rng.dirichlet(np.ones(self.num_states)/self.num_states, size=len(xc)).T
-        update *= xc*weight
+        update = self._acc_rng.dirichlet(np.ones(self.num_states) / self.num_states, size=len(xc)).T
+        update *= xc * weight
         self.word_count[:, xv] += update
         self.comp_count[d_id, :] += np.sum(update, axis=1)
         self.doc_count[d_id] += weight
 
         self.len_acc.update(np.sum(xc), weight, self._len_rng)
 
-    def seq_initialize(self, x: Tuple[Optional[T1], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-                                                          np.ndarray]], weights: np.ndarray, rng: RandomState) -> None:
+    def seq_initialize(
+        self,
+        x: tuple[T1 | None, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+        weights: np.ndarray,
+        rng: RandomState,
+    ) -> None:
         """Vectorized initialization of sufficient statistics form an encoded sequence of observations in arg 'x'.
 
         The encoded sequence 'x' is a Tuple length 2. The first component contains data type Optional[T1]
@@ -530,9 +573,12 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.len_acc.seq_initialize(nn, weights, self._len_rng)
 
-    def seq_update(self, x: Tuple[Optional[T1], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-                                                      np.ndarray]],
-                   weights: np.ndarray, estimate: IntegerPLSIDistribution) -> None:
+    def seq_update(
+        self,
+        x: tuple[T1 | None, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+        weights: np.ndarray,
+        estimate: IntegerPLSIDistribution,
+    ) -> None:
         """Vectorized update of sufficient statistics for encoded sequence of iid observations in x.
 
         The encoded sequence 'x' is a Tuple length 2. The first component contains data type Optional[T1]
@@ -554,10 +600,21 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         nn, (xv, xc, xd, xi, xn, xm) = x
-        fast_seq_update(xv, xc, xd, xi, xm, weights, estimate.prob_mat, estimate.state_mat, self.word_count,
-                        self.comp_count, self.doc_count)
+        fast_seq_update(
+            xv,
+            xc,
+            xd,
+            xi,
+            xm,
+            weights,
+            estimate.prob_mat,
+            estimate.state_mat,
+            self.word_count,
+            self.comp_count,
+            self.doc_count,
+        )
 
-        '''
+        """
 
         temp = xc*weights[xi]
         update  = estimate.prob_mat[xv, :] * estimate.state_mat[xd, :]
@@ -573,7 +630,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
             self.word_count[i,:] += np.bincount(xv, weights=update[:,i], minlength=self.num_vals)
             self.comp_count[:,i] += np.bincount(xd, weights=update[:,i], minlength=self.num_docs)
         self.doc_count += np.bincount(xm, weights=weights, minlength=self.num_docs)
-        '''
+        """
 
         # Fused-EM fast path: recover the per-document data log-likelihood that
         # estimate.seq_log_density would return. PLSI's seq_log_density is the exact (non-variational)
@@ -601,29 +658,25 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         the host seq_update.
         """
         nn, (xv, xc, xd, xi, xn, xm) = x
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         xv_e = engine.asarray(np.asarray(xv, dtype=np.int64))
         xd_e = engine.asarray(np.asarray(xd, dtype=np.int64))
         xi_e = engine.asarray(np.asarray(xi, dtype=np.int64))
 
-        prob = engine.asarray(estimate.prob_mat)                                   # (num_vals, S)
-        state = engine.asarray(estimate.state_mat)                                 # (num_docs, S)
-        update = prob[xv_e, :] * state[xd_e, :]                                    # (n_pairs, S)
+        prob = engine.asarray(estimate.prob_mat)  # (num_vals, S)
+        state = engine.asarray(estimate.state_mat)  # (num_docs, S)
+        update = prob[xv_e, :] * state[xd_e, :]  # (n_pairs, S)
         temp = engine.asarray(np.asarray(xc, dtype=np.float64)) * engine.asarray(weights_np)[xi_e]
         update = update * (temp / engine.sum(update, axis=1))[:, None]
 
-        wc_rows = [engine.index_add(engine.zeros(self.num_vals), xv_e, update[:, i])
-                   for i in range(self.num_states)]
-        cc_cols = [engine.index_add(engine.zeros(self.num_docs), xd_e, update[:, i])
-                   for i in range(self.num_states)]
+        wc_rows = [engine.index_add(engine.zeros(self.num_vals), xv_e, update[:, i]) for i in range(self.num_states)]
+        cc_cols = [engine.index_add(engine.zeros(self.num_docs), xd_e, update[:, i]) for i in range(self.num_states)]
         self.word_count += np.asarray(engine.to_numpy(engine.stack(wc_rows, axis=0)))
         self.comp_count += np.asarray(engine.to_numpy(engine.stack(cc_cols, axis=1)))
-        self.doc_count += np.bincount(np.asarray(xm, dtype=np.int64), weights=weights_np,
-                                      minlength=self.num_docs)
+        self.doc_count += np.bincount(np.asarray(xm, dtype=np.int64), weights=weights_np, minlength=self.num_docs)
         self.len_acc.seq_update(nn, weights_np, estimate.len_dist)
 
-    def combine(self, suff_stat: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]]) -> 'IntegerPLSIAccumulator':
+    def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]) -> "IntegerPLSIAccumulator":
         """Combine the sufficient statistics in arg 'suff_stat' with object instance.
 
         Arg 'suff_stat' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
@@ -647,7 +700,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def value(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[Any]]:
+    def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, Any | None]:
         """Returns sufficient statistics of IntegerPLSIAccumulator object instance.
 
         Returned value 'suff_stat' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
@@ -659,7 +712,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         """
         return self.word_count, self.comp_count, self.doc_count, self.len_acc.value()
 
-    def from_value(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]]) -> 'IntegerPLSIAccumulator':
+    def from_value(self, x: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]) -> "IntegerPLSIAccumulator":
         """Set the sufficient statistics of object instance to arg 'x' values.
 
         Arg 'x' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
@@ -682,7 +735,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> 'IntegerPLSIAccumulator':
+    def scale(self, c: float) -> "IntegerPLSIAccumulator":
         """Scale linear latent counts and delegate document-length statistics."""
         self.word_count *= c
         self.comp_count *= c
@@ -690,7 +743,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         self.len_acc.scale(c)
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge the sufficient statistics of object instance with matching keys.
 
         If wc_key is set, merge the state/word count variable.
@@ -726,7 +779,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.len_acc.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set the sufficient statistics of object instance to matching key values in arg 'stats_dict'.
 
         If wc_key is set, set the state/word count variable to matching key in stats_dict.
@@ -755,17 +808,22 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.len_acc.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'IntegerPLSIDataEncoder':
+    def acc_to_encoder(self) -> "IntegerPLSIDataEncoder":
         """Return an IntegerPLSIDataEncoder object."""
         len_encoder = self.len_acc.acc_to_encoder()
         return IntegerPLSIDataEncoder(len_encoder=len_encoder)
 
-class IntegerPLSIAccumulatorFactory(StatisticAccumulatorFactory):
 
-    def __init__(self, num_vals: int, num_states: int, num_docs: int,
-                 len_factory: Optional[StatisticAccumulatorFactory] = NullAccumulatorFactory(),
-                 keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None),
-                 name: Optional[str] = None) -> None:
+class IntegerPLSIAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(
+        self,
+        num_vals: int,
+        num_states: int,
+        num_docs: int,
+        len_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
+        keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
+        name: str | None = None,
+    ) -> None:
         """IntegerPLSIAccumulatorFactory object for creating IntegerPLSIAccumulator objects.
 
         Args:
@@ -795,20 +853,34 @@ class IntegerPLSIAccumulatorFactory(StatisticAccumulatorFactory):
         self.num_docs = num_docs
         self.name = name
 
-    def make(self) -> 'IntegerPLSIAccumulator':
+    def make(self) -> "IntegerPLSIAccumulator":
         """Returns IntegerPLSIAccumulator object."""
-        return IntegerPLSIAccumulator(self.num_vals, self.num_states, self.num_docs, len_acc=self.len_factory.make(),
-                                      keys=self.keys, name=self.name)
+        return IntegerPLSIAccumulator(
+            self.num_vals,
+            self.num_states,
+            self.num_docs,
+            len_acc=self.len_factory.make(),
+            keys=self.keys,
+            name=self.name,
+        )
+
 
 class IntegerPLSIEstimator(ParameterEstimator):
-
-    def __init__(self, num_vals: int, num_states: int, num_docs: int,
-                 len_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 pseudo_count: Optional[Tuple[Optional[float], Optional[float], Optional[float]]] = (None, None, None),
-                 suff_stat: Optional[Tuple[Optional[np.ndarray], Optional[np.ndarray],
-                                           Optional[np.ndarray]]] = (None, None, None),
-                 name: Optional[str] = None,
-                 keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None)) -> None:
+    def __init__(
+        self,
+        num_vals: int,
+        num_states: int,
+        num_docs: int,
+        len_estimator: ParameterEstimator | None = NullEstimator(),
+        pseudo_count: tuple[float | None, float | None, float | None] | None = (None, None, None),
+        suff_stat: tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None] | None = (
+            None,
+            None,
+            None,
+        ),
+        name: str | None = None,
+        keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
+    ) -> None:
         """IntegerPLSIEstimator for estimating integer PLSI distributions from aggregated sufficient statistics.
 
         Args:
@@ -841,22 +913,23 @@ class IntegerPLSIEstimator(ParameterEstimator):
             keys (Tuple[Optional[str], Optional[str], Optional[str]]): Keys for merging word, state, and doc
                 sufficient statistics with matching keys.
         """
-        self.suff_stat     = suff_stat if suff_stat is not None else (None, None, None)
-        self.pseudo_count  = pseudo_count if pseudo_count is not None else (None, None, None)
-        self.num_vals      = num_vals
-        self.num_states    = num_states
-        self.num_docs      = num_docs
+        self.suff_stat = suff_stat if suff_stat is not None else (None, None, None)
+        self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None, None)
+        self.num_vals = num_vals
+        self.num_states = num_states
+        self.num_docs = num_docs
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
-        self.keys          = keys if keys is not None else (None, None, None)
-        self.name          = name
+        self.keys = keys if keys is not None else (None, None, None)
+        self.name = name
 
-    def accumulator_factory(self) -> 'IntegerPLSIAccumulatorFactory':
+    def accumulator_factory(self) -> "IntegerPLSIAccumulatorFactory":
         """Returns IntegerPLSIAccumulatorFactory object."""
         len_est = self.len_estimator.accumulator_factory()
         return IntegerPLSIAccumulatorFactory(self.num_vals, self.num_states, self.num_docs, len_est, self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]])\
-            -> 'IntegerPLSIDistribution':
+    def estimate(
+        self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]
+    ) -> "IntegerPLSIDistribution":
         """Estimate IntegerPLSIDistribution from aggregated sufficient statistics in arg 'suff_stat'.
 
         Args:
@@ -871,7 +944,7 @@ class IntegerPLSIEstimator(ParameterEstimator):
 
         if self.pseudo_count[0] is not None and self.suff_stat[0] is not None:
             adj_cnt = self.pseudo_count[0] / np.prod(word_count.shape)
-            word_prob_mat = word_count.T + adj_cnt*self.suff_stat[0].T
+            word_prob_mat = word_count.T + adj_cnt * self.suff_stat[0].T
             word_prob_mat /= np.sum(word_prob_mat, axis=0, keepdims=True)
 
         elif self.pseudo_count[0] is not None and self.suff_stat[0] is None:
@@ -903,7 +976,7 @@ class IntegerPLSIEstimator(ParameterEstimator):
 
         if self.pseudo_count[2] is not None and self.suff_stat[2] is not None:
             adj_cnt = self.pseudo_count[2] / len(doc_count)
-            doc_prob_vec = doc_count + adj_cnt*self.suff_stat[2]
+            doc_prob_vec = doc_count + adj_cnt * self.suff_stat[2]
             doc_prob_vec /= np.sum(doc_prob_vec)
 
         elif self.pseudo_count[2] is not None and self.suff_stat[2] is None:
@@ -924,8 +997,7 @@ class IntegerPLSIEstimator(ParameterEstimator):
 
 
 class IntegerPLSIDataEncoder(DataSequenceEncoder):
-
-    def __init__(self, len_encoder: Optional[DataSequenceEncoder] = NullDataEncoder()) -> None:
+    def __init__(self, len_encoder: DataSequenceEncoder | None = NullDataEncoder()) -> None:
         """IntegerPLSIDataEncoder object for encoding sequences of iid observations from a PLSI model.
 
         Args:
@@ -941,7 +1013,7 @@ class IntegerPLSIDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns a string representation of object instance."""
-        return 'IntegerPLSIDataEncoder(len_dist=' + str(self.len_encoder) + ')'
+        return "IntegerPLSIDataEncoder(len_dist=" + str(self.len_encoder) + ")"
 
     def __eq__(self, other: object) -> bool:
         """Check if object is equivalent to instance of IntegerPLSIDataEncoder.
@@ -958,8 +1030,9 @@ class IntegerPLSIDataEncoder(DataSequenceEncoder):
         else:
             return False
 
-    def seq_encode(self, x: Sequence[Tuple[int, Sequence[Tuple[int, float]]]])\
-            -> Tuple[Any, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    def seq_encode(
+        self, x: Sequence[tuple[int, Sequence[tuple[int, float]]]]
+    ) -> tuple[Any, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         """Encode a sequence of iid PLSI observations for use with vectorized functions.
 
         Input arg 'x' is a sequence of iid PLSI observations having form
@@ -990,14 +1063,13 @@ class IntegerPLSIDataEncoder(DataSequenceEncoder):
         xm = []
 
         for i, (d_id, xx) in enumerate(x):
-
             v = [u[0] for u in xx]
             c = [u[1] for u in xx]
 
             xv.extend(v)
             xc.extend(c)
-            xd.extend([d_id]*len(v))
-            xi.extend([i]*len(v))
+            xd.extend([d_id] * len(v))
+            xi.extend([i] * len(v))
             xn.append(np.sum(c))
             xm.append(d_id)
 
@@ -1013,8 +1085,11 @@ class IntegerPLSIDataEncoder(DataSequenceEncoder):
         return nn, (xv, xc, xd, xi, xn, xm)
 
 
-@numba.njit('void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:,:], float64[:,:], float64[:], '
-            'float64[:])', fastmath=True, cache=True)
+@numba.njit(
+    "void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:,:], float64[:,:], float64[:], float64[:])",
+    fastmath=True,
+    cache=True,
+)
 def fast_seq_log_density(xv, xc, xd, xi, xm, wmat, smat, dvec, out):
     n = len(xv)
     m = len(xm)
@@ -1026,12 +1101,15 @@ def fast_seq_log_density(xv, xc, xd, xi, xm, wmat, smat, dvec, out):
         i2 = xd[i]
         i3 = xi[i]
         for j in range(k):
-            ll += wmat[i1,j]*smat[i2,j]
-        out[i3] += cc*np.log(ll)
+            ll += wmat[i1, j] * smat[i2, j]
+        out[i3] += cc * np.log(ll)
     for i in range(m):
         out[i] += dvec[xm[i]]
 
-@numba.njit('void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:,:], float64[:,:])', fastmath=True, cache=True)
+
+@numba.njit(
+    "void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:,:], float64[:,:])", fastmath=True, cache=True
+)
 def fast_seq_component_log_density(xv, xc, xd, xi, xm, wmat, out):
     n = len(xv)
     k = wmat.shape[1]
@@ -1040,10 +1118,15 @@ def fast_seq_component_log_density(xv, xc, xd, xi, xm, wmat, out):
         i1 = xv[i]
         i3 = xi[i]
         for j in range(k):
-            out[i3, j] += np.log(wmat[i1,j])*cc
+            out[i3, j] += np.log(wmat[i1, j]) * cc
 
-@numba.njit('void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:], float64[:,:], float64[:,:], '
-            'float64[:,:], float64[:,:], float64[:])', fastmath=True, cache=True)
+
+@numba.njit(
+    "void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:], float64[:,:], float64[:,:], "
+    "float64[:,:], float64[:,:], float64[:])",
+    fastmath=True,
+    cache=True,
+)
 def fast_seq_update(xv, xc, xd, xi, xm, weights, wmat, smat, wcnt, scnt, dcnt):
     n = len(xv)
     m = len(xm)
@@ -1056,50 +1139,53 @@ def fast_seq_update(xv, xc, xd, xi, xm, weights, wmat, smat, wcnt, scnt, dcnt):
         i2 = xd[i]
         ww = weights[xi[i]]
         for j in range(k):
-            temp = wmat[i1,j]*smat[i2,j]
+            temp = wmat[i1, j] * smat[i2, j]
             posterior[j] = temp
-            norm_const  += temp
-        norm_const = ww*cc/norm_const
+            norm_const += temp
+        norm_const = ww * cc / norm_const
         for j in range(k):
-            temp = posterior[j]*norm_const
-            wcnt[j,i1] += temp
-            scnt[i2,j] += temp
+            temp = posterior[j] * norm_const
+            wcnt[j, i1] += temp
+            scnt[i2, j] += temp
     for i in range(m):
         dcnt[xm[i]] += weights[i]
 
 
-@numba.njit('float64[:](float64[:,:], int32[:], float64[:,:], int32[:], float64[:])', cache=True)
+@numba.njit("float64[:](float64[:,:], int32[:], float64[:,:], int32[:], float64[:])", cache=True)
 def index_dot(x, xi, y, yi, out):
     n = x.shape[1]
     for i in range(len(xi)):
         i1 = xi[i]
         i2 = yi[i]
         for j in range(n):
-            out[i] += x[i1,j]*y[i2,j]
+            out[i] += x[i1, j] * y[i2, j]
     return out
 
-@numba.njit('float64[:](int32[:], float64[:], float64[:])', cache=True)
+
+@numba.njit("float64[:](int32[:], float64[:], float64[:])", cache=True)
 def bincount(x, w, out):
     for i in range(len(x)):
         out[x[i]] += w[i]
     return out
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
+
+@numba.njit("float64[:,:](int32[:], float64[:,:], float64[:,:])", cache=True)
 def vec_bincount1(x, w, out):
     n = w.shape[1]
     for i in range(len(x)):
         for j in range(n):
-            out[x[i],j] += w[i,j]
+            out[x[i], j] += w[i, j]
     return out
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], int32[:], float64[:,:])', cache=True)
+
+@numba.njit("float64[:,:](int32[:], float64[:,:], int32[:], float64[:,:])", cache=True)
 def vec_bincount2(x, w, y, out):
     for i in range(len(x)):
         out[x[i], :] += w[y[i], :]
     return out
 
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
+@numba.njit("float64[:,:](int32[:], float64[:,:], float64[:,:])", cache=True)
 def vec_bincount3(x, w, out):
     """Numba bincount on the rows of matrix w for groups x.
 
@@ -1123,7 +1209,7 @@ def vec_bincount3(x, w, out):
     return out
 
 
-@numba.njit('float64[:,:](int32[:], float64[:,:], float64[:,:])', cache=True)
+@numba.njit("float64[:,:](int32[:], float64[:,:], float64[:,:])", cache=True)
 def vec_bincount4(x, w, out):
     """Numba bincount on the rows of matrix w for groups x.
 
@@ -1149,17 +1235,16 @@ def vec_bincount4(x, w, out):
 
 def _register_int_plsi_engine_kernel():
     """Register the engine-resident integer-PLSI kernel (idempotent; called at import)."""
-    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
-                                    register_kernel_factory)
     from pysp.engines import NUMPY_ENGINE
+    from pysp.stats.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
     class IntegerPLSIKernel(GenericKernel):
         def accumulate(self, enc, weights):
             if self.estimator is None:
-                raise ValueError('IntegerPLSIKernel.accumulate requires an estimator.')
+                raise ValueError("IntegerPLSIKernel.accumulate requires an estimator.")
             if self.engine.name == NUMPY_ENGINE.name:
                 return super().accumulate(enc, weights)
-            host_enc = getattr(enc, 'host_payload', enc)
+            host_enc = getattr(enc, "host_payload", enc)
             accumulator = self.estimator.accumulator_factory().make()
             accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
             return accumulator.value()

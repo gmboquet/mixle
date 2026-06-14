@@ -12,6 +12,7 @@ Covers:
   - OptionalDistribution.get_data_type using the bstats get_data_type
     convention with fallback to legacy get_type.
 """
+
 import inspect
 import typing
 import unittest
@@ -21,17 +22,26 @@ import pandas as pd
 
 import pysp.bstats as bstats
 from pysp.bstats import (
-    GaussianDistribution, GaussianEstimator, MixtureDistribution,
-    MixtureEstimator, PoissonDistribution, estimate, initialize,
-    seq_encode, seq_estimate, seq_log_density_sum,
+    GaussianDistribution,
+    GaussianEstimator,
+    MixtureDistribution,
+    MixtureEstimator,
+    PoissonDistribution,
+    estimate,
+    initialize,
+    seq_encode,
+    seq_estimate,
+    seq_log_density_sum,
 )
 from pysp.bstats.ignored import (
-    IgnoredAccumulator, IgnoredDistribution, IgnoredEstimator,
+    IgnoredAccumulator,
+    IgnoredDistribution,
+    IgnoredEstimator,
 )
 from pysp.bstats.optional import OptionalDistribution, OptionalEstimator
 
 
-class _RecordingAccumulator(object):
+class _RecordingAccumulator:
     """Accumulator stub recording which driver code paths were used."""
 
     def __init__(self, log):
@@ -39,19 +49,19 @@ class _RecordingAccumulator(object):
         self.wsum = 0.0
 
     def update(self, x, weight, estimate=None):
-        self.log.append(('update', x))
+        self.log.append(("update", x))
         self.wsum += weight
 
     def initialize(self, x, weight, rng):
-        self.log.append(('initialize', x))
+        self.log.append(("initialize", x))
         self.wsum += weight
 
     def df_update(self, df, weights, estimate=None):
-        self.log.append(('df_update', len(df)))
+        self.log.append(("df_update", len(df)))
         self.wsum += float(np.sum(weights))
 
     def df_initialize(self, df, weights, rng):
-        self.log.append(('df_initialize', len(df)))
+        self.log.append(("df_initialize", len(df)))
         self.wsum += float(np.sum(weights))
 
     def combine(self, suff_stat):
@@ -72,8 +82,7 @@ class _RecordingAccumulator(object):
         pass
 
 
-class _RecordingFactory(object):
-
+class _RecordingFactory:
     def __init__(self, log):
         self.log = log
 
@@ -81,7 +90,7 @@ class _RecordingFactory(object):
         return _RecordingAccumulator(self.log)
 
 
-class _ModernEstimator(object):
+class _ModernEstimator:
     """bstats-style API: accumulator_factory() and estimate(suff_stat)."""
 
     def __init__(self):
@@ -93,10 +102,10 @@ class _ModernEstimator(object):
 
     def estimate(self, suff_stat):
         self.estimate_args = (suff_stat,)
-        return ('modern', suff_stat)
+        return ("modern", suff_stat)
 
 
-class _LegacyEstimator(object):
+class _LegacyEstimator:
     """Legacy stats-style API: accumulatorFactory() and estimate(nobs, ss)."""
 
     def __init__(self):
@@ -108,7 +117,7 @@ class _LegacyEstimator(object):
 
     def estimate(self, nobs, suff_stat):
         self.estimate_args = (nobs, suff_stat)
-        return ('legacy', nobs, suff_stat)
+        return ("legacy", nobs, suff_stat)
 
 
 class DispatchHelperTestCase(unittest.TestCase):
@@ -124,15 +133,15 @@ class DispatchHelperTestCase(unittest.TestCase):
 
     def test_estimate_dispatch_single_argument(self):
         est = _ModernEstimator()
-        rv = bstats._estimator_estimate(est, 5.0, 'ss')
-        self.assertEqual(rv, ('modern', 'ss'))
-        self.assertEqual(est.estimate_args, ('ss',))
+        rv = bstats._estimator_estimate(est, 5.0, "ss")
+        self.assertEqual(rv, ("modern", "ss"))
+        self.assertEqual(est.estimate_args, ("ss",))
 
     def test_estimate_dispatch_two_argument(self):
         est = _LegacyEstimator()
-        rv = bstats._estimator_estimate(est, 5.0, 'ss')
-        self.assertEqual(rv, ('legacy', 5.0, 'ss'))
-        self.assertEqual(est.estimate_args, (5.0, 'ss'))
+        rv = bstats._estimator_estimate(est, 5.0, "ss")
+        self.assertEqual(rv, ("legacy", 5.0, "ss"))
+        self.assertEqual(est.estimate_args, (5.0, "ss"))
 
     def test_spark_and_pandas_branches_use_dispatch_helpers(self):
         # The RDD/DataFrame branches cannot be run without a SparkContext;
@@ -140,12 +149,10 @@ class DispatchHelperTestCase(unittest.TestCase):
         # camelCase factory or the two-argument estimate call.
         for fn in (bstats.estimate, bstats.seq_estimate, bstats.initialize):
             src = inspect.getsource(fn)
-            self.assertNotIn('.accumulatorFactory()', src,
-                             '%s still calls camelCase factory' % fn.__name__)
-            self.assertNotIn('estimator.estimate(nobs', src,
-                             '%s still calls two-argument estimate' % fn.__name__)
-            self.assertIn('_accumulator_factory(', src)
-            self.assertIn('_estimator_estimate(', src)
+            self.assertNotIn(".accumulatorFactory()", src, "%s still calls camelCase factory" % fn.__name__)
+            self.assertNotIn("estimator.estimate(nobs", src, "%s still calls two-argument estimate" % fn.__name__)
+            self.assertIn("_accumulator_factory(", src)
+            self.assertIn("_estimator_estimate(", src)
 
 
 class PandasBranchTestCase(unittest.TestCase):
@@ -153,34 +160,34 @@ class PandasBranchTestCase(unittest.TestCase):
 
     @staticmethod
     def df():
-        return pd.DataFrame({'x': [1.0, 2.0, 3.0]})
+        return pd.DataFrame({"x": [1.0, 2.0, 3.0]})
 
     def test_estimate_pandas_modern(self):
         est = _ModernEstimator()
         rv = estimate(self.df(), est)
-        self.assertEqual(rv, ('modern', 3.0))
-        self.assertEqual(est.log, [('df_update', 3)])
+        self.assertEqual(rv, ("modern", 3.0))
+        self.assertEqual(est.log, [("df_update", 3)])
         self.assertEqual(est.estimate_args, (3.0,))
 
     def test_estimate_pandas_legacy(self):
         est = _LegacyEstimator()
         rv = estimate(self.df(), est)
-        self.assertEqual(rv, ('legacy', None, 3.0))
-        self.assertEqual(est.log, [('df_update', 3)])
+        self.assertEqual(rv, ("legacy", None, 3.0))
+        self.assertEqual(est.log, [("df_update", 3)])
         self.assertEqual(est.estimate_args, (None, 3.0))
 
     def test_initialize_pandas_modern(self):
         est = _ModernEstimator()
         rv = initialize(self.df(), est, np.random.RandomState(1), 0.5)
-        self.assertEqual(rv[0], 'modern')
-        self.assertEqual(est.log, [('df_initialize', 3)])
+        self.assertEqual(rv[0], "modern")
+        self.assertEqual(est.log, [("df_initialize", 3)])
 
     def test_initialize_pandas_legacy(self):
         est = _LegacyEstimator()
         rv = initialize(self.df(), est, np.random.RandomState(1), 0.5)
-        self.assertEqual(rv[0], 'legacy')
+        self.assertEqual(rv[0], "legacy")
         self.assertIsNone(rv[1])
-        self.assertEqual(est.log, [('df_initialize', 3)])
+        self.assertEqual(est.log, [("df_initialize", 3)])
 
 
 class LocalEstimateTestCase(unittest.TestCase):
@@ -188,9 +195,7 @@ class LocalEstimateTestCase(unittest.TestCase):
 
     @staticmethod
     def make_problem(n=400, seed=1):
-        truth = MixtureDistribution(
-            [GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)],
-            [0.5, 0.5])
+        truth = MixtureDistribution([GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)], [0.5, 0.5])
         data = truth.sampler(seed=seed).sample(n)
         est = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])
         return data, est
@@ -215,9 +220,7 @@ class LocalEstimateTestCase(unittest.TestCase):
         # EM symmetry breaking can take arbitrarily many iterations; component
         # recovery is therefore tested from a deterministic warm start.
         data, est = self.make_problem()
-        mm = MixtureDistribution(
-            [GaussianDistribution(-1.0, 4.0), GaussianDistribution(1.0, 4.0)],
-            [0.5, 0.5])
+        mm = MixtureDistribution([GaussianDistribution(-1.0, 4.0), GaussianDistribution(1.0, 4.0)], [0.5, 0.5])
 
         for _ in range(10):
             mm = estimate(data, est, prev_estimate=mm)
@@ -236,13 +239,11 @@ class LocalEstimateTestCase(unittest.TestCase):
         m_loc = estimate(data, est, prev_estimate=mm)
 
         self.assertTrue(np.allclose(np.sort(m_seq.w), np.sort(m_loc.w)))
-        self.assertTrue(np.allclose(sorted(c.mu for c in m_seq.components),
-                                    sorted(c.mu for c in m_loc.components)))
+        self.assertTrue(np.allclose(sorted(c.mu for c in m_seq.components), sorted(c.mu for c in m_loc.components)))
 
 
 class IgnoredTestCase(unittest.TestCase):
-
-    class _RecordingDist(object):
+    class _RecordingDist:
         def __init__(self):
             self.prior = None
 
@@ -254,7 +255,7 @@ class IgnoredTestCase(unittest.TestCase):
 
     def test_estimator_set_prior_signature(self):
         params = list(inspect.signature(IgnoredEstimator.set_prior).parameters)
-        self.assertEqual(params, ['self', 'prior'])
+        self.assertEqual(params, ["self", "prior"])
 
     def test_estimator_set_prior_delegates(self):
         inner = self._RecordingDist()
@@ -299,22 +300,21 @@ class IgnoredTestCase(unittest.TestCase):
         d = IgnoredDistribution(g)
         data = [0.0, 1.0, 2.5]
         enc = d.seq_encode(data)
-        self.assertTrue(np.allclose(d.seq_log_density(enc),
-                                    [g.log_density(x) for x in data]))
+        self.assertTrue(np.allclose(d.seq_log_density(enc), [g.log_density(x) for x in data]))
         samples = d.sampler(seed=1).sample(size=5)
         self.assertEqual(len(samples), 5)
 
 
 class OptionalTestCase(unittest.TestCase):
-
-    class _LegacyTypedDist(object):
+    class _LegacyTypedDist:
         """Inner distribution exposing only the legacy get_type() name."""
 
         def get_type(self):
             return float
 
-    class _UntypedDist(object):
+    class _UntypedDist:
         """Inner distribution exposing neither get_data_type nor get_type."""
+
         pass
 
     def test_get_data_type_bstats_convention(self):
@@ -363,9 +363,8 @@ class OptionalTestCase(unittest.TestCase):
         d = OptionalDistribution(GaussianDistribution(0.0, 1.0), p=0.25)
         data = d.sampler(seed=7).sample(60)
         enc = d.seq_encode(data)
-        self.assertTrue(np.allclose(d.seq_log_density(enc),
-                                    [d.log_density(x) for x in data]))
+        self.assertTrue(np.allclose(d.seq_log_density(enc), [d.log_density(x) for x in data]))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

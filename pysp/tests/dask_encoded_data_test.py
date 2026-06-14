@@ -8,16 +8,14 @@ from pysp.stats import GaussianDistribution, GaussianEstimator, seq_encode, seq_
 from pysp.utils.estimation import StreamingEstimator, constant, optimize, streaming_accumulate
 
 
-class _Future(object):
-
+class _Future:
     def __init__(self, value):
         self.value = value
 
 
-class _SynchronousClient(object):
-
+class _SynchronousClient:
     def submit(self, fn, *args, **kwargs):
-        kwargs.pop('pure', None)
+        kwargs.pop("pure", None)
         values = [arg.value if isinstance(arg, _Future) else arg for arg in args]
         return _Future(fn(*values, **kwargs))
 
@@ -30,7 +28,7 @@ class _SynchronousClient(object):
         return None
 
     def scheduler_info(self):
-        return {'workers': {'worker-0': {}, 'worker-1': {}}}
+        return {"workers": {"worker-0": {}, "worker-1": {}}}
 
 
 def _dask_client():
@@ -38,12 +36,10 @@ def _dask_client():
         from distributed import Client
     except ImportError:
         return None
-    return Client(n_workers=2, threads_per_worker=1, processes=False,
-                  dashboard_address=None)
+    return Client(n_workers=2, threads_per_worker=1, processes=False, dashboard_address=None)
 
 
 class DaskEncodedDataSynchronousClientTestCase(unittest.TestCase):
-
     def test_dask_handle_protocol_with_synchronous_client(self):
         client = _SynchronousClient()
         data = list(np.linspace(-2.0, 2.0, 40))
@@ -51,8 +47,9 @@ class DaskEncodedDataSynchronousClientTestCase(unittest.TestCase):
         estimator = GaussianEstimator()
         enc_local = seq_encode(data, model=model)
 
-        with DaskEncodedData(data, model=model, estimator=estimator,
-                             client=client, num_partitions=3, sub_chunks=2) as enc:
+        with DaskEncodedData(
+            data, model=model, estimator=estimator, client=client, num_partitions=3, sub_chunks=2
+        ) as enc:
             cnt_h, ll_h = seq_log_density_sum(enc, model)
             fitted_h = seq_estimate(enc, estimator, model)
             n_h, acc_h = streaming_accumulate(enc, estimator, model)
@@ -74,27 +71,33 @@ class DaskEncodedDataSynchronousClientTestCase(unittest.TestCase):
         start = GaussianDistribution(1.0, 4.0)
         estimator = GaussianEstimator()
 
-        fitted = optimize(data, estimator, prev_estimate=start, backend='dask',
-                          client=client, num_chunks=3, max_its=2,
-                          delta=None, out=io.StringIO())
-        local = optimize(data, estimator, prev_estimate=start, max_its=2,
-                         delta=None, out=io.StringIO())
+        fitted = optimize(
+            data,
+            estimator,
+            prev_estimate=start,
+            backend="dask",
+            client=client,
+            num_chunks=3,
+            max_its=2,
+            delta=None,
+            out=io.StringIO(),
+        )
+        local = optimize(data, estimator, prev_estimate=start, max_its=2, delta=None, out=io.StringIO())
 
         self.assertAlmostEqual(fitted.mu, local.mu, places=10)
         self.assertAlmostEqual(fitted.sigma2, local.sigma2, places=10)
 
 
 class DaskEncodedDataTestCase(unittest.TestCase):
-
     @classmethod
     def setUpClass(cls):
         cls.client = _dask_client()
         if cls.client is None:
-            raise unittest.SkipTest('dask.distributed is not installed')
+            raise unittest.SkipTest("dask.distributed is not installed")
 
     @classmethod
     def tearDownClass(cls):
-        if getattr(cls, 'client', None) is not None:
+        if getattr(cls, "client", None) is not None:
             cls.client.close()
 
     def test_dask_handle_matches_local_scoring_and_estimate(self):
@@ -103,9 +106,9 @@ class DaskEncodedDataTestCase(unittest.TestCase):
         estimator = GaussianEstimator()
         enc_local = seq_encode(data, model=model)
 
-        with DaskEncodedData(data, model=model, estimator=estimator,
-                             client=self.client, num_partitions=3,
-                             sub_chunks=2) as enc:
+        with DaskEncodedData(
+            data, model=model, estimator=estimator, client=self.client, num_partitions=3, sub_chunks=2
+        ) as enc:
             self.assertTrue(is_encoded_data_handle(enc))
             self.assertEqual(len(enc), len(data))
             cnt_h, ll_h = seq_log_density_sum(enc, model)
@@ -124,15 +127,23 @@ class DaskEncodedDataTestCase(unittest.TestCase):
         start = GaussianDistribution(1.0, 4.0)
         estimator = GaussianEstimator()
 
-        with encoded_data(data, model=start, estimator=estimator, backend='dask',
-                          client=self.client, num_chunks=3) as enc:
+        with encoded_data(
+            data, model=start, estimator=estimator, backend="dask", client=self.client, num_chunks=3
+        ) as enc:
             self.assertIsInstance(enc, DaskEncodedData)
 
-        fitted = optimize(data, estimator, prev_estimate=start, backend='dask',
-                          client=self.client, num_chunks=3, max_its=2,
-                          delta=None, out=io.StringIO())
-        local = optimize(data, estimator, prev_estimate=start, max_its=2,
-                         delta=None, out=io.StringIO())
+        fitted = optimize(
+            data,
+            estimator,
+            prev_estimate=start,
+            backend="dask",
+            client=self.client,
+            num_chunks=3,
+            max_its=2,
+            delta=None,
+            out=io.StringIO(),
+        )
+        local = optimize(data, estimator, prev_estimate=start, max_its=2, delta=None, out=io.StringIO())
 
         self.assertAlmostEqual(fitted.mu, local.mu, places=10)
         self.assertAlmostEqual(fitted.sigma2, local.sigma2, places=10)
@@ -143,8 +154,7 @@ class DaskEncodedDataTestCase(unittest.TestCase):
         estimator = GaussianEstimator()
         enc_local = seq_encode(data, model=model)
 
-        with DaskEncodedData(data, model=model, estimator=estimator,
-                             client=self.client, num_partitions=2) as enc:
+        with DaskEncodedData(data, model=model, estimator=estimator, client=self.client, num_partitions=2) as enc:
             n_h, acc_h = streaming_accumulate(enc, estimator, model)
             stream = StreamingEstimator(estimator, schedule=constant(0.5), model=model)
             fitted_h = stream.update(enc_data=enc)
@@ -159,5 +169,5 @@ class DaskEncodedDataTestCase(unittest.TestCase):
         self.assertAlmostEqual(fitted_h.sigma2, fitted_l.sigma2, places=10)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ Covers: clean grammar module imports without cnrg, the in-tree grammar accumulat
 GrammarDistribution.estimator() fix, markov_transform sample/estimate smoke on tiny data, and DataSequenceEncoder
 equality / encode round-trip consistency.
 """
+
 import importlib
 import unittest
 import warnings
@@ -13,9 +14,9 @@ import numpy as np
 
 
 def _make_markov_transform_dist(alpha=0.05, with_len=True):
-    from pysp.stats.markov_transform import MarkovTransformDistribution
-    from pysp.stats.composite import CompositeDistribution
     from pysp.stats.categorical import CategoricalDistribution
+    from pysp.stats.composite import CompositeDistribution
+    from pysp.stats.markov_transform import MarkovTransformDistribution
 
     nw = 3
     init_prob = np.asarray([0.5, 0.3, 0.2])
@@ -24,9 +25,13 @@ def _make_markov_transform_dist(alpha=0.05, with_len=True):
     cond_prob /= cond_prob.sum(axis=1, keepdims=True)
 
     if with_len:
-        len_dist = CompositeDistribution((CategoricalDistribution({2: 0.5, 3: 0.5}),
-                                          CategoricalDistribution({2: 0.5, 3: 0.5}),
-                                          CategoricalDistribution({3: 0.6, 4: 0.4})))
+        len_dist = CompositeDistribution(
+            (
+                CategoricalDistribution({2: 0.5, 3: 0.5}),
+                CategoricalDistribution({2: 0.5, 3: 0.5}),
+                CategoricalDistribution({3: 0.6, 4: 0.4}),
+            )
+        )
     else:
         len_dist = None
 
@@ -34,9 +39,9 @@ def _make_markov_transform_dist(alpha=0.05, with_len=True):
 
 
 def _make_sparse_assoc_dist(low_memory=False):
-    from pysp.stats.sparse_markov_transform import SparseMarkovAssociationDistribution
-    from pysp.stats.composite import CompositeDistribution
     from pysp.stats.categorical import CategoricalDistribution
+    from pysp.stats.composite import CompositeDistribution
+    from pysp.stats.sparse_markov_transform import SparseMarkovAssociationDistribution
 
     nw = 3
     init_prob = np.asarray([0.5, 0.3, 0.2])
@@ -44,84 +49,104 @@ def _make_sparse_assoc_dist(low_memory=False):
     cond_prob = rng.rand(nw, nw) + 0.1
     cond_prob /= cond_prob.sum(axis=1, keepdims=True)
 
-    len_dist = CompositeDistribution((CategoricalDistribution({2: 0.5, 3: 0.5}),
-                                      CategoricalDistribution({3: 0.6, 4: 0.4})))
+    len_dist = CompositeDistribution(
+        (CategoricalDistribution({2: 0.5, 3: 0.5}), CategoricalDistribution({3: 0.6, 4: 0.4}))
+    )
 
-    return SparseMarkovAssociationDistribution(init_prob, cond_prob, alpha=0.1, len_dist=len_dist,
-                                               low_memory=low_memory)
+    return SparseMarkovAssociationDistribution(
+        init_prob, cond_prob, alpha=0.1, len_dist=len_dist, low_memory=low_memory
+    )
 
 
 class ImportTestCase(unittest.TestCase):
-
     def test_markov_transform_imports(self):
-        mod = importlib.import_module('pysp.stats.markov_transform')
-        for name in ('MarkovTransformDistribution', 'MarkovTransformSampler', 'MarkovTransformAccumulator',
-                     'MarkovTransformAccumulatorFactory', 'MarkovTransformEstimator',
-                     'MarkovTransformDataEncoder'):
+        mod = importlib.import_module("pysp.stats.markov_transform")
+        for name in (
+            "MarkovTransformDistribution",
+            "MarkovTransformSampler",
+            "MarkovTransformAccumulator",
+            "MarkovTransformAccumulatorFactory",
+            "MarkovTransformEstimator",
+            "MarkovTransformDataEncoder",
+        ):
             self.assertTrue(hasattr(mod, name), name)
 
     def test_sparse_markov_transform_imports(self):
-        mod = importlib.import_module('pysp.stats.sparse_markov_transform')
-        for name in ('SparseMarkovAssociationDistribution', 'SparseMarkovAssociationSampler',
-                     'SparseMarkovAssociationAccumulator', 'SparseMarkovAssociationAccumulatorFactory',
-                     'SparseMarkovAssociationEstimator', 'SparseMarkovAssociationDataEncoder'):
+        mod = importlib.import_module("pysp.stats.sparse_markov_transform")
+        for name in (
+            "SparseMarkovAssociationDistribution",
+            "SparseMarkovAssociationSampler",
+            "SparseMarkovAssociationAccumulator",
+            "SparseMarkovAssociationAccumulatorFactory",
+            "SparseMarkovAssociationEstimator",
+            "SparseMarkovAssociationDataEncoder",
+        ):
             self.assertTrue(hasattr(mod, name), name)
 
     def test_grammar_imports_without_cnrg(self):
         # The module must import cleanly even when the optional 'cnrg' package is absent.
-        mod = importlib.import_module('pysp.stats.grammar')
-        for name in ('GrammarDistribution', 'GrammarSampler', 'GrammarEstimatorAccumulator',
-                     'GrammarAccumulatorFactory', 'GrammarEstimator', 'GrammarDataEncoder'):
+        mod = importlib.import_module("pysp.stats.grammar")
+        for name in (
+            "GrammarDistribution",
+            "GrammarSampler",
+            "GrammarEstimatorAccumulator",
+            "GrammarAccumulatorFactory",
+            "GrammarEstimator",
+            "GrammarDataEncoder",
+        ):
             self.assertTrue(hasattr(mod, name), name)
 
 
 class GrammarTestCase(unittest.TestCase):
-
     @staticmethod
     def _grammar():
-        from pysp.stats.grammar import GrammarRule, VRG
+        from pysp.stats.grammar import VRG, GrammarRule
 
         graph = nx.Graph()
-        graph.add_node(0, label='A', node_color='')
-        graph.add_node(1, label='B', node_color='')
-        graph.add_edge(0, 1, weight=1.0, edge_color='')
-        grammar = VRG(name='tiny')
+        graph.add_node(0, label="A", node_color="")
+        graph.add_node(1, label="B", node_color="")
+        graph.add_edge(0, 1, weight=1.0, edge_color="")
+        grammar = VRG(name="tiny")
         grammar.add_rule(GrammarRule(2, graph, frequency=3.0))
         return grammar
 
     def test_estimator_does_not_pass_distribution_as_pseudo_count(self):
         from pysp.stats.grammar import GrammarDistribution, GrammarEstimator
 
-        dist = GrammarDistribution(None, 0.01, name='g')
+        dist = GrammarDistribution(None, 0.01, name="g")
         est = dist.estimator()
         self.assertIsInstance(est, GrammarEstimator)
         self.assertIsNone(est.pseudo_count)
-        self.assertEqual(est.name, 'g')
+        self.assertEqual(est.name, "g")
 
         est2 = dist.estimator(pseudo_count=2.0)
         self.assertEqual(est2.pseudo_count, 2.0)
 
     def test_accumulator_factory_and_alias(self):
-        from pysp.stats.grammar import GrammarEstimator, GrammarAccumulatorFactory
+        from pysp.stats.grammar import GrammarAccumulatorFactory, GrammarEstimator
 
         est = GrammarEstimator()
         self.assertIsInstance(est.accumulator_factory(), GrammarAccumulatorFactory)
         self.assertIsInstance(est.accumulatorFactory(), GrammarAccumulatorFactory)
 
     def test_encoder_equality(self):
-        from pysp.stats.grammar import GrammarDistribution, GrammarDataEncoder
+        from pysp.stats.grammar import GrammarDataEncoder, GrammarDistribution
 
         dist = GrammarDistribution(None, 0.01)
         enc = dist.dist_to_encoder()
         self.assertEqual(enc, GrammarDataEncoder())
         self.assertNotEqual(enc, object())
-        data = ['a', 'b']
+        data = ["a", "b"]
         self.assertEqual(enc.seq_encode(data), data)
-        self.assertEqual(str(enc), 'GrammarDataEncoder')
+        self.assertEqual(str(enc), "GrammarDataEncoder")
 
     def test_in_tree_grammar_accumulates_scores_and_samples_without_cnrg(self):
-        from pysp.stats.grammar import GrammarDistribution, GrammarEstimator, GrammarEstimatorAccumulator, \
-            GrammarSampler
+        from pysp.stats.grammar import (
+            GrammarDistribution,
+            GrammarEstimator,
+            GrammarEstimatorAccumulator,
+            GrammarSampler,
+        )
 
         grammar = self._grammar()
         dist = GrammarDistribution(grammar, 0.01)
@@ -142,9 +167,8 @@ class GrammarTestCase(unittest.TestCase):
 
 
 class MarkovTransformTestCase(unittest.TestCase):
-
     def setUp(self):
-        warnings.simplefilter('ignore')
+        warnings.simplefilter("ignore")
         self.dist = _make_markov_transform_dist(with_len=True)
         self.data = self.dist.sampler(seed=11).sample(size=25)
 
@@ -182,11 +206,14 @@ class MarkovTransformTestCase(unittest.TestCase):
         self.assertEqual(enc1, enc2)
         self.assertNotEqual(enc1, MarkovTransformDataEncoder(len_encoder=None))
         self.assertNotEqual(enc1, object())
-        self.assertIn('MarkovTransformDataEncoder', str(enc1))
+        self.assertIn("MarkovTransformDataEncoder", str(enc1))
 
     def test_estimate_smoke(self):
-        from pysp.stats.markov_transform import (MarkovTransformEstimator, MarkovTransformAccumulatorFactory,
-                                                 MarkovTransformDistribution)
+        from pysp.stats.markov_transform import (
+            MarkovTransformAccumulatorFactory,
+            MarkovTransformDistribution,
+            MarkovTransformEstimator,
+        )
 
         dist = _make_markov_transform_dist(with_len=False)
         enc = dist.dist_to_encoder()
@@ -225,13 +252,12 @@ class MarkovTransformTestCase(unittest.TestCase):
         self.assertIsNone(size_val)
 
     def test_str_uses_class_name(self):
-        self.assertTrue(str(self.dist).startswith('MarkovTransformDistribution('))
+        self.assertTrue(str(self.dist).startswith("MarkovTransformDistribution("))
 
 
 class SparseMarkovAssociationTestCase(unittest.TestCase):
-
     def setUp(self):
-        warnings.simplefilter('ignore')
+        warnings.simplefilter("ignore")
         self.dist = _make_sparse_assoc_dist(low_memory=False)
         self.data = self.dist.sampler(seed=21).sample(size=15)
 
@@ -261,8 +287,8 @@ class SparseMarkovAssociationTestCase(unittest.TestCase):
         enc_lm = _make_sparse_assoc_dist(low_memory=True).dist_to_encoder()
         self.assertNotEqual(enc1, enc_lm)
         self.assertNotEqual(enc1, object())
-        self.assertIn('SparseMarkovAssociationDataEncoder', str(enc1))
+        self.assertIn("SparseMarkovAssociationDataEncoder", str(enc1))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

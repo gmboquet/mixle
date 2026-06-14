@@ -1,7 +1,9 @@
 """Gradient-fitting state objects owned by distribution-layer hooks."""
+
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -21,7 +23,7 @@ def prior_zero(torch, engine, ref=None):
 
 def prior_family(prior):
     """Return the normalized prior family name, if ``prior`` is mapping-like."""
-    return prior.get('family') if isinstance(prior, Mapping) else None
+    return prior.get("family") if isinstance(prior, Mapping) else None
 
 
 def prior_sequence(values, n: int):
@@ -34,12 +36,12 @@ def prior_sequence(values, n: int):
 
 def composite_child_priors(priors, n: int):
     """Return child priors for a composite-style product distribution."""
-    if prior_family(priors) == 'composite':
-        return prior_sequence(tuple(priors.get('children', ())), n)
+    if prior_family(priors) == "composite":
+        return prior_sequence(tuple(priors.get("children", ())), n)
     if isinstance(priors, (list, tuple)):
         return prior_sequence(tuple(priors), n)
-    if isinstance(priors, Mapping) and 'children' in priors:
-        return prior_sequence(tuple(priors.get('children', ())), n)
+    if isinstance(priors, Mapping) and "children" in priors:
+        return prior_sequence(tuple(priors.get("children", ())), n)
     if n == 1 and priors is not None:
         return [priors]
     return [None] * n
@@ -48,20 +50,20 @@ def composite_child_priors(priors, n: int):
 def conditional_priors(priors, keys):
     """Return per-condition, default, and given priors for conditional models."""
     family = prior_family(priors)
-    if family == 'conditional':
-        condition_priors = priors.get('conditions', priors.get('dmap', {}))
+    if family == "conditional":
+        condition_priors = priors.get("conditions", priors.get("dmap", {}))
         if isinstance(condition_priors, Mapping):
             condition_priors = {key: condition_priors.get(key) for key in keys}
         else:
             condition_priors = dict(zip(keys, prior_sequence(tuple(condition_priors), len(keys))))
-        return condition_priors, priors.get('default'), priors.get('given')
-    if isinstance(priors, Mapping) and any(k in priors for k in ('conditions', 'dmap', 'default', 'given')):
-        condition_priors = priors.get('conditions', priors.get('dmap', {}))
+        return condition_priors, priors.get("default"), priors.get("given")
+    if isinstance(priors, Mapping) and any(k in priors for k in ("conditions", "dmap", "default", "given")):
+        condition_priors = priors.get("conditions", priors.get("dmap", {}))
         if isinstance(condition_priors, Mapping):
             condition_priors = {key: condition_priors.get(key) for key in keys}
         else:
             condition_priors = dict(zip(keys, prior_sequence(tuple(condition_priors), len(keys))))
-        return condition_priors, priors.get('default'), priors.get('given')
+        return condition_priors, priors.get("default"), priors.get("given")
     if isinstance(priors, Mapping) and prior_family(priors) is None and any(key in priors for key in keys):
         return {key: priors.get(key) for key in keys}, None, None
     if isinstance(priors, (list, tuple)):
@@ -72,13 +74,13 @@ def conditional_priors(priors, keys):
 def record_child_priors(priors, fields, n: int):
     """Return field-aligned child priors for a named record model."""
     family = prior_family(priors)
-    if family == 'record':
-        field_priors = priors.get('fields', {})
+    if family == "record":
+        field_priors = priors.get("fields", {})
         if isinstance(field_priors, Mapping):
             return [field_priors.get(field) for field in fields[:n]]
         return prior_sequence(tuple(field_priors), n)
-    if isinstance(priors, Mapping) and 'fields' in priors:
-        field_priors = priors.get('fields', {})
+    if isinstance(priors, Mapping) and "fields" in priors:
+        field_priors = priors.get("fields", {})
         if isinstance(field_priors, Mapping):
             return [field_priors.get(field) for field in fields[:n]]
         return prior_sequence(tuple(field_priors), n)
@@ -94,20 +96,20 @@ def record_child_priors(priors, fields, n: int):
 def transform_prior(priors):
     """Return the base-child prior for a transform wrapper."""
     family = prior_family(priors)
-    if family == 'transform':
-        return priors.get('base', priors.get('child'))
-    if isinstance(priors, Mapping) and ('base' in priors or 'child' in priors):
-        return priors.get('base', priors.get('child'))
+    if family == "transform":
+        return priors.get("base", priors.get("child"))
+    if isinstance(priors, Mapping) and ("base" in priors or "child" in priors):
+        return priors.get("base", priors.get("child"))
     return priors
 
 
 def select_child_priors(priors, n: int):
     """Return choice-child priors for a select/routed model."""
     family = prior_family(priors)
-    if family == 'select':
-        return prior_sequence(tuple(priors.get('children', ())), n)
-    if isinstance(priors, Mapping) and 'children' in priors:
-        return prior_sequence(tuple(priors.get('children', ())), n)
+    if family == "select":
+        return prior_sequence(tuple(priors.get("children", ())), n)
+    if isinstance(priors, Mapping) and "children" in priors:
+        return prior_sequence(tuple(priors.get("children", ())), n)
     if isinstance(priors, (list, tuple)):
         return prior_sequence(tuple(priors), n)
     if n == 1 and priors is not None:
@@ -118,13 +120,13 @@ def select_child_priors(priors, n: int):
 def mixture_priors(priors, n: int):
     """Return component priors plus an optional weight prior for mixtures."""
     family = prior_family(priors)
-    if family == 'mixture':
-        return prior_sequence(tuple(priors.get('components', ())), n), priors.get('weights')
-    if isinstance(priors, Mapping) and ('components' in priors or 'weights' in priors):
-        return prior_sequence(tuple(priors.get('components', ())), n), priors.get('weights')
+    if family == "mixture":
+        return prior_sequence(tuple(priors.get("components", ())), n), priors.get("weights")
+    if isinstance(priors, Mapping) and ("components" in priors or "weights" in priors):
+        return prior_sequence(tuple(priors.get("components", ())), n), priors.get("weights")
     if isinstance(priors, (list, tuple)):
         return prior_sequence(tuple(priors), n), None
-    if family == 'dirichlet':
+    if family == "dirichlet":
         return [None] * n, priors
     if priors is not None:
         return [priors] * n, None
@@ -134,10 +136,10 @@ def mixture_priors(priors, n: int):
 def sequence_priors(priors):
     """Return element and length priors for an iid sequence model."""
     family = prior_family(priors)
-    if family == 'sequence':
-        return priors.get('element'), priors.get('length')
-    if isinstance(priors, Mapping) and ('element' in priors or 'length' in priors):
-        return priors.get('element'), priors.get('length')
+    if family == "sequence":
+        return priors.get("element"), priors.get("length")
+    if isinstance(priors, Mapping) and ("element" in priors or "length" in priors):
+        return priors.get("element"), priors.get("length")
     if isinstance(priors, (list, tuple)):
         seq = tuple(priors)
         return (seq[0] if len(seq) > 0 else None), (seq[1] if len(seq) > 1 else None)
@@ -147,22 +149,23 @@ def sequence_priors(priors):
 def markov_chain_priors(priors, row_keys):
     """Return initial, transition-row, and length priors for Markov chains."""
     family = prior_family(priors)
-    if family == 'markov_chain':
-        rows = priors.get('transitions', priors.get('transition_map', {}))
+    if family == "markov_chain":
+        rows = priors.get("transitions", priors.get("transition_map", {}))
         if isinstance(rows, Mapping):
             rows = {key: rows.get(key) for key in row_keys}
         else:
             rows = dict(zip(row_keys, prior_sequence(tuple(rows), len(row_keys))))
-        return priors.get('initial', priors.get('init')), rows, priors.get('length')
-    if isinstance(priors, Mapping) and any(k in priors for k in ('initial', 'init', 'transitions',
-                                                                 'transition_map', 'length')):
-        rows = priors.get('transitions', priors.get('transition_map', {}))
+        return priors.get("initial", priors.get("init")), rows, priors.get("length")
+    if isinstance(priors, Mapping) and any(
+        k in priors for k in ("initial", "init", "transitions", "transition_map", "length")
+    ):
+        rows = priors.get("transitions", priors.get("transition_map", {}))
         if isinstance(rows, Mapping):
             rows = {key: rows.get(key) for key in row_keys}
         else:
             rows = dict(zip(row_keys, prior_sequence(tuple(rows), len(row_keys))))
-        return priors.get('initial', priors.get('init')), rows, priors.get('length')
-    if family == 'dirichlet':
+        return priors.get("initial", priors.get("init")), rows, priors.get("length")
+    if family == "dirichlet":
         return priors, {key: priors for key in row_keys}, None
     if isinstance(priors, (list, tuple)):
         seq = tuple(priors)
@@ -183,7 +186,7 @@ def dirichlet_alpha_tensor(alpha, labels, logits, engine, torch):
         alpha = 1.0
     if isinstance(alpha, Mapping):
         if labels is None:
-            raise ValueError('Dirichlet alpha mappings require categorical labels.')
+            raise ValueError("Dirichlet alpha mappings require categorical labels.")
         alpha = [alpha.get(label, 1.0) for label in labels]
     alpha_t = engine.asarray(alpha)
     if alpha_t.ndim == 0:
@@ -193,19 +196,19 @@ def dirichlet_alpha_tensor(alpha, labels, logits, engine, torch):
 
 def normal_gamma_log_prior(mu, sigma2, priors, torch):
     """Return a Normal-Gamma log prior over a Gaussian-style mean/variance."""
-    if prior_family(priors) != 'normalgamma':
+    if prior_family(priors) != "normalgamma":
         return None
     tau = 1.0 / sigma2
-    alpha = float(priors.get('alpha', priors.get('a', 1.0)))
-    beta = float(priors.get('beta', priors.get('b', 0.0)))
+    alpha = float(priors.get("alpha", priors.get("a", 1.0)))
+    beta = float(priors.get("beta", priors.get("b", 0.0)))
     lp = (alpha - 1.0) * torch.log(tau) - beta * tau
-    kappa = float(priors.get('kappa', 0.0))
+    kappa = float(priors.get("kappa", 0.0))
     if kappa > 0.0:
-        lp = lp + 0.5 * torch.log(tau) - 0.5 * kappa * tau * (mu - float(priors.get('mu0', 0.0))) ** 2
+        lp = lp + 0.5 * torch.log(tau) - 0.5 * kappa * tau * (mu - float(priors.get("mu0", 0.0))) ** 2
     return lp
 
 
-class CategoricalGradientFitState(object):
+class CategoricalGradientFitState:
     """Autograd state for finite categorical simplex maps."""
 
     def __init__(self, template: Any, labels: Sequence[Any], logits: Any) -> None:
@@ -216,39 +219,41 @@ class CategoricalGradientFitState(object):
     def shadow(self, torch, shadow_child):
         """Build a temporary distribution object backed by live Torch logits."""
         shadow = object.__new__(type(self.template))
-        shadow.__dict__.update(getattr(self.template, '__dict__', {}))
+        shadow.__dict__.update(getattr(self.template, "__dict__", {}))
         probs = torch.softmax(self.logits, dim=0)
         shadow._backend_labels = self.labels
         shadow._backend_log_probs = torch.log(probs)
-        shadow._backend_log_default = getattr(self.template, 'log_default_value', -np.inf)
+        shadow._backend_log_default = getattr(self.template, "log_default_value", -np.inf)
         return shadow
 
     def score(self, enc, engine, torch, score_child):
         """Score encoded categorical observations through the shadow object."""
         from pysp.stats.backend import backend_seq_log_density
+
         return backend_seq_log_density(self.shadow(torch, None), enc, engine)
 
     def build(self, torch, build_child, detach_value):
         """Reconstruct a fitted categorical distribution from optimized logits."""
         probs = torch.softmax(self.logits, dim=0).detach().cpu().numpy()
         pmap = {label: float(prob) for label, prob in zip(self.labels, probs)}
-        return type(self.template)(pmap, default_value=getattr(self.template, 'default_value', 0.0),
-                                   name=getattr(self.template, 'name', None))
+        return type(self.template)(
+            pmap, default_value=getattr(self.template, "default_value", 0.0), name=getattr(self.template, "name", None)
+        )
 
     def log_prior(self, priors, prior_strength: float, torch, engine, initial_leaves_by_id, prior_child):
         """Return the Dirichlet or weak fallback prior contribution."""
         if prior_strength == 0.0 and priors is None:
             return prior_zero(torch, engine, self.logits)
         alpha = None
-        if prior_family(priors) == 'dirichlet':
-            alpha = priors.get('alpha')
+        if prior_family(priors) == "dirichlet":
+            alpha = priors.get("alpha")
         if alpha is None:
             alpha = 1.0 + float(prior_strength) / max(1, self.logits.numel())
         alpha_t = dirichlet_alpha_tensor(alpha, self.labels, self.logits, engine, torch)
         return torch.sum((alpha_t - 1.0) * torch.log_softmax(self.logits, dim=0))
 
 
-class OptionalGradientFitState(object):
+class OptionalGradientFitState:
     """Autograd state for optional/missing-value wrappers."""
 
     def __init__(self, template: Any, child: Any, logit_p: Any) -> None:
@@ -259,7 +264,7 @@ class OptionalGradientFitState(object):
     def shadow(self, torch, shadow_child):
         """Build a temporary optional wrapper backed by live child/raw p state."""
         shadow = object.__new__(type(self.template))
-        shadow.__dict__.update(getattr(self.template, '__dict__', {}))
+        shadow.__dict__.update(getattr(self.template, "__dict__", {}))
         shadow.dist = shadow_child(self.child, torch)
         shadow.has_p = self.logit_p is not None
         if self.logit_p is not None:
@@ -286,17 +291,20 @@ class OptionalGradientFitState(object):
     def build(self, torch, build_child, detach_value):
         """Reconstruct a fitted optional distribution from optimized state."""
         p = None if self.logit_p is None else float(torch.sigmoid(self.logit_p).detach().cpu().item())
-        return type(self.template)(build_child(self.child, torch), p=p,
-                                   missing_value=getattr(self.template, 'missing_value', None),
-                                   name=getattr(self.template, 'name', None))
+        return type(self.template)(
+            build_child(self.child, torch),
+            p=p,
+            missing_value=getattr(self.template, "missing_value", None),
+            name=getattr(self.template, "name", None),
+        )
 
     def log_prior(self, priors, prior_strength: float, torch, engine, initial_leaves_by_id, prior_child):
         """Return observed-child plus optional missingness prior contribution."""
         family = prior_family(priors)
-        if family == 'optional':
-            child_prior = priors.get('observed')
-            missing_prior = priors.get('missing')
-        elif family == 'beta':
+        if family == "optional":
+            child_prior = priors.get("observed")
+            missing_prior = priors.get("missing")
+        elif family == "beta":
             child_prior = None
             missing_prior = priors
         else:
@@ -305,9 +313,9 @@ class OptionalGradientFitState(object):
         rv = prior_child(self.child, child_prior, prior_strength, torch, engine, initial_leaves_by_id)
         if self.logit_p is not None:
             p = torch.sigmoid(self.logit_p)
-            if prior_family(missing_prior) == 'beta':
-                alpha = float(missing_prior.get('alpha', 1.0))
-                beta = float(missing_prior.get('beta', 1.0))
+            if prior_family(missing_prior) == "beta":
+                alpha = float(missing_prior.get("alpha", 1.0))
+                beta = float(missing_prior.get("beta", 1.0))
                 rv = rv + (alpha - 1.0) * torch.log(p) + (beta - 1.0) * torch.log1p(-p)
             elif prior_strength != 0.0:
                 alpha = 1.0 + float(prior_strength) / 2.0
@@ -315,7 +323,7 @@ class OptionalGradientFitState(object):
         return rv
 
 
-class CompositeGradientFitState(object):
+class CompositeGradientFitState:
     """Autograd state for product distributions over tuple-like observations."""
 
     def __init__(self, template: Any, children: Sequence[Any]) -> None:
@@ -325,7 +333,7 @@ class CompositeGradientFitState(object):
     def shadow(self, torch, shadow_child):
         """Build a temporary composite with live child shadows."""
         shadow = object.__new__(type(self.template))
-        shadow.__dict__.update(getattr(self.template, '__dict__', {}))
+        shadow.__dict__.update(getattr(self.template, "__dict__", {}))
         shadow.dists = tuple(shadow_child(child, torch) for child in self.children)
         shadow.count = len(shadow.dists)
         return shadow
@@ -350,7 +358,7 @@ class CompositeGradientFitState(object):
         return rv
 
 
-class ConditionalGradientFitState(object):
+class ConditionalGradientFitState:
     """Autograd state for conditional keyed children."""
 
     def __init__(self, template: Any, dmap: Mapping[Any, Any], default_child: Any, given_child: Any) -> None:
@@ -362,7 +370,7 @@ class ConditionalGradientFitState(object):
     def shadow(self, torch, shadow_child):
         """Build a temporary conditional model with live child shadows."""
         shadow = object.__new__(type(self.template))
-        shadow.__dict__.update(getattr(self.template, '__dict__', {}))
+        shadow.__dict__.update(getattr(self.template, "__dict__", {}))
         shadow.dmap = {key: shadow_child(child, torch) for key, child in self.dmap.items()}
         if self.default_child is not None:
             shadow.default_dist = shadow_child(self.default_child, torch)
@@ -384,7 +392,7 @@ class ConditionalGradientFitState(object):
             elif self.default_child is not None:
                 scores = score_child(self.default_child, eobs_vals[i], engine, torch)
             else:
-                scores = engine.zeros(len(idx_vals[i])) + float('-inf')
+                scores = engine.zeros(len(idx_vals[i])) + float("-inf")
             rv = engine.index_add(rv, idx, scores)
         if self.given_child is not None and given_enc is not None:
             rv = rv + score_child(self.given_child, given_enc, engine, torch)
@@ -393,27 +401,36 @@ class ConditionalGradientFitState(object):
     def build(self, torch, build_child, detach_value):
         """Reconstruct a fitted conditional distribution from children."""
         fitted_map = {key: build_child(child, torch) for key, child in self.dmap.items()}
-        default_dist = getattr(self.template, 'default_dist', None) if self.default_child is None else \
-            build_child(self.default_child, torch)
-        given_dist = getattr(self.template, 'given_dist', None) if self.given_child is None else \
-            build_child(self.given_child, torch)
-        return type(self.template)(fitted_map, default_dist=default_dist, given_dist=given_dist,
-                                   name=getattr(self.template, 'name', None),
-                                   keys=getattr(self.template, 'keys', None))
+        default_dist = (
+            getattr(self.template, "default_dist", None)
+            if self.default_child is None
+            else build_child(self.default_child, torch)
+        )
+        given_dist = (
+            getattr(self.template, "given_dist", None)
+            if self.given_child is None
+            else build_child(self.given_child, torch)
+        )
+        return type(self.template)(
+            fitted_map,
+            default_dist=default_dist,
+            given_dist=given_dist,
+            name=getattr(self.template, "name", None),
+            keys=getattr(self.template, "keys", None),
+        )
 
     def log_prior(self, priors, prior_strength: float, torch, engine, initial_leaves_by_id, prior_child):
         """Return keyed/default/given prior contributions for all active children."""
         condition_priors, default_prior, given_prior = conditional_priors(priors, tuple(self.dmap.keys()))
         rv = prior_zero(torch, engine)
         for key, child in self.dmap.items():
-            rv = rv + prior_child(child, condition_priors.get(key), prior_strength, torch, engine,
-                                  initial_leaves_by_id)
+            rv = rv + prior_child(child, condition_priors.get(key), prior_strength, torch, engine, initial_leaves_by_id)
         if self.default_child is not None:
-            rv = rv + prior_child(self.default_child, default_prior, prior_strength, torch, engine,
-                                  initial_leaves_by_id)
+            rv = rv + prior_child(
+                self.default_child, default_prior, prior_strength, torch, engine, initial_leaves_by_id
+            )
         if self.given_child is not None:
-            rv = rv + prior_child(self.given_child, given_prior, prior_strength, torch, engine,
-                                  initial_leaves_by_id)
+            rv = rv + prior_child(self.given_child, given_prior, prior_strength, torch, engine, initial_leaves_by_id)
         return rv
 
 
@@ -429,12 +446,12 @@ class RecordGradientFitState(CompositeGradientFitState):
 
     def build(self, torch, build_child, detach_value):
         """Reconstruct a fitted record distribution preserving field sources."""
-        fields = tuple(zip(getattr(self.template, 'fields', ()), getattr(self.template, 'sources', ())))
+        fields = tuple(zip(getattr(self.template, "fields", ()), getattr(self.template, "sources", ())))
         return type(self.template)(fields, tuple(build_child(child, torch) for child in self.children))
 
     def log_prior(self, priors, prior_strength: float, torch, engine, initial_leaves_by_id, prior_child):
         """Return field-aligned child prior contributions."""
-        priors_by_child = record_child_priors(priors, getattr(self.template, 'fields', ()), len(self.children))
+        priors_by_child = record_child_priors(priors, getattr(self.template, "fields", ()), len(self.children))
         rv = prior_zero(torch, engine)
         for child, child_prior in zip(self.children, priors_by_child):
             rv = rv + prior_child(child, child_prior, prior_strength, torch, engine, initial_leaves_by_id)
@@ -455,8 +472,9 @@ class SelectGradientFitState(CompositeGradientFitState):
 
     def build(self, torch, build_child, detach_value):
         """Reconstruct a fitted select distribution preserving the router."""
-        return type(self.template)(tuple(build_child(child, torch) for child in self.children),
-                                   getattr(self.template, 'choice_function'))
+        return type(self.template)(
+            tuple(build_child(child, torch) for child in self.children), self.template.choice_function
+        )
 
     def log_prior(self, priors, prior_strength: float, torch, engine, initial_leaves_by_id, prior_child):
         """Return child prior contributions aligned to select choices."""
@@ -467,7 +485,7 @@ class SelectGradientFitState(CompositeGradientFitState):
         return rv
 
 
-class TransformGradientFitState(object):
+class TransformGradientFitState:
     """Autograd state for fixed transforms with differentiable children."""
 
     def __init__(self, template: Any, child: Any) -> None:
@@ -477,7 +495,7 @@ class TransformGradientFitState(object):
     def shadow(self, torch, shadow_child):
         """Build a temporary transform wrapper with a live base child."""
         shadow = object.__new__(type(self.template))
-        shadow.__dict__.update(getattr(self.template, '__dict__', {}))
+        shadow.__dict__.update(getattr(self.template, "__dict__", {}))
         shadow.dist = shadow_child(self.child, torch)
         return shadow
 
@@ -487,17 +505,17 @@ class TransformGradientFitState(object):
         rv = score_child(self.child, child_enc, engine, torch)
         if self.template.density_correction:
             rv = rv + engine.asarray(log_jac)
-        invalid = engine.zeros(rv.shape) + float('-inf')
+        invalid = engine.zeros(rv.shape) + float("-inf")
         return engine.where(engine.asarray(valid), rv, invalid)
 
     def build(self, torch, build_child, detach_value):
         """Reconstruct a transform wrapper around the fitted base child."""
         return type(self.template)(
             build_child(self.child, torch),
-            transform=getattr(self.template, 'transform', None),
-            density_correction=getattr(self.template, 'density_correction', None),
-            name=getattr(self.template, 'name', None),
-            keys=getattr(self.template, 'keys', None),
+            transform=getattr(self.template, "transform", None),
+            density_correction=getattr(self.template, "density_correction", None),
+            name=getattr(self.template, "name", None),
+            keys=getattr(self.template, "keys", None),
         )
 
     def log_prior(self, priors, prior_strength: float, torch, engine, initial_leaves_by_id, prior_child):
@@ -505,7 +523,7 @@ class TransformGradientFitState(object):
         return prior_child(self.child, transform_prior(priors), prior_strength, torch, engine, initial_leaves_by_id)
 
 
-class SequenceGradientFitState(object):
+class SequenceGradientFitState:
     """Autograd state for iid sequence distributions."""
 
     def __init__(self, template: Any, child: Any, len_child: Any) -> None:
@@ -516,7 +534,7 @@ class SequenceGradientFitState(object):
     def shadow(self, torch, shadow_child):
         """Build a temporary sequence model with live element/length children."""
         shadow = object.__new__(type(self.template))
-        shadow.__dict__.update(getattr(self.template, '__dict__', {}))
+        shadow.__dict__.update(getattr(self.template, "__dict__", {}))
         shadow.dist = shadow_child(self.child, torch)
         if self.len_child is not None:
             shadow.len_dist = shadow_child(self.len_child, torch)
@@ -539,11 +557,15 @@ class SequenceGradientFitState(object):
 
     def build(self, torch, build_child, detach_value):
         """Reconstruct a fitted sequence distribution from child fits."""
-        length_dist = getattr(self.template, 'len_dist', None) if self.len_child is None else \
-            build_child(self.len_child, torch)
-        return type(self.template)(build_child(self.child, torch), len_dist=length_dist,
-                                   len_normalized=getattr(self.template, 'len_normalized', False),
-                                   name=getattr(self.template, 'name', None))
+        length_dist = (
+            getattr(self.template, "len_dist", None) if self.len_child is None else build_child(self.len_child, torch)
+        )
+        return type(self.template)(
+            build_child(self.child, torch),
+            len_dist=length_dist,
+            len_normalized=getattr(self.template, "len_normalized", False),
+            name=getattr(self.template, "name", None),
+        )
 
     def log_prior(self, priors, prior_strength: float, torch, engine, initial_leaves_by_id, prior_child):
         """Return element and length child prior contributions."""
@@ -554,7 +576,7 @@ class SequenceGradientFitState(object):
         return rv
 
 
-class MixtureGradientFitState(object):
+class MixtureGradientFitState:
     """Autograd state for mixture components and simplex weights."""
 
     def __init__(self, template: Any, components: Sequence[Any], w_logits: Any) -> None:
@@ -565,7 +587,7 @@ class MixtureGradientFitState(object):
     def shadow(self, torch, shadow_child):
         """Build a temporary mixture backed by live component/weight tensors."""
         shadow = object.__new__(type(self.template))
-        shadow.__dict__.update(getattr(self.template, '__dict__', {}))
+        shadow.__dict__.update(getattr(self.template, "__dict__", {}))
         shadow.components = [shadow_child(child, torch) for child in self.components]
         shadow.num_components = len(shadow.components)
         shadow.w = torch.softmax(self.w_logits, dim=0)
@@ -583,7 +605,7 @@ class MixtureGradientFitState(object):
         """Reconstruct a fitted mixture from optimized components and weights."""
         components = [build_child(child, torch) for child in self.components]
         weights = detach_value(torch.softmax(self.w_logits, dim=0))
-        return type(self.template)(components, list(weights / weights.sum()), name=getattr(self.template, 'name', None))
+        return type(self.template)(components, list(weights / weights.sum()), name=getattr(self.template, "name", None))
 
     def log_prior(self, priors, prior_strength: float, torch, engine, initial_leaves_by_id, prior_child):
         """Return component prior contributions plus mixture-weight prior."""
@@ -591,8 +613,8 @@ class MixtureGradientFitState(object):
         rv = prior_zero(torch, engine)
         for child, child_prior in zip(self.components, component_priors):
             rv = rv + prior_child(child, child_prior, prior_strength, torch, engine, initial_leaves_by_id)
-        if prior_family(weight_prior) == 'dirichlet':
-            alpha = dirichlet_alpha_tensor(weight_prior.get('alpha'), None, self.w_logits, engine, torch)
+        if prior_family(weight_prior) == "dirichlet":
+            alpha = dirichlet_alpha_tensor(weight_prior.get("alpha"), None, self.w_logits, engine, torch)
             rv = rv + torch.sum((alpha - 1.0) * torch.log_softmax(self.w_logits, dim=0))
         elif prior_strength != 0.0:
             alpha = 1.0 + float(prior_strength) / max(1, len(self.components))

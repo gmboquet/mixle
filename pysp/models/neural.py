@@ -1,14 +1,16 @@
 """Torch neural-network objective helpers."""
+
 from __future__ import annotations
 
-from typing import Any, Iterable, Optional, Sequence, Tuple
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 import numpy as np
 
 from pysp.utils.objectives import optimize_torch_objective
 
 
-class GaussianRegressionNN(object):
+class GaussianRegressionNN:
     """A Torch module trained with a Gaussian regression log likelihood.
 
     The wrapped module predicts the response mean and this helper learns a
@@ -16,9 +18,10 @@ class GaussianRegressionNN(object):
     generic Torch objective optimizer as the distribution objective helpers.
     """
 
-    def __init__(self, module: Any, noise: float = 1.0, engine: Optional[Any] = None,
-                 precision: Optional[Any] = None) -> None:
-        torch, engine = _torch_engine(engine, precision=precision, owner='GaussianRegressionNN')
+    def __init__(
+        self, module: Any, noise: float = 1.0, engine: Any | None = None, precision: Any | None = None
+    ) -> None:
+        torch, engine = _torch_engine(engine, precision=precision, owner="GaussianRegressionNN")
         self.torch = torch
         self.engine = engine
         self.module = module.to(device=engine.device, dtype=engine.dtype)
@@ -33,7 +36,7 @@ class GaussianRegressionNN(object):
         """Return the fitted observation standard deviation."""
         return float(self.log_noise.detach().exp().cpu().item())
 
-    def _xy(self, x: Any, y: Any) -> Tuple[Any, Any]:
+    def _xy(self, x: Any, y: Any) -> tuple[Any, Any]:
         xx = self.engine.asarray(x)
         yy = self.engine.asarray(y)
         if len(xx.shape) == 1:
@@ -58,20 +61,38 @@ class GaussianRegressionNN(object):
         resid = yy - pred
         return -0.5 * torch.sum(resid * resid / noise2 + torch.log(2.0 * torch.pi * noise2))
 
-    def fit(self, x: Any, y: Any, max_its: int = 500, lr: float = 0.01,
-            optimizer: str = 'adam', tol: float = 1.0e-7,
-            out: Optional[Any] = None, print_iter: int = 100,
-            return_result: bool = False, restore_best: bool = True) -> Any:
+    def fit(
+        self,
+        x: Any,
+        y: Any,
+        max_its: int = 500,
+        lr: float = 0.01,
+        optimizer: str = "adam",
+        tol: float = 1.0e-7,
+        out: Any | None = None,
+        print_iter: int = 100,
+        return_result: bool = False,
+        restore_best: bool = True,
+    ) -> Any:
         """Maximize the Gaussian regression log likelihood.
 
         The default return shape is the historical ``(value, iterations)``
         tuple.  Set ``return_result=True`` for the full objective diagnostics.
         """
         return optimize_torch_objective(
-            self.parameters(), lambda: self.log_likelihood(x, y), engine=self.engine,
-            max_its=max_its, lr=lr, optimizer=optimizer, tol=tol,
-            maximize=True, out=out, print_iter=print_iter,
-            return_result=return_result, restore_best=restore_best)
+            self.parameters(),
+            lambda: self.log_likelihood(x, y),
+            engine=self.engine,
+            max_its=max_its,
+            lr=lr,
+            optimizer=optimizer,
+            tol=tol,
+            maximize=True,
+            out=out,
+            print_iter=print_iter,
+            return_result=return_result,
+            restore_best=restore_best,
+        )
 
     def predict(self, x: Any) -> np.ndarray:
         """Return mean predictions as a NumPy array."""
@@ -79,7 +100,7 @@ class GaussianRegressionNN(object):
             return self.predict_tensor(x).detach().cpu().numpy()
 
 
-class CategoricalClassificationNN(object):
+class CategoricalClassificationNN:
     """A Torch classifier wrapper optimized by summed categorical log likelihood.
 
     The wrapped module must return one logits row per observation.  Fitting is
@@ -88,9 +109,8 @@ class CategoricalClassificationNN(object):
     objectives.
     """
 
-    def __init__(self, module: Any, engine: Optional[Any] = None,
-                 precision: Optional[Any] = None) -> None:
-        torch, engine = _torch_engine(engine, precision=precision, owner='CategoricalClassificationNN')
+    def __init__(self, module: Any, engine: Any | None = None, precision: Any | None = None) -> None:
+        torch, engine = _torch_engine(engine, precision=precision, owner="CategoricalClassificationNN")
         self.torch = torch
         self.engine = engine
         self.module = module.to(device=engine.device, dtype=engine.dtype)
@@ -120,27 +140,45 @@ class CategoricalClassificationNN(object):
         logits = self.logits_tensor(x)
         labels = self._labels(y)
         if len(logits.shape) != 2:
-            raise ValueError('classification module must return a (n, classes) logits matrix.')
+            raise ValueError("classification module must return a (n, classes) logits matrix.")
         if logits.shape[0] != labels.shape[0]:
-            raise ValueError('classification labels must match row count.')
-        return -self.torch.nn.functional.cross_entropy(logits, labels, reduction='sum')
+            raise ValueError("classification labels must match row count.")
+        return -self.torch.nn.functional.cross_entropy(logits, labels, reduction="sum")
 
-    def fit(self, x: Any, y: Any, max_its: int = 500, lr: float = 0.01,
-            optimizer: str = 'adam', tol: float = 1.0e-7,
-            out: Optional[Any] = None, print_iter: int = 100,
-            return_result: bool = False, restore_best: bool = True) -> Any:
+    def fit(
+        self,
+        x: Any,
+        y: Any,
+        max_its: int = 500,
+        lr: float = 0.01,
+        optimizer: str = "adam",
+        tol: float = 1.0e-7,
+        out: Any | None = None,
+        print_iter: int = 100,
+        return_result: bool = False,
+        restore_best: bool = True,
+    ) -> Any:
         """Maximize the categorical classification log likelihood."""
         return optimize_torch_objective(
-            self.parameters(), lambda: self.log_likelihood(x, y), engine=self.engine,
-            max_its=max_its, lr=lr, optimizer=optimizer, tol=tol,
-            maximize=True, out=out, print_iter=print_iter,
-            return_result=return_result, restore_best=restore_best)
+            self.parameters(),
+            lambda: self.log_likelihood(x, y),
+            engine=self.engine,
+            max_its=max_its,
+            lr=lr,
+            optimizer=optimizer,
+            tol=tol,
+            maximize=True,
+            out=out,
+            print_iter=print_iter,
+            return_result=return_result,
+            restore_best=restore_best,
+        )
 
     def predict_proba_tensor(self, x: Any) -> Any:
         """Return class probabilities for ``x`` as a Torch tensor."""
         logits = self.logits_tensor(x)
         if len(logits.shape) != 2:
-            raise ValueError('classification module must return a (n, classes) logits matrix.')
+            raise ValueError("classification module must return a (n, classes) logits matrix.")
         return self.torch.softmax(logits, dim=1)
 
     def predict_proba(self, x: Any) -> np.ndarray:
@@ -153,7 +191,7 @@ class CategoricalClassificationNN(object):
         return np.argmax(self.predict_proba(x), axis=1)
 
 
-class PoissonRegressionNN(object):
+class PoissonRegressionNN:
     """A Torch count-regression wrapper optimized by Poisson log likelihood.
 
     The wrapped module predicts log rates.  Observed counts must be
@@ -161,9 +199,8 @@ class PoissonRegressionNN(object):
     are promoted to column vectors.
     """
 
-    def __init__(self, module: Any, engine: Optional[Any] = None,
-                 precision: Optional[Any] = None) -> None:
-        torch, engine = _torch_engine(engine, precision=precision, owner='PoissonRegressionNN')
+    def __init__(self, module: Any, engine: Any | None = None, precision: Any | None = None) -> None:
+        torch, engine = _torch_engine(engine, precision=precision, owner="PoissonRegressionNN")
         self.torch = torch
         self.engine = engine
         self.module = module.to(device=engine.device, dtype=engine.dtype)
@@ -183,9 +220,9 @@ class PoissonRegressionNN(object):
         if len(counts.shape) == 1 and len(log_rate.shape) == 2 and log_rate.shape[1] == 1:
             counts = counts[:, None]
         if tuple(counts.shape) != tuple(log_rate.shape):
-            raise ValueError('Poisson counts must match the module log-rate shape.')
+            raise ValueError("Poisson counts must match the module log-rate shape.")
         if bool(self.torch.any(counts < 0).detach().cpu().item()):
-            raise ValueError('Poisson counts must be non-negative.')
+            raise ValueError("Poisson counts must be non-negative.")
         return counts
 
     def log_rate_tensor(self, x: Any) -> Any:
@@ -199,16 +236,34 @@ class PoissonRegressionNN(object):
         counts = self._counts_like(y, log_rate)
         return torch.sum(counts * log_rate - torch.exp(log_rate) - torch.lgamma(counts + 1.0))
 
-    def fit(self, x: Any, y: Any, max_its: int = 500, lr: float = 0.01,
-            optimizer: str = 'adam', tol: float = 1.0e-7,
-            out: Optional[Any] = None, print_iter: int = 100,
-            return_result: bool = False, restore_best: bool = True) -> Any:
+    def fit(
+        self,
+        x: Any,
+        y: Any,
+        max_its: int = 500,
+        lr: float = 0.01,
+        optimizer: str = "adam",
+        tol: float = 1.0e-7,
+        out: Any | None = None,
+        print_iter: int = 100,
+        return_result: bool = False,
+        restore_best: bool = True,
+    ) -> Any:
         """Maximize the Poisson count log likelihood."""
         return optimize_torch_objective(
-            self.parameters(), lambda: self.log_likelihood(x, y), engine=self.engine,
-            max_its=max_its, lr=lr, optimizer=optimizer, tol=tol,
-            maximize=True, out=out, print_iter=print_iter,
-            return_result=return_result, restore_best=restore_best)
+            self.parameters(),
+            lambda: self.log_likelihood(x, y),
+            engine=self.engine,
+            max_its=max_its,
+            lr=lr,
+            optimizer=optimizer,
+            tol=tol,
+            maximize=True,
+            out=out,
+            print_iter=print_iter,
+            return_result=return_result,
+            restore_best=restore_best,
+        )
 
     def predict_rate_tensor(self, x: Any) -> Any:
         """Return predicted Poisson rates as a Torch tensor."""
@@ -224,22 +279,20 @@ class PoissonRegressionNN(object):
         return np.rint(self.predict_rate(x)).astype(np.int64)
 
 
-def make_mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int = 1,
-             activation: str = 'tanh') -> Any:
+def make_mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int = 1, activation: str = "tanh") -> Any:
     """Create a simple fully connected Torch MLP."""
     try:
         import torch
     except ImportError as e:  # pragma: no cover
-        raise ImportError('make_mlp requires torch.') from e
+        raise ImportError("make_mlp requires torch.") from e
     activations = {
-        'relu': torch.nn.ReLU,
-        'tanh': torch.nn.Tanh,
-        'gelu': torch.nn.GELU,
-        'sigmoid': torch.nn.Sigmoid,
+        "relu": torch.nn.ReLU,
+        "tanh": torch.nn.Tanh,
+        "gelu": torch.nn.GELU,
+        "sigmoid": torch.nn.Sigmoid,
     }
     if activation not in activations:
-        raise ValueError('Unknown activation %s. Expected one of %s.' %
-                         (activation, ', '.join(sorted(activations))))
+        raise ValueError("Unknown activation %s. Expected one of %s." % (activation, ", ".join(sorted(activations))))
     dims = [int(input_dim)] + [int(h) for h in hidden_dims] + [int(output_dim)]
     layers = []
     for i in range(len(dims) - 1):
@@ -249,16 +302,19 @@ def make_mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int = 1,
     return torch.nn.Sequential(*layers)
 
 
-def _torch_engine(engine: Optional[Any], precision: Optional[Any] = None,
-                  owner: str = 'GaussianRegressionNN') -> Tuple[Any, Any]:
+def _torch_engine(
+    engine: Any | None, precision: Any | None = None, owner: str = "GaussianRegressionNN"
+) -> tuple[Any, Any]:
     try:
         import torch
     except ImportError as e:  # pragma: no cover
-        raise ImportError('%s requires torch.' % owner) from e
+        raise ImportError("%s requires torch." % owner) from e
     if engine is None:
         from pysp.engines import TorchEngine
+
         engine = TorchEngine(dtype=precision or torch.float64)
     elif precision is not None:
         from pysp.engines import engine_with_precision
+
         engine = engine_with_precision(engine, precision)
     return torch, engine

@@ -3,8 +3,9 @@
 Kept fast by fitting a small mixture once in setUpClass and reusing it; no DPM
 fitting is exercised here (htsne accepts a prefit mix_model).
 """
-import io
+
 import importlib
+import io
 import time
 import unittest
 
@@ -12,35 +13,67 @@ import numpy as np
 import scipy.sparse
 
 from pysp.stats import (
-    CategoricalDistribution, CategoricalEstimator, CompositeDistribution, CompositeEstimator,
-    GaussianDistribution, GaussianEstimator, HeterogeneousPCFGDistribution, HiddenMarkovModelDistribution,
-    MixtureDistribution, MixtureEstimator,
-    OptionalDistribution, seq_encode, seq_estimate, seq_initialize,
-)
-from pysp.stats import PoissonDistribution, SequenceDistribution, IntegerCategoricalDistribution
-from pysp.utils.htsne import (
-    _barnes_hut_negative_forces, _exact_negative_forces, _exact_tsne_gradient, _kl, _sparse_joint_pmat,
-    _posteriors_and_loglikes, _sparse_positive_forces_from_edges,
-    _python_barnes_hut_negative_forces, _sparse_positive_forces_symmetric_from_edges,
-    _tsne_barnes_hut_from_p,
-    approx_sparse_model_distances, balanced_factors, conditional_pmat, dpmsne, get_pmat, htsne, humap,
-    fisher_factors, local_factors, model_knn, model_log_affinity, sparse_model_distances,
-    t_kernel, tsne_exact, update_alpha, update_embed,
+    CategoricalDistribution,
+    CategoricalEstimator,
+    CompositeDistribution,
+    CompositeEstimator,
+    GaussianDistribution,
+    GaussianEstimator,
+    HeterogeneousPCFGDistribution,
+    HiddenMarkovModelDistribution,
+    IntegerCategoricalDistribution,
+    MixtureDistribution,
+    MixtureEstimator,
+    OptionalDistribution,
+    PoissonDistribution,
+    SequenceDistribution,
+    seq_encode,
+    seq_estimate,
+    seq_initialize,
 )
 from pysp.utils.fisher import FisherView
+from pysp.utils.htsne import (
+    _barnes_hut_negative_forces,
+    _exact_negative_forces,
+    _exact_tsne_gradient,
+    _kl,
+    _posteriors_and_loglikes,
+    _python_barnes_hut_negative_forces,
+    _sparse_joint_pmat,
+    _sparse_positive_forces_from_edges,
+    _sparse_positive_forces_symmetric_from_edges,
+    _tsne_barnes_hut_from_p,
+    approx_sparse_model_distances,
+    balanced_factors,
+    conditional_pmat,
+    dpmsne,
+    fisher_factors,
+    get_pmat,
+    htsne,
+    humap,
+    local_factors,
+    model_knn,
+    model_log_affinity,
+    sparse_model_distances,
+    t_kernel,
+    tsne_exact,
+    update_alpha,
+    update_embed,
+)
 from pysp.utils.optional_deps import HAS_NUMBA
 
-HAS_UMAP = importlib.util.find_spec('umap') is not None
+HAS_UMAP = importlib.util.find_spec("umap") is not None
 
 
 def make_data_and_model(n, seed=1):
     """Three well-separated heterogeneous clusters and a mixture fit to them."""
     comps = [
-        CompositeDistribution((GaussianDistribution(mu, 1.0),
-                               CategoricalDistribution(pm)))
-        for mu, pm in [(-12.0, {'a': 0.8, 'b': 0.1, 'c': 0.1}),
-                       (0.0, {'a': 0.1, 'b': 0.8, 'c': 0.1}),
-                       (12.0, {'a': 0.1, 'b': 0.1, 'c': 0.8})]
+        CompositeDistribution((GaussianDistribution(mu, 1.0), CategoricalDistribution(pm)))
+        for mu, pm in [
+            (-12.0, {"a": 0.8, "b": 0.1, "c": 0.1}),
+            (0.0, {"a": 0.1, "b": 0.8, "c": 0.1}),
+            (12.0, {"a": 0.1, "b": 0.1, "c": 0.8}),
+        ]
     ]
     truth = MixtureDistribution(comps, [1.0 / 3] * 3)
     data = truth.sampler(seed=seed).sample(size=n)
@@ -58,10 +91,12 @@ def make_data_and_model(n, seed=1):
 def separation_ratio(y, labels):
     """Mean between-centroid distance over mean within-cluster spread."""
     cents = np.stack([y[labels == c].mean(axis=0) for c in np.unique(labels)])
-    within = np.mean([np.linalg.norm(y[labels == c] - cents[i], axis=1).mean()
-                      for i, c in enumerate(np.unique(labels))])
-    between = np.mean([np.linalg.norm(cents[i] - cents[j])
-                       for i in range(len(cents)) for j in range(i + 1, len(cents))])
+    within = np.mean(
+        [np.linalg.norm(y[labels == c] - cents[i], axis=1).mean() for i, c in enumerate(np.unique(labels))]
+    )
+    between = np.mean(
+        [np.linalg.norm(cents[i] - cents[j]) for i in range(len(cents)) for j in range(i + 1, len(cents))]
+    )
     return between / max(within, 1.0e-12)
 
 
@@ -125,18 +160,18 @@ class _VandermondeMomentModel:
 
 
 class HTSNETestCase(unittest.TestCase):
-
     @classmethod
     def setUpClass(cls):
         cls.n = 240
         cls.data, cls.labels, cls.model = make_data_and_model(cls.n)
         from pysp.utils.htsne import _posteriors_and_loglikes
+
         cls.z, cls.l = _posteriors_and_loglikes(cls.model, data=cls.data)
 
     # ---- affinity construction -------------------------------------------------
 
     def test_log_affinity_shape_and_diag(self):
-        for aff in ('coassign', 'bhattacharyya', 'likelihood'):
+        for aff in ("coassign", "bhattacharyya", "likelihood"):
             log_s = model_log_affinity(self.z, self.l, affinity=aff)
             self.assertEqual(log_s.shape, (self.n, self.n))
             self.assertTrue(np.all(np.isneginf(np.diag(log_s))))
@@ -146,7 +181,7 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_coassign_is_posterior_similarity(self):
         # s_ij = P(z_i = z_j | x) = sum_k z_ik z_jk: exact, symmetric, in [0, 1]
-        log_s = model_log_affinity(self.z, affinity='coassign')
+        log_s = model_log_affinity(self.z, affinity="coassign")
         s = np.exp(log_s)
         expected = np.dot(self.z, self.z.T)
         expected[np.arange(self.n), np.arange(self.n)] = 0.0
@@ -156,8 +191,8 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_bhattacharyya_bounds_coassign(self):
         # BC >= co-assignment probability (Cauchy-Schwarz), both <= 1
-        s_co = np.exp(model_log_affinity(self.z, affinity='coassign'))
-        s_bc = np.exp(model_log_affinity(self.z, affinity='bhattacharyya'))
+        s_co = np.exp(model_log_affinity(self.z, affinity="coassign"))
+        s_bc = np.exp(model_log_affinity(self.z, affinity="bhattacharyya"))
         self.assertTrue(np.all(s_bc >= s_co - 1.0e-12))
         self.assertTrue(np.all(s_bc <= 1 + 1.0e-12))
 
@@ -171,7 +206,7 @@ class HTSNETestCase(unittest.TestCase):
 
     @staticmethod
     def _row_entropies(p):
-        with np.errstate(divide='ignore', invalid='ignore'):
+        with np.errstate(divide="ignore", invalid="ignore"):
             lp = np.where(p > 0, np.log(p), 0.0)
         return -np.sum(p * lp, axis=1)
 
@@ -183,8 +218,10 @@ class HTSNETestCase(unittest.TestCase):
         log_aff[np.arange(m), np.arange(m)] = -np.inf
         for px in (5.0, 20.0, 50.0):
             ent = self._row_entropies(conditional_pmat(log_aff, perplexity=px))
-            self.assertTrue(np.allclose(ent, np.log(px), atol=5.0e-3),
-                            'max entropy err %g for perplexity %g' % (np.abs(ent - np.log(px)).max(), px))
+            self.assertTrue(
+                np.allclose(ent, np.log(px), atol=5.0e-3),
+                "max entropy err %g for perplexity %g" % (np.abs(ent - np.log(px)).max(), px),
+            )
 
     def test_perplexity_calibration_saturates_on_ties(self):
         # model affinities from a K-component mixture are low-rank, so rows have
@@ -206,8 +243,8 @@ class HTSNETestCase(unittest.TestCase):
         # adding per-row offsets to the log-likelihood matrix (e.g. from
         # variable-length observations) must not change the conditionals
         shift = np.random.RandomState(0).uniform(-50, 50, size=(self.n, 1))
-        p0 = get_pmat(self.z, self.l, targ_perplexity=None, affinity='likelihood')
-        p1 = get_pmat(self.z, self.l + shift, targ_perplexity=None, affinity='likelihood')
+        p0 = get_pmat(self.z, self.l, targ_perplexity=None, affinity="likelihood")
+        p1 = get_pmat(self.z, self.l + shift, targ_perplexity=None, affinity="likelihood")
         self.assertTrue(np.allclose(p0, p1, atol=1.0e-12))
 
         # and with calibration, on tie-free affinities
@@ -234,9 +271,7 @@ class HTSNETestCase(unittest.TestCase):
             dense_vals = np.sort(log_s[i])[::-1][:k]
             sparse_vals = np.sort(log_s[i, d_csr[i].indices])[::-1]
             self.assertTrue(np.allclose(dense_vals, sparse_vals, atol=1.0e-9))
-            self.assertTrue(np.allclose(d_csr[i].data,
-                                        np.maximum(-log_s[i, d_csr[i].indices], 0.0),
-                                        atol=1.0e-12))
+            self.assertTrue(np.allclose(d_csr[i].data, np.maximum(-log_s[i, d_csr[i].indices], 0.0), atol=1.0e-12))
 
     def test_local_affinity_resolves_within_component_geometry(self):
         data = [-3.0, 0.0, 0.1, 4.0]
@@ -254,9 +289,9 @@ class HTSNETestCase(unittest.TestCase):
     def test_fisher_affinity_resolves_within_component_geometry(self):
         data = [-3.0, 0.0, 0.1, 4.0]
         model = MixtureDistribution([GaussianDistribution(0.0, 4.0)], [1.0])
-        factors = fisher_factors(model, data=data, metric='diagonal')
+        factors = fisher_factors(model, data=data, metric="diagonal")
         self.assertEqual(len(factors), 1)
-        self.assertEqual(factors[0]['kind'], 'fisher')
+        self.assertEqual(factors[0]["kind"], "fisher")
 
         log_s = model_log_affinity(None, None, affinity=factors)
         self.assertGreater(log_s[1, 2], log_s[1, 3])
@@ -266,10 +301,10 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_fisher_affinity_uses_fisher_vectors(self):
         data = self.data[:35]
-        factors = fisher_factors(self.model, data=data, metric='diagonal')
+        factors = fisher_factors(self.model, data=data, metric="diagonal")
         self.assertEqual(len(factors), 1)
-        self.assertEqual(factors[0]['kind'], 'fisher')
-        self.assertEqual(factors[0]['x'].shape[0], len(data))
+        self.assertEqual(factors[0]["kind"], "fisher")
+        self.assertEqual(factors[0]["x"].shape[0], len(data))
 
         log_s = model_log_affinity(None, None, affinity=factors)
         self.assertEqual(log_s.shape, (len(data), len(data)))
@@ -289,14 +324,13 @@ class HTSNETestCase(unittest.TestCase):
     def test_fisher_affinity_raw_and_encoded_match(self):
         data = self.data[:35]
         enc = self.model.dist_to_encoder().seq_encode(data)
-        f_raw = fisher_factors(self.model, data=data, metric='diagonal')
-        f_enc = fisher_factors(self.model, enc_data=enc, metric='diagonal')
+        f_raw = fisher_factors(self.model, data=data, metric="diagonal")
+        f_enc = fisher_factors(self.model, enc_data=enc, metric="diagonal")
 
-        np.testing.assert_allclose(f_enc[0]['x'], f_raw[0]['x'], atol=1.0e-10)
+        np.testing.assert_allclose(f_enc[0]["x"], f_raw[0]["x"], atol=1.0e-10)
         np.testing.assert_allclose(
-            model_log_affinity(None, None, affinity=f_enc),
-            model_log_affinity(None, None, affinity=f_raw),
-            atol=1.0e-10)
+            model_log_affinity(None, None, affinity=f_enc), model_log_affinity(None, None, affinity=f_raw), atol=1.0e-10
+        )
 
     def test_fisher_affinity_uses_observed_score_covariance(self):
         data = self.data[:40]
@@ -308,20 +342,18 @@ class HTSNETestCase(unittest.TestCase):
         diag = np.mean(centered * centered, axis=0)
         expected = centered / np.sqrt(diag.reshape((1, -1)) + ridge)
 
-        factors = fisher_factors(self.model, data=data, metric='diagonal',
-                                 ridge=ridge, information='observed')
-        np.testing.assert_allclose(factors[0]['x'], expected, atol=1.0e-10)
+        factors = fisher_factors(self.model, data=data, metric="diagonal", ridge=ridge, information="observed")
+        np.testing.assert_allclose(factors[0]["x"], expected, atol=1.0e-10)
 
-        model_factors = fisher_factors(self.model, data=data, metric='diagonal',
-                                       ridge=ridge, information='model')
-        self.assertFalse(np.allclose(model_factors[0]['x'], factors[0]['x']))
+        model_factors = fisher_factors(self.model, data=data, metric="diagonal", ridge=ridge, information="model")
+        self.assertFalse(np.allclose(model_factors[0]["x"], factors[0]["x"]))
 
     def test_fisher_affinity_is_gaussian_kernel_on_fisher_vectors(self):
         data = np.linspace(-2.0, 2.0, 7)
-        factors = fisher_factors(GaussianDistribution(0.0, 2.0), data=data, metric='diagonal')
+        factors = fisher_factors(GaussianDistribution(0.0, 2.0), data=data, metric="diagonal")
         log_s = model_log_affinity(None, None, affinity=factors)
 
-        x = factors[0]['x']
+        x = factors[0]["x"]
         d2 = np.sum((x[:, None, :] - x[None, :, :]) ** 2, axis=2)
         expected = -0.5 * d2
         expected[np.arange(len(data)), np.arange(len(data))] = -np.inf
@@ -337,94 +369,129 @@ class HTSNETestCase(unittest.TestCase):
     def test_fisher_affinity_does_not_require_dpm_or_mixture_model(self):
         model = CompositeDistribution((GaussianDistribution(0.0, 1.0), PoissonDistribution(3.0)))
         data = [(-2.0, 1), (-1.8, 1), (-0.1, 3), (0.1, 3), (2.0, 8), (2.2, 8)]
-        factors = fisher_factors(model, data=data, metric='diagonal')
+        factors = fisher_factors(model, data=data, metric="diagonal")
         log_s = model_log_affinity(None, None, affinity=factors)
 
         self.assertGreater(log_s[0, 1], log_s[0, 5])
 
-        y_model = htsne(data, mix_model=model, affinity='fisher', method='exact',
-                        perplexity=2.0, max_its=5, seed=10, out=io.StringIO())
+        y_model = htsne(
+            data,
+            mix_model=model,
+            affinity="fisher",
+            method="exact",
+            perplexity=2.0,
+            max_its=5,
+            seed=10,
+            out=io.StringIO(),
+        )
         self.assertEqual(y_model.shape, (len(data), 2))
         self.assertTrue(np.all(np.isfinite(y_model)))
 
-        y_prebuilt = htsne(None, mix_model=None, affinity=factors, method='exact',
-                           perplexity=2.0, max_its=5, seed=10, out=io.StringIO())
+        y_prebuilt = htsne(
+            None,
+            mix_model=None,
+            affinity=factors,
+            method="exact",
+            perplexity=2.0,
+            max_its=5,
+            seed=10,
+            out=io.StringIO(),
+        )
         self.assertEqual(y_prebuilt.shape, (len(data), 2))
         self.assertTrue(np.all(np.isfinite(y_prebuilt)))
 
     def test_fisher_affinity_supports_pcfg_model(self):
         model = HeterogeneousPCFGDistribution(
-            binary_rules={'S': [('A', 'B', 0.45), ('B', 'A', 0.55)]},
+            binary_rules={"S": [("A", "B", 0.45), ("B", "A", 0.55)]},
             terminal_rules={
-                'A': [(CategoricalDistribution({'a': 0.75, 'b': 0.25}), 1.0)],
-                'B': [(CategoricalDistribution({'x': 0.7, 'y': 0.3}), 1.0)],
+                "A": [(CategoricalDistribution({"a": 0.75, "b": 0.25}), 1.0)],
+                "B": [(CategoricalDistribution({"x": 0.7, "y": 0.3}), 1.0)],
             },
-            start='S')
-        data = [['a', 'x'], ['a', 'y'], ['b', 'x'], ['x', 'a'], ['y', 'a'], ['x', 'b']]
+            start="S",
+        )
+        data = [["a", "x"], ["a", "y"], ["b", "x"], ["x", "a"], ["y", "a"], ["x", "b"]]
         enc = model.dist_to_encoder().seq_encode(data)
 
-        f_raw = fisher_factors(model, data=data, metric='diagonal')
-        f_enc = fisher_factors(model, enc_data=enc, metric='diagonal')
-        np.testing.assert_allclose(f_enc[0]['x'], f_raw[0]['x'], atol=1.0e-10)
+        f_raw = fisher_factors(model, data=data, metric="diagonal")
+        f_enc = fisher_factors(model, enc_data=enc, metric="diagonal")
+        np.testing.assert_allclose(f_enc[0]["x"], f_raw[0]["x"], atol=1.0e-10)
 
         log_s = model_log_affinity(None, None, affinity=f_raw)
         self.assertEqual(log_s.shape, (len(data), len(data)))
         self.assertTrue(np.all(np.isfinite(log_s[~np.eye(len(data), dtype=bool)])))
 
-        y = htsne(data, mix_model=model, affinity='fisher', method='exact',
-                  perplexity=3.0, max_its=5, print_iter=1000, seed=8,
-                  out=io.StringIO())
+        y = htsne(
+            data,
+            mix_model=model,
+            affinity="fisher",
+            method="exact",
+            perplexity=3.0,
+            max_its=5,
+            print_iter=1000,
+            seed=8,
+            out=io.StringIO(),
+        )
         self.assertEqual(y.shape, (len(data), 2))
         self.assertTrue(np.all(np.isfinite(y)))
 
     def test_fisher_affinity_supports_hmm_model(self):
         model = HiddenMarkovModelDistribution(
             [
-                CategoricalDistribution({'a': 0.85, 'b': 0.15}),
-                CategoricalDistribution({'a': 0.2, 'b': 0.8}),
+                CategoricalDistribution({"a": 0.85, "b": 0.15}),
+                CategoricalDistribution({"a": 0.2, "b": 0.8}),
             ],
             [0.6, 0.4],
             [[0.75, 0.25], [0.2, 0.8]],
-            len_dist=IntegerCategoricalDistribution(2, [1.0]))
-        data = [['a', 'a'], ['a', 'b'], ['b', 'a'], ['b', 'b'], ['a', 'a'], ['b', 'b']]
+            len_dist=IntegerCategoricalDistribution(2, [1.0]),
+        )
+        data = [["a", "a"], ["a", "b"], ["b", "a"], ["b", "b"], ["a", "a"], ["b", "b"]]
         enc = model.dist_to_encoder().seq_encode(data)
 
-        f_raw = fisher_factors(model, data=data, metric='diagonal')
-        f_enc = fisher_factors(model, enc_data=enc, metric='diagonal')
-        np.testing.assert_allclose(f_enc[0]['x'], f_raw[0]['x'], atol=1.0e-10)
+        f_raw = fisher_factors(model, data=data, metric="diagonal")
+        f_enc = fisher_factors(model, enc_data=enc, metric="diagonal")
+        np.testing.assert_allclose(f_enc[0]["x"], f_raw[0]["x"], atol=1.0e-10)
 
         log_s = model_log_affinity(None, None, affinity=f_raw)
         self.assertEqual(log_s.shape, (len(data), len(data)))
         self.assertTrue(np.all(np.isfinite(log_s[~np.eye(len(data), dtype=bool)])))
 
-        y = htsne(data, mix_model=model, affinity='fisher', method='exact',
-                  perplexity=3.0, max_its=5, print_iter=1000, seed=9,
-                  out=io.StringIO())
+        y = htsne(
+            data,
+            mix_model=model,
+            affinity="fisher",
+            method="exact",
+            perplexity=3.0,
+            max_its=5,
+            print_iter=1000,
+            seed=9,
+            out=io.StringIO(),
+        )
         self.assertEqual(y.shape, (len(data), 2))
         self.assertTrue(np.all(np.isfinite(y)))
 
     def test_fisher_hard_assignments_match_coassign_partition(self):
-        data = ['a', 'a', 'b', 'b', 'a', 'b']
-        labels = np.asarray([0 if x == 'a' else 1 for x in data])
+        data = ["a", "a", "b", "b", "a", "b"]
+        labels = np.asarray([0 if x == "a" else 1 for x in data])
         model = MixtureDistribution(
             [
-                CategoricalDistribution({'a': 1.0, 'b': 0.0}),
-                CategoricalDistribution({'a': 0.0, 'b': 1.0}),
+                CategoricalDistribution({"a": 1.0, "b": 0.0}),
+                CategoricalDistribution({"a": 0.0, "b": 1.0}),
             ],
-            [0.5, 0.5])
+            [0.5, 0.5],
+        )
 
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             z, l = _posteriors_and_loglikes(model, data=data)
-            log_co = model_log_affinity(z, l, affinity='coassign')
-            log_bh = model_log_affinity(z, l, affinity='bhattacharyya')
-            factors = fisher_factors(model, data=data, metric='diagonal')
+            log_co = model_log_affinity(z, l, affinity="coassign")
+            log_bh = model_log_affinity(z, l, affinity="bhattacharyya")
+            factors = fisher_factors(model, data=data, metric="diagonal")
             log_f = model_log_affinity(None, None, affinity=factors)
 
         np.testing.assert_allclose(np.exp(log_co), np.exp(log_bh), atol=1.0e-12)
 
         off = ~np.eye(len(data), dtype=bool)
         same = (labels[:, None] == labels[None, :]) & off
-        diff = (labels[:, None] != labels[None, :])
+        diff = labels[:, None] != labels[None, :]
         np.testing.assert_allclose(log_f[same], 0.0, atol=1.0e-12)
         self.assertLess(float(log_f[diff].max()), float(log_f[same].min()))
 
@@ -434,42 +501,56 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_htsne_fisher_affinity_exact_smoke(self):
         data = self.data[:30]
-        y = htsne(data, mix_model=self.model, method='exact', affinity='fisher',
-                  perplexity=8.0, max_its=5, print_iter=1000, seed=4,
-                  out=io.StringIO())
+        y = htsne(
+            data,
+            mix_model=self.model,
+            method="exact",
+            affinity="fisher",
+            perplexity=8.0,
+            max_its=5,
+            print_iter=1000,
+            seed=4,
+            out=io.StringIO(),
+        )
         self.assertEqual(y.shape, (len(data), 2))
         self.assertTrue(np.all(np.isfinite(y)))
 
     def test_htsne_fisher_affinity_encoded_exact_smoke(self):
         data = self.data[:30]
         enc = self.model.dist_to_encoder().seq_encode(data)
-        y = htsne(None, mix_model=self.model, enc_data=enc, method='exact',
-                  affinity='fisher', perplexity=8.0, max_its=5,
-                  print_iter=1000, seed=4, out=io.StringIO())
+        y = htsne(
+            None,
+            mix_model=self.model,
+            enc_data=enc,
+            method="exact",
+            affinity="fisher",
+            perplexity=8.0,
+            max_its=5,
+            print_iter=1000,
+            seed=4,
+            out=io.StringIO(),
+        )
         self.assertEqual(y.shape, (len(data), 2))
         self.assertTrue(np.all(np.isfinite(y)))
 
     def test_fisher_model_knn_matches_dense_affinity(self):
         data = self.data[:40]
-        factors = fisher_factors(self.model, data=data, metric='diagonal')
+        factors = fisher_factors(self.model, data=data, metric="diagonal")
         log_s = model_log_affinity(None, None, affinity=factors)
 
         idx, dist = model_knn(None, None, k=7, affinity=factors, block_size=13)
         self.assertEqual(idx.shape, (len(data), 7))
         self.assertTrue(np.all(idx[:, 0] == np.arange(len(data))))
         for i in (0, 11, len(data) - 1):
-            np.testing.assert_allclose(
-                dist[i, 1:],
-                np.maximum(-log_s[i, idx[i, 1:]], 0.0),
-                atol=1.0e-12)
+            np.testing.assert_allclose(dist[i, 1:], np.maximum(-log_s[i, idx[i, 1:]], 0.0), atol=1.0e-12)
 
     def test_fisher_approx_sparse_distances_can_reduce_to_exact(self):
         data = self.data[:45]
-        factors = fisher_factors(self.model, data=data, metric='diagonal')
+        factors = fisher_factors(self.model, data=data, metric="diagonal")
         k = 8
         d_csr = approx_sparse_model_distances(
-            None, None, k=k, affinity=factors, n_trees=1, leaf_size=len(data),
-            candidate_multiplier=1, seed=6)
+            None, None, k=k, affinity=factors, n_trees=1, leaf_size=len(data), candidate_multiplier=1, seed=6
+        )
         self.assertEqual(d_csr.shape, (len(data), len(data)))
         self.assertTrue(np.all(d_csr.getnnz(axis=1) == k))
 
@@ -481,13 +562,13 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_fisher_information_mode_is_validated(self):
         with self.assertRaises(ValueError):
-            fisher_factors(self.model, data=self.data[:5], information='complete')
+            fisher_factors(self.model, data=self.data[:5], information="complete")
 
     def test_approx_sparse_distances_can_reduce_to_exact(self):
         k = 10
         d_csr = approx_sparse_model_distances(
-            self.z, self.l, k=k, n_trees=1, leaf_size=self.n,
-            candidate_multiplier=1, seed=5)
+            self.z, self.l, k=k, n_trees=1, leaf_size=self.n, candidate_multiplier=1, seed=5
+        )
         self.assertEqual(d_csr.shape, (self.n, self.n))
         self.assertTrue(np.all(d_csr.getnnz(axis=1) == k))
 
@@ -571,19 +652,17 @@ class HTSNETestCase(unittest.TestCase):
         rng = np.random.RandomState(14)
         n = 30
         y = rng.randn(n, 2)
-        a = scipy.sparse.random(n, n, density=0.2, random_state=rng, format='csr')
+        a = scipy.sparse.random(n, n, density=0.2, random_state=rng, format="csr")
         p_coo = (a + a.T).tocoo()
         keep = p_coo.row != p_coo.col
-        p = scipy.sparse.csr_matrix((p_coo.data[keep], (p_coo.row[keep], p_coo.col[keep])),
-                                    shape=p_coo.shape)
+        p = scipy.sparse.csr_matrix((p_coo.data[keep], (p_coo.row[keep], p_coo.col[keep])), shape=p_coo.shape)
         p.eliminate_zeros()
         p = p / p.sum()
         full = p.tocoo()
         upper = scipy.sparse.triu(p, k=1).tocoo()
 
         f_full = _sparse_positive_forces_from_edges(full.row, full.col, full.data, y, scale=3.0)
-        f_upper = _sparse_positive_forces_symmetric_from_edges(
-            upper.row, upper.col, upper.data, y, scale=3.0)
+        f_upper = _sparse_positive_forces_symmetric_from_edges(upper.row, upper.col, upper.data, y, scale=3.0)
         np.testing.assert_allclose(f_upper, f_full, atol=1.0e-12)
 
     def test_barnes_hut_exact_one_step_matches_dense_update_on_complete_graph(self):
@@ -598,17 +677,26 @@ class HTSNETestCase(unittest.TestCase):
         p_sparse = scipy.sparse.csr_matrix(p)
 
         y_dense, _, _, _ = update_embed(
-            p, y.copy(), np.zeros_like(y), np.ones_like(y),
-            momentum=0.0, eta=7.0, alpha=1.0, min_gain=0.01)
+            p, y.copy(), np.zeros_like(y), np.ones_like(y), momentum=0.0, eta=7.0, alpha=1.0, min_gain=0.01
+        )
         y_bh = _tsne_barnes_hut_from_p(
-            p_sparse, Y=y.copy(), max_its=1, eta=7.0, momentum=0.0,
-            early_exaggeration=1.0, early_its=0, min_gain=0.01,
-            repulsion_method='exact', print_iter=1000, check_every=1000,
-            out=io.StringIO())
+            p_sparse,
+            Y=y.copy(),
+            max_its=1,
+            eta=7.0,
+            momentum=0.0,
+            early_exaggeration=1.0,
+            early_its=0,
+            min_gain=0.01,
+            repulsion_method="exact",
+            print_iter=1000,
+            check_every=1000,
+            out=io.StringIO(),
+        )
         np.testing.assert_allclose(y_bh, y_dense, atol=1.0e-10)
 
     def test_barnes_hut_respects_max_iterations(self):
-        mod = importlib.import_module('pysp.utils.htsne')
+        mod = importlib.import_module("pysp.utils.htsne")
         rng = np.random.RandomState(16)
         n = 12
         a = rng.rand(n, n)
@@ -626,9 +714,17 @@ class HTSNETestCase(unittest.TestCase):
         try:
             mod._negative_forces = counted
             mod._tsne_barnes_hut_from_p(
-                p, Y=y, max_its=3, eta=1.0, early_exaggeration=1.0,
-                early_its=250, print_iter=1000, check_every=1000,
-                repulsion_method='exact', out=io.StringIO())
+                p,
+                Y=y,
+                max_its=3,
+                eta=1.0,
+                early_exaggeration=1.0,
+                early_its=250,
+                print_iter=1000,
+                check_every=1000,
+                repulsion_method="exact",
+                out=io.StringIO(),
+            )
         finally:
             mod._negative_forces = old
 
@@ -690,8 +786,8 @@ class HTSNETestCase(unittest.TestCase):
         np.testing.assert_allclose(grad, 0.0, atol=1.0e-12)
 
         y2, iy2, gains2, _ = update_embed(
-            p, y.copy(), np.zeros_like(y), np.ones_like(y),
-            momentum=0.0, eta=100.0, alpha=1.0, min_gain=0.01)
+            p, y.copy(), np.zeros_like(y), np.ones_like(y), momentum=0.0, eta=100.0, alpha=1.0, min_gain=0.01
+        )
         np.testing.assert_allclose(y2, y, atol=1.0e-10)
         np.testing.assert_allclose(iy2, 0.0, atol=1.0e-10)
         self.assertTrue(np.all(gains2 >= 0.01))
@@ -706,9 +802,9 @@ class HTSNETestCase(unittest.TestCase):
         np.testing.assert_allclose(stats, expected, atol=1.0e-12)
         self.assertEqual(np.linalg.matrix_rank(stats), degree + 1)
 
-        factors = fisher_factors(model, data=x, metric='identity')
+        factors = fisher_factors(model, data=x, metric="identity")
         expected_vectors = expected - expected.mean(axis=0, keepdims=True)
-        np.testing.assert_allclose(factors[0]['x'], expected_vectors, atol=1.0e-12)
+        np.testing.assert_allclose(factors[0]["x"], expected_vectors, atol=1.0e-12)
 
         log_s = model_log_affinity(None, None, affinity=factors)
         d2 = np.sum((expected_vectors[:, None, :] - expected_vectors[None, :, :]) ** 2, axis=2)
@@ -723,8 +819,16 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_exact_embedding_converges_and_separates(self):
         t0 = time.time()
-        y = htsne(self.data, mix_model=self.model, perplexity=20.0, method='exact',
-                  affinity='balanced', max_its=400, seed=3, out=io.StringIO())
+        y = htsne(
+            self.data,
+            mix_model=self.model,
+            perplexity=20.0,
+            method="exact",
+            affinity="balanced",
+            max_its=400,
+            seed=3,
+            out=io.StringIO(),
+        )
         self.assertLess(time.time() - t0, 30.0)
         self.assertEqual(y.shape, (self.n, 2))
         self.assertGreater(separation_ratio(y, self.labels), 3.0)
@@ -732,8 +836,7 @@ class HTSNETestCase(unittest.TestCase):
     def test_default_local_embedding_runs(self):
         data = self.data[:75]
         labels = self.labels[:75]
-        y = htsne(data, mix_model=self.model, perplexity=10.0, method='exact',
-                  max_its=300, seed=3, out=io.StringIO())
+        y = htsne(data, mix_model=self.model, perplexity=10.0, method="exact", max_its=300, seed=3, out=io.StringIO())
         self.assertEqual(y.shape, (len(data), 2))
         self.assertTrue(np.all(np.isfinite(y)))
         self.assertGreater(separation_ratio(y, labels), 1.5)
@@ -742,29 +845,56 @@ class HTSNETestCase(unittest.TestCase):
         p = get_pmat(self.z, self.l, targ_perplexity=20.0)
         buf = io.StringIO()
         tsne_exact(p, max_its=300, seed=3, print_iter=50, out=buf)
-        kls = [float(line.rsplit('=', 1)[1]) for line in buf.getvalue().strip().split('\n')]
+        kls = [float(line.rsplit("=", 1)[1]) for line in buf.getvalue().strip().split("\n")]
         self.assertGreater(len(kls), 2)
         self.assertLess(kls[-1], kls[0])
         self.assertLess(kls[-1], 1.0)
 
     def test_barnes_hut_embedding(self):
         t0 = time.time()
-        y = htsne(self.data, mix_model=self.model, perplexity=20.0, method='barnes_hut',
-                  affinity='balanced', max_its=350, seed=3, out=io.StringIO())
+        y = htsne(
+            self.data,
+            mix_model=self.model,
+            perplexity=20.0,
+            method="barnes_hut",
+            affinity="balanced",
+            max_its=350,
+            seed=3,
+            out=io.StringIO(),
+        )
         self.assertLess(time.time() - t0, 60.0)
         self.assertEqual(y.shape, (self.n, 2))
         self.assertGreater(separation_ratio(y, self.labels), 3.0)
 
     def test_barnes_hut_approx_neighbor_embedding(self):
-        y = htsne(self.data[:30], mix_model=self.model, perplexity=5.0, method='barnes_hut',
-                  affinity='balanced', neighbor_method='approx', neighbor_trees=2, neighbor_leaf_size=20,
-                  candidate_multiplier=2, max_its=300, seed=3, out=io.StringIO())
+        y = htsne(
+            self.data[:30],
+            mix_model=self.model,
+            perplexity=5.0,
+            method="barnes_hut",
+            affinity="balanced",
+            neighbor_method="approx",
+            neighbor_trees=2,
+            neighbor_leaf_size=20,
+            candidate_multiplier=2,
+            max_its=300,
+            seed=3,
+            out=io.StringIO(),
+        )
         self.assertEqual(y.shape, (30, 2))
         self.assertTrue(np.all(np.isfinite(y)))
 
     def test_optimize_alpha_path(self):
-        y = htsne(self.data[:100], mix_model=self.model, perplexity=10.0, method='exact',
-                  optimize_alpha=True, max_its=300, seed=3, out=io.StringIO())
+        y = htsne(
+            self.data[:100],
+            mix_model=self.model,
+            perplexity=10.0,
+            method="exact",
+            optimize_alpha=True,
+            max_its=300,
+            seed=3,
+            out=io.StringIO(),
+        )
         self.assertEqual(y.shape, (100, 2))
         self.assertTrue(np.all(np.isfinite(y)))
 
@@ -786,14 +916,13 @@ class HTSNETestCase(unittest.TestCase):
         self.assertTrue(np.all(dist >= 0.0))
         log_s = model_log_affinity(self.z, self.l)
         for i in (0, 17, self.n - 1):
-            self.assertTrue(np.allclose(dist[i, 1:],
-                                        np.maximum(-log_s[i, idx[i, 1:]], 0.0),
-                                        atol=1.0e-12))
+            self.assertTrue(np.allclose(dist[i, 1:], np.maximum(-log_s[i, idx[i, 1:]], 0.0), atol=1.0e-12))
 
     @unittest.skipUnless(HAS_UMAP, "umap-learn is not installed")
     def test_humap_embedding(self):
-        y = humap(self.data, mix_model=self.model, n_neighbors=15, affinity='balanced',
-                  n_epochs=50, seed=4, out=io.StringIO())
+        y = humap(
+            self.data, mix_model=self.model, n_neighbors=15, affinity="balanced", n_epochs=50, seed=4, out=io.StringIO()
+        )
         self.assertEqual(y.shape, (self.n, 2))
         self.assertTrue(np.all(np.isfinite(y)))
         self.assertGreater(separation_ratio(y, self.labels), 2.0)
@@ -807,13 +936,10 @@ class HTSNETestCase(unittest.TestCase):
         len_probs[2:60] = 1.0
         len_probs /= len_probs.sum()
         len_dist = IntegerCategoricalDistribution(min_val=0, p_vec=len_probs)
-        topic_a = SequenceDistribution(
-            IntegerCategoricalDistribution(0, [0.85, 0.05, 0.05, 0.05]), len_dist=len_dist)
-        topic_b = SequenceDistribution(
-            IntegerCategoricalDistribution(0, [0.05, 0.05, 0.05, 0.85]), len_dist=len_dist)
+        topic_a = SequenceDistribution(IntegerCategoricalDistribution(0, [0.85, 0.05, 0.05, 0.05]), len_dist=len_dist)
+        topic_b = SequenceDistribution(IntegerCategoricalDistribution(0, [0.05, 0.05, 0.05, 0.85]), len_dist=len_dist)
 
-        data = topic_a.sampler(seed=seed).sample(size=n_per) + \
-            topic_b.sampler(seed=seed + 1).sample(size=n_per)
+        data = topic_a.sampler(seed=seed).sample(size=n_per) + topic_b.sampler(seed=seed + 1).sample(size=n_per)
         labels = np.repeat([0, 1], n_per)
         model = MixtureDistribution([topic_a, topic_b], [0.5, 0.5])
         return data, labels, model
@@ -824,6 +950,7 @@ class HTSNETestCase(unittest.TestCase):
         # of the same topic should both have near-1 affinity
         data, labels, model = self._varlen_data_and_model(60)
         from pysp.utils.htsne import _posteriors_and_loglikes
+
         z, _ = _posteriors_and_loglikes(model, data=data)
         s = np.dot(z, z.T)
         lengths = np.asarray([len(x) for x in data])
@@ -837,8 +964,16 @@ class HTSNETestCase(unittest.TestCase):
         data, labels, model = self._varlen_data_and_model(120)
         lengths = np.asarray([len(x) for x in data], dtype=float)
 
-        y = htsne(data, mix_model=model, perplexity=20.0, method='exact', affinity='balanced',
-                  max_its=350, seed=3, out=io.StringIO())
+        y = htsne(
+            data,
+            mix_model=model,
+            perplexity=20.0,
+            method="exact",
+            affinity="balanced",
+            max_its=350,
+            seed=3,
+            out=io.StringIO(),
+        )
         self.assertGreater(separation_ratio(y, labels), 2.0)
 
         # the embedding should not be organized by observation length: within
@@ -847,8 +982,10 @@ class HTSNETestCase(unittest.TestCase):
             yc, lc = y[labels == c], lengths[labels == c]
             short, long_ = yc[lc <= np.median(lc)], yc[lc > np.median(lc)]
             gap = np.linalg.norm(short.mean(0) - long_.mean(0))
-            spread = 0.5 * (np.linalg.norm(short - short.mean(0), axis=1).mean()
-                            + np.linalg.norm(long_ - long_.mean(0), axis=1).mean())
+            spread = 0.5 * (
+                np.linalg.norm(short - short.mean(0), axis=1).mean()
+                + np.linalg.norm(long_ - long_.mean(0), axis=1).mean()
+            )
             self.assertLess(gap, 2.0 * spread)
 
     def test_sequence_field_log_density_sums_unless_len_normalized(self):
@@ -857,16 +994,16 @@ class HTSNETestCase(unittest.TestCase):
         data = [[0], [0, 0, 0]]
         len_dist = PoissonDistribution(2.0)
         raw_components = [
-            SequenceDistribution(IntegerCategoricalDistribution(0, [0.8, 0.2]),
-                                 len_dist=len_dist, len_normalized=False),
-            SequenceDistribution(IntegerCategoricalDistribution(0, [0.2, 0.8]),
-                                 len_dist=len_dist, len_normalized=False),
+            SequenceDistribution(
+                IntegerCategoricalDistribution(0, [0.8, 0.2]), len_dist=len_dist, len_normalized=False
+            ),
+            SequenceDistribution(
+                IntegerCategoricalDistribution(0, [0.2, 0.8]), len_dist=len_dist, len_normalized=False
+            ),
         ]
         norm_components = [
-            SequenceDistribution(IntegerCategoricalDistribution(0, [0.8, 0.2]),
-                                 len_dist=len_dist, len_normalized=True),
-            SequenceDistribution(IntegerCategoricalDistribution(0, [0.2, 0.8]),
-                                 len_dist=len_dist, len_normalized=True),
+            SequenceDistribution(IntegerCategoricalDistribution(0, [0.8, 0.2]), len_dist=len_dist, len_normalized=True),
+            SequenceDistribution(IntegerCategoricalDistribution(0, [0.2, 0.8]), len_dist=len_dist, len_normalized=True),
         ]
 
         raw_terms = list(_field_log_density_features(raw_components, data))
@@ -913,7 +1050,7 @@ class HTSNETestCase(unittest.TestCase):
         data, comp_labels, topic_labels, length_labels, model = self._crossed_varlen_data_and_model()
         factors = local_factors(model, data)
         self.assertEqual(len(factors), 2)  # sequence content + sequence length
-        self.assertTrue(any(isinstance(f, dict) and f.get('kind') == 'local' for f in factors))
+        self.assertTrue(any(isinstance(f, dict) and f.get("kind") == "local" for f in factors))
 
         log_s = model_log_affinity(None, None, affinity=factors, evidence_cap=1.0)
         self.assertGreater(affinity_neighbor_purity(log_s, comp_labels, k=12), 0.90)
@@ -922,8 +1059,16 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_crossed_varlen_sequence_local_embedding_tracks_both_axes(self):
         data, comp_labels, topic_labels, length_labels, model = self._crossed_varlen_data_and_model()
-        y = htsne(data, mix_model=model, perplexity=18.0, method='exact', affinity='local',
-                  max_its=300, seed=8, out=io.StringIO())
+        y = htsne(
+            data,
+            mix_model=model,
+            perplexity=18.0,
+            method="exact",
+            affinity="local",
+            max_its=300,
+            seed=8,
+            out=io.StringIO(),
+        )
         self.assertGreater(embedding_neighbor_purity(y, comp_labels, k=12), 0.90)
         self.assertGreater(embedding_neighbor_purity(y, topic_labels, k=12), 0.95)
         self.assertGreater(embedding_neighbor_purity(y, length_labels, k=12), 0.90)
@@ -931,9 +1076,9 @@ class HTSNETestCase(unittest.TestCase):
     @classmethod
     def _complex_heterogeneous_data_and_model(cls, n_per=55):
         cat_probs = [
-            {'red': 0.78, 'blue': 0.12, 'green': 0.10},
-            {'red': 0.10, 'blue': 0.78, 'green': 0.12},
-            {'red': 0.12, 'blue': 0.10, 'green': 0.78},
+            {"red": 0.78, "blue": 0.12, "green": 0.10},
+            {"red": 0.10, "blue": 0.78, "green": 0.12},
+            {"red": 0.12, "blue": 0.10, "green": 0.78},
         ]
         seq_probs = [
             [0.80, 0.12, 0.04, 0.04],
@@ -946,14 +1091,19 @@ class HTSNETestCase(unittest.TestCase):
 
         comps = []
         for k in range(3):
-            comps.append(CompositeDistribution((
-                GaussianDistribution(-5.0 + 5.0 * k, 1.0 + 0.5 * k),
-                CategoricalDistribution(cat_probs[k]),
-                OptionalDistribution(GaussianDistribution(-3.0 + 3.0 * k, 1.2), p=miss_probs[k]),
-                PoissonDistribution(count_rates[k]),
-                SequenceDistribution(IntegerCategoricalDistribution(0, seq_probs[k]),
-                                     len_dist=PoissonDistribution(seq_lens[k])),
-            )))
+            comps.append(
+                CompositeDistribution(
+                    (
+                        GaussianDistribution(-5.0 + 5.0 * k, 1.0 + 0.5 * k),
+                        CategoricalDistribution(cat_probs[k]),
+                        OptionalDistribution(GaussianDistribution(-3.0 + 3.0 * k, 1.2), p=miss_probs[k]),
+                        PoissonDistribution(count_rates[k]),
+                        SequenceDistribution(
+                            IntegerCategoricalDistribution(0, seq_probs[k]), len_dist=PoissonDistribution(seq_lens[k])
+                        ),
+                    )
+                )
+            )
 
         data, labels = [], []
         for k, comp in enumerate(comps):
@@ -968,21 +1118,28 @@ class HTSNETestCase(unittest.TestCase):
         data, labels, model = self._complex_heterogeneous_data_and_model()
         factors = local_factors(model, data)
         self.assertEqual(len(factors), 7)
-        self.assertEqual(sum(isinstance(f, dict) and f.get('kind') == 'local' for f in factors), 3)
+        self.assertEqual(sum(isinstance(f, dict) and f.get("kind") == "local" for f in factors), 3)
 
         log_s = model_log_affinity(None, None, affinity=factors, evidence_cap=1.0)
         self.assertGreater(affinity_neighbor_purity(log_s, labels, k=12), 0.95)
 
     def test_complex_heterogeneous_local_barnes_hut_embedding(self):
         data, labels, model = self._complex_heterogeneous_data_and_model()
-        y = htsne(data, mix_model=model, perplexity=18.0, method='barnes_hut',
-                  affinity='local', neighbor_method='exact', max_its=300,
-                  seed=9, out=io.StringIO())
+        y = htsne(
+            data,
+            mix_model=model,
+            perplexity=18.0,
+            method="barnes_hut",
+            affinity="local",
+            neighbor_method="exact",
+            max_its=300,
+            seed=9,
+            out=io.StringIO(),
+        )
         self.assertEqual(y.shape, (len(data), 2))
         self.assertTrue(np.all(np.isfinite(y)))
         self.assertGreater(embedding_neighbor_purity(y, labels, k=12), 0.90)
         self.assertGreater(separation_ratio(y, labels), 2.5)
-
 
     # ---- balanced (mixed-type) affinities -----------------------------------
 
@@ -1000,13 +1157,17 @@ class HTSNETestCase(unittest.TestCase):
     def test_balanced_factors_preserve_crossed_heterogeneous_fields(self):
         comps = []
         for mu in (-3.0, 3.0):
-            for cat_probs in ({'x': 0.999, 'y': 0.001}, {'x': 0.001, 'y': 0.999}):
-                comps.append(CompositeDistribution((
-                    GaussianDistribution(mu, 0.08),
-                    CategoricalDistribution(cat_probs),
-                )))
+            for cat_probs in ({"x": 0.999, "y": 0.001}, {"x": 0.001, "y": 0.999}):
+                comps.append(
+                    CompositeDistribution(
+                        (
+                            GaussianDistribution(mu, 0.08),
+                            CategoricalDistribution(cat_probs),
+                        )
+                    )
+                )
         model = MixtureDistribution(comps, [0.25] * 4)
-        data = [(-3.0, 'x'), (-3.1, 'y'), (3.0, 'x'), (3.1, 'y')]
+        data = [(-3.0, "x"), (-3.1, "y"), (3.0, "x"), (3.1, "y")]
 
         factors = balanced_factors(model, data)
         self.assertEqual(len(factors), 2)
@@ -1020,43 +1181,50 @@ class HTSNETestCase(unittest.TestCase):
         self.assertGreater(s_cat[0, 2], 0.95)
         self.assertLess(s_cat[0, 1], 0.10)
 
-        log_cont = model_log_affinity(None, None,
-                                      affinity=balanced_factors(model, data, field_weights=[1.0, 0.0]))
-        log_cat = model_log_affinity(None, None,
-                                     affinity=balanced_factors(model, data, field_weights=[0.0, 1.0]))
+        log_cont = model_log_affinity(None, None, affinity=balanced_factors(model, data, field_weights=[1.0, 0.0]))
+        log_cat = model_log_affinity(None, None, affinity=balanced_factors(model, data, field_weights=[0.0, 1.0]))
         self.assertGreater(log_cont[0, 1], log_cont[0, 2])
         self.assertGreater(log_cat[0, 2], log_cat[0, 1])
 
     def test_balanced_embeddings_run(self):
-        y = htsne(self.data, mix_model=self.model, perplexity=20.0, affinity='balanced',
-                  method='exact', seed=3, max_its=300, out=io.StringIO())
+        y = htsne(
+            self.data,
+            mix_model=self.model,
+            perplexity=20.0,
+            affinity="balanced",
+            method="exact",
+            seed=3,
+            max_its=300,
+            out=io.StringIO(),
+        )
         self.assertEqual(y.shape, (self.n, 2))
         self.assertGreater(separation_ratio(y, self.labels), 2.0)
 
     def test_auto_affinity_resolution(self):
         from pysp.utils.htsne import _resolve_affinity
+
         # composite components + raw data -> local factor list (one per leaf field)
-        r = _resolve_affinity('auto', self.model, self.data, None)
+        r = _resolve_affinity("auto", self.model, self.data, None)
         self.assertIsInstance(r, list)
         self.assertEqual(len(r), 2)
-        self.assertTrue(any(isinstance(f, dict) and f.get('kind') == 'local' for f in r))
+        self.assertTrue(any(isinstance(f, dict) and f.get("kind") == "local" for f in r))
         # no raw data -> falls back to bhattacharyya
-        self.assertEqual(_resolve_affinity('auto', self.model, None, None), 'bhattacharyya')
+        self.assertEqual(_resolve_affinity("auto", self.model, None, None), "bhattacharyya")
         # non-composite components decompose too: a plain mixture is one leaf field
-        plain = MixtureDistribution([GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)],
-                                    [0.5, 0.5])
-        r = _resolve_affinity('auto', plain, [0.0, 1.0], None)
+        plain = MixtureDistribution([GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)], [0.5, 0.5])
+        r = _resolve_affinity("auto", plain, [0.0, 1.0], None)
         self.assertIsInstance(r, list)
         self.assertEqual(len(r), 1)
 
     def test_balanced_requires_data(self):
         with self.assertRaises(ValueError):
-            htsne(None, mix_model=self.model, enc_data=('x',), affinity='balanced', out=io.StringIO())
+            htsne(None, mix_model=self.model, enc_data=("x",), affinity="balanced", out=io.StringIO())
 
     def test_balanced_decomposes_sequences_and_optionals(self):
         # sequence-of-records components flatten into element fields + length;
         # the old implementation refused anything without top-level .dists
         from pysp.utils.htsne import balanced_factors
+
         data, labels, model = self._varlen_data_and_model(60)
         factors = balanced_factors(model, data)
         self.assertGreater(len(factors), 1)
@@ -1065,19 +1233,21 @@ class HTSNETestCase(unittest.TestCase):
             self.assertEqual(g.shape[0], n)
             # per-field posteriors: squared factors sum to one per row
             self.assertTrue(np.allclose((g * g).sum(axis=1), 1.0, atol=1.0e-8))
-        y = htsne(data, mix_model=model, seed=3, max_its=200, affinity='balanced',
-                  out=io.StringIO())
+        y = htsne(data, mix_model=model, seed=3, max_its=200, affinity="balanced", out=io.StringIO())
         self.assertEqual(y.shape, (n, 2))
         self.assertGreater(separation_ratio(y, labels), 1.5)
 
     def test_optional_missing_inner_field_does_not_create_nan_affinities(self):
         from pysp.utils.htsne import balanced_factors
 
-        model = MixtureDistribution([
-            OptionalDistribution(CategoricalDistribution({'a': 1.0}), p=0.5),
-            OptionalDistribution(CategoricalDistribution({'b': 1.0}), p=0.5),
-        ], [0.5, 0.5])
-        data = [None, 'a', None, 'b'] * 8
+        model = MixtureDistribution(
+            [
+                OptionalDistribution(CategoricalDistribution({"a": 1.0}), p=0.5),
+                OptionalDistribution(CategoricalDistribution({"b": 1.0}), p=0.5),
+            ],
+            [0.5, 0.5],
+        )
+        data = [None, "a", None, "b"] * 8
 
         for maker in (balanced_factors, local_factors):
             factors = maker(model, data)
@@ -1086,6 +1256,7 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_evidence_cap_bounds_field_influence(self):
         from pysp.utils.htsne import balanced_factors, model_log_affinity
+
         factors = balanced_factors(self.model, self.data)
         la_inf = model_log_affinity(None, None, affinity=factors)
         cap = 1.0
@@ -1101,14 +1272,15 @@ class HTSNETestCase(unittest.TestCase):
             self.assertTrue(np.allclose(la_cap[off][mild], la_inf[off][mild], atol=1.0e-10))
         # single-factor affinities ignore the cap (it could only create ties)
         from pysp.utils.htsne import _posteriors_and_loglikes
+
         z, _ = _posteriors_and_loglikes(self.model, data=self.data)
-        la1 = model_log_affinity(z, affinity='bhattacharyya')
-        la1c = model_log_affinity(z, affinity='bhattacharyya', evidence_cap=cap)
-        self.assertTrue(np.allclose(np.nan_to_num(la1, neginf=-1e30),
-                                    np.nan_to_num(la1c, neginf=-1e30)))
+        la1 = model_log_affinity(z, affinity="bhattacharyya")
+        la1c = model_log_affinity(z, affinity="bhattacharyya", evidence_cap=cap)
+        self.assertTrue(np.allclose(np.nan_to_num(la1, neginf=-1e30), np.nan_to_num(la1c, neginf=-1e30)))
 
     def test_field_weights_apply_to_whole_field_coefficient(self):
         from pysp.utils.htsne import balanced_factors, model_log_affinity
+
         factors = balanced_factors(self.model, self.data, field_weights=[2.0, 0.0])
         la = model_log_affinity(None, None, affinity=factors, evidence_cap=None)
 
@@ -1120,10 +1292,14 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_optional_without_missing_probability_has_no_gate_field(self):
         from pysp.utils.htsne import balanced_factors, model_log_affinity
-        model = MixtureDistribution([
-            OptionalDistribution(GaussianDistribution(-2.0, 1.0), p=None),
-            OptionalDistribution(GaussianDistribution(2.0, 1.0), p=None),
-        ], [0.5, 0.5])
+
+        model = MixtureDistribution(
+            [
+                OptionalDistribution(GaussianDistribution(-2.0, 1.0), p=None),
+                OptionalDistribution(GaussianDistribution(2.0, 1.0), p=None),
+            ],
+            [0.5, 0.5],
+        )
         data = [None, -2.0, -1.5, None, 1.5, 2.0]
         factors = balanced_factors(model, data)
         self.assertEqual(len(factors), 1)
@@ -1133,11 +1309,12 @@ class HTSNETestCase(unittest.TestCase):
 
     def test_field_weights_validated_against_flattened_fields(self):
         from pysp.utils.htsne import balanced_factors
+
         with self.assertRaises(ValueError):
             balanced_factors(self.model, self.data, field_weights=[1.0])
         with self.assertRaises(ValueError):
             balanced_factors(self.model, self.data, field_weights=[1.0, -1.0])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

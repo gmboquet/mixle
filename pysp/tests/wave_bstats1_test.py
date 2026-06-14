@@ -14,6 +14,7 @@ Each test class includes regression tests for calls that used to raise:
   - ConditionalDistribution.seq_log_density read an unset has_default and its
     sampler/estimator were empty stubs.
 """
+
 import unittest
 
 import numpy as np
@@ -36,7 +37,6 @@ def fit(data, est):
 
 
 class DirichletTestCase(unittest.TestCase):
-
     alpha = np.array([2.0, 3.0, 4.0])
 
     def make_dist(self):
@@ -92,7 +92,7 @@ class DirichletTestCase(unittest.TestCase):
         data = d.sampler(seed=4).sample(size=400)
         est = DirichletEstimator(dim=3)
         acc, m = fit(data, est)
-        self.assertTrue(np.all(np.abs(m.alpha - self.alpha)/self.alpha < 0.3))
+        self.assertTrue(np.all(np.abs(m.alpha - self.alpha) / self.alpha < 0.3))
 
         # seq path accumulates the same statistics
         acc2 = est.accumulator_factory().make()
@@ -109,14 +109,13 @@ class DirichletTestCase(unittest.TestCase):
 
 
 class DiracTestCase(unittest.TestCase):
-
     def test_log_density(self):
         # regression: used to raise AttributeError (self.dist never set)
-        d = DiracDistribution('a')
-        self.assertEqual(d.log_density('a'), 0.0)
-        self.assertEqual(d.log_density('b'), -np.inf)
-        self.assertEqual(d.density('a'), 1.0)
-        self.assertEqual(d.density('b'), 0.0)
+        d = DiracDistribution("a")
+        self.assertEqual(d.log_density("a"), 0.0)
+        self.assertEqual(d.log_density("b"), -np.inf)
+        self.assertEqual(d.density("a"), 1.0)
+        self.assertEqual(d.density("b"), 0.0)
 
     def test_seq_log_density_matches_scalar(self):
         d = DiracDistribution(3)
@@ -126,27 +125,26 @@ class DiracTestCase(unittest.TestCase):
 
     def test_get_prior(self):
         # regression: used to raise AttributeError (self.dist never set)
-        self.assertIsInstance(DiracDistribution('a').get_prior(), NullDistribution)
+        self.assertIsInstance(DiracDistribution("a").get_prior(), NullDistribution)
 
     def test_sampler(self):
         # regression: used to raise AttributeError (self.dist never set)
-        d = DiracDistribution('a')
+        d = DiracDistribution("a")
         s = d.sampler(seed=1)
-        self.assertEqual(s.sample(), 'a')
-        self.assertEqual(s.sample(size=3), ['a', 'a', 'a'])
+        self.assertEqual(s.sample(), "a")
+        self.assertEqual(s.sample(size=3), ["a", "a", "a"])
 
     def test_estimator_round_trip(self):
         # regression: estimator() used to raise TypeError (missing value argument)
-        d = DiracDistribution('a')
+        d = DiracDistribution("a")
         est = d.estimator()
         self.assertIsInstance(est, DiracEstimator)
-        acc, m = fit(['a', 'a', 'b'], est)
+        acc, m = fit(["a", "a", "b"], est)
         self.assertIsInstance(m, DiracDistribution)
-        self.assertEqual(m.value, 'a')
+        self.assertEqual(m.value, "a")
 
 
 class NullTestCase(unittest.TestCase):
-
     def test_sampler(self):
         # regression: NullDistribution.sampler() used to raise TypeError
         # (NullSampler.__init__ only accepted a seed)
@@ -169,36 +167,34 @@ class NullTestCase(unittest.TestCase):
         self.assertTrue(np.isfinite(sd.log_density([0.1, -0.2, 0.5])))
 
     def test_estimator(self):
-        acc, m = fit([1, 'a', None], null_dist.estimator())
+        acc, m = fit([1, "a", None], null_dist.estimator())
         self.assertIs(m, null_dist)
         self.assertIsNone(acc.value())
 
 
 class GammaTestCase(unittest.TestCase):
-
     def test_estimator_accepts_name_and_prior(self):
         # regression: used to raise TypeError (unexpected keyword argument 'name')
-        d = GammaDistribution(2.0, 3.0, name='g')
+        d = GammaDistribution(2.0, 3.0, name="g")
         est = d.estimator()
         self.assertIsInstance(est, GammaEstimator)
-        self.assertEqual(est.name, 'g')
+        self.assertEqual(est.name, "g")
 
     def test_seq_log_density_matches_scalar(self):
         d = GammaDistribution(3.0, 2.0)
         data = d.sampler(seed=1).sample(20)
         enc = d.seq_encode(data)
         self.assertTrue(np.allclose(d.seq_log_density(enc), [d.log_density(u) for u in data]))
-        self.assertTrue(np.allclose(d.seq_log_density(enc),
-                                    scipy.stats.gamma.logpdf(data, 3.0, scale=2.0)))
+        self.assertTrue(np.allclose(d.seq_log_density(enc), scipy.stats.gamma.logpdf(data, 3.0, scale=2.0)))
 
     def test_estimate_recovery(self):
         d = GammaDistribution(3.0, 2.0)
         data = d.sampler(seed=5).sample(500)
         acc, m = fit(data, GammaEstimator())
-        self.assertLess(abs(m.k - 3.0)/3.0, 0.15)
-        self.assertLess(abs(m.theta - 2.0)/2.0, 0.15)
+        self.assertLess(abs(m.k - 3.0) / 3.0, 0.15)
+        self.assertLess(abs(m.theta - 2.0) / 2.0, 0.15)
         # ML invariant: k*theta equals the sample mean
-        self.assertAlmostEqual(m.k*m.theta, data.mean(), places=8)
+        self.assertAlmostEqual(m.k * m.theta, data.mean(), places=8)
 
     def test_estimate_pseudo_count_theta_denominator(self):
         # regression: theta used the log-pseudo-count denominator, so with
@@ -208,53 +204,51 @@ class GammaTestCase(unittest.TestCase):
         pc1, ss1 = 2.0, 1.5
         est = GammaEstimator(pseudo_count=(pc1, 0.0), suff_stat=(ss1, 0.0))
         acc, m = fit(data, est)
-        adj_mean = (data.sum() + ss1*pc1)/(len(data) + pc1)
-        self.assertAlmostEqual(m.k*m.theta, adj_mean, places=8)
+        adj_mean = (data.sum() + ss1 * pc1) / (len(data) + pc1)
+        self.assertAlmostEqual(m.k * m.theta, adj_mean, places=8)
 
     def test_estimate_empty_suff_stat(self):
-        m = GammaEstimator(name='g').estimate((0, 0.0, 0.0))
+        m = GammaEstimator(name="g").estimate((0, 0.0, 0.0))
         self.assertEqual((m.k, m.theta), (1.0, 1.0))
-        self.assertEqual(m.name, 'g')
+        self.assertEqual(m.name, "g")
 
 
 class ConditionalTestCase(unittest.TestCase):
-
     def make_dist(self):
-        return ConditionalDistribution({'a': GaussianDistribution(0.0, 1.0),
-                                        'b': GaussianDistribution(5.0, 1.0)})
+        return ConditionalDistribution({"a": GaussianDistribution(0.0, 1.0), "b": GaussianDistribution(5.0, 1.0)})
 
     def test_seq_log_density_matches_scalar(self):
         # regression: used to raise AttributeError (self.has_default never set)
         cd = self.make_dist()
-        data = [('a', 0.5), ('b', 5.2), ('a', -0.3), ('c', 1.0)]
+        data = [("a", 0.5), ("b", 5.2), ("a", -0.3), ("c", 1.0)]
         enc = cd.seq_encode(data)
         self.assertTrue(np.allclose(cd.seq_log_density(enc), [cd.log_density(u) for u in data]))
         # the unmatched value 'c' falls back to the null default (log density 0)
-        self.assertEqual(cd.log_density(('c', 1.0)), 0.0)
+        self.assertEqual(cd.log_density(("c", 1.0)), 0.0)
 
     def test_seq_log_density_without_default(self):
         cd = self.make_dist()
-        data = [('a', 0.5), ('c', 1.0)]
+        data = [("a", 0.5), ("c", 1.0)]
         enc = cd.seq_encode(data)
         cd_nodef = ConditionalDistribution(dict(cd.dmap), default_dist=None)
         ll = cd_nodef.seq_log_density(enc)
-        self.assertAlmostEqual(ll[0], cd.dmap['a'].log_density(0.5), places=10)
+        self.assertAlmostEqual(ll[0], cd.dmap["a"].log_density(0.5), places=10)
         self.assertEqual(ll[1], -np.inf)
 
     def test_seq_encode_without_default(self):
         # regression: seq_encode crashed on None.seq_encode when default_dist
         # is None and an unmatched conditioning value appears
-        cd = ConditionalDistribution({'a': GaussianDistribution(0.0, 1.0)}, default_dist=None)
-        data = [('a', 0.5), ('z', 1.0)]
+        cd = ConditionalDistribution({"a": GaussianDistribution(0.0, 1.0)}, default_dist=None)
+        data = [("a", 0.5), ("z", 1.0)]
         ll = cd.seq_log_density(cd.seq_encode(data))
-        self.assertAlmostEqual(ll[0], cd.dmap['a'].log_density(0.5), places=10)
+        self.assertAlmostEqual(ll[0], cd.dmap["a"].log_density(0.5), places=10)
         self.assertEqual(ll[1], -np.inf)
 
     def test_seq_initialize_routes_to_members(self):
         # regression: the accumulator inherited the no-op seq_initialize, so
         # seq-path initialization silently gathered no statistics
         cd = self.make_dist()
-        data = [('a', 0.5), ('b', 5.2), ('a', -0.3)]
+        data = [("a", 0.5), ("b", 5.2), ("a", -0.3)]
         enc = cd.seq_encode(data)
         est = cd.estimator()
         rng = np.random.RandomState(3)
@@ -270,15 +264,15 @@ class ConditionalTestCase(unittest.TestCase):
         # regression: sampler()/sample() used to be empty stubs returning None
         cd = self.make_dist()
         s = cd.sampler(seed=7)
-        self.assertTrue(np.isfinite(s.sample_given('a')))
-        self.assertEqual(len(s.sample_given('b', size=4)), 4)
+        self.assertTrue(np.isfinite(s.sample_given("a")))
+        self.assertEqual(len(s.sample_given("b", size=4)), 4)
         with self.assertRaises(NotImplementedError):
             s.sample()
 
     def test_sampler_unmatched_without_default(self):
-        cd = ConditionalDistribution({'a': GaussianDistribution(0.0, 1.0)}, default_dist=None)
+        cd = ConditionalDistribution({"a": GaussianDistribution(0.0, 1.0)}, default_dist=None)
         with self.assertRaises(KeyError):
-            cd.sampler(seed=1).sample_given('z')
+            cd.sampler(seed=1).sample_given("z")
 
     def test_estimator_round_trip(self):
         # regression: estimator() used to be an empty stub returning None, and
@@ -288,14 +282,14 @@ class ConditionalTestCase(unittest.TestCase):
         self.assertIsInstance(est, ConditionalDistributionEstimator)
 
         rng = np.random.RandomState(2)
-        data = [('a', v) for v in rng.normal(1.0, 1.0, 80)]
-        data += [('b', v) for v in rng.normal(-3.0, 1.0, 80)]
+        data = [("a", v) for v in rng.normal(1.0, 1.0, 80)]
+        data += [("b", v) for v in rng.normal(-3.0, 1.0, 80)]
         acc, m = fit(data, est)
 
         self.assertIsInstance(m, ConditionalDistribution)
         self.assertIsInstance(m.default_dist, NullDistribution)
-        mu_a, _ = m.dmap['a'].get_parameters()
-        mu_b, _ = m.dmap['b'].get_parameters()
+        mu_a, _ = m.dmap["a"].get_parameters()
+        mu_b, _ = m.dmap["b"].get_parameters()
         self.assertLess(abs(mu_a - 1.0), 0.4)
         self.assertLess(abs(mu_b + 3.0), 0.4)
 
@@ -305,7 +299,7 @@ class ConditionalTestCase(unittest.TestCase):
 
     def test_seq_update_with_and_without_estimate(self):
         cd = self.make_dist()
-        data = [('a', 0.5), ('b', 5.2), ('c', 1.0)]
+        data = [("a", 0.5), ("b", 5.2), ("c", 1.0)]
         enc = cd.seq_encode(data)
         est = cd.estimator()
         acc1 = est.accumulator_factory().make()
@@ -317,5 +311,5 @@ class ConditionalTestCase(unittest.TestCase):
             self.assertTrue(np.allclose(v1[0][k], v2[0][k]))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

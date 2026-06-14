@@ -8,8 +8,8 @@ from pysp.stats import (
     CategoricalDistribution,
     GaussianDistribution,
     IntegerCategoricalDistribution,
-    SegmentalHiddenMarkovModelDistribution,
     SegmentalHiddenMarkovEstimator,
+    SegmentalHiddenMarkovModelDistribution,
     SequenceDistribution,
     SequenceEstimator,
     StudentTDistribution,
@@ -19,14 +19,13 @@ from pysp.stats import (
 
 
 class SegmentalHiddenMarkovTestCase(unittest.TestCase):
-
     def make_scalar_model(self):
         return SegmentalHiddenMarkovModelDistribution(
             [GaussianDistribution(-2.0, 1.0), StudentTDistribution(5.0, loc=2.0, scale=1.5)],
             [0.6, 0.4],
             [[0.7, 0.3], [0.2, 0.8]],
             len_dist=IntegerCategoricalDistribution(0, [0.0, 0.0, 1.0, 0.0]),
-            name='seg',
+            name="seg",
         )
 
     def brute_log_density(self, model, x):
@@ -91,10 +90,12 @@ class SegmentalHiddenMarkovTestCase(unittest.TestCase):
     def test_sequence_emission_estimator_runs(self):
         model = SegmentalHiddenMarkovModelDistribution(
             [
-                SequenceDistribution(GaussianDistribution(-2.0, 1.0),
-                                     len_dist=CategoricalDistribution({1: 0.4, 2: 0.6})),
-                SequenceDistribution(GaussianDistribution(2.0, 1.0),
-                                     len_dist=CategoricalDistribution({2: 0.6, 3: 0.4})),
+                SequenceDistribution(
+                    GaussianDistribution(-2.0, 1.0), len_dist=CategoricalDistribution({1: 0.4, 2: 0.6})
+                ),
+                SequenceDistribution(
+                    GaussianDistribution(2.0, 1.0), len_dist=CategoricalDistribution({2: 0.6, 3: 0.4})
+                ),
             ],
             [0.5, 0.5],
             [[0.6, 0.4], [0.3, 0.7]],
@@ -103,10 +104,14 @@ class SegmentalHiddenMarkovTestCase(unittest.TestCase):
         data = model.sampler(5).sample(80)
         est = SegmentalHiddenMarkovEstimator(
             [
-                SequenceEstimator(GaussianDistribution(-1.0, 2.0).estimator(),
-                                  len_estimator=CategoricalDistribution({1: 0.5, 2: 0.5}).estimator()),
-                SequenceEstimator(GaussianDistribution(1.0, 2.0).estimator(),
-                                  len_estimator=CategoricalDistribution({2: 0.5, 3: 0.5}).estimator()),
+                SequenceEstimator(
+                    GaussianDistribution(-1.0, 2.0).estimator(),
+                    len_estimator=CategoricalDistribution({1: 0.5, 2: 0.5}).estimator(),
+                ),
+                SequenceEstimator(
+                    GaussianDistribution(1.0, 2.0).estimator(),
+                    len_estimator=CategoricalDistribution({2: 0.5, 3: 0.5}).estimator(),
+                ),
             ],
             len_estimator=CategoricalDistribution({2: 1.0}).estimator(),
             pseudo_count=(1.0, 1.0),
@@ -117,5 +122,5 @@ class SegmentalHiddenMarkovTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(fitted.seq_log_density(enc[0][1]))))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

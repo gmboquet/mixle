@@ -5,27 +5,35 @@ reproduce, on every engine (numpy and torch), both the HMM log-likelihood (``seq
 the Baum-Welch sufficient statistics that the legacy accumulator collects (initial/state/transition
 expected counts), including per-sequence weights.
 """
+
 import unittest
 
 import numpy as np
 
-from pysp.stats import HiddenMarkovModelDistribution, CategoricalDistribution
-from pysp.stats.hidden_markov import hmm_pad_log_emissions, hmm_engine_forward_backward
 from pysp.engines import NUMPY_ENGINE
+from pysp.stats import CategoricalDistribution, HiddenMarkovModelDistribution
+from pysp.stats.hidden_markov import hmm_engine_forward_backward, hmm_pad_log_emissions
 
 try:
     from pysp.engines import TorchEngine
-    _TORCH = TorchEngine(device='cpu', dtype='float64')
+
+    _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
 
 
 def _model():
-    topics = [CategoricalDistribution({'a': 0.7, 'b': 0.2, 'c': 0.1}),
-              CategoricalDistribution({'a': 0.1, 'b': 0.3, 'c': 0.6})]
+    topics = [
+        CategoricalDistribution({"a": 0.7, "b": 0.2, "c": 0.1}),
+        CategoricalDistribution({"a": 0.1, "b": 0.3, "c": 0.6}),
+    ]
     return HiddenMarkovModelDistribution(
-        topics, [0.6, 0.4], [[0.7, 0.3], [0.4, 0.6]],
-        len_dist=CategoricalDistribution({3: 0.4, 4: 0.3, 5: 0.3}), use_numba=True)
+        topics,
+        [0.6, 0.4],
+        [[0.7, 0.3], [0.4, 0.6]],
+        len_dist=CategoricalDistribution({3: 0.4, 4: 0.3, 5: 0.3}),
+        use_numba=True,
+    )
 
 
 def _fb_inputs(dist, data):
@@ -41,13 +49,12 @@ def _fb_inputs(dist, data):
 
 
 class HmmEngineForwardBackwardTestCase(unittest.TestCase):
-
     def setUp(self):
         self.dist = _model()
         self.data = self.dist.sampler(seed=3).sample(40)
-        self.engines = [('numpy', NUMPY_ENGINE)]
+        self.engines = [("numpy", NUMPY_ENGINE)]
         if _TORCH is not None:
-            self.engines.append(('torch', _TORCH))
+            self.engines.append(("torch", _TORCH))
 
     def test_log_likelihood_parity(self):
         padded, mask, _ = _fb_inputs(self.dist, self.data)
@@ -59,8 +66,10 @@ class HmmEngineForwardBackwardTestCase(unittest.TestCase):
             with self.subTest(engine=name):
                 ll, _, _, _ = hmm_engine_forward_backward(engine, padded, log_w, log_a, mask)
                 ll = np.asarray(engine.to_numpy(ll))
-                self.assertTrue(np.allclose(ll + len_ll, ref, atol=1.0e-9),
-                                '%s log-likelihood disagrees with seq_log_density' % name)
+                self.assertTrue(
+                    np.allclose(ll + len_ll, ref, atol=1.0e-9),
+                    "%s log-likelihood disagrees with seq_log_density" % name,
+                )
 
     def test_estep_counts_parity(self):
         # reference: the legacy accumulator's Baum-Welch sufficient statistics
@@ -75,19 +84,19 @@ class HmmEngineForwardBackwardTestCase(unittest.TestCase):
         log_a = np.log(self.dist.transitions)
         for name, engine in self.engines:
             with self.subTest(engine=name):
-                _, gamma, xi_sum, pi = hmm_engine_forward_backward(
-                    engine, padded, log_w, log_a, mask, weights=weights)
+                _, gamma, xi_sum, pi = hmm_engine_forward_backward(engine, padded, log_w, log_a, mask, weights=weights)
                 gamma = np.asarray(engine.to_numpy(gamma))
                 xi_sum = np.asarray(engine.to_numpy(xi_sum))
                 pi = np.asarray(engine.to_numpy(pi))
                 init_counts = pi.sum(axis=0)
                 state_counts = gamma.sum(axis=(0, 1))
-                self.assertTrue(np.allclose(init_counts, acc.init_counts, atol=1.0e-8),
-                                '%s init counts differ' % name)
-                self.assertTrue(np.allclose(state_counts, acc.state_counts, atol=1.0e-8),
-                                '%s state counts differ' % name)
-                self.assertTrue(np.allclose(xi_sum, acc.trans_counts, atol=1.0e-8),
-                                '%s transition counts differ' % name)
+                self.assertTrue(np.allclose(init_counts, acc.init_counts, atol=1.0e-8), "%s init counts differ" % name)
+                self.assertTrue(
+                    np.allclose(state_counts, acc.state_counts, atol=1.0e-8), "%s state counts differ" % name
+                )
+                self.assertTrue(
+                    np.allclose(xi_sum, acc.trans_counts, atol=1.0e-8), "%s transition counts differ" % name
+                )
 
 
 class HmmEngineForwardBackwardInitTestCase(unittest.TestCase):
@@ -110,35 +119,48 @@ class HmmEngineForwardBackwardInitTestCase(unittest.TestCase):
                 # each sequence's per-row init result equals running it alone with that shared init
                 for n in range(n_seq):
                     one, _, _, _ = hmm_engine_forward_backward(
-                        engine, log_emit[n:n + 1], log_w_seq[n], log_a, mask[n:n + 1])
-                    self.assertAlmostEqual(float(np.asarray(engine.to_numpy(one))[0]), float(ll[n]),
-                                           places=10)
+                        engine, log_emit[n : n + 1], log_w_seq[n], log_a, mask[n : n + 1]
+                    )
+                    self.assertAlmostEqual(float(np.asarray(engine.to_numpy(one))[0]), float(ll[n]), places=10)
 
 
 class HmmEngineEStepTestCase(unittest.TestCase):
     """The engine-resident E-step (accumulator + kernel) matches the host Baum-Welch."""
 
     def setUp(self):
-        topics = [CategoricalDistribution({'a': 0.7, 'b': 0.2, 'c': 0.1}),
-                  CategoricalDistribution({'a': 0.1, 'b': 0.3, 'c': 0.6})]
+        topics = [
+            CategoricalDistribution({"a": 0.7, "b": 0.2, "c": 0.1}),
+            CategoricalDistribution({"a": 0.1, "b": 0.3, "c": 0.6}),
+        ]
         self.numba_dist = HiddenMarkovModelDistribution(
-            topics, [0.6, 0.4], [[0.7, 0.3], [0.4, 0.6]],
-            len_dist=CategoricalDistribution({3: 0.4, 4: 0.6}), use_numba=True)
+            topics,
+            [0.6, 0.4],
+            [[0.7, 0.3], [0.4, 0.6]],
+            len_dist=CategoricalDistribution({3: 0.4, 4: 0.6}),
+            use_numba=True,
+        )
         self.blocked_dist = HiddenMarkovModelDistribution(
-            topics, [0.6, 0.4], [[0.7, 0.3], [0.4, 0.6]],
-            len_dist=CategoricalDistribution({3: 0.4, 4: 0.6}), use_numba=False)
+            topics,
+            [0.6, 0.4],
+            [[0.7, 0.3], [0.4, 0.6]],
+            len_dist=CategoricalDistribution({3: 0.4, 4: 0.6}),
+            use_numba=False,
+        )
         self.data = self.numba_dist.sampler(seed=3).sample(40)
         self.weights = np.linspace(0.5, 1.5, len(self.data))
-        self.engines = [('numpy', NUMPY_ENGINE)] + ([('torch', _TORCH)] if _TORCH is not None else [])
+        self.engines = [("numpy", NUMPY_ENGINE)] + ([("torch", _TORCH)] if _TORCH is not None else [])
 
     def _assert_value_parity(self, host_value, eng_value, label):
         for k in (1, 2, 3):  # init / state / transition counts
-            self.assertTrue(np.allclose(np.asarray(host_value[k]), np.asarray(eng_value[k]), atol=1.0e-8),
-                            '%s suff-stat block %d differs' % (label, k))
+            self.assertTrue(
+                np.allclose(np.asarray(host_value[k]), np.asarray(eng_value[k]), atol=1.0e-8),
+                "%s suff-stat block %d differs" % (label, k),
+            )
         for host_acc, eng_acc in zip(host_value[4], eng_value[4]):
             for key in set(host_acc) | set(eng_acc):
-                self.assertAlmostEqual(host_acc.get(key, 0.0), eng_acc.get(key, 0.0), places=7,
-                                       msg='%s emission counts differ' % label)
+                self.assertAlmostEqual(
+                    host_acc.get(key, 0.0), eng_acc.get(key, 0.0), places=7, msg="%s emission counts differ" % label
+                )
 
     def test_accumulator_seq_update_engine_parity(self):
         for dist in (self.numba_dist, self.blocked_dist):
@@ -148,13 +170,13 @@ class HmmEngineEStepTestCase(unittest.TestCase):
             host.seq_update(enc, self.weights, dist)
             host_value = host.value()
             for name, engine in self.engines:
-                with self.subTest(encoding=('numba' if dist.use_numba else 'blocked'), engine=name):
+                with self.subTest(encoding=("numba" if dist.use_numba else "blocked"), engine=name):
                     acc = est.accumulator_factory().make()
                     acc.seq_update_engine(enc, self.weights, dist, engine)
                     self._assert_value_parity(host_value, acc.value(), name)
 
     def test_engine_kernel_accumulate_parity(self):
-        dist = self.blocked_dist          # torch-capable encoding
+        dist = self.blocked_dist  # torch-capable encoding
         est = dist.estimator()
         enc = dist.dist_to_encoder().seq_encode(self.data)
         host = est.accumulator_factory().make()
@@ -163,9 +185,9 @@ class HmmEngineEStepTestCase(unittest.TestCase):
         for name, engine in self.engines:
             with self.subTest(engine=name):
                 kernel = dist.kernel(engine=engine, estimator=est)
-                self.assertEqual(type(kernel).__name__, 'HiddenMarkovModelKernel')
+                self.assertEqual(type(kernel).__name__, "HiddenMarkovModelKernel")
                 self._assert_value_parity(host_value, kernel.accumulate(enc, self.weights), name)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

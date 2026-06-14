@@ -13,23 +13,29 @@ log-likelihood). For each family this verifies:
 
 Families covered: LDA, LLDA, IntegerPLSI.
 """
+
 import io
 import unittest
 
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.stats import (CategoricalDistribution, CategoricalEstimator,
-                        IntegerPLSIDistribution, IntegerPLSIEstimator,
-                        LDADistribution, seq_encode, seq_log_density_sum)
+from pysp.stats import (
+    CategoricalDistribution,
+    CategoricalEstimator,
+    IntegerPLSIDistribution,
+    IntegerPLSIEstimator,
+    LDADistribution,
+    seq_encode,
+    seq_log_density_sum,
+)
 from pysp.stats.lda import LDAEstimator
 from pysp.stats.llda import LLDADistribution, LLDAEstimator
-from pysp.utils.optsutil import count_by_value
 from pysp.utils.estimation import optimize
+from pysp.utils.optsutil import count_by_value
 
 
 class FusedEMVariationalTestCase(unittest.TestCase):
-
     def _parity(self, dist, est, data):
         enc = seq_encode(data, model=dist)
         _, ref = seq_log_density_sum(enc, dist)
@@ -40,10 +46,26 @@ class FusedEMVariationalTestCase(unittest.TestCase):
         self.assertAlmostEqual(acc._seq_ll, ref, delta=1e-4 * max(1.0, abs(ref)))
 
     def _fused(self, est_factory, data, max_its=15, init_p=0.1):
-        std = optimize(data, est_factory(), max_its=max_its, delta=None, rng=RandomState(1),
-                       out=io.StringIO(), init_p=init_p, reuse_estep_ll=False)
-        fused = optimize(data, est_factory(), max_its=max_its, delta=None, rng=RandomState(1),
-                         out=io.StringIO(), init_p=init_p, reuse_estep_ll=True)
+        std = optimize(
+            data,
+            est_factory(),
+            max_its=max_its,
+            delta=None,
+            rng=RandomState(1),
+            out=io.StringIO(),
+            init_p=init_p,
+            reuse_estep_ll=False,
+        )
+        fused = optimize(
+            data,
+            est_factory(),
+            max_its=max_its,
+            delta=None,
+            rng=RandomState(1),
+            out=io.StringIO(),
+            init_p=init_p,
+            reuse_estep_ll=True,
+        )
         _, ls = seq_log_density_sum(seq_encode(data, model=std), std)
         _, lf = seq_log_density_sum(seq_encode(data, model=fused), fused)
         self.assertAlmostEqual(ls, lf, delta=1e-4 * max(1.0, abs(ls)))
@@ -55,9 +77,12 @@ class FusedEMVariationalTestCase(unittest.TestCase):
             CategoricalDistribution({0: 0.1, 1: 0.1, 2: 0.4, 3: 0.4}),
             CategoricalDistribution({0: 0.25, 1: 0.25, 2: 0.25, 3: 0.25}),
         ]
-        dist = LDADistribution(topics, alpha=[1.0, 1.0, 1.0],
-                               len_dist=CategoricalDistribution({4: 0.3, 5: 0.4, 6: 0.3}),
-                               gamma_threshold=1e-10)
+        dist = LDADistribution(
+            topics,
+            alpha=[1.0, 1.0, 1.0],
+            len_dist=CategoricalDistribution({4: 0.3, 5: 0.4, 6: 0.3}),
+            gamma_threshold=1e-10,
+        )
         raw = dist.sampler(seed=3).sample(40)
         data = [sorted(count_by_value(u).items()) for u in raw]
         mk = lambda: LDAEstimator([CategoricalEstimator() for _ in range(3)])
@@ -73,7 +98,7 @@ class FusedEMVariationalTestCase(unittest.TestCase):
 
     # ----------------------------------------------------------------- LLDA
     def _llda(self):
-        VOCAB = ['w0', 'w1', 'w2', 'w3']
+        VOCAB = ["w0", "w1", "w2", "w3"]
         PMATS = [[0.4, 0.4, 0.1, 0.1], [0.1, 0.1, 0.4, 0.4]]
         rng = RandomState(7)
         label_sets = [[0], [1], [0, 2], [1, 2]]
@@ -87,12 +112,16 @@ class FusedEMVariationalTestCase(unittest.TestCase):
                 cnts[VOCAB[wd]] = cnts.get(VOCAB[wd], 0) + 1
             data.append((sorted(cnts.items()), labels))
         dist = LLDADistribution(
-            [CategoricalDistribution({'w0': 0.4, 'w1': 0.4, 'w2': 0.1, 'w3': 0.1}),
-             CategoricalDistribution({'w0': 0.1, 'w1': 0.1, 'w2': 0.4, 'w3': 0.4})],
+            [
+                CategoricalDistribution({"w0": 0.4, "w1": 0.4, "w2": 0.1, "w3": 0.1}),
+                CategoricalDistribution({"w0": 0.1, "w1": 0.1, "w2": 0.4, "w3": 0.4}),
+            ],
             np.asarray([[1.0, 1.0], [1.5, 0.5], [0.5, 1.5]], dtype=float),
-            gamma_threshold=1e-10)
-        mk = lambda: LLDAEstimator([CategoricalEstimator(), CategoricalEstimator()], num_alphas=3,
-                                   gamma_threshold=1e-10)
+            gamma_threshold=1e-10,
+        )
+        mk = lambda: LLDAEstimator(
+            [CategoricalEstimator(), CategoricalEstimator()], num_alphas=3, gamma_threshold=1e-10
+        )
         return dist, mk, data
 
     def test_llda_parity(self):
@@ -113,12 +142,13 @@ class FusedEMVariationalTestCase(unittest.TestCase):
         sw = rng.dirichlet(np.ones(num_words), size=num_states).T
         ds = rng.dirichlet(np.ones(num_states), size=num_authors)
         dv = rng.dirichlet(np.ones(num_authors))
-        dist = IntegerPLSIDistribution(state_word_mat=sw, doc_state_mat=ds, doc_vec=dv,
-                                       len_dist=CategoricalDistribution({8: 1.0}))
+        dist = IntegerPLSIDistribution(
+            state_word_mat=sw, doc_state_mat=ds, doc_vec=dv, len_dist=CategoricalDistribution({8: 1.0})
+        )
         data = dist.sampler(seed=10).sample(400)
-        mk = lambda: IntegerPLSIEstimator(num_vals=num_words, num_states=num_states,
-                                          num_docs=num_authors,
-                                          len_estimator=CategoricalEstimator())
+        mk = lambda: IntegerPLSIEstimator(
+            num_vals=num_words, num_states=num_states, num_docs=num_authors, len_estimator=CategoricalEstimator()
+        )
         return dist, mk, data
 
     def test_int_plsi_parity(self):
@@ -130,5 +160,5 @@ class FusedEMVariationalTestCase(unittest.TestCase):
         self._fused(mk, data, init_p=0.5)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

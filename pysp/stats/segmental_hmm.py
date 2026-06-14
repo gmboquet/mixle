@@ -10,21 +10,33 @@ Unlike ``HiddenMarkovModelDistribution``, each state keeps its own encoder, so
 emission distributions may use different distribution classes as long as they
 can all score the same raw segment observations.
 """
+
 import math
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
 from scipy.special import logsumexp
 
 from pysp.arithmetic import maxrandint
-from pysp.stats.markovchain import MarkovChainDistribution
-from pysp.stats.null_dist import NullAccumulator, NullAccumulatorFactory, NullDataEncoder, \
-    NullDistribution, NullEstimator
-from pysp.stats.pdist import DataSequenceEncoder, DistributionSampler, ParameterEstimator, \
-    SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    StatisticAccumulatorFactory
-from pysp.utils.aliasing import coalesce_alias, require, MISSING
+from pysp.stats.markov_chain import MarkovChainDistribution
+from pysp.stats.null_dist import (
+    NullAccumulator,
+    NullAccumulatorFactory,
+    NullDataEncoder,
+    NullDistribution,
+    NullEstimator,
+)
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
+from pysp.utils.aliasing import MISSING, coalesce_alias, require
 
 
 def _forward_log(log_w: np.ndarray, log_a: np.ndarray, log_emit: np.ndarray) -> float:
@@ -38,8 +50,9 @@ def _forward_log(log_w: np.ndarray, log_a: np.ndarray, log_emit: np.ndarray) -> 
     return float(logsumexp(alpha))
 
 
-def _forward_backward(log_w: np.ndarray, log_a: np.ndarray,
-                      log_emit: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
+def _forward_backward(
+    log_w: np.ndarray, log_a: np.ndarray, log_emit: np.ndarray
+) -> tuple[float, np.ndarray, np.ndarray]:
     """Forward/backward posterior probabilities for one segment sequence.
 
     Returns (log_likelihood, gamma, xi_sum), where gamma[t, k] is p(z_t=k|x)
@@ -85,56 +98,60 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+
         children = tuple(self.emissions)
         if not self.null_len_dist:
             children = children + (self.len_dist,)
-        return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
-                                        kernel_status='generic_latent')
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children), kernel_status="generic_latent")
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+
         emission_children = tuple(declaration_for(emission) for emission in self.emissions)
         length = None if self.null_len_dist else declaration_for(self.len_dist)
-        children = tuple(child for child in emission_children + ((length,) if length is not None else ())
-                         if child is not None)
-        roles = tuple('state_%d_emission' % i for i, child in enumerate(emission_children) if child is not None)
+        children = tuple(
+            child for child in emission_children + ((length,) if length is not None else ()) if child is not None
+        )
+        roles = tuple("state_%d_emission" % i for i, child in enumerate(emission_children) if child is not None)
         if length is not None:
-            roles += ('length',)
+            roles += ("length",)
         return DistributionDeclaration(
-            name='segmental_hidden_markov',
+            name="segmental_hidden_markov",
             distribution_type=type(self),
             parameters=(
-                ParameterSpec('w', constraint='simplex_vector'),
-                ParameterSpec('transitions', constraint='row_simplex_matrix'),
+                ParameterSpec("w", constraint="simplex_vector"),
+                ParameterSpec("transitions", constraint="row_simplex_matrix"),
             ),
             statistics=(
-                StatisticSpec('num_states', kind='metadata', additive=False, scales=False),
-                StatisticSpec('initial_counts'),
-                StatisticSpec('state_counts'),
-                StatisticSpec('transition_counts'),
-                StatisticSpec('emissions', kind='tuple'),
-                StatisticSpec('length', kind='child_stat'),
+                StatisticSpec("num_states", kind="metadata", additive=False, scales=False),
+                StatisticSpec("initial_counts"),
+                StatisticSpec("state_counts"),
+                StatisticSpec("transition_counts"),
+                StatisticSpec("emissions", kind="tuple"),
+                StatisticSpec("length", kind="child_stat"),
             ),
-            support='segmental_hidden_state_sequence',
+            support="segmental_hidden_state_sequence",
             children=children,
             child_roles=roles,
             differentiable=False,
         )
 
-    def __init__(self,
-                 emissions: Sequence[SequenceEncodableProbabilityDistribution],
-                 w: Union[Sequence[float], np.ndarray] = MISSING,
-                 transitions: Union[Sequence[Sequence[float]], np.ndarray] = MISSING,
-                 len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 name: Optional[str] = None,
-                 weights: Union[Sequence[float], np.ndarray] = MISSING) -> None:
-        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
-        transitions = require('transitions', transitions, default=MISSING)
+    def __init__(
+        self,
+        emissions: Sequence[SequenceEncodableProbabilityDistribution],
+        w: Sequence[float] | np.ndarray = MISSING,
+        transitions: Sequence[Sequence[float]] | np.ndarray = MISSING,
+        len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        name: str | None = None,
+        weights: Sequence[float] | np.ndarray = MISSING,
+    ) -> None:
+        w = coalesce_alias("w", w, "weights", weights, default=MISSING)
+        transitions = require("transitions", transitions, default=MISSING)
         self.emissions = list(emissions)
         self.n_states = len(self.emissions)
         self.w = np.asarray(w, dtype=np.float64)
         if self.w.shape[0] != self.n_states:
-            raise ValueError('initial probability vector length must match number of emissions.')
+            raise ValueError("initial probability vector length must match number of emissions.")
         self.w = self.w / self.w.sum()
         self.transitions = np.asarray(transitions, dtype=np.float64).reshape((self.n_states, self.n_states))
         row_sum = self.transitions.sum(axis=1, keepdims=True)
@@ -143,7 +160,7 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
             self.transitions[bad, :] = 1.0 / float(self.n_states)
             row_sum = self.transitions.sum(axis=1, keepdims=True)
         self.transitions = self.transitions / row_sum
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             self.log_w = np.log(self.w)
             self.log_transitions = np.log(self.transitions)
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
@@ -151,14 +168,19 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         self.name = name
 
     def __str__(self) -> str:
-        s1 = ','.join(str(u) for u in self.emissions)
+        s1 = ",".join(str(u) for u in self.emissions)
         s2 = repr(list(self.w))
         s3 = repr([list(u) for u in self.transitions])
-        return 'SegmentalHiddenMarkovModelDistribution([%s], %s, %s, len_dist=%s, name=%s)' % (
-            s1, s2, s3, str(self.len_dist), repr(self.name))
+        return "SegmentalHiddenMarkovModelDistribution([%s], %s, %s, len_dist=%s, name=%s)" % (
+            s1,
+            s2,
+            s3,
+            str(self.len_dist),
+            repr(self.name),
+        )
 
     @property
-    def topics(self) -> List[SequenceEncodableProbabilityDistribution]:
+    def topics(self) -> list[SequenceEncodableProbabilityDistribution]:
         """Compatibility alias with HiddenMarkovModelDistribution terminology."""
         return self.emissions
 
@@ -179,7 +201,7 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
             rv += self.len_dist.log_density(n)
         return rv
 
-    def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray, Tuple[Any, ...], Optional[Any]]) -> np.ndarray:
+    def seq_log_density(self, x: tuple[np.ndarray, np.ndarray, tuple[Any, ...], Any | None]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         idx, sz, enc_by_state, len_enc = x
         nseq = len(sz)
@@ -191,14 +213,15 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
 
         offsets = np.concatenate([[0], np.cumsum(sz)]).astype(int)
         for i in range(nseq):
-            rv[i] = _forward_log(self.log_w, self.log_transitions, log_emit[offsets[i]:offsets[i + 1]])
+            rv[i] = _forward_log(self.log_w, self.log_transitions, log_emit[offsets[i] : offsets[i + 1]])
 
         if not self.null_len_dist and len_enc is not None:
             rv += self.len_dist.seq_log_density(len_enc)
         return rv
 
-    def backend_seq_log_density(self, x: Tuple[np.ndarray, np.ndarray, Tuple[Any, ...], Optional[Any]],
-                                engine: Any) -> Any:
+    def backend_seq_log_density(
+        self, x: tuple[np.ndarray, np.ndarray, tuple[Any, ...], Any | None], engine: Any
+    ) -> Any:
         """Engine-neutral segmental-HMM forward scoring for encoded segment sequences."""
         from pysp.stats.backend import backend_seq_log_density
 
@@ -209,8 +232,7 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
 
         if total > 0:
             emission_scores = [
-                backend_seq_log_density(dist, enc_by_state[k], engine)
-                for k, dist in enumerate(self.emissions)
+                backend_seq_log_density(dist, enc_by_state[k], engine) for k, dist in enumerate(self.emissions)
             ]
             log_emit = engine.stack(emission_scores, axis=1)
             log_w = engine.asarray(self.log_w)
@@ -230,39 +252,40 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
             rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
         return rv
 
-    def sampler(self, seed: Optional[int] = None) -> 'SegmentalHiddenMarkovSampler':
+    def sampler(self, seed: int | None = None) -> "SegmentalHiddenMarkovSampler":
         """Return a sampler for drawing observations from this distribution."""
         if self.null_len_dist:
-            raise ValueError('SegmentalHiddenMarkovSampler requires a non-null len_dist.')
+            raise ValueError("SegmentalHiddenMarkovSampler requires a non-null len_dist.")
         return SegmentalHiddenMarkovSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'SegmentalHiddenMarkovEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "SegmentalHiddenMarkovEstimator":
         """Return an estimator for fitting this distribution from data."""
         len_est = self.len_dist.estimator(pseudo_count=pseudo_count)
         ests = [u.estimator(pseudo_count=pseudo_count) for u in self.emissions]
         return SegmentalHiddenMarkovEstimator(
-            ests, len_estimator=len_est, pseudo_count=(pseudo_count, pseudo_count), name=self.name)
+            ests, len_estimator=len_est, pseudo_count=(pseudo_count, pseudo_count), name=self.name
+        )
 
-    def dist_to_encoder(self) -> 'SegmentalHiddenMarkovDataEncoder':
+    def dist_to_encoder(self) -> "SegmentalHiddenMarkovDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return SegmentalHiddenMarkovDataEncoder(
-            [d.dist_to_encoder() for d in self.emissions], self.len_dist.dist_to_encoder())
+            [d.dist_to_encoder() for d in self.emissions], self.len_dist.dist_to_encoder()
+        )
 
 
 class SegmentalHiddenMarkovSampler(DistributionSampler):
     """Draw iid segmental-HMM observations."""
 
-    def __init__(self, dist: SegmentalHiddenMarkovModelDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: SegmentalHiddenMarkovModelDistribution, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = RandomState(seed)
         self.obs_samplers = [d.sampler(seed=self.rng.randint(0, maxrandint)) for d in dist.emissions]
         self.len_sampler = dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
         p_map = {i: dist.w[i] for i in range(dist.n_states)}
-        t_map = {i: {j: dist.transitions[i, j] for j in range(dist.n_states)}
-                 for i in range(dist.n_states)}
+        t_map = {i: {j: dist.transitions[i, j] for j in range(dist.n_states)} for i in range(dist.n_states)}
         self.state_sampler = MarkovChainDistribution(p_map, t_map).sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: Optional[int] = None) -> Union[List[Any], List[List[Any]]]:
+    def sample(self, size: int | None = None) -> list[Any] | list[list[Any]]:
         if size is not None:
             return [self.sample() for _ in range(size)]
         n = self.len_sampler.sample()
@@ -273,10 +296,13 @@ class SegmentalHiddenMarkovSampler(DistributionSampler):
 class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
     """Baum-Welch accumulator for segmental HMMs."""
 
-    def __init__(self, accumulators: Sequence[SequenceEncodableStatisticAccumulator],
-                 len_accumulator: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
-                 keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None),
-                 name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        accumulators: Sequence[SequenceEncodableStatisticAccumulator],
+        len_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
+        keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
+        name: str | None = None,
+    ) -> None:
         self.accumulators = list(accumulators)
         self.num_states = len(self.accumulators)
         self.init_counts = np.zeros(self.num_states, dtype=np.float64)
@@ -293,9 +319,9 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self._seq_ll = 0.0
 
         self._init_rng = False
-        self._state_rng: Optional[RandomState] = None
-        self._len_rng: Optional[RandomState] = None
-        self._acc_rng: Optional[List[RandomState]] = None
+        self._state_rng: RandomState | None = None
+        self._len_rng: RandomState | None = None
+        self._acc_rng: list[RandomState] | None = None
 
     def _rng_initialize(self, rng: RandomState) -> None:
         seeds = rng.randint(maxrandint, size=2 + self.num_states)
@@ -313,8 +339,9 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         enc = self.acc_to_encoder().seq_encode([x])
         self.seq_initialize(enc, np.asarray([weight]), rng)
 
-    def seq_initialize(self, x: Tuple[np.ndarray, np.ndarray, Tuple[Any, ...], Optional[Any]],
-                       weights: np.ndarray, rng: RandomState) -> None:
+    def seq_initialize(
+        self, x: tuple[np.ndarray, np.ndarray, tuple[Any, ...], Any | None], weights: np.ndarray, rng: RandomState
+    ) -> None:
         if not self._init_rng:
             self._rng_initialize(rng)
         idx, sz, enc_by_state, len_enc = x
@@ -330,8 +357,9 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             weighted_state[start:stop, :] = 0.0
             weighted_state[np.arange(start, stop), states[start:stop]] = weights[i]
             self.init_counts[states[start]] += weights[i]
-            self.state_counts += np.bincount(states[start:stop], weights=np.full(n, weights[i]),
-                                             minlength=self.num_states)
+            self.state_counts += np.bincount(
+                states[start:stop], weights=np.full(n, weights[i]), minlength=self.num_states
+            )
             for t in range(start, stop - 1):
                 self.trans_counts[states[t], states[t + 1]] += weights[i]
 
@@ -339,8 +367,12 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[k].seq_initialize(enc_by_state[k], weighted_state[:, k], self._acc_rng[k])
         self.len_accumulator.seq_initialize(len_enc, weights, self._len_rng)
 
-    def seq_update(self, x: Tuple[np.ndarray, np.ndarray, Tuple[Any, ...], Optional[Any]],
-                   weights: np.ndarray, estimate: SegmentalHiddenMarkovModelDistribution) -> None:
+    def seq_update(
+        self,
+        x: tuple[np.ndarray, np.ndarray, tuple[Any, ...], Any | None],
+        weights: np.ndarray,
+        estimate: SegmentalHiddenMarkovModelDistribution,
+    ) -> None:
         idx, sz, enc_by_state, len_enc = x
         total = len(idx)
         log_emit = np.empty((total, self.num_states), dtype=np.float64)
@@ -359,8 +391,7 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             if n == 0:
                 continue
             start, stop = offsets[i], offsets[i + 1]
-            ll_i, gamma, xi_sum = _forward_backward(
-                estimate.log_w, estimate.log_transitions, log_emit[start:stop])
+            ll_i, gamma, xi_sum = _forward_backward(estimate.log_w, estimate.log_transitions, log_emit[start:stop])
             if track_ll:
                 ll_ret[i] = ll_i
             w = weights[i]
@@ -397,14 +428,12 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             log_emit_flat[:, k] = dist.seq_log_density(enc_by_state[k])
 
         padded, mask, offsets = hmm_pad_log_emissions(log_emit_flat, sz)
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             log_w = estimate.log_w
             log_a = estimate.log_transitions
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
 
-        _, gamma, xi_sum, pi = hmm_engine_forward_backward(
-            engine, padded, log_w, log_a, mask, weights=weights_np)
+        _, gamma, xi_sum, pi = hmm_engine_forward_backward(engine, padded, log_w, log_a, mask, weights=weights_np)
         gamma = np.asarray(engine.to_numpy(gamma))
         xi_sum = np.asarray(engine.to_numpy(xi_sum))
         pi = np.asarray(engine.to_numpy(pi))
@@ -413,7 +442,7 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         for i in range(len(sz)):
             n = int(sz[i])
             if n > 0:
-                gamma_flat[offsets[i]:offsets[i + 1], :] = gamma[i, :n, :]
+                gamma_flat[offsets[i] : offsets[i + 1], :] = gamma[i, :n, :]
 
         self.init_counts += pi.sum(axis=0)
         self.state_counts += gamma_flat.sum(axis=0)
@@ -422,8 +451,9 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[k].seq_update(enc_by_state[k], gamma_flat[:, k], estimate.emissions[k])
         self.len_accumulator.seq_update(len_enc, weights_np, estimate.len_dist)
 
-    def combine(self, suff_stat: Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Optional[Any]]) \
-            -> 'SegmentalHiddenMarkovAccumulator':
+    def combine(
+        self, suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Any | None]
+    ) -> "SegmentalHiddenMarkovAccumulator":
         _, init_counts, state_counts, trans_counts, acc_values, len_value = suff_stat
         self.init_counts += init_counts
         self.state_counts += state_counts
@@ -434,12 +464,19 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             self.len_accumulator.combine(len_value)
         return self
 
-    def value(self) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray, Tuple[Any, ...], Optional[Any]]:
-        return (self.num_states, self.init_counts, self.state_counts, self.trans_counts,
-                tuple(a.value() for a in self.accumulators), self.len_accumulator.value())
+    def value(self) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, tuple[Any, ...], Any | None]:
+        return (
+            self.num_states,
+            self.init_counts,
+            self.state_counts,
+            self.trans_counts,
+            tuple(a.value() for a in self.accumulators),
+            self.len_accumulator.value(),
+        )
 
-    def from_value(self, x: Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Optional[Any]]) \
-            -> 'SegmentalHiddenMarkovAccumulator':
+    def from_value(
+        self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Any | None]
+    ) -> "SegmentalHiddenMarkovAccumulator":
         num_states, init_counts, state_counts, trans_counts, acc_values, len_value = x
         self.num_states = num_states
         self.init_counts = init_counts
@@ -451,7 +488,7 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             self.len_accumulator.from_value(len_value)
         return self
 
-    def scale(self, c: float) -> 'SegmentalHiddenMarkovAccumulator':
+    def scale(self, c: float) -> "SegmentalHiddenMarkovAccumulator":
         self.init_counts *= c
         self.state_counts *= c
         self.trans_counts *= c
@@ -460,7 +497,7 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self.len_accumulator.scale(c)
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         if self.init_key is not None:
             stats_dict[self.init_key] = stats_dict.get(self.init_key, 0.0) + self.init_counts
         if self.trans_key is not None:
@@ -475,7 +512,7 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             acc.key_merge(stats_dict)
         self.len_accumulator.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         if self.init_key is not None and self.init_key in stats_dict:
             self.init_counts = stats_dict[self.init_key]
         if self.trans_key is not None and self.trans_key in stats_dict:
@@ -486,18 +523,22 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             acc.key_replace(stats_dict)
         self.len_accumulator.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'SegmentalHiddenMarkovDataEncoder':
+    def acc_to_encoder(self) -> "SegmentalHiddenMarkovDataEncoder":
         return SegmentalHiddenMarkovDataEncoder(
-            [a.acc_to_encoder() for a in self.accumulators], self.len_accumulator.acc_to_encoder())
+            [a.acc_to_encoder() for a in self.accumulators], self.len_accumulator.acc_to_encoder()
+        )
 
 
 class SegmentalHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for SegmentalHiddenMarkovAccumulator."""
 
-    def __init__(self, factories: Sequence[StatisticAccumulatorFactory],
-                 len_factory: Optional[StatisticAccumulatorFactory] = NullAccumulatorFactory(),
-                 keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None),
-                 name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        factories: Sequence[StatisticAccumulatorFactory],
+        len_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
+        keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
+        name: str | None = None,
+    ) -> None:
         self.factories = list(factories)
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
         self.keys = keys
@@ -505,17 +546,21 @@ class SegmentalHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
 
     def make(self) -> SegmentalHiddenMarkovAccumulator:
         return SegmentalHiddenMarkovAccumulator(
-            [f.make() for f in self.factories], self.len_factory.make(), keys=self.keys, name=self.name)
+            [f.make() for f in self.factories], self.len_factory.make(), keys=self.keys, name=self.name
+        )
 
 
 class SegmentalHiddenMarkovEstimator(ParameterEstimator):
     """Baum-Welch estimator for SegmentalHiddenMarkovModelDistribution."""
 
-    def __init__(self, estimators: Sequence[ParameterEstimator],
-                 len_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 pseudo_count: Optional[Tuple[Optional[float], Optional[float]]] = (None, None),
-                 name: Optional[str] = None,
-                 keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None)) -> None:
+    def __init__(
+        self,
+        estimators: Sequence[ParameterEstimator],
+        len_estimator: ParameterEstimator | None = NullEstimator(),
+        pseudo_count: tuple[float | None, float | None] | None = (None, None),
+        name: str | None = None,
+        keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
+    ) -> None:
         self.estimators = list(estimators)
         self.num_states = len(self.estimators)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
@@ -526,11 +571,16 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
     def accumulator_factory(self) -> SegmentalHiddenMarkovAccumulatorFactory:
         return SegmentalHiddenMarkovAccumulatorFactory(
             [e.accumulator_factory() for e in self.estimators],
-            self.len_estimator.accumulator_factory(), keys=self.keys, name=self.name)
+            self.len_estimator.accumulator_factory(),
+            keys=self.keys,
+            name=self.name,
+        )
 
-    def estimate(self, nobs: Optional[float],
-                 suff_stat: Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Optional[Any]]) \
-            -> SegmentalHiddenMarkovModelDistribution:
+    def estimate(
+        self,
+        nobs: float | None,
+        suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Any | None],
+    ) -> SegmentalHiddenMarkovModelDistribution:
         num_states, init_counts, state_counts, trans_counts, emission_ss, len_ss = suff_stat
         emissions = [self.estimators[k].estimate(state_counts[k], emission_ss[k]) for k in range(num_states)]
         len_dist = self.len_estimator.estimate(nobs, len_ss)
@@ -552,32 +602,37 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
             row_sum = transitions.sum(axis=1, keepdims=True)
         transitions = transitions / row_sum
 
-        return SegmentalHiddenMarkovModelDistribution(
-            emissions, w, transitions, len_dist=len_dist, name=self.name)
+        return SegmentalHiddenMarkovModelDistribution(emissions, w, transitions, len_dist=len_dist, name=self.name)
 
 
 class SegmentalHiddenMarkovDataEncoder(DataSequenceEncoder):
     """Encode a batch of segment sequences for a segmental HMM."""
 
-    def __init__(self, emission_encoders: Sequence[DataSequenceEncoder],
-                 len_encoder: Optional[DataSequenceEncoder] = NullDataEncoder()) -> None:
+    def __init__(
+        self,
+        emission_encoders: Sequence[DataSequenceEncoder],
+        len_encoder: DataSequenceEncoder | None = NullDataEncoder(),
+    ) -> None:
         self.emission_encoders = list(emission_encoders)
         self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
 
     def __str__(self) -> str:
-        return 'SegmentalHiddenMarkovDataEncoder([%s], len_encoder=%s)' % (
-            ','.join(str(e) for e in self.emission_encoders), str(self.len_encoder))
+        return "SegmentalHiddenMarkovDataEncoder([%s], len_encoder=%s)" % (
+            ",".join(str(e) for e in self.emission_encoders),
+            str(self.len_encoder),
+        )
 
     def __eq__(self, other: object) -> bool:
-        return (isinstance(other, SegmentalHiddenMarkovDataEncoder)
-                and self.emission_encoders == other.emission_encoders
-                and self.len_encoder == other.len_encoder)
+        return (
+            isinstance(other, SegmentalHiddenMarkovDataEncoder)
+            and self.emission_encoders == other.emission_encoders
+            and self.len_encoder == other.len_encoder
+        )
 
-    def seq_encode(self, x: Sequence[Sequence[Any]]) \
-            -> Tuple[np.ndarray, np.ndarray, Tuple[Any, ...], Optional[Any]]:
+    def seq_encode(self, x: Sequence[Sequence[Any]]) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...], Any | None]:
         lengths = np.asarray([len(seq) for seq in x], dtype=np.int32)
         idx = np.repeat(np.arange(len(x), dtype=np.int32), lengths)
-        flat: List[Any] = []
+        flat: list[Any] = []
         for seq in x:
             flat.extend(seq)
         enc_by_state = tuple(enc.seq_encode(flat) for enc in self.emission_encoders)
@@ -597,19 +652,18 @@ SegmentalHiddenMarkovModelSampler = SegmentalHiddenMarkovSampler
 
 def _register_segmental_engine_kernel():
     """Register the engine-resident segmental-HMM kernel (idempotent; called at import)."""
-    from pysp.stats.kernel import (GenericKernel, KernelFactory, GenericKernelFactory,
-                                    register_kernel_factory)
     from pysp.engines import NUMPY_ENGINE
+    from pysp.stats.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
     class SegmentalHiddenMarkovModelKernel(GenericKernel):
         """Segmental-HMM kernel whose E-step runs the forward-backward on the active engine."""
 
         def accumulate(self, enc, weights):
             if self.estimator is None:
-                raise ValueError('SegmentalHiddenMarkovModelKernel.accumulate requires an estimator.')
+                raise ValueError("SegmentalHiddenMarkovModelKernel.accumulate requires an estimator.")
             if self.engine.name == NUMPY_ENGINE.name:
                 return super().accumulate(enc, weights)
-            host_enc = getattr(enc, 'host_payload', enc)
+            host_enc = getattr(enc, "host_payload", enc)
             accumulator = self.estimator.accumulator_factory().make()
             accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
             return accumulator.value()
@@ -620,8 +674,7 @@ def _register_segmental_engine_kernel():
                 return GenericKernelFactory().build(dist, engine, estimator=estimator)
             return SegmentalHiddenMarkovModelKernel(dist, engine=engine, estimator=estimator)
 
-    register_kernel_factory(SegmentalHiddenMarkovModelDistribution,
-                            SegmentalHiddenMarkovModelKernelFactory())
+    register_kernel_factory(SegmentalHiddenMarkovModelDistribution, SegmentalHiddenMarkovModelKernelFactory())
 
 
 _register_segmental_engine_kernel()

@@ -1,6 +1,8 @@
 """Create, estimate, and sample from a Pareto type-I distribution."""
+
 import math
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -21,30 +23,31 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
         return DistributionDeclaration(
-            name='pareto',
+            name="pareto",
             distribution_type=cls,
             parameters=(
-                ParameterSpec('xm', constraint='positive'),
-                ParameterSpec('alpha', constraint='positive'),
+                ParameterSpec("xm", constraint="positive"),
+                ParameterSpec("alpha", constraint="positive"),
             ),
             statistics=(
-                StatisticSpec('count'),
-                StatisticSpec('sum_of_logs'),
-                StatisticSpec('min_val', kind='support_bound', additive=False, scales=False),
+                StatisticSpec("count"),
+                StatisticSpec("sum_of_logs"),
+                StatisticSpec("min_val", kind="support_bound", additive=False, scales=False),
             ),
-            support='positive_tail',
+            support="positive_tail",
         )
 
-    def __init__(self, xm: float, alpha: float, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(self, xm: float, alpha: float, name: str | None = None, keys: str | None = None) -> None:
         if xm <= 0.0 or alpha <= 0.0 or not np.isfinite(xm) or not np.isfinite(alpha):
-            raise ValueError('ParetoDistribution requires xm > 0 and alpha > 0.')
+            raise ValueError("ParetoDistribution requires xm > 0 and alpha > 0.")
         self.xm = float(xm)
         self.alpha = float(alpha)
         self.log_xm = math.log(self.xm)
@@ -53,8 +56,12 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        return 'ParetoDistribution(%s, %s, name=%s, keys=%s)' % (
-            repr(self.xm), repr(self.alpha), repr(self.name), repr(self.keys))
+        return "ParetoDistribution(%s, %s, name=%s, keys=%s)" % (
+            repr(self.xm),
+            repr(self.alpha),
+            repr(self.name),
+            repr(self.keys),
+        )
 
     def density(self, x: float) -> float:
         """Return the probability density or mass at a single observation."""
@@ -70,7 +77,7 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
             return -np.inf
         return self.log_alpha + self.alpha * self.log_xm - (self.alpha + 1.0) * math.log(xx)
 
-    def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         xx, lx = x
         rv = self.log_alpha + self.alpha * self.log_xm - (self.alpha + 1.0) * lx
@@ -82,30 +89,33 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
         rv = engine.log(alpha) + alpha * engine.log(xm) - (alpha + engine.asarray(1.0)) * log_vals
         return engine.where(vals >= xm, rv, engine.asarray(-np.inf))
 
-    def backend_seq_log_density(self, x: Tuple[Any, Any], engine: Any) -> Any:
+    def backend_seq_log_density(self, x: tuple[Any, Any], engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
         return self.backend_log_density_from_params(
-            engine.asarray(x[0]), engine.asarray(x[1]), engine.asarray(self.xm), engine.asarray(self.alpha), engine)
+            engine.asarray(x[0]), engine.asarray(x[1]), engine.asarray(self.xm), engine.asarray(self.alpha), engine
+        )
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['ParetoDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["ParetoDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked Pareto parameters for a homogeneous mixture kernel."""
         return {
-            'xm': engine.asarray([d.xm for d in dists]),
-            'alpha': engine.asarray([d.alpha for d in dists]),
+            "xm": engine.asarray([d.xm for d in dists]),
+            "alpha": engine.asarray([d.alpha for d in dists]),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: Tuple[Any, Any], params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: tuple[Any, Any], params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of Pareto log densities."""
         vals = engine.asarray(x[0])
         log_vals = engine.asarray(x[1])
         return cls.backend_log_density_from_params(
-            vals[:, None], log_vals[:, None], params['xm'][None, :], params['alpha'][None, :], engine)
+            vals[:, None], log_vals[:, None], params["xm"][None, :], params["alpha"][None, :], engine
+        )
 
     @classmethod
-    def backend_stacked_sufficient_statistics(cls, x: Tuple[Any, Any], weights: Any,
-                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any, Any]:
+    def backend_stacked_sufficient_statistics(
+        cls, x: tuple[Any, Any], weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[Any, Any, Any]:
         """Return stacked Pareto sufficient statistics using engine-resident arrays."""
         vals = engine.asarray(x[0])
         log_vals = engine.asarray(x[1])
@@ -116,18 +126,19 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
         min_val = -engine.max(engine.where(mask, -vals[:, None], engine.asarray(-np.inf)), axis=0)
         return count, sum_logs, min_val
 
-    def sampler(self, seed: Optional[int] = None) -> 'ParetoSampler':
+    def sampler(self, seed: int | None = None) -> "ParetoSampler":
         """Return a sampler for drawing observations from this distribution."""
         return ParetoSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'ParetoEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "ParetoEstimator":
         """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return ParetoEstimator(name=self.name, keys=self.keys)
-        return ParetoEstimator(pseudo_count=pseudo_count, suff_stat=(self.xm, self.alpha),
-                               name=self.name, keys=self.keys)
+        return ParetoEstimator(
+            pseudo_count=pseudo_count, suff_stat=(self.xm, self.alpha), name=self.name, keys=self.keys
+        )
 
-    def dist_to_encoder(self) -> 'ParetoDataEncoder':
+    def dist_to_encoder(self) -> "ParetoDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return ParetoDataEncoder()
 
@@ -135,37 +146,38 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
 class ParetoSampler(DistributionSampler):
     """Draw iid Pareto observations."""
 
-    def __init__(self, dist: ParetoDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: ParetoDistribution, seed: int | None = None) -> None:
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: Optional[int] = None) -> Union[float, np.ndarray]:
+    def sample(self, size: int | None = None) -> float | np.ndarray:
         return self.dist.xm * (self.rng.pareto(self.dist.alpha, size=size) + 1.0)
 
 
 class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted support minimum and log-sum statistics."""
 
-    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.count = 0.0
         self.sum_of_logs = 0.0
         self.min_val = np.inf
         self.name = name
         self.key = keys
 
-    def update(self, x: float, weight: float, estimate: Optional[ParetoDistribution]) -> None:
+    def update(self, x: float, weight: float, estimate: ParetoDistribution | None) -> None:
         if x <= 0.0:
-            raise ValueError('ParetoDistribution requires observations x > 0.')
+            raise ValueError("ParetoDistribution requires observations x > 0.")
         if weight > 0.0:
             self.count += weight
             self.sum_of_logs += math.log(x) * weight
             self.min_val = min(self.min_val, x)
 
-    def initialize(self, x: float, weight: float, rng: Optional[RandomState]) -> None:
+    def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         self.update(x, weight, None)
 
-    def seq_update(self, x: Tuple[np.ndarray, np.ndarray], weights: np.ndarray,
-                   estimate: Optional[ParetoDistribution]) -> None:
+    def seq_update(
+        self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: ParetoDistribution | None
+    ) -> None:
         xx, lx = x
         mask = weights > 0.0
         if np.any(mask):
@@ -173,12 +185,12 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum_of_logs += np.dot(lx, weights)
             self.min_val = min(self.min_val, float(np.min(xx[mask])))
 
-    def seq_update_engine(self, x: Tuple[np.ndarray, np.ndarray], weights: Any,
-                          estimate: Optional[ParetoDistribution], engine: Any) -> None:
+    def seq_update_engine(
+        self, x: tuple[np.ndarray, np.ndarray], weights: Any, estimate: ParetoDistribution | None, engine: Any
+    ) -> None:
         """Engine-resident accumulation of the count and log-sum statistics (numpy or torch)."""
         xx, lx = x
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         w = engine.asarray(weights_np)
         lx_e = engine.asarray(np.asarray(lx, dtype=np.float64))
         zero = engine.asarray(0.0)
@@ -189,50 +201,49 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
         if np.any(mask_np):
             self.min_val = min(self.min_val, float(np.min(np.asarray(xx)[mask_np])))
 
-    def seq_initialize(self, x: Tuple[np.ndarray, np.ndarray], weights: np.ndarray,
-                       rng: Optional[RandomState]) -> None:
+    def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: Tuple[float, float, float]) -> 'ParetoAccumulator':
+    def combine(self, suff_stat: tuple[float, float, float]) -> "ParetoAccumulator":
         self.count += suff_stat[0]
         self.sum_of_logs += suff_stat[1]
         self.min_val = min(self.min_val, suff_stat[2])
         return self
 
-    def value(self) -> Tuple[float, float, float]:
+    def value(self) -> tuple[float, float, float]:
         return self.count, self.sum_of_logs, self.min_val
 
-    def from_value(self, x: Tuple[float, float, float]) -> 'ParetoAccumulator':
+    def from_value(self, x: tuple[float, float, float]) -> "ParetoAccumulator":
         self.count = x[0]
         self.sum_of_logs = x[1]
         self.min_val = x[2]
         return self
 
-    def scale(self, c: float) -> 'ParetoAccumulator':
+    def scale(self, c: float) -> "ParetoAccumulator":
         """Scale linear count/log-sum statistics while preserving support bound."""
         self.count *= c
         self.sum_of_logs *= c
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None:
             if self.key in stats_dict:
                 stats_dict[self.key].combine(self.value())
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None and self.key in stats_dict:
             self.from_value(stats_dict[self.key].value())
 
-    def acc_to_encoder(self) -> 'ParetoDataEncoder':
+    def acc_to_encoder(self) -> "ParetoDataEncoder":
         return ParetoDataEncoder()
 
 
 class ParetoAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for ParetoAccumulator."""
 
-    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.name = name
         self.keys = keys
 
@@ -243,10 +254,14 @@ class ParetoAccumulatorFactory(StatisticAccumulatorFactory):
 class ParetoEstimator(ParameterEstimator):
     """MLE estimator for Pareto scale and shape."""
 
-    def __init__(self, pseudo_count: Optional[float] = None,
-                 suff_stat: Optional[Tuple[float, float]] = None,
-                 min_denom: float = 1.0e-12, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: tuple[float, float] | None = None,
+        min_denom: float = 1.0e-12,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.min_denom = min_denom
@@ -256,7 +271,7 @@ class ParetoEstimator(ParameterEstimator):
     def accumulator_factory(self) -> ParetoAccumulatorFactory:
         return ParetoAccumulatorFactory(name=self.name, keys=self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[float, float, float]) -> ParetoDistribution:
+    def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> ParetoDistribution:
         count, sum_logs, xm = suff_stat
         if count <= 0.0:
             xm, alpha = self.suff_stat if self.suff_stat is not None else (1.0, 1.0)
@@ -277,13 +292,13 @@ class ParetoDataEncoder(DataSequenceEncoder):
     """Encode Pareto observations with x and log(x)."""
 
     def __str__(self) -> str:
-        return 'ParetoDataEncoder'
+        return "ParetoDataEncoder"
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, ParetoDataEncoder)
 
-    def seq_encode(self, x: Sequence[float]) -> Tuple[np.ndarray, np.ndarray]:
+    def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(rv <= 0.0) or np.any(np.isnan(rv))):
-            raise ValueError('ParetoDistribution requires observations x > 0.')
+            raise ValueError("ParetoDistribution requires observations x > 0.")
         return rv, np.log(rv)

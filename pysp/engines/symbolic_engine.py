@@ -5,12 +5,14 @@ lightweight algebraic experiments.  Numeric execution remains the job of
 NumPy/Torch engines; arrays here are NumPy object arrays of scalar expression
 nodes so generated kernels can be inspected without a separate runtime.
 """
+
 from __future__ import annotations
 
 import math
 from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -22,40 +24,40 @@ class SymbolicExpression:
     """A tiny immutable symbolic expression tree."""
 
     op: str
-    args: Tuple[Any, ...] = ()
+    args: tuple[Any, ...] = ()
 
     __array_priority__ = 1000
     __pysp_engine__ = None
 
     @staticmethod
-    def symbol(name: str) -> 'SymbolicExpression':
+    def symbol(name: str) -> SymbolicExpression:
         """Create a named symbolic variable node."""
-        return SymbolicExpression('symbol', (str(name),))
+        return SymbolicExpression("symbol", (str(name),))
 
     @staticmethod
-    def constant(value: Any) -> 'SymbolicExpression':
+    def constant(value: Any) -> SymbolicExpression:
         """Create a symbolic constant node."""
-        return SymbolicExpression('const', (value,))
+        return SymbolicExpression("const", (value,))
 
     @staticmethod
-    def call(op: str, *args: Any) -> 'SymbolicExpression':
+    def call(op: str, *args: Any) -> SymbolicExpression:
         """Create an operation node with symbolic arguments."""
         return SymbolicExpression(op, tuple(_sym(arg) for arg in args))
 
-    def evaluate(self, values: Dict[str, Any]) -> Any:
+    def evaluate(self, values: dict[str, Any]) -> Any:
         """Evaluate the expression with a mapping from symbol names to values."""
-        if self.op == 'symbol':
+        if self.op == "symbol":
             return values[self.args[0]]
-        if self.op == 'const':
+        if self.op == "const":
             return self.args[0]
         vals = [arg.evaluate(values) if isinstance(arg, SymbolicExpression) else arg for arg in self.args]
         return _EVAL_OPS[self.op](*vals)
 
-    def symbols(self) -> Tuple[str, ...]:
+    def symbols(self) -> tuple[str, ...]:
         """Return sorted symbolic variable names referenced by this expression."""
         return tuple(sorted(_collect_symbols(self)))
 
-    def op_counts(self) -> Dict[str, int]:
+    def op_counts(self) -> dict[str, int]:
         """Return operation counts for this expression tree."""
         counts: Counter = Counter()
         _collect_op_counts(self, counts)
@@ -70,47 +72,92 @@ class SymbolicExpression:
         return sum(self.op_counts().values())
 
     def __str__(self) -> str:
-        if self.op == 'symbol':
+        if self.op == "symbol":
             return self.args[0]
-        if self.op == 'const':
+        if self.op == "const":
             return repr(self.args[0])
         if self.op in _INFIX and len(self.args) == 2:
-            return '(%s %s %s)' % (self.args[0], _INFIX[self.op], self.args[1])
-        if self.op == 'neg':
-            return '(-%s)' % self.args[0]
-        return '%s(%s)' % (self.op, ', '.join(str(arg) for arg in self.args))
+            return "(%s %s %s)" % (self.args[0], _INFIX[self.op], self.args[1])
+        if self.op == "neg":
+            return "(-%s)" % self.args[0]
+        return "%s(%s)" % (self.op, ", ".join(str(arg) for arg in self.args))
 
     __repr__ = __str__
 
-    def __add__(self, other): return SymbolicExpression.call('add', self, other)
-    def __radd__(self, other): return SymbolicExpression.call('add', other, self)
-    def __sub__(self, other): return SymbolicExpression.call('sub', self, other)
-    def __rsub__(self, other): return SymbolicExpression.call('sub', other, self)
-    def __mul__(self, other): return SymbolicExpression.call('mul', self, other)
-    def __rmul__(self, other): return SymbolicExpression.call('mul', other, self)
-    def __truediv__(self, other): return SymbolicExpression.call('div', self, other)
-    def __rtruediv__(self, other): return SymbolicExpression.call('div', other, self)
-    def __pow__(self, other): return SymbolicExpression.call('pow', self, other)
-    def __rpow__(self, other): return SymbolicExpression.call('pow', other, self)
-    def __neg__(self): return SymbolicExpression.call('neg', self)
-    def __lt__(self, other): return SymbolicExpression.call('lt', self, other)
-    def __le__(self, other): return SymbolicExpression.call('le', self, other)
-    def __gt__(self, other): return SymbolicExpression.call('gt', self, other)
-    def __ge__(self, other): return SymbolicExpression.call('ge', self, other)
-    def __eq__(self, other): return SymbolicExpression.call('eq', self, other)
-    def __ne__(self, other): return SymbolicExpression.call('ne', self, other)
-    def __and__(self, other): return SymbolicExpression.call('and', self, other)
-    def __rand__(self, other): return SymbolicExpression.call('and', other, self)
-    def __or__(self, other): return SymbolicExpression.call('or', self, other)
-    def __ror__(self, other): return SymbolicExpression.call('or', other, self)
-    def __invert__(self): return SymbolicExpression.call('invert', self)
-    def __bool__(self): raise TypeError('symbolic expressions cannot be used as Python booleans.')
+    def __add__(self, other):
+        return SymbolicExpression.call("add", self, other)
+
+    def __radd__(self, other):
+        return SymbolicExpression.call("add", other, self)
+
+    def __sub__(self, other):
+        return SymbolicExpression.call("sub", self, other)
+
+    def __rsub__(self, other):
+        return SymbolicExpression.call("sub", other, self)
+
+    def __mul__(self, other):
+        return SymbolicExpression.call("mul", self, other)
+
+    def __rmul__(self, other):
+        return SymbolicExpression.call("mul", other, self)
+
+    def __truediv__(self, other):
+        return SymbolicExpression.call("div", self, other)
+
+    def __rtruediv__(self, other):
+        return SymbolicExpression.call("div", other, self)
+
+    def __pow__(self, other):
+        return SymbolicExpression.call("pow", self, other)
+
+    def __rpow__(self, other):
+        return SymbolicExpression.call("pow", other, self)
+
+    def __neg__(self):
+        return SymbolicExpression.call("neg", self)
+
+    def __lt__(self, other):
+        return SymbolicExpression.call("lt", self, other)
+
+    def __le__(self, other):
+        return SymbolicExpression.call("le", self, other)
+
+    def __gt__(self, other):
+        return SymbolicExpression.call("gt", self, other)
+
+    def __ge__(self, other):
+        return SymbolicExpression.call("ge", self, other)
+
+    def __eq__(self, other):
+        return SymbolicExpression.call("eq", self, other)
+
+    def __ne__(self, other):
+        return SymbolicExpression.call("ne", self, other)
+
+    def __and__(self, other):
+        return SymbolicExpression.call("and", self, other)
+
+    def __rand__(self, other):
+        return SymbolicExpression.call("and", other, self)
+
+    def __or__(self, other):
+        return SymbolicExpression.call("or", self, other)
+
+    def __ror__(self, other):
+        return SymbolicExpression.call("or", other, self)
+
+    def __invert__(self):
+        return SymbolicExpression.call("invert", self)
+
+    def __bool__(self):
+        raise TypeError("symbolic expressions cannot be used as Python booleans.")
 
 
 class SymbolicEngine(ComputeEngine):
     """Small symbolic expression engine over scalar nodes and object arrays."""
 
-    name = 'symbolic'
+    name = "symbolic"
     supports_autograd = False
 
     def symbol(self, name: str) -> SymbolicExpression:
@@ -144,7 +191,7 @@ class SymbolicEngine(ComputeEngine):
         """Return ``x`` as a NumPy object array without numeric evaluation."""
         return np.asarray(x, dtype=object)
 
-    def evaluate(self, x: Any, values: Dict[str, Any]) -> Any:
+    def evaluate(self, x: Any, values: dict[str, Any]) -> Any:
         """Evaluate a scalar expression or object-array expression tree."""
         if isinstance(x, SymbolicExpression):
             return x.evaluate(values)
@@ -157,21 +204,21 @@ class SymbolicEngine(ComputeEngine):
             otypes=[object],
         )(arr)
 
-    def symbols(self, x: Any) -> Tuple[str, ...]:
+    def symbols(self, x: Any) -> tuple[str, ...]:
         """Return sorted symbolic variable names referenced by ``x``."""
         names = set()
         for expr in _iter_expressions(x):
             names.update(expr.symbols())
         return tuple(sorted(names))
 
-    def op_counts(self, x: Any) -> Dict[str, int]:
+    def op_counts(self, x: Any) -> dict[str, int]:
         """Return aggregate operation counts over a scalar or array expression."""
         counts: Counter = Counter()
         for expr in _iter_expressions(x):
             _collect_op_counts(expr, counts)
         return dict(counts)
 
-    def diagnostics(self, x: Any) -> Dict[str, Any]:
+    def diagnostics(self, x: Any) -> dict[str, Any]:
         """Return a compact diagnostic summary for generated-kernel inspection."""
         expressions = tuple(_iter_expressions(x))
         counts: Counter = Counter()
@@ -182,24 +229,24 @@ class SymbolicEngine(ComputeEngine):
             max_depth = max(max_depth, expr.depth())
             names.update(expr.symbols())
         return {
-            'num_expressions': len(expressions),
-            'symbols': tuple(sorted(names)),
-            'op_counts': dict(counts),
-            'max_depth': max_depth,
+            "num_expressions": len(expressions),
+            "symbols": tuple(sorted(names)),
+            "op_counts": dict(counts),
+            "max_depth": max_depth,
         }
 
     def stack(self, arrays: Any, axis: int = 0) -> Any:
         """Stack symbolic arrays with NumPy object-array semantics."""
         return np.stack(tuple(arrays), axis=axis)
 
-    log = staticmethod(lambda x: _elementwise_call('log', x))
-    exp = staticmethod(lambda x: _elementwise_call('exp', x))
-    sqrt = staticmethod(lambda x: _elementwise_call('sqrt', x))
-    abs = staticmethod(lambda x: _elementwise_call('abs', x))
-    floor = staticmethod(lambda x: _elementwise_call('floor', x))
-    gammaln = staticmethod(lambda x: _elementwise_call('gammaln', x))
-    digamma = staticmethod(lambda x: _elementwise_call('digamma', x))
-    erf = staticmethod(lambda x: _elementwise_call('erf', x))
+    log = staticmethod(lambda x: _elementwise_call("log", x))
+    exp = staticmethod(lambda x: _elementwise_call("exp", x))
+    sqrt = staticmethod(lambda x: _elementwise_call("sqrt", x))
+    abs = staticmethod(lambda x: _elementwise_call("abs", x))
+    floor = staticmethod(lambda x: _elementwise_call("floor", x))
+    gammaln = staticmethod(lambda x: _elementwise_call("gammaln", x))
+    digamma = staticmethod(lambda x: _elementwise_call("digamma", x))
+    erf = staticmethod(lambda x: _elementwise_call("erf", x))
 
     @staticmethod
     def sum(x: Any, axis: Any = None, *args: Any, **kwargs: Any) -> Any:
@@ -214,94 +261,97 @@ class SymbolicEngine(ComputeEngine):
     @staticmethod
     def where(cond: Any, x: Any, y: Any) -> Any:
         """Return a symbolic elementwise conditional expression."""
-        return _elementwise_call('where', cond, x, y)
+        return _elementwise_call("where", cond, x, y)
 
     @staticmethod
     def maximum(x: Any, y: Any) -> Any:
         """Return a symbolic elementwise maximum expression."""
-        return _elementwise_call('max', x, y)
+        return _elementwise_call("max", x, y)
 
     @staticmethod
     def less(x: Any, y: Any) -> Any:
         """Return a symbolic less-than comparison."""
-        return _elementwise_call('lt', x, y)
+        return _elementwise_call("lt", x, y)
 
     @staticmethod
     def less_equal(x: Any, y: Any) -> Any:
         """Return a symbolic less-than-or-equal comparison."""
-        return _elementwise_call('le', x, y)
+        return _elementwise_call("le", x, y)
 
     @staticmethod
     def greater(x: Any, y: Any) -> Any:
         """Return a symbolic greater-than comparison."""
-        return _elementwise_call('gt', x, y)
+        return _elementwise_call("gt", x, y)
 
     @staticmethod
     def greater_equal(x: Any, y: Any) -> Any:
         """Return a symbolic greater-than-or-equal comparison."""
-        return _elementwise_call('ge', x, y)
+        return _elementwise_call("ge", x, y)
 
     @staticmethod
     def equal(x: Any, y: Any) -> Any:
         """Return a symbolic equality comparison."""
-        return _elementwise_call('eq', x, y)
+        return _elementwise_call("eq", x, y)
 
     @staticmethod
     def not_equal(x: Any, y: Any) -> Any:
         """Return a symbolic inequality comparison."""
-        return _elementwise_call('ne', x, y)
+        return _elementwise_call("ne", x, y)
 
     @staticmethod
     def logical_and(x: Any, y: Any) -> Any:
         """Return a symbolic elementwise logical-and expression."""
-        return _elementwise_call('and', x, y)
+        return _elementwise_call("and", x, y)
 
     @staticmethod
     def logical_or(x: Any, y: Any) -> Any:
         """Return a symbolic elementwise logical-or expression."""
-        return _elementwise_call('or', x, y)
+        return _elementwise_call("or", x, y)
 
     @staticmethod
     def logical_not(x: Any) -> Any:
         """Return a symbolic elementwise logical-not expression."""
-        return _elementwise_call('invert', x)
+        return _elementwise_call("invert", x)
 
     @staticmethod
     def clip(x: Any, a_min: Any = None, a_max: Any = None) -> Any:
         """Return a symbolic clipped expression."""
-        return _elementwise_call('clip', x, a_min, a_max)
+        return _elementwise_call("clip", x, a_min, a_max)
 
-    isnan = staticmethod(lambda x: _elementwise_call('isnan', x))
-    isinf = staticmethod(lambda x: _elementwise_call('isinf', x))
+    isnan = staticmethod(lambda x: _elementwise_call("isnan", x))
+    isinf = staticmethod(lambda x: _elementwise_call("isinf", x))
     max = staticmethod(lambda x, axis=None, *args, **kwargs: _reduce_symbolic(x, _max_values, axis=axis))
     dot = staticmethod(lambda x, y: np.dot(_sym_array(x), _sym_array(y)))
     matmul = staticmethod(lambda x, y: np.matmul(_sym_array(x), _sym_array(y)))
     cumsum = staticmethod(lambda x, axis=None, *args, **kwargs: np.cumsum(_sym_array(x), axis=axis))
-    bincount = staticmethod(lambda x, *args, **kwargs: SymbolicExpression.call('bincount', x))
-    unique = staticmethod(lambda x, *args, **kwargs: SymbolicExpression.call('unique', x))
-    searchsorted = staticmethod(lambda x, y, *args, **kwargs: SymbolicExpression.call('searchsorted', x, y))
-    betaln = staticmethod(lambda x, y: _elementwise_call('betaln', x, y))
+    bincount = staticmethod(lambda x, *args, **kwargs: SymbolicExpression.call("bincount", x))
+    unique = staticmethod(lambda x, *args, **kwargs: SymbolicExpression.call("unique", x))
+    searchsorted = staticmethod(lambda x, y, *args, **kwargs: SymbolicExpression.call("searchsorted", x, y))
+    betaln = staticmethod(lambda x, y: _elementwise_call("betaln", x, y))
 
     def index_add(self, out: Any, index: Any, values: Any) -> Any:
         """Return a symbolic index-add operation node."""
-        return SymbolicExpression.call('index_add', out, index, values)
+        return SymbolicExpression.call("index_add", out, index, values)
 
     @staticmethod
     def to_sympy(x: Any) -> Any:
         """Lower a symbolic expression (or object array) to a sympy expression."""
         from pysp.engines.symbolic_export import to_sympy
+
         return to_sympy(x)
 
     @staticmethod
     def to_sage(x: Any) -> Any:
         """Lower a symbolic expression (or object array) to a sage expression."""
         from pysp.engines.symbolic_export import to_sage
+
         return to_sage(x)
 
     @staticmethod
     def to_latex(x: Any) -> str:
         """Return a LaTeX string for a symbolic expression via sympy."""
         from pysp.engines.symbolic_export import to_latex
+
         return to_latex(x)
 
 
@@ -316,20 +366,20 @@ def _sum_values(values: Any) -> SymbolicExpression:
 def _max_values(values: Any) -> SymbolicExpression:
     values = np.asarray(values, dtype=object).reshape(-1)
     if values.size == 0:
-        raise ValueError('cannot reduce an empty symbolic array.')
+        raise ValueError("cannot reduce an empty symbolic array.")
     rv = _sym(values[0])
     for value in values[1:]:
-        rv = SymbolicExpression.call('max', rv, value)
+        rv = SymbolicExpression.call("max", rv, value)
     return rv
 
 
 def _logsumexp_values(values: Any) -> SymbolicExpression:
     values = np.asarray(values, dtype=object).reshape(-1)
-    terms = [SymbolicExpression.call('exp', value) for value in values]
+    terms = [SymbolicExpression.call("exp", value) for value in values]
     total = SymbolicExpression.constant(0.0)
     for term in terms:
         total = total + term
-    return SymbolicExpression.call('log', total)
+    return SymbolicExpression.call("log", total)
 
 
 def _reduce_symbolic(x: Any, reducer: Callable[[Any], SymbolicExpression], axis: Any = None) -> Any:
@@ -383,7 +433,7 @@ def _iter_expressions(x: Any) -> Iterable[SymbolicExpression]:
 def _collect_symbols(expr: Any) -> set:
     if not isinstance(expr, SymbolicExpression):
         return set()
-    if expr.op == 'symbol':
+    if expr.op == "symbol":
         return {expr.args[0]}
     names = set()
     for arg in expr.args:
@@ -402,28 +452,24 @@ def _collect_op_counts(expr: Any, counts: Counter) -> None:
 def _expression_depth(expr: Any) -> int:
     if not isinstance(expr, SymbolicExpression) or not expr.args:
         return 1
-    child_depths = [
-        _expression_depth(arg)
-        for arg in expr.args
-        if isinstance(arg, SymbolicExpression)
-    ]
+    child_depths = [_expression_depth(arg) for arg in expr.args if isinstance(arg, SymbolicExpression)]
     return 1 + (max(child_depths) if child_depths else 0)
 
 
 _INFIX = {
-    'add': '+',
-    'sub': '-',
-    'mul': '*',
-    'div': '/',
-    'pow': '**',
-    'lt': '<',
-    'le': '<=',
-    'gt': '>',
-    'ge': '>=',
-    'eq': '==',
-    'ne': '!=',
-    'and': '&',
-    'or': '|',
+    "add": "+",
+    "sub": "-",
+    "mul": "*",
+    "div": "/",
+    "pow": "**",
+    "lt": "<",
+    "le": "<=",
+    "gt": ">",
+    "ge": ">=",
+    "eq": "==",
+    "ne": "!=",
+    "and": "&",
+    "or": "|",
 }
 
 
@@ -435,35 +481,35 @@ def _clip_value(x: Any, a_min: Any, a_max: Any) -> Any:
     return x
 
 
-_EVAL_OPS: Dict[str, Callable[..., Any]] = {
-    'add': lambda x, y: x + y,
-    'sub': lambda x, y: x - y,
-    'mul': lambda x, y: x * y,
-    'div': lambda x, y: x / y,
-    'pow': lambda x, y: x ** y,
-    'neg': lambda x: -x,
-    'lt': lambda x, y: x < y,
-    'le': lambda x, y: x <= y,
-    'gt': lambda x, y: x > y,
-    'ge': lambda x, y: x >= y,
-    'eq': lambda x, y: x == y,
-    'ne': lambda x, y: x != y,
-    'and': lambda x, y: bool(x) and bool(y),
-    'or': lambda x, y: bool(x) or bool(y),
-    'invert': lambda x: not bool(x),
-    'log': math.log,
-    'exp': math.exp,
-    'sqrt': math.sqrt,
-    'abs': abs,
-    'floor': math.floor,
-    'max': lambda *xs: max(xs),
-    'where': lambda cond, x, y: x if bool(cond) else y,
-    'clip': _clip_value,
-    'gammaln': math.lgamma,
-    'erf': math.erf,
-    'isnan': math.isnan,
-    'isinf': math.isinf,
-    'betaln': lambda x, y: math.lgamma(x) + math.lgamma(y) - math.lgamma(x + y),
+_EVAL_OPS: dict[str, Callable[..., Any]] = {
+    "add": lambda x, y: x + y,
+    "sub": lambda x, y: x - y,
+    "mul": lambda x, y: x * y,
+    "div": lambda x, y: x / y,
+    "pow": lambda x, y: x**y,
+    "neg": lambda x: -x,
+    "lt": lambda x, y: x < y,
+    "le": lambda x, y: x <= y,
+    "gt": lambda x, y: x > y,
+    "ge": lambda x, y: x >= y,
+    "eq": lambda x, y: x == y,
+    "ne": lambda x, y: x != y,
+    "and": lambda x, y: bool(x) and bool(y),
+    "or": lambda x, y: bool(x) or bool(y),
+    "invert": lambda x: not bool(x),
+    "log": math.log,
+    "exp": math.exp,
+    "sqrt": math.sqrt,
+    "abs": abs,
+    "floor": math.floor,
+    "max": lambda *xs: max(xs),
+    "where": lambda cond, x, y: x if bool(cond) else y,
+    "clip": _clip_value,
+    "gammaln": math.lgamma,
+    "erf": math.erf,
+    "isnan": math.isnan,
+    "isinf": math.isinf,
+    "betaln": lambda x, y: math.lgamma(x) + math.lgamma(y) - math.lgamma(x + y),
 }
 
 

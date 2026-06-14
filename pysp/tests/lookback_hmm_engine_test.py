@@ -1,20 +1,22 @@
 """Engine scoring + E-step parity for the lookback HMMs (numpy + torch), both module variants."""
+
 import unittest
 
 import numpy as np
 
 import pysp.stats.look_back_hmm as new_mod
 import pysp.stats.lookback_hmm as old_mod
+from pysp.engines import NUMPY_ENGINE
+from pysp.stats.backend import backend_seq_log_density
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.intrange import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 from pysp.stats.null_dist import NullDistribution, NullEstimator
 from pysp.stats.sequence import SequenceDistribution, SequenceEstimator
-from pysp.stats.backend import backend_seq_log_density
-from pysp.engines import NUMPY_ENGINE
 
 try:
     from pysp.engines import TorchEngine
-    _TORCH = TorchEngine(device='cpu', dtype='float64')
+
+    _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
 
@@ -24,20 +26,28 @@ EMISSION_PROBS = [[0.7, 0.2, 0.1], [0.1, 0.3, 0.6]]
 
 
 def _make_dist(mod, len_dist):
-    topics = [SequenceDistribution(IntegerCategoricalDistribution(0, p),
-                                   len_dist=CategoricalDistribution({1: 1.0}))
-              for p in EMISSION_PROBS]
+    topics = [
+        SequenceDistribution(IntegerCategoricalDistribution(0, p), len_dist=CategoricalDistribution({1: 1.0}))
+        for p in EMISSION_PROBS
+    ]
     init_dist = [NullDistribution()] * 2 if mod is old_mod else None
-    return mod.LookbackHiddenMarkovDistribution(topics, w=W, transitions=TRANSITIONS, lag=0,
-                                                init_dist=init_dist, len_dist=len_dist)
+    return mod.LookbackHiddenMarkovDistribution(
+        topics, w=W, transitions=TRANSITIONS, lag=0, init_dist=init_dist, len_dist=len_dist
+    )
 
 
 def _make_estimator(mod):
-    topic_est = SequenceEstimator(IntegerCategoricalEstimator(min_val=0, max_val=2, pseudo_count=0.1),
-                                  len_estimator=CategoricalEstimator(pseudo_count=0.1))
+    topic_est = SequenceEstimator(
+        IntegerCategoricalEstimator(min_val=0, max_val=2, pseudo_count=0.1),
+        len_estimator=CategoricalEstimator(pseudo_count=0.1),
+    )
     return mod.LookbackHiddenMarkovEstimator(
-        [topic_est] * 2, lag=0, init_estimators=[NullEstimator()] * 2,
-        len_estimator=CategoricalEstimator(pseudo_count=0.1), pseudo_count=(1.0, 1.0))
+        [topic_est] * 2,
+        lag=0,
+        init_estimators=[NullEstimator()] * 2,
+        len_estimator=CategoricalEstimator(pseudo_count=0.1),
+        pseudo_count=(1.0, 1.0),
+    )
 
 
 def _flatten(v):
@@ -56,15 +66,15 @@ def _flatten(v):
             a = np.asarray(u, dtype=np.float64).ravel()
             if a.size:
                 out.append(a)
+
     rec(v)
     return np.concatenate(out) if out else np.zeros(0)
 
 
 class LookbackHmmEngineTestCase(unittest.TestCase):
-
     def setUp(self):
         self.len_dist = CategoricalDistribution({2: 0.25, 3: 0.25, 4: 0.25, 5: 0.25})
-        self.engines = [('numpy', NUMPY_ENGINE)] + ([('torch', _TORCH)] if _TORCH is not None else [])
+        self.engines = [("numpy", NUMPY_ENGINE)] + ([("torch", _TORCH)] if _TORCH is not None else [])
 
     def _run(self, mod):
         dist = _make_dist(mod, self.len_dist)
@@ -72,13 +82,12 @@ class LookbackHmmEngineTestCase(unittest.TestCase):
         data = [list(rng.randint(0, 3, size=int(rng.randint(2, 6)))) for _ in range(30)]
         weights = np.linspace(0.5, 1.5, len(data))
         enc = dist.dist_to_encoder().seq_encode(data)
-        self.assertIn('torch', dist.supported_engines())
+        self.assertIn("torch", dist.supported_engines())
         # scoring parity
         host_ll = dist.seq_log_density(enc)
         for name, engine in self.engines:
             v = np.asarray(engine.to_numpy(backend_seq_log_density(dist, enc, engine)))
-            self.assertTrue(np.allclose(host_ll, v, atol=1.0e-6),
-                            '%s/%s scoring differs' % (mod.__name__, name))
+            self.assertTrue(np.allclose(host_ll, v, atol=1.0e-6), "%s/%s scoring differs" % (mod.__name__, name))
         # E-step parity
         est = _make_estimator(mod)
         host = est.accumulator_factory().make()
@@ -87,9 +96,8 @@ class LookbackHmmEngineTestCase(unittest.TestCase):
         for name, engine in self.engines:
             kernel = dist.kernel(engine=engine, estimator=est)
             val = _flatten(kernel.accumulate(enc, weights))
-            self.assertEqual(hv.shape, val.shape, '%s/%s shape' % (mod.__name__, name))
-            self.assertTrue(np.allclose(hv, val, atol=1.0e-6),
-                            '%s/%s E-step differs' % (mod.__name__, name))
+            self.assertEqual(hv.shape, val.shape, "%s/%s shape" % (mod.__name__, name))
+            self.assertTrue(np.allclose(hv, val, atol=1.0e-6), "%s/%s E-step differs" % (mod.__name__, name))
 
     def test_old_module(self):
         self._run(old_mod)
@@ -98,5 +106,5 @@ class LookbackHmmEngineTestCase(unittest.TestCase):
         self._run(new_mod)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

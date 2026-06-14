@@ -4,12 +4,13 @@ enumerators, and ss_mixture scalar-vs-vectorized accumulation.
 The routing tests use two children with very different densities so that any encoder-group /
 choice-index mix-up produces wildly wrong numbers.
 """
+
 import unittest
 
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.categorical import CategoricalDistribution
 from pysp.stats.conditional import ConditionalDistribution
 from pysp.stats.gaussian import GaussianDistribution, GaussianEstimator
 from pysp.stats.pdist import EnumerationError
@@ -26,7 +27,7 @@ def numeric_choice(x) -> int:
 
 def letter_choice(x) -> int:
     """Routes 'x'/'y' to child 1, everything else to child 0."""
-    return 1 if x in ('x', 'y') else 0
+    return 1 if x in ("x", "y") else 0
 
 
 class SelectRoutingTestCase(unittest.TestCase):
@@ -47,8 +48,9 @@ class SelectRoutingTestCase(unittest.TestCase):
         expected = np.asarray([self.dist.log_density(x) for x in self.data])
 
         self.assertEqual(len(sld), len(self.data))
-        self.assertTrue(np.allclose(sld, expected),
-                        'seq_log_density disagrees with log_density: %s vs %s' % (sld, expected))
+        self.assertTrue(
+            np.allclose(sld, expected), "seq_log_density disagrees with log_density: %s vs %s" % (sld, expected)
+        )
 
     def test_seq_update_routes_to_correct_child(self) -> None:
         est = SelectEstimator([GaussianEstimator(), GaussianEstimator()], numeric_choice)
@@ -87,7 +89,7 @@ class SelectRoutingTestCase(unittest.TestCase):
         # GaussianEstimator only defines accumulator_factory(); the old factory called the
         # legacy camelCase accumulatorFactory() and raised AttributeError.
         child = GaussianEstimator()
-        self.assertFalse(hasattr(child, 'accumulatorFactory'))
+        self.assertFalse(hasattr(child, "accumulatorFactory"))
 
         est = SelectEstimator([GaussianEstimator(), GaussianEstimator()], numeric_choice)
         acc = est.accumulator_factory().make()
@@ -118,16 +120,16 @@ class SelectRoutingTestCase(unittest.TestCase):
         enc_a = self.dist.dist_to_encoder()
         enc_b = self.dist.dist_to_encoder()
         self.assertEqual(enc_a, enc_b)
-        self.assertNotEqual(enc_a, 'not an encoder')
-        self.assertIn('SelectDataEncoder', str(enc_a))
+        self.assertNotEqual(enc_a, "not an encoder")
+        self.assertIn("SelectDataEncoder", str(enc_a))
 
 
 class SelectEnumeratorTestCase(unittest.TestCase):
     """Tests for the select enumerator over the union of child supports."""
 
     def test_union_sorted_exact_and_deduped(self) -> None:
-        d0 = CategoricalDistribution({'a': 0.5, 'b': 0.5})
-        d1 = CategoricalDistribution({'a': 0.3, 'x': 0.7})
+        d0 = CategoricalDistribution({"a": 0.5, "b": 0.5})
+        d1 = CategoricalDistribution({"a": 0.3, "x": 0.7})
         dist = SelectDistribution([d0, d1], letter_choice)
 
         items = dist.enumerator().top_k(10)
@@ -136,9 +138,9 @@ class SelectEnumeratorTestCase(unittest.TestCase):
 
         # 'a' appears in both child supports but routes to child 0; it must be emitted once with
         # the child-0 score. 'x' routes to child 1.
-        self.assertEqual(set(vals), {'a', 'b', 'x'})
+        self.assertEqual(set(vals), {"a", "b", "x"})
         self.assertEqual(len(vals), len(set(vals)))
-        self.assertEqual(vals[0], 'x')
+        self.assertEqual(vals[0], "x")
 
         for v, lp in items:
             self.assertAlmostEqual(lp, dist.log_density(v), places=10)
@@ -148,33 +150,31 @@ class SelectEnumeratorTestCase(unittest.TestCase):
     def test_zero_probability_values_skipped(self) -> None:
         # 'y' is routed to child 1 but only child 0 gives it mass, so p('y') = 0 and it must
         # never be yielded.
-        d0 = CategoricalDistribution({'a': 0.6, 'y': 0.4})
-        d1 = CategoricalDistribution({'x': 1.0})
+        d0 = CategoricalDistribution({"a": 0.6, "y": 0.4})
+        d1 = CategoricalDistribution({"x": 1.0})
         dist = SelectDistribution([d0, d1], letter_choice)
 
         items = dist.enumerator().top_k(10)
         vals = [v for v, _ in items]
-        self.assertEqual(set(vals), {'a', 'x'})
+        self.assertEqual(set(vals), {"a", "x"})
 
     def test_non_enumerable_child_fails_fast(self) -> None:
-        dist = SelectDistribution([GaussianDistribution(0.0, 1.0), CategoricalDistribution({'x': 1.0})],
-                                  letter_choice)
+        dist = SelectDistribution([GaussianDistribution(0.0, 1.0), CategoricalDistribution({"x": 1.0})], letter_choice)
         with self.assertRaises(EnumerationError) as ctx:
             dist.enumerator()
-        self.assertIn('SelectDistribution.dists[0]', str(ctx.exception))
+        self.assertIn("SelectDistribution.dists[0]", str(ctx.exception))
 
 
 class ConditionalEnumeratorTestCase(unittest.TestCase):
     """Tests for the conditional enumerator over (given, value) pairs."""
 
     def test_joint_enumeration_sorted_and_exact(self) -> None:
-        given = CategoricalDistribution({'a': 0.6, 'b': 0.4})
-        dmap = {'a': CategoricalDistribution({'x': 0.7, 'y': 0.3}),
-                'b': CategoricalDistribution({'x': 0.2, 'z': 0.8})}
+        given = CategoricalDistribution({"a": 0.6, "b": 0.4})
+        dmap = {"a": CategoricalDistribution({"x": 0.7, "y": 0.3}), "b": CategoricalDistribution({"x": 0.2, "z": 0.8})}
         dist = ConditionalDistribution(dmap, given_dist=given)
 
         items = dist.enumerator().top_k(10)
-        expected = {('a', 'x'): 0.42, ('a', 'y'): 0.18, ('b', 'x'): 0.08, ('b', 'z'): 0.32}
+        expected = {("a", "x"): 0.42, ("a", "y"): 0.18, ("b", "x"): 0.08, ("b", "z"): 0.32}
 
         self.assertEqual(len(items), 4)
         self.assertEqual({v for v, _ in items}, set(expected))
@@ -187,36 +187,35 @@ class ConditionalEnumeratorTestCase(unittest.TestCase):
             self.assertGreaterEqual(lps[i], lps[i + 1] - TOL)
 
     def test_default_distribution_covers_missing_keys(self) -> None:
-        given = CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2})
-        dmap = {'a': CategoricalDistribution({'x': 1.0}), 'b': CategoricalDistribution({'y': 1.0})}
-        dist = ConditionalDistribution(dmap, given_dist=given,
-                                       default_dist=CategoricalDistribution({'q': 1.0}))
+        given = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
+        dmap = {"a": CategoricalDistribution({"x": 1.0}), "b": CategoricalDistribution({"y": 1.0})}
+        dist = ConditionalDistribution(dmap, given_dist=given, default_dist=CategoricalDistribution({"q": 1.0}))
 
         items = dist.enumerator().top_k(10)
         as_dict = {v: lp for v, lp in items}
-        self.assertEqual(set(as_dict), {('a', 'x'), ('b', 'y'), ('c', 'q')})
-        self.assertAlmostEqual(as_dict[('c', 'q')], np.log(0.2), places=10)
+        self.assertEqual(set(as_dict), {("a", "x"), ("b", "y"), ("c", "q")})
+        self.assertAlmostEqual(as_dict[("c", "q")], np.log(0.2), places=10)
 
     def test_missing_key_without_default_contributes_nothing(self) -> None:
-        given = CategoricalDistribution({'a': 0.5, 'c': 0.5})
-        dmap = {'a': CategoricalDistribution({'x': 0.9, 'y': 0.1})}
+        given = CategoricalDistribution({"a": 0.5, "c": 0.5})
+        dmap = {"a": CategoricalDistribution({"x": 0.9, "y": 0.1})}
         dist = ConditionalDistribution(dmap, given_dist=given)
 
         items = dist.enumerator().top_k(10)
-        self.assertEqual({v for v, _ in items}, {('a', 'x'), ('a', 'y')})
+        self.assertEqual({v for v, _ in items}, {("a", "x"), ("a", "y")})
 
     def test_null_given_fails_fast(self) -> None:
-        dist = ConditionalDistribution({'a': CategoricalDistribution({'x': 1.0})})
+        dist = ConditionalDistribution({"a": CategoricalDistribution({"x": 1.0})})
         with self.assertRaises(EnumerationError) as ctx:
             dist.enumerator()
-        self.assertIn('given distribution', str(ctx.exception))
+        self.assertIn("given distribution", str(ctx.exception))
 
     def test_non_enumerable_conditional_fails_fast(self) -> None:
-        given = CategoricalDistribution({'a': 1.0})
-        dist = ConditionalDistribution({'a': GaussianDistribution(0.0, 1.0)}, given_dist=given)
+        given = CategoricalDistribution({"a": 1.0})
+        dist = ConditionalDistribution({"a": GaussianDistribution(0.0, 1.0)}, given_dist=given)
         with self.assertRaises(EnumerationError) as ctx:
             dist.enumerator()
-        self.assertIn('dmap', str(ctx.exception))
+        self.assertIn("dmap", str(ctx.exception))
 
 
 class SemiSupervisedMixtureAccumulatorTestCase(unittest.TestCase):
@@ -226,11 +225,13 @@ class SemiSupervisedMixtureAccumulatorTestCase(unittest.TestCase):
         comps = [GaussianDistribution(0.0, 1.0), GaussianDistribution(3.0, 1.0)]
         self.dist = SemiSupervisedMixtureDistribution(comps, [0.5, 0.5])
         self.est = SemiSupervisedMixtureEstimator([GaussianEstimator(), GaussianEstimator()])
-        self.data = [(0.2, None),
-                     (2.9, [(1, 1.0)]),
-                     (1.5, [(0, 0.6), (1, 0.4)]),
-                     (-0.3, None),
-                     (3.3, [(1, 0.7), (0, 0.3)])]
+        self.data = [
+            (0.2, None),
+            (2.9, [(1, 1.0)]),
+            (1.5, [(0, 0.6), (1, 0.4)]),
+            (-0.3, None),
+            (3.3, [(1, 0.7), (0, 0.3)]),
+        ]
 
     def test_scalar_update_matches_seq_update(self) -> None:
         scalar_acc = self.est.accumulator_factory().make()
@@ -242,12 +243,12 @@ class SemiSupervisedMixtureAccumulatorTestCase(unittest.TestCase):
         seq_acc.seq_update(enc, np.ones(len(self.data)), self.dist)
 
         v_scalar, v_seq = scalar_acc.value(), seq_acc.value()
-        self.assertTrue(np.allclose(v_scalar[0], v_seq[0]),
-                        'comp_counts differ: %s vs %s' % (v_scalar[0], v_seq[0]))
+        self.assertTrue(np.allclose(v_scalar[0], v_seq[0]), "comp_counts differ: %s vs %s" % (v_scalar[0], v_seq[0]))
         for ss_scalar, ss_seq in zip(v_scalar[1], v_seq[1]):
-            self.assertTrue(np.allclose(np.asarray(ss_scalar, dtype=float),
-                                        np.asarray(ss_seq, dtype=float)),
-                            'component suff stats differ: %s vs %s' % (ss_scalar, ss_seq))
+            self.assertTrue(
+                np.allclose(np.asarray(ss_scalar, dtype=float), np.asarray(ss_seq, dtype=float)),
+                "component suff stats differ: %s vs %s" % (ss_scalar, ss_seq),
+            )
 
     def test_estimates_agree_between_paths(self) -> None:
         scalar_acc = self.est.accumulator_factory().make()
@@ -266,7 +267,7 @@ class SemiSupervisedMixtureAccumulatorTestCase(unittest.TestCase):
             self.assertAlmostEqual(c_scalar.sigma2, c_seq.sigma2, places=10)
 
     def test_string_representation_keeps_name_intact(self) -> None:
-        dist = SemiSupervisedMixtureDistribution(self.dist.components, [0.5, 0.5], name='semi')
+        dist = SemiSupervisedMixtureDistribution(self.dist.components, [0.5, 0.5], name="semi")
         dist_str = str(dist)
 
         self.assertIn("name='semi'", dist_str)
@@ -289,8 +290,8 @@ class SemiSupervisedMixtureAccumulatorTestCase(unittest.TestCase):
     def test_enumerator_fails_fast_with_reason(self) -> None:
         with self.assertRaises(EnumerationError) as ctx:
             self.dist.enumerator()
-        self.assertIn('prior', str(ctx.exception))
+        self.assertIn("prior", str(ctx.exception))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

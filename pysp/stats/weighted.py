@@ -11,17 +11,27 @@ estimation. Likelihood evaluations delegate to the base distribution on the valu
     P((x, w)) = P_base(x).
 
 """
-from pysp.arithmetic import *
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
-    DistributionEnumerator, child_enumerator
-from numpy.random import RandomState
-import numpy as np
-from typing import Dict, Any, Optional, Tuple, Sequence, TypeVar, Union
 
-D = TypeVar('D')
-E = TypeVar('E')
-SS = TypeVar('SS')
+from collections.abc import Sequence
+from typing import Any, TypeVar
+
+import numpy as np
+
+from pysp.arithmetic import *
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+    child_enumerator,
+)
+
+D = TypeVar("D")
+E = TypeVar("E")
+SS = TypeVar("SS")
 
 
 class WeightedDistribution(SequenceEncodableProbabilityDistribution):
@@ -39,30 +49,32 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import capabilities_for
+
         return capabilities_for(self.dist)
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+
         child = declaration_for(self.dist)
         children = () if child is None else (child,)
         return DistributionDeclaration(
-            name='weighted',
+            name="weighted",
             distribution_type=type(self),
             parameters=(),
-            statistics=(StatisticSpec('weighted_child', kind='child_stat'),),
-            support='weighted_observation',
+            statistics=(StatisticSpec("weighted_child", kind="child_stat"),),
+            support="weighted_observation",
             children=children,
-            child_roles=('value',) if child is not None else (),
+            child_roles=("value",) if child is not None else (),
             differentiable=False,
         )
 
-    def __init__(self, dist: SequenceEncodableProbabilityDistribution, name: Optional[str] = None):
+    def __init__(self, dist: SequenceEncodableProbabilityDistribution, name: str | None = None):
         self.dist = dist
         self.name = name
 
     def __str__(self) -> str:
         """Returns string representation of WeightedDistribution object."""
-        return 'WeightedDistribution(dist=%s, name=%s)' % (repr(self.dist), repr(self.name))
+        return "WeightedDistribution(dist=%s, name=%s)" % (repr(self.dist), repr(self.name))
 
     def density(self, x: D) -> float:
         """Density of the base distribution at observation value x.
@@ -91,7 +103,7 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         """
         return self.dist.log_density(x)
 
-    def seq_log_density(self, x: Tuple[E, np.ndarray]) -> np.ndarray:
+    def seq_log_density(self, x: tuple[E, np.ndarray]) -> np.ndarray:
         """Vectorized log-density of the base distribution on encoded values.
 
         Args:
@@ -103,48 +115,51 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         """
         return self.dist.seq_log_density(x[0])
 
-    def backend_seq_log_density(self, x: Tuple[E, np.ndarray], engine: Any) -> Any:
+    def backend_seq_log_density(self, x: tuple[E, np.ndarray], engine: Any) -> Any:
         """Engine-neutral vectorized log-density delegated to the value distribution."""
         from pysp.stats.backend import backend_seq_log_density
+
         return backend_seq_log_density(self.dist, x[0], engine)
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['WeightedDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["WeightedDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked child parameters for homogeneous weighted-wrapper mixtures."""
         from pysp.stats.stacked import stacked_component_params
+
         child_dists = [dist.dist for dist in dists]
         try:
             child_route = stacked_component_params(child_dists, engine)
         except ValueError as exc:
-            raise ValueError('Weighted child %s is not stackable: %s' %
-                             (type(child_dists[0]).__name__, exc))
-        return {'child_route': child_route, 'num_components': len(dists)}
+            raise ValueError("Weighted child %s is not stackable: %s" % (type(child_dists[0]).__name__, exc))
+        return {"child_route": child_route, "num_components": len(dists)}
 
     @classmethod
-    def backend_stacked_log_density(cls, x: Tuple[E, np.ndarray], params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: tuple[E, np.ndarray], params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of child log densities, ignoring attached weights."""
         from pysp.stats.stacked import stacked_component_log_density
-        return stacked_component_log_density(x[0], params['child_route'], engine)
+
+        return stacked_component_log_density(x[0], params["child_route"], engine)
 
     @classmethod
-    def backend_stacked_sufficient_statistics_with_estimator(cls, x: Tuple[E, np.ndarray], weights: Any,
-                                                            params: Dict[str, Any], engine: Any,
-                                                            estimator: Any) -> Any:
+    def backend_stacked_sufficient_statistics_with_estimator(
+        cls, x: tuple[E, np.ndarray], weights: Any, params: dict[str, Any], engine: Any, estimator: Any
+    ) -> Any:
         """Return child legacy statistics with posterior weights scaled by observation weights."""
         from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics
-        ww = engine.asarray(weights) * engine.asarray(x[1])[:, None]
-        num_components = int(params['num_components'])
-        component_estimators = tuple(getattr(est, 'estimator', None)
-                                     for est in getattr(estimator, 'estimators', ()))
-        child_estimator = StackedEstimatorView(component_estimators) \
-            if len(component_estimators) == num_components else None
-        return stacked_component_sufficient_statistics(x[0], ww, params['child_route'], engine, child_estimator)
 
-    def dist_to_encoder(self) -> 'WeightedDataEncoder':
+        ww = engine.asarray(weights) * engine.asarray(x[1])[:, None]
+        num_components = int(params["num_components"])
+        component_estimators = tuple(getattr(est, "estimator", None) for est in getattr(estimator, "estimators", ()))
+        child_estimator = (
+            StackedEstimatorView(component_estimators) if len(component_estimators) == num_components else None
+        )
+        return stacked_component_sufficient_statistics(x[0], ww, params["child_route"], engine, child_estimator)
+
+    def dist_to_encoder(self) -> "WeightedDataEncoder":
         """Returns a WeightedDataEncoder for encoding sequences of (value, weight) observations."""
         return WeightedDataEncoder(encoder=self.dist.dist_to_encoder())
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'WeightedEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "WeightedEstimator":
         """Create a WeightedEstimator wrapping the base distribution's estimator.
 
         Args:
@@ -159,7 +174,7 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         else:
             return WeightedEstimator(estimator=self.dist.estimator(), name=self.name)
 
-    def sampler(self, seed: Optional[int] = None) -> 'WeightedSampler':
+    def sampler(self, seed: int | None = None) -> "WeightedSampler":
         """Create a WeightedSampler producing (value, weight) pairs.
 
         Args:
@@ -171,9 +186,9 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         """
         return WeightedSampler(self, seed)
 
-    def enumerator(self) -> 'DistributionEnumerator':
+    def enumerator(self) -> "DistributionEnumerator":
         """Delegates to the base distribution's enumerator (log_density is pure delegation)."""
-        return child_enumerator(self.dist, 'WeightedDistribution.dist')
+        return child_enumerator(self.dist, "WeightedDistribution.dist")
 
 
 class WeightedSampler(DistributionSampler):
@@ -194,11 +209,11 @@ class WeightedSampler(DistributionSampler):
 
     """
 
-    def __init__(self, dist: WeightedDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: WeightedDistribution, seed: int | None = None) -> None:
         super().__init__(dist, seed)
         self.dist_sampler = dist.dist.sampler(seed=self.new_seed())
 
-    def sample(self, size: Optional[int] = None) -> Union[Tuple[Any, float], Sequence[Tuple[Any, float]]]:
+    def sample(self, size: int | None = None) -> tuple[Any, float] | Sequence[tuple[Any, float]]:
         """Draw iid (value, weight) samples, each with weight 1.0.
 
         Args:
@@ -227,11 +242,11 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
 
     """
 
-    def __init__(self, accumulator: SequenceEncodableStatisticAccumulator, name: Optional[str] = None):
+    def __init__(self, accumulator: SequenceEncodableStatisticAccumulator, name: str | None = None):
         self.accumulator = accumulator
         self.name = name
 
-    def initialize(self, x: Tuple[D, float], weight: float, rng: np.random.RandomState) -> None:
+    def initialize(self, x: tuple[D, float], weight: float, rng: np.random.RandomState) -> None:
         """Initialize the base accumulator with observation x[0] weighted by weight*x[1].
 
         Args:
@@ -240,9 +255,9 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
             rng (RandomState): Random number generator for initialization.
 
         """
-        self.accumulator.initialize(x[0], weight*x[1], rng)
+        self.accumulator.initialize(x[0], weight * x[1], rng)
 
-    def update(self, x: Tuple[D, float], weight: float, estimate: WeightedDistribution) -> None:
+    def update(self, x: tuple[D, float], weight: float, estimate: WeightedDistribution) -> None:
         """Update the base accumulator with observation x[0] weighted by weight*x[1].
 
         Args:
@@ -251,7 +266,7 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (WeightedDistribution): Previous estimate of the weighted distribution.
 
         """
-        self.accumulator.update(x[0], weight*x[1], estimate.dist)
+        self.accumulator.update(x[0], weight * x[1], estimate.dist)
 
     def seq_update(self, x, weights: np.ndarray, estimate: WeightedDistribution) -> None:
         """Vectorized update of the base accumulator with weights scaled by the observation weights.
@@ -262,18 +277,18 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (WeightedDistribution): Previous estimate of the weighted distribution.
 
         """
-        self.accumulator.seq_update(x[0], weights*x[1], estimate.dist)
+        self.accumulator.seq_update(x[0], weights * x[1], estimate.dist)
 
     def seq_update_engine(self, x, weights: Any, estimate: WeightedDistribution, engine: Any) -> None:
         """Engine-resident E-step: per-observation weights are scaled on the active engine and the
         base accumulator is routed through the engine. Matches seq_update.
         """
         from pysp.stats.backend import child_seq_update
-        w = engine.asarray(weights) * engine.asarray(np.asarray(x[1], dtype=np.float64))
-        child_seq_update(self.accumulator, x[0], w,
-                         estimate.dist if estimate is not None else None, engine)
 
-    def seq_initialize(self, x: Tuple[E, np.ndarray], weights: np.ndarray, rng: np.random.RandomState) -> None:
+        w = engine.asarray(weights) * engine.asarray(np.asarray(x[1], dtype=np.float64))
+        child_seq_update(self.accumulator, x[0], w, estimate.dist if estimate is not None else None, engine)
+
+    def seq_initialize(self, x: tuple[E, np.ndarray], weights: np.ndarray, rng: np.random.RandomState) -> None:
         """Vectorized initialization of the base accumulator with scaled weights.
 
         Args:
@@ -282,9 +297,9 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
             rng (RandomState): Random number generator for initialization.
 
         """
-        self.accumulator.seq_initialize(x[0], weights*x[1], rng)
+        self.accumulator.seq_initialize(x[0], weights * x[1], rng)
 
-    def combine(self, suff_stat: SS) -> 'WeightedAccumulator':
+    def combine(self, suff_stat: SS) -> "WeightedAccumulator":
         """Combine the base accumulator's sufficient statistics with suff_stat.
 
         Args:
@@ -297,7 +312,7 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator.combine(suff_stat)
         return self
 
-    def from_value(self, x: SS) -> 'WeightedAccumulator':
+    def from_value(self, x: SS) -> "WeightedAccumulator":
         """Set the base accumulator's sufficient statistics from x.
 
         Args:
@@ -315,22 +330,23 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
         """Returns the base accumulator's sufficient statistics."""
         return self.accumulator.value()
 
-    def scale(self, c: float) -> 'WeightedAccumulator':
+    def scale(self, c: float) -> "WeightedAccumulator":
         """Scale the child accumulator through its family-specific protocol."""
         self.accumulator.scale(c)
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge keyed sufficient statistics of the base accumulator into stats_dict."""
         self.accumulator.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace keyed sufficient statistics of the base accumulator from stats_dict."""
         self.accumulator.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'WeightedDataEncoder':
+    def acc_to_encoder(self) -> "WeightedDataEncoder":
         """Returns a WeightedDataEncoder for encoding sequences of (value, weight) observations."""
         return WeightedDataEncoder(encoder=self.accumulator.acc_to_encoder())
+
 
 class WeightedAccumulatorFactory(StatisticAccumulatorFactory):
     """WeightedAccumulatorFactory object for creating WeightedAccumulator objects.
@@ -345,11 +361,11 @@ class WeightedAccumulatorFactory(StatisticAccumulatorFactory):
 
     """
 
-    def __init__(self, factory: StatisticAccumulatorFactory, name: Optional[str] = None):
+    def __init__(self, factory: StatisticAccumulatorFactory, name: str | None = None):
         self.factory = factory
         self.name = name
 
-    def make(self) -> 'WeightedAccumulator':
+    def make(self) -> "WeightedAccumulator":
         """Returns a new WeightedAccumulator wrapping a fresh base accumulator."""
         return WeightedAccumulator(accumulator=self.factory.make(), name=self.name)
 
@@ -367,15 +383,15 @@ class WeightedEstimator(ParameterEstimator):
 
     """
 
-    def __init__(self, estimator: ParameterEstimator, name: Optional[str] = None):
+    def __init__(self, estimator: ParameterEstimator, name: str | None = None):
         self.estimator = estimator
         self.name = name
 
-    def accumulator_factory(self) -> 'WeightedAccumulatorFactory':
+    def accumulator_factory(self) -> "WeightedAccumulatorFactory":
         """Returns a WeightedAccumulatorFactory wrapping the base estimator's factory."""
         return WeightedAccumulatorFactory(factory=self.estimator.accumulator_factory(), name=self.name)
 
-    def estimate(self, nobs: Optional[float], suff_stat: SS) -> 'WeightedDistribution':
+    def estimate(self, nobs: float | None, suff_stat: SS) -> "WeightedDistribution":
         """Estimate a WeightedDistribution from the base distribution's sufficient statistics.
 
         Args:
@@ -405,7 +421,7 @@ class WeightedDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns string representation of WeightedDataEncoder object."""
-        return 'WeightedDataEncoder(encoder=%s)' % (repr(self.encoder))
+        return "WeightedDataEncoder(encoder=%s)" % (repr(self.encoder))
 
     def __eq__(self, other: object) -> bool:
         """Return True if other is a WeightedDataEncoder with an equal base encoder."""
@@ -414,7 +430,7 @@ class WeightedDataEncoder(DataSequenceEncoder):
         else:
             return False
 
-    def seq_encode(self, x: Sequence[Tuple[D, float]]) -> Tuple[Any, np.ndarray]:
+    def seq_encode(self, x: Sequence[tuple[D, float]]) -> tuple[Any, np.ndarray]:
         """Encode a sequence of (value, weight) observations for vectorized use.
 
         Args:

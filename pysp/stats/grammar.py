@@ -9,23 +9,24 @@ an isomorphic model rule with a matching (or nearby, controlled by lhs_delta) le
 degree-distribution background model weighted by mix_p.
 
 """
-from pysp.arithmetic import *
-from pysp.stats.pdist import (
-    SequenceEncodableProbabilityDistribution,
-    SequenceEncodableStatisticAccumulator,
-    ParameterEstimator,
-    StatisticAccumulatorFactory,
-    DataSequenceEncoder,
-    DistributionSampler,
-)
-import numpy as np
 
 import networkx as nx
 import networkx.algorithms.isomorphism as iso
+import numpy as np
 from networkx.readwrite import json_graph
 
+from pysp.arithmetic import *
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
 
-class GrammarRule(object):
+
+class GrammarRule:
     """Lightweight graph-grammar rule."""
 
     __pysp_serializable__ = True
@@ -48,16 +49,20 @@ class GrammarRule(object):
         self.frequency = float(state["frequency"])
 
     def __str__(self) -> str:
-        return 'GrammarRule(lhs=%s, frequency=%s, nodes=%s, edges=%s)' % (
-            repr(self.lhs), repr(self.frequency), self.graph.number_of_nodes(), self.graph.number_of_edges())
+        return "GrammarRule(lhs=%s, frequency=%s, nodes=%s, edges=%s)" % (
+            repr(self.lhs),
+            repr(self.frequency),
+            self.graph.number_of_nodes(),
+            self.graph.number_of_edges(),
+        )
 
 
-class VRG(object):
+class VRG:
     """Small in-tree node-replacement grammar container."""
 
     __pysp_serializable__ = True
 
-    def __init__(self, grammar_type='mu_level_dl', clustering='leiden', name='', mu=4) -> None:
+    def __init__(self, grammar_type="mu_level_dl", clustering="leiden", name="", mu=4) -> None:
         self.type = grammar_type
         self.clustering = clustering
         self.name = name
@@ -97,7 +102,7 @@ class VRG(object):
         self.num_rules = state.get("num_rules", self.num_rules)
 
     def __str__(self) -> str:
-        return 'VRG(name=%s, num_rules=%s)' % (repr(self.name), self.num_rules)
+        return "VRG(name=%s, num_rules=%s)" % (repr(self.name), self.num_rules)
 
 
 def _copy_rule(rule):
@@ -108,12 +113,12 @@ def _edge_weights(graph):
     for a in graph:
         for b in graph[a]:
             edge_data = graph[a][b]
-            if 'weight' in edge_data:
-                yield edge_data.get('weight', 1.0)
+            if "weight" in edge_data:
+                yield edge_data.get("weight", 1.0)
             else:
                 for value in edge_data.values():
                     if isinstance(value, dict):
-                        yield value.get('weight', 1.0)
+                        yield value.get("weight", 1.0)
 
 
 def _isomorphic_rule_graph(g1, g2):
@@ -122,11 +127,12 @@ def _isomorphic_rule_graph(g1, g2):
     node_match = iso.categorical_node_match(["label", "node_color"], ["", ""])
     color_match = iso.categorical_edge_match("edge_color", "")
     weight_match = iso.numerical_edge_match("weight", 1.0)
-    return nx.is_isomorphic(g1i, g2i, edge_match=color_match, node_match=node_match) and \
-        nx.is_isomorphic(g1i, g2i, edge_match=weight_match, node_match=node_match)
+    return nx.is_isomorphic(g1i, g2i, edge_match=color_match, node_match=node_match) and nx.is_isomorphic(
+        g1i, g2i, edge_match=weight_match, node_match=node_match
+    )
 
 
-def decomp_pair(sub_rule, method='connected'):
+def decomp_pair(sub_rule, method="connected"):
     """Decompose a sub-rule graph into connected components.
 
     This conservative fallback leaves connected graphs unchanged and produces one sub-rule per connected component
@@ -199,9 +205,7 @@ def get_degree_dist(rule_list):
 class GrammarDistribution(SequenceEncodableProbabilityDistribution):
     """GrammarDistribution object for evaluating the likelihood of node-replacement grammars (VRG objects)."""
 
-    def __init__(
-        self, grammar, mix_p, decomp_level=0, lhs_delta=0, name=None, orig_n=100
-    ):
+    def __init__(self, grammar, mix_p, decomp_level=0, lhs_delta=0, name=None, orig_n=100):
         """GrammarDistribution object defined by a model grammar and mixing parameters.
 
         Args:
@@ -296,27 +300,16 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
                         f_sum = sum([r.frequency for r in model_grammar.rule_dict[i]])
                         for m_rule in model_grammar.rule_dict[i]:
                             if _isomorphic_rule_graph(m_rule.graph, t_rule.graph):
-                                p += (
-                                    (1.0 - self.mix_p)
-                                    * (1.0 * m_rule.frequency)
-                                    / f_sum
-                                )
+                                p += (1.0 - self.mix_p) * (1.0 * m_rule.frequency) / f_sum
 
                 if self.mix_p > 0.0:
                     rule_dd = get_degree_dist([t_rule])
                     for d, freq in rule_dd.items():
                         if d in model_dd:
-                            dp = (
-                                self.mix_p * 1.0 * model_dd[d] / sum(model_dd.values())
-                            ) ** freq
+                            dp = (self.mix_p * 1.0 * model_dd[d] / sum(model_dd.values())) ** freq
                             p += dp
                         else:
-                            dp = (
-                                self.mix_p
-                                * 1.0
-                                * model_dd["inf"]
-                                / sum(model_dd.values())
-                            ) ** freq
+                            dp = (self.mix_p * 1.0 * model_dd["inf"] / sum(model_dd.values())) ** freq
                             p += dp
 
                 # recursive decomp: only do if not found and has a decomp level set
@@ -329,20 +322,11 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
                         for sub_rule in sub_rules:
                             found_rule = False
                             if sub_rule[0] in model_grammar.rule_dict:
-                                f_sum = sum(
-                                    [
-                                        r.frequency
-                                        for r in model_grammar.rule_dict[sub_rule[0]]
-                                    ]
-                                )
+                                f_sum = sum([r.frequency for r in model_grammar.rule_dict[sub_rule[0]]])
                                 for m_rule in model_grammar.rule_dict[sub_rule[0]]:
                                     if _isomorphic_rule_graph(m_rule.graph, sub_rule[1]):
                                         found_rule = True
-                                        p += (
-                                            (1.0 - self.mix_p)
-                                            * (1.0 * m_rule.frequency)
-                                            / f_sum
-                                        )
+                                        p += (1.0 - self.mix_p) * (1.0 * m_rule.frequency) / f_sum
                             if not found_rule:
                                 decomp = decomp_pair(sub_rule, "leiden")
                                 for d in decomp:
@@ -438,9 +422,7 @@ class GrammarSampler(DistributionSampler):
             A networkx graph generated from the grammar.
 
         """
-        g, rule_ordering = generate_graph(
-            rule_dict=self.grammar.rule_dict, target_n=self.orig_n, rng=self.rng
-        )
+        g, rule_ordering = generate_graph(rule_dict=self.grammar.rule_dict, target_n=self.orig_n, rng=self.rng)
 
         return g
 
@@ -456,9 +438,7 @@ class GrammarSampler(DistributionSampler):
         """
         rv = []
         for size in size_arr:
-            g, rule_ordering = generate_graph(
-                rule_dict=self.grammar.rule_dict, target_n=size, rng=self.rng
-            )
+            g, rule_ordering = generate_graph(rule_dict=self.grammar.rule_dict, target_n=size, rng=self.rng)
             rv.append(g)
         return rv
 
@@ -671,7 +651,7 @@ class GrammarDataEncoder(DataSequenceEncoder):
 
     def __str__(self):
         """Returns string representation of GrammarDataEncoder object."""
-        return 'GrammarDataEncoder'
+        return "GrammarDataEncoder"
 
     def __eq__(self, other):
         """Encoders are interchangeable iff other is also a GrammarDataEncoder.
@@ -696,6 +676,7 @@ class GrammarDataEncoder(DataSequenceEncoder):
 
         """
         return x
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 GrammarAccumulator = GrammarEstimatorAccumulator

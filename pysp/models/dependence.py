@@ -1,15 +1,16 @@
 """Conditional-dependence and small causal-structure learning utilities."""
+
 from __future__ import annotations
 
 import itertools
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
+from typing import Any
 
 import numpy as np
 
-
-Edge = Tuple[int, int]
+Edge = tuple[int, int]
 
 
 @dataclass
@@ -18,7 +19,7 @@ class ConditionalIndependenceResult:
 
     measure: float
     statistic: float
-    p_value: Optional[float]
+    p_value: float | None
     independent: bool
 
 
@@ -26,9 +27,9 @@ class ConditionalIndependenceResult:
 class CausalSkeleton:
     """Undirected skeleton plus separating sets from a PC-style search."""
 
-    edges: Set[Edge]
-    separating_sets: Dict[Edge, FrozenSet[int]]
-    variable_names: List[Any]
+    edges: set[Edge]
+    separating_sets: dict[Edge, frozenset[int]]
+    variable_names: list[Any]
 
     def has_edge(self, i: int, j: int) -> bool:
         """Return whether the undirected skeleton contains edge ``i``--``j``."""
@@ -39,14 +40,12 @@ class CausalSkeleton:
 class PartiallyDirectedGraph:
     """Partially directed graph after collider orientation."""
 
-    directed_edges: Set[Edge]
-    undirected_edges: Set[Edge]
-    variable_names: List[Any]
+    directed_edges: set[Edge]
+    undirected_edges: set[Edge]
+    variable_names: list[Any]
 
 
-def gaussian_partial_correlation(data: Any, x: int, y: int,
-                                 given: Sequence[int] = (),
-                                 ridge: float = 1.0e-10) -> float:
+def gaussian_partial_correlation(data: Any, x: int, y: int, given: Sequence[int] = (), ridge: float = 1.0e-10) -> float:
     """Return partial correlation rho_xy.given for continuous data."""
     arr = _as_2d_data(data)
     x_vec = arr[:, int(x)]
@@ -60,10 +59,9 @@ def gaussian_partial_correlation(data: Any, x: int, y: int,
     return _corr(x_res, y_res)
 
 
-def gaussian_conditional_independence(data: Any, x: int, y: int,
-                                      given: Sequence[int] = (),
-                                      alpha: float = 0.05,
-                                      ridge: float = 1.0e-10) -> ConditionalIndependenceResult:
+def gaussian_conditional_independence(
+    data: Any, x: int, y: int, given: Sequence[int] = (), alpha: float = 0.05, ridge: float = 1.0e-10
+) -> ConditionalIndependenceResult:
     """Fisher-z Gaussian conditional independence test."""
     arr = _as_2d_data(data)
     rho = gaussian_partial_correlation(arr, x, y, given=given, ridge=ridge)
@@ -72,26 +70,25 @@ def gaussian_conditional_independence(data: Any, x: int, y: int,
     statistic = 0.5 * math.log((1.0 + rho) / (1.0 - rho)) * math.sqrt(dof)
     p_value = math.erfc(abs(statistic) / math.sqrt(2.0))
     return ConditionalIndependenceResult(
-        measure=rho, statistic=float(statistic), p_value=float(p_value),
-        independent=bool(p_value > alpha))
+        measure=rho, statistic=float(statistic), p_value=float(p_value), independent=bool(p_value > alpha)
+    )
 
 
-def discrete_conditional_mutual_information(data: Any, x: int, y: int,
-                                            given: Sequence[int] = ()) -> float:
+def discrete_conditional_mutual_information(data: Any, x: int, y: int, given: Sequence[int] = ()) -> float:
     """Estimate I(X;Y | Z) from categorical samples using empirical counts."""
     arr = np.asarray(data)
     if arr.ndim != 2:
-        raise ValueError('data must be a two-dimensional array.')
+        raise ValueError("data must be a two-dimensional array.")
     x = int(x)
     y = int(y)
     given = tuple(int(g) for g in given)
     n = arr.shape[0]
     if n == 0:
-        raise ValueError('data must contain at least one row.')
-    xyz: Dict[Tuple[Any, Any, Tuple[Any, ...]], int] = {}
-    xz: Dict[Tuple[Any, Tuple[Any, ...]], int] = {}
-    yz: Dict[Tuple[Any, Tuple[Any, ...]], int] = {}
-    zc: Dict[Tuple[Any, ...], int] = {}
+        raise ValueError("data must contain at least one row.")
+    xyz: dict[tuple[Any, Any, tuple[Any, ...]], int] = {}
+    xz: dict[tuple[Any, tuple[Any, ...]], int] = {}
+    yz: dict[tuple[Any, tuple[Any, ...]], int] = {}
+    zc: dict[tuple[Any, ...], int] = {}
     for row in arr:
         z = tuple(row[g] for g in given)
         xv = row[x]
@@ -106,21 +103,23 @@ def discrete_conditional_mutual_information(data: Any, x: int, y: int,
     return float(max(0.0, cmi))
 
 
-def learn_pc_skeleton(data: Any,
-                      variable_names: Optional[Sequence[Any]] = None,
-                      alpha: float = 0.05,
-                      max_cond_set: int = 2,
-                      method: str = 'gaussian') -> CausalSkeleton:
+def learn_pc_skeleton(
+    data: Any,
+    variable_names: Sequence[Any] | None = None,
+    alpha: float = 0.05,
+    max_cond_set: int = 2,
+    method: str = "gaussian",
+) -> CausalSkeleton:
     """Learn a PC-style undirected skeleton from conditional independences."""
-    arr = _as_2d_data(data) if method == 'gaussian' else np.asarray(data)
+    arr = _as_2d_data(data) if method == "gaussian" else np.asarray(data)
     if arr.ndim != 2:
-        raise ValueError('data must be a two-dimensional array.')
+        raise ValueError("data must be a two-dimensional array.")
     p = arr.shape[1]
     names = list(range(p)) if variable_names is None else list(variable_names)
     if len(names) != p:
-        raise ValueError('variable_names length must match data columns.')
-    edges: Set[Edge] = {_edge(i, j) for i in range(p) for j in range(i + 1, p)}
-    sepsets: Dict[Edge, FrozenSet[int]] = {}
+        raise ValueError("variable_names length must match data columns.")
+    edges: set[Edge] = {_edge(i, j) for i in range(p) for j in range(i + 1, p)}
+    sepsets: dict[Edge, frozenset[int]] = {}
     for cond_size in range(max(0, int(max_cond_set)) + 1):
         for i, j in list(edges):
             candidates = [v for v in range(p) if v != i and v != j]
@@ -135,7 +134,7 @@ def learn_pc_skeleton(data: Any,
 
 def orient_v_structures(skeleton: CausalSkeleton) -> PartiallyDirectedGraph:
     """Orient unshielded colliders i -> k <- j using separating sets."""
-    directed: Set[Edge] = set()
+    directed: set[Edge] = set()
     p = len(skeleton.variable_names)
     for i, j in itertools.combinations(range(p), 2):
         if skeleton.has_edge(i, j):
@@ -154,11 +153,10 @@ def orient_v_structures(skeleton: CausalSkeleton) -> PartiallyDirectedGraph:
     return PartiallyDirectedGraph(directed, undirected, skeleton.variable_names)
 
 
-def _is_independent(data: np.ndarray, i: int, j: int, given: Sequence[int],
-                    alpha: float, method: str) -> bool:
-    if method == 'gaussian':
+def _is_independent(data: np.ndarray, i: int, j: int, given: Sequence[int], alpha: float, method: str) -> bool:
+    if method == "gaussian":
         return gaussian_conditional_independence(data, i, j, given=given, alpha=alpha).independent
-    if method == 'discrete':
+    if method == "discrete":
         return discrete_conditional_mutual_information(data, i, j, given=given) <= alpha
     raise ValueError("method must be 'gaussian' or 'discrete'.")
 
@@ -166,11 +164,11 @@ def _is_independent(data: np.ndarray, i: int, j: int, given: Sequence[int],
 def _as_2d_data(data: Any) -> np.ndarray:
     arr = np.asarray(data, dtype=np.float64)
     if arr.ndim != 2:
-        raise ValueError('data must be a two-dimensional array.')
+        raise ValueError("data must be a two-dimensional array.")
     if arr.shape[0] == 0:
-        raise ValueError('data must contain at least one row.')
+        raise ValueError("data must contain at least one row.")
     if np.any(~np.isfinite(arr)):
-        raise ValueError('data must be finite.')
+        raise ValueError("data must be finite.")
     return arr
 
 

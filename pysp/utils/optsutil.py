@@ -1,12 +1,14 @@
-import numpy as np
 from collections import defaultdict
-from typing import TypeVar, Union, Sequence, Dict, Tuple, List, Callable, Optional
+from collections.abc import Callable, Sequence
+from typing import TypeVar
 
-T = TypeVar('T')
-T1 = TypeVar('T1')
+import numpy as np
+
+T = TypeVar("T")
+T1 = TypeVar("T1")
 
 
-def map_to_integers(x: Sequence[T], val_map: Dict[T, int]) -> List[int]:
+def map_to_integers(x: Sequence[T], val_map: dict[T, int]) -> list[int]:
     """Map sequence of type T to integers.
 
     Args:
@@ -25,7 +27,7 @@ def map_to_integers(x: Sequence[T], val_map: Dict[T, int]) -> List[int]:
     return rv
 
 
-def get_inv_map(val_map: Dict[T, T1]) -> Dict[T1, T]:
+def get_inv_map(val_map: dict[T, T1]) -> dict[T1, T]:
     """Obtain the inverse dictionary mapping of key/value pairs.
 
     Args:
@@ -45,7 +47,7 @@ def get_inv_map(val_map: Dict[T, T1]) -> Dict[T1, T]:
     return rv
 
 
-def text_file(f) -> List[str]:
+def text_file(f) -> list[str]:
     """Open a file and split by newline.
 
     Args
@@ -55,16 +57,16 @@ def text_file(f) -> List[str]:
         List of strings split on newline character.
 
     """
-    fin = open(f, 'r')
+    fin = open(f)
     rv = fin.read()
 
-    if rv is not None and len(rv) > 0 and rv[-1] == '\n':
-        return rv[:-1].split('\n')
+    if rv is not None and len(rv) > 0 and rv[-1] == "\n":
+        return rv[:-1].split("\n")
     else:
-        return rv.split('\n')
+        return rv.split("\n")
 
 
-def reduce_by_key(f: Callable[[T1, T1], T1], x: Sequence[Tuple[T, T1]]) -> Dict[T, T1]:
+def reduce_by_key(f: Callable[[T1, T1], T1], x: Sequence[tuple[T, T1]]) -> dict[T, T1]:
     """Reduce sequence of tuple of key value pairs under grouping function f.
 
     Args:
@@ -86,7 +88,7 @@ def reduce_by_key(f: Callable[[T1, T1], T1], x: Sequence[Tuple[T, T1]]) -> Dict[
     return rv
 
 
-def sum_by_key(x: Sequence[Tuple[T, T1]]) -> Dict[T, T1]:
+def sum_by_key(x: Sequence[tuple[T, T1]]) -> dict[T, T1]:
     """Sum values and return dictionary of items with their respective summed values.
 
     Args:
@@ -107,7 +109,7 @@ def sum_by_key(x: Sequence[Tuple[T, T1]]) -> Dict[T, T1]:
     return rv
 
 
-def group_by_key(x: Sequence[Tuple[T, T1]]) -> Dict[T, List[T1]]:
+def group_by_key(x: Sequence[tuple[T, T1]]) -> dict[T, list[T1]]:
     """Group keys and return dictionary of items with their respective values aggregated as a list.
 
     Args:
@@ -125,7 +127,7 @@ def group_by_key(x: Sequence[Tuple[T, T1]]) -> Dict[T, List[T1]]:
     return rv
 
 
-def group_by(f: Callable[[T], T1], x: Sequence[T]) -> Dict[T1, List[T]]:
+def group_by(f: Callable[[T], T1], x: Sequence[T]) -> dict[T1, list[T]]:
     """Maps values in x to key from mapping f. Dictionary mapping keys to list of grouped values in x is returned.
 
     Args:
@@ -144,7 +146,8 @@ def group_by(f: Callable[[T], T1], x: Sequence[T]) -> Dict[T1, List[T]]:
 
     return rv
 
-def count_by_value(x: Union[Sequence[T], np.ndarray]) -> Dict[T, int]:
+
+def count_by_value(x: Sequence[T] | np.ndarray) -> dict[T, int]:
     """Count the number of observations of a given value in arg 'x'.
 
     Args:
@@ -162,7 +165,7 @@ def count_by_value(x: Union[Sequence[T], np.ndarray]) -> Dict[T, int]:
     return rv
 
 
-def flat_map(f: Callable[[T], Sequence[T1]], x: Sequence[T]) -> List[T1]:
+def flat_map(f: Callable[[T], Sequence[T1]], x: Sequence[T]) -> list[T1]:
     """Map values of x under mapping f().
 
     Args:
@@ -176,8 +179,7 @@ def flat_map(f: Callable[[T], Sequence[T1]], x: Sequence[T]) -> List[T1]:
     return [u for v in x for u in f(v)]
 
 
-def least_occurring(x: Sequence[T], count: Optional[int] = None, percent: Optional[float] = None,
-                    keep_freq: bool = True):
+def least_occurring(x: Sequence[T], count: int | None = None, percent: float | None = None, keep_freq: bool = True):
     cnt_map = list(count_by_value(x).items())
     s_idx = np.argsort([u[1] for u in cnt_map])
 

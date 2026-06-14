@@ -5,17 +5,19 @@ each rank encodes its local data shard once, accumulates sufficient statistics
 against that resident encoding, rank 0 folds/key-ties/runs the M-step, and the
 result is broadcast back to every rank.
 """
+
 import io
 import os
 import pickle
 import sys
-from typing import Any, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 
 from pysp.parallel import EncodedDataHandle
 
-__all__ = ['TorchRunEncodedData', 'torchrun_out']
+__all__ = ["TorchRunEncodedData", "torchrun_out"]
 
 _PROTO = pickle.HIGHEST_PROTOCOL
 
@@ -24,9 +26,9 @@ def _torch_dist():
     try:
         import torch
     except ImportError as e:
-        raise ImportError('TorchRunEncodedData requires torch.') from e
+        raise ImportError("TorchRunEncodedData requires torch.") from e
     if not torch.distributed.is_available():
-        raise ImportError('TorchRunEncodedData requires torch.distributed.')
+        raise ImportError("TorchRunEncodedData requires torch.distributed.")
     return torch, torch.distributed
 
 
@@ -37,7 +39,7 @@ def torchrun_out(root: int = 0):
         if dist.is_initialized():
             rank = dist.get_rank()
         else:
-            rank = int(os.environ.get('RANK') or 0)
+            rank = int(os.environ.get("RANK") or 0)
     except ImportError:
         rank = 0
     return sys.stdout if rank == root else io.StringIO()
@@ -63,23 +65,31 @@ class TorchRunEncodedData(EncodedDataHandle):
             CUDA and ``gloo`` otherwise.
     """
 
-    def __init__(self, data: Optional[Sequence[Any]], estimator=None, model=None,
-                 encoder=None, sub_chunks: int = 1, group: Optional[Any] = None,
-                 root: int = 0, root_only: bool = False,
-                 init_process_group: bool = True,
-                 backend: Optional[str] = None):
+    def __init__(
+        self,
+        data: Sequence[Any] | None,
+        estimator=None,
+        model=None,
+        encoder=None,
+        sub_chunks: int = 1,
+        group: Any | None = None,
+        root: int = 0,
+        root_only: bool = False,
+        init_process_group: bool = True,
+        backend: str | None = None,
+    ):
         self.torch, self.dist = _torch_dist()
         self.group = group
         self.root = int(root)
         self._owns_process_group = False
 
         if encoder is None:
-            if model is not None and callable(getattr(model, 'dist_to_encoder', None)):
+            if model is not None and callable(getattr(model, "dist_to_encoder", None)):
                 encoder = model.dist_to_encoder()
             elif estimator is not None:
                 encoder = estimator.accumulator_factory().make().acc_to_encoder()
         if encoder is None:
-            raise ValueError('TorchRunEncodedData requires an encoder, model, or estimator.')
+            raise ValueError("TorchRunEncodedData requires an encoder, model, or estimator.")
 
         self._maybe_init_process_group(init_process_group, backend)
         self.rank = self.dist.get_rank(group=self.group) if self.dist.is_initialized() else 0
@@ -98,39 +108,37 @@ class TorchRunEncodedData(EncodedDataHandle):
         if self.world > 1:
             self.size = self._all_reduce_pair(float(nobs), 0.0)[0]
 
-    def _maybe_init_process_group(self, init_process_group: bool,
-                                  backend: Optional[str]) -> None:
+    def _maybe_init_process_group(self, init_process_group: bool, backend: str | None) -> None:
         if self.dist.is_initialized() or not init_process_group:
             return
-        if 'RANK' not in os.environ or 'WORLD_SIZE' not in os.environ:
+        if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
             return
         if backend is None:
-            backend = 'nccl' if self.torch.cuda.is_available() else 'gloo'
-        if backend == 'nccl' and self.torch.cuda.is_available():
-            self.torch.cuda.set_device(int(os.environ.get('LOCAL_RANK') or 0))
+            backend = "nccl" if self.torch.cuda.is_available() else "gloo"
+        if backend == "nccl" and self.torch.cuda.is_available():
+            self.torch.cuda.set_device(int(os.environ.get("LOCAL_RANK") or 0))
         self.dist.init_process_group(backend=backend)
         self._owns_process_group = True
 
-    def _local_shard(self, data: Optional[Sequence[Any]], root_only: bool) -> Sequence[Any]:
+    def _local_shard(self, data: Sequence[Any] | None, root_only: bool) -> Sequence[Any]:
         if self.world == 1:
             if data is None:
-                raise ValueError('TorchRunEncodedData requires data in single-rank mode.')
+                raise ValueError("TorchRunEncodedData requires data in single-rank mode.")
             return data
         if root_only:
             if self.rank == self.root:
                 if data is None:
-                    raise ValueError('root_only=True requires data on the root rank.')
-                shards = [[data[j] for j in range(i, len(data), self.world)]
-                          for i in range(self.world)]
+                    raise ValueError("root_only=True requires data on the root rank.")
+                shards = [[data[j] for j in range(i, len(data), self.world)] for i in range(self.world)]
             else:
                 shards = None
             return self._scatter_object(shards)
         if data is None:
-            raise ValueError('every rank must pass data when root_only=False.')
+            raise ValueError("every rank must pass data when root_only=False.")
         return [data[j] for j in range(self.rank, len(data), self.world)]
 
-    def _scatter_object(self, objects: Optional[Sequence[Any]]) -> Any:
-        if hasattr(self.dist, 'scatter_object_list'):
+    def _scatter_object(self, objects: Sequence[Any] | None) -> Any:
+        if hasattr(self.dist, "scatter_object_list"):
             out = [None]
             in_list = list(objects) if self.rank == self.root else None
             self.dist.scatter_object_list(out, in_list, src=self.root, group=self.group)
@@ -146,7 +154,7 @@ class TorchRunEncodedData(EncodedDataHandle):
         self.dist.broadcast_object_list(box, src=self.root, group=self.group)
         return pickle.loads(box[0])
 
-    def _gather_object(self, value: Any) -> Optional[Sequence[Any]]:
+    def _gather_object(self, value: Any) -> Sequence[Any] | None:
         if self.world == 1:
             return [value]
         gathered = [None for _ in range(self.world)]
@@ -155,16 +163,16 @@ class TorchRunEncodedData(EncodedDataHandle):
             return None
         return [pickle.loads(raw) for raw in gathered]
 
-    def _all_reduce_pair(self, count: float, total: float) -> Tuple[float, float]:
+    def _all_reduce_pair(self, count: float, total: float) -> tuple[float, float]:
         if self.world == 1:
             return count, total
         backend = self.dist.get_backend(group=self.group)
-        device = 'cuda' if backend == 'nccl' and self.torch.cuda.is_available() else 'cpu'
+        device = "cuda" if backend == "nccl" and self.torch.cuda.is_available() else "cpu"
         values = self.torch.tensor([count, total], dtype=self.torch.float64, device=device)
         self.dist.all_reduce(values, op=self.dist.ReduceOp.SUM, group=self.group)
         return float(values[0].cpu().item()), float(values[1].cpu().item())
 
-    def _local_update(self, estimator, model) -> Tuple[float, Any]:
+    def _local_update(self, estimator, model) -> tuple[float, Any]:
         accumulator = estimator.accumulator_factory().make()
         count = 0.0
         for sz, enc in self._enc_chunks:
@@ -172,7 +180,7 @@ class TorchRunEncodedData(EncodedDataHandle):
             accumulator.seq_update(enc, np.ones(sz, dtype=np.float64), model)
         return count, accumulator.value()
 
-    def _fold_value_and_share(self, estimator, local: Tuple[float, Any]) -> Tuple[float, Any]:
+    def _fold_value_and_share(self, estimator, local: tuple[float, Any]) -> tuple[float, Any]:
         gathered = self._gather_object(local)
         if self.rank == self.root:
             accumulator = estimator.accumulator_factory().make()
@@ -188,7 +196,7 @@ class TorchRunEncodedData(EncodedDataHandle):
             payload = None
         return self._broadcast_object(payload)
 
-    def _fold_model_and_share(self, estimator, local: Tuple[float, Any]):
+    def _fold_model_and_share(self, estimator, local: tuple[float, Any]):
         nobs, value = self._fold_value_and_share(estimator, local)
         if self.rank == self.root:
             model = estimator.estimate(nobs, value)
@@ -204,12 +212,12 @@ class TorchRunEncodedData(EncodedDataHandle):
     def pysp_seq_initialize(self, estimator, rng: np.random.RandomState, p: float):
         """Distributed randomized initialization; identical model on all ranks."""
         if self.rank == self.root:
-            seeds = [int(s) for s in rng.randint(2 ** 31, size=self.world)]
+            seeds = [int(s) for s in rng.randint(2**31, size=self.world)]
         else:
             seeds = None
-        seed = self._scatter_object(seeds) if self.world > 1 else int(rng.randint(2 ** 31))
+        seed = self._scatter_object(seeds) if self.world > 1 else int(rng.randint(2**31))
         rng_loc = np.random.RandomState(seed)
-        rng_w = np.random.RandomState(seed=rng_loc.randint(2 ** 31))
+        rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
         accumulator = estimator.accumulator_factory().make()
         count = 0.0
         for sz, enc in self._enc_chunks:
@@ -219,7 +227,7 @@ class TorchRunEncodedData(EncodedDataHandle):
             accumulator.seq_initialize(enc, weights, rng_loc)
         return self._fold_model_and_share(estimator, (count, accumulator.value()))
 
-    def pysp_seq_log_density_sum(self, estimate) -> Tuple[float, float]:
+    def pysp_seq_log_density_sum(self, estimate) -> tuple[float, float]:
         """Allreduced count and summed log density."""
         count = 0.0
         total = 0.0
@@ -228,7 +236,7 @@ class TorchRunEncodedData(EncodedDataHandle):
             total += float(np.asarray(estimate.seq_log_density(enc), dtype=np.float64).sum())
         return self._all_reduce_pair(count, total)
 
-    def pysp_stream_accumulate(self, estimator, model) -> Tuple[float, Any]:
+    def pysp_stream_accumulate(self, estimator, model) -> tuple[float, Any]:
         """Globally folded batch sufficient statistics for streaming EM."""
         model = self._broadcast_object(model)
         return self._fold_value_and_share(estimator, self._local_update(estimator, model))

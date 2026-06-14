@@ -1,13 +1,16 @@
-from typing import Tuple, Union, List, Optional
-import numpy as np
 import itertools
+
+import numpy as np
 from scipy.special import gammaln
 
 
-def binomial_rank(log_p_vec: Union[List[float], np.ndarray],
-                  log_p1_vec: Optional[Union[List[float], np.ndarray]] = None,
-                  count_vec: Optional[Union[List, np.ndarray]] = None, ll_eps: float = 1.0e-4,
-                  max_len: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, Tuple[float, float, float]]:
+def binomial_rank(
+    log_p_vec: list[float] | np.ndarray,
+    log_p1_vec: list[float] | np.ndarray | None = None,
+    count_vec: list | np.ndarray | None = None,
+    ll_eps: float = 1.0e-4,
+    max_len: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, tuple[float, float, float]]:
     """Approximates the log-density histogram for a composite of binomials.
 
     x, y, (LL0, DLL, cnt) =  binomial_rank(np.log([0.3, 0.2]), count_vec=[3, 2], max_len=10000)
@@ -81,13 +84,11 @@ def binomial_rank(log_p_vec: Union[List[float], np.ndarray],
         acc_count += next_count
 
     ll0 = min_vec.sum()
-    acc_ll = ll0 + np.arange(len(acc_prob))*dll
+    acc_ll = ll0 + np.arange(len(acc_prob)) * dll
     return acc_ll, acc_prob, (ll0, dll, acc_count)
 
 
-
-if __name__ == '__main__':
-
+if __name__ == "__main__":
     pvec = np.asarray([0.3, 0.8, 0.4])
     pvec = np.log(pvec)
     nvec = np.log1p(-np.exp(pvec))
@@ -97,15 +98,19 @@ if __name__ == '__main__':
     nvec_long = np.concatenate([[u] * n for u, n in zip(nvec, cvec)])
 
     test = np.asarray([1, 0, 1, 1, 0, 1, 0, 1])
-    ll = np.where(test==1, pvec_long, nvec_long).sum()
+    ll = np.where(test == 1, pvec_long, nvec_long).sum()
 
     acc_ll, acc_prob, (ll0, dll, acc_count) = binomial_rank(pvec, count_vec=cvec, max_len=100000)
-    left  = acc_prob[(int((ll - ll0) / dll) - 1):].sum() * np.power(2, acc_count)
-    mid   = acc_prob[int((ll - ll0) / dll):].sum() * np.power(2, acc_count)
-    right = acc_prob[(int((ll - ll0) / dll) + 1):].sum() * np.power(2, acc_count)
-    print('Approximate rank: %f ( Somewhere in [%f, %f] )'%(mid, right, left))
+    left = acc_prob[(int((ll - ll0) / dll) - 1) :].sum() * np.power(2, acc_count)
+    mid = acc_prob[int((ll - ll0) / dll) :].sum() * np.power(2, acc_count)
+    right = acc_prob[(int((ll - ll0) / dll) + 1) :].sum() * np.power(2, acc_count)
+    print("Approximate rank: %f ( Somewhere in [%f, %f] )" % (mid, right, left))
 
     # Verify this
-    temp = np.asarray([np.where([u == 1 for u in x], pvec_long, nvec_long).sum() for x in itertools.product([0, 1], repeat=len(pvec_long))])
-    print('True rank:' + str((temp >= ll).sum()))
-
+    temp = np.asarray(
+        [
+            np.where([u == 1 for u in x], pvec_long, nvec_long).sum()
+            for x in itertools.product([0, 1], repeat=len(pvec_long))
+        ]
+    )
+    print("True rank:" + str((temp >= ll).sum()))

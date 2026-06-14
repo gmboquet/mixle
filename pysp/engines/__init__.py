@@ -1,7 +1,9 @@
 """Compute engines for backend-neutral pysparkplug kernels."""
+
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Optional, Type
+from collections.abc import Iterable
+from typing import Any
 
 import numpy as np
 
@@ -13,27 +15,27 @@ from pysp.engines.symbolic_export import to_latex, to_sage, to_sympy
 from pysp.engines.torch_engine import TorchEngine, torch
 
 __all__ = [
-    'ComputeEngine',
-    'NumpyEngine',
-    'SymbolicEngine',
-    'SymbolicExpression',
-    'SYMBOLIC_ENGINE',
-    'TorchEngine',
-    'NUMPY_ENGINE',
-    'engine_of',
-    'engine_with_precision',
-    'normalize_numpy_dtype',
-    'normalize_torch_dtype',
-    'precision_name',
-    'register_array_type',
-    'to_latex',
-    'to_numpy',
-    'to_sage',
-    'to_sympy',
+    "ComputeEngine",
+    "NumpyEngine",
+    "SymbolicEngine",
+    "SymbolicExpression",
+    "SYMBOLIC_ENGINE",
+    "TorchEngine",
+    "NUMPY_ENGINE",
+    "engine_of",
+    "engine_with_precision",
+    "normalize_numpy_dtype",
+    "normalize_torch_dtype",
+    "precision_name",
+    "register_array_type",
+    "to_latex",
+    "to_numpy",
+    "to_sage",
+    "to_sympy",
 ]
 
 
-_ARRAY_ENGINE_REGISTRY: Dict[Type[Any], ComputeEngine] = {
+_ARRAY_ENGINE_REGISTRY: dict[type[Any], ComputeEngine] = {
     np.ndarray: NUMPY_ENGINE,
     np.generic: NUMPY_ENGINE,
 }
@@ -50,13 +52,13 @@ else:
     DTensor = None
 
 
-def register_array_type(array_type: Type[Any], engine: ComputeEngine) -> None:
+def register_array_type(array_type: type[Any], engine: ComputeEngine) -> None:
     """Register an array/tensor type with its owning engine."""
     _ARRAY_ENGINE_REGISTRY[array_type] = engine
 
 
-def _direct_engine(x: Any) -> Optional[ComputeEngine]:
-    explicit = getattr(x, '__pysp_engine__', None)
+def _direct_engine(x: Any) -> ComputeEngine | None:
+    explicit = getattr(x, "__pysp_engine__", None)
     if explicit is not None:
         return explicit
     # object arrays of symbolic nodes are ndarrays, so they must be routed to
@@ -93,7 +95,7 @@ def engine_of(x: Any, default: ComputeEngine = NUMPY_ENGINE) -> ComputeEngine:
     if direct is not None:
         return direct
 
-    found: Optional[ComputeEngine] = None
+    found: ComputeEngine | None = None
     for child in _child_values(x):
         child_engine = engine_of(child, default=None)
         if child_engine is None:
@@ -101,8 +103,7 @@ def engine_of(x: Any, default: ComputeEngine = NUMPY_ENGINE) -> ComputeEngine:
         if found is None:
             found = child_engine
         elif type(found) is not type(child_engine):
-            raise TypeError('mixed compute engines in encoded payload: %s and %s' %
-                            (found.name, child_engine.name))
+            raise TypeError("mixed compute engines in encoded payload: %s and %s" % (found.name, child_engine.name))
     return default if found is None else found
 
 

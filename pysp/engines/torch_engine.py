@@ -1,7 +1,9 @@
 """Torch implementation of the ComputeEngine protocol."""
+
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
@@ -18,30 +20,37 @@ except ImportError:  # pragma: no cover - exercised when optional extra is absen
 class TorchEngine(ComputeEngine):
     """Torch tensor engine for device placement, autograd, and optional DTensor sharding."""
 
-    name = 'torch'
+    name = "torch"
     supports_autograd = True
 
-    def __init__(self, device: Optional[str] = None, dtype: Any = None,
-                 compile: bool = False, mesh: Any = None, shard: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        device: str | None = None,
+        dtype: Any = None,
+        compile: bool = False,
+        mesh: Any = None,
+        shard: str | None = None,
+    ) -> None:
         if torch is None:
-            require('torch', 'torch')
-        if shard not in (None, 'components'):
+            require("torch", "torch")
+        if shard not in (None, "components"):
             raise ValueError("TorchEngine shard must be None or 'components'.")
-        self.device = torch.device(device or 'cpu')
+        self.device = torch.device(device or "cpu")
         self.dtype = normalize_torch_dtype(dtype, torch) if dtype is not None else torch.float64
         self.compile_enabled = bool(compile)
         self.mesh = mesh
         self.shard = shard
 
-    def with_precision(self, precision: Any) -> 'TorchEngine':
+    def with_precision(self, precision: Any) -> TorchEngine:
         """Return a Torch engine with the same placement and a new dtype policy."""
-        return TorchEngine(device=str(self.device), dtype=precision,
-                           compile=self.compile_enabled, mesh=self.mesh, shard=self.shard)
+        return TorchEngine(
+            device=str(self.device), dtype=precision, compile=self.compile_enabled, mesh=self.mesh, shard=self.shard
+        )
 
     def asarray(self, x: Any, dtype: Any = None) -> Any:
         """Convert ``x`` to a Torch tensor or DTensor on the configured device."""
         if torch is None:
-            require('torch', 'torch')
+            require("torch", "torch")
         if self._is_dtensor(x):
             rv = x
             if dtype is not None:
@@ -53,9 +62,9 @@ class TorchEngine(ComputeEngine):
         arr = np.asarray(x)
         if dtype is not None:
             dt = dtype
-        elif arr.dtype.kind == 'f':
+        elif arr.dtype.kind == "f":
             dt = self.dtype
-        elif arr.dtype.kind == 'b':
+        elif arr.dtype.kind == "b":
             dt = torch.bool
         else:
             dt = torch.int64
@@ -71,9 +80,9 @@ class TorchEngine(ComputeEngine):
 
     def arange(self, *args: Any, **kwargs: Any) -> Any:
         """Return ``torch.arange`` on the configured device."""
-        kwargs.setdefault('device', self.device)
-        if 'dtype' not in kwargs and any(isinstance(x, (float, np.floating)) for x in args):
-            kwargs['dtype'] = self.dtype
+        kwargs.setdefault("device", self.device)
+        if "dtype" not in kwargs and any(isinstance(x, (float, np.floating)) for x in args):
+            kwargs["dtype"] = self.dtype
         return self._replicate_tensor(torch.arange(*args, **kwargs))
 
     def to_numpy(self, x: Any) -> np.ndarray:
@@ -110,7 +119,7 @@ class TorchEngine(ComputeEngine):
         sharded along their component dimension.  With no mesh, or with no
         component sharding requested, this is just ``asarray``.
         """
-        if self.mesh is None or self.shard != 'components':
+        if self.mesh is None or self.shard != "components":
             return self.asarray(x)
         if self._is_dtensor(x):
             rv = x
@@ -120,12 +129,12 @@ class TorchEngine(ComputeEngine):
                 pass
             else:
                 rv = rv.to(device=self.device, dtype=self.dtype if rv.dtype.is_floating_point else rv.dtype)
-                shape = tuple(getattr(rv, 'shape', ()))
+                shape = tuple(getattr(rv, "shape", ()))
                 if len(shape) == 0:
                     return self._replicate_tensor(rv)
                 axis = _normalize_axis(axis, len(shape))
                 return self._distribute_tensor(rv, self._component_placements(axis))
-        shape = tuple(getattr(rv, 'shape', ()))
+        shape = tuple(getattr(rv, "shape", ()))
         if len(shape) == 0:
             return rv.redistribute(device_mesh=self.mesh, placements=self._replicated_placements())
         axis = _normalize_axis(axis, len(shape))
@@ -137,7 +146,7 @@ class TorchEngine(ComputeEngine):
 
     def compile(self, fn: Callable) -> Callable:
         """Compile ``fn`` with ``torch.compile`` when enabled and available."""
-        if self.compile_enabled and hasattr(torch, 'compile'):
+        if self.compile_enabled and hasattr(torch, "compile"):
             return torch.compile(fn)
         return fn
 
@@ -151,29 +160,31 @@ class TorchEngine(ComputeEngine):
     floor = staticmethod(lambda x: torch.floor(x))
     isnan = staticmethod(lambda x: torch.isnan(x))
     isinf = staticmethod(lambda x: torch.isinf(x))
+
     @staticmethod
     def sum(x, *args, **kwargs):
         """Return ``torch.sum`` accepting either ``axis`` or ``dim``."""
-        if 'axis' in kwargs and 'dim' not in kwargs:
-            kwargs['dim'] = kwargs.pop('axis')
+        if "axis" in kwargs and "dim" not in kwargs:
+            kwargs["dim"] = kwargs.pop("axis")
         return torch.sum(x, *args, **kwargs)
 
     @staticmethod
     def max(x, *args, **kwargs):
         """Return ``torch.max`` accepting either ``axis`` or ``dim``."""
-        if 'axis' in kwargs and 'dim' not in kwargs:
-            kwargs['dim'] = kwargs.pop('axis')
+        if "axis" in kwargs and "dim" not in kwargs:
+            kwargs["dim"] = kwargs.pop("axis")
         rv = torch.max(x, *args, **kwargs)
-        return rv.values if hasattr(rv, 'values') else rv
+        return rv.values if hasattr(rv, "values") else rv
 
     dot = staticmethod(lambda x, y: torch.dot(x, y))
     matmul = staticmethod(lambda x, y: torch.matmul(x, y))
     cumsum = staticmethod(lambda x, *args, **kwargs: torch.cumsum(x, *args, **kwargs))
+
     @staticmethod
     def logsumexp(x, *args, **kwargs):
         """Return ``torch.logsumexp`` accepting either ``axis`` or ``dim``."""
-        if 'axis' in kwargs and 'dim' not in kwargs:
-            kwargs['dim'] = kwargs.pop('axis')
+        if "axis" in kwargs and "dim" not in kwargs:
+            kwargs["dim"] = kwargs.pop("axis")
         return torch.logsumexp(x, *args, **kwargs)
 
     bincount = staticmethod(lambda x, *args, **kwargs: torch.bincount(x, *args, **kwargs))
@@ -222,17 +233,17 @@ class TorchEngine(ComputeEngine):
 
 def _dtensor_api():
     try:
-        from torch.distributed.tensor import DTensor, Shard, Replicate, distribute_tensor
+        from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
     except ImportError as e:  # pragma: no cover - depends on torch build
-        raise ImportError('TorchEngine mesh placement requires torch.distributed.tensor.') from e
+        raise ImportError("TorchEngine mesh placement requires torch.distributed.tensor.") from e
     return DTensor, Shard, Replicate, distribute_tensor
 
 
 def _mesh_ndim(mesh: Any) -> int:
-    ndim = getattr(mesh, 'ndim', None)
+    ndim = getattr(mesh, "ndim", None)
     if ndim is not None:
         return int(ndim)
-    shape = getattr(mesh, 'shape', None)
+    shape = getattr(mesh, "shape", None)
     if shape is not None:
         return max(1, len(tuple(shape)))
     return 1
@@ -243,5 +254,5 @@ def _normalize_axis(axis: int, ndim: int) -> int:
     if axis < 0:
         axis += ndim
     if axis < 0 or axis >= ndim:
-        raise ValueError('component axis %d is out of bounds for tensor rank %d.' % (axis, ndim))
+        raise ValueError("component axis %d is out of bounds for tensor rank %d." % (axis, ndim))
     return axis

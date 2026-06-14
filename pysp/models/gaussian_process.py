@@ -1,19 +1,27 @@
 """Small Torch-backed Gaussian-process regression model."""
+
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
 from pysp.utils.objectives import optimize_torch_objective
 
 
-class GaussianProcessRegressor(object):
+class GaussianProcessRegressor:
     """Exact GP regression with an RBF kernel and Gaussian observation noise."""
 
-    def __init__(self, lengthscale: float = 1.0, amplitude: float = 1.0,
-                 noise: float = 0.1, mean: float = 0.0, jitter: float = 1.0e-6,
-                 engine: Optional[Any] = None, precision: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        lengthscale: float = 1.0,
+        amplitude: float = 1.0,
+        noise: float = 0.1,
+        mean: float = 0.0,
+        jitter: float = 1.0e-6,
+        engine: Any | None = None,
+        precision: Any | None = None,
+    ) -> None:
         torch, engine = _torch_engine(engine, precision=precision)
         self.torch = torch
         self.engine = engine
@@ -42,7 +50,7 @@ class GaussianProcessRegressor(object):
         """Return the fitted Gaussian observation-noise standard deviation."""
         return float(self.log_noise.detach().exp().cpu().item())
 
-    def _xy(self, x: Any, y: Any) -> Tuple[Any, Any]:
+    def _xy(self, x: Any, y: Any) -> tuple[Any, Any]:
         xx = self.engine.asarray(x)
         if len(xx.shape) == 1:
             xx = xx[:, None]
@@ -81,23 +89,40 @@ class GaussianProcessRegressor(object):
         logdet = 2.0 * torch.sum(torch.log(torch.diagonal(chol)))
         return -0.5 * (quad + logdet + n * np.log(2.0 * np.pi))
 
-    def fit(self, x: Any, y: Any, max_its: int = 500, lr: float = 0.05,
-            optimizer: str = 'adam', tol: float = 1.0e-7,
-            out: Optional[Any] = None, print_iter: int = 100,
-            return_result: bool = False, restore_best: bool = True) -> Any:
+    def fit(
+        self,
+        x: Any,
+        y: Any,
+        max_its: int = 500,
+        lr: float = 0.05,
+        optimizer: str = "adam",
+        tol: float = 1.0e-7,
+        out: Any | None = None,
+        print_iter: int = 100,
+        return_result: bool = False,
+        restore_best: bool = True,
+    ) -> Any:
         """Maximize the GP log marginal likelihood.
 
         The default return shape is the historical ``(value, iterations)``
         tuple.  Set ``return_result=True`` for the full objective diagnostics.
         """
         return optimize_torch_objective(
-            self.parameters(), lambda: self.log_marginal_likelihood(x, y),
-            engine=self.engine, max_its=max_its, lr=lr, optimizer=optimizer,
-            tol=tol, maximize=True, out=out, print_iter=print_iter,
-            return_result=return_result, restore_best=restore_best)
+            self.parameters(),
+            lambda: self.log_marginal_likelihood(x, y),
+            engine=self.engine,
+            max_its=max_its,
+            lr=lr,
+            optimizer=optimizer,
+            tol=tol,
+            maximize=True,
+            out=out,
+            print_iter=print_iter,
+            return_result=return_result,
+            restore_best=restore_best,
+        )
 
-    def predict(self, x_train: Any, y_train: Any, x_new: Any,
-                return_cov: bool = False) -> Any:
+    def predict(self, x_train: Any, y_train: Any, x_new: Any, return_cov: bool = False) -> Any:
         """Return posterior predictive mean, and optionally covariance."""
         torch = self.torch
         with torch.no_grad():
@@ -121,16 +146,18 @@ class GaussianProcessRegressor(object):
             return mean.detach().cpu().numpy(), cov.detach().cpu().numpy()
 
 
-def _torch_engine(engine: Optional[Any], precision: Optional[Any] = None) -> Tuple[Any, Any]:
+def _torch_engine(engine: Any | None, precision: Any | None = None) -> tuple[Any, Any]:
     try:
         import torch
     except ImportError as e:  # pragma: no cover
-        raise ImportError('GaussianProcessRegressor requires torch.') from e
+        raise ImportError("GaussianProcessRegressor requires torch.") from e
     if engine is None:
         from pysp.engines import TorchEngine
+
         engine = TorchEngine(dtype=precision or torch.float64)
     elif precision is not None:
         from pysp.engines import engine_with_precision
+
         engine = engine_with_precision(engine, precision)
     return torch, engine
 

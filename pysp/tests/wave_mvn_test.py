@@ -4,27 +4,26 @@ Covers: sample -> estimate round-trip on a small 2-component 2-d problem, agreem
 scalar and vectorized (seq_) updates, and sampler output shapes. Also smoke-tests the
 docstring-pass modules mvn, dmvn, and dirichlet via sample/log-density round trips.
 """
+
 import unittest
 
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.stats.mvnmixture import (GaussianMixtureDistribution, GaussianMixtureEstimator,
-                                   GaussianMixtureDataEncoder)
-from pysp.stats.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
-from pysp.stats.dmvn import DiagonalGaussianDistribution
 from pysp.stats.dirichlet import DirichletDistribution
+from pysp.stats.dmvn import DiagonalGaussianDistribution
+from pysp.stats.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
+from pysp.stats.mvnmixture import GaussianMixtureDataEncoder, GaussianMixtureDistribution, GaussianMixtureEstimator
 
 
 def make_dist():
     mu = [[-3.0, -3.0], [3.0, 3.0]]
     sig2 = [[[1.0, 0.3], [0.3, 1.0]], [[0.5, -0.1], [-0.1, 0.8]]]
     w = [0.4, 0.6]
-    return GaussianMixtureDistribution(mu, sig2, w, name='gm')
+    return GaussianMixtureDistribution(mu, sig2, w, name="gm")
 
 
 class GaussianMixtureTestCase(unittest.TestCase):
-
     def test_sampler_shapes(self):
         dist = make_dist()
         sampler = dist.sampler(seed=1)
@@ -98,8 +97,7 @@ class GaussianMixtureTestCase(unittest.TestCase):
         est = GaussianMixtureEstimator([MultivariateGaussianEstimator(), MultivariateGaussianEstimator()])
 
         # Start EM from a rough (perturbed) model and run a few seq_update/estimate steps.
-        model = GaussianMixtureDistribution([[-1.0, -1.0], [1.0, 1.0]],
-                                            [4.0 * np.eye(2), 4.0 * np.eye(2)], [0.5, 0.5])
+        model = GaussianMixtureDistribution([[-1.0, -1.0], [1.0, 1.0]], [4.0 * np.eye(2), 4.0 * np.eye(2)], [0.5, 0.5])
         enc = est.accumulator_factory().make().acc_to_encoder().seq_encode(data)
 
         for _ in range(10):
@@ -201,7 +199,7 @@ class GaussianMixtureTestCase(unittest.TestCase):
         self.assertTrue(isinstance(str(enc1), str))
         self.assertEqual(enc1, dist.dist_to_encoder())
         self.assertIsInstance(enc3, GaussianMixtureDataEncoder)
-        self.assertNotEqual(enc1, 'not an encoder')
+        self.assertNotEqual(enc1, "not an encoder")
 
         data = dist.sampler(seed=13).sample(size=5)
         self.assertEqual(enc1.seq_encode(data).shape, (5, 2))
@@ -261,5 +259,5 @@ class DocstringModuleSmokeTestCase(unittest.TestCase):
         self.assertAlmostEqual(dist.log_density(data[0]), seq_ll[0], places=8)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

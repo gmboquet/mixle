@@ -6,14 +6,15 @@ from pysp.models import ErdosRenyiGraphModel, StochasticBlockGraphModel, hard_em
 
 
 class RandomGraphModelsTestCase(unittest.TestCase):
-
     def test_erdos_renyi_mle_matches_observed_edge_fraction(self):
-        adj = np.asarray([
-            [0, 1, 0, 1],
-            [1, 0, 1, 0],
-            [0, 1, 0, 0],
-            [1, 0, 0, 0],
-        ])
+        adj = np.asarray(
+            [
+                [0, 1, 0, 1],
+                [1, 0, 1, 0],
+                [0, 1, 0, 0],
+                [1, 0, 0, 0],
+            ]
+        )
         model = ErdosRenyiGraphModel.fit_mle(adj)
 
         self.assertAlmostEqual(model.p, 3.0 / 6.0)
@@ -29,12 +30,14 @@ class RandomGraphModelsTestCase(unittest.TestCase):
 
     def test_stochastic_block_mle_recovers_block_edge_frequencies(self):
         assignments = [0, 0, 1, 1]
-        adj = np.asarray([
-            [0, 1, 0, 0],
-            [1, 0, 1, 0],
-            [0, 1, 0, 1],
-            [0, 0, 1, 0],
-        ])
+        adj = np.asarray(
+            [
+                [0, 1, 0, 0],
+                [1, 0, 1, 0],
+                [0, 1, 0, 1],
+                [0, 0, 1, 0],
+            ]
+        )
         model = StochasticBlockGraphModel.fit_mle(adj, assignments, num_blocks=2)
 
         np.testing.assert_allclose(model.block_probs, [[1.0, 0.25], [0.25, 1.0]])
@@ -66,5 +69,5 @@ class RandomGraphModelsTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.diff(result.history) >= -1.0e-9))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

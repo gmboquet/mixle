@@ -50,7 +50,8 @@ non-negative integers.
 import heapq
 import itertools
 import math
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from collections.abc import Iterator, Sequence
+from typing import Any
 
 import numpy as np
 from scipy.optimize import minimize_scalar
@@ -59,8 +60,13 @@ from scipy.special import logsumexp
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.hidden_markov import HiddenMarkovAccumulatorFactory, HiddenMarkovModelDistribution
 from pysp.stats.null_dist import NullDistribution, NullEstimator
-from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution, \
-    DistributionEnumerator, EnumerationError, child_enumerator
+from pysp.stats.pdist import (
+    DistributionEnumerator,
+    EnumerationError,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    child_enumerator,
+)
 from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
 
 STRUCTURAL_ZERO = -1
@@ -85,7 +91,7 @@ def _exponent_log_probs(exponents: np.ndarray, log_theta: float) -> np.ndarray:
     return log_p - log_z
 
 
-def _quantize_counts(counts: np.ndarray, log_theta: float, k_max: Optional[int]) -> np.ndarray:
+def _quantize_counts(counts: np.ndarray, log_theta: float, k_max: int | None) -> np.ndarray:
     """Quantize per-row counts to integer exponents for a fixed theta.
 
     Each row is normalized to the unconstrained MLE p_hat and quantized to
@@ -123,8 +129,7 @@ def _quantize_counts(counts: np.ndarray, log_theta: float, k_max: Optional[int])
     return rv
 
 
-def _quantized_expected_ll(count_blocks: Sequence[np.ndarray], exp_blocks: Sequence[np.ndarray],
-                           theta: float) -> float:
+def _quantized_expected_ll(count_blocks: Sequence[np.ndarray], exp_blocks: Sequence[np.ndarray], theta: float) -> float:
     """Expected complete-data log-likelihood of count blocks under exponent blocks and theta.
 
     Args:
@@ -150,8 +155,9 @@ def _quantized_expected_ll(count_blocks: Sequence[np.ndarray], exp_blocks: Seque
     return rv
 
 
-def _optimize_theta(count_blocks: Sequence[np.ndarray], exp_blocks: Sequence[np.ndarray],
-                    current_theta: float) -> float:
+def _optimize_theta(
+    count_blocks: Sequence[np.ndarray], exp_blocks: Sequence[np.ndarray], current_theta: float
+) -> float:
     """Maximize the expected complete-data log-likelihood over theta for fixed exponents.
 
     Args:
@@ -167,15 +173,16 @@ def _optimize_theta(count_blocks: Sequence[np.ndarray], exp_blocks: Sequence[np.
     if all(np.all(k[k >= 0] == 0) for k in exp_blocks):
         return current_theta
 
-    res = minimize_scalar(lambda t: -_quantized_expected_ll(count_blocks, exp_blocks, t),
-                          bounds=(1.0e-6, 1.0 - 1.0e-6), method='bounded')
+    res = minimize_scalar(
+        lambda t: -_quantized_expected_ll(count_blocks, exp_blocks, t), bounds=(1.0e-6, 1.0 - 1.0e-6), method="bounded"
+    )
 
     return float(res.x)
 
 
-def _fit_quantized_parameters(count_blocks: Sequence[np.ndarray], fixed_theta: Optional[float],
-                              k_max: Optional[int], max_its: int) \
-        -> Tuple[float, List[np.ndarray]]:
+def _fit_quantized_parameters(
+    count_blocks: Sequence[np.ndarray], fixed_theta: float | None, k_max: int | None, max_its: int
+) -> tuple[float, list[np.ndarray]]:
     """Coordinate ascent over (theta, integer exponents) for the quantized M-step.
 
     Alternates exponent quantization at the current theta with the 1-d theta maximization, from
@@ -198,11 +205,11 @@ def _fit_quantized_parameters(count_blocks: Sequence[np.ndarray], fixed_theta: O
         return fixed_theta, [_quantize_counts(u, log_theta, k_max) for u in count_blocks]
 
     best_ll = -np.inf
-    best: Optional[Tuple[float, List[np.ndarray]]] = None
+    best: tuple[float, list[np.ndarray]] | None = None
 
     for theta0 in (0.25, 0.5, 0.75, 0.9):
         theta = theta0
-        prev_exps: Optional[List[np.ndarray]] = None
+        prev_exps: list[np.ndarray] | None = None
 
         for _ in range(max_its):
             exps = [_quantize_counts(u, math.log(theta), k_max) for u in count_blocks]
@@ -227,8 +234,9 @@ def _swap_perm(num_states: int, i: int, j: int) -> np.ndarray:
     return perm
 
 
-def _states_nearly_collapsed(trans_exp: np.ndarray, emit_exp: np.ndarray, i: int, j: int,
-                             log_theta: float, tol_nats: float) -> bool:
+def _states_nearly_collapsed(
+    trans_exp: np.ndarray, emit_exp: np.ndarray, i: int, j: int, log_theta: float, tol_nats: float
+) -> bool:
     """True when states i and j are effectively indistinguishable for the EM dynamics.
 
     Compares the normalized log-probabilities of the emission rows and the swap-aware transition
@@ -265,9 +273,17 @@ def _states_nearly_collapsed(trans_exp: np.ndarray, emit_exp: np.ndarray, i: int
     return True
 
 
-def _split_collapsed_pair(trans_exp: np.ndarray, emit_exp: np.ndarray, trans_counts: np.ndarray,
-                          emit_counts: np.ndarray, i: int, j: int, k_max: Optional[int],
-                          log_theta: float, split_nats: float) -> bool:
+def _split_collapsed_pair(
+    trans_exp: np.ndarray,
+    emit_exp: np.ndarray,
+    trans_counts: np.ndarray,
+    emit_counts: np.ndarray,
+    i: int,
+    j: int,
+    k_max: int | None,
+    log_theta: float,
+    split_nats: float,
+) -> bool:
     """Push states i and j apart along their strongest raw-count asymmetry.
 
     The quantized M-step can round two nearly-identical states onto (nearly) the same theta^k grid
@@ -302,11 +318,9 @@ def _split_collapsed_pair(trans_exp: np.ndarray, emit_exp: np.ndarray, trans_cou
     signals = []
 
     for counts_i, counts_j, exps, cell_i, cell_j in (
-            (emit_counts[i, :], emit_counts[j, :], emit_exp,
-             lambda c: (i, c), lambda c: (j, c)),
-            (trans_counts[i, :], trans_counts[j, perm], trans_exp,
-             lambda c: (i, c), lambda c: (j, perm[c]))):
-
+        (emit_counts[i, :], emit_counts[j, :], emit_exp, lambda c: (i, c), lambda c: (j, c)),
+        (trans_counts[i, :], trans_counts[j, perm], trans_exp, lambda c: (i, c), lambda c: (j, perm[c])),
+    ):
         tot_i = counts_i.sum()
         tot_j = counts_j.sum()
         if tot_i <= 0 or tot_j <= 0:
@@ -341,9 +355,15 @@ def _split_collapsed_pair(trans_exp: np.ndarray, emit_exp: np.ndarray, trans_cou
     return True
 
 
-def _split_collapsed_states(trans_exp: np.ndarray, emit_exp: np.ndarray, trans_counts: np.ndarray,
-                            emit_counts: np.ndarray, k_max: Optional[int], log_theta: float,
-                            split_nats: float) -> int:
+def _split_collapsed_states(
+    trans_exp: np.ndarray,
+    emit_exp: np.ndarray,
+    trans_counts: np.ndarray,
+    emit_counts: np.ndarray,
+    k_max: int | None,
+    log_theta: float,
+    split_nats: float,
+) -> int:
     """Separate every nearly-collapsed state pair; returns the number of splits applied."""
     num_states = trans_exp.shape[0]
     num_split = 0
@@ -351,8 +371,9 @@ def _split_collapsed_states(trans_exp: np.ndarray, emit_exp: np.ndarray, trans_c
     for i in range(num_states):
         for j in range(i + 1, num_states):
             if _states_nearly_collapsed(trans_exp, emit_exp, i, j, log_theta, split_nats):
-                if _split_collapsed_pair(trans_exp, emit_exp, trans_counts, emit_counts, i, j,
-                                         k_max, log_theta, split_nats):
+                if _split_collapsed_pair(
+                    trans_exp, emit_exp, trans_counts, emit_counts, i, j, k_max, log_theta, split_nats
+                ):
                     num_split += 1
 
     return num_split
@@ -383,49 +404,53 @@ def _stationary_distribution(transitions: np.ndarray) -> np.ndarray:
 
 
 class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
-
     """Hidden Markov model distribution with quantized observation summaries."""
+
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+
         length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
         children = () if length is None else (length,)
         return DistributionDeclaration(
-            name='quantized_hidden_markov',
+            name="quantized_hidden_markov",
             distribution_type=type(self),
             parameters=(
-                ParameterSpec('theta', constraint='unit_interval'),
-                ParameterSpec('levels', constraint='metadata', differentiable=False),
-                ParameterSpec('transition_exponents', constraint='integer_matrix', differentiable=False),
-                ParameterSpec('emission_exponents', constraint='integer_matrix', differentiable=False),
-                ParameterSpec('initial_exponents', constraint='integer_vector', differentiable=False),
-                ParameterSpec('init_mode', constraint='metadata', differentiable=False),
-                ParameterSpec('k_max', constraint='optional_integer', differentiable=False),
+                ParameterSpec("theta", constraint="unit_interval"),
+                ParameterSpec("levels", constraint="metadata", differentiable=False),
+                ParameterSpec("transition_exponents", constraint="integer_matrix", differentiable=False),
+                ParameterSpec("emission_exponents", constraint="integer_matrix", differentiable=False),
+                ParameterSpec("initial_exponents", constraint="integer_vector", differentiable=False),
+                ParameterSpec("init_mode", constraint="metadata", differentiable=False),
+                ParameterSpec("k_max", constraint="optional_integer", differentiable=False),
             ),
             statistics=(
-                StatisticSpec('num_states', kind='metadata', additive=False, scales=False),
-                StatisticSpec('initial_counts'),
-                StatisticSpec('state_counts'),
-                StatisticSpec('transition_counts'),
-                StatisticSpec('emissions', kind='tuple'),
-                StatisticSpec('length', kind='child_stat'),
+                StatisticSpec("num_states", kind="metadata", additive=False, scales=False),
+                StatisticSpec("initial_counts"),
+                StatisticSpec("state_counts"),
+                StatisticSpec("transition_counts"),
+                StatisticSpec("emissions", kind="tuple"),
+                StatisticSpec("length", kind="child_stat"),
             ),
-            support='quantized_hidden_state_sequence',
+            support="quantized_hidden_state_sequence",
             children=children,
-            child_roles=('length',) if length is not None else (),
+            child_roles=("length",) if length is not None else (),
             differentiable=False,
         )
 
-    def __init__(self, theta: float,
-                 levels: Sequence[Any],
-                 transition_exponents: Union[Sequence[Sequence[int]], np.ndarray],
-                 emission_exponents: Union[Sequence[Sequence[int]], np.ndarray],
-                 initial_exponents: Optional[Union[Sequence[int], np.ndarray]] = None,
-                 init_mode: str = 'quantized',
-                 k_max: Optional[int] = None,
-                 len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 name: Optional[str] = None,
-                 terminal_values: Optional[set] = None,
-                 use_numba: bool = False) -> None:
+    def __init__(
+        self,
+        theta: float,
+        levels: Sequence[Any],
+        transition_exponents: Sequence[Sequence[int]] | np.ndarray,
+        emission_exponents: Sequence[Sequence[int]] | np.ndarray,
+        initial_exponents: Sequence[int] | np.ndarray | None = None,
+        init_mode: str = "quantized",
+        k_max: int | None = None,
+        len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        name: str | None = None,
+        terminal_values: set | None = None,
+        use_numba: bool = False,
+    ) -> None:
         """QuantizedHiddenMarkovModelDistribution: an HMM whose probabilities are powers of theta.
 
         Every transition, emission, and (when init_mode='quantized') initial-state probability is
@@ -470,8 +495,8 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
 
         """
         if not (0.0 < theta < 1.0):
-            raise ValueError('QuantizedHiddenMarkovModelDistribution requires theta in (0, 1).')
-        if init_mode not in ('quantized', 'stationary'):
+            raise ValueError("QuantizedHiddenMarkovModelDistribution requires theta in (0, 1).")
+        if init_mode not in ("quantized", "stationary"):
             raise ValueError("init_mode must be 'quantized' or 'stationary'.")
 
         self.theta = float(theta)
@@ -487,49 +512,66 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         num_levels = len(self.levels)
 
         if self.transition_exponents.shape != (num_states, num_states):
-            raise ValueError('transition_exponents must be a square matrix.')
+            raise ValueError("transition_exponents must be a square matrix.")
         if self.emission_exponents.shape != (num_states, num_levels):
-            raise ValueError('emission_exponents must have shape (n_states, len(levels)).')
+            raise ValueError("emission_exponents must have shape (n_states, len(levels)).")
         if not np.all(np.any(self.transition_exponents >= 0, axis=1)):
-            raise ValueError('Each transition_exponents row needs a non-negative entry.')
+            raise ValueError("Each transition_exponents row needs a non-negative entry.")
         if not np.all(np.any(self.emission_exponents >= 0, axis=1)):
-            raise ValueError('Each emission_exponents row needs a non-negative entry.')
+            raise ValueError("Each emission_exponents row needs a non-negative entry.")
 
         transitions = np.exp(_exponent_log_probs(self.transition_exponents, self.log_theta))
         emission_probs = np.exp(_exponent_log_probs(self.emission_exponents, self.log_theta))
 
-        if init_mode == 'quantized':
+        if init_mode == "quantized":
             if initial_exponents is None:
                 raise ValueError("initial_exponents is required when init_mode='quantized'.")
-            self.initial_exponents = np.reshape(np.asarray(initial_exponents, dtype=np.int64),
-                                                num_states)
+            self.initial_exponents = np.reshape(np.asarray(initial_exponents, dtype=np.int64), num_states)
             if not np.any(self.initial_exponents >= 0):
-                raise ValueError('initial_exponents needs a non-negative entry.')
+                raise ValueError("initial_exponents needs a non-negative entry.")
             w = np.exp(_exponent_log_probs(self.initial_exponents[None, :], self.log_theta))[0]
         else:
             self.initial_exponents = None
             w = _stationary_distribution(transitions)
 
-        topics = [CategoricalDistribution(dict(zip(self.levels, emission_probs[i, :].tolist())))
-                  for i in range(num_states)]
+        topics = [
+            CategoricalDistribution(dict(zip(self.levels, emission_probs[i, :].tolist()))) for i in range(num_states)
+        ]
 
-        super().__init__(topics=topics, w=w, transitions=transitions, taus=None, len_dist=len_dist,
-                         name=name, terminal_values=terminal_values, use_numba=use_numba)
+        super().__init__(
+            topics=topics,
+            w=w,
+            transitions=transitions,
+            taus=None,
+            len_dist=len_dist,
+            name=name,
+            terminal_values=terminal_values,
+            use_numba=use_numba,
+        )
 
     def __str__(self) -> str:
         """Returns string representation of QuantizedHiddenMarkovModelDistribution instance."""
-        s_init = repr(None if self.initial_exponents is None else
-                      [int(u) for u in self.initial_exponents])
+        s_init = repr(None if self.initial_exponents is None else [int(u) for u in self.initial_exponents])
 
-        return 'QuantizedHiddenMarkovModelDistribution(%s, %s, %s, %s, initial_exponents=%s, ' \
-               'init_mode=%s, k_max=%s, len_dist=%s, name=%s, terminal_values=%s, use_numba=%s)' \
-               % (repr(self.theta), repr(self.levels),
-                  repr([[int(v) for v in u] for u in self.transition_exponents]),
-                  repr([[int(v) for v in u] for u in self.emission_exponents]),
-                  s_init, repr(self.init_mode), repr(self.k_max), str(self.len_dist),
-                  repr(self.name), repr(self.terminal_values), repr(self.use_numba))
+        return (
+            "QuantizedHiddenMarkovModelDistribution(%s, %s, %s, %s, initial_exponents=%s, "
+            "init_mode=%s, k_max=%s, len_dist=%s, name=%s, terminal_values=%s, use_numba=%s)"
+            % (
+                repr(self.theta),
+                repr(self.levels),
+                repr([[int(v) for v in u] for u in self.transition_exponents]),
+                repr([[int(v) for v in u] for u in self.emission_exponents]),
+                s_init,
+                repr(self.init_mode),
+                repr(self.k_max),
+                str(self.len_dist),
+                repr(self.name),
+                repr(self.terminal_values),
+                repr(self.use_numba),
+            )
+        )
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'QuantizedHiddenMarkovEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "QuantizedHiddenMarkovEstimator":
         """Create QuantizedHiddenMarkovEstimator matching this distribution's configuration.
 
         Args:
@@ -540,15 +582,24 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             QuantizedHiddenMarkovEstimator object.
 
         """
-        len_est = NullEstimator() if isinstance(self.len_dist, NullDistribution) \
+        len_est = (
+            NullEstimator()
+            if isinstance(self.len_dist, NullDistribution)
             else self.len_dist.estimator(pseudo_count=pseudo_count)
+        )
 
-        return QuantizedHiddenMarkovEstimator(self.n_states, levels=self.levels,
-                                              pseudo_count=pseudo_count, k_max=self.k_max,
-                                              init_mode=self.init_mode, len_estimator=len_est,
-                                              name=self.name, use_numba=self.use_numba)
+        return QuantizedHiddenMarkovEstimator(
+            self.n_states,
+            levels=self.levels,
+            pseudo_count=pseudo_count,
+            k_max=self.k_max,
+            init_mode=self.init_mode,
+            len_estimator=len_est,
+            name=self.name,
+            use_numba=self.use_numba,
+        )
 
-    def enumerator(self) -> 'QuantizedHiddenMarkovModelEnumerator':
+    def enumerator(self) -> "QuantizedHiddenMarkovModelEnumerator":
         """Returns a quantized-HMM-specialized enumerator over observation sequences.
 
         The enumerator is exact like HiddenMarkovModelEnumerator, but avoids constructing
@@ -558,12 +609,12 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         return QuantizedHiddenMarkovModelEnumerator(self)
 
 
-class _QuantizedHmmPrefix(object):
+class _QuantizedHmmPrefix:
     """Concrete observation prefix used by QuantizedHiddenMarkovModelEnumerator."""
 
-    __slots__ = ('t', 'values', 'proj')
+    __slots__ = ("t", "values", "proj")
 
-    def __init__(self, t: int, values: Tuple[Any, ...], proj: np.ndarray) -> None:
+    def __init__(self, t: int, values: tuple[Any, ...], proj: np.ndarray) -> None:
         self.t = t
         self.values = values
         self.proj = proj
@@ -581,11 +632,11 @@ class QuantizedHiddenMarkovModelEnumerator(DistributionEnumerator):
         """
         super().__init__(dist)
         if dist.has_topics:
-            raise EnumerationError(dist, reason='taus/topics parameterization is not supported')
+            raise EnumerationError(dist, reason="taus/topics parameterization is not supported")
         if dist.terminal_values is not None:
-            raise EnumerationError(dist, reason='terminal_values semantics are not supported')
+            raise EnumerationError(dist, reason="terminal_values semantics are not supported")
         if isinstance(dist.len_dist, NullDistribution):
-            raise EnumerationError(dist, reason='no length distribution is modeled (len_dist is Null)')
+            raise EnumerationError(dist, reason="no length distribution is modeled (len_dist is Null)")
 
         self._levels = list(dist.levels)
         self._n_states = dist.n_states
@@ -604,13 +655,12 @@ class QuantizedHiddenMarkovModelEnumerator(DistributionEnumerator):
         self._pool = pool
 
         # UB[r][s] bounds r further (transition + emission) steps out of state s.
-        self._ub: List[np.ndarray] = [np.zeros(self._n_states, dtype=np.float64)]
+        self._ub: list[np.ndarray] = [np.zeros(self._n_states, dtype=np.float64)]
 
-        len_stream = BufferedStream(child_enumerator(
-            dist.len_dist, 'QuantizedHiddenMarkovModelDistribution.len_dist'))
+        len_stream = BufferedStream(child_enumerator(dist.len_dist, "QuantizedHiddenMarkovModelDistribution.len_dist"))
         self._merge = LengthFrontierMerge(len_stream, self._kbest_sequences)
 
-    def _emissions(self, rank: int) -> Optional[np.ndarray]:
+    def _emissions(self, rank: int) -> np.ndarray | None:
         if rank >= len(self._pool):
             return None
         return self._pool[rank][2]
@@ -622,7 +672,7 @@ class QuantizedHiddenMarkovModelEnumerator(DistributionEnumerator):
             self._ub.append(logsumexp(step, axis=1))
         return self._ub[r]
 
-    def _kbest_sequences(self, n: int, lp_len: float) -> Iterator[Tuple[List[Any], float]]:
+    def _kbest_sequences(self, n: int, lp_len: float) -> Iterator[tuple[list[Any], float]]:
         if n == 0:
             yield ([], lp_len)
             return
@@ -632,21 +682,21 @@ class QuantizedHiddenMarkovModelEnumerator(DistributionEnumerator):
         counter = itertools.count()
         heap = []  # entries: (-score, counter, kind, payload)
 
-        def push_candidate(parent: '_QuantizedHmmPrefix', rank: int) -> None:
+        def push_candidate(parent: "_QuantizedHmmPrefix", rank: int) -> None:
             if rank >= len(self._pool):
                 return
             pool_lp = self._pool[rank][1]
             remaining = n - parent.t - 1
             bound = logsumexp(parent.proj + self._ub_for(remaining)) + pool_lp + lp_len
             if bound > -np.inf:
-                heapq.heappush(heap, (-bound, next(counter), 'cand', (parent, rank)))
+                heapq.heappush(heap, (-bound, next(counter), "cand", (parent, rank)))
 
         root = _QuantizedHmmPrefix(0, (), self._log_w)
         push_candidate(root, 0)
 
         while heap:
             _, _, kind, payload = heapq.heappop(heap)
-            if kind == 'done':
+            if kind == "done":
                 yield payload
                 continue
 
@@ -660,32 +710,33 @@ class QuantizedHiddenMarkovModelEnumerator(DistributionEnumerator):
             if t == n:
                 exact = float(logsumexp(alpha) + lp_len)
                 if exact > -np.inf:
-                    heapq.heappush(heap, (-exact, next(counter), 'done',
-                                          (list(parent.values) + [x], exact)))
+                    heapq.heappush(heap, (-exact, next(counter), "done", (list(parent.values) + [x], exact)))
             else:
                 proj = logsumexp(alpha[:, None] + self._log_a, axis=0)
                 child = _QuantizedHmmPrefix(t, parent.values + (x,), proj)
                 push_candidate(child, 0)
 
-    def __next__(self) -> Tuple[List[Any], float]:
+    def __next__(self) -> tuple[list[Any], float]:
         return next(self._merge)
 
 
 class QuantizedHiddenMarkovEstimator(ParameterEstimator):
-
-    def __init__(self, num_states: int,
-                 levels: Optional[Sequence[Any]] = None,
-                 pseudo_count: Optional[float] = None,
-                 k_max: Optional[int] = None,
-                 fixed_theta: Optional[float] = None,
-                 init_mode: str = 'quantized',
-                 len_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 name: Optional[str] = None,
-                 keys: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = (None, None, None),
-                 use_numba: bool = False,
-                 max_quant_its: int = 50,
-                 split_collapsed: bool = True,
-                 split_nats: float = math.log(2.0)) -> None:
+    def __init__(
+        self,
+        num_states: int,
+        levels: Sequence[Any] | None = None,
+        pseudo_count: float | None = None,
+        k_max: int | None = None,
+        fixed_theta: float | None = None,
+        init_mode: str = "quantized",
+        len_estimator: ParameterEstimator | None = NullEstimator(),
+        name: str | None = None,
+        keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
+        use_numba: bool = False,
+        max_quant_its: int = 50,
+        split_collapsed: bool = True,
+        split_nats: float = math.log(2.0),
+    ) -> None:
         """QuantizedHiddenMarkovEstimator for estimating QuantizedHiddenMarkovModelDistribution.
 
         The E-step accumulates the standard Baum-Welch expected counts (reusing
@@ -744,12 +795,12 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
             split_nats (float): Collapse tolerance and target separation in nats.
 
         """
-        if init_mode not in ('quantized', 'stationary'):
+        if init_mode not in ("quantized", "stationary"):
             raise ValueError("init_mode must be 'quantized' or 'stationary'.")
         if fixed_theta is not None and not (0.0 < fixed_theta < 1.0):
-            raise ValueError('fixed_theta must be in (0, 1).')
+            raise ValueError("fixed_theta must be in (0, 1).")
         if k_max is not None and k_max < 1:
-            raise ValueError('k_max must be a positive integer.')
+            raise ValueError("k_max must be a positive integer.")
 
         self.num_states = num_states
         self.levels = None if levels is None else list(levels)
@@ -765,17 +816,18 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
         self.split_collapsed = split_collapsed
         self.split_nats = split_nats
 
-    def accumulator_factory(self) -> 'HiddenMarkovAccumulatorFactory':
+    def accumulator_factory(self) -> "HiddenMarkovAccumulatorFactory":
         """Returns a HiddenMarkovAccumulatorFactory with categorical emission accumulators."""
         est_factories = [CategoricalEstimator().accumulator_factory() for _ in range(self.num_states)]
         len_factory = self.len_estimator.accumulator_factory()
 
-        return HiddenMarkovAccumulatorFactory(est_factories, len_factory, self.use_numba, self.keys,
-                                              self.name)
+        return HiddenMarkovAccumulatorFactory(est_factories, len_factory, self.use_numba, self.keys, self.name)
 
-    def estimate(self, nobs: Optional[float],
-                 suff_stat: Tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Dict[Any, float]],
-                                  Optional[Any]]) -> 'QuantizedHiddenMarkovModelDistribution':
+    def estimate(
+        self,
+        nobs: float | None,
+        suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[dict[Any, float]], Any | None],
+    ) -> "QuantizedHiddenMarkovModelDistribution":
         """Estimate a QuantizedHiddenMarkovModelDistribution from Baum-Welch expected counts.
 
         Sufficient statistics in arg 'suff_stat' are the HiddenMarkovAccumulator value:
@@ -803,8 +855,9 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
             vocab.update(state_counts_map.keys())
 
         if len(vocab) == 0:
-            raise ValueError('QuantizedHiddenMarkovEstimator.estimate() requires observed emission '
-                             'values or estimator levels.')
+            raise ValueError(
+                "QuantizedHiddenMarkovEstimator.estimate() requires observed emission values or estimator levels."
+            )
 
         try:
             levels = sorted(vocab)
@@ -826,22 +879,31 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
             emit_counts += self.pseudo_count
 
         count_blocks = [trans_counts, emit_counts]
-        if self.init_mode == 'quantized':
+        if self.init_mode == "quantized":
             count_blocks.append(init_counts[None, :])
 
-        theta, exp_blocks = _fit_quantized_parameters(count_blocks, self.fixed_theta, self.k_max,
-                                                      self.max_quant_its)
+        theta, exp_blocks = _fit_quantized_parameters(count_blocks, self.fixed_theta, self.k_max, self.max_quant_its)
 
         if self.split_collapsed and num_states > 1:
-            _split_collapsed_states(exp_blocks[0], exp_blocks[1], trans_counts, emit_counts,
-                                    self.k_max, math.log(theta), self.split_nats)
+            _split_collapsed_states(
+                exp_blocks[0], exp_blocks[1], trans_counts, emit_counts, self.k_max, math.log(theta), self.split_nats
+            )
 
-        initial_exponents = exp_blocks[2][0, :] if self.init_mode == 'quantized' else None
+        initial_exponents = exp_blocks[2][0, :] if self.init_mode == "quantized" else None
 
         return QuantizedHiddenMarkovModelDistribution(
-            theta, levels, exp_blocks[0], exp_blocks[1], initial_exponents=initial_exponents,
-            init_mode=self.init_mode, k_max=self.k_max, len_dist=len_dist, name=self.name,
-            use_numba=self.use_numba)
+            theta,
+            levels,
+            exp_blocks[0],
+            exp_blocks[1],
+            initial_exponents=initial_exponents,
+            init_mode=self.init_mode,
+            k_max=self.k_max,
+            len_dist=len_dist,
+            name=self.name,
+            use_numba=self.use_numba,
+        )
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 QuantizedHiddenMarkovModelEstimator = QuantizedHiddenMarkovEstimator

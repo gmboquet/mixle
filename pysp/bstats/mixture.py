@@ -18,18 +18,19 @@ Use ``mixture_prior(weight_prior, component_priors)`` when you want to pass a
 single joint prior containing both the weight prior and one conjugate prior per
 component.
 """
-from typing import TypeVar, Optional, Generic, List, Mapping
 
-from pysp.arithmetic import *
-from pysp.bstats.pdist import ProbabilityDistribution, StatisticAccumulator, ParameterEstimator
+from collections.abc import Mapping
+
+import numpy as np
 from numpy.random import RandomState
+from scipy.special import digamma
+
+import pysp.utils.vector as vec
+from pysp.arithmetic import *
 from pysp.bstats.composite import CompositeDistribution
 from pysp.bstats.dirichlet import DirichletDistribution
+from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, StatisticAccumulator
 from pysp.bstats.symdirichlet import SymmetricDirichletDistribution
-import numpy as np
-import pysp.utils.vector as vec
-from scipy.special import gammaln, digamma
-
 
 default_prior = SymmetricDirichletDistribution(1)
 
@@ -63,27 +64,34 @@ def _component_prior_tuple(component_priors, num_components: int):
     elif num_components == 1:
         rv = (component_priors,)
     else:
-        raise TypeError('mixture component priors must be a sequence or CompositeDistribution.')
+        raise TypeError("mixture component priors must be a sequence or CompositeDistribution.")
     if len(rv) != num_components:
-        raise ValueError('expected %d component priors, got %d.' % (num_components, len(rv)))
+        raise ValueError("expected %d component priors, got %d." % (num_components, len(rv)))
     return rv
 
 
 def _split_mixture_prior(prior, num_components: int):
     if prior is None:
         return None, None
-    if isinstance(prior, CompositeDistribution) and len(prior.dists) == 2 and \
-            isinstance(prior.dists[1], CompositeDistribution):
+    if (
+        isinstance(prior, CompositeDistribution)
+        and len(prior.dists) == 2
+        and isinstance(prior.dists[1], CompositeDistribution)
+    ):
         return prior.dists[0], _component_prior_tuple(prior.dists[1], num_components)
-    if isinstance(prior, Mapping) and ('weights' in prior or 'weight_prior' in prior or
-                                      'components' in prior or 'component_priors' in prior):
-        weight_prior = prior.get('weights', prior.get('weight_prior'))
-        component_priors = prior.get('components', prior.get('component_priors'))
+    if isinstance(prior, Mapping) and (
+        "weights" in prior or "weight_prior" in prior or "components" in prior or "component_priors" in prior
+    ):
+        weight_prior = prior.get("weights", prior.get("weight_prior"))
+        component_priors = prior.get("components", prior.get("component_priors"))
         if weight_prior is None:
             weight_prior = _default_weight_prior(num_components)
         return weight_prior, _component_prior_tuple(component_priors, num_components)
-    if isinstance(prior, (list, tuple)) and len(prior) == 2 and \
-            isinstance(prior[1], (list, tuple, CompositeDistribution)):
+    if (
+        isinstance(prior, (list, tuple))
+        and len(prior) == 2
+        and isinstance(prior[1], (list, tuple, CompositeDistribution))
+    ):
         return prior[0], _component_prior_tuple(prior[1], num_components)
     return prior, None
 
@@ -97,10 +105,11 @@ def _dirichlet_expectations(prior, num_components: int):
         return alpha, digamma(alpha) - digamma(np.sum(alpha))
     return None, None
 
+
 class MixtureDistribution(ProbabilityDistribution):
     """Finite mixture of component distributions with mixing weights w."""
 
-    def __init__(self, components, w, name=None, prior: Optional[ProbabilityDistribution] = None):
+    def __init__(self, components, w, name=None, prior: ProbabilityDistribution | None = None):
         """Create a mixture distribution.
 
         Args:
@@ -116,19 +125,24 @@ class MixtureDistribution(ProbabilityDistribution):
         self.components = components
         self.num_components = len(components)
         self.w = np.asarray(w)
-        self.zw = (self.w == 0.0)
+        self.zw = self.w == 0.0
         self.log_w = np.log(self.w + self.zw)
         self.log_w[self.zw] = -np.inf
         self.prior = None
 
-        #self.parents = []
-        #for d in self.components:
+        # self.parents = []
+        # for d in self.components:
         #    d.add_parent(self)
 
         self.set_prior(_default_weight_prior(self.num_components) if prior is None else prior)
 
     def __str__(self):
-        return 'MixtureDistribution([%s], [%s], name=%s, prior=%s)' % (','.join([str(u) for u in self.components]), ','.join(map(str, self.w)), str(self.name), str(self.prior))
+        return "MixtureDistribution([%s], [%s], name=%s, prior=%s)" % (
+            ",".join([str(u) for u in self.components]),
+            ",".join(map(str, self.w)),
+            str(self.name),
+            str(self.prior),
+        )
 
     def get_prior(self):
         """Return the joint prior as a CompositeDistribution of the weight
@@ -162,7 +176,7 @@ class MixtureDistribution(ProbabilityDistribution):
                 parameter values.
         """
         self.w = params[0]
-        for d,p in zip(self.components, params[1]):
+        for d, p in zip(self.components, params[1]):
             d.set_parameters(p)
 
     def density(self, x):
@@ -240,7 +254,6 @@ class MixtureDistribution(ProbabilityDistribution):
             comp_log_density /= comp_log_density.sum()
             return comp_log_density
 
-
     def seq_log_density(self, x):
         """Vectorized log-density at sequence-encoded input x.
 
@@ -252,7 +265,7 @@ class MixtureDistribution(ProbabilityDistribution):
         """
 
         ll_mat = np.asarray([u.seq_log_density(x) for u in self.components]).T + self.log_w
-        ll_max  = ll_mat.max(axis=1, keepdims=True)
+        ll_max = ll_mat.max(axis=1, keepdims=True)
 
         good_rows = np.isfinite(ll_max.flatten())
 
@@ -281,7 +294,6 @@ class MixtureDistribution(ProbabilityDistribution):
 
             return rv
 
-
     def seq_component_log_density(self, x):
         """Per-component log-densities at sequence-encoded input x.
 
@@ -309,11 +321,11 @@ class MixtureDistribution(ProbabilityDistribution):
 
         bad_rows = np.isinf(ll_max.flatten())
 
-        #if np.any(bad_rows):
-        #	print('bad')
+        # if np.any(bad_rows):
+        # print('bad')
 
         ll_mat[bad_rows, :] = self.log_w
-        ll_max[bad_rows]    = np.max(self.log_w)
+        ll_max[bad_rows] = np.max(self.log_w)
 
         ll_mat -= ll_max
 
@@ -334,7 +346,7 @@ class MixtureDistribution(ProbabilityDistribution):
         """
         return self.components[0].seq_encode(x)
 
-    def sampler(self, seed: Optional[int] = None):
+    def sampler(self, seed: int | None = None):
         """Return a MixtureSampler for this distribution.
 
         Args:
@@ -347,10 +359,10 @@ class MixtureDistribution(ProbabilityDistribution):
         return MixtureEstimator([u.estimator() for u in self.components], name=self.name, prior=self.prior)
 
 
-class MixtureSampler(object):
+class MixtureSampler:
     """Draws observations from a MixtureDistribution."""
 
-    def __init__(self, dist: MixtureDistribution, seed: Optional[int] = None):
+    def __init__(self, dist: MixtureDistribution, seed: int | None = None):
         """Create a sampler for a MixtureDistribution.
 
         Args:
@@ -378,9 +390,9 @@ class MixtureSampler(object):
         compState = self.rng.choice(range(0, self.dist.num_components), size=size, replace=True, p=self.dist.w)
 
         if size is None:
-                return self.compSamplers[compState].sample()
+            return self.compSamplers[compState].sample()
         else:
-                return [self.compSamplers[i].sample() for i in compState]
+            return [self.compSamplers[i].sample() for i in compState]
 
 
 class MixtureEstimatorAccumulator(StatisticAccumulator):
@@ -438,9 +450,9 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
             for i in range(self.num_components):
                 self.accumulators[i].initialize(x, 0, rng)
         else:
-            wc  = rng.dirichlet(np.ones(self.num_components))
+            wc = rng.dirichlet(np.ones(self.num_components))
             for i in range(self.num_components):
-                w = weight*wc[i]
+                w = weight * wc[i]
                 self.accumulators[i].initialize(x, w, rng)
                 self.comp_counts[i] += w
 
@@ -458,14 +470,14 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
 
         bad_rows = np.isinf(ll_max.flatten())
 
-        #if np.any(bad_rows):
-        #	print('bad')
+        # if np.any(bad_rows):
+        # print('bad')
 
         ll_mat[bad_rows, :] = estimate.log_w
-        ll_max[bad_rows]    = np.max(estimate.log_w)
+        ll_max[bad_rows] = np.max(estimate.log_w)
 
-        #ll_mat[bad_rows, :] = -np.log(self.num_components)
-        #ll_max[bad_rows]    = -np.log(self.num_components)
+        # ll_mat[bad_rows, :] = -np.log(self.num_components)
+        # ll_max[bad_rows]    = -np.log(self.num_components)
 
         ll_mat -= ll_max
         np.exp(ll_mat, out=ll_mat)
@@ -473,12 +485,9 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
         ll_mat /= ll_sum
 
         for i in range(self.num_components):
-            w_loc = ll_mat[:, i]*weights
+            w_loc = ll_mat[:, i] * weights
             self.comp_counts[i] += w_loc.sum()
             self.accumulators[i].seq_update(x, w_loc, estimate.components[i])
-
-
-
 
     def combine(self, suff_stat):
         """Merge another accumulator's value() into this one.
@@ -558,7 +567,8 @@ class MixtureEstimatorAccumulator(StatisticAccumulator):
         for u in self.accumulators:
             u.key_replace(stats_dict)
 
-class MixtureEstimatorAccumulatorFactory(object):
+
+class MixtureEstimatorAccumulatorFactory:
     """Factory for creating MixtureEstimatorAccumulator objects."""
 
     def __init__(self, factories, dim, keys):
@@ -610,7 +620,9 @@ class MixtureEstimator(ParameterEstimator):
     def get_prior(self):
         """Return the joint prior as a CompositeDistribution of the weight
         prior and the component estimators' priors."""
-        return CompositeDistribution((self.prior, CompositeDistribution([d.get_prior() for d in self.estimators], name=self.keys[1])))
+        return CompositeDistribution(
+            (self.prior, CompositeDistribution([d.get_prior() for d in self.estimators], name=self.keys[1]))
+        )
 
     def set_prior(self, prior):
         """Set a weight prior or a joint weight/component prior.
@@ -654,10 +666,7 @@ class MixtureEstimator(ParameterEstimator):
         payloads itself.
         """
         counts, comp_suff_stats = suff_stat
-        return counts * c, tuple(
-            est.scale_suff_stat(ss, c)
-            for est, ss in zip(self.estimators, comp_suff_stats)
-        )
+        return counts * c, tuple(est.scale_suff_stat(ss, c) for est, ss in zip(self.estimators, comp_suff_stats))
 
     def estimate(self, suff_stat):
         """Estimate a MixtureDistribution from sufficient statistics.
@@ -679,30 +688,28 @@ class MixtureEstimator(ParameterEstimator):
         if self.fixed_w is not None:
             return MixtureDistribution(components, self.fixed_w, name=self.name, prior=self.prior)
 
-
         if isinstance(self.prior, (DirichletDistribution, SymmetricDirichletDistribution)):
-
-            cpp = np.add(counts, self.prior.get_parameters())-1.0
+            cpp = np.add(counts, self.prior.get_parameters()) - 1.0
             # MAP of a Dirichlet lies on the boundary when alpha_k + n_k < 1
             cpp = np.maximum(cpp, 0.0)
 
             if cpp.sum() == 0:
-                w = np.ones(num_components)/float(num_components)
+                w = np.ones(num_components) / float(num_components)
             else:
-                w = cpp/(cpp.sum())
+                w = cpp / (cpp.sum())
 
-            return MixtureDistribution(components, w, name=self.name, prior=DirichletDistribution(cpp+1))
+            return MixtureDistribution(components, w, name=self.name, prior=DirichletDistribution(cpp + 1))
 
         else:
-
             nobs_loc = counts.sum()
 
             if nobs_loc == 0:
-                w = np.ones(num_components)/float(num_components)
+                w = np.ones(num_components) / float(num_components)
             else:
                 w = counts / counts.sum()
 
             return MixtureDistribution(components, w, name=self.name, prior=self.prior)
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 MixtureAccumulator = MixtureEstimatorAccumulator

@@ -1,43 +1,44 @@
 """Distribution capability metadata for engine and planner decisions."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any
 
 
 @dataclass(frozen=True)
 class DistributionCapabilities:
     """Runtime capability metadata for a distribution family."""
 
-    engine_ready: Tuple[str, ...] = ('numpy',)
-    kernel_status: str = 'generic'
-    numpy_only_reason: Optional[str] = None
+    engine_ready: tuple[str, ...] = ("numpy",)
+    kernel_status: str = "generic"
+    numpy_only_reason: str | None = None
 
     def supports_engine(self, engine: Any) -> bool:
         """Return whether this metadata allows execution on ``engine``."""
-        name = 'numpy' if engine is None else getattr(engine, 'name', str(engine))
+        name = "numpy" if engine is None else getattr(engine, "name", str(engine))
         return name in self.engine_ready
 
     @property
     def is_permanently_numpy_only(self) -> bool:
         """Return true for families intentionally excluded from tensor engines."""
-        return self.engine_ready == ('numpy',) and self.numpy_only_reason is not None
+        return self.engine_ready == ("numpy",) and self.numpy_only_reason is not None
 
 
-_CAPABILITIES: Dict[Type[Any], DistributionCapabilities] = {}
+_CAPABILITIES: dict[type[Any], DistributionCapabilities] = {}
 
 
-def register_capabilities(dist_type: Type[Any], capabilities: DistributionCapabilities) -> None:
+def register_capabilities(dist_type: type[Any], capabilities: DistributionCapabilities) -> None:
     """Register capability metadata for a distribution class."""
     _CAPABILITIES[dist_type] = capabilities
 
 
-def registered_capability_types() -> Tuple[Type[Any], ...]:
+def registered_capability_types() -> tuple[type[Any], ...]:
     """Return distribution classes with explicitly registered capabilities."""
     return tuple(sorted(_CAPABILITIES.keys(), key=lambda cls: (cls.__module__, cls.__name__)))
 
 
-def numpy_only_distribution_types() -> Tuple[Type[Any], ...]:
+def numpy_only_distribution_types() -> tuple[type[Any], ...]:
     """Return families intentionally kept on the NumPy execution path.
 
     This excludes transitional ``legacy_numpy`` families: those may gain
@@ -46,26 +47,26 @@ def numpy_only_distribution_types() -> Tuple[Type[Any], ...]:
     good fit.
     """
     return tuple(
-        dist_type for dist_type in registered_capability_types()
-        if _CAPABILITIES[dist_type].is_permanently_numpy_only
+        dist_type for dist_type in registered_capability_types() if _CAPABILITIES[dist_type].is_permanently_numpy_only
     )
 
 
 def capabilities_for(x: Any) -> DistributionCapabilities:
     """Return registered capabilities for a distribution instance or class."""
     cls = x if isinstance(x, type) else type(x)
-    if 'engine_ready' in getattr(cls, '__dict__', {}):
+    if "engine_ready" in getattr(cls, "__dict__", {}):
         return DistributionCapabilities(
-            engine_ready=tuple(getattr(cls, 'engine_ready')),
-            kernel_status=getattr(cls, 'kernel_status', 'generic'),
-            numpy_only_reason=getattr(cls, 'numpy_only_reason', None))
+            engine_ready=tuple(cls.engine_ready),
+            kernel_status=getattr(cls, "kernel_status", "generic"),
+            numpy_only_reason=getattr(cls, "numpy_only_reason", None),
+        )
 
     if not isinstance(x, type):
-        hook = getattr(x, 'compute_capabilities', None)
+        hook = getattr(x, "compute_capabilities", None)
         if callable(hook):
             return hook()
 
-    hook = getattr(cls, 'compute_capabilities', None)
+    hook = getattr(cls, "compute_capabilities", None)
     if callable(hook):
         try:
             return hook()
@@ -80,15 +81,16 @@ def capabilities_for(x: Any) -> DistributionCapabilities:
         caps = _CAPABILITIES.get(base)
         if caps is not None:
             return caps
-    engine_ready = getattr(cls, 'engine_ready', ('numpy',))
+    engine_ready = getattr(cls, "engine_ready", ("numpy",))
     return DistributionCapabilities(engine_ready=tuple(engine_ready))
 
 
-def intersect_engine_ready(children: Tuple[Any, ...],
-                           preferred_order: Tuple[str, ...] = ('numpy', 'torch')) -> Tuple[str, ...]:
+def intersect_engine_ready(
+    children: tuple[Any, ...], preferred_order: tuple[str, ...] = ("numpy", "torch")
+) -> tuple[str, ...]:
     """Return the engine names supported by every child distribution."""
     if not children:
-        return ('numpy',)
+        return ("numpy",)
     ready = set(capabilities_for(children[0]).engine_ready)
     for child in children[1:]:
         ready &= set(capabilities_for(child).engine_ready)
@@ -97,12 +99,12 @@ def intersect_engine_ready(children: Tuple[Any, ...],
 
 def compute_capabilities_from_hook(x: Any) -> DistributionCapabilities:
     """Compatibility helper for callers that need a direct hook result."""
-    hook = getattr(x, 'compute_capabilities', None)
+    hook = getattr(x, "compute_capabilities", None)
     if callable(hook):
         return hook()
     return capabilities_for(x)
 
 
-def supported_engines(x: Any) -> Tuple[str, ...]:
+def supported_engines(x: Any) -> tuple[str, ...]:
     """Return engine names supported by a distribution instance or class."""
     return capabilities_for(x).engine_ready
