@@ -194,7 +194,8 @@ def best_of(data: Optional[Sequence[T]], vdata: Optional[Sequence[T]], est: Para
             init_estimator: Optional[ParameterEstimator] = None,
             enc_data: Optional[List[Tuple[int, E0]]] = None,
             enc_vdata: Optional[Sequence[Tuple[int, E0]]] = None,
-            out: IO = sys.stdout, print_iter: int = 1) -> Tuple[float, SequenceEncodableProbabilityDistribution]:
+            out: IO = sys.stdout, print_iter: int = 1,
+            reuse_estep_ll: bool = False) -> Tuple[float, SequenceEncodableProbabilityDistribution]:
     """Performs EM algorithm for trials-number of randomized initial conditions. Returns the best model fit in terms of
         maximum log-likelihood value from validation data.
 
@@ -214,6 +215,9 @@ def best_of(data: Optional[Sequence[T]], vdata: Optional[Sequence[T]], est: Para
         enc_vdata (Optional[List[Tuple[int, E0]]]): Optional sequence encoded validation set.
         out (I0): Text output stream.
         print_iter (int): Print iterations (i.e. log-likelihood difference) every print_iter-iterations.
+        reuse_estep_ll (bool): Forwarded to each trial's ``optimize`` call -- reuse the E-step
+            likelihood for convergence instead of a separate scoring pass (see ``optimize``). Default
+            False (exact historical behavior); set True to speed up the per-trial EM for latent models.
 
     Returns:
         Tuple of log-likelihood of best fitting model and the best fitting model from number of trials.
@@ -240,7 +244,7 @@ def best_of(data: Optional[Sequence[T]], vdata: Optional[Sequence[T]], est: Para
     for kk in range(trials):
         mm = optimize(None, est, init_estimator=i_est, enc_data=enc_data, enc_vdata=enc_vdata,
                       max_its=max_its, delta=delta, init_p=init_p, rng=rng, out=out,
-                      print_iter=print_iter)
+                      print_iter=print_iter, reuse_estep_ll=reuse_estep_ll)
         _, vll = seq_log_density_sum(score_data, mm)
         out.write('Trial %d. VLL=%f\n' % (kk + 1, vll))
         if vll > rv_ll:
