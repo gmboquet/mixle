@@ -212,7 +212,7 @@ def best_of(
     enc_vdata: Sequence[tuple[int, E0]] | None = None,
     out: IO = sys.stdout,
     print_iter: int = 1,
-    reuse_estep_ll: bool = False,
+    reuse_estep_ll: bool = True,
 ) -> tuple[float, SequenceEncodableProbabilityDistribution]:
     """Performs EM algorithm for trials-number of randomized initial conditions. Returns the best model fit in terms of
         maximum log-likelihood value from validation data.
@@ -233,9 +233,9 @@ def best_of(
         enc_vdata (Optional[List[Tuple[int, E0]]]): Optional sequence encoded validation set.
         out (I0): Text output stream.
         print_iter (int): Print iterations (i.e. log-likelihood difference) every print_iter-iterations.
-        reuse_estep_ll (bool): Forwarded to each trial's ``optimize`` call -- reuse the E-step
-            likelihood for convergence instead of a separate scoring pass (see ``optimize``). Default
-            False (exact historical behavior); set True to speed up the per-trial EM for latent models.
+        reuse_estep_ll (bool): Default True. Forwarded to each trial's ``optimize`` call -- reuse the
+            E-step likelihood for convergence instead of a separate scoring pass (see ``optimize``).
+            Set False to force the exact historical per-iteration scoring behavior.
 
     Returns:
         Tuple of log-likelihood of best fitting model and the best fitting model from number of trials.
@@ -586,7 +586,7 @@ def optimize(
     root: int = 0,
     root_only: bool = False,
     strategy: Any | None = None,
-    reuse_estep_ll: bool = False,
+    reuse_estep_ll: bool = True,
 ) -> SequenceEncodableProbabilityDistribution:
     """Estimation of 'estimator' via EM algorithm for max_its iterations or until
         new_loglikelihood - old_loglikelihood < delta.
@@ -636,13 +636,15 @@ def optimize(
         strategy (Optional[Any]): Optional EM strategy from ``pysp.utils.em`` (e.g. ``AnnealedEM``,
             ``HardEM``, ``MonteCarloEM``) or any callable ``(enc, estimator, model) -> model`` to use
             in place of the standard exact E/M step. ``None`` uses the standard step.
-        reuse_estep_ll (bool): When True, reuse the data log-likelihood computed during the E-step
-            (the posterior normalizer / forward pass) for convergence instead of running a separate
-            scoring pass each iteration -- up to ~2x faster per iteration when the model reports it
-            (currently top-level mixtures and HMMs on the default local engine). Convergence then
-            lags by one iteration (same fixed point) and the best-likelihood model is returned. Falls
-            back to the standard loop for engines/strategies/distributed backends or models that
-            can't report the LL. Default False (exact historical behavior).
+        reuse_estep_ll (bool): Default True. Reuse the data log-likelihood computed during the E-step
+            (the posterior normalizer / forward pass / variational ELBO) for convergence instead of
+            running a separate scoring pass each iteration -- typically ~1.5-2x faster per iteration
+            for latent models (mixtures, HMMs and variants, topic models, associations, IBP, ...) on
+            the default local engine. Convergence then lags by one iteration (same fixed point) and
+            the best-likelihood model is returned; fixed-iteration fits (delta=None) are identical to
+            the standard loop. Automatically falls back to the standard loop for engines/strategies/
+            distributed backends or models that can't report the LL (no slowdown there). Set False to
+            force the exact historical per-iteration scoring behavior.
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
