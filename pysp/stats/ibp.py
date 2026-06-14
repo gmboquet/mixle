@@ -300,6 +300,12 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self.data_format = _check_data_format(data_format)
         self.feature_counts = np.zeros(self.num_features, dtype=np.float64)
         self.total_count = 0.0
+        # Data log-likelihood accumulated as a byproduct of the E-step (the plug-in per-row
+        # log_density), only when _track_ll is enabled. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
+        # pays nothing.
+        self._track_ll = False
+        self._seq_ll = 0.0
 
     def update(self, x: Any, weight: float, estimate: Optional[IndianBuffetProcessDistribution]) -> None:
         if estimate is not None:
@@ -316,8 +322,18 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         if estimate is not None:
             self.alpha = estimate.alpha
         xx = np.asarray(x, dtype=np.float64)
-        self.feature_counts += np.dot(np.asarray(weights, dtype=np.float64), xx)
-        self.total_count += float(np.sum(weights))
+        ww = np.asarray(weights, dtype=np.float64)
+        self.feature_counts += np.dot(ww, xx)
+        self.total_count += float(np.sum(ww))
+        if self._track_ll:
+            if estimate is None:
+                # No model to score against (e.g. seq_initialize); signal the fused-EM caller to
+                # fall back to a separate scoring pass.
+                self._seq_ll = None
+            elif self._seq_ll is not None:
+                # Per-row plug-in log-density (== IndianBuffetProcessDistribution.seq_log_density).
+                row_ll = estimate.log_nsum + np.dot(xx, estimate.log_dvec)
+                self._seq_ll += float(np.dot(ww, row_ll))
 
     def seq_update_engine(self, x: np.ndarray, weights: Any,
                           estimate: Optional[IndianBuffetProcessDistribution], engine: Any) -> None:

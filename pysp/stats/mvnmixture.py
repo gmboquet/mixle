@@ -383,6 +383,12 @@ class GaussianMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.comp_counts = np.zeros(self.num_components, dtype=float)
         self.weight_key = keys[0]
         self.comp_key = keys[1]
+        # Data log-likelihood accumulated as a byproduct of the E-step (the posterior normalizer),
+        # only when _track_ll is enabled. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
+        # pays nothing.
+        self._track_ll = False
+        self._seq_ll = 0.0
 
         ### Initializer seeds
         self._init_rng: bool = False
@@ -517,9 +523,23 @@ class GaussianMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         ll_mat[bad_rows, :] = estimate.log_w.copy()
         ll_max[bad_rows] = np.max(estimate.log_w)
 
+        # Capture per-row data log-likelihood (== seq_log_density) by reusing the rowmax and rowsum
+        # already computed for normalization: row_ll = rowmax + log(rowsum), with -inf for the bad
+        # rows seq_log_density also reports as -inf. Free except an O(n) log/dot, and only when the
+        # fused-EM fast path requests it (_track_ll).
+        rowmax = ll_max[:, 0].copy() if self._track_ll else None
+
         ll_mat -= ll_max
         np.exp(ll_mat, out=ll_mat)
         np.sum(ll_mat, axis=1, keepdims=True, out=ll_max)
+
+        if self._track_ll:
+            with np.errstate(divide='ignore'):
+                row_ll = rowmax + np.log(ll_max[:, 0])
+            if np.any(bad_rows):
+                row_ll[bad_rows] = -np.inf
+            self._seq_ll += float(np.dot(weights, row_ll))
+
         np.divide(weights[:, None], ll_max, out=ll_max)
         ll_mat *= ll_max
 

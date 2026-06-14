@@ -610,6 +610,12 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
         self.trans_key = keys[1]
         self.state_key = keys[2]
 
+        # When _track_ll is enabled, seq_update accumulates the per-sequence data
+        # log-likelihood into _seq_ll. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); default path is unchanged and zero-cost.
+        self._track_ll = False
+        self._seq_ll = 0.0
+
     def update(self, x, weight, estimate):
         """Update sufficient statistics with one observed sequence and weight.
 
@@ -754,6 +760,20 @@ class LookbackHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumul
         pr_obs -= pr_max
         np.exp(pr_obs, out=pr_obs)
 
+        # When the fused-EM fast path requests it, compute the per-sequence data
+        # log-likelihood from the already-scored emissions via the (read-only)
+        # forward kernel, reusing pr_obs so no emissions are re-scored. Done before
+        # Baum-Welch (which may overwrite pr_obs). Matches seq_log_density exactly.
+        if self._track_ll:
+            ll_ret = np.zeros(seq_cnt, dtype=np.float64)
+            nb_next = np.zeros((seq_cnt, num_states), dtype=np.float64)
+            nb_buff = np.zeros((seq_cnt, num_states), dtype=np.float64)
+            pr_max_1d = np.ascontiguousarray(pr_max[:, 0])
+            numba_seq_log_density(num_states, tz, pr_obs, init_pvec, tran_mat, pr_max_1d,
+                                  nb_next, nb_buff, ll_ret)
+            if estimate.len_dist is not None and len_enc is not None:
+                ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
+            self._seq_ll += float(np.dot(weights, ll_ret))
 
         alphas = np.zeros((tot_cnt, num_states), dtype=np.float64)
         xi_acc = np.zeros((seq_cnt, num_states, num_states), dtype=np.float64)

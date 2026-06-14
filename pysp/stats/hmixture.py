@@ -527,6 +527,12 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         keys_temp = keys if keys is not None else (None, None)
         self.weight_key = keys_temp[0]
         self.comp_key = keys_temp[1]
+        # Data log-likelihood accumulated as a byproduct of the E-step (the posterior normalizer),
+        # only when _track_ll is enabled. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
+        # pays nothing.
+        self._track_ll = False
+        self._seq_ll = 0.0
 
         ### Initializer seeds
         self._init_rng: bool = False
@@ -701,6 +707,20 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         np.exp(rv, out=rv)
         ll_sum = rv.sum(axis=1, keepdims=True)
+
+        # Capture per-row data log-likelihood (== seq_log_density) by reusing the posterior
+        # normalizer already computed here: row_ll = rowmax + log(rowsum), with -inf for the bad
+        # sequences seq_log_density would also return -inf for, plus the length-distribution term.
+        # Only when the fused-EM fast path requests it (_track_ll); standard path is unaffected.
+        if self._track_ll:
+            with np.errstate(divide='ignore'):
+                row_ll = ll_max2[:, 0] + np.log(ll_sum[:, 0])
+            if np.any(bad_seq):
+                row_ll[bad_seq] = -np.inf
+            if estimate is not None and estimate.len_dist is not None:
+                row_ll = row_ll + estimate.len_dist.seq_log_density(enc_len)
+            self._seq_ll += float(np.dot(weights, row_ll))
+
         rv /= ll_sum
         rv = rv[idx, :]
         ww = np.reshape(weights[idx], (-1, 1))

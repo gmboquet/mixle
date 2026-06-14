@@ -353,6 +353,12 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         self.init_key = keys[0]
         self.trans_key = keys[1]
         self.low_memory = low_memory
+        # Data log-likelihood accumulated as a byproduct of the E-step (the per-observation
+        # log_density), only when _track_ll is enabled. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
+        # pays nothing. Both the flat (non-low-memory) and per-observation branches report it.
+        self._track_ll = False
+        self._seq_ll = 0.0
 
         self._init_rng = False
         self._size_rng = None
@@ -526,6 +532,19 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             sval = np.bincount(seqidx, weights=pp)
             sval *= b
             sval += a
+            if self._track_ll:
+                # Per-emitted-word inner mass (== seq_log_density's b*w + a); aggregate
+                # log(sval)*count by observation, then add the smoothed initial-state term, exactly
+                # mirroring SparseMarkovAssociationDistribution.seq_log_density. Captured before the
+                # responsibility normalization overwrites ``sval``.
+                with np.errstate(divide='ignore'):
+                    ll2_terms = np.log(sval) * fcyvec
+                obs_ll = np.bincount(fsqyvec, weights=ll2_terms, minlength=len(x[0]))
+                init_terms = np.log(estimate.init_prob_vec[fvxvec] * b + a) * fcxvec
+                obs_ll += np.bincount(fsqxvec, weights=init_terms, minlength=len(x[0]))
+                if not isinstance(estimate.len_dist, NullDistribution):
+                    obs_ll += estimate.len_dist.seq_log_density(x[1])
+                self._seq_ll += float(np.dot(np.asarray(weights, dtype=np.float64), obs_ll))
             np.divide(weights[fsqyvec]*b, sval, out=sval)
             sval *= fcyvec
             pp   *= sval[seqidx]
@@ -538,6 +557,9 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         else:
 
             nzv = x[2]
+            track = self._track_ll
+            obs_ll = np.zeros(len(x[0]), dtype=np.float64) if track else None
+            log_init = estimate.init_prob_vec if track else None
             rows = []
             cols = []
             vals = []
@@ -545,12 +567,21 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             for i, (entry, weight) in enumerate(zip(x[0], weights)):
 
                 vx, cx,vy, cy = entry
+                nx = np.sum(cx)
 
                 temp = estimate.cond_prob_mat[vx[:, None], vy].toarray()
 
                 loc_cprob = temp * cx[:, None]
                 w = loc_cprob.sum(axis=0)
-                loc_cprob *= (cy * b / (w * b + a * np.sum(cx))) * weight
+                if track:
+                    # Per-observation log-density (== seq_log_density low-memory branch). The dense
+                    # path normalizes counts by nx, so inner = (w*b + a*nx)/nx; reuse ``w`` before the
+                    # responsibility scaling below.
+                    with np.errstate(divide='ignore'):
+                        ll2 = float(np.dot(np.log((w * b + a * nx) / nx), cy))
+                        ll1 = float(np.dot(np.log(log_init[vx] * b + a), cx))
+                    obs_ll[i] = ll1 + ll2
+                loc_cprob *= (cy * b / (w * b + a * nx)) * weight
 
                 rows.append(np.repeat(vx, len(vy)))
                 cols.append(np.tile(vy, len(vx)))
@@ -561,6 +592,11 @@ class SparseMarkovAssociationAccumulator(SequenceEncodableStatisticAccumulator):
                 umat = csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
                                   shape=(nw, nw))
                 self.trans_count += umat
+
+            if track:
+                if not isinstance(estimate.len_dist, NullDistribution):
+                    obs_ll += estimate.len_dist.seq_log_density(x[1])
+                self._seq_ll += float(np.dot(np.asarray(weights, dtype=np.float64), obs_ll))
 
         self.size_accumulator.seq_update(x[1], weights, estimate.len_dist)
 
