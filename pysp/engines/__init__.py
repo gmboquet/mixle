@@ -9,7 +9,13 @@ import numpy as np
 
 from pysp.engines.base import ComputeEngine
 from pysp.engines.numpy_engine import NUMPY_ENGINE, NumpyEngine
-from pysp.engines.precision import engine_with_precision, normalize_numpy_dtype, normalize_torch_dtype, precision_name
+from pysp.engines.precision import (
+    auto_precision,
+    engine_with_precision,
+    normalize_numpy_dtype,
+    normalize_torch_dtype,
+    precision_name,
+)
 from pysp.engines.symbolic_engine import SYMBOLIC_ENGINE, SymbolicEngine, SymbolicExpression, is_symbolic_payload
 from pysp.engines.symbolic_export import to_latex, to_sage, to_sympy
 from pysp.engines.torch_engine import TorchEngine, torch
@@ -22,6 +28,7 @@ __all__ = [
     "SYMBOLIC_ENGINE",
     "TorchEngine",
     "NUMPY_ENGINE",
+    "auto_precision",
     "engine_of",
     "engine_with_precision",
     "normalize_numpy_dtype",
