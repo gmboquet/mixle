@@ -1,4 +1,4 @@
-"""Tests for the extended fused numba kernel families (pysp.stats.kernels).
+"""Tests for the extended fused numba kernel families (pysp.stats.fused_kernels).
 
 Covers Gamma, LogGaussian, Binomial, DiagonalGaussian, Optional and Ignored.
 For each family a small mixture is checked against the legacy vectorized
@@ -35,7 +35,7 @@ from pysp.stats import (
     seq_encode,
     seq_estimate,
 )
-from pysp.stats.kernels import CompiledMixture
+from pysp.stats.fused_kernels import CompiledMixture
 
 
 def _cat(k):
