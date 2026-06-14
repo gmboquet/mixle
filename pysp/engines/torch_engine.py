@@ -41,6 +41,15 @@ class TorchEngine(ComputeEngine):
         self.mesh = mesh
         self.shard = shard
 
+    @property
+    def accumulator_dtype(self) -> Any:
+        """High-precision dtype for sufficient-statistic reductions (always float64).
+
+        Reductions that aggregate over observations accumulate in float64 even when scoring runs in
+        reduced precision, so a float32 fit does not drift on large N.
+        """
+        return torch.float64
+
     def with_precision(self, precision: Any) -> TorchEngine:
         """Return a Torch engine with the same placement and a new dtype policy."""
         return TorchEngine(

@@ -1354,6 +1354,9 @@ def _generated_param_arg(value: Any, engine: Any) -> Any:
 
 
 def _weighted_component_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any) -> Any:
+    # Accumulate the over-observations reduction in float64 (no-op for full-precision engines) so a
+    # reduced-precision component fit does not drift on large N.
+    acc = getattr(engine, "accumulator_dtype", None)
     arr = engine.asarray(stat)
     shape = tuple(getattr(arr, "shape", ()))
     weights_shape = tuple(getattr(weights, "shape", ()))
@@ -1363,12 +1366,12 @@ def _weighted_component_sum(stat: Any, spec: StatisticSpec, weights: Any, engine
         if not weights_shape or shape[0] != weights_shape[0]:
             raise ValueError("generated %s statistics must have a row axis." % spec.kind)
         extra_axes = (None,) * (len(shape) - 1)
-        return engine.sum(weights[(slice(None), slice(None)) + extra_axes] * arr[:, None, ...], axis=0)
+        return engine.sum(weights[(slice(None), slice(None)) + extra_axes] * arr[:, None, ...], axis=0, dtype=acc)
     elif len(shape) != 2 or shape != weights_shape:
         raise ValueError(
             "generated sufficient statistics must be row, row-component, or declared vector/matrix arrays."
         )
-    return engine.sum(weights * arr, axis=0)
+    return engine.sum(weights * arr, axis=0, dtype=acc)
 
 
 def _weighted_row_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any) -> Any:
@@ -1377,10 +1380,13 @@ def _weighted_row_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any)
     weights_shape = tuple(getattr(weights, "shape", ()))
     if not shape or not weights_shape or shape[0] != weights_shape[0]:
         raise ValueError("generated %s statistics must have a row axis." % spec.kind)
+    # Accumulate the over-observations reduction in the engine's high-precision dtype (float64) so a
+    # reduced-precision (float32) fit does not drift on large N. No-op for full-precision engines.
+    acc = getattr(engine, "accumulator_dtype", None)
     if len(shape) == 1:
-        return engine.sum(weights * arr, axis=0)
+        return engine.sum(weights * arr, axis=0, dtype=acc)
     extra_axes = (None,) * (len(shape) - 1)
-    return engine.sum(weights[(slice(None),) + extra_axes] * arr, axis=0)
+    return engine.sum(weights[(slice(None),) + extra_axes] * arr, axis=0, dtype=acc)
 
 
 def _host_legacy_value(value: Any, engine: Any) -> Any:

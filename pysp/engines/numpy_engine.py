@@ -22,6 +22,16 @@ class NumpyEngine(ComputeEngine):
     def __init__(self, dtype: Any = None) -> None:
         self.dtype = normalize_numpy_dtype(dtype)
 
+    @property
+    def accumulator_dtype(self) -> Any:
+        """High-precision dtype for sufficient-statistic reductions (always float64).
+
+        Reductions that aggregate over observations (the sum/index-add forming sufficient
+        statistics) accumulate in this dtype even when scoring runs in reduced precision, so a
+        float32 fit does not drift on large N (e.g. catastrophic cancellation in a variance).
+        """
+        return np.float64
+
     def with_precision(self, precision: Any) -> NumpyEngine:
         """Return a NumPy engine using ``precision`` for floating arrays."""
         return NumpyEngine(dtype=precision)
