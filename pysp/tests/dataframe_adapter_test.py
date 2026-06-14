@@ -4,6 +4,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from pysp.data import dataframe_records, seq_encode_dataframe
 from pysp.stats import (
     CategoricalDistribution,
     CompositeDistribution,
@@ -11,10 +12,8 @@ from pysp.stats import (
     GaussianEstimator,
     RecordDistribution,
     RecordEstimator,
-    dataframe_records,
     field,
     seq_encode,
-    seq_encode_dataframe,
     seq_log_density_sum,
 )
 from pysp.utils.estimation import optimize

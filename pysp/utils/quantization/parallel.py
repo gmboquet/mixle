@@ -107,7 +107,7 @@ class ConvolutionExecutor:
             self._pool = None
 
     def convolve(self, a, b, max_fine_bucket: int | None = None):
-        from pysp.utils.quantization import CountHistogram
+        from pysp.utils.quantization.core import CountHistogram
 
         if not a.data or not b.data:
             return CountHistogram.empty()

@@ -2,7 +2,8 @@
 
 import numpy as np
 from pysp.stats import *
-from pysp.utils.estimation import partition_data, best_of, empirical_kl_divergence
+from pysp.utils.estimation import best_of
+from pysp.utils.evaluation import empirical_kl_divergence, partition_data
 
 if __name__ == '__main__':
 

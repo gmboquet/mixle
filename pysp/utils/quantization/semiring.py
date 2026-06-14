@@ -33,7 +33,7 @@ import abc
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any, TypeVar
 
-from pysp.utils.quantization import CountHistogram, CountIndex, Quantizer, convolve_indices, leaf_count_index
+from pysp.utils.quantization.core import CountHistogram, CountIndex, Quantizer, convolve_indices, leaf_count_index
 
 E = TypeVar("E")
 

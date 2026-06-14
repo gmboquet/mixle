@@ -1,7 +1,8 @@
 """Generate data and fit a hierarchical mixture model. This is a mixture sequence mixture distribution."""
 import numpy as np
 from pysp.stats import *
-from pysp.utils.estimation import optimize, partition_data
+from pysp.utils.estimation import optimize
+from pysp.utils.evaluation import partition_data
 
 
 if __name__ == '__main__':

@@ -22,8 +22,8 @@ import numpy as np
 
 from pysp.engines import TorchEngine
 from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
-from pysp.utils.estimation import fit_map as _fit_map
-from pysp.utils.estimation import fit_mle as _fit_mle
+from pysp.utils.fit import fit_map as _fit_map
+from pysp.utils.fit import fit_mle as _fit_mle
 
 __all__ = ["TorchMixture"]
 

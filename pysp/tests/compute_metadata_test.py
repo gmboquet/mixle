@@ -474,7 +474,6 @@ class ComputeMetadataTestCase(unittest.TestCase):
             "pysp.stats",
             "pysp.stats.backend",
             "pysp.stats.capabilities",
-            "pysp.stats.dataframe",
             "pysp.stats.declarations",
             "pysp.stats.gradient",
             "pysp.stats.pdist",

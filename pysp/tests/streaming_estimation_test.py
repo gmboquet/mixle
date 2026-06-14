@@ -13,7 +13,8 @@ from pysp.stats import (
     UniformDistribution,
     UniformEstimator,
 )
-from pysp.utils.estimation import IncrementalEstimator, StreamingEstimator, constant, harmonic
+from pysp.utils.estimation import constant, harmonic
+from pysp.utils.streaming import IncrementalEstimator, StreamingEstimator
 
 
 def _assert_suff_close(test_case, actual, expected):

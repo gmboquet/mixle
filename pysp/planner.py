@@ -649,11 +649,11 @@ def encoded_data(
         return data
     backend_name = str(backend or "local").lower()
     if backend_name in ("mp", "multiprocessing"):
-        from pysp.utils.parallel import MPEncodedData
+        from pysp.utils.parallel.multiprocessing import MPEncodedData
 
         return MPEncodedData(data, estimator=estimator, encoder=encoder, num_workers=num_workers, sub_chunks=sub_chunks)
     if backend_name == "mpi":
-        from pysp.utils.parallel_mpi import MPIEncodedData
+        from pysp.utils.parallel.mpi import MPIEncodedData
 
         return MPIEncodedData(
             data, estimator=estimator, encoder=encoder, sub_chunks=sub_chunks, comm=comm, root=root, root_only=root_only
@@ -671,7 +671,7 @@ def encoded_data(
             sub_chunks=sub_chunks,
         )
     if backend_name == "torchrun":
-        from pysp.utils.parallel_torchrun import TorchRunEncodedData
+        from pysp.utils.parallel.torchrun import TorchRunEncodedData
 
         return TorchRunEncodedData(
             data,

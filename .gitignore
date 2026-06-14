@@ -45,4 +45,4 @@ pip-delete-this-directory.txt
 .claude/
 
 # Downloaded example datasets
-data/
+/data/

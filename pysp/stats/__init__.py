@@ -61,8 +61,6 @@ __all__ = [
     "statistic_layout_issues",
     "validate_declaration",
     "validate_statistic_layout",
-    "dataframe_records",
-    "seq_encode_dataframe",
     "RecordDistribution",
     "RecordEstimator",
     "RecordSampler",
@@ -395,8 +393,6 @@ __all__ = [
     "WeightedDistribution",
     "WeightedDataEncoder",
     "WeightedEstimator",
-    "GraphDataEncoder",
-    "GraphObservation",
     "ErdosRenyiGraphDistribution",
     "ErdosRenyiGraphSampler",
     "ErdosRenyiGraphAccumulator",
@@ -485,7 +481,6 @@ from pysp.stats.conditional import (
     ConditionalEnumerator,
     ConditionalEstimator,
 )
-from pysp.stats.dataframe import dataframe_records, seq_encode_dataframe
 from pysp.stats.declarations import (
     DistributionDeclaration,
     ExponentialFamilySpec,
@@ -550,7 +545,6 @@ from pysp.stats.geometric import (
     GeometricEstimator,
     GeometricSampler,
 )
-from pysp.stats.graph_data import GraphDataEncoder, GraphObservation
 from pysp.stats.heterogeneous_mixture import (
     HeterogeneousMixtureDataEncoder,
     HeterogeneousMixtureDistribution,
@@ -1256,7 +1250,7 @@ def seq_log_density_sum(
 
     """
     if hasattr(enc_data, "pysp_seq_log_density_sum"):
-        # parallel-backend handle (pysp.utils.parallel / parallel_mpi)
+        # parallel-backend handle (pysp.utils.parallel.multiprocessing / parallel_mpi)
         return enc_data.pysp_seq_log_density_sum(estimate)
 
     if isinstance(enc_data, RDD_TYPES):
@@ -1351,7 +1345,7 @@ def seq_estimate(
     validate_estimator_keys(estimator)
 
     if hasattr(enc_data, "pysp_seq_estimate"):
-        # parallel-backend handle (pysp.utils.parallel / parallel_mpi)
+        # parallel-backend handle (pysp.utils.parallel.multiprocessing / parallel_mpi)
         return enc_data.pysp_seq_estimate(estimator, prev_estimate)
 
     if isinstance(enc_data, RDD_TYPES):
@@ -1453,7 +1447,7 @@ def seq_initialize(
     validate_estimator_keys(estimator)
 
     if hasattr(enc_data, "pysp_seq_initialize"):
-        # parallel-backend handle (pysp.utils.parallel / parallel_mpi)
+        # parallel-backend handle (pysp.utils.parallel.multiprocessing / parallel_mpi)
         return enc_data.pysp_seq_initialize(estimator, rng, p)
 
     if isinstance(enc_data, RDD_TYPES):
