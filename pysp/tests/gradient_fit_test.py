@@ -35,7 +35,7 @@ from pysp.stats import (
     WeibullDistribution,
     field,
 )
-from pysp.utils.estimation import fit_map, fit_mle
+from pysp.utils.fit import fit_map, fit_mle
 from pysp.utils.priors import (
     BetaPrior,
     ConditionalPrior,

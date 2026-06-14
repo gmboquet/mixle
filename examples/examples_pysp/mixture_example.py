@@ -4,7 +4,8 @@
 import numpy as np
 
 from pysp.stats import *
-from pysp.utils.estimation import optimize, partition_data
+from pysp.utils.estimation import optimize
+from pysp.utils.evaluation import partition_data
 
 if __name__ == '__main__':
     rng = np.random.RandomState(1)

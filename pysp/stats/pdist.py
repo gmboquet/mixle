@@ -182,7 +182,7 @@ class ProbabilityDistribution:
             because they fell beyond the depth bound.
 
         """
-        from pysp.utils.quantization import leaf_count_index
+        from pysp.utils.quantization.core import leaf_count_index
 
         return leaf_count_index(self.enumerator(), quantizer, max_fine_bucket)
 
@@ -205,7 +205,7 @@ class ProbabilityDistribution:
             pysp.utils.enumeration.LazyQuantizedEnumerationIndex.
 
         """
-        from pysp.utils.quantization import count_budget_index
+        from pysp.utils.quantization.core import count_budget_index
 
         return count_budget_index(
             self, budget_bits, bin_width_bits=bin_width_bits, oversample=oversample, num_workers=num_workers
@@ -240,7 +240,7 @@ class ProbabilityDistribution:
         the k-th *distinct* value in O(1) is not possible -- it needs exact distinct per-bin counts,
         which require the overlap structure this design deliberately avoids materializing.
         """
-        from pysp.utils.quantization import distinct_budget_stream
+        from pysp.utils.quantization.core import distinct_budget_stream
 
         return distinct_budget_stream(
             self,

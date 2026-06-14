@@ -25,8 +25,9 @@ from pysp.stats import (
     seq_initialize,
     seq_log_density_sum,
 )
-from pysp.utils.estimation import StreamingEstimator, constant, optimize
-from pysp.utils.parallel import MPEncodedData
+from pysp.utils.estimation import constant, optimize
+from pysp.utils.parallel.multiprocessing import MPEncodedData
+from pysp.utils.streaming import StreamingEstimator
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -165,7 +166,7 @@ sys.path.insert(0, %(repo)r)
 from pysp.tests.parallel_test import make_data, make_estimator, make_start_model
 from pysp.stats import seq_encode, seq_log_density_sum
 from pysp.utils.estimation import optimize
-from pysp.utils.parallel_mpi import MPIEncodedData, mpi_out
+from pysp.utils.parallel.mpi import MPIEncodedData, mpi_out
 from mpi4py import MPI
 
 data = make_data()

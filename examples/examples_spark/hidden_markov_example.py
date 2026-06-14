@@ -2,7 +2,7 @@
 
 from pyspark import SparkContext, SparkConf
 from pysp.stats import *
-from pysp.stats.rdd_sampler import sample_rdd
+from pysp.data.rdd_sampler import sample_rdd
 from pysp.utils.estimation import best_of
 import numpy as np
 

@@ -4,7 +4,7 @@ import numpy as np
 
 from pysp.stats import *
 from pysp.stats.int_spike import *
-from pysp.utils.estimation import empirical_kl_divergence
+from pysp.utils.evaluation import empirical_kl_divergence
 
 
 class BaseDistributionTestCase(unittest.TestCase):

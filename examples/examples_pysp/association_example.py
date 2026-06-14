@@ -3,7 +3,8 @@
 import numpy as np
 import time
 from pysp.stats import *
-from pysp.utils.estimation import best_of, partition_data, iterate, optimize
+from pysp.utils.estimation import best_of, iterate, optimize
+from pysp.utils.evaluation import partition_data
 
 
 if __name__ == '__main__':
