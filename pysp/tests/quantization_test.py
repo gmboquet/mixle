@@ -38,6 +38,53 @@ class CountSemiringTestCase(unittest.TestCase):
             self.assertEqual(c.count_at(k), v)
         self.assertEqual(c.total(), a.total() * b.total())
 
+    def test_kronecker_and_naive_convolution_agree(self):
+        # CountHistogram.convolve switches to Kronecker substitution above a size threshold;
+        # the two backends must be bit-identical, including with huge (>2**128) counts, zero
+        # gaps, delta operands, and a depth cap. Force each backend by toggling the threshold.
+        import random
+
+        import pysp.utils.quantization.core as core
+
+        def brute(a, b, cap):
+            base = a.base + b.base
+            width = len(a.data) + len(b.data) - 1
+            if cap is not None:
+                width = min(width, cap - base + 1)
+            if width <= 0:
+                return CountHistogram.empty()
+            out = [0] * width
+            for i, ai in enumerate(a.data):
+                for j, bj in enumerate(b.data):
+                    if i + j < width:
+                        out[i + j] += ai * bj
+            return CountHistogram(base, out)
+
+        rng = random.Random(7)
+
+        def rand_hist(width, bits):
+            return CountHistogram(rng.randint(-5, 40), [rng.randrange(0, 1 << bits) for _ in range(width)])
+
+        cases = [
+            (CountHistogram(2, [1, 3, 0, 5]), CountHistogram(-1, [2, 0, 4])),
+            (CountHistogram(0, [7]), rand_hist(60, 200)),  # delta x wide, huge counts
+            (rand_hist(80, 300), rand_hist(70, 300)),  # wide x wide, > 2**128 counts
+            (rand_hist(50, 4), CountHistogram(3, [0, 0, 9, 0])),  # internal zeros
+        ]
+        saved = core._KRONECKER_MIN_PRODUCT
+        try:
+            for a, b in cases:
+                for cap in (None, a.base + b.base + 5):
+                    truth = brute(a, b, cap)
+                    core._KRONECKER_MIN_PRODUCT = 0  # force Kronecker
+                    kron = a.convolve(b, max_fine_bucket=cap)
+                    core._KRONECKER_MIN_PRODUCT = 10**18  # force naive
+                    naive = a.convolve(b, max_fine_bucket=cap)
+                    self.assertEqual((kron.base, kron.data), (truth.base, truth.data))
+                    self.assertEqual((naive.base, naive.data), (truth.base, truth.data))
+        finally:
+            core._KRONECKER_MIN_PRODUCT = saved
+
     def test_convolution_unranker_matches_brute_force(self):
         q = Quantizer(bin_width_bits=1.0, oversample=8)
         d1 = [("a", math.log(0.5)), ("b", math.log(0.3)), ("c", math.log(0.2))]
