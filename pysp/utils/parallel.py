@@ -32,16 +32,17 @@ Notes:
     - Runtime kernel/engine objects are not picklable; ship plain
       distributions/estimators (the handle does this for you).
 """
+
 import multiprocessing as mp
 import pickle
-import sys
-from typing import Any, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 
 from pysp.parallel import EncodedDataHandle
 
-__all__ = ['MPEncodedData']
+__all__ = ["MPEncodedData"]
 
 _PROTO = pickle.HIGHEST_PROTOCOL
 
@@ -49,14 +50,14 @@ _PROTO = pickle.HIGHEST_PROTOCOL
 def _worker_main(conn) -> None:
     """Worker loop: encode the assigned shard once, then serve per-iteration
     accumulate/score commands against the resident encoded chunks."""
-    enc_chunks: List[Tuple[int, Any]] = []
+    enc_chunks: list[tuple[int, Any]] = []
 
     while True:
         msg = conn.recv()
         cmd = msg[0]
 
         try:
-            if cmd == 'setup':
+            if cmd == "setup":
                 _, encoder_b, shard_b, sub_chunks = msg
                 encoder = pickle.loads(encoder_b)
                 shard = pickle.loads(shard_b)
@@ -67,9 +68,9 @@ def _worker_main(conn) -> None:
                     part = [shard[j] for j in range(i, n, k)]
                     if part:
                         enc_chunks.append((len(part), encoder.seq_encode(part)))
-                conn.send(('ok', n))
+                conn.send(("ok", n))
 
-            elif cmd == 'update':
+            elif cmd == "update":
                 _, estimator_b, model_b = msg
                 estimator = pickle.loads(estimator_b)
                 model = pickle.loads(model_b)
@@ -78,41 +79,42 @@ def _worker_main(conn) -> None:
                 for sz, x in enc_chunks:
                     count += sz
                     accumulator.seq_update(x, np.ones(sz), model)
-                conn.send(('ok', pickle.dumps((count, accumulator.value()), protocol=_PROTO)))
+                conn.send(("ok", pickle.dumps((count, accumulator.value()), protocol=_PROTO)))
 
-            elif cmd == 'init':
+            elif cmd == "init":
                 _, estimator_b, seed, p = msg
                 estimator = pickle.loads(estimator_b)
                 accumulator = estimator.accumulator_factory().make()
                 rng_loc = np.random.RandomState(seed)
-                rng_w = np.random.RandomState(seed=rng_loc.randint(2 ** 31))
+                rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
                 count = 0.0
                 for sz, x in enc_chunks:
                     w = np.zeros(sz, dtype=float)
                     w[rng_w.rand(sz) <= p] = 1.0
                     count += np.sum(w)
                     accumulator.seq_initialize(x, w, rng_loc)
-                conn.send(('ok', pickle.dumps((count, accumulator.value()), protocol=_PROTO)))
+                conn.send(("ok", pickle.dumps((count, accumulator.value()), protocol=_PROTO)))
 
-            elif cmd == 'llsum':
+            elif cmd == "llsum":
                 _, model_b = msg
                 model = pickle.loads(model_b)
                 cnt, ll = 0.0, 0.0
                 for sz, x in enc_chunks:
                     cnt += sz
                     ll += model.seq_log_density(x).sum()
-                conn.send(('ok', (cnt, ll)))
+                conn.send(("ok", (cnt, ll)))
 
-            elif cmd == 'stop':
-                conn.send(('ok', None))
+            elif cmd == "stop":
+                conn.send(("ok", None))
                 return
 
             else:
-                conn.send(('err', 'unknown command %r' % (cmd,)))
+                conn.send(("err", "unknown command %r" % (cmd,)))
 
         except BaseException as e:  # surface worker failures on the driver
             import traceback
-            conn.send(('err', '%s\n%s' % (e, traceback.format_exc())))
+
+            conn.send(("err", "%s\n%s" % (e, traceback.format_exc())))
 
 
 class MPEncodedData(EncodedDataHandle):
@@ -136,22 +138,23 @@ class MPEncodedData(EncodedDataHandle):
             the vectorized update inside each worker).
     """
 
-    def __init__(self, data: Sequence[Any], estimator=None, encoder=None,
-                 num_workers: Optional[int] = None, sub_chunks: int = 1):
+    def __init__(
+        self, data: Sequence[Any], estimator=None, encoder=None, num_workers: int | None = None, sub_chunks: int = 1
+    ):
         if encoder is None:
             if estimator is None:
-                raise ValueError('MPEncodedData requires an estimator or an explicit encoder.')
+                raise ValueError("MPEncodedData requires an estimator or an explicit encoder.")
             encoder = estimator.accumulator_factory().make().acc_to_encoder()
 
         n = len(data)
         if n == 0:
-            raise ValueError('MPEncodedData requires non-empty data.')
+            raise ValueError("MPEncodedData requires non-empty data.")
         if num_workers is None:
             num_workers = mp.cpu_count()
         num_workers = max(1, min(int(num_workers), n))
 
         self.num_workers = num_workers
-        self._ctx = mp.get_context('spawn')
+        self._ctx = mp.get_context("spawn")
         self._conns = []
         self._procs = []
 
@@ -168,7 +171,7 @@ class MPEncodedData(EncodedDataHandle):
             self.size = 0
             for i, conn in enumerate(self._conns):
                 shard = [data[j] for j in range(i, n, num_workers)]
-                conn.send(('setup', encoder_b, pickle.dumps(shard, protocol=_PROTO), sub_chunks))
+                conn.send(("setup", encoder_b, pickle.dumps(shard, protocol=_PROTO), sub_chunks))
             for conn in self._conns:
                 self.size += self._recv(conn)
         except BaseException:
@@ -180,16 +183,16 @@ class MPEncodedData(EncodedDataHandle):
     @staticmethod
     def _recv(conn):
         status, payload = conn.recv()
-        if status != 'ok':
-            raise RuntimeError('parallel worker failed:\n%s' % payload)
+        if status != "ok":
+            raise RuntimeError("parallel worker failed:\n%s" % payload)
         return payload
 
-    def _broadcast_collect(self, msg) -> List[Any]:
+    def _broadcast_collect(self, msg) -> list[Any]:
         for conn in self._conns:
             conn.send(msg)
         return [self._recv(conn) for conn in self._conns]
 
-    def _fold_stats(self, estimator, payloads) -> Tuple[float, Any]:
+    def _fold_stats(self, estimator, payloads) -> tuple[float, Any]:
         accumulator = estimator.accumulator_factory().make()
         nobs = 0.0
         for raw in payloads:
@@ -205,38 +208,42 @@ class MPEncodedData(EncodedDataHandle):
 
     def pysp_seq_estimate(self, estimator, prev_estimate):
         """One distributed EM step: returns the re-estimated distribution."""
-        payloads = self._broadcast_collect((
-            'update',
-            pickle.dumps(estimator, protocol=_PROTO),
-            pickle.dumps(prev_estimate, protocol=_PROTO),
-        ))
+        payloads = self._broadcast_collect(
+            (
+                "update",
+                pickle.dumps(estimator, protocol=_PROTO),
+                pickle.dumps(prev_estimate, protocol=_PROTO),
+            )
+        )
         nobs, value = self._fold_stats(estimator, payloads)
         return estimator.estimate(nobs, value)
 
     def pysp_seq_initialize(self, estimator, rng: np.random.RandomState, p: float):
         """Distributed randomized initialization (mirrors seq_initialize)."""
-        seeds = rng.randint(2 ** 31, size=self.num_workers)
+        seeds = rng.randint(2**31, size=self.num_workers)
         estimator_b = pickle.dumps(estimator, protocol=_PROTO)
         for conn, seed in zip(self._conns, seeds):
-            conn.send(('init', estimator_b, int(seed), float(p)))
+            conn.send(("init", estimator_b, int(seed), float(p)))
         payloads = [self._recv(conn) for conn in self._conns]
         nobs, value = self._fold_stats(estimator, payloads)
         return estimator.estimate(nobs, value)
 
-    def pysp_seq_log_density_sum(self, estimate) -> Tuple[float, float]:
+    def pysp_seq_log_density_sum(self, estimate) -> tuple[float, float]:
         """Total observation count and summed log density across all workers."""
-        results = self._broadcast_collect(('llsum', pickle.dumps(estimate, protocol=_PROTO)))
+        results = self._broadcast_collect(("llsum", pickle.dumps(estimate, protocol=_PROTO)))
         cnt = sum(r[0] for r in results)
         ll = sum(r[1] for r in results)
         return cnt, ll
 
-    def pysp_stream_accumulate(self, estimator, model) -> Tuple[float, Any]:
+    def pysp_stream_accumulate(self, estimator, model) -> tuple[float, Any]:
         """Return globally folded batch sufficient statistics for streaming EM."""
-        payloads = self._broadcast_collect((
-            'update',
-            pickle.dumps(estimator, protocol=_PROTO),
-            pickle.dumps(model, protocol=_PROTO),
-        ))
+        payloads = self._broadcast_collect(
+            (
+                "update",
+                pickle.dumps(estimator, protocol=_PROTO),
+                pickle.dumps(model, protocol=_PROTO),
+            )
+        )
         return self._fold_stats(estimator, payloads)
 
     # -- lifecycle -----------------------------------------------------------
@@ -245,7 +252,7 @@ class MPEncodedData(EncodedDataHandle):
         """Shut the worker pool down. Idempotent."""
         for conn in self._conns:
             try:
-                conn.send(('stop',))
+                conn.send(("stop",))
             except (BrokenPipeError, OSError):
                 pass
         for conn in self._conns:
@@ -263,7 +270,7 @@ class MPEncodedData(EncodedDataHandle):
     def __len__(self) -> int:
         return int(self.size)
 
-    def __enter__(self) -> 'MPEncodedData':
+    def __enter__(self) -> "MPEncodedData":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

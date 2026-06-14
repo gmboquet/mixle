@@ -1,27 +1,35 @@
 """Stacked mixture kernels built from distribution-owned backend math."""
+
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Optional, Sequence, Tuple, Type
+from typing import Any
 
 import numpy as np
 
 from pysp.engines import ComputeEngine
-from pysp.stats.declarations import declaration_for, generated_stacked_available, generated_stacked_log_density, \
-    generated_stacked_params, generated_stacked_preferred, generated_stacked_strategy, \
-    generated_stacked_sufficient_statistics, generated_stacked_sufficient_statistics_available
-from pysp.stats.kernel import GenericKernelFactory, Kernel, KernelFactory
+from pysp.stats.declarations import (
+    declaration_for,
+    generated_stacked_available,
+    generated_stacked_log_density,
+    generated_stacked_params,
+    generated_stacked_preferred,
+    generated_stacked_strategy,
+    generated_stacked_sufficient_statistics,
+    generated_stacked_sufficient_statistics_available,
+)
+from pysp.stats.kernel import Kernel, KernelFactory
 from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
-
-_COMPONENT_AXIS_KEY = '__pysp_component_axis__'
+_COMPONENT_AXIS_KEY = "__pysp_component_axis__"
 
 
 @dataclass(frozen=True)
 class StackedComponentParams:
     """A generic route for homogeneous component scoring."""
 
-    component_type: Type[Any]
+    component_type: type[Any]
     strategy: str
     params: Any
 
@@ -40,7 +48,7 @@ class StackedMixtureResidentStats:
     component_counts: Any
     component_stats: Any
     engine: ComputeEngine
-    component_type: Type[Any]
+    component_type: type[Any]
 
     def value(self) -> Any:
         """Return sufficient statistics in the legacy ``MixtureEstimator`` format."""
@@ -48,7 +56,7 @@ class StackedMixtureResidentStats:
         stats = _engine_to_numpy(self.component_stats, self.engine)
         return counts, _unstack_component_stats(stats, len(counts))
 
-    def local_value(self) -> Tuple[int, Any]:
+    def local_value(self) -> tuple[int, Any]:
         """Return this rank's component-stat payload in the legacy local-slice format.
 
         DTensor-backed model-parallel runs should run component M-steps on the
@@ -67,8 +75,9 @@ class StackedMixtureResidentStats:
         """Estimate a distribution after converting to the legacy estimator protocol."""
         return estimator.estimate(None, self.value())
 
-    def estimate_component_shard(self, estimator: ParameterEstimator,
-                                 total_count: Optional[float] = None) -> 'StackedMixtureShardEstimate':
+    def estimate_component_shard(
+        self, estimator: ParameterEstimator, total_count: float | None = None
+    ) -> StackedMixtureShardEstimate:
         """Run the component-local part of a mixture M-step for this shard.
 
         Component distributions are independent given posterior sufficient
@@ -87,47 +96,49 @@ class StackedMixtureShardEstimate:
 
     component_start: int
     component_stop: int
-    components: Tuple[Any, ...]
+    components: tuple[Any, ...]
     weights: np.ndarray
     total_count: float
 
 
-def estimate_component_shard_value(estimator: ParameterEstimator, component_start: int,
-                                   value: Tuple[Any, Tuple[Any, ...]],
-                                   total_count: Optional[float] = None) -> StackedMixtureShardEstimate:
+def estimate_component_shard_value(
+    estimator: ParameterEstimator,
+    component_start: int,
+    value: tuple[Any, tuple[Any, ...]],
+    total_count: float | None = None,
+) -> StackedMixtureShardEstimate:
     """Estimate the component-local part of a mixture M-step from an explicit shard value."""
     counts, comp_suff_stats = value
     counts = np.asarray(counts, dtype=np.float64)
     start = int(component_start)
     stop = start + len(counts)
-    num_components = int(getattr(estimator, 'num_components', len(counts)))
+    num_components = int(getattr(estimator, "num_components", len(counts)))
     if start < 0 or stop > num_components:
-        raise ValueError('component shard [%d, %d) exceeds estimator with %d components.' %
-                         (start, stop, num_components))
+        raise ValueError(
+            "component shard [%d, %d) exceeds estimator with %d components." % (start, stop, num_components)
+        )
     if len(comp_suff_stats) != len(counts):
-        raise ValueError('component shard has %d count entries but %d component statistics.' %
-                         (len(counts), len(comp_suff_stats)))
+        raise ValueError(
+            "component shard has %d count entries but %d component statistics." % (len(counts), len(comp_suff_stats))
+        )
 
-    estimators = getattr(estimator, 'estimators', None)
+    estimators = getattr(estimator, "estimators", None)
     if estimators is None:
-        raise ValueError('estimate_component_shard_value requires a mixture-style estimator with component estimators.')
-    components = tuple(
-        estimators[start + i].estimate(counts[i], comp_suff_stats[i])
-        for i in range(len(counts))
-    )
+        raise ValueError("estimate_component_shard_value requires a mixture-style estimator with component estimators.")
+    components = tuple(estimators[start + i].estimate(counts[i], comp_suff_stats[i]) for i in range(len(counts)))
 
-    fixed_weights = getattr(estimator, 'fixed_weights', None)
+    fixed_weights = getattr(estimator, "fixed_weights", None)
     if fixed_weights is not None:
         weights = np.asarray(fixed_weights, dtype=np.float64)[start:stop]
         global_total = float(np.asarray(total_count if total_count is not None else counts.sum()))
     else:
         if total_count is None:
             if start != 0 or stop != num_components:
-                raise ValueError('total_count is required when estimating weights for a component shard.')
+                raise ValueError("total_count is required when estimating weights for a component shard.")
             total_count = float(counts.sum())
         global_total = float(total_count)
-        pseudo_count = getattr(estimator, 'pseudo_count', None)
-        suff_stat = getattr(estimator, 'suff_stat', None)
+        pseudo_count = getattr(estimator, "pseudo_count", None)
+        suff_stat = getattr(estimator, "suff_stat", None)
         if pseudo_count is not None and suff_stat is None:
             p = float(pseudo_count) / float(num_components)
             weights = (counts + p) / (global_total + float(pseudo_count))
@@ -148,9 +159,9 @@ def estimate_component_shard_value(estimator: ParameterEstimator, component_star
     )
 
 
-def tie_component_shard_values(estimator: ParameterEstimator,
-                               shard_values: Sequence[Tuple[int, Tuple[Any, Tuple[Any, ...]]]]
-                               ) -> Tuple[Tuple[int, Tuple[np.ndarray, Tuple[Any, ...]]], ...]:
+def tie_component_shard_values(
+    estimator: ParameterEstimator, shard_values: Sequence[tuple[int, tuple[Any, tuple[Any, ...]]]]
+) -> tuple[tuple[int, tuple[np.ndarray, tuple[Any, ...]]], ...]:
     """Apply pysparkplug key tying to component-sharded mixture statistics.
 
     ``MixtureAccumulator.key_merge`` / ``key_replace`` assume a full component
@@ -161,10 +172,10 @@ def tie_component_shard_values(estimator: ParameterEstimator,
     """
     if not shard_values:
         return ()
-    estimators = getattr(estimator, 'estimators', None)
+    estimators = getattr(estimator, "estimators", None)
     if estimators is None:
-        raise ValueError('tie_component_shard_values requires a mixture-style estimator.')
-    num_components = int(getattr(estimator, 'num_components', len(estimators)))
+        raise ValueError("tie_component_shard_values requires a mixture-style estimator.")
+    num_components = int(getattr(estimator, "num_components", len(estimators)))
     keyed_accs = []
     keyed_counts = []
     for start, value in shard_values:
@@ -173,11 +184,13 @@ def tie_component_shard_values(estimator: ParameterEstimator,
         start = int(start)
         stop = start + len(counts)
         if start < 0 or stop > num_components:
-            raise ValueError('component shard [%d, %d) exceeds estimator with %d components.' %
-                             (start, stop, num_components))
+            raise ValueError(
+                "component shard [%d, %d) exceeds estimator with %d components." % (start, stop, num_components)
+            )
         if len(comp_stats) != len(counts):
-            raise ValueError('component shard has %d count entries but %d component statistics.' %
-                             (len(counts), len(comp_stats)))
+            raise ValueError(
+                "component shard has %d count entries but %d component statistics." % (len(counts), len(comp_stats))
+            )
         accs = []
         for offset, suff_stat in enumerate(comp_stats):
             acc = estimators[start + offset].accumulator_factory().make()
@@ -186,7 +199,7 @@ def tie_component_shard_values(estimator: ParameterEstimator,
         keyed_accs.append([start, tuple(accs)])
         keyed_counts.append([start, counts])
 
-    keys = getattr(estimator, 'keys', (None, None))
+    keys = getattr(estimator, "keys", (None, None))
     weight_key = keys[0] if isinstance(keys, tuple) and len(keys) > 0 else None
     comp_key = keys[1] if isinstance(keys, tuple) and len(keys) > 1 else None
 
@@ -242,18 +255,18 @@ def stacked_component_params(dists: Sequence[Any], engine: ComputeEngine) -> Sta
     single dispatcher.
     """
     if not dists:
-        raise ValueError('stacked_component_params requires at least one component.')
-    component_type: Type[Any] = type(dists[0])
+        raise ValueError("stacked_component_params requires at least one component.")
+    component_type: type[Any] = type(dists[0])
     if any(type(component) is not component_type for component in dists):
-        raise ValueError('stacked component scoring requires homogeneous component types.')
+        raise ValueError("stacked component scoring requires homogeneous component types.")
 
-    params_fn = getattr(component_type, 'backend_stacked_params', None)
-    score_fn = getattr(component_type, 'backend_stacked_log_density', None)
+    params_fn = getattr(component_type, "backend_stacked_params", None)
+    score_fn = getattr(component_type, "backend_stacked_log_density", None)
     has_explicit = callable(params_fn) and callable(score_fn)
     try:
         return StackedComponentParams(
             component_type=component_type,
-            strategy='generated',
+            strategy="generated",
             params=_place_stacked_params(generated_stacked_params(dists, engine), engine, default_axis=0),
         )
     except ValueError:
@@ -261,37 +274,42 @@ def stacked_component_params(dists: Sequence[Any], engine: ComputeEngine) -> Sta
             raise
     return StackedComponentParams(
         component_type=component_type,
-        strategy='explicit',
+        strategy="explicit",
         params=_place_stacked_params(params_fn(dists, engine), engine, default_axis=None),
     )
 
 
 def stacked_component_log_density(enc: Any, route: StackedComponentParams, engine: ComputeEngine) -> Any:
     """Evaluate a route returned by ``stacked_component_params``."""
-    if route.strategy == 'generated':
+    if route.strategy == "generated":
         return generated_stacked_log_density(enc, route.params, engine)
-    if route.strategy == 'explicit':
+    if route.strategy == "explicit":
         return route.component_type.backend_stacked_log_density(enc, route.params, engine)
-    raise ValueError('Unknown stacked component strategy %s.' % route.strategy)
+    raise ValueError("Unknown stacked component strategy %s." % route.strategy)
 
 
-def stacked_component_sufficient_statistics(enc: Any, weights: Any, route: StackedComponentParams,
-                                            engine: ComputeEngine,
-                                            estimator: Optional[ParameterEstimator] = None) -> Any:
+def stacked_component_sufficient_statistics(
+    enc: Any,
+    weights: Any,
+    route: StackedComponentParams,
+    engine: ComputeEngine,
+    estimator: ParameterEstimator | None = None,
+) -> Any:
     """Return component-stacked legacy sufficient statistics for a stacked route."""
-    stats_fn = getattr(route.component_type, 'backend_stacked_sufficient_statistics', None)
-    estimator_stats_fn = getattr(route.component_type, 'backend_stacked_sufficient_statistics_with_estimator', None)
+    stats_fn = getattr(route.component_type, "backend_stacked_sufficient_statistics", None)
+    estimator_stats_fn = getattr(route.component_type, "backend_stacked_sufficient_statistics_with_estimator", None)
     if callable(stats_fn):
         return stats_fn(enc, weights, route.params, engine)
     if estimator is not None and callable(estimator_stats_fn):
         return estimator_stats_fn(enc, weights, route.params, engine, estimator)
-    if route.strategy == 'generated':
+    if route.strategy == "generated":
         return generated_stacked_sufficient_statistics(enc, weights, route.params, engine)
-    raise NotImplementedError('%s does not provide resident stacked sufficient statistics.' %
-                              route.component_type.__name__)
+    raise NotImplementedError(
+        "%s does not provide resident stacked sufficient statistics." % route.component_type.__name__
+    )
 
 
-def unstack_component_stats(value: Any, num_components: int) -> Tuple[Any, ...]:
+def unstack_component_stats(value: Any, num_components: int) -> tuple[Any, ...]:
     """Return per-component legacy statistics from a component-stacked payload."""
     return _unstack_component_stats(value, num_components)
 
@@ -305,14 +323,13 @@ class StackedMixtureKernel(Kernel):
     ``backend_stacked_params`` and ``backend_stacked_log_density``.
     """
 
-    def __init__(self, dist: Any, engine: ComputeEngine,
-                 estimator: Optional[ParameterEstimator] = None) -> None:
+    def __init__(self, dist: Any, engine: ComputeEngine, estimator: ParameterEstimator | None = None) -> None:
         self.dist = dist
         self.engine = engine
         self.estimator = estimator
         self.route = stacked_component_params(dist.components, engine)
-        self.component_type: Type[Any] = self.route.component_type
-        self._generated = self.route.strategy == 'generated'
+        self.component_type: type[Any] = self.route.component_type
+        self._generated = self.route.strategy == "generated"
         self.params = self.route.params
         self.log_w = _place_component_array(engine.asarray(dist.log_w), engine, axis=0)
 
@@ -322,9 +339,9 @@ class StackedMixtureKernel(Kernel):
 
     def component_scores(self, enc: Any) -> Any:
         """Return unweighted component log densities with shape ``(n, k)``."""
-        enc = getattr(enc, 'engine_payload', enc)
+        enc = getattr(enc, "engine_payload", enc)
         ll = stacked_component_log_density(enc, self.route, self.engine)
-        zw = getattr(self.dist, 'zw', None)
+        zw = getattr(self.dist, "zw", None)
         if zw is not None and np.any(zw):
             mask = self.engine.asarray(np.asarray(zw))
             ll = self.engine.where(mask[None, :], ll * 0.0 + self.engine.asarray(-np.inf), ll)
@@ -346,13 +363,15 @@ class StackedMixtureKernel(Kernel):
     @property
     def has_resident_accumulate(self) -> bool:
         """Return true when the leaf family can accumulate sufficient stats on the engine."""
-        if callable(getattr(self.component_type, 'backend_stacked_sufficient_statistics', None)):
+        if callable(getattr(self.component_type, "backend_stacked_sufficient_statistics", None)):
             return True
-        if self.estimator is not None and \
-                callable(getattr(self.component_type, 'backend_stacked_sufficient_statistics_with_estimator', None)):
+        if self.estimator is not None and callable(
+            getattr(self.component_type, "backend_stacked_sufficient_statistics_with_estimator", None)
+        ):
             return True
-        return self.route.strategy == 'generated' and \
-            generated_stacked_sufficient_statistics_available(self.route.params)
+        return self.route.strategy == "generated" and generated_stacked_sufficient_statistics_available(
+            self.route.params
+        )
 
     def resident_accumulate(self, enc: Any, weights: Any) -> StackedMixtureResidentStats:
         """Return engine-resident mixture sufficient statistics.
@@ -364,7 +383,7 @@ class StackedMixtureKernel(Kernel):
         weights = self.engine.asarray(weights)
         gamma = gamma * weights[:, None]
         counts = self.engine.sum(gamma, axis=0)
-        engine_enc = getattr(enc, 'engine_payload', enc)
+        engine_enc = getattr(enc, "engine_payload", enc)
         stats = stacked_component_sufficient_statistics(engine_enc, gamma, self.route, self.engine, self.estimator)
         return StackedMixtureResidentStats(
             component_counts=counts,
@@ -376,10 +395,10 @@ class StackedMixtureKernel(Kernel):
     def accumulate(self, enc: Any, weights: Any) -> Any:
         """Return mixture sufficient statistics in the legacy estimator format."""
         if self.estimator is None:
-            raise ValueError('StackedMixtureKernel.accumulate requires an estimator.')
+            raise ValueError("StackedMixtureKernel.accumulate requires an estimator.")
         if self.has_resident_accumulate:
             return self.resident_accumulate(enc, weights).value()
-        host_enc = getattr(enc, 'host_payload', enc)
+        host_enc = getattr(enc, "host_payload", enc)
         gamma = self.posteriors(enc)
         weights = self.engine.asarray(weights)
         gamma = gamma * weights[:, None]
@@ -396,77 +415,84 @@ class StackedMixtureKernel(Kernel):
         self.dist = dist
         self.route = stacked_component_params(dist.components, self.engine)
         self.component_type = self.route.component_type
-        self._generated = self.route.strategy == 'generated'
+        self._generated = self.route.strategy == "generated"
         self.params = self.route.params
         self.log_w = _place_component_array(self.engine.asarray(dist.log_w), self.engine, axis=0)
 
 
 def _stackable_mixture(dist: Any) -> bool:
-    components = getattr(dist, 'components', None)
+    components = getattr(dist, "components", None)
     if not components:
         return False
     component_type = type(components[0])
     if not all(type(component) is component_type for component in components):
         return False
-    return (callable(getattr(component_type, 'backend_stacked_params', None)) and
-            callable(getattr(component_type, 'backend_stacked_log_density', None))) or \
-        generated_stacked_available(component_type)
+    return (
+        callable(getattr(component_type, "backend_stacked_params", None))
+        and callable(getattr(component_type, "backend_stacked_log_density", None))
+    ) or generated_stacked_available(component_type)
 
 
-def _has_generated_backend_hook(dist_type: Type[Any]) -> bool:
-    if generated_stacked_strategy(dist_type) != 'backend_log_density_from_params':
+def _has_generated_backend_hook(dist_type: type[Any]) -> bool:
+    if generated_stacked_strategy(dist_type) != "backend_log_density_from_params":
         return False
     declaration = declaration_for(dist_type)
     if declaration is None:
         return False
     generated_constraints = {
-        'real',
-        'real_vector',
-        'positive',
-        'positive_vector',
-        'unit_interval',
-        'integer',
-        'positive_integer',
-        'non_negative_integer',
-        'optional_integer',
-        'fixed',
+        "real",
+        "real_vector",
+        "positive",
+        "positive_vector",
+        "unit_interval",
+        "integer",
+        "positive_integer",
+        "non_negative_integer",
+        "optional_integer",
+        "fixed",
     }
     for spec in declaration.parameters:
-        if str(spec.constraint).startswith('greater_than:'):
+        if str(spec.constraint).startswith("greater_than:"):
             continue
         if spec.constraint not in generated_constraints:
             return False
     return True
 
 
-def stacked_component_strategy(dist_type: Type[Any]) -> str:
+def stacked_component_strategy(dist_type: type[Any]) -> str:
     """Describe how homogeneous mixture component scoring will be dispatched."""
     if generated_stacked_preferred(dist_type):
-        return 'generated_exp_family'
+        return "generated_exp_family"
     if _has_generated_backend_hook(dist_type):
-        return 'generated_backend_hook'
-    if (callable(getattr(dist_type, 'backend_stacked_params', None)) and
-            callable(getattr(dist_type, 'backend_stacked_log_density', None))):
-        return 'explicit_stacked'
-    return 'generic'
+        return "generated_backend_hook"
+    if callable(getattr(dist_type, "backend_stacked_params", None)) and callable(
+        getattr(dist_type, "backend_stacked_log_density", None)
+    ):
+        return "explicit_stacked"
+    return "generic"
 
 
 class StackedMixtureKernelFactory(KernelFactory):
     """Factory for homogeneous mixtures with distribution-owned stacked math."""
 
-    def __init__(self, fallback: Optional[KernelFactory] = None) -> None:
+    def __init__(self, fallback: KernelFactory | None = None) -> None:
         # numpy mixtures fall through to generated numba (legacy-enc compatible);
         # GeneratedNumbaKernelFactory itself defers to the generic kernel when no
         # generated scorer exists, so this remains a guaranteed fallback chain
         if fallback is None:
             from pysp.stats.kernel import GeneratedNumbaKernelFactory
+
             fallback = GeneratedNumbaKernelFactory()
         self.fallback = fallback
 
-    def build(self, dist: SequenceEncodableProbabilityDistribution, engine: ComputeEngine,
-              estimator: Optional[ParameterEstimator] = None) -> Kernel:
+    def build(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        engine: ComputeEngine,
+        estimator: ParameterEstimator | None = None,
+    ) -> Kernel:
         """Build a stacked mixture kernel when safe, otherwise use fallback."""
-        if getattr(engine, 'name', None) == 'torch' and _stackable_mixture(dist):
+        if getattr(engine, "name", None) == "torch" and _stackable_mixture(dist):
             if not dist.supports_engine(engine):
                 return self.fallback.build(dist, engine, estimator=estimator)
             try:
@@ -476,14 +502,14 @@ class StackedMixtureKernelFactory(KernelFactory):
         return self.fallback.build(dist, engine, estimator=estimator)
 
 
-def _place_stacked_params(params: Any, engine: ComputeEngine, default_axis: Optional[int]) -> Any:
+def _place_stacked_params(params: Any, engine: ComputeEngine, default_axis: int | None) -> Any:
     """Apply engine-owned component placement to stacked parameter payloads."""
-    if not callable(getattr(engine, 'place_component_axis', None)):
+    if not callable(getattr(engine, "place_component_axis", None)):
         return params
     return _place_value(params, engine, default_axis)
 
 
-def _place_value(value: Any, engine: ComputeEngine, axis: Optional[int]) -> Any:
+def _place_value(value: Any, engine: ComputeEngine, axis: int | None) -> Any:
     if isinstance(value, StackedComponentParams):
         return replace(value, params=_place_value(value.params, engine, axis))
     if isinstance(value, dict):
@@ -493,7 +519,7 @@ def _place_value(value: Any, engine: ComputeEngine, axis: Optional[int]) -> Any:
             if key == _COMPONENT_AXIS_KEY:
                 rv[key] = child
                 continue
-            if str(key).startswith('__pysp_'):
+            if str(key).startswith("__pysp_"):
                 rv[key] = child
                 continue
             child_axis = axis_spec.get(key) if isinstance(axis_spec, dict) else axis_spec
@@ -516,7 +542,7 @@ def _place_component_array(value: Any, engine: ComputeEngine, axis: int) -> Any:
     except Exception:
         arr = None
     if arr is not None:
-        if arr.dtype.kind in ('O', 'U', 'S'):
+        if arr.dtype.kind in ("O", "U", "S"):
             return value
         if arr.ndim == 0:
             return value
@@ -547,7 +573,7 @@ def _engine_local_to_numpy(value: Any, engine: ComputeEngine) -> Any:
         return tuple(_engine_local_to_numpy(child, engine) for child in value)
     if isinstance(value, list):
         return [_engine_local_to_numpy(child, engine) for child in value]
-    local_fn = getattr(value, 'to_local', None)
+    local_fn = getattr(value, "to_local", None)
     if callable(local_fn):
         try:
             return _tensor_like_to_numpy(local_fn())
@@ -557,10 +583,10 @@ def _engine_local_to_numpy(value: Any, engine: ComputeEngine) -> Any:
 
 
 def _tensor_like_to_numpy(value: Any) -> Any:
-    detach = getattr(value, 'detach', None)
+    detach = getattr(value, "detach", None)
     if callable(detach):
         value = detach()
-    cpu = getattr(value, 'cpu', None)
+    cpu = getattr(value, "cpu", None)
     if callable(cpu):
         value = cpu()
     try:
@@ -569,8 +595,8 @@ def _tensor_like_to_numpy(value: Any) -> Any:
         return value
 
 
-def _local_component_bounds(value: Any, local_count: int) -> Tuple[int, int]:
-    chunk_fn = getattr(value, '__create_chunk_list__', None)
+def _local_component_bounds(value: Any, local_count: int) -> tuple[int, int]:
+    chunk_fn = getattr(value, "__create_chunk_list__", None)
     if callable(chunk_fn):
         try:
             chunks = chunk_fn()
@@ -585,7 +611,7 @@ def _local_component_bounds(value: Any, local_count: int) -> Tuple[int, int]:
     return 0, int(local_count)
 
 
-def _unstack_component_stats(value: Any, num_components: int) -> Tuple[Any, ...]:
+def _unstack_component_stats(value: Any, num_components: int) -> tuple[Any, ...]:
     if isinstance(value, tuple):
         if _all_component_stacked(value, num_components):
             return tuple(tuple(_take_component(child, i) for child in value) for i in range(num_components))
@@ -598,16 +624,15 @@ def _unstack_component_stats(value: Any, num_components: int) -> Tuple[Any, ...]
             return tuple(value)
     if _is_component_stacked(value, num_components):
         return tuple(_take_component(value, i) for i in range(num_components))
-    raise ValueError('Resident component statistics do not expose a component axis of length %d.' %
-                     num_components)
+    raise ValueError("Resident component statistics do not expose a component axis of length %d." % num_components)
 
 
-def _all_component_stacked(values: Tuple[Any, ...], num_components: int) -> bool:
+def _all_component_stacked(values: tuple[Any, ...], num_components: int) -> bool:
     return bool(values) and all(_is_component_stacked(value, num_components) for value in values)
 
 
 def _is_component_stacked(value: Any, num_components: int) -> bool:
-    shape = getattr(value, 'shape', None)
+    shape = getattr(value, "shape", None)
     return shape is not None and len(shape) > 0 and int(shape[0]) == num_components
 
 

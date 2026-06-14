@@ -13,21 +13,22 @@ is a small adapter over the modular compute-engine stack:
 * gradient fitting delegates to the declaration/objective-based generic
   optimizers in ``pysp.utils.estimation``.
 """
+
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
-from pysp.engines import TorchEngine, torch
+from pysp.engines import TorchEngine
 from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 from pysp.utils.estimation import fit_map as _fit_map
 from pysp.utils.estimation import fit_mle as _fit_mle
 
-__all__ = ['TorchMixture']
+__all__ = ["TorchMixture"]
 
 
-class TorchMixture(object):
+class TorchMixture:
     """Thin compatibility adapter over ``ComputeEngine`` kernels.
 
     New code should prefer ``dist.kernel(engine=TorchEngine(...))``,
@@ -37,8 +38,7 @@ class TorchMixture(object):
     working while distribution math remains distribution-owned.
     """
 
-    def __init__(self, model: SequenceEncodableProbabilityDistribution,
-                 device: str = 'cpu', dtype: Any = None) -> None:
+    def __init__(self, model: SequenceEncodableProbabilityDistribution, device: str = "cpu", dtype: Any = None) -> None:
         self.model = model
         self.engine = TorchEngine(device=device, dtype=dtype)
         self.device = self.engine.device
@@ -46,12 +46,12 @@ class TorchMixture(object):
         self.is_mixture = _is_mixture_model(model)
         self.K = model.num_components if self.is_mixture else 1
 
-    def encode(self, data: Any) -> Tuple[int, Any]:
+    def encode(self, data: Any) -> tuple[int, Any]:
         """Encode observations using the model's canonical sequence encoder."""
         payload = self.model.dist_to_encoder().seq_encode(data)
         return len(data), payload
 
-    def seq_component_log_density(self, enc: Tuple[int, Any], model: Optional[Any] = None) -> np.ndarray:
+    def seq_component_log_density(self, enc: tuple[int, Any], model: Any | None = None) -> np.ndarray:
         """Return component log-density matrix as a NumPy array."""
         model = self.model if model is None else model
         self._validate_ignored_structure(model)
@@ -65,13 +65,13 @@ class TorchMixture(object):
         scores = self._score(model, payload)
         return scores.reshape((-1, 1))
 
-    def seq_log_density(self, enc: Tuple[int, Any], model: Optional[Any] = None) -> np.ndarray:
+    def seq_log_density(self, enc: tuple[int, Any], model: Any | None = None) -> np.ndarray:
         """Return per-row model log densities as a NumPy array."""
         model = self.model if model is None else model
         self._validate_ignored_structure(model)
         return self._score(model, enc[1])
 
-    def posteriors(self, enc: Tuple[int, Any], model: Optional[Any] = None) -> Any:
+    def posteriors(self, enc: tuple[int, Any], model: Any | None = None) -> Any:
         """Return posterior component weights as a Torch tensor."""
         model = self.model if model is None else model
         self._validate_ignored_structure(model)
@@ -81,7 +81,7 @@ class TorchMixture(object):
         payload = enc[1]
         try:
             kernel = model.kernel(engine=self.engine)
-            if callable(getattr(kernel, 'posteriors', None)):
+            if callable(getattr(kernel, "posteriors", None)):
                 return kernel.posteriors(payload)
             comp = kernel.component_scores(payload) + self.engine.asarray(model.log_w)[None, :]
             denom = self.engine.logsumexp(comp, axis=1)
@@ -89,8 +89,7 @@ class TorchMixture(object):
         except Exception:
             return self.engine.asarray(model.seq_posterior(payload))
 
-    def weighted_suff_stats(self, enc: Tuple[int, Any], gamma: Any,
-                            model: Optional[Any] = None) -> Any:
+    def weighted_suff_stats(self, enc: tuple[int, Any], gamma: Any, model: Any | None = None) -> Any:
         """Return legacy-format sufficient statistics for posterior weights."""
         model = self.model if model is None else model
         if _is_mixture_model(model):
@@ -110,33 +109,50 @@ class TorchMixture(object):
         acc.seq_update(enc[1], weights, model)
         return acc.value()
 
-    def em_step(self, enc: Tuple[int, Any], estimator: ParameterEstimator,
-                model: Optional[Any] = None, weights: Optional[Any] = None) -> Any:
+    def em_step(
+        self,
+        enc: tuple[int, Any],
+        estimator: ParameterEstimator,
+        model: Any | None = None,
+        weights: Any | None = None,
+    ) -> Any:
         """Run one EM M-step using modular kernels when possible."""
         model = self.model if model is None else model
         n, payload = enc
-        row_weights = np.ones(int(n), dtype=np.float64) if weights is None else \
-            np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
+        row_weights = (
+            np.ones(int(n), dtype=np.float64)
+            if weights is None
+            else np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
+        )
         try:
             stats = model.kernel(engine=self.engine, estimator=estimator).accumulate(
-                payload, self.engine.asarray(row_weights))
+                payload, self.engine.asarray(row_weights)
+            )
         except Exception:
             acc = estimator.accumulator_factory().make()
             acc.seq_update(payload, row_weights, model)
             stats = acc.value()
         return estimator.estimate(n, stats)
 
-    def initialize(self, enc: Tuple[int, Any], estimator: ParameterEstimator,
-                   rng: np.random.RandomState, p: float = 0.1) -> Any:
+    def initialize(
+        self, enc: tuple[int, Any], estimator: ParameterEstimator, rng: np.random.RandomState, p: float = 0.1
+    ) -> Any:
         """Initialize through the standard sequence-initialization protocol."""
         from pysp.stats import seq_initialize
 
         return seq_initialize([enc], estimator, rng, p)
 
-    def fit(self, enc: Tuple[int, Any], estimator: ParameterEstimator,
-            max_its: int = 100, delta: float = 1.0e-8,
-            rng: Optional[np.random.RandomState] = None, init_p: float = 0.1,
-            model: Optional[Any] = None, out: Optional[Any] = None) -> Tuple[Any, float]:
+    def fit(
+        self,
+        enc: tuple[int, Any],
+        estimator: ParameterEstimator,
+        max_its: int = 100,
+        delta: float = 1.0e-8,
+        rng: np.random.RandomState | None = None,
+        init_p: float = 0.1,
+        model: Any | None = None,
+        out: Any | None = None,
+    ) -> tuple[Any, float]:
         """Run local EM to convergence and return ``(model, log_likelihood)``."""
         model = self.initialize(enc, estimator, rng or np.random.RandomState(), p=init_p) if model is None else model
         old_ll = float(self.seq_log_density(enc, model=model).sum())
@@ -144,38 +160,74 @@ class TorchMixture(object):
             model = self.em_step(enc, estimator, model=model)
             ll = float(self.seq_log_density(enc, model=model).sum())
             if out is not None:
-                out.write('Iteration %d: ln[p(Data|Model)]=%e, delta=%e\n' % (i + 1, ll, ll - old_ll))
+                out.write("Iteration %d: ln[p(Data|Model)]=%e, delta=%e\n" % (i + 1, ll, ll - old_ll))
             if abs(ll - old_ll) < delta:
                 old_ll = ll
                 break
             old_ll = ll
         return model, old_ll
 
-    def fit_mle(self, enc: Tuple[int, Any], model: Optional[Any] = None,
-                max_its: int = 500, lr: float = 0.05, optimizer: str = 'adam',
-                tol: float = 1.0e-7, out: Optional[Any] = None,
-                print_iter: int = 100, return_result: bool = False) -> Any:
+    def fit_mle(
+        self,
+        enc: tuple[int, Any],
+        model: Any | None = None,
+        max_its: int = 500,
+        lr: float = 0.05,
+        optimizer: str = "adam",
+        tol: float = 1.0e-7,
+        out: Any | None = None,
+        print_iter: int = 100,
+        return_result: bool = False,
+    ) -> Any:
         """Delegate gradient MLE to the generic declaration-backed fitter."""
-        return _fit_mle(enc[1], self.model if model is None else model, engine=self.engine,
-                        max_its=max_its, lr=lr, optimizer=optimizer, tol=tol,
-                        out=out, print_iter=print_iter, return_result=return_result)
+        return _fit_mle(
+            enc[1],
+            self.model if model is None else model,
+            engine=self.engine,
+            max_its=max_its,
+            lr=lr,
+            optimizer=optimizer,
+            tol=tol,
+            out=out,
+            print_iter=print_iter,
+            return_result=return_result,
+        )
 
-    def fit_map(self, enc: Tuple[int, Any], model: Optional[Any] = None,
-                priors: Optional[Any] = None, prior_strength: float = 1.0,
-                w_alpha: Optional[float] = None, max_its: int = 500,
-                lr: float = 0.05, optimizer: str = 'adam',
-                tol: float = 1.0e-7, out: Optional[Any] = None,
-                print_iter: int = 100, return_result: bool = False) -> Any:
+    def fit_map(
+        self,
+        enc: tuple[int, Any],
+        model: Any | None = None,
+        priors: Any | None = None,
+        prior_strength: float = 1.0,
+        w_alpha: float | None = None,
+        max_its: int = 500,
+        lr: float = 0.05,
+        optimizer: str = "adam",
+        tol: float = 1.0e-7,
+        out: Any | None = None,
+        print_iter: int = 100,
+        return_result: bool = False,
+    ) -> Any:
         """Delegate MAP fitting to the generic objective/declaration path.
 
         ``priors`` and ``w_alpha`` are accepted for source compatibility; rich
         conjugate priors now belong in distribution/objective declarations
         rather than this compatibility shim.
         """
-        return _fit_map(enc[1], self.model if model is None else model, engine=self.engine,
-                        prior_strength=prior_strength, priors=priors, max_its=max_its, lr=lr,
-                        optimizer=optimizer, tol=tol, out=out, print_iter=print_iter,
-                        return_result=return_result)
+        return _fit_map(
+            enc[1],
+            self.model if model is None else model,
+            engine=self.engine,
+            prior_strength=prior_strength,
+            priors=priors,
+            max_its=max_its,
+            lr=lr,
+            optimizer=optimizer,
+            tol=tol,
+            out=out,
+            print_iter=print_iter,
+            return_result=return_result,
+        )
 
     def _score(self, model: Any, payload: Any) -> np.ndarray:
         try:
@@ -186,30 +238,30 @@ class TorchMixture(object):
 
     def _validate_ignored_structure(self, model: Any) -> None:
         if _ignored_signature(model) != _ignored_signature(self.model):
-            raise ValueError('TorchMixture encoded data are tied to the wrapped IgnoredDistribution structure.')
+            raise ValueError("TorchMixture encoded data are tied to the wrapped IgnoredDistribution structure.")
 
 
 def _ignored_signature(model: Any) -> Any:
-    if _has_type_name(model, 'IgnoredDistribution') and hasattr(model, 'dist'):
-        return ('ignored', str(model.dist))
-    if _has_type_name(model, 'CompositeDistribution') and hasattr(model, 'dists'):
-        return ('composite', tuple(_ignored_signature(d) for d in model.dists))
+    if _has_type_name(model, "IgnoredDistribution") and hasattr(model, "dist"):
+        return ("ignored", str(model.dist))
+    if _has_type_name(model, "CompositeDistribution") and hasattr(model, "dists"):
+        return ("composite", tuple(_ignored_signature(d) for d in model.dists))
     if _is_mixture_model(model):
-        return ('mixture', tuple(_ignored_signature(d) for d in model.components))
-    if _has_type_name(model, 'OptionalDistribution') and hasattr(model, 'dist'):
-        return ('optional', _ignored_signature(model.dist))
-    if _has_type_name(model, 'SequenceDistribution') and hasattr(model, 'dist') and hasattr(model, 'len_dist'):
-        return ('sequence', _ignored_signature(model.dist), _ignored_signature(model.len_dist))
+        return ("mixture", tuple(_ignored_signature(d) for d in model.components))
+    if _has_type_name(model, "OptionalDistribution") and hasattr(model, "dist"):
+        return ("optional", _ignored_signature(model.dist))
+    if _has_type_name(model, "SequenceDistribution") and hasattr(model, "dist") and hasattr(model, "len_dist"):
+        return ("sequence", _ignored_signature(model.dist), _ignored_signature(model.len_dist))
     return None
 
 
 def _is_mixture_model(model: Any) -> bool:
     return bool(
-        hasattr(model, 'components') and
-        hasattr(model, 'log_w') and
-        hasattr(model, 'num_components') and
-        callable(getattr(model, 'seq_component_log_density', None)) and
-        callable(getattr(model, 'seq_posterior', None))
+        hasattr(model, "components")
+        and hasattr(model, "log_w")
+        and hasattr(model, "num_components")
+        and callable(getattr(model, "seq_component_log_density", None))
+        and callable(getattr(model, "seq_posterior", None))
     )
 
 

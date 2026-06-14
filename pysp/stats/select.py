@@ -14,17 +14,27 @@ The choice function partitions the data space, so each child distribution is est
 the observations routed to it.
 
 """
+
+from collections.abc import Callable, Sequence
+from typing import Any, TypeVar
+
 import numpy as np
 from numpy.random import RandomState
+
 from pysp.arithmetic import *
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DistributionSampler, DataSequenceEncoder, StatisticAccumulatorFactory, \
-    DistributionEnumerator, child_enumerator
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+    child_enumerator,
+)
 from pysp.utils.enumeration import BufferedStream, best_first_union_max
 
-from typing import Callable, Dict, Tuple, Any, Optional, Sequence, TypeVar, List
-
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 def _child_accumulator_factory(estimator: ParameterEstimator) -> StatisticAccumulatorFactory:
@@ -40,9 +50,9 @@ def _child_accumulator_factory(estimator: ParameterEstimator) -> StatisticAccumu
         StatisticAccumulatorFactory created by the child estimator.
 
     """
-    factory_fn = getattr(estimator, 'accumulator_factory', None)
+    factory_fn = getattr(estimator, "accumulator_factory", None)
     if factory_fn is None:
-        factory_fn = getattr(estimator, 'accumulatorFactory')
+        factory_fn = estimator.accumulatorFactory
     return factory_fn()
 
 
@@ -52,8 +62,9 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
     The density of an observation x is dists[choice_function(x)].density(x).
     """
 
-    def __init__(self, dists: Sequence[SequenceEncodableProbabilityDistribution],
-                 choice_function: Callable[[T], int]) -> None:
+    def __init__(
+        self, dists: Sequence[SequenceEncodableProbabilityDistribution], choice_function: Callable[[T], int]
+    ) -> None:
         """SelectDistribution object for observations routed to child distributions.
 
         Args:
@@ -74,27 +85,28 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
-        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.dists)),
-                                        kernel_status='generic')
+
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.dists)), kernel_status="generic")
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+
         children = tuple(declaration_for(d) for d in self.dists)
         children = tuple(d for d in children if d is not None)
         return DistributionDeclaration(
-            name='select',
+            name="select",
             distribution_type=type(self),
             parameters=(),
-            statistics=(StatisticSpec('children', kind='choice_child_stats'),),
-            support='choice_partition',
+            statistics=(StatisticSpec("children", kind="choice_child_stats"),),
+            support="choice_partition",
             children=children,
-            child_roles=tuple('choice_%d' % i for i in range(len(children))),
+            child_roles=tuple("choice_%d" % i for i in range(len(children))),
             differentiable=all(child.differentiable for child in children),
         )
 
     def __str__(self) -> str:
         """Returns string representation of SelectDistribution object."""
-        return 'SelectDistribution(' + ','.join([str(u) for u in self.dists]) + ')'
+        return "SelectDistribution(" + ",".join([str(u) for u in self.dists]) + ")"
 
     def density(self, x: T) -> float:
         """Density of the child distribution selected for observation x.
@@ -122,7 +134,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         idx = self.choice_function(x)
         return self.dists[idx].log_density(x)
 
-    def seq_log_density(self, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]]) -> np.ndarray:
+    def seq_log_density(self, x: tuple[tuple[np.ndarray, ...], tuple[int, ...], tuple[Any, ...]]) -> np.ndarray:
         """Vectorized evaluation of the log-density on sequence encoded data x.
 
         The encoding groups observations by choice index: x[1][i] is the choice index of group i,
@@ -144,10 +156,12 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
             rv[xi[i]] = self.dists[idx[i]].seq_log_density(enc_tuple[i])
         return rv
 
-    def backend_seq_log_density(self, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]],
-                                engine: Any) -> Any:
+    def backend_seq_log_density(
+        self, x: tuple[tuple[np.ndarray, ...], tuple[int, ...], tuple[Any, ...]], engine: Any
+    ) -> Any:
         """Engine-neutral vectorized log-density for choice-grouped encodings."""
         from pysp.stats.backend import backend_seq_log_density
+
         xi, idx, enc_tuple = x
         sz = sum(len(u) for u in xi)
         rv = engine.zeros(sz)
@@ -157,64 +171,74 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['SelectDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["SelectDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked child parameters for homogeneous select-wrapper mixtures."""
         from pysp.stats.stacked import stacked_component_params
+
         count = dists[0].count
         choice_function = dists[0].choice_function
         if any(d.count != count or d.choice_function is not choice_function for d in dists):
-            raise ValueError('Stacked SelectDistribution components require matching choice routing.')
+            raise ValueError("Stacked SelectDistribution components require matching choice routing.")
         children = []
         for i in range(count):
             child_dists = [d.dists[i] for d in dists]
             try:
                 children.append(stacked_component_params(child_dists, engine))
             except ValueError as exc:
-                raise ValueError('Select choice %d child %s is not stackable: %s' %
-                                 (i, type(child_dists[0]).__name__, exc))
-        return {'children': tuple(children), 'choice_function': choice_function, 'num_components': len(dists)}
+                raise ValueError(
+                    "Select choice %d child %s is not stackable: %s" % (i, type(child_dists[0]).__name__, exc)
+                )
+        return {"children": tuple(children), "choice_function": choice_function, "num_components": len(dists)}
 
     @classmethod
-    def backend_stacked_log_density(cls, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]],
-                                    params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(
+        cls, x: tuple[tuple[np.ndarray, ...], tuple[int, ...], tuple[Any, ...]], params: dict[str, Any], engine: Any
+    ) -> Any:
         """Return an ``(n, k)`` matrix of choice-routed select log densities."""
         from pysp.stats.stacked import stacked_component_log_density
+
         xi, idx, enc_tuple = x
         sz = sum(len(u) for u in xi)
-        rv = engine.zeros((sz, int(params['num_components'])))
+        rv = engine.zeros((sz, int(params["num_components"])))
         for i in range(len(idx)):
-            child_scores = stacked_component_log_density(enc_tuple[i], params['children'][idx[i]], engine)
+            child_scores = stacked_component_log_density(enc_tuple[i], params["children"][idx[i]], engine)
             rv = engine.index_add(rv, engine.asarray(xi[i]), child_scores)
         return rv
 
     @classmethod
     def backend_stacked_sufficient_statistics_with_estimator(
-            cls, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]], weights: Any,
-            params: Dict[str, Any], engine: Any, estimator: Any) -> Tuple[List[Tuple[Any, Any]], ...]:
+        cls,
+        x: tuple[tuple[np.ndarray, ...], tuple[int, ...], tuple[Any, ...]],
+        weights: Any,
+        params: dict[str, Any],
+        engine: Any,
+        estimator: Any,
+    ) -> tuple[list[tuple[Any, Any]], ...]:
         """Return per-component legacy select sufficient statistics."""
-        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
-            unstack_component_stats
+        from pysp.stats.stacked import (
+            StackedEstimatorView,
+            stacked_component_sufficient_statistics,
+            unstack_component_stats,
+        )
+
         xi, idx, enc_tuple = x
         ww = engine.asarray(weights)
-        num_components = int(tuple(getattr(ww, 'shape', (0, 0)))[1])
-        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+        num_components = int(tuple(getattr(ww, "shape", (0, 0)))[1])
+        outer_estimators = tuple(getattr(estimator, "estimators", ()))
         by_choice = {choice: pos for pos, choice in enumerate(idx)}
-        per_component: List[List[Tuple[Any, Any]]] = [
-            [None] * len(params['children']) for _ in range(num_components)
-        ]
+        per_component: list[list[tuple[Any, Any]]] = [[None] * len(params["children"]) for _ in range(num_components)]
 
-        for choice, route in enumerate(params['children']):
+        for choice, route in enumerate(params["children"]):
             component_estimators = tuple(
-                getattr(component_est, 'estimators', ())[choice]
+                getattr(component_est, "estimators", ())[choice]
                 for component_est in outer_estimators
-                if len(getattr(component_est, 'estimators', ())) > choice
+                if len(getattr(component_est, "estimators", ())) > choice
             )
             group_pos = by_choice.get(choice)
             if group_pos is None:
                 child_counts = [0.0] * num_components
                 child_stats_by_component = tuple(
-                    _child_accumulator_factory(component_est).make().value()
-                    for component_est in component_estimators
+                    _child_accumulator_factory(component_est).make().value() for component_est in component_estimators
                 )
                 if len(child_stats_by_component) != num_components:
                     child_stats_by_component = tuple(None for _ in range(num_components))
@@ -222,10 +246,12 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
                 row_index = engine.asarray(xi[group_pos])
                 group_weights = ww[row_index]
                 child_counts = engine.sum(group_weights, axis=0)
-                child_estimator = StackedEstimatorView(component_estimators) \
-                    if len(component_estimators) == num_components else None
+                child_estimator = (
+                    StackedEstimatorView(component_estimators) if len(component_estimators) == num_components else None
+                )
                 child_stats = stacked_component_sufficient_statistics(
-                    enc_tuple[group_pos], group_weights, route, engine, child_estimator)
+                    enc_tuple[group_pos], group_weights, route, engine, child_estimator
+                )
                 child_stats_by_component = unstack_component_stats(child_stats, num_components)
             for component in range(num_components):
                 per_component[component][choice] = (
@@ -234,12 +260,13 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
                 )
         return tuple(per_component)
 
-    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: list[Any], recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for autograd fitting."""
         from pysp.stats.gradient import SelectGradientFitState
+
         return SelectGradientFitState(self, [recurse(dist, engine, torch, leaves) for dist in self.dists])
 
-    def sampler(self, seed: Optional[int] = None) -> 'SelectSampler':
+    def sampler(self, seed: int | None = None) -> "SelectSampler":
         """Creates a SelectSampler object for sampling from the child distributions.
 
         Args:
@@ -251,7 +278,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         """
         return SelectSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'SelectEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "SelectEstimator":
         """Creates a SelectEstimator with one child estimator per child distribution.
 
         Args:
@@ -263,7 +290,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         """
         return SelectEstimator([d.estimator(pseudo_count=pseudo_count) for d in self.dists], self.choice_function)
 
-    def dist_to_encoder(self) -> 'SelectDataEncoder':
+    def dist_to_encoder(self) -> "SelectDataEncoder":
         """Creates a SelectDataEncoder object for encoding sequences of SelectDistribution data.
 
         Returns:
@@ -273,7 +300,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         encoders = [d.dist_to_encoder() for d in self.dists]
         return SelectDataEncoder(encoders=encoders, choice_function=self.choice_function)
 
-    def enumerator(self) -> 'SelectEnumerator':
+    def enumerator(self) -> "SelectEnumerator":
         """Creates a SelectEnumerator iterating the union of child supports in descending
         select-density order. All children must support enumeration."""
         return SelectEnumerator(self)
@@ -299,26 +326,27 @@ class SelectEnumerator(DistributionEnumerator):
 
         """
         super().__init__(dist)
-        streams = [BufferedStream(child_enumerator(d, 'SelectDistribution.dists[%d]' % i))
-                   for i, d in enumerate(dist.dists)]
+        streams = [
+            BufferedStream(child_enumerator(d, "SelectDistribution.dists[%d]" % i)) for i, d in enumerate(dist.dists)
+        ]
         log_offsets = [0.0] * len(streams)
 
         # Zero-probability candidates (selected child assigns no mass) are re-scored to -inf and
         # skipped; suppress the harmless log(0) warning that some children emit in that case.
         def exact_log_density(x):
-            with np.errstate(divide='ignore'):
+            with np.errstate(divide="ignore"):
                 return dist.log_density(x)
 
         self._union = best_first_union_max(streams, log_offsets, exact_log_density)
 
-    def __next__(self) -> Tuple[Any, float]:
+    def __next__(self) -> tuple[Any, float]:
         return next(self._union)
 
 
 class SelectSampler(DistributionSampler):
     """SelectSampler draws samples from each child distribution of a SelectDistribution."""
 
-    def __init__(self, dist: SelectDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: SelectDistribution, seed: int | None = None) -> None:
         """SelectSampler object used to generate samples from the children of a SelectDistribution.
 
         Args:
@@ -335,7 +363,7 @@ class SelectSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist_samplers = [d.sampler(seed=self.rng.randint(maxint)) for d in dist.dists]
 
-    def sample(self, size: Optional[int] = None):
+    def sample(self, size: int | None = None):
         """Draw one sample from every child distribution.
 
         Note: this samples each child independently and groups the draws, returning a tuple with
@@ -359,8 +387,9 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
     """SelectEstimatorAccumulator accumulates sufficient statistics for each child distribution,
     routing each observation to one child accumulator via the choice function."""
 
-    def __init__(self, accumulators: Sequence[SequenceEncodableStatisticAccumulator],
-                 choice_function: Callable[[T], int]) -> None:
+    def __init__(
+        self, accumulators: Sequence[SequenceEncodableStatisticAccumulator], choice_function: Callable[[T], int]
+    ) -> None:
         """SelectEstimatorAccumulator object for aggregating sufficient statistics.
 
         Args:
@@ -385,9 +414,9 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = len(accumulators)
 
         self._rng_init = False
-        self._acc_rng: Optional[List[RandomState]] = None
+        self._acc_rng: list[RandomState] | None = None
 
-    def update(self, x: T, weight: float, estimate: Optional[SelectDistribution]) -> None:
+    def update(self, x: T, weight: float, estimate: SelectDistribution | None) -> None:
         """Route one weighted observation to the accumulator of the selected child.
 
         Args:
@@ -428,8 +457,12 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulators[idx].initialize(x, weight, self._acc_rng[idx])
         self.weights[idx] += weight
 
-    def seq_update(self, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]],
-                   weights: np.ndarray, estimate: Optional[SelectDistribution]) -> None:
+    def seq_update(
+        self,
+        x: tuple[tuple[np.ndarray, ...], tuple[int, ...], tuple[Any, ...]],
+        weights: np.ndarray,
+        estimate: SelectDistribution | None,
+    ) -> None:
         """Vectorized update of the child accumulators from sequence encoded data x.
 
         Each encoded group i carries its choice index x[1][i]; the group's encoded data and
@@ -452,23 +485,31 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[j].seq_update(enc_tuple[i], w, estimate.dists[j] if estimate is not None else None)
             self.weights[j] += np.sum(w)
 
-    def seq_update_engine(self, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]],
-                          weights: Any, estimate: Optional[SelectDistribution], engine: Any) -> None:
+    def seq_update_engine(
+        self,
+        x: tuple[tuple[np.ndarray, ...], tuple[int, ...], tuple[Any, ...]],
+        weights: Any,
+        estimate: SelectDistribution | None,
+        engine: Any,
+    ) -> None:
         """Engine-resident E-step: each group's weights are gathered on the active engine and routed
         to the chosen child accumulator through the engine. Matches seq_update.
         """
         from pysp.stats.backend import child_seq_update
+
         xi, idx, enc_tuple = x
         w_eng = engine.asarray(weights)
         for i in range(len(idx)):
             j = idx[i]
             w = w_eng[np.asarray(xi[i], dtype=np.int64)]
-            child_seq_update(self.accumulators[j], enc_tuple[i], w,
-                             estimate.dists[j] if estimate is not None else None, engine)
+            child_seq_update(
+                self.accumulators[j], enc_tuple[i], w, estimate.dists[j] if estimate is not None else None, engine
+            )
             self.weights[j] += float(engine.to_numpy(engine.sum(w)))
 
-    def seq_initialize(self, x: Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]],
-                       weights: np.ndarray, rng: RandomState) -> None:
+    def seq_initialize(
+        self, x: tuple[tuple[np.ndarray, ...], tuple[int, ...], tuple[Any, ...]], weights: np.ndarray, rng: RandomState
+    ) -> None:
         """Vectorized initialization of the child accumulators from sequence encoded data x.
 
         Each encoded group i carries its choice index x[1][i]; the group's encoded data and
@@ -493,7 +534,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[j].seq_initialize(enc_tuple[i], w, self._acc_rng[j])
             self.weights[j] += np.sum(w)
 
-    def combine(self, suff_stat: Sequence[Tuple[float, Any]]) -> 'SelectEstimatorAccumulator':
+    def combine(self, suff_stat: Sequence[tuple[float, Any]]) -> "SelectEstimatorAccumulator":
         """Aggregate sufficient statistics suff_stat with this accumulator's statistics.
 
         Args:
@@ -510,11 +551,11 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def value(self) -> List[Tuple[float, Any]]:
+    def value(self) -> list[tuple[float, Any]]:
         """Returns the sufficient statistics as a list of (weight, child value) pairs."""
         return [(w, acc.value()) for w, acc in zip(self.weights, self.accumulators)]
 
-    def from_value(self, x: Sequence[Tuple[float, Any]]) -> 'SelectEstimatorAccumulator':
+    def from_value(self, x: Sequence[tuple[float, Any]]) -> "SelectEstimatorAccumulator":
         """Set the accumulator's sufficient statistics to x.
 
         Args:
@@ -531,13 +572,13 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> 'SelectEstimatorAccumulator':
+    def scale(self, c: float) -> "SelectEstimatorAccumulator":
         for i in range(self.count):
             self.weights[i] *= c
             self.accumulators[i].scale(c)
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Invoke key_merge on each child accumulator.
 
         Args:
@@ -550,7 +591,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         for acc in self.accumulators:
             acc.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Invoke key_replace on each child accumulator.
 
         Args:
@@ -563,7 +604,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         for acc in self.accumulators:
             acc.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'SelectDataEncoder':
+    def acc_to_encoder(self) -> "SelectDataEncoder":
         """Creates a SelectDataEncoder object for encoding sequences of SelectDistribution data.
 
         Returns:
@@ -578,8 +619,7 @@ class SelectEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
     """SelectEstimatorAccumulatorFactory creates SelectEstimatorAccumulator objects from the
     child estimators."""
 
-    def __init__(self, estimators: Sequence[ParameterEstimator],
-                 choice_function: Callable[[T], int]) -> None:
+    def __init__(self, estimators: Sequence[ParameterEstimator], choice_function: Callable[[T], int]) -> None:
         """SelectEstimatorAccumulatorFactory object.
 
         Args:
@@ -594,22 +634,22 @@ class SelectEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         self.estimators = estimators
         self.choice_function = choice_function
 
-    def make(self) -> 'SelectEstimatorAccumulator':
+    def make(self) -> "SelectEstimatorAccumulator":
         """Creates a SelectEstimatorAccumulator with one child accumulator per child estimator.
 
         Returns:
             SelectEstimatorAccumulator object.
 
         """
-        return SelectEstimatorAccumulator([_child_accumulator_factory(x).make() for x in self.estimators],
-                                          self.choice_function)
+        return SelectEstimatorAccumulator(
+            [_child_accumulator_factory(x).make() for x in self.estimators], self.choice_function
+        )
 
 
 class SelectEstimator(ParameterEstimator):
     """SelectEstimator estimates a SelectDistribution from child sufficient statistics."""
 
-    def __init__(self, estimators: Sequence[ParameterEstimator],
-                 choice_function: Callable[[T], int]) -> None:
+    def __init__(self, estimators: Sequence[ParameterEstimator], choice_function: Callable[[T], int]) -> None:
         """SelectEstimator object.
 
         Args:
@@ -626,7 +666,7 @@ class SelectEstimator(ParameterEstimator):
         self.choice_function = choice_function
         self.count = len(estimators)
 
-    def accumulator_factory(self) -> 'SelectEstimatorAccumulatorFactory':
+    def accumulator_factory(self) -> "SelectEstimatorAccumulatorFactory":
         """Creates a SelectEstimatorAccumulatorFactory from the child estimators.
 
         Returns:
@@ -635,7 +675,7 @@ class SelectEstimator(ParameterEstimator):
         """
         return SelectEstimatorAccumulatorFactory(self.estimators, self.choice_function)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Sequence[Tuple[float, Any]]) -> 'SelectDistribution':
+    def estimate(self, nobs: float | None, suff_stat: Sequence[tuple[float, Any]]) -> "SelectDistribution":
         """Estimate a SelectDistribution from aggregated sufficient statistics.
 
         Args:
@@ -647,8 +687,9 @@ class SelectEstimator(ParameterEstimator):
             SelectDistribution object.
 
         """
-        return (SelectDistribution([est.estimate(ss[0], ss[1]) for est, ss in zip(self.estimators, suff_stat)],
-                                   self.choice_function))
+        return SelectDistribution(
+            [est.estimate(ss[0], ss[1]) for est, ss in zip(self.estimators, suff_stat)], self.choice_function
+        )
 
 
 class SelectDataEncoder(DataSequenceEncoder):
@@ -672,7 +713,7 @@ class SelectDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns string representation of SelectDataEncoder with its child encoders."""
-        return 'SelectDataEncoder(' + ','.join([str(encoder) for encoder in self.encoders]) + ')'
+        return "SelectDataEncoder(" + ",".join([str(encoder) for encoder in self.encoders]) + ")"
 
     def __eq__(self, other: object) -> bool:
         """Checks if an object is an equivalent SelectDataEncoder.
@@ -700,7 +741,7 @@ class SelectDataEncoder(DataSequenceEncoder):
         else:
             return False
 
-    def seq_encode(self, x: Sequence[T]) -> Tuple[Tuple[np.ndarray, ...], Tuple[int, ...], Tuple[Any, ...]]:
+    def seq_encode(self, x: Sequence[T]) -> tuple[tuple[np.ndarray, ...], tuple[int, ...], tuple[Any, ...]]:
         """Encode a sequence of iid SelectDistribution observations for vectorized "seq_" calls.
 
         Observations are grouped by their choice index, in order of first appearance. The
@@ -738,6 +779,7 @@ class SelectDataEncoder(DataSequenceEncoder):
             idx_enc_vals.append(self.encoders[keys].seq_encode(vals[1]))
 
         return tuple(idx_xi), tuple(idx_keys), tuple(idx_enc_vals)
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 SelectAccumulator = SelectEstimatorAccumulator

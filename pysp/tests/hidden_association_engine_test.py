@@ -1,16 +1,18 @@
 """Engine-resident E-step parity for the hidden association model (numpy + torch)."""
+
 import unittest
 
 import numpy as np
 
+from pysp.engines import NUMPY_ENGINE
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.conditional import ConditionalDistribution, ConditionalDistributionEstimator
-from pysp.stats.hidden_association import (HiddenAssociationDistribution, HiddenAssociationEstimator)
-from pysp.engines import NUMPY_ENGINE
+from pysp.stats.hidden_association import HiddenAssociationDistribution, HiddenAssociationEstimator
 
 try:
     from pysp.engines import TorchEngine
-    _TORCH = TorchEngine(device='cpu', dtype='float64')
+
+    _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
 
@@ -32,26 +34,28 @@ def _flatten(value):
 
 
 class HiddenAssociationEngineTestCase(unittest.TestCase):
-
     def setUp(self):
         self.dist = HiddenAssociationDistribution(
-            cond_dist=ConditionalDistribution({
-                'a': CategoricalDistribution({'x': 0.80, 'y': 0.20}),
-                'b': CategoricalDistribution({'x': 0.25, 'y': 0.75}),
-            }),
-            len_dist=CategoricalDistribution({0.0: 0.10, 2.0: 0.30, 3.0: 0.60}))
+            cond_dist=ConditionalDistribution(
+                {
+                    "a": CategoricalDistribution({"x": 0.80, "y": 0.20}),
+                    "b": CategoricalDistribution({"x": 0.25, "y": 0.75}),
+                }
+            ),
+            len_dist=CategoricalDistribution({0.0: 0.10, 2.0: 0.30, 3.0: 0.60}),
+        )
         self.data = [
-            ([('a', 2.0), ('b', 1.0)], [('x', 1.0), ('y', 2.0)]),
-            ([('b', 3.0)], [('y', 2.0)]),
-            ([('a', 1.0)], []),
-            ([('a', 1.0), ('b', 2.0)], [('x', 3.0), ('y', 1.0)]),
+            ([("a", 2.0), ("b", 1.0)], [("x", 1.0), ("y", 2.0)]),
+            ([("b", 3.0)], [("y", 2.0)]),
+            ([("a", 1.0)], []),
+            ([("a", 1.0), ("b", 2.0)], [("x", 3.0), ("y", 1.0)]),
         ]
         self.weights = np.array([1.0, 0.6, 1.4, 0.9])
         self.est = HiddenAssociationEstimator(
-            cond_estimator=ConditionalDistributionEstimator(
-                {'a': CategoricalEstimator(), 'b': CategoricalEstimator()}),
-            len_estimator=CategoricalEstimator())
-        self.engines = [('numpy', NUMPY_ENGINE)] + ([('torch', _TORCH)] if _TORCH is not None else [])
+            cond_estimator=ConditionalDistributionEstimator({"a": CategoricalEstimator(), "b": CategoricalEstimator()}),
+            len_estimator=CategoricalEstimator(),
+        )
+        self.engines = [("numpy", NUMPY_ENGINE)] + ([("torch", _TORCH)] if _TORCH is not None else [])
 
     def test_engine_estep_parity(self):
         enc = self.dist.dist_to_encoder().seq_encode(self.data)
@@ -61,13 +65,16 @@ class HiddenAssociationEngineTestCase(unittest.TestCase):
         for name, engine in self.engines:
             with self.subTest(engine=name):
                 kernel = self.dist.kernel(engine=engine, estimator=self.est)
-                self.assertEqual(type(kernel).__name__, 'HiddenAssociationKernel')
+                self.assertEqual(type(kernel).__name__, "HiddenAssociationKernel")
                 value = kernel.accumulate(enc, self.weights)
-                self.assertTrue(np.allclose(_flatten(hv[0]), _flatten(value[0]), atol=1.0e-7),
-                                '%s conditional suff-stats differ' % name)
-                self.assertTrue(np.allclose(_flatten(hv[2]), _flatten(value[2]), atol=1.0e-8),
-                                '%s size suff-stats differ' % name)
+                self.assertTrue(
+                    np.allclose(_flatten(hv[0]), _flatten(value[0]), atol=1.0e-7),
+                    "%s conditional suff-stats differ" % name,
+                )
+                self.assertTrue(
+                    np.allclose(_flatten(hv[2]), _flatten(value[2]), atol=1.0e-8), "%s size suff-stats differ" % name
+                )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

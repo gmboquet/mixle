@@ -3,8 +3,10 @@
 This module handles Bernoulli edges conditional on observed or fixed node block
 assignments. It does not marginalize over unknown block assignments.
 """
+
 import math
-from typing import Any, Dict, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -41,19 +43,28 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_object')
 
-    def __init__(self, block_probs: Any, block_assignments: Optional[Any] = None,
-                 block_prior: Optional[Any] = None, directed: bool = False,
-                 self_loops: bool = False, include_assignment_prior: bool = False,
-                 name: Optional[str] = None, keys: Optional[str] = None) -> None:
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_object")
+
+    def __init__(
+        self,
+        block_probs: Any,
+        block_assignments: Any | None = None,
+        block_prior: Any | None = None,
+        directed: bool = False,
+        self_loops: bool = False,
+        include_assignment_prior: bool = False,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         probs = _validate_block_probs(block_probs)
         if not directed and not np.allclose(probs, probs.T):
-            raise ValueError('undirected block_probs must be symmetric.')
+            raise ValueError("undirected block_probs must be symmetric.")
         self.block_probs = probs
         self.num_blocks = int(probs.shape[0])
-        self.block_assignments = None if block_assignments is None else _as_assignments(
-            block_assignments, len(block_assignments))
+        self.block_assignments = (
+            None if block_assignments is None else _as_assignments(block_assignments, len(block_assignments))
+        )
         if self.block_assignments is not None:
             _validate_block_indices(self.block_assignments, self.num_blocks)
         self.block_prior = _normalize_prior(block_prior, self.num_blocks)
@@ -65,28 +76,41 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         self.keys = keys
 
     def __str__(self) -> str:
-        return 'StochasticBlockGraphDistribution(num_blocks=%d, directed=%s, self_loops=%s, name=%s, keys=%s)' % (
-            self.num_blocks, repr(self.directed), repr(self.self_loops), repr(self.name), repr(self.keys))
+        return "StochasticBlockGraphDistribution(num_blocks=%d, directed=%s, self_loops=%s, name=%s, keys=%s)" % (
+            self.num_blocks,
+            repr(self.directed),
+            repr(self.self_loops),
+            repr(self.name),
+            repr(self.keys),
+        )
 
     @classmethod
-    def from_model(cls, model: Any, block_prior: Optional[Any] = None,
-                   include_assignment_prior: bool = False) -> 'StochasticBlockGraphDistribution':
-        return cls(model.block_probs, block_assignments=model.block_assignments,
-                   block_prior=block_prior, directed=model.directed, self_loops=model.self_loops,
-                   include_assignment_prior=include_assignment_prior, name=getattr(model, 'name', None))
+    def from_model(
+        cls, model: Any, block_prior: Any | None = None, include_assignment_prior: bool = False
+    ) -> "StochasticBlockGraphDistribution":
+        return cls(
+            model.block_probs,
+            block_assignments=model.block_assignments,
+            block_prior=block_prior,
+            directed=model.directed,
+            self_loops=model.self_loops,
+            include_assignment_prior=include_assignment_prior,
+            name=getattr(model, "name", None),
+        )
 
     def to_model(self) -> Any:
         if self.block_assignments is None:
-            raise ValueError('fixed block_assignments are required to convert to StochasticBlockGraphModel.')
+            raise ValueError("fixed block_assignments are required to convert to StochasticBlockGraphModel.")
         from pysp.models.random_graph import StochasticBlockGraphModel
+
         return StochasticBlockGraphModel(
-            self.block_probs, self.block_assignments, directed=self.directed,
-            self_loops=self.self_loops, name=self.name)
+            self.block_probs, self.block_assignments, directed=self.directed, self_loops=self.self_loops, name=self.name
+        )
 
     def _obs_with_assignments(self, x: Any) -> GraphObservation:
         obs = _extract_observation(x, directed=self.directed, fallback_assignments=self.block_assignments)
         if obs.block_assignments is None:
-            raise ValueError('block assignments are required for SBM log-density.')
+            raise ValueError("block assignments are required for SBM log-density.")
         _validate_block_indices(obs.block_assignments, self.num_blocks)
         return obs
 
@@ -145,21 +169,22 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
             return float(np.sum(self.block_prior * np.diag(self.block_probs)))
         return float(self.block_prior @ self.block_probs @ self.block_prior)
 
-    def link_probability(self, i: int, j: int, block_assignments: Optional[Any] = None) -> float:
+    def link_probability(self, i: int, j: int, block_assignments: Any | None = None) -> float:
         if i == j and not self.self_loops:
             return 0.0
-        assignments = self.block_assignments if block_assignments is None else np.asarray(block_assignments, dtype=np.int64)
+        assignments = (
+            self.block_assignments if block_assignments is None else np.asarray(block_assignments, dtype=np.int64)
+        )
         if assignments is None:
             return self._prior_predictive_link_probability(same_node=(i == j))
         _validate_block_indices(assignments, self.num_blocks)
         return float(self.block_probs[int(assignments[i]), int(assignments[j])])
 
-    def edge_marginals(self, block_assignments: Optional[Any] = None,
-                       num_nodes: Optional[int] = None) -> np.ndarray:
+    def edge_marginals(self, block_assignments: Any | None = None, num_nodes: int | None = None) -> np.ndarray:
         if block_assignments is None:
             if self.block_assignments is None:
                 if num_nodes is None:
-                    raise ValueError('block_assignments or num_nodes is required.')
+                    raise ValueError("block_assignments or num_nodes is required.")
                 n = int(num_nodes)
                 edge_p = self._prior_predictive_link_probability(same_node=False)
                 mat = np.full((n, n), edge_p, dtype=np.float64)
@@ -189,19 +214,19 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
             return counts / counts.sum() if counts.sum() > 0.0 else self.block_prior.copy()
         return self.block_prior.copy()
 
-    def posterior(self, x: Any) -> Dict[str, Any]:
+    def posterior(self, x: Any) -> dict[str, Any]:
         obs = self._obs_with_assignments(x)
         counts = np.bincount(obs.block_assignments, minlength=self.num_blocks).astype(np.float64)
         return {
-            'block_counts': counts,
-            'block_marginals': counts / counts.sum() if counts.sum() > 0.0 else self.block_prior.copy(),
-            'edge_marginals': self.edge_marginals(obs.block_assignments),
+            "block_counts": counts,
+            "block_marginals": counts / counts.sum() if counts.sum() > 0.0 else self.block_prior.copy(),
+            "edge_marginals": self.edge_marginals(obs.block_assignments),
         }
 
-    def sampler(self, seed: Optional[int] = None) -> 'StochasticBlockGraphSampler':
+    def sampler(self, seed: int | None = None) -> "StochasticBlockGraphSampler":
         return StochasticBlockGraphSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'StochasticBlockGraphEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "StochasticBlockGraphEstimator":
         return StochasticBlockGraphEstimator(
             num_blocks=self.num_blocks,
             block_assignments=self.block_assignments,
@@ -222,25 +247,25 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
 class StochasticBlockGraphSampler(DistributionSampler):
     """Sample binary graphs from an SBM."""
 
-    def __init__(self, dist: StochasticBlockGraphDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: StochasticBlockGraphDistribution, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = RandomState(seed)
 
     def sample_assignments(self, num_nodes: int) -> np.ndarray:
         n = int(num_nodes)
         if n < 0:
-            raise ValueError('num_nodes must be non-negative.')
+            raise ValueError("num_nodes must be non-negative.")
         return self.rng.choice(self.dist.num_blocks, size=n, p=self.dist.block_prior).astype(np.int64)
 
-    def sample_graph(self, num_nodes: Optional[int] = None,
-                     block_assignments: Optional[Any] = None,
-                     return_assignments: bool = False) -> Any:
+    def sample_graph(
+        self, num_nodes: int | None = None, block_assignments: Any | None = None, return_assignments: bool = False
+    ) -> Any:
         if block_assignments is None:
             if self.dist.block_assignments is not None and num_nodes is None:
                 assignments = self.dist.block_assignments
             else:
                 if num_nodes is None:
-                    raise ValueError('num_nodes is required when block_assignments are not fixed.')
+                    raise ValueError("num_nodes is required when block_assignments are not fixed.")
                 assignments = self.sample_assignments(int(num_nodes))
         else:
             assignments = np.asarray(block_assignments, dtype=np.int64)
@@ -256,14 +281,21 @@ class StochasticBlockGraphSampler(DistributionSampler):
                 mat[j, i] = edge
         return (mat, assignments.copy()) if return_assignments else mat
 
-    def sample(self, size: Optional[int] = None, num_nodes: Optional[int] = None,
-               block_assignments: Optional[Any] = None, return_assignments: bool = False) -> Any:
+    def sample(
+        self,
+        size: int | None = None,
+        num_nodes: int | None = None,
+        block_assignments: Any | None = None,
+        return_assignments: bool = False,
+    ) -> Any:
         if size is None:
-            return self.sample_graph(num_nodes=num_nodes, block_assignments=block_assignments,
-                                     return_assignments=return_assignments)
+            return self.sample_graph(
+                num_nodes=num_nodes, block_assignments=block_assignments, return_assignments=return_assignments
+            )
         return [
-            self.sample_graph(num_nodes=num_nodes, block_assignments=block_assignments,
-                              return_assignments=return_assignments)
+            self.sample_graph(
+                num_nodes=num_nodes, block_assignments=block_assignments, return_assignments=return_assignments
+            )
             for _ in range(int(size))
         ]
 
@@ -271,9 +303,15 @@ class StochasticBlockGraphSampler(DistributionSampler):
 class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate block-pair edge counts for SBM fitting."""
 
-    def __init__(self, num_blocks: Optional[int] = None, block_assignments: Optional[Any] = None,
-                 directed: bool = False, self_loops: bool = False,
-                 name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        num_blocks: int | None = None,
+        block_assignments: Any | None = None,
+        directed: bool = False,
+        self_loops: bool = False,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         self.num_blocks = None if num_blocks is None else int(num_blocks)
         self.block_assignments = None if block_assignments is None else np.asarray(block_assignments, dtype=np.int64)
         if self.num_blocks is None and self.block_assignments is not None and self.block_assignments.size:
@@ -307,13 +345,13 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self.block_counts = c
         self.num_blocks = new
 
-    def update(self, x: Any, weight: float, estimate: Optional[StochasticBlockGraphDistribution]) -> None:
+    def update(self, x: Any, weight: float, estimate: StochasticBlockGraphDistribution | None) -> None:
         fallback = self.block_assignments
         if fallback is None and estimate is not None:
             fallback = estimate.block_assignments
         obs = _extract_observation(x, directed=self.directed, fallback_assignments=fallback)
         if obs.block_assignments is None:
-            raise ValueError('block assignments are required for SBM accumulation.')
+            raise ValueError("block assignments are required for SBM accumulation.")
         assignments = obs.block_assignments
         needed = int(assignments.max()) + 1 if assignments.size else 0
         self._ensure_capacity(max(needed, 0 if self.num_blocks is None else self.num_blocks))
@@ -330,18 +368,21 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
                 self.successes[b, a] += w * obs.adjacency[i, j]
                 self.totals[b, a] += w
 
-    def initialize(self, x: Any, weight: float, rng: Optional[RandomState]) -> None:
+    def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
         self.update(x, weight, None)
 
-    def seq_update(self, x: Sequence[GraphObservation], weights: np.ndarray,
-                   estimate: Optional[StochasticBlockGraphDistribution]) -> None:
+    def seq_update(
+        self, x: Sequence[GraphObservation], weights: np.ndarray, estimate: StochasticBlockGraphDistribution | None
+    ) -> None:
         for obs, weight in zip(x, weights):
             self.update(obs, float(weight), estimate)
 
-    def seq_initialize(self, x: Sequence[GraphObservation], weights: np.ndarray, rng: Optional[RandomState]) -> None:
+    def seq_initialize(self, x: Sequence[GraphObservation], weights: np.ndarray, rng: RandomState | None) -> None:
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]) -> 'StochasticBlockGraphAccumulator':
+    def combine(
+        self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
+    ) -> "StochasticBlockGraphAccumulator":
         successes, totals, block_counts, total_nodes, num_graphs = suff_stat
         self._ensure_capacity(successes.shape[0])
         k = successes.shape[0]
@@ -352,11 +393,12 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self.num_graphs += float(num_graphs)
         return self
 
-    def value(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
-        return (self.successes.copy(), self.totals.copy(), self.block_counts.copy(),
-                self.total_nodes, self.num_graphs)
+    def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+        return (self.successes.copy(), self.totals.copy(), self.block_counts.copy(), self.total_nodes, self.num_graphs)
 
-    def from_value(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]) -> 'StochasticBlockGraphAccumulator':
+    def from_value(
+        self, x: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
+    ) -> "StochasticBlockGraphAccumulator":
         successes, totals, block_counts, total_nodes, num_graphs = x
         self.successes = np.asarray(successes, dtype=np.float64).copy()
         self.totals = np.asarray(totals, dtype=np.float64).copy()
@@ -366,14 +408,14 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self.num_graphs = float(num_graphs)
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None:
             if self.key in stats_dict:
                 stats_dict[self.key].combine(self.value())
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None and self.key in stats_dict:
             self.from_value(stats_dict[self.key].value())
 
@@ -384,9 +426,15 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
 class StochasticBlockGraphAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for StochasticBlockGraphAccumulator."""
 
-    def __init__(self, num_blocks: Optional[int] = None, block_assignments: Optional[Any] = None,
-                 directed: bool = False, self_loops: bool = False,
-                 name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        num_blocks: int | None = None,
+        block_assignments: Any | None = None,
+        directed: bool = False,
+        self_loops: bool = False,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         self.num_blocks = None if num_blocks is None else int(num_blocks)
         self.block_assignments = None if block_assignments is None else np.asarray(block_assignments, dtype=np.int64)
         self.directed = bool(directed)
@@ -396,19 +444,32 @@ class StochasticBlockGraphAccumulatorFactory(StatisticAccumulatorFactory):
 
     def make(self) -> StochasticBlockGraphAccumulator:
         return StochasticBlockGraphAccumulator(
-            num_blocks=self.num_blocks, block_assignments=self.block_assignments,
-            directed=self.directed, self_loops=self.self_loops, name=self.name, keys=self.keys)
+            num_blocks=self.num_blocks,
+            block_assignments=self.block_assignments,
+            directed=self.directed,
+            self_loops=self.self_loops,
+            name=self.name,
+            keys=self.keys,
+        )
 
 
 class StochasticBlockGraphEstimator(ParameterEstimator):
     """Estimate an SBM from graphs with observed block assignments."""
 
-    def __init__(self, num_blocks: Optional[int] = None, block_assignments: Optional[Any] = None,
-                 directed: bool = False, self_loops: bool = False,
-                 pseudo_count: Optional[float] = None, prior_p: float = 0.5,
-                 block_prior: Optional[Any] = None, estimate_block_prior: bool = True,
-                 include_assignment_prior: bool = False, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        num_blocks: int | None = None,
+        block_assignments: Any | None = None,
+        directed: bool = False,
+        self_loops: bool = False,
+        pseudo_count: float | None = None,
+        prior_p: float = 0.5,
+        block_prior: Any | None = None,
+        estimate_block_prior: bool = True,
+        include_assignment_prior: bool = False,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         self.num_blocks = None if num_blocks is None else int(num_blocks)
         self.block_assignments = None if block_assignments is None else np.asarray(block_assignments, dtype=np.int64)
         if self.num_blocks is None and self.block_assignments is not None and self.block_assignments.size:
@@ -417,7 +478,9 @@ class StochasticBlockGraphEstimator(ParameterEstimator):
         self.self_loops = bool(self_loops)
         self.pseudo_count = pseudo_count
         self.prior_p = float(prior_p)
-        self.block_prior = None if block_prior is None or self.num_blocks is None else _normalize_prior(block_prior, self.num_blocks)
+        self.block_prior = (
+            None if block_prior is None or self.num_blocks is None else _normalize_prior(block_prior, self.num_blocks)
+        )
         self.estimate_block_prior = bool(estimate_block_prior)
         self.include_assignment_prior = bool(include_assignment_prior)
         self.name = name
@@ -425,11 +488,17 @@ class StochasticBlockGraphEstimator(ParameterEstimator):
 
     def accumulator_factory(self) -> StochasticBlockGraphAccumulatorFactory:
         return StochasticBlockGraphAccumulatorFactory(
-            num_blocks=self.num_blocks, block_assignments=self.block_assignments,
-            directed=self.directed, self_loops=self.self_loops, name=self.name, keys=self.keys)
+            num_blocks=self.num_blocks,
+            block_assignments=self.block_assignments,
+            directed=self.directed,
+            self_loops=self.self_loops,
+            name=self.name,
+            keys=self.keys,
+        )
 
-    def estimate(self, nobs: Optional[float],
-                 suff_stat: Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]) -> StochasticBlockGraphDistribution:
+    def estimate(
+        self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
+    ) -> StochasticBlockGraphDistribution:
         successes, totals, block_counts, total_nodes, num_graphs = suff_stat
         successes = np.asarray(successes, dtype=np.float64).copy()
         totals = np.asarray(totals, dtype=np.float64).copy()

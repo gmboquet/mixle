@@ -14,41 +14,59 @@ p_mat(x) = P_dist(x[0])*...*P_dist(x[n-1])*P_len(n),
 for an observation x of data type Sequence[T] having length n.
 
 """
+
+from collections.abc import Sequence
+from typing import Any, Optional, TypeVar
+
 import numpy as np
 from numpy.random import RandomState
+
 from pysp.arithmetic import maxrandint
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
-    DistributionEnumerator, EnumerationError, child_enumerator
-from pysp.utils.enumeration import BufferedStream, ProductEnumerator, LengthFrontierMerge
-from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullEstimator, NullDataEncoder, \
-    NullAccumulatorFactory
+from pysp.stats.null_dist import (
+    NullAccumulator,
+    NullAccumulatorFactory,
+    NullDataEncoder,
+    NullDistribution,
+    NullEstimator,
+)
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    EnumerationError,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+    child_enumerator,
+)
+from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, ProductEnumerator
 
-from typing import Optional, List, Any, Tuple, Sequence, TypeVar, Dict
+T = TypeVar("T")  # Data type of Sequence distribution dist.
+E1 = TypeVar("E1")  # Generic type of distribution encoding.
+E2 = TypeVar("E2")  # Generic type of length encoding.
+SS1 = TypeVar("SS1")  # Generic type for sufficient statistic of base dist.
+SS2 = TypeVar("SS2")  # Generic type for sufficient statistics of length dist.
 
-
-T = TypeVar('T') # Data type of Sequence distribution dist.
-E1 = TypeVar('E1') # Generic type of distribution encoding.
-E2 = TypeVar('E2') # Generic type of length encoding.
-SS1 = TypeVar('SS1') # Generic type for sufficient statistic of base dist.
-SS2 = TypeVar('SS2') # Generic type for sufficient statistics of length dist.
-
-E = Tuple[np.ndarray, np.ndarray, np.ndarray, E1, Optional[E2]]
+E = tuple[np.ndarray, np.ndarray, np.ndarray, E1, E2 | None]
 
 
 class SequenceDistribution(SequenceEncodableProbabilityDistribution):
-
     """Independent sequence distribution built from a component observation distribution."""
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
-        children = (self.dist,) if self.null_len_dist else (self.dist, self.len_dist)
-        return DistributionCapabilities(engine_ready=intersect_engine_ready(children),
-                                        kernel_status='numba_adapter')
 
-    def __init__(self, dist: SequenceEncodableProbabilityDistribution,
-                 len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 len_normalized: Optional[bool] = False, name: Optional[str] = None) -> None:
+        children = (self.dist,) if self.null_len_dist else (self.dist, self.len_dist)
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children), kernel_status="numba_adapter")
+
+    def __init__(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        len_normalized: bool | None = False,
+        name: str | None = None,
+    ) -> None:
         """SequenceDistribution object for sequence of iid observations from distribution a of data type T.
 
         Args:
@@ -76,23 +94,24 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+
         base = declaration_for(self.dist)
         length = None if self.null_len_dist else declaration_for(self.len_dist)
         children = tuple(d for d in (base, length) if d is not None)
         roles = []
         if base is not None:
-            roles.append('element')
+            roles.append("element")
         if length is not None:
-            roles.append('length')
+            roles.append("length")
         return DistributionDeclaration(
-            name='sequence',
+            name="sequence",
             distribution_type=type(self),
             parameters=(),
             statistics=(
-                StatisticSpec('elements', kind='child_stat'),
-                StatisticSpec('lengths', kind='child_stat'),
+                StatisticSpec("elements", kind="child_stat"),
+                StatisticSpec("lengths", kind="child_stat"),
             ),
-            support='sequence',
+            support="sequence",
             children=children,
             child_roles=tuple(roles),
             differentiable=all(child.differentiable for child in children),
@@ -105,7 +124,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         s3 = repr(self.len_normalized)
         s4 = repr(self.name)
 
-        return 'SequenceDistribution(%s, len_dist=%s, len_normalized=%s, name=%s)' % (s1, s2, s3, s4)
+        return "SequenceDistribution(%s, len_dist=%s, len_normalized=%s, name=%s)" % (s1, s2, s3, s4)
 
     def density(self, x: Sequence[T]) -> float:
         """Evaluate the density of SequenceDistribution at observed sequence x.
@@ -208,6 +227,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
     def backend_seq_log_density(self, x: E, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded sequences."""
         from pysp.stats.backend import backend_seq_log_density
+
         idx, icnt, inz, enc_seq, enc_nseq = x
         nseq = len(icnt)
         ll_sum = engine.zeros(nseq)
@@ -225,100 +245,111 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         return ll_sum
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['SequenceDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["SequenceDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked child routes for homogeneous sequence mixtures."""
         from pysp.stats.stacked import stacked_component_params
+
         len_normalized = bool(dists[0].len_normalized)
         null_len_dist = bool(dists[0].null_len_dist)
         if any(bool(d.len_normalized) != len_normalized or bool(d.null_len_dist) != null_len_dist for d in dists):
-            raise ValueError('Stacked SequenceDistribution components require matching length policy.')
+            raise ValueError("Stacked SequenceDistribution components require matching length policy.")
         try:
             element_route = stacked_component_params([d.dist for d in dists], engine)
         except ValueError as exc:
-            raise ValueError('Sequence element child %s is not stackable: %s' %
-                             (type(dists[0].dist).__name__, exc))
+            raise ValueError("Sequence element child %s is not stackable: %s" % (type(dists[0].dist).__name__, exc))
         length_route = None
         if not null_len_dist:
             try:
                 length_route = stacked_component_params([d.len_dist for d in dists], engine)
             except ValueError as exc:
-                raise ValueError('Sequence length child %s is not stackable: %s' %
-                                 (type(dists[0].len_dist).__name__, exc))
+                raise ValueError(
+                    "Sequence length child %s is not stackable: %s" % (type(dists[0].len_dist).__name__, exc)
+                )
         return {
-            'element_route': element_route,
-            'length_route': length_route,
-            'len_normalized': len_normalized,
-            'num_components': len(dists),
+            "element_route": element_route,
+            "length_route": length_route,
+            "len_normalized": len_normalized,
+            "num_components": len(dists),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: E, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of sequence log densities."""
         from pysp.stats.stacked import stacked_component_log_density
+
         idx, icnt, inz, enc_seq, enc_nseq = x
         nseq = len(icnt)
-        rv = engine.zeros((nseq, int(params['num_components'])))
+        rv = engine.zeros((nseq, int(params["num_components"])))
 
         if len(idx) > 0:
             eidx = engine.asarray(idx)
-            element_scores = stacked_component_log_density(enc_seq, params['element_route'], engine)
-            if params['len_normalized']:
+            element_scores = stacked_component_log_density(enc_seq, params["element_route"], engine)
+            if params["len_normalized"]:
                 element_scores = element_scores * engine.asarray(icnt)[eidx, None]
             rv = engine.index_add(rv, eidx, element_scores)
 
-        if params['length_route'] is not None and enc_nseq is not None:
-            rv = rv + stacked_component_log_density(enc_nseq, params['length_route'], engine)
+        if params["length_route"] is not None and enc_nseq is not None:
+            rv = rv + stacked_component_log_density(enc_nseq, params["length_route"], engine)
 
         return rv
 
     @classmethod
-    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any,
-                                                            params: Dict[str, Any], engine: Any,
-                                                            estimator: Any) -> Tuple[Any, ...]:
+    def backend_stacked_sufficient_statistics_with_estimator(
+        cls, x: E, weights: Any, params: dict[str, Any], engine: Any, estimator: Any
+    ) -> tuple[Any, ...]:
         """Return per-component legacy sequence sufficient statistics."""
-        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
-            unstack_component_stats
+        from pysp.stats.stacked import (
+            StackedEstimatorView,
+            stacked_component_sufficient_statistics,
+            unstack_component_stats,
+        )
+
         idx, icnt, inz, enc_seq, enc_nseq = x
         ww = engine.asarray(weights)
-        num_components = int(tuple(getattr(ww, 'shape', (0, 0)))[1])
-        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+        num_components = int(tuple(getattr(ww, "shape", (0, 0)))[1])
+        outer_estimators = tuple(getattr(estimator, "estimators", ()))
 
-        element_estimators = tuple(
-            getattr(component_est, 'estimator', None) for component_est in outer_estimators)
-        element_estimator = StackedEstimatorView(element_estimators) \
-            if len(element_estimators) == num_components else None
+        element_estimators = tuple(getattr(component_est, "estimator", None) for component_est in outer_estimators)
+        element_estimator = (
+            StackedEstimatorView(element_estimators) if len(element_estimators) == num_components else None
+        )
         if len(idx) > 0:
             eidx = engine.asarray(idx)
             element_weights = ww[eidx]
-            if params['len_normalized']:
+            if params["len_normalized"]:
                 element_weights = element_weights * engine.asarray(icnt)[eidx, None]
         else:
             element_weights = engine.zeros((0, num_components))
         element_stats = stacked_component_sufficient_statistics(
-            enc_seq, element_weights, params['element_route'], engine, element_estimator)
+            enc_seq, element_weights, params["element_route"], engine, element_estimator
+        )
         element_by_component = unstack_component_stats(element_stats, num_components)
 
-        if params['length_route'] is None or enc_nseq is None:
+        if params["length_route"] is None or enc_nseq is None:
             length_by_component = tuple(None for _ in range(num_components))
         else:
             length_estimators = tuple(
-                getattr(component_est, 'len_estimator', None) for component_est in outer_estimators)
-            length_estimator = StackedEstimatorView(length_estimators) \
-                if len(length_estimators) == num_components else None
+                getattr(component_est, "len_estimator", None) for component_est in outer_estimators
+            )
+            length_estimator = (
+                StackedEstimatorView(length_estimators) if len(length_estimators) == num_components else None
+            )
             length_stats = stacked_component_sufficient_statistics(
-                enc_nseq, ww, params['length_route'], engine, length_estimator)
+                enc_nseq, ww, params["length_route"], engine, length_estimator
+            )
             length_by_component = unstack_component_stats(length_stats, num_components)
 
         return tuple((element_by_component[i], length_by_component[i]) for i in range(num_components))
 
-    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: list[Any], recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for autograd fitting."""
         from pysp.stats.gradient import SequenceGradientFitState
+
         child = recurse(self.dist, engine, torch, leaves)
         len_child = None if self.null_len_dist else recurse(self.len_dist, engine, torch, leaves)
         return SequenceGradientFitState(self, child, len_child)
 
-    def sampler(self, seed: Optional[int] = None) -> 'SequenceSampler':
+    def sampler(self, seed: int | None = None) -> "SequenceSampler":
         """Create a SequenceSampler object from instance of SequenceDistribution.
 
         Note: If member len_dist (SequenceEncodableDistribution) is NullDistribution() and or not compatible with
@@ -332,18 +363,22 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if self.null_len_dist:
-            raise Exception('Error: len_dist cannot be none for SequenceDistribution.sampler(seed:Optional[int]=None).')
+            raise Exception("Error: len_dist cannot be none for SequenceDistribution.sampler(seed:Optional[int]=None).")
         else:
             return SequenceSampler(self.dist, self.len_dist, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'SequenceEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "SequenceEstimator":
         """Create SequenceEstimator from instance of SequenceDistribution with pseudo_count passed if not None."""
         len_est = self.len_dist.estimator(pseudo_count=pseudo_count)
 
-        return SequenceEstimator(self.dist.estimator(pseudo_count=pseudo_count), len_estimator=len_est,
-                                 len_normalized=self.len_normalized, name=self.name)
+        return SequenceEstimator(
+            self.dist.estimator(pseudo_count=pseudo_count),
+            len_estimator=len_est,
+            len_normalized=self.len_normalized,
+            name=self.name,
+        )
 
-    def dist_to_encoder(self) -> 'SequenceDataEncoder':
+    def dist_to_encoder(self) -> "SequenceDataEncoder":
         """Create SequenceDataEncoder for encoding sequences of iid observations of SequenceDistribution.
 
         Base distribution DataSequenceEncoder and length distribution DataSequenceEncoder objects are passed.
@@ -357,7 +392,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         encoders = (dist_encoder, len_encoder)
         return SequenceDataEncoder(encoders=encoders)
 
-    def enumerator(self) -> 'SequenceEnumerator':
+    def enumerator(self) -> "SequenceEnumerator":
         """Returns SequenceEnumerator iterating sequences in descending probability order."""
         return SequenceEnumerator(self)
 
@@ -376,19 +411,20 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.utils.quantization_semiring import CountSemiring
 
         if self.null_len_dist:
-            raise EnumerationError(self, reason='no length distribution is modeled (len_dist is Null)')
+            raise EnumerationError(self, reason="no length distribution is modeled (len_dist is Null)")
         if self.len_normalized:
-            raise EnumerationError(self, reason='len_normalized densities are not enumerable')
+            raise EnumerationError(self, reason="len_normalized densities are not enumerable")
 
         sr = CountSemiring()
-        elem_index, elem_truncated = child_count_index(self.dist, 'SequenceDistribution.dist',
-                                                       quantizer, max_fine_bucket)
+        elem_index, elem_truncated = child_count_index(
+            self.dist, "SequenceDistribution.dist", quantizer, max_fine_bucket
+        )
         truncated = elem_truncated
 
         # Collect lengths (descending probability) whose length-term bucket is within the bound.
-        lengths: List[Tuple[int, float]] = []  # (L, lp_len)
+        lengths: list[tuple[int, float]] = []  # (L, lp_len)
         _LEN_CAP = 1 << 24
-        for length, lp_len in child_enumerator(self.len_dist, 'SequenceDistribution.len_dist'):
+        for length, lp_len in child_enumerator(self.len_dist, "SequenceDistribution.len_dist"):
             if not isinstance(length, (int, np.integer)) or length < 0:
                 continue
             if lp_len == -np.inf:
@@ -426,7 +462,6 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class SequenceEnumerator(DistributionEnumerator):
-
     def __init__(self, dist: SequenceDistribution) -> None:
         """Enumerates sequences (lists) in descending probability order.
 
@@ -446,24 +481,26 @@ class SequenceEnumerator(DistributionEnumerator):
         """
         super().__init__(dist)
         if dist.null_len_dist:
-            raise EnumerationError(dist, reason='no length distribution is modeled (len_dist is Null)')
+            raise EnumerationError(dist, reason="no length distribution is modeled (len_dist is Null)")
         if dist.len_normalized:
-            raise EnumerationError(dist, reason='len_normalized densities are not enumerable')
-        elem_buf = BufferedStream(child_enumerator(dist.dist, 'SequenceDistribution.dist'))
-        len_stream = BufferedStream(child_enumerator(dist.len_dist, 'SequenceDistribution.len_dist'))
+            raise EnumerationError(dist, reason="len_normalized densities are not enumerable")
+        elem_buf = BufferedStream(child_enumerator(dist.dist, "SequenceDistribution.dist"))
+        len_stream = BufferedStream(child_enumerator(dist.len_dist, "SequenceDistribution.len_dist"))
         self._merge = LengthFrontierMerge(
-            len_stream, lambda n, lp_len: ProductEnumerator([elem_buf] * n, combine=list, offset=lp_len))
+            len_stream, lambda n, lp_len: ProductEnumerator([elem_buf] * n, combine=list, offset=lp_len)
+        )
 
-    def __next__(self) -> Tuple[Any, float]:
+    def __next__(self) -> tuple[Any, float]:
         return next(self._merge)
 
 
 class SequenceSampler(DistributionSampler):
-
-    def __init__(self,
-                 dist: SequenceEncodableProbabilityDistribution,
-                 len_dist: SequenceEncodableProbabilityDistribution,
-                 seed: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        len_dist: SequenceEncodableProbabilityDistribution,
+        seed: int | None = None,
+    ) -> None:
         """SequenceSampler object for sampling from an SequenceDistribution instance.
 
         Args:
@@ -487,7 +524,7 @@ class SequenceSampler(DistributionSampler):
         self.dist_sampler = self.dist.sampler(seed=self.rng.randint(0, maxrandint))
         self.len_sampler = self.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: Optional[int] = None) -> List[Any]:
+    def sample(self, size: int | None = None) -> list[Any]:
         """Generate iid samples from SequenceSampler object.
 
         If size is None, the length 'n' of the iid sequence is sampled from len_sampler. Then 'n' iid samples are
@@ -510,12 +547,13 @@ class SequenceSampler(DistributionSampler):
 
 
 class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
-
-    def __init__(self,
-                 accumulator: SequenceEncodableStatisticAccumulator,
-                 len_accumulator: SequenceEncodableStatisticAccumulator = NullAccumulator(),
-                 len_normalized: Optional[bool] = False,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        accumulator: SequenceEncodableStatisticAccumulator,
+        len_accumulator: SequenceEncodableStatisticAccumulator = NullAccumulator(),
+        len_normalized: bool | None = False,
+        keys: str | None = None,
+    ) -> None:
         """SequenceAccumulator object for aggregating sufficient statistics of sequence distribution from observed data.
 
         Args:
@@ -550,9 +588,9 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
 
         ### Seeds for initialize/seq_initialize consistency
         self._init_rng = False
-        self._len_rng: Optional[RandomState] = None
+        self._len_rng: RandomState | None = None
 
-    def update(self, x: Sequence[T], weight: float, estimate: Optional[SequenceDistribution]) -> None:
+    def update(self, x: Sequence[T], weight: float, estimate: SequenceDistribution | None) -> None:
         """Update sufficient statistics for SequenceAccumulator object.
 
         Aggregate sufficient statistics of base accumulator and length accumulator with sufficient statistics of
@@ -655,7 +693,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         if not self.null_len_accumulator:
             self.len_accumulator.seq_initialize(enc_nseq, weights, self._len_rng)
 
-    def seq_update(self, x: E, weights: np.ndarray, estimate: Optional['SequenceDistribution']) -> None:
+    def seq_update(self, x: E, weights: np.ndarray, estimate: Optional["SequenceDistribution"]) -> None:
         """Vectorized update of SequenceAccumulator sufficient statistics from sequence encoded x.
 
         Args:
@@ -677,12 +715,12 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         if not self.null_len_accumulator:
             self.len_accumulator.seq_update(enc_nseq, weights, estimate.len_dist if estimate is not None else None)
 
-    def seq_update_engine(self, x: E, weights: Any, estimate: Optional['SequenceDistribution'],
-                          engine: Any) -> None:
+    def seq_update_engine(self, x: E, weights: Any, estimate: Optional["SequenceDistribution"], engine: Any) -> None:
         """Engine-resident E-step: per-element weights are gathered/normalized on the active engine
         and the base/length accumulators are routed through the engine. Matches seq_update.
         """
         from pysp.stats.backend import child_seq_update
+
         idx, icnt, inz, enc_seq, enc_nseq = x
 
         w_eng = engine.asarray(weights)
@@ -692,14 +730,14 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         else:
             w = w_eng[idx_arr]
 
-        child_seq_update(self.accumulator, enc_seq, w,
-                         estimate.dist if estimate is not None else None, engine)
+        child_seq_update(self.accumulator, enc_seq, w, estimate.dist if estimate is not None else None, engine)
 
         if not self.null_len_accumulator:
-            child_seq_update(self.len_accumulator, enc_nseq, w_eng,
-                             estimate.len_dist if estimate is not None else None, engine)
+            child_seq_update(
+                self.len_accumulator, enc_nseq, w_eng, estimate.len_dist if estimate is not None else None, engine
+            )
 
-    def combine(self, suff_stat: Tuple[SS1, Optional[SS2]]) -> 'SequenceAccumulator':
+    def combine(self, suff_stat: tuple[SS1, SS2 | None]) -> "SequenceAccumulator":
         """Combine the sufficient statistics of SequenceAccumulator instance with suff_stat arg.
 
         Args:
@@ -717,11 +755,11 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def value(self) -> Tuple[Any, Optional[Any]]:
+    def value(self) -> tuple[Any, Any | None]:
         """Return Tuple[SS1, Optional[SS2]], sufficient statistics of base accumulator and length accumulator."""
         return self.accumulator.value(), self.len_accumulator.value()
 
-    def from_value(self, x: Tuple[SS1, Optional[SS2]]) -> 'SequenceAccumulator':
+    def from_value(self, x: tuple[SS1, SS2 | None]) -> "SequenceAccumulator":
         """Set the SequenceAccumulator base accumulator and length accumulator to values of x.
 
         Args:
@@ -739,7 +777,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> 'SequenceAccumulator':
+    def scale(self, c: float) -> "SequenceAccumulator":
         """Scale element and length sufficient statistics through their accumulators."""
         self.accumulator.scale(c)
         if not self.null_len_accumulator:
@@ -754,7 +792,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
 
         return rv
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merges member sufficient statistics with sufficient statistics that contain matching keys.
 
         Args:
@@ -775,7 +813,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         if not self.null_len_accumulator:
             self.len_accumulator.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set member sufficient statistics to values of objects with matching keys.
 
         Args:
@@ -794,7 +832,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         if not self.null_len_accumulator:
             self.len_accumulator.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'SequenceDataEncoder':
+    def acc_to_encoder(self) -> "SequenceDataEncoder":
         """Create SequenceDataEncoder for encoding sequences of iid observations of SequenceDistribution.
 
         Base distribution DataSequenceEncoder and length distribution DataSequenceEncoder objects are passed.
@@ -810,12 +848,13 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class SequenceAccumulatorFactory(StatisticAccumulatorFactory):
-
-    def __init__(self,
-                 dist_factory: StatisticAccumulatorFactory,
-                 len_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
-                 len_normalized: Optional[bool] = False,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        dist_factory: StatisticAccumulatorFactory,
+        len_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
+        len_normalized: bool | None = False,
+        keys: str | None = None,
+    ) -> None:
         """SequenceAccumulatorFactory object for creating SequenceAccumulator objects.
 
         Args:
@@ -841,22 +880,23 @@ class SequenceAccumulatorFactory(StatisticAccumulatorFactory):
         self.len_normalized = len_normalized
         self.keys = keys
 
-    def make(self) -> 'SequenceAccumulator':
+    def make(self) -> "SequenceAccumulator":
         """Return SequenceAccumulator with SequenceEncodableStatisticAccumulator objects created from dist_factory and
-            len_factory."""
+        len_factory."""
         len_acc = self.len_factory.make()
         return SequenceAccumulator(self.dist_factory.make(), len_acc, self.len_normalized, self.keys)
 
 
 class SequenceEstimator(ParameterEstimator):
-
-    def __init__(self,
-                 estimator: ParameterEstimator,
-                 len_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 len_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 len_normalized: Optional[bool] = False,
-                 name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        estimator: ParameterEstimator,
+        len_estimator: ParameterEstimator | None = NullEstimator(),
+        len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        len_normalized: bool | None = False,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """SequenceEstimator object for estimating SequenceDistribution from aggregated sufficient statistics.
 
         Requires arg 'estimator' to be ParameterEstimator of data type T, compatible with the observed entry values
@@ -892,28 +932,33 @@ class SequenceEstimator(ParameterEstimator):
         self.len_normalized = len_normalized
         self.name = name
 
-    def accumulator_factory(self) -> 'SequenceAccumulatorFactory':
+    def accumulator_factory(self) -> "SequenceAccumulatorFactory":
         """Return SequenceAccumulatorFactory from len_estimator and estimator member variables with keys passed."""
         len_factory = self.len_estimator.accumulator_factory()
         dist_factory = self.estimator.accumulator_factory()
 
         return SequenceAccumulatorFactory(dist_factory, len_factory, self.len_normalized, self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[Any, Optional[Any]]) -> 'SequenceDistribution':
+    def estimate(self, nobs: float | None, suff_stat: tuple[Any, Any | None]) -> "SequenceDistribution":
         if isinstance(self.len_estimator, NullEstimator):
-            return SequenceDistribution(self.estimator.estimate(nobs, suff_stat[0]), len_dist=self.len_dist,
-                                        len_normalized=self.len_normalized, name=self.name)
+            return SequenceDistribution(
+                self.estimator.estimate(nobs, suff_stat[0]),
+                len_dist=self.len_dist,
+                len_normalized=self.len_normalized,
+                name=self.name,
+            )
 
         else:
-            return SequenceDistribution(self.estimator.estimate(nobs, suff_stat[0]),
-                                        len_dist=self.len_estimator.estimate(nobs, suff_stat[1]),
-                                        len_normalized=self.len_normalized, name=self.name)
+            return SequenceDistribution(
+                self.estimator.estimate(nobs, suff_stat[0]),
+                len_dist=self.len_estimator.estimate(nobs, suff_stat[1]),
+                len_normalized=self.len_normalized,
+                name=self.name,
+            )
 
 
 class SequenceDataEncoder(DataSequenceEncoder):
-
-    def __init__(self,
-                 encoders: Tuple[DataSequenceEncoder, DataSequenceEncoder]) -> None:
+    def __init__(self, encoders: tuple[DataSequenceEncoder, DataSequenceEncoder]) -> None:
         """SequenceDataEncoder object for encoding sequences of iid observations from sequence distributions.
 
         encoders[0] is a DataSequenceEncoder for data type T, producing encoded sequences of type T1.
@@ -936,9 +981,9 @@ class SequenceDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns string representation of SequenceDataEncoder object."""
-        s = 'SequenceDataEncoder('
-        s += str(self.encoder) + ',len_encoder='
-        s += str(self.len_encoder) + ')'
+        s = "SequenceDataEncoder("
+        s += str(self.encoder) + ",len_encoder="
+        s += str(self.len_encoder) + ")"
 
         return s
 
@@ -967,8 +1012,9 @@ class SequenceDataEncoder(DataSequenceEncoder):
 
             return True
 
-    def seq_encode(self, x: Sequence[Sequence[T]])\
-            -> Tuple[np.ndarray, np.ndarray, np.ndarray, Tuple[Any, ...], Optional[Any]]:
+    def seq_encode(
+        self, x: Sequence[Sequence[T]]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[Any, ...], Any | None]:
         """Encode iid observations of Sequence distribution for use with vectorized "seq_" functions.
 
         Data 'x' must be a Sequence of Sequences containing data types T consistent with the distribution encoder
@@ -1004,7 +1050,7 @@ class SequenceDataEncoder(DataSequenceEncoder):
 
         rv1 = np.asarray(tidx, dtype=int)
         rv2 = np.asarray(nx, dtype=float)
-        rv3 = (rv2 != 0)
+        rv3 = rv2 != 0
 
         rv2[rv3] = 1.0 / rv2[rv3]
 

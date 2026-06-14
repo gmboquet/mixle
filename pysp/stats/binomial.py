@@ -6,18 +6,27 @@ and the BinomialDataEncoder classes for use with pysparkplug.
 Data type: int.
 
 """
-import numpy as np
+
 import math
+from collections.abc import Sequence
+from typing import Any, Optional
+
+import numpy as np
 from numpy.random import RandomState
-from pysp.utils.vector import gammaln
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
-    DistributionEnumerator
+
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.utils.vector import gammaln
 
-from typing import Optional, Dict, List, Union, Tuple, Any, Sequence
-
-E = Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]
+E = tuple[np.ndarray, np.ndarray, np.ndarray, int, int]
 
 
 class BinomialDistribution(SequenceEncodableProbabilityDistribution):
@@ -26,26 +35,28 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
         from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+
         return DistributionDeclaration(
-            name='binomial',
+            name="binomial",
             distribution_type=cls,
             parameters=(
-                ParameterSpec('p', constraint='unit_interval'),
-                ParameterSpec('n', constraint='non_negative_integer', differentiable=False),
-                ParameterSpec('min_val', constraint='optional_integer', differentiable=False),
+                ParameterSpec("p", constraint="unit_interval"),
+                ParameterSpec("n", constraint="non_negative_integer", differentiable=False),
+                ParameterSpec("min_val", constraint="optional_integer", differentiable=False),
             ),
             statistics=(
-                StatisticSpec('count'),
-                StatisticSpec('sum'),
-                StatisticSpec('min_val', kind='support_bound', additive=False, scales=False),
-                StatisticSpec('max_val', kind='support_bound', additive=False, scales=False),
+                StatisticSpec("count"),
+                StatisticSpec("sum"),
+                StatisticSpec("min_val", kind="support_bound", additive=False, scales=False),
+                StatisticSpec("max_val", kind="support_bound", additive=False, scales=False),
             ),
-            support='bounded_integer',
+            support="bounded_integer",
             exponential_family=ExponentialFamilySpec(
                 sufficient_statistics=cls.exp_family_sufficient_statistics,
                 natural_parameters=cls.exp_family_natural_parameters,
@@ -57,16 +68,16 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     @staticmethod
-    def _exp_family_shifted_values(x: E, params: Dict[str, Any], engine: Any) -> Any:
+    def _exp_family_shifted_values(x: E, params: dict[str, Any], engine: Any) -> Any:
         ux, ix, _, _, _ = x
         vals = engine.asarray(ux)
-        min_val = params.get('min_val')
+        min_val = params.get("min_val")
         if min_val is not None:
             vals = vals - engine.asarray(min_val)
         return vals[engine.asarray(ix)]
 
     @staticmethod
-    def exp_family_sufficient_statistics(x: E, engine: Any) -> Tuple[Any, ...]:
+    def exp_family_sufficient_statistics(x: E, engine: Any) -> tuple[Any, ...]:
         """Return placeholder-free Binomial sufficient statistics.
 
         The parameter-dependent support shift is handled by
@@ -77,21 +88,21 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         return (engine.asarray(vals),)
 
     @staticmethod
-    def exp_family_sufficient_statistics_from_params(x: E, params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+    def exp_family_sufficient_statistics_from_params(x: E, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Return Binomial sufficient statistics for generated scoring."""
         return (BinomialDistribution._exp_family_shifted_values(x, params, engine),)
 
     @staticmethod
-    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Return Binomial natural parameters for generated scoring."""
-        p = params['p']
+        p = params["p"]
         return (engine.log(p) - engine.log(engine.asarray(1.0) - p),)
 
     @staticmethod
-    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
         """Return Binomial log partition for generated scoring."""
-        p = params['p']
-        return -params['n'] * engine.log(engine.asarray(1.0) - p)
+        p = params["p"]
+        return -params["n"] * engine.log(engine.asarray(1.0) - p)
 
     @staticmethod
     def exp_family_base_measure(x: E, engine: Any) -> Any:
@@ -99,17 +110,18 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         return engine.asarray(x[2]) * 0.0
 
     @staticmethod
-    def exp_family_base_measure_from_params(x: E, params: Dict[str, Any], engine: Any) -> Any:
+    def exp_family_base_measure_from_params(x: E, params: dict[str, Any], engine: Any) -> Any:
         """Return Binomial support/base measure for generated scoring."""
         xx = BinomialDistribution._exp_family_shifted_values(x, params, engine)
-        n = params['n']
+        n = params["n"]
         one = engine.asarray(1.0)
         good = (xx >= 0.0) & (xx <= n) & (engine.floor(xx) == xx)
         base = engine.gammaln(n + one) - engine.gammaln(xx + one) - engine.gammaln(n - xx + one)
         return engine.where(good, base, engine.asarray(-np.inf))
 
-    def __init__(self, p: float, n: int, min_val: Optional[int] = None, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self, p: float, n: int, min_val: int | None = None, name: str | None = None, keys: str | None = None
+    ) -> None:
         """BinomialDistribution object used for x~Binomial(n,p) with support (min_val, n-min_val-1).
 
         Supports data types of int between (0, n-1) or (min_val, n-min_val-1) if min_val is not None.
@@ -136,12 +148,12 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
             keys (Optional[str]): All BinomialDistributions with same keys are same distributions.
         """
         if p <= 0.0 or p >= 1.0:
-            raise ValueError('Binomial distribution requires p in (0, 1).')
+            raise ValueError("Binomial distribution requires p in (0, 1).")
         else:
             self.p = float(p)
 
         if n < 0 or np.isinf(n) or int(n) != n:
-            raise ValueError('Binomial distribution requires a non-negative integer n.')
+            raise ValueError("Binomial distribution requires a non-negative integer n.")
         else:
             self.n = int(n)
 
@@ -153,8 +165,13 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         """Get string representation of BinomialDistribution."""
-        return 'BinomialDistribution(p=%s, n=%s, min_val=%s, name=%s, keys=%s)' % (
-            repr(self.p), repr(self.n), repr(self.min_val), repr(self.name), repr(self.keys))
+        return "BinomialDistribution(p=%s, n=%s, min_val=%s, name=%s, keys=%s)" % (
+            repr(self.p),
+            repr(self.n),
+            repr(self.min_val),
+            repr(self.name),
+            repr(self.keys),
+        )
 
     def density(self, x: int) -> float:
         """Returns the probability mass of integer value x.
@@ -191,7 +208,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         if not np.isfinite(xx) or np.floor(xx) != xx or xx < 0 or xx > n:
             return -np.inf
         xx = int(xx)
-        return (gammaln(n+1) - gammaln(xx + 1) - gammaln(n - xx + 1)) + self.log_1p * (n - xx) + self.log_p * xx
+        return (gammaln(n + 1) - gammaln(xx + 1) - gammaln(n - xx + 1)) + self.log_1p * (n - xx) + self.log_p * xx
 
     def seq_log_density(self, x: E) -> np.ndarray:
         """Vectorized evaluation of log-density for sequence encoded data.
@@ -209,7 +226,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         """
         ux, ix, _, _, _ = x
         n = self.n
-        gn = gammaln(n+1)
+        gn = gammaln(n + 1)
 
         if self.min_val is not None:
             xx = ux - self.min_val
@@ -223,25 +240,31 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         return cc[ix]
 
     @staticmethod
-    def backend_log_density_from_params(vals: Any, n: Any, p: Any, min_val: Optional[int], engine: Any) -> Any:
+    def backend_log_density_from_params(vals: Any, n: Any, p: Any, min_val: int | None, engine: Any) -> Any:
         """Engine-neutral binomial log-density from explicit parameters."""
         xx = vals - engine.asarray(min_val) if min_val is not None else vals
         good = (xx >= 0.0) & (xx <= n) & (engine.floor(xx) == xx)
         one = engine.asarray(1.0)
-        rv = (engine.gammaln(n + one) - engine.gammaln(xx + one) - engine.gammaln(n - xx + one)
-              + (n - xx) * engine.log(one - p) + xx * engine.log(p))
+        rv = (
+            engine.gammaln(n + one)
+            - engine.gammaln(xx + one)
+            - engine.gammaln(n - xx + one)
+            + (n - xx) * engine.log(one - p)
+            + xx * engine.log(p)
+        )
         return engine.where(good, rv, engine.asarray(-np.inf))
 
     def backend_seq_log_density(self, x: E, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
         ux, ix, _, _, _ = x
         vals = engine.asarray(ux)
-        scores = self.backend_log_density_from_params(vals, engine.asarray(float(self.n)), engine.asarray(self.p),
-                                                      self.min_val, engine)
+        scores = self.backend_log_density_from_params(
+            vals, engine.asarray(float(self.n)), engine.asarray(self.p), self.min_val, engine
+        )
         return scores[engine.asarray(ix)]
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['BinomialDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["BinomialDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked binomial parameters for a homogeneous mixture kernel.
 
         A stacked binomial mixture requires components to share the same trial count
@@ -251,25 +274,27 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         n = dists[0].n
         min_val = dists[0].min_val
         if any(d.n != n or d.min_val != min_val for d in dists):
-            raise ValueError('Stacked BinomialDistribution components require shared n and min_val.')
+            raise ValueError("Stacked BinomialDistribution components require shared n and min_val.")
         return {
-            'p': engine.asarray([d.p for d in dists]),
-            'n': engine.asarray(float(n)),
-            'min_val': min_val,
+            "p": engine.asarray([d.p for d in dists]),
+            "n": engine.asarray(float(n)),
+            "min_val": min_val,
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: E, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of binomial log densities."""
         ux, ix, _, _, _ = x
         vals = engine.asarray(ux)
         scores = cls.backend_log_density_from_params(
-            vals[:, None], params['n'], params['p'][None, :], params['min_val'], engine)
+            vals[:, None], params["n"], params["p"][None, :], params["min_val"], engine
+        )
         return scores[engine.asarray(ix), :]
 
     @classmethod
-    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any, params: Dict[str, Any],
-                                                            engine: Any, estimator: Any) -> Tuple[Any, Any, Any, Any]:
+    def backend_stacked_sufficient_statistics_with_estimator(
+        cls, x: E, weights: Any, params: dict[str, Any], engine: Any, estimator: Any
+    ) -> tuple[Any, Any, Any, Any]:
         """Return stacked Binomial sufficient statistics using estimator-owned support bounds."""
         _, _, xx, min_val, max_val = x
         vals = engine.asarray(xx)
@@ -277,17 +302,11 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         count = engine.sum(ww, axis=0)
         obs_sum = engine.sum(ww * vals[:, None], axis=0)
         init_min, init_max = _binomial_initial_bounds(estimator, len(np.asarray(engine.to_numpy(count))))
-        min_bounds = [
-            min_val if lo is None else min(lo, min_val)
-            for lo in init_min
-        ]
-        max_bounds = [
-            max_val if hi is None else max(hi, max_val)
-            for hi in init_max
-        ]
+        min_bounds = [min_val if lo is None else min(lo, min_val) for lo in init_min]
+        max_bounds = [max_val if hi is None else max(hi, max_val) for hi in init_max]
         return count, obs_sum, engine.asarray(min_bounds), engine.asarray(max_bounds)
 
-    def sampler(self, seed: Optional[int] = None) -> 'BinomialSampler':
+    def sampler(self, seed: int | None = None) -> "BinomialSampler":
         """Returns BinomialSampler for generating samples from BinomialDistribution(n,p,min_val).
 
         Args:
@@ -298,7 +317,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         """
         return BinomialSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'BinomialEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "BinomialEstimator":
         """Creates a BinomialEstimator for estimating parameters of BinomialDistribution.
 
         Args:
@@ -310,10 +329,15 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         if pseudo_count is None:
             return BinomialEstimator(name=self.name, keys=self.keys)
         else:
-            return BinomialEstimator(max_val=self.n, min_val=self.min_val, pseudo_count=pseudo_count,
-                                     suff_stat=self.p * self.n * pseudo_count, name=self.name)
+            return BinomialEstimator(
+                max_val=self.n,
+                min_val=self.min_val,
+                pseudo_count=pseudo_count,
+                suff_stat=self.p * self.n * pseudo_count,
+                name=self.name,
+            )
 
-    def dist_to_encoder(self) -> 'BinomialDataEncoder':
+    def dist_to_encoder(self) -> "BinomialDataEncoder":
         """Creates a BinomialDataEncoder object for seqeunce encoding data.
 
         Returns:
@@ -321,16 +345,16 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         """
         return BinomialDataEncoder()
 
-    def enumerator(self) -> 'BinomialEnumerator':
+    def enumerator(self) -> "BinomialEnumerator":
         """Returns BinomialEnumerator iterating the support in descending probability order."""
         return BinomialEnumerator(self)
 
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
         """Build a bounded bit-quantized index by walking the binomial mode outward."""
         if max_bits < 0:
-            raise ValueError('max_bits must be non-negative.')
+            raise ValueError("max_bits must be non-negative.")
         if bin_width_bits <= 0:
-            raise ValueError('bin_width_bits must be positive.')
+            raise ValueError("bin_width_bits must be positive.")
 
         shift = self.min_val if self.min_val is not None else 0
         mode = int(np.floor((self.n + 1) * self.p))
@@ -338,7 +362,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         left = mode
         right = mode + 1
         limit_lp = -(float(max_bits) + 1.0e-12) * math.log(2.0)
-        items: List[Tuple[int, float]] = []
+        items: list[tuple[int, float]] = []
 
         while left >= 0 or right <= self.n:
             lp_l = self.log_density(shift + left) if left >= 0 else -np.inf
@@ -355,8 +379,12 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
                 right += 1
 
         return QuantizedEnumerationIndex.from_items(
-            items, max_bits=max_bits, bin_width_bits=bin_width_bits,
-            sorted_items=True, truncated=len(items) < self.n + 1)
+            items,
+            max_bits=max_bits,
+            bin_width_bits=bin_width_bits,
+            sorted_items=True,
+            truncated=len(items) < self.n + 1,
+        )
 
     def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
         """Build an exact aligned cross-bin view over finite binomial supports."""
@@ -376,17 +404,16 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
-def _binomial_initial_bounds(estimator: Any, num_components: int) -> Tuple[List[Optional[int]], List[Optional[int]]]:
-    estimators = tuple(getattr(estimator, 'estimators', ()))
+def _binomial_initial_bounds(estimator: Any, num_components: int) -> tuple[list[int | None], list[int | None]]:
+    estimators = tuple(getattr(estimator, "estimators", ()))
     if len(estimators) != num_components:
         return [None] * num_components, [None] * num_components
-    min_bounds = [getattr(est, 'min_val', None) for est in estimators]
-    max_bounds = [getattr(est, 'max_val', None) for est in estimators]
+    min_bounds = [getattr(est, "min_val", None) for est in estimators]
+    max_bounds = [getattr(est, "max_val", None) for est in estimators]
     return min_bounds, max_bounds
 
 
 class BinomialEnumerator(DistributionEnumerator):
-
     def __init__(self, dist: BinomialDistribution) -> None:
         """Enumerates the support of a BinomialDistribution in descending probability order.
 
@@ -408,7 +435,7 @@ class BinomialEnumerator(DistributionEnumerator):
     def _lp(self, i: int) -> float:
         return self.dist.log_density(self._shift + i)
 
-    def __next__(self) -> Tuple[int, float]:
+    def __next__(self) -> tuple[int, float]:
         if not self._started:
             self._started = True
             return (self._shift + self._mode, self._lp(self._mode))
@@ -427,8 +454,7 @@ class BinomialEnumerator(DistributionEnumerator):
 
 
 class BinomialSampler(DistributionSampler):
-
-    def __init__(self, dist: BinomialDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: BinomialDistribution, seed: int | None = None) -> None:
         """BinomialSampler object used to draw samples from BinomialDistribution.
 
         Args:
@@ -443,7 +469,7 @@ class BinomialSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: Optional[int] = None) -> Union[int, List[int]]:
+    def sample(self, size: int | None = None) -> int | list[int]:
         """Draw samples from BinomialSampler.
 
         Args:
@@ -468,9 +494,13 @@ class BinomialSampler(DistributionSampler):
 
 
 class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
-
-    def __init__(self, max_val: Optional[int] = None, min_val: Optional[int] = None,
-                 name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        max_val: int | None = None,
+        min_val: int | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """BinomialAccumulator object used for aggregating sufficient statistics of BinomialDistribution.
 
         Sufficient statistics (sum, count).
@@ -497,7 +527,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.max_val = max_val
         self.min_val = min_val
 
-    def update(self, x: int, weight: float, estimate: Optional['BinomialDistribution']) -> None:
+    def update(self, x: int, weight: float, estimate: Optional["BinomialDistribution"]) -> None:
         """Accumulates Binomial sufficient statistics for weighted single observation.
 
         Add x*weight to attribute sum, and increase the count by weight.
@@ -525,7 +555,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         else:
             self.max_val = max(self.max_val, x)
 
-    def initialize(self, x: int, weight: float, rng: Optional[RandomState]) -> None:
+    def initialize(self, x: int, weight: float, rng: RandomState | None) -> None:
         """Initialize BinomialAccumulator sufficient statistics for one weighted observation.
 
         Args:
@@ -539,7 +569,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.update(x, weight, None)
 
-    def seq_update(self, x: E, weights: np.ndarray, estimate: Optional['BinomialDistribution']) -> None:
+    def seq_update(self, x: E, weights: np.ndarray, estimate: Optional["BinomialDistribution"]) -> None:
         """Accumulates Binomial sufficient statistics for encoded sequence.
 
         Args:
@@ -567,16 +597,14 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         else:
             self.max_val = max_val
 
-    def seq_update_engine(self, x: E, weights: Any, estimate: Optional['BinomialDistribution'],
-                          engine: Any) -> None:
+    def seq_update_engine(self, x: E, weights: Any, estimate: Optional["BinomialDistribution"], engine: Any) -> None:
         """Engine-resident accumulation of count/sum statistics (numpy or torch).
 
         The weighted sum and count reductions run on the active engine; the scalar min/max
         support bounds remain host bookkeeping. Matches seq_update.
         """
         _, _, xx, min_val, max_val = x
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         w = engine.asarray(weights_np)
         xv = engine.asarray(np.asarray(xx, dtype=np.float64))
 
@@ -593,7 +621,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         else:
             self.max_val = max_val
 
-    def seq_initialize(self, x: E, weights: np.ndarray, rng: Optional[RandomState]) -> None:
+    def seq_initialize(self, x: E, weights: np.ndarray, rng: RandomState | None) -> None:
         """Vectorized initialization of BinomialAccumulator sufficient statistics with weights.
 
         Calls seq_update().
@@ -609,7 +637,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: Tuple[float, float, Optional[int], Optional[int]]) -> 'BinomialAccumulator':
+    def combine(self, suff_stat: tuple[float, float, int | None, int | None]) -> "BinomialAccumulator":
         """Combine the sufficient statistics of BinomialAccumulator with suff_stat.
 
         Args:
@@ -635,7 +663,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def value(self) -> Tuple[float, float, Optional[int], Optional[int]]:
+    def value(self) -> tuple[float, float, int | None, int | None]:
         """Returns the sufficient statistics, and member variables min_val and max_val.
 
         Returns:
@@ -645,7 +673,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """
         return self.count, self.sum, self.min_val, self.max_val
 
-    def from_value(self, x: Tuple[float, float, Optional[int], Optional[int]]) -> 'BinomialAccumulator':
+    def from_value(self, x: tuple[float, float, int | None, int | None]) -> "BinomialAccumulator":
         """Set BinomialAccumulator suff stats and member variables from suff_stat tuple defined in value().
 
         Takes tuple of (count, sum, min_val, max_val) for setting values of BinomialAccumulator.
@@ -665,13 +693,13 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> 'BinomialAccumulator':
+    def scale(self, c: float) -> "BinomialAccumulator":
         """Scale linear count/sum statistics while preserving support bounds."""
         self.count *= c
         self.sum *= c
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Combines the sufficient statistics of BinomialAccumulators that have the same key value.
 
         Args:
@@ -687,7 +715,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set sufficient statistics of object instance to matching instances with matching keys.
 
         Args:
@@ -701,7 +729,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
             if self.key in stats_dict:
                 self.from_value(stats_dict[self.key].value())
 
-    def acc_to_encoder(self) -> 'BinomialDataEncoder':
+    def acc_to_encoder(self) -> "BinomialDataEncoder":
         """Create BinomialDataEncoder object for encoding data.
 
         Note: Used for seq_initialize.
@@ -712,10 +740,15 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """
         return BinomialDataEncoder()
 
-class BinomialAccumulatorFactory(StatisticAccumulatorFactory):
 
-    def __init__(self, max_val: Optional[int] = None, min_val: Optional[int] = 0, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+class BinomialAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(
+        self,
+        max_val: int | None = None,
+        min_val: int | None = 0,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """Creates BinomialAccumulatorFactory object.
 
         Args:
@@ -732,7 +765,7 @@ class BinomialAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
         self.keys = keys
 
-    def make(self) -> 'BinomialAccumulator':
+    def make(self) -> "BinomialAccumulator":
         """Creates a BinomialAccumulator object.
 
         Returns:
@@ -743,9 +776,15 @@ class BinomialAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class BinomialEstimator(ParameterEstimator):
-
-    def __init__(self, max_val: Optional[int] = None, min_val: Optional[int] = 0, pseudo_count: Optional[float] = None,
-                 suff_stat: Optional[float] = None, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        max_val: int | None = None,
+        min_val: int | None = 0,
+        pseudo_count: float | None = None,
+        suff_stat: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """Create a BinomialEstimator object for estimating BinomialDistribution.
 
         Args:
@@ -783,7 +822,7 @@ class BinomialEstimator(ParameterEstimator):
         """
         return BinomialAccumulatorFactory(self.max_val, self.min_val, self.name, self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[float, float, Optional[int], Optional[int]]):
+    def estimate(self, nobs: float | None, suff_stat: tuple[float, float, int | None, int | None]):
         """Estimate a BinomialDistribution from BinomialEstimator using sufficient statistics in suff_stat.
 
         Note: nobs is not used here. Kept for consistency with other ParameterEstimators.
@@ -853,9 +892,9 @@ class BinomialDataEncoder(DataSequenceEncoder):
             String name BinomialDataEncoder
 
         """
-        return 'BinomialDataEncoder'
+        return "BinomialDataEncoder"
 
-    def __eq__(self, other: object ) -> bool:
+    def __eq__(self, other: object) -> bool:
         """Define equality for BinomialDataEncoder objects.
 
         Args:
@@ -867,7 +906,7 @@ class BinomialDataEncoder(DataSequenceEncoder):
         """
         return isinstance(other, BinomialDataEncoder)
 
-    def seq_encode(self, x: Sequence[int]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
+    def seq_encode(self, x: Sequence[int]) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
         """Encode List[int] for vectorized seq calls in Accumulator and Distribution.
 
         Args:
@@ -881,7 +920,7 @@ class BinomialDataEncoder(DataSequenceEncoder):
         xx0 = np.asarray(x, dtype=np.float64)
 
         if np.any(xx0 < 0) or np.any(np.isnan(xx0)) or np.any(np.floor(xx0) != xx0):
-            raise ValueError('BinomialDistribution requires non-negative integer values for x.')
+            raise ValueError("BinomialDistribution requires non-negative integer values for x.")
 
         xx = np.asarray(xx0, dtype=np.int32)
         if xx.size == 0:

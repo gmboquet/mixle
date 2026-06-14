@@ -4,15 +4,16 @@ This module is intentionally model-facing rather than engine-facing: callers
 provide objective functions, distributions provide their own scoring math, and
 compute engines provide only tensor arithmetic/autograd.
 """
+
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.stats import seq_encode
 from pysp.stats.backend import backend_seq_log_density
 from pysp.stats.pdist import SequenceEncodableProbabilityDistribution
 from pysp.utils.estimation import (
@@ -22,7 +23,6 @@ from pysp.utils.estimation import (
     _gradient_shadow_state,
     _torch_for_gradient_fit,
 )
-
 
 ObjectiveCallable = Callable[[Any, Any, Any], Any]
 ParameterObjectiveCallable = Callable[[Mapping[str, Any], Any, Any], Any]
@@ -41,28 +41,28 @@ class ObjectiveFitResult:
     model: Any
     value: float
     iterations: int
-    history: Tuple[float, ...] = ()
+    history: tuple[float, ...] = ()
     converged: bool = False
-    initial_value: Optional[float] = None
-    final_delta: Optional[float] = None
+    initial_value: float | None = None
+    final_delta: float | None = None
     maximize: bool = True
-    best_value: Optional[float] = None
-    best_iteration: Optional[int] = None
-    final_gradient_norm: Optional[float] = None
+    best_value: float | None = None
+    best_iteration: int | None = None
+    final_gradient_norm: float | None = None
 
-    def as_tuple(self) -> Tuple[Any, float]:
+    def as_tuple(self) -> tuple[Any, float]:
         """Return the historical ``(model, value)`` shape used by fit helpers."""
         return self.model, self.value
 
     @property
-    def objective_change(self) -> Optional[float]:
+    def objective_change(self) -> float | None:
         """Return the signed objective change from the start of optimization."""
         if self.initial_value is None:
             return None
         return self.value - self.initial_value
 
     @property
-    def improvement(self) -> Optional[float]:
+    def improvement(self) -> float | None:
         """Return positive improvement in the requested optimization direction."""
         change = self.objective_change
         if change is None:
@@ -70,7 +70,7 @@ class ObjectiveFitResult:
         return change if self.maximize else -change
 
     @property
-    def best_improvement(self) -> Optional[float]:
+    def best_improvement(self) -> float | None:
         """Return best positive improvement seen during optimization."""
         if self.initial_value is None or self.best_value is None:
             return None
@@ -94,21 +94,26 @@ class ObjectiveParameter:
 
     name: str
     value: Any
-    constraint: str = 'real'
+    constraint: str = "real"
 
 
-class ObjectiveParameterSet(object):
+class ObjectiveParameterSet:
     """Engine-backed named parameters for user-supplied objectives."""
 
-    def __init__(self, parameters: Any, engine: Optional[Any] = None,
-                 precision: Optional[Any] = None, torch: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        parameters: Any,
+        engine: Any | None = None,
+        precision: Any | None = None,
+        torch: Any | None = None,
+    ) -> None:
         if torch is None:
             torch, engine = _torch_for_gradient_fit(engine, precision=precision)
         self.torch = torch
         self.engine = engine
         self.specs = tuple(_normalize_objective_parameters(parameters))
         if not self.specs:
-            raise ValueError('ObjectiveParameterSet requires at least one parameter.')
+            raise ValueError("ObjectiveParameterSet requires at least one parameter.")
         self.raw = {}
         initial_values = {}
         for spec in self.specs:
@@ -116,10 +121,11 @@ class ObjectiveParameterSet(object):
             if _objective_is_coupled_bound_constraint(constraint):
                 anchor = _objective_bound_anchor(constraint)
                 if anchor not in initial_values:
-                    raise ValueError('Objective parameter %s requires earlier anchor parameter %s.' %
-                                     (spec.name, anchor))
+                    raise ValueError(
+                        "Objective parameter %s requires earlier anchor parameter %s." % (spec.name, anchor)
+                    )
                 delta = _objective_bound_delta(spec.value, initial_values[anchor], constraint)
-                self.raw[spec.name] = _objective_raw_tensor(delta, 'positive', self.engine, self.torch)
+                self.raw[spec.name] = _objective_raw_tensor(delta, "positive", self.engine, self.torch)
             else:
                 self.raw[spec.name] = _objective_raw_tensor(spec.value, constraint, self.engine, self.torch)
             initial_values[spec.name] = spec.value
@@ -132,8 +138,7 @@ class ObjectiveParameterSet(object):
         """Return constrained tensors keyed by parameter name."""
         values = {}
         for spec in self.specs:
-            values[spec.name] = _objective_constrained_value(
-                self.raw[spec.name], spec.constraint, self.torch, values)
+            values[spec.name] = _objective_constrained_value(self.raw[spec.name], spec.constraint, self.torch, values)
         return values
 
     def detached_values(self) -> Mapping[str, Any]:
@@ -141,10 +146,10 @@ class ObjectiveParameterSet(object):
         return {key: _detach_objective_value(value) for key, value in self.values().items()}
 
 
-class ExpectedLogDensity(object):
+class ExpectedLogDensity:
     """Objective ``sum_i w_i log q_model(x_i)`` for encoded observations."""
 
-    def __init__(self, weights: Optional[Sequence[float]] = None, normalize: bool = False) -> None:
+    def __init__(self, weights: Sequence[float] | None = None, normalize: bool = False) -> None:
         self.weights = None if weights is None else np.asarray(weights, dtype=np.float64)
         self.normalize = bool(normalize)
 
@@ -162,12 +167,12 @@ class ExpectedLogDensity(object):
         return obj
 
 
-class ObjectiveSum(object):
+class ObjectiveSum:
     """Add several model objectives into one scalar objective."""
 
     def __init__(self, *objectives: ObjectiveCallable) -> None:
         if not objectives:
-            raise ValueError('ObjectiveSum requires at least one objective.')
+            raise ValueError("ObjectiveSum requires at least one objective.")
         self.objectives = objectives
 
     def __call__(self, model: Any, enc: Any, engine: Any) -> Any:
@@ -177,7 +182,7 @@ class ObjectiveSum(object):
         return rv
 
 
-class UnnormalizedLogLikelihood(object):
+class UnnormalizedLogLikelihood:
     """Objective for models specified by unnormalized log likelihoods.
 
     The objective is
@@ -190,18 +195,20 @@ class UnnormalizedLogLikelihood(object):
     ``logmeanexp(log f_theta(y_j) - log q(y_j))``.
     """
 
-    def __init__(self,
-                 log_unnormalized: ObjectiveCallable,
-                 log_partition: Optional[Callable[[Any, Any], Any]] = None,
-                 partition_enc: Optional[Any] = None,
-                 reference_log_density: Optional[Callable[[Any, Any], Any]] = None,
-                 weights: Optional[Sequence[float]] = None,
-                 normalize: bool = False) -> None:
+    def __init__(
+        self,
+        log_unnormalized: ObjectiveCallable,
+        log_partition: Callable[[Any, Any], Any] | None = None,
+        partition_enc: Any | None = None,
+        reference_log_density: Callable[[Any, Any], Any] | None = None,
+        weights: Sequence[float] | None = None,
+        normalize: bool = False,
+    ) -> None:
         if log_partition is None and partition_enc is None:
-            raise ValueError('UnnormalizedLogLikelihood requires log_partition or partition_enc.')
+            raise ValueError("UnnormalizedLogLikelihood requires log_partition or partition_enc.")
         self.log_unnormalized = log_unnormalized
         self.log_partition = log_partition
-        self.partition_enc = partition_enc.payload if hasattr(partition_enc, 'payload') else partition_enc
+        self.partition_enc = partition_enc.payload if hasattr(partition_enc, "payload") else partition_enc
         self.reference_log_density = reference_log_density
         self.weights = None if weights is None else np.asarray(weights, dtype=np.float64)
         self.normalize = bool(normalize)
@@ -230,10 +237,10 @@ class UnnormalizedLogLikelihood(object):
         return engine.logsumexp(scores, axis=0) - engine.log(engine.asarray(float(scores.shape[0])))
 
 
-class CallableObjective(object):
+class CallableObjective:
     """Small adapter naming arbitrary objective callables."""
 
-    def __init__(self, fn: ObjectiveCallable, name: str = 'callable_objective') -> None:
+    def __init__(self, fn: ObjectiveCallable, name: str = "callable_objective") -> None:
         self.fn = fn
         self.name = name
 
@@ -241,20 +248,22 @@ class CallableObjective(object):
         return self.fn(model, enc, engine)
 
 
-def fit_objective(enc: Any,
-                  model: SequenceEncodableProbabilityDistribution,
-                  objective: ObjectiveCallable,
-                  engine: Optional[Any] = None,
-                  max_its: int = 500,
-                  lr: float = 0.05,
-                  optimizer: str = 'adam',
-                  tol: float = 1.0e-7,
-                  maximize: bool = True,
-                  out: Optional[Any] = None,
-                  print_iter: int = 100,
-                  return_result: bool = False,
-                  precision: Optional[Any] = None,
-                  restore_best: bool = True) -> Any:
+def fit_objective(
+    enc: Any,
+    model: SequenceEncodableProbabilityDistribution,
+    objective: ObjectiveCallable,
+    engine: Any | None = None,
+    max_its: int = 500,
+    lr: float = 0.05,
+    optimizer: str = "adam",
+    tol: float = 1.0e-7,
+    maximize: bool = True,
+    out: Any | None = None,
+    print_iter: int = 100,
+    return_result: bool = False,
+    precision: Any | None = None,
+    restore_best: bool = True,
+) -> Any:
     """Optimize a user-supplied differentiable objective over a distribution tree.
 
     The objective is called as ``objective(shadow_model, enc, engine)`` and must
@@ -265,13 +274,13 @@ def fit_objective(enc: Any,
     step.
     """
     torch, engine = _torch_for_gradient_fit(engine, precision=precision)
-    if hasattr(enc, 'payload'):
+    if hasattr(enc, "payload"):
         enc = enc.payload
 
     leaves = []
     state = _gradient_raw_state(model, engine, torch, leaves)
     if not leaves:
-        raise GradientFitError('%s has no differentiable parameters.' % type(model).__name__)
+        raise GradientFitError("%s has no differentiable parameters." % type(model).__name__)
 
     opt = _make_optimizer(torch, optimizer, leaves, lr)
     sign = 1.0 if maximize else -1.0
@@ -287,12 +296,14 @@ def fit_objective(enc: Any,
     best_iteration = 0
     best_state = _clone_parameter_state(leaves)
     for i in range(iterations):
-        if optimizer == 'lbfgs':
+        if optimizer == "lbfgs":
+
             def closure():
                 opt.zero_grad()
                 loss = -sign * objective_value()
                 loss.backward()
                 return loss
+
             loss = opt.step(closure)
         else:
             opt.zero_grad()
@@ -303,7 +314,7 @@ def fit_objective(enc: Any,
         cur = _objective_scalar(objective_value())
         history.append(cur)
         if out is not None and (i + 1) % max(1, int(print_iter)) == 0:
-            out.write('objective iteration %d: value=%e\n' % (i + 1, cur))
+            out.write("objective iteration %d: value=%e\n" % (i + 1, cur))
         if _objective_is_better(cur, best_value, maximize=maximize):
             best_value = cur
             best_iteration = len(history) - 1
@@ -337,22 +348,24 @@ def fit_objective(enc: Any,
     return result if return_result else result.as_tuple()
 
 
-def variational_projection(source: SequenceEncodableProbabilityDistribution,
-                           target: SequenceEncodableProbabilityDistribution,
-                           data: Optional[Sequence[Any]] = None,
-                           enc: Optional[Any] = None,
-                           sample_size: int = 1000,
-                           seed: Optional[int] = None,
-                           engine: Optional[Any] = None,
-                           max_its: int = 500,
-                           lr: float = 0.05,
-                           optimizer: str = 'adam',
-                           tol: float = 1.0e-7,
-                           out: Optional[Any] = None,
-                           print_iter: int = 100,
-                           return_result: bool = False,
-                           precision: Optional[Any] = None,
-                           restore_best: bool = True) -> Any:
+def variational_projection(
+    source: SequenceEncodableProbabilityDistribution,
+    target: SequenceEncodableProbabilityDistribution,
+    data: Sequence[Any] | None = None,
+    enc: Any | None = None,
+    sample_size: int = 1000,
+    seed: int | None = None,
+    engine: Any | None = None,
+    max_its: int = 500,
+    lr: float = 0.05,
+    optimizer: str = "adam",
+    tol: float = 1.0e-7,
+    out: Any | None = None,
+    print_iter: int = 100,
+    return_result: bool = False,
+    precision: Any | None = None,
+    restore_best: bool = True,
+) -> Any:
     """Project ``source`` onto the family represented by ``target``.
 
     This minimizes a Monte-Carlo estimate of the forward KL
@@ -363,29 +376,43 @@ def variational_projection(source: SequenceEncodableProbabilityDistribution,
     if enc is None:
         if data is None:
             if sample_size <= 0:
-                raise ValueError('sample_size must be positive when data/enc is not supplied.')
+                raise ValueError("sample_size must be positive when data/enc is not supplied.")
             data = source.sampler(seed=seed).sample(size=int(sample_size))
         enc = target.dist_to_encoder().seq_encode(data)
     objective = ExpectedLogDensity(normalize=True)
-    return fit_objective(enc, target, objective, engine=engine, max_its=max_its, lr=lr,
-                         optimizer=optimizer, tol=tol, maximize=True, out=out,
-                         print_iter=print_iter, precision=precision,
-                         return_result=return_result, restore_best=restore_best)
+    return fit_objective(
+        enc,
+        target,
+        objective,
+        engine=engine,
+        max_its=max_its,
+        lr=lr,
+        optimizer=optimizer,
+        tol=tol,
+        maximize=True,
+        out=out,
+        print_iter=print_iter,
+        precision=precision,
+        return_result=return_result,
+        restore_best=restore_best,
+    )
 
 
-def optimize_torch_objective(parameters: Iterable[Any],
-                             objective: Callable[[], Any],
-                             engine: Optional[Any] = None,
-                             max_its: int = 500,
-                             lr: float = 0.05,
-                             optimizer: str = 'adam',
-                             tol: float = 1.0e-7,
-                             maximize: bool = True,
-                             out: Optional[Any] = None,
-                             print_iter: int = 100,
-                             precision: Optional[Any] = None,
-                             return_result: bool = False,
-                             restore_best: bool = True) -> Any:
+def optimize_torch_objective(
+    parameters: Iterable[Any],
+    objective: Callable[[], Any],
+    engine: Any | None = None,
+    max_its: int = 500,
+    lr: float = 0.05,
+    optimizer: str = "adam",
+    tol: float = 1.0e-7,
+    maximize: bool = True,
+    out: Any | None = None,
+    print_iter: int = 100,
+    precision: Any | None = None,
+    return_result: bool = False,
+    restore_best: bool = True,
+) -> Any:
     """Optimize an arbitrary Torch objective over supplied tensor parameters.
 
     This is the escape hatch for models whose likelihood is not an iid
@@ -394,9 +421,9 @@ def optimize_torch_objective(parameters: Iterable[Any],
     tensors are copied back to their best seen values before returning.
     """
     torch, _ = _torch_for_gradient_fit(engine, precision=precision)
-    params = [p for p in parameters if getattr(p, 'requires_grad', False)]
+    params = [p for p in parameters if getattr(p, "requires_grad", False)]
     if not params:
-        raise ValueError('optimize_torch_objective requires at least one trainable parameter.')
+        raise ValueError("optimize_torch_objective requires at least one trainable parameter.")
     opt = _make_optimizer(torch, optimizer, params, lr)
     sign = 1.0 if maximize else -1.0
     iterations = max(1, int(max_its))
@@ -407,12 +434,14 @@ def optimize_torch_objective(parameters: Iterable[Any],
     best_state = _clone_parameter_state(params)
 
     for i in range(iterations):
-        if optimizer == 'lbfgs':
+        if optimizer == "lbfgs":
+
             def closure():
                 opt.zero_grad()
                 loss = -sign * objective()
                 loss.backward()
                 return loss
+
             loss = opt.step(closure)
         else:
             opt.zero_grad()
@@ -423,7 +452,7 @@ def optimize_torch_objective(parameters: Iterable[Any],
         cur = _objective_scalar(objective())
         history.append(cur)
         if out is not None and (i + 1) % max(1, int(print_iter)) == 0:
-            out.write('torch objective iteration %d: value=%e\n' % (i + 1, cur))
+            out.write("torch objective iteration %d: value=%e\n" % (i + 1, cur))
         if _objective_is_better(cur, best_value, maximize=maximize):
             best_value = cur
             best_iteration = len(history) - 1
@@ -458,20 +487,22 @@ def optimize_torch_objective(parameters: Iterable[Any],
     return final_value, iterations
 
 
-def fit_parameter_objective(parameters: Any,
-                            objective: ParameterObjectiveCallable,
-                            enc: Optional[Any] = None,
-                            engine: Optional[Any] = None,
-                            max_its: int = 500,
-                            lr: float = 0.05,
-                            optimizer: str = 'adam',
-                            tol: float = 1.0e-7,
-                            maximize: bool = True,
-                            out: Optional[Any] = None,
-                            print_iter: int = 100,
-                            precision: Optional[Any] = None,
-                            return_result: bool = False,
-                            restore_best: bool = True) -> Any:
+def fit_parameter_objective(
+    parameters: Any,
+    objective: ParameterObjectiveCallable,
+    enc: Any | None = None,
+    engine: Any | None = None,
+    max_its: int = 500,
+    lr: float = 0.05,
+    optimizer: str = "adam",
+    tol: float = 1.0e-7,
+    maximize: bool = True,
+    out: Any | None = None,
+    print_iter: int = 100,
+    precision: Any | None = None,
+    return_result: bool = False,
+    restore_best: bool = True,
+) -> Any:
     """Optimize an arbitrary objective over named constrained parameters.
 
     ``parameters`` may be a mapping of ``name -> initial_value`` for real
@@ -486,14 +517,14 @@ def fit_parameter_objective(parameters: Any,
         torch = param_set.torch
         engine = param_set.engine
         if precision is not None:
-            raise ValueError('precision cannot be changed for an existing ObjectiveParameterSet.')
+            raise ValueError("precision cannot be changed for an existing ObjectiveParameterSet.")
     else:
         torch, engine = _torch_for_gradient_fit(engine, precision=precision)
         param_set = ObjectiveParameterSet(parameters, engine=engine, torch=torch)
     params = list(param_set.trainable_tensors())
     if not params:
-        raise ValueError('fit_parameter_objective requires at least one trainable parameter.')
-    if hasattr(enc, 'payload'):
+        raise ValueError("fit_parameter_objective requires at least one trainable parameter.")
+    if hasattr(enc, "payload"):
         enc = enc.payload
 
     opt = _make_optimizer(torch, optimizer, params, lr)
@@ -509,12 +540,14 @@ def fit_parameter_objective(parameters: Any,
     best_iteration = 0
     best_state = _clone_parameter_state(params)
     for i in range(iterations):
-        if optimizer == 'lbfgs':
+        if optimizer == "lbfgs":
+
             def closure():
                 opt.zero_grad()
                 loss = -sign * objective_value()
                 loss.backward()
                 return loss
+
             loss = opt.step(closure)
         else:
             opt.zero_grad()
@@ -525,7 +558,7 @@ def fit_parameter_objective(parameters: Any,
         cur = _objective_scalar(objective_value())
         history.append(cur)
         if out is not None and (i + 1) % max(1, int(print_iter)) == 0:
-            out.write('parameter objective iteration %d: value=%e\n' % (i + 1, cur))
+            out.write("parameter objective iteration %d: value=%e\n" % (i + 1, cur))
         if _objective_is_better(cur, best_value, maximize=maximize):
             best_value = cur
             best_iteration = len(history) - 1
@@ -560,10 +593,9 @@ def fit_parameter_objective(parameters: Any,
 
 
 def _make_optimizer(torch: Any, optimizer: str, parameters: Sequence[Any], lr: float) -> Any:
-    opt_classes = {'adam': torch.optim.Adam, 'lbfgs': torch.optim.LBFGS}
+    opt_classes = {"adam": torch.optim.Adam, "lbfgs": torch.optim.LBFGS}
     if optimizer not in opt_classes:
-        raise ValueError('Unknown optimizer %s. Expected one of %s.' %
-                         (optimizer, ', '.join(sorted(opt_classes))))
+        raise ValueError("Unknown optimizer %s. Expected one of %s." % (optimizer, ", ".join(sorted(opt_classes))))
     return opt_classes[optimizer](parameters, lr=lr)
 
 
@@ -571,7 +603,7 @@ def _objective_scalar(value: Any) -> float:
     return float(value.detach().cpu().item())
 
 
-def _objective_best_entry(history: Sequence[float], maximize: bool = True) -> Tuple[float, int]:
+def _objective_best_entry(history: Sequence[float], maximize: bool = True) -> tuple[float, int]:
     values = np.asarray(history, dtype=np.float64)
     idx = int(np.nanargmax(values) if maximize else np.nanargmin(values))
     return float(values[idx]), idx
@@ -581,7 +613,7 @@ def _objective_is_better(value: float, best_value: float, maximize: bool = True)
     return value > best_value if maximize else value < best_value
 
 
-def _clone_parameter_state(parameters: Sequence[Any]) -> Tuple[Any, ...]:
+def _clone_parameter_state(parameters: Sequence[Any]) -> tuple[Any, ...]:
     return tuple(param.detach().clone() for param in parameters)
 
 
@@ -591,23 +623,21 @@ def _restore_parameter_state(torch: Any, parameters: Sequence[Any], values: Sequ
             param.copy_(value)
 
 
-def _objective_gradient_norm(torch: Any,
-                             parameters: Sequence[Any],
-                             objective: Callable[[], Any]) -> float:
+def _objective_gradient_norm(torch: Any, parameters: Sequence[Any], objective: Callable[[], Any]) -> float:
     for param in parameters:
-        if getattr(param, 'grad', None) is not None:
+        if getattr(param, "grad", None) is not None:
             param.grad = None
     value = objective()
     value.backward()
     total = None
     for param in parameters:
-        grad = getattr(param, 'grad', None)
+        grad = getattr(param, "grad", None)
         if grad is None:
             continue
         term = torch.sum(grad.detach() * grad.detach())
         total = term if total is None else total + term
     for param in parameters:
-        if getattr(param, 'grad', None) is not None:
+        if getattr(param, "grad", None) is not None:
             param.grad = None
     if total is None:
         return 0.0
@@ -631,68 +661,70 @@ def _normalize_objective_parameters(parameters: Any) -> Sequence[ObjectiveParame
         elif isinstance(item, tuple) and len(item) == 3:
             rv.append(ObjectiveParameter(str(item[0]), item[1], str(item[2])))
         else:
-            raise TypeError('Objective parameters must be ObjectiveParameter objects, '
-                            '(name, value), or (name, value, constraint) tuples.')
+            raise TypeError(
+                "Objective parameters must be ObjectiveParameter objects, "
+                "(name, value), or (name, value, constraint) tuples."
+            )
     return rv
 
 
 def _objective_raw_tensor(value: Any, constraint: str, engine: Any, torch: Any) -> Any:
-    tensor = engine.asarray(value, dtype=getattr(engine, 'dtype', None)).clone().detach()
+    tensor = engine.asarray(value, dtype=getattr(engine, "dtype", None)).clone().detach()
     eps = 1.0e-8
-    if constraint in ('positive', 'positive_vector', 'positive_matrix'):
+    if constraint in ("positive", "positive_vector", "positive_matrix"):
         tensor = torch.log(torch.clamp(tensor, min=eps))
-    elif constraint == 'unit_interval':
+    elif constraint == "unit_interval":
         tensor = torch.logit(torch.clamp(tensor, min=eps, max=1.0 - eps))
-    elif constraint in ('simplex', 'simplex_vector'):
+    elif constraint in ("simplex", "simplex_vector"):
         tensor = torch.clamp(tensor, min=eps)
         tensor = tensor / torch.sum(tensor)
         tensor = torch.log(tensor)
-    elif constraint == 'row_simplex_matrix':
+    elif constraint == "row_simplex_matrix":
         tensor = torch.clamp(tensor, min=eps)
         tensor = tensor / torch.sum(tensor, dim=1, keepdim=True)
         tensor = torch.log(tensor)
-    elif constraint == 'column_simplex_matrix':
+    elif constraint == "column_simplex_matrix":
         tensor = torch.clamp(tensor, min=eps)
         tensor = tensor / torch.sum(tensor, dim=0, keepdim=True)
         tensor = torch.log(tensor)
     elif _objective_is_coupled_bound_constraint(constraint):
-        raise ValueError('Coupled objective constraints are initialized by ObjectiveParameterSet.')
-    elif constraint != 'real':
-        raise ValueError('Unknown objective parameter constraint %s.' % constraint)
+        raise ValueError("Coupled objective constraints are initialized by ObjectiveParameterSet.")
+    elif constraint != "real":
+        raise ValueError("Unknown objective parameter constraint %s." % constraint)
     tensor.requires_grad_(True)
     return tensor
 
 
-def _objective_constrained_value(raw: Any, constraint: str, torch: Any, values: Optional[Mapping[str, Any]] = None) -> Any:
-    if constraint in ('positive', 'positive_vector', 'positive_matrix'):
+def _objective_constrained_value(raw: Any, constraint: str, torch: Any, values: Mapping[str, Any] | None = None) -> Any:
+    if constraint in ("positive", "positive_vector", "positive_matrix"):
         return torch.exp(raw)
-    if constraint == 'unit_interval':
+    if constraint == "unit_interval":
         return torch.sigmoid(raw)
-    if constraint in ('simplex', 'simplex_vector'):
+    if constraint in ("simplex", "simplex_vector"):
         return torch.softmax(raw, dim=0)
-    if constraint == 'row_simplex_matrix':
+    if constraint == "row_simplex_matrix":
         return torch.softmax(raw, dim=1)
-    if constraint == 'column_simplex_matrix':
+    if constraint == "column_simplex_matrix":
         return torch.softmax(raw, dim=0)
     if _objective_is_greater_than_constraint(constraint):
         anchor = _objective_bound_anchor(constraint)
         if values is None or anchor not in values:
-            raise ValueError('Objective constraint %s requires resolved anchor %s.' % (constraint, anchor))
+            raise ValueError("Objective constraint %s requires resolved anchor %s." % (constraint, anchor))
         return values[anchor] + torch.exp(raw)
     if _objective_is_less_than_constraint(constraint):
         anchor = _objective_bound_anchor(constraint)
         if values is None or anchor not in values:
-            raise ValueError('Objective constraint %s requires resolved anchor %s.' % (constraint, anchor))
+            raise ValueError("Objective constraint %s requires resolved anchor %s." % (constraint, anchor))
         return values[anchor] - torch.exp(raw)
     return raw
 
 
 def _objective_is_greater_than_constraint(constraint: str) -> bool:
-    return str(constraint).startswith('greater_than:')
+    return str(constraint).startswith("greater_than:")
 
 
 def _objective_is_less_than_constraint(constraint: str) -> bool:
-    return str(constraint).startswith('less_than:')
+    return str(constraint).startswith("less_than:")
 
 
 def _objective_is_coupled_bound_constraint(constraint: str) -> bool:
@@ -700,9 +732,9 @@ def _objective_is_coupled_bound_constraint(constraint: str) -> bool:
 
 
 def _objective_bound_anchor(constraint: str) -> str:
-    anchor = str(constraint).split(':', 1)[1] if ':' in str(constraint) else ''
+    anchor = str(constraint).split(":", 1)[1] if ":" in str(constraint) else ""
     if not anchor:
-        raise ValueError('%s constraint requires an anchor parameter.' % constraint)
+        raise ValueError("%s constraint requires an anchor parameter." % constraint)
     return anchor
 
 
@@ -714,22 +746,22 @@ def _objective_bound_delta(value: Any, anchor_value: Any, constraint: str) -> An
     else:
         delta = anchor_arr - value_arr
     if np.any(delta <= 0.0) or not np.all(np.isfinite(delta)):
-        raise ValueError('Initial value for %s must satisfy its coupled bound.' % constraint)
+        raise ValueError("Initial value for %s must satisfy its coupled bound." % constraint)
     return delta
 
 
 def _detach_objective_value(value: Any) -> Any:
-    if hasattr(value, 'detach'):
+    if hasattr(value, "detach"):
         arr = value.detach().cpu().numpy()
         return float(arr) if np.ndim(arr) == 0 else arr
     return value
 
 
-def projection_samples(source: SequenceEncodableProbabilityDistribution,
-                       sample_size: int,
-                       seed: Optional[int] = None) -> Sequence[Any]:
+def projection_samples(
+    source: SequenceEncodableProbabilityDistribution, sample_size: int, seed: int | None = None
+) -> Sequence[Any]:
     """Draw reusable samples for Monte-Carlo projection experiments."""
     if sample_size <= 0:
-        raise ValueError('sample_size must be positive.')
+        raise ValueError("sample_size must be positive.")
     rng = RandomState(seed)
-    return source.sampler(seed=int(rng.randint(2 ** 31 - 1))).sample(size=int(sample_size))
+    return source.sampler(seed=int(rng.randint(2**31 - 1))).sample(size=int(sample_size))

@@ -5,18 +5,21 @@ Bayesian (conjugate-prior) estimators from pysp.bstats instead. get_dpm_mixture
 fits a Dirichlet process mixture over automatically-typed data with
 variational inference.
 """
+
 import math
 import numbers
-import numpy as np
-from dataclasses import dataclass, field
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
+from typing import Any, TypeVar
 
-from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution, \
-    SequenceEncodableStatisticAccumulator
+import numpy as np
 
-from typing import Optional, Any, Sequence, Dict, TypeVar, Union, List, Tuple
-T = TypeVar('T')
+from pysp.stats.pdist import (
+    ParameterEstimator,
+)
+
+T = TypeVar("T")
 
 # Leaf-typing heuristics: integers with at most this many distinct values (or
 # at most this fraction of observations) are modeled as categorical rather
@@ -49,12 +52,13 @@ DictRecordDistribution = _estimator_provider(False).DictRecordDistribution
 DictRecordEstimator = _estimator_provider(False).DictRecordEstimator
 
 
-def get_optional_estimator(est: ParameterEstimator, missing_value: Optional[Any] = None, use_bstats: bool = False):
+def get_optional_estimator(est: ParameterEstimator, missing_value: Any | None = None, use_bstats: bool = False):
     return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value)
 
 
-def get_length_estimator(len_dict: Dict[int, int], pseudo_count: Optional[float] = None,
-                         emp_suff_stat: bool = True, use_bstats: bool = False) -> 'ParameterEstimator':
+def get_length_estimator(
+    len_dict: dict[int, int], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
+) -> "ParameterEstimator":
     """Length model for sequences.
 
     Observed lengths are often bounded protocol/domain facts, not Poisson counts,
@@ -64,16 +68,19 @@ def get_length_estimator(len_dict: Dict[int, int], pseudo_count: Optional[float]
     n = sum(len_dict.values())
     cutoff = max(MAX_LENGTH_CATEGORICAL_DISTINCT, MAX_LENGTH_CATEGORICAL_FRACTION * n)
     if len(len_dict) <= cutoff and _dense_integer_support(len_dict):
-        return get_integer_categorical_estimator(dict(len_dict), pseudo_count, emp_suff_stat,
-                                                 use_bstats=use_bstats)
+        return get_integer_categorical_estimator(dict(len_dict), pseudo_count, emp_suff_stat, use_bstats=use_bstats)
     if use_bstats:
         return _estimator_provider(True).PoissonEstimator()
     return get_poisson_estimator(dict(len_dict), pseudo_count, emp_suff_stat)
 
 
-def get_sequence_estimator(est: ParameterEstimator, len_dict: Optional[Dict[int, int]] = None,
-                           pseudo_count: Optional[float] = None, emp_suff_stat: bool = True,
-                           use_bstats: bool = False) -> 'ParameterEstimator':
+def get_sequence_estimator(
+    est: ParameterEstimator,
+    len_dict: dict[int, int] | None = None,
+    pseudo_count: float | None = None,
+    emp_suff_stat: bool = True,
+    use_bstats: bool = False,
+) -> "ParameterEstimator":
     len_est = None
     if len_dict:
         len_est = get_length_estimator(len_dict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
@@ -81,8 +88,13 @@ def get_sequence_estimator(est: ParameterEstimator, len_dict: Optional[Dict[int,
     return SequenceEstimator(est) if len_est is None else SequenceEstimator(est, len_estimator=len_est)
 
 
-def get_set_estimator(member_dict: Dict[Any, int], num_sets: int, pseudo_count: Optional[float] = None,
-                      emp_suff_stat: bool = True, use_bstats: bool = False) -> 'ParameterEstimator':
+def get_set_estimator(
+    member_dict: dict[Any, int],
+    num_sets: int,
+    pseudo_count: float | None = None,
+    emp_suff_stat: bool = True,
+    use_bstats: bool = False,
+) -> "ParameterEstimator":
     """Bernoulli set model with membership probabilities from observed sets."""
     BernoulliSetEstimator = _estimator_provider(use_bstats).BernoulliSetEstimator
     if use_bstats:
@@ -92,23 +104,26 @@ def get_set_estimator(member_dict: Dict[Any, int], num_sets: int, pseudo_count: 
         suff_stat = {k: v / num_sets for k, v in member_dict.items()}
     return BernoulliSetEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat)
 
-def get_ignored_estimator(use_bstats: bool = False) -> 'ParameterEstimator':
+
+def get_ignored_estimator(use_bstats: bool = False) -> "ParameterEstimator":
     return _estimator_provider(use_bstats).IgnoredEstimator()
 
-def get_composite_estimator(ests: Sequence[ParameterEstimator], use_bstats: bool = False) -> 'ParameterEstimator':
+
+def get_composite_estimator(ests: Sequence[ParameterEstimator], use_bstats: bool = False) -> "ParameterEstimator":
     return _estimator_provider(use_bstats).CompositeEstimator(ests)
 
 
-def get_dict_record_estimator(keys: Sequence[Any], ests: Sequence[ParameterEstimator]) -> 'ParameterEstimator':
+def get_dict_record_estimator(keys: Sequence[Any], ests: Sequence[ParameterEstimator]) -> "ParameterEstimator":
     return DictRecordEstimator(keys, ests)
 
-def get_categorical_estimator(vdict: Dict[T, float], pseudo_count: Optional[float] = None, emp_suff_stat: bool = True,
-                              use_bstats: bool = False) -> 'ParameterEstimator':
+
+def get_categorical_estimator(
+    vdict: dict[T, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
+) -> "ParameterEstimator":
     provider = _estimator_provider(use_bstats)
     if use_bstats:
         alpha = 1.0 if pseudo_count is None else pseudo_count
-        return provider.CategoricalEstimator(
-            prior=provider.DictDirichletDistribution({k: alpha for k in vdict.keys()}))
+        return provider.CategoricalEstimator(prior=provider.DictDirichletDistribution({k: alpha for k in vdict.keys()}))
 
     if emp_suff_stat:
         cnt = sum(vdict.values())
@@ -119,25 +134,23 @@ def get_categorical_estimator(vdict: Dict[T, float], pseudo_count: Optional[floa
     return provider.CategoricalEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat)
 
 
-def _integer_range(vdict: Dict[Any, float]):
+def _integer_range(vdict: dict[Any, float]):
     vals = [int(k) for k in vdict.keys()]
     min_val = min(vals)
     max_val = max(vals)
     return min_val, max_val, max_val - min_val + 1
 
 
-def _dense_integer_support(vdict: Dict[Any, float]) -> bool:
+def _dense_integer_support(vdict: dict[Any, float]) -> bool:
     if len(vdict) == 0:
         return False
     _, _, width = _integer_range(vdict)
-    return width <= max(
-        MAX_INT_CATEGORICAL_DISTINCT,
-        int(math.ceil(MAX_INT_CATEGORICAL_RANGE_MULTIPLIER * len(vdict))))
+    return width <= max(MAX_INT_CATEGORICAL_DISTINCT, int(math.ceil(MAX_INT_CATEGORICAL_RANGE_MULTIPLIER * len(vdict))))
 
 
-def get_integer_categorical_estimator(vdict: Dict[int, float], pseudo_count: Optional[float] = None,
-                                      emp_suff_stat: bool = True,
-                                      use_bstats: bool = False) -> 'ParameterEstimator':
+def get_integer_categorical_estimator(
+    vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
+) -> "ParameterEstimator":
     min_val, max_val, width = _integer_range(vdict)
 
     if use_bstats:
@@ -153,11 +166,13 @@ def get_integer_categorical_estimator(vdict: Dict[int, float], pseudo_count: Opt
         suff_stat = (min_val, p_vec)
 
     return _estimator_provider(False).IntegerCategoricalEstimator(
-        min_val=min_val, max_val=max_val, pseudo_count=pseudo_count, suff_stat=suff_stat)
+        min_val=min_val, max_val=max_val, pseudo_count=pseudo_count, suff_stat=suff_stat
+    )
 
 
-def get_poisson_estimator(vdict: Dict[int, float], pseudo_count: Optional[float] = None, emp_suff_stat: bool = True) \
-        -> 'ParameterEstimator':
+def get_poisson_estimator(
+    vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True
+) -> "ParameterEstimator":
 
     if emp_suff_stat:
         ss_0 = 0.0
@@ -179,8 +194,12 @@ def get_poisson_estimator(vdict: Dict[int, float], pseudo_count: Optional[float]
     return _estimator_provider(False).PoissonEstimator(pseudo_count=pseudo_count, suff_stat=ss_1)
 
 
-def get_gaussian_estimator(vdict: Dict[Union[np.floating, float], float], pseudo_count: Optional[float] = None,
-                           emp_suff_stat: bool = True, use_bstats: bool = False) -> 'ParameterEstimator':
+def get_gaussian_estimator(
+    vdict: dict[np.floating | float, float],
+    pseudo_count: float | None = None,
+    emp_suff_stat: bool = True,
+    use_bstats: bool = False,
+) -> "ParameterEstimator":
 
     if emp_suff_stat:
         ss_0 = 0.0
@@ -189,10 +208,10 @@ def get_gaussian_estimator(vdict: Dict[Union[np.floating, float], float], pseudo
         for k, v in vdict.items():
             if math.isfinite(k):
                 ss_0 += v
-                ss_1 += k*v
-                ss_2 += k*k*v
+                ss_1 += k * v
+                ss_2 += k * k * v
         ss_1 = ss_1 / ss_0
-        ss_2 = (ss_2 / ss_0) - ss_1*ss_1
+        ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
 
     elif pseudo_count is not None:
         ss_1 = 1.0e-6
@@ -209,22 +228,23 @@ def get_gaussian_estimator(vdict: Dict[Union[np.floating, float], float], pseudo
         mu0 = ss_1 if ss_1 is not None else 0.0
         v0 = ss_2 if (ss_2 is not None and ss_2 > 0) else 1.0
         a0 = 1.001
-        prior = provider.NormalGammaDistribution(mu0, 1.0e-3, a0, a0*v0)
+        prior = provider.NormalGammaDistribution(mu0, 1.0e-3, a0, a0 * v0)
         return provider.GaussianEstimator(prior=prior)
 
     return _estimator_provider(False).GaussianEstimator(
-        pseudo_count=(pseudo_count, pseudo_count), suff_stat=(ss_1, ss_2))
+        pseudo_count=(pseudo_count, pseudo_count), suff_stat=(ss_1, ss_2)
+    )
 
 
-def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> 'ParameterEstimator':
+def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> "ParameterEstimator":
     return _estimator_provider(use_bstats).MultivariateGaussianEstimator(dim=dim)
 
 
 @dataclass
-class MarginalFieldProfile(object):
+class MarginalFieldProfile:
     """Marginal evidence for one detected scalar field or structural feature."""
 
-    path: Tuple[Any, ...]
+    path: tuple[Any, ...]
     role: str
     count: int
     missing_count: int
@@ -232,66 +252,66 @@ class MarginalFieldProfile(object):
     observed_count: int
     kind: str
     recommendation: str
-    bits_per_obs: Optional[float] = None
-    entropy_bits: Optional[float] = None
-    cardinality: Optional[int] = None
-    unique_fraction: Optional[float] = None
-    effective_cardinality: Optional[float] = None
+    bits_per_obs: float | None = None
+    entropy_bits: float | None = None
+    cardinality: int | None = None
+    unique_fraction: float | None = None
+    effective_cardinality: float | None = None
     is_constant: bool = False
-    top_mass: Optional[float] = None
-    numeric_mean: Optional[float] = None
-    numeric_var: Optional[float] = None
-    integer_min: Optional[int] = None
-    integer_max: Optional[int] = None
-    integer_density: Optional[float] = None
-    model_scores_bits: Dict[str, float] = field(default_factory=dict)
-    model_score_gap_bits: Optional[float] = None
-    validation_scores_bits: Dict[str, float] = field(default_factory=dict)
-    validation_recommendation: Optional[str] = None
-    validation_score_gap_bits: Optional[float] = None
+    top_mass: float | None = None
+    numeric_mean: float | None = None
+    numeric_var: float | None = None
+    integer_min: int | None = None
+    integer_max: int | None = None
+    integer_density: float | None = None
+    model_scores_bits: dict[str, float] = field(default_factory=dict)
+    model_score_gap_bits: float | None = None
+    validation_scores_bits: dict[str, float] = field(default_factory=dict)
+    validation_recommendation: str | None = None
+    validation_score_gap_bits: float | None = None
     validation_count: int = 0
-    validation_notes: List[str] = field(default_factory=list)
-    notes: List[str] = field(default_factory=list)
+    validation_notes: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         return {
-            'path': format_path(self.path),
-            'role': self.role,
-            'count': self.count,
-            'missing_count': self.missing_count,
-            'missing_fraction': self.missing_fraction,
-            'observed_count': self.observed_count,
-            'kind': self.kind,
-            'recommendation': self.recommendation,
-            'bits_per_obs': self.bits_per_obs,
-            'entropy_bits': self.entropy_bits,
-            'cardinality': self.cardinality,
-            'unique_fraction': self.unique_fraction,
-            'effective_cardinality': self.effective_cardinality,
-            'is_constant': self.is_constant,
-            'top_mass': self.top_mass,
-            'numeric_mean': self.numeric_mean,
-            'numeric_var': self.numeric_var,
-            'integer_min': self.integer_min,
-            'integer_max': self.integer_max,
-            'integer_density': self.integer_density,
-            'model_scores_bits': dict(self.model_scores_bits),
-            'model_score_gap_bits': self.model_score_gap_bits,
-            'validation_scores_bits': dict(self.validation_scores_bits),
-            'validation_recommendation': self.validation_recommendation,
-            'validation_score_gap_bits': self.validation_score_gap_bits,
-            'validation_count': self.validation_count,
-            'validation_notes': list(self.validation_notes),
-            'notes': list(self.notes),
+            "path": format_path(self.path),
+            "role": self.role,
+            "count": self.count,
+            "missing_count": self.missing_count,
+            "missing_fraction": self.missing_fraction,
+            "observed_count": self.observed_count,
+            "kind": self.kind,
+            "recommendation": self.recommendation,
+            "bits_per_obs": self.bits_per_obs,
+            "entropy_bits": self.entropy_bits,
+            "cardinality": self.cardinality,
+            "unique_fraction": self.unique_fraction,
+            "effective_cardinality": self.effective_cardinality,
+            "is_constant": self.is_constant,
+            "top_mass": self.top_mass,
+            "numeric_mean": self.numeric_mean,
+            "numeric_var": self.numeric_var,
+            "integer_min": self.integer_min,
+            "integer_max": self.integer_max,
+            "integer_density": self.integer_density,
+            "model_scores_bits": dict(self.model_scores_bits),
+            "model_score_gap_bits": self.model_score_gap_bits,
+            "validation_scores_bits": dict(self.validation_scores_bits),
+            "validation_recommendation": self.validation_recommendation,
+            "validation_score_gap_bits": self.validation_score_gap_bits,
+            "validation_count": self.validation_count,
+            "validation_notes": list(self.validation_notes),
+            "notes": list(self.notes),
         }
 
 
 @dataclass
-class PairwiseDependencyHint(object):
+class PairwiseDependencyHint:
     """Unconditional pairwise dependency hint measured from encoded values."""
 
-    left: Tuple[Any, ...]
-    right: Tuple[Any, ...]
+    left: tuple[Any, ...]
+    right: tuple[Any, ...]
     mi_bits: float
     adjusted_mi_bits: float
     bic_gain_bits: float
@@ -300,114 +320,135 @@ class PairwiseDependencyHint(object):
     right_entropy_bits: float
     joint_count: int
     method: str
-    p_value: Optional[float] = None
-    notes: List[str] = field(default_factory=list)
+    p_value: float | None = None
+    notes: list[str] = field(default_factory=list)
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         return {
-            'left': format_path(self.left),
-            'right': format_path(self.right),
-            'mi_bits': self.mi_bits,
-            'adjusted_mi_bits': self.adjusted_mi_bits,
-            'bic_gain_bits': self.bic_gain_bits,
-            'normalized_mi': self.normalized_mi,
-            'left_entropy_bits': self.left_entropy_bits,
-            'right_entropy_bits': self.right_entropy_bits,
-            'joint_count': self.joint_count,
-            'method': self.method,
-            'p_value': self.p_value,
-            'notes': list(self.notes),
+            "left": format_path(self.left),
+            "right": format_path(self.right),
+            "mi_bits": self.mi_bits,
+            "adjusted_mi_bits": self.adjusted_mi_bits,
+            "bic_gain_bits": self.bic_gain_bits,
+            "normalized_mi": self.normalized_mi,
+            "left_entropy_bits": self.left_entropy_bits,
+            "right_entropy_bits": self.right_entropy_bits,
+            "joint_count": self.joint_count,
+            "method": self.method,
+            "p_value": self.p_value,
+            "notes": list(self.notes),
         }
 
 
 @dataclass
-class StructureProfile(object):
+class StructureProfile:
     """Structure-analysis result returned by ``analyze_structure``."""
 
     estimator: ParameterEstimator
-    fields: List[MarginalFieldProfile]
-    pairwise_hints: List[PairwiseDependencyHint]
-    warnings: List[str]
+    fields: list[MarginalFieldProfile]
+    pairwise_hints: list[PairwiseDependencyHint]
+    warnings: list[str]
     sampled_rows: int
     total_rows: int
-    dependency_tree_edges: List[PairwiseDependencyHint] = field(default_factory=list)
-    dependency_residual_edges: List[PairwiseDependencyHint] = field(default_factory=list)
+    dependency_tree_edges: list[PairwiseDependencyHint] = field(default_factory=list)
+    dependency_residual_edges: list[PairwiseDependencyHint] = field(default_factory=list)
     dependency_redundancy_ratio: float = 0.0
     encoded_pairwise_fields: int = 0
     pairwise_fields_available: int = 0
     pairwise_pairs_available: int = 0
     pairwise_pairs_checked: int = 0
-    pairwise_pair_strategy: str = 'none'
+    pairwise_pair_strategy: str = "none"
 
     def recommend(self) -> ParameterEstimator:
         return self.estimator
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         return {
-            'total_rows': self.total_rows,
-            'sampled_rows': self.sampled_rows,
-            'estimator': type(self.estimator).__name__,
-            'fields': [u.summary() for u in self.fields],
-            'pairwise_hints': [u.summary() for u in self.pairwise_hints],
-            'dependency_tree_edges': [u.summary() for u in self.dependency_tree_edges],
-            'dependency_residual_edges': [u.summary() for u in self.dependency_residual_edges],
-            'dependency_redundancy_ratio': self.dependency_redundancy_ratio,
-            'encoded_pairwise_fields': self.encoded_pairwise_fields,
-            'pairwise_fields_available': self.pairwise_fields_available,
-            'pairwise_pairs_available': self.pairwise_pairs_available,
-            'pairwise_pairs_checked': self.pairwise_pairs_checked,
-            'pairwise_pair_strategy': self.pairwise_pair_strategy,
-            'warnings': list(self.warnings),
+            "total_rows": self.total_rows,
+            "sampled_rows": self.sampled_rows,
+            "estimator": type(self.estimator).__name__,
+            "fields": [u.summary() for u in self.fields],
+            "pairwise_hints": [u.summary() for u in self.pairwise_hints],
+            "dependency_tree_edges": [u.summary() for u in self.dependency_tree_edges],
+            "dependency_residual_edges": [u.summary() for u in self.dependency_residual_edges],
+            "dependency_redundancy_ratio": self.dependency_redundancy_ratio,
+            "encoded_pairwise_fields": self.encoded_pairwise_fields,
+            "pairwise_fields_available": self.pairwise_fields_available,
+            "pairwise_pairs_available": self.pairwise_pairs_available,
+            "pairwise_pairs_checked": self.pairwise_pairs_checked,
+            "pairwise_pair_strategy": self.pairwise_pair_strategy,
+            "warnings": list(self.warnings),
         }
 
-    def explain(self) -> List[str]:
+    def explain(self) -> list[str]:
         lines = []
         for field_profile in self.fields:
-            bits = '' if field_profile.bits_per_obs is None else \
-                ' (~%.3f bits/obs)' % field_profile.bits_per_obs
-            lines.append('%s: %s -> %s%s' % (
-                format_path(field_profile.path), field_profile.kind,
-                field_profile.recommendation, bits))
+            bits = "" if field_profile.bits_per_obs is None else " (~%.3f bits/obs)" % field_profile.bits_per_obs
+            lines.append(
+                "%s: %s -> %s%s"
+                % (format_path(field_profile.path), field_profile.kind, field_profile.recommendation, bits)
+            )
             for note in field_profile.notes:
-                lines.append('  - %s' % note)
+                lines.append("  - %s" % note)
         for hint in self.pairwise_hints:
-            p_value = '' if hint.p_value is None else ', p=%.3f' % hint.p_value
-            lines.append('%s <-> %s: %.3f bits MI, %.3f adjusted, %.3f BIC gain/obs%s' % (
-                format_path(hint.left), format_path(hint.right),
-                hint.mi_bits, hint.adjusted_mi_bits, hint.bic_gain_bits, p_value))
+            p_value = "" if hint.p_value is None else ", p=%.3f" % hint.p_value
+            lines.append(
+                "%s <-> %s: %.3f bits MI, %.3f adjusted, %.3f BIC gain/obs%s"
+                % (
+                    format_path(hint.left),
+                    format_path(hint.right),
+                    hint.mi_bits,
+                    hint.adjusted_mi_bits,
+                    hint.bic_gain_bits,
+                    p_value,
+                )
+            )
         for field_profile in self.fields:
             if field_profile.validation_recommendation is not None:
-                gap = '' if field_profile.validation_score_gap_bits is None else \
-                    ', gap %.3f bits/obs' % field_profile.validation_score_gap_bits
-                lines.append('%s validation: %s over %d rows%s' % (
-                    format_path(field_profile.path), field_profile.validation_recommendation,
-                    field_profile.validation_count, gap))
+                gap = (
+                    ""
+                    if field_profile.validation_score_gap_bits is None
+                    else ", gap %.3f bits/obs" % field_profile.validation_score_gap_bits
+                )
+                lines.append(
+                    "%s validation: %s over %d rows%s"
+                    % (
+                        format_path(field_profile.path),
+                        field_profile.validation_recommendation,
+                        field_profile.validation_count,
+                        gap,
+                    )
+                )
                 for note in field_profile.validation_notes:
-                    lines.append('  - %s' % note)
+                    lines.append("  - %s" % note)
         for edge in self.dependency_tree_edges:
-            lines.append('tree edge %s <-> %s: %.3f BIC gain/obs' % (
-                format_path(edge.left), format_path(edge.right), edge.bic_gain_bits))
+            lines.append(
+                "tree edge %s <-> %s: %.3f BIC gain/obs"
+                % (format_path(edge.left), format_path(edge.right), edge.bic_gain_bits)
+            )
         if self.dependency_residual_edges:
-            lines.append('dependency residuals: %d non-tree accepted edges (ratio %.3f)' % (
-                len(self.dependency_residual_edges), self.dependency_redundancy_ratio))
+            lines.append(
+                "dependency residuals: %d non-tree accepted edges (ratio %.3f)"
+                % (len(self.dependency_residual_edges), self.dependency_redundancy_ratio)
+            )
         for warning in self.warnings:
-            lines.append('warning: %s' % warning)
+            lines.append("warning: %s" % warning)
         return lines
 
 
-def format_path(path: Tuple[Any, ...]) -> str:
+def format_path(path: tuple[Any, ...]) -> str:
     if len(path) == 0:
-        return '$'
-    rv = '$'
+        return "$"
+    rv = "$"
     for part in path:
         if isinstance(part, int):
-            rv += '[%d]' % part
+            rv += "[%d]" % part
         else:
-            rv += '[%r]' % part
+            rv += "[%r]" % part
     return rv
 
 
-def _path_sort_key(path: Tuple[Any, ...]) -> Tuple[Tuple[int, Any], ...]:
+def _path_sort_key(path: tuple[Any, ...]) -> tuple[tuple[int, Any], ...]:
     return tuple((0, part) if isinstance(part, int) else (1, repr(part)) for part in path)
 
 
@@ -431,7 +472,7 @@ def _entropy_from_counts(counts: Sequence[float]) -> float:
     return rv
 
 
-def _gaussian_bits(var: float) -> Optional[float]:
+def _gaussian_bits(var: float) -> float | None:
     if var <= 0.0 or not math.isfinite(var):
         return None
     return max(0.0, 0.5 * math.log(2.0 * math.pi * math.e * var, 2.0))
@@ -443,7 +484,7 @@ def _bic_penalty_bits(num_params: int, nobs: int) -> float:
     return 0.5 * float(num_params) * math.log(float(nobs), 2.0) / float(nobs)
 
 
-def _categorical_bic_bits(vdict: Dict[Any, float], num_levels: Optional[int] = None) -> Optional[float]:
+def _categorical_bic_bits(vdict: dict[Any, float], num_levels: int | None = None) -> float | None:
     n = int(sum(vdict.values()))
     if n <= 0:
         return None
@@ -451,7 +492,7 @@ def _categorical_bic_bits(vdict: Dict[Any, float], num_levels: Optional[int] = N
     return _entropy_from_counts(vdict.values()) + _bic_penalty_bits(max(0, k - 1), n)
 
 
-def _poisson_bits(vdict: Dict[int, float], mean: float) -> Optional[float]:
+def _poisson_bits(vdict: dict[int, float], mean: float) -> float | None:
     if mean <= 0.0:
         return None
     total = float(sum(vdict.values()))
@@ -464,7 +505,7 @@ def _poisson_bits(vdict: Dict[int, float], mean: float) -> Optional[float]:
     return -ll / (total * math.log(2.0))
 
 
-def _poisson_bic_bits(vdict: Dict[int, float], mean: float) -> Optional[float]:
+def _poisson_bic_bits(vdict: dict[int, float], mean: float) -> float | None:
     bits = _poisson_bits(vdict, mean)
     if bits is None:
         return None
@@ -475,7 +516,7 @@ def _normal_cdf(x: float, mean: float, sd: float) -> float:
     return 0.5 * (1.0 + math.erf((x - mean) / (sd * math.sqrt(2.0))))
 
 
-def _integer_gaussian_bic_bits(vdict: Dict[int, float], mean: float, var: float) -> Optional[float]:
+def _integer_gaussian_bic_bits(vdict: dict[int, float], mean: float, var: float) -> float | None:
     if var <= 0.0 or not math.isfinite(var):
         return None
     sd = math.sqrt(var)
@@ -490,19 +531,18 @@ def _integer_gaussian_bic_bits(vdict: Dict[int, float], mean: float, var: float)
     return -ll / (total * math.log(2.0)) + _bic_penalty_bits(2, int(total))
 
 
-def _gaussian_bic_bits(var: float, nobs: int) -> Optional[float]:
+def _gaussian_bic_bits(var: float, nobs: int) -> float | None:
     bits = _gaussian_bits(var)
     if bits is None:
         return None
     return bits + _bic_penalty_bits(2, nobs)
 
 
-def _clean_scores(scores: Dict[str, Optional[float]]) -> Dict[str, float]:
-    return {k: float(v) for k, v in scores.items()
-            if v is not None and math.isfinite(float(v))}
+def _clean_scores(scores: dict[str, float | None]) -> dict[str, float]:
+    return {k: float(v) for k, v in scores.items() if v is not None and math.isfinite(float(v))}
 
 
-def _score_gap_bits(scores: Dict[str, float], recommendation: str) -> Optional[float]:
+def _score_gap_bits(scores: dict[str, float], recommendation: str) -> float | None:
     if recommendation not in scores or len(scores) <= 1:
         return None
     chosen = scores[recommendation]
@@ -512,35 +552,39 @@ def _score_gap_bits(scores: Dict[str, float], recommendation: str) -> Optional[f
     return min(alternatives) - chosen
 
 
-def _recommended_integer_model(vdict: Dict[Any, float]) -> Tuple[str, Dict[str, float]]:
+def _recommended_integer_model(vdict: dict[Any, float]) -> tuple[str, dict[str, float]]:
     n = int(sum(vdict.values()))
     min_val, max_val, width = _integer_range(vdict)
     distinct = len(vdict)
     mean = sum(int(k) * v for k, v in vdict.items()) / float(max(1, n))
     var = max(0.0, sum(((int(k) - mean) ** 2) * v for k, v in vdict.items()) / float(max(1, n)))
 
-    if n >= ID_MIN_COUNT and distinct >= ID_DISTINCT_FRACTION * n and \
-            width >= INT_ID_RANGE_MULTIPLIER * max(1, distinct):
-        return 'ignored', {}
+    if (
+        n >= ID_MIN_COUNT
+        and distinct >= ID_DISTINCT_FRACTION * n
+        and width >= INT_ID_RANGE_MULTIPLIER * max(1, distinct)
+    ):
+        return "ignored", {}
 
-    scores: Dict[str, Optional[float]] = {}
+    scores: dict[str, float | None] = {}
     dense = _dense_integer_support(vdict)
     if dense:
-        scores['integer_categorical'] = _categorical_bic_bits(vdict, num_levels=width)
+        scores["integer_categorical"] = _categorical_bic_bits(vdict, num_levels=width)
     elif distinct <= max(MAX_INT_CATEGORICAL_DISTINCT, MAX_INT_CATEGORICAL_FRACTION * n):
-        scores['categorical'] = _categorical_bic_bits(vdict, num_levels=distinct)
+        scores["categorical"] = _categorical_bic_bits(vdict, num_levels=distinct)
     if min_val >= 0:
-        scores['poisson'] = _poisson_bic_bits(vdict, mean)
-    scores['gaussian'] = _integer_gaussian_bic_bits(vdict, mean, var)
+        scores["poisson"] = _poisson_bic_bits(vdict, mean)
+    scores["gaussian"] = _integer_gaussian_bic_bits(vdict, mean, var)
 
     clean = _clean_scores(scores)
     if not clean:
-        return 'ignored', {}
+        return "ignored", {}
     return min(clean.items(), key=lambda u: (u[1], u[0]))[0], clean
 
 
-def _validation_split(values: Sequence[Any], validation_fraction: float, max_validation_rows: int,
-                      min_validation_count: int, seed: int) -> Optional[Tuple[List[Any], List[Any]]]:
+def _validation_split(
+    values: Sequence[Any], validation_fraction: float, max_validation_rows: int, min_validation_count: int, seed: int
+) -> tuple[list[Any], list[Any]] | None:
     if validation_fraction <= 0.0 or max_validation_rows <= 0:
         return None
     n = len(values)
@@ -562,9 +606,12 @@ def _validation_split(values: Sequence[Any], validation_fraction: float, max_val
     return train, validation
 
 
-def _validation_categorical_bits(train: Sequence[Any], validation: Sequence[Any],
-                                 support: Optional[Sequence[Any]] = None,
-                                 alpha: float = VALIDATION_ALPHA) -> Optional[float]:
+def _validation_categorical_bits(
+    train: Sequence[Any],
+    validation: Sequence[Any],
+    support: Sequence[Any] | None = None,
+    alpha: float = VALIDATION_ALPHA,
+) -> float | None:
     if not train or not validation or alpha <= 0.0:
         return None
     counts = defaultdict(float)
@@ -582,9 +629,9 @@ def _validation_categorical_bits(train: Sequence[Any], validation: Sequence[Any]
     return total_bits / float(len(validation))
 
 
-def _validation_integer_categorical_bits(train: Sequence[int], validation: Sequence[int],
-                                         min_val: int, max_val: int,
-                                         alpha: float = VALIDATION_ALPHA) -> Optional[float]:
+def _validation_integer_categorical_bits(
+    train: Sequence[int], validation: Sequence[int], min_val: int, max_val: int, alpha: float = VALIDATION_ALPHA
+) -> float | None:
     if not train or not validation or alpha <= 0.0 or max_val < min_val:
         return None
     counts = defaultdict(float)
@@ -601,7 +648,7 @@ def _validation_integer_categorical_bits(train: Sequence[int], validation: Seque
     return total_bits / float(len(validation))
 
 
-def _validation_poisson_bits(train: Sequence[int], validation: Sequence[int]) -> Optional[float]:
+def _validation_poisson_bits(train: Sequence[int], validation: Sequence[int]) -> float | None:
     if not train or not validation:
         return None
     if any(int(value) < 0 for value in train) or any(int(value) < 0 for value in validation):
@@ -616,7 +663,7 @@ def _validation_poisson_bits(train: Sequence[int], validation: Sequence[int]) ->
     return -ll / (float(len(validation)) * math.log(2.0))
 
 
-def _validation_gaussian_bits(train: Sequence[float], validation: Sequence[float]) -> Optional[float]:
+def _validation_gaussian_bits(train: Sequence[float], validation: Sequence[float]) -> float | None:
     if not train or not validation:
         return None
     arr = np.asarray(train, dtype=float)
@@ -634,7 +681,7 @@ def _validation_gaussian_bits(train: Sequence[float], validation: Sequence[float
     return -ll / (float(len(validation)) * math.log(2.0))
 
 
-def _validation_integer_gaussian_bits(train: Sequence[int], validation: Sequence[int]) -> Optional[float]:
+def _validation_integer_gaussian_bits(train: Sequence[int], validation: Sequence[int]) -> float | None:
     if not train or not validation:
         return None
     arr = np.asarray([int(value) for value in train], dtype=float)
@@ -648,46 +695,53 @@ def _validation_integer_gaussian_bits(train: Sequence[int], validation: Sequence
     return -ll / (float(len(validation)) * math.log(2.0))
 
 
-def _validate_marginal_profile(profile: MarginalFieldProfile, values: Sequence[Any],
-                               validation_fraction: float, max_validation_rows: int,
-                               min_validation_count: int, seed: int) -> MarginalFieldProfile:
+def _validate_marginal_profile(
+    profile: MarginalFieldProfile,
+    values: Sequence[Any],
+    validation_fraction: float,
+    max_validation_rows: int,
+    min_validation_count: int,
+    seed: int,
+) -> MarginalFieldProfile:
     observed = [value for value in values if not _is_missing_value(value)]
     split = _validation_split(observed, validation_fraction, max_validation_rows, min_validation_count, seed)
     if split is None:
         return profile
-    if profile.recommendation == 'ignored':
-        profile.validation_notes.append('predictive validation skipped for ignored field')
+    if profile.recommendation == "ignored":
+        profile.validation_notes.append("predictive validation skipped for ignored field")
         return profile
 
     train, validation = split
-    scores: Dict[str, Optional[float]] = {}
+    scores: dict[str, float | None] = {}
 
-    if profile.kind in ('string', 'boolean'):
-        scores['categorical'] = _validation_categorical_bits(train, validation)
+    if profile.kind in ("string", "boolean"):
+        scores["categorical"] = _validation_categorical_bits(train, validation)
 
-    elif profile.kind == 'integer':
+    elif profile.kind == "integer":
         candidates = set(profile.model_scores_bits.keys())
-        if 'categorical' in candidates:
-            scores['categorical'] = _validation_categorical_bits(train, validation)
-        if 'integer_categorical' in candidates:
+        if "categorical" in candidates:
+            scores["categorical"] = _validation_categorical_bits(train, validation)
+        if "integer_categorical" in candidates:
             train_int = [int(value) for value in train]
             if train_int:
                 lo = min(train_int)
                 hi = max(train_int)
-                scores['integer_categorical'] = _validation_integer_categorical_bits(
-                    [int(value) for value in train],
-                    [int(value) for value in validation],
-                    lo, hi)
-        if 'poisson' in candidates:
-            scores['poisson'] = _validation_poisson_bits(
-                [int(value) for value in train], [int(value) for value in validation])
-        if 'gaussian' in candidates:
-            scores['gaussian'] = _validation_integer_gaussian_bits(
-                [int(value) for value in train], [int(value) for value in validation])
+                scores["integer_categorical"] = _validation_integer_categorical_bits(
+                    [int(value) for value in train], [int(value) for value in validation], lo, hi
+                )
+        if "poisson" in candidates:
+            scores["poisson"] = _validation_poisson_bits(
+                [int(value) for value in train], [int(value) for value in validation]
+            )
+        if "gaussian" in candidates:
+            scores["gaussian"] = _validation_integer_gaussian_bits(
+                [int(value) for value in train], [int(value) for value in validation]
+            )
 
-    elif profile.kind == 'numeric':
-        scores['gaussian'] = _validation_gaussian_bits(
-            [float(value) for value in train], [float(value) for value in validation])
+    elif profile.kind == "numeric":
+        scores["gaussian"] = _validation_gaussian_bits(
+            [float(value) for value in train], [float(value) for value in validation]
+        )
 
     clean = _clean_scores(scores)
     if not clean:
@@ -697,19 +751,20 @@ def _validate_marginal_profile(profile: MarginalFieldProfile, values: Sequence[A
     profile.validation_recommendation = recommendation
     profile.validation_score_gap_bits = _score_gap_bits(clean, recommendation)
     profile.validation_count = len(validation)
-    if profile.validation_score_gap_bits is not None and \
-            profile.validation_score_gap_bits < AMBIGUOUS_SCORE_GAP_BITS:
+    if profile.validation_score_gap_bits is not None and profile.validation_score_gap_bits < AMBIGUOUS_SCORE_GAP_BITS:
         profile.validation_notes.append(
-            'top validation models are close: %.3f bits/obs gap' % profile.validation_score_gap_bits)
+            "top validation models are close: %.3f bits/obs gap" % profile.validation_score_gap_bits
+        )
     if recommendation != profile.recommendation:
         profile.validation_notes.append(
-            'validation prefers %s over marginal recommendation %s' % (recommendation, profile.recommendation))
+            "validation prefers %s over marginal recommendation %s" % (recommendation, profile.recommendation)
+        )
     return profile
 
 
-def _extract_field_series(data: Sequence[Any],
-                          path: Tuple[Any, ...] = (),
-                          role: str = 'field') -> Dict[Tuple[Any, ...], Tuple[str, List[Any]]]:
+def _extract_field_series(
+    data: Sequence[Any], path: tuple[Any, ...] = (), role: str = "field"
+) -> dict[tuple[Any, ...], tuple[str, list[Any]]]:
     if len(data) == 0:
         return {path: (role, [])}
 
@@ -719,10 +774,10 @@ def _extract_field_series(data: Sequence[Any],
 
     if all(isinstance(u, tuple) for u in observed):
         max_len = max(len(u) for u in observed)
-        rv: Dict[Tuple[Any, ...], Tuple[str, List[Any]]] = {}
+        rv: dict[tuple[Any, ...], tuple[str, list[Any]]] = {}
         for i in range(max_len):
             child_values = [u[i] if isinstance(u, tuple) and i < len(u) else None for u in data]
-            rv.update(_extract_field_series(child_values, path + (i,), role='field'))
+            rv.update(_extract_field_series(child_values, path + (i,), role="field"))
         return rv
 
     if all(_is_sequence_like(u) for u in observed):
@@ -730,16 +785,16 @@ def _extract_field_series(data: Sequence[Any],
         fixed = len({v for v in lengths if v is not None}) == 1
         if fixed:
             dim = next(v for v in lengths if v is not None)
-            rv: Dict[Tuple[Any, ...], Tuple[str, List[Any]]] = {}
+            rv: dict[tuple[Any, ...], tuple[str, list[Any]]] = {}
             for i in range(dim):
                 child_values = [list(u)[i] if _is_sequence_like(u) and len(u) > i else None for u in data]
-                rv.update(_extract_field_series(child_values, path + (i,), role='field'))
+                rv.update(_extract_field_series(child_values, path + (i,), role="field"))
             return rv
         elems = []
         for u in observed:
             elems.extend(list(u))
-        rv = {path + ('length',): ('length', lengths)}
-        rv.update(_extract_field_series(elems, path + ('element',), role='sequence_element'))
+        rv = {path + ("length",): ("length", lengths)}
+        rv.update(_extract_field_series(elems, path + ("element",), role="sequence_element"))
         return rv
 
     if all(isinstance(u, (set, frozenset)) for u in observed):
@@ -747,32 +802,33 @@ def _extract_field_series(data: Sequence[Any],
         for u in observed:
             members.extend(list(u))
         return {
-            path + ('set_size',): ('length', [len(u) if isinstance(u, (set, frozenset)) else None for u in data]),
-            path + ('set_member',): ('set_member', members),
+            path + ("set_size",): ("length", [len(u) if isinstance(u, (set, frozenset)) else None for u in data]),
+            path + ("set_member",): ("set_member", members),
         }
 
     if all(isinstance(u, dict) for u in observed):
         keys = sorted({k for u in observed for k in u.keys()}, key=repr)
-        rv: Dict[Tuple[Any, ...], Tuple[str, List[Any]]] = {}
+        rv: dict[tuple[Any, ...], tuple[str, list[Any]]] = {}
         for k in keys:
             child_values = [u.get(k, None) if isinstance(u, dict) else None for u in data]
-            rv.update(_extract_field_series(child_values, path + ('key', k), role='field'))
+            rv.update(_extract_field_series(child_values, path + ("key", k), role="field"))
         return rv
 
     return {path: (role, list(data))}
 
 
-def _profile_series(path: Tuple[Any, ...], role: str, values: Sequence[Any]) -> MarginalFieldProfile:
+def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> MarginalFieldProfile:
     missing = sum(1 for u in values if _is_missing_value(u))
     observed = [u for u in values if not _is_missing_value(u)]
     count = len(values)
     observed_count = len(observed)
     missing_fraction = 0.0 if count == 0 else missing / float(count)
-    notes: List[str] = []
+    notes: list[str] = []
 
     if observed_count == 0:
-        return MarginalFieldProfile(path, role, count, missing, missing_fraction,
-                                    observed_count, 'empty', 'ignored', notes=notes)
+        return MarginalFieldProfile(
+            path, role, count, missing, missing_fraction, observed_count, "empty", "ignored", notes=notes
+        )
 
     vdict = defaultdict(int)
     unhashable = False
@@ -783,45 +839,84 @@ def _profile_series(path: Tuple[Any, ...], role: str, values: Sequence[Any]) -> 
             unhashable = True
             break
     if unhashable:
-        return MarginalFieldProfile(path, role, count, missing, missing_fraction, observed_count, 'object', 'ignored',
-                                    notes=['unhashable values are not modeled by automatic profiling'])
+        return MarginalFieldProfile(
+            path,
+            role,
+            count,
+            missing,
+            missing_fraction,
+            observed_count,
+            "object",
+            "ignored",
+            notes=["unhashable values are not modeled by automatic profiling"],
+        )
 
     entropy = _entropy_from_counts(vdict.values())
     top_mass = max(vdict.values()) / float(observed_count)
     cardinality = len(vdict)
     unique_fraction = cardinality / float(observed_count)
-    effective_cardinality = 2.0 ** entropy
+    effective_cardinality = 2.0**entropy
     is_constant = cardinality == 1
     if is_constant:
-        notes.append('observed values are constant')
+        notes.append("observed values are constant")
 
     all_bool = all(isinstance(u, (bool, np.bool_)) for u in observed)
     all_int = all(isinstance(u, (int, np.integer)) and not isinstance(u, (bool, np.bool_)) for u in observed)
-    all_num = all(isinstance(u, numbers.Real) and not isinstance(u, (bool, np.bool_)) and
-                  math.isfinite(float(u)) for u in observed)
+    all_num = all(
+        isinstance(u, numbers.Real) and not isinstance(u, (bool, np.bool_)) and math.isfinite(float(u))
+        for u in observed
+    )
     all_str = all(isinstance(u, (str, bytes)) for u in observed)
 
     if all_str:
-        recommendation = 'categorical'
-        kind = 'string'
-        model_scores = _clean_scores({'categorical': _categorical_bic_bits(vdict)})
+        recommendation = "categorical"
+        kind = "string"
+        model_scores = _clean_scores({"categorical": _categorical_bic_bits(vdict)})
         if observed_count >= ID_MIN_COUNT and cardinality >= ID_DISTINCT_FRACTION * observed_count:
-            recommendation = 'ignored'
-            kind = 'string_identifier'
-            notes.append('nearly every string value is unique')
+            recommendation = "ignored"
+            kind = "string_identifier"
+            notes.append("nearly every string value is unique")
         return MarginalFieldProfile(
-            path, role, count, missing, missing_fraction, observed_count, kind, recommendation,
-            bits_per_obs=entropy, entropy_bits=entropy, cardinality=cardinality,
-            unique_fraction=unique_fraction, effective_cardinality=effective_cardinality,
-            is_constant=is_constant, top_mass=top_mass, model_scores_bits=model_scores, notes=notes)
+            path,
+            role,
+            count,
+            missing,
+            missing_fraction,
+            observed_count,
+            kind,
+            recommendation,
+            bits_per_obs=entropy,
+            entropy_bits=entropy,
+            cardinality=cardinality,
+            unique_fraction=unique_fraction,
+            effective_cardinality=effective_cardinality,
+            is_constant=is_constant,
+            top_mass=top_mass,
+            model_scores_bits=model_scores,
+            notes=notes,
+        )
 
     if all_bool:
-        model_scores = _clean_scores({'categorical': _categorical_bic_bits(vdict)})
+        model_scores = _clean_scores({"categorical": _categorical_bic_bits(vdict)})
         return MarginalFieldProfile(
-            path, role, count, missing, missing_fraction, observed_count, 'boolean', 'categorical',
-            bits_per_obs=entropy, entropy_bits=entropy, cardinality=cardinality,
-            unique_fraction=unique_fraction, effective_cardinality=effective_cardinality,
-            is_constant=is_constant, top_mass=top_mass, model_scores_bits=model_scores, notes=notes)
+            path,
+            role,
+            count,
+            missing,
+            missing_fraction,
+            observed_count,
+            "boolean",
+            "categorical",
+            bits_per_obs=entropy,
+            entropy_bits=entropy,
+            cardinality=cardinality,
+            unique_fraction=unique_fraction,
+            effective_cardinality=effective_cardinality,
+            is_constant=is_constant,
+            top_mass=top_mass,
+            model_scores_bits=model_scores,
+            notes=notes,
+        )
 
     if all_int:
         min_val, max_val, width = _integer_range(vdict)
@@ -831,53 +926,98 @@ def _profile_series(path: Tuple[Any, ...], role: str, values: Sequence[Any]) -> 
         recommendation, model_scores = _recommended_integer_model(vdict)
         score_gap = _score_gap_bits(model_scores, recommendation)
         bits = model_scores.get(recommendation)
-        kind = 'integer'
-        if recommendation == 'ignored':
-            recommendation = 'ignored'
-            kind = 'integer_identifier'
-            notes.append('sparse high-cardinality integer support looks identifier-like')
-        elif recommendation == 'poisson':
+        kind = "integer"
+        if recommendation == "ignored":
+            recommendation = "ignored"
+            kind = "integer_identifier"
+            notes.append("sparse high-cardinality integer support looks identifier-like")
+        elif recommendation == "poisson":
             dispersion = var / mean if mean > 0.0 else np.inf
-            notes.append('selected by BIC-style code length; variance/mean dispersion is %.3f' % dispersion)
-        elif recommendation == 'gaussian' and min_val >= 0:
-            notes.append('nonnegative integers are better explained by a discretized Gaussian code')
+            notes.append("selected by BIC-style code length; variance/mean dispersion is %.3f" % dispersion)
+        elif recommendation == "gaussian" and min_val >= 0:
+            notes.append("nonnegative integers are better explained by a discretized Gaussian code")
         if score_gap is not None and score_gap < AMBIGUOUS_SCORE_GAP_BITS:
-            notes.append('top marginal models are close: %.3f bits/obs gap' % score_gap)
+            notes.append("top marginal models are close: %.3f bits/obs gap" % score_gap)
         return MarginalFieldProfile(
-            path, role, count, missing, missing_fraction, observed_count, kind, recommendation,
-            bits_per_obs=bits, entropy_bits=entropy, cardinality=cardinality, top_mass=top_mass,
-            unique_fraction=unique_fraction, effective_cardinality=effective_cardinality,
+            path,
+            role,
+            count,
+            missing,
+            missing_fraction,
+            observed_count,
+            kind,
+            recommendation,
+            bits_per_obs=bits,
+            entropy_bits=entropy,
+            cardinality=cardinality,
+            top_mass=top_mass,
+            unique_fraction=unique_fraction,
+            effective_cardinality=effective_cardinality,
             is_constant=is_constant,
-            numeric_mean=mean, numeric_var=var, integer_min=min_val, integer_max=max_val,
-            integer_density=density, model_scores_bits=model_scores,
-            model_score_gap_bits=score_gap, notes=notes)
+            numeric_mean=mean,
+            numeric_var=var,
+            integer_min=min_val,
+            integer_max=max_val,
+            integer_density=density,
+            model_scores_bits=model_scores,
+            model_score_gap_bits=score_gap,
+            notes=notes,
+        )
 
     if all_num:
         arr = np.asarray(observed, dtype=float)
         mean = float(arr.mean())
         var = float(arr.var())
-        model_scores = _clean_scores({'gaussian': _gaussian_bic_bits(var, observed_count)})
+        model_scores = _clean_scores({"gaussian": _gaussian_bic_bits(var, observed_count)})
         return MarginalFieldProfile(
-            path, role, count, missing, missing_fraction, observed_count, 'numeric', 'gaussian',
-            bits_per_obs=_gaussian_bits(var), entropy_bits=entropy, cardinality=cardinality,
-            unique_fraction=unique_fraction, effective_cardinality=effective_cardinality,
-            is_constant=is_constant, top_mass=top_mass, numeric_mean=mean, numeric_var=var,
-            model_scores_bits=model_scores, notes=notes)
+            path,
+            role,
+            count,
+            missing,
+            missing_fraction,
+            observed_count,
+            "numeric",
+            "gaussian",
+            bits_per_obs=_gaussian_bits(var),
+            entropy_bits=entropy,
+            cardinality=cardinality,
+            unique_fraction=unique_fraction,
+            effective_cardinality=effective_cardinality,
+            is_constant=is_constant,
+            top_mass=top_mass,
+            numeric_mean=mean,
+            numeric_var=var,
+            model_scores_bits=model_scores,
+            notes=notes,
+        )
 
     return MarginalFieldProfile(
-        path, role, count, missing, missing_fraction, observed_count, 'mixed_object', 'ignored',
-        entropy_bits=entropy, cardinality=cardinality, unique_fraction=unique_fraction,
-        effective_cardinality=effective_cardinality, is_constant=is_constant, top_mass=top_mass,
-        notes=['mixed scalar types are left unmodeled'])
+        path,
+        role,
+        count,
+        missing,
+        missing_fraction,
+        observed_count,
+        "mixed_object",
+        "ignored",
+        entropy_bits=entropy,
+        cardinality=cardinality,
+        unique_fraction=unique_fraction,
+        effective_cardinality=effective_cardinality,
+        is_constant=is_constant,
+        top_mass=top_mass,
+        notes=["mixed scalar types are left unmodeled"],
+    )
 
 
-def _encode_for_pairwise(profile: MarginalFieldProfile, values: Sequence[Any],
-                         max_cardinality: int, num_bins: int) -> Optional[Tuple[List[Any], str]]:
-    if profile.role not in ('field', 'length') or profile.recommendation == 'ignored':
+def _encode_for_pairwise(
+    profile: MarginalFieldProfile, values: Sequence[Any], max_cardinality: int, num_bins: int
+) -> tuple[list[Any], str] | None:
+    if profile.role not in ("field", "length") or profile.recommendation == "ignored":
         return None
 
-    encoded: List[Any] = []
-    if profile.kind in ('numeric', 'integer') and profile.recommendation in ('gaussian', 'poisson'):
+    encoded: list[Any] = []
+    if profile.kind in ("numeric", "integer") and profile.recommendation in ("gaussian", "poisson"):
         finite = [float(u) for u in values if not _is_missing_value(u) and math.isfinite(float(u))]
         if len(finite) < 2:
             return None
@@ -885,20 +1025,20 @@ def _encode_for_pairwise(profile: MarginalFieldProfile, values: Sequence[Any],
         edges = np.unique(np.quantile(np.asarray(finite, dtype=float), quantiles))
         for u in values:
             if _is_missing_value(u):
-                encoded.append('__missing__')
+                encoded.append("__missing__")
             else:
-                encoded.append(int(np.searchsorted(edges, float(u), side='right')))
-        return encoded, 'quantile_bins'
+                encoded.append(int(np.searchsorted(edges, float(u), side="right")))
+        return encoded, "quantile_bins"
 
     observed = [u for u in values if not _is_missing_value(u)]
     if len(set(observed)) > max_cardinality:
         return None
     for u in values:
-        encoded.append('__missing__' if _is_missing_value(u) else u)
-    return encoded, 'empirical_discrete'
+        encoded.append("__missing__" if _is_missing_value(u) else u)
+    return encoded, "empirical_discrete"
 
 
-def _mi_from_encoded(x: Sequence[Any], y: Sequence[Any]) -> Tuple[float, float, float, float, float, int]:
+def _mi_from_encoded(x: Sequence[Any], y: Sequence[Any]) -> tuple[float, float, float, float, float, int]:
     n = min(len(x), len(y))
     cx = defaultdict(int)
     cy = defaultdict(int)
@@ -924,8 +1064,9 @@ def _mi_from_encoded(x: Sequence[Any], y: Sequence[Any]) -> Tuple[float, float, 
     return mi, adjusted_mi, bic_gain, hx, hy, n
 
 
-def _pairwise_permutation_p_value(x: Sequence[Any], y: Sequence[Any], observed_adjusted_mi: float,
-                                  permutations: int, rng: np.random.RandomState) -> float:
+def _pairwise_permutation_p_value(
+    x: Sequence[Any], y: Sequence[Any], observed_adjusted_mi: float, permutations: int, rng: np.random.RandomState
+) -> float:
     if permutations <= 0:
         return 1.0
     y_arr = np.asarray(list(y), dtype=object)
@@ -939,11 +1080,11 @@ def _pairwise_permutation_p_value(x: Sequence[Any], y: Sequence[Any], observed_a
     return float(exceed + 1) / float(permutations + 1)
 
 
-def _maximum_dependency_forest(hints: Sequence[PairwiseDependencyHint]) -> List[PairwiseDependencyHint]:
-    parent: Dict[Tuple[Any, ...], Tuple[Any, ...]] = {}
-    rank: Dict[Tuple[Any, ...], int] = {}
+def _maximum_dependency_forest(hints: Sequence[PairwiseDependencyHint]) -> list[PairwiseDependencyHint]:
+    parent: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+    rank: dict[tuple[Any, ...], int] = {}
 
-    def find(x: Tuple[Any, ...]) -> Tuple[Any, ...]:
+    def find(x: tuple[Any, ...]) -> tuple[Any, ...]:
         if x not in parent:
             parent[x] = x
             rank[x] = 0
@@ -953,7 +1094,7 @@ def _maximum_dependency_forest(hints: Sequence[PairwiseDependencyHint]) -> List[
             x = parent[x]
         return x
 
-    def union(x: Tuple[Any, ...], y: Tuple[Any, ...]) -> bool:
+    def union(x: tuple[Any, ...], y: tuple[Any, ...]) -> bool:
         rx = find(x)
         ry = find(y)
         if rx == ry:
@@ -968,21 +1109,22 @@ def _maximum_dependency_forest(hints: Sequence[PairwiseDependencyHint]) -> List[
         return True
 
     edges = []
-    ordered = sorted(hints, key=lambda u: (-u.bic_gain_bits, -u.adjusted_mi_bits,
-                                           format_path(u.left), format_path(u.right)))
+    ordered = sorted(
+        hints, key=lambda u: (-u.bic_gain_bits, -u.adjusted_mi_bits, format_path(u.left), format_path(u.right))
+    )
     for hint in ordered:
         if union(hint.left, hint.right):
             edges.append(hint)
     return edges
 
 
-def _edge_key(hint: PairwiseDependencyHint) -> Tuple[Tuple[Any, ...], Tuple[Any, ...]]:
+def _edge_key(hint: PairwiseDependencyHint) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     left_key = _path_sort_key(hint.left)
     right_key = _path_sort_key(hint.right)
     return (hint.left, hint.right) if left_key <= right_key else (hint.right, hint.left)
 
 
-def _pair_from_ordinal(ordinal: int, num_items: int) -> Tuple[int, int]:
+def _pair_from_ordinal(ordinal: int, num_items: int) -> tuple[int, int]:
     remaining = int(ordinal)
     for i in range(num_items - 1):
         row_count = num_items - i - 1
@@ -992,35 +1134,41 @@ def _pair_from_ordinal(ordinal: int, num_items: int) -> Tuple[int, int]:
     return num_items - 2, num_items - 1
 
 
-def _pair_index_schedule(num_items: int, max_pairs: int) -> Tuple[List[Tuple[int, int]], str, int]:
+def _pair_index_schedule(num_items: int, max_pairs: int) -> tuple[list[tuple[int, int]], str, int]:
     total = num_items * (num_items - 1) // 2
     if total == 0 or max_pairs <= 0:
-        return [], 'none', total
+        return [], "none", total
     if max_pairs >= total:
-        return [(i, j) for i in range(num_items) for j in range(i + 1, num_items)], 'exhaustive', total
+        return [(i, j) for i in range(num_items) for j in range(i + 1, num_items)], "exhaustive", total
 
     ordinals = np.linspace(0, total - 1, max_pairs, dtype=int)
     pairs = [_pair_from_ordinal(int(k), num_items) for k in np.unique(ordinals)]
-    return pairs, 'stratified', total
+    return pairs, "stratified", total
 
 
-def analyze_structure(data, pairwise: bool = True, max_pairwise_fields: int = 32,
-                      max_pairwise_pairs: int = 512, max_cardinality: int = 128,
-                      num_bins: int = 8, sample_size: Optional[int] = 5000,
-                      validate_marginals: bool = True,
-                      validation_fraction: float = 0.25,
-                      max_validation_rows: int = 1000,
-                      validation_min_count: int = 30,
-                      validation_seed: int = 17,
-                      mi_threshold_bits: float = 0.05,
-                      bic_gain_threshold_bits: float = 0.0,
-                      pairwise_permutations: int = 0,
-                      permutation_alpha: float = 0.05,
-                      dependency_tree: bool = True,
-                      rng: Optional[np.random.RandomState] = None,
-                      pseudo_count: Optional[float] = 1.0,
-                      emp_suff_stat: bool = True,
-                      use_bstats: bool = False) -> StructureProfile:
+def analyze_structure(
+    data,
+    pairwise: bool = True,
+    max_pairwise_fields: int = 32,
+    max_pairwise_pairs: int = 512,
+    max_cardinality: int = 128,
+    num_bins: int = 8,
+    sample_size: int | None = 5000,
+    validate_marginals: bool = True,
+    validation_fraction: float = 0.25,
+    max_validation_rows: int = 1000,
+    validation_min_count: int = 30,
+    validation_seed: int = 17,
+    mi_threshold_bits: float = 0.05,
+    bic_gain_threshold_bits: float = 0.0,
+    pairwise_permutations: int = 0,
+    permutation_alpha: float = 0.05,
+    dependency_tree: bool = True,
+    rng: np.random.RandomState | None = None,
+    pseudo_count: float | None = 1.0,
+    emp_suff_stat: bool = True,
+    use_bstats: bool = False,
+) -> StructureProfile:
     """Profile data and return marginal recommendations plus pairwise hints.
 
     Integer marginals are compared by BIC-style average code length. Pairwise
@@ -1033,8 +1181,7 @@ def analyze_structure(data, pairwise: bool = True, max_pairwise_fields: int = 32
     """
     rows = list(data)
     total_rows = len(rows)
-    estimator = get_estimator(rows, pseudo_count=pseudo_count, emp_suff_stat=emp_suff_stat,
-                              use_bstats=use_bstats)
+    estimator = get_estimator(rows, pseudo_count=pseudo_count, emp_suff_stat=emp_suff_stat, use_bstats=use_bstats)
     field_series = _extract_field_series(rows)
     fields = [
         _profile_series(path, role, values)
@@ -1044,31 +1191,38 @@ def analyze_structure(data, pairwise: bool = True, max_pairwise_fields: int = 32
         for field_profile in fields:
             values = field_series[field_profile.path][1]
             _validate_marginal_profile(
-                field_profile, values, validation_fraction, max_validation_rows,
-                validation_min_count, validation_seed)
+                field_profile, values, validation_fraction, max_validation_rows, validation_min_count, validation_seed
+            )
 
-    warnings = [
-        'pairwise hints are unconditional; latent mixture/state/topic structure can explain or hide them'
-    ]
+    warnings = ["pairwise hints are unconditional; latent mixture/state/topic structure can explain or hide them"]
     observed_rows = [u for u in rows if u is not None]
     if use_bstats and observed_rows and all(isinstance(u, dict) for u in observed_rows):
-        warnings.append('dict records are profiled by key, but bstats automatic estimator construction '
-                        'currently leaves dict-valued observations ignored')
+        warnings.append(
+            "dict records are profiled by key, but bstats automatic estimator construction "
+            "currently leaves dict-valued observations ignored"
+        )
     for field_profile in fields:
-        if field_profile.validation_recommendation is not None and \
-                field_profile.validation_recommendation != field_profile.recommendation:
-            warnings.append('validation disagrees with marginal recommendation for %s: %s vs %s' % (
-                format_path(field_profile.path), field_profile.validation_recommendation,
-                field_profile.recommendation))
-    hints: List[PairwiseDependencyHint] = []
-    dependency_edges: List[PairwiseDependencyHint] = []
-    residual_edges: List[PairwiseDependencyHint] = []
+        if (
+            field_profile.validation_recommendation is not None
+            and field_profile.validation_recommendation != field_profile.recommendation
+        ):
+            warnings.append(
+                "validation disagrees with marginal recommendation for %s: %s vs %s"
+                % (
+                    format_path(field_profile.path),
+                    field_profile.validation_recommendation,
+                    field_profile.recommendation,
+                )
+            )
+    hints: list[PairwiseDependencyHint] = []
+    dependency_edges: list[PairwiseDependencyHint] = []
+    residual_edges: list[PairwiseDependencyHint] = []
     redundancy_ratio = 0.0
     encoded_pairwise_fields = 0
     pairwise_fields_available = 0
     pairwise_pairs_available = 0
     pairwise_pairs_checked = 0
-    pairwise_pair_strategy = 'none'
+    pairwise_pair_strategy = "none"
     sampled_rows = total_rows
 
     if pairwise and total_rows > 1:
@@ -1078,7 +1232,7 @@ def analyze_structure(data, pairwise: bool = True, max_pairwise_fields: int = 32
             idx = rng.choice(total_rows, size=sample_size, replace=False)
             pair_rows = [rows[int(i)] for i in idx]
             sampled_rows = len(pair_rows)
-            warnings.append('pairwise analysis sampled %d of %d rows' % (sampled_rows, total_rows))
+            warnings.append("pairwise analysis sampled %d of %d rows" % (sampled_rows, total_rows))
         pair_series = _extract_field_series(pair_rows)
         encoded = []
         profile_by_path = {u.path: u for u in fields}
@@ -1091,12 +1245,14 @@ def analyze_structure(data, pairwise: bool = True, max_pairwise_fields: int = 32
                 encoded.append((path, enc[0], enc[1]))
         pairwise_fields_available = len(encoded)
         if pairwise_fields_available > max_pairwise_fields:
-            warnings.append('pairwise analysis encoded %d of %d eligible fields' % (
-                max_pairwise_fields, pairwise_fields_available))
+            warnings.append(
+                "pairwise analysis encoded %d of %d eligible fields" % (max_pairwise_fields, pairwise_fields_available)
+            )
         encoded = encoded[:max_pairwise_fields]
         encoded_pairwise_fields = len(encoded)
-        pair_schedule, pairwise_pair_strategy, pairwise_pairs_available = \
-            _pair_index_schedule(len(encoded), max_pairwise_pairs)
+        pair_schedule, pairwise_pair_strategy, pairwise_pairs_available = _pair_index_schedule(
+            len(encoded), max_pairwise_pairs
+        )
         checked = 0
         for i, j in pair_schedule:
             left, x, method_x = encoded[i]
@@ -1109,31 +1265,55 @@ def analyze_structure(data, pairwise: bool = True, max_pairwise_fields: int = 32
             if pairwise_permutations > 0 and adjusted_mi >= mi_threshold_bits:
                 rng = np.random.RandomState(1) if rng is None else rng
                 p_value = _pairwise_permutation_p_value(x, y, adjusted_mi, pairwise_permutations, rng)
-            if adjusted_mi >= mi_threshold_bits and bic_gain > bic_gain_threshold_bits and \
-                    (p_value is None or p_value <= permutation_alpha):
-                notes = ['finite-sample MI adjusted by Miller-Madow/BIC contingency penalty']
+            if (
+                adjusted_mi >= mi_threshold_bits
+                and bic_gain > bic_gain_threshold_bits
+                and (p_value is None or p_value <= permutation_alpha)
+            ):
+                notes = ["finite-sample MI adjusted by Miller-Madow/BIC contingency penalty"]
                 if p_value is not None:
-                    notes.append('permutation test used %d shuffles' % pairwise_permutations)
-                hints.append(PairwiseDependencyHint(
-                    left, right, mi, adjusted_mi, bic_gain, norm, hx, hy, n,
-                    method='%s/%s' % (method_x, method_y), p_value=p_value, notes=notes))
+                    notes.append("permutation test used %d shuffles" % pairwise_permutations)
+                hints.append(
+                    PairwiseDependencyHint(
+                        left,
+                        right,
+                        mi,
+                        adjusted_mi,
+                        bic_gain,
+                        norm,
+                        hx,
+                        hy,
+                        n,
+                        method="%s/%s" % (method_x, method_y),
+                        p_value=p_value,
+                        notes=notes,
+                    )
+                )
         pairwise_pairs_checked = checked
-        hints.sort(key=lambda u: (-u.bic_gain_bits, -u.adjusted_mi_bits,
-                                  format_path(u.left), format_path(u.right)))
+        hints.sort(key=lambda u: (-u.bic_gain_bits, -u.adjusted_mi_bits, format_path(u.left), format_path(u.right)))
         if pairwise_pairs_checked < pairwise_pairs_available:
-            warnings.append('pairwise analysis checked %d of %d eligible field pairs using %s scheduling' % (
-                pairwise_pairs_checked, pairwise_pairs_available, pairwise_pair_strategy))
+            warnings.append(
+                "pairwise analysis checked %d of %d eligible field pairs using %s scheduling"
+                % (pairwise_pairs_checked, pairwise_pairs_available, pairwise_pair_strategy)
+            )
         if dependency_tree:
             dependency_edges = _maximum_dependency_forest(hints)
             tree_keys = {_edge_key(edge) for edge in dependency_edges}
             residual_edges = [hint for hint in hints if _edge_key(hint) not in tree_keys]
             redundancy_ratio = 0.0 if len(hints) == 0 else len(residual_edges) / float(len(hints))
             if residual_edges:
-                warnings.append('accepted dependency graph has %d non-tree edges; this can indicate '
-                                'transitive dependence or latent/common-cause structure' % len(residual_edges))
+                warnings.append(
+                    "accepted dependency graph has %d non-tree edges; this can indicate "
+                    "transitive dependence or latent/common-cause structure" % len(residual_edges)
+                )
 
     return StructureProfile(
-        estimator, fields, hints, warnings, sampled_rows, total_rows,
+        estimator,
+        fields,
+        hints,
+        warnings,
+        sampled_rows,
+        total_rows,
         dependency_tree_edges=dependency_edges,
         dependency_residual_edges=residual_edges,
         dependency_redundancy_ratio=redundancy_ratio,
@@ -1141,10 +1321,11 @@ def analyze_structure(data, pairwise: bool = True, max_pairwise_fields: int = 32
         pairwise_fields_available=pairwise_fields_available,
         pairwise_pairs_available=pairwise_pairs_available,
         pairwise_pairs_checked=pairwise_pairs_checked,
-        pairwise_pair_strategy=pairwise_pair_strategy)
+        pairwise_pair_strategy=pairwise_pair_strategy,
+    )
 
 
-class DatumNode(object):
+class DatumNode:
     """Accumulates type/structure evidence for one slot of the data.
 
     Tuples are treated as fixed-arity records (positional children). Lists,
@@ -1155,17 +1336,17 @@ class DatumNode(object):
     """
 
     def __init__(self, parent=None, data=None):
-        self.children   = []
+        self.children = []
         self.dict_children = {}
-        self.parent     = parent
-        self.vdict      = defaultdict(int)
-        self.len_dict   = defaultdict(int)
+        self.parent = parent
+        self.vdict = defaultdict(int)
+        self.len_dict = defaultdict(int)
         self.set_member = defaultdict(int)
-        self.count      = 0
+        self.count = 0
         self.none_count = 0
-        self.nan_count  = 0
-        self.inf_count  = 0
-        self.str_count  = 0
+        self.nan_count = 0
+        self.inf_count = 0
+        self.str_count = 0
         self.float_count = 0
         self.int_count = 0
         self.bool_count = 0
@@ -1221,9 +1402,23 @@ class DatumNode(object):
             if not (isinstance(x, (float, np.floating)) and not math.isfinite(x)):
                 self.vdict[x] += 1
 
-    _COUNTERS = ('count', 'none_count', 'nan_count', 'inf_count', 'str_count', 'float_count',
-                 'int_count', 'bool_count', 'obj_count', 'neg_count', 'zero_count',
-                 'tuple_count', 'seq_count', 'set_count', 'dict_count')
+    _COUNTERS = (
+        "count",
+        "none_count",
+        "nan_count",
+        "inf_count",
+        "str_count",
+        "float_count",
+        "int_count",
+        "bool_count",
+        "obj_count",
+        "neg_count",
+        "zero_count",
+        "tuple_count",
+        "seq_count",
+        "set_count",
+        "dict_count",
+    )
 
     def copy(self):
         rv = DatumNode(self.parent)
@@ -1312,14 +1507,13 @@ class DatumNode(object):
 
         if self.int_count > 0:
             recommendation, _ = _recommended_integer_model(self.vdict)
-            if recommendation == 'ignored':
+            if recommendation == "ignored":
                 return get_ignored_estimator(use_bstats=use_bstats)
-            if recommendation == 'integer_categorical':
-                return get_integer_categorical_estimator(
-                    self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
-            if recommendation == 'categorical':
+            if recommendation == "integer_categorical":
+                return get_integer_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+            if recommendation == "categorical":
                 return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
-            if recommendation == 'poisson':
+            if recommendation == "poisson":
                 if use_bstats:
                     return _estimator_provider(True).PoissonEstimator()
                 return get_poisson_estimator(self.vdict, pseudo_count, emp_suff_stat)
@@ -1368,7 +1562,7 @@ class DatumNode(object):
             child = child.merge(u)
         return child
 
-    def get_estimator(self, pseudo_count: Optional[float] = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
+    def get_estimator(self, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
         structured = self.tuple_count + self.seq_count + self.set_count + self.dict_count
         typed = self.count - self.none_count
         container_kinds = sum(u > 0 for u in (self.tuple_count, self.seq_count, self.set_count, self.dict_count))
@@ -1381,8 +1575,7 @@ class DatumNode(object):
             rv = get_ignored_estimator(use_bstats=use_bstats)
 
         elif self.set_count > 0:
-            rv = get_set_estimator(self.set_member, self.set_count, pseudo_count, emp_suff_stat,
-                                   use_bstats=use_bstats)
+            rv = get_set_estimator(self.set_member, self.set_count, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
         elif self.dict_count > 0:
             if use_bstats:
@@ -1391,8 +1584,11 @@ class DatumNode(object):
                 keys = sorted(self.dict_children.keys(), key=repr)
                 rv = get_dict_record_estimator(
                     keys,
-                    [self.dict_children[k].get_estimator(
-                        pseudo_count, emp_suff_stat, use_bstats=use_bstats) for k in keys])
+                    [
+                        self.dict_children[k].get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+                        for k in keys
+                    ],
+                )
 
         elif structured > 0:
             fixed_arity = len(self.len_dict) == 1
@@ -1400,21 +1596,26 @@ class DatumNode(object):
                 # records: positional composite
                 rv = get_composite_estimator(
                     [u.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats) for u in self.children],
-                    use_bstats=use_bstats)
+                    use_bstats=use_bstats,
+                )
             elif self._fixed_numeric_vector_dim() is not None:
                 rv = get_multivariate_gaussian_estimator(self._fixed_numeric_vector_dim(), use_bstats=use_bstats)
             elif fixed_arity and self.tuple_count == 0 and not self._children_homogeneous():
                 # fixed-length lists/vectors with positionally distinct types
                 rv = get_composite_estimator(
                     [u.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats) for u in self.children],
-                    use_bstats=use_bstats)
+                    use_bstats=use_bstats,
+                )
             else:
                 # variable-length (or homogeneous fixed-length) sequences
                 child = self._merged_child()
                 rv = get_sequence_estimator(
                     child.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats),
-                    len_dict=self.len_dict, pseudo_count=pseudo_count, emp_suff_stat=emp_suff_stat,
-                    use_bstats=use_bstats)
+                    len_dict=self.len_dict,
+                    pseudo_count=pseudo_count,
+                    emp_suff_stat=emp_suff_stat,
+                    use_bstats=use_bstats,
+                )
 
         else:
             rv = self._leaf_estimator(pseudo_count, emp_suff_stat, use_bstats)
@@ -1454,9 +1655,18 @@ class DatumNode(object):
             return True
 
         def profile(u):
-            return (u.str_count > 0, u.bool_count > 0, u.float_count > 0, u.int_count > 0,
-                    u.obj_count > 0, u.tuple_count > 0, u.seq_count > 0,
-                    u.set_count > 0, u.dict_count > 0, len(u.children) > 0)
+            return (
+                u.str_count > 0,
+                u.bool_count > 0,
+                u.float_count > 0,
+                u.int_count > 0,
+                u.obj_count > 0,
+                u.tuple_count > 0,
+                u.seq_count > 0,
+                u.set_count > 0,
+                u.dict_count > 0,
+                len(u.children) > 0,
+            )
 
         profiles = {profile(u) for u in self.children}
         if len(profiles) > 1:
@@ -1482,12 +1692,21 @@ class DatumNode(object):
             self.dict_children[key] = child
         return self.dict_children[key]
 
-def get_estimator(data, pseudo_count: Optional[float] = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
+
+def get_estimator(data, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
     return DatumNode(data=data).get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
 
-def get_dpm_mixture(data, rng=None, max_components: int = 20, max_its: int = 100, delta: float = 1.0e-6,
-                    pseudo_count: Optional[float] = 1.0, print_iter: int = 1, out=None):
+def get_dpm_mixture(
+    data,
+    rng=None,
+    max_components: int = 20,
+    max_its: int = 100,
+    delta: float = 1.0e-6,
+    pseudo_count: float | None = 1.0,
+    print_iter: int = 1,
+    out=None,
+):
     """Fit a Dirichlet process mixture to automatically-typed data.
 
     Component estimators are constructed with get_estimator(use_bstats=True)
@@ -1508,6 +1727,7 @@ def get_dpm_mixture(data, rng=None, max_components: int = 20, max_its: int = 100
         DirichletProcessMixtureDistribution fit to the data.
     """
     import sys
+
     from pysp.bstats import DirichletProcessMixtureEstimator
     from pysp.bstats.bestimation import optimize
 

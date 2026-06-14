@@ -29,7 +29,6 @@ from pysp.utils.mcmc import (
 
 
 class MCMCTestCase(unittest.TestCase):
-
     def test_random_walk_samples_gaussian_target(self):
         dist = GaussianDistribution(1.0, 2.0)
         result = sample_distribution(
@@ -52,10 +51,10 @@ class MCMCTestCase(unittest.TestCase):
         self.assertLess(result.acceptance_rate, 0.9)
         self.assertGreater(result.effective_sample_size(max_lag=100), 50.0)
         summary = result.summary(max_lag=100)
-        self.assertEqual(summary['num_samples'], 2500)
-        self.assertLess(abs(summary['mean'] - 1.0), 0.15)
-        self.assertGreater(summary['ess'], 50.0)
-        self.assertGreater(summary['mcse'], 0.0)
+        self.assertEqual(summary["num_samples"], 2500)
+        self.assertLess(abs(summary["mean"] - 1.0), 0.15)
+        self.assertGreater(summary["ess"], 50.0)
+        self.assertGreater(summary["mcse"], 0.0)
 
     def test_mixture_proposal_samples_with_exact_proposal_density(self):
         proposal = MixtureProposal(
@@ -108,7 +107,7 @@ class MCMCTestCase(unittest.TestCase):
         samples = np.asarray(result.samples, dtype=float)
 
         self.assertEqual(len(samples), 2000)
-        self.assertEqual(set(result.acceptance_rate_by_label), {'hmc'})
+        self.assertEqual(set(result.acceptance_rate_by_label), {"hmc"})
         self.assertLess(abs(float(samples.mean()) - 1.0), 0.15)
         self.assertLess(abs(float(samples.var()) - 2.0), 0.35)
         self.assertGreater(result.acceptance_rate, 0.8)
@@ -223,9 +222,9 @@ class MCMCTestCase(unittest.TestCase):
         self.assertGreater(float(proposal.covariance[0, 1]), 0.3)
         self.assertGreater(result.acceptance_rate, 0.2)
         self.assertLess(result.acceptance_rate, 0.6)
-        self.assertEqual(summary['num_samples'], 3000)
-        self.assertEqual(summary['mean'].shape, (2,))
-        self.assertEqual(summary['mcse'].shape, (2,))
+        self.assertEqual(summary["num_samples"], 3000)
+        self.assertEqual(summary["mean"].shape, (2,))
+        self.assertEqual(summary["mcse"].shape, (2,))
 
     def test_independent_proposal_uses_hastings_correction(self):
         target = GaussianDistribution(1.0, 2.0)
@@ -256,33 +255,33 @@ class MCMCTestCase(unittest.TestCase):
 
     def test_blocked_metropolis_within_gibbs_updates_dict_state(self):
         def log_target(state):
-            x = float(state['x'])
-            y = float(state['y'])
+            x = float(state["x"])
+            y = float(state["y"])
             return -0.5 * x * x - 0.5 * (y - 2.0) * (y - 2.0) / 0.5
 
         result = metropolis_within_gibbs(
             log_target=log_target,
-            initial={'x': 0.0, 'y': 0.0},
+            initial={"x": 0.0, "y": 0.0},
             proposals={
-                'x': BlockProposal('x', RandomWalkProposal(scale=0.8)),
-                'y': BlockProposal('y', RandomWalkProposal(scale=0.7)),
+                "x": BlockProposal("x", RandomWalkProposal(scale=0.8)),
+                "y": BlockProposal("y", RandomWalkProposal(scale=0.7)),
             },
             num_samples=2500,
             burn_in=500,
             rng=np.random.RandomState(9),
         )
-        xs = np.asarray([sample['x'] for sample in result.samples], dtype=float)
-        ys = np.asarray([sample['y'] for sample in result.samples], dtype=float)
+        xs = np.asarray([sample["x"] for sample in result.samples], dtype=float)
+        ys = np.asarray([sample["y"] for sample in result.samples], dtype=float)
         by_label = result.acceptance_rate_by_label
 
-        self.assertEqual(set(by_label), {'x', 'y'})
+        self.assertEqual(set(by_label), {"x", "y"})
         self.assertEqual(len(result.accepted), 6000)
         self.assertLess(abs(float(xs.mean())), 0.15)
         self.assertLess(abs(float(xs.var()) - 1.0), 0.35)
         self.assertLess(abs(float(ys.mean()) - 2.0), 0.15)
         self.assertLess(abs(float(ys.var()) - 0.5), 0.2)
-        self.assertGreater(by_label['x'], 0.4)
-        self.assertGreater(by_label['y'], 0.4)
+        self.assertGreater(by_label["x"], 0.4)
+        self.assertGreater(by_label["y"], 0.4)
 
     def test_evidence_updates_distribution_target(self):
         prior = GaussianDistribution(0.0, 10.0)
@@ -312,26 +311,44 @@ class MCMCTestCase(unittest.TestCase):
         target = GaussianDistribution(0.0, 1.0)
         proposal = RandomWalkProposal(scale=1.0)
 
-        with self.assertRaisesRegex(ValueError, 'num_samples'):
+        with self.assertRaisesRegex(ValueError, "num_samples"):
             sample_distribution(target, 0.0, proposal, num_samples=-1)
-        with self.assertRaisesRegex(ValueError, 'burn_in'):
+        with self.assertRaisesRegex(ValueError, "burn_in"):
             sample_distribution(target, 0.0, proposal, num_samples=1, burn_in=-1)
-        with self.assertRaisesRegex(ValueError, 'thin'):
+        with self.assertRaisesRegex(ValueError, "thin"):
             sample_distribution(target, 0.0, proposal, num_samples=1, thin=0)
-        with self.assertRaisesRegex(ValueError, 'initial state'):
+        with self.assertRaisesRegex(ValueError, "initial state"):
             sample_distribution(GammaDistribution(2.0, 1.0), -1.0, proposal, num_samples=1)
-        with self.assertRaisesRegex(ValueError, 'step_size'):
-            hamiltonian_monte_carlo(lambda x: -float(x) * float(x), lambda x: -2.0 * float(x),
-                                    0.0, num_samples=1, step_size=0.0, num_steps=1)
-        with self.assertRaisesRegex(ValueError, 'num_steps'):
-            hamiltonian_monte_carlo(lambda x: -float(x) * float(x), lambda x: -2.0 * float(x),
-                                    0.0, num_samples=1, step_size=0.1, num_steps=0)
-        with self.assertRaisesRegex(ValueError, 'grad_log_target shape'):
-            hamiltonian_monte_carlo(lambda x: -0.5 * float(x) * float(x), lambda x: [0.0, 0.0],
-                                    0.0, num_samples=1, step_size=0.1, num_steps=1)
-        with self.assertRaisesRegex(ValueError, 'adapt_after'):
+        with self.assertRaisesRegex(ValueError, "step_size"):
+            hamiltonian_monte_carlo(
+                lambda x: -float(x) * float(x),
+                lambda x: -2.0 * float(x),
+                0.0,
+                num_samples=1,
+                step_size=0.0,
+                num_steps=1,
+            )
+        with self.assertRaisesRegex(ValueError, "num_steps"):
+            hamiltonian_monte_carlo(
+                lambda x: -float(x) * float(x),
+                lambda x: -2.0 * float(x),
+                0.0,
+                num_samples=1,
+                step_size=0.1,
+                num_steps=0,
+            )
+        with self.assertRaisesRegex(ValueError, "grad_log_target shape"):
+            hamiltonian_monte_carlo(
+                lambda x: -0.5 * float(x) * float(x),
+                lambda x: [0.0, 0.0],
+                0.0,
+                num_samples=1,
+                step_size=0.1,
+                num_steps=1,
+            )
+        with self.assertRaisesRegex(ValueError, "adapt_after"):
             AdaptiveCovarianceProposal(adapt_after=1)
-        with self.assertRaisesRegex(ValueError, 'initial_covariance'):
+        with self.assertRaisesRegex(ValueError, "initial_covariance"):
             AdaptiveCovarianceProposal(initial_covariance=-1.0).sample(np.asarray([0.0]), np.random.RandomState(1))
 
     def test_metropolis_hastings_accepts_unnormalized_log_targets(self):
@@ -350,7 +367,6 @@ class MCMCTestCase(unittest.TestCase):
 
 
 class ParameterPosteriorTestCase(unittest.TestCase):
-
     def test_gaussian_mean_posterior_matches_conjugate(self):
         # Known-variance normal model with a normal prior on the mean has a
         # closed-form normal posterior. We sample the full (mu, sigma2) posterior
@@ -365,9 +381,15 @@ class ParameterPosteriorTestCase(unittest.TestCase):
         sample_var = float(data.var())
 
         result = sample_parameter_posterior(
-            GaussianDistribution(0.0, 1.0), data,
-            prior=None, sampler='mh', steps=4000, burn_in=2000, seed=7,
-            proposal=RandomWalkProposal(scale=[0.08, 0.08]))
+            GaussianDistribution(0.0, 1.0),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=4000,
+            burn_in=2000,
+            seed=7,
+            proposal=RandomWalkProposal(scale=[0.08, 0.08]),
+        )
 
         mus = np.asarray([t[0] for t in result.samples], dtype=float)
         s2s = np.asarray([t[1] for t in result.samples], dtype=float)
@@ -390,12 +412,24 @@ class ParameterPosteriorTestCase(unittest.TestCase):
         data = rng.normal(-1.0, 2.0, size=300)
 
         mh = sample_parameter_posterior(
-            GaussianDistribution(0.0, 1.0), data, sampler='mh',
-            steps=3000, burn_in=1500, seed=11,
-            proposal=RandomWalkProposal(scale=[0.1, 0.1]))
+            GaussianDistribution(0.0, 1.0),
+            data,
+            sampler="mh",
+            steps=3000,
+            burn_in=1500,
+            seed=11,
+            proposal=RandomWalkProposal(scale=[0.1, 0.1]),
+        )
         hmc = sample_parameter_posterior(
-            GaussianDistribution(0.0, 1.0), data, sampler='hmc',
-            steps=1500, burn_in=800, seed=12, step_size=0.02, num_steps=15)
+            GaussianDistribution(0.0, 1.0),
+            data,
+            sampler="hmc",
+            steps=1500,
+            burn_in=800,
+            seed=12,
+            step_size=0.02,
+            num_steps=15,
+        )
 
         mh_mu = float(np.mean([t[0] for t in mh.samples]))
         hmc_mu = float(np.mean([t[0] for t in hmc.samples]))
@@ -414,9 +448,15 @@ class ParameterPosteriorTestCase(unittest.TestCase):
         n = len(data)
 
         result = sample_parameter_posterior(
-            PoissonDistribution(1.0), data, prior=None, sampler='mh',
-            steps=4000, burn_in=2000, seed=13,
-            proposal=RandomWalkProposal(scale=0.05))
+            PoissonDistribution(1.0),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=4000,
+            burn_in=2000,
+            seed=13,
+            proposal=RandomWalkProposal(scale=0.05),
+        )
 
         lams = np.asarray(result.samples, dtype=float)
         # Posterior over lam under flat prior on log-lam: Gamma(total, scale=1/n)
@@ -434,9 +474,15 @@ class ParameterPosteriorTestCase(unittest.TestCase):
         n = len(data)
 
         result = sample_parameter_posterior(
-            BernoulliDistribution(0.5), data, prior=None, sampler='mh',
-            steps=4000, burn_in=2000, seed=14,
-            proposal=RandomWalkProposal(scale=0.1))
+            BernoulliDistribution(0.5),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=4000,
+            burn_in=2000,
+            seed=14,
+            proposal=RandomWalkProposal(scale=0.1),
+        )
 
         ps = np.asarray(result.samples, dtype=float)
         self.assertTrue(np.all(ps > 0.0))
@@ -446,14 +492,12 @@ class ParameterPosteriorTestCase(unittest.TestCase):
 
     def test_categorical_posterior_samples_are_valid_simplices(self):
         rng = np.random.RandomState(505)
-        labels = ['a', 'b', 'c', 'd']
+        labels = ["a", "b", "c", "d"]
         true_p = [0.1, 0.4, 0.3, 0.2]
         data = rng.choice(labels, p=true_p, size=600).tolist()
         proto = CategoricalDistribution({k: 0.25 for k in labels})
 
-        result = sample_parameter_posterior(
-            proto, data, prior=None, sampler='mh',
-            steps=3000, burn_in=1500, seed=15)
+        result = sample_parameter_posterior(proto, data, prior=None, sampler="mh", steps=3000, burn_in=1500, seed=15)
 
         for prob_map in result.samples:
             self.assertEqual(set(prob_map), set(labels))
@@ -473,9 +517,15 @@ class ParameterPosteriorTestCase(unittest.TestCase):
         rng = np.random.RandomState(606)
         data = rng.poisson(3.0, size=100)
         result = sample_parameter_posterior(
-            PoissonDistribution(1.0), data, sampler='mh', steps=50, burn_in=50,
-            seed=16, return_distributions=True,
-            proposal=RandomWalkProposal(scale=0.05))
+            PoissonDistribution(1.0),
+            data,
+            sampler="mh",
+            steps=50,
+            burn_in=50,
+            seed=16,
+            return_distributions=True,
+            proposal=RandomWalkProposal(scale=0.05),
+        )
         self.assertEqual(len(result.samples), 50)
         for dist in result.samples:
             self.assertIsInstance(dist, PoissonDistribution)
@@ -488,15 +538,26 @@ class ParameterPosteriorTestCase(unittest.TestCase):
         data = rng.poisson(8.0, size=40)
 
         flat = sample_parameter_posterior(
-            PoissonDistribution(1.0), data, prior=None, sampler='mh',
-            steps=3000, burn_in=1500, seed=17,
-            proposal=RandomWalkProposal(scale=0.08))
+            PoissonDistribution(1.0),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=3000,
+            burn_in=1500,
+            seed=17,
+            proposal=RandomWalkProposal(scale=0.08),
+        )
         # log Gamma(k=2, scale=1) density on lam (drops constant terms).
         shaped = sample_parameter_posterior(
-            PoissonDistribution(1.0), data,
+            PoissonDistribution(1.0),
+            data,
             prior=lambda lam: (2.0 - 1.0) * np.log(lam) - lam / 1.0,
-            sampler='mh', steps=3000, burn_in=1500, seed=18,
-            proposal=RandomWalkProposal(scale=0.08))
+            sampler="mh",
+            steps=3000,
+            burn_in=1500,
+            seed=18,
+            proposal=RandomWalkProposal(scale=0.08),
+        )
 
         flat_mean = float(np.mean(flat.samples))
         shaped_mean = float(np.mean(shaped.samples))
@@ -504,14 +565,16 @@ class ParameterPosteriorTestCase(unittest.TestCase):
         self.assertGreater(shaped_mean, 0.0)
 
     def test_unsupported_family_raises_not_implemented(self):
-        with self.assertRaisesRegex(NotImplementedError, 'does not support'):
+        with self.assertRaisesRegex(NotImplementedError, "does not support"):
             build_parameter_bridge(GammaDistribution(2.0, 1.0).estimator())
 
     def test_bridge_round_trips_parameters(self):
-        for proto in (GaussianDistribution(1.3, 2.7),
-                      PoissonDistribution(4.2),
-                      BernoulliDistribution(0.37),
-                      CategoricalDistribution({'a': 0.2, 'b': 0.5, 'c': 0.3})):
+        for proto in (
+            GaussianDistribution(1.3, 2.7),
+            PoissonDistribution(4.2),
+            BernoulliDistribution(0.37),
+            CategoricalDistribution({"a": 0.2, "b": 0.5, "c": 0.3}),
+        ):
             bridge = build_parameter_bridge(proto)
             phi = bridge.to_unconstrained(bridge.initial_theta)
             theta = bridge.from_unconstrained(phi)
@@ -526,11 +589,11 @@ class ParameterPosteriorTestCase(unittest.TestCase):
 
 
 class ConjugatePosteriorTestCase(unittest.TestCase):
-
     def _bstats(self):
         import pysp.bstats as bstats
         from pysp.bstats.beta import BetaDistribution as BBeta
         from pysp.bstats.gamma import GammaDistribution as BGamma
+
         return bstats, BBeta, BGamma
 
     def test_poisson_gamma_conjugate_matches_analytic(self):
@@ -590,9 +653,9 @@ class ConjugatePosteriorTestCase(unittest.TestCase):
 
     def test_conjugate_unsupported_leaf_raises(self):
         bstats, _, _ = self._bstats()
-        with self.assertRaisesRegex(NotImplementedError, 'supports bstats'):
+        with self.assertRaisesRegex(NotImplementedError, "supports bstats"):
             sample_conjugate_posterior(bstats.ExponentialDistribution(1.0), [0.5, 1.0], draws=5)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

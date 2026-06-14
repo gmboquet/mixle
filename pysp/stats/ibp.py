@@ -12,7 +12,9 @@ factorized posterior q(pi_k) = Beta(a_k, b_k).  The local variational factor for
 an observed feature row is deterministic, so the accumulator gathers weighted
 feature-use counts and the estimator performs the conjugate Beta update.
 """
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -27,12 +29,11 @@ from pysp.stats.pdist import (
     StatisticAccumulatorFactory,
 )
 
-
-SS = Tuple[np.ndarray, float, Optional[float]]
+SS = tuple[np.ndarray, float, float | None]
 
 
 def _check_data_format(data_format: str) -> str:
-    if data_format not in ('auto', 'dense', 'sparse'):
+    if data_format not in ("auto", "dense", "sparse"):
         raise ValueError("data_format must be one of 'auto', 'dense', or 'sparse'")
     return data_format
 
@@ -40,24 +41,25 @@ def _check_data_format(data_format: str) -> str:
 def _validate_num_features(num_features: int) -> int:
     num_features = int(num_features)
     if num_features <= 0:
-        raise ValueError('num_features must be positive')
+        raise ValueError("num_features must be positive")
     return num_features
 
 
 def _validate_alpha(alpha: float) -> float:
     alpha = float(alpha)
     if alpha <= 0.0 or not np.isfinite(alpha):
-        raise ValueError('alpha must be a finite positive value')
+        raise ValueError("alpha must be a finite positive value")
     return alpha
 
 
-def _validate_probability_vector(p: Union[Sequence[float], np.ndarray], num_features: int,
-                                 min_prob: float = 0.0) -> np.ndarray:
+def _validate_probability_vector(
+    p: Sequence[float] | np.ndarray, num_features: int, min_prob: float = 0.0
+) -> np.ndarray:
     rv = np.asarray(p, dtype=np.float64)
     if rv.shape != (num_features,):
-        raise ValueError('feature probability vector must have length num_features')
+        raise ValueError("feature probability vector must have length num_features")
     if np.any(np.isnan(rv)) or np.any(rv < 0.0) or np.any(rv > 1.0):
-        raise ValueError('feature probabilities must lie in [0, 1]')
+        raise ValueError("feature probabilities must lie in [0, 1]")
     if min_prob > 0.0:
         rv = np.clip(rv, min_prob, 1.0 - min_prob)
     return rv
@@ -75,7 +77,7 @@ def _as_1d_array(x: Any) -> np.ndarray:
     if isinstance(x, (set, frozenset)):
         return np.asarray(list(x))
     if isinstance(x, (str, bytes)):
-        raise TypeError('IBP observations must be binary vectors or active-feature indices, not strings')
+        raise TypeError("IBP observations must be binary vectors or active-feature indices, not strings")
     return np.asarray(list(x))
 
 
@@ -84,18 +86,18 @@ def _to_binary_vector(x: Any, num_features: int, data_format: str) -> np.ndarray
     xx = _as_1d_array(x)
 
     if xx.ndim != 1:
-        raise ValueError('IBP observations must be one-dimensional')
+        raise ValueError("IBP observations must be one-dimensional")
 
-    if data_format == 'dense' or (data_format == 'auto' and _is_binary_vector(xx, num_features)):
+    if data_format == "dense" or (data_format == "auto" and _is_binary_vector(xx, num_features)):
         if xx.size != num_features:
-            raise ValueError('dense IBP observations must have length num_features')
+            raise ValueError("dense IBP observations must have length num_features")
         if not _is_binary_vector(xx, num_features):
-            raise ValueError('dense IBP observations must contain only 0/1 values')
+            raise ValueError("dense IBP observations must contain only 0/1 values")
         return xx.astype(bool, copy=False)
 
     idx = np.asarray(xx, dtype=np.int64)
     if np.any(idx < 0) or np.any(idx >= num_features):
-        raise ValueError('sparse IBP feature index out of range')
+        raise ValueError("sparse IBP feature index out of range")
     rv = np.zeros(num_features, dtype=bool)
     if idx.size:
         rv[np.unique(idx)] = True
@@ -122,33 +124,41 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='generic_table')
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_table")
 
     @classmethod
     def compute_declaration(cls):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
         return DistributionDeclaration(
-            name='indian_buffet_process',
+            name="indian_buffet_process",
             distribution_type=cls,
             parameters=(
-                ParameterSpec('num_features', constraint='integer', differentiable=False),
-                ParameterSpec('alpha', constraint='positive'),
-                ParameterSpec('beta_params', constraint='positive_matrix'),
+                ParameterSpec("num_features", constraint="integer", differentiable=False),
+                ParameterSpec("alpha", constraint="positive"),
+                ParameterSpec("beta_params", constraint="positive_matrix"),
             ),
             statistics=(
-                StatisticSpec('feature_counts', kind='count_vector'),
-                StatisticSpec('total_count'),
-                StatisticSpec('alpha', kind='metadata', additive=False, scales=False),
+                StatisticSpec("feature_counts", kind="count_vector"),
+                StatisticSpec("total_count"),
+                StatisticSpec("alpha", kind="metadata", additive=False, scales=False),
             ),
-            support='binary_feature_matrix',
+            support="binary_feature_matrix",
             differentiable=False,
         )
 
-    def __init__(self, num_features: int, alpha: float = 1.0,
-                 beta_params: Optional[Union[Sequence[Sequence[float]], np.ndarray]] = None,
-                 feature_probs: Optional[Union[Sequence[float], np.ndarray]] = None,
-                 min_prob: float = 1.0e-128, name: Optional[str] = None,
-                 keys: Optional[str] = None, data_format: str = 'auto') -> None:
+    def __init__(
+        self,
+        num_features: int,
+        alpha: float = 1.0,
+        beta_params: Sequence[Sequence[float]] | np.ndarray | None = None,
+        feature_probs: Sequence[float] | np.ndarray | None = None,
+        min_prob: float = 1.0e-128,
+        name: str | None = None,
+        keys: str | None = None,
+        data_format: str = "auto",
+    ) -> None:
         self.num_features = _validate_num_features(num_features)
         self.alpha = _validate_alpha(alpha)
         self.name = name
@@ -159,18 +169,20 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         if beta_params is not None:
             bp = np.asarray(beta_params, dtype=np.float64)
             if bp.shape != (self.num_features, 2):
-                raise ValueError('beta_params must have shape (num_features, 2)')
+                raise ValueError("beta_params must have shape (num_features, 2)")
             if np.any(bp <= 0.0) or np.any(~np.isfinite(bp)):
-                raise ValueError('beta_params must be finite positive values')
+                raise ValueError("beta_params must be finite positive values")
             self.beta_params = bp.copy()
         elif feature_probs is not None:
             p = _validate_probability_vector(feature_probs, self.num_features, self.min_prob)
             self.beta_params = np.column_stack((p, 1.0 - p))
         else:
-            self.beta_params = np.column_stack((
-                np.full(self.num_features, self.alpha / float(self.num_features), dtype=np.float64),
-                np.ones(self.num_features, dtype=np.float64),
-            ))
+            self.beta_params = np.column_stack(
+                (
+                    np.full(self.num_features, self.alpha / float(self.num_features), dtype=np.float64),
+                    np.ones(self.num_features, dtype=np.float64),
+                )
+            )
 
         beta_sum = self.beta_params.sum(axis=1)
         self.feature_probs = self.beta_params[:, 0] / beta_sum
@@ -185,10 +197,18 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         self.expected_log_nsum = float(self.expected_log_nvec.sum())
 
     def __str__(self) -> str:
-        return ('IndianBuffetProcessDistribution(%s, alpha=%s, beta_params=%s, min_prob=%s, '
-                'name=%s, keys=%s, data_format=%s)') % (
-                    repr(self.num_features), repr(self.alpha), repr(self.beta_params.tolist()),
-                    repr(self.min_prob), repr(self.name), repr(self.keys), repr(self.data_format))
+        return (
+            "IndianBuffetProcessDistribution(%s, alpha=%s, beta_params=%s, min_prob=%s, "
+            "name=%s, keys=%s, data_format=%s)"
+        ) % (
+            repr(self.num_features),
+            repr(self.alpha),
+            repr(self.beta_params.tolist()),
+            repr(self.min_prob),
+            repr(self.name),
+            repr(self.keys),
+            repr(self.data_format),
+        )
 
     def density(self, x: Any) -> float:
         """Return the probability density or mass at a single observation."""
@@ -212,36 +232,36 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
     def backend_seq_log_density(self, x: np.ndarray, engine: Any) -> Any:
         """Engine-neutral vectorized plug-in log-density for encoded feature rows."""
         log_dvec = engine.asarray(self.log_dvec)
-        xx = engine.asarray(x, dtype=getattr(log_dvec, 'dtype', None))
+        xx = engine.asarray(x, dtype=getattr(log_dvec, "dtype", None))
         return float(self.log_nsum) + engine.matmul(xx, log_dvec)
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['IndianBuffetProcessDistribution'],
-                               engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["IndianBuffetProcessDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked finite-IBP parameters for equal-feature mixtures."""
         num_features = int(dists[0].num_features)
         if any(int(dist.num_features) != num_features for dist in dists):
-            raise ValueError('Stacked IndianBuffetProcessDistribution components require equal feature dimension.')
+            raise ValueError("Stacked IndianBuffetProcessDistribution components require equal feature dimension.")
         return {
-            '__pysp_component_axis__': {'log_dvec': 1, 'log_nsum': 0, 'alpha': 0},
-            'log_dvec': engine.asarray(np.stack([dist.log_dvec for dist in dists], axis=1)),
-            'log_nsum': engine.asarray([dist.log_nsum for dist in dists]),
-            'alpha': engine.asarray([dist.alpha for dist in dists]),
+            "__pysp_component_axis__": {"log_dvec": 1, "log_nsum": 0, "alpha": 0},
+            "log_dvec": engine.asarray(np.stack([dist.log_dvec for dist in dists], axis=1)),
+            "log_nsum": engine.asarray([dist.log_nsum for dist in dists]),
+            "alpha": engine.asarray([dist.alpha for dist in dists]),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: np.ndarray, params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: np.ndarray, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of finite-IBP component log densities."""
-        xx = engine.asarray(x, dtype=getattr(params['log_dvec'], 'dtype', None))
-        return engine.matmul(xx, params['log_dvec']) + params['log_nsum'][None, :]
+        xx = engine.asarray(x, dtype=getattr(params["log_dvec"], "dtype", None))
+        return engine.matmul(xx, params["log_dvec"]) + params["log_nsum"][None, :]
 
     @classmethod
-    def backend_stacked_sufficient_statistics(cls, x: np.ndarray, weights: Any,
-                                              params: Dict[str, Any], engine: Any) -> Tuple[Any, Any, Any]:
+    def backend_stacked_sufficient_statistics(
+        cls, x: np.ndarray, weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[Any, Any, Any]:
         """Return component-stacked legacy ``(feature_counts, total_count, alpha)`` statistics."""
         ww = engine.asarray(weights)
-        xx = engine.asarray(x, dtype=getattr(ww, 'dtype', None))
-        return engine.matmul(ww.T, xx), engine.sum(ww, axis=0), params['alpha']
+        xx = engine.asarray(x, dtype=getattr(ww, "dtype", None))
+        return engine.matmul(ww.T, xx), engine.sum(ww, axis=0), params["alpha"]
 
     def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized expected log-density values for encoded observations."""
@@ -252,18 +272,25 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         """Per-row VB contribution; rows are observed, so there is no local entropy."""
         return self.seq_expected_log_density(x)
 
-    def sampler(self, seed: Optional[int] = None) -> 'IndianBuffetProcessSampler':
+    def sampler(self, seed: int | None = None) -> "IndianBuffetProcessSampler":
         """Return a sampler for drawing observations from this distribution."""
         return IndianBuffetProcessSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'IndianBuffetProcessEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "IndianBuffetProcessEstimator":
         """Return an estimator for fitting this distribution from data."""
         suff_stat = self.feature_probs.copy() if pseudo_count is not None else None
         return IndianBuffetProcessEstimator(
-            self.num_features, alpha=self.alpha, pseudo_count=pseudo_count, suff_stat=suff_stat,
-            min_prob=self.min_prob, name=self.name, keys=self.keys, data_format=self.data_format)
+            self.num_features,
+            alpha=self.alpha,
+            pseudo_count=pseudo_count,
+            suff_stat=suff_stat,
+            min_prob=self.min_prob,
+            name=self.name,
+            keys=self.keys,
+            data_format=self.data_format,
+        )
 
-    def dist_to_encoder(self) -> 'IndianBuffetProcessDataEncoder':
+    def dist_to_encoder(self) -> "IndianBuffetProcessDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return IndianBuffetProcessDataEncoder(self.num_features, self.data_format)
 
@@ -271,16 +298,16 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
 class IndianBuffetProcessSampler(DistributionSampler):
     """Sampler for finite-truncated IBP feature rows."""
 
-    def __init__(self, dist: IndianBuffetProcessDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: IndianBuffetProcessDistribution, seed: int | None = None) -> None:
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def _format(self, z: np.ndarray) -> Union[List[int], List[bool]]:
-        if self.dist.data_format == 'sparse':
+    def _format(self, z: np.ndarray) -> list[int] | list[bool]:
+        if self.dist.data_format == "sparse":
             return list(np.flatnonzero(z).astype(int))
         return z.astype(int).tolist()
 
-    def sample(self, size: Optional[int] = None) -> Union[List[int], List[List[int]]]:
+    def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
         if size is None:
             z = self.rng.rand(self.dist.num_features) <= self.dist.feature_probs
             return self._format(z)
@@ -292,8 +319,9 @@ class IndianBuffetProcessSampler(DistributionSampler):
 class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulates weighted feature-use counts for the IBP VB update."""
 
-    def __init__(self, num_features: int, alpha: float = 1.0, keys: Optional[str] = None,
-                 data_format: str = 'auto') -> None:
+    def __init__(
+        self, num_features: int, alpha: float = 1.0, keys: str | None = None, data_format: str = "auto"
+    ) -> None:
         self.num_features = _validate_num_features(num_features)
         self.alpha = _validate_alpha(alpha)
         self.key = keys
@@ -307,18 +335,17 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self._track_ll = False
         self._seq_ll = 0.0
 
-    def update(self, x: Any, weight: float, estimate: Optional[IndianBuffetProcessDistribution]) -> None:
+    def update(self, x: Any, weight: float, estimate: IndianBuffetProcessDistribution | None) -> None:
         if estimate is not None:
             self.alpha = estimate.alpha
         xx = _to_binary_vector(x, self.num_features, self.data_format)
         self.feature_counts += weight * xx
         self.total_count += weight
 
-    def initialize(self, x: Any, weight: float, rng: Optional[RandomState]) -> None:
+    def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
         self.update(x, weight, None)
 
-    def seq_update(self, x: np.ndarray, weights: np.ndarray,
-                   estimate: Optional[IndianBuffetProcessDistribution]) -> None:
+    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: IndianBuffetProcessDistribution | None) -> None:
         if estimate is not None:
             self.alpha = estimate.alpha
         xx = np.asarray(x, dtype=np.float64)
@@ -335,8 +362,9 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
                 row_ll = estimate.log_nsum + np.dot(xx, estimate.log_dvec)
                 self._seq_ll += float(np.dot(ww, row_ll))
 
-    def seq_update_engine(self, x: np.ndarray, weights: Any,
-                          estimate: Optional[IndianBuffetProcessDistribution], engine: Any) -> None:
+    def seq_update_engine(
+        self, x: np.ndarray, weights: Any, estimate: IndianBuffetProcessDistribution | None, engine: Any
+    ) -> None:
         """Engine-resident accumulation of weighted feature-use counts (numpy or torch).
 
         The weighted feature counts are reduced via a weight-vector / binary-matrix product on the
@@ -344,17 +372,16 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         """
         if estimate is not None:
             self.alpha = estimate.alpha
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         w = engine.asarray(weights_np)
         xx = engine.asarray(np.asarray(x, dtype=np.float64))
         self.feature_counts += np.asarray(engine.to_numpy(engine.matmul(w, xx)), dtype=np.float64)
         self.total_count += float(engine.to_numpy(engine.sum(w)))
 
-    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: Optional[RandomState]) -> None:
+    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: SS) -> 'IndianBuffetProcessAccumulator':
+    def combine(self, suff_stat: SS) -> "IndianBuffetProcessAccumulator":
         self.feature_counts += suff_stat[0]
         self.total_count += suff_stat[1]
         if suff_stat[2] is not None:
@@ -364,39 +391,40 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
     def value(self) -> SS:
         return self.feature_counts.copy(), self.total_count, self.alpha
 
-    def from_value(self, x: SS) -> 'IndianBuffetProcessAccumulator':
+    def from_value(self, x: SS) -> "IndianBuffetProcessAccumulator":
         self.feature_counts = np.asarray(x[0], dtype=np.float64).copy()
         self.total_count = float(x[1])
         if x[2] is not None:
             self.alpha = float(x[2])
         return self
 
-    def scale(self, c: float) -> 'IndianBuffetProcessAccumulator':
+    def scale(self, c: float) -> "IndianBuffetProcessAccumulator":
         """Scale additive counts while preserving the IBP concentration metadata."""
         self.feature_counts *= c
         self.total_count *= c
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None:
             if self.key in stats_dict:
                 stats_dict[self.key].combine(self.value())
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None and self.key in stats_dict:
             self.from_value(stats_dict[self.key].value())
 
-    def acc_to_encoder(self) -> 'IndianBuffetProcessDataEncoder':
+    def acc_to_encoder(self) -> "IndianBuffetProcessDataEncoder":
         return IndianBuffetProcessDataEncoder(self.num_features, self.data_format)
 
 
 class IndianBuffetProcessAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for IBP accumulators."""
 
-    def __init__(self, num_features: int, alpha: float = 1.0, keys: Optional[str] = None,
-                 data_format: str = 'auto') -> None:
+    def __init__(
+        self, num_features: int, alpha: float = 1.0, keys: str | None = None, data_format: str = "auto"
+    ) -> None:
         self.num_features = _validate_num_features(num_features)
         self.alpha = _validate_alpha(alpha)
         self.keys = keys
@@ -415,16 +443,20 @@ class IndianBuffetProcessEstimator(ParameterEstimator):
     the IBP prior mean alpha / (alpha + K).
     """
 
-    def __init__(self, num_features: int, alpha: float = 1.0,
-                 pseudo_count: Optional[float] = None,
-                 suff_stat: Optional[Union[Sequence[float], np.ndarray]] = None,
-                 estimate_alpha: bool = True,
-                 min_alpha: float = 1.0e-12,
-                 max_alpha: float = 1.0e12,
-                 min_prob: float = 1.0e-128,
-                 name: Optional[str] = None,
-                 keys: Optional[str] = None,
-                 data_format: str = 'auto') -> None:
+    def __init__(
+        self,
+        num_features: int,
+        alpha: float = 1.0,
+        pseudo_count: float | None = None,
+        suff_stat: Sequence[float] | np.ndarray | None = None,
+        estimate_alpha: bool = True,
+        min_alpha: float = 1.0e-12,
+        max_alpha: float = 1.0e12,
+        min_prob: float = 1.0e-128,
+        name: str | None = None,
+        keys: str | None = None,
+        data_format: str = "auto",
+    ) -> None:
         self.num_features = _validate_num_features(num_features)
         self.alpha = _validate_alpha(alpha)
         self.pseudo_count = pseudo_count
@@ -440,20 +472,20 @@ class IndianBuffetProcessEstimator(ParameterEstimator):
     def accumulator_factory(self) -> IndianBuffetProcessAccumulatorFactory:
         return IndianBuffetProcessAccumulatorFactory(self.num_features, self.alpha, self.keys, self.data_format)
 
-    def estimate(self, nobs: Optional[float], suff_stat: SS) -> IndianBuffetProcessDistribution:
+    def estimate(self, nobs: float | None, suff_stat: SS) -> IndianBuffetProcessDistribution:
         feature_counts, total_count, prev_alpha = suff_stat
         alpha = self.alpha if prev_alpha is None else _validate_alpha(prev_alpha)
         feature_counts = np.asarray(feature_counts, dtype=np.float64)
 
         if feature_counts.shape != (self.num_features,):
-            raise ValueError('IBP sufficient statistics have the wrong feature dimension')
+            raise ValueError("IBP sufficient statistics have the wrong feature dimension")
 
         active_pseudo = np.zeros(self.num_features, dtype=np.float64)
         inactive_pseudo = np.zeros(self.num_features, dtype=np.float64)
         if self.pseudo_count is not None:
             pc = float(self.pseudo_count)
             if pc < 0.0:
-                raise ValueError('pseudo_count must be non-negative')
+                raise ValueError("pseudo_count must be non-negative")
             if self.suff_stat is not None:
                 prior_probs = self.suff_stat
             else:
@@ -477,8 +509,14 @@ class IndianBuffetProcessEstimator(ParameterEstimator):
 
         beta_params = np.column_stack((post_a, post_b))
         return IndianBuffetProcessDistribution(
-            self.num_features, alpha=new_alpha, beta_params=beta_params, min_prob=self.min_prob,
-            name=self.name, keys=self.keys, data_format=self.data_format)
+            self.num_features,
+            alpha=new_alpha,
+            beta_params=beta_params,
+            min_prob=self.min_prob,
+            name=self.name,
+            keys=self.keys,
+            data_format=self.data_format,
+        )
 
     def model_log_density(self, model: IndianBuffetProcessDistribution) -> float:
         """Global VB term E_q[log p(pi | alpha)] + H[q(pi)]."""
@@ -488,33 +526,36 @@ class IndianBuffetProcessEstimator(ParameterEstimator):
         ab = a + b
         prior_a = model.alpha / float(model.num_features)
         elog_pi = digamma(a) - digamma(ab)
-        entropy = betaln(a, b) - (a - 1.0) * digamma(a) - (b - 1.0) * digamma(b) \
-            + (ab - 2.0) * digamma(ab)
+        entropy = betaln(a, b) - (a - 1.0) * digamma(a) - (b - 1.0) * digamma(b) + (ab - 2.0) * digamma(ab)
         return float(np.sum(np.log(prior_a) + (prior_a - 1.0) * elog_pi + entropy))
 
 
 class IndianBuffetProcessDataEncoder(DataSequenceEncoder):
     """Encode dense or sparse IBP rows as a dense boolean matrix."""
 
-    def __init__(self, num_features: int, data_format: str = 'auto') -> None:
+    def __init__(self, num_features: int, data_format: str = "auto") -> None:
         self.num_features = _validate_num_features(num_features)
         self.data_format = _check_data_format(data_format)
 
     def __str__(self) -> str:
-        return 'IndianBuffetProcessDataEncoder(num_features=%s, data_format=%s)' % (
-            repr(self.num_features), repr(self.data_format))
+        return "IndianBuffetProcessDataEncoder(num_features=%s, data_format=%s)" % (
+            repr(self.num_features),
+            repr(self.data_format),
+        )
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, IndianBuffetProcessDataEncoder) \
-            and self.num_features == other.num_features \
+        return (
+            isinstance(other, IndianBuffetProcessDataEncoder)
+            and self.num_features == other.num_features
             and self.data_format == other.data_format
+        )
 
-    def seq_encode(self, x: Union[Sequence[Any], np.ndarray]) -> np.ndarray:
+    def seq_encode(self, x: Sequence[Any] | np.ndarray) -> np.ndarray:
         if isinstance(x, np.ndarray) and x.ndim == 2:
             if x.shape[1] != self.num_features:
-                raise ValueError('dense IBP matrix must have num_features columns')
+                raise ValueError("dense IBP matrix must have num_features columns")
             if not np.all(np.logical_or(x == 0, x == 1)):
-                raise ValueError('dense IBP matrix must contain only 0/1 values')
+                raise ValueError("dense IBP matrix must contain only 0/1 values")
             return x.astype(bool, copy=False)
 
         rows = [_to_binary_vector(u, self.num_features, self.data_format) for u in x]

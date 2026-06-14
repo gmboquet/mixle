@@ -1,22 +1,45 @@
-import unittest
-import io
 import copy
+import io
+import unittest
 
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE, NumpyEngine
-from pysp.stats import AffineTransform, BetaDistribution, BinomialDistribution, CategoricalDistribution, \
-    CategoricalEstimator, CompositeDistribution, CompositeEstimator, DiagonalGaussianDistribution, GaussianDistribution, \
-    GaussianEstimator, \
-    MixtureDistribution, MixtureEstimator, MultivariateGaussianDistribution, OptionalDistribution, PoissonDistribution, \
-    SequenceDistribution, SpearmanRankingDistribution, TransformDistribution, WeightedDistribution, EncodedData, \
-    GeneratedNumbaKernel, \
-    EngineNotSupportedError, NumbaKernelFactory, \
-    encoded_nbytes, generated_log_density, generated_numba_log_density, generated_numba_stacked_log_density, \
-    generated_stacked_log_density, generated_stacked_params, generated_sufficient_statistics, kernel_for, \
-    seq_estimate, seq_log_density_sum
-from pysp.stats.stacked import StackedMixtureKernel, estimate_component_shard_value, tie_component_shard_values
+from pysp.stats import (
+    AffineTransform,
+    BetaDistribution,
+    BinomialDistribution,
+    CompositeDistribution,
+    CompositeEstimator,
+    DiagonalGaussianDistribution,
+    EncodedData,
+    EngineNotSupportedError,
+    GaussianDistribution,
+    GaussianEstimator,
+    GeneratedNumbaKernel,
+    MixtureDistribution,
+    MixtureEstimator,
+    MultivariateGaussianDistribution,
+    NumbaKernelFactory,
+    OptionalDistribution,
+    PoissonDistribution,
+    SequenceDistribution,
+    SpearmanRankingDistribution,
+    TransformDistribution,
+    WeightedDistribution,
+    encoded_nbytes,
+    generated_log_density,
+    generated_numba_log_density,
+    generated_numba_stacked_log_density,
+    generated_stacked_log_density,
+    generated_stacked_params,
+    generated_sufficient_statistics,
+    kernel_for,
+    seq_estimate,
+    seq_log_density_sum,
+)
 from pysp.stats.kernel import GenericKernel, KernelFactory
+from pysp.stats.stacked import StackedMixtureKernel, estimate_component_shard_value, tie_component_shard_values
 from pysp.utils.estimation import optimize
 
 
@@ -26,8 +49,9 @@ def _assert_stats_close(test_case, actual, expected):
         for a, e in zip(actual, expected):
             _assert_stats_close(test_case, a, e)
         return
-    np.testing.assert_allclose(np.asarray(actual, dtype=float), np.asarray(expected, dtype=float),
-                               rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(
+        np.asarray(actual, dtype=float), np.asarray(expected, dtype=float), rtol=1.0e-12, atol=1.0e-12
+    )
 
 
 def _assert_mixture_close(test_case, actual, expected):
@@ -49,7 +73,7 @@ def _apply_global_key_merge(*accumulators):
 def _split_component_shards(value):
     counts, comp_stats = value
     return tuple(
-        (idx, (np.asarray(counts[idx:idx + 1], dtype=np.float64).copy(), (copy.deepcopy(comp_stats[idx]),)))
+        (idx, (np.asarray(counts[idx : idx + 1], dtype=np.float64).copy(), (copy.deepcopy(comp_stats[idx]),)))
         for idx in range(len(counts))
     )
 
@@ -62,9 +86,8 @@ def _merge_component_shards(shards):
 
 
 class ComputeKernelTestCase(unittest.TestCase):
-
     class FakeTorchEngine(NumpyEngine):
-        name = 'torch'
+        name = "torch"
 
     def test_gaussian_kernel_matches_legacy_seq_paths(self):
         dist = GaussianDistribution(0.5, 2.0)
@@ -92,8 +115,9 @@ class ComputeKernelTestCase(unittest.TestCase):
 
         kernel = kernel_for(dist, estimator=est)
         np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(enc), rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(enc), rtol=1.0e-12, atol=1.0e-12
+        )
 
         legacy_acc = est.accumulator_factory().make()
         legacy_acc.seq_update(enc, weights, dist)
@@ -104,10 +128,12 @@ class ComputeKernelTestCase(unittest.TestCase):
             [GaussianDistribution(-2.0, 0.8), GaussianDistribution(2.5, 1.4)],
             [0.35, 0.65],
         )
-        est = MixtureEstimator([
-            GaussianEstimator(keys='shared_gaussian'),
-            GaussianEstimator(keys='shared_gaussian'),
-        ])
+        est = MixtureEstimator(
+            [
+                GaussianEstimator(keys="shared_gaussian"),
+                GaussianEstimator(keys="shared_gaussian"),
+            ]
+        )
         data = dist.sampler(seed=30).sample(size=70)
         weights = np.linspace(0.2, 1.4, len(data))
         enc = dist.dist_to_encoder().seq_encode(data)
@@ -123,7 +149,7 @@ class ComputeKernelTestCase(unittest.TestCase):
         _assert_stats_close(self, _merge_component_shards(tied), expected.value())
         for start, value in tied:
             shard = estimate_component_shard_value(est, start, value, total_count=float(expected.value()[0].sum()))
-            _assert_stats_close(self, shard.weights, expected_model.w[start:start + 1])
+            _assert_stats_close(self, shard.weights, expected_model.w[start : start + 1])
             _assert_stats_close(
                 self,
                 [shard.components[0].mu, shard.components[0].sigma2],
@@ -135,10 +161,13 @@ class ComputeKernelTestCase(unittest.TestCase):
             [GaussianDistribution(-2.0, 0.8), GaussianDistribution(2.5, 1.4)],
             [0.35, 0.65],
         )
-        est = MixtureEstimator([
-            GaussianEstimator(),
-            GaussianEstimator(),
-        ], keys=('shared_weights', 'shared_components'))
+        est = MixtureEstimator(
+            [
+                GaussianEstimator(),
+                GaussianEstimator(),
+            ],
+            keys=("shared_weights", "shared_components"),
+        )
         data = dist.sampler(seed=31).sample(size=80)
         left, right = data[:35], data[35:]
         enc_left = dist.dist_to_encoder().seq_encode(left)
@@ -158,10 +187,10 @@ class ComputeKernelTestCase(unittest.TestCase):
         expected_model = est.estimate(None, expected)
 
         for start, value in tied:
-            _assert_stats_close(self, value[0], expected[0][start:start + 1])
+            _assert_stats_close(self, value[0], expected[0][start : start + 1])
             _assert_stats_close(self, value[1], (expected[1][start],))
             shard = estimate_component_shard_value(est, start, value, total_count=float(expected[0].sum()))
-            _assert_stats_close(self, shard.weights, expected_model.w[start:start + 1])
+            _assert_stats_close(self, shard.weights, expected_model.w[start : start + 1])
             _assert_stats_close(
                 self,
                 [shard.components[0].mu, shard.components[0].sigma2],
@@ -183,7 +212,7 @@ class ComputeKernelTestCase(unittest.TestCase):
 
     def test_registered_factory_overrides_generic_kernel(self):
         class TaggedKernel(GenericKernel):
-            tag = 'custom'
+            tag = "custom"
 
         class TaggedFactory(KernelFactory):
             def build(self, dist, engine, estimator=None):
@@ -193,6 +222,7 @@ class ComputeKernelTestCase(unittest.TestCase):
             pass
 
         from pysp.stats import register_kernel_factory
+
         register_kernel_factory(TaggedGaussian, TaggedFactory())
 
         kernel = TaggedGaussian(0.0, 1.0).kernel()
@@ -200,10 +230,10 @@ class ComputeKernelTestCase(unittest.TestCase):
 
     def test_generic_kernel_rejects_unsupported_engine(self):
         class NumpyOnlyGaussian(GaussianDistribution):
-            engine_ready = ('numpy',)
+            engine_ready = ("numpy",)
 
         dist = NumpyOnlyGaussian(0.0, 1.0)
-        self.assertEqual(dist.supported_engines(), ('numpy',))
+        self.assertEqual(dist.supported_engines(), ("numpy",))
         self.assertTrue(dist.supports_engine(NUMPY_ENGINE))
         self.assertFalse(dist.supports_engine(self.FakeTorchEngine()))
 
@@ -212,7 +242,7 @@ class ComputeKernelTestCase(unittest.TestCase):
 
     def test_generic_kernel_allows_distribution_engine_opt_in(self):
         class TorchReadyGaussian(GaussianDistribution):
-            engine_ready = ('numpy', 'torch')
+            engine_ready = ("numpy", "torch")
 
         dist = TorchReadyGaussian(0.0, 1.0)
         enc = dist.dist_to_encoder().seq_encode(np.asarray([-1.0, 0.0, 1.0]))
@@ -234,8 +264,9 @@ class ComputeKernelTestCase(unittest.TestCase):
         data = truth.sampler(seed=12).sample(size=80)
 
         legacy = optimize(data, est, max_its=3, delta=None, prev_estimate=start, out=io.StringIO())
-        engine_fit = optimize(data, est, max_its=3, delta=None, prev_estimate=start, engine=NUMPY_ENGINE,
-                              out=io.StringIO())
+        engine_fit = optimize(
+            data, est, max_its=3, delta=None, prev_estimate=start, engine=NUMPY_ENGINE, out=io.StringIO()
+        )
 
         _assert_mixture_close(self, engine_fit, legacy)
 
@@ -243,37 +274,50 @@ class ComputeKernelTestCase(unittest.TestCase):
         dist = GaussianDistribution(0.0, 1.0)
         est = GaussianEstimator()
         data = np.asarray([-1.0, 0.0, 1.0, 2.0])
-        fitted = optimize(data, est, max_its=1, delta=None, prev_estimate=dist,
-                          engine=self.FakeTorchEngine(), out=io.StringIO())
+        fitted = optimize(
+            data, est, max_its=1, delta=None, prev_estimate=dist, engine=self.FakeTorchEngine(), out=io.StringIO()
+        )
         self.assertIsInstance(fitted, GaussianDistribution)
 
         class NumpyOnlyGaussian(GaussianDistribution):
-            engine_ready = ('numpy',)
+            engine_ready = ("numpy",)
 
         numpy_only = NumpyOnlyGaussian(0.0, 1.0)
         with self.assertRaises(EngineNotSupportedError):
-            optimize(data, est, max_its=1, delta=None,
-                     prev_estimate=numpy_only, engine=self.FakeTorchEngine(), out=io.StringIO())
+            optimize(
+                data,
+                est,
+                max_its=1,
+                delta=None,
+                prev_estimate=numpy_only,
+                engine=self.FakeTorchEngine(),
+                out=io.StringIO(),
+            )
 
     def test_default_kernel_dispatch_selects_generated_numba_on_numpy(self):
         # the default dispatch (model.kernel()) must auto-select generated numba
         # on the numpy engine for mixtures of declared exp-family leaves, and the
         # score must match the legacy seq path on the legacy seq_encode payload
         # that the engine estimation path feeds kernels
-        from pysp.stats import seq_encode, seq_log_density_sum
+        from pysp.stats import seq_encode
         from pysp.stats.kernel import GenericKernel
+
         mix = MixtureDistribution([GaussianDistribution(-2.0, 1.0), GaussianDistribution(2.0, 1.0)], [0.5, 0.5])
-        comp = MixtureDistribution([
-            CompositeDistribution((GaussianDistribution(-2.0, 1.0), PoissonDistribution(3.0))),
-            CompositeDistribution((GaussianDistribution(2.0, 1.0), PoissonDistribution(8.0))),
-        ], [0.5, 0.5])
+        comp = MixtureDistribution(
+            [
+                CompositeDistribution((GaussianDistribution(-2.0, 1.0), PoissonDistribution(3.0))),
+                CompositeDistribution((GaussianDistribution(2.0, 1.0), PoissonDistribution(8.0))),
+            ],
+            [0.5, 0.5],
+        )
         for model in (mix, comp):
             kernel = model.kernel()
             self.assertIsInstance(kernel, GeneratedNumbaKernel)
             enc = seq_encode(model.sampler(seed=5).sample(60), model=model)
             for _, payload in enc:
-                np.testing.assert_allclose(kernel.score(payload), model.seq_log_density(payload),
-                                           rtol=1.0e-10, atol=1.0e-10)
+                np.testing.assert_allclose(
+                    kernel.score(payload), model.seq_log_density(payload), rtol=1.0e-10, atol=1.0e-10
+                )
 
         # a non-exponential-family model keeps the guaranteed generic fallback
         spearman = SpearmanRankingDistribution(np.asarray([0.4, 0.35, 0.25]))
@@ -293,20 +337,23 @@ class ComputeKernelTestCase(unittest.TestCase):
         enc = kernel.encode(data)
         legacy_enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc),
-                                   rtol=1.0e-10, atol=1.0e-10)
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc),
-                                   rtol=1.0e-10, atol=1.0e-10)
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc), rtol=1.0e-10, atol=1.0e-10)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc), rtol=1.0e-10, atol=1.0e-10
+        )
 
         legacy_acc = est.accumulator_factory().make()
         legacy_acc.seq_update(legacy_enc, weights, dist)
         _assert_stats_close(self, kernel.accumulate(enc, weights), legacy_acc.value())
 
     def test_numba_kernel_factory_falls_back_for_support_mismatched_generated_family(self):
-        dist = MixtureDistribution([
-            BinomialDistribution(0.25, 4),
-            BinomialDistribution(0.60, 6),
-        ], [0.5, 0.5])
+        dist = MixtureDistribution(
+            [
+                BinomialDistribution(0.25, 4),
+                BinomialDistribution(0.60, 6),
+            ],
+            [0.5, 0.5],
+        )
         data = [0, 1, 2, 4]
 
         kernel = NumbaKernelFactory().build(dist, NUMPY_ENGINE)
@@ -314,8 +361,7 @@ class ComputeKernelTestCase(unittest.TestCase):
         enc = kernel.encode(data)
         legacy_enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc),
-                                   rtol=1.0e-10, atol=1.0e-10)
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc), rtol=1.0e-10, atol=1.0e-10)
 
     def test_declaration_generated_stacked_scores_match_leaf_scores(self):
         engine = self.FakeTorchEngine()
@@ -338,8 +384,7 @@ class ComputeKernelTestCase(unittest.TestCase):
         engine = self.FakeTorchEngine()
 
         expected = dist.seq_log_density(enc)
-        np.testing.assert_allclose(generated_log_density(dist, enc, engine), expected,
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(generated_log_density(dist, enc, engine), expected, rtol=1.0e-12, atol=1.0e-12)
 
         kernel = kernel_for(dist, engine=engine)
         self.assertIsInstance(kernel, GenericKernel)
@@ -350,13 +395,13 @@ class ComputeKernelTestCase(unittest.TestCase):
         data = np.asarray([0.2, 0.4, 0.8])
         enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(generated_numba_log_density(dist, enc), dist.seq_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            generated_numba_log_density(dist, enc), dist.seq_log_density(enc), rtol=1.0e-12, atol=1.0e-12
+        )
 
         kernel = NumbaKernelFactory().build(dist, NUMPY_ENGINE, estimator=dist.estimator())
         self.assertIsInstance(kernel, GeneratedNumbaKernel)
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(enc), rtol=1.0e-12, atol=1.0e-12)
 
         weights = np.asarray([0.5, 1.25, 0.75])
         legacy = dist.estimator().accumulator_factory().make()
@@ -369,16 +414,18 @@ class ComputeKernelTestCase(unittest.TestCase):
         params = generated_stacked_params(components, NUMPY_ENGINE)
 
         expected = np.column_stack([component.seq_log_density(enc) for component in components])
-        np.testing.assert_allclose(generated_numba_stacked_log_density(enc, params), expected,
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            generated_numba_stacked_log_density(enc, params), expected, rtol=1.0e-12, atol=1.0e-12
+        )
 
     def test_declaration_generated_numba_vector_leaf_scores_match_legacy(self):
         dist = DiagonalGaussianDistribution([0.0, 1.0], [1.5, 2.5])
         data = np.asarray([[0.5, 1.5], [-0.25, 2.0], [1.25, -0.5]])
         enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(generated_numba_log_density(dist, enc), dist.seq_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            generated_numba_log_density(dist, enc), dist.seq_log_density(enc), rtol=1.0e-12, atol=1.0e-12
+        )
 
         components = [
             DiagonalGaussianDistribution([0.0, 1.0], [1.5, 2.5]),
@@ -386,8 +433,9 @@ class ComputeKernelTestCase(unittest.TestCase):
         ]
         params = generated_stacked_params(components, NUMPY_ENGINE)
         expected = np.column_stack([component.seq_log_density(enc) for component in components])
-        np.testing.assert_allclose(generated_numba_stacked_log_density(enc, params), expected,
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            generated_numba_stacked_log_density(enc, params), expected, rtol=1.0e-12, atol=1.0e-12
+        )
 
     def test_declaration_generated_numba_vector_mixture_kernel_matches_legacy(self):
         class DeclarationOnlyDiagonalGaussian(DiagonalGaussianDistribution):
@@ -407,10 +455,10 @@ class ComputeKernelTestCase(unittest.TestCase):
         enc = kernel.encode(data)
         legacy_enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12
+        )
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12)
 
         legacy_acc = est.accumulator_factory().make()
         legacy_acc.seq_update(legacy_enc, weights, dist)
@@ -421,8 +469,9 @@ class ComputeKernelTestCase(unittest.TestCase):
         data = np.asarray([[0.5, 1.5], [-0.25, 2.0], [1.25, -0.5]])
         enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(generated_numba_log_density(dist, enc), dist.seq_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            generated_numba_log_density(dist, enc), dist.seq_log_density(enc), rtol=1.0e-12, atol=1.0e-12
+        )
 
         components = [
             MultivariateGaussianDistribution([0.0, 1.0], [[1.5, 0.2], [0.2, 2.5]]),
@@ -430,8 +479,9 @@ class ComputeKernelTestCase(unittest.TestCase):
         ]
         params = generated_stacked_params(components, NUMPY_ENGINE)
         expected = np.column_stack([component.seq_log_density(enc) for component in components])
-        np.testing.assert_allclose(generated_numba_stacked_log_density(enc, params), expected,
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            generated_numba_stacked_log_density(enc, params), expected, rtol=1.0e-12, atol=1.0e-12
+        )
 
     def test_declaration_generated_numba_matrix_mixture_kernel_matches_legacy(self):
         components = [
@@ -448,10 +498,10 @@ class ComputeKernelTestCase(unittest.TestCase):
         enc = kernel.encode(data)
         legacy_enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12
+        )
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12)
 
         legacy_acc = est.accumulator_factory().make()
         legacy_acc.seq_update(legacy_enc, weights, dist)
@@ -469,10 +519,10 @@ class ComputeKernelTestCase(unittest.TestCase):
         enc = kernel.encode(data)
         legacy_enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12
+        )
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12)
 
         legacy_acc = est.accumulator_factory().make()
         legacy_acc.seq_update(legacy_enc, weights, dist)
@@ -484,10 +534,9 @@ class ComputeKernelTestCase(unittest.TestCase):
             CompositeDistribution((BetaDistribution(4.0, 1.75), BetaDistribution(3.5, 2.25))),
         ]
         dist = MixtureDistribution(components, [0.35, 0.65])
-        est = MixtureEstimator([
-            CompositeEstimator(tuple(child.estimator() for child in component.dists))
-            for component in components
-        ])
+        est = MixtureEstimator(
+            [CompositeEstimator(tuple(child.estimator() for child in component.dists)) for component in components]
+        )
         data = [(0.2, 0.7), (0.4, 0.5), (0.8, 0.25), (0.55, 0.35)]
         weights = np.asarray([0.5, 1.25, 0.75, 1.1])
 
@@ -496,10 +545,10 @@ class ComputeKernelTestCase(unittest.TestCase):
         enc = kernel.encode(data)
         legacy_enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12
+        )
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12)
 
         legacy_acc = est.accumulator_factory().make()
         legacy_acc.seq_update(legacy_enc, weights, dist)
@@ -520,10 +569,10 @@ class ComputeKernelTestCase(unittest.TestCase):
         enc = kernel.encode(data)
         legacy_enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12
+        )
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12)
 
         legacy_acc = est.accumulator_factory().make()
         legacy_acc.seq_update(legacy_enc, weights, dist)
@@ -544,10 +593,10 @@ class ComputeKernelTestCase(unittest.TestCase):
         enc = kernel.encode(data)
         legacy_enc = dist.dist_to_encoder().seq_encode(data)
 
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12
+        )
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(legacy_enc), rtol=1.0e-12, atol=1.0e-12)
 
         legacy_acc = est.accumulator_factory().make()
         legacy_acc.seq_update(legacy_enc, weights, dist)
@@ -567,10 +616,10 @@ class ComputeKernelTestCase(unittest.TestCase):
         self.assertIsInstance(kernel, StackedMixtureKernel)
         enc = kernel.encode(data)
 
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(enc), rtol=1.0e-12, atol=1.0e-12
+        )
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(enc), rtol=1.0e-12, atol=1.0e-12)
 
         legacy_acc = est.accumulator_factory().make()
         legacy_acc.seq_update(enc, weights, dist)
@@ -591,10 +640,10 @@ class ComputeKernelTestCase(unittest.TestCase):
         self.assertIsInstance(kernel, StackedMixtureKernel)
         enc = kernel.encode(data)
 
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(enc), rtol=1.0e-12, atol=1.0e-12
+        )
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(enc), rtol=1.0e-12, atol=1.0e-12)
 
         legacy_acc = est.accumulator_factory().make()
         legacy_acc.seq_update(enc, weights, dist)
@@ -612,9 +661,9 @@ class ComputeKernelTestCase(unittest.TestCase):
         generated = generated_sufficient_statistics(dist, enc, weights, self.FakeTorchEngine())
         _assert_stats_close(self, generated, legacy.value())
 
-        class NoAccumulatorEstimator(object):
+        class NoAccumulatorEstimator:
             def accumulator_factory(self):
-                raise AssertionError('generated stats should avoid host accumulator fallback')
+                raise AssertionError("generated stats should avoid host accumulator fallback")
 
         kernel = GenericKernel(dist, engine=self.FakeTorchEngine(), estimator=NoAccumulatorEstimator())
         _assert_stats_close(self, kernel.accumulate(enc, weights), legacy.value())
@@ -647,15 +696,14 @@ class ComputeKernelTestCase(unittest.TestCase):
         kernel = kernel_for(dist, engine=self.FakeTorchEngine(), estimator=est)
 
         self.assertIsInstance(kernel, StackedMixtureKernel)
-        np.testing.assert_allclose(kernel.component_scores(enc), dist.seq_component_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(enc),
-                                   rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            kernel.component_scores(enc), dist.seq_component_log_density(enc), rtol=1.0e-12, atol=1.0e-12
+        )
+        np.testing.assert_allclose(kernel.score(enc), dist.seq_log_density(enc), rtol=1.0e-12, atol=1.0e-12)
 
     def test_encoder_nbytes_reports_nested_payload_size(self):
-        enc = (np.asarray([1.0, 2.0], dtype=np.float64),
-               {'idx': np.asarray([1, 2, 3], dtype=np.int32)})
-        expected = enc[0].nbytes + enc[1]['idx'].nbytes + len('idx'.encode('utf-8'))
+        enc = (np.asarray([1.0, 2.0], dtype=np.float64), {"idx": np.asarray([1, 2, 3], dtype=np.int32)})
+        expected = enc[0].nbytes + enc[1]["idx"].nbytes + len(b"idx")
         self.assertEqual(encoded_nbytes(enc), expected)
 
         data = np.asarray([0.0, 1.0, 2.0], dtype=np.float64)
@@ -672,14 +720,14 @@ class ComputeKernelTestCase(unittest.TestCase):
 
         self.assertEqual(wrapped.count, len(data))
         self.assertIs(wrapped.encoder, encoder)
-        self.assertEqual(wrapped.engine.name, 'numpy')
+        self.assertEqual(wrapped.engine.name, "numpy")
         self.assertEqual(wrapped.nbytes, wrapped.payload.nbytes)
         self.assertEqual(wrapped.as_seq_chunk()[0], len(data))
 
         chunked = [(len(data), wrapped.payload)]
-        np.testing.assert_allclose(seq_log_density_sum(wrapped, dist),
-                                   seq_log_density_sum(chunked, dist),
-                                   rtol=0, atol=0)
+        np.testing.assert_allclose(
+            seq_log_density_sum(wrapped, dist), seq_log_density_sum(chunked, dist), rtol=0, atol=0
+        )
 
         wrapped_model = seq_estimate(wrapped, est, dist)
         chunked_model = seq_estimate(chunked, est, dist)
@@ -687,5 +735,5 @@ class ComputeKernelTestCase(unittest.TestCase):
         self.assertAlmostEqual(wrapped_model.sigma2, chunked_model.sigma2)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

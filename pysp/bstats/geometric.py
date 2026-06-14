@@ -16,22 +16,30 @@ Estimation returns the posterior mode (MAP) clamped to the boundary values
 prior. expected_log_density evaluates the variational Bayes expectation
 E_q[log p(x | p)] via digamma terms.
 """
-from typing import Optional
-from pysp.bstats.pdist import ProbabilityDistribution, StatisticAccumulator, ParameterEstimator
-from pysp.bstats.beta import BetaDistribution
-from pysp.bstats.nulldist import NullDistribution, null_dist
-from numpy.random import RandomState
-from scipy.special import digamma
+
 import mpmath
 import numpy as np
+from numpy.random import RandomState
+from scipy.special import digamma
+
+from pysp.bstats.beta import BetaDistribution
+from pysp.bstats.nulldist import NullDistribution
+from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, StatisticAccumulator
 
 default_prior = BetaDistribution(1.0, 1.0)
+
 
 class GeometricDistribution(ProbabilityDistribution):
     """Geometric distribution with success probability p, optionally carrying
     a Beta conjugate prior on p."""
 
-    def __init__(self, p: float, name: Optional[str] = None, prior: ProbabilityDistribution = default_prior, keys: Optional[str] = None):
+    def __init__(
+        self,
+        p: float,
+        name: str | None = None,
+        prior: ProbabilityDistribution = default_prior,
+        keys: str | None = None,
+    ):
         """GeometricDistribution object with success probability p.
 
         Args:
@@ -49,7 +57,12 @@ class GeometricDistribution(ProbabilityDistribution):
         self.set_prior(prior)
 
     def __str__(self):
-        return 'GeometricDistribution(%f, prior=%s, keys=%s, name=%s)'%(self.p, str(self.prior), str(self.keys), str(self.name))
+        return "GeometricDistribution(%f, prior=%s, keys=%s, name=%s)" % (
+            self.p,
+            str(self.prior),
+            str(self.keys),
+            str(self.name),
+        )
 
     def set_prior(self, dist: ProbabilityDistribution) -> None:
         """Set the prior and precompute conjugate-prior expectations.
@@ -95,7 +108,7 @@ class GeometricDistribution(ProbabilityDistribution):
     def entropy(self) -> float:
         """Returns the entropy of the geometric distribution (in nats)."""
         p = self.p
-        return -(np.log1p(-p)*(1-p)/p + np.log(p))
+        return -(np.log1p(-p) * (1 - p) / p + np.log(p))
 
     def cross_entropy(self, dist) -> float:
         """Cross-entropy H(self, dist) for a GeometricDistribution argument.
@@ -110,7 +123,7 @@ class GeometricDistribution(ProbabilityDistribution):
         if isinstance(dist, GeometricDistribution):
             pp = dist.p
             p = self.p
-            return -(np.log1p(-pp)*(1-p)/p + np.log(pp))
+            return -(np.log1p(-pp) * (1 - p) / p + np.log(pp))
         else:
             return None
 
@@ -134,9 +147,9 @@ class GeometricDistribution(ProbabilityDistribution):
         if p_loc == 1.0:
             return 1.0
         if order == 1:
-            return 1.0/p_loc
+            return 1.0 / p_loc
         elif order == 2:
-            return (2-p_loc)/(p_loc*p_loc)
+            return (2 - p_loc) / (p_loc * p_loc)
         else:
             q = 1.0 - p_loc
             aa = mpmath.polylog(-order, q)
@@ -171,7 +184,7 @@ class GeometricDistribution(ProbabilityDistribution):
         elif self.p == 0.0:
             return -np.inf
         else:
-            return (x-1)*self.log_1p + self.log_p
+            return (x - 1) * self.log_1p + self.log_p
 
     def expected_log_density(self, x: int) -> float:
         """Variational expectation E_q[log p(x | p)] under the Beta prior.
@@ -191,7 +204,7 @@ class GeometricDistribution(ProbabilityDistribution):
             if x < 1:
                 return -np.inf
             else:
-                return (gb-gab)*(x-1) + (ga - gab)
+                return (gb - gab) * (x - 1) + (ga - gab)
         else:
             return self.log_density(x)
 
@@ -213,7 +226,7 @@ class GeometricDistribution(ProbabilityDistribution):
         elif self.p == 0.0:
             rv.fill(-np.inf)
         else:
-            rv = (x - 1.0)*self.log_1p + self.log_p
+            rv = (x - 1.0) * self.log_1p + self.log_p
             rv[invalid] = -np.inf
         return rv
 
@@ -229,14 +242,13 @@ class GeometricDistribution(ProbabilityDistribution):
         """
         if self.has_conj_prior:
             ga, gb, gab = self.conj_prior_params
-            rv = x-1
-            rv *= (gb - gab)
-            rv += (ga - gab)
+            rv = x - 1
+            rv *= gb - gab
+            rv += ga - gab
             rv[x < 1] = -np.inf
             return rv
         else:
             return self.seq_log_density(x)
-
 
     def seq_encode(self, x):
         """Encode an iterable of observations into a float numpy array.
@@ -276,7 +288,7 @@ class GeometricDistribution(ProbabilityDistribution):
         return GeometricEstimator(name=self.name, keys=self.keys, prior=self.prior)
 
 
-class GeometricSampler(object):
+class GeometricSampler:
     """Draws samples from a GeometricDistribution."""
 
     def __init__(self, dist, seed=None):
@@ -287,7 +299,7 @@ class GeometricSampler(object):
             seed (Optional[int]): Seed for the random number generator.
 
         """
-        self.rng  = RandomState(seed)
+        self.rng = RandomState(seed)
         self.dist = dist
 
     def sample(self, size=None):
@@ -315,10 +327,10 @@ class GeometricAccumulator(StatisticAccumulator):
             name (Optional[str]): Name of the accumulator.
 
         """
-        self.sum   = 0.0
+        self.sum = 0.0
         self.count = 0.0
-        self.key   = keys
-        self.name  = name
+        self.key = keys
+        self.name = name
 
     def update(self, x, weight, estimate):
         """Accumulate the weighted sufficient statistics of observation x.
@@ -330,7 +342,7 @@ class GeometricAccumulator(StatisticAccumulator):
 
         """
         if x >= 0:
-            self.sum  += x*weight
+            self.sum += x * weight
             self.count += weight
 
     def seq_update(self, x, weights, estimate):
@@ -377,7 +389,7 @@ class GeometricAccumulator(StatisticAccumulator):
             This accumulator.
 
         """
-        self.sum   += suff_stat[1]
+        self.sum += suff_stat[1]
         self.count += suff_stat[0]
         return self
 
@@ -424,9 +436,10 @@ class GeometricAccumulator(StatisticAccumulator):
             if self.key in stats_dict:
                 vals = stats_dict[self.key]
                 self.count = vals[0]
-                self.sum   = vals[1]
+                self.sum = vals[1]
 
-class GeometricAccumulatorFactory():
+
+class GeometricAccumulatorFactory:
     """Factory that creates GeometricAccumulator objects."""
 
     def __init__(self, keys, name):
@@ -444,17 +457,20 @@ class GeometricAccumulatorFactory():
         """Returns a new GeometricAccumulator."""
         return GeometricAccumulator(self.keys, self.name)
 
+
 class GeometricEstimator(ParameterEstimator):
     """Estimates a GeometricDistribution from sufficient statistics, using a
     conjugate Beta posterior update when the prior allows it."""
 
-    name: Optional[str]
+    name: str | None
     has_conj_prior: bool
     has_prior: bool
-    keys: Optional[str]
+    keys: str | None
     prior: ProbabilityDistribution
 
-    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None, prior: ProbabilityDistribution = default_prior):
+    def __init__(
+        self, name: str | None = None, keys: str | None = None, prior: ProbabilityDistribution = default_prior
+    ):
         """GeometricEstimator object.
 
         Args:
@@ -464,7 +480,7 @@ class GeometricEstimator(ParameterEstimator):
                 enables the conjugate update.
 
         """
-        self.keys  = keys
+        self.keys = keys
         self.name = name
         self.set_prior(prior)
 
@@ -518,7 +534,6 @@ class GeometricEstimator(ParameterEstimator):
         ocnt, osum = suff_stat
 
         if self.has_conj_prior:
-
             old_a = self.prior.a
             old_b = self.prior.b
 
@@ -526,7 +541,7 @@ class GeometricEstimator(ParameterEstimator):
             b = old_b + osum - ocnt
 
             if a > 1 and b > 1:
-                p = (a-1)/(a+b-2)
+                p = (a - 1) / (a + b - 2)
             elif a <= 1 and b > 1:
                 p = 0.0
             elif a > 1 and b <= 1:
@@ -534,15 +549,13 @@ class GeometricEstimator(ParameterEstimator):
             else:
                 p = 0.5
 
-            return GeometricDistribution(p, name=self.name, prior=BetaDistribution(a,b), keys=self.keys)
+            return GeometricDistribution(p, name=self.name, prior=BetaDistribution(a, b), keys=self.keys)
 
         else:
+            return GeometricDistribution(ocnt / osum, name=self.name, keys=self.keys)
 
-            return GeometricDistribution(ocnt/osum, name=self.name, keys=self.keys)
 
-
-if __name__ == '__main__':
-
+if __name__ == "__main__":
     dist = GeometricDistribution(0.2)
 
     data = dist.sampler(seed=1).sample(100)

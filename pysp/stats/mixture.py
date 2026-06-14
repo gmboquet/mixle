@@ -12,25 +12,40 @@ where P(Z=k) is a mixture weight for component k, and P(Y|Z=k) is defined as a t
 If component distribution P(Y|Z=k) has data type (T), then the Mixture distribution has data type (T) as well.
 
 """
+
 import math
+from collections.abc import Sequence
+from typing import Any, TypeVar
+
 import numpy as np
-from pysp.utils.aliasing import coalesce_alias, MISSING
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
-    DistributionEnumerator, child_enumerator, EnumerationError
-from pysp.utils.enumeration import BufferedStream, QuantizedEnumerationIndex, best_first_union, \
-    bounded_best_first_union_index, freeze
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import maxrandint
-from typing import List, Union, Tuple, Any, Optional, TypeVar, Sequence, Dict
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    EnumerationError,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+    child_enumerator,
+)
+from pysp.utils.aliasing import MISSING, coalesce_alias
+from pysp.utils.enumeration import (
+    BufferedStream,
+    QuantizedEnumerationIndex,
+    best_first_union,
+    bounded_best_first_union_index,
+    freeze,
+)
 
-
-T = TypeVar('T')   ### Type of Mixture component data.
-T1 = TypeVar('T1') ### Type of encoded data.
-T2 = TypeVar('T2') ### Type of component suff_stat
-key_type = Union[Tuple[str, str], Tuple[None, None]]
+T = TypeVar("T")  ### Type of Mixture component data.
+T1 = TypeVar("T1")  ### Type of encoded data.
+T2 = TypeVar("T2")  ### Type of component suff_stat
+key_type = tuple[str, str] | tuple[None, None]
 
 
 class MixtureDistribution(SequenceEncodableProbabilityDistribution):
@@ -59,21 +74,25 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
-        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.components)),
-                                        kernel_status='numba_adapter')
 
-    def __init__(self,
-                 components: Sequence[SequenceEncodableProbabilityDistribution],
-                 w: Union[np.ndarray, List[float]] = MISSING,
-                 name: Optional[str] = None,
-                 weights: Union[np.ndarray, List[float]] = MISSING) -> None:
-        w = coalesce_alias('w', w, 'weights', weights, default=MISSING)
+        return DistributionCapabilities(
+            engine_ready=intersect_engine_ready(tuple(self.components)), kernel_status="numba_adapter"
+        )
+
+    def __init__(
+        self,
+        components: Sequence[SequenceEncodableProbabilityDistribution],
+        w: np.ndarray | list[float] = MISSING,
+        name: str | None = None,
+        weights: np.ndarray | list[float] = MISSING,
+    ) -> None:
+        w = coalesce_alias("w", w, "weights", weights, default=MISSING)
         if isinstance(w, np.ndarray):
             self.w = w
         else:
             self.w = np.asarray(w, dtype=float)
 
-        self.zw = (self.w == 0.0)
+        self.zw = self.w == 0.0
         self.log_w = np.log(w + self.zw)
         self.log_w[self.zw] = -np.inf
         self.components = components
@@ -82,29 +101,30 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
+
         children = tuple(declaration_for(d) for d in self.components)
         children = tuple(d for d in children if d is not None)
         return DistributionDeclaration(
-            name='mixture',
+            name="mixture",
             distribution_type=type(self),
-            parameters=(ParameterSpec('w', constraint='simplex'),),
+            parameters=(ParameterSpec("w", constraint="simplex"),),
             statistics=(
-                StatisticSpec('component_counts'),
-                StatisticSpec('components', kind='tuple'),
+                StatisticSpec("component_counts"),
+                StatisticSpec("components", kind="tuple"),
             ),
-            support='mixture',
+            support="mixture",
             children=children,
-            child_roles=tuple('component_%d' % i for i in range(len(children))),
+            child_roles=tuple("component_%d" % i for i in range(len(children))),
             differentiable=all(child.differentiable for child in children),
         )
 
     def __str__(self) -> str:
         """Return string representation of MixtureDistribution object instance."""
-        s1 = ','.join([str(u) for u in self.components])
+        s1 = ",".join([str(u) for u in self.components])
         s2 = repr(list(self.w))
         s3 = repr(self.name)
 
-        return 'MixtureDistribution([%s], %s, name=%s)' % (s1, s2, s3)
+        return "MixtureDistribution([%s], %s, name=%s)" % (s1, s2, s3)
 
     def density(self, x: T) -> float:
         """Evaluate density of Mixture distribution at observation x.
@@ -272,7 +292,6 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             return ll_sum.flatten()
 
         else:
-
             ll_mat = ll_mat[good_rows, :]
             ll_max = ll_max[good_rows]
             ll_mat -= ll_max
@@ -291,6 +310,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
     def backend_seq_component_log_density(self, x: T1, engine: Any) -> Any:
         """Engine-neutral component log densities for encoded data."""
         from pysp.stats.backend import backend_seq_log_density
+
         scores = []
         for i in range(self.num_components):
             if self.zw[i]:
@@ -306,11 +326,12 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         log_w = engine.asarray(self.log_w)
         return engine.logsumexp(ll_mat + log_w, axis=1)
 
-    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: list[Any], recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for autograd fitting."""
         from pysp.stats.gradient import MixtureGradientFitState
+
         components = [recurse(component, engine, torch, leaves) for component in self.components]
-        w_logits = tensor_param(self.w, engine, torch, transform='logits')
+        w_logits = tensor_param(self.w, engine, torch, transform="logits")
         leaves.append(w_logits)
         return MixtureGradientFitState(self, components, w_logits)
 
@@ -364,7 +385,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         return ll_mat
 
-    def sampler(self, seed: Optional[int] = None) -> 'MixtureSampler':
+    def sampler(self, seed: int | None = None) -> "MixtureSampler":
         """Create MixtureSampler for sampling from MixtureDistribution instance.
 
         Args:
@@ -376,7 +397,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         """
         return MixtureSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'MixtureEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "MixtureEstimator":
         """Create MixtureEstimator for estimating MixtureDistribution.
 
         Args:
@@ -389,16 +410,18 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         if pseudo_count is not None:
             return MixtureEstimator(
                 [u.estimator(pseudo_count=1.0 / self.num_components) for u in self.components],
-                pseudo_count=pseudo_count, name=self.name)
+                pseudo_count=pseudo_count,
+                name=self.name,
+            )
         else:
             return MixtureEstimator([u.estimator() for u in self.components], name=self.name)
 
-    def dist_to_encoder(self) -> 'MixtureDataEncoder':
+    def dist_to_encoder(self) -> "MixtureDataEncoder":
         """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
         dist_encoder = self.components[0].dist_to_encoder()
         return MixtureDataEncoder(encoder=dist_encoder)
 
-    def enumerator(self) -> 'MixtureEnumerator':
+    def enumerator(self) -> "MixtureEnumerator":
         """Returns a MixtureEnumerator iterating the union of component supports in descending
         mixture probability order."""
         return MixtureEnumerator(self)
@@ -413,22 +436,26 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         enumerate, the method falls back to the structured cross-index path.
         """
         if max_bits < 0:
-            raise ValueError('max_bits must be non-negative.')
+            raise ValueError("max_bits must be non-negative.")
         if bin_width_bits <= 0:
-            raise ValueError('bin_width_bits must be positive.')
+            raise ValueError("bin_width_bits must be positive.")
 
-        active = [(k, comp, float(self.w[k]), float(self.log_w[k]))
-                  for k, comp in enumerate(self.components) if self.w[k] > 0.0]
+        active = [
+            (k, comp, float(self.w[k]), float(self.log_w[k]))
+            for k, comp in enumerate(self.components)
+            if self.w[k] > 0.0
+        ]
         if not active:
             return QuantizedEnumerationIndex.from_items(
-                [], max_bits=max_bits, bin_width_bits=bin_width_bits, truncated=False)
+                [], max_bits=max_bits, bin_width_bits=bin_width_bits, truncated=False
+            )
 
         active_count = len(active)
         comps = [comp for _, comp, _, _ in active]
         log_w_arr = np.asarray([log_w for _, _, _, log_w in active], dtype=np.float64)
 
         def exact_log_density(x):
-            with np.errstate(divide='ignore'):
+            with np.errstate(divide="ignore"):
                 return vec.log_sum(np.asarray([c.log_density(x) for c in comps]) + log_w_arr)
 
         def component_log_density(k: int, x: T) -> float:
@@ -436,29 +463,31 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         try:
             streams = [
-                BufferedStream(child_enumerator(comp, 'MixtureDistribution.components[%d]' % k))
+                BufferedStream(child_enumerator(comp, "MixtureDistribution.components[%d]" % k))
                 for k, comp, _, _ in active
             ]
             log_offsets = [log_w for _, _, _, log_w in active]
             return bounded_best_first_union_index(
-                streams, log_offsets, exact_log_density,
-                max_bits=max_bits, bin_width_bits=bin_width_bits,
-                component_log_density=component_log_density)
+                streams,
+                log_offsets,
+                exact_log_density,
+                max_bits=max_bits,
+                bin_width_bits=bin_width_bits,
+                component_log_density=component_log_density,
+            )
         except EnumerationError:
             pass
 
-        cross_bits = tuple(float(max_bits) + math.log(active_count * weight, 2.0)
-                           for _, _, weight, _ in active)
+        cross_bits = tuple(float(max_bits) + math.log(active_count * weight, 2.0) for _, _, weight, _ in active)
         try:
-            cross = comps[0].quantized_multi_cross_index(
-                comps[1:], max_bits=cross_bits, bin_width_bits=bin_width_bits)
+            cross = comps[0].quantized_multi_cross_index(comps[1:], max_bits=cross_bits, bin_width_bits=bin_width_bits)
             candidates = []
             for value, log_probs in cross.iter_items():
                 mix_lp = vec.log_sum(log_w_arr + np.asarray(log_probs, dtype=np.float64))
                 candidates.append((value, float(mix_lp)))
             return QuantizedEnumerationIndex.from_items(
-                candidates, max_bits=max_bits, bin_width_bits=bin_width_bits,
-                truncated=cross.truncated)
+                candidates, max_bits=max_bits, bin_width_bits=bin_width_bits, truncated=cross.truncated
+            )
         except EnumerationError:
             pass
 
@@ -473,8 +502,8 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             try:
                 child_index = comp.quantized_index(max_bits=candidate_bits, bin_width_bits=bin_width_bits)
             except EnumerationError as e:
-                path = 'MixtureDistribution.components[%d]' % k
-                new_path = path if not e.path else '%s -> %s' % (path, e.path)
+                path = "MixtureDistribution.components[%d]" % k
+                new_path = path if not e.path else "%s -> %s" % (path, e.path)
                 raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
             truncated = truncated or child_index.truncated
             for value, _ in child_index.iter_from():
@@ -486,9 +515,9 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         if truncated:
             return QuantizedEnumerationIndex.from_items(
-                candidates, max_bits=max_bits, bin_width_bits=bin_width_bits, truncated=True)
-        return QuantizedEnumerationIndex.from_items(
-            candidates, max_bits=max_bits, bin_width_bits=bin_width_bits)
+                candidates, max_bits=max_bits, bin_width_bits=bin_width_bits, truncated=True
+            )
+        return QuantizedEnumerationIndex.from_items(candidates, max_bits=max_bits, bin_width_bits=bin_width_bits)
 
     def quantized_count_index(self, quantizer, max_fine_bucket: int):
         """BoundedCount for the MARGINAL mixture law: pool weight-scaled component count indices.
@@ -515,7 +544,8 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             if self.w[k] <= 0.0:
                 continue
             child_index, child_truncated = child_count_index(
-                comp, 'MixtureDistribution.components[%d]' % k, quantizer, max_fine_bucket)
+                comp, "MixtureDistribution.components[%d]" % k, quantizer, max_fine_bucket
+            )
             truncated = truncated or child_truncated
             scaled = sr.scale(child_index, float(self.log_w[k]), quantizer, max_fine_bucket)
             total = scaled if not built else sr.plus(total, scaled)
@@ -547,7 +577,6 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class MixtureEnumerator(DistributionEnumerator):
-
     def __init__(self, dist: MixtureDistribution) -> None:
         """Enumerates the union of component supports in descending mixture probability order.
 
@@ -567,7 +596,7 @@ class MixtureEnumerator(DistributionEnumerator):
         for k, comp in enumerate(dist.components):
             if dist.w[k] <= 0.0:
                 continue
-            streams.append(BufferedStream(child_enumerator(comp, 'MixtureDistribution.components[%d]' % k)))
+            streams.append(BufferedStream(child_enumerator(comp, "MixtureDistribution.components[%d]" % k)))
             log_offsets.append(dist.log_w[k])
             comps.append(comp)
         log_w_arr = np.asarray(log_offsets, dtype=np.float64)
@@ -575,18 +604,17 @@ class MixtureEnumerator(DistributionEnumerator):
         # Equivalent to dist.log_density but restricted to positive-weight components, so a
         # zero-weight component never sees (possibly type-incompatible) candidate values.
         def exact_log_density(x):
-            with np.errstate(divide='ignore'):
+            with np.errstate(divide="ignore"):
                 return vec.log_sum(np.asarray([c.log_density(x) for c in comps]) + log_w_arr)
 
         self._union = best_first_union(streams, log_offsets, exact_log_density)
 
-    def __next__(self) -> Tuple[Any, float]:
+    def __next__(self) -> tuple[Any, float]:
         return next(self._union)
 
 
 class MixtureSampler(DistributionSampler):
-
-    def __init__(self, dist: MixtureDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: MixtureDistribution, seed: int | None = None) -> None:
         """MixtureSampler used to generate samples from instance of MixtureDistribution.
 
         Args:
@@ -604,7 +632,7 @@ class MixtureSampler(DistributionSampler):
         self.dist = dist
         self.comp_samplers = [d.sampler(seed=rng_loc.randint(0, maxrandint)) for d in self.dist.components]
 
-    def sample(self, size: Optional[int] = None) -> Union[List[Any], Any]:
+    def sample(self, size: int | None = None) -> list[Any] | Any:
         """Draw iid samples from a mixture distribution.
 
         The data type drawn from 'comp_samplers' is type T, corresponding to the data type of the mixture components.
@@ -628,10 +656,12 @@ class MixtureSampler(DistributionSampler):
 
 
 class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
-
-    def __init__(self,
-                 accumulators: Sequence[SequenceEncodableStatisticAccumulator],
-                 keys: Tuple[Optional[str], Optional[str]] = (None, None), name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        accumulators: Sequence[SequenceEncodableStatisticAccumulator],
+        keys: tuple[str | None, str | None] = (None, None),
+        name: str | None = None,
+    ) -> None:
         """MixtureAccumulator object used to aggregate the sufficient statistics of observed data.
 
         Args:
@@ -666,9 +696,9 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
         ### Initializer seeds
         self._init_rng: bool = False
-        self._acc_rng: Optional[List[RandomState]] = None
+        self._acc_rng: list[RandomState] | None = None
 
-    def seq_update(self, x: T1, weights: np.ndarray, estimate: 'MixtureDistribution') -> None:
+    def seq_update(self, x: T1, weights: np.ndarray, estimate: "MixtureDistribution") -> None:
         """Vectorized update of sufficient statistics from encoded sequence of observations x.
 
         Args value x is a sequence encoded sequence of mixture observations. The data type for each mixture observation
@@ -694,9 +724,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         ll_mat_init = False
 
         for i in range(estimate.num_components):
-
             if not estimate.zw[i]:
-
                 temp = estimate.components[i].seq_log_density(enc_data)
 
                 if not ll_mat_init:
@@ -725,7 +753,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         np.sum(ll_mat, axis=1, keepdims=True, out=ll_max)
 
         if track:
-            with np.errstate(divide='ignore'):
+            with np.errstate(divide="ignore"):
                 row_ll = rowmax + np.log(ll_max[:, 0])
             if np.any(bad_rows):
                 row_ll[bad_rows] = -np.inf
@@ -739,7 +767,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             self.comp_counts[i] += w_loc.sum()
             self.accumulators[i].seq_update(enc_data, w_loc, estimate.components[i])
 
-    def update(self, x: T, weight: float, estimate: 'MixtureDistribution') -> None:
+    def update(self, x: T, weight: float, estimate: "MixtureDistribution") -> None:
         """Update sufficient statistics of MixtureAccumulator with weighted observation.
 
         Requires previous estimate of MixtureDistribution.
@@ -775,7 +803,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        seeds = rng.randint(2 ** 31, size=self.num_components)
+        seeds = rng.randint(2**31, size=self.num_components)
         self._acc_rng = [RandomState(seed=seed) for seed in seeds]
         self._w_rng = RandomState(seed=rng.randint(maxrandint))
         self._init_rng = True
@@ -837,15 +865,16 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         ww = np.zeros((sz, self.num_components))
 
         if keep_len > 0:
-            ww[keep_idx, :] = self._w_rng.dirichlet(alpha=np.ones(self.num_components) / (self.num_components ** 2),
-                                            size=keep_len)
+            ww[keep_idx, :] = self._w_rng.dirichlet(
+                alpha=np.ones(self.num_components) / (self.num_components**2), size=keep_len
+            )
         ww *= np.reshape(weights, (sz, 1))
 
         for i in range(self.num_components):
             self.accumulators[i].seq_initialize(x, ww[:, i], self._acc_rng[i])
             self.comp_counts[i] += np.sum(ww[:, i])
 
-    def combine(self, suff_stat: Tuple[np.ndarray, Tuple[T2, ...]]) -> 'MixtureAccumulator':
+    def combine(self, suff_stat: tuple[np.ndarray, tuple[T2, ...]]) -> "MixtureAccumulator":
         """Merge the sufficient statistics of suff_stat with MixtureAccumulator instance.
 
         Arg suff_stat is a Tuple of length two containing,
@@ -867,7 +896,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def value(self) -> Tuple[np.ndarray, Tuple[Any, ...]]:
+    def value(self) -> tuple[np.ndarray, tuple[Any, ...]]:
         """Returns sufficient statistics of MixtureAccumulator instance.
 
         The sufficient statistics value returned (suff_stat) is a Tuple of length two containing,
@@ -882,7 +911,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         """
         return self.comp_counts, tuple([u.value() for u in self.accumulators])
 
-    def from_value(self, x: Tuple[np.ndarray, Tuple[T2, ...]]) -> 'MixtureAccumulator':
+    def from_value(self, x: tuple[np.ndarray, tuple[T2, ...]]) -> "MixtureAccumulator":
         """Set sufficient statistics of MixtureAccumulator instance to x.
 
         The sufficient statistics value 'x' is a Tuple of length two containing,
@@ -903,14 +932,14 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[i].from_value(x[1][i])
         return self
 
-    def scale(self, c: float) -> 'MixtureAccumulator':
+    def scale(self, c: float) -> "MixtureAccumulator":
         """Scale component counts and delegate child sufficient statistics."""
         self.comp_counts *= c
         for acc in self.accumulators:
             acc.scale(c)
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Combine the sufficient statistics of MixtureAccumulator instance with other MixtureAccumulator that have
             matching weight or component keys.
 
@@ -942,7 +971,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         for u in self.accumulators:
             u.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace the sufficient statistics of MixtureAccumulator instance with sufficient statistics of matching
             weight and/or component keys found in stats_dict.
 
@@ -969,18 +998,19 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         for u in self.accumulators:
             u.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'MixtureDataEncoder':
+    def acc_to_encoder(self) -> "MixtureDataEncoder":
         """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
         acc_encoder = self.accumulators[0].acc_to_encoder()
         return MixtureDataEncoder(encoder=acc_encoder)
 
 
 class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
-
-    def __init__(self,
-                 factories: Sequence[StatisticAccumulatorFactory],
-                 keys: Tuple[Optional[str], Optional[str]] = (None, None),
-                 name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        factories: Sequence[StatisticAccumulatorFactory],
+        keys: tuple[str | None, str | None] = (None, None),
+        name: str | None = None,
+    ) -> None:
         """MixtureAccumulatorFactory object for creating MixtureAccumulator objects.
 
         Args:
@@ -1000,21 +1030,22 @@ class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
         self.name = name
 
-    def make(self) -> 'MixtureAccumulator':
+    def make(self) -> "MixtureAccumulator":
         """Return MixtureAccumulator object with SequenceEncodableStatisticAccumulator objects for the components
-            and keys passed."""
+        and keys passed."""
         return MixtureAccumulator([factory.make() for factory in self.factories], keys=self.keys, name=self.name)
 
 
 class MixtureEstimator(ParameterEstimator):
-
-    def __init__(self,
-                 estimators: Sequence[ParameterEstimator],
-                 fixed_weights: Optional[Union[List[float], np.ndarray]] = None,
-                 suff_stat: Optional[np.ndarray] = None,
-                 pseudo_count: Optional[float] = None,
-                 name: Optional[str] = None,
-                 keys: Tuple[Optional[str], Optional[str]] = (None, None)) -> None:
+    def __init__(
+        self,
+        estimators: Sequence[ParameterEstimator],
+        fixed_weights: list[float] | np.ndarray | None = None,
+        suff_stat: np.ndarray | None = None,
+        pseudo_count: float | None = None,
+        name: str | None = None,
+        keys: tuple[str | None, str | None] = (None, None),
+    ) -> None:
         """MixtureEstimator object used to estimate MixtureDistribution from aggregated sufficient statistics.
 
         Args:
@@ -1044,12 +1075,12 @@ class MixtureEstimator(ParameterEstimator):
         self.name = name
         self.fixed_weights = np.asarray(fixed_weights) if fixed_weights is not None else None
 
-    def accumulator_factory(self) -> 'MixtureAccumulatorFactory':
+    def accumulator_factory(self) -> "MixtureAccumulatorFactory":
         """Returns MixtureAccumulatorFactory object passing component StatisticAccumulatorFactory objects and keys."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         return MixtureAccumulatorFactory(est_factories, keys=self.keys, name=self.name)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[np.ndarray, Tuple[Any, ...]]) -> 'MixtureDistribution':
+    def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, tuple[Any, ...]]) -> "MixtureDistribution":
         """Estimate MixtureDistribution from aggregated sufficient statistics.
 
         Args suff_stat is a Tuple length two containing:
@@ -1101,7 +1132,6 @@ class MixtureEstimator(ParameterEstimator):
 
 
 class MixtureDataEncoder(DataSequenceEncoder):
-
     def __init__(self, encoder: DataSequenceEncoder) -> None:
         """MixtureDataEncoder used for sequence encoding data for use with vectorized 'seq_' functions.
 
@@ -1118,7 +1148,7 @@ class MixtureDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns string representation of MixtureDataEncoder object."""
-        return 'MixtureDataEncoder(' + str(self.encoder) + ')'
+        return "MixtureDataEncoder(" + str(self.encoder) + ")"
 
     def __eq__(self, other: object) -> bool:
         """Checks if an object is equivalent to a MixtureDataEncoder instance.

@@ -25,7 +25,6 @@ from pysp.stats.gaussian import GaussianDistribution, GaussianEstimator
 
 
 class DPMModelHelpersTestCase(unittest.TestCase):
-
     def test_stick_breaking_and_crp_utilities(self):
         weights = stick_breaking_weights([0.5, 0.25])
         np.testing.assert_allclose(weights, [0.5, 0.125, 0.375])
@@ -62,7 +61,6 @@ class DPMModelHelpersTestCase(unittest.TestCase):
 
 
 class POMDPModelHelpersTestCase(unittest.TestCase):
-
     def test_filtering_matches_first_step_by_hand(self):
         model = POMDPModel(
             transition=[[[0.9, 0.1], [0.2, 0.8]]],
@@ -90,8 +88,7 @@ class POMDPModelHelpersTestCase(unittest.TestCase):
             initial_belief=[0.5, 0.5],
         )
         initial_ll = sum(initial.sequence_log_likelihood(a, o) for a, o in sequences)
-        result = baum_welch_pomdp(sequences, 2, 1, 2, initial_model=initial,
-                                  max_its=8, pseudo_count=0.1)
+        result = baum_welch_pomdp(sequences, 2, 1, 2, initial_model=initial, max_its=8, pseudo_count=0.1)
         final_ll = sum(result.model.sequence_log_likelihood(a, o) for a, o in sequences)
 
         self.assertGreater(final_ll, initial_ll)
@@ -99,59 +96,60 @@ class POMDPModelHelpersTestCase(unittest.TestCase):
 
 
 class KnowledgeGraphHelpersTestCase(unittest.TestCase):
-
     def test_transe_margin_training_reduces_fixed_negative_loss(self):
         model = TransEKnowledgeGraphModel.random(
-            3, 1, embedding_dim=4, seed=2,
-            entity_names=['alice', 'bob', 'carol'],
-            relation_names=['likes'])
-        positives = [('alice', 'likes', 'bob'), ('bob', 'likes', 'carol')]
-        negatives = [('alice', 'likes', 'carol'), ('carol', 'likes', 'alice')]
+            3, 1, embedding_dim=4, seed=2, entity_names=["alice", "bob", "carol"], relation_names=["likes"]
+        )
+        positives = [("alice", "likes", "bob"), ("bob", "likes", "carol")]
+        negatives = [("alice", "likes", "carol"), ("carol", "likes", "alice")]
         before = model.margin_loss(positives, negatives, margin=0.5)
         result = model.fit_margin(positives, negatives, margin=0.5, lr=0.03, max_its=80, seed=3)
         after = model.margin_loss(positives, negatives, margin=0.5)
 
         self.assertLess(after, before)
         self.assertLessEqual(result.history[-1], result.history[0])
-        self.assertGreater(np.mean(model.score_triples(positives)),
-                           np.mean(model.score_triples(negatives)))
+        self.assertGreater(np.mean(model.score_triples(positives)), np.mean(model.score_triples(negatives)))
 
 
 class GrammarLearningHelpersTestCase(unittest.TestCase):
-
     def test_viterbi_parse_matches_unambiguous_pcfg_log_density(self):
         model = HeterogeneousPCFGDistribution(
-            binary_rules={'S': [('A', 'B', 1.0)]},
+            binary_rules={"S": [("A", "B", 1.0)]},
             terminal_rules={
-                'A': [(CategoricalDistribution({'a': 1.0}), 1.0)],
-                'B': [(CategoricalDistribution({'b': 1.0}), 1.0)],
+                "A": [(CategoricalDistribution({"a": 1.0}), 1.0)],
+                "B": [(CategoricalDistribution({"b": 1.0}), 1.0)],
             },
-            start='S',
+            start="S",
         )
-        parse = viterbi_parse(model, list('ab'))
+        parse = viterbi_parse(model, list("ab"))
 
-        self.assertEqual(parse.label, 'S')
+        self.assertEqual(parse.label, "S")
         self.assertEqual(parse.span, (0, 2))
-        self.assertEqual(parse.leaves(), list('ab'))
-        self.assertAlmostEqual(parse.log_prob, model.log_density(list('ab')))
+        self.assertEqual(parse.leaves(), list("ab"))
+        self.assertAlmostEqual(parse.log_prob, model.log_density(list("ab")))
         self.assertEqual(len(grammar_rule_table(model)), 3)
 
     def test_fit_induced_pcfg_returns_finite_learned_grammar(self):
-        data = [list('ab') for _ in range(25)] + [list('ba') for _ in range(5)]
-        terminal_estimator = CategoricalDistribution({'a': 0.5, 'b': 0.5}).estimator(pseudo_count=1.0)
+        data = [list("ab") for _ in range(25)] + [list("ba") for _ in range(5)]
+        terminal_estimator = CategoricalDistribution({"a": 0.5, "b": 0.5}).estimator(pseudo_count=1.0)
         result = fit_induced_pcfg(
-            data, [terminal_estimator], max_nonterminals=2, max_its=2,
-            terminal_rule_mass=0.6, rule_pseudo_count=1.0e-3,
-            prune_threshold=0.0, seed=7)
+            data,
+            [terminal_estimator],
+            max_nonterminals=2,
+            max_its=2,
+            terminal_rule_mass=0.6,
+            rule_pseudo_count=1.0e-3,
+            prune_threshold=0.0,
+            seed=7,
+        )
 
         self.assertIsInstance(result.model, HeterogeneousPCFGDistribution)
         self.assertEqual(len(result.history), 3)
         self.assertTrue(np.all(np.isfinite(result.history)))
-        self.assertGreater(pcfg_log_likelihood(result.model, [list('ab')]), -np.inf)
+        self.assertGreater(pcfg_log_likelihood(result.model, [list("ab")]), -np.inf)
 
 
 class DependenceAndCausalityHelpersTestCase(unittest.TestCase):
-
     def test_discrete_conditional_mutual_information_detects_dependence(self):
         data = np.asarray([[0, 0], [0, 0], [1, 1], [1, 1]] * 20)
         self.assertGreater(discrete_conditional_mutual_information(data, 0, 1), 0.6)
@@ -189,5 +187,5 @@ class DependenceAndCausalityHelpersTestCase(unittest.TestCase):
         self.assertIn((2, 1), graph.directed_edges)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

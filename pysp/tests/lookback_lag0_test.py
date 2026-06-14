@@ -7,6 +7,7 @@ Checks log_density against a hand-computed ordinary-HMM forward pass and against
 pysp.stats.hidden_markov.HiddenMarkovModelDistribution, that sampled sequence lengths match the
 length distribution's draws exactly, and that EM (scalar and vectorized paths) runs and agrees.
 """
+
 import unittest
 
 import numpy as np
@@ -18,7 +19,7 @@ from pysp.arithmetic import maxrandint
 from pysp.stats import seq_encode, seq_estimate, seq_initialize, seq_log_density_sum
 from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.hidden_markov import HiddenMarkovModelDistribution
-from pysp.stats.intrange import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 from pysp.stats.null_dist import NullDistribution, NullEstimator
 from pysp.stats.sequence import SequenceDistribution, SequenceEstimator
 
@@ -44,7 +45,6 @@ class _MarginalWindowDistribution:
 
 
 class _MarginalWindowSampler:
-
     def __init__(self, base_sampler):
         self.base_sampler = base_sampler
 
@@ -57,26 +57,31 @@ class _MarginalWindowSampler:
 
 def make_lag0_dist(mod, len_dist):
     """Lag-0 lookback HMM with categorical emissions wrapped as length-1-window topics."""
-    topics = [SequenceDistribution(IntegerCategoricalDistribution(0, p), len_dist=CategoricalDistribution({1: 1.0}))
-              for p in EMISSION_PROBS]
+    topics = [
+        SequenceDistribution(IntegerCategoricalDistribution(0, p), len_dist=CategoricalDistribution({1: 1.0}))
+        for p in EMISSION_PROBS
+    ]
     init_dist = [NullDistribution()] * 2 if mod is old_mod else None
 
-    return mod.LookbackHiddenMarkovDistribution(topics, w=W, transitions=TRANSITIONS, lag=0,
-                                                init_dist=init_dist, len_dist=len_dist)
+    return mod.LookbackHiddenMarkovDistribution(
+        topics, w=W, transitions=TRANSITIONS, lag=0, init_dist=init_dist, len_dist=len_dist
+    )
 
 
 def make_lag0_estimator(mod, with_len=True):
     """Estimator matching make_lag0_dist(); init estimators are Null since lag=0 has no initial segment."""
-    topic_est = SequenceEstimator(IntegerCategoricalEstimator(min_val=0, max_val=2, pseudo_count=0.1),
-                                  len_estimator=CategoricalEstimator(pseudo_count=0.1))
+    topic_est = SequenceEstimator(
+        IntegerCategoricalEstimator(min_val=0, max_val=2, pseudo_count=0.1),
+        len_estimator=CategoricalEstimator(pseudo_count=0.1),
+    )
     if with_len:
         len_est = CategoricalEstimator(pseudo_count=0.1)
     else:
         len_est = None if mod is old_mod else NullEstimator()
 
     return mod.LookbackHiddenMarkovEstimator(
-        [topic_est] * 2, lag=0, init_estimators=[NullEstimator()] * 2,
-        len_estimator=len_est, pseudo_count=(1.0, 1.0))
+        [topic_est] * 2, lag=0, init_estimators=[NullEstimator()] * 2, len_estimator=len_est, pseudo_count=(1.0, 1.0)
+    )
 
 
 def forward_log_density(seq, w, transitions, emission_probs, len_probs):
@@ -100,7 +105,6 @@ def forward_log_density(seq, w, transitions, emission_probs, len_probs):
 
 
 class Lag0LogDensityTestCase(unittest.TestCase):
-
     def setUp(self):
         self.len_dist = CategoricalDistribution(dict(LEN_PROBS))
         self.sequences = [[0, 1], [2, 2, 0], [1, 0, 2, 1], [0, 0, 0, 0, 0], [2, 1, 0, 1, 2]]
@@ -114,8 +118,12 @@ class Lag0LogDensityTestCase(unittest.TestCase):
                     self.assertAlmostEqual(dist.log_density(seq), expected, places=10)
 
     def test_log_density_matches_ordinary_hmm(self):
-        hmm = HiddenMarkovModelDistribution([IntegerCategoricalDistribution(0, p) for p in EMISSION_PROBS],
-                                            w=W, transitions=TRANSITIONS, len_dist=self.len_dist)
+        hmm = HiddenMarkovModelDistribution(
+            [IntegerCategoricalDistribution(0, p) for p in EMISSION_PROBS],
+            w=W,
+            transitions=TRANSITIONS,
+            len_dist=self.len_dist,
+        )
         for mod in MODULES:
             with self.subTest(module=mod.__name__):
                 dist = make_lag0_dist(mod, self.len_dist)
@@ -143,12 +151,12 @@ class Lag0LogDensityTestCase(unittest.TestCase):
 
 
 class Lag0SamplerTestCase(unittest.TestCase):
-
     def make_sampler_dist(self, mod, len_dist):
         topics = [_MarginalWindowDistribution(IntegerCategoricalDistribution(0, p)) for p in EMISSION_PROBS]
         init_dist = [NullDistribution()] * 2
-        return mod.LookbackHiddenMarkovDistribution(topics, w=W, transitions=TRANSITIONS, lag=0,
-                                                    init_dist=init_dist, len_dist=len_dist)
+        return mod.LookbackHiddenMarkovDistribution(
+            topics, w=W, transitions=TRANSITIONS, lag=0, init_dist=init_dist, len_dist=len_dist
+        )
 
     def test_deterministic_lengths_emit_exactly_n_observations(self):
         for mod in MODULES:
@@ -187,7 +195,6 @@ class Lag0SamplerTestCase(unittest.TestCase):
 
 
 class Lag0EstimationTestCase(unittest.TestCase):
-
     @staticmethod
     def make_data(n_seq, rng):
         return [[int(v) for v in rng.randint(0, 3, size=rng.randint(2, 6))] for _ in range(n_seq)]
@@ -270,5 +277,5 @@ class Lag0EstimationTestCase(unittest.TestCase):
                     self.assertAlmostEqual(float(np.sum(v[4])), tot_pos - len(data), places=8)  # trans_counts
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

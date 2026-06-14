@@ -1,12 +1,24 @@
 """Defines the log-pseudo-determinant, polgamma, trigamma, and digamma inverse functions."""
-from scipy.special import gammaln
-from scipy.special import gammaln, betaln, beta
-from scipy.special import digamma, psi  # as digammaS0
-from scipy.special import zeta, gamma, polygamma
-import numpy as np
+
 import math
+from collections.abc import Iterable
+
+import numpy as np
+
+# Several scipy.special names are re-exported as part of this module's public surface
+# (other modules do `from pysp.utils.special import beta, betaln, gammaln, ...`).
+from scipy.special import (  # noqa: F401  -- re-exported
+    beta,
+    betaln,
+    digamma,  # as digammaS0
+    gamma,
+    gammaln,
+    polygamma,
+    psi,
+    zeta,
+)
+
 from pysp.arithmetic import *
-from typing import Union, Optional, Any, List, Iterable
 
 D1 = digamma(1.0)
 
@@ -72,8 +84,7 @@ def polygamma_loc(n, y, out=None):
     return fac2
 
 
-def trigamma(y: Union[np.ndarray, int, float, Iterable, List[float]], out: Optional[np.ndarray] = None) \
-        -> Union[np.ndarray, float]:
+def trigamma(y: np.ndarray | int | float | Iterable | list[float], out: np.ndarray | None = None) -> np.ndarray | float:
     """Trigamma function.
 
     Args:
@@ -86,7 +97,8 @@ def trigamma(y: Union[np.ndarray, int, float, Iterable, List[float]], out: Optio
     """
     return zeta(2, y, out=out)
 
-def digammainv(y: Union[np.ndarray, float], out: Optional[np.ndarray] = None) -> Union[np.ndarray, float]:
+
+def digammainv(y: np.ndarray | float, out: np.ndarray | None = None) -> np.ndarray | float:
     """Inverse digamma function evaluated on y.
 
     Args:
@@ -98,13 +110,12 @@ def digammainv(y: Union[np.ndarray, float], out: Optional[np.ndarray] = None) ->
 
     """
     if isinstance(y, np.ndarray):
-
         rv = np.zeros(y.shape, dtype=float)
         rv[np.isposinf(y)] = np.inf
 
         Q = np.isfinite(y)
         z = y[Q]
-        M = (z >= -2.22)
+        M = z >= -2.22
         x = np.empty(z.shape, dtype=float)
         x[M] = exp(z[M]) + 0.5
         x[~M] = -1.0 / (z[~M] - D1)
@@ -131,10 +142,10 @@ def digammainv(y: Union[np.ndarray, float], out: Optional[np.ndarray] = None) ->
     else:
         x = (exp(y) + 0.5) if y >= -2.22 else (-1.0 / (y - D1))
 
-        x -= ((digamma(x) - y) / trigamma(x))
-        x -= ((digamma(x) - y) / trigamma(x))
-        x -= ((digamma(x) - y) / trigamma(x))
-        x -= ((digamma(x) - y) / trigamma(x))
-        x -= ((digamma(x) - y) / trigamma(x))
+        x -= (digamma(x) - y) / trigamma(x)
+        x -= (digamma(x) - y) / trigamma(x)
+        x -= (digamma(x) - y) / trigamma(x)
+        x -= (digamma(x) - y) / trigamma(x)
+        x -= (digamma(x) - y) / trigamma(x)
 
     return x

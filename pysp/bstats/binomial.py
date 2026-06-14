@@ -5,14 +5,13 @@ observations x_1..x_m, the posterior is Beta(a + sum x_i, b + sum (n - x_i)).
 Estimation returns the posterior mode (MAP) for p, carrying the posterior as
 the new prior, matching the conventions of the other pysp.bstats modules.
 """
-from typing import Optional, Tuple
 
-from numpy.random import RandomState
-from scipy.special import gammaln, digamma
 import numpy as np
+from numpy.random import RandomState
+from scipy.special import digamma, gammaln
 
-from pysp.bstats.pdist import ProbabilityDistribution, StatisticAccumulator, ParameterEstimator
 from pysp.bstats.beta import BetaDistribution
+from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, StatisticAccumulator
 
 default_prior = BetaDistribution(1.0001, 1.0001)
 
@@ -21,8 +20,14 @@ class BinomialDistribution(ProbabilityDistribution):
     """Binomial distribution with n trials and success probability p,
     optionally carrying a Beta conjugate prior on p."""
 
-    def __init__(self, n: int, p: float, name: Optional[str] = None,
-                 prior: ProbabilityDistribution = default_prior, keys: Optional[str] = None):
+    def __init__(
+        self,
+        n: int,
+        p: float,
+        name: str | None = None,
+        prior: ProbabilityDistribution = default_prior,
+        keys: str | None = None,
+    ):
         """BinomialDistribution object with n trials and success probability p.
 
         Args:
@@ -42,8 +47,13 @@ class BinomialDistribution(ProbabilityDistribution):
         self.set_prior(prior)
 
     def __str__(self):
-        return 'BinomialDistribution(%d, %f, name=%s, prior=%s, keys=%s)' % (
-            self.n, self.p, str(self.name), str(self.prior), str(self.keys))
+        return "BinomialDistribution(%d, %f, name=%s, prior=%s, keys=%s)" % (
+            self.n,
+            self.p,
+            str(self.name),
+            str(self.prior),
+            str(self.keys),
+        )
 
     def get_parameters(self) -> float:
         """Returns the success probability p."""
@@ -115,7 +125,7 @@ class BinomialDistribution(ProbabilityDistribution):
         if x < 0 or x > n:
             return -np.inf
         cc = gammaln(n + 1) - gammaln(x + 1) - gammaln(n - x + 1)
-        return cc + x*self.log_p + (n - x)*self.log_1p
+        return cc + x * self.log_p + (n - x) * self.log_1p
 
     def expected_log_density(self, x: int) -> float:
         """Variational expectation E_q[log p(x | p)] under the Beta prior.
@@ -136,7 +146,7 @@ class BinomialDistribution(ProbabilityDistribution):
                 return -np.inf
             e1, e2 = self.expected_nparams
             cc = gammaln(n + 1) - gammaln(x + 1) - gammaln(n - x + 1)
-            return cc + x*e1 + (n - x)*e2
+            return cc + x * e1 + (n - x) * e2
         else:
             return self.log_density(x)
 
@@ -172,7 +182,7 @@ class BinomialDistribution(ProbabilityDistribution):
 
         """
         xv, cc = x
-        rv = xv*self.log_p + (self.n - xv)*self.log_1p + cc
+        rv = xv * self.log_p + (self.n - xv) * self.log_1p + cc
         rv[np.bitwise_or(xv < 0, xv > self.n)] = -np.inf
         return rv
 
@@ -190,7 +200,7 @@ class BinomialDistribution(ProbabilityDistribution):
         if self.has_conj_prior:
             xv, cc = x
             e1, e2 = self.expected_nparams
-            rv = xv*e1 + (self.n - xv)*e2 + cc
+            rv = xv * e1 + (self.n - xv) * e2 + cc
             rv[np.bitwise_or(xv < 0, xv > self.n)] = -np.inf
             return rv
         else:
@@ -210,7 +220,7 @@ class BinomialDistribution(ProbabilityDistribution):
         cc = gammaln(self.n + 1) - gammaln(xv + 1) - gammaln(self.n - xv + 1)
         return xv, cc
 
-    def sampler(self, seed: Optional[int] = None):
+    def sampler(self, seed: int | None = None):
         """Create a BinomialSampler for this distribution.
 
         Args:
@@ -232,10 +242,10 @@ class BinomialDistribution(ProbabilityDistribution):
         return BinomialEstimator(self.n, name=self.name, keys=self.keys, prior=self.prior)
 
 
-class BinomialSampler(object):
+class BinomialSampler:
     """Draws samples from a BinomialDistribution."""
 
-    def __init__(self, dist: BinomialDistribution, seed: Optional[int] = None):
+    def __init__(self, dist: BinomialDistribution, seed: int | None = None):
         """BinomialSampler object.
 
         Args:
@@ -309,7 +319,7 @@ class BinomialAccumulator(StatisticAccumulator):
             estimate: Current distribution estimate (unused).
 
         """
-        self.sum += x*weight
+        self.sum += x * weight
         self.count += weight
 
     def seq_update(self, x, weights, estimate):
@@ -381,7 +391,7 @@ class BinomialAccumulator(StatisticAccumulator):
                 self.from_value(stats_dict[self.key].value())
 
 
-class BinomialEstimatorAccumulatorFactory(object):
+class BinomialEstimatorAccumulatorFactory:
     """Factory that creates BinomialAccumulator objects."""
 
     def __init__(self, n, name, keys):
@@ -406,8 +416,13 @@ class BinomialEstimator(ParameterEstimator):
     """Estimates a BinomialDistribution from sufficient statistics, using a
     conjugate Beta posterior update when the prior allows it."""
 
-    def __init__(self, n: int, name: Optional[str] = None, keys: Optional[str] = None,
-                 prior: ProbabilityDistribution = default_prior):
+    def __init__(
+        self,
+        n: int,
+        name: str | None = None,
+        keys: str | None = None,
+        prior: ProbabilityDistribution = default_prior,
+    ):
         """BinomialEstimator object.
 
         Args:
@@ -455,7 +470,7 @@ class BinomialEstimator(ParameterEstimator):
             return float(self.prior.log_density(model.p))
         return super().model_log_density(model)
 
-    def estimate(self, suff_stat: Tuple[float, float]) -> BinomialDistribution:
+    def estimate(self, suff_stat: tuple[float, float]) -> BinomialDistribution:
         """Estimate a BinomialDistribution from sufficient statistics.
 
         With a Beta(a, b) prior the posterior is Beta(a + successes,
@@ -474,26 +489,25 @@ class BinomialEstimator(ParameterEstimator):
 
         """
         count, psum = suff_stat
-        fsum = count*self.n - psum
+        fsum = count * self.n - psum
 
         if self.has_conj_prior:
-
             a, b = self.prior.get_parameters()
             new_a = a + psum
             new_b = b + fsum
 
             # posterior mode for new_a, new_b > 1; mean on the boundary
             if new_a > 1.0 and new_b > 1.0:
-                p = (new_a - 1.0)/(new_a + new_b - 2.0)
+                p = (new_a - 1.0) / (new_a + new_b - 2.0)
             else:
-                p = new_a/(new_a + new_b)
+                p = new_a / (new_a + new_b)
 
-            return BinomialDistribution(self.n, p, name=self.name, keys=self.keys,
-                                        prior=BetaDistribution(new_a, new_b))
+            return BinomialDistribution(self.n, p, name=self.name, keys=self.keys, prior=BetaDistribution(new_a, new_b))
 
         else:
-            p = psum/(count*self.n) if count > 0 else 0.5
+            p = psum / (count * self.n) if count > 0 else 0.5
             return BinomialDistribution(self.n, p, name=self.name, keys=self.keys, prior=self.prior)
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 BinomialAccumulatorFactory = BinomialEstimatorAccumulatorFactory

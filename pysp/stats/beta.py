@@ -1,6 +1,8 @@
 """Create, estimate, and sample from a beta distribution on (0, 1)."""
+
 import math
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -23,26 +25,28 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def compute_capabilities(cls):
         from pysp.stats.capabilities import DistributionCapabilities
-        return DistributionCapabilities(engine_ready=('numpy', 'torch'), kernel_status='numba_adapter')
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
         from pysp.stats.declarations import DistributionDeclaration, ExponentialFamilySpec, ParameterSpec, StatisticSpec
+
         return DistributionDeclaration(
-            name='beta',
+            name="beta",
             distribution_type=cls,
             parameters=(
-                ParameterSpec('a', constraint='positive'),
-                ParameterSpec('b', constraint='positive'),
+                ParameterSpec("a", constraint="positive"),
+                ParameterSpec("b", constraint="positive"),
             ),
             statistics=(
-                StatisticSpec('count'),
-                StatisticSpec('sum_of_logs'),
-                StatisticSpec('sum_of_log1m'),
-                StatisticSpec('sum'),
-                StatisticSpec('sum2'),
+                StatisticSpec("count"),
+                StatisticSpec("sum_of_logs"),
+                StatisticSpec("sum_of_log1m"),
+                StatisticSpec("sum"),
+                StatisticSpec("sum2"),
             ),
-            support='unit_interval_open',
+            support="unit_interval_open",
             exponential_family=ExponentialFamilySpec(
                 sufficient_statistics=cls.exp_family_sufficient_statistics,
                 natural_parameters=cls.exp_family_natural_parameters,
@@ -52,7 +56,7 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     @staticmethod
-    def exp_family_sufficient_statistics(x: Tuple[Any, Any, Any, Any], engine: Any) -> Tuple[Any, ...]:
+    def exp_family_sufficient_statistics(x: tuple[Any, Any, Any, Any], engine: Any) -> tuple[Any, ...]:
         """Return Beta sufficient statistics for generated scoring.
 
         Scoring needs only ``log_x`` and ``log1m_x`` (the two natural-parameter partners). The
@@ -63,8 +67,9 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         return engine.asarray(x[0]), engine.asarray(x[1])
 
     @staticmethod
-    def exp_family_legacy_sufficient_statistics(x: Tuple[Any, Any, Any, Any],
-                                                params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+    def exp_family_legacy_sufficient_statistics(
+        x: tuple[Any, Any, Any, Any], params: dict[str, Any], engine: Any
+    ) -> tuple[Any, ...]:
         """Return per-row Beta sufficient statistics in accumulator order."""
         log_x, log1m_x, xx, xx2 = x
         vals = engine.asarray(xx)
@@ -77,18 +82,18 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     @staticmethod
-    def exp_family_natural_parameters(params: Dict[str, Any], engine: Any) -> Tuple[Any, ...]:
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Return Beta natural parameters for generated scoring."""
-        return params['a'] - engine.asarray(1.0), params['b'] - engine.asarray(1.0)
+        return params["a"] - engine.asarray(1.0), params["b"] - engine.asarray(1.0)
 
     @staticmethod
-    def exp_family_log_partition(params: Dict[str, Any], engine: Any) -> Any:
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
         """Return Beta log partition for generated scoring."""
-        return engine.betaln(params['a'], params['b'])
+        return engine.betaln(params["a"], params["b"])
 
-    def __init__(self, a: float, b: float, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, a: float, b: float, name: str | None = None, keys: str | None = None) -> None:
         if a <= 0.0 or b <= 0.0 or not np.isfinite(a) or not np.isfinite(b):
-            raise ValueError('BetaDistribution requires a > 0 and b > 0.')
+            raise ValueError("BetaDistribution requires a > 0 and b > 0.")
         self.a = float(a)
         self.b = float(b)
         self.log_const = float(gammaln(self.a) + gammaln(self.b) - gammaln(self.a + self.b))
@@ -96,8 +101,12 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        return 'BetaDistribution(%s, %s, name=%s, keys=%s)' % (
-            repr(self.a), repr(self.b), repr(self.name), repr(self.keys))
+        return "BetaDistribution(%s, %s, name=%s, keys=%s)" % (
+            repr(self.a),
+            repr(self.b),
+            repr(self.name),
+            repr(self.keys),
+        )
 
     def density(self, x: float) -> float:
         """Return the probability density or mass at a single observation."""
@@ -113,7 +122,7 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
             return -np.inf
         return (self.a - 1.0) * math.log(xx) + (self.b - 1.0) * math.log1p(-xx) - self.log_const
 
-    def seq_log_density(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
+    def seq_log_density(self, x: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         lx, l1mx, _, _ = x
         return (self.a - 1.0) * lx + (self.b - 1.0) * l1mx - self.log_const
@@ -123,46 +132,51 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral Beta log-density from encoded logs and parameters."""
         return (a - 1.0) * log_x + (b - 1.0) * log1m_x - engine.betaln(a, b)
 
-    def backend_seq_log_density(self, x: Tuple[Any, Any, Any, Any], engine: Any) -> Any:
+    def backend_seq_log_density(self, x: tuple[Any, Any, Any, Any], engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
         log_x, log1m_x, _, _ = x
         return self.backend_log_density_from_params(
-            engine.asarray(log_x), engine.asarray(log1m_x),
-            engine.asarray(self.a), engine.asarray(self.b), engine)
+            engine.asarray(log_x), engine.asarray(log1m_x), engine.asarray(self.a), engine.asarray(self.b), engine
+        )
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['BetaDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["BetaDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked Beta parameters for a homogeneous mixture kernel."""
         return {
-            'a': engine.asarray([d.a for d in dists]),
-            'b': engine.asarray([d.b for d in dists]),
+            "a": engine.asarray([d.a for d in dists]),
+            "b": engine.asarray([d.b for d in dists]),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: Tuple[Any, Any, Any, Any],
-                                    params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: tuple[Any, Any, Any, Any], params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of Beta log densities."""
         log_x, log1m_x, _, _ = x
         return cls.backend_log_density_from_params(
-            engine.asarray(log_x)[:, None], engine.asarray(log1m_x)[:, None],
-            params['a'][None, :], params['b'][None, :], engine)
+            engine.asarray(log_x)[:, None],
+            engine.asarray(log1m_x)[:, None],
+            params["a"][None, :],
+            params["b"][None, :],
+            engine,
+        )
 
-    def sampler(self, seed: Optional[int] = None) -> 'BetaSampler':
+    def sampler(self, seed: int | None = None) -> "BetaSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BetaSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'BetaEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "BetaEstimator":
         """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
             return BetaEstimator(name=self.name, keys=self.keys)
-        suff_stat = np.asarray([
-            digamma(self.a) - digamma(self.a + self.b),
-            digamma(self.b) - digamma(self.a + self.b),
-        ], dtype=np.float64)
-        return BetaEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat,
-                             name=self.name, keys=self.keys)
+        suff_stat = np.asarray(
+            [
+                digamma(self.a) - digamma(self.a + self.b),
+                digamma(self.b) - digamma(self.a + self.b),
+            ],
+            dtype=np.float64,
+        )
+        return BetaEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat, name=self.name, keys=self.keys)
 
-    def dist_to_encoder(self) -> 'BetaDataEncoder':
+    def dist_to_encoder(self) -> "BetaDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return BetaDataEncoder()
 
@@ -170,18 +184,18 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
 class BetaSampler(DistributionSampler):
     """Draw iid beta observations."""
 
-    def __init__(self, dist: BetaDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: BetaDistribution, seed: int | None = None) -> None:
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: Optional[int] = None) -> Union[float, np.ndarray]:
+    def sample(self, size: int | None = None) -> float | np.ndarray:
         return self.rng.beta(self.dist.a, self.dist.b, size=size)
 
 
 class BetaAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate sufficient statistics for beta estimation."""
 
-    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.count = 0.0
         self.sum_of_logs = 0.0
         self.sum_of_log1m = 0.0
@@ -190,20 +204,24 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         self.name = name
         self.key = keys
 
-    def update(self, x: float, weight: float, estimate: Optional[BetaDistribution]) -> None:
+    def update(self, x: float, weight: float, estimate: BetaDistribution | None) -> None:
         if x <= 0.0 or x >= 1.0:
-            raise ValueError('BetaDistribution requires observations in (0, 1).')
+            raise ValueError("BetaDistribution requires observations in (0, 1).")
         self.count += weight
         self.sum_of_logs += math.log(x) * weight
         self.sum_of_log1m += math.log1p(-x) * weight
         self.sum += x * weight
         self.sum2 += x * x * weight
 
-    def initialize(self, x: float, weight: float, rng: Optional[RandomState]) -> None:
+    def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         self.update(x, weight, None)
 
-    def seq_update(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray,
-                   estimate: Optional[BetaDistribution]) -> None:
+    def seq_update(
+        self,
+        x: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        weights: np.ndarray,
+        estimate: BetaDistribution | None,
+    ) -> None:
         lx, l1mx, xx, xx2 = x
         self.count += np.sum(weights, dtype=np.float64)
         self.sum_of_logs += np.dot(lx, weights)
@@ -211,11 +229,12 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum += np.dot(xx, weights)
         self.sum2 += np.dot(xx2, weights)
 
-    def seq_initialize(self, x: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray,
-                       rng: Optional[RandomState]) -> None:
+    def seq_initialize(
+        self, x: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None
+    ) -> None:
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: Tuple[float, float, float, float, float]) -> 'BetaAccumulator':
+    def combine(self, suff_stat: tuple[float, float, float, float, float]) -> "BetaAccumulator":
         self.count += suff_stat[0]
         self.sum_of_logs += suff_stat[1]
         self.sum_of_log1m += suff_stat[2]
@@ -223,10 +242,10 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 += suff_stat[4]
         return self
 
-    def value(self) -> Tuple[float, float, float, float, float]:
+    def value(self) -> tuple[float, float, float, float, float]:
         return self.count, self.sum_of_logs, self.sum_of_log1m, self.sum, self.sum2
 
-    def from_value(self, x: Tuple[float, float, float, float, float]) -> 'BetaAccumulator':
+    def from_value(self, x: tuple[float, float, float, float, float]) -> "BetaAccumulator":
         self.count = x[0]
         self.sum_of_logs = x[1]
         self.sum_of_log1m = x[2]
@@ -234,25 +253,25 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 = x[4]
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None:
             if self.key in stats_dict:
                 stats_dict[self.key].combine(self.value())
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None and self.key in stats_dict:
             self.from_value(stats_dict[self.key].value())
 
-    def acc_to_encoder(self) -> 'BetaDataEncoder':
+    def acc_to_encoder(self) -> "BetaDataEncoder":
         return BetaDataEncoder()
 
 
 class BetaAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for BetaAccumulator."""
 
-    def __init__(self, name: Optional[str] = None, keys: Optional[str] = None) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.name = name
         self.keys = keys
 
@@ -263,10 +282,14 @@ class BetaAccumulatorFactory(StatisticAccumulatorFactory):
 class BetaEstimator(ParameterEstimator):
     """Estimate beta shape parameters from weighted log-moment statistics."""
 
-    def __init__(self, pseudo_count: Optional[float] = None,
-                 suff_stat: Optional[Sequence[float]] = None,
-                 delta: float = 1.0e-8, name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: Sequence[float] | None = None,
+        delta: float = 1.0e-8,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         self.pseudo_count = pseudo_count
         self.suff_stat = np.asarray(suff_stat, dtype=np.float64) if suff_stat is not None else None
         self.delta = delta
@@ -289,8 +312,7 @@ class BetaEstimator(ParameterEstimator):
                 return np.array([mean * common, (1.0 - mean) * common], dtype=np.float64)
         return np.array([1.0, 1.0], dtype=np.float64)
 
-    def estimate(self, nobs: Optional[float],
-                 suff_stat: Tuple[float, float, float, float, float]) -> BetaDistribution:
+    def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float, float]) -> BetaDistribution:
         count, sum_log_x, sum_log1m, sum_x, sum_x2 = suff_stat
         if count <= 0.0 and self.pseudo_count is None:
             return BetaDistribution(1.0, 1.0, name=self.name, keys=self.keys)
@@ -300,8 +322,7 @@ class BetaEstimator(ParameterEstimator):
         if self.pseudo_count is not None:
             prior_logs = self.suff_stat
             if prior_logs is None:
-                prior_logs = np.asarray([digamma(1.0) - digamma(2.0),
-                                         digamma(1.0) - digamma(2.0)], dtype=np.float64)
+                prior_logs = np.asarray([digamma(1.0) - digamma(2.0), digamma(1.0) - digamma(2.0)], dtype=np.float64)
             logs = logs + self.pseudo_count * prior_logs
             denom = denom + self.pseudo_count
 
@@ -316,13 +337,13 @@ class BetaDataEncoder(DataSequenceEncoder):
     """Encode beta observations with log x and log(1-x) columns."""
 
     def __str__(self) -> str:
-        return 'BetaDataEncoder'
+        return "BetaDataEncoder"
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, BetaDataEncoder)
 
-    def seq_encode(self, x: Sequence[float]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(rv <= 0.0) or np.any(rv >= 1.0) or np.any(np.isnan(rv))):
-            raise ValueError('BetaDistribution requires observations in (0, 1).')
+            raise ValueError("BetaDistribution requires observations in (0, 1).")
         return np.log(rv), np.log1p(-rv), rv, rv * rv

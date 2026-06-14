@@ -5,19 +5,18 @@ import numpy as np
 
 from pysp.stats import GaussianDistribution
 
-
-HAS_TORCH = importlib.util.find_spec('torch') is not None
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 if HAS_TORCH:
     import torch
 else:
     torch = None
 
 
-@unittest.skipUnless(HAS_TORCH, 'torch is not installed')
+@unittest.skipUnless(HAS_TORCH, "torch is not installed")
 class ObjectiveProjectionTorchTest(unittest.TestCase):
-
     def setUp(self):
         from pysp.engines import TorchEngine
+
         self.engine = TorchEngine(dtype=torch.float64)
 
     def assertObjectiveResultDiagnostics(self, result):
@@ -40,16 +39,19 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
 
     def three_class_classification_fixture(self):
         centers = np.asarray([[-1.25, -1.0], [1.25, -1.0], [0.0, 1.35]], dtype=float)
-        offsets = np.asarray([
-            [-0.18, -0.04],
-            [-0.12, 0.10],
-            [-0.05, -0.14],
-            [0.02, 0.05],
-            [0.08, -0.08],
-            [0.15, 0.12],
-            [0.20, -0.02],
-            [-0.22, 0.16],
-        ], dtype=float)
+        offsets = np.asarray(
+            [
+                [-0.18, -0.04],
+                [-0.12, 0.10],
+                [-0.05, -0.14],
+                [0.02, 0.05],
+                [0.08, -0.08],
+                [0.15, 0.12],
+                [0.20, -0.02],
+                [-0.22, 0.16],
+            ],
+            dtype=float,
+        )
         x = np.vstack([center + offsets for center in centers])
         y = np.repeat(np.arange(3, dtype=np.int64), len(offsets))
         return x, y
@@ -69,8 +71,8 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         start_obj = float(ExpectedLogDensity()(start, enc, self.engine).detach().cpu().item())
 
         fitted, value = fit_objective(
-            enc, start, ExpectedLogDensity(), engine=self.engine,
-            max_its=250, lr=0.05, tol=0.0)
+            enc, start, ExpectedLogDensity(), engine=self.engine, max_its=250, lr=0.05, tol=0.0
+        )
 
         self.assertGreater(value, start_obj)
         self.assertLess(abs(fitted.mu - np.mean(data)), 0.15)
@@ -84,8 +86,8 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         data = source.sampler(seed=2).sample(size=500)
 
         projected, value = variational_projection(
-            source, target, data=data, engine=self.engine,
-            max_its=300, lr=0.05, tol=0.0)
+            source, target, data=data, engine=self.engine, max_its=300, lr=0.05, tol=0.0
+        )
 
         self.assertTrue(np.isfinite(value))
         self.assertLess(abs(projected.mu - np.mean(data)), 0.12)
@@ -99,8 +101,8 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         data = source.sampler(seed=3).sample(size=300)
 
         result = variational_projection(
-            source, target, data=data, engine=self.engine,
-            max_its=180, lr=0.05, tol=0.0, return_result=True)
+            source, target, data=data, engine=self.engine, max_its=180, lr=0.05, tol=0.0, return_result=True
+        )
 
         self.assertTrue(np.isfinite(result.value))
         self.assertObjectiveResultDiagnostics(result)
@@ -121,8 +123,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
             return 0.5 * engine.log(engine.asarray(2.0 * np.pi) * model.sigma2)
 
         objective = UnnormalizedLogLikelihood(log_unnormalized, log_partition=log_partition)
-        fitted, value = fit_objective(enc, start, objective, engine=self.engine,
-                                      max_its=250, lr=0.05, tol=0.0)
+        fitted, value = fit_objective(enc, start, objective, engine=self.engine, max_its=250, lr=0.05, tol=0.0)
 
         self.assertTrue(np.isfinite(value))
         self.assertLess(abs(fitted.mu - np.mean(data)), 0.15)
@@ -133,8 +134,8 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
 
         x = torch.tensor(-4.0, dtype=torch.float64, requires_grad=True)
         value, _ = optimize_torch_objective(
-            [x], lambda: -((x - 3.0) ** 2), engine=self.engine,
-            max_its=200, lr=0.1, tol=0.0)
+            [x], lambda: -((x - 3.0) ** 2), engine=self.engine, max_its=200, lr=0.1, tol=0.0
+        )
 
         self.assertGreater(value, -1.0e-4)
         self.assertLess(abs(float(x.detach().cpu().item()) - 3.0), 0.02)
@@ -144,16 +145,16 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
 
         x = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
         value, _ = optimize_torch_objective(
-            [x], lambda: -((x - 1.0) ** 2), engine=self.engine,
-            max_its=1, lr=10.0, tol=0.0)
+            [x], lambda: -((x - 1.0) ** 2), engine=self.engine, max_its=1, lr=10.0, tol=0.0
+        )
 
         self.assertAlmostEqual(value, -1.0)
         self.assertAlmostEqual(float(x.detach().cpu().item()), 0.0)
 
         y = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
         final_value, _ = optimize_torch_objective(
-            [y], lambda: -((y - 1.0) ** 2), engine=self.engine,
-            max_its=1, lr=10.0, tol=0.0, restore_best=False)
+            [y], lambda: -((y - 1.0) ** 2), engine=self.engine, max_its=1, lr=10.0, tol=0.0, restore_best=False
+        )
 
         self.assertLess(final_value, -1.0)
         self.assertGreater(abs(float(y.detach().cpu().item())), 5.0)
@@ -182,15 +183,11 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
 
         params, value = fit_parameter_objective(
             [
-                ObjectiveParameter('loc', -2.0),
-                ObjectiveParameter('scale', 4.0, constraint='positive'),
-                ObjectiveParameter('gate', 0.2, constraint='unit_interval'),
+                ObjectiveParameter("loc", -2.0),
+                ObjectiveParameter("scale", 4.0, constraint="positive"),
+                ObjectiveParameter("gate", 0.2, constraint="unit_interval"),
             ],
-            lambda p, enc, engine: -(
-                (p['loc'] - 1.5) ** 2 +
-                (p['scale'] - 0.75) ** 2 +
-                (p['gate'] - 0.8) ** 2
-            ),
+            lambda p, enc, engine: -((p["loc"] - 1.5) ** 2 + (p["scale"] - 0.75) ** 2 + (p["gate"] - 0.8) ** 2),
             engine=self.engine,
             max_its=350,
             lr=0.07,
@@ -198,9 +195,9 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         )
 
         self.assertGreater(value, -1.0e-4)
-        self.assertLess(abs(params['loc'] - 1.5), 0.02)
-        self.assertLess(abs(params['scale'] - 0.75), 0.02)
-        self.assertLess(abs(params['gate'] - 0.8), 0.02)
+        self.assertLess(abs(params["loc"] - 1.5), 0.02)
+        self.assertLess(abs(params["scale"] - 0.75), 0.02)
+        self.assertLess(abs(params["gate"] - 0.8), 0.02)
 
     def test_fit_parameter_objective_handles_simplex_vectors(self):
         from pysp.utils.objectives import ObjectiveParameter, fit_parameter_objective
@@ -208,11 +205,11 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         target = np.asarray([0.1, 0.25, 0.65], dtype=float)
 
         def objective(params, enc, engine):
-            delta = params['w'] - engine.asarray(target)
+            delta = params["w"] - engine.asarray(target)
             return -engine.sum(delta * delta)
 
         params, value = fit_parameter_objective(
-            [ObjectiveParameter('w', [0.7, 0.2, 0.1], constraint='simplex_vector')],
+            [ObjectiveParameter("w", [0.7, 0.2, 0.1], constraint="simplex_vector")],
             objective,
             engine=self.engine,
             max_its=300,
@@ -221,8 +218,8 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         )
 
         self.assertGreater(value, -1.0e-4)
-        self.assertAlmostEqual(float(np.sum(params['w'])), 1.0, places=10)
-        self.assertLess(np.linalg.norm(params['w'] - target), 0.02)
+        self.assertAlmostEqual(float(np.sum(params["w"])), 1.0, places=10)
+        self.assertLess(np.linalg.norm(params["w"] - target), 0.02)
 
     def test_fit_parameter_objective_accepts_simplex_alias_and_positive_matrix(self):
         from pysp.utils.objectives import ObjectiveParameter, fit_parameter_objective
@@ -233,21 +230,23 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         target_col = np.asarray([[0.2, 0.8], [0.3, 0.1], [0.5, 0.1]], dtype=float)
 
         def objective(params, enc, engine):
-            w_delta = params['w'] - engine.asarray(target_w)
-            mat_delta = params['scale'] - engine.asarray(target_mat)
-            row_delta = params['transition'] - engine.asarray(target_row)
-            col_delta = params['topic'] - engine.asarray(target_col)
-            return -(engine.sum(w_delta * w_delta) + engine.sum(mat_delta * mat_delta) +
-                     engine.sum(row_delta * row_delta) + engine.sum(col_delta * col_delta))
+            w_delta = params["w"] - engine.asarray(target_w)
+            mat_delta = params["scale"] - engine.asarray(target_mat)
+            row_delta = params["transition"] - engine.asarray(target_row)
+            col_delta = params["topic"] - engine.asarray(target_col)
+            return -(
+                engine.sum(w_delta * w_delta)
+                + engine.sum(mat_delta * mat_delta)
+                + engine.sum(row_delta * row_delta)
+                + engine.sum(col_delta * col_delta)
+            )
 
         params, value = fit_parameter_objective(
             [
-                ObjectiveParameter('w', [0.75, 0.25], constraint='simplex'),
-                ObjectiveParameter('scale', [[2.0, 1.5], [1.0, 0.5]], constraint='positive_matrix'),
-                ObjectiveParameter('transition', [[0.4, 0.4, 0.2], [0.2, 0.3, 0.5]],
-                                   constraint='row_simplex_matrix'),
-                ObjectiveParameter('topic', [[0.6, 0.2], [0.2, 0.3], [0.2, 0.5]],
-                                   constraint='column_simplex_matrix'),
+                ObjectiveParameter("w", [0.75, 0.25], constraint="simplex"),
+                ObjectiveParameter("scale", [[2.0, 1.5], [1.0, 0.5]], constraint="positive_matrix"),
+                ObjectiveParameter("transition", [[0.4, 0.4, 0.2], [0.2, 0.3, 0.5]], constraint="row_simplex_matrix"),
+                ObjectiveParameter("topic", [[0.6, 0.2], [0.2, 0.3], [0.2, 0.5]], constraint="column_simplex_matrix"),
             ],
             objective,
             engine=self.engine,
@@ -257,32 +256,32 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         )
 
         self.assertGreater(value, -1.0e-4)
-        self.assertAlmostEqual(float(np.sum(params['w'])), 1.0, places=10)
-        self.assertTrue(np.all(params['scale'] > 0.0))
-        np.testing.assert_allclose(np.sum(params['transition'], axis=1), np.ones(2), rtol=1.0e-10, atol=1.0e-10)
-        np.testing.assert_allclose(np.sum(params['topic'], axis=0), np.ones(2), rtol=1.0e-10, atol=1.0e-10)
-        self.assertLess(np.linalg.norm(params['w'] - target_w), 0.02)
-        self.assertLess(np.linalg.norm(params['scale'] - target_mat), 0.03)
-        self.assertLess(np.linalg.norm(params['transition'] - target_row), 0.03)
-        self.assertLess(np.linalg.norm(params['topic'] - target_col), 0.03)
+        self.assertAlmostEqual(float(np.sum(params["w"])), 1.0, places=10)
+        self.assertTrue(np.all(params["scale"] > 0.0))
+        np.testing.assert_allclose(np.sum(params["transition"], axis=1), np.ones(2), rtol=1.0e-10, atol=1.0e-10)
+        np.testing.assert_allclose(np.sum(params["topic"], axis=0), np.ones(2), rtol=1.0e-10, atol=1.0e-10)
+        self.assertLess(np.linalg.norm(params["w"] - target_w), 0.02)
+        self.assertLess(np.linalg.norm(params["scale"] - target_mat), 0.03)
+        self.assertLess(np.linalg.norm(params["transition"] - target_row), 0.03)
+        self.assertLess(np.linalg.norm(params["topic"] - target_col), 0.03)
 
     def test_fit_parameter_objective_accepts_coupled_bound_constraints(self):
         from pysp.utils.objectives import ObjectiveParameter, fit_parameter_objective
 
         def objective(params, enc, engine):
             return -(
-                (params['low'] - 0.5) ** 2 +
-                (params['high'] - 1.75) ** 2 +
-                (params['ceiling'] - 3.0) ** 2 +
-                (params['floor'] - 2.0) ** 2
+                (params["low"] - 0.5) ** 2
+                + (params["high"] - 1.75) ** 2
+                + (params["ceiling"] - 3.0) ** 2
+                + (params["floor"] - 2.0) ** 2
             )
 
         params, value = fit_parameter_objective(
             [
-                ObjectiveParameter('low', -2.0),
-                ObjectiveParameter('high', 4.0, constraint='greater_than:low'),
-                ObjectiveParameter('ceiling', 5.0),
-                ObjectiveParameter('floor', 1.0, constraint='less_than:ceiling'),
+                ObjectiveParameter("low", -2.0),
+                ObjectiveParameter("high", 4.0, constraint="greater_than:low"),
+                ObjectiveParameter("ceiling", 5.0),
+                ObjectiveParameter("floor", 1.0, constraint="less_than:ceiling"),
             ],
             objective,
             engine=self.engine,
@@ -292,34 +291,34 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         )
 
         self.assertGreater(value, -1.0e-4)
-        self.assertGreater(params['high'], params['low'])
-        self.assertLess(params['floor'], params['ceiling'])
-        self.assertLess(abs(params['low'] - 0.5), 0.02)
-        self.assertLess(abs(params['high'] - 1.75), 0.02)
-        self.assertLess(abs(params['ceiling'] - 3.0), 0.02)
-        self.assertLess(abs(params['floor'] - 2.0), 0.02)
+        self.assertGreater(params["high"], params["low"])
+        self.assertLess(params["floor"], params["ceiling"])
+        self.assertLess(abs(params["low"] - 0.5), 0.02)
+        self.assertLess(abs(params["high"] - 1.75), 0.02)
+        self.assertLess(abs(params["ceiling"] - 3.0), 0.02)
+        self.assertLess(abs(params["floor"] - 2.0), 0.02)
 
     def test_fit_parameter_objective_accepts_prebuilt_parameter_set(self):
         from pysp.utils.objectives import ObjectiveParameter, ObjectiveParameterSet, fit_parameter_objective
 
-        param_set = ObjectiveParameterSet([ObjectiveParameter('x', -3.0)], engine=self.engine)
+        param_set = ObjectiveParameterSet([ObjectiveParameter("x", -3.0)], engine=self.engine)
         params, value = fit_parameter_objective(
             param_set,
-            lambda p, enc, engine: -((p['x'] - 2.0) ** 2),
+            lambda p, enc, engine: -((p["x"] - 2.0) ** 2),
             max_its=200,
             lr=0.08,
             tol=0.0,
         )
 
         self.assertGreater(value, -1.0e-4)
-        self.assertLess(abs(params['x'] - 2.0), 0.02)
+        self.assertLess(abs(params["x"] - 2.0), 0.02)
 
     def test_fit_parameter_objective_restores_best_seen_named_parameters(self):
         from pysp.utils.objectives import ObjectiveParameter, fit_parameter_objective
 
         result = fit_parameter_objective(
-            [ObjectiveParameter('x', 0.0)],
-            lambda p, enc, engine: -((p['x'] - 1.0) ** 2),
+            [ObjectiveParameter("x", 0.0)],
+            lambda p, enc, engine: -((p["x"] - 1.0) ** 2),
             engine=self.engine,
             max_its=1,
             lr=10.0,
@@ -329,7 +328,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
 
         self.assertEqual(result.best_iteration, 0)
         self.assertAlmostEqual(result.value, -1.0)
-        self.assertAlmostEqual(result.model['x'], 0.0)
+        self.assertAlmostEqual(result.model["x"], 0.0)
         self.assertAlmostEqual(result.best_value, -1.0)
         self.assertLess(result.history[-1], result.best_value)
 
@@ -341,14 +340,15 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
 
         def objective(params, enc, engine):
             x = engine.asarray(enc)
-            sigma2 = params['sigma2']
-            return engine.sum(-0.5 * (((x - params['mu']) ** 2) / sigma2 +
-                                      engine.log(engine.asarray(2.0 * np.pi) * sigma2)))
+            sigma2 = params["sigma2"]
+            return engine.sum(
+                -0.5 * (((x - params["mu"]) ** 2) / sigma2 + engine.log(engine.asarray(2.0 * np.pi) * sigma2))
+            )
 
         result = fit_parameter_objective(
             [
-                ObjectiveParameter('mu', -2.0),
-                ObjectiveParameter('sigma2', 3.0, constraint='positive'),
+                ObjectiveParameter("mu", -2.0),
+                ObjectiveParameter("sigma2", 3.0, constraint="positive"),
             ],
             objective,
             enc=data,
@@ -360,8 +360,8 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         )
 
         self.assertTrue(np.isfinite(result.value))
-        self.assertLess(abs(result.model['mu'] - np.mean(data)), 0.12)
-        self.assertLess(abs(result.model['sigma2'] - np.var(data)), 0.15)
+        self.assertLess(abs(result.model["mu"] - np.mean(data)), 0.12)
+        self.assertLess(abs(result.model["sigma2"] - np.var(data)), 0.15)
         self.assertGreater(result.iterations, 0)
         self.assertObjectiveResultDiagnostics(result)
 
@@ -400,7 +400,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         torch.manual_seed(4)
         x = np.linspace(-1.0, 1.0, 50)[:, None]
         y = 2.0 * x - 0.5
-        model = GaussianRegressionNN(make_mlp(1, [8], 1, activation='tanh'), noise=0.8, engine=self.engine)
+        model = GaussianRegressionNN(make_mlp(1, [8], 1, activation="tanh"), noise=0.8, engine=self.engine)
         before = np.mean((model.predict(x) - y) ** 2)
         value, _ = model.fit(x, y, max_its=300, lr=0.03, tol=0.0)
         after = np.mean((model.predict(x) - y) ** 2)
@@ -494,5 +494,5 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertAlmostEqual(after, result.value)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

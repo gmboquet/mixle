@@ -8,14 +8,15 @@ includes its likelihood contribution in log_density / seq_log_density. These tes
   * a NullDistribution length leaves the score unchanged.
 
 """
+
 import unittest
 
 import numpy as np
 
-from pysp.stats.tree_hmm import TreeHiddenMarkovModelDistribution
 from pysp.stats.gaussian import GaussianDistribution
-from pysp.stats.intrange import IntegerCategoricalDistribution
+from pysp.stats.int_range import IntegerCategoricalDistribution
 from pysp.stats.null_dist import NullDistribution
+from pysp.stats.tree_hmm import TreeHiddenMarkovModelDistribution
 
 
 def _child_counts(tree):
@@ -28,11 +29,9 @@ def _child_counts(tree):
 
 
 class TreeHmmLenTest(unittest.TestCase):
-
     def setUp(self):
         self.num_states = 2
-        self.topics = [GaussianDistribution(mu=0.0, sigma2=1.0),
-                       GaussianDistribution(mu=10.0, sigma2=1.0)]
+        self.topics = [GaussianDistribution(mu=0.0, sigma2=1.0), GaussianDistribution(mu=10.0, sigma2=1.0)]
         self.w = np.array([0.5, 0.5])
         self.trans = np.array([[0.7, 0.3], [0.3, 0.7]])
 
@@ -43,9 +42,9 @@ class TreeHmmLenTest(unittest.TestCase):
         # Trees whose forward recursion is supported on the (otherwise fragile) numpy path so we can
         # cross-check both scoring backends. child counts noted per node.
         self.trees = [
-            [((0, -1), 0.1), ((1, 0), 0.2), ((2, 1), 9.9)],                  # 0->1, 1->1, 2->0
-            [((0, -1), 0.1), ((1, 0), 0.2), ((2, 1), 9.9), ((3, 2), 0.3)],   # 0->1, 1->1, 2->1, 3->0
-            [((0, -1), 0.1), ((1, 0), 0.2), ((2, 0), 9.9)],                  # 0->2, 1->0, 2->0
+            [((0, -1), 0.1), ((1, 0), 0.2), ((2, 1), 9.9)],  # 0->1, 1->1, 2->0
+            [((0, -1), 0.1), ((1, 0), 0.2), ((2, 1), 9.9), ((3, 2), 0.3)],  # 0->1, 1->1, 2->1, 3->0
+            [((0, -1), 0.1), ((1, 0), 0.2), ((2, 0), 9.9)],  # 0->2, 1->0, 2->0
         ]
 
     def _len_term(self, tree):
@@ -53,8 +52,14 @@ class TreeHmmLenTest(unittest.TestCase):
         return float(sum(np.log(self.len_probs[c]) for c in _child_counts(tree).values()))
 
     def _dist(self, len_dist, use_numba):
-        return TreeHiddenMarkovModelDistribution(topics=self.topics, w=self.w, transitions=self.trans,
-                                                 len_dist=len_dist, terminal_level=4, use_numba=use_numba)
+        return TreeHiddenMarkovModelDistribution(
+            topics=self.topics,
+            w=self.w,
+            transitions=self.trans,
+            len_dist=len_dist,
+            terminal_level=4,
+            use_numba=use_numba,
+        )
 
     def test_scalar_equals_old_plus_len_term(self):
         """Scalar log_density == (length-free score) + sum of child-count log probs."""
@@ -105,13 +110,12 @@ class TreeHmmLenTest(unittest.TestCase):
                     self.assertAlmostEqual(self._null_len_term(), 0.0, places=12)
                     # Score must match a hand-evaluated length-free total via seq_log_density.
                     enc = d_null.dist_to_encoder().seq_encode([tree])
-                    self.assertAlmostEqual(d_null.log_density(tree),
-                                           float(d_null.seq_log_density(enc)[0]), places=9)
+                    self.assertAlmostEqual(d_null.log_density(tree), float(d_null.seq_log_density(enc)[0]), places=9)
 
     @staticmethod
     def _null_len_term():
         return NullDistribution().log_density(7) + NullDistribution().log_density(0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -11,33 +11,50 @@ The ConditionalDistribution allows for user defined conditional distributions P_
 P_given(X0).
 
 """
+
 import heapq
 import itertools
+import math
+from collections.abc import Iterator, Sequence
+from typing import Any, Optional, TypeVar
 
 import numpy as np
-import math
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, ConditionalSampler, \
-    DistributionEnumerator, EnumerationError, child_enumerator
-from pysp.stats.null_dist import NullDistribution, NullAccumulator, NullDataEncoder, NullAccumulatorFactory, \
-    NullEstimator
-from pysp.utils.enumeration import BufferedStream
-from typing import Optional, List, Union, Any, Tuple, Sequence, TypeVar, Dict, Iterator
-from pysp.arithmetic import maxrandint
 from numpy.random import RandomState
 
-T0 = TypeVar('T0')
-T1 = TypeVar('T1')
+from pysp.arithmetic import maxrandint
+from pysp.stats.null_dist import (
+    NullAccumulator,
+    NullAccumulatorFactory,
+    NullDataEncoder,
+    NullDistribution,
+    NullEstimator,
+)
+from pysp.stats.pdist import (
+    ConditionalSampler,
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    EnumerationError,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+    child_enumerator,
+)
+from pysp.utils.enumeration import BufferedStream
 
-E0 = TypeVar('E0')
-E1 = TypeVar('E1')
-E = Tuple[int, Tuple[T0, ...], Tuple[np.ndarray, ...], Tuple[E0, ...], Optional[E1]]
-SS0 = TypeVar('SS0')
-SS1 = TypeVar('SS1')
-SS2 = TypeVar('SS2')
+T0 = TypeVar("T0")
+T1 = TypeVar("T1")
+
+E0 = TypeVar("E0")
+E1 = TypeVar("E1")
+E = tuple[int, tuple[T0, ...], tuple[np.ndarray, ...], tuple[E0, ...], E1 | None]
+SS0 = TypeVar("SS0")
+SS1 = TypeVar("SS1")
+SS2 = TypeVar("SS2")
 
 
-def _conditional_zero_stats(component_estimators: Sequence[Any], num_components: int) -> Tuple[Any, ...]:
+def _conditional_zero_stats(component_estimators: Sequence[Any], num_components: int) -> tuple[Any, ...]:
     """Return per-component zero-value legacy stats from child estimators."""
     if len(component_estimators) != num_components or any(est is None for est in component_estimators):
         return tuple(None for _ in range(num_components))
@@ -64,13 +81,14 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
     """ConditionalDistribution models pairs (x0, x1) with density P_cond(x1 | x0) * P_given(x0),
     where the conditional distributions are looked up from a dictionary keyed by x0."""
 
-    def __init__(self,
-                 dmap: Union[Dict[Any, SequenceEncodableProbabilityDistribution],
-                             List[SequenceEncodableProbabilityDistribution]],
-                 default_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 given_dist: Optional[SequenceEncodableProbabilityDistribution] = NullDistribution(),
-                 name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        dmap: dict[Any, SequenceEncodableProbabilityDistribution] | list[SequenceEncodableProbabilityDistribution],
+        default_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        given_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """ConditionalDistribution object for data types x=Tuple[T0, T1].
 
         P(x) = P_cond(x[1] | x[0])*P_given(x[0]), where
@@ -121,43 +139,44 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
+
         children = list(self.dmap.values())
         if self.has_default:
             children.append(self.default_dist)
         if self.has_given:
             children.append(self.given_dist)
-        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(children)),
-                                        kernel_status='generic')
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(children)), kernel_status="generic")
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+
         children = []
         roles = []
         for key, dist in self.dmap.items():
             declaration = declaration_for(dist)
             if declaration is not None:
                 children.append(declaration)
-                roles.append('condition_%s' % repr(key))
+                roles.append("condition_%s" % repr(key))
         if self.has_default:
             declaration = declaration_for(self.default_dist)
             if declaration is not None:
                 children.append(declaration)
-                roles.append('default')
+                roles.append("default")
         if self.has_given:
             declaration = declaration_for(self.given_dist)
             if declaration is not None:
                 children.append(declaration)
-                roles.append('given')
+                roles.append("given")
         return DistributionDeclaration(
-            name='conditional',
+            name="conditional",
             distribution_type=type(self),
             parameters=(),
             statistics=(
-                StatisticSpec('conditions', kind='mapping'),
-                StatisticSpec('default', kind='child_stat'),
-                StatisticSpec('given', kind='child_stat'),
+                StatisticSpec("conditions", kind="mapping"),
+                StatisticSpec("default", kind="child_stat"),
+                StatisticSpec("given", kind="child_stat"),
             ),
-            support='conditional_pair',
+            support="conditional_pair",
             children=tuple(children),
             child_roles=tuple(roles),
             differentiable=all(child.differentiable for child in children),
@@ -171,9 +190,9 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         s4 = repr(self.name)
         s5 = repr(self.keys)
 
-        return 'ConditionalDistribution(%s, default_dist=%s, given_dist=%s, name=%s, keys=%s)' % (s1, s2, s3, s4, s5)
+        return "ConditionalDistribution(%s, default_dist=%s, given_dist=%s, name=%s, keys=%s)" % (s1, s2, s3, s4, s5)
 
-    def density(self, x: Tuple[T0, T1]) -> float:
+    def density(self, x: tuple[T0, T1]) -> float:
         """Evaluates density of ConditionalDistribution at Tuple x.
 
         Calls log_density() and returns the exponentiated result. See log_density() for details.
@@ -188,7 +207,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         """
         return math.exp(self.log_density(x))
 
-    def log_density(self, x: Tuple[T0, T1]) -> float:
+    def log_density(self, x: tuple[T0, T1]) -> float:
         """Evaluate log-density of ConditionalDistribution at Tuple x.
 
         Log-density:
@@ -255,6 +274,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
     def backend_seq_log_density(self, x: E0, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for grouped conditional encodings."""
         from pysp.stats.backend import backend_seq_log_density
+
         sz, cond_vals, eobs_vals, idx_vals, given_enc = x
         rv = engine.zeros(sz)
         for i in range(len(cond_vals)):
@@ -265,7 +285,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
             elif self.has_default:
                 scores = backend_seq_log_density(self.default_dist, eobs_vals[i], engine)
             else:
-                scores = engine.zeros(len(idx_vals[i])) + float('-inf')
+                scores = engine.zeros(len(idx_vals[i])) + float("-inf")
             rv = engine.index_add(rv, idx, scores)
 
         if self.has_given and given_enc is not None:
@@ -274,15 +294,20 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['ConditionalDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["ConditionalDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked child routes for homogeneous conditional mixtures."""
         from pysp.stats.stacked import stacked_component_params
+
         keys = tuple(dists[0].dmap.keys())
         has_default = bool(dists[0].has_default)
         has_given = bool(dists[0].has_given)
-        if any(tuple(dist.dmap.keys()) != keys or bool(dist.has_default) != has_default or
-               bool(dist.has_given) != has_given for dist in dists):
-            raise ValueError('Stacked ConditionalDistribution components require matching key/default/given layout.')
+        if any(
+            tuple(dist.dmap.keys()) != keys
+            or bool(dist.has_default) != has_default
+            or bool(dist.has_given) != has_given
+            for dist in dists
+        ):
+            raise ValueError("Stacked ConditionalDistribution components require matching key/default/given layout.")
 
         routes = {}
         for key in keys:
@@ -290,98 +315,110 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
             try:
                 routes[key] = stacked_component_params(child_dists, engine)
             except ValueError as exc:
-                raise ValueError('Conditional key %s child %s is not stackable: %s' %
-                                 (repr(key), type(child_dists[0]).__name__, exc))
+                raise ValueError(
+                    "Conditional key %s child %s is not stackable: %s" % (repr(key), type(child_dists[0]).__name__, exc)
+                )
 
         default_route = None
         if has_default:
             try:
                 default_route = stacked_component_params([dist.default_dist for dist in dists], engine)
             except ValueError as exc:
-                raise ValueError('Conditional default child %s is not stackable: %s' %
-                                 (type(dists[0].default_dist).__name__, exc))
+                raise ValueError(
+                    "Conditional default child %s is not stackable: %s" % (type(dists[0].default_dist).__name__, exc)
+                )
 
         given_route = None
         if has_given:
             try:
                 given_route = stacked_component_params([dist.given_dist for dist in dists], engine)
             except ValueError as exc:
-                raise ValueError('Conditional given child %s is not stackable: %s' %
-                                 (type(dists[0].given_dist).__name__, exc))
+                raise ValueError(
+                    "Conditional given child %s is not stackable: %s" % (type(dists[0].given_dist).__name__, exc)
+                )
 
         return {
-            'routes': routes,
-            'default_route': default_route,
-            'given_route': given_route,
-            'has_default': has_default,
-            'has_given': has_given,
-            'keys': keys,
-            'num_components': len(dists),
+            "routes": routes,
+            "default_route": default_route,
+            "given_route": given_route,
+            "has_default": has_default,
+            "has_given": has_given,
+            "keys": keys,
+            "num_components": len(dists),
         }
 
     @classmethod
-    def backend_stacked_log_density(cls, x: E0, params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: E0, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of conditional log densities."""
         from pysp.stats.stacked import stacked_component_log_density
+
         sz, cond_vals, eobs_vals, idx_vals, given_enc = x
-        rv = engine.zeros((sz, int(params['num_components'])))
+        rv = engine.zeros((sz, int(params["num_components"])))
         for i in range(len(cond_vals)):
             key = cond_vals[i]
             idx = engine.asarray(idx_vals[i])
-            route = params['routes'].get(key, params['default_route'])
+            route = params["routes"].get(key, params["default_route"])
             if route is None:
-                scores = engine.zeros((len(idx_vals[i]), int(params['num_components']))) + float('-inf')
+                scores = engine.zeros((len(idx_vals[i]), int(params["num_components"]))) + float("-inf")
             else:
                 scores = stacked_component_log_density(eobs_vals[i], route, engine)
             rv = engine.index_add(rv, idx, scores)
 
-        if params['given_route'] is not None and given_enc is not None:
-            rv = rv + stacked_component_log_density(given_enc, params['given_route'], engine)
+        if params["given_route"] is not None and given_enc is not None:
+            rv = rv + stacked_component_log_density(given_enc, params["given_route"], engine)
 
         return rv
 
     @classmethod
-    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E0, weights: Any,
-                                                            params: Dict[str, Any], engine: Any,
-                                                            estimator: Any) -> Tuple[Dict[Any, Any], Any, Any]:
+    def backend_stacked_sufficient_statistics_with_estimator(
+        cls, x: E0, weights: Any, params: dict[str, Any], engine: Any, estimator: Any
+    ) -> tuple[dict[Any, Any], Any, Any]:
         """Return per-component legacy conditional sufficient statistics."""
-        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
-            unstack_component_stats
+        from pysp.stats.stacked import (
+            StackedEstimatorView,
+            stacked_component_sufficient_statistics,
+            unstack_component_stats,
+        )
+
         sz, cond_vals, eobs_vals, idx_vals, given_enc = x
         ww = engine.asarray(weights)
-        num_components = int(tuple(getattr(ww, 'shape', (0, 0)))[1])
-        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+        num_components = int(tuple(getattr(ww, "shape", (0, 0)))[1])
+        outer_estimators = tuple(getattr(estimator, "estimators", ()))
         group_pos = {key: pos for pos, key in enumerate(cond_vals)}
 
-        per_key_stats: Dict[Any, Tuple[Any, ...]] = {}
-        for key, route in params['routes'].items():
+        per_key_stats: dict[Any, tuple[Any, ...]] = {}
+        for key, route in params["routes"].items():
             component_estimators = tuple(
-                getattr(component_est, 'estimator_map', {}).get(key)
-                for component_est in outer_estimators
+                getattr(component_est, "estimator_map", {}).get(key) for component_est in outer_estimators
             )
             pos = group_pos.get(key)
             if pos is None:
                 per_key_stats[key] = _conditional_zero_stats(component_estimators, num_components)
                 continue
-            child_estimator = StackedEstimatorView(component_estimators) \
-                if len(component_estimators) == num_components else None
+            child_estimator = (
+                StackedEstimatorView(component_estimators) if len(component_estimators) == num_components else None
+            )
             child_weights = ww[engine.asarray(idx_vals[pos])]
             child_stats = stacked_component_sufficient_statistics(
-                eobs_vals[pos], child_weights, route, engine, child_estimator)
+                eobs_vals[pos], child_weights, route, engine, child_estimator
+            )
             per_key_stats[key] = unstack_component_stats(child_stats, num_components)
 
         default_stats = None
-        if params['default_route'] is not None:
-            default_estimators = tuple(getattr(component_est, 'default_estimator', None)
-                                       for component_est in outer_estimators)
+        if params["default_route"] is not None:
+            default_estimators = tuple(
+                getattr(component_est, "default_estimator", None) for component_est in outer_estimators
+            )
             for pos, key in enumerate(cond_vals):
-                if key in params['routes']:
+                if key in params["routes"]:
                     continue
-                child_estimator = StackedEstimatorView(default_estimators) \
-                    if len(default_estimators) == num_components else None
+                child_estimator = (
+                    StackedEstimatorView(default_estimators) if len(default_estimators) == num_components else None
+                )
                 child_weights = ww[engine.asarray(idx_vals[pos])]
                 child_stats = stacked_component_sufficient_statistics(
-                    eobs_vals[pos], child_weights, params['default_route'], engine, child_estimator)
+                    eobs_vals[pos], child_weights, params["default_route"], engine, child_estimator
+                )
                 default_stats = _conditional_add_stats(default_stats, child_stats, engine)
             if default_stats is None:
                 default_by_component = _conditional_zero_stats(default_estimators, num_components)
@@ -390,32 +427,39 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         else:
             default_by_component = tuple(None for _ in range(num_components))
 
-        if params['given_route'] is not None and given_enc is not None:
-            given_estimators = tuple(getattr(component_est, 'given_estimator', None)
-                                     for component_est in outer_estimators)
-            given_estimator = StackedEstimatorView(given_estimators) \
-                if len(given_estimators) == num_components else None
+        if params["given_route"] is not None and given_enc is not None:
+            given_estimators = tuple(
+                getattr(component_est, "given_estimator", None) for component_est in outer_estimators
+            )
+            given_estimator = (
+                StackedEstimatorView(given_estimators) if len(given_estimators) == num_components else None
+            )
             given_stats = stacked_component_sufficient_statistics(
-                given_enc, ww, params['given_route'], engine, given_estimator)
+                given_enc, ww, params["given_route"], engine, given_estimator
+            )
             given_by_component = unstack_component_stats(given_stats, num_components)
         else:
             given_by_component = tuple(None for _ in range(num_components))
 
-        return tuple((
-            {key: per_key_stats[key][component] for key in params['keys']},
-            default_by_component[component],
-            given_by_component[component],
-        ) for component in range(num_components))
+        return tuple(
+            (
+                {key: per_key_stats[key][component] for key in params["keys"]},
+                default_by_component[component],
+                given_by_component[component],
+            )
+            for component in range(num_components)
+        )
 
-    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: list[Any], recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for autograd fitting."""
         from pysp.stats.gradient import ConditionalGradientFitState
+
         dmap = {key: recurse(child, engine, torch, leaves) for key, child in self.dmap.items()}
         default_child = recurse(self.default_dist, engine, torch, leaves) if self.has_default else None
         given_child = recurse(self.given_dist, engine, torch, leaves) if self.has_given else None
         return ConditionalGradientFitState(self, dmap, default_child, given_child)
 
-    def sampler(self, seed: Optional[int] = None) -> 'ConditionalDistributionSampler':
+    def sampler(self, seed: int | None = None) -> "ConditionalDistributionSampler":
         """Creates ConditionalDistributionSampler object for sampling from ConditionalDistribution instance.
 
         Args:
@@ -427,7 +471,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         """
         return ConditionalDistributionSampler(self, seed=seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> "ConditionalDistributionEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> "ConditionalDistributionEstimator":
         """Creates ConditionalDistributionEstimator object from sufficient statistics of ConditionalDistribution object.
 
         Used to estimate a ConditionalDistribution from data observations.
@@ -443,23 +487,25 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         default_est = self.default_dist.estimator(pseudo_count)
         given_est = self.given_dist.estimator(pseudo_count)
 
-        return ConditionalDistributionEstimator(estimator_map=est_map,
-                                                default_estimator=default_est,
-                                                given_estimator=given_est,
-                                                name=self.name,
-                                                keys=self.keys)
+        return ConditionalDistributionEstimator(
+            estimator_map=est_map,
+            default_estimator=default_est,
+            given_estimator=given_est,
+            name=self.name,
+            keys=self.keys,
+        )
 
-    def dist_to_encoder(self) -> 'ConditionalDistributionDataEncoder':
+    def dist_to_encoder(self) -> "ConditionalDistributionDataEncoder":
         """Creates ConditionalDistributionDataEncoder object for encoding sequences of ConditionalDistribution data."""
         encoder_map = {k: v.dist_to_encoder() for k, v in self.dmap.items()}
         default_encoder = NullDataEncoder() if not self.has_default else self.default_dist.dist_to_encoder()
         given_encoder = NullDataEncoder() if not self.has_given else self.given_dist.dist_to_encoder()
 
-        return ConditionalDistributionDataEncoder(encoder_map=encoder_map,
-                                                  default_encoder=default_encoder,
-                                                  given_encoder=given_encoder)
+        return ConditionalDistributionDataEncoder(
+            encoder_map=encoder_map, default_encoder=default_encoder, given_encoder=given_encoder
+        )
 
-    def enumerator(self) -> 'ConditionalDistributionEnumerator':
+    def enumerator(self) -> "ConditionalDistributionEnumerator":
         """Creates a ConditionalDistributionEnumerator iterating (given, value) pairs in
         descending joint probability order.
 
@@ -498,37 +544,40 @@ class ConditionalDistributionEnumerator(DistributionEnumerator):
         super().__init__(dist)
 
         if not dist.has_given:
-            raise EnumerationError(dist, reason='the given distribution is unspecified '
-                                                '(NullDistribution), so the support over (given, value) '
-                                                'pairs is not enumerable')
+            raise EnumerationError(
+                dist,
+                reason="the given distribution is unspecified "
+                "(NullDistribution), so the support over (given, value) "
+                "pairs is not enumerable",
+            )
 
-        self._given_stream = BufferedStream(
-            child_enumerator(dist.given_dist, 'ConditionalDistribution.given_dist'))
+        self._given_stream = BufferedStream(child_enumerator(dist.given_dist, "ConditionalDistribution.given_dist"))
 
         # Fail fast: build one enumerator per conditional up front. Each given value appears at
         # most once in the given enumeration, so each stored enumerator is consumed at most once.
-        self._cond_enums = {k: child_enumerator(v, 'ConditionalDistribution.dmap[%s]' % repr(k))
-                            for k, v in dist.dmap.items()}
+        self._cond_enums = {
+            k: child_enumerator(v, "ConditionalDistribution.dmap[%s]" % repr(k)) for k, v in dist.dmap.items()
+        }
         if dist.has_default:
-            child_enumerator(dist.default_dist, 'ConditionalDistribution.default_dist')
+            child_enumerator(dist.default_dist, "ConditionalDistribution.default_dist")
 
         self._next_rank = 0
         self._counter = itertools.count()
-        self._heap: List[Tuple[float, int, int]] = []  # (-head_lp, counter, stream id)
-        self._heads: Dict[int, Tuple[Any, float]] = {}
-        self._streams: Dict[int, Iterator[Tuple[Any, float]]] = {}
+        self._heap: list[tuple[float, int, int]] = []  # (-head_lp, counter, stream id)
+        self._heads: dict[int, tuple[Any, float]] = {}
+        self._streams: dict[int, Iterator[tuple[Any, float]]] = {}
 
-    def _make_stream(self, x0: Any, lp0: float) -> Optional[Iterator[Tuple[Any, float]]]:
+    def _make_stream(self, x0: Any, lp0: float) -> Iterator[tuple[Any, float]] | None:
         """Return a sorted stream of ((x0, x1), lp0 + lp1) pairs, or None when x0 has no mass."""
         if x0 in self._cond_enums:
             child = self._cond_enums.pop(x0)
         elif self.dist.has_default:
-            child = child_enumerator(self.dist.default_dist, 'ConditionalDistribution.default_dist')
+            child = child_enumerator(self.dist.default_dist, "ConditionalDistribution.default_dist")
         else:
             return None
         return (((x0, x1), lp0 + lp1) for x1, lp1 in child)
 
-    def _pop(self) -> Tuple[Any, float]:
+    def _pop(self) -> tuple[Any, float]:
         """Emit the best instantiated head and advance its stream."""
         _, _, sid = heapq.heappop(self._heap)
         value, lp = self._heads.pop(sid)
@@ -540,7 +589,7 @@ class ConditionalDistributionEnumerator(DistributionEnumerator):
             del self._streams[sid]
         return (value, lp)
 
-    def __next__(self) -> Tuple[Any, float]:
+    def __next__(self) -> tuple[Any, float]:
         while True:
             frontier = self._given_stream.get(self._next_rank)
             if frontier is None:
@@ -568,7 +617,7 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
     """ConditionalDistributionSampler draws (given, value) pairs from a ConditionalDistribution,
     or values conditioned on a fixed given value via sample_given()."""
 
-    def __init__(self, dist: ConditionalDistribution, seed: Optional[int] = None) -> None:
+    def __init__(self, dist: ConditionalDistribution, seed: int | None = None) -> None:
         """ConditionalDistributionSampler object samples from ConditionalDistribution either directly or conditionally.
 
         Args:
@@ -601,7 +650,7 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
 
         self.samplers = {k: u.sampler(rng.randint(0, maxrandint)) for k, u in self.dist.dmap.items()}
 
-    def single_sample(self) -> Tuple[Any, Any]:
+    def single_sample(self) -> tuple[Any, Any]:
         """Generates a simple sample from the ConditionalDistribution.
 
         Returns Tuple of T0 and T1, where T1 is the data type of the conditional distribution, and T0 is the type of
@@ -618,7 +667,7 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
             x1 = self.default_sampler.sample()
         return x0, x1
 
-    def sample(self, size: Optional[int] = None) -> Union[Tuple[Any, Any], List[Tuple[Any, Any]]]:
+    def sample(self, size: int | None = None) -> tuple[Any, Any] | list[tuple[Any, Any]]:
         """Sample 'size' independent samples from ConditionalDistribution.
 
         Sequence of 'size' calls to single_sample(). If size is None, size is taken to be 1.
@@ -658,18 +707,20 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
             return self.default_sampler.sample()
 
         else:
-            raise Exception('Conditional default distribution unspecified.')
+            raise Exception("Conditional default distribution unspecified.")
 
 
 class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
     """ConditionalDistributionAccumulator accumulates sufficient statistics for each conditional
     distribution, the default distribution, and the given distribution."""
 
-    def __init__(self,
-                 accumulator_map: Dict[T0, SequenceEncodableStatisticAccumulator],
-                 default_accumulator: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
-                 given_accumulator: Optional[SequenceEncodableStatisticAccumulator] = NullAccumulator(),
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        accumulator_map: dict[T0, SequenceEncodableStatisticAccumulator],
+        default_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
+        given_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
+        keys: str | None = None,
+    ) -> None:
         """ConditionalDistributionAccumulator used for aggregating sufficient statistics of ConditionalDistribution.
 
         The sufficient statistics are defined through the accumulator_map dictionary, which is a dictionary with keys
@@ -719,11 +770,11 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         #### seeds for intializers
         self._init_rng = False
-        self._acc_rng: Optional[Dict[T0, RandomState]] = None
-        self._default_rng: Optional[RandomState] = None
-        self._given_rng: Optional[RandomState] = None
+        self._acc_rng: dict[T0, RandomState] | None = None
+        self._default_rng: RandomState | None = None
+        self._given_rng: RandomState | None = None
 
-    def update(self, x: Tuple[T0, T1], weight: float, estimate: Optional['ConditionalDistribution']) -> None:
+    def update(self, x: tuple[T0, T1], weight: float, estimate: Optional["ConditionalDistribution"]) -> None:
         """Updates sufficient statistics of ConditionalDistributionAccumulator for one weighted observation x.
 
         Single weighted observation used to update the sufficient statistics of ConditionalDistributionAccumulator.
@@ -763,10 +814,10 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         for acc_key in self.accumulator_map.keys():
             self._acc_rng[acc_key] = RandomState(seed=rng.randint(2**31))
 
-        self._default_rng = RandomState(seed=rng.randint(2 ** 31))
-        self._given_rng = RandomState(seed=rng.randint(2 ** 31))
+        self._default_rng = RandomState(seed=rng.randint(2**31))
+        self._given_rng = RandomState(seed=rng.randint(2**31))
 
-    def initialize(self, x: Tuple[T0, T1], weight: float, rng: RandomState) -> None:
+    def initialize(self, x: tuple[T0, T1], weight: float, rng: RandomState) -> None:
         """Initialize ConditionalDistributionAccumulator with single weighted observation.
 
         Note: _rng_initialize is called if _init_rng is False. This allows consistency between seq_initialize and
@@ -832,8 +883,9 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         for i in range(len(cond_vals)):
             if cond_vals[i] in self.accumulator_map:
-                self.accumulator_map[cond_vals[i]].seq_initialize(eobs_vals[i], weights[idx_vals[i]],
-                                                                  self._acc_rng[cond_vals[i]])
+                self.accumulator_map[cond_vals[i]].seq_initialize(
+                    eobs_vals[i], weights[idx_vals[i]], self._acc_rng[cond_vals[i]]
+                )
             else:
                 if self.has_default:
                     self.default_accumulator.seq_initialize(eobs_vals[i], weights[idx_vals[i]], self._default_rng)
@@ -841,7 +893,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         if self.has_given:
             self.given_accumulator.seq_initialize(given_enc, weights, self._given_rng)
 
-    def seq_update(self, x: E0, weights: np.ndarray, estimate: 'ConditionalDistribution') -> None:
+    def seq_update(self, x: E0, weights: np.ndarray, estimate: "ConditionalDistribution") -> None:
         """Vectorized update of sufficient statistics of ConditionalDistributionAccumulator for a sequence encoded
         x.
 
@@ -876,8 +928,9 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         for i in range(len(cond_vals)):
             if cond_vals[i] in self.accumulator_map:
-                self.accumulator_map[cond_vals[i]].seq_update(eobs_vals[i], weights[idx_vals[i]],
-                                                              estimate.dmap[cond_vals[i]])
+                self.accumulator_map[cond_vals[i]].seq_update(
+                    eobs_vals[i], weights[idx_vals[i]], estimate.dmap[cond_vals[i]]
+                )
             else:
                 if self.has_default:
                     if estimate is None:
@@ -891,31 +944,41 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             else:
                 self.given_accumulator.seq_update(given_enc, weights, estimate.given_dist)
 
-    def seq_update_engine(self, x: E0, weights: Any, estimate: 'ConditionalDistribution',
-                          engine: Any) -> None:
+    def seq_update_engine(self, x: E0, weights: Any, estimate: "ConditionalDistribution", engine: Any) -> None:
         """Engine-resident E-step: per-conditional-value subgroup weights are gathered on the active
         engine and the matching child accumulators (and the given accumulator) are routed through
         the engine. Matches seq_update.
         """
         from pysp.stats.backend import child_seq_update
+
         sz, cond_vals, eobs_vals, idx_vals, given_enc = x
         w_eng = engine.asarray(weights)
 
         for i in range(len(cond_vals)):
             wi = w_eng[np.asarray(idx_vals[i], dtype=np.int64)]
             if cond_vals[i] in self.accumulator_map:
-                child_seq_update(self.accumulator_map[cond_vals[i]], eobs_vals[i], wi,
-                                 estimate.dmap[cond_vals[i]] if estimate is not None else None, engine)
+                child_seq_update(
+                    self.accumulator_map[cond_vals[i]],
+                    eobs_vals[i],
+                    wi,
+                    estimate.dmap[cond_vals[i]] if estimate is not None else None,
+                    engine,
+                )
             elif self.has_default:
-                child_seq_update(self.default_accumulator, eobs_vals[i], wi,
-                                 None if estimate is None else estimate.default_dist, engine)
+                child_seq_update(
+                    self.default_accumulator,
+                    eobs_vals[i],
+                    wi,
+                    None if estimate is None else estimate.default_dist,
+                    engine,
+                )
 
         if self.has_given:
-            child_seq_update(self.given_accumulator, given_enc, w_eng,
-                             None if estimate is None else estimate.given_dist, engine)
+            child_seq_update(
+                self.given_accumulator, given_enc, w_eng, None if estimate is None else estimate.given_dist, engine
+            )
 
-    def combine(self, suff_stat: Tuple[Dict[T0, SS0], Optional[SS1], Optional[SS2]]) \
-            -> 'ConditionalDistributionAccumulator':
+    def combine(self, suff_stat: tuple[dict[T0, SS0], SS1 | None, SS2 | None]) -> "ConditionalDistributionAccumulator":
         """Aggregate sufficient statistics (suff_stat) with sufficient statistics of ConditionalDistributionAccumulator
             instance.
 
@@ -941,7 +1004,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def value(self) -> Tuple[Dict[Any, Any], Optional[Any], Optional[Any]]:
+    def value(self) -> tuple[dict[Any, Any], Any | None, Any | None]:
         """Get sufficient statistics of CompositeDistributionAccumulator."""
         rv3 = self.given_accumulator.value()
         rv2 = self.default_accumulator.value()
@@ -949,7 +1012,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         return rv1, rv2, rv3
 
-    def from_value(self, x: Tuple[Dict[T0, SS0], Optional[SS1], Optional[SS1]]) -> 'ConditionalDistributionAccumulator':
+    def from_value(self, x: tuple[dict[T0, SS0], SS1 | None, SS1 | None]) -> "ConditionalDistributionAccumulator":
         """Set ConditionalDistributionAccumulator member instances to x.
 
         Input x must be sufficient statistic tuple compatible with ConditionalDistributionAccumulator.
@@ -972,7 +1035,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> 'ConditionalDistributionAccumulator':
+    def scale(self, c: float) -> "ConditionalDistributionAccumulator":
         for accumulator in self.accumulator_map.values():
             accumulator.scale(c)
         if self.has_default:
@@ -981,7 +1044,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             self.given_accumulator.scale(c)
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Aggregate the sufficient statistics of ConditionalDistributionAccumulator with member instance key in
             stats_dict.
 
@@ -1002,7 +1065,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         if self.has_given:
             self.given_accumulator.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Invoke key_replace on each member SequenceEncodableStatisticAccumulator of
             ConditionalDistributionAccumulator instance.
 
@@ -1023,27 +1086,29 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         if self.has_given:
             self.given_accumulator.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'ConditionalDistributionDataEncoder':
+    def acc_to_encoder(self) -> "ConditionalDistributionDataEncoder":
         """Creates ConditionalDistributionDataEncoder object for encoding sequences of ConditionalDistribution data."""
 
         encoder_map = {k: v.acc_to_encoder() for k, v in self.accumulator_map.items()}
         default_encoder = self.default_accumulator.acc_to_encoder()
         given_encoder = self.given_accumulator.acc_to_encoder()
 
-        return ConditionalDistributionDataEncoder(encoder_map=encoder_map,
-                                                  default_encoder=default_encoder,
-                                                  given_encoder=given_encoder)
+        return ConditionalDistributionDataEncoder(
+            encoder_map=encoder_map, default_encoder=default_encoder, given_encoder=given_encoder
+        )
 
 
 class ConditionalDistributionAccumulatorFactory(StatisticAccumulatorFactory):
     """ConditionalDistributionAccumulatorFactory creates ConditionalDistributionAccumulator
     objects from the per-key, default, and given factories."""
 
-    def __init__(self,
-                 factory_map: Dict[T0, StatisticAccumulatorFactory],
-                 default_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
-                 given_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        factory_map: dict[T0, StatisticAccumulatorFactory],
+        default_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
+        given_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
+        keys: str | None = None,
+    ) -> None:
         """ConditionalDistributionAccumulatorFactory creates ConditionalDistributionAccumulator objects.
 
         Args:
@@ -1070,7 +1135,7 @@ class ConditionalDistributionAccumulatorFactory(StatisticAccumulatorFactory):
         self.given_factory = given_factory
         self.keys = keys
 
-    def make(self) -> 'ConditionalDistributionAccumulator':
+    def make(self) -> "ConditionalDistributionAccumulator":
         """Create ConditionalAccumulator object from StatisticAccumulatorFactory member instances.
 
         SequenceEncodableStatisticAccumulator objects are created for accumulator_map, default_accumulator, and
@@ -1091,12 +1156,14 @@ class ConditionalDistributionEstimator(ParameterEstimator):
     """ConditionalDistributionEstimator estimates a ConditionalDistribution from aggregated
     sufficient statistics."""
 
-    def __init__(self,
-                 estimator_map: Dict[T0, ParameterEstimator],
-                 default_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 given_estimator: Optional[ParameterEstimator] = NullEstimator(),
-                 name: Optional[str] = None,
-                 keys: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        estimator_map: dict[T0, ParameterEstimator],
+        default_estimator: ParameterEstimator | None = NullEstimator(),
+        given_estimator: ParameterEstimator | None = NullEstimator(),
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """ConditionalDistributionEstimator object used to estimate ConditionalDistribution from aggregated data.
 
         If None is passed for default_estimator, default_estimator is set to NullEstimator().
@@ -1125,7 +1192,7 @@ class ConditionalDistributionEstimator(ParameterEstimator):
         self.given_estimator = given_estimator if given_estimator is not None else NullEstimator()
         self.name = name
 
-    def accumulator_factory(self) -> 'ConditionalDistributionAccumulatorFactory':
+    def accumulator_factory(self) -> "ConditionalDistributionAccumulatorFactory":
         """Creates ConditionalDistributionAccumulatorFactory from estimator member values.
 
         Returns:
@@ -1138,8 +1205,9 @@ class ConditionalDistributionEstimator(ParameterEstimator):
 
         return ConditionalDistributionAccumulatorFactory(emap_items, def_factory, given_factory, self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: Tuple[Dict[T0, SS0], Optional[SS1], Optional[SS2]]) \
-            -> 'ConditionalDistribution':
+    def estimate(
+        self, nobs: float | None, suff_stat: tuple[dict[T0, SS0], SS1 | None, SS2 | None]
+    ) -> "ConditionalDistribution":
         """Estimate a ConditionalDistribution from aggregated data.
 
         Calls the estimate() member function of each ParameterEstimator instance for estimator_map, default_estimator,
@@ -1163,19 +1231,21 @@ class ConditionalDistributionEstimator(ParameterEstimator):
         given_dist = self.given_estimator.estimate(None, suff_stat[2])
         dist_map = {k: self.estimator_map[k].estimate(None, v) for k, v in suff_stat[0].items()}
 
-        return ConditionalDistribution(dist_map, default_dist=default_dist, given_dist=given_dist, name=self.name,
-                                       keys=self.keys)
+        return ConditionalDistribution(
+            dist_map, default_dist=default_dist, given_dist=given_dist, name=self.name, keys=self.keys
+        )
 
 
 class ConditionalDistributionDataEncoder(DataSequenceEncoder):
     """ConditionalDistributionDataEncoder encodes sequences of (given, value) pairs, grouping the
     values by given value and delegating each group to the matching conditional encoder."""
 
-    def __init__(self,
-                 encoder_map: Dict[T0, DataSequenceEncoder],
-                 default_encoder: DataSequenceEncoder = NullDataEncoder(),
-                 given_encoder: DataSequenceEncoder = NullDataEncoder()
-                 ) -> None:
+    def __init__(
+        self,
+        encoder_map: dict[T0, DataSequenceEncoder],
+        default_encoder: DataSequenceEncoder = NullDataEncoder(),
+        given_encoder: DataSequenceEncoder = NullDataEncoder(),
+    ) -> None:
         """ConditionalDistributionDataEncoder used to encode sequence of data.
 
         Data type should be Tuple[T0, T1] where T0 is the type of the conditional value in ConditionalDistribution.
@@ -1207,20 +1277,20 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
     def __str__(self) -> str:
         """Return string representation of the ConditionalDataEncoder with member DataSequenceEncoders printed out."""
         encoder_items = list(self.encoder_map.items())
-        encoder_str = 'ConditionalDataEncoder('
+        encoder_str = "ConditionalDataEncoder("
         for k, v in encoder_items[:-1]:
-            encoder_str += str(k) + ':' + str(v) + ','
-        encoder_str += str(encoder_items[-1][0]) + ':' + str(encoder_items[-1][1])
+            encoder_str += str(k) + ":" + str(v) + ","
+        encoder_str += str(encoder_items[-1][0]) + ":" + str(encoder_items[-1][1])
 
         if not self.null_default_encoder:
-            encoder_str += ',default=' + str(self.default_encoder)
+            encoder_str += ",default=" + str(self.default_encoder)
         else:
-            encoder_str += ',default=None'
+            encoder_str += ",default=None"
 
         if not self.null_given_encoder:
-            encoder_str += ',given=' + str(self.given_encoder)
+            encoder_str += ",given=" + str(self.given_encoder)
         else:
-            encoder_str += ',given=None)'
+            encoder_str += ",given=None)"
 
         return encoder_str
 
@@ -1252,8 +1322,9 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
 
         return True
 
-    def seq_encode(self, x: List[Tuple[T0, T1]]) -> Tuple[int, Tuple[Any, ...], Tuple[Any, ...],
-                                                          Tuple[np.ndarray, ...], Optional[Any]]:
+    def seq_encode(
+        self, x: list[tuple[T0, T1]]
+    ) -> tuple[int, tuple[Any, ...], tuple[Any, ...], tuple[np.ndarray, ...], Any | None]:
         """Encode sequence of iid observations from ConditionalDistribution for vectorized "seq_" function calls.
 
         Data must be a List of Tuple of two types, T0 and T1. T0 is the data type compatible with the conditional
@@ -1311,6 +1382,7 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
         given_enc = self.given_encoder.seq_encode(given_vals)
 
         return len(x), cond_vals, tuple(eobs_vals), tuple(idx_vals), given_enc
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 ConditionalAccumulator = ConditionalDistributionAccumulator

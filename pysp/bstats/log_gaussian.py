@@ -6,15 +6,14 @@ data. Encoded sequences store log(x), which makes the sufficient statistics
 and variational expectations identical to the Gaussian case up to the
 Jacobian term -log(x) in the density.
 """
-from typing import Optional, Tuple
 
+import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma
-import numpy as np
 
-from pysp.bstats.pdist import ProbabilityDistribution, StatisticAccumulator, ParameterEstimator
-from pysp.bstats.normgamma import NormalGammaDistribution
 from pysp.bstats.gaussian import GaussianAccumulator, GaussianEstimator
+from pysp.bstats.normgamma import NormalGammaDistribution
+from pysp.bstats.pdist import ProbabilityDistribution
 
 default_prior = NormalGammaDistribution(0.0, 1.0e-8, 0.500001, 1.0)
 
@@ -23,8 +22,9 @@ class LogGaussianDistribution(ProbabilityDistribution):
     """Log-Gaussian distribution with log-scale mean mu and variance sigma2,
     optionally carrying a NormalGamma conjugate prior over (mu, 1/sigma2)."""
 
-    def __init__(self, mu: float, sigma2: float, name: Optional[str] = None,
-                 prior: ProbabilityDistribution = default_prior):
+    def __init__(
+        self, mu: float, sigma2: float, name: str | None = None, prior: ProbabilityDistribution = default_prior
+    ):
         """LogGaussianDistribution object with log-scale parameters (mu, sigma2).
 
         Args:
@@ -43,13 +43,13 @@ class LogGaussianDistribution(ProbabilityDistribution):
         self.set_prior(prior)
 
     def __str__(self):
-        return 'LogGaussianDistribution(%f, %f, name=%s, prior=%s)' % (self.mu, self.sigma2, self.name, str(self.prior))
+        return "LogGaussianDistribution(%f, %f, name=%s, prior=%s)" % (self.mu, self.sigma2, self.name, str(self.prior))
 
-    def get_parameters(self) -> Tuple[float, float]:
+    def get_parameters(self) -> tuple[float, float]:
         """Returns the parameter tuple (mu, sigma2)."""
         return self.mu, self.sigma2
 
-    def set_parameters(self, params: Tuple[float, float]) -> None:
+    def set_parameters(self, params: tuple[float, float]) -> None:
         """Set the parameters and refresh the cached normalizing constant.
 
         Args:
@@ -58,7 +58,7 @@ class LogGaussianDistribution(ProbabilityDistribution):
         """
         self.mu = params[0]
         self.sigma2 = params[1]
-        self.log_const = -0.5*np.log(2.0*np.pi*self.sigma2)
+        self.log_const = -0.5 * np.log(2.0 * np.pi * self.sigma2)
 
     def get_prior(self) -> ProbabilityDistribution:
         """Returns the prior distribution on (mu, tau=1/sigma2)."""
@@ -85,10 +85,10 @@ class LogGaussianDistribution(ProbabilityDistribution):
 
             mu, lam, a, b = self.conj_prior_params
 
-            ea = ((mu*mu)*(a/b)*0.5 + (0.5/lam) + 0.5*(np.log(b) - digamma(a)))
-            e1 = mu*a/b
-            e2 = -0.5*a/b
-            eb = -0.5*np.log(2*np.pi)
+            ea = (mu * mu) * (a / b) * 0.5 + (0.5 / lam) + 0.5 * (np.log(b) - digamma(a))
+            e1 = mu * a / b
+            e2 = -0.5 * a / b
+            eb = -0.5 * np.log(2 * np.pi)
 
             self.expected_nparams = [ea, eb, e1, e2]
             self.has_conj_prior = True
@@ -125,7 +125,7 @@ class LogGaussianDistribution(ProbabilityDistribution):
         if x <= 0:
             return -np.inf
         y = np.log(x)
-        return self.log_const - 0.5*(y - self.mu)*(y - self.mu)/self.sigma2 - y
+        return self.log_const - 0.5 * (y - self.mu) * (y - self.mu) / self.sigma2 - y
 
     def expected_log_density(self, x: float) -> float:
         """Variational expectation E_q[log p(x | mu, tau)] under the prior.
@@ -147,7 +147,7 @@ class LogGaussianDistribution(ProbabilityDistribution):
                 return -np.inf
             y = np.log(x)
             ea, eb, e1, e2 = self.expected_nparams
-            return y*(e1 + y*e2) - ea + eb - y
+            return y * (e1 + y * e2) - ea + eb - y
         else:
             return self.log_density(x)
 
@@ -163,7 +163,7 @@ class LogGaussianDistribution(ProbabilityDistribution):
         """
         rv = np.log(np.asarray(x, dtype=float))
         if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
-            raise Exception('LogGaussianDistribution requires support x in (0,inf).')
+            raise Exception("LogGaussianDistribution requires support x in (0,inf).")
         return rv
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
@@ -178,7 +178,7 @@ class LogGaussianDistribution(ProbabilityDistribution):
         """
         rv = x - self.mu
         rv *= rv
-        rv *= -0.5/self.sigma2
+        rv *= -0.5 / self.sigma2
         rv += self.log_const
         rv -= x
         return rv
@@ -195,11 +195,11 @@ class LogGaussianDistribution(ProbabilityDistribution):
         """
         if self.has_conj_prior:
             ea, eb, e1, e2 = self.expected_nparams
-            return x*(e1 + x*e2) - ea + eb - x
+            return x * (e1 + x * e2) - ea + eb - x
         else:
             return self.seq_log_density(x)
 
-    def sampler(self, seed: Optional[int] = None):
+    def sampler(self, seed: int | None = None):
         """Create a LogGaussianSampler for this distribution.
 
         Args:
@@ -221,10 +221,10 @@ class LogGaussianDistribution(ProbabilityDistribution):
         return LogGaussianEstimator(name=self.name, prior=self.prior)
 
 
-class LogGaussianSampler(object):
+class LogGaussianSampler:
     """Draws samples from a LogGaussianDistribution."""
 
-    def __init__(self, dist: LogGaussianDistribution, seed: Optional[int] = None):
+    def __init__(self, dist: LogGaussianDistribution, seed: int | None = None):
         """LogGaussianSampler object.
 
         Args:
@@ -267,7 +267,7 @@ class LogGaussianAccumulator(GaussianAccumulator):
         super().update(np.log(x), weight, estimate)
 
 
-class LogGaussianEstimatorAccumulatorFactory(object):
+class LogGaussianEstimatorAccumulatorFactory:
     """Factory that creates LogGaussianAccumulator objects."""
 
     def __init__(self, name, keys):
@@ -315,6 +315,7 @@ class LogGaussianEstimator(GaussianEstimator):
         gd = super().estimate(suff_stat)
         sigma2 = gd.sigma2 if gd.sigma2 > 0 else 1.0
         return LogGaussianDistribution(gd.mu, sigma2, name=self.name, prior=gd.prior)
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 LogGaussianAccumulatorFactory = LogGaussianEstimatorAccumulatorFactory

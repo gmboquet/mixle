@@ -8,34 +8,45 @@ independent observations of 'n'-tupled data. Each component 'k' of the Composite
 must be compatible with data type T_k.
 
 """
+
 import math
 from collections import defaultdict
+from collections.abc import Sequence
+from typing import Any, Optional, TypeVar
+
 import numpy as np
 from numpy.random import RandomState
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator, DistributionSampler, \
-    StatisticAccumulatorFactory, SequenceEncodableStatisticAccumulator, DataSequenceEncoder, \
-    DistributionEnumerator, child_enumerator, EnumerationError
-from pysp.utils.enumeration import BufferedStream, LazyQuantizedEnumerationIndex, ProductEnumerator, QuantizedCrossIndex
-from typing import Optional, List, Union, Any, Tuple, Sequence, TypeVar, Dict
+
 from pysp.arithmetic import maxrandint
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    EnumerationError,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+    child_enumerator,
+)
+from pysp.utils.enumeration import BufferedStream, LazyQuantizedEnumerationIndex, ProductEnumerator, QuantizedCrossIndex
 
-
-T = Tuple[Any, ...]
-E = TypeVar('E')
-SS = TypeVar('SS')
+T = tuple[Any, ...]
+E = TypeVar("E")
+SS = TypeVar("SS")
 
 
 class CompositeDistribution(SequenceEncodableProbabilityDistribution):
-
     """Product distribution over heterogeneous component variables."""
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
-        return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.dists)),
-                                        kernel_status='numba_adapter')
 
-    def __init__(self,
-                 dists: Sequence[SequenceEncodableProbabilityDistribution]) -> None:
+        return DistributionCapabilities(
+            engine_ready=intersect_engine_ready(tuple(self.dists)), kernel_status="numba_adapter"
+        )
+
+    def __init__(self, dists: Sequence[SequenceEncodableProbabilityDistribution]) -> None:
         """CompositeDistribution for modeling independent distributions of from (Dist_0,Dist_1,...,Dist_{n-1}).
 
         Data type must be (T_0, T_1, ..., T_{n-1}), where data type T_k is consistent with distribution Dist_k. The
@@ -56,24 +67,25 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+
         children = tuple(declaration_for(d) for d in self.dists)
         children = tuple(d for d in children if d is not None)
         return DistributionDeclaration(
-            name='composite',
+            name="composite",
             distribution_type=type(self),
             parameters=(),
-            statistics=(StatisticSpec('components', kind='tuple'),),
-            support='product',
+            statistics=(StatisticSpec("components", kind="tuple"),),
+            support="product",
             children=children,
-            child_roles=tuple('field_%d' % i for i in range(len(children))),
+            child_roles=tuple("field_%d" % i for i in range(len(children))),
             differentiable=all(child.differentiable for child in children),
         )
 
     def __str__(self) -> str:
         """Returns str name of CompositeDistribution with each dist as well."""
-        return 'CompositeDistribution((%s))' % (','.join(map(str, self.dists)))
+        return "CompositeDistribution((%s))" % (",".join(map(str, self.dists)))
 
-    def density(self, x: Tuple[Any, ...]) -> float:
+    def density(self, x: tuple[Any, ...]) -> float:
         """Evaluates density of CompositeDistribution for single observation tuple x.
 
         p_mat(x) = p_mat(x_0 | dist_0)*p_mat(x_1 | dist_1)*...*p_mat(x_{n-1} | dist_{n-1}),
@@ -94,7 +106,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
-    def log_density(self, x: Tuple[Any, ...]) -> float:
+    def log_density(self, x: tuple[Any, ...]) -> float:
         """Evaluates log-density of CompositeDistribution for single observation tuple x.
 
         log(p_mat(x)) = log(p_mat(x_0 | dist_0)) + log(p_mat(x_1 | dist_1)) + ... + log(p_mat(x_{n-1} | dist_{n-1})),
@@ -138,67 +150,75 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
     def backend_seq_log_density(self, x: E, engine: Any) -> Any:
         """Engine-neutral vectorized log-density by composing child distributions."""
         from pysp.stats.backend import backend_seq_log_density
+
         rv = backend_seq_log_density(self.dists[0], x[0], engine)
         for i in range(1, self.count):
             rv = rv + backend_seq_log_density(self.dists[i], x[i], engine)
         return rv
 
-    def gradient_fit_state(self, engine: Any, torch: Any, leaves: List[Any], recurse: Any, tensor_param: Any) -> Any:
+    def gradient_fit_state(self, engine: Any, torch: Any, leaves: list[Any], recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for autograd fitting."""
         from pysp.stats.gradient import CompositeGradientFitState
+
         return CompositeGradientFitState(self, [recurse(dist, engine, torch, leaves) for dist in self.dists])
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence['CompositeDistribution'], engine: Any) -> Dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence["CompositeDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked child parameters for homogeneous composite mixtures."""
         from pysp.stats.stacked import stacked_component_params
+
         count = dists[0].count
         if any(d.count != count for d in dists):
-            raise ValueError('Stacked CompositeDistribution components require equal arity.')
+            raise ValueError("Stacked CompositeDistribution components require equal arity.")
         children = []
         for i in range(count):
             child_dists = [d.dists[i] for d in dists]
             try:
                 children.append(stacked_component_params(child_dists, engine))
             except ValueError as exc:
-                raise ValueError('Composite child %s is not stackable: %s' %
-                                 (type(child_dists[0]).__name__, exc))
-        return {'children': tuple(children)}
+                raise ValueError("Composite child %s is not stackable: %s" % (type(child_dists[0]).__name__, exc))
+        return {"children": tuple(children)}
 
     @classmethod
-    def backend_stacked_log_density(cls, x: E, params: Dict[str, Any], engine: Any) -> Any:
+    def backend_stacked_log_density(cls, x: E, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of composite log densities."""
         from pysp.stats.stacked import stacked_component_log_density
-        children = params['children']
+
+        children = params["children"]
         rv = stacked_component_log_density(x[0], children[0], engine)
         for i in range(1, len(children)):
             rv = rv + stacked_component_log_density(x[i], children[i], engine)
         return rv
 
     @classmethod
-    def backend_stacked_sufficient_statistics_with_estimator(cls, x: E, weights: Any,
-                                                            params: Dict[str, Any], engine: Any,
-                                                            estimator: Any) -> Tuple[Any, ...]:
+    def backend_stacked_sufficient_statistics_with_estimator(
+        cls, x: E, weights: Any, params: dict[str, Any], engine: Any, estimator: Any
+    ) -> tuple[Any, ...]:
         """Return per-component legacy composite sufficient statistics."""
-        from pysp.stats.stacked import StackedEstimatorView, stacked_component_sufficient_statistics, \
-            unstack_component_stats
+        from pysp.stats.stacked import (
+            StackedEstimatorView,
+            stacked_component_sufficient_statistics,
+            unstack_component_stats,
+        )
+
         ww = engine.asarray(weights)
-        num_components = int(tuple(getattr(ww, 'shape', (0, 0)))[1])
-        outer_estimators = tuple(getattr(estimator, 'estimators', ()))
+        num_components = int(tuple(getattr(ww, "shape", (0, 0)))[1])
+        outer_estimators = tuple(getattr(estimator, "estimators", ()))
         child_payloads = []
-        for i, route in enumerate(params['children']):
+        for i, route in enumerate(params["children"]):
             component_estimators = tuple(
-                getattr(component_est, 'estimators', ())[i]
+                getattr(component_est, "estimators", ())[i]
                 for component_est in outer_estimators
-                if len(getattr(component_est, 'estimators', ())) > i
+                if len(getattr(component_est, "estimators", ())) > i
             )
-            child_estimator = StackedEstimatorView(component_estimators) \
-                if len(component_estimators) == num_components else None
+            child_estimator = (
+                StackedEstimatorView(component_estimators) if len(component_estimators) == num_components else None
+            )
             child_stats = stacked_component_sufficient_statistics(x[i], ww, route, engine, child_estimator)
             child_payloads.append(unstack_component_stats(child_stats, num_components))
         return tuple(tuple(child[i] for child in child_payloads) for i in range(num_components))
 
-    def sampler(self, seed: Optional[int] = None) -> 'CompositeSampler':
+    def sampler(self, seed: int | None = None) -> "CompositeSampler":
         """Create CompositeSampler for sampling from CompositeDistribution instance.
 
         Args:
@@ -210,7 +230,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """
         return CompositeSampler(self, seed)
 
-    def estimator(self, pseudo_count: Optional[float] = None) -> 'CompositeEstimator':
+    def estimator(self, pseudo_count: float | None = None) -> "CompositeEstimator":
         """Create CompositeEstimator for estimating CompositeDistribution.
 
         Args:
@@ -222,7 +242,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """
         return CompositeEstimator([d.estimator(pseudo_count=pseudo_count) for d in self.dists])
 
-    def dist_to_encoder(self) -> 'CompositeDataEncoder':
+    def dist_to_encoder(self) -> "CompositeDataEncoder":
         """Creates CompositeDataEncoder for encoding sequence of tuple data.
 
         Passes 'encoders', which is a list of DataSequenceEncoders for each component of the CompositeDistribution.
@@ -235,7 +255,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
         return CompositeDataEncoder(encoders=encoders)
 
-    def enumerator(self) -> 'CompositeEnumerator':
+    def enumerator(self) -> "CompositeEnumerator":
         """Creates CompositeEnumerator iterating tuples in descending joint probability order."""
         return CompositeEnumerator(self)
 
@@ -249,35 +269,35 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         joint log-density.
         """
         if max_bits < 0:
-            raise ValueError('max_bits must be non-negative.')
+            raise ValueError("max_bits must be non-negative.")
         if bin_width_bits <= 0:
-            raise ValueError('bin_width_bits must be positive.')
+            raise ValueError("bin_width_bits must be positive.")
 
         max_bin = int(math.floor(float(max_bits) / float(bin_width_bits) + 1.0e-12))
         if self.count == 0:
             counts = {0: 1} if max_bin >= 0 else {}
 
-            def empty_getter(bin_id: int, offset: int) -> Tuple[Tuple[Any, ...], float]:
+            def empty_getter(bin_id: int, offset: int) -> tuple[tuple[Any, ...], float]:
                 if bin_id != 0 or offset != 0:
-                    raise IndexError('offset outside indexed bin.')
+                    raise IndexError("offset outside indexed bin.")
                 return (), 0.0
 
             return LazyQuantizedEnumerationIndex(
-                counts, bin_width_bits=bin_width_bits, max_bits=max_bits,
-                truncated=False, getter=empty_getter)
+                counts, bin_width_bits=bin_width_bits, max_bits=max_bits, truncated=False, getter=empty_getter
+            )
 
-        child_bins: List[Dict[int, List[Tuple[Any, float]]]] = []
+        child_bins: list[dict[int, list[tuple[Any, float]]]] = []
         truncated = False
         for i, dist in enumerate(self.dists):
             try:
                 child_index = dist.quantized_index(max_bits=max_bits, bin_width_bits=bin_width_bits)
             except EnumerationError as e:
-                path = 'CompositeDistribution.dists[%d]' % i
-                new_path = path if not e.path else '%s -> %s' % (path, e.path)
+                path = "CompositeDistribution.dists[%d]" % i
+                new_path = path if not e.path else "%s -> %s" % (path, e.path)
                 raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
 
             truncated = truncated or child_index.truncated
-            bins_i: Dict[int, List[Tuple[Any, float]]] = defaultdict(list)
+            bins_i: dict[int, list[tuple[Any, float]]] = defaultdict(list)
             for value, log_prob in child_index.iter_from():
                 bits = max(0.0, -float(log_prob) / math.log(2.0))
                 qbin = int(math.ceil(bits / float(bin_width_bits) - 1.0e-12))
@@ -288,16 +308,17 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             child_bins.append(dict(bins_i))
 
         if any(len(bins_i) == 0 for bins_i in child_bins):
-            def empty_getter(bin_id: int, offset: int) -> Tuple[Tuple[Any, ...], float]:
-                raise IndexError('offset outside indexed bin.')
+
+            def empty_getter(bin_id: int, offset: int) -> tuple[tuple[Any, ...], float]:
+                raise IndexError("offset outside indexed bin.")
 
             return LazyQuantizedEnumerationIndex(
-                {}, bin_width_bits=bin_width_bits, max_bits=max_bits,
-                truncated=True, getter=empty_getter)
+                {}, bin_width_bits=bin_width_bits, max_bits=max_bits, truncated=True, getter=empty_getter
+            )
 
-        plans: Dict[int, List[Tuple[Tuple[int, ...], int]]] = {0: [((), 1)]}
+        plans: dict[int, list[tuple[tuple[int, ...], int]]] = {0: [((), 1)]}
         for bins_i in child_bins:
-            next_plans: Dict[int, List[Tuple[Tuple[int, ...], int]]] = defaultdict(list)
+            next_plans: dict[int, list[tuple[tuple[int, ...], int]]] = defaultdict(list)
             for partial_bin, partial_plans in plans.items():
                 for child_bin in sorted(bins_i):
                     new_bin = partial_bin + child_bin
@@ -309,13 +330,12 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
                         next_plans[new_bin].append((prefix + (child_bin,), count * child_count))
             plans = dict(next_plans)
 
-        counts = {b: sum(count for _, count in plan_list)
-                  for b, plan_list in plans.items() if plan_list}
+        counts = {b: sum(count for _, count in plan_list) for b, plan_list in plans.items() if plan_list}
         plans_by_bin = {b: plan_list for b, plan_list in plans.items() if plan_list}
 
-        def getter(bin_id: int, offset: int) -> Tuple[Tuple[Any, ...], float]:
+        def getter(bin_id: int, offset: int) -> tuple[tuple[Any, ...], float]:
             if offset < 0:
-                raise IndexError('offset must be non-negative.')
+                raise IndexError("offset must be non-negative.")
             for plan, plan_count in plans_by_bin.get(bin_id, []):
                 if offset >= plan_count:
                     offset -= plan_count
@@ -333,11 +353,11 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
                     values.append(value)
                     log_prob += lp
                 return tuple(values), float(log_prob)
-            raise IndexError('offset outside indexed bin.')
+            raise IndexError("offset outside indexed bin.")
 
         return LazyQuantizedEnumerationIndex(
-            counts, bin_width_bits=bin_width_bits, max_bits=max_bits,
-            truncated=truncated, getter=getter)
+            counts, bin_width_bits=bin_width_bits, max_bits=max_bits, truncated=truncated, getter=getter
+        )
 
     def quantized_count_index(self, quantizer, max_fine_bucket: int):
         """Structural count index: the ADDITIVE law -- the carrier's n-ary product over children.
@@ -361,8 +381,8 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             try:
                 child_index, child_truncated = dist.quantized_count_index(quantizer, max_fine_bucket)
             except EnumerationError as e:
-                path = 'CompositeDistribution.dists[%d]' % i
-                new_path = path if not e.path else '%s -> %s' % (path, e.path)
+                path = "CompositeDistribution.dists[%d]" % i
+                new_path = path if not e.path else "%s -> %s" % (path, e.path)
                 raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
             children.append(child_index)
             truncated = truncated or child_truncated
@@ -373,9 +393,9 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """Build an aligned cross-bin view for compatible composite distributions."""
         dists = [self] + list(others)
         if any(not isinstance(dist, CompositeDistribution) for dist in dists):
-            raise EnumerationError(self, reason='composite cross-index requires CompositeDistribution objects')
+            raise EnumerationError(self, reason="composite cross-index requires CompositeDistribution objects")
         if any(dist.count != self.count for dist in dists):
-            raise EnumerationError(self, reason='composite cross-index requires equal tuple arity')
+            raise EnumerationError(self, reason="composite cross-index requires equal tuple arity")
         if isinstance(max_bits, np.ndarray):
             max_bits_tuple = tuple(float(x) for x in max_bits.tolist())
         elif isinstance(max_bits, (list, tuple)):
@@ -383,29 +403,28 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         else:
             max_bits_tuple = tuple([float(max_bits)] * len(dists))
         if len(max_bits_tuple) != len(dists):
-            raise ValueError('max_bits length must match the number of distributions.')
+            raise ValueError("max_bits length must match the number of distributions.")
         if bin_width_bits <= 0:
-            raise ValueError('bin_width_bits must be positive.')
+            raise ValueError("bin_width_bits must be positive.")
 
         child_crosses = []
         truncated = False
         for i in range(self.count):
             try:
                 child_cross = self.dists[i].quantized_multi_cross_index(
-                    [dist.dists[i] for dist in dists[1:]],
-                    max_bits=max_bits_tuple,
-                    bin_width_bits=bin_width_bits)
+                    [dist.dists[i] for dist in dists[1:]], max_bits=max_bits_tuple, bin_width_bits=bin_width_bits
+                )
             except EnumerationError as e:
-                path = 'CompositeDistribution.dists[%d]' % i
-                new_path = path if not e.path else '%s -> %s' % (path, e.path)
+                path = "CompositeDistribution.dists[%d]" % i
+                new_path = path if not e.path else "%s -> %s" % (path, e.path)
                 raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
             child_crosses.append(child_cross)
             truncated = truncated or child_cross.truncated
 
-        partials: List[Tuple[Tuple[Any, ...], Tuple[float, ...]]] = [((), tuple([0.0] * len(dists)))]
+        partials: list[tuple[tuple[Any, ...], tuple[float, ...]]] = [((), tuple([0.0] * len(dists)))]
         log2 = math.log(2.0)
         for child_cross in child_crosses:
-            next_partials: List[Tuple[Tuple[Any, ...], Tuple[float, ...]]] = []
+            next_partials: list[tuple[tuple[Any, ...], tuple[float, ...]]] = []
             for prefix, lp_prefix in partials:
                 for value, lps in child_cross.iter_items():
                     new_lps = tuple(float(lp_prefix[j] + lps[j]) for j in range(len(dists)))
@@ -418,7 +437,8 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
         items = [(values, lps) for values, lps in partials]
         return QuantizedCrossIndex.from_items(
-            items, max_bits=max_bits_tuple, bin_width_bits=bin_width_bits, truncated=truncated)
+            items, max_bits=max_bits_tuple, bin_width_bits=bin_width_bits, truncated=truncated
+        )
 
     def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
         """Build an aligned cross-bin view for two compatible composite distributions."""
@@ -426,8 +446,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class CompositeEnumerator(DistributionEnumerator):
-
-    def __init__(self, dist: 'CompositeDistribution') -> None:
+    def __init__(self, dist: "CompositeDistribution") -> None:
         """Enumerates tuples of the component supports in descending joint probability order.
 
         Joint log-density is the sum of component log-densities, so this is a best-first
@@ -439,17 +458,17 @@ class CompositeEnumerator(DistributionEnumerator):
 
         """
         super().__init__(dist)
-        streams = [BufferedStream(child_enumerator(d, 'CompositeDistribution.dists[%d]' % i))
-                   for i, d in enumerate(dist.dists)]
+        streams = [
+            BufferedStream(child_enumerator(d, "CompositeDistribution.dists[%d]" % i)) for i, d in enumerate(dist.dists)
+        ]
         self._product = ProductEnumerator(streams, combine=tuple)
 
-    def __next__(self) -> Tuple[Tuple[Any, ...], float]:
+    def __next__(self) -> tuple[tuple[Any, ...], float]:
         return next(self._product)
 
 
 class CompositeSampler(DistributionSampler):
-
-    def __init__(self, dist: 'CompositeDistribution', seed: Optional[int] = None) -> None:
+    def __init__(self, dist: "CompositeDistribution", seed: int | None = None) -> None:
         """CompositeSampler used to generate samples from CompositeDistribution.
 
         Args:
@@ -466,7 +485,7 @@ class CompositeSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist_samplers = [d.sampler(seed=self.rng.randint(maxrandint)) for d in dist.dists]
 
-    def sample(self, size: Optional[int] = None) -> Union[List[Tuple[Any, ...]], Tuple[Any, ...]]:
+    def sample(self, size: int | None = None) -> list[tuple[Any, ...]] | tuple[Any, ...]:
         """Generate independent samples from a CompositeDistribution.
 
         If size is None, draw one sample and return as Tuple of length = len(dists). If size > 0,
@@ -487,8 +506,7 @@ class CompositeSampler(DistributionSampler):
 
 
 class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
-
-    def __init__(self, accumulators: Sequence[SequenceEncodableStatisticAccumulator], keys: Optional[str] = None) -> None:
+    def __init__(self, accumulators: Sequence[SequenceEncodableStatisticAccumulator], keys: str | None = None) -> None:
         """CompositeAccumulator object used for aggregating suffcient statistics of each component of the
             CompositeDistribution.
 
@@ -511,9 +529,9 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
 
         ### variables for initialization
         self._init_rng = False
-        self._acc_rng: Optional[List[RandomState]] = None
+        self._acc_rng: list[RandomState] | None = None
 
-    def update(self, x: T, weight: float, estimate: Optional['CompositeDistribution']) -> None:
+    def update(self, x: T, weight: float, estimate: Optional["CompositeDistribution"]) -> None:
         """Calls update on each CompositeAccumulator component[k], passing x[k] and weight along with estimate
             if provided.
 
@@ -539,10 +557,10 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
                 self.accumulators[i].update(x[i], weight, None)
 
     def _rng_initialize(self, rng: RandomState) -> None:
-        seeds = rng.randint(2 ** 31, size=self.count)
+        seeds = rng.randint(2**31, size=self.count)
         self._acc_rng = [RandomState(seed=seed) for seed in seeds]
 
-    def initialize(self, x: Tuple[Any, ...], weight: float, rng: np.random.RandomState) -> None:
+    def initialize(self, x: tuple[Any, ...], weight: float, rng: np.random.RandomState) -> None:
         """Initialize each accumulator of CompositeAccumulator with component x[i] of x and weight.
 
         Note: rng is used to set List[RandomState]: _acc_rng. This is done to ensure iteration over observations of data,
@@ -585,14 +603,13 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         for i in range(0, self.count):
             self.accumulators[i].seq_initialize(x[i], weights, self._acc_rng[i])
 
-    def get_seq_lambda(self) -> List[Any]:
+    def get_seq_lambda(self) -> list[Any]:
         rv = []
         for i in range(self.count):
             rv.extend(self.accumulators[i].get_seq_lambda())
         return rv
 
-    def seq_update(self, x: Tuple[Any, ...], weights: np.ndarray,
-                   estimate: Optional['CompositeDistribution']) -> None:
+    def seq_update(self, x: tuple[Any, ...], weights: np.ndarray, estimate: Optional["CompositeDistribution"]) -> None:
         """Vectorized aggregation of sufficient statistics for each component of CompositeAccumulator.
 
         Requires sequence encoded input x, from CompositeDataEncoder.seq_encode(data).
@@ -610,17 +627,20 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         for i in range(self.count):
             self.accumulators[i].seq_update(x[i], weights, estimate.dists[i] if estimate is not None else None)
 
-    def seq_update_engine(self, x: Tuple[Any, ...], weights: Any,
-                          estimate: Optional['CompositeDistribution'], engine: Any) -> None:
+    def seq_update_engine(
+        self, x: tuple[Any, ...], weights: Any, estimate: Optional["CompositeDistribution"], engine: Any
+    ) -> None:
         """Engine-resident E-step: route each component accumulator through the active engine so
         nested families stay resident. Matches seq_update.
         """
         from pysp.stats.backend import child_seq_update
-        for i in range(self.count):
-            child_seq_update(self.accumulators[i], x[i], weights,
-                             estimate.dists[i] if estimate is not None else None, engine)
 
-    def combine(self, suff_stat: SS) -> 'CompositeAccumulator':
+        for i in range(self.count):
+            child_seq_update(
+                self.accumulators[i], x[i], weights, estimate.dists[i] if estimate is not None else None, engine
+            )
+
+    def combine(self, suff_stat: SS) -> "CompositeAccumulator":
         """Aggregate the sufficient statistics of CompositeAccumulator with input suff_stat.
 
         Args:
@@ -635,12 +655,12 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def value(self) -> Tuple[Any, ...]:
+    def value(self) -> tuple[Any, ...]:
         """Returns Tuple of length equal to member variable count, containing sufficient statistics for each
-            component."""
+        component."""
         return tuple([x.value() for x in self.accumulators])
 
-    def from_value(self, x: SS) -> 'CompositeAccumulator':
+    def from_value(self, x: SS) -> "CompositeAccumulator":
         """Set CompositeAccumulator instance sufficient statistics to x.
 
         Args:
@@ -656,13 +676,13 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> 'CompositeAccumulator':
+    def scale(self, c: float) -> "CompositeAccumulator":
         """Scale each child accumulator using its family-specific protocol."""
         for acc in self.accumulators:
             acc.scale(c)
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]) -> None:
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Combines the sufficient statistics of CompositeAccumulators that have the same key value.
 
         If key is not in the stats_dict (dictionary), the key and accumulator are added to the dict.
@@ -683,7 +703,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         for u in self.accumulators:
             u.key_merge(stats_dict)
 
-    def key_replace(self, stats_dict: Dict[str, Any]) -> None:
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set CompositeAccumulator sufficient statistic attributes values to suff stats with matching keys.
 
         Args:
@@ -701,7 +721,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         for u in self.accumulators:
             u.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> 'CompositeDataEncoder':
+    def acc_to_encoder(self) -> "CompositeDataEncoder":
         """Creates CompositeDataEncoder for encoding sequence of tuple data.
 
         encoders is a list of DataSequenceEncoders for each component of the CompositeDistribution.
@@ -716,8 +736,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class CompositeAccumulatorFactory(StatisticAccumulatorFactory):
-
-    def __init__(self, factories: Sequence[StatisticAccumulatorFactory], keys: Optional[str] = None) -> None:
+    def __init__(self, factories: Sequence[StatisticAccumulatorFactory], keys: str | None = None) -> None:
         """CompositeAccumulatorFactory used for lightweight creation of CompositeAccumulator.
 
         Args:
@@ -733,7 +752,7 @@ class CompositeAccumulatorFactory(StatisticAccumulatorFactory):
         self.factories = factories
         self.keys = keys
 
-    def make(self) -> 'CompositeAccumulator':
+    def make(self) -> "CompositeAccumulator":
         """Create a CompositeAccumulator object from list of StatisticAccumulatorFactory objects.
 
         Returns:
@@ -744,8 +763,7 @@ class CompositeAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class CompositeEstimator(ParameterEstimator):
-
-    def __init__(self, estimators: Sequence[ParameterEstimator], keys: Optional[str] = None) -> None:
+    def __init__(self, estimators: Sequence[ParameterEstimator], keys: str | None = None) -> None:
         """CompositeEstimator object used to estimate CompositeDistribution from sufficient statistics of each
             component.
 
@@ -765,7 +783,7 @@ class CompositeEstimator(ParameterEstimator):
         self.count = len(estimators)
         self.keys = keys
 
-    def accumulator_factory(self) -> 'CompositeAccumulatorFactory':
+    def accumulator_factory(self) -> "CompositeAccumulatorFactory":
         """Creates CompositeAccumulatorFactory from each ParameterEstimator in estimators.
 
         Returns:
@@ -774,7 +792,7 @@ class CompositeEstimator(ParameterEstimator):
         """
         return CompositeAccumulatorFactory([u.accumulator_factory() for u in self.estimators], self.keys)
 
-    def estimate(self, nobs: Optional[float], suff_stat: SS) -> 'CompositeDistribution':
+    def estimate(self, nobs: float | None, suff_stat: SS) -> "CompositeDistribution":
         """Estimate a CompositeDistribution from an aggregated sufficient statistics Tuple for a given number of
             observations (nobs).
 
@@ -791,7 +809,6 @@ class CompositeEstimator(ParameterEstimator):
 
 
 class CompositeDataEncoder(DataSequenceEncoder):
-
     def __init__(self, encoders: Sequence[DataSequenceEncoder]) -> None:
         """CompositeDataEncoder used for encoding data.
 
@@ -826,7 +843,6 @@ class CompositeDataEncoder(DataSequenceEncoder):
             return False
 
         else:
-
             for i, encoder in enumerate(self.encoders):
                 if not encoder == other.encoders[i]:
                     return False
@@ -838,16 +854,16 @@ class CompositeDataEncoder(DataSequenceEncoder):
         for each component.
         """
 
-        s = 'CompositeDataEncoder(['
+        s = "CompositeDataEncoder(["
 
         for d in self.encoders[:-1]:
-            s += str(d) + ','
+            s += str(d) + ","
 
-        s += str(self.encoders[-1]) + '])'
+        s += str(self.encoders[-1]) + "])"
 
         return s
 
-    def seq_encode(self, x: Sequence[Tuple[Any, ...]]) -> Tuple[Any, ...]:
+    def seq_encode(self, x: Sequence[tuple[Any, ...]]) -> tuple[Any, ...]:
         """Encode Sequence of tuples of data for use with vectorized "seq_" functions.
 
         The input x must be a Sequence of Tuples of length equal to the length of encoders. Each component tuple

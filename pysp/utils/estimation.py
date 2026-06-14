@@ -4,24 +4,31 @@ Useful functions for estimating pysparkplug 'SequenceEncodableProbabilityDistrib
 objects.
 
 """
+
 import copy
+import sys
+import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import IO, Any, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
-import sys
-import time
 
-from pysp.stats import initialize, seq_estimate, seq_log_density_sum, seq_encode, seq_log_density, seq_initialize, \
-    validate_estimator_keys
+from pysp.stats import (
+    seq_encode,
+    seq_estimate,
+    seq_initialize,
+    seq_log_density,
+    seq_log_density_sum,
+    validate_estimator_keys,
+)
 from pysp.stats.gradient import GradientFitError
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, ParameterEstimator
+from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 from pysp.utils.priors import as_prior_dict
 
-from typing import Any, Tuple, List, Union, TypeVar, Optional, IO, Sequence, Mapping
-
-T = TypeVar('T')
-E0 = TypeVar('E0')
+T = TypeVar("T")
+E0 = TypeVar("E0")
 
 
 @dataclass
@@ -31,43 +38,43 @@ class GradientFitResult:
     model: SequenceEncodableProbabilityDistribution
     value: float
     iterations: int
-    history: Tuple[float, ...] = ()
+    history: tuple[float, ...] = ()
     converged: bool = False
-    initial_value: Optional[float] = None
-    final_delta: Optional[float] = None
-    log_likelihood: Optional[float] = None
-    log_prior: Optional[float] = None
+    initial_value: float | None = None
+    final_delta: float | None = None
+    log_likelihood: float | None = None
+    log_prior: float | None = None
     prior_strength: float = 0.0
-    tag: str = 'MLE'
-    best_value: Optional[float] = None
-    best_iteration: Optional[int] = None
-    final_gradient_norm: Optional[float] = None
+    tag: str = "MLE"
+    best_value: float | None = None
+    best_iteration: int | None = None
+    final_gradient_norm: float | None = None
 
-    def as_tuple(self) -> Tuple[SequenceEncodableProbabilityDistribution, float]:
+    def as_tuple(self) -> tuple[SequenceEncodableProbabilityDistribution, float]:
         """Return the historical ``(model, objective)`` shape."""
         return self.model, self.value
 
     @property
-    def objective_change(self) -> Optional[float]:
+    def objective_change(self) -> float | None:
         """Return the signed objective change from the start of optimization."""
         if self.initial_value is None:
             return None
         return self.value - self.initial_value
 
     @property
-    def improvement(self) -> Optional[float]:
+    def improvement(self) -> float | None:
         """Return the maximization improvement from the start objective."""
         return self.objective_change
 
     @property
-    def best_improvement(self) -> Optional[float]:
+    def best_improvement(self) -> float | None:
         """Return best improvement seen during optimization."""
         if self.initial_value is None or self.best_value is None:
             return None
         return self.best_value - self.initial_value
 
     @property
-    def prior_sensitivity(self) -> Optional[float]:
+    def prior_sensitivity(self) -> float | None:
         """Return the magnitude fraction of the final objective coming from the prior."""
         if self.log_likelihood is None or self.log_prior is None:
             return None
@@ -77,9 +84,11 @@ class GradientFitResult:
         return 0.0 if total == 0.0 else prior / total
 
 
-def empirical_kl_divergence(dist1: SequenceEncodableProbabilityDistribution,
-                            dist2: SequenceEncodableProbabilityDistribution, enc_data: List[Tuple[int, Any]]
-                            ) -> Tuple[float, float, float]:
+def empirical_kl_divergence(
+    dist1: SequenceEncodableProbabilityDistribution,
+    dist2: SequenceEncodableProbabilityDistribution,
+    enc_data: list[tuple[int, Any]],
+) -> tuple[float, float, float]:
     """Computes the emirical KL-divergence between two densities.
 
     Compute the KL-divergence between dist1 and dist2, for encoded sequence of data. Dists must both have the
@@ -142,7 +151,7 @@ def k_fold_split_index(sz: int, k: int, rng: RandomState) -> np.ndarray:
     return rv
 
 
-def partition_data_index(sz: int, pvec: Union[List[float], np.ndarray], rng: RandomState) -> List[np.ndarray]:
+def partition_data_index(sz: int, pvec: list[float] | np.ndarray, rng: RandomState) -> list[np.ndarray]:
     """Returns List of np.ndarray[int] containing integers indexes for data partitions proportional to pvec.
 
     Args:
@@ -170,7 +179,7 @@ def partition_data_index(sz: int, pvec: Union[List[float], np.ndarray], rng: Ran
     return rv
 
 
-def partition_data(data: Sequence[T], pvec: Union[List[float], np.ndarray], rng: RandomState) -> List[List[T]]:
+def partition_data(data: Sequence[T], pvec: list[float] | np.ndarray, rng: RandomState) -> list[list[T]]:
     """Partitions List of data into partitions, each with size equal to the proportion of pvec.
 
     Args:
@@ -189,13 +198,22 @@ def partition_data(data: Sequence[T], pvec: Union[List[float], np.ndarray], rng:
     return [[data[i] for i in u] for u in idx_list]
 
 
-def best_of(data: Optional[Sequence[T]], vdata: Optional[Sequence[T]], est: ParameterEstimator, trials: int,
-            max_its: int, init_p: float, delta: float, rng: RandomState,
-            init_estimator: Optional[ParameterEstimator] = None,
-            enc_data: Optional[List[Tuple[int, E0]]] = None,
-            enc_vdata: Optional[Sequence[Tuple[int, E0]]] = None,
-            out: IO = sys.stdout, print_iter: int = 1,
-            reuse_estep_ll: bool = False) -> Tuple[float, SequenceEncodableProbabilityDistribution]:
+def best_of(
+    data: Sequence[T] | None,
+    vdata: Sequence[T] | None,
+    est: ParameterEstimator,
+    trials: int,
+    max_its: int,
+    init_p: float,
+    delta: float,
+    rng: RandomState,
+    init_estimator: ParameterEstimator | None = None,
+    enc_data: list[tuple[int, E0]] | None = None,
+    enc_vdata: Sequence[tuple[int, E0]] | None = None,
+    out: IO = sys.stdout,
+    print_iter: int = 1,
+    reuse_estep_ll: bool = False,
+) -> tuple[float, SequenceEncodableProbabilityDistribution]:
     """Performs EM algorithm for trials-number of randomized initial conditions. Returns the best model fit in terms of
         maximum log-likelihood value from validation data.
 
@@ -224,7 +242,7 @@ def best_of(data: Optional[Sequence[T]], vdata: Optional[Sequence[T]], est: Para
 
     """
     if data is None and enc_data is None:
-        raise Exception('Optimization called with empty data or enc_data.')
+        raise Exception("Optimization called with empty data or enc_data.")
 
     max_its = max(1, max_its)
     trials = max(1, trials)
@@ -242,31 +260,44 @@ def best_of(data: Optional[Sequence[T]], vdata: Optional[Sequence[T]], est: Para
 
     rv_ll, rv_mm = -np.inf, None
     for kk in range(trials):
-        mm = optimize(None, est, init_estimator=i_est, enc_data=enc_data, enc_vdata=enc_vdata,
-                      max_its=max_its, delta=delta, init_p=init_p, rng=rng, out=out,
-                      print_iter=print_iter, reuse_estep_ll=reuse_estep_ll)
+        mm = optimize(
+            None,
+            est,
+            init_estimator=i_est,
+            enc_data=enc_data,
+            enc_vdata=enc_vdata,
+            max_its=max_its,
+            delta=delta,
+            init_p=init_p,
+            rng=rng,
+            out=out,
+            print_iter=print_iter,
+            reuse_estep_ll=reuse_estep_ll,
+        )
         _, vll = seq_log_density_sum(score_data, mm)
-        out.write('Trial %d. VLL=%f\n' % (kk + 1, vll))
+        out.write("Trial %d. VLL=%f\n" % (kk + 1, vll))
         if vll > rv_ll:
             rv_ll, rv_mm = vll, mm
 
     return rv_ll, rv_mm
 
 
-def _local_encoded_chunks(enc_data: Any) -> List[Tuple[int, Any]]:
-    if hasattr(enc_data, 'as_seq_chunk'):
+def _local_encoded_chunks(enc_data: Any) -> list[tuple[int, Any]]:
+    if hasattr(enc_data, "as_seq_chunk"):
         return [enc_data.as_seq_chunk()]
     if isinstance(enc_data, tuple) and len(enc_data) == 2 and isinstance(enc_data[0], (int, np.integer, float)):
         return [enc_data]
     if isinstance(enc_data, list):
         return enc_data
-    raise ValueError('engine-aware optimize currently supports local encoded chunks only; '
-                     'distributed engine orchestration is handled by a later planner slice.')
+    raise ValueError(
+        "engine-aware optimize currently supports local encoded chunks only; "
+        "distributed engine orchestration is handled by a later planner slice."
+    )
 
 
-def _engine_seq_log_density_sum(enc_data: Any,
-                                estimate: SequenceEncodableProbabilityDistribution,
-                                engine: Any) -> Tuple[float, float]:
+def _engine_seq_log_density_sum(
+    enc_data: Any, estimate: SequenceEncodableProbabilityDistribution, engine: Any
+) -> tuple[float, float]:
     chunks = _local_encoded_chunks(enc_data)
     kernel = estimate.kernel(engine=engine)
     nobs = 0.0
@@ -277,10 +308,9 @@ def _engine_seq_log_density_sum(enc_data: Any,
     return nobs, ll
 
 
-def _engine_seq_estimate(enc_data: Any,
-                         estimator: ParameterEstimator,
-                         prev_estimate: SequenceEncodableProbabilityDistribution,
-                         engine: Any) -> SequenceEncodableProbabilityDistribution:
+def _engine_seq_estimate(
+    enc_data: Any, estimator: ParameterEstimator, prev_estimate: SequenceEncodableProbabilityDistribution, engine: Any
+) -> SequenceEncodableProbabilityDistribution:
     validate_estimator_keys(estimator)
     chunks = _local_encoded_chunks(enc_data)
     kernel = prev_estimate.kernel(engine=engine, estimator=estimator)
@@ -293,11 +323,11 @@ def _engine_seq_estimate(enc_data: Any,
 
 
 def _dataframe_like(data: Any) -> bool:
-    return hasattr(data, 'columns') and hasattr(data, 'loc')
+    return hasattr(data, "columns") and hasattr(data, "loc")
 
 
 def _recordish(obj: Any) -> bool:
-    return obj is not None and hasattr(obj, 'fields') and hasattr(obj, 'sources')
+    return obj is not None and hasattr(obj, "fields") and hasattr(obj, "sources")
 
 
 def _dataframe_fields(fields: Any, estimator: Any, model: Any) -> Any:
@@ -305,7 +335,7 @@ def _dataframe_fields(fields: Any, estimator: Any, model: Any) -> Any:
         return fields
     for obj in (model, estimator):
         if _recordish(obj):
-            return tuple(zip(getattr(obj, 'fields'), getattr(obj, 'sources')))
+            return tuple(zip(obj.fields, obj.sources))
     return None
 
 
@@ -313,6 +343,7 @@ def _data_records_for_encoding(data: Any, fields: Any, estimator: Any, model: An
     if not _dataframe_like(data) and fields is None:
         return data
     from pysp.stats.dataframe import dataframe_records
+
     record_fields = _dataframe_fields(fields, estimator, model)
     return dataframe_records(data, fields=record_fields, as_dict=_recordish(model) or _recordish(estimator))
 
@@ -324,22 +355,24 @@ def _data_records_for_encoding(data: Any, fields: Any, estimator: Any, model: An
 # step until convergence. The helpers below factor out that skeleton so each
 # entry point is a thin policy wrapper over one tested loop.
 
-def _resolve_encoder(estimator: ParameterEstimator,
-                     prev_estimate: Optional[SequenceEncodableProbabilityDistribution] = None) -> Any:
+
+def _resolve_encoder(
+    estimator: ParameterEstimator, prev_estimate: SequenceEncodableProbabilityDistribution | None = None
+) -> Any:
     """Return the data encoder for a fitting run (model encoder if continuing)."""
     if prev_estimate is not None:
         return prev_estimate.dist_to_encoder()
     return estimator.accumulator_factory().make().acc_to_encoder()
 
 
-def _ll_sum_fn(engine: Optional[Any]):
+def _ll_sum_fn(engine: Any | None):
     """Return a (enc, model) -> (count, log_likelihood) scorer for the engine."""
     if engine is None:
         return seq_log_density_sum
     return lambda enc, model: _engine_seq_log_density_sum(enc, model, engine)
 
 
-def _em_step_fn(engine: Optional[Any], strategy: Optional[Any] = None):
+def _em_step_fn(engine: Any | None, strategy: Any | None = None):
     """Return the per-iteration (enc, estimator, model) -> model update.
 
     With ``strategy`` set, the update is delegated to an EM strategy object
@@ -348,16 +381,19 @@ def _em_step_fn(engine: Optional[Any], strategy: Optional[Any] = None):
     import. Otherwise the standard exact E/M step is used (engine-aware).
     """
     if strategy is not None:
-        step_method = getattr(strategy, 'step', None)
+        step_method = getattr(strategy, "step", None)
         if callable(step_method):
+
             def step(enc, estimator, model):
                 result = step_method(enc, estimator, model, engine=engine)
-                return getattr(result, 'model', result)
+                return getattr(result, "model", result)
+
             return step
         if callable(strategy):
             return lambda enc, estimator, model: strategy(enc, estimator, model)
-        raise TypeError('strategy must be an EM strategy with .step(...) or a callable '
-                        '(enc, estimator, model) -> model.')
+        raise TypeError(
+            "strategy must be an EM strategy with .step(...) or a callable (enc, estimator, model) -> model."
+        )
     if engine is None:
         return seq_estimate
     return lambda enc, estimator, model: _engine_seq_estimate(enc, estimator, model, engine)
@@ -381,28 +417,40 @@ def _local_fused_step(enc_data, estimator, model):
     accumulator.key_replace(stats_dict)
     nxt = estimator.estimate(None, accumulator.value())
     # Present only when the top-level accumulator recorded it (e.g. mixtures); else None -> fallback.
-    return nxt, getattr(accumulator, '_seq_ll', None)
+    return nxt, getattr(accumulator, "_seq_ll", None)
 
 
-def _write_em_iter(out: Optional[IO], i: int, ll: float, dll: float, vll: float, has_vdata: bool) -> None:
+def _write_em_iter(out: IO | None, i: int, ll: float, dll: float, vll: float, has_vdata: bool) -> None:
     """Write one EM progress line in the historical format."""
     if out is None:
         return
     if has_vdata:
-        out.write('Iteration %d: ln[p_mat(Data|Model)]=%e, ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e, '
-                  'ln[p_mat(Valid Data|Model)]=%e\n' % (i, ll, dll, vll))
+        out.write(
+            "Iteration %d: ln[p_mat(Data|Model)]=%e, ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e, "
+            "ln[p_mat(Valid Data|Model)]=%e\n" % (i, ll, dll, vll)
+        )
     else:
-        out.write('Iteration %d: ln[p_mat(Data|Model)]=%e, '
-                  'ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e\n' % (i, ll, dll))
+        out.write(
+            "Iteration %d: ln[p_mat(Data|Model)]=%e, "
+            "ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e\n" % (i, ll, dll)
+        )
 
 
-def _em_loop(enc_data: Any, estimator: ParameterEstimator,
-             model: SequenceEncodableProbabilityDistribution,
-             step_fn: Any, ll_fn: Any, max_its: int, delta: Optional[float],
-             enc_vdata: Optional[Any] = None, out: Optional[IO] = sys.stdout,
-             print_iter: int = 1, monotone: bool = True,
-             track_best: bool = True,
-             fused_step_fn: Optional[Any] = None) -> Tuple[SequenceEncodableProbabilityDistribution, float]:
+def _em_loop(
+    enc_data: Any,
+    estimator: ParameterEstimator,
+    model: SequenceEncodableProbabilityDistribution,
+    step_fn: Any,
+    ll_fn: Any,
+    max_its: int,
+    delta: float | None,
+    enc_vdata: Any | None = None,
+    out: IO | None = sys.stdout,
+    print_iter: int = 1,
+    monotone: bool = True,
+    track_best: bool = True,
+    fused_step_fn: Any | None = None,
+) -> tuple[SequenceEncodableProbabilityDistribution, float]:
     """Canonical EM iteration shared by the public estimation entry points.
 
     Args:
@@ -426,8 +474,9 @@ def _em_loop(enc_data: Any, estimator: ParameterEstimator,
         ``(chosen_model, best_validation_score)``.
     """
     if fused_step_fn is not None:
-        return _fused_em_loop(enc_data, estimator, model, fused_step_fn, ll_fn, max_its,
-                              delta, enc_vdata, out, print_iter, track_best)
+        return _fused_em_loop(
+            enc_data, estimator, model, fused_step_fn, ll_fn, max_its, delta, enc_vdata, out, print_iter, track_best
+        )
 
     _, old_ll = ll_fn(enc_data, model)
     has_v = enc_vdata is not None
@@ -457,8 +506,9 @@ def _em_loop(enc_data: Any, estimator: ParameterEstimator,
     return (best_model if track_best else model), best_vll
 
 
-def _fused_em_loop(enc_data, estimator, model, fused_step_fn, ll_fn, max_its, delta,
-                   enc_vdata, out, print_iter, track_best):
+def _fused_em_loop(
+    enc_data, estimator, model, fused_step_fn, ll_fn, max_its, delta, enc_vdata, out, print_iter, track_best
+):
     """EM loop that reuses the E-step's likelihood normalizer instead of a separate score pass.
 
     Each ``fused_step_fn`` call returns ``(next_model, ll_of_model)`` where ``ll_of_model`` is the
@@ -486,7 +536,7 @@ def _fused_em_loop(enc_data, estimator, model, fused_step_fn, ll_fn, max_its, de
             best_score = score
             best_model = model
 
-        dll = (ll_model - prev_ll) if prev_ll is not None else float('inf')
+        dll = (ll_model - prev_ll) if prev_ll is not None else float("inf")
         converged = (delta is not None) and (prev_ll is not None) and (dll < delta)
         if converged or ((i + 1) % print_iter == 0):
             _write_em_iter(out, i + 1, ll_model, dll, score, has_v)
@@ -507,30 +557,37 @@ def _fused_em_loop(enc_data, estimator, model, fused_step_fn, ll_fn, max_its, de
     return chosen, (best_score if best_score is not None else 0.0)
 
 
-def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its: int = 10,
-             delta: Optional[float] = 1.0e-9,
-             init_estimator: Optional[ParameterEstimator] = None, init_p: float = 0.1,
-             rng: RandomState = RandomState(), prev_estimate: Optional[SequenceEncodableProbabilityDistribution] = None,
-             vdata: Optional[Sequence[T]] = None,
-             enc_data: Optional[List[Tuple[int, E0]]] = None,
-             enc_vdata: Optional[List[Tuple[int, E0]]] = None,
-             out: IO = sys.stdout,
-             print_iter: int = 1, num_chunks: int = 1,
-             engine: Optional[Any] = None,
-             precision: Optional[Any] = None,
-             fields: Optional[Any] = None,
-             resources: Optional[Any] = None,
-             placement: Optional[Any] = None,
-             sub_chunks: int = 1,
-             chunk_size: Optional[int] = None,
-             backend: str = 'local',
-             num_workers: Optional[int] = None,
-             client: Optional[Any] = None,
-             comm: Optional[Any] = None,
-             root: int = 0,
-             root_only: bool = False,
-             strategy: Optional[Any] = None,
-             reuse_estep_ll: bool = False) -> SequenceEncodableProbabilityDistribution:
+def optimize(
+    data: Sequence[T] | None,
+    estimator: ParameterEstimator,
+    max_its: int = 10,
+    delta: float | None = 1.0e-9,
+    init_estimator: ParameterEstimator | None = None,
+    init_p: float = 0.1,
+    rng: RandomState = RandomState(),
+    prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
+    vdata: Sequence[T] | None = None,
+    enc_data: list[tuple[int, E0]] | None = None,
+    enc_vdata: list[tuple[int, E0]] | None = None,
+    out: IO = sys.stdout,
+    print_iter: int = 1,
+    num_chunks: int = 1,
+    engine: Any | None = None,
+    precision: Any | None = None,
+    fields: Any | None = None,
+    resources: Any | None = None,
+    placement: Any | None = None,
+    sub_chunks: int = 1,
+    chunk_size: int | None = None,
+    backend: str = "local",
+    num_workers: int | None = None,
+    client: Any | None = None,
+    comm: Any | None = None,
+    root: int = 0,
+    root_only: bool = False,
+    strategy: Any | None = None,
+    reuse_estep_ll: bool = False,
+) -> SequenceEncodableProbabilityDistribution:
     """Estimation of 'estimator' via EM algorithm for max_its iterations or until
         new_loglikelihood - old_loglikelihood < delta.
 
@@ -594,11 +651,12 @@ def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its
     """
     if precision is not None:
         from pysp.engines import engine_with_precision
+
         engine = engine_with_precision(engine, precision)
 
-    backend_name = str(backend or 'local').lower()
-    if data is None and enc_data is None and not (backend_name == 'mpi' and root_only):
-        raise Exception('Optimization called with empty data or enc_data.')
+    backend_name = str(backend or "local").lower()
+    if data is None and enc_data is None and not (backend_name == "mpi" and root_only):
+        raise Exception("Optimization called with empty data or enc_data.")
 
     est = estimator if init_estimator is None else init_estimator
 
@@ -612,18 +670,32 @@ def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its
     close_created_enc_data = False
     if enc_data is None:
         data_for_encoding = _data_records_for_encoding(data, fields, est, encode_model)
-        if resources is not None or placement is not None or backend_name != 'local':
+        if resources is not None or placement is not None or backend_name != "local":
             from pysp.parallel import encoded_data, is_encoded_data_handle
+
             close_created_enc_data = not is_encoded_data_handle(data_for_encoding)
-            enc_data = encoded_data(data_for_encoding, estimator=est, model=encode_model,
-                                    encoder=data_encoder, placement=placement, resources=resources,
-                                    engine=engine, precision=precision, num_chunks=num_chunks,
-                                    sub_chunks=sub_chunks, backend=backend_name,
-                                    num_workers=num_workers, client=client, comm=comm, root=root,
-                                    root_only=root_only)
+            enc_data = encoded_data(
+                data_for_encoding,
+                estimator=est,
+                model=encode_model,
+                encoder=data_encoder,
+                placement=placement,
+                resources=resources,
+                engine=engine,
+                precision=precision,
+                num_chunks=num_chunks,
+                sub_chunks=sub_chunks,
+                backend=backend_name,
+                num_workers=num_workers,
+                client=client,
+                comm=comm,
+                root=root,
+                root_only=root_only,
+            )
         else:
-            enc_data = seq_encode(data=data_for_encoding, encoder=data_encoder,
-                                  num_chunks=num_chunks, chunk_size=chunk_size)
+            enc_data = seq_encode(
+                data=data_for_encoding, encoder=data_encoder, num_chunks=num_chunks, chunk_size=chunk_size
+            )
 
     try:
         if prev_estimate is None:
@@ -647,22 +719,29 @@ def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its
             fused_step_fn = _local_fused_step
 
         best_model, _ = _em_loop(
-            enc_data, estimator, mm,
+            enc_data,
+            estimator,
+            mm,
             step_fn=_em_step_fn(engine, strategy),
             ll_fn=_ll_sum_fn(engine),
-            max_its=max_its, delta=delta, enc_vdata=enc_vdata,
-            out=out, print_iter=print_iter, fused_step_fn=fused_step_fn)
+            max_its=max_its,
+            delta=delta,
+            enc_vdata=enc_vdata,
+            out=out,
+            print_iter=print_iter,
+            fused_step_fn=fused_step_fn,
+        )
 
         return best_model
     finally:
-        if close_created_enc_data and callable(getattr(enc_data, 'close', None)):
+        if close_created_enc_data and callable(getattr(enc_data, "close", None)):
             enc_data.close()
 
 
 def constant(rho: float):
     """Return a constant streaming step-size schedule."""
     if rho <= 0.0 or rho > 1.0:
-        raise ValueError('constant(rho) requires 0 < rho <= 1.')
+        raise ValueError("constant(rho) requires 0 < rho <= 1.")
 
     def schedule(t: int) -> float:
         return float(rho)
@@ -673,9 +752,9 @@ def constant(rho: float):
 def harmonic(alpha: float, offset: float = 1.0):
     """Return ``rho_t = (offset + t - 1)^(-alpha)`` for streaming EM."""
     if alpha <= 0.5 or alpha > 1.0:
-        raise ValueError('harmonic(alpha) requires 0.5 < alpha <= 1.0.')
+        raise ValueError("harmonic(alpha) requires 0.5 < alpha <= 1.0.")
     if offset <= 0.0:
-        raise ValueError('harmonic offset must be positive.')
+        raise ValueError("harmonic offset must be positive.")
 
     def schedule(t: int) -> float:
         tt = max(1, int(t))
@@ -684,9 +763,9 @@ def harmonic(alpha: float, offset: float = 1.0):
     return schedule
 
 
-def streaming_accumulate(enc_data: Any,
-                         estimator: ParameterEstimator,
-                         model: SequenceEncodableProbabilityDistribution) -> Tuple[float, Any]:
+def streaming_accumulate(
+    enc_data: Any, estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution
+) -> tuple[float, Any]:
     """Return one batch's globally tied sufficient-stat accumulator.
 
     Encoded-data handles can implement ``pysp_stream_accumulate`` to do the
@@ -694,7 +773,7 @@ def streaming_accumulate(enc_data: Any,
     in-process ``seq_update`` loop.
     """
     validate_estimator_keys(estimator)
-    if hasattr(enc_data, 'pysp_stream_accumulate'):
+    if hasattr(enc_data, "pysp_stream_accumulate"):
         nobs, value = enc_data.pysp_stream_accumulate(estimator, model)
         return nobs, estimator.accumulator_factory().make().from_value(value)
 
@@ -710,16 +789,20 @@ def streaming_accumulate(enc_data: Any,
     return nobs, acc
 
 
-class StreamingEstimator(object):
+class StreamingEstimator:
     """Decay-mode online estimator built from accumulator scaling and M-steps."""
 
-    def __init__(self, estimator: ParameterEstimator, schedule=None,
-                 model: Optional[SequenceEncodableProbabilityDistribution] = None,
-                 init_estimator: Optional[ParameterEstimator] = None,
-                 init_p: float = 0.1,
-                 rng: Optional[RandomState] = None,
-                 encoder=None,
-                 num_chunks: int = 1) -> None:
+    def __init__(
+        self,
+        estimator: ParameterEstimator,
+        schedule=None,
+        model: SequenceEncodableProbabilityDistribution | None = None,
+        init_estimator: ParameterEstimator | None = None,
+        init_p: float = 0.1,
+        rng: RandomState | None = None,
+        encoder=None,
+        num_chunks: int = 1,
+    ) -> None:
         validate_estimator_keys(estimator)
         self.estimator = estimator
         self.init_estimator = estimator if init_estimator is None else init_estimator
@@ -735,14 +818,17 @@ class StreamingEstimator(object):
 
     def _encode_batch(self, data, enc_data):
         if enc_data is not None:
-            if hasattr(enc_data, 'as_seq_chunk'):
+            if hasattr(enc_data, "as_seq_chunk"):
                 return [enc_data.as_seq_chunk()]
             return enc_data
         if data is None:
-            raise ValueError('StreamingEstimator.update requires data or enc_data.')
+            raise ValueError("StreamingEstimator.update requires data or enc_data.")
         if self.encoder is None:
-            self.encoder = self.model.dist_to_encoder() if self.model is not None else \
-                self.init_estimator.accumulator_factory().make().acc_to_encoder()
+            self.encoder = (
+                self.model.dist_to_encoder()
+                if self.model is not None
+                else self.init_estimator.accumulator_factory().make().acc_to_encoder()
+            )
         return seq_encode(data, encoder=self.encoder, num_chunks=self.num_chunks)
 
     def _ensure_model(self, enc_data):
@@ -751,8 +837,9 @@ class StreamingEstimator(object):
             self.model = seq_initialize(enc_data, self.init_estimator, self.rng, p)
             self.encoder = self.model.dist_to_encoder()
 
-    def update(self, data: Optional[Sequence[T]] = None, enc_data: Optional[List[Tuple[int, E0]]] = None) \
-            -> SequenceEncodableProbabilityDistribution:
+    def update(
+        self, data: Sequence[T] | None = None, enc_data: list[tuple[int, E0]] | None = None
+    ) -> SequenceEncodableProbabilityDistribution:
         """Consume one batch and return the updated model."""
         enc_batch = self._encode_batch(data, enc_data)
         self._ensure_model(enc_batch)
@@ -764,7 +851,7 @@ class StreamingEstimator(object):
         else:
             rho = float(self.schedule(self.step + 1))
             if rho <= 0.0 or rho > 1.0:
-                raise ValueError('streaming schedule returned %r; expected 0 < rho <= 1.' % rho)
+                raise ValueError("streaming schedule returned %r; expected 0 < rho <= 1." % rho)
             self.running_accumulator.scale(1.0 - rho)
             batch_acc.scale(rho)
             self.running_accumulator.combine(batch_acc.value())
@@ -786,7 +873,7 @@ class StreamingEstimator(object):
         self.step = 0
 
 
-class IncrementalEstimator(object):
+class IncrementalEstimator:
     """Neal-Hinton style incremental EM over replaceable data chunks.
 
     Each chunk contributes a sufficient-statistic payload computed under the
@@ -796,13 +883,16 @@ class IncrementalEstimator(object):
     only uses ``scale(-1)``, ``combine()``, and ``estimate()``.
     """
 
-    def __init__(self, estimator: ParameterEstimator,
-                 model: Optional[SequenceEncodableProbabilityDistribution] = None,
-                 init_estimator: Optional[ParameterEstimator] = None,
-                 init_p: float = 0.1,
-                 rng: Optional[RandomState] = None,
-                 encoder=None,
-                 num_chunks: int = 1) -> None:
+    def __init__(
+        self,
+        estimator: ParameterEstimator,
+        model: SequenceEncodableProbabilityDistribution | None = None,
+        init_estimator: ParameterEstimator | None = None,
+        init_p: float = 0.1,
+        rng: RandomState | None = None,
+        encoder=None,
+        num_chunks: int = 1,
+    ) -> None:
         validate_estimator_keys(estimator)
         self.estimator = estimator
         self.init_estimator = estimator if init_estimator is None else init_estimator
@@ -819,14 +909,17 @@ class IncrementalEstimator(object):
 
     def _encode_batch(self, data, enc_data):
         if enc_data is not None:
-            if hasattr(enc_data, 'as_seq_chunk'):
+            if hasattr(enc_data, "as_seq_chunk"):
                 return [enc_data.as_seq_chunk()]
             return enc_data
         if data is None:
-            raise ValueError('IncrementalEstimator.update requires data or enc_data.')
+            raise ValueError("IncrementalEstimator.update requires data or enc_data.")
         if self.encoder is None:
-            self.encoder = self.model.dist_to_encoder() if self.model is not None else \
-                self.init_estimator.accumulator_factory().make().acc_to_encoder()
+            self.encoder = (
+                self.model.dist_to_encoder()
+                if self.model is not None
+                else self.init_estimator.accumulator_factory().make().acc_to_encoder()
+            )
         return seq_encode(data, encoder=self.encoder, num_chunks=self.num_chunks)
 
     def _ensure_model(self, enc_data):
@@ -835,12 +928,12 @@ class IncrementalEstimator(object):
             self.model = seq_initialize(enc_data, self.init_estimator, self.rng, p)
             self.encoder = self.model.dist_to_encoder()
 
-    def update(self, chunk_id: Any,
-               data: Optional[Sequence[T]] = None,
-               enc_data: Optional[List[Tuple[int, E0]]] = None) -> SequenceEncodableProbabilityDistribution:
+    def update(
+        self, chunk_id: Any, data: Sequence[T] | None = None, enc_data: list[tuple[int, E0]] | None = None
+    ) -> SequenceEncodableProbabilityDistribution:
         """Replace one chunk contribution and return the updated model."""
         if chunk_id is None:
-            raise ValueError('IncrementalEstimator.update requires a non-None chunk_id.')
+            raise ValueError("IncrementalEstimator.update requires a non-None chunk_id.")
         enc_batch = self._encode_batch(data, enc_data)
         self._ensure_model(enc_batch)
         batch_nobs, batch_acc = streaming_accumulate(enc_batch, self.estimator, self.model)
@@ -883,12 +976,18 @@ class IncrementalEstimator(object):
         self.step = 0
 
 
-def iterate(data: List[T], estimator: Optional[ParameterEstimator], max_its: int,
-            prev_estimate: Optional[SequenceEncodableProbabilityDistribution] = None, init_p: float = 0.1,
-            rng: Optional[RandomState] = RandomState(), out: IO = sys.stdout,
-            enc_data: Optional[List[Tuple[int, E0]]] = None,
-            init_estimator: Optional[ParameterEstimator] = None,
-            print_iter: int = 1) -> SequenceEncodableProbabilityDistribution:
+def iterate(
+    data: list[T],
+    estimator: ParameterEstimator | None,
+    max_its: int,
+    prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
+    init_p: float = 0.1,
+    rng: RandomState | None = RandomState(),
+    out: IO = sys.stdout,
+    enc_data: list[tuple[int, E0]] | None = None,
+    init_estimator: ParameterEstimator | None = None,
+    print_iter: int = 1,
+) -> SequenceEncodableProbabilityDistribution:
     """Performs max_its-iterations of EM algorithm and returns next estimate (SequenceEncodableProbabilityDistribution).
 
     Args:
@@ -913,7 +1012,7 @@ def iterate(data: List[T], estimator: Optional[ParameterEstimator], max_its: int
 
     """
     if data is None and enc_data is None:
-        raise Exception('Optimization called with empty data or enc_data.')
+        raise Exception("Optimization called with empty data or enc_data.")
 
     i_est = estimator if init_estimator is None else init_estimator
 
@@ -925,7 +1024,7 @@ def iterate(data: List[T], estimator: Optional[ParameterEstimator], max_its: int
     else:
         mm = prev_estimate
 
-    if hasattr(enc_data, 'cache'):
+    if hasattr(enc_data, "cache"):
         enc_data.cache()
 
     # fixed-iteration stepping with timing only (no convergence/scoring): the
@@ -934,37 +1033,39 @@ def iterate(data: List[T], estimator: Optional[ParameterEstimator], max_its: int
     for i in range(max_its):
         mm = seq_estimate(enc_data, estimator, mm)
         if (i + 1) % print_iter == 0:
-            out.write('Iteration %d\t E[dT]=%f.\n' % (i + 1, (time.time() - t0) / float(i + 1)))
+            out.write("Iteration %d\t E[dT]=%f.\n" % (i + 1, (time.time() - t0) / float(i + 1)))
 
     return mm
 
 
-def _torch_for_gradient_fit(engine, precision: Optional[Any] = None):
+def _torch_for_gradient_fit(engine, precision: Any | None = None):
     try:
         import torch
     except ImportError as e:
-        raise ImportError('fit_mle/fit_map require torch for autograd-backed engines.') from e
+        raise ImportError("fit_mle/fit_map require torch for autograd-backed engines.") from e
 
     if engine is None:
         from pysp.engines import TorchEngine
+
         engine = TorchEngine(dtype=precision or torch.float64)
     elif precision is not None:
         from pysp.engines import engine_with_precision
+
         engine = engine_with_precision(engine, precision)
-    if not getattr(engine, 'supports_autograd', False):
-        raise ValueError('fit_mle/fit_map require an engine with supports_autograd=True.')
+    if not getattr(engine, "supports_autograd", False):
+        raise ValueError("fit_mle/fit_map require an engine with supports_autograd=True.")
     return torch, engine
 
 
 def _tensor_param(value, engine, torch, transform=None):
-    tensor = engine.asarray(value, dtype=getattr(engine, 'dtype', None))
+    tensor = engine.asarray(value, dtype=getattr(engine, "dtype", None))
     tensor = tensor.clone().detach()
     eps = 1.0e-8
-    if transform == 'log':
+    if transform == "log":
         tensor = torch.log(torch.clamp(tensor, min=eps))
-    elif transform == 'logit':
+    elif transform == "logit":
         tensor = torch.logit(torch.clamp(tensor, min=eps, max=1.0 - eps))
-    elif transform == 'logits':
+    elif transform == "logits":
         tensor = torch.log(torch.clamp(tensor, min=eps))
     tensor.requires_grad_(True)
     return tensor
@@ -973,17 +1074,17 @@ def _tensor_param(value, engine, torch, transform=None):
 def _gradient_raw_state(dist, engine, torch, leaves):
     from pysp.stats.declarations import declaration_for
 
-    hook = getattr(dist, 'gradient_fit_state', None)
+    hook = getattr(dist, "gradient_fit_state", None)
     if callable(hook):
         state = hook(engine, torch, leaves, _gradient_raw_state, _tensor_param)
         if state is not None:
             return state
 
     declaration = declaration_for(dist)
-    if declaration is None or not callable(getattr(dist, 'backend_seq_log_density', None)):
-        return ('fixed', dist)
+    if declaration is None or not callable(getattr(dist, "backend_seq_log_density", None)):
+        return ("fixed", dist)
     if not declaration.differentiable:
-        return ('fixed', dist)
+        return ("fixed", dist)
 
     raw = {}
     fixed = {}
@@ -996,47 +1097,47 @@ def _gradient_raw_state(dist, engine, torch, leaves):
             anchor = _ordered_bound_anchor(spec.constraint)
             delta = _ordered_bound_delta(getattr(dist, spec.name), getattr(dist, anchor), spec.constraint)
             raw_name = _coupled_raw_name(spec.name, anchor, spec.constraint)
-            raw[raw_name] = _tensor_param(delta, engine, torch, transform='log')
+            raw[raw_name] = _tensor_param(delta, engine, torch, transform="log")
             leaves.append(raw[raw_name])
             continue
         raw_name, transform = _raw_name_and_transform(spec.name, spec.constraint)
         raw[raw_name] = _tensor_param(value, engine, torch, transform=transform)
         leaves.append(raw[raw_name])
-    return ('leaf', dist, declaration, raw, fixed)
+    return ("leaf", dist, declaration, raw, fixed)
 
 
-def _raw_name_and_transform(name: str, constraint: str) -> Tuple[str, Optional[str]]:
+def _raw_name_and_transform(name: str, constraint: str) -> tuple[str, str | None]:
     if _is_ordered_bound_constraint(constraint):
-        return _coupled_raw_name(name, _ordered_bound_anchor(constraint), constraint), 'log'
-    if constraint in ('positive', 'positive_vector', 'positive_matrix'):
-        return 'log_' + name, 'log'
-    if constraint == 'unit_interval':
-        return 'logit_' + name, 'logit'
-    if constraint in ('simplex', 'simplex_vector', 'row_simplex_matrix', 'column_simplex_matrix'):
-        return name + '_logits', 'logits'
+        return _coupled_raw_name(name, _ordered_bound_anchor(constraint), constraint), "log"
+    if constraint in ("positive", "positive_vector", "positive_matrix"):
+        return "log_" + name, "log"
+    if constraint == "unit_interval":
+        return "logit_" + name, "logit"
+    if constraint in ("simplex", "simplex_vector", "row_simplex_matrix", "column_simplex_matrix"):
+        return name + "_logits", "logits"
     return name, None
 
 
 def _canonical_value(name: str, spec_name: str, constraint: str, raw: dict, torch):
-    if constraint in ('positive', 'positive_vector', 'positive_matrix'):
-        return torch.exp(raw['log_' + spec_name])
-    if constraint == 'unit_interval':
-        return torch.sigmoid(raw['logit_' + spec_name])
-    if constraint in ('simplex', 'simplex_vector'):
-        return torch.softmax(raw[spec_name + '_logits'], dim=0)
-    if constraint == 'row_simplex_matrix':
-        return torch.softmax(raw[spec_name + '_logits'], dim=1)
-    if constraint == 'column_simplex_matrix':
-        return torch.softmax(raw[spec_name + '_logits'], dim=0)
+    if constraint in ("positive", "positive_vector", "positive_matrix"):
+        return torch.exp(raw["log_" + spec_name])
+    if constraint == "unit_interval":
+        return torch.sigmoid(raw["logit_" + spec_name])
+    if constraint in ("simplex", "simplex_vector"):
+        return torch.softmax(raw[spec_name + "_logits"], dim=0)
+    if constraint == "row_simplex_matrix":
+        return torch.softmax(raw[spec_name + "_logits"], dim=1)
+    if constraint == "column_simplex_matrix":
+        return torch.softmax(raw[spec_name + "_logits"], dim=0)
     return raw[name]
 
 
 def _is_greater_than_constraint(constraint: str) -> bool:
-    return str(constraint).startswith('greater_than:')
+    return str(constraint).startswith("greater_than:")
 
 
 def _is_less_than_constraint(constraint: str) -> bool:
-    return str(constraint).startswith('less_than:')
+    return str(constraint).startswith("less_than:")
 
 
 def _is_ordered_bound_constraint(constraint: str) -> bool:
@@ -1044,9 +1145,9 @@ def _is_ordered_bound_constraint(constraint: str) -> bool:
 
 
 def _ordered_bound_anchor(constraint: str) -> str:
-    anchor = str(constraint).split(':', 1)[1] if ':' in str(constraint) else ''
+    anchor = str(constraint).split(":", 1)[1] if ":" in str(constraint) else ""
     if not anchor:
-        raise ValueError('%s constraint requires an anchor parameter.' % constraint)
+        raise ValueError("%s constraint requires an anchor parameter." % constraint)
     return anchor
 
 
@@ -1057,29 +1158,29 @@ def _ordered_bound_delta(value: Any, anchor_value: Any, constraint: str) -> Any:
         delta = anchor_value - value
     delta_arr = np.asarray(delta, dtype=np.float64)
     if np.any(delta_arr <= 0.0) or not np.all(np.isfinite(delta_arr)):
-        raise ValueError('Initial value for %s must satisfy its ordered bound.' % constraint)
+        raise ValueError("Initial value for %s must satisfy its ordered bound." % constraint)
     return delta
 
 
 def _coupled_raw_name(name: str, anchor: str, constraint: str) -> str:
-    return 'log_' + _ordered_bound_delta_name(name, anchor, constraint)
+    return "log_" + _ordered_bound_delta_name(name, anchor, constraint)
 
 
 def _ordered_bound_delta_name(name: str, anchor: str, constraint: str) -> str:
     if _is_greater_than_constraint(constraint):
-        return '%s_minus_%s' % (name, anchor)
-    return '%s_minus_%s' % (anchor, name)
+        return "%s_minus_%s" % (name, anchor)
+    return "%s_minus_%s" % (anchor, name)
 
 
 def _gradient_shadow_state(state, torch):
-    shadow_fn = getattr(state, 'shadow', None)
+    shadow_fn = getattr(state, "shadow", None)
     if callable(shadow_fn):
         return shadow_fn(torch, _gradient_shadow_state)
     kind = state[0]
-    if kind == 'leaf':
+    if kind == "leaf":
         _, template, declaration, raw, fixed = state
         shadow = object.__new__(type(template))
-        shadow.__dict__.update(getattr(template, '__dict__', {}))
+        shadow.__dict__.update(getattr(template, "__dict__", {}))
         params = {}
         for spec in declaration.parameters:
             if spec.name in fixed:
@@ -1096,12 +1197,12 @@ def _gradient_shadow_state(state, torch):
                 raw_name, _ = _raw_name_and_transform(spec.name, spec.constraint)
                 params[spec.name] = _canonical_value(raw_name, spec.name, spec.constraint, raw, torch)
             setattr(shadow, spec.name, params[spec.name])
-        if 'p_vec' in params:
-            shadow.log_p_vec = torch.log(params['p_vec'])
+        if "p_vec" in params:
+            shadow.log_p_vec = torch.log(params["p_vec"])
         return shadow
-    if kind == 'fixed':
+    if kind == "fixed":
         return state[1]
-    raise GradientFitError('Unknown gradient fit state %s.' % kind)
+    raise GradientFitError("Unknown gradient fit state %s." % kind)
 
 
 def _gradient_enc_chunks(enc):
@@ -1112,9 +1213,11 @@ def _gradient_enc_chunks(enc):
     objective sums log densities over observations, so either form reduces to a
     list of payloads whose per-chunk score sums are added together.
     """
-    if (isinstance(enc, list) and enc and
-            all(isinstance(c, tuple) and len(c) == 2 and
-                isinstance(c[0], (int, np.integer)) for c in enc)):
+    if (
+        isinstance(enc, list)
+        and enc
+        and all(isinstance(c, tuple) and len(c) == 2 and isinstance(c[0], (int, np.integer)) for c in enc)
+    ):
         return [payload for _, payload in enc]
     return [enc]
 
@@ -1122,19 +1225,19 @@ def _gradient_enc_chunks(enc):
 def _gradient_score_state(state, enc, engine, torch):
     from pysp.stats.backend import backend_seq_log_density
 
-    score_fn = getattr(state, 'score', None)
+    score_fn = getattr(state, "score", None)
     if callable(score_fn):
         return score_fn(enc, engine, torch, _gradient_score_state)
     kind = state[0]
-    if kind == 'leaf':
+    if kind == "leaf":
         return backend_seq_log_density(_gradient_shadow_state(state, torch), enc, engine)
-    if kind == 'fixed':
+    if kind == "fixed":
         return engine.asarray(state[1].seq_log_density(enc))
-    raise GradientFitError('Unknown gradient fit state %s.' % kind)
+    raise GradientFitError("Unknown gradient fit state %s." % kind)
 
 
 def _detach_value(x):
-    if hasattr(x, 'detach'):
+    if hasattr(x, "detach"):
         arr = x.detach().cpu().numpy()
         return float(arr) if np.ndim(arr) == 0 else arr
     return x
@@ -1144,7 +1247,7 @@ def _tensor_scalar(x) -> float:
     return float(x.detach().cpu().item())
 
 
-def _gradient_best_entry(history: Sequence[float]) -> Tuple[float, int]:
+def _gradient_best_entry(history: Sequence[float]) -> tuple[float, int]:
     values = np.asarray(history, dtype=np.float64)
     idx = int(np.nanargmax(values))
     return float(values[idx]), idx
@@ -1152,19 +1255,19 @@ def _gradient_best_entry(history: Sequence[float]) -> Tuple[float, int]:
 
 def _gradient_objective_norm(torch, leaves: Sequence[Any], objective) -> float:
     for leaf in leaves:
-        if getattr(leaf, 'grad', None) is not None:
+        if getattr(leaf, "grad", None) is not None:
             leaf.grad = None
     value = objective()
     value.backward()
     total = None
     for leaf in leaves:
-        grad = getattr(leaf, 'grad', None)
+        grad = getattr(leaf, "grad", None)
         if grad is None:
             continue
         term = torch.sum(grad.detach() * grad.detach())
         total = term if total is None else total + term
     for leaf in leaves:
-        if getattr(leaf, 'grad', None) is not None:
+        if getattr(leaf, "grad", None) is not None:
             leaf.grad = None
     if total is None:
         return 0.0
@@ -1172,11 +1275,11 @@ def _gradient_objective_norm(torch, leaves: Sequence[Any], objective) -> float:
 
 
 def _gradient_build_state(state, torch):
-    build_fn = getattr(state, 'build', None)
+    build_fn = getattr(state, "build", None)
     if callable(build_fn):
         return build_fn(torch, _gradient_build_state, _detach_value)
     kind = state[0]
-    if kind == 'leaf':
+    if kind == "leaf":
         _, template, declaration, raw, fixed = state
         args = []
         params = {}
@@ -1194,18 +1297,18 @@ def _gradient_build_state(state, torch):
             params[spec.name] = value
             args.append(_detach_value(value))
         kwargs = {}
-        if hasattr(template, 'name'):
-            kwargs['name'] = getattr(template, 'name')
-        if hasattr(template, 'keys'):
-            kwargs['keys'] = getattr(template, 'keys')
+        if hasattr(template, "name"):
+            kwargs["name"] = template.name
+        if hasattr(template, "keys"):
+            kwargs["keys"] = template.keys
         try:
             return type(template)(*args, **kwargs)
         except TypeError:
-            kwargs.pop('keys', None)
+            kwargs.pop("keys", None)
             return type(template)(*args, **kwargs)
-    if kind == 'fixed':
+    if kind == "fixed":
         return state[1]
-    raise GradientFitError('Unknown gradient fit state %s.' % kind)
+    raise GradientFitError("Unknown gradient fit state %s." % kind)
 
 
 def _raw_l2_prior(leaves, initial_leaves, torch, prior_strength: float, engine):
@@ -1218,52 +1321,106 @@ def _raw_l2_prior(leaves, initial_leaves, torch, prior_strength: float, engine):
     return -0.5 * float(prior_strength) * penalty
 
 
-def fit_mle(enc: Any, model: SequenceEncodableProbabilityDistribution, engine=None,
-            max_its: int = 500, lr: float = 0.05, optimizer: str = 'adam',
-            tol: float = 1.0e-7, out: Optional[IO] = None,
-            print_iter: int = 100,
-            precision: Optional[Any] = None,
-            return_result: bool = False) -> Any:
+def fit_mle(
+    enc: Any,
+    model: SequenceEncodableProbabilityDistribution,
+    engine=None,
+    max_its: int = 500,
+    lr: float = 0.05,
+    optimizer: str = "adam",
+    tol: float = 1.0e-7,
+    out: IO | None = None,
+    print_iter: int = 100,
+    precision: Any | None = None,
+    return_result: bool = False,
+) -> Any:
     """Fit converted models by maximizing backend log likelihood with autograd.
 
     The generic implementation handles declaration-backed tensor leaves and
     delegates structured model families to distribution-owned
     ``gradient_fit_state`` hooks.
     """
-    return _fit_gradient(enc, model, engine, max_its, lr, optimizer, tol, out, print_iter,
-                         tag='MLE', prior_strength=0.0, precision=precision,
-                         return_result=return_result)
+    return _fit_gradient(
+        enc,
+        model,
+        engine,
+        max_its,
+        lr,
+        optimizer,
+        tol,
+        out,
+        print_iter,
+        tag="MLE",
+        prior_strength=0.0,
+        precision=precision,
+        return_result=return_result,
+    )
 
 
-def fit_map(enc: Any, model: SequenceEncodableProbabilityDistribution, engine=None,
-            prior_strength: float = 1.0, priors: Optional[Any] = None,
-            max_its: int = 500, lr: float = 0.05,
-            optimizer: str = 'adam', tol: float = 1.0e-7, out: Optional[IO] = None,
-            print_iter: int = 100,
-            precision: Optional[Any] = None,
-            return_result: bool = False) -> Any:
+def fit_map(
+    enc: Any,
+    model: SequenceEncodableProbabilityDistribution,
+    engine=None,
+    prior_strength: float = 1.0,
+    priors: Any | None = None,
+    max_its: int = 500,
+    lr: float = 0.05,
+    optimizer: str = "adam",
+    tol: float = 1.0e-7,
+    out: IO | None = None,
+    print_iter: int = 100,
+    precision: Any | None = None,
+    return_result: bool = False,
+) -> Any:
     """Fit converted models with MAP priors over declaration-backed parameters.
 
     ``prior_strength=0`` is exactly the same objective as ``fit_mle`` when no
     explicit ``priors`` are supplied.  ``priors`` may be a legacy prior dict or
     one of the helpers from ``pysp.utils.priors``.
     """
-    return _fit_gradient(enc, model, engine, max_its, lr, optimizer, tol, out, print_iter,
-                         tag='MAP', prior_strength=float(prior_strength), priors=priors,
-                         precision=precision, return_result=return_result)
+    return _fit_gradient(
+        enc,
+        model,
+        engine,
+        max_its,
+        lr,
+        optimizer,
+        tol,
+        out,
+        print_iter,
+        tag="MAP",
+        prior_strength=float(prior_strength),
+        priors=priors,
+        precision=precision,
+        return_result=return_result,
+    )
 
 
-def _fit_gradient(enc, model, engine, max_its, lr, optimizer, tol, out, print_iter, tag, prior_strength,
-                  priors=None, precision: Optional[Any] = None, return_result: bool = False):
+def _fit_gradient(
+    enc,
+    model,
+    engine,
+    max_its,
+    lr,
+    optimizer,
+    tol,
+    out,
+    print_iter,
+    tag,
+    prior_strength,
+    priors=None,
+    precision: Any | None = None,
+    return_result: bool = False,
+):
     torch, engine = _torch_for_gradient_fit(engine, precision=precision)
-    if hasattr(enc, 'payload'):
+    if hasattr(enc, "payload"):
         enc = enc.payload
     enc_chunks = _gradient_enc_chunks(enc)
 
-    leaves: List[Any] = []
+    leaves: list[Any] = []
     state = _gradient_raw_state(model, engine, torch, leaves)
     if not leaves:
-        raise GradientFitError('%s has no differentiable parameters.' % type(model).__name__)
+        raise GradientFitError("%s has no differentiable parameters." % type(model).__name__)
     initial_leaves_by_id = {id(leaf): leaf.detach().clone() for leaf in leaves}
     priors = as_prior_dict(priors)
 
@@ -1286,10 +1443,21 @@ def _fit_gradient(enc, model, engine, max_its, lr, optimizer, tol, out, print_it
     # restore_best=False keeps this fit's "return the final iterate" semantics
     # (the leaves still hold the final values for the diagnostics below).
     from pysp.utils.objectives import optimize_torch_objective
+
     loop = optimize_torch_objective(
-        leaves, objective, engine=engine, max_its=max_its, lr=lr, optimizer=optimizer,
-        tol=tol, maximize=True, out=out, print_iter=print_iter,
-        restore_best=False, return_result=True)
+        leaves,
+        objective,
+        engine=engine,
+        max_its=max_its,
+        lr=lr,
+        optimizer=optimizer,
+        tol=tol,
+        maximize=True,
+        out=out,
+        print_iter=print_iter,
+        restore_best=False,
+        return_result=True,
+    )
     history = list(loop.history)
     iterations = loop.iterations
     converged = loop.converged
@@ -1321,14 +1489,14 @@ def _fit_gradient(enc, model, engine, max_its, lr, optimizer, tol, out, print_it
 
 def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engine, initial_leaves_by_id):
     """Structured log prior for declaration-backed MAP objectives."""
-    prior_fn = getattr(state, 'log_prior', None)
+    prior_fn = getattr(state, "log_prior", None)
     if callable(prior_fn):
         return prior_fn(priors, prior_strength, torch, engine, initial_leaves_by_id, _gradient_log_prior_state)
     kind = state[0]
-    if kind == 'leaf':
+    if kind == "leaf":
         shadow = _gradient_shadow_state(state, torch)
         declaration, raw = state[2], state[3]
-        prior_hook = getattr(shadow, 'gradient_log_prior', None)
+        prior_hook = getattr(shadow, "gradient_log_prior", None)
         if callable(prior_hook):
             hook_lp = prior_hook(priors, prior_strength, torch, engine)
             if hook_lp is not None:
@@ -1348,10 +1516,10 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
                 if param_prior is None:
                     continue
                 pfam = _prior_family(param_prior)
-                if pfam == 'gamma':
+                if pfam == "gamma":
                     value = torch.exp(raw[_coupled_raw_name(spec.name, anchor, spec.constraint)])
-                    shape = engine.asarray(param_prior.get('shape', 1.0))
-                    rate = engine.asarray(param_prior.get('rate', 0.0))
+                    shape = engine.asarray(param_prior.get("shape", 1.0))
+                    rate = engine.asarray(param_prior.get("rate", 0.0))
                     lp = lp + torch.sum((shape - 1.0) * torch.log(value) - rate * value)
                     matched = True
                 continue
@@ -1360,27 +1528,32 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
             raw_name, _ = _raw_name_and_transform(spec.name, spec.constraint)
             value = _canonical_value(raw_name, spec.name, spec.constraint, raw, torch)
             pfam = _prior_family(param_prior)
-            if pfam == 'gamma' and spec.constraint in ('positive', 'positive_vector', 'positive_matrix'):
-                shape = engine.asarray(param_prior.get('shape', 1.0))
-                rate = engine.asarray(param_prior.get('rate', 0.0))
+            if pfam == "gamma" and spec.constraint in ("positive", "positive_vector", "positive_matrix"):
+                shape = engine.asarray(param_prior.get("shape", 1.0))
+                rate = engine.asarray(param_prior.get("rate", 0.0))
                 lp = lp + torch.sum((shape - 1.0) * torch.log(value) - rate * value)
                 matched = True
-            elif pfam == 'beta' and spec.constraint == 'unit_interval':
-                alpha = engine.asarray(param_prior.get('alpha', 1.0))
-                beta = engine.asarray(param_prior.get('beta', 1.0))
+            elif pfam == "beta" and spec.constraint == "unit_interval":
+                alpha = engine.asarray(param_prior.get("alpha", 1.0))
+                beta = engine.asarray(param_prior.get("beta", 1.0))
                 lp = lp + torch.sum((alpha - 1.0) * torch.log(value) + (beta - 1.0) * torch.log1p(-value))
                 matched = True
-            elif pfam == 'dirichlet' and spec.constraint in (
-                    'simplex', 'simplex_vector', 'row_simplex_matrix', 'column_simplex_matrix'):
-                alpha = _dirichlet_alpha_tensor(param_prior.get('alpha'), None, value, engine, torch)
+            elif pfam == "dirichlet" and spec.constraint in (
+                "simplex",
+                "simplex_vector",
+                "row_simplex_matrix",
+                "column_simplex_matrix",
+            ):
+                alpha = _dirichlet_alpha_tensor(param_prior.get("alpha"), None, value, engine, torch)
                 lp = lp + torch.sum((alpha - 1.0) * torch.log(value))
                 matched = True
 
         if matched:
             return lp
-        return _raw_l2_prior(_state_leaves(state), _state_initial_leaves(state, initial_leaves_by_id),
-                             torch, prior_strength, engine)
-    if kind == 'fixed':
+        return _raw_l2_prior(
+            _state_leaves(state), _state_initial_leaves(state, initial_leaves_by_id), torch, prior_strength, engine
+        )
+    if kind == "fixed":
         return _prior_zero(torch, engine)
     return _prior_zero(torch, engine)
 
@@ -1392,20 +1565,20 @@ def _prior_zero(torch, engine, ref=None):
 
 
 def _prior_family(prior):
-    return prior.get('family') if isinstance(prior, Mapping) else None
+    return prior.get("family") if isinstance(prior, Mapping) else None
 
 
 def _prior_parameter_matches(prior, name: str) -> bool:
-    return not isinstance(prior, Mapping) or prior.get('parameter') in (None, name)
+    return not isinstance(prior, Mapping) or prior.get("parameter") in (None, name)
 
 
 def _parameter_prior(priors, name: str):
     family = _prior_family(priors)
-    if family in ('gamma', 'beta', 'dirichlet') and _prior_parameter_matches(priors, name):
+    if family in ("gamma", "beta", "dirichlet") and _prior_parameter_matches(priors, name):
         return priors
     if isinstance(priors, Mapping):
-        if isinstance(priors.get('parameters'), Mapping) and name in priors['parameters']:
-            return as_prior_dict(priors['parameters'][name])
+        if isinstance(priors.get("parameters"), Mapping) and name in priors["parameters"]:
+            return as_prior_dict(priors["parameters"][name])
         if name in priors:
             return as_prior_dict(priors[name])
     return None
@@ -1416,7 +1589,7 @@ def _dirichlet_alpha_tensor(alpha, labels, logits, engine, torch):
         alpha = 1.0
     if isinstance(alpha, Mapping):
         if labels is None:
-            raise ValueError('Dirichlet alpha mappings require categorical labels.')
+            raise ValueError("Dirichlet alpha mappings require categorical labels.")
         alpha = [alpha.get(label, 1.0) for label in labels]
     alpha_t = engine.asarray(alpha)
     if alpha_t.ndim == 0:
@@ -1426,7 +1599,7 @@ def _dirichlet_alpha_tensor(alpha, labels, logits, engine, torch):
 
 def _state_leaves(state):
     kind = state[0]
-    if kind == 'leaf':
+    if kind == "leaf":
         return list(state[3].values())
     return []
 

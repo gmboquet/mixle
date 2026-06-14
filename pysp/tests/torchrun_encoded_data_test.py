@@ -1,5 +1,5 @@
-import io
 import importlib
+import io
 import os
 import subprocess
 import sys
@@ -10,28 +10,26 @@ import numpy as np
 
 from pysp.parallel import Resources, encoded_data, is_encoded_data_handle
 from pysp.stats import GaussianDistribution, GaussianEstimator, seq_encode, seq_estimate, seq_log_density_sum
-from pysp.utils.estimation import StreamingEstimator, constant, optimize, streaming_accumulate
+from pysp.utils.estimation import optimize, streaming_accumulate
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-HAS_TORCH = importlib.util.find_spec('torch') is not None
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 if HAS_TORCH:
     from pysp.utils.parallel_torchrun import TorchRunEncodedData
 else:
     TorchRunEncodedData = None
 
 
-@unittest.skipUnless(HAS_TORCH, 'torch is not installed')
+@unittest.skipUnless(HAS_TORCH, "torch is not installed")
 class TorchRunEncodedDataTestCase(unittest.TestCase):
-
     def test_single_rank_handle_matches_local_scoring_and_estimate(self):
         data = list(np.linspace(-2.0, 2.0, 40))
         model = GaussianDistribution(0.25, 1.5)
         estimator = GaussianEstimator()
         enc_local = seq_encode(data, model=model)
 
-        with TorchRunEncodedData(data, model=model, estimator=estimator,
-                                 sub_chunks=2) as enc:
+        with TorchRunEncodedData(data, model=model, estimator=estimator, sub_chunks=2) as enc:
             self.assertTrue(is_encoded_data_handle(enc))
             self.assertEqual(len(enc), len(data))
             cnt_h, ll_h = seq_log_density_sum(enc, model)
@@ -54,14 +52,20 @@ class TorchRunEncodedDataTestCase(unittest.TestCase):
         start = GaussianDistribution(1.0, 4.0)
         estimator = GaussianEstimator()
 
-        with encoded_data(data, model=start, estimator=estimator,
-                          backend='torchrun', sub_chunks=2) as enc:
+        with encoded_data(data, model=start, estimator=estimator, backend="torchrun", sub_chunks=2) as enc:
             self.assertIsInstance(enc, TorchRunEncodedData)
 
-        fitted = optimize(data, estimator, prev_estimate=start, backend='torchrun',
-                          sub_chunks=2, max_its=2, delta=None, out=io.StringIO())
-        local = optimize(data, estimator, prev_estimate=start, max_its=2,
-                         delta=None, out=io.StringIO())
+        fitted = optimize(
+            data,
+            estimator,
+            prev_estimate=start,
+            backend="torchrun",
+            sub_chunks=2,
+            max_its=2,
+            delta=None,
+            out=io.StringIO(),
+        )
+        local = optimize(data, estimator, prev_estimate=start, max_its=2, delta=None, out=io.StringIO())
 
         self.assertAlmostEqual(fitted.mu, local.mu, places=10)
         self.assertAlmostEqual(fitted.sigma2, local.sigma2, places=10)
@@ -69,12 +73,12 @@ class TorchRunEncodedDataTestCase(unittest.TestCase):
     def test_resources_can_describe_torchrun_world(self):
         resources = Resources.from_torchrun()
         self.assertGreaterEqual(len(resources.devices), 1)
-        self.assertTrue(all(device.engine == 'torch' for device in resources.devices))
+        self.assertTrue(all(device.engine == "torch" for device in resources.devices))
 
     def test_torchrun_two_rank_smoke(self):
-        if os.environ.get('PYSPARKPLUG_RUN_TORCHRUN_SMOKE') != '1':
-            self.skipTest('set PYSPARKPLUG_RUN_TORCHRUN_SMOKE=1 to launch a local two-rank torchrun smoke test')
-        script = r'''
+        if os.environ.get("PYSPARKPLUG_RUN_TORCHRUN_SMOKE") != "1":
+            self.skipTest("set PYSPARKPLUG_RUN_TORCHRUN_SMOKE=1 to launch a local two-rank torchrun smoke test")
+        script = r"""
 import io
 import os
 import sys
@@ -200,23 +204,33 @@ if torch.distributed.get_rank() == 0:
     print('TORCHRUN-BACKEND-OK', flush=True)
 torch.distributed.barrier()
 enc.close()
-''' % {'repo': REPO}
+""" % {"repo": REPO}
         with tempfile.TemporaryDirectory() as td:
-            path = os.path.join(td, 'torchrun_check.py')
-            with open(path, 'w') as f:
+            path = os.path.join(td, "torchrun_check.py")
+            with open(path, "w") as f:
                 f.write(script)
-            env = dict(os.environ, PYTHONPATH=REPO, MASTER_ADDR='127.0.0.1')
-            if sys.platform != 'darwin':
-                env.setdefault('GLOO_SOCKET_IFNAME', 'lo')
-            res = subprocess.run([
-                sys.executable, '-m', 'torch.distributed.run',
-                '--standalone', '--rdzv_endpoint=127.0.0.1:0',
-                '--local-addr=127.0.0.1', '--nproc_per_node=2', path,
-            ], capture_output=True, text=True, timeout=90, env=env)
-        self.assertEqual(res.returncode, 0,
-                         'torchrun failed:\n%s\n%s' % (res.stdout, res.stderr))
-        self.assertIn('TORCHRUN-BACKEND-OK', res.stdout)
+            env = dict(os.environ, PYTHONPATH=REPO, MASTER_ADDR="127.0.0.1")
+            if sys.platform != "darwin":
+                env.setdefault("GLOO_SOCKET_IFNAME", "lo")
+            res = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "torch.distributed.run",
+                    "--standalone",
+                    "--rdzv_endpoint=127.0.0.1:0",
+                    "--local-addr=127.0.0.1",
+                    "--nproc_per_node=2",
+                    path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=90,
+                env=env,
+            )
+        self.assertEqual(res.returncode, 0, "torchrun failed:\n%s\n%s" % (res.stdout, res.stderr))
+        self.assertIn("TORCHRUN-BACKEND-OK", res.stdout)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -4,17 +4,18 @@ This module keeps nonparametric-mixture logic in the model layer.  It exposes
 small stick-breaking utilities and a dependency-free truncated variational
 mixture loop over ordinary ``pysp.stats`` component estimators.
 """
+
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any
 
 import numpy as np
 
 import pysp.utils.vector as vec
 from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 from pysp.utils.special import digamma
-
 
 _EPS = 1.0e-300
 
@@ -23,44 +24,47 @@ _EPS = 1.0e-300
 class TruncatedDPMFitResult:
     """Fitted truncated DPM plus variational responsibilities and history."""
 
-    model: 'TruncatedDPMModel'
+    model: TruncatedDPMModel
     responsibilities: np.ndarray
-    history: List[float]
+    history: list[float]
 
 
-class TruncatedDPMModel(object):
+class TruncatedDPMModel:
     """Truncated stick-breaking mixture over existing pysp component models."""
 
-    def __init__(self,
-                 components: Sequence[SequenceEncodableProbabilityDistribution],
-                 alpha: float = 1.0,
-                 gamma: Optional[Any] = None,
-                 weights: Optional[Any] = None,
-                 name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        components: Sequence[SequenceEncodableProbabilityDistribution],
+        alpha: float = 1.0,
+        gamma: Any | None = None,
+        weights: Any | None = None,
+        name: str | None = None,
+    ) -> None:
         if len(components) == 0:
-            raise ValueError('TruncatedDPMModel requires at least one component.')
+            raise ValueError("TruncatedDPMModel requires at least one component.")
         if alpha <= 0.0 or not np.isfinite(alpha):
-            raise ValueError('alpha must be finite and positive.')
+            raise ValueError("alpha must be finite and positive.")
         self.components = list(components)
         self.num_components = len(self.components)
         self.alpha = float(alpha)
         self.name = name
         if gamma is None:
-            self.gamma = np.column_stack([
-                np.ones(self.num_components, dtype=np.float64),
-                np.full(self.num_components, self.alpha, dtype=np.float64),
-            ])
+            self.gamma = np.column_stack(
+                [
+                    np.ones(self.num_components, dtype=np.float64),
+                    np.full(self.num_components, self.alpha, dtype=np.float64),
+                ]
+            )
         else:
             self.gamma = _as_gamma(gamma, self.num_components)
         if weights is None:
             self.weights = mean_stick_weights(self.gamma)
         else:
-            self.weights = _as_simplex(weights, self.num_components, 'weights')
+            self.weights = _as_simplex(weights, self.num_components, "weights")
         self.log_weights = np.log(np.clip(self.weights, _EPS, 1.0))
 
     def __str__(self) -> str:
-        return 'TruncatedDPMModel(num_components=%d, alpha=%r, name=%r)' % (
-            self.num_components, self.alpha, self.name)
+        return "TruncatedDPMModel(num_components=%d, alpha=%r, name=%r)" % (self.num_components, self.alpha, self.name)
 
     @property
     def expected_log_weights(self) -> np.ndarray:
@@ -88,13 +92,13 @@ class TruncatedDPMModel(object):
     def effective_components(self, threshold: float = 0.01) -> int:
         """Count components with posterior mean stick weight above ``threshold``."""
         if threshold < 0.0:
-            raise ValueError('threshold must be non-negative.')
+            raise ValueError("threshold must be non-negative.")
         return int(np.count_nonzero(self.weights > threshold))
 
-    def sample(self, size: Optional[int] = None, seed: Optional[int] = None) -> Union[Any, List[Any]]:
+    def sample(self, size: int | None = None, seed: int | None = None) -> Any | list[Any]:
         """Draw observations from the finite truncation."""
         rng = np.random.RandomState(seed)
-        samplers = [d.sampler(seed=int(rng.randint(0, 2 ** 31 - 1))) for d in self.components]
+        samplers = [d.sampler(seed=int(rng.randint(0, 2**31 - 1))) for d in self.components]
         states = rng.choice(self.num_components, size=size, replace=True, p=self.weights)
         if size is None:
             return samplers[int(states)].sample()
@@ -109,9 +113,9 @@ def stick_breaking_weights(stick_fractions: Any, residual: bool = True) -> np.nd
     """
     v = np.asarray(stick_fractions, dtype=np.float64)
     if v.ndim != 1:
-        raise ValueError('stick_fractions must be one-dimensional.')
+        raise ValueError("stick_fractions must be one-dimensional.")
     if np.any(~np.isfinite(v)) or np.any(v < 0.0) or np.any(v > 1.0):
-        raise ValueError('stick fractions must be finite values in [0, 1].')
+        raise ValueError("stick fractions must be finite values in [0, 1].")
     remaining = 1.0
     weights = []
     for frac in v:
@@ -151,19 +155,18 @@ def mean_stick_weights(gamma: Any) -> np.ndarray:
         weights.append(remaining * mean_v[i])
         remaining *= 1.0 - mean_v[i]
     weights.append(remaining)
-    return _as_simplex(weights, gam.shape[0], 'mean stick weights')
+    return _as_simplex(weights, gam.shape[0], "mean stick weights")
 
 
-def sample_crp_assignments(num_obs: int, alpha: float,
-                           seed: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+def sample_crp_assignments(num_obs: int, alpha: float, seed: int | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Sample Chinese-restaurant-process assignments and table counts."""
     if num_obs < 0:
-        raise ValueError('num_obs must be non-negative.')
+        raise ValueError("num_obs must be non-negative.")
     if alpha <= 0.0 or not np.isfinite(alpha):
-        raise ValueError('alpha must be finite and positive.')
+        raise ValueError("alpha must be finite and positive.")
     rng = np.random.RandomState(seed)
     assignments = np.empty(int(num_obs), dtype=np.int64)
-    counts: List[int] = []
+    counts: list[int] = []
     for i in range(int(num_obs)):
         probs = np.asarray(counts + [float(alpha)], dtype=np.float64)
         probs /= probs.sum()
@@ -176,14 +179,16 @@ def sample_crp_assignments(num_obs: int, alpha: float,
     return assignments, np.asarray(counts, dtype=np.int64)
 
 
-def fit_truncated_dpm(data: Sequence[Any],
-                      initial_components: Sequence[SequenceEncodableProbabilityDistribution],
-                      component_estimator: Union[ParameterEstimator, Sequence[ParameterEstimator]],
-                      alpha: float = 1.0,
-                      max_its: int = 50,
-                      tol: Optional[float] = 1.0e-8,
-                      sort_components: bool = True,
-                      name: Optional[str] = None) -> TruncatedDPMFitResult:
+def fit_truncated_dpm(
+    data: Sequence[Any],
+    initial_components: Sequence[SequenceEncodableProbabilityDistribution],
+    component_estimator: ParameterEstimator | Sequence[ParameterEstimator],
+    alpha: float = 1.0,
+    max_its: int = 50,
+    tol: float | None = 1.0e-8,
+    sort_components: bool = True,
+    name: str | None = None,
+) -> TruncatedDPMFitResult:
     """Fit a truncated DP mixture by coordinate-ascent variational updates.
 
     The component M-steps are delegated to ordinary ``pysp.stats`` estimators.
@@ -191,19 +196,21 @@ def fit_truncated_dpm(data: Sequence[Any],
     distribution modules.
     """
     if len(data) == 0:
-        raise ValueError('fit_truncated_dpm requires at least one observation.')
+        raise ValueError("fit_truncated_dpm requires at least one observation.")
     if len(initial_components) == 0:
-        raise ValueError('initial_components must not be empty.')
+        raise ValueError("initial_components must not be empty.")
     if alpha <= 0.0 or not np.isfinite(alpha):
-        raise ValueError('alpha must be finite and positive.')
+        raise ValueError("alpha must be finite and positive.")
     k = len(initial_components)
     components = list(initial_components)
     estimators = _component_estimators(component_estimator, k)
-    gamma = np.column_stack([
-        np.ones(k, dtype=np.float64),
-        np.full(k, float(alpha), dtype=np.float64),
-    ])
-    history: List[float] = []
+    gamma = np.column_stack(
+        [
+            np.ones(k, dtype=np.float64),
+            np.full(k, float(alpha), dtype=np.float64),
+        ]
+    )
+    history: list[float] = []
     responsibilities = np.full((len(data), k), 1.0 / k, dtype=np.float64)
 
     for _ in range(max(1, int(max_its))):
@@ -229,40 +236,42 @@ def fit_truncated_dpm(data: Sequence[Any],
     return TruncatedDPMFitResult(model, responsibilities, history)
 
 
-def _as_gamma(gamma: Any, expected_rows: Optional[int] = None) -> np.ndarray:
+def _as_gamma(gamma: Any, expected_rows: int | None = None) -> np.ndarray:
     gam = np.asarray(gamma, dtype=np.float64)
     if gam.ndim != 2 or gam.shape[1] != 2:
-        raise ValueError('gamma must have shape (num_components, 2).')
+        raise ValueError("gamma must have shape (num_components, 2).")
     if expected_rows is not None and gam.shape[0] != expected_rows:
-        raise ValueError('gamma row count must match the number of components.')
+        raise ValueError("gamma row count must match the number of components.")
     if np.any(~np.isfinite(gam)) or np.any(gam <= 0.0):
-        raise ValueError('gamma entries must be finite and positive.')
+        raise ValueError("gamma entries must be finite and positive.")
     return gam
 
 
 def _as_simplex(values: Any, size: int, name: str) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float64)
     if arr.ndim != 1 or arr.shape[0] != size:
-        raise ValueError('%s must have length %d.' % (name, size))
+        raise ValueError("%s must have length %d." % (name, size))
     if np.any(~np.isfinite(arr)) or np.any(arr < 0.0):
-        raise ValueError('%s must contain finite non-negative values.' % name)
+        raise ValueError("%s must contain finite non-negative values." % name)
     total = arr.sum()
     if total <= 0.0:
-        raise ValueError('%s must have positive total mass.' % name)
+        raise ValueError("%s must have positive total mass." % name)
     return arr / total
 
 
-def _component_estimators(component_estimator: Union[ParameterEstimator, Sequence[ParameterEstimator]],
-                          k: int) -> List[ParameterEstimator]:
+def _component_estimators(
+    component_estimator: ParameterEstimator | Sequence[ParameterEstimator], k: int
+) -> list[ParameterEstimator]:
     if isinstance(component_estimator, (list, tuple)):
         if len(component_estimator) != k:
-            raise ValueError('component_estimator sequence length must match initial_components.')
+            raise ValueError("component_estimator sequence length must match initial_components.")
         return list(component_estimator)
     return [component_estimator for _ in range(k)]
 
 
-def _component_log_density_matrix(components: Sequence[SequenceEncodableProbabilityDistribution],
-                                  data: Sequence[Any]) -> np.ndarray:
+def _component_log_density_matrix(
+    components: Sequence[SequenceEncodableProbabilityDistribution], data: Sequence[Any]
+) -> np.ndarray:
     rv = np.empty((len(data), len(components)), dtype=np.float64)
     for j, comp in enumerate(components):
         rv[:, j] = [comp.log_density(x) for x in data]
@@ -283,11 +292,13 @@ def _softmax_rows(log_scores: np.ndarray) -> np.ndarray:
     return rv
 
 
-def _estimate_components(data: Sequence[Any],
-                         old_components: Sequence[SequenceEncodableProbabilityDistribution],
-                         estimators: Sequence[ParameterEstimator],
-                         responsibilities: np.ndarray,
-                         counts: np.ndarray) -> List[SequenceEncodableProbabilityDistribution]:
+def _estimate_components(
+    data: Sequence[Any],
+    old_components: Sequence[SequenceEncodableProbabilityDistribution],
+    estimators: Sequence[ParameterEstimator],
+    responsibilities: np.ndarray,
+    counts: np.ndarray,
+) -> list[SequenceEncodableProbabilityDistribution]:
     new_components = []
     for k, estimator in enumerate(estimators):
         if counts[k] <= 1.0e-12:

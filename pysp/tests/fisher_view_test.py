@@ -1,20 +1,21 @@
 """Tests for the generic Fisher-geometry view protocol."""
+
 import unittest
 
 import numpy as np
 
 from pysp.stats import (
     BernoulliDistribution,
+    BetaDistribution,
     BinomialDistribution,
     CategoricalDistribution,
     CompositeDistribution,
-    BetaDistribution,
     DiagonalGaussianDistribution,
     DirichletDistribution,
     ExponentialDistribution,
-    GeometricDistribution,
-    GaussianDistribution,
     GammaDistribution,
+    GaussianDistribution,
+    GeometricDistribution,
     HeterogeneousPCFGDistribution,
     HiddenMarkovModelDistribution,
     IndianBuffetProcessDistribution,
@@ -36,7 +37,6 @@ from pysp.utils.special import digamma, trigamma
 
 
 class FisherViewTestCase(unittest.TestCase):
-
     @staticmethod
     def weighted_moments(mat, probs):
         probs = np.asarray(probs, dtype=np.float64)
@@ -48,7 +48,7 @@ class FisherViewTestCase(unittest.TestCase):
     def assert_data_and_encoded_match(self, dist, data):
         view = dist.to_fisher()
         raw = view.expected_statistics_matrix(data=data)
-        if hasattr(dist, 'dist_to_encoder'):
+        if hasattr(dist, "dist_to_encoder"):
             enc = dist.dist_to_encoder().seq_encode(data)
         else:
             enc = dist.seq_encode(data)
@@ -67,10 +67,12 @@ class FisherViewTestCase(unittest.TestCase):
 
         data = [-1.0, 2.0]
         mat = view.statistics_matrix(data=data)
-        expected = np.asarray([
-            [-1.0, 1.0, 1.0, 1.0],
-            [2.0, 4.0, 1.0, 1.0],
-        ])
+        expected = np.asarray(
+            [
+                [-1.0, 1.0, 1.0, 1.0],
+                [2.0, 4.0, 1.0, 1.0],
+            ]
+        )
         np.testing.assert_allclose(mat, expected)
 
     def test_encoded_statistics_match_raw_statistics(self):
@@ -88,7 +90,7 @@ class FisherViewTestCase(unittest.TestCase):
         view = FisherView(GaussianDistribution(0.0, 1.0))
 
         def fail_encode(data, estimate):
-            raise AssertionError('generic raw data path should not encode the batch')
+            raise AssertionError("generic raw data path should not encode the batch")
 
         view._encode_data = fail_encode
         mat = view.statistics_matrix(data=[-1.0, 2.0])
@@ -96,9 +98,7 @@ class FisherViewTestCase(unittest.TestCase):
         np.testing.assert_allclose(mat, [[-1.0, 1.0, 1.0, 1.0], [2.0, 4.0, 1.0, 1.0]])
 
     def test_batch_statistics_use_encoder_for_dynamic_schemas(self):
-        dist = SequenceDistribution(
-            PoissonDistribution(2.0),
-            IntegerCategoricalDistribution(0, [0.1, 0.2, 0.4, 0.3]))
+        dist = SequenceDistribution(PoissonDistribution(2.0), IntegerCategoricalDistribution(0, [0.1, 0.2, 0.4, 0.3]))
         data = [[1, 2], [0, 3, 2], [1]]
 
         self.assert_data_and_encoded_match(dist, data)
@@ -106,13 +106,14 @@ class FisherViewTestCase(unittest.TestCase):
     def test_latent_sequence_statistics_have_encoded_parity(self):
         dist = HiddenMarkovModelDistribution(
             [
-                CategoricalDistribution({'a': 0.8, 'b': 0.2}),
-                CategoricalDistribution({'a': 0.2, 'b': 0.8}),
+                CategoricalDistribution({"a": 0.8, "b": 0.2}),
+                CategoricalDistribution({"a": 0.2, "b": 0.8}),
             ],
             [0.5, 0.5],
             [[0.9, 0.1], [0.1, 0.9]],
-            len_dist=IntegerCategoricalDistribution(1, [0.2, 0.4, 0.4]))
-        data = [['a', 'a'], ['b', 'b', 'a'], ['a']]
+            len_dist=IntegerCategoricalDistribution(1, [0.2, 0.4, 0.4]),
+        )
+        data = [["a", "a"], ["b", "b", "a"], ["a"]]
 
         self.assert_data_and_encoded_match(dist, data)
 
@@ -125,7 +126,8 @@ class FisherViewTestCase(unittest.TestCase):
             ],
             [0.4, 0.35, 0.25],
             [[0.75, 0.2, 0.05], [0.15, 0.7, 0.15], [0.1, 0.2, 0.7]],
-            len_dist=IntegerCategoricalDistribution(5, [0.1, 0.2, 0.25, 0.25, 0.2]))
+            len_dist=IntegerCategoricalDistribution(5, [0.1, 0.2, 0.25, 0.25, 0.2]),
+        )
         data = [
             [-1.2, -0.8, 0.1, 1.0, 2.2],
             [2.4, 1.8, 3.1, 4.4, 4.9, 5.3, 5.1],
@@ -141,13 +143,14 @@ class FisherViewTestCase(unittest.TestCase):
 
     def test_pcfg_fast_statistics_match_accumulator_replay(self):
         dist = HeterogeneousPCFGDistribution(
-            binary_rules={'S': [('A', 'B', 0.4), ('B', 'A', 0.6)]},
+            binary_rules={"S": [("A", "B", 0.4), ("B", "A", 0.6)]},
             terminal_rules={
-                'A': [(CategoricalDistribution({'a': 0.7, 'b': 0.3}), 1.0)],
-                'B': [(CategoricalDistribution({'a': 0.2, 'b': 0.8}), 1.0)],
+                "A": [(CategoricalDistribution({"a": 0.7, "b": 0.3}), 1.0)],
+                "B": [(CategoricalDistribution({"a": 0.2, "b": 0.8}), 1.0)],
             },
-            start='S')
-        data = [['a', 'a'], ['a', 'b'], ['b', 'a'], ['b', 'b']]
+            start="S",
+        )
+        data = [["a", "a"], ["a", "b"], ["b", "a"], ["b", "b"]]
         enc = dist.dist_to_encoder().seq_encode(data)
         view = dist.to_fisher()
 
@@ -182,8 +185,8 @@ class FisherViewTestCase(unittest.TestCase):
             ),
             (
                 SelectDistribution(
-                    [GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 1.0)],
-                    lambda x: 0 if x < 0.0 else 1),
+                    [GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 1.0)], lambda x: 0 if x < 0.0 else 1
+                ),
                 [-2.0, -0.5, 1.0, 3.0],
             ),
             (
@@ -231,21 +234,23 @@ class FisherViewTestCase(unittest.TestCase):
                 [[0.2, 0.3, 0.5], [0.1, 0.7, 0.2], [0.4, 0.2, 0.4]],
             ),
             (
-                IndianBuffetProcessDistribution(3, feature_probs=[0.2, 0.5, 0.8], data_format='dense'),
+                IndianBuffetProcessDistribution(3, feature_probs=[0.2, 0.5, 0.8], data_format="dense"),
                 [[1, 0, 1], [0, 1, 1], [0, 0, 1]],
             ),
             (
                 MultinomialDistribution(
-                    CategoricalDistribution({'a': 0.25, 'b': 0.75}),
-                    len_dist=IntegerCategoricalDistribution(1, [0.2, 0.4, 0.4])),
-                [[('a', 1), ('b', 2)], [('b', 1)], [('a', 2)]],
+                    CategoricalDistribution({"a": 0.25, "b": 0.75}),
+                    len_dist=IntegerCategoricalDistribution(1, [0.2, 0.4, 0.4]),
+                ),
+                [[("a", 1), ("b", 2)], [("b", 1)], [("a", 2)]],
             ),
             (
                 MultinomialDistribution(
-                    CategoricalDistribution({'a': 0.25, 'b': 0.75}),
+                    CategoricalDistribution({"a": 0.25, "b": 0.75}),
                     len_dist=IntegerCategoricalDistribution(1, [0.2, 0.4, 0.4]),
-                    len_normalized=True),
-                [[('a', 1), ('b', 2)], [('b', 1)], [('a', 2)]],
+                    len_normalized=True,
+                ),
+                [[("a", 1), ("b", 2)], [("b", 1)], [("a", 2)]],
             ),
         ]
 
@@ -254,14 +259,13 @@ class FisherViewTestCase(unittest.TestCase):
                 self.assert_data_and_encoded_match(dist, data)
 
     def test_sequence_and_hmm_model_fisher_are_finite(self):
-        seq = SequenceDistribution(
-            GaussianDistribution(0.0, 1.0),
-            IntegerCategoricalDistribution(1, [0.2, 0.5, 0.3]))
+        seq = SequenceDistribution(GaussianDistribution(0.0, 1.0), IntegerCategoricalDistribution(1, [0.2, 0.5, 0.3]))
         hmm = HiddenMarkovModelDistribution(
             [GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 1.5)],
             [0.6, 0.4],
             [[0.8, 0.2], [0.3, 0.7]],
-            len_dist=IntegerCategoricalDistribution(1, [0.3, 0.4, 0.3]))
+            len_dist=IntegerCategoricalDistribution(1, [0.3, 0.4, 0.3]),
+        )
 
         for dist in (seq, hmm):
             view = dist.to_fisher()
@@ -275,7 +279,8 @@ class FisherViewTestCase(unittest.TestCase):
             [GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 1.5)],
             [0.6, 0.4],
             [[0.8, 0.2], [0.3, 0.7]],
-            len_dist=IntegerCategoricalDistribution(1, [0.3, 0.4, 0.3]))
+            len_dist=IntegerCategoricalDistribution(1, [0.3, 0.4, 0.3]),
+        )
         view = dist.to_fisher()
         data = [[-1.0, -0.5], [2.0, 2.5, -1.0], [0.0]]
         stats = view.expected_statistics_matrix(data=data)
@@ -284,12 +289,12 @@ class FisherViewTestCase(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             view.fisher_information(diagonal=False, ridge=0.0)
         with self.assertRaises(NotImplementedError):
-            view.fisher_vectors(stats=stats, metric='full')
+            view.fisher_vectors(stats=stats, metric="full")
 
         info = view.observed_fisher_information(stats=stats, diagonal=False, ridge=0.0)
         self.assertEqual(info.shape, (stats.shape[1], stats.shape[1]))
         self.assertTrue(np.all(np.isfinite(info)))
-        fv = view.observed_fisher_vectors(stats=stats, metric='full')
+        fv = view.observed_fisher_vectors(stats=stats, metric="full")
         self.assertEqual(fv.shape, stats.shape)
         self.assertTrue(np.all(np.isfinite(fv)))
 
@@ -299,10 +304,10 @@ class FisherViewTestCase(unittest.TestCase):
         from pysp.bstats.dirichlet import DirichletDistribution as BayesianDirichletDistribution
         from pysp.bstats.dmvn import DiagonalGaussianDistribution as BayesianDiagonalGaussianDistribution
         from pysp.bstats.exponential import ExponentialDistribution as BayesianExponentialDistribution
-        from pysp.bstats.gaussian import GaussianDistribution as BayesianGaussianDistribution
         from pysp.bstats.gamma import GammaDistribution as BayesianGammaDistribution
+        from pysp.bstats.gaussian import GaussianDistribution as BayesianGaussianDistribution
         from pysp.bstats.hidden_markov import HiddenMarkovModelDistribution as BayesianHiddenMarkovModelDistribution
-        from pysp.bstats.intrange import IntegerCategoricalDistribution as BayesianIntegerCategoricalDistribution
+        from pysp.bstats.int_range import IntegerCategoricalDistribution as BayesianIntegerCategoricalDistribution
         from pysp.bstats.log_gaussian import LogGaussianDistribution as BayesianLogGaussianDistribution
         from pysp.bstats.mvn import MultivariateGaussianDistribution as BayesianMultivariateGaussianDistribution
         from pysp.bstats.optional import OptionalDistribution as BayesianOptionalDistribution
@@ -312,7 +317,8 @@ class FisherViewTestCase(unittest.TestCase):
             (
                 BayesianSequenceDistribution(
                     BayesianGaussianDistribution(0.0, 1.0),
-                    len_dist=BayesianIntegerCategoricalDistribution([0.2, 0.5, 0.3], min_index=1)),
+                    len_dist=BayesianIntegerCategoricalDistribution([0.2, 0.5, 0.3], min_index=1),
+                ),
                 [[-1.0, 0.0], [1.0], [2.0, 2.5, 3.0]],
             ),
             (
@@ -324,15 +330,16 @@ class FisherViewTestCase(unittest.TestCase):
                 [0, 2, 5, 1],
             ),
             (
-                BayesianCategoricalDistribution({'x': 0.2, 'y': 0.8}),
-                ['x', 'y', 'y', 'x'],
+                BayesianCategoricalDistribution({"x": 0.2, "y": 0.8}),
+                ["x", "y", "y", "x"],
             ),
             (
                 BayesianHiddenMarkovModelDistribution(
                     [BayesianGaussianDistribution(-1.0, 1.0), BayesianGaussianDistribution(2.0, 1.5)],
                     [0.6, 0.4],
                     [[0.8, 0.2], [0.3, 0.7]],
-                    len_dist=BayesianIntegerCategoricalDistribution([0.3, 0.4, 0.3], min_index=1)),
+                    len_dist=BayesianIntegerCategoricalDistribution([0.3, 0.4, 0.3], min_index=1),
+                ),
                 [[-1.0, -0.5], [2.0, 2.5, -1.0], [0.0]],
             ),
             (
@@ -374,19 +381,17 @@ class FisherViewTestCase(unittest.TestCase):
                 self.assertTrue(np.all(info >= -1.0e-12))
 
     def test_vectorizer_handles_dynamic_dictionary_support(self):
-        dist = CategoricalDistribution({'a': 0.5, 'b': 0.5})
+        dist = CategoricalDistribution({"a": 0.5, "b": 0.5})
         view = dist.to_fisher()
 
-        mat = view.statistics_matrix(data=['a', 'b', 'a'])
+        mat = view.statistics_matrix(data=["a", "b", "a"])
 
         self.assertIsInstance(view.vectorizer, SufficientStatisticVectorizer)
         self.assertEqual(set(view.vectorizer.label_strings()), {"'a'", "'b'"})
         np.testing.assert_allclose(mat, [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
 
     def test_latent_model_uses_expected_complete_data_statistics(self):
-        dist = MixtureDistribution(
-            [GaussianDistribution(-2.0, 1.0), GaussianDistribution(2.0, 1.0)],
-            [0.25, 0.75])
+        dist = MixtureDistribution([GaussianDistribution(-2.0, 1.0), GaussianDistribution(2.0, 1.0)], [0.25, 0.75])
         view = dist.to_fisher()
 
         ss = view.structured_statistics(0.0)
@@ -394,9 +399,7 @@ class FisherViewTestCase(unittest.TestCase):
         np.testing.assert_allclose(ss[0], dist.posterior(0.0))
 
     def test_mixture_fisher_matrix_is_posterior_gated(self):
-        dist = MixtureDistribution(
-            [GaussianDistribution(-2.0, 1.0), GaussianDistribution(2.0, 1.0)],
-            [0.25, 0.75])
+        dist = MixtureDistribution([GaussianDistribution(-2.0, 1.0), GaussianDistribution(2.0, 1.0)], [0.25, 0.75])
         view = dist.to_fisher()
         x = 0.3
 
@@ -408,9 +411,7 @@ class FisherViewTestCase(unittest.TestCase):
         np.testing.assert_allclose(mat, expected)
 
     def test_mixture_view_has_complete_data_fisher_information(self):
-        dist = MixtureDistribution(
-            [GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 3.0)],
-            [0.4, 0.6])
+        dist = MixtureDistribution([GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 3.0)], [0.4, 0.6])
         view = dist.to_fisher()
 
         stats = view.expected_statistics_matrix(data=[-2.0, 0.0, 3.0])
@@ -425,22 +426,22 @@ class FisherViewTestCase(unittest.TestCase):
         dist = JointMixtureDistribution(
             components1=[GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 1.5)],
             components2=[GaussianDistribution(0.0, 2.0), GaussianDistribution(3.0, 0.75)],
-            w1=[0.4, 0.6], w2=[0.5, 0.5],
+            w1=[0.4, 0.6],
+            w2=[0.5, 0.5],
             taus12=[[0.8, 0.2], [0.25, 0.75]],
-            taus21=[[0.64, 0.18181818181818182], [0.36, 0.8181818181818182]])
+            taus21=[[0.64, 0.18181818181818182], [0.36, 0.8181818181818182]],
+        )
         data = [(-1.2, -0.3), (0.0, 2.1), (2.6, 3.5)]
         view = dist.to_fisher()
 
-        self.assertEqual(type(view).__name__, 'JointMixtureFisherView')
+        self.assertEqual(type(view).__name__, "JointMixtureFisherView")
         self.assertEqual(view.num_pairs, 4)
         for x in data:
             self.assertAlmostEqual(view.log_density(x), dist.log_density(x), places=12)
         self.assert_data_and_encoded_match(dist, data)
 
     def test_observed_fisher_information_uses_score_covariance(self):
-        dist = MixtureDistribution(
-            [GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 3.0)],
-            [0.4, 0.6])
+        dist = MixtureDistribution([GaussianDistribution(-1.0, 1.0), GaussianDistribution(2.0, 3.0)], [0.4, 0.6])
         view = dist.to_fisher()
         stats = view.expected_statistics_matrix(data=[-2.0, -0.5, 0.0, 1.0, 3.0])
         centered = stats - view._model_mean().reshape((1, -1))
@@ -449,14 +450,12 @@ class FisherViewTestCase(unittest.TestCase):
         expected_full = np.dot(centered.T, centered) / float(centered.shape[0])
 
         np.testing.assert_allclose(
-            view.observed_fisher_information(stats=stats, diagonal=True, ridge=0.0),
-            expected_diag)
+            view.observed_fisher_information(stats=stats, diagonal=True, ridge=0.0), expected_diag
+        )
         np.testing.assert_allclose(
-            view.observed_fisher_information(stats=stats, diagonal=False, ridge=0.0),
-            expected_full)
-        np.testing.assert_allclose(
-            view.observed_fisher_vectors(stats=stats, metric='identity'),
-            centered)
+            view.observed_fisher_information(stats=stats, diagonal=False, ridge=0.0), expected_full
+        )
+        np.testing.assert_allclose(view.observed_fisher_vectors(stats=stats, metric="identity"), centered)
 
     def test_weighted_observed_fisher_uses_empirical_center(self):
         dist = WeightedDistribution(GaussianDistribution(0.0, 1.0))
@@ -465,16 +464,14 @@ class FisherViewTestCase(unittest.TestCase):
         centered = stats - stats.mean(axis=0, keepdims=True)
 
         np.testing.assert_allclose(view.score_center(stats=stats), stats.mean(axis=0))
-        np.testing.assert_allclose(
-            view.observed_fisher_vectors(stats=stats, metric='identity'),
-            centered)
+        np.testing.assert_allclose(view.observed_fisher_vectors(stats=stats, metric="identity"), centered)
 
     def test_fisher_vectors_use_model_center_for_exact_views(self):
         dist = GaussianDistribution(0.0, 1.0)
         view = dist.to_fisher()
 
         stats = view.statistics_matrix(data=[-1.0, 0.0, 1.0])
-        fv = view.fisher_vectors(stats=stats, metric='identity')
+        fv = view.fisher_vectors(stats=stats, metric="identity")
 
         self.assertEqual(fv.shape, stats.shape)
         self.assertTrue(np.all(np.isfinite(fv)))
@@ -482,9 +479,7 @@ class FisherViewTestCase(unittest.TestCase):
 
     def test_leaf_views_have_exact_fisher_information(self):
         g_view = GaussianDistribution(0.0, 2.0).to_fisher()
-        np.testing.assert_allclose(
-            g_view.fisher_information(ridge=0.0),
-            np.diag([2.0, 8.0, 0.0, 0.0]))
+        np.testing.assert_allclose(g_view.fisher_information(ridge=0.0), np.diag([2.0, 8.0, 0.0, 0.0]))
 
         count_cases = [
             (BernoulliDistribution(0.35), 0.35, 0.35 * 0.65),
@@ -498,10 +493,8 @@ class FisherViewTestCase(unittest.TestCase):
                 np.testing.assert_allclose(view.mean_statistics(), [1.0, mean])
                 np.testing.assert_allclose(view.fisher_information(ridge=0.0), np.diag([0.0, var]))
 
-        c_view = CategoricalDistribution({'a': 0.25, 'b': 0.75}).to_fisher()
-        np.testing.assert_allclose(
-            c_view.fisher_information(ridge=0.0),
-            [[0.1875, -0.1875], [-0.1875, 0.1875]])
+        c_view = CategoricalDistribution({"a": 0.25, "b": 0.75}).to_fisher()
+        np.testing.assert_allclose(c_view.fisher_information(ridge=0.0), [[0.1875, -0.1875], [-0.1875, 0.1875]])
 
         ic_view = IntegerCategoricalDistribution(2, [0.2, 0.3, 0.5]).to_fisher()
         p = np.asarray([0.2, 0.3, 0.5])
@@ -521,9 +514,7 @@ class FisherViewTestCase(unittest.TestCase):
 
         mvn_view = MultivariateGaussianDistribution([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]]).to_fisher()
         np.testing.assert_allclose(mvn_view.mean_statistics(), [0.0, 0.0, 1.0, 0.0, 1.0, 1.0])
-        np.testing.assert_allclose(
-            mvn_view.fisher_information(ridge=0.0),
-            np.diag([1.0, 1.0, 2.0, 1.0, 2.0, 0.0]))
+        np.testing.assert_allclose(mvn_view.fisher_information(ridge=0.0), np.diag([1.0, 1.0, 2.0, 1.0, 2.0, 0.0]))
 
         lg_view = LogGaussianDistribution(0.0, 2.0).to_fisher()
         np.testing.assert_allclose(lg_view.mean_statistics(), [0.0, 2.0, 1.0, 1.0])
@@ -556,30 +547,33 @@ class FisherViewTestCase(unittest.TestCase):
         alpha = np.asarray([2.0, 3.0, 4.0])
         dir_info = np.zeros((4, 4), dtype=np.float64)
         dir_info[:3, :3] = np.diag(trigamma(alpha)) - trigamma(alpha.sum())
-        np.testing.assert_allclose(dir_view.mean_statistics(),
-                                   np.concatenate((digamma(alpha) - digamma(alpha.sum()), [1.0])))
+        np.testing.assert_allclose(
+            dir_view.mean_statistics(), np.concatenate((digamma(alpha) - digamma(alpha.sum()), [1.0]))
+        )
         np.testing.assert_allclose(dir_view.fisher_information(ridge=0.0), dir_info)
 
-        ibp_view = IndianBuffetProcessDistribution(
-            3, feature_probs=[0.2, 0.5, 0.8], data_format='dense').to_fisher()
+        ibp_view = IndianBuffetProcessDistribution(3, feature_probs=[0.2, 0.5, 0.8], data_format="dense").to_fisher()
         p = np.asarray([0.2, 0.5, 0.8])
         np.testing.assert_allclose(ibp_view.mean_statistics(), p)
         np.testing.assert_allclose(ibp_view.fisher_information(ridge=0.0), np.diag(p * (1.0 - p)))
 
     def test_generic_fisher_vectors_add_ridge_once(self):
         view = FisherView(GaussianDistribution(0.0, 1.0))
-        stats = np.asarray([
-            [0.0, 0.0],
-            [2.0, 1.0],
-            [4.0, 3.0],
-        ])
+        stats = np.asarray(
+            [
+                [0.0, 0.0],
+                [2.0, 1.0],
+                [4.0, 3.0],
+            ]
+        )
         ridge = 0.25
         centered = stats - stats.mean(axis=0, keepdims=True)
         diag = np.mean(centered * centered, axis=0)
 
         np.testing.assert_allclose(
-            view.fisher_vectors(stats=stats, metric='diagonal', ridge=ridge),
-            centered / np.sqrt(diag.reshape((1, -1)) + ridge))
+            view.fisher_vectors(stats=stats, metric="diagonal", ridge=ridge),
+            centered / np.sqrt(diag.reshape((1, -1)) + ridge),
+        )
 
     def test_composite_model_fisher_is_child_block_diagonal(self):
         dist = CompositeDistribution((GaussianDistribution(1.0, 2.0), PoissonDistribution(3.0)))
@@ -589,15 +583,14 @@ class FisherViewTestCase(unittest.TestCase):
         pos = 0
         for block in blocks:
             n = block.shape[0]
-            expected[pos:pos + n, pos:pos + n] = block
+            expected[pos : pos + n, pos : pos + n] = block
             pos += n
 
         np.testing.assert_allclose(view.fisher_information(ridge=0.0), expected)
 
     def test_optional_model_fisher_matches_exact_enumeration(self):
-        dist = OptionalDistribution(CategoricalDistribution({'a': 0.2, 'b': 0.8}),
-                                    p=0.3, missing_value=None)
-        data = [None, 'a', 'b']
+        dist = OptionalDistribution(CategoricalDistribution({"a": 0.2, "b": 0.8}), p=0.3, missing_value=None)
+        data = [None, "a", "b"]
         probs = np.asarray([0.3, 0.7 * 0.2, 0.7 * 0.8])
         view = dist.to_fisher()
         stats = view.expected_statistics_matrix(data=data)
@@ -634,12 +627,13 @@ class FisherViewTestCase(unittest.TestCase):
     def test_hmm_model_fisher_matches_exact_finite_enumeration(self):
         dist = HiddenMarkovModelDistribution(
             [
-                CategoricalDistribution({'a': 0.8, 'b': 0.2}),
-                CategoricalDistribution({'a': 0.3, 'b': 0.7}),
+                CategoricalDistribution({"a": 0.8, "b": 0.2}),
+                CategoricalDistribution({"a": 0.3, "b": 0.7}),
             ],
             [0.6, 0.4],
             [[0.7, 0.3], [0.2, 0.8]],
-            len_dist=IntegerCategoricalDistribution(1, [0.55, 0.45]))
+            len_dist=IntegerCategoricalDistribution(1, [0.55, 0.45]),
+        )
         enumerated = list(dist.enumerator())
         data = [value for value, _ in enumerated]
         probs = np.asarray([np.exp(log_prob) for _, log_prob in enumerated], dtype=np.float64)
@@ -652,18 +646,19 @@ class FisherViewTestCase(unittest.TestCase):
         np.testing.assert_allclose(view.fisher_information(ridge=0.0), cov, atol=1.0e-12)
         np.testing.assert_allclose(view.fisher_information(diagonal=True, ridge=0.0), np.diag(cov), atol=1.0e-12)
 
-        fv = view.fisher_vectors(stats=stats, metric='full', ridge=1.0e-8)
+        fv = view.fisher_vectors(stats=stats, metric="full", ridge=1.0e-8)
         self.assertEqual(fv.shape, stats.shape)
         self.assertTrue(np.all(np.isfinite(fv)))
 
     def test_pcfg_model_fisher_matches_exact_finite_enumeration(self):
         dist = HeterogeneousPCFGDistribution(
-            binary_rules={'S': [('A', 'B', 0.4), ('B', 'A', 0.6)]},
+            binary_rules={"S": [("A", "B", 0.4), ("B", "A", 0.6)]},
             terminal_rules={
-                'A': [(CategoricalDistribution({'a': 0.7, 'b': 0.3}), 1.0)],
-                'B': [(CategoricalDistribution({'a': 0.2, 'b': 0.8}), 1.0)],
+                "A": [(CategoricalDistribution({"a": 0.7, "b": 0.3}), 1.0)],
+                "B": [(CategoricalDistribution({"a": 0.2, "b": 0.8}), 1.0)],
             },
-            start='S')
+            start="S",
+        )
         enumerated = list(dist.enumerator())
         data = [value for value, _ in enumerated]
         probs = np.asarray([np.exp(log_prob) for _, log_prob in enumerated], dtype=np.float64)
@@ -677,14 +672,15 @@ class FisherViewTestCase(unittest.TestCase):
 
     def test_recursive_pcfg_uses_observed_metric_on_data(self):
         dist = HeterogeneousPCFGDistribution(
-            binary_rules={'S': [('S', 'A', 0.5)]},
+            binary_rules={"S": [("S", "A", 0.5)]},
             terminal_rules={
-                'S': [(CategoricalDistribution({'z': 1.0}), 0.5)],
-                'A': [(CategoricalDistribution({'a': 1.0}), 1.0)],
+                "S": [(CategoricalDistribution({"z": 1.0}), 0.5)],
+                "A": [(CategoricalDistribution({"a": 1.0}), 1.0)],
             },
-            start='S')
+            start="S",
+        )
         view = dist.to_fisher()
-        stats = view.expected_statistics_matrix(data=[['z'], ['z', 'a'], ['z', 'a', 'a']])
+        stats = view.expected_statistics_matrix(data=[["z"], ["z", "a"], ["z", "a", "a"]])
 
         with self.assertRaises(NotImplementedError):
             view.fisher_information(ridge=0.0)
@@ -715,14 +711,14 @@ class FisherViewTestCase(unittest.TestCase):
     def test_bstats_categorical_default_mass_uses_generic_view(self):
         from pysp.bstats.categorical import CategoricalDistribution as BayesianCategoricalDistribution
 
-        dist = BayesianCategoricalDistribution({'a': 0.5}, default_value=0.5)
+        dist = BayesianCategoricalDistribution({"a": 0.5}, default_value=0.5)
         view = dist.to_fisher()
-        mat = view.expected_statistics_matrix(data=['a', 'unmapped'])
+        mat = view.expected_statistics_matrix(data=["a", "unmapped"])
 
         self.assertEqual(type(view), FisherView)
         self.assertEqual(mat.shape[0], 2)
         self.assertTrue(np.all(np.isfinite(mat)))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

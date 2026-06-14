@@ -7,6 +7,7 @@ Covers:
   - parameter recovery of estimators on sampled data,
   - empirical KL divergence with degenerate (-inf) likelihood values.
 """
+
 import unittest
 
 import numpy as np
@@ -14,25 +15,44 @@ import scipy.special
 import scipy.stats
 
 from pysp.stats import (
-    initialize, estimate, seq_encode,
-    BetaDistribution, BinomialDistribution, CategoricalDistribution, CompositeDistribution, ConditionalDistribution,
-    DiagonalGaussianDistribution, DirichletDistribution, ExponentialDistribution,
-    GammaDistribution, GaussianDistribution, GeometricDistribution,
-    IntegerCategoricalDistribution, LogGaussianDistribution, MixtureDistribution,
-    MultivariateGaussianDistribution, OptionalDistribution, ParetoDistribution, PoissonDistribution,
+    BetaDistribution,
+    BinomialDistribution,
+    CategoricalDistribution,
+    CompositeDistribution,
+    ConditionalDistribution,
+    DiagonalGaussianDistribution,
+    DirichletDistribution,
+    ExponentialDistribution,
+    GammaDistribution,
+    GaussianDistribution,
+    GeometricDistribution,
+    IntegerCategoricalDistribution,
+    LogGaussianDistribution,
+    MixtureDistribution,
+    MultivariateGaussianDistribution,
+    OptionalDistribution,
+    ParetoDistribution,
+    PoissonDistribution,
     SequenceDistribution,
+    estimate,
+    initialize,
+    seq_encode,
 )
 from pysp.stats.geometric import GeometricEstimator
 from pysp.utils.estimation import empirical_kl_divergence
 from pysp.utils.special import digammainv, logpdet, trigamma
 from pysp.utils.vector import (
-    log_posterior, log_posterior_sum, log_sum, make_pdf, posterior, row_choice,
+    log_posterior,
+    log_posterior_sum,
+    log_sum,
+    make_pdf,
+    posterior,
+    row_choice,
     weighted_log_sum,
 )
 
 
 class VectorUtilsTestCase(unittest.TestCase):
-
     def test_log_sum_matches_scipy(self):
         rng = np.random.RandomState(1)
         for _ in range(10):
@@ -100,14 +120,11 @@ class VectorUtilsTestCase(unittest.TestCase):
             p_mat = rng.dirichlet(np.ones(m), size=n)
             idx = row_choice(p_mat, np.random.RandomState(m + 100))
             u = np.random.RandomState(m + 100).rand(n)
-            ref = np.array([min(np.searchsorted(np.cumsum(p_mat[i]), u[i], side='right'), m - 1)
-                            for i in range(n)])
-            self.assertTrue(np.array_equal(idx, ref),
-                            'row_choice disagrees with inverse-CDF sampling for m=%d' % m)
+            ref = np.array([min(np.searchsorted(np.cumsum(p_mat[i]), u[i], side="right"), m - 1) for i in range(n)])
+            self.assertTrue(np.array_equal(idx, ref), "row_choice disagrees with inverse-CDF sampling for m=%d" % m)
 
 
 class SpecialUtilsTestCase(unittest.TestCase):
-
     def test_logpdet_full_rank(self):
         rng = np.random.RandomState(4)
         for d in [2, 3, 6]:
@@ -202,7 +219,7 @@ class ReferenceLogDensityTestCase(unittest.TestCase):
         self.assert_close(d.log_density(x), ref)
 
     def test_categorical(self):
-        pm = {'a': 0.4, 'b': 0.35, 'c': 0.25}
+        pm = {"a": 0.4, "b": 0.35, "c": 0.25}
         d = CategoricalDistribution(pm)
         for k, v in pm.items():
             self.assert_close(d.log_density(k), np.log(v))
@@ -216,19 +233,19 @@ class ReferenceLogDensityTestCase(unittest.TestCase):
 
     def test_invalid_support_returns_negative_infinity(self):
         invalid_cases = [
-            (PoissonDistribution(lam=2.0), [-1, 1.5, 'bad']),
-            (GeometricDistribution(p=0.4), [0, -1, 1.5, 'bad']),
-            (BinomialDistribution(p=0.4, n=5), [-1, 6, 2.5, 'bad']),
-            (BetaDistribution(a=2.0, b=3.0), [0.0, 1.0, np.nan, 'bad']),
-            (GammaDistribution(k=2.0, theta=3.0), [0.0, -1.0, np.nan, 'bad']),
+            (PoissonDistribution(lam=2.0), [-1, 1.5, "bad"]),
+            (GeometricDistribution(p=0.4), [0, -1, 1.5, "bad"]),
+            (BinomialDistribution(p=0.4, n=5), [-1, 6, 2.5, "bad"]),
+            (BetaDistribution(a=2.0, b=3.0), [0.0, 1.0, np.nan, "bad"]),
+            (GammaDistribution(k=2.0, theta=3.0), [0.0, -1.0, np.nan, "bad"]),
             (LogGaussianDistribution(mu=0.0, sigma2=1.0), [0.0, -1.0]),
             (ExponentialDistribution(beta=2.0), [-1.0]),
-            (ParetoDistribution(xm=2.0, alpha=3.0), [1.0, np.nan, 'bad']),
+            (ParetoDistribution(xm=2.0, alpha=3.0), [1.0, np.nan, "bad"]),
             (DirichletDistribution([2.0, 3.0, 4.0]), [[0.2, 0.3, 0.4], [-0.1, 0.6, 0.5]]),
         ]
         for dist, values in invalid_cases:
             for x in values:
-                self.assertEqual(dist.log_density(x), -np.inf, msg='%s at %s' % (dist, x))
+                self.assertEqual(dist.log_density(x), -np.inf, msg="%s at %s" % (dist, x))
 
         self.assertEqual(LogGaussianDistribution(0.0, 1.0).density(0.0), 0.0)
 
@@ -245,7 +262,7 @@ class ReferenceLogDensityTestCase(unittest.TestCase):
             (BetaDistribution, (0.0, 1.0)),
         ]
         for cls, args in invalid:
-            with self.assertRaises(ValueError, msg='%s%r' % (cls.__name__, args)):
+            with self.assertRaises(ValueError, msg="%s%r" % (cls.__name__, args)):
                 cls(*args)
 
     def test_count_encoders_reject_fractional_counts(self):
@@ -263,12 +280,13 @@ class ReferenceLogDensityTestCase(unittest.TestCase):
         np.testing.assert_array_equal(np.isneginf(p.seq_log_density(enc_p)), [False, False, True])
 
         g = GeometricDistribution(0.4)
-        np.testing.assert_array_equal(np.isneginf(g.seq_log_density(np.asarray([0.0, 1.0, 1.5, 2.0]))),
-                                      [True, False, True, False])
+        np.testing.assert_array_equal(
+            np.isneginf(g.seq_log_density(np.asarray([0.0, 1.0, 1.5, 2.0]))), [True, False, True, False]
+        )
 
     def test_conditional_seq_log_density_without_default_matches_scalar(self):
-        d = ConditionalDistribution({'seen': GaussianDistribution(0.0, 1.0)}, default_dist=None)
-        data = [('seen', 0.25), ('missing', 0.25)]
+        d = ConditionalDistribution({"seen": GaussianDistribution(0.0, 1.0)}, default_dist=None)
+        data = [("seen", 0.25), ("missing", 0.25)]
         enc = d.dist_to_encoder().seq_encode(data)
         np.testing.assert_allclose(d.seq_log_density(enc), np.asarray([d.log_density(x) for x in data]))
 
@@ -285,16 +303,16 @@ class ConsistencyTestCase(unittest.TestCase):
             PoissonDistribution(lam=6.0),
             GeometricDistribution(p=0.4),
             BinomialDistribution(p=0.3, n=8),
-            CategoricalDistribution({'a': 0.4, 'b': 0.3, 'c': 0.2, 'd': 0.1}),
+            CategoricalDistribution({"a": 0.4, "b": 0.3, "c": 0.2, "d": 0.1}),
             IntegerCategoricalDistribution(0, [0.1, 0.4, 0.3, 0.2]),
             DiagonalGaussianDistribution([1.8, 4.3, -1.5], [1.1, 4.8, 9.1]),
             MultivariateGaussianDistribution([1.0, 2.0], [[2.0, 0.5], [0.5, 1.0]]),
             DirichletDistribution([1.1, 2.8, 4.5]),
-            MixtureDistribution([GaussianDistribution(mu=-3.0, sigma2=1.0),
-                                 GaussianDistribution(mu=3.0, sigma2=2.0)], [0.4, 0.6]),
+            MixtureDistribution(
+                [GaussianDistribution(mu=-3.0, sigma2=1.0), GaussianDistribution(mu=3.0, sigma2=2.0)], [0.4, 0.6]
+            ),
             CompositeDistribution((ExponentialDistribution(3.1), PoissonDistribution(3.2))),
-            SequenceDistribution(GeometricDistribution(0.8),
-                                 len_dist=CategoricalDistribution({5: 1.0})),
+            SequenceDistribution(GeometricDistribution(0.8), len_dist=CategoricalDistribution({5: 1.0})),
             OptionalDistribution(PoissonDistribution(4.7), p=0.1),
         ]
 
@@ -306,26 +324,28 @@ class ConsistencyTestCase(unittest.TestCase):
             scalar_ll = np.array([dist.log_density(x) for x in data])
             self.assertTrue(
                 np.allclose(seq_ll, scalar_ll, rtol=1e-10, atol=1e-12),
-                'seq/scalar log-density mismatch for %s: max diff %s' % (
-                    str(dist), np.max(np.abs(seq_ll - scalar_ll))))
+                "seq/scalar log-density mismatch for %s: max diff %s" % (str(dist), np.max(np.abs(seq_ll - scalar_ll))),
+            )
 
     def test_density_matches_exp_log_density(self):
         for dist in self.battery():
-            if not hasattr(dist, 'density'):
+            if not hasattr(dist, "density"):
                 continue
             data = dist.sampler(seed=11).sample(size=20)
             for x in data:
                 ld = dist.log_density(x)
                 self.assertAlmostEqual(
-                    dist.density(x), np.exp(ld), places=10,
-                    msg='density != exp(log_density) for %s at %s' % (str(dist), repr(x)))
+                    dist.density(x),
+                    np.exp(ld),
+                    places=10,
+                    msg="density != exp(log_density) for %s at %s" % (str(dist), repr(x)),
+                )
 
     def test_sampler_reproducible(self):
         for dist in self.battery():
             s1 = dist.sampler(seed=42).sample(size=10)
             s2 = dist.sampler(seed=42).sample(size=10)
-            self.assertEqual(list(map(str, s1)), list(map(str, s2)),
-                             'sampler not reproducible for %s' % str(dist))
+            self.assertEqual(list(map(str, s1)), list(map(str, s2)), "sampler not reproducible for %s" % str(dist))
 
 
 class EstimationRecoveryTestCase(unittest.TestCase):
@@ -367,7 +387,7 @@ class EstimationRecoveryTestCase(unittest.TestCase):
         self.assertAlmostEqual(fit.theta, 3.0, delta=0.4)
 
     def test_categorical_recovery(self):
-        truth = {'a': 0.5, 'b': 0.3, 'c': 0.2}
+        truth = {"a": 0.5, "b": 0.3, "c": 0.2}
         fit = self.fit(CategoricalDistribution(truth))
         for k, v in truth.items():
             self.assertAlmostEqual(np.exp(fit.log_density(k)), v, delta=0.02)
@@ -379,7 +399,6 @@ class EstimationRecoveryTestCase(unittest.TestCase):
 
 
 class EmpiricalKLTestCase(unittest.TestCase):
-
     def test_identical_distributions_zero_kl(self):
         d = GaussianDistribution(mu=0.0, sigma2=1.0)
         data = d.sampler(seed=8).sample(size=200)
@@ -390,9 +409,9 @@ class EmpiricalKLTestCase(unittest.TestCase):
         self.assertEqual(bad2, 0)
 
     def test_handles_neg_inf_log_densities(self):
-        d1 = CategoricalDistribution({'a': 0.5, 'b': 0.5})
-        d2 = CategoricalDistribution({'a': 1.0}, default_value=0.0)
-        data = ['a', 'b', 'a', 'a']
+        d1 = CategoricalDistribution({"a": 0.5, "b": 0.5})
+        d2 = CategoricalDistribution({"a": 1.0}, default_value=0.0)
+        data = ["a", "b", "a", "a"]
         enc = seq_encode(data, encoder=d1.dist_to_encoder())
         kl, bad1, bad2 = empirical_kl_divergence(d1, d2, enc)
         self.assertTrue(np.isfinite(kl))
@@ -400,5 +419,5 @@ class EmpiricalKLTestCase(unittest.TestCase):
         self.assertEqual(bad2, 1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

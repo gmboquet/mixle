@@ -18,18 +18,24 @@ where c_u is the count attached to value u and n1, n2 are the total counts of S1
 distribution len_dist models the total counts [n1, n2, n3].
 
 """
-from typing import Optional, List, Tuple
-from pysp.arithmetic import *
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution, SequenceEncodableStatisticAccumulator, \
-    ParameterEstimator, DistributionSampler, StatisticAccumulatorFactory, DataSequenceEncoder
-from pysp.utils.aliasing import coalesce_alias, MISSING
-import numpy as np
-import pysp.utils.vector as vec
-from collections import defaultdict
-from scipy.sparse import csc_matrix, lil_matrix
-from pysp.utils.optsutil import count_by_value
+
 import itertools
+
+import numpy as np
+from scipy.sparse import csc_matrix
+
+from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
+from pysp.utils.aliasing import MISSING, coalesce_alias
+from pysp.utils.optsutil import count_by_value
 
 
 class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
@@ -61,16 +67,16 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self):
         """Returns string representation of MarkovTransformDistribution object."""
-        s1 = ','.join(map(str,self.init_prob_vec))
+        s1 = ",".join(map(str, self.init_prob_vec))
         temp = self.cond_prob_mat.nonzero()
-        tt = np.asarray(self.cond_prob_mat[temp[0],temp[1]]).flatten()
-        s20 = ','.join(map(str, tt))
-        s21 = ','.join(map(str, temp[0]))
-        s22 = ','.join(map(str, temp[1]))
-        s2 = '([%s], ([%s],[%s]))'%(s20, s21, s22)
+        tt = np.asarray(self.cond_prob_mat[temp[0], temp[1]]).flatten()
+        s20 = ",".join(map(str, tt))
+        s21 = ",".join(map(str, temp[0]))
+        s22 = ",".join(map(str, temp[1]))
+        s2 = "([%s], ([%s],[%s]))" % (s20, s21, s22)
         s3 = str(self.alpha)
         s4 = str(self.len_dist)
-        return 'MarkovTransformDistribution([%s], %s, alpha=%s, len_dist=%s)' % (s1, s2, s3, s4)
+        return "MarkovTransformDistribution([%s], %s, alpha=%s, len_dist=%s)" % (s1, s2, s3, s4)
 
     def density(self, x):
         """Density of the Markov transform model at observation x.
@@ -100,8 +106,8 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         nw = self.num_vals
-        a  = self.alpha/nw
-        b  = 1 - self.alpha
+        a = self.alpha / nw
+        b = 1 - self.alpha
 
         xx, yy, zz = x
 
@@ -111,21 +117,21 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
         n1 = 0
         n2 = 0
         n3 = 0
-        for u,c in xx:
-            ll1 += np.log(self.init_prob_vec[u])*c
+        for u, c in xx:
+            ll1 += np.log(self.init_prob_vec[u]) * c
             n1 += c
-        for u,c in yy:
-            ll2 += np.log(self.init_prob_vec[u])*c
+        for u, c in yy:
+            ll2 += np.log(self.init_prob_vec[u]) * c
             n2 += c
 
-        nn = n1*n2
+        nn = n1 * n2
 
         for w, cw in zz:
             loc_ll = 0.0
             for u, cu in xx:
                 for v, cv in yy:
-                    loc_ll += (b*self.cond_prob_mat[u*nw + v, w] + a)*cu*cv/nn
-            ll3 += np.log(loc_ll)*cw
+                    loc_ll += (b * self.cond_prob_mat[u * nw + v, w] + a) * cu * cv / nn
+            ll3 += np.log(loc_ll) * cw
             n3 += cw
 
         rv = ll1 + ll2 + ll3
@@ -146,24 +152,23 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         nw = self.num_vals
-        a  = self.alpha/nw
-        b  = 1 - self.alpha
+        a = self.alpha / nw
+        b = 1 - self.alpha
 
         rv = np.zeros(len(x[0]), dtype=np.float64)
 
-        for i,entry in enumerate(x[0]):
-
+        for i, entry in enumerate(x[0]):
             xx, cx, yy, cy, zz, cz = entry
 
-            ridx = np.reshape(xx*nw, (-1,1)) + np.reshape(yy, (1,-1))
+            ridx = np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))
             ridx = ridx.flatten()
 
-            cc = np.reshape(cx, (-1,1)) * np.reshape(cy, (1,-1))
+            cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
             cc = cc.flatten()
             cc /= cc.sum()
 
             loc_cprob = self.cond_prob_mat[:, zz]
-            loc_cprob = ((loc_cprob[ridx,:].toarray().T) * b) + a
+            loc_cprob = ((loc_cprob[ridx, :].toarray().T) * b) + a
             ll3 = np.dot(np.log(np.dot(loc_cprob, cc)), cz)
 
             ll1 = np.dot(np.log(self.init_prob_vec[xx]), cx)
@@ -180,9 +185,9 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
     def compute_capabilities(self):
         """Return backend capability metadata for this concrete Markov-transform instance."""
         from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
-        ready = intersect_engine_ready((self.len_dist,)) if self.len_dist is not None \
-            else ('numpy', 'torch')
-        return DistributionCapabilities(engine_ready=ready, kernel_status='generic_object')
+
+        ready = intersect_engine_ready((self.len_dist,)) if self.len_dist is not None else ("numpy", "torch")
+        return DistributionCapabilities(engine_ready=ready, kernel_status="generic_object")
 
     def backend_seq_log_density(self, x, engine):
         """Engine-neutral Markov-transform scoring.
@@ -206,19 +211,22 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
             cc = cc / cc.sum()
             loc_dense = (self.cond_prob_mat[ridx, :][:, zz]).toarray().T  # (len(zz), len(ridx))
             loc = engine.asarray(loc_dense) * b + a
-            inner = engine.matmul(loc, engine.asarray(cc))               # (len(zz),)
+            inner = engine.matmul(loc, engine.asarray(cc))  # (len(zz),)
             ll3 = engine.sum(engine.log(inner) * engine.asarray(np.asarray(cz, dtype=np.float64)))
-            ll1 = engine.sum(init_log[engine.asarray(np.asarray(xx, dtype=np.int64))]
-                             * engine.asarray(np.asarray(cx, dtype=np.float64)))
-            ll2 = engine.sum(init_log[engine.asarray(np.asarray(yy, dtype=np.int64))]
-                             * engine.asarray(np.asarray(cy, dtype=np.float64)))
+            ll1 = engine.sum(
+                init_log[engine.asarray(np.asarray(xx, dtype=np.int64))]
+                * engine.asarray(np.asarray(cx, dtype=np.float64))
+            )
+            ll2 = engine.sum(
+                init_log[engine.asarray(np.asarray(yy, dtype=np.int64))]
+                * engine.asarray(np.asarray(cy, dtype=np.float64))
+            )
             vals.append(float(engine.to_numpy(ll1 + ll2 + ll3)))
 
         rv = engine.asarray(np.asarray(vals, dtype=np.float64))
         if self.len_dist is not None:
             rv = rv + backend_seq_log_density(self.len_dist, x[1], engine)
         return rv
-
 
     def seq_encode(self, x):
         """Encode a sequence of observations for vectorized calls (legacy method).
@@ -255,9 +263,9 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
         else:
             nn = None
 
-        vv = np.zeros((len(vset),3), dtype=int)
-        for i,vvv in enumerate(vset):
-            vv[i,:] = vvv[:]
+        vv = np.zeros((len(vset), 3), dtype=int)
+        for i, vvv in enumerate(vset):
+            vv[i, :] = vvv[:]
 
         return rv, nn, vv
 
@@ -286,8 +294,9 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         len_estimator = None if self.len_dist is None else self.len_dist.estimator(pseudo_count)
-        return MarkovTransformEstimator(self.num_vals, alpha=self.alpha, len_estimator=len_estimator,
-                                        pseudo_count=pseudo_count)
+        return MarkovTransformEstimator(
+            self.num_vals, alpha=self.alpha, len_estimator=len_estimator, pseudo_count=pseudo_count
+        )
 
     def dist_to_encoder(self):
         """Returns a MarkovTransformDataEncoder object for encoding sequences of data."""
@@ -298,7 +307,7 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
 class MarkovTransformSampler(DistributionSampler):
     """MarkovTransformSampler object for sampling observations from a MarkovTransformDistribution."""
 
-    def __init__(self, dist: MarkovTransformDistribution, seed: Optional[int] = None):
+    def __init__(self, dist: MarkovTransformDistribution, seed: int | None = None):
         """MarkovTransformSampler object.
 
         Args:
@@ -311,15 +320,15 @@ class MarkovTransformSampler(DistributionSampler):
             size_sampler (DistributionSampler): Sampler for the total counts [n1, n2, n3].
 
         """
-        self.rng  = np.random.RandomState(seed)
+        self.rng = np.random.RandomState(seed)
         self.dist = dist
-        #self.init_sampler  = np.random.RandomState(self.rng.tomaxint())
-        #self.next_sampler  = np.random.RandomState(self.rng.tomaxint())
-        #self.tran_sampler  = np.random.RandomState(self.rng.tomaxint())
-        #self.flat_sampler  = np.random.RandomState(self.rng.tomaxint())
-        self.size_sampler  = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
+        # self.init_sampler  = np.random.RandomState(self.rng.tomaxint())
+        # self.next_sampler  = np.random.RandomState(self.rng.tomaxint())
+        # self.tran_sampler  = np.random.RandomState(self.rng.tomaxint())
+        # self.flat_sampler  = np.random.RandomState(self.rng.tomaxint())
+        self.size_sampler = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: Optional[int] = None):
+    def sample(self, size: int | None = None):
         """Draw 'size' iid observations from the Markov transform model.
 
         Each observation is a tuple (S1, S2, S3) of lists of (value, count) pairs. If size is None a single
@@ -333,7 +342,6 @@ class MarkovTransformSampler(DistributionSampler):
 
         """
         if size is None:
-
             slens = self.size_sampler.sample()
             rng = np.random.RandomState(self.rng.randint(0, maxrandint))
 
@@ -346,9 +354,8 @@ class MarkovTransformSampler(DistributionSampler):
             nw = self.dist.num_vals
 
             for zz1, zz2 in zip(z1, z2):
-
                 if rng.rand() > self.dist.alpha:
-                    p = self.dist.cond_prob_mat[v1[zz1]*nw + v2[zz2], :].toarray().flatten()
+                    p = self.dist.cond_prob_mat[v1[zz1] * nw + v2[zz2], :].toarray().flatten()
                     v3.append(rng.choice(nw, p=p))
                 else:
                     v3.append(rng.choice(nw))
@@ -359,11 +366,10 @@ class MarkovTransformSampler(DistributionSampler):
             return [self.sample() for i in range(size)]
 
 
-
 class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
     """MarkovTransformAccumulator object for accumulating sufficient statistics of the Markov transform model."""
 
-    def __init__(self, num_vals, size_acc=None, keys=(None,None)):
+    def __init__(self, num_vals, size_acc=None, keys=(None, None)):
         """MarkovTransformAccumulator object.
 
         Args:
@@ -381,7 +387,7 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         self.init_count = np.zeros(num_vals)
-        self.trans_count = csc_matrix((num_vals*num_vals, num_vals))
+        self.trans_count = csc_matrix((num_vals * num_vals, num_vals))
         self.size_accumulator = size_acc
         self.num_vals = num_vals
         self.init_key = keys[0]
@@ -415,20 +421,20 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
         cz = np.asarray([u[1] for u in zz], dtype=float)
 
         ridx = np.reshape(vx * nw, (-1, 1)) + np.reshape(vy, (1, -1))
-        ridx = ridx.flatten()[:,None]
+        ridx = ridx.flatten()[:, None]
 
         cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
-        cc = cc.flatten()[:,None]
+        cc = cc.flatten()[:, None]
         cs = cc.sum()
 
-        a = estimate.alpha/nw
+        a = estimate.alpha / nw
         b = 1 - estimate.alpha
 
         temp = estimate.cond_prob_mat[ridx, vz].toarray()
 
         loc_cprob = temp * cc
         w = loc_cprob.sum(axis=0)
-        loc_cprob *= (cz * b / (b*w + a*cs)) * weight
+        loc_cprob *= (cz * b / (b * w + a * cs)) * weight
 
         self.trans_count[ridx, vz] += loc_cprob
         self.init_count[vx] += cx * weight
@@ -436,7 +442,6 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
 
         if self.size_accumulator is not None:
             self.size_accumulator.update((cx.sum(), cy.sum(), cz.sum()), weight, estimate.len_dist)
-
 
     def initialize(self, x, weight, rng):
         """Initialize sufficient statistics with a single weighted observation (no previous estimate).
@@ -460,17 +465,17 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
         cz = np.asarray([u[1] for u in zz], dtype=float)
 
         ridx = np.reshape(vx * nw, (-1, 1)) + np.reshape(vy, (1, -1))
-        ridx = ridx.flatten()[:,None]
+        ridx = ridx.flatten()[:, None]
 
         cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
         cc = cc.flatten()
 
-        loc_cprob = np.outer(cc / cc.sum(), weight*cz)
-        #umat = lil_matrix((nw * nw, nw))
-        #umat[ridx, vz] = loc_cprob
+        loc_cprob = np.outer(cc / cc.sum(), weight * cz)
+        # umat = lil_matrix((nw * nw, nw))
+        # umat[ridx, vz] = loc_cprob
 
         self.trans_count[ridx, vz] += loc_cprob
-        #self.trans_count += umat
+        # self.trans_count += umat
         self.init_count[vx] += cx * weight
         self.init_count[vy] += cy * weight
 
@@ -494,16 +499,15 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
         nw = self.num_vals
 
         for entry, ww in zip(x[0], weights):
-
             xx, cx, yy, cy, zz, cz = entry
 
-            ridx = np.reshape(xx*nw, (-1,1)) + np.reshape(yy, (1,-1))
-            ridx = ridx.flatten()[:,None]
+            ridx = np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))
+            ridx = ridx.flatten()[:, None]
 
-            cc = np.reshape(cx, (-1,1)) * np.reshape(cy, (1,-1))
+            cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
             cc = cc.flatten()
 
-            loc_cprob = np.outer(cc / cc.sum(), ww*cz)
+            loc_cprob = np.outer(cc / cc.sum(), ww * cz)
 
             self.trans_count[ridx, zz] += loc_cprob
             self.init_count[xx] += cx * ww
@@ -526,24 +530,23 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
         """
         nw = self.num_vals
         nzv = x[2]
-        a = estimate.alpha/nw
+        a = estimate.alpha / nw
         b = 1 - estimate.alpha
 
-        umat = csc_matrix((np.zeros(nzv.shape[0]), (nzv[:,0]*nw + nzv[:,1], nzv[:,2])), shape=(nw*nw, nw))
+        umat = csc_matrix((np.zeros(nzv.shape[0]), (nzv[:, 0] * nw + nzv[:, 1], nzv[:, 2])), shape=(nw * nw, nw))
 
         track = self._track_ll
         log_init = np.log(estimate.init_prob_vec) if track else None
         obs_ll = np.zeros(len(x[0]), dtype=np.float64) if track else None
 
-        for i,(entry,ww) in enumerate(zip(x[0], weights)):
-
+        for i, (entry, ww) in enumerate(zip(x[0], weights)):
             xx, cx, yy, cy, zz, cz = entry
 
-            ridx = np.reshape(xx*nw, (-1,1)) + np.reshape(yy, (1,-1))
-            ridx = ridx.flatten()[:,None]
+            ridx = np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))
+            ridx = ridx.flatten()[:, None]
 
-            cc = np.reshape(cx, (-1,1)) * np.reshape(cy, (1,-1))
-            cc = cc.flatten()[:,None]
+            cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
+            cc = cc.flatten()[:, None]
             cs = cc.sum()
 
             temp = estimate.cond_prob_mat[ridx, zz].toarray()
@@ -554,14 +557,14 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
                 # Per-observation log-density (== MarkovTransformDistribution.log_density), reusing
                 # ``w`` (== sum_{u,v} P(z|u,v)*c_u*c_v) and ``cs`` before the responsibility scaling
                 # below. seq_log_density normalizes cc by cs, so inner = (b*w + a*cs)/cs.
-                with np.errstate(divide='ignore'):
+                with np.errstate(divide="ignore"):
                     ll3 = float(np.dot(np.log((b * w + a * cs) / cs), cz))
                     ll1 = float(np.dot(log_init[xx], cx))
                     ll2 = float(np.dot(log_init[yy], cy))
                 obs_ll[i] = ll1 + ll2 + ll3
-            loc_cprob *= (cz*b/(b*w + a*cs))*ww
+            loc_cprob *= (cz * b / (b * w + a * cs)) * ww
 
-            umat[ridx,zz] += loc_cprob
+            umat[ridx, zz] += loc_cprob
             self.init_count[xx] += cx * ww
             self.init_count[yy] += cy * ww
 
@@ -584,11 +587,9 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
         nzv = x[2]
         a = estimate.alpha / nw
         b = 1 - estimate.alpha
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, 'to_numpy') else weights,
-                                dtype=np.float64)
+        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
 
-        umat = csc_matrix((np.zeros(nzv.shape[0]), (nzv[:, 0] * nw + nzv[:, 1], nzv[:, 2])),
-                          shape=(nw * nw, nw))
+        umat = csc_matrix((np.zeros(nzv.shape[0]), (nzv[:, 0] * nw + nzv[:, 1], nzv[:, 2])), shape=(nw * nw, nw))
 
         for i, (entry, ww) in enumerate(zip(x[0], weights_np)):
             xx, cx, yy, cy, zz, cz = entry
@@ -596,9 +597,9 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
             cc = (np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))).flatten()[:, None]
             cs = float(cc.sum())
 
-            temp = estimate.cond_prob_mat[ridx, zz].toarray()             # (len(ridx), len(zz))
+            temp = estimate.cond_prob_mat[ridx, zz].toarray()  # (len(ridx), len(zz))
             loc_cprob = engine.asarray(temp) * engine.asarray(cc)
-            w = engine.sum(loc_cprob, axis=0)                             # (len(zz),)
+            w = engine.sum(loc_cprob, axis=0)  # (len(zz),)
             scale = engine.asarray(np.asarray(cz, dtype=np.float64)) * b / (b * w + a * cs) * float(ww)
             loc_cprob = loc_cprob * scale[None, :]
 
@@ -657,8 +658,6 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-
-
     def key_merge(self, stats_dict):
         """Merge keyed sufficient statistics into stats_dict (delegates to the size accumulator).
 
@@ -669,7 +668,7 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        '''
+        """
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
                 stats_dict[self.weight_key] += self.comp_counts
@@ -683,10 +682,9 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
                     acc[i] = acc[i].combine(self.accumulators[i].value())
             else:
                 stats_dict[self.comp_key] = self.accumulators
-        '''
+        """
         if self.size_accumulator is not None:
             self.size_accumulator.key_merge(stats_dict)
-
 
     def key_replace(self, stats_dict):
         """Replace keyed sufficient statistics from stats_dict (delegates to the size accumulator).
@@ -698,7 +696,7 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        '''
+        """
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
                 self.comp_counts = stats_dict[self.weight_key]
@@ -707,7 +705,7 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
             if self.comp_key in stats_dict:
                 acc = stats_dict[self.comp_key]
                 self.accumulators = acc
-        '''
+        """
         if self.size_accumulator is not None:
             self.size_accumulator.key_replace(stats_dict)
 
@@ -749,8 +747,16 @@ class MarkovTransformAccumulatorFactory(StatisticAccumulatorFactory):
 class MarkovTransformEstimator(ParameterEstimator):
     """MarkovTransformEstimator object for estimating MarkovTransformDistribution objects from statistics."""
 
-    def __init__(self, num_vals=MISSING, alpha=0.0, len_estimator=None, suff_stat=None, pseudo_count=None,
-                 keys=(None, None), num_values=MISSING):
+    def __init__(
+        self,
+        num_vals=MISSING,
+        alpha=0.0,
+        len_estimator=None,
+        suff_stat=None,
+        pseudo_count=None,
+        keys=(None, None),
+        num_values=MISSING,
+    ):
         """MarkovTransformEstimator object.
 
         Args:
@@ -771,10 +777,10 @@ class MarkovTransformEstimator(ParameterEstimator):
 
         """
         self.keys = keys
-        self.len_estimator=len_estimator
+        self.len_estimator = len_estimator
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
-        self.num_vals = coalesce_alias('num_vals', num_vals, 'num_values', num_values, default=MISSING)
+        self.num_vals = coalesce_alias("num_vals", num_vals, "num_values", num_values, default=MISSING)
         self.alpha = alpha
 
     def accumulator_factory(self):
@@ -809,9 +815,9 @@ class MarkovTransformEstimator(ParameterEstimator):
         else:
             len_dist = None
         trans_count = trans_count.tocsc()
-        row_sum = trans_count * csc_matrix(np.ones((trans_count.shape[1],1)))
+        row_sum = trans_count * csc_matrix(np.ones((trans_count.shape[1], 1)))
 
-        init_prob  = init_count / np.sum(init_count)
+        init_prob = init_count / np.sum(init_count)
         trans_prob = trans_count.multiply(row_sum.power(-1))
 
         return MarkovTransformDistribution(init_prob, trans_prob, self.alpha, len_dist)
@@ -834,7 +840,7 @@ class MarkovTransformDataEncoder(DataSequenceEncoder):
 
     def __str__(self):
         """Returns string representation of MarkovTransformDataEncoder object."""
-        return 'MarkovTransformDataEncoder(len_encoder=%s)' % (str(self.len_encoder))
+        return "MarkovTransformDataEncoder(len_encoder=%s)" % (str(self.len_encoder))
 
     def __eq__(self, other):
         """Encoders are interchangeable iff other is a MarkovTransformDataEncoder with an equal len_encoder.

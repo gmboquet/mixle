@@ -30,17 +30,17 @@ i.e. the expected weights of an unseen group.
 Group sizes are exogenous unless len_dist is supplied (used for sampling and
 added to the per-group score).
 """
-from typing import Optional, Sequence
+
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma
 
 from pysp.arithmetic import maxint
-from pysp.bstats.pdist import ProbabilityDistribution, StatisticAccumulator, ParameterEstimator
 from pysp.bstats.dirichlet import DirichletDistribution
-from pysp.bstats.nulldist import null_dist, NullDistribution, NullEstimator, NullAccumulator
-from pysp.bstats.markovchain import _map_probs
+from pysp.bstats.nulldist import NullAccumulator, NullDistribution, NullEstimator, null_dist
+from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, StatisticAccumulator
 
 _TINY = 1.0e-300
 
@@ -49,9 +49,16 @@ class HierarchicalDirichletProcessMixtureDistribution(ProbabilityDistribution):
     """Truncated hierarchical DP mixture over K shared atoms with global
     weights beta and (optionally) fitted per-group weights."""
 
-    def __init__(self, components, beta, alpha: float, gamma: float,
-                 group_weights: Optional[np.ndarray] = None, name: Optional[str] = None,
-                 len_dist: ProbabilityDistribution = null_dist):
+    def __init__(
+        self,
+        components,
+        beta,
+        alpha: float,
+        gamma: float,
+        group_weights: np.ndarray | None = None,
+        name: str | None = None,
+        len_dist: ProbabilityDistribution = null_dist,
+    ):
         """HierarchicalDirichletProcessMixtureDistribution object.
 
         Args:
@@ -76,16 +83,22 @@ class HierarchicalDirichletProcessMixtureDistribution(ProbabilityDistribution):
         self.len_dist = len_dist
 
         self.beta = np.asarray(beta, dtype=float)
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             self.log_beta = np.log(self.beta)
 
         self.group_weights = None if group_weights is None else np.asarray(group_weights, dtype=float)
 
     def __str__(self):
-        cstr = ','.join(str(u) for u in self.components)
-        bstr = ','.join(map(str, self.beta.tolist()))
-        return 'HierarchicalDirichletProcessMixtureDistribution([%s], [%s], %f, %f, name=%s, len_dist=%s)' % (
-            cstr, bstr, self.alpha, self.gamma, self.name, str(self.len_dist))
+        cstr = ",".join(str(u) for u in self.components)
+        bstr = ",".join(map(str, self.beta.tolist()))
+        return "HierarchicalDirichletProcessMixtureDistribution([%s], [%s], %f, %f, name=%s, len_dist=%s)" % (
+            cstr,
+            bstr,
+            self.alpha,
+            self.gamma,
+            self.name,
+            str(self.len_dist),
+        )
 
     def get_parameters(self):
         """Returns the parameter tuple (beta, alpha, gamma, component parameters)."""
@@ -101,7 +114,7 @@ class HierarchicalDirichletProcessMixtureDistribution(ProbabilityDistribution):
         """
         beta, alpha, gamma, comp_params = params
         self.beta = np.asarray(beta, dtype=float)
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             self.log_beta = np.log(self.beta)
         self.alpha = float(alpha)
         self.gamma = float(gamma)
@@ -120,8 +133,9 @@ class HierarchicalDirichletProcessMixtureDistribution(ProbabilityDistribution):
         good = np.isfinite(ll_max.flatten())
         rv = np.full(len(good), -np.inf)
         if np.any(good):
-            rv[good] = (np.log(np.sum(np.exp(ll[good, :] - ll_max[good]), axis=1, keepdims=True))
-                        + ll_max[good]).flatten()
+            rv[good] = (
+                np.log(np.sum(np.exp(ll[good, :] - ll_max[good]), axis=1, keepdims=True)) + ll_max[good]
+            ).flatten()
         return float(rv.sum())
 
     def density(self, x) -> float:
@@ -201,7 +215,7 @@ class HierarchicalDirichletProcessMixtureDistribution(ProbabilityDistribution):
         for j in range(len(lengths)):
             if lengths[j] == 0:
                 continue
-            rv[j] = self._group_log_density(log_b_all[offsets[j]:offsets[j + 1], :], self.log_beta)
+            rv[j] = self._group_log_density(log_b_all[offsets[j] : offsets[j + 1], :], self.log_beta)
 
         if len_enc is not None:
             rv += self.len_dist.seq_log_density(len_enc)
@@ -226,14 +240,14 @@ class HierarchicalDirichletProcessMixtureDistribution(ProbabilityDistribution):
             return self.seq_log_density(x)
 
         log_b_all = self._emission_log_densities(flat_enc)
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             log_gw = np.log(np.maximum(self.group_weights, _TINY))
 
         rv = np.zeros(len(lengths))
         for j in range(len(lengths)):
             if lengths[j] == 0:
                 continue
-            rv[j] = self._group_log_density(log_b_all[offsets[j]:offsets[j + 1], :], log_gw[j, :])
+            rv[j] = self._group_log_density(log_b_all[offsets[j] : offsets[j + 1], :], log_gw[j, :])
 
         if len_enc is not None:
             rv += self.len_dist.seq_log_density(len_enc)
@@ -255,23 +269,25 @@ class HierarchicalDirichletProcessMixtureDistribution(ProbabilityDistribution):
         """
         lengths, offsets, flat_enc, len_enc = self.seq_encode(x)
         log_b_all = self._emission_log_densities(flat_enc)
-        with np.errstate(divide='ignore'):
-            log_gw = np.log(np.maximum(self.group_weights, _TINY)) \
-                if self.group_weights is not None and len(self.group_weights) == len(lengths) \
+        with np.errstate(divide="ignore"):
+            log_gw = (
+                np.log(np.maximum(self.group_weights, _TINY))
+                if self.group_weights is not None and len(self.group_weights) == len(lengths)
                 else np.tile(self.log_beta, (len(lengths), 1))
+            )
 
         rv = np.zeros((len(lengths), self.num_components))
         for j in range(len(lengths)):
             if lengths[j] == 0:
                 continue
-            ll = log_b_all[offsets[j]:offsets[j + 1], :] + log_gw[j, :]
+            ll = log_b_all[offsets[j] : offsets[j + 1], :] + log_gw[j, :]
             ll -= ll.max(axis=1, keepdims=True)
             phi = np.exp(ll)
             phi /= phi.sum(axis=1, keepdims=True)
             rv[j, :] = phi.mean(axis=0)
         return rv
 
-    def sampler(self, seed: Optional[int] = None):
+    def sampler(self, seed: int | None = None):
         """Create a HierarchicalDirichletProcessMixtureSampler for this distribution.
 
         Args:
@@ -293,15 +309,19 @@ class HierarchicalDirichletProcessMixtureDistribution(ProbabilityDistribution):
         """
         len_est = NullEstimator() if isinstance(self.len_dist, NullDistribution) else self.len_dist.estimator()
         return HierarchicalDirichletProcessMixtureEstimator(
-            [u.estimator() for u in self.components], gamma=self.gamma, alpha=self.alpha,
-            name=self.name, len_estimator=len_est)
+            [u.estimator() for u in self.components],
+            gamma=self.gamma,
+            alpha=self.alpha,
+            name=self.name,
+            len_estimator=len_est,
+        )
 
 
-class HierarchicalDirichletProcessMixtureSampler(object):
+class HierarchicalDirichletProcessMixtureSampler:
     """Draws groups from a HierarchicalDirichletProcessMixtureDistribution
     (per-group weights drawn from Dirichlet(alpha*beta))."""
 
-    def __init__(self, dist: HierarchicalDirichletProcessMixtureDistribution, seed: Optional[int] = None):
+    def __init__(self, dist: HierarchicalDirichletProcessMixtureDistribution, seed: int | None = None):
         """HierarchicalDirichletProcessMixtureSampler object.
 
         Args:
@@ -319,7 +339,7 @@ class HierarchicalDirichletProcessMixtureSampler(object):
         else:
             self.len_sampler = dist.len_dist.sampler(seed=rng.randint(0, maxint))
 
-    def sample_group(self, n: Optional[int] = None):
+    def sample_group(self, n: int | None = None):
         """Draw a single group of n observations.
 
         Group weights pi ~ Dirichlet(alpha*beta) are drawn once for the
@@ -335,10 +355,10 @@ class HierarchicalDirichletProcessMixtureSampler(object):
         """
         if n is None:
             if self.len_sampler is None:
-                raise Exception('HDP sampler requires a len_dist (or explicit n) to sample groups.')
+                raise Exception("HDP sampler requires a len_dist (or explicit n) to sample groups.")
             n = int(self.len_sampler.sample())
 
-        pi = self.rng.dirichlet(np.maximum(self.dist.alpha*self.dist.beta, 1.0e-8))
+        pi = self.rng.dirichlet(np.maximum(self.dist.alpha * self.dist.beta, 1.0e-8))
         states = self.rng.choice(self.dist.num_components, size=n, p=pi)
         return [self.comp_samplers[k].sample() for k in states]
 
@@ -375,7 +395,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(StatisticAccumulator):
         self.num_components = len(accumulators)
         self.name = name
         self.key = keys
-        self.group_counts = []         # one (K,) count vector per group, in data order
+        self.group_counts = []  # one (K,) count vector per group, in data order
         self.prev_beta = None
         self.prev_alpha = None
         self.len_accumulator = len_accumulator
@@ -392,9 +412,9 @@ class HierarchicalDirichletProcessMixtureAccumulator(StatisticAccumulator):
         counts = np.zeros(self.num_components)
         for u in x:
             p = rng.dirichlet(np.ones(self.num_components))
-            counts += p*weight
+            counts += p * weight
             for k in range(self.num_components):
-                self.accumulators[k].initialize(u, p[k]*weight, rng)
+                self.accumulators[k].initialize(u, p[k] * weight, rng)
         self.group_counts.append(counts)
 
         if not isinstance(self.len_accumulator, NullAccumulator):
@@ -417,11 +437,14 @@ class HierarchicalDirichletProcessMixtureAccumulator(StatisticAccumulator):
 
         for j in range(len(lengths)):
             sl = slice(offsets[j], offsets[j + 1])
-            self.group_counts.append(np.dot(phi[sl, :].T, np.repeat(weights[j], lengths[j]))
-                                     if lengths[j] > 0 else np.zeros(self.num_components))
+            self.group_counts.append(
+                np.dot(phi[sl, :].T, np.repeat(weights[j], lengths[j]))
+                if lengths[j] > 0
+                else np.zeros(self.num_components)
+            )
 
         for k in range(self.num_components):
-            self.accumulators[k].seq_initialize(flat_enc, phi[:, k]*seq_w, rng)
+            self.accumulators[k].seq_initialize(flat_enc, phi[:, k] * seq_w, rng)
 
         if len_enc is not None and not isinstance(self.len_accumulator, NullAccumulator):
             self.len_accumulator.seq_initialize(len_enc, weights, rng)
@@ -467,7 +490,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(StatisticAccumulator):
         if gw is None or len(gw) != len(lengths):
             gw = np.tile(estimate.beta, (len(lengths), 1))
 
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             log_gw = np.log(np.maximum(gw, _TINY))
 
         phi_all = np.zeros_like(log_b_all)
@@ -514,8 +537,13 @@ class HierarchicalDirichletProcessMixtureAccumulator(StatisticAccumulator):
     def value(self):
         """Returns (group_counts, prev_beta, prev_alpha, atom values, len_value)."""
         len_val = None if isinstance(self.len_accumulator, NullAccumulator) else self.len_accumulator.value()
-        return (list(self.group_counts), self.prev_beta, self.prev_alpha,
-                tuple(u.value() for u in self.accumulators), len_val)
+        return (
+            list(self.group_counts),
+            self.prev_beta,
+            self.prev_alpha,
+            tuple(u.value() for u in self.accumulators),
+            len_val,
+        )
 
     def from_value(self, x):
         """Set the sufficient statistics from a value() tuple.
@@ -565,7 +593,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(StatisticAccumulator):
             u.key_replace(stats_dict)
 
 
-class HierarchicalDirichletProcessMixtureAccumulatorFactory(object):
+class HierarchicalDirichletProcessMixtureAccumulatorFactory:
     """Factory that creates HierarchicalDirichletProcessMixtureAccumulator objects."""
 
     def __init__(self, factories, len_factory, name, keys):
@@ -587,16 +615,23 @@ class HierarchicalDirichletProcessMixtureAccumulatorFactory(object):
         """Returns a new HierarchicalDirichletProcessMixtureAccumulator."""
         len_acc = NullAccumulator() if self.len_factory is None else self.len_factory.make()
         return HierarchicalDirichletProcessMixtureAccumulator(
-            [f.make() for f in self.factories], len_accumulator=len_acc, name=self.name, keys=self.keys)
+            [f.make() for f in self.factories], len_accumulator=len_acc, name=self.name, keys=self.keys
+        )
 
 
 class HierarchicalDirichletProcessMixtureEstimator(ParameterEstimator):
     """Estimates a HierarchicalDirichletProcessMixtureDistribution from
     accumulated group counts via the direct-assignment truncation updates."""
 
-    def __init__(self, estimators, gamma: float = 1.0, alpha: float = 1.0,
-                 name: Optional[str] = None, keys: Optional[str] = None,
-                 len_estimator: ParameterEstimator = NullEstimator()):
+    def __init__(
+        self,
+        estimators,
+        gamma: float = 1.0,
+        alpha: float = 1.0,
+        name: str | None = None,
+        keys: str | None = None,
+        len_estimator: ParameterEstimator = NullEstimator(),
+    ):
         """HierarchicalDirichletProcessMixtureEstimator object.
 
         Args:
@@ -620,9 +655,12 @@ class HierarchicalDirichletProcessMixtureEstimator(ParameterEstimator):
     def accumulator_factory(self):
         """Returns a HierarchicalDirichletProcessMixtureAccumulatorFactory
         for this estimator."""
-        len_factory = None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.accumulator_factory()
+        len_factory = (
+            None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.accumulator_factory()
+        )
         return HierarchicalDirichletProcessMixtureAccumulatorFactory(
-            [u.accumulator_factory() for u in self.estimators], len_factory, self.name, self.keys)
+            [u.accumulator_factory() for u in self.estimators], len_factory, self.name, self.keys
+        )
 
     def model_log_density(self, model) -> float:
         """Log-density of the model parameters under the HDP priors.
@@ -644,11 +682,11 @@ class HierarchicalDirichletProcessMixtureEstimator(ParameterEstimator):
         """
         k = self.num_components
 
-        beta_prior = DirichletDistribution(np.ones(k)*self.gamma/k)
+        beta_prior = DirichletDistribution(np.ones(k) * self.gamma / k)
         rv = float(beta_prior.log_density(np.maximum(model.beta, _TINY)))
 
         if model.group_weights is not None:
-            ab = np.maximum(self.alpha*model.beta, _TINY)
+            ab = np.maximum(self.alpha * model.beta, _TINY)
             group_prior = DirichletDistribution(ab)
             for j in range(len(model.group_weights)):
                 rv += float(group_prior.log_density(np.maximum(model.group_weights[j, :], _TINY)))
@@ -689,29 +727,29 @@ class HierarchicalDirichletProcessMixtureEstimator(ParameterEstimator):
 
         counts = np.asarray(group_counts) if len(group_counts) > 0 else np.zeros((0, k))
         alpha = self.alpha if prev_alpha is None else float(prev_alpha)
-        beta0 = np.ones(k)/k if prev_beta is None else np.asarray(prev_beta, dtype=float)
+        beta0 = np.ones(k) / k if prev_beta is None else np.asarray(prev_beta, dtype=float)
 
         # global weights via the expected-table-count approximation:
         # m_jk = alpha*beta_k * (psi(alpha*beta_k + n_jk) - psi(alpha*beta_k))
-        ab = np.maximum(alpha*beta0, 1.0e-12)
+        ab = np.maximum(alpha * beta0, 1.0e-12)
         if counts.shape[0] > 0:
-            m_mat = ab*(digamma(ab + counts) - digamma(ab))
+            m_mat = ab * (digamma(ab + counts) - digamma(ab))
             m_k = m_mat.sum(axis=0)
         else:
             m_k = np.zeros(k)
 
-        beta = (m_k + self.gamma/k)/(m_k.sum() + self.gamma)
+        beta = (m_k + self.gamma / k) / (m_k.sum() + self.gamma)
 
         # per-group posterior-mean weights under the Dirichlet(alpha*beta)
         # prior. The mean (not the MAP) is used deliberately: with
         # alpha*beta_k < 1 the Dirichlet density is unbounded on the simplex
         # boundary, so MAP weights degenerate to spikes; the mean is strictly
         # interior and keeps the penalized objective well-defined.
-        ab_new = alpha*beta
+        ab_new = alpha * beta
         group_weights = np.zeros((counts.shape[0], k))
         for j in range(counts.shape[0]):
-            group_weights[j, :] = (counts[j, :] + ab_new)/(counts[j, :].sum() + alpha)
+            group_weights[j, :] = (counts[j, :] + ab_new) / (counts[j, :].sum() + alpha)
 
         return HierarchicalDirichletProcessMixtureDistribution(
-            components, beta, alpha, self.gamma, group_weights=group_weights,
-            name=self.name, len_dist=len_dist)
+            components, beta, alpha, self.gamma, group_weights=group_weights, name=self.name, len_dist=len_dist
+        )

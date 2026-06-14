@@ -14,22 +14,22 @@ through to their local implementations. Install with:
     pip install pysparkplug[spark]
 """
 
-__all__ = ['numba', 'HAS_NUMBA', 'pyspark', 'HAS_PYSPARK', 'RDD_TYPES', 'require']
+__all__ = ["numba", "HAS_NUMBA", "pyspark", "HAS_PYSPARK", "RDD_TYPES", "require"]
 
 
 def require(name: str, extra: str):
     """Raise a helpful error for a feature that needs an uninstalled extra."""
-    raise ImportError("%s is required for this feature; install it with "
-                      "pip install pysparkplug[%s]" % (name, extra))
+    raise ImportError("%s is required for this feature; install it with pip install pysparkplug[%s]" % (name, extra))
 
 
 try:
     import numba
+
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
 
-    class _NumbaShim(object):
+    class _NumbaShim:
         prange = staticmethod(range)
 
         @staticmethod
@@ -39,6 +39,7 @@ except ImportError:
 
             def deco(f):
                 return f
+
             return deco
 
         njit = _decorate
@@ -50,6 +51,7 @@ except ImportError:
 try:
     import pyspark
     import pyspark.rdd
+
     HAS_PYSPARK = True
     RDD_TYPES = (pyspark.rdd.RDD,)
 except ImportError:

@@ -1,15 +1,16 @@
 """Engine-resident E-step parity for the integer hidden association model (numpy + torch)."""
+
 import unittest
 
 import numpy as np
 
-from pysp.stats.int_hidden_association import (IntegerHiddenAssociationDistribution,
-                                               IntegerHiddenAssociationEstimator)
 from pysp.engines import NUMPY_ENGINE
+from pysp.stats.int_hidden_association import IntegerHiddenAssociationDistribution, IntegerHiddenAssociationEstimator
 
 try:
     from pysp.engines import TorchEngine
-    _TORCH = TorchEngine(device='cpu', dtype='float64')
+
+    _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
 
@@ -19,10 +20,10 @@ STATE_PROB = np.asarray([[0.70, 0.20, 0.10], [0.15, 0.25, 0.60]], dtype=float)
 
 
 class IntHiddenAssociationEngineTestCase(unittest.TestCase):
-
     def setUp(self):
         self.dist = IntegerHiddenAssociationDistribution(
-            state_prob_mat=STATE_PROB, cond_weights=COND_WEIGHTS, alpha=0.30, use_numba=False)
+            state_prob_mat=STATE_PROB, cond_weights=COND_WEIGHTS, alpha=0.30, use_numba=False
+        )
         self.data = [
             ([(0, 2.0), (1, 1.0)], [(0, 3.0), (1, 2.0)]),
             ([(1, 1.0), (2, 2.0)], [(2, 1.0)]),
@@ -30,9 +31,8 @@ class IntHiddenAssociationEngineTestCase(unittest.TestCase):
             ([(2, 3.0), (0, 1.0)], [(1, 2.0), (2, 1.0)]),
         ]
         self.weights = np.array([1.0, 0.7, 1.3, 0.9])
-        self.est = IntegerHiddenAssociationEstimator(num_vals=[3, 3], num_states=2, alpha=0.30,
-                                                     use_numba=False)
-        self.engines = [('numpy', NUMPY_ENGINE)] + ([('torch', _TORCH)] if _TORCH is not None else [])
+        self.est = IntegerHiddenAssociationEstimator(num_vals=[3, 3], num_states=2, alpha=0.30, use_numba=False)
+        self.engines = [("numpy", NUMPY_ENGINE)] + ([("torch", _TORCH)] if _TORCH is not None else [])
 
     def test_engine_estep_parity(self):
         enc = self.dist.dist_to_encoder().seq_encode(self.data)
@@ -43,15 +43,18 @@ class IntHiddenAssociationEngineTestCase(unittest.TestCase):
         for name, engine in self.engines:
             with self.subTest(engine=name):
                 kernel = self.dist.kernel(engine=engine, estimator=self.est)
-                self.assertEqual(type(kernel).__name__, 'IntegerHiddenAssociationKernel')
+                self.assertEqual(type(kernel).__name__, "IntegerHiddenAssociationKernel")
                 value = kernel.accumulate(enc, self.weights)
-                self.assertTrue(np.allclose(np.asarray(hv[0]), np.asarray(value[0]), atol=1.0e-9),
-                                '%s init_count differ' % name)
-                self.assertTrue(np.allclose(np.asarray(hv[1]), np.asarray(value[1]), atol=1.0e-9),
-                                '%s weight_count differ' % name)
-                self.assertTrue(np.allclose(np.asarray(hv[2]), np.asarray(value[2]), atol=1.0e-9),
-                                '%s state_count differ' % name)
+                self.assertTrue(
+                    np.allclose(np.asarray(hv[0]), np.asarray(value[0]), atol=1.0e-9), "%s init_count differ" % name
+                )
+                self.assertTrue(
+                    np.allclose(np.asarray(hv[1]), np.asarray(value[1]), atol=1.0e-9), "%s weight_count differ" % name
+                )
+                self.assertTrue(
+                    np.allclose(np.asarray(hv[2]), np.asarray(value[2]), atol=1.0e-9), "%s state_count differ" % name
+                )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

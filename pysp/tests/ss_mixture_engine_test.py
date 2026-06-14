@@ -1,21 +1,26 @@
 """Engine-resident E-step parity for the semi-supervised mixture (numpy + torch)."""
+
 import unittest
+
 import numpy as np
-from pysp.stats import SemiSupervisedMixtureDistribution, GaussianDistribution, GaussianEstimator
-from pysp.stats.ss_mixture import SemiSupervisedMixtureEstimator
+
 from pysp.engines import NUMPY_ENGINE
+from pysp.stats import GaussianDistribution, GaussianEstimator, SemiSupervisedMixtureDistribution
+from pysp.stats.ss_mixture import SemiSupervisedMixtureEstimator
+
 try:
     from pysp.engines import TorchEngine
-    _TORCH = TorchEngine(device='cpu', dtype='float64')
+
+    _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
 
 
 class SemiSupervisedMixtureEngineTestCase(unittest.TestCase):
-
     def setUp(self):
-        self.dist = SemiSupervisedMixtureDistribution([GaussianDistribution(-1.0, 1.0),
-                                                       GaussianDistribution(3.0, 1.0)], [0.5, 0.5])
+        self.dist = SemiSupervisedMixtureDistribution(
+            [GaussianDistribution(-1.0, 1.0), GaussianDistribution(3.0, 1.0)], [0.5, 0.5]
+        )
         self.est = SemiSupervisedMixtureEstimator([GaussianEstimator(), GaussianEstimator()])
         rng = np.random.RandomState(0)
         self.data = []
@@ -29,7 +34,7 @@ class SemiSupervisedMixtureEngineTestCase(unittest.TestCase):
             else:
                 self.data.append((v, [(0, 0.3), (1, 0.7)]))
         self.weights = np.linspace(0.5, 1.5, len(self.data))
-        self.engines = [('numpy', NUMPY_ENGINE)] + ([('torch', _TORCH)] if _TORCH is not None else [])
+        self.engines = [("numpy", NUMPY_ENGINE)] + ([("torch", _TORCH)] if _TORCH is not None else [])
 
     def test_engine_estep_parity(self):
         enc = self.dist.dist_to_encoder().seq_encode(self.data)
@@ -39,12 +44,12 @@ class SemiSupervisedMixtureEngineTestCase(unittest.TestCase):
         for name, engine in self.engines:
             with self.subTest(engine=name):
                 kernel = self.dist.kernel(engine=engine, estimator=self.est)
-                self.assertEqual(type(kernel).__name__, 'SemiSupervisedMixtureKernel')
+                self.assertEqual(type(kernel).__name__, "SemiSupervisedMixtureKernel")
                 value = kernel.accumulate(enc, self.weights)
                 self.assertTrue(np.allclose(np.asarray(hv[0]), np.asarray(value[0]), atol=1.0e-8))
                 for ha, ea in zip(hv[1], value[1]):
                     self.assertTrue(np.allclose(np.asarray(ha), np.asarray(ea), atol=1.0e-7))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

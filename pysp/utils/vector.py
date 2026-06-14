@@ -1,19 +1,24 @@
 """Vector contains functions useful for estimation and evaluation of pysparkplug classes."""
-from pysp.arithmetic import *
+
+from collections.abc import Iterable, Sequence
+from typing import SupportsIndex, overload
+
 import numpy as np
 import scipy.linalg
 import scipy.special
 
-from typing import List, Union, Tuple, Iterable, Optional, Sequence, SupportsIndex, overload
+from pysp.arithmetic import *
 
 
 @overload
 def gammaln(x: np.ndarray) -> np.ndarray: ...
 
+
 @overload
 def gammaln(x: float) -> float: ...
 
-def gammaln(x: Union[np.ndarray, float, int]) -> Union[np.ndarray, float]:
+
+def gammaln(x: np.ndarray | float | int) -> np.ndarray | float:
     """Return logrithm of the gamma function.
 
     Returns np.log(.np.abs(Gamma(x)))
@@ -54,7 +59,9 @@ def sorted_merge(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return c
 
 
-def sorted_dict_merge_add(k_vec1: np.ndarray, c_vec1: np.ndarray, k_vec2: np.ndarray, c_vec2: np.ndarray) -> Tuple[np.ndarray,np.ndarray]:
+def sorted_dict_merge_add(
+    k_vec1: np.ndarray, c_vec1: np.ndarray, k_vec2: np.ndarray, c_vec2: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     """Performs a merge on two sorted arrays of dictionary keys and the counts for their respective keys.
 
     Returns the merge sorted keys and corresponding counts.
@@ -90,7 +97,7 @@ def sorted_dict_merge_add(k_vec1: np.ndarray, c_vec1: np.ndarray, k_vec2: np.nda
     return rv_vals, rv_cnts
 
 
-def make(x: Union[np.ndarray, Sequence[Union[int, float, str]], List[np.ndarray]]) -> np.ndarray:
+def make(x: np.ndarray | Sequence[int | float | str] | list[np.ndarray]) -> np.ndarray:
     """Convert the array x into a numpy array.
 
     Args:
@@ -104,7 +111,7 @@ def make(x: Union[np.ndarray, Sequence[Union[int, float, str]], List[np.ndarray]
     return np.asarray(x)
 
 
-def make_pdf(x: Union[np.ndarray, Sequence[float], List[np.ndarray]]):
+def make_pdf(x: np.ndarray | Sequence[float] | list[np.ndarray]):
     """Takes log density values and normalizes on the log-scale, returning an ndarray that s.t. np.exp(rv).sum() == 1.0.
 
     Arg data type for x: Union[np.ndarray, Sequence[float], List[np.ndarray]]).
@@ -127,7 +134,7 @@ def make_pdf(x: Union[np.ndarray, Sequence[float], List[np.ndarray]]):
     return rv
 
 
-def zeros(n: Union[int, Iterable, Tuple[int]]) -> np.ndarray:
+def zeros(n: int | Iterable | tuple[int]) -> np.ndarray:
     """Return numpy array of shape n, with default dtype=float64.
 
     Args:
@@ -140,7 +147,7 @@ def zeros(n: Union[int, Iterable, Tuple[int]]) -> np.ndarray:
     return np.zeros(n)
 
 
-def mat_inv(x: Union[List[List[Union[float, int]]],List[np.ndarray], np.ndarray]) -> np.ndarray:
+def mat_inv(x: list[list[float | int]] | list[np.ndarray] | np.ndarray) -> np.ndarray:
     """Computes the inverse of a square matrix x.
 
     Arg x data type Union[List[List[Union[float, int]]],List[np.ndarray], np.ndarray]).
@@ -154,8 +161,7 @@ def mat_inv(x: Union[List[List[Union[float, int]]],List[np.ndarray], np.ndarray]
     return np.linalg.inv(x)
 
 
-def dot(x: Union[np.ndarray, Iterable, int, float], y: Union[np.ndarray, Iterable, int, float])\
-        -> Union[np.ndarray, float]:
+def dot(x: np.ndarray | Iterable | int | float, y: np.ndarray | Iterable | int | float) -> np.ndarray | float:
     """Performs call to numpy.dot().
 
     Args:
@@ -168,7 +174,7 @@ def dot(x: Union[np.ndarray, Iterable, int, float], y: Union[np.ndarray, Iterabl
     return np.dot(x, y)
 
 
-def outer(x: Union[np.ndarray, Iterable, int, float], y: Union[np.ndarray, Iterable, int, float]) -> np.ndarray:
+def outer(x: np.ndarray | Iterable | int | float, y: np.ndarray | Iterable | int | float) -> np.ndarray:
     """Compute the outer product of two vectors
 
     Args:
@@ -200,7 +206,7 @@ def diag(x: np.ndarray) -> np.ndarray:
     return np.diag(x)
 
 
-def reshape(x: np.ndarray, sz: Union[SupportsIndex, Sequence[SupportsIndex]]) -> np.ndarray:
+def reshape(x: np.ndarray, sz: SupportsIndex | Sequence[SupportsIndex]) -> np.ndarray:
     """Gives a new shape to an array without changing its data.
 
     Args:
@@ -214,7 +220,7 @@ def reshape(x: np.ndarray, sz: Union[SupportsIndex, Sequence[SupportsIndex]]) ->
     return np.reshape(x, sz)
 
 
-def cholesky(x_mat: np.ndarray) -> Optional[Tuple[np.ndarray, bool]]:
+def cholesky(x_mat: np.ndarray) -> tuple[np.ndarray, bool] | None:
     """Compute the Cholesky decomposition of a matrix, to use in cho_solve.
 
     Returns a matrix containing the Cholesky decomposition, x_mat = L L* or x_mat = U* U of a Hermitian positive-definite
@@ -234,7 +240,7 @@ def cholesky(x_mat: np.ndarray) -> Optional[Tuple[np.ndarray, bool]]:
     return rv
 
 
-def cho_solve(a_mat: Tuple[np.ndarray, bool], b: np.ndarray) -> np.ndarray:
+def cho_solve(a_mat: tuple[np.ndarray, bool], b: np.ndarray) -> np.ndarray:
     """Solve the linear equations a_mat x = b, given the Cholesky factorization of a_mat.
 
     Args:
@@ -248,8 +254,11 @@ def cho_solve(a_mat: Tuple[np.ndarray, bool], b: np.ndarray) -> np.ndarray:
     return scipy.linalg.cho_solve(a_mat, b)
 
 
-def maximum(x: Union[float, int, Iterable, np.ndarray], y: Union[float, int, Iterable, np.ndarray],
-            output: Optional[Union[float, int, np.ndarray]] = None) -> Union[float, int, np.ndarray]:
+def maximum(
+    x: float | int | Iterable | np.ndarray,
+    y: float | int | Iterable | np.ndarray,
+    output: float | int | np.ndarray | None = None,
+) -> float | int | np.ndarray:
     """Element-wise maximum of array elements.
 
     Compare two arrays and returns a new array containing the element-wise
@@ -343,8 +352,9 @@ def log_posterior(x: np.ndarray) -> np.ndarray:
     return x - mass
 
 
-def posterior(log_x: np.ndarray, out: Optional[np.ndarray] = None,
-              log_sum: Optional[bool] = False) -> Union[np.ndarray, Tuple[np.ndarray, float]]:
+def posterior(
+    log_x: np.ndarray, out: np.ndarray | None = None, log_sum: bool | None = False
+) -> np.ndarray | tuple[np.ndarray, float]:
     """Computes posterior density for vector of log-likelihood evaluated at each parameter component.
 
     I.e. if,
@@ -392,7 +402,7 @@ def posterior(log_x: np.ndarray, out: Optional[np.ndarray] = None,
         return rv
 
 
-def log_posterior_sum(x: np.ndarray) -> Tuple[np.ndarray, float]:
+def log_posterior_sum(x: np.ndarray) -> tuple[np.ndarray, float]:
     """Computes posterior density for vector of log-likelihood evaluated at each parameter component.
 
     I.e. if,
@@ -423,7 +433,7 @@ def log_posterior_sum(x: np.ndarray) -> Tuple[np.ndarray, float]:
     return x - mass, mass
 
 
-def weighted_log_posterior(x: np.ndarray, w: np.ndarray) -> List[float]:
+def weighted_log_posterior(x: np.ndarray, w: np.ndarray) -> list[float]:
     """Computes weighted posterior density for vector of log-likelihood evaluated at each parameter component.
 
     I.e. if,
@@ -465,7 +475,7 @@ def weighted_log_posterior(x: np.ndarray, w: np.ndarray) -> List[float]:
     return rv
 
 
-def weighted_log_posterior_sum(x: np.ndarray, w: np.ndarray) -> Tuple[List[float], float]:
+def weighted_log_posterior_sum(x: np.ndarray, w: np.ndarray) -> tuple[list[float], float]:
     """Computes weighted posterior density for vector of log-likelihood evaluated at each parameter component.
 
     I.e. if,
@@ -511,8 +521,8 @@ def weighted_log_posterior_sum(x: np.ndarray, w: np.ndarray) -> Tuple[List[float
     return rv, mass
 
 
-#tuple[float[:, :, :], float[:], float]
-def matrix_log_posteriors(x: np.ndarray, u_mat: np.ndarray, u: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
+# tuple[float[:, :, :], float[:], float]
+def matrix_log_posteriors(x: np.ndarray, u_mat: np.ndarray, u: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
     """
 
     :param x:
@@ -529,7 +539,6 @@ def matrix_log_posteriors(x: np.ndarray, u_mat: np.ndarray, u: np.ndarray) -> Tu
     outer_max = -inf
 
     for i in range(h):
-
         row_sum = zero
 
         for j in range(z):
@@ -555,7 +564,7 @@ def matrix_log_posteriors(x: np.ndarray, u_mat: np.ndarray, u: np.ndarray) -> Tu
     return row_posteriors, outer_posterior, ll
 
 
-def row_choice(p_mat: np.ndarray, rng: Optional[np.random.RandomState]) -> np.ndarray:
+def row_choice(p_mat: np.ndarray, rng: np.random.RandomState | None) -> np.ndarray:
     """Vectorized choice call for varying sampling weights on contained in the rows of p_mat.
 
     N, S = p_mat.shape

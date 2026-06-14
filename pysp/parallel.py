@@ -4,16 +4,17 @@ The planner is advisory: it estimates memory pressure from an encoder/model
 pair and produces a printable, editable placement.  Orchestrators still own
 actual data movement and sufficient-statistic folding.
 """
-from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from __future__ import annotations
 
 import json
 import os
 import pickle
 import sys
 import time
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -21,26 +22,25 @@ from pysp.engines import NUMPY_ENGINE, NumpyEngine, engine_with_precision, preci
 from pysp.stats import ResidentEncodedPayload, move_encoded_payload
 from pysp.stats.pdist import DataSequenceEncoder, encoded_nbytes
 
-
 __all__ = [
-    'CalibrationCatalog',
-    'CalibrationRecord',
-    'DeviceSpec',
-    'DaskEncodedData',
-    'EncodedDataHandle',
-    'LocalEncodedData',
-    'ModelShard',
-    'Placement',
-    'PlacementShard',
-    'Resources',
-    'SparkEncodedData',
-    'calibrate_resources',
-    'encoded_data',
-    'estimate_estimator_stat_nbytes',
-    'estimate_model_nbytes',
-    'is_encoded_data_handle',
-    'model_sharding_plan',
-    'plan',
+    "CalibrationCatalog",
+    "CalibrationRecord",
+    "DeviceSpec",
+    "DaskEncodedData",
+    "EncodedDataHandle",
+    "LocalEncodedData",
+    "ModelShard",
+    "Placement",
+    "PlacementShard",
+    "Resources",
+    "SparkEncodedData",
+    "calibrate_resources",
+    "encoded_data",
+    "estimate_estimator_stat_nbytes",
+    "estimate_model_nbytes",
+    "is_encoded_data_handle",
+    "model_sharding_plan",
+    "plan",
 ]
 
 
@@ -49,38 +49,38 @@ class DeviceSpec:
     """Description of one compute placement target."""
 
     name: str
-    kind: str = 'cpu'
-    memory_bytes: Optional[int] = None
-    engine: str = 'numpy'
+    kind: str = "cpu"
+    memory_bytes: int | None = None
+    engine: str = "numpy"
     throughput: float = 1.0
-    precision: Optional[str] = None
+    precision: str | None = None
 
     @property
     def is_gpu(self) -> bool:
         """Return true for CUDA/MPS/GPU-like devices."""
-        return self.kind in ('cuda', 'mps', 'gpu')
+        return self.kind in ("cuda", "mps", "gpu")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable device description."""
         return {
-            'name': self.name,
-            'kind': self.kind,
-            'memory_bytes': self.memory_bytes,
-            'engine': self.engine,
-            'throughput': self.throughput,
-            'precision': self.precision,
+            "name": self.name,
+            "kind": self.kind,
+            "memory_bytes": self.memory_bytes,
+            "engine": self.engine,
+            "throughput": self.throughput,
+            "precision": self.precision,
         }
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> 'DeviceSpec':
+    def from_dict(cls, payload: dict[str, Any]) -> DeviceSpec:
         """Build a device description from ``to_dict`` output."""
         return cls(
-            name=str(payload['name']),
-            kind=str(payload.get('kind', 'cpu')),
-            memory_bytes=None if payload.get('memory_bytes') is None else int(payload['memory_bytes']),
-            engine=str(payload.get('engine', 'numpy')),
-            throughput=float(payload.get('throughput', 1.0)),
-            precision=payload.get('precision'),
+            name=str(payload["name"]),
+            kind=str(payload.get("kind", "cpu")),
+            memory_bytes=None if payload.get("memory_bytes") is None else int(payload["memory_bytes"]),
+            engine=str(payload.get("engine", "numpy")),
+            throughput=float(payload.get("throughput", 1.0)),
+            precision=payload.get("precision"),
         )
 
 
@@ -88,50 +88,65 @@ class DeviceSpec:
 class Resources:
     """A collection of placement targets."""
 
-    devices: Tuple[DeviceSpec, ...]
+    devices: tuple[DeviceSpec, ...]
 
     def __post_init__(self) -> None:
         if len(self.devices) == 0:
-            raise ValueError('Resources requires at least one device.')
+            raise ValueError("Resources requires at least one device.")
         for device in self.devices:
             if device.throughput <= 0.0:
-                raise ValueError('device throughput must be positive.')
+                raise ValueError("device throughput must be positive.")
             if device.memory_bytes is not None and device.memory_bytes <= 0:
-                raise ValueError('device memory_bytes must be positive when supplied.')
+                raise ValueError("device memory_bytes must be positive when supplied.")
 
     @classmethod
-    def single_cpu(cls, memory_bytes: Optional[int] = None,
-                   throughput: float = 1.0,
-                   precision: Optional[Any] = None) -> 'Resources':
+    def single_cpu(
+        cls, memory_bytes: int | None = None, throughput: float = 1.0, precision: Any | None = None
+    ) -> Resources:
         """Return a one-device CPU resource description."""
-        return cls((DeviceSpec(
-            name='cpu:0', kind='cpu', memory_bytes=memory_bytes,
-            engine='numpy', throughput=float(throughput),
-            precision=None if precision is None else precision_name(precision)),))
+        return cls(
+            (
+                DeviceSpec(
+                    name="cpu:0",
+                    kind="cpu",
+                    memory_bytes=memory_bytes,
+                    engine="numpy",
+                    throughput=float(throughput),
+                    precision=None if precision is None else precision_name(precision),
+                ),
+            )
+        )
 
     @classmethod
-    def local(cls, num_cpus: Optional[int] = None,
-              memory_bytes: Optional[int] = None,
-              precision: Optional[Any] = None) -> 'Resources':
+    def local(
+        cls, num_cpus: int | None = None, memory_bytes: int | None = None, precision: Any | None = None
+    ) -> Resources:
         """Return local CPU resources split into logical worker slots."""
         count = os.cpu_count() if num_cpus is None else int(num_cpus)
         count = max(1, count)
         per_device_memory = None
         if memory_bytes is not None:
             per_device_memory = max(1, int(memory_bytes) // count)
-        return cls(tuple(
-            DeviceSpec(
-                name='cpu:%d' % i, kind='cpu', memory_bytes=per_device_memory,
-                engine='numpy', throughput=1.0,
-                precision=None if precision is None else precision_name(precision))
-            for i in range(count)))
+        return cls(
+            tuple(
+                DeviceSpec(
+                    name="cpu:%d" % i,
+                    kind="cpu",
+                    memory_bytes=per_device_memory,
+                    engine="numpy",
+                    throughput=1.0,
+                    precision=None if precision is None else precision_name(precision),
+                )
+                for i in range(count)
+            )
+        )
 
     @classmethod
-    def discover(cls, include_torch: bool = True,
-                 cpu_workers: Optional[int] = None,
-                 precision: Optional[Any] = None) -> 'Resources':
+    def discover(
+        cls, include_torch: bool = True, cpu_workers: int | None = None, precision: Any | None = None
+    ) -> Resources:
         """Best-effort local resource discovery with no required extras."""
-        devices: List[DeviceSpec] = list(cls.local(cpu_workers or 1, precision=precision).devices)
+        devices: list[DeviceSpec] = list(cls.local(cpu_workers or 1, precision=precision).devices)
         if include_torch:
             try:
                 import torch
@@ -142,98 +157,126 @@ class Resources:
                 if torch.cuda.is_available():
                     for i in range(torch.cuda.device_count()):
                         props = torch.cuda.get_device_properties(i)
-                        devices.append(DeviceSpec(
-                            name='cuda:%d' % i, kind='cuda',
-                            memory_bytes=int(props.total_memory),
-                            engine='torch', throughput=10.0,
-                            precision=dtype))
-                if getattr(torch.backends, 'mps', None) is not None and torch.backends.mps.is_available():
-                    devices.append(DeviceSpec(
-                        name='mps:0', kind='mps', memory_bytes=None,
-                        engine='torch', throughput=3.0,
-                        precision=dtype))
+                        devices.append(
+                            DeviceSpec(
+                                name="cuda:%d" % i,
+                                kind="cuda",
+                                memory_bytes=int(props.total_memory),
+                                engine="torch",
+                                throughput=10.0,
+                                precision=dtype,
+                            )
+                        )
+                if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+                    devices.append(
+                        DeviceSpec(
+                            name="mps:0", kind="mps", memory_bytes=None, engine="torch", throughput=3.0, precision=dtype
+                        )
+                    )
         return cls(tuple(devices))
 
     @classmethod
-    def from_specs(cls, specs: Iterable[DeviceSpec]) -> 'Resources':
+    def from_specs(cls, specs: Iterable[DeviceSpec]) -> Resources:
         """Build resources from an iterable of device specifications."""
         return cls(tuple(specs))
 
     @classmethod
-    def from_mpi(cls, comm: Optional[Any] = None,
-                 memory_bytes: Optional[int] = None,
-                 throughput: float = 1.0,
-                 precision: Optional[Any] = None) -> 'Resources':
+    def from_mpi(
+        cls,
+        comm: Any | None = None,
+        memory_bytes: int | None = None,
+        throughput: float = 1.0,
+        precision: Any | None = None,
+    ) -> Resources:
         """Return CPU resource slots for an MPI world without importing mpi4py.
 
         ``comm`` may be an mpi4py-style communicator exposing ``Get_size``.
         When it is omitted, common MPI launcher environment variables are used
         as a best-effort size hint, falling back to one slot.
         """
-        if comm is not None and callable(getattr(comm, 'Get_size', None)):
+        if comm is not None and callable(getattr(comm, "Get_size", None)):
             size = int(comm.Get_size())
         else:
-            size = int(os.environ.get('OMPI_COMM_WORLD_SIZE') or
-                       os.environ.get('PMI_SIZE') or
-                       os.environ.get('PMIX_SIZE') or
-                       os.environ.get('MPI_LOCALNRANKS') or
-                       1)
+            size = int(
+                os.environ.get("OMPI_COMM_WORLD_SIZE")
+                or os.environ.get("PMI_SIZE")
+                or os.environ.get("PMIX_SIZE")
+                or os.environ.get("MPI_LOCALNRANKS")
+                or 1
+            )
         size = max(1, size)
         per_device_memory = None if memory_bytes is None else max(1, int(memory_bytes) // size)
         dtype = None if precision is None else precision_name(precision)
-        return cls(tuple(DeviceSpec(
-            name='mpi:%d' % i, kind='cpu', memory_bytes=per_device_memory,
-            engine='numpy', throughput=float(throughput), precision=dtype)
-            for i in range(size)))
+        return cls(
+            tuple(
+                DeviceSpec(
+                    name="mpi:%d" % i,
+                    kind="cpu",
+                    memory_bytes=per_device_memory,
+                    engine="numpy",
+                    throughput=float(throughput),
+                    precision=dtype,
+                )
+                for i in range(size)
+            )
+        )
 
     @classmethod
-    def from_dask(cls, client: Any,
-                  precision: Optional[Any] = None) -> 'Resources':
+    def from_dask(cls, client: Any, precision: Any | None = None) -> Resources:
         """Return resource slots from a dask.distributed-like client.
 
         The method relies only on ``client.scheduler_info()`` and therefore
         does not introduce a dask dependency.
         """
-        info_fn = getattr(client, 'scheduler_info', None)
+        info_fn = getattr(client, "scheduler_info", None)
         if not callable(info_fn):
-            raise TypeError('from_dask requires a client with scheduler_info().')
+            raise TypeError("from_dask requires a client with scheduler_info().")
         info = info_fn()
-        workers = info.get('workers', {}) if isinstance(info, dict) else {}
+        workers = info.get("workers", {}) if isinstance(info, dict) else {}
         if not workers:
-            raise ValueError('dask scheduler_info did not report any workers.')
+            raise ValueError("dask scheduler_info did not report any workers.")
         dtype = None if precision is None else precision_name(precision)
         devices = []
         for i, (name, worker) in enumerate(sorted(workers.items(), key=lambda item: str(item[0]))):
-            nthreads = int(worker.get('nthreads', 1)) if isinstance(worker, dict) else 1
-            memory_limit = worker.get('memory_limit') if isinstance(worker, dict) else None
-            devices.append(DeviceSpec(
-                name='dask:%s' % name,
-                kind='cpu',
-                memory_bytes=None if memory_limit is None else int(memory_limit),
-                engine='numpy',
-                throughput=max(1.0, float(nthreads)),
-                precision=dtype))
+            nthreads = int(worker.get("nthreads", 1)) if isinstance(worker, dict) else 1
+            memory_limit = worker.get("memory_limit") if isinstance(worker, dict) else None
+            devices.append(
+                DeviceSpec(
+                    name="dask:%s" % name,
+                    kind="cpu",
+                    memory_bytes=None if memory_limit is None else int(memory_limit),
+                    engine="numpy",
+                    throughput=max(1.0, float(nthreads)),
+                    precision=dtype,
+                )
+            )
         return cls(tuple(devices))
 
     @classmethod
-    def from_spark(cls, spark_context: Any,
-                   memory_bytes: Optional[int] = None,
-                   precision: Optional[Any] = None) -> 'Resources':
+    def from_spark(cls, spark_context: Any, memory_bytes: int | None = None, precision: Any | None = None) -> Resources:
         """Return CPU resource slots from a SparkContext-like object."""
-        workers = int(getattr(spark_context, 'defaultParallelism', 1) or 1)
+        workers = int(getattr(spark_context, "defaultParallelism", 1) or 1)
         workers = max(1, workers)
         per_device_memory = None if memory_bytes is None else max(1, int(memory_bytes) // workers)
         dtype = None if precision is None else precision_name(precision)
-        return cls(tuple(DeviceSpec(
-            name='spark:%d' % i, kind='cpu', memory_bytes=per_device_memory,
-            engine='numpy', throughput=1.0, precision=dtype)
-            for i in range(workers)))
+        return cls(
+            tuple(
+                DeviceSpec(
+                    name="spark:%d" % i,
+                    kind="cpu",
+                    memory_bytes=per_device_memory,
+                    engine="numpy",
+                    throughput=1.0,
+                    precision=dtype,
+                )
+                for i in range(workers)
+            )
+        )
 
     @classmethod
-    def from_torchrun(cls, memory_bytes: Optional[int] = None,
-                      precision: Optional[Any] = None) -> 'Resources':
+    def from_torchrun(cls, memory_bytes: int | None = None, precision: Any | None = None) -> Resources:
         """Return torchrun rank/device slots from launcher environment hints."""
-        world = int(os.environ.get('WORLD_SIZE') or 1)
+        world = int(os.environ.get("WORLD_SIZE") or 1)
         world = max(1, world)
         dtype = None if precision is None else precision_name(precision)
         try:
@@ -250,31 +293,43 @@ class Resources:
                     mem = int(torch.cuda.get_device_properties(dev_idx).total_memory)
                 except Exception:
                     mem = per_device_memory
-                devices.append(DeviceSpec(
-                    name='cuda:%d' % dev_idx, kind='cuda',
-                    memory_bytes=mem, engine='torch', throughput=10.0,
-                    precision=dtype))
+                devices.append(
+                    DeviceSpec(
+                        name="cuda:%d" % dev_idx,
+                        kind="cuda",
+                        memory_bytes=mem,
+                        engine="torch",
+                        throughput=10.0,
+                        precision=dtype,
+                    )
+                )
             else:
-                devices.append(DeviceSpec(
-                    name='torchrun:%d' % rank, kind='cpu',
-                    memory_bytes=per_device_memory, engine='torch',
-                    throughput=1.0, precision=dtype))
+                devices.append(
+                    DeviceSpec(
+                        name="torchrun:%d" % rank,
+                        kind="cpu",
+                        memory_bytes=per_device_memory,
+                        engine="torch",
+                        throughput=1.0,
+                        precision=dtype,
+                    )
+                )
         return cls(tuple(devices))
 
     def fastest(self) -> DeviceSpec:
         """Return the device with the largest advisory throughput weight."""
         return max(self.devices, key=lambda d: d.throughput)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable resource description."""
-        return {'devices': [device.to_dict() for device in self.devices]}
+        return {"devices": [device.to_dict() for device in self.devices]}
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> 'Resources':
+    def from_dict(cls, payload: dict[str, Any]) -> Resources:
         """Build resources from ``to_dict`` output."""
-        devices = payload.get('devices')
+        devices = payload.get("devices")
         if devices is None:
-            raise ValueError('resource payload requires a devices field.')
+            raise ValueError("resource payload requires a devices field.")
         return cls(tuple(DeviceSpec.from_dict(device) for device in devices))
 
     def to_json(self, **kwargs: Any) -> str:
@@ -282,19 +337,19 @@ class Resources:
         return json.dumps(self.to_dict(), **kwargs)
 
     @classmethod
-    def from_json(cls, text: str) -> 'Resources':
+    def from_json(cls, text: str) -> Resources:
         """Deserialize resources from JSON produced by ``to_json``."""
         return cls.from_dict(json.loads(text))
 
     def save(self, path: Any, **kwargs: Any) -> None:
         """Persist resources to a JSON file for reuse by later plans."""
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             f.write(self.to_json(**kwargs))
 
     @classmethod
-    def load(cls, path: Any) -> 'Resources':
+    def load(cls, path: Any) -> Resources:
         """Load resources from a JSON file created by ``save``."""
-        with open(path, 'r') as f:
+        with open(path) as f:
             return cls.from_json(f.read())
 
 
@@ -307,44 +362,44 @@ class CalibrationRecord:
     resources: Resources
     sample_size: int
     repeats: int
-    precision: Optional[str] = None
-    estimator_type: Optional[str] = None
-    row_count: Optional[int] = None
-    model_bytes: Optional[int] = None
-    statistic_bytes: Optional[int] = None
+    precision: str | None = None
+    estimator_type: str | None = None
+    row_count: int | None = None
+    model_bytes: int | None = None
+    statistic_bytes: int | None = None
     timestamp: float = 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable calibration record."""
         return {
-            'model_type': self.model_type,
-            'estimator_type': self.estimator_type,
-            'workload': self.workload,
-            'sample_size': int(self.sample_size),
-            'repeats': int(self.repeats),
-            'precision': self.precision,
-            'row_count': self.row_count,
-            'model_bytes': self.model_bytes,
-            'statistic_bytes': self.statistic_bytes,
-            'timestamp': float(self.timestamp),
-            'resources': self.resources.to_dict(),
+            "model_type": self.model_type,
+            "estimator_type": self.estimator_type,
+            "workload": self.workload,
+            "sample_size": int(self.sample_size),
+            "repeats": int(self.repeats),
+            "precision": self.precision,
+            "row_count": self.row_count,
+            "model_bytes": self.model_bytes,
+            "statistic_bytes": self.statistic_bytes,
+            "timestamp": float(self.timestamp),
+            "resources": self.resources.to_dict(),
         }
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> 'CalibrationRecord':
+    def from_dict(cls, payload: dict[str, Any]) -> CalibrationRecord:
         """Build a calibration record from ``to_dict`` output."""
         return cls(
-            model_type=str(payload['model_type']),
-            estimator_type=payload.get('estimator_type'),
-            workload=str(payload['workload']),
-            sample_size=int(payload.get('sample_size', 0)),
-            repeats=int(payload.get('repeats', 0)),
-            precision=payload.get('precision'),
-            row_count=None if payload.get('row_count') is None else int(payload['row_count']),
-            model_bytes=None if payload.get('model_bytes') is None else int(payload['model_bytes']),
-            statistic_bytes=None if payload.get('statistic_bytes') is None else int(payload['statistic_bytes']),
-            timestamp=float(payload.get('timestamp', 0.0)),
-            resources=Resources.from_dict(payload['resources']),
+            model_type=str(payload["model_type"]),
+            estimator_type=payload.get("estimator_type"),
+            workload=str(payload["workload"]),
+            sample_size=int(payload.get("sample_size", 0)),
+            repeats=int(payload.get("repeats", 0)),
+            precision=payload.get("precision"),
+            row_count=None if payload.get("row_count") is None else int(payload["row_count"]),
+            model_bytes=None if payload.get("model_bytes") is None else int(payload["model_bytes"]),
+            statistic_bytes=None if payload.get("statistic_bytes") is None else int(payload["statistic_bytes"]),
+            timestamp=float(payload.get("timestamp", 0.0)),
+            resources=Resources.from_dict(payload["resources"]),
         )
 
 
@@ -352,17 +407,16 @@ class CalibrationRecord:
 class CalibrationCatalog:
     """Append-only catalog of resource calibration measurements."""
 
-    records: Tuple[CalibrationRecord, ...] = ()
+    records: tuple[CalibrationRecord, ...] = ()
 
     def add(self, record: CalibrationRecord) -> CalibrationRecord:
         """Append ``record`` and return it."""
         self.records = tuple(self.records) + (record,)
         return record
 
-    def latest(self,
-               model_type: Optional[str] = None,
-               workload: Optional[str] = None,
-               precision: Optional[str] = None) -> Optional[CalibrationRecord]:
+    def latest(
+        self, model_type: str | None = None, workload: str | None = None, precision: str | None = None
+    ) -> CalibrationRecord | None:
         """Return the newest record matching the supplied filters."""
         workload_name = None if workload is None else str(workload).lower()
         for record in sorted(self.records, key=lambda r: r.timestamp, reverse=True):
@@ -375,42 +429,40 @@ class CalibrationCatalog:
             return record
         return None
 
-    def resources_for(self,
-                      model_type: Optional[str] = None,
-                      workload: Optional[str] = None,
-                      precision: Optional[str] = None) -> Optional[Resources]:
+    def resources_for(
+        self, model_type: str | None = None, workload: str | None = None, precision: str | None = None
+    ) -> Resources | None:
         """Return calibrated resources from the newest matching record."""
         record = self.latest(model_type=model_type, workload=workload, precision=precision)
         return None if record is None else record.resources
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable calibration catalog."""
-        return {'records': [record.to_dict() for record in self.records]}
+        return {"records": [record.to_dict() for record in self.records]}
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> 'CalibrationCatalog':
+    def from_dict(cls, payload: dict[str, Any]) -> CalibrationCatalog:
         """Build a catalog from ``to_dict`` output."""
-        return cls(tuple(CalibrationRecord.from_dict(record)
-                         for record in payload.get('records', ())))
+        return cls(tuple(CalibrationRecord.from_dict(record) for record in payload.get("records", ())))
 
     def to_json(self, **kwargs: Any) -> str:
         """Serialize the calibration catalog to JSON."""
         return json.dumps(self.to_dict(), **kwargs)
 
     @classmethod
-    def from_json(cls, text: str) -> 'CalibrationCatalog':
+    def from_json(cls, text: str) -> CalibrationCatalog:
         """Deserialize a calibration catalog from JSON."""
         return cls.from_dict(json.loads(text))
 
     def save(self, path: Any, **kwargs: Any) -> None:
         """Persist the catalog to a JSON file."""
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             f.write(self.to_json(**kwargs))
 
     @classmethod
-    def load(cls, path: Any) -> 'CalibrationCatalog':
+    def load(cls, path: Any) -> CalibrationCatalog:
         """Load a calibration catalog from disk."""
-        with open(path, 'r') as f:
+        with open(path) as f:
             return cls.from_json(f.read())
 
 
@@ -440,7 +492,7 @@ class PlacementShard:
 class Placement:
     """Printable placement returned by ``plan``."""
 
-    shards: Tuple[PlacementShard, ...]
+    shards: tuple[PlacementShard, ...]
     total_rows: int
     encoded_row_bytes: float
     transient_row_bytes: float
@@ -450,41 +502,48 @@ class Placement:
 
     def __str__(self) -> str:
         parts = [
-            'Placement(total_rows=%d, shards=%d, row_bytes=%.1f, transient_row_bytes=%.1f, '
-            'model_bytes=%d, statistic_bytes=%d, dtype_bytes=%d)' % (
-                self.total_rows, len(self.shards), self.encoded_row_bytes,
-                self.transient_row_bytes, self.model_bytes, self.statistic_bytes,
-                self.dtype_bytes)
+            "Placement(total_rows=%d, shards=%d, row_bytes=%.1f, transient_row_bytes=%.1f, "
+            "model_bytes=%d, statistic_bytes=%d, dtype_bytes=%d)"
+            % (
+                self.total_rows,
+                len(self.shards),
+                self.encoded_row_bytes,
+                self.transient_row_bytes,
+                self.model_bytes,
+                self.statistic_bytes,
+                self.dtype_bytes,
+            )
         ]
         for shard in self.shards:
-            parts.append('  %s[%d:%d] rows=%d sub_chunks=%d estimated_bytes=%d' % (
-                shard.device.name, shard.start, shard.stop, shard.size,
-                shard.sub_chunks, shard.total_bytes))
-        return '\n'.join(parts)
+            parts.append(
+                "  %s[%d:%d] rows=%d sub_chunks=%d estimated_bytes=%d"
+                % (shard.device.name, shard.start, shard.stop, shard.size, shard.sub_chunks, shard.total_bytes)
+            )
+        return "\n".join(parts)
 
-    def for_device(self, name: str) -> Tuple[PlacementShard, ...]:
+    def for_device(self, name: str) -> tuple[PlacementShard, ...]:
         """Return all placement shards assigned to a named device."""
         return tuple(shard for shard in self.shards if shard.device.name == name)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly placement summary."""
         return {
-            'total_rows': self.total_rows,
-            'encoded_row_bytes': self.encoded_row_bytes,
-            'transient_row_bytes': self.transient_row_bytes,
-            'model_bytes': self.model_bytes,
-            'statistic_bytes': self.statistic_bytes,
-            'dtype_bytes': self.dtype_bytes,
-            'shards': [
+            "total_rows": self.total_rows,
+            "encoded_row_bytes": self.encoded_row_bytes,
+            "transient_row_bytes": self.transient_row_bytes,
+            "model_bytes": self.model_bytes,
+            "statistic_bytes": self.statistic_bytes,
+            "dtype_bytes": self.dtype_bytes,
+            "shards": [
                 {
-                    'device': shard.device.name,
-                    'kind': shard.device.kind,
-                    'engine': shard.device.engine,
-                    'start': shard.start,
-                    'stop': shard.stop,
-                    'sub_chunks': shard.sub_chunks,
-                    'encoded_bytes': shard.encoded_bytes,
-                    'transient_bytes': shard.transient_bytes,
+                    "device": shard.device.name,
+                    "kind": shard.device.kind,
+                    "engine": shard.device.engine,
+                    "start": shard.start,
+                    "stop": shard.stop,
+                    "sub_chunks": shard.sub_chunks,
+                    "encoded_bytes": shard.encoded_bytes,
+                    "transient_bytes": shard.transient_bytes,
                 }
                 for shard in self.shards
             ],
@@ -516,10 +575,10 @@ class ModelShard:
 class _LocalShard:
     device: DeviceSpec
     engine: Any
-    chunks: Tuple[Tuple[int, Any], ...]
+    chunks: tuple[tuple[int, Any], ...]
 
 
-class EncodedDataHandle(object):
+class EncodedDataHandle:
     """Duck-typed orchestrator contract consumed by ``pysp.stats``.
 
     Local, multiprocessing, MPI, Spark, dask, or future worker handles can
@@ -527,7 +586,7 @@ class EncodedDataHandle(object):
     to document the contract and to give local code a common type to return.
     """
 
-    def pysp_seq_log_density_sum(self, estimate: Any) -> Tuple[float, float]:
+    def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
         """Return ``(num_observations, summed_log_density)`` for ``estimate``."""
         raise NotImplementedError
 
@@ -539,7 +598,7 @@ class EncodedDataHandle(object):
         """Initialize a model through the handle's resident encoded data."""
         raise NotImplementedError
 
-    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> Tuple[float, Any]:
+    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return folded sufficient statistics for streaming/incremental EM."""
         raise NotImplementedError
 
@@ -547,7 +606,7 @@ class EncodedDataHandle(object):
         """Release worker resources owned by this handle, if any."""
         return None
 
-    def __enter__(self) -> 'EncodedDataHandle':
+    def __enter__(self) -> EncodedDataHandle:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -556,63 +615,88 @@ class EncodedDataHandle(object):
 
 def is_encoded_data_handle(obj: Any) -> bool:
     """Return true when ``obj`` exposes the sequence-orchestrator contract."""
-    return all(callable(getattr(obj, name, None)) for name in (
-        'pysp_seq_log_density_sum',
-        'pysp_seq_estimate',
-        'pysp_seq_initialize',
-        'pysp_stream_accumulate',
-    ))
+    return all(
+        callable(getattr(obj, name, None))
+        for name in (
+            "pysp_seq_log_density_sum",
+            "pysp_seq_estimate",
+            "pysp_seq_initialize",
+            "pysp_stream_accumulate",
+        )
+    )
 
 
-def encoded_data(data: Any,
-                 estimator: Optional[Any] = None,
-                 model: Optional[Any] = None,
-                 encoder: Optional[DataSequenceEncoder] = None,
-                 placement: Optional[Placement] = None,
-                 resources: Optional[Resources] = None,
-                 engine: Optional[Any] = None,
-                 precision: Optional[Any] = None,
-                 num_chunks: Optional[int] = None,
-                 sub_chunks: int = 1,
-                 backend: str = 'local',
-                 num_workers: Optional[int] = None,
-                 client: Optional[Any] = None,
-                 comm: Optional[Any] = None,
-                 root: int = 0,
-                 root_only: bool = False) -> EncodedDataHandle:
+def encoded_data(
+    data: Any,
+    estimator: Any | None = None,
+    model: Any | None = None,
+    encoder: DataSequenceEncoder | None = None,
+    placement: Placement | None = None,
+    resources: Resources | None = None,
+    engine: Any | None = None,
+    precision: Any | None = None,
+    num_chunks: int | None = None,
+    sub_chunks: int = 1,
+    backend: str = "local",
+    num_workers: int | None = None,
+    client: Any | None = None,
+    comm: Any | None = None,
+    root: int = 0,
+    root_only: bool = False,
+) -> EncodedDataHandle:
     """Return an encoded-data handle, preserving existing compatible handles."""
     if is_encoded_data_handle(data):
         return data
-    backend_name = str(backend or 'local').lower()
-    if backend_name in ('mp', 'multiprocessing'):
+    backend_name = str(backend or "local").lower()
+    if backend_name in ("mp", "multiprocessing"):
         from pysp.utils.parallel import MPEncodedData
-        return MPEncodedData(data, estimator=estimator, encoder=encoder,
-                             num_workers=num_workers, sub_chunks=sub_chunks)
-    if backend_name == 'mpi':
+
+        return MPEncodedData(data, estimator=estimator, encoder=encoder, num_workers=num_workers, sub_chunks=sub_chunks)
+    if backend_name == "mpi":
         from pysp.utils.parallel_mpi import MPIEncodedData
-        return MPIEncodedData(data, estimator=estimator, encoder=encoder,
-                              sub_chunks=sub_chunks, comm=comm,
-                              root=root, root_only=root_only)
-    if backend_name == 'spark':
-        return SparkEncodedData(data, estimator=estimator, model=model,
-                                encoder=encoder)
-    if backend_name == 'dask':
-        return DaskEncodedData(data, estimator=estimator, model=model,
-                               encoder=encoder, client=client,
-                               num_partitions=num_chunks or num_workers,
-                               sub_chunks=sub_chunks)
-    if backend_name == 'torchrun':
+
+        return MPIEncodedData(
+            data, estimator=estimator, encoder=encoder, sub_chunks=sub_chunks, comm=comm, root=root, root_only=root_only
+        )
+    if backend_name == "spark":
+        return SparkEncodedData(data, estimator=estimator, model=model, encoder=encoder)
+    if backend_name == "dask":
+        return DaskEncodedData(
+            data,
+            estimator=estimator,
+            model=model,
+            encoder=encoder,
+            client=client,
+            num_partitions=num_chunks or num_workers,
+            sub_chunks=sub_chunks,
+        )
+    if backend_name == "torchrun":
         from pysp.utils.parallel_torchrun import TorchRunEncodedData
-        return TorchRunEncodedData(data, estimator=estimator, model=model,
-                                   encoder=encoder, sub_chunks=sub_chunks,
-                                   group=comm, root=root,
-                                   root_only=root_only)
-    if backend_name != 'local':
+
+        return TorchRunEncodedData(
+            data,
+            estimator=estimator,
+            model=model,
+            encoder=encoder,
+            sub_chunks=sub_chunks,
+            group=comm,
+            root=root,
+            root_only=root_only,
+        )
+    if backend_name != "local":
         raise ValueError("unknown encoded-data backend %r" % backend)
     return LocalEncodedData(
-        data, estimator=estimator, model=model, encoder=encoder,
-        placement=placement, resources=resources, engine=engine,
-        precision=precision, num_chunks=num_chunks, sub_chunks=sub_chunks)
+        data,
+        estimator=estimator,
+        model=model,
+        encoder=encoder,
+        placement=placement,
+        resources=resources,
+        engine=engine,
+        precision=precision,
+        num_chunks=num_chunks,
+        sub_chunks=sub_chunks,
+    )
 
 
 class LocalEncodedData(EncodedDataHandle):
@@ -625,40 +709,52 @@ class LocalEncodedData(EncodedDataHandle):
     global sufficient-statistic folding.
     """
 
-    def __init__(self,
-                 data: Sequence[Any],
-                 estimator: Optional[Any] = None,
-                 model: Optional[Any] = None,
-                 encoder: Optional[DataSequenceEncoder] = None,
-                 placement: Optional[Placement] = None,
-                 resources: Optional[Resources] = None,
-                 engine: Optional[Any] = None,
-                 precision: Optional[Any] = None,
-                 num_chunks: Optional[int] = None,
-                 sub_chunks: int = 1) -> None:
+    def __init__(
+        self,
+        data: Sequence[Any],
+        estimator: Any | None = None,
+        model: Any | None = None,
+        encoder: DataSequenceEncoder | None = None,
+        placement: Placement | None = None,
+        resources: Resources | None = None,
+        engine: Any | None = None,
+        precision: Any | None = None,
+        num_chunks: int | None = None,
+        sub_chunks: int = 1,
+    ) -> None:
         if len(data) == 0:
-            raise ValueError('LocalEncodedData requires non-empty data.')
+            raise ValueError("LocalEncodedData requires non-empty data.")
         if encoder is None:
-            if model is not None and callable(getattr(model, 'dist_to_encoder', None)):
+            if model is not None and callable(getattr(model, "dist_to_encoder", None)):
                 encoder = model.dist_to_encoder()
             elif estimator is not None:
                 encoder = estimator.accumulator_factory().make().acc_to_encoder()
         if encoder is None:
-            raise ValueError('LocalEncodedData requires an encoder, model, or estimator.')
+            raise ValueError("LocalEncodedData requires an encoder, model, or estimator.")
         if placement is None:
-            placement = plan(data=data, model=model, estimator=estimator, encoder=encoder,
-                             resources=resources, engine=engine, precision=precision,
-                             num_chunks=num_chunks, sub_chunks=sub_chunks)
+            placement = plan(
+                data=data,
+                model=model,
+                estimator=estimator,
+                encoder=encoder,
+                resources=resources,
+                engine=engine,
+                precision=precision,
+                num_chunks=num_chunks,
+                sub_chunks=sub_chunks,
+            )
         self.placement = placement
         self.encoder = encoder
         self.size = int(len(data))
-        self.shards: Tuple[_LocalShard, ...] = tuple(
+        self.shards: tuple[_LocalShard, ...] = tuple(
             self._encode_shard(data, shard, engine=engine, precision=precision)
             for shard in placement.shards
-            if shard.size > 0)
+            if shard.size > 0
+        )
 
-    def _encode_shard(self, data: Sequence[Any], shard: PlacementShard,
-                      engine: Optional[Any], precision: Optional[Any]) -> _LocalShard:
+    def _encode_shard(
+        self, data: Sequence[Any], shard: PlacementShard, engine: Any | None, precision: Any | None
+    ) -> _LocalShard:
         shard_engine = engine if engine is not None else _engine_for_device(shard.device, precision)
         chunks = []
         part_count = max(1, int(shard.sub_chunks))
@@ -671,7 +767,7 @@ class LocalEncodedData(EncodedDataHandle):
             chunks.append((len(raw), ResidentEncodedPayload(host_payload, engine_payload)))
         return _LocalShard(shard.device, shard_engine, tuple(chunks))
 
-    def pysp_seq_log_density_sum(self, estimate: Any) -> Tuple[float, float]:
+    def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
         """Return total count and summed log density over resident chunks."""
         count = 0.0
         total = 0.0
@@ -680,7 +776,7 @@ class LocalEncodedData(EncodedDataHandle):
             for sz, enc in shard.chunks:
                 count += sz
                 if kernel is None:
-                    scores = estimate.seq_log_density(getattr(enc, 'host_payload', enc))
+                    scores = estimate.seq_log_density(getattr(enc, "host_payload", enc))
                     total += float(np.asarray(scores, dtype=np.float64).sum())
                 else:
                     scores = kernel.score(enc)
@@ -700,8 +796,9 @@ class LocalEncodedData(EncodedDataHandle):
                 nobs += sz
                 if kernel is None:
                     local_acc = estimator.accumulator_factory().make()
-                    local_acc.seq_update(getattr(enc, 'host_payload', enc),
-                                         np.ones(sz, dtype=np.float64), prev_estimate)
+                    local_acc.seq_update(
+                        getattr(enc, "host_payload", enc), np.ones(sz, dtype=np.float64), prev_estimate
+                    )
                     accumulator.combine(local_acc.value())
                 else:
                     weights = shard.engine.asarray(np.ones(sz, dtype=np.float64))
@@ -716,23 +813,23 @@ class LocalEncodedData(EncodedDataHandle):
         validate_estimator_keys(estimator)
         accumulator = estimator.accumulator_factory().make()
         nobs = 0.0
-        seeds = rng.randint(2 ** 31, size=max(1, self.num_chunks))
+        seeds = rng.randint(2**31, size=max(1, self.num_chunks))
         seed_idx = 0
         for shard in self.shards:
             for sz, enc in shard.chunks:
                 rng_loc = np.random.RandomState(int(seeds[seed_idx % len(seeds)]))
-                rng_w = np.random.RandomState(seed=rng_loc.randint(2 ** 31))
+                rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
                 seed_idx += 1
                 weights = np.zeros(sz, dtype=np.float64)
                 weights[rng_w.rand(sz) <= p] = 1.0
                 nobs += float(weights.sum())
                 local_acc = estimator.accumulator_factory().make()
-                local_acc.seq_initialize(getattr(enc, 'host_payload', enc), weights, rng_loc)
+                local_acc.seq_initialize(getattr(enc, "host_payload", enc), weights, rng_loc)
                 accumulator.combine(local_acc.value())
         _global_key_merge(accumulator)
         return estimator.estimate(nobs, accumulator.value())
 
-    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> Tuple[float, Any]:
+    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return globally tied batch sufficient statistics for streaming EM."""
         from pysp.stats import validate_estimator_keys
 
@@ -745,7 +842,7 @@ class LocalEncodedData(EncodedDataHandle):
                 nobs += sz
                 if kernel is None:
                     local_acc = estimator.accumulator_factory().make()
-                    local_acc.seq_update(getattr(enc, 'host_payload', enc), np.ones(sz, dtype=np.float64), model)
+                    local_acc.seq_update(getattr(enc, "host_payload", enc), np.ones(sz, dtype=np.float64), model)
                     accumulator.combine(local_acc.value())
                 else:
                     weights = shard.engine.asarray(np.ones(sz, dtype=np.float64))
@@ -758,10 +855,10 @@ class LocalEncodedData(EncodedDataHandle):
         """Return the number of local encoded chunks across all shards."""
         return sum(len(shard.chunks) for shard in self.shards)
 
-    def __iter__(self) -> Iterator[Tuple[int, Any]]:
+    def __iter__(self) -> Iterator[tuple[int, Any]]:
         for shard in self.shards:
             for sz, enc in shard.chunks:
-                yield sz, getattr(enc, 'host_payload', enc)
+                yield sz, getattr(enc, "host_payload", enc)
 
     def __len__(self) -> int:
         return self.size
@@ -774,21 +871,23 @@ class LocalEncodedData(EncodedDataHandle):
 class SparkEncodedData(EncodedDataHandle):
     """Spark RDD encoded-data handle implementing the orchestrator protocol."""
 
-    def __init__(self,
-                 data: Any,
-                 estimator: Optional[Any] = None,
-                 model: Optional[Any] = None,
-                 encoder: Optional[DataSequenceEncoder] = None,
-                 materialize: bool = True) -> None:
+    def __init__(
+        self,
+        data: Any,
+        estimator: Any | None = None,
+        model: Any | None = None,
+        encoder: DataSequenceEncoder | None = None,
+        materialize: bool = True,
+    ) -> None:
         if encoder is None:
-            if model is not None and callable(getattr(model, 'dist_to_encoder', None)):
+            if model is not None and callable(getattr(model, "dist_to_encoder", None)):
                 encoder = model.dist_to_encoder()
             elif estimator is not None:
                 encoder = estimator.accumulator_factory().make().acc_to_encoder()
         if encoder is None:
-            raise ValueError('SparkEncodedData requires an encoder, model, or estimator.')
-        if not hasattr(data, 'context'):
-            raise TypeError('SparkEncodedData requires a Spark RDD-like object.')
+            raise ValueError("SparkEncodedData requires an encoder, model, or estimator.")
+        if not hasattr(data, "context"):
+            raise TypeError("SparkEncodedData requires a Spark RDD-like object.")
         from pysp.stats import seq_encode
 
         self.encoder = encoder
@@ -797,22 +896,25 @@ class SparkEncodedData(EncodedDataHandle):
         if materialize:
             self.size = int(self.enc_rdd.map(lambda item: item[0]).sum())
 
-    def pysp_seq_log_density_sum(self, estimate: Any) -> Tuple[float, float]:
+    def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
         """Return Spark-folded ``(count, summed_log_density)`` for ``estimate``."""
         from pysp.stats import seq_log_density_sum
+
         return seq_log_density_sum(self.enc_rdd, estimate)
 
     def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any:
         """Run one Spark distributed E-step fold and estimator M-step."""
         from pysp.stats import seq_estimate
+
         return seq_estimate(self.enc_rdd, estimator, prev_estimate)
 
     def pysp_seq_initialize(self, estimator: Any, rng: np.random.RandomState, p: float) -> Any:
         """Initialize a model over the resident Spark encoded RDD."""
         from pysp.stats import seq_initialize
+
         return seq_initialize(self.enc_rdd, estimator, rng, p)
 
-    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> Tuple[float, Any]:
+    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return Spark-folded sufficient statistics for streaming EM."""
         from pysp.stats import validate_estimator_keys
 
@@ -863,50 +965,53 @@ class SparkEncodedData(EncodedDataHandle):
 class DaskEncodedData(EncodedDataHandle):
     """dask.distributed encoded-data handle implementing the orchestrator protocol."""
 
-    def __init__(self,
-                 data: Any,
-                 estimator: Optional[Any] = None,
-                 model: Optional[Any] = None,
-                 encoder: Optional[DataSequenceEncoder] = None,
-                 client: Optional[Any] = None,
-                 num_partitions: Optional[int] = None,
-                 sub_chunks: int = 1,
-                 materialize: bool = True) -> None:
+    def __init__(
+        self,
+        data: Any,
+        estimator: Any | None = None,
+        model: Any | None = None,
+        encoder: DataSequenceEncoder | None = None,
+        client: Any | None = None,
+        num_partitions: int | None = None,
+        sub_chunks: int = 1,
+        materialize: bool = True,
+    ) -> None:
         if encoder is None:
-            if model is not None and callable(getattr(model, 'dist_to_encoder', None)):
+            if model is not None and callable(getattr(model, "dist_to_encoder", None)):
                 encoder = model.dist_to_encoder()
             elif estimator is not None:
                 encoder = estimator.accumulator_factory().make().acc_to_encoder()
         if encoder is None:
-            raise ValueError('DaskEncodedData requires an encoder, model, or estimator.')
+            raise ValueError("DaskEncodedData requires an encoder, model, or estimator.")
         self.encoder = encoder
         self.client, self._owns_client = _dask_client(client)
         self._closed = False
         self._partitions = tuple(self._submit_partitions(data, encoder, num_partitions, sub_chunks))
         if not self._partitions:
-            raise ValueError('DaskEncodedData requires non-empty data.')
+            raise ValueError("DaskEncodedData requires non-empty data.")
         self.size = None
         if materialize:
-            self.size = int(sum(self.client.gather([
-                self.client.submit(_dask_payload_size, part, pure=False)
-                for part in self._partitions
-            ])))
+            self.size = int(
+                sum(
+                    self.client.gather(
+                        [self.client.submit(_dask_payload_size, part, pure=False) for part in self._partitions]
+                    )
+                )
+            )
 
-    def _submit_partitions(self, data: Any, encoder: DataSequenceEncoder,
-                           num_partitions: Optional[int], sub_chunks: int) -> List[Any]:
+    def _submit_partitions(
+        self, data: Any, encoder: DataSequenceEncoder, num_partitions: int | None, sub_chunks: int
+    ) -> list[Any]:
         encoder_b = pickle.dumps(encoder, protocol=pickle.HIGHEST_PROTOCOL)
-        if hasattr(data, 'to_delayed') and callable(getattr(data, 'to_delayed')):
+        if hasattr(data, "to_delayed") and callable(data.to_delayed):
             try:
                 from dask import delayed
             except ImportError as e:
-                raise ImportError('DaskEncodedData requires dask for collection ingestion.') from e
+                raise ImportError("DaskEncodedData requires dask for collection ingestion.") from e
             delayed_parts = list(data.to_delayed())
-            delayed_payloads = [
-                delayed(_dask_encode_partition)(encoder_b, part, sub_chunks)
-                for part in delayed_parts
-            ]
+            delayed_payloads = [delayed(_dask_encode_partition)(encoder_b, part, sub_chunks) for part in delayed_parts]
             return list(self.client.compute(delayed_payloads))
-        if not hasattr(data, '__len__'):
+        if not hasattr(data, "__len__"):
             data = list(data)
         nobs = len(data)
         if nobs == 0:
@@ -917,11 +1022,10 @@ class DaskEncodedData(EncodedDataHandle):
         futures = []
         for start, stop in _split_range(0, nobs, num_partitions):
             shard = [data[i] for i in range(start, stop)]
-            futures.append(self.client.submit(
-                _dask_encode_shard, encoder_b, shard, sub_chunks, pure=False))
+            futures.append(self.client.submit(_dask_encode_shard, encoder_b, shard, sub_chunks, pure=False))
         return futures
 
-    def _fold_stats(self, estimator: Any, payloads: Iterable[bytes]) -> Tuple[float, Any]:
+    def _fold_stats(self, estimator: Any, payloads: Iterable[bytes]) -> tuple[float, Any]:
         accumulator = estimator.accumulator_factory().make()
         nobs = 0.0
         for raw in payloads:
@@ -931,13 +1035,10 @@ class DaskEncodedData(EncodedDataHandle):
         _global_key_merge(accumulator)
         return nobs, accumulator.value()
 
-    def pysp_seq_log_density_sum(self, estimate: Any) -> Tuple[float, float]:
+    def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
         """Return dask-folded ``(count, summed_log_density)`` for ``estimate``."""
         model_b = pickle.dumps(estimate, protocol=pickle.HIGHEST_PROTOCOL)
-        futures = [
-            self.client.submit(_dask_log_density_sum, part, model_b, pure=False)
-            for part in self._partitions
-        ]
+        futures = [self.client.submit(_dask_log_density_sum, part, model_b, pure=False) for part in self._partitions]
         results = self.client.gather(futures)
         return (sum(r[0] for r in results), sum(r[1] for r in results))
 
@@ -961,16 +1062,15 @@ class DaskEncodedData(EncodedDataHandle):
 
         validate_estimator_keys(estimator)
         estimator_b = pickle.dumps(estimator, protocol=pickle.HIGHEST_PROTOCOL)
-        seeds = rng.randint(2 ** 31, size=max(1, len(self._partitions)))
+        seeds = rng.randint(2**31, size=max(1, len(self._partitions)))
         futures = [
-            self.client.submit(
-                _dask_initialize_partition, part, estimator_b, int(seed), float(p), pure=False)
+            self.client.submit(_dask_initialize_partition, part, estimator_b, int(seed), float(p), pure=False)
             for part, seed in zip(self._partitions, seeds)
         ]
         nobs, value = self._fold_stats(estimator, self.client.gather(futures))
         return estimator.estimate(nobs, value)
 
-    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> Tuple[float, Any]:
+    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return dask-folded sufficient statistics for streaming EM."""
         from pysp.stats import validate_estimator_keys
 
@@ -990,10 +1090,13 @@ class DaskEncodedData(EncodedDataHandle):
 
     def __len__(self) -> int:
         if self.size is None:
-            self.size = int(sum(self.client.gather([
-                self.client.submit(_dask_payload_size, part, pure=False)
-                for part in self._partitions
-            ])))
+            self.size = int(
+                sum(
+                    self.client.gather(
+                        [self.client.submit(_dask_payload_size, part, pure=False) for part in self._partitions]
+                    )
+                )
+            )
         return self.size
 
     def close(self) -> None:
@@ -1009,13 +1112,13 @@ class DaskEncodedData(EncodedDataHandle):
                 self.client.close()
 
 
-def _dask_client(client: Optional[Any]) -> Tuple[Any, bool]:
+def _dask_client(client: Any | None) -> tuple[Any, bool]:
     if client is not None:
         return client, False
     try:
         from distributed import Client, get_client
     except ImportError as e:
-        raise ImportError('DaskEncodedData requires dask.distributed.') from e
+        raise ImportError("DaskEncodedData requires dask.distributed.") from e
     try:
         return get_client(), False
     except ValueError:
@@ -1025,27 +1128,30 @@ def _dask_client(client: Optional[Any]) -> Tuple[Any, bool]:
 def _dask_worker_count(client: Any) -> int:
     try:
         info = client.scheduler_info()
-        workers = info.get('workers', {}) if isinstance(info, dict) else {}
+        workers = info.get("workers", {}) if isinstance(info, dict) else {}
         return max(1, len(workers))
     except Exception:
         return 1
 
 
-def _dask_rows(partition: Any) -> List[Any]:
-    if hasattr(partition, 'itertuples'):
+def _dask_rows(partition: Any) -> list[Any]:
+    if hasattr(partition, "itertuples"):
         return list(partition.itertuples(index=False, name=None))
-    if hasattr(partition, 'tolist'):
+    if hasattr(partition, "tolist"):
         values = partition.tolist()
         return values if isinstance(values, list) else list(values)
     return list(partition)
 
 
-def _dask_encode_partition(encoder_b: bytes, partition: Any, sub_chunks: int) -> Tuple[int, Tuple[Tuple[int, Any], ...]]:
+def _dask_encode_partition(
+    encoder_b: bytes, partition: Any, sub_chunks: int
+) -> tuple[int, tuple[tuple[int, Any], ...]]:
     return _dask_encode_shard(encoder_b, _dask_rows(partition), sub_chunks)
 
 
-def _dask_encode_shard(encoder_b: bytes, shard: Sequence[Any],
-                       sub_chunks: int) -> Tuple[int, Tuple[Tuple[int, Any], ...]]:
+def _dask_encode_shard(
+    encoder_b: bytes, shard: Sequence[Any], sub_chunks: int
+) -> tuple[int, tuple[tuple[int, Any], ...]]:
     encoder = pickle.loads(encoder_b)
     nobs = len(shard)
     chunks = []
@@ -1057,12 +1163,13 @@ def _dask_encode_shard(encoder_b: bytes, shard: Sequence[Any],
     return nobs, tuple(chunks)
 
 
-def _dask_payload_size(payload: Tuple[int, Tuple[Tuple[int, Any], ...]]) -> int:
+def _dask_payload_size(payload: tuple[int, tuple[tuple[int, Any], ...]]) -> int:
     return int(payload[0])
 
 
-def _dask_update_partition(payload: Tuple[int, Tuple[Tuple[int, Any], ...]],
-                           estimator_b: bytes, model_b: bytes) -> bytes:
+def _dask_update_partition(
+    payload: tuple[int, tuple[tuple[int, Any], ...]], estimator_b: bytes, model_b: bytes
+) -> bytes:
     estimator = pickle.loads(estimator_b)
     model = pickle.loads(model_b)
     accumulator = estimator.accumulator_factory().make()
@@ -1073,12 +1180,13 @@ def _dask_update_partition(payload: Tuple[int, Tuple[Tuple[int, Any], ...]],
     return pickle.dumps((count, accumulator.value()), protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def _dask_initialize_partition(payload: Tuple[int, Tuple[Tuple[int, Any], ...]],
-                               estimator_b: bytes, seed: int, p: float) -> bytes:
+def _dask_initialize_partition(
+    payload: tuple[int, tuple[tuple[int, Any], ...]], estimator_b: bytes, seed: int, p: float
+) -> bytes:
     estimator = pickle.loads(estimator_b)
     accumulator = estimator.accumulator_factory().make()
     rng_loc = np.random.RandomState(seed)
-    rng_w = np.random.RandomState(seed=rng_loc.randint(2 ** 31))
+    rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
     count = 0.0
     for sz, enc in payload[1]:
         weights = np.zeros(sz, dtype=np.float64)
@@ -1088,8 +1196,7 @@ def _dask_initialize_partition(payload: Tuple[int, Tuple[Tuple[int, Any], ...]],
     return pickle.dumps((count, accumulator.value()), protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def _dask_log_density_sum(payload: Tuple[int, Tuple[Tuple[int, Any], ...]],
-                          model_b: bytes) -> Tuple[float, float]:
+def _dask_log_density_sum(payload: tuple[int, tuple[tuple[int, Any], ...]], model_b: bytes) -> tuple[float, float]:
     model = pickle.loads(model_b)
     count = 0.0
     total = 0.0
@@ -1099,47 +1206,49 @@ def _dask_log_density_sum(payload: Tuple[int, Tuple[Tuple[int, Any], ...]],
     return count, total
 
 
-def plan(data: Optional[Sequence[Any]] = None,
-         model: Optional[Any] = None,
-         estimator: Optional[Any] = None,
-         encoder: Optional[DataSequenceEncoder] = None,
-         resources: Optional[Resources] = None,
-         engine: Optional[Any] = None,
-         precision: Optional[Any] = None,
-         num_chunks: Optional[int] = None,
-         sub_chunks: int = 1,
-         sample_size: int = 256,
-         safety_factor: float = 1.25) -> Placement:
+def plan(
+    data: Sequence[Any] | None = None,
+    model: Any | None = None,
+    estimator: Any | None = None,
+    encoder: DataSequenceEncoder | None = None,
+    resources: Resources | None = None,
+    engine: Any | None = None,
+    precision: Any | None = None,
+    num_chunks: int | None = None,
+    sub_chunks: int = 1,
+    sample_size: int = 256,
+    safety_factor: float = 1.25,
+) -> Placement:
     """Return an advisory placement for local or distributed orchestration."""
     if resources is None:
         resources = Resources.single_cpu(precision=precision)
     if sub_chunks <= 0:
-        raise ValueError('sub_chunks must be positive.')
+        raise ValueError("sub_chunks must be positive.")
     if safety_factor <= 0.0:
-        raise ValueError('safety_factor must be positive.')
+        raise ValueError("safety_factor must be positive.")
     if data is None and num_chunks is None:
-        raise ValueError('plan requires data or an explicit num_chunks.')
+        raise ValueError("plan requires data or an explicit num_chunks.")
 
     nobs = 0 if data is None else len(data)
     if nobs < 0:
-        raise ValueError('data length must be non-negative.')
+        raise ValueError("data length must be non-negative.")
     if encoder is None:
-        if model is not None and callable(getattr(model, 'dist_to_encoder', None)):
+        if model is not None and callable(getattr(model, "dist_to_encoder", None)):
             encoder = model.dist_to_encoder()
         elif estimator is not None:
             encoder = estimator.accumulator_factory().make().acc_to_encoder()
     if encoder is None and data is not None:
-        raise ValueError('plan requires an encoder, model, or estimator when data are supplied.')
+        raise ValueError("plan requires an encoder, model, or estimator when data are supplied.")
 
     engine = engine_with_precision(engine or NUMPY_ENGINE, precision)
-    dtype_bytes = _dtype_bytes(getattr(engine, 'dtype', None), precision)
+    dtype_bytes = _dtype_bytes(getattr(engine, "dtype", None), precision)
     encoded_row_bytes = _estimate_encoded_row_bytes(data, encoder, sample_size) if data is not None else 0.0
     model_bytes = estimate_model_nbytes(model) if model is not None else 0
     statistic_bytes = estimate_estimator_stat_nbytes(estimator) if estimator is not None else model_bytes
     transient_row_bytes = _transient_row_bytes(model, dtype_bytes)
 
     chunks = _chunk_ranges(nobs, resources, num_chunks)
-    shards: List[PlacementShard] = []
+    shards: list[PlacementShard] = []
     for device, start, stop in chunks:
         size = stop - start
         row_bytes = encoded_row_bytes + transient_row_bytes
@@ -1149,14 +1258,16 @@ def plan(data: Optional[Sequence[Any]] = None,
         shard_count = max(1, int(np.ceil(size / max_rows))) if max_rows is not None and size > max_rows else 1
         for a, b in _split_range(start, stop, shard_count):
             part_size = b - a
-            shards.append(PlacementShard(
-                device=device,
-                start=a,
-                stop=b,
-                sub_chunks=max(1, int(sub_chunks)),
-                encoded_bytes=int(np.ceil(part_size * encoded_row_bytes * safety_factor)),
-                transient_bytes=int(np.ceil(part_size * transient_row_bytes * safety_factor + fixed)),
-            ))
+            shards.append(
+                PlacementShard(
+                    device=device,
+                    start=a,
+                    stop=b,
+                    sub_chunks=max(1, int(sub_chunks)),
+                    encoded_bytes=int(np.ceil(part_size * encoded_row_bytes * safety_factor)),
+                    transient_bytes=int(np.ceil(part_size * transient_row_bytes * safety_factor + fixed)),
+                )
+            )
     return Placement(
         shards=tuple(shards),
         total_rows=nobs,
@@ -1164,27 +1275,30 @@ def plan(data: Optional[Sequence[Any]] = None,
         transient_row_bytes=float(transient_row_bytes),
         model_bytes=int(model_bytes),
         statistic_bytes=int(statistic_bytes),
-        dtype_bytes=int(dtype_bytes))
+        dtype_bytes=int(dtype_bytes),
+    )
 
 
-def model_sharding_plan(model: Any,
-                        resources: Resources,
-                        estimator: Optional[Any] = None,
-                        axis: str = 'components',
-                        min_components_per_shard: int = 1) -> Tuple[ModelShard, ...]:
+def model_sharding_plan(
+    model: Any,
+    resources: Resources,
+    estimator: Any | None = None,
+    axis: str = "components",
+    min_components_per_shard: int = 1,
+) -> tuple[ModelShard, ...]:
     """Return an advisory component-axis sharding plan.
 
     This is the planning half of model parallelism.  It does not create DTensor
     placements or move tensors; it answers which component range each device
     should own when a stacked/generated component kernel is available.
     """
-    if axis != 'components':
+    if axis != "components":
         raise ValueError("only axis='components' is currently supported.")
     if min_components_per_shard <= 0:
-        raise ValueError('min_components_per_shard must be positive.')
-    k = int(getattr(model, 'num_components', 0) or 0)
+        raise ValueError("min_components_per_shard must be positive.")
+    k = int(getattr(model, "num_components", 0) or 0)
     if k <= 0:
-        raise ValueError('model does not expose a positive num_components attribute.')
+        raise ValueError("model does not expose a positive num_components attribute.")
     devices = tuple(resources.devices)
     max_shards = max(1, min(len(devices), int(np.ceil(k / float(min_components_per_shard)))))
     weights = np.asarray([d.throughput for d in devices[:max_shards]], dtype=np.float64)
@@ -1204,19 +1318,22 @@ def model_sharding_plan(model: Any,
 
     total_param_bytes = estimate_model_nbytes(model)
     total_stat_bytes = estimate_estimator_stat_nbytes(estimator) if estimator is not None else total_param_bytes
-    shards: List[ModelShard] = []
+    shards: list[ModelShard] = []
     start = 0
     for device, count in zip(devices[:max_shards], counts):
         stop = min(k, start + int(count))
         if stop <= start:
             continue
         frac = float(stop - start) / float(k)
-        shards.append(ModelShard(
-            device=device,
-            component_start=start,
-            component_stop=stop,
-            parameter_bytes=int(np.ceil(total_param_bytes * frac)),
-            statistic_bytes=int(np.ceil(total_stat_bytes * frac))))
+        shards.append(
+            ModelShard(
+                device=device,
+                component_start=start,
+                component_stop=stop,
+                parameter_bytes=int(np.ceil(total_param_bytes * frac)),
+                statistic_bytes=int(np.ceil(total_stat_bytes * frac)),
+            )
+        )
         start = stop
     if start < k:
         last = shards[-1]
@@ -1225,21 +1342,24 @@ def model_sharding_plan(model: Any,
             component_start=last.component_start,
             component_stop=k,
             parameter_bytes=last.parameter_bytes + int(np.ceil(total_param_bytes * (k - start) / float(k))),
-            statistic_bytes=last.statistic_bytes + int(np.ceil(total_stat_bytes * (k - start) / float(k))))
+            statistic_bytes=last.statistic_bytes + int(np.ceil(total_stat_bytes * (k - start) / float(k))),
+        )
     return tuple(shards)
 
 
-def calibrate_resources(data: Sequence[Any],
-                        model: Any,
-                        resources: Optional[Resources] = None,
-                        estimator: Optional[Any] = None,
-                        encoder: Optional[DataSequenceEncoder] = None,
-                        sample_size: int = 512,
-                        repeats: int = 3,
-                        workload: str = 'score',
-                        precision: Optional[Any] = None,
-                        catalog: Optional[CalibrationCatalog] = None,
-                        catalog_path: Optional[Any] = None) -> Resources:
+def calibrate_resources(
+    data: Sequence[Any],
+    model: Any,
+    resources: Resources | None = None,
+    estimator: Any | None = None,
+    encoder: DataSequenceEncoder | None = None,
+    sample_size: int = 512,
+    repeats: int = 3,
+    workload: str = "score",
+    precision: Any | None = None,
+    catalog: CalibrationCatalog | None = None,
+    catalog_path: Any | None = None,
+) -> Resources:
     """Time model scoring on each resource and return updated throughputs.
 
     Calibration is deliberately advisory and local.  It runs a small scoring
@@ -1251,17 +1371,17 @@ def calibrate_resources(data: Sequence[Any],
     ``catalog_path`` to append a persisted model/workload calibration record.
     """
     if len(data) == 0:
-        raise ValueError('calibrate_resources requires non-empty data.')
+        raise ValueError("calibrate_resources requires non-empty data.")
     workload_name = str(workload).lower()
-    if workload_name == 'accumulate':
-        workload_name = 'estep'
-    if workload_name not in ('score', 'estep', 'em'):
+    if workload_name == "accumulate":
+        workload_name = "estep"
+    if workload_name not in ("score", "estep", "em"):
         raise ValueError("unknown calibration workload %r" % workload)
     resources = Resources.single_cpu(precision=precision) if resources is None else resources
     encoder = model.dist_to_encoder() if encoder is None else encoder
-    if workload_name in ('estep', 'em') and estimator is None and callable(getattr(model, 'estimator', None)):
+    if workload_name in ("estep", "em") and estimator is None and callable(getattr(model, "estimator", None)):
         estimator = model.estimator()
-    if workload_name in ('estep', 'em') and estimator is None:
+    if workload_name in ("estep", "em") and estimator is None:
         raise ValueError("calibrate_resources workload=%r requires an estimator or model.estimator()." % workload)
     m = min(max(1, int(sample_size)), len(data))
     sample = [data[i] for i in range(m)]
@@ -1276,25 +1396,28 @@ def calibrate_resources(data: Sequence[Any],
             for _ in range(max(1, int(repeats))):
                 _synchronize(device)
                 start = time.perf_counter()
-                if workload_name == 'score':
+                if workload_name == "score":
                     scores = kernel.score(enc_loc)
                     engine.to_numpy(scores)
                 else:
                     weights = engine.asarray(np.ones(m, dtype=np.float64))
                     stats = kernel.accumulate(ResidentEncodedPayload(enc, enc_loc), weights)
-                    if workload_name == 'em':
+                    if workload_name == "em":
                         estimator.estimate(float(m), stats)
                 _synchronize(device)
                 elapsed = max(time.perf_counter() - start, 1.0e-12)
                 best = elapsed if best is None else min(best, elapsed)
             throughput = float(m) / float(best)
-            updated.append(DeviceSpec(
-                name=device.name,
-                kind=device.kind,
-                memory_bytes=device.memory_bytes,
-                engine=device.engine,
-                throughput=throughput,
-                precision=device.precision if precision is None else precision_name(precision)))
+            updated.append(
+                DeviceSpec(
+                    name=device.name,
+                    kind=device.kind,
+                    memory_bytes=device.memory_bytes,
+                    engine=device.engine,
+                    throughput=throughput,
+                    precision=device.precision if precision is None else precision_name(precision),
+                )
+            )
         except Exception:
             updated.append(device)
     calibrated = Resources(tuple(updated))
@@ -1313,16 +1436,18 @@ def calibrate_resources(data: Sequence[Any],
     return calibrated
 
 
-def _record_calibration(catalog: Optional[CalibrationCatalog],
-                        catalog_path: Optional[Any],
-                        model: Any,
-                        estimator: Optional[Any],
-                        workload: str,
-                        sample_size: int,
-                        repeats: int,
-                        precision: Optional[Any],
-                        resources: Resources,
-                        row_count: int) -> None:
+def _record_calibration(
+    catalog: CalibrationCatalog | None,
+    catalog_path: Any | None,
+    model: Any,
+    estimator: Any | None,
+    workload: str,
+    sample_size: int,
+    repeats: int,
+    precision: Any | None,
+    resources: Resources,
+    row_count: int,
+) -> None:
     if catalog is None and catalog_path is None:
         return
     target = catalog
@@ -1367,8 +1492,7 @@ def estimate_estimator_stat_nbytes(estimator: Any) -> int:
         return 0
 
 
-def _estimate_encoded_row_bytes(data: Sequence[Any], encoder: DataSequenceEncoder,
-                                sample_size: int) -> float:
+def _estimate_encoded_row_bytes(data: Sequence[Any], encoder: DataSequenceEncoder, sample_size: int) -> float:
     if len(data) == 0:
         return 0.0
     m = min(max(1, int(sample_size)), len(data))
@@ -1377,14 +1501,15 @@ def _estimate_encoded_row_bytes(data: Sequence[Any], encoder: DataSequenceEncode
     return max(1.0, float(encoder.nbytes(payload)) / float(m))
 
 
-def _engine_for_device(device: DeviceSpec, precision: Optional[Any]) -> Any:
+def _engine_for_device(device: DeviceSpec, precision: Any | None) -> Any:
     dtype = precision if precision is not None else device.precision
-    if device.engine == 'torch':
+    if device.engine == "torch":
         from pysp.engines import TorchEngine
-        if device.kind == 'cpu':
-            device_name = 'cpu'
-        elif device.kind == 'mps':
-            device_name = 'mps'
+
+        if device.kind == "cpu":
+            device_name = "cpu"
+        elif device.kind == "mps":
+            device_name = "mps"
         else:
             device_name = device.name
         return TorchEngine(device=device_name, dtype=dtype)
@@ -1392,18 +1517,17 @@ def _engine_for_device(device: DeviceSpec, precision: Optional[Any]) -> Any:
 
 
 def _synchronize(device: DeviceSpec) -> None:
-    if device.engine != 'torch':
+    if device.engine != "torch":
         return
     try:
         import torch
     except ImportError:
         return
-    if device.kind == 'cuda' and torch.cuda.is_available():
+    if device.kind == "cuda" and torch.cuda.is_available():
         torch.cuda.synchronize(device.name)
 
 
-def _chunk_ranges(nobs: int, resources: Resources,
-                  num_chunks: Optional[int]) -> List[Tuple[DeviceSpec, int, int]]:
+def _chunk_ranges(nobs: int, resources: Resources, num_chunks: int | None) -> list[tuple[DeviceSpec, int, int]]:
     if nobs == 0:
         return [(resources.fastest(), 0, 0)]
     weights = np.asarray([device.throughput for device in resources.devices], dtype=np.float64)
@@ -1430,8 +1554,7 @@ def _chunk_ranges(nobs: int, resources: Resources,
     return [(device, start, stop) for device, (start, stop) in zip(devices, ranges)]
 
 
-def _weighted_device_cycle(devices: Tuple[DeviceSpec, ...], weights: np.ndarray,
-                           n: int) -> List[DeviceSpec]:
+def _weighted_device_cycle(devices: tuple[DeviceSpec, ...], weights: np.ndarray, n: int) -> list[DeviceSpec]:
     counts = np.floor(weights * n).astype(int)
     while counts.sum() < n:
         counts[int(np.argmax(weights - counts / float(max(1, n))))] += 1
@@ -1441,7 +1564,7 @@ def _weighted_device_cycle(devices: Tuple[DeviceSpec, ...], weights: np.ndarray,
     return rv[:n]
 
 
-def _split_range(start: int, stop: int, parts: int) -> List[Tuple[int, int]]:
+def _split_range(start: int, stop: int, parts: int) -> list[tuple[int, int]]:
     parts = max(1, int(parts))
     n = max(0, stop - start)
     rv = []
@@ -1453,9 +1576,7 @@ def _split_range(start: int, stop: int, parts: int) -> List[Tuple[int, int]]:
     return rv
 
 
-def _max_rows_for_device(device: DeviceSpec, row_bytes: float,
-                         fixed_bytes: int,
-                         safety_factor: float) -> Optional[int]:
+def _max_rows_for_device(device: DeviceSpec, row_bytes: float, fixed_bytes: int, safety_factor: float) -> int | None:
     if device.memory_bytes is None or row_bytes <= 0.0:
         return None
     available = int(device.memory_bytes) - int(fixed_bytes)
@@ -1465,19 +1586,19 @@ def _max_rows_for_device(device: DeviceSpec, row_bytes: float,
 
 
 def _transient_row_bytes(model: Any, dtype_bytes: int) -> float:
-    k = int(getattr(model, 'num_components', 1) or 1)
-    states = int(getattr(model, 'num_states', k) or k)
+    k = int(getattr(model, "num_components", 1) or 1)
+    states = int(getattr(model, "num_states", k) or k)
     return float(max(k, states, 1) * max(1, dtype_bytes) * 3)
 
 
-def _dtype_bytes(dtype: Any, precision: Optional[Any]) -> int:
+def _dtype_bytes(dtype: Any, precision: Any | None) -> int:
     if precision is not None:
         name = precision_name(precision)
-        if name in ('float16', 'bfloat16'):
+        if name in ("float16", "bfloat16"):
             return 2
-        if name == 'float32':
+        if name == "float32":
             return 4
-        if name == 'float64':
+        if name == "float64":
             return 8
     if dtype is None:
         return 8
@@ -1485,9 +1606,9 @@ def _dtype_bytes(dtype: Any, precision: Optional[Any]) -> int:
         return int(np.dtype(dtype).itemsize)
     except TypeError:
         text = str(dtype)
-        if '16' in text:
+        if "16" in text:
             return 2
-        if '32' in text:
+        if "32" in text:
             return 4
         return 8
 
@@ -1504,24 +1625,25 @@ def _object_nbytes(x: Any, seen: set, depth: int, max_depth: int) -> int:
     if isinstance(x, (bytes, bytearray)):
         return len(x)
     if isinstance(x, str):
-        return len(x.encode('utf-8'))
+        return len(x.encode("utf-8"))
     if isinstance(x, (bool, np.bool_)):
         return 1
     if isinstance(x, (int, float, complex, np.number)):
         return sys.getsizeof(x)
-    nbytes = getattr(x, 'nbytes', None)
+    nbytes = getattr(x, "nbytes", None)
     if isinstance(nbytes, (int, np.integer)):
         return int(nbytes)
     if isinstance(x, dict):
-        return sum(_object_nbytes(k, seen, depth + 1, max_depth)
-                   + _object_nbytes(v, seen, depth + 1, max_depth)
-                   for k, v in x.items())
+        return sum(
+            _object_nbytes(k, seen, depth + 1, max_depth) + _object_nbytes(v, seen, depth + 1, max_depth)
+            for k, v in x.items()
+        )
     if isinstance(x, (list, tuple)):
         return sum(_object_nbytes(v, seen, depth + 1, max_depth) for v in x)
-    if hasattr(x, '__dict__'):
+    if hasattr(x, "__dict__"):
         total = 0
         for key, value in vars(x).items():
-            if key.startswith('_') or callable(value):
+            if key.startswith("_") or callable(value):
                 continue
             total += _object_nbytes(value, seen, depth + 1, max_depth)
         return total
@@ -1531,12 +1653,13 @@ def _object_nbytes(x: Any, seen: set, depth: int, max_depth: int) -> int:
         return 0
 
 
-def _kernel_or_none(model: Any, engine: Any, estimator: Optional[Any] = None) -> Any:
+def _kernel_or_none(model: Any, engine: Any, estimator: Any | None = None) -> Any:
     # Only a genuinely kernel-less model falls back to the legacy seq path;
     # a real failure inside a kernel factory must surface, not silently
     # degrade to the slow path.
     from pysp.stats.backend import BackendScoringError
-    if not hasattr(model, 'kernel'):
+
+    if not hasattr(model, "kernel"):
         return None
     try:
         return model.kernel(engine=engine, estimator=estimator)
@@ -1545,6 +1668,6 @@ def _kernel_or_none(model: Any, engine: Any, estimator: Optional[Any] = None) ->
 
 
 def _global_key_merge(accumulator: Any) -> None:
-    stats_dict: Dict[str, Any] = {}
+    stats_dict: dict[str, Any] = {}
     accumulator.key_merge(stats_dict)
     accumulator.key_replace(stats_dict)

@@ -13,18 +13,16 @@ distribution, giving log-density
 A Beta prior on p is conjugate and enables variational (expected log-density)
 updates.
 """
-from typing import Optional, Any, Dict, Union
-from numpy.random import RandomState
-from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, StatisticAccumulator
+
+from typing import Any, Union
+
+import numpy as np
+from scipy.special import digamma
+
 from pysp.bstats.beta import BetaDistribution
 from pysp.bstats.composite import CompositeDistribution
-from pysp.bstats.nulldist import NullDistribution, null_dist
-from pysp.utils.special import stirling2
-import numpy as np
-from scipy.special import gammaln, digamma, exp1
-from scipy.optimize import minimize_scalar
-import scipy.integrate
-
+from pysp.bstats.nulldist import NullDistribution
+from pysp.bstats.pdist import ParameterEstimator, ProbabilityDistribution, StatisticAccumulator
 
 default_prior = BetaDistribution(1.0001, 1.0001)
 
@@ -33,7 +31,15 @@ class OptionalDistribution(ProbabilityDistribution):
     """Distribution over observations that are missing with probability p and
     otherwise drawn from a wrapped distribution."""
 
-    def __init__(self, dist: ProbabilityDistribution, p: float = 0.5, missing_value: Any = None, name: Optional[str] = None, prior: ProbabilityDistribution = default_prior, keys: Optional[str] = None):
+    def __init__(
+        self,
+        dist: ProbabilityDistribution,
+        p: float = 0.5,
+        missing_value: Any = None,
+        name: str | None = None,
+        prior: ProbabilityDistribution = default_prior,
+        keys: str | None = None,
+    ):
         """OptionalDistribution object for data with missing values.
 
         Args:
@@ -50,7 +56,7 @@ class OptionalDistribution(ProbabilityDistribution):
         self.name = name
         self.keys = keys
         self.dist = dist
-        self.p    = p
+        self.p = p
         self.log_p0 = np.log(p)
         self.log_p1 = np.log1p(-p)
         self.missing_value = missing_value
@@ -59,7 +65,14 @@ class OptionalDistribution(ProbabilityDistribution):
 
     def __str__(self) -> str:
         """Returns string representation of OptionalDistribution object."""
-        return 'OptionalDistribution(%s, p=%s, missing_value=%s, name=%s, prior=%s, keys=%s)' % (str(self.dist), repr(self.p), repr(self.missing_value), repr(self.name), str(self.prior), repr(self.keys))
+        return "OptionalDistribution(%s, p=%s, missing_value=%s, name=%s, prior=%s, keys=%s)" % (
+            str(self.dist),
+            repr(self.p),
+            repr(self.missing_value),
+            repr(self.name),
+            str(self.prior),
+            repr(self.keys),
+        )
 
     def get_parameters(self):
         """Returns tuple (p, parameters of the wrapped distribution)."""
@@ -74,7 +87,7 @@ class OptionalDistribution(ProbabilityDistribution):
         self.p = params[0]
         self.log_p0 = np.log(params[0])
         self.log_p1 = np.log1p(-params[0])
-        #self.missing_value = params[0][1]
+        # self.missing_value = params[0][1]
         self.dist.set_parameters(params[1])
 
     def get_prior(self) -> ProbabilityDistribution:
@@ -97,7 +110,7 @@ class OptionalDistribution(ProbabilityDistribution):
 
         if isinstance(prior, BetaDistribution):
             a, b = self.prior.get_parameters()
-            self.conj_prior_params = (digamma(a), digamma(b), digamma(a+b))
+            self.conj_prior_params = (digamma(a), digamma(b), digamma(a + b))
             self.has_conj_prior = True
             self.has_prior = True
         elif isinstance(prior, NullDistribution) or prior is None:
@@ -117,11 +130,11 @@ class OptionalDistribution(ProbabilityDistribution):
         legacy get_type() name, and to Any when the wrapped distribution
         declares neither.
         """
-        get_type_fn = getattr(self.dist, 'get_data_type', None)
+        get_type_fn = getattr(self.dist, "get_data_type", None)
         if get_type_fn is None:
-            get_type_fn = getattr(self.dist, 'get_type', None)
+            get_type_fn = getattr(self.dist, "get_type", None)
         base_type = Any if get_type_fn is None else get_type_fn()
-        return Union[type(self.missing_value), base_type]
+        return Union[type(self.missing_value), base_type]  # noqa: UP007  -- runtime typing.Union value, not an annotation
 
     def density(self, x) -> float:
         """Density at observation x.
@@ -252,10 +265,10 @@ class OptionalDistribution(ProbabilityDistribution):
         nz_val = []
         cnt = 0
 
-        for i,xx in enumerate(x):
+        for i, xx in enumerate(x):
             cnt += 1
 
-            if  (xx is self.missing_value) or (self.mv_is_nan and np.isscalar(xx) and np.isnan(xx)):
+            if (xx is self.missing_value) or (self.mv_is_nan and np.isscalar(xx) and np.isnan(xx)):
                 iz_idx.append(i)
             else:
                 nz_idx.append(i)
@@ -267,7 +280,7 @@ class OptionalDistribution(ProbabilityDistribution):
 
         return cnt, nz_idx, iz_idx, nz_val
 
-    def sampler(self, seed: Optional[int] = None):
+    def sampler(self, seed: int | None = None):
         """Create an OptionalSampler from this distribution.
 
         Args:
@@ -288,10 +301,12 @@ class OptionalDistribution(ProbabilityDistribution):
         Returns:
             OptionalEstimator object.
         """
-        return OptionalEstimator(self.dist.estimator(), missing_value=self.missing_value, name=self.name, keys=self.keys, prior=self.prior)
+        return OptionalEstimator(
+            self.dist.estimator(), missing_value=self.missing_value, name=self.name, keys=self.keys, prior=self.prior
+        )
 
 
-class OptionalSampler(object):
+class OptionalSampler:
     """Sampler that emits the missing value with probability p and otherwise
     samples from the wrapped distribution."""
 
@@ -302,7 +317,7 @@ class OptionalSampler(object):
             dist (OptionalDistribution): Distribution to sample from.
             seed (Optional[int]): Used to set seed in random sampler.
         """
-        rng  = np.random.RandomState(seed)
+        rng = np.random.RandomState(seed)
         self.dist = dist
         self.obs_sampler = dist.dist.sampler(rng.randint(0, 2**31))
         self.mis_sampler = np.random.RandomState(rng.randint(0, 2**31))
@@ -341,11 +356,11 @@ class OptionalEstimatorAccumulator(StatisticAccumulator):
             keys (Optional[str]): Key used to merge sufficient statistics
                 across accumulators.
         """
-        self.acc   = accumulator
-        self.name  = name
-        self.key   = keys
-        self.psum  = 0.0
-        self.nsum  = 0.0
+        self.acc = accumulator
+        self.name = name
+        self.key = keys
+        self.psum = 0.0
+        self.nsum = 0.0
         self.missing_value = missing_value
         self.mv_is_nan = False if not np.isscalar(missing_value) else np.isnan(missing_value)
 
@@ -424,20 +439,20 @@ class OptionalEstimatorAccumulator(StatisticAccumulator):
         self.acc.from_value(x[2])
         return self
 
-    def key_merge(self, stats_dict: Dict[str, Any]):
+    def key_merge(self, stats_dict: dict[str, Any]):
         if self.key is not None:
             if self.key in stats_dict:
                 stats_dict[self.key].combine(self.value())
             else:
                 stats_dict[self.key] = self
 
-    def key_replace(self, stats_dict: Dict[str, Any]):
+    def key_replace(self, stats_dict: dict[str, Any]):
         if self.key is not None:
             if self.key in stats_dict:
                 self.from_value(stats_dict[self.key].value())
 
 
-class OptionalEstimatorAccumulatorFactory(object):
+class OptionalEstimatorAccumulatorFactory:
     """Factory for creating OptionalEstimatorAccumulator objects."""
 
     def __init__(self, acc_factory, missing_value, name, keys):
@@ -466,7 +481,15 @@ class OptionalEstimator(ParameterEstimator):
     """Estimator for an OptionalDistribution: missing probability p (Beta
     posterior when the prior is conjugate) plus the wrapped estimator."""
 
-    def __init__(self, estimator: ParameterEstimator, missing_value: Any = None, fixed_prob: Optional[float] = None, name: Optional[str] = None, keys: Optional[str] = None, prior: ProbabilityDistribution = default_prior):
+    def __init__(
+        self,
+        estimator: ParameterEstimator,
+        missing_value: Any = None,
+        fixed_prob: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+        prior: ProbabilityDistribution = default_prior,
+    ):
         """OptionalEstimator object.
 
         Args:
@@ -482,8 +505,8 @@ class OptionalEstimator(ParameterEstimator):
                 (Beta is conjugate).
         """
         self.estimator = estimator
-        self.name  = name
-        self.keys  = keys
+        self.name = name
+        self.keys = keys
         self.prior = prior
         self.fixed_prob = fixed_prob
         self.missing_value = missing_value
@@ -538,21 +561,23 @@ class OptionalEstimator(ParameterEstimator):
         dist = self.estimator.estimate(dist_suff_stat)
 
         if self.has_conj_prior:
-
             a, b = self.prior.get_parameters()
             new_a = a + psum
             new_b = b + nsum
-            new_p = (psum + a - 1.0)/(psum + nsum + a + b - 2.0)
+            new_p = (psum + a - 1.0) / (psum + nsum + a + b - 2.0)
             new_prior = BetaDistribution(new_a, new_b)
 
         else:
-            new_p = psum/(psum + nsum)
+            new_p = psum / (psum + nsum)
             new_prior = self.prior
 
         if self.fixed_prob is not None:
             new_p = self.fixed_prob
 
-        return OptionalDistribution(dist, p=new_p, missing_value=self.missing_value, name=self.name, prior=new_prior, keys=self.keys)
+        return OptionalDistribution(
+            dist, p=new_p, missing_value=self.missing_value, name=self.name, prior=new_prior, keys=self.keys
+        )
+
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 OptionalAccumulator = OptionalEstimatorAccumulator
