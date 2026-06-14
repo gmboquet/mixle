@@ -359,6 +359,27 @@ def _em_step_fn(engine: Optional[Any], strategy: Optional[Any] = None):
     return lambda enc, estimator, model: _engine_seq_estimate(enc, estimator, model, engine)
 
 
+def _local_fused_step(enc_data, estimator, model):
+    """Local E/M step that also returns the data log-likelihood of ``model``.
+
+    Runs the standard local accumulation pass and, when the top-level accumulator records the
+    data log-likelihood during its E-step (the posterior normalizer, e.g. for mixtures), returns
+    it so the caller can skip a separate convergence-LL pass. Returns
+    ``(next_model, ll_of_model_or_None)``; ``None`` means the model can't report it and the caller
+    should score ``model`` itself. Local (non-RDD, non-parallel-handle) encoded data only.
+    """
+    accumulator = estimator.accumulator_factory().make()
+    accumulator._track_ll = True  # ask the accumulator to record the E-step data log-likelihood
+    for sz, x in enc_data:
+        accumulator.seq_update(x, np.ones(sz), model)
+    stats_dict = dict()
+    accumulator.key_merge(stats_dict)
+    accumulator.key_replace(stats_dict)
+    nxt = estimator.estimate(None, accumulator.value())
+    # Present only when the top-level accumulator recorded it (e.g. mixtures); else None -> fallback.
+    return nxt, getattr(accumulator, '_seq_ll', None)
+
+
 def _write_em_iter(out: Optional[IO], i: int, ll: float, dll: float, vll: float, has_vdata: bool) -> None:
     """Write one EM progress line in the historical format."""
     if out is None:
@@ -376,7 +397,8 @@ def _em_loop(enc_data: Any, estimator: ParameterEstimator,
              step_fn: Any, ll_fn: Any, max_its: int, delta: Optional[float],
              enc_vdata: Optional[Any] = None, out: Optional[IO] = sys.stdout,
              print_iter: int = 1, monotone: bool = True,
-             track_best: bool = True) -> Tuple[SequenceEncodableProbabilityDistribution, float]:
+             track_best: bool = True,
+             fused_step_fn: Optional[Any] = None) -> Tuple[SequenceEncodableProbabilityDistribution, float]:
     """Canonical EM iteration shared by the public estimation entry points.
 
     Args:
@@ -389,10 +411,20 @@ def _em_loop(enc_data: Any, estimator: ParameterEstimator,
             training log-likelihood (the historical ``optimize`` guard).
         track_best: when True return the best-by-validation model seen; otherwise
             the final accepted model.
+        fused_step_fn: optional ``(enc, estimator, model) -> (next_model, ll_of_model)``
+            update that returns the data log-likelihood of ``model`` as a byproduct of
+            the E-step (the posterior normalizer), avoiding a separate convergence-LL
+            pass. ``ll_of_model`` may be ``None`` when the model can't report it, in
+            which case this falls back to scoring ``model`` directly. See
+            :func:`_fused_em_loop`.
 
     Returns:
         ``(chosen_model, best_validation_score)``.
     """
+    if fused_step_fn is not None:
+        return _fused_em_loop(enc_data, estimator, model, fused_step_fn, ll_fn, max_its,
+                              delta, enc_vdata, out, print_iter, track_best)
+
     _, old_ll = ll_fn(enc_data, model)
     has_v = enc_vdata is not None
     best_vll = ll_fn(enc_vdata, model)[1] if has_v else old_ll
@@ -421,6 +453,56 @@ def _em_loop(enc_data: Any, estimator: ParameterEstimator,
     return (best_model if track_best else model), best_vll
 
 
+def _fused_em_loop(enc_data, estimator, model, fused_step_fn, ll_fn, max_its, delta,
+                   enc_vdata, out, print_iter, track_best):
+    """EM loop that reuses the E-step's likelihood normalizer instead of a separate score pass.
+
+    Each ``fused_step_fn`` call returns ``(next_model, ll_of_model)`` where ``ll_of_model`` is the
+    data log-likelihood of the *input* model, computed for free as the posterior normalizer during
+    the E-step. The convergence test therefore lags the standard loop by one iteration (it compares
+    the likelihood of successive accepted models), which converges to the same fixed point; the
+    returned model is still the best-likelihood model seen (so quality is preserved even though
+    intermediate steps are accepted unconditionally). When ``ll_of_model`` is ``None`` the model
+    cannot report it and we fall back to scoring ``model`` directly for that iteration.
+    """
+    has_v = enc_vdata is not None
+    best_model = model
+    best_score = ll_fn(enc_vdata, model)[1] if has_v else None
+    prev_ll = None
+    nxt = None
+    converged = False
+
+    for i in range(int(max_its)):
+        nxt, ll_model = fused_step_fn(enc_data, estimator, model)
+        if ll_model is None:
+            _, ll_model = ll_fn(enc_data, model)
+        score = ll_fn(enc_vdata, model)[1] if has_v else ll_model
+
+        if best_score is None or score >= best_score:
+            best_score = score
+            best_model = model
+
+        dll = (ll_model - prev_ll) if prev_ll is not None else float('inf')
+        converged = (delta is not None) and (prev_ll is not None) and (dll < delta)
+        if converged or ((i + 1) % print_iter == 0):
+            _write_em_iter(out, i + 1, ll_model, dll, score, has_v)
+        if converged:
+            break
+
+        prev_ll = ll_model
+        model = nxt
+
+    if not converged and nxt is not None:
+        # Loop ran to max_its: fold the final step into best-model tracking (one extra score pass).
+        score = ll_fn(enc_vdata, nxt)[1] if has_v else ll_fn(enc_data, nxt)[1]
+        if best_score is None or score >= best_score:
+            best_score = score
+            best_model = nxt
+
+    chosen = best_model if track_best else (nxt if nxt is not None else model)
+    return chosen, (best_score if best_score is not None else 0.0)
+
+
 def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its: int = 10,
              delta: Optional[float] = 1.0e-9,
              init_estimator: Optional[ParameterEstimator] = None, init_p: float = 0.1,
@@ -443,7 +525,8 @@ def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its
              comm: Optional[Any] = None,
              root: int = 0,
              root_only: bool = False,
-             strategy: Optional[Any] = None) -> SequenceEncodableProbabilityDistribution:
+             strategy: Optional[Any] = None,
+             reuse_estep_ll: bool = False) -> SequenceEncodableProbabilityDistribution:
     """Estimation of 'estimator' via EM algorithm for max_its iterations or until
         new_loglikelihood - old_loglikelihood < delta.
 
@@ -492,6 +575,13 @@ def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its
         strategy (Optional[Any]): Optional EM strategy from ``pysp.utils.em`` (e.g. ``AnnealedEM``,
             ``HardEM``, ``MonteCarloEM``) or any callable ``(enc, estimator, model) -> model`` to use
             in place of the standard exact E/M step. ``None`` uses the standard step.
+        reuse_estep_ll (bool): When True, reuse the data log-likelihood computed during the E-step
+            (the posterior normalizer) for convergence instead of running a separate scoring pass
+            each iteration -- up to ~2x faster per iteration when the model reports it (currently
+            top-level mixtures on the default local engine). Convergence then lags by one iteration
+            (same fixed point) and the best-likelihood model is returned. Falls back to the standard
+            loop for engines/strategies/distributed backends or models that can't report the LL.
+            Default False (exact historical behavior).
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
@@ -546,12 +636,18 @@ def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its
             vdata_for_encoding = _data_records_for_encoding(vdata, fields, est, mm)
             enc_vdata = seq_encode(vdata_for_encoding, data_encoder, num_chunks=num_chunks, chunk_size=chunk_size)
 
+        # Fused EM (reuse the E-step likelihood normalizer instead of a separate score pass) is only
+        # valid on the plain local encoded path with the default engine and exact E-step.
+        fused_step_fn = None
+        if reuse_estep_ll and engine is None and strategy is None and isinstance(enc_data, list):
+            fused_step_fn = _local_fused_step
+
         best_model, _ = _em_loop(
             enc_data, estimator, mm,
             step_fn=_em_step_fn(engine, strategy),
             ll_fn=_ll_sum_fn(engine),
             max_its=max_its, delta=delta, enc_vdata=enc_vdata,
-            out=out, print_iter=print_iter)
+            out=out, print_iter=print_iter, fused_step_fn=fused_step_fn)
 
         return best_model
     finally:
