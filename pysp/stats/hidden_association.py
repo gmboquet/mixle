@@ -399,6 +399,12 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         self.size_accumulator = size_acc if size_acc is not None else NullAccumulator()
         self.init_key, self.trans_key = keys if keys is not None else (None, None)
         self.name = name
+        # Data log-likelihood accumulated as a byproduct of the E-step (the per-observation log_density),
+        # only when _track_ll is enabled. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
+        # pays nothing.
+        self._track_ll = False
+        self._seq_ll = 0.0
 
     def update(self, x: Tuple[List[Tuple[T, float]], List[Tuple[T, float]]], weight: float,
                estimate: HiddenAssociationDistribution) -> None:
@@ -413,6 +419,11 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         """
         nn = 0
         pv = np.zeros(len(x[0]))
+        # Data log-density of this observation (== HiddenAssociationDistribution.log_density(x)),
+        # reusing the per-emitted logsumexp normalizer ``ll`` the E-step already computes. Only
+        # materialized when the fused-EM fast path requests it (_track_ll).
+        track = self._track_ll
+        obs_ll = 0.0
 
         for x1, c1 in x[1]:
             cc = 0
@@ -432,11 +443,19 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
                 else:
                     ll = math.log1p(math.exp(ll - tt)) + tt
 
+            if track:
+                obs_ll += (ll - math.log(cc)) * c1
+
             pv -= ll
             np.exp(pv, out=pv)
 
             for i, (x0, c0) in enumerate(x[0]):
                 self.cond_accumulator.update((x0, x1), pv[i] * c1 * weight, estimate.cond_dist)
+
+        if track:
+            obs_ll += estimate.given_dist.log_density(x[0])
+            obs_ll += estimate.len_dist.log_density(nn)
+            self._seq_ll += weight * obs_ll
 
         if self.given_accumulator is not None:
             given_dist = None if estimate is None else estimate.given_dist

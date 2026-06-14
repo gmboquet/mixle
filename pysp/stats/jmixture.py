@@ -462,6 +462,12 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.comp_counts2 = vec.zeros(self.num_components2)
         self.joint_counts = vec.zeros((self.num_components1, self.num_components2))
         self.name = name
+        # Data log-likelihood accumulated as a byproduct of the E-step (the posterior normalizer),
+        # only when _track_ll is enabled. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
+        # pays nothing.
+        self._track_ll = False
+        self._seq_ll = 0.0
 
         self._rng_init = False
         self._idx1_rng: Optional[RandomState] = None
@@ -613,6 +619,14 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         gamma_2 = np.sum(ll_joint, axis=1, keepdims=True)
         sf = np.sum(gamma_2, axis=2, keepdims=True)
         ww = np.reshape(weights, [-1, 1, 1])
+
+        # Capture per-row data log-likelihood (== seq_log_density) by reusing the joint posterior
+        # normalizer sf already computed here: row_ll = log(sf) + rowmax1 + rowmax2. Free except an
+        # O(n) log/dot, and only when the fused-EM fast path requests it (_track_ll).
+        if self._track_ll:
+            with np.errstate(divide='ignore'):
+                row_ll = np.log(sf[:, 0, 0]) + ll_max1[:, 0, 0] + ll_max2[:, 0, 0]
+            self._seq_ll += float(np.dot(weights, row_ll))
 
         gamma_1 = np.sum(ll_joint, axis=2, keepdims=True)
         gamma_1 *= ww / sf

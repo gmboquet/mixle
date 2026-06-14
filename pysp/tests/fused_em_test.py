@@ -10,9 +10,9 @@ import unittest
 import numpy as np
 
 from pysp.stats import (MixtureDistribution, GaussianDistribution, MixtureEstimator, GaussianEstimator,
-                        HiddenMarkovModelDistribution, HiddenMarkovEstimator, CategoricalDistribution,
-                        PoissonDistribution, PoissonEstimator, CategoricalEstimator,
-                        HierarchicalMixtureDistribution, HierarchicalMixtureEstimator,
+                        HiddenMarkovModelDistribution, HiddenMarkovEstimator,
+                        PoissonDistribution, PoissonEstimator,
+                        SequenceDistribution, SequenceEstimator,
                         seq_encode, seq_log_density_sum)
 from pysp.utils.estimation import optimize
 
@@ -85,15 +85,27 @@ class FusedEMTestCase(unittest.TestCase):
                 self.assertAlmostEqual(ls, lf, places=6)
 
     def test_fallback_for_unsupported_top_level(self):
-        # A hierarchical mixture iterates under EM but its accumulator doesn't report the E-step LL,
-        # so reuse_estep_ll falls back to the standard loop and produces the same result.
-        topics = [CategoricalDistribution({'a': 0.6, 'b': 0.2, 'c': 0.2}),
-                  CategoricalDistribution({'a': 0.2, 'b': 0.6, 'c': 0.2})]
-        truth = HierarchicalMixtureDistribution(topics, [0.5, 0.5], [[0.8, 0.2], [0.2, 0.8]],
-                                                len_dist=CategoricalDistribution({6: 1.0}))
+        # A SequenceDistribution iterates under EM (its inner mixture has latent components) but the
+        # top-level SequenceAccumulator never records the E-step LL, so reuse_estep_ll hits the
+        # `_seq_ll is None` fallback in _local_fused_step and scores the model itself. The fused and
+        # standard loops must still produce the same result.
+        # (Note: hmixture, HMMs, and the other latent families now DO report _seq_ll and take the
+        # fused fast path -- they're covered by the tests above; this one exercises the fallback.)
+        inner = MixtureDistribution(
+            [GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)], [0.5, 0.5])
+        truth = SequenceDistribution(inner, len_dist=PoissonDistribution(5.0))
         data = truth.sampler(1).sample(400)
-        est = HierarchicalMixtureEstimator([CategoricalEstimator() for _ in range(2)], num_mixtures=2,
-                                           len_estimator=CategoricalEstimator())
+        est = SequenceEstimator(MixtureEstimator([GaussianEstimator()] * 2),
+                                len_estimator=PoissonEstimator())
+
+        # Confirm the top-level accumulator genuinely does NOT report _seq_ll, so the fallback runs.
+        enc = seq_encode(data, model=truth)
+        acc = est.accumulator_factory().make()
+        acc._track_ll = True
+        for sz, x in enc:
+            acc.seq_update(x, np.ones(sz), truth)
+        self.assertIsNone(getattr(acc, '_seq_ll', None))
+
         std = optimize(data, est, max_its=15, delta=None, rng=np.random.RandomState(4), out=io.StringIO())
         fb = optimize(data, est, max_its=15, delta=None, rng=np.random.RandomState(4),
                       out=io.StringIO(), reuse_estep_ll=True)

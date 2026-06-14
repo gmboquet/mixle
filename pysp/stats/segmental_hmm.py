@@ -285,6 +285,13 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
         self.init_key, self.trans_key, self.state_key = keys if keys is not None else (None, None, None)
         self.name = name
+
+        # When _track_ll is enabled, seq_update accumulates the per-sequence data
+        # log-likelihood into _seq_ll. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); default path is unchanged and zero-cost.
+        self._track_ll = False
+        self._seq_ll = 0.0
+
         self._init_rng = False
         self._state_rng: Optional[RandomState] = None
         self._len_rng: Optional[RandomState] = None
@@ -340,20 +347,33 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         for k, dist in enumerate(estimate.emissions):
             log_emit[:, k] = dist.seq_log_density(enc_by_state[k])
 
+        # When the fused-EM fast path requests it, accumulate the per-sequence data
+        # log-likelihood from the existing forward pass (ll returned by _forward_backward,
+        # which equals seq_log_density's _forward_log term exactly). The standard path skips it.
+        track_ll = self._track_ll
+        ll_ret = np.zeros(len(sz), dtype=np.float64) if track_ll else None
+
         offsets = np.concatenate([[0], np.cumsum(sz)]).astype(int)
         gamma_all = np.zeros((total, self.num_states), dtype=np.float64)
         for i, n in enumerate(sz):
             if n == 0:
                 continue
             start, stop = offsets[i], offsets[i + 1]
-            _, gamma, xi_sum = _forward_backward(
+            ll_i, gamma, xi_sum = _forward_backward(
                 estimate.log_w, estimate.log_transitions, log_emit[start:stop])
+            if track_ll:
+                ll_ret[i] = ll_i
             w = weights[i]
             gamma_w = gamma * w
             gamma_all[start:stop, :] = gamma_w
             self.init_counts += gamma_w[0]
             self.state_counts += gamma_w.sum(axis=0)
             self.trans_counts += xi_sum * w
+
+        if track_ll:
+            if not estimate.null_len_dist and len_enc is not None:
+                ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
+            self._seq_ll += float(np.dot(weights, ll_ret))
 
         for k in range(self.num_states):
             self.accumulators[k].seq_update(enc_by_state[k], gamma_all[:, k], estimate.emissions[k])

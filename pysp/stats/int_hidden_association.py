@@ -476,6 +476,14 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         self.use_numba = use_numba
         self.weight_key, self.state_key = keys if keys is not None else (None, None)
 
+        # Data log-likelihood accumulated as a byproduct of the E-step (the per-observation log_density),
+        # only when _track_ll is enabled. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path pays
+        # nothing. Only the pure (non-numba) blocked branch reports it; the numba branch sets it to
+        # None to force the caller's separate-scoring fallback.
+        self._track_ll = False
+        self._seq_ll = 0.0
+
         self._init_rng = False
         self._rng_prev = None
         self._rng_size = None
@@ -623,6 +631,8 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             xx = x[0]
             a = estimate.alpha / estimate.num_vals2
             b = 1 - estimate.alpha
+            track = self._track_ll
+            obs_ll = np.zeros(len(xx[0]), dtype=np.float64) if track else None
 
             for i, (entry, weight) in enumerate(zip(xx[0], weights)):
                 vx, cx, vy, cy = entry
@@ -635,6 +645,12 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
                 ss = np.sum(np.sum(z_mat, axis=0, keepdims=True), axis=1, keepdims=True)
                 denom = ss * b + a
+                if track:
+                    # Per-observation log-density (== IntegerHiddenAssociation.log_density assoc term),
+                    # reusing ``denom`` (the per-emitted-word mixture mass) before it is consumed by the
+                    # responsibility normalization below.
+                    with np.errstate(divide='ignore'):
+                        obs_ll[i] = float(np.dot(np.log(denom.reshape(-1)), cy))
                 scale = np.zeros_like(denom)
                 np.divide(b, denom, out=scale, where=denom > 0.0)
                 z_mat *= scale
@@ -645,7 +661,18 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
             self.prev_accumulator.seq_update(xx[1], weights, None if estimate is None else estimate.prev_dist)
             self.size_accumulator.seq_update(xx[2], weights, None if estimate is None else estimate.len_dist)
+
+            if track:
+                obs_ll += estimate.prev_dist.seq_log_density(xx[1])
+                obs_ll += estimate.len_dist.seq_log_density(xx[2])
+                self._seq_ll += float(np.dot(np.asarray(weights, dtype=np.float64), obs_ll))
         else:
+
+            if self._track_ll:
+                # The numba kernel does not expose the per-observation normalizer; signal the
+                # fused-EM caller to fall back to a separate scoring pass instead of reporting a
+                # wrong value.
+                self._seq_ll = None
 
             (s0, s1, x0, x1, c0, c1, w0), xv, nn = x[1]
 

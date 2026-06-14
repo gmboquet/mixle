@@ -754,6 +754,12 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 
 		self.use_numba = use_numba
 
+		# When _track_ll is enabled, seq_update accumulates the per-sequence data
+		# log-likelihood into _seq_ll. Used by the fused-EM fast path in
+		# optimize(reuse_estep_ll=True); default path is unchanged and zero-cost.
+		self._track_ll = False
+		self._seq_ll = 0.0
+
 		# protected for seq_initialize consistency.
 		self._init_rng = False
 		self._len_rng = None
@@ -986,10 +992,15 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 			for i in range(num_states):
 				pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
 
-			pr_max = pr_obs.max(axis=1, keepdims=True)
-			pr_obs -= pr_max
+			pr_max0 = pr_obs.max(axis=1, keepdims=True)
+			pr_obs -= pr_max0
 			np.exp(pr_obs, out=pr_obs)
 
+			# When the fused-EM fast path requests it, accumulate the per-sequence data
+			# log-likelihood from the forward normalizers (un-floored row sums + emission max),
+			# matching seq_log_density exactly. The standard path skips this entirely.
+			track_ll = self._track_ll
+			ll_ret = np.zeros(num_seq) if track_ll else None
 
 			# Vectorized alpha pass. The first band only covers sequences that actually have a
 			# step-0 observation, so index the per-sequence init weights to those sequences (empty
@@ -999,6 +1010,9 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 			w0 = w[good[:, 0]] if w.shape[0] == num_seq else w
 			np.multiply(pr_obs[band[0]:band[1], :], w0, out=alphas_prev)
 			pr_sum = alphas_prev.sum(axis=1, keepdims=True)
+			if track_ll:
+				with np.errstate(divide='ignore'):
+					ll_ret[good[:, 0]] += np.log(pr_sum[:, 0]) + pr_max0[band[0]:band[1], 0]
 			pr_sum[pr_sum == 0] = 1.0
 			alphas_prev /= pr_sum
 
@@ -1009,11 +1023,20 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 				np.dot(alphas_prev[has_next_loc, :], A, out=alphas_next)
 				alphas_next *= pr_obs[band[0]:band[1], :]
 				pr_max = alphas_next.sum(axis=1, keepdims=True)
+				if track_ll:
+					with np.errstate(divide='ignore'):
+						ll_ret[good[:, i]] += np.log(pr_max[:, 0]) + pr_max0[band[0]:band[1], 0]
 
 				pr_max[pr_max == 0] = 1.0
 
 				alphas_next /= pr_max
 				alphas_prev = alphas_next
+
+			if track_ll:
+				ll_ret[np.isnan(ll_ret)] = -np.inf
+				if estimate.len_dist is not None and len_enc is not None:
+					ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
+				self._seq_ll += float(np.dot(weights, ll_ret))
 
 
 			band2 = idx_bands[-1]
@@ -1113,6 +1136,20 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
 			pr_obs -= pr_max
 			np.exp(pr_obs, out=pr_obs)
 
+			# When the fused-EM fast path requests it, compute the per-sequence data log-likelihood
+			# from the already-scored emissions via the (read-only) forward kernel, reusing pr_obs so
+			# no emissions are re-scored. Matches seq_log_density's numba branch (averaged init w_sum).
+			if self._track_ll:
+				ll_ret = np.zeros(seq_cnt, dtype=np.float64)
+				nb_next = np.zeros((seq_cnt, num_states), dtype=np.float64)
+				nb_buff = np.zeros((seq_cnt, num_states), dtype=np.float64)
+				pr_max_1d = np.ascontiguousarray(pr_max[:, 0])
+				w_sum = np.sum(estimate.w, axis=0) / float(len(estimate.w))
+				numba_seq_log_density(num_states, tz, pr_obs, w_sum, tran_mat, pr_max_1d,
+				                      nb_next, nb_buff, ll_ret)
+				if estimate.len_dist is not None and len_enc is not None:
+					ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
+				self._seq_ll += float(np.dot(weights, ll_ret))
 
 
 			#alphas = np.zeros((tot_cnt, num_states), dtype=np.float64)

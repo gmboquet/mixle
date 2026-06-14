@@ -386,6 +386,12 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
         self.num_vals = num_vals
         self.init_key = keys[0]
         self.trans_key = keys[1]
+        # Data log-likelihood accumulated as a byproduct of the E-step (the per-observation
+        # log_density), only when _track_ll is enabled. Used by the fused-EM fast path in
+        # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
+        # pays nothing.
+        self._track_ll = False
+        self._seq_ll = 0.0
 
     def update(self, x, weight, estimate):
         """Update sufficient statistics with a single weighted observation.
@@ -525,6 +531,10 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
 
         umat = csc_matrix((np.zeros(nzv.shape[0]), (nzv[:,0]*nw + nzv[:,1], nzv[:,2])), shape=(nw*nw, nw))
 
+        track = self._track_ll
+        log_init = np.log(estimate.init_prob_vec) if track else None
+        obs_ll = np.zeros(len(x[0]), dtype=np.float64) if track else None
+
         for i,(entry,ww) in enumerate(zip(x[0], weights)):
 
             xx, cx, yy, cy, zz, cz = entry
@@ -540,6 +550,15 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
 
             loc_cprob = temp * cc
             w = loc_cprob.sum(axis=0)
+            if track:
+                # Per-observation log-density (== MarkovTransformDistribution.log_density), reusing
+                # ``w`` (== sum_{u,v} P(z|u,v)*c_u*c_v) and ``cs`` before the responsibility scaling
+                # below. seq_log_density normalizes cc by cs, so inner = (b*w + a*cs)/cs.
+                with np.errstate(divide='ignore'):
+                    ll3 = float(np.dot(np.log((b * w + a * cs) / cs), cz))
+                    ll1 = float(np.dot(log_init[xx], cx))
+                    ll2 = float(np.dot(log_init[yy], cy))
+                obs_ll[i] = ll1 + ll2 + ll3
             loc_cprob *= (cz*b/(b*w + a*cs))*ww
 
             umat[ridx,zz] += loc_cprob
@@ -548,6 +567,11 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
 
         if self.size_accumulator is not None:
             self.size_accumulator.seq_update(x[1], weights, estimate.len_dist)
+
+        if track:
+            if self.size_accumulator is not None:
+                obs_ll += estimate.len_dist.seq_log_density(x[1])
+            self._seq_ll += float(np.dot(np.asarray(weights, dtype=np.float64), obs_ll))
 
         self.trans_count += umat
 
