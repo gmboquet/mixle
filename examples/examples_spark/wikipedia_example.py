@@ -1,103 +1,80 @@
-"""Run distributed topic-model estimation for the Wikipedia example corpus."""
+"""Distributed LDA topic-model estimation on a self-contained synthetic corpus (Spark).
 
-import os
+Mirrors examples_pysp/wikipedia_example.py, but parallelizes the corpus with Spark: the only
+difference from the local version is that the encoded documents live in an RDD. A synthetic corpus
+is sampled from a known LDADistribution (each topic favoring a contiguous block of the vocabulary),
+then recovered. No external corpus required.
+
+Run with a JVM available, e.g.:
+    export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+    export PYSPARK_PYTHON=/path/to/venv/bin/python
+    python examples/examples_spark/wikipedia_example.py
+"""
 import sys
 import time
+
 import numpy as np
 from pyspark import SparkContext, SparkConf
-from pysp.stats import *
+
 import pysp.utils.optsutil as ops
+from pysp.stats import *
 
-data_loc = os.path.join(os.path.dirname(os.path.realpath(__file__)), '../../data')
 
-
-def load_wiki_data():
-
-	sword_loc = os.path.join(data_loc, 'stop_words')
-	sword = set([''])
-	for f in [os.path.join(sword_loc,'mallet.txt')]:
-		fin = open(os.path.join(sword_loc, f), 'rt')
-		sword.update(fin.read().split('\n'))
-		fin.close()
-
-	wiki_loc  = os.path.join(data_loc, 'wiki_example')
-	files     = [os.path.join(wiki_loc,u) for u in filter(lambda v: v.endswith('.txt'), os.listdir(wiki_loc))]
-	data      = ops.flatMap(lambda x: x, [list(map(lambda u: list(filter(lambda v: v not in sword, u.split(' '))), ops.textFile(f))) for f in files])
-	data      = list(filter(lambda u: len(u) > 0, data))
-
-	words = sorted(set([u for v in data for u in v]))
-
-	return data, words
+def make_corpus(num_topics, num_words, num_docs, words_per_doc, seed=2):
+    """Sample integer-encoded documents from a known block-structured LDA model."""
+    rng = np.random.RandomState(1)
+    block = num_words // num_topics
+    topics = []
+    for i in range(num_topics):
+        p = np.full(num_words, 0.2)
+        p[i * block:(i + 1) * block] += 5.0
+        topics.append(IntegerCategoricalDistribution(0, p / p.sum()))
+    truth = LDADistribution(topics, alpha=np.ones(num_topics) * 0.2,
+                            len_dist=CategoricalDistribution({words_per_doc: 1.0}))
+    docs = truth.sampler(seed=seed).sample(num_docs)
+    return [list(ops.count_by_value(doc).items()) for doc in docs], block
 
 
 if __name__ == '__main__':
+    conf = SparkConf().setAppName('wikipedia_example')
+    sc = SparkContext(conf=conf)
+    sc._jvm.org.apache.log4j.LogManager.getRootLogger().setLevel(
+        sc._jvm.org.apache.log4j.Level.ERROR)
 
-	conf = SparkConf().setAppName("wikipedia_example")
-	sc   = SparkContext(conf=conf)
+    num_topics = 6
+    num_words = 60
+    out = sys.stdout
 
-	# Disable INFO/WARN printing
-	log4j = sc._jvm.org.apache.log4j
-	log4j.LogManager.getRootLogger().setLevel(log4j.Level.ERROR)
+    data, block = make_corpus(num_topics, num_words, num_docs=800, words_per_doc=80)
+    out.write('#docs=%d  vocab=%d\n' % (len(data), num_words))
 
-	num_topics = 10
-	print_cnt = 10
-	rng = np.random.RandomState(2)
-	#out = open('/Users/boquet1/PycharmProjects/wiki_debug.log', 'wt')
-	out = sys.stdout
+    # The only difference from the local example: the data is an RDD.
+    data_cnt = sc.parallelize(data, 4)
 
+    topic_est = IntegerCategoricalEstimator(min_val=0, max_val=num_words - 1, pseudo_count=0.01)
+    estimator = LDAEstimator([topic_est] * num_topics, keys=(None, 'topics'), gamma_threshold=1.0e-6)
 
-	data, words = load_wiki_data()
+    model = initialize(data_cnt, estimator, np.random.RandomState(1), 0.1)
+    enc_data = seq_encode(data_cnt, model=model)
 
-	avg_size = np.mean([len(u) for u in data])
+    dcnt, ll_sum = seq_log_density_sum(enc_data, model)
+    old_elob = ll_sum / dcnt
+    for kk in range(40):
+        t0 = time.time()
+        model = seq_estimate(enc_data, estimator, prev_estimate=model)
+        dcnt, ll_sum = seq_log_density_sum(enc_data, model)
+        elob = ll_sum / dcnt
+        if kk % 10 == 0:
+            out.write('iteration %3d  E[LB]=%e  delta=%e  dt=%.2fs\n'
+                      % (kk + 1, elob, elob - old_elob, time.time() - t0))
+        if abs(elob - old_elob) < 1.0e-6:
+            break
+        old_elob = elob
 
-	out.write('#words = %d / #docs = %d / avg w/doc = %f\n' % (len(words), len(data), avg_size))
+    for i in np.argsort(-model.alpha):
+        log_p = model.topics[i].log_p_vec
+        top = np.argsort(-log_p)[:block]
+        out.write('topic %d [alpha=%.3f]: %s\n'
+                  % (i, model.alpha[i], ', '.join('w%d' % w for w in top)))
 
-
-	word_map = dict()
-	data = [ops.map_to_integers(u, word_map) for u in data]
-	data_cnt = [list(ops.countByValue(u).items()) for u in data]
-	word_map_inv = ops.get_inv_map(word_map)
-
-
-	estimator0 = IntegerCategoricalEstimator(minVal=0, maxVal=(len(word_map)-1), pseudo_count=0.001)
-	estimator1 = LDAEstimator([estimator0]*num_topics, keys=(None, 'topics'), gamma_threshold=1.0e-8)
-
-	estimator = estimator1
-
-	# The only difference between the local and spark versions is that we parallelize the data
-	data_cnt = sc.parallelize([list(ops.countByValue(u).items()) for u in data], 4)
-
-
-	imm = initialize(data_cnt, estimator, rng, 0.1)
-
-	enc_data   = seq_encode(data_cnt, model=imm)
-	prev_model = imm
-
-	dcnt, lob_sum = seq_log_density_sum(enc_data, imm)
-	old_elob = lob_sum / dcnt
-
-
-	for kk in range(300):
-		t0 = time.time()
-		mm = seq_estimate(enc_data, estimator, prev_estimate=prev_model)
-		t1 = time.time()
-
-		dcnt, lob_sum = seq_log_density_sum(enc_data, mm)
-		elob = lob_sum/dcnt
-
-		prev_model = mm
-		out.write('Iteration %d\tE[LoB]=%e\tdelta E[LoB]=%e\tdelta time=%f\n'%(kk+1, elob, elob-old_elob, t1-t0))
-
-		old_elob = elob
-
-		if (kk+1) % print_cnt == 0:
-
-			topics = mm.topics
-
-			for i in np.argsort(-mm.alpha):
-				sidx = np.argsort(-topics[i].logPVec)
-				top_words = ', '.join(['%s (%f)'%(word_map_inv[j], np.exp(topics[i].logPVec[j])) for j in sidx[:10]])
-				out.write('Topic %d [%f]: %s\n'%(i, mm.alpha[i], top_words))
-
-
-		out.flush()
+    sc.stop()

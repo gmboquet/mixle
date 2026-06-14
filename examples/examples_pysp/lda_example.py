@@ -1,97 +1,39 @@
-"""LDA example of fake data ranking top words in each document for model fits."""
-import sys
+"""Fit an LDA topic model with the high-level optimize() helper on self-contained random data.
+
+Documents are bags of (word, count) pairs. A known LDADistribution (each topic favoring a distinct
+trio of words) generates the corpus, and an LDAEstimator over Categorical topics recovers it. For the
+low-level sequence-EM loop and an integer-vocab corpus, see wikipedia_example.py.
+"""
 import numpy as np
 
 import pysp.utils.optsutil as ops
 from pysp.stats import *
-
-
-def make_fake_data(num_topics, num_docs, snr, p_alpha, seed):
-    word_per_doc = 100
-    num_words = 10
-    num_topics = num_topics
-
-    rng = np.random.RandomState(seed)
-
-    alpha1 = p_alpha * np.ones(num_topics)
-    alpha1[np.arange(num_topics) >= (num_topics / 2)] = 0.0001
-
-    alpha2 = p_alpha * np.ones(num_topics)
-    alpha2[np.arange(num_topics) < (num_topics / 2)] = 0.0001
-
-    topics = [{k: snr * rng.rand() + (
-        1.0 if (i * num_words / num_topics) <= k and ((i + 1) * num_words / num_topics) > k else 0.0) for k in
-               range(num_words)} for i in range(num_topics)]
-    topics = [CategoricalDistribution({str(k): v / float(sum(u.values())) for k, v in u.items()}) for u in topics]
-
-    # Create the data
-    dist1 = LDADistribution(topics, alpha1, len_dist=CategoricalDistribution({word_per_doc: 1.0}))
-    dist2 = LDADistribution(topics, alpha2, len_dist=CategoricalDistribution({word_per_doc: 1.0}))
-    dist = MixtureDistribution([dist1, dist2], [0.5, 0.5])
-
-    data = dist.sampler(seed=1).sample(size=num_docs)
-
-    words = sorted(set([u for v in data for u in v]))
-
-    return data, words, dist
-
+from pysp.utils.estimation import optimize
 
 if __name__ == '__main__':
+    num_topics = 4
+    vocab = ['w%d' % i for i in range(12)]
 
-    num_topics = 10
-    print_cnt = 10
-    rng = np.random.RandomState(2)
-    # out = open('/Users/boquet1/PycharmProjects/lda_debug.log', 'wt')
-    out = sys.stdout
+    # Topic i favors words [3i, 3i+1, 3i+2].
+    topics = []
+    for i in range(num_topics):
+        p = np.full(len(vocab), 0.02)
+        p[3 * i:3 * i + 3] = 1.0
+        topics.append(CategoricalDistribution(dict(zip(vocab, p / p.sum()))))
 
-    data, words, dist = make_fake_data(num_topics, 50, 0.0001, 1, 1)
+    true_lda = LDADistribution(topics, alpha=np.ones(num_topics) * 0.3,
+                               len_dist=CategoricalDistribution({40: 1.0}))
 
-    avg_size = np.mean([len(u) for u in data])
+    documents = true_lda.sampler(seed=1).sample(400)
+    data = [list(ops.count_by_value(doc).items()) for doc in documents]
 
-    out.write('#words = %d / #docs = %d / avg w/doc = %f\n' % (len(words), len(data), avg_size))
+    estimator = LDAEstimator([CategoricalEstimator(pseudo_count=0.01)] * num_topics,
+                             gamma_threshold=1.0e-6)
 
-    data_cnt = [list(ops.count_by_value(u).items()) for u in data]
+    model = optimize(data, estimator, max_its=60, print_iter=20, init_p=0.1,
+                     rng=np.random.RandomState(2))
 
-    estimator1 = LDAEstimator(
-        [CategoricalEstimator(pseudo_count=0.001, suff_stat={w: 1.0 / len(words) for w in words})] * num_topics,
-        keys=(None, None), gamma_threshold=0.001)
-    estimator = MixtureEstimator([estimator1] * 2, pseudo_count=1.0)
-
-    enc_data = seq_encode(data_cnt, estimator.accumulator_factory().make().acc_to_encoder())
-    imm = seq_initialize(enc_data, estimator, rng=np.random.RandomState(1), p=0.10)
-    prev_model = imm
-
-    dcnt, lob_sum = seq_log_density_sum(enc_data, imm)
-    old_elob = lob_sum / dcnt
-    d_elob = np.inf
-    kk = -1
-
-    while d_elob > 1.0e-8:
-        kk += 1
-        mm = seq_estimate(enc_data, estimator, prev_estimate=prev_model)
-
-        dcnt, lob_sum = seq_log_density_sum(enc_data, mm)
-        elob = lob_sum / dcnt
-
-        prev_model = mm
-        out.write('Iteration %d\tE[LOB]=%e\tdelta E[LOB]=%e\n' % (kk + 1, elob, elob - old_elob))
-
-        old_elob = elob
-
-        if (kk + 1) % print_cnt == 0:
-
-            out.write('Weights = %s\n' % (str(','.join(map(str, mm.w)))))
-            out.write('Alpha_2 = %s\n' % (str(','.join(map(str, mm.components[0].alpha)))))
-            out.write('Alpha_1 = %s\n' % (str(','.join(map(str, mm.components[1].alpha)))))
-            topics = mm.components[0].topics
-
-            for i in range(num_topics):
-                log_prob_vec = np.asarray([x for x in topics[i].pmap.values()])
-                vals = np.asarray([x for x in topics[i].pmap.keys()])
-
-                sidx = np.argsort(-log_prob_vec)
-                top_words = ', '.join(
-                    ['%s (%f)' % (vals[j], np.exp(log_prob_vec[j])) for j in sidx])
-                out.write('Topic %d: %s\n' % (i, top_words))
-
-        out.flush()
+    print('alpha: %s' % np.round(model.alpha, 3))
+    for i, topic in enumerate(model.topics):
+        top = sorted(topic.pmap.items(), key=lambda kv: -kv[1])[:3]
+        print('topic %d: %s' % (i, ', '.join('%s(%.2f)' % (w, p) for w, p in top)))
