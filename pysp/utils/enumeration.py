@@ -34,6 +34,7 @@ __all__ = [
     "best_first_union",
     "best_first_union_max",
     "rerank_by_density",
+    "stable_top_k",
     "bounded_best_first_union_index",
     "QuantizedEnumerationIndex",
     "LazyQuantizedEnumerationIndex",
@@ -1026,3 +1027,43 @@ def rerank_by_density(stream: Iterator[tuple[Any, float]], window: int) -> Itera
         except StopIteration:
             continue
         push(v2, lp2)
+
+
+def stable_top_k(
+    make_stream: Callable[[], Iterator[tuple[Any, float]]],
+    k: int,
+    start_window: int | None = None,
+    max_window: int = 1 << 20,
+    growth: int = 2,
+    tol: float = 1.0e-9,
+) -> list[tuple[Any, float]]:
+    """Verified true-descending top-k from an approximately-descending stream, without tuning a window.
+
+    :func:`rerank_by_density` is exact only when its ``window`` exceeds the (unknown) maximum
+    rank displacement of the approximate stream. This wrapper removes that guess: it reranks with a
+    growing window and stops when the top-k is a *fixed point* -- identical across two successive
+    window sizes -- which means no item outside the smaller window could have displaced the top-k,
+    so the result is the true descending top-k.
+
+    ``make_stream`` must return a FRESH approximately-descending ``(value, log_prob)`` iterator on
+    each call (the seek index's distinct stream, e.g. ``lambda: dist.count_budget_distinct(...)``).
+    Each doubling replays the stream, so prefer a cheap factory (replay over a pre-built index)
+    when k or the window is large. Returns up to k pairs in exact descending probability order.
+    """
+    if k < 1:
+        raise ValueError("k must be a positive integer.")
+    window = start_window if start_window is not None else max(2 * k, 64)
+    previous: list[tuple[Any, float]] | None = None
+    while window <= max_window:
+        current = list(itertools.islice(rerank_by_density(make_stream(), window), k))
+        if previous is not None and len(previous) == len(current):
+            same = all(
+                freeze(pv) == freeze(cv) and abs(plp - clp) <= tol for (pv, plp), (cv, clp) in zip(previous, current)
+            )
+            if same:
+                return current
+        if len(current) < k:
+            return current  # stream exhausted: fewer than k distinct values exist
+        previous = current
+        window *= growth
+    return previous if previous is not None else []
