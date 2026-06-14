@@ -1224,6 +1224,12 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self.use_numba = use_numba
         self.name = name
 
+        # Data log-likelihood accumulated as a byproduct of the E-step forward pass, only when
+        # _track_ll is enabled. Used by the fused-EM fast path in optimize(reuse_estep_ll=True);
+        # not part of value(). Off by default so the standard path pays nothing.
+        self._track_ll = False
+        self._seq_ll = 0.0
+
         # protected for initialization.
         self._init_rng: bool = False
         self._len_rng: Optional[RandomState] = None
@@ -1485,17 +1491,26 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             for i in range(num_states):
                 pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
 
-            pr_max = pr_obs.max(axis=1, keepdims=True)
-            pr_obs -= pr_max
+            pr_max0 = pr_obs.max(axis=1, keepdims=True)
+            pr_obs -= pr_max0
             np.exp(pr_obs, out=pr_obs)
+
+            # When the fused-EM fast path requests it, accumulate the per-sequence data
+            # log-likelihood from the forward normalizers (un-floored row sums + emission max),
+            # matching seq_log_density exactly. The standard path skips this entirely.
+            track_ll = self._track_ll
+            ll_ret = np.zeros(num_seq) if track_ll else None
 
             # Vectorized alpha pass
             band = idx_bands[0]
             alphas_prev = alphas[band[0]:band[1], :]
             np.multiply(pr_obs[band[0]:band[1], :], w, out=alphas_prev)
-            pr_sum = alphas_prev.sum(axis=1, keepdims=True)
-            pr_sum[pr_sum == 0] = 1.0
-            alphas_prev /= pr_sum
+            a_sum = alphas_prev.sum(axis=1, keepdims=True)
+            if track_ll:
+                with np.errstate(divide='ignore'):
+                    ll_ret[good[:, 0]] += np.log(a_sum[:, 0]) + pr_max0[band[0]:band[1], 0]
+            a_sum[a_sum == 0] = 1.0
+            alphas_prev /= a_sum
 
             for i in range(1, max_len):
                 band = idx_bands[i]
@@ -1503,11 +1518,12 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 alphas_next = alphas[band[0]:band[1], :]
                 np.dot(alphas_prev[has_next_loc, :], a_mat, out=alphas_next)
                 alphas_next *= pr_obs[band[0]:band[1], :]
-                pr_max = alphas_next.sum(axis=1, keepdims=True)
-
-                pr_max[pr_max == 0] = 1.0
-
-                alphas_next /= pr_max
+                a_sum = alphas_next.sum(axis=1, keepdims=True)
+                if track_ll:
+                    with np.errstate(divide='ignore'):
+                        ll_ret[good[:, i]] += np.log(a_sum[:, 0]) + pr_max0[band[0]:band[1], 0]
+                a_sum[a_sum == 0] = 1.0
+                alphas_next /= a_sum
                 alphas_prev = alphas_next
 
             band2 = idx_bands[-1]
@@ -1572,6 +1588,11 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
             self.init_counts += alphas[band1[0]:band1[1], :].sum(axis=0)
 
+            if track_ll:
+                if estimate.len_dist is not None and len_enc is not None:
+                    ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
+                self._seq_ll += float(np.dot(weights, ll_ret))
+
             if self.len_accumulator is not None:
                 self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
 
@@ -1596,6 +1617,20 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             pr_max = pr_obs.max(axis=1, keepdims=True)
             pr_obs -= pr_max
             np.exp(pr_obs, out=pr_obs)
+
+            # When the fused-EM fast path requests it, compute the per-sequence data log-likelihood
+            # from the already-scored emissions via the (read-only) forward kernel, reusing pr_obs so
+            # no emissions are re-scored. Done before Baum-Welch (which may overwrite pr_obs).
+            if self._track_ll:
+                ll_ret = np.zeros(seq_cnt, dtype=np.float64)
+                nb_next = np.zeros((seq_cnt, num_states), dtype=np.float64)
+                nb_buff = np.zeros((seq_cnt, num_states), dtype=np.float64)
+                pr_max_1d = np.ascontiguousarray(pr_max[:, 0])
+                numba_seq_log_density(num_states, tz, pr_obs, init_pvec, tran_mat, pr_max_1d,
+                                      nb_next, nb_buff, ll_ret)
+                if estimate.len_dist is not None and len_enc is not None:
+                    ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
+                self._seq_ll += float(np.dot(weights, ll_ret))
 
             alphas = np.zeros((tot_cnt, num_states), dtype=np.float64)
             xi_acc = np.zeros((seq_cnt, num_states, num_states), dtype=np.float64)

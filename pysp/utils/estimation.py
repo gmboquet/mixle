@@ -576,12 +576,12 @@ def optimize(data: Optional[Sequence[T]], estimator: ParameterEstimator, max_its
             ``HardEM``, ``MonteCarloEM``) or any callable ``(enc, estimator, model) -> model`` to use
             in place of the standard exact E/M step. ``None`` uses the standard step.
         reuse_estep_ll (bool): When True, reuse the data log-likelihood computed during the E-step
-            (the posterior normalizer) for convergence instead of running a separate scoring pass
-            each iteration -- up to ~2x faster per iteration when the model reports it (currently
-            top-level mixtures on the default local engine). Convergence then lags by one iteration
-            (same fixed point) and the best-likelihood model is returned. Falls back to the standard
-            loop for engines/strategies/distributed backends or models that can't report the LL.
-            Default False (exact historical behavior).
+            (the posterior normalizer / forward pass) for convergence instead of running a separate
+            scoring pass each iteration -- up to ~2x faster per iteration when the model reports it
+            (currently top-level mixtures and HMMs on the default local engine). Convergence then
+            lags by one iteration (same fixed point) and the best-likelihood model is returned. Falls
+            back to the standard loop for engines/strategies/distributed backends or models that
+            can't report the LL. Default False (exact historical behavior).
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm

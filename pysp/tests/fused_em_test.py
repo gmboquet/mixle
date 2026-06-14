@@ -11,6 +11,8 @@ import numpy as np
 
 from pysp.stats import (MixtureDistribution, GaussianDistribution, MixtureEstimator, GaussianEstimator,
                         HiddenMarkovModelDistribution, HiddenMarkovEstimator, CategoricalDistribution,
+                        PoissonDistribution, PoissonEstimator, CategoricalEstimator,
+                        HierarchicalMixtureDistribution, HierarchicalMixtureEstimator,
                         seq_encode, seq_log_density_sum)
 from pysp.utils.estimation import optimize
 
@@ -57,15 +59,43 @@ class FusedEMTestCase(unittest.TestCase):
         # Same optimum (the one-iteration convergence lag may stop a hair earlier/later).
         self.assertLess(abs(lls - llf), 1.0e-4)
 
-    def test_fallback_for_non_mixture_top_level(self):
-        topics = [GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)]
-        hmm = HiddenMarkovModelDistribution(topics, [0.5, 0.5], [[0.8, 0.2], [0.2, 0.8]],
-                                            len_dist=CategoricalDistribution({20: 1.0}))
-        data = hmm.sampler(1).sample(300)
-        est = HiddenMarkovEstimator([GaussianEstimator()] * 2, use_numba=True)
-        std = optimize(data, est, max_its=15, delta=None, rng=np.random.RandomState(3), out=io.StringIO())
-        # reuse_estep_ll requested but the HMM accumulator can't report it -> clean fallback.
-        fb = optimize(data, est, max_its=15, delta=None, rng=np.random.RandomState(3),
+    def test_hmm_estep_ll_matches_and_fixed_iters_identical(self):
+        topics = [GaussianDistribution(-4.0, 1.0), GaussianDistribution(0.0, 1.0), GaussianDistribution(4.0, 1.0)]
+        A = [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]
+        for use_numba in (True, False):
+            hmm = HiddenMarkovModelDistribution(topics, [1 / 3.0] * 3, A, len_dist=PoissonDistribution(8.0))
+            data = hmm.sampler(1).sample(1000)
+            enc = seq_encode(data, model=hmm)
+            est = HiddenMarkovEstimator([GaussianEstimator()] * 3, len_estimator=PoissonEstimator(),
+                                        use_numba=use_numba)
+            with self.subTest(use_numba=use_numba):
+                # E-step reported LL == seq_log_density_sum.
+                acc = est.accumulator_factory().make()
+                acc._track_ll = True
+                for sz, x in enc:
+                    acc.seq_update(x, np.ones(sz), hmm)
+                _, ref = seq_log_density_sum(enc, hmm)
+                self.assertAlmostEqual(acc._seq_ll, ref, places=5)
+                # Fixed-iteration fused == standard.
+                std = optimize(data, est, max_its=12, delta=None, rng=np.random.RandomState(3), out=io.StringIO())
+                fused = optimize(data, est, max_its=12, delta=None, rng=np.random.RandomState(3),
+                                 out=io.StringIO(), reuse_estep_ll=True)
+                _, ls = seq_log_density_sum(enc, std)
+                _, lf = seq_log_density_sum(enc, fused)
+                self.assertAlmostEqual(ls, lf, places=6)
+
+    def test_fallback_for_unsupported_top_level(self):
+        # A hierarchical mixture iterates under EM but its accumulator doesn't report the E-step LL,
+        # so reuse_estep_ll falls back to the standard loop and produces the same result.
+        topics = [CategoricalDistribution({'a': 0.6, 'b': 0.2, 'c': 0.2}),
+                  CategoricalDistribution({'a': 0.2, 'b': 0.6, 'c': 0.2})]
+        truth = HierarchicalMixtureDistribution(topics, [0.5, 0.5], [[0.8, 0.2], [0.2, 0.8]],
+                                                len_dist=CategoricalDistribution({6: 1.0}))
+        data = truth.sampler(1).sample(400)
+        est = HierarchicalMixtureEstimator([CategoricalEstimator() for _ in range(2)], num_mixtures=2,
+                                           len_estimator=CategoricalEstimator())
+        std = optimize(data, est, max_its=15, delta=None, rng=np.random.RandomState(4), out=io.StringIO())
+        fb = optimize(data, est, max_its=15, delta=None, rng=np.random.RandomState(4),
                       out=io.StringIO(), reuse_estep_ll=True)
         enc = seq_encode(data, model=std)
         _, lls = seq_log_density_sum(enc, std)
