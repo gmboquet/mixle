@@ -73,6 +73,81 @@ E1 = tuple[
 E2 = tuple[tuple[np.ndarray, np.ndarray, np.ndarray], Any | None]
 
 
+# --- Conjugate Dirichlet prior machinery (folded from pysp.bstats.hidden_markov) ---
+#
+# Hidden states are the fixed integers 0..S-1 (as in pysp.bstats), so the chain prior is a
+# Dirichlet on the initial-state probabilities plus an independent Dirichlet on each transition
+# row, carried as ``prior = (init_prior, row_priors)``.  Per-state emission ("topic") component
+# priors are owned by the emission distributions/estimators themselves (the unified leaf-family
+# Bayesian protocol), so the HMM only adds the chain-level prior and delegates emission terms to
+# the topic estimators.  ``prior=None`` (the default) preserves the existing MLE / pseudo-count
+# path byte-identically.
+
+
+def hmm_dirichlet_default_prior(num_states: int):
+    """Returns the default ``(init_prior, row_priors)`` pair of unit-parameter Dirichlets.
+
+    Args:
+        num_states (int): Number of hidden states S.
+
+    Returns:
+        Tuple ``(DirichletDistribution, list of S DirichletDistribution)``.
+
+    """
+    from pysp.bstats.dirichlet import DirichletDistribution
+
+    return (
+        DirichletDistribution(np.ones(num_states)),
+        [DirichletDistribution(np.ones(num_states)) for _ in range(num_states)],
+    )
+
+
+def _unpack_hmm_chain_prior(prior):
+    """Normalize the chain prior into ``(init_prior, row_priors)``."""
+    init_prior, row_priors = prior[0], list(prior[1])
+    return init_prior, row_priors
+
+
+def _hmm_map_probs(counts: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Dirichlet MAP with boundary clamp; posterior mean when degenerate.
+
+    Mirrors pysp.bstats.markov_chain._map_probs exactly.
+    """
+    num = np.maximum(counts + alpha - 1.0, 0.0)
+    tot = num.sum()
+    if tot > 0:
+        return num / tot
+    cpp = counts + alpha
+    return cpp / cpp.sum()
+
+
+def _hmm_forward_ll(log_b: np.ndarray, log_init: np.ndarray, log_trans: np.ndarray) -> float:
+    """Scaled forward recursion returning a single sequence log-likelihood.
+
+    Mirrors pysp.bstats.hidden_markov.HiddenMarkovModelDistribution._forward_ll exactly so that
+    expected_log_density (which feeds digamma-expected init/transition log-probs and topic
+    expected emissions) matches the bstats reference.
+    """
+    b_max = log_b.max(axis=1, keepdims=True)
+    b = np.exp(log_b - b_max)
+    a_mat = np.exp(log_trans)
+
+    alpha = np.exp(log_init) * b[0, :]
+    c = alpha.sum()
+    ll = np.log(c) if c > 0 else -np.inf
+    alpha = alpha / c if c > 0 else alpha
+
+    for t in range(1, log_b.shape[0]):
+        alpha = np.dot(alpha, a_mat) * b[t, :]
+        c = alpha.sum()
+        if c <= 0:
+            return -np.inf
+        ll += np.log(c)
+        alpha /= c
+
+    return float(ll + b_max.sum())
+
+
 class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     """Hidden Markov model distribution for variable-length observation sequences."""
 
@@ -87,6 +162,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         terminal_values: set[T] | None = None,
         use_numba: bool = False,
         weights: Sequence[float] | np.ndarray = MISSING,
+        prior=None,
     ) -> None:
         """HiddenMarkovModelDistribution object defining HMM compatible with data type T.
 
@@ -151,6 +227,141 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         else:
             self.taus = None
             self.has_topics = False
+
+        self.set_prior(prior)
+
+    def get_prior(self):
+        """Returns the chain conjugate prior in ``(init_prior, row_priors)`` form (or None).
+
+        Per-state emission component priors are owned by the emission distributions themselves.
+        """
+        if not self.has_conj_prior:
+            return None
+        return (self.init_prior, list(self.row_priors))
+
+    def set_prior(self, prior) -> None:
+        """Set the conjugate Dirichlet chain prior and precompute its digamma expectations.
+
+        With Dirichlet ``init_prior`` and Dirichlet ``row_priors`` (over the fixed hidden states
+        0..S-1) this caches the digamma expectations E[ln p_k] = psi(alpha_k) - psi(sum alpha) used
+        by expected_log_density and sets ``has_conj_prior`` accordingly. ``prior=None`` leaves the
+        distribution a plain point model.
+
+        Args:
+            prior: ``(init_prior, row_priors)`` tuple or None.
+
+        """
+        from pysp.bstats.dirichlet import DirichletDistribution
+
+        if prior is None:
+            self.prior = None
+            self.init_prior = None
+            self.row_priors = None
+            self.e_log_init = None
+            self.e_log_trans = None
+            self.has_conj_prior = False
+            return
+
+        init_prior, row_priors = _unpack_hmm_chain_prior(prior)
+        self.prior = prior
+        self.init_prior = init_prior
+        self.row_priors = row_priors
+
+        if isinstance(init_prior, DirichletDistribution) and all(
+            isinstance(u, DirichletDistribution) for u in row_priors
+        ):
+            a0 = np.asarray(init_prior.get_parameters(), dtype=float)
+            self.e_log_init = digamma(a0) - digamma(a0.sum())
+            self.e_log_trans = np.zeros((self.n_states, self.n_states))
+            for i, row_prior in enumerate(row_priors):
+                ai = np.asarray(row_prior.get_parameters(), dtype=float)
+                self.e_log_trans[i, :] = digamma(ai) - digamma(ai.sum())
+            self.has_conj_prior = True
+        else:
+            self.e_log_init = None
+            self.e_log_trans = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: list[T]) -> float:
+        """Forward log-likelihood with digamma-expected initial/transition log-probabilities and
+        the topics' expected_log_density emissions.
+
+        Falls back to the plug-in log_density(x) when no conjugate prior is set. Not supported for
+        the taus/topic-mixture parameterization (falls back to log_density there).
+
+        Args:
+            x (List[T]): Observed sequence of HMM emissions.
+
+        Returns:
+            Expected log-density of the observed HMM sequence x.
+
+        """
+        if not self.has_conj_prior or self.has_topics:
+            return self.log_density(x)
+        if x is None or len(x) == 0:
+            return self.len_dist.log_density(0)
+
+        log_b = np.asarray([[topic.expected_log_density(u) for topic in self.topics] for u in x])
+        rv = _hmm_forward_ll(log_b, self.e_log_init, self.e_log_trans)
+        rv += self.len_dist.log_density(len(x))
+        return rv
+
+    def seq_expected_log_density(self, x: E1 | E2) -> np.ndarray:
+        """Vectorized expected_log_density() at sequence-encoded input x.
+
+        Falls back to seq_log_density(x) when no conjugate prior is set or for the taus
+        parameterization.
+
+        Args:
+            x: Encoded sequences from seq_encode().
+
+        Returns:
+            Numpy array of expected log-densities, one per sequence.
+
+        """
+        if not self.has_conj_prior or self.has_topics:
+            return self.seq_log_density(x)
+
+        x0, x1 = x
+        e_log_init = self.e_log_init
+        e_log_trans = self.e_log_trans
+
+        if x1 is None:
+            (tot_cnt, idx_bands, has_next, len_vec, idx_mat, idx_vec, enc_data), _, len_enc = x0
+            num_seq = idx_mat.shape[0]
+            num_states = self.n_states
+
+            log_b = np.zeros((tot_cnt, num_states))
+            for i in range(num_states):
+                log_b[:, i] = self.topics[i].seq_expected_log_density(enc_data)
+
+            rv = np.zeros(num_seq)
+            for seq_i in range(num_seq):
+                rows = idx_mat[seq_i, :]
+                rows = rows[rows >= 0]
+                if len(rows) == 0:
+                    continue
+                rv[seq_i] = _hmm_forward_ll(log_b[rows, :], e_log_init, e_log_trans)
+        else:
+            (idx, sz, enc_data), len_enc = x1
+            num_states = self.n_states
+            tot_cnt = len(idx)
+
+            log_b = np.zeros((tot_cnt, num_states))
+            for i in range(num_states):
+                log_b[:, i] = self.topics[i].seq_expected_log_density(enc_data)
+
+            tz = np.concatenate([[0], sz]).cumsum().astype(int)
+            rv = np.zeros(len(sz))
+            for seq_i in range(len(sz)):
+                if sz[seq_i] == 0:
+                    continue
+                rv[seq_i] = _hmm_forward_ll(log_b[tz[seq_i] : tz[seq_i + 1], :], e_log_init, e_log_trans)
+
+        if self.len_dist is not None and len_enc is not None:
+            rv += self.len_dist.seq_log_density(len_enc)
+
+        return rv
 
     def __str__(self) -> str:
         """Returns string representation of HiddenMarkovDistribution instance."""
@@ -638,7 +849,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
         comp_ests = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
         return HiddenMarkovEstimator(
-            comp_ests, pseudo_count=(pseudo_count, pseudo_count), len_estimator=len_est, name=self.name
+            comp_ests,
+            pseudo_count=(pseudo_count, pseudo_count),
+            len_estimator=len_est,
+            name=self.name,
+            prior=self.get_prior(),
         )
 
     def dist_to_encoder(self) -> "HiddenMarkovDataEncoder":
@@ -1992,6 +2207,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         use_numba: bool = False,
+        prior=None,
     ) -> None:
         """HiddenMarkovEstimator object for estimating HiddenMarkovDistribution for aggregated sufficient statistics.
 
@@ -2024,12 +2240,73 @@ class HiddenMarkovEstimator(ParameterEstimator):
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.name = name
         self.use_numba = use_numba
+        self.set_prior(prior)
 
     def accumulator_factory(self):
         """Returns an HiddenMarkovAccumulatorFactory object."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         len_factory = self.len_estimator.accumulator_factory()
         return HiddenMarkovAccumulatorFactory(est_factories, len_factory, self.use_numba, self.keys, self.name)
+
+    def get_prior(self):
+        """Returns the chain conjugate prior in ``(init_prior, row_priors)`` form (or None).
+
+        Per-state emission component priors are owned by the topic estimators themselves.
+        """
+        if not self.has_conj_prior:
+            return None
+        return (self.init_prior, list(self.row_priors))
+
+    def set_prior(self, prior) -> None:
+        """Set the conjugate Dirichlet chain prior and flag whether it admits the conjugate update.
+
+        Args:
+            prior: ``(init_prior, row_priors)`` tuple or None; has_conj_prior is set when both the
+                initial-state prior and all row priors are Dirichlet.
+
+        """
+        from pysp.bstats.dirichlet import DirichletDistribution
+
+        if prior is None:
+            self.prior = None
+            self.init_prior = None
+            self.row_priors = None
+            self.has_conj_prior = False
+            return
+
+        init_prior, row_priors = _unpack_hmm_chain_prior(prior)
+        self.prior = prior
+        self.init_prior = init_prior
+        self.row_priors = row_priors
+        self.has_conj_prior = isinstance(init_prior, DirichletDistribution) and all(
+            isinstance(u, DirichletDistribution) for u in row_priors
+        )
+
+    def model_log_density(self, model: "HiddenMarkovModelDistribution") -> float:
+        """Log-density of the model parameters under the priors (ELBO global term).
+
+        Sums the Dirichlet log-densities of the initial-state and transition probabilities (floored
+        at a tiny constant so boundary MAP estimates score finitely) plus each topic estimator's
+        model_log_density of its emission distribution. Returns the emission-only sum without a
+        conjugate chain prior.
+
+        Args:
+            model (HiddenMarkovModelDistribution): Model to score.
+
+        Returns:
+            Prior log-density of the model parameters.
+
+        """
+        rv = 0.0
+        if self.has_conj_prior:
+            tiny = 1.0e-300
+            rv += float(self.init_prior.log_density(np.maximum(model.w, tiny)))
+            for i, row_prior in enumerate(self.row_priors):
+                rv += float(row_prior.log_density(np.maximum(model.transitions[i, :], tiny)))
+        for est, topic in zip(self.estimators, model.topics):
+            if hasattr(est, "model_log_density"):
+                rv += float(est.model_log_density(topic))
+        return rv
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray, list[T1], T2 | None]
@@ -2060,10 +2337,36 @@ class HiddenMarkovEstimator(ParameterEstimator):
             HiddenMarkovModelDistribution object.
 
         """
+        from pysp.bstats.dirichlet import DirichletDistribution
+
         num_states, init_counts, state_counts, trans_counts, topic_ss, len_ss = suff_stat
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
         topics = [self.estimators[i].estimate(state_counts[i], topic_ss[i]) for i in range(num_states)]
+
+        if self.has_conj_prior:
+            a0 = np.asarray(self.init_prior.get_parameters(), dtype=float)
+            w = _hmm_map_probs(init_counts, a0)
+            init_posterior = DirichletDistribution(init_counts + a0)
+
+            transitions = np.zeros((num_states, num_states), dtype=np.float64)
+            row_posteriors = []
+            for i in range(num_states):
+                ai = np.asarray(self.row_priors[i].get_parameters(), dtype=float)
+                transitions[i, :] = _hmm_map_probs(trans_counts[i, :], ai)
+                row_posteriors.append(DirichletDistribution(trans_counts[i, :] + ai))
+
+            return HiddenMarkovModelDistribution(
+                topics=topics,
+                w=w,
+                transitions=transitions,
+                taus=None,
+                len_dist=len_dist,
+                name=self.name,
+                terminal_values=None,
+                use_numba=self.use_numba,
+                prior=(init_posterior, row_posteriors),
+            )
 
         if self.pseudo_count[0] is not None:
             p1 = self.pseudo_count[0] / float(num_states)

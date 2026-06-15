@@ -14,7 +14,7 @@ If component distribution P(Y|Z=k) has data type (T), then the Mixture distribut
 """
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, TypeVar
 
 import numpy as np
@@ -22,6 +22,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import maxrandint
+from pysp.stats.dirichlet import DirichletDistribution
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -33,6 +34,7 @@ from pysp.stats.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from pysp.stats.symdirichlet import SymmetricDirichletDistribution
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.enumeration import (
     BufferedStream,
@@ -41,11 +43,114 @@ from pysp.utils.enumeration import (
     bounded_best_first_union_index,
     freeze,
 )
+from pysp.utils.special import digamma
 
 T = TypeVar("T")  ### Type of Mixture component data.
 T1 = TypeVar("T1")  ### Type of encoded data.
 T2 = TypeVar("T2")  ### Type of component suff_stat
 key_type = tuple[str, str] | tuple[None, None]
+
+
+def mixture_prior(
+    weight_prior: SequenceEncodableProbabilityDistribution,
+    component_priors: Sequence[SequenceEncodableProbabilityDistribution],
+) -> tuple[SequenceEncodableProbabilityDistribution, tuple[SequenceEncodableProbabilityDistribution, ...]]:
+    """Build the joint mixture prior: a weight prior plus one prior per component.
+
+    Args:
+        weight_prior: Prior on the mixture weights (a
+            :class:`~pysp.stats.dirichlet.DirichletDistribution` or
+            :class:`~pysp.stats.symdirichlet.SymmetricDirichletDistribution`).
+        component_priors: Sequence of one conjugate prior per component.
+
+    Returns:
+        A ``(weight_prior, tuple(component_priors))`` pair consumed by
+        ``MixtureDistribution``/``MixtureEstimator`` ``set_prior``.
+    """
+    return weight_prior, tuple(component_priors)
+
+
+def _default_weight_prior(num_components: int) -> DirichletDistribution:
+    """Flat (concentration-one) Dirichlet weight prior of the given dimension."""
+    return DirichletDistribution(np.ones(num_components))
+
+
+def _component_prior_tuple(
+    component_priors: Any, num_components: int
+) -> tuple[SequenceEncodableProbabilityDistribution, ...] | None:
+    if component_priors is None:
+        return None
+    if isinstance(component_priors, (list, tuple)):
+        rv = tuple(component_priors)
+    elif num_components == 1:
+        rv = (component_priors,)
+    else:
+        raise TypeError("mixture component priors must be a sequence.")
+    if len(rv) != num_components:
+        raise ValueError("expected %d component priors, got %d." % (num_components, len(rv)))
+    return rv
+
+
+def _split_mixture_prior(
+    prior: Any, num_components: int
+) -> tuple[
+    SequenceEncodableProbabilityDistribution | None, tuple[SequenceEncodableProbabilityDistribution, ...] | None
+]:
+    """Split a joint mixture prior into (weight_prior, component_priors).
+
+    Accepts ``None``, a bare weight prior, a ``(weight_prior, component_priors)`` pair (as
+    produced by :func:`mixture_prior`), or a mapping with ``weights``/``components`` entries.
+    Returns ``(None, None)`` for ``None`` so the caller can fall back to the MLE path.
+    """
+    if prior is None:
+        return None, None
+    if isinstance(prior, Mapping) and (
+        "weights" in prior or "weight_prior" in prior or "components" in prior or "component_priors" in prior
+    ):
+        weight_prior = prior.get("weights", prior.get("weight_prior"))
+        component_priors = prior.get("components", prior.get("component_priors"))
+        if weight_prior is None:
+            weight_prior = _default_weight_prior(num_components)
+        return weight_prior, _component_prior_tuple(component_priors, num_components)
+    if (
+        isinstance(prior, (list, tuple))
+        and len(prior) == 2
+        and isinstance(prior[1], (list, tuple))
+        and not isinstance(prior[0], (list, tuple))
+    ):
+        return prior[0], _component_prior_tuple(prior[1], num_components)
+    return prior, None
+
+
+def _set_estimator_prior(estimator: ParameterEstimator, prior: Any) -> None:
+    """Push a component prior onto a child estimator.
+
+    Stats leaf estimators take their prior via the constructor rather than a ``set_prior``
+    method, so this prefers ``set_prior`` when present and otherwise updates the conventional
+    ``prior``/``has_conj_prior`` attributes used by the folded leaf estimators.
+    """
+    set_prior = getattr(estimator, "set_prior", None)
+    if callable(set_prior):
+        set_prior(prior)
+        return
+    estimator.prior = prior
+    if hasattr(estimator, "has_conj_prior"):
+        estimator.has_conj_prior = prior is not None
+
+
+def _dirichlet_expectations(prior: Any, num_components: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Return ``(alpha, E[log w_k])`` for a (symmetric) Dirichlet weight prior, else ``(None, None)``.
+
+    ``E[log w_k] = digamma(alpha_k) - digamma(sum_j alpha_j)`` are the variational weight
+    expectations used by ``expected_log_density``.
+    """
+    if isinstance(prior, DirichletDistribution):
+        alpha = np.asarray(prior.get_parameters(), dtype=float)
+        return alpha, digamma(alpha) - digamma(np.sum(alpha))
+    if isinstance(prior, SymmetricDirichletDistribution):
+        alpha = np.ones(num_components) * prior.get_parameters()
+        return alpha, digamma(alpha) - digamma(np.sum(alpha))
+    return None, None
 
 
 class MixtureDistribution(SequenceEncodableProbabilityDistribution):
@@ -85,6 +190,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         w: np.ndarray | list[float] = MISSING,
         name: str | None = None,
         weights: np.ndarray | list[float] = MISSING,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
         if isinstance(w, np.ndarray):
@@ -98,6 +204,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         self.components = components
         self.num_components = len(components)
         self.name = name
+        self.set_prior(prior)
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
@@ -125,6 +232,58 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         s3 = repr(self.name)
 
         return "MixtureDistribution([%s], %s, name=%s)" % (s1, s2, s3)
+
+    def get_prior(self) -> SequenceEncodableProbabilityDistribution | None:
+        """Return the joint mixture prior, or ``None`` for a plain point model.
+
+        When a weight prior is attached the joint prior is the
+        ``(weight_prior, tuple(component priors))`` pair produced by
+        :func:`mixture_prior`; otherwise ``None``.
+        """
+        if not self.has_conj_prior:
+            return None
+        return self.prior, tuple(d.get_prior() for d in self.components)
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Attach a weight prior (and optional per-component priors), caching weight expectations.
+
+        With a (symmetric) Dirichlet weight prior this caches the variational weight
+        expectations ``E[log w_k] = digamma(alpha_k) - digamma(sum_j alpha_j)`` used by
+        ``expected_log_density``. Component priors, when supplied, are delegated to each
+        component via ``component.set_prior``. ``prior=None`` (the default) leaves the
+        mixture a plain point model (byte-identical MLE behaviour).
+        """
+        weight_prior, component_priors = _split_mixture_prior(prior, self.num_components)
+        self.prior = weight_prior
+        if component_priors is not None:
+            for d, p in zip(self.components, component_priors):
+                d.set_prior(p)
+        self.conj_prior_params, self.expected_nparams = _dirichlet_expectations(self.prior, self.num_components)
+        self.has_conj_prior = self.expected_nparams is not None
+
+    def expected_log_density(self, x: T) -> float:
+        """Variational expected log-density at observation x.
+
+        Uses ``E[log w_k]`` under the (symmetric) Dirichlet weight prior together with each
+        component's ``expected_log_density``. Falls back to the plug-in ``log_density(x)``
+        when no conjugate weight prior is attached.
+        """
+        if not self.has_conj_prior:
+            return self.log_density(x)
+        cc = self.expected_nparams
+        return vec.log_sum(np.asarray([u.expected_log_density(x) for u in self.components]) + cc)
+
+    def seq_expected_log_density(self, x: T1) -> np.ndarray:
+        """Vectorized variational expected log-density at sequence-encoded input x.
+
+        Falls back to ``seq_log_density(x)`` when no conjugate weight prior is attached.
+        """
+        if not self.has_conj_prior:
+            return self.seq_log_density(x)
+        cc = self.expected_nparams
+        ll = np.asarray([u.seq_expected_log_density(x) for u in self.components]).T + cc
+        ml = np.max(ll, axis=1, keepdims=True)
+        return np.log(np.sum(np.exp(ll - ml), axis=1)) + ml.flatten()
 
     def density(self, x: T) -> float:
         """Evaluate density of Mixture distribution at observation x.
@@ -412,9 +571,10 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
                 [u.estimator(pseudo_count=1.0 / self.num_components) for u in self.components],
                 pseudo_count=pseudo_count,
                 name=self.name,
+                prior=self.prior,
             )
         else:
-            return MixtureEstimator([u.estimator() for u in self.components], name=self.name)
+            return MixtureEstimator([u.estimator() for u in self.components], name=self.name, prior=self.prior)
 
     def dist_to_encoder(self) -> "MixtureDataEncoder":
         """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
@@ -1045,6 +1205,7 @@ class MixtureEstimator(ParameterEstimator):
         pseudo_count: float | None = None,
         name: str | None = None,
         keys: tuple[str | None, str | None] = (None, None),
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """MixtureEstimator object used to estimate MixtureDistribution from aggregated sufficient statistics.
 
@@ -1074,11 +1235,57 @@ class MixtureEstimator(ParameterEstimator):
         self.keys = keys
         self.name = name
         self.fixed_weights = np.asarray(fixed_weights) if fixed_weights is not None else None
+        self.prior = None
+        self.has_conj_prior = False
+        self.set_prior(prior)
 
     def accumulator_factory(self) -> "MixtureAccumulatorFactory":
         """Returns MixtureAccumulatorFactory object passing component StatisticAccumulatorFactory objects and keys."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         return MixtureAccumulatorFactory(est_factories, keys=self.keys, name=self.name)
+
+    def get_prior(self) -> SequenceEncodableProbabilityDistribution | None:
+        """Return the joint mixture prior, or ``None`` for a plain MLE estimator.
+
+        When a weight prior is attached the joint prior is the
+        ``(weight_prior, tuple(component priors))`` pair produced by :func:`mixture_prior`.
+        """
+        if not self.has_conj_prior:
+            return None
+        return self.prior, tuple(d.get_prior() for d in self.estimators)
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Attach a weight prior (and optional per-component priors).
+
+        With a (symmetric) Dirichlet weight prior the estimator switches to the conjugate
+        MAP weight update; component priors, when supplied, are delegated to each component
+        estimator via ``estimator.set_prior`` (those carry out their own conjugate updates).
+        ``prior=None`` leaves the estimator a plain MLE estimator (byte-identical behaviour).
+        """
+        weight_prior, component_priors = _split_mixture_prior(prior, self.num_components)
+        self.prior = weight_prior
+        if component_priors is not None:
+            for d, p in zip(self.estimators, component_priors):
+                _set_estimator_prior(d, p)
+        self.has_conj_prior = isinstance(self.prior, (DirichletDistribution, SymmetricDirichletDistribution))
+
+    def model_log_density(self, model: "MixtureDistribution") -> float:
+        """Log density of the model parameters under this estimator's prior (ELBO global term).
+
+        Returns the Dirichlet weight-prior log-density evaluated at ``model.w`` plus the sum of
+        each component estimator's ``model_log_density`` at the corresponding component model.
+        Returns ``0.0`` for a plain MLE estimator with no priors anywhere.
+        """
+        rv = 0.0
+        if self.has_conj_prior:
+            rv += float(self.prior.log_density(model.w))
+        for est, comp in zip(self.estimators, model.components):
+            fn = getattr(est, "model_log_density", None)
+            if fn is not None:
+                term = fn(comp)
+                if term is not None:
+                    rv += float(term)
+        return rv
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, tuple[Any, ...]]) -> "MixtureDistribution":
         """Estimate MixtureDistribution from aggregated sufficient statistics.
@@ -1108,6 +1315,27 @@ class MixtureEstimator(ParameterEstimator):
         counts, comp_suff_stats = suff_stat
 
         components = [self.estimators[i].estimate(counts[i], comp_suff_stats[i]) for i in range(num_components)]
+
+        if self.has_conj_prior and self.fixed_weights is None:
+            # Conjugate Dirichlet weight update: MAP weights w_k proportional to
+            # (count_k + alpha_k - 1), clamped at the simplex boundary; the posterior
+            # Dirichlet(alpha + counts) is carried forward as the new weight prior.
+            if isinstance(self.prior, SymmetricDirichletDistribution):
+                alpha = np.ones(num_components) * float(self.prior.get_parameters())
+            else:
+                alpha = np.asarray(self.prior.get_parameters(), dtype=float)
+
+            cpp = np.add(counts, alpha) - 1.0
+            cpp = np.maximum(cpp, 0.0)
+
+            if cpp.sum() == 0:
+                w = np.ones(num_components) / float(num_components)
+            else:
+                w = cpp / cpp.sum()
+
+            return MixtureDistribution(
+                components, w, name=self.name, prior=DirichletDistribution(np.add(counts, alpha))
+            )
 
         if self.fixed_weights is not None:
             w = np.asarray(self.fixed_weights)

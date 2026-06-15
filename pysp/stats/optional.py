@@ -17,6 +17,7 @@ from typing import Any, TypeVar
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.stats.composite import _distribute_child_prior
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -29,6 +30,7 @@ from pysp.stats.pdist import (
     child_enumerator,
 )
 from pysp.utils.enumeration import freeze, merge_enumerators
+from pysp.utils.special import digamma
 
 T = TypeVar("T")
 E = TypeVar("E")
@@ -50,6 +52,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         p: float | None = None,
         missing_value: Any = None,
         name: str | None = None,
+        prior: tuple[Any, Any] | None = None,
     ) -> None:
         """OptionalDistribution for handling missing values in estimation.
 
@@ -58,6 +61,11 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             p (Optional[float]): Probability that dist has missing_value.
             missing_value (Any): Missing value from dist.
             name (Optional[str]): Set a name for the object instance.
+            prior (Optional): Joint parameter prior ``(p_prior, dist_prior)``. ``p_prior`` is a conjugate
+                Beta prior on the missing probability ``p`` (a
+                :class:`~pysp.stats.beta.BetaDistribution`); ``dist_prior`` is the underlying
+                distribution's prior, distributed via ``set_prior``. ``None`` (default) leaves a plain
+                point model (existing behavior byte-identical).
 
         Attributes:
             dist (SequenceEncodableProbabilityDistribution): Base distribution.
@@ -80,6 +88,67 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         self.log1_p = np.log1p(self.p)
         self.missing_value = missing_value
         self.name = name
+        self.set_prior(prior)
+
+    def get_prior(self) -> tuple[Any, Any]:
+        """Return the joint prior as ``(p_prior, dist_prior)``."""
+        return self.prior, self.dist.get_prior()
+
+    def set_prior(self, prior: tuple[Any, Any] | None) -> None:
+        """Distribute the joint prior ``(p_prior, dist_prior)`` to the missing probability and base dist.
+
+        ``prior=None`` is a no-op (point model, existing behavior byte-identical). Otherwise the first
+        element is a conjugate Beta prior on ``p`` (caching the digamma expectations used by
+        ``expected_log_density``) and the second is pushed to the base distribution's ``set_prior``.
+        """
+        if prior is None:
+            self.prior = None
+            self.conj_prior_params = None
+            self.has_conj_prior = False
+            return
+        self.dist.set_prior(prior[1])
+        self._set_p_prior(prior[0])
+
+    def _set_p_prior(self, p_prior: Any) -> None:
+        from pysp.stats.beta import BetaDistribution
+
+        self.prior = p_prior
+        if isinstance(p_prior, BetaDistribution):
+            a, b = p_prior.get_parameters()
+            self.conj_prior_params = (digamma(a), digamma(b), digamma(a + b))
+            self.has_conj_prior = True
+        else:
+            self.conj_prior_params = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: T) -> float:
+        """Posterior-expected log-density ``E_q[log p(x)]`` at ``x``.
+
+        With a conjugate Beta prior on ``p`` the expectation over ``p`` is available in closed form via
+        digamma terms (missing => ``da - dab``; observed => ``db - dab + dist.expected_log_density(x)``);
+        otherwise this falls back to the plug-in ``log_density``.
+        """
+        if not self.has_conj_prior:
+            return self.log_density(x)
+        da, db, dab = self.conj_prior_params
+        if self.missing_value_is_nan:
+            missing = isinstance(x, (np.floating, float)) and np.isnan(x)
+        else:
+            missing = (x == self.missing_value) or (x is self.missing_value)
+        if missing:
+            return da - dab
+        return db - dab + self.dist.expected_log_density(x)
+
+    def seq_expected_log_density(self, x: tuple[int, np.ndarray, np.ndarray, "E"]) -> np.ndarray:
+        """Vectorized posterior-expected log-density; falls back to ``seq_log_density`` without a prior."""
+        if not self.has_conj_prior:
+            return self.seq_log_density(x)
+        sz, z_idx, nz_idx, enc_data = x
+        da, db, dab = self.conj_prior_params
+        rv = np.empty(sz, dtype=np.float64)
+        rv.fill(da - dab)
+        rv[nz_idx] = self.dist.seq_expected_log_density(enc_data) + (db - dab)
+        return rv
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec, declaration_for
@@ -289,12 +358,14 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "OptionalEstimator":
         """Return an estimator for fitting this distribution from data."""
+        prior = None if self.prior is None else (self.prior, self.dist.get_prior())
         return OptionalEstimator(
             self.dist.estimator(pseudo_count=pseudo_count),
             missing_value=self.missing_value,
             pseudo_count=pseudo_count,
             est_prob=self.has_p,
             name=self.name,
+            prior=prior,
         )
 
     def dist_to_encoder(self) -> "OptionalDataEncoder":
@@ -529,6 +600,7 @@ class OptionalEstimator(ParameterEstimator):
         pseudo_count: float | None = None,
         name: str | None = None,
         keys: str | None = None,
+        prior: tuple[Any, Any] | None = None,
     ) -> None:
         """OptionalEstimator for estimating OptionalDistribution from sufficient statistics.
 
@@ -539,6 +611,9 @@ class OptionalEstimator(ParameterEstimator):
             pseudo_count (Optional[float]): Regularize estimate of missing data.
             name (Optional[str]): Set name to object.
             keys (Optional[str]): Set keys for sufficient statistics.
+            prior (Optional): Joint parameter prior ``(p_prior, dist_prior)``. ``p_prior`` is a conjugate
+                Beta prior on ``p``; ``dist_prior`` is delegated to the base estimator. ``None`` (default)
+                leaves the empirical / pseudo-count update byte-identical.
 
         Attributes:
             estimator (ParameterEstimator): Estimator for base distribution.
@@ -555,11 +630,67 @@ class OptionalEstimator(ParameterEstimator):
         self.missing_value = missing_value
         self.keys = keys
         self.name = name
+        self.prior = None
+        self.has_conj_prior = False
+        self.set_prior(prior)
 
     def accumulator_factory(self) -> "OptionalEstimatorAccumulatorFactory":
         return OptionalEstimatorAccumulatorFactory(self.estimator, self.missing_value, keys=self.keys, name=self.name)
 
+    def get_prior(self) -> tuple[Any, Any]:
+        """Return the joint prior as ``(p_prior, dist_prior)`` from this estimator and the base estimator."""
+        return self.prior, self.estimator.get_prior()
+
+    def set_prior(self, prior: tuple[Any, Any] | None) -> None:
+        """Distribute ``(p_prior, dist_prior)`` to this estimator's ``p`` prior and the base estimator.
+
+        ``prior=None`` is a no-op (empirical/pseudo-count path stays byte-identical). The first element
+        is a conjugate Beta prior on ``p``; the second is pushed to the base estimator via ``set_prior``.
+        """
+        from pysp.stats.beta import BetaDistribution
+
+        if prior is None:
+            return
+        _distribute_child_prior(self.estimator, prior[1])
+        self.prior = prior[0]
+        self.has_conj_prior = isinstance(prior[0], BetaDistribution)
+
+    def model_log_density(self, model: "OptionalDistribution") -> float:
+        """Sum the Beta-prior log-density at ``p`` and the base estimator's term (ELBO global term)."""
+        rv = self.estimator.model_log_density(model.dist)
+        if self.has_conj_prior:
+            rv += float(self.prior.log_density(model.p))
+        return rv
+
+    def _estimate_conjugate(self, suff_stat: tuple[list[float], SS]) -> "OptionalDistribution":
+        """Closed-form Beta conjugate posterior update on ``p`` (carried forward as the fitted prior).
+
+        ``psum`` is the missing weight, ``nsum`` the observed weight; the posterior mode of the Beta is
+        used for ``p`` and the base distribution is delegated to the inner estimator.
+        """
+        from pysp.stats.beta import BetaDistribution
+
+        psum = suff_stat[0][0]
+        nsum = suff_stat[0][1]
+        dist = self.estimator.estimate(nsum, suff_stat[1])
+
+        a, b = self.prior.get_parameters()
+        new_a = a + psum
+        new_b = b + nsum
+        new_p = (psum + a - 1.0) / (psum + nsum + a + b - 2.0)
+        new_prior = BetaDistribution(new_a, new_b)
+        return OptionalDistribution(
+            dist,
+            p=new_p,
+            missing_value=self.missing_value,
+            name=self.name,
+            prior=(new_prior, dist.get_prior()),
+        )
+
     def estimate(self, nobs: float | None, suff_stat: tuple[list[float], SS] | None) -> "OptionalDistribution":
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
+
         dist = self.estimator.estimate(suff_stat[0][1], suff_stat[1])
 
         if self.pseudo_count is not None and self.est_prob:
