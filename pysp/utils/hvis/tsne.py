@@ -12,7 +12,7 @@ import sys
 import numpy as np
 import scipy.sparse
 
-from pysp.utils.htsne.affinity import _calibrate_row
+from pysp.utils.hvis.affinity import _calibrate_row
 from pysp.utils.optional_deps import HAS_NUMBA, numba
 
 
@@ -539,14 +539,14 @@ def _negative_forces(
 def _dispatch_negative_forces(*args, **kwargs) -> tuple[np.ndarray, float]:
     """Call _negative_forces through the htsne package namespace.
 
-    When this module lived as a single ``pysp.utils.htsne`` module, the
+    When this module lived as a single ``pysp.utils.hvis`` module, the
     Barnes-Hut loop read ``_negative_forces`` as a module global, so rebinding
-    ``pysp.utils.htsne._negative_forces`` redirected the call. Preserving that
+    ``pysp.utils.hvis._negative_forces`` redirected the call. Preserving that
     hook now that the package re-exports the name: resolve the (possibly
     monkeypatched) package attribute at call time and fall back to the local
     definition.
     """
-    pkg = sys.modules.get("pysp.utils.htsne")
+    pkg = sys.modules.get("pysp.utils.hvis")
     fn = getattr(pkg, "_negative_forces", _negative_forces) if pkg is not None else _negative_forces
     return fn(*args, **kwargs)
 
