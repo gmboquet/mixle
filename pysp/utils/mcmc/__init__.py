@@ -36,6 +36,7 @@ from .proposals import (
 )
 from .samplers import (
     MCMCResult,
+    affine_invariant_ensemble,
     distribution_log_target,
     hamiltonian_monte_carlo,
     metropolis_hastings,
@@ -55,6 +56,7 @@ __all__ = [
     "ParameterBridge",
     "Proposal",
     "RandomWalkProposal",
+    "affine_invariant_ensemble",
     "build_parameter_bridge",
     "distribution_log_target",
     "hamiltonian_monte_carlo",

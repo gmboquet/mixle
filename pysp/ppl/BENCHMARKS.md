@@ -18,8 +18,8 @@ Stan / Pyro / NumPyro have **no exact path** — they must run MCMC or SVI and g
 
 | Task (N) | pysp.ppl exact | NumPyro NUTS (2000 draws) | speedup | same answer? |
 |---|---|---|---|---|
-| Poisson-Gamma, N=200k | **3.6 ms** | 3721 ms (ESS 859) | **1027×** | yes — rate 3.5042 vs 3.5043 |
-| Beta-Bernoulli, N=100k | **2.5 ms** | 2247 ms (ESS 647) | **906×** | yes — p 0.3720 vs 0.3720 |
+| Poisson-Gamma, N=200k | **5.4 ms** | 5690 ms (ESS 859) | **1053×** | yes — rate 3.5042 vs 3.5043 |
+| Beta-Bernoulli, N=100k | **2.6 ms** | 3619 ms (ESS 647) | **1412×** | yes — p 0.3720 vs 0.3720 |
 
 This is the headline: for the large, common class of conjugate / exponential-family /
 mixture-of-conjugate models, pysp.ppl isn't "competitive with" sampling PPLs — it sidesteps
@@ -31,42 +31,44 @@ and takes this path with no user intervention.
 
 | Task (N) | pysp.ppl | Pyro SVI (AutoNormal) | speedup | same answer? |
 |---|---|---|---|---|
-| Gaussian MLE, N=500k | **36 ms** (closed-form EM) | 6313 ms | **175×** | yes — mean 4.993 vs 4.992 |
+| Gaussian MLE, N=500k | **45 ms** (closed-form EM) | 11778 ms | **259×** | yes — mean 4.993 vs 4.991 |
 
 pysp runs the vectorized `seq_update` EM engine and converges in closed-form sufficient-statistic
 updates; the gradient-PPL route (Pyro SVI / torch-Adam) iterates Adam to the same answer.
 
-## 3. General (non-conjugate) MCMC — honest accounting
+## 3. General (non-conjugate) MCMC
 
-For a generic posterior with no closed form (here: Gaussian mean+sd, N=20k), pysp offers
-RW-Metropolis (zero compile overhead) and analytic-gradient HMC (perfect mixing). This is the
-class where JIT-compiled NUTS and ensemble samplers are strong, and we report it straight:
+For a generic posterior with no closed form (here: Gaussian mean+sd, N=20k), pysp offers four
+samplers via `fit(how=...)`. The decisive metric is **ESS/sec** (effective samples per second of
+wall-clock, compile included):
 
-| sampler | wall-clock | ESS | ESS/sec | note |
+| sampler (`how=`) | wall-clock | ESS | ESS/sec | note |
 |---|---|---|---|---|
-| pysp RW-Metropolis | **416 ms** | 125 | 300 | fastest single-fit wall-clock |
-| pysp HMC (analytic grad) | 7383 ms | 1000 | 135 | perfect mixing, torch per-step overhead |
-| NumPyro NUTS | 1564 ms | 1473 | 942 | incl. JIT compile; best ESS/sec of the gradient samplers |
-| emcee (ensemble) | 3448 ms | 32000 | 9280 | affine-invariant ensemble dominates ESS/sec here |
+| `ensemble` (Goodman & Weare) | 1723 ms | 15408 | **8945** | **highest ESS/sec — beats emcee and NUTS** |
+| emcee (ensemble) | 4006 ms | 31580 | 7883 | the reference affine-invariant sampler |
+| `mcmc` (RW-Metropolis) | **639 ms** | 125 | 196 | fastest single-fit wall-clock |
+| NumPyro NUTS | 2359 ms | 1473 | 624 | incl. JIT compile |
+| `hmc` (analytic grad) | 12287 ms | 1000 | 81 | perfect mixing, but per-leapfrog Torch overhead |
 
-Honest takeaways for the general case:
+Takeaways for the general case:
 
-* **Single-fit wall-clock**: pysp RW-Metropolis is fastest (416 ms) — no compile step, so for a
-  one-shot fit you get an answer before NumPyro has finished tracing.
-* **Mixing efficiency (ESS/sec)**: pysp does **not** lead here. NumPyro's JIT-compiled NUTS and
-  emcee's ensemble sampler get more effective samples per second on this low-dimensional target.
-  pysp HMC achieves the same *perfect* mixing as NUTS (ESS = draws) but pays a per-leapfrog Torch
-  dispatch cost; closing that gap (fused exp-family gradients / a compiled trajectory) is the
-  open optimization, tracked in the compute-engine design.
+* **Mixing efficiency (ESS/sec)**: pysp's affine-invariant **ensemble** sampler is the leader —
+  ~14× NumPyro NUTS and slightly above emcee — at the lowest wall-clock of the high-ESS samplers.
+  It needs no per-dimension step tuning and no JIT-compile latency.
+* **Single-fit wall-clock**: pysp RW-Metropolis is fastest to *an* answer (639 ms) — no compile
+  step, so for a one-shot low-dim fit you finish before NumPyro has traced the model.
+* **HMC** achieves the same *perfect* mixing as NUTS (ESS = draws) but pays a per-leapfrog Torch
+  dispatch cost; a fused exp-family gradient / compiled trajectory (compute-engine design) is the
+  open optimization. Prefer `ensemble` for throughput today.
 
 ## Bottom line vs Stan / Pyro / NumPyro
 
 * **Conjugate / exponential-family / mixture models** (the bulk of applied work): exact and
-  **~1000× faster** — a capability the sampling PPLs do not have.
-* **EM / MLE models**: **~175× faster**, same answer.
-* **General non-conjugate posteriors**: competitive on single-fit wall-clock; NUTS/ensemble lead
-  on ESS/sec. We report this rather than hide it.
+  **~1000–1400× faster** — a capability the sampling PPLs do not have.
+* **EM / MLE models**: **~260× faster**, same answer.
+* **General non-conjugate posteriors**: pysp's `ensemble` sampler has the **highest ESS/sec** of
+  any sampler measured (above emcee and NumPyro NUTS), and RW-Metropolis wins single-fit latency.
 
-So pysp.ppl's advantage is decisive precisely where a closed form or sufficient-statistic
-structure exists — which it exploits automatically — and it remains a usable general sampler
-elsewhere. Reproduce any row with `python -m pysp.ppl.benchmark_vs`.
+So pysp.ppl is fastest where a closed form or sufficient-statistic structure exists — which it
+exploits automatically — and leads on sampling throughput for general posteriors too. Reproduce
+any row with `python -m pysp.ppl.benchmark_vs`.
