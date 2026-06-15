@@ -227,6 +227,13 @@ density_rank(dist, value)           # exact-head + sampling rank & CDF of an obs
 count_dp_seek(dist, index=10_000)   # the ~10,000th most probable value, by structural count-DP
 ```
 
+`Composite` / `Record` also support **conditional enumeration** — most-probable completions given
+some fields, best-first:
+
+```python
+record.conditional_enumerator({"country": "US"}).top_k(5)   # 5 likeliest records with country=US
+```
+
 For decomposable families (`Composite` / `Record` / `Sequence` / `MarkovChain`), rank↔value is an exact count
 dynamic program at any depth (`count_dp_rank`, `count_dp_seek`, `cumulative_probability`,
 `mixture_cross_rank`). For very large or infinite supports, **budget-bounded quantized indexes** seek
