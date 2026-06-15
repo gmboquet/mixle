@@ -66,5 +66,32 @@ class ContinuousCDFTestCase(unittest.TestCase):
                 self.assertAlmostEqual(fd, math.exp(dist.log_density(x)), delta=1e-3, msg="%s at %s" % (name, x))
 
 
+class MultivariateCumulativeTestCase(unittest.TestCase):
+    """Multivariate Gaussians have no coordinate-wise CDF (no total order on R^d), but the
+    probability-ordered cumulative G(x)=P(p(Y)>=p(x)) -- the highest-density-region mass through x --
+    is exact via the chi-square of the Mahalanobis distance, and density_rank uses it."""
+
+    def test_mvn_exact_cumulative_matches_sampling(self):
+        import numpy as np
+
+        from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution
+        from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
+        from pysp.utils.density_rank import density_rank
+
+        mvn = MultivariateGaussianDistribution(np.array([0.5, -1.0]), np.array([[2.0, 0.3], [0.3, 1.0]]))
+        dmvn = DiagonalGaussianDistribution(np.array([0.0, 1.0, 2.0]), np.array([1.0, 2.0, 0.5]))
+        for dist, x in [(mvn, np.array([1.0, 0.0])), (dmvn, np.array([0.5, 1.5, 2.0]))]:
+            r = density_rank(dist, x, n_samples=1)
+            self.assertEqual(r.method, "exact-analytic")
+            # large-sample Monte-Carlo reference
+            t = float(dist.log_density(x))
+            ys = dist.sampler(0).sample(100000)
+            samp = sum(1 for y in ys if float(dist.log_density(y)) >= t - 1e-9) / 100000
+            self.assertAlmostEqual(r.cumulative_probability, samp, delta=0.02)
+            self.assertTrue(0.0 <= r.cumulative_probability <= 1.0)
+        # the mode has nothing strictly more probable -> G == 0
+        self.assertAlmostEqual(density_rank(mvn, mvn.mu).cumulative_probability, 0.0, delta=1e-9)
+
+
 if __name__ == "__main__":
     unittest.main()
