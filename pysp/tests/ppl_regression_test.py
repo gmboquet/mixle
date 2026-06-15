@@ -98,5 +98,26 @@ class MixedEffectsTestCase(unittest.TestCase):
                                1.0, delta=0.15)
 
 
+    def test_random_slopes_lmm(self):
+        rng = np.random.RandomState(0)
+        G, n_per = 60, 40
+        u0 = rng.normal(0, 1.0, G)
+        u1 = rng.normal(0, 0.8, G)
+        ys, xs, subj = [], [], []
+        for gi in range(G):
+            x = rng.normal(0, 1, n_per)
+            y = 1.0 + 2.0 * x + u0[gi] + u1[gi] * x + rng.normal(0, 0.5, n_per)
+            ys += list(y); xs += list(x); subj += [gi] * n_per
+        m = Normal(free * Field("x") + free + Group("subject", slopes=["x"]), free).fit(
+            ys, given={"x": xs, "subject": subj})
+        r = m.result
+        sds = np.sqrt(np.diag(r.random_cov))
+        self.assertAlmostEqual(sds[0], 1.0, delta=0.25)    # random intercept sd
+        self.assertAlmostEqual(sds[1], 0.8, delta=0.25)    # random slope sd
+        self.assertAlmostEqual(r.sigma, 0.5, delta=0.1)
+        bslope = np.array([r.group_effects_full[i][1] for i in range(G)])
+        self.assertGreater(np.corrcoef(bslope, u1)[0, 1], 0.95)
+
+
 if __name__ == "__main__":
     unittest.main()
