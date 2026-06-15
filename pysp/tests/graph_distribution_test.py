@@ -48,6 +48,48 @@ class GraphDistributionTestCase(unittest.TestCase):
         self.assertAlmostEqual(round_tripped.p, dist.p, places=12)
         self.assertEqual(round_tripped.directed, dist.directed)
 
+    def test_erdos_renyi_enumeration_matches_brute_force(self):
+        import itertools
+
+        from pysp.data.graph_data import _edge_indices
+        from pysp.utils.density_rank import density_rank
+        from pysp.utils.enumeration import freeze
+
+        def brute(dist, n):
+            edges = list(_edge_indices(n, dist.directed, dist.self_loops))
+            out = []
+            for bits in itertools.product((0, 1), repeat=len(edges)):
+                adj = np.zeros((n, n), dtype=np.int8)
+                for (i, j), v in zip(edges, bits):
+                    adj[i, j] = v
+                    if not dist.directed:
+                        adj[j, i] = v
+                out.append((adj, dist.log_density(adj)))
+            out.sort(key=lambda t: -t[1])
+            return out
+
+        for directed, self_loops, p, n in [(False, False, 0.3, 4), (True, False, 0.4, 3), (False, True, 0.25, 3)]:
+            dist = stats.ErdosRenyiGraphDistribution(p, directed=directed, self_loops=self_loops, num_nodes=n)
+            items = list(dist.enumerator())
+            b = brute(dist, n)
+            self.assertEqual(len(items), len(b))
+            np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in b], atol=1e-9)
+            for v, lp in items:
+                self.assertAlmostEqual(lp, dist.log_density(v), places=9)
+            self.assertEqual(len({freeze(v) for v, _ in items}), len(items))
+
+        # all four capabilities now route through the enumerator (rank uses the exact head)
+        dist = stats.ErdosRenyiGraphDistribution(0.3, num_nodes=5)
+        dist.enumerator().quantized_index(max_bits=10.0)  # arbitrary-index unranking builds
+        r = density_rank(dist, dist.sampler(0).sample(), n_samples=2000, seed=1)
+        self.assertEqual(r.method, "exact-head")
+
+    def test_erdos_renyi_enumeration_requires_num_nodes(self):
+        from pysp.stats.compute.pdist import EnumerationError
+
+        with self.assertRaises(EnumerationError):
+            stats.ErdosRenyiGraphDistribution(0.3).enumerator()
+
     def test_stochastic_block_matches_legacy_model_and_estimates_probabilities(self):
         assignments = np.asarray([0, 0, 1, 1])
         adj = np.asarray(
