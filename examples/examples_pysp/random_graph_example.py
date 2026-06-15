@@ -1,7 +1,6 @@
 """Example use for IntegerBernoulliSetDistribution for random graph generation."""
 import numpy as np
 
-
 from pysp.stats import *
 from pysp.utils.estimation import optimize
 

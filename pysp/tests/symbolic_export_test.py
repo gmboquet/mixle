@@ -18,7 +18,7 @@ HAS_SAGE = importlib.util.find_spec("sage") is not None
 
 def _gaussian_log_density_expr(mu=0.0, sigma2=1.0):
     """Symbolic Gaussian log-density expression in symbol ``x``."""
-    from pysp.stats.gaussian import GaussianDistribution
+    from pysp.stats.leaf.gaussian import GaussianDistribution
 
     x = SYMBOLIC_ENGINE.symbol("x")
     return GaussianDistribution(mu, sigma2).backend_seq_log_density(x, SYMBOLIC_ENGINE), x

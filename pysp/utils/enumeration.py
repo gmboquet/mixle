@@ -11,7 +11,7 @@ generic algorithms used by the combinator distributions:
   - best_first_union / best_first_union_max: union of sorted streams with possibly
     overlapping supports, re-scored exactly and emitted in provably correct order.
 
-See pysp.stats.pdist.DistributionEnumerator for the enumeration contract.
+See pysp.stats.compute.pdist.DistributionEnumerator for the enumeration contract.
 """
 
 import bisect
@@ -75,7 +75,7 @@ def freeze(x: Any) -> Hashable:
 
 def supports_enumeration(dist) -> bool:
     """Return True if dist.enumerator() can be constructed."""
-    from pysp.stats.pdist import EnumerationError
+    from pysp.stats.compute.pdist import EnumerationError
 
     try:
         dist.enumerator()

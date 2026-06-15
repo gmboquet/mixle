@@ -11,12 +11,12 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.composite import CompositeDistribution
-from pysp.stats.hidden_markov import HiddenMarkovModelDistribution
-from pysp.stats.int_range import IntegerCategoricalDistribution
-from pysp.stats.mixture import MixtureDistribution
-from pysp.stats.poisson import PoissonDistribution
-from pysp.stats.sequence import SequenceDistribution
+from pysp.stats.combinator.composite import CompositeDistribution
+from pysp.stats.combinator.sequence import SequenceDistribution
+from pysp.stats.latent.hidden_markov import HiddenMarkovModelDistribution
+from pysp.stats.latent.mixture import MixtureDistribution
+from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
+from pysp.stats.leaf.poisson import PoissonDistribution
 from pysp.utils.density_rank import count_dp_rank, density_rank
 
 

@@ -30,12 +30,12 @@ from pysp.stats import (
     seq_estimate,
     seq_log_density_sum,
 )
-from pysp.stats.ignored import (
+from pysp.stats.combinator.ignored import (
     IgnoredAccumulator,
     IgnoredDistribution,
     IgnoredEstimator,
 )
-from pysp.stats.optional import OptionalDistribution, OptionalEstimator
+from pysp.stats.combinator.optional import OptionalDistribution, OptionalEstimator
 
 
 class LocalEstimateTestCase(unittest.TestCase):

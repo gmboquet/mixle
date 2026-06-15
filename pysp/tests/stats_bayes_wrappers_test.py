@@ -14,19 +14,19 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.beta import BetaDistribution as SBeta
-from pysp.stats.catdirichlet import DictDirichletDistribution as SDir
-from pysp.stats.categorical import CategoricalDistribution as SCat
-from pysp.stats.categorical import CategoricalEstimator as SCatEst
-from pysp.stats.composite import CompositeDistribution as SComp
-from pysp.stats.composite import CompositeEstimator as SCompEst
-from pysp.stats.conditional import ConditionalDistribution as SCond
-from pysp.stats.gaussian import GaussianDistribution as SGauss
-from pysp.stats.gaussian import GaussianEstimator as SGaussEst
-from pysp.stats.ignored import IgnoredDistribution as SIgnored
-from pysp.stats.normgamma import NormalGammaDistribution as SNG
-from pysp.stats.optional import OptionalDistribution as SOpt
-from pysp.stats.sequence import SequenceDistribution as SSeq
+from pysp.stats.bayes.catdirichlet import DictDirichletDistribution as SDir
+from pysp.stats.bayes.normgamma import NormalGammaDistribution as SNG
+from pysp.stats.combinator.composite import CompositeDistribution as SComp
+from pysp.stats.combinator.composite import CompositeEstimator as SCompEst
+from pysp.stats.combinator.conditional import ConditionalDistribution as SCond
+from pysp.stats.combinator.ignored import IgnoredDistribution as SIgnored
+from pysp.stats.combinator.optional import OptionalDistribution as SOpt
+from pysp.stats.combinator.sequence import SequenceDistribution as SSeq
+from pysp.stats.leaf.beta import BetaDistribution as SBeta
+from pysp.stats.leaf.categorical import CategoricalDistribution as SCat
+from pysp.stats.leaf.categorical import CategoricalEstimator as SCatEst
+from pysp.stats.leaf.gaussian import GaussianDistribution as SGauss
+from pysp.stats.leaf.gaussian import GaussianEstimator as SGaussEst
 
 NG = (0.3, 2.0, 4.0, 5.0)
 DIR = {"a": 2.0, "b": 3.0, "c": 1.5}

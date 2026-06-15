@@ -6,7 +6,7 @@ import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats import GaussianDistribution, GaussianEstimator, JointMixtureDistribution
-from pysp.stats.jmixture import JointMixtureEstimator
+from pysp.stats.latent.jmixture import JointMixtureEstimator
 
 try:
     from pysp.engines import TorchEngine

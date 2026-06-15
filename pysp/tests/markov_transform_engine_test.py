@@ -10,10 +10,10 @@ import unittest
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats.backend import backend_seq_log_density
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.composite import CompositeDistribution, CompositeEstimator
-from pysp.stats.markov_transform import MarkovTransformDistribution, MarkovTransformEstimator
+from pysp.stats.combinator.composite import CompositeDistribution, CompositeEstimator
+from pysp.stats.compute.backend import backend_seq_log_density
+from pysp.stats.graph.markov_transform import MarkovTransformDistribution, MarkovTransformEstimator
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 
 try:
     from pysp.engines import TorchEngine

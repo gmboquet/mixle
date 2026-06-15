@@ -5,8 +5,8 @@ import unittest
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.stats.tree_hmm import TreeHiddenMarkovEstimator, TreeHiddenMarkovModelDistribution
+from pysp.stats.latent.tree_hmm import TreeHiddenMarkovEstimator, TreeHiddenMarkovModelDistribution
+from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
 
 try:
     from pysp.engines import TorchEngine

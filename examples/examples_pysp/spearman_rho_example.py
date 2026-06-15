@@ -2,8 +2,7 @@
 
 import numpy as np
 
-
-from pysp.stats.spearman_rho import SpearmanRankingDistribution, SpearmanRankingEstimator
+from pysp.stats.graph.spearman_rho import SpearmanRankingDistribution, SpearmanRankingEstimator
 from pysp.utils.estimation import optimize
 
 if __name__ == '__main__':

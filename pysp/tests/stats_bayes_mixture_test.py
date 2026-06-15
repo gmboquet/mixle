@@ -16,17 +16,17 @@ import numpy as np
 from scipy.special import logsumexp
 
 from pysp.stats import seq_encode, seq_estimate, seq_initialize
-from pysp.stats.dirichlet import DirichletDistribution
-from pysp.stats.gaussian import GaussianDistribution
-from pysp.stats.mixture import (
+from pysp.stats.bayes.dirichlet import DirichletDistribution
+from pysp.stats.bayes.normgamma import NormalGammaDistribution
+from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+from pysp.stats.latent.mixture import (
     MixtureDistribution,
     MixtureEstimator,
     _dirichlet_expectations,
     _split_mixture_prior,
     mixture_prior,
 )
-from pysp.stats.normgamma import NormalGammaDistribution
-from pysp.stats.symdirichlet import SymmetricDirichletDistribution
+from pysp.stats.leaf.gaussian import GaussianDistribution
 from pysp.utils.estimation import _data_objective_sum, _model_objective, fit, optimize
 from pysp.utils.special import digamma
 

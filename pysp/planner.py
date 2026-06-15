@@ -20,7 +20,7 @@ import numpy as np
 
 from pysp.engines import NUMPY_ENGINE, NumpyEngine, auto_precision, engine_with_precision, precision_name
 from pysp.stats import ResidentEncodedPayload, move_encoded_payload
-from pysp.stats.pdist import DataSequenceEncoder, encoded_nbytes
+from pysp.stats.compute.pdist import DataSequenceEncoder, encoded_nbytes
 
 __all__ = [
     "CalibrationCatalog",
@@ -1659,7 +1659,7 @@ def _kernel_or_none(model: Any, engine: Any, estimator: Any | None = None) -> An
     # Only a genuinely kernel-less model falls back to the legacy seq path;
     # a real failure inside a kernel factory must surface, not silently
     # degrade to the slow path.
-    from pysp.stats.backend import BackendScoringError
+    from pysp.stats.compute.backend import BackendScoringError
 
     if not hasattr(model, "kernel"):
         return None

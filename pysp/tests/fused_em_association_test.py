@@ -19,15 +19,21 @@ import unittest
 import numpy as np
 
 from pysp.stats import seq_encode, seq_log_density_sum
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.composite import CompositeDistribution, CompositeEstimator
-from pysp.stats.conditional import ConditionalDistribution, ConditionalDistributionEstimator
-from pysp.stats.hidden_association import HiddenAssociationDistribution, HiddenAssociationEstimator
-from pysp.stats.ibp import IndianBuffetProcessDistribution, IndianBuffetProcessEstimator
-from pysp.stats.int_hidden_association import IntegerHiddenAssociationDistribution, IntegerHiddenAssociationEstimator
-from pysp.stats.int_multinomial import IntegerMultinomialDistribution, IntegerMultinomialEstimator
-from pysp.stats.markov_transform import MarkovTransformDistribution, MarkovTransformEstimator
-from pysp.stats.sparse_markov_transform import SparseMarkovAssociationDistribution, SparseMarkovAssociationEstimator
+from pysp.stats.combinator.composite import CompositeDistribution, CompositeEstimator
+from pysp.stats.combinator.conditional import ConditionalDistribution, ConditionalDistributionEstimator
+from pysp.stats.graph.markov_transform import MarkovTransformDistribution, MarkovTransformEstimator
+from pysp.stats.graph.sparse_markov_transform import (
+    SparseMarkovAssociationDistribution,
+    SparseMarkovAssociationEstimator,
+)
+from pysp.stats.latent.hidden_association import HiddenAssociationDistribution, HiddenAssociationEstimator
+from pysp.stats.latent.ibp import IndianBuffetProcessDistribution, IndianBuffetProcessEstimator
+from pysp.stats.latent.int_hidden_association import (
+    IntegerHiddenAssociationDistribution,
+    IntegerHiddenAssociationEstimator,
+)
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.leaf.int_multinomial import IntegerMultinomialDistribution, IntegerMultinomialEstimator
 from pysp.utils.estimation import optimize
 
 

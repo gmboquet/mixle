@@ -6,7 +6,7 @@ import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats import CategoricalDistribution, CategoricalEstimator, LDADistribution
-from pysp.stats.lda import LDAEstimator
+from pysp.stats.latent.lda import LDAEstimator
 from pysp.utils.optsutil import count_by_value
 
 try:
