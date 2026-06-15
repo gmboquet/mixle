@@ -2,18 +2,14 @@
 
 Mirrors stats_bayes_gaussian_test.py: each leaf gains conjugate posterior estimation,
 ``expected_log_density``, and a posterior-returning ``fit`` while its MLE path stays
-byte-identical. Numeric expectations mirror the historical bstats assertions, and a
-direct parity block asserts 1e-12 agreement with the pysp.bstats reference.
+byte-identical. Conjugate behavior is pinned against the textbook Beta posterior closed form,
+the digamma expected-log-density formula, and scalar-vs-seq self-consistency.
 """
 
 import unittest
 
 import numpy as np
 
-from pysp.bstats.bernoulli import BernoulliEstimator as BsBernE
-from pysp.bstats.beta import BetaDistribution as BsBeta
-from pysp.bstats.binomial import BinomialEstimator as BsBinE
-from pysp.bstats.geometric import GeometricEstimator as BsGeoE
 from pysp.stats.bernoulli import BernoulliDistribution, BernoulliEstimator
 from pysp.stats.beta import BetaDistribution
 from pysp.stats.binomial import BinomialDistribution, BinomialEstimator
@@ -62,17 +58,6 @@ class StatsBayesBernoulliTestCase(unittest.TestCase):
         d0 = BernoulliDistribution(0.4)
         self.assertAlmostEqual(d0.expected_log_density(True), d0.log_density(True), places=12)
 
-    def test_parity_with_bstats(self):
-        """1e-12 parity against the pysp.bstats reference implementation."""
-        a, b = 2.3, 4.7
-        bs = BsBernE(prior=BsBeta(a, b)).estimate((self.psum, self.nsum))
-        st = BernoulliEstimator(prior=BetaDistribution(a, b)).estimate(None, (self.count, self.psum))
-        self.assertAlmostEqual(bs.p, st.p, places=12)
-        self.assertAlmostEqual(bs.get_prior().a, st.get_prior().a, places=12)
-        self.assertAlmostEqual(bs.get_prior().b, st.get_prior().b, places=12)
-        for x in (True, False):
-            self.assertAlmostEqual(bs.expected_log_density(x), st.expected_log_density(x), places=12)
-
 
 class StatsBayesGeometricTestCase(unittest.TestCase):
     def setUp(self):
@@ -105,16 +90,6 @@ class StatsBayesGeometricTestCase(unittest.TestCase):
         )
         d0 = GeometricDistribution(0.3)
         self.assertAlmostEqual(d0.expected_log_density(3), d0.log_density(3), places=12)
-
-    def test_parity_with_bstats(self):
-        a, b = 1.7, 3.1
-        bs = BsGeoE(prior=BsBeta(a, b)).estimate((self.count, self.sum))
-        st = GeometricEstimator(prior=BetaDistribution(a, b)).estimate(None, (self.count, self.sum))
-        self.assertAlmostEqual(bs.p, st.p, places=12)
-        self.assertAlmostEqual(bs.get_prior().a, st.get_prior().a, places=12)
-        self.assertAlmostEqual(bs.get_prior().b, st.get_prior().b, places=12)
-        for x in (1, 2, 5, 0):
-            self.assertAlmostEqual(bs.expected_log_density(x), st.expected_log_density(x), places=12)
 
 
 class StatsBayesBinomialTestCase(unittest.TestCase):
@@ -163,18 +138,6 @@ class StatsBayesBinomialTestCase(unittest.TestCase):
         )
         d0 = BinomialDistribution(0.4, self.n)
         self.assertAlmostEqual(d0.expected_log_density(3), d0.log_density(3), places=12)
-
-    def test_parity_with_bstats(self):
-        a, b = 2.1, 5.5
-        bs = BsBinE(self.n, prior=BsBeta(a, b)).estimate((self.count, self.sum))
-        st = BinomialEstimator(max_val=self.n, min_val=0, prior=BetaDistribution(a, b)).estimate(
-            None, (self.count, self.sum, 0, self.n)
-        )
-        self.assertAlmostEqual(bs.p, st.p, places=12)
-        self.assertAlmostEqual(bs.get_prior().a, st.get_prior().a, places=12)
-        self.assertAlmostEqual(bs.get_prior().b, st.get_prior().b, places=12)
-        for x in (0, 3, 7, 10, 11):
-            self.assertAlmostEqual(bs.expected_log_density(x), st.expected_log_density(x), places=12)
 
 
 if __name__ == "__main__":

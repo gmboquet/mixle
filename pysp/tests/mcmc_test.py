@@ -589,19 +589,19 @@ class ParameterPosteriorTestCase(unittest.TestCase):
 
 
 class ConjugatePosteriorTestCase(unittest.TestCase):
-    def _bstats(self):
-        import pysp.bstats as bstats
-        from pysp.bstats.beta import BetaDistribution as BBeta
-        from pysp.bstats.gamma import GammaDistribution as BGamma
+    def _stats(self):
+        import pysp.stats as stats
+        from pysp.stats.beta import BetaDistribution as BBeta
+        from pysp.stats.gamma import GammaDistribution as BGamma
 
-        return bstats, BBeta, BGamma
+        return stats, BBeta, BGamma
 
     def test_poisson_gamma_conjugate_matches_analytic(self):
-        bstats, _, BGamma = self._bstats()
+        stats, _, BGamma = self._stats()
         rng = np.random.RandomState(11)
         data = rng.poisson(4.0, size=200).tolist()
         k0, theta0 = 2.0, 1.0
-        proto = bstats.PoissonDistribution(1.0, prior=BGamma(k0, theta0))
+        proto = stats.PoissonDistribution(1.0, prior=BGamma(k0, theta0))
 
         result = sample_conjugate_posterior(proto, data, draws=40000, seed=21)
         samples = np.asarray(result.samples, dtype=float)
@@ -618,11 +618,11 @@ class ConjugatePosteriorTestCase(unittest.TestCase):
         self.assertLess(abs(float(samples.var()) - analytic_var) / analytic_var, 0.1)
 
     def test_bernoulli_beta_conjugate_matches_analytic(self):
-        bstats, BBeta, _ = self._bstats()
+        stats, BBeta, _ = self._stats()
         rng = np.random.RandomState(12)
         data = (rng.rand(200) < 0.3).astype(int).tolist()
         a0, b0 = 1.0, 1.0
-        proto = bstats.BernoulliDistribution(0.5, prior=BBeta(a0, b0))
+        proto = stats.BernoulliDistribution(0.5, prior=BBeta(a0, b0))
 
         result = sample_conjugate_posterior(proto, data, draws=40000, seed=22)
         samples = np.asarray(result.samples, dtype=float)
@@ -638,10 +638,10 @@ class ConjugatePosteriorTestCase(unittest.TestCase):
         self.assertLess(abs(float(samples.var()) - analytic_var) / analytic_var, 0.1)
 
     def test_gaussian_normalgamma_conjugate_centers_on_data(self):
-        bstats, _, _ = self._bstats()
+        stats, _, _ = self._stats()
         rng = np.random.RandomState(13)
         data = rng.normal(2.0, 1.5, size=300).tolist()
-        proto = bstats.GaussianDistribution(0.0, 1.0)
+        proto = stats.GaussianDistribution(0.0, 1.0)
 
         result = sample_conjugate_posterior(proto, data, draws=40000, seed=23)
         mus = np.asarray([t[0] for t in result.samples], dtype=float)
@@ -652,9 +652,9 @@ class ConjugatePosteriorTestCase(unittest.TestCase):
         self.assertLess(abs(float(s2s.mean()) - float(np.var(data))) / float(np.var(data)), 0.15)
 
     def test_conjugate_unsupported_leaf_raises(self):
-        bstats, _, _ = self._bstats()
-        with self.assertRaisesRegex(NotImplementedError, "supports bstats"):
-            sample_conjugate_posterior(bstats.ExponentialDistribution(1.0), [0.5, 1.0], draws=5)
+        stats, _, _ = self._stats()
+        with self.assertRaisesRegex(NotImplementedError, "Gaussian, Poisson, and Bernoulli"):
+            sample_conjugate_posterior(stats.ExponentialDistribution(1.0), [0.5, 1.0], draws=5)
 
 
 if __name__ == "__main__":

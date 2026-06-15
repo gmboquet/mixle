@@ -109,17 +109,15 @@ def ensure_pysp_serialization_registry() -> None:
     if _REGISTRY_READY:
         return
 
-    from pysp.bstats.pdist import ParameterEstimator as BStatsEstimator
-    from pysp.bstats.pdist import ProbabilityDistribution as BStatsDistribution
     from pysp.stats.pdist import ParameterEstimator as StatsEstimator
     from pysp.stats.pdist import ProbabilityDistribution as StatsDistribution
 
-    for package_name in ("pysp.stats", "pysp.bstats"):
+    for package_name in ("pysp.stats",):
         for module in _iter_distribution_modules(package_name):
             for _, cls in inspect.getmembers(module, inspect.isclass):
                 if cls.__module__ != module.__name__:
                     continue
-                if issubclass(cls, (StatsDistribution, BStatsDistribution, StatsEstimator, BStatsEstimator)):
+                if issubclass(cls, (StatsDistribution, StatsEstimator)):
                     register_serializable_class(cls)
                 elif cls.__module__ == "pysp.stats.transform" and cls.__name__.endswith("Transform"):
                     register_serializable_class(cls)
