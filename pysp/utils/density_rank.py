@@ -104,6 +104,13 @@ def density_rank(
             # value is among the least probable, and the accumulated mass is exact.
             return DensityRankResult(min(1.0, mass), strictly_more, True, 0.0, t, "exact-exhausted")
 
+    # Exact analytic cumulative when the family provides one (e.g. the multivariate Gaussian's
+    # chi-square-of-Mahalanobis highest-density-region mass): no enumeration, no sampling.
+    exact_cumulative = getattr(dist, "density_cumulative", None)
+    if callable(exact_cumulative):
+        g = float(exact_cumulative(value))
+        return DensityRankResult(min(1.0, max(0.0, g)), None, True, 0.0, t, "exact-analytic")
+
     # Sampling fallback: estimate G(value) = P(log p(Y) >= t).
     samples = dist.sampler(seed).sample(n_samples)
     hits = 0
