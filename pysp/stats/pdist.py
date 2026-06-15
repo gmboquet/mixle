@@ -139,6 +139,35 @@ class ProbabilityDistribution:
 
         return to_fisher(self)
 
+    def get_prior(self) -> Optional["ProbabilityDistribution"]:
+        """Return the conjugate/parameter prior carried by this distribution, if any.
+
+        A distribution participates in the Bayesian (variational) protocol by
+        carrying a prior over its parameters. The default returns whatever was
+        stored on the ``prior`` attribute (``None`` for a plain point model),
+        so frequentist distributions answer ``None`` and behave as MLE models.
+        """
+        return getattr(self, "prior", None)
+
+    def set_prior(self, prior: Optional["ProbabilityDistribution"]) -> None:
+        """Attach a parameter prior to this distribution.
+
+        The default just records the prior; conjugate families override this to
+        precompute the variational expected natural parameters used by
+        ``expected_log_density``.
+        """
+        self.prior = prior
+
+    def expected_log_density(self, x: Any) -> float:
+        """Return the variational expectation ``E_q[log p(x | theta)]``.
+
+        When the distribution carries a conjugate parameter posterior ``q`` this
+        is the Bayesian E-step term; for a plain point model (no prior) it
+        degenerates to the plug-in ``log_density(x)``. Conjugate families
+        override this with their closed form.
+        """
+        return self.log_density(x)
+
     def enumerator(self) -> "DistributionEnumerator":
         """Return a DistributionEnumerator over this distribution's support.
 
@@ -344,6 +373,14 @@ class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
     def seq_log_density(self, x: Any) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         return np.asarray([self.log_density(u) for u in x])
+
+    def seq_expected_log_density(self, x: Any) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations.
+
+        Degenerates to ``seq_log_density`` for a plain point model; conjugate
+        families override with a closed form. See ``expected_log_density``.
+        """
+        return self.seq_log_density(x)
 
     def seq_log_density_lambda(self):
         """Return vectorized log-density callables for encoded data."""
@@ -569,6 +606,25 @@ class ParameterEstimator(Generic[SS]):
 
     @abstractmethod
     def accumulator_factory(self) -> "StatisticAccumulatorFactory": ...
+
+    def get_prior(self) -> Optional["ProbabilityDistribution"]:
+        """Return the parameter prior configured on this estimator, if any.
+
+        The unified estimation contract treats the prior as the single
+        regularization concept: ``None`` gives maximum likelihood, a conjugate
+        prior gives the Bayesian posterior update inside ``estimate``. The
+        default reads the ``prior`` attribute (``None`` when unset).
+        """
+        return getattr(self, "prior", None)
+
+    def model_log_density(self, model: "ProbabilityDistribution") -> float:
+        """Return the prior log-density of ``model``'s parameters (the ELBO global term).
+
+        Used by the variational/MAP objective in ``fit``. The default is ``0.0``
+        (no prior); conjugate estimators override this to evaluate their prior at
+        the model's parameters, mapping to the prior's parameterization first.
+        """
+        return 0.0
 
 
 class DataSequenceEncoder:
