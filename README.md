@@ -222,11 +222,12 @@ unbounded.
 from pysp.utils.density_rank import density_rank, count_dp_seek
 
 dist.enumerator().top_k(5)          # the 5 most probable (value, log_prob), in order
+dist.enumerator().top_p(0.95)       # smallest set covering 95% of the mass (discrete nucleus)
 density_rank(dist, value)           # exact-head + sampling rank & CDF of an observation
 count_dp_seek(dist, index=10_000)   # the ~10,000th most probable value, by structural count-DP
 ```
 
-For decomposable families (`Composite` / `Sequence` / `MarkovChain`), rank↔value is an exact count
+For decomposable families (`Composite` / `Record` / `Sequence` / `MarkovChain`), rank↔value is an exact count
 dynamic program at any depth (`count_dp_rank`, `count_dp_seek`, `cumulative_probability`,
 `mixture_cross_rank`). For very large or infinite supports, **budget-bounded quantized indexes** seek
 and unrank over just the most-probable region without enumerating everything:
@@ -249,8 +250,9 @@ Kronecker-substitution count convolution).
 - **Scalar / basic:** Gaussian, Student-t / Cauchy, Logistic, LogGaussian, Laplace, Uniform,
   Exponential, Gamma, Beta, Weibull, Rayleigh, Pareto, Poisson, Bernoulli, Geometric, Binomial,
   Negative Binomial, von Mises–Fisher, multivariate / diagonal Gaussian, Dirichlet, categorical.
-- **Combinators:** `CompositeDistribution` (tuples), `SequenceDistribution`, `OptionalDistribution`
-  (missing data), `TransformDistribution`, `ConditionalDistribution`, `WeightedDistribution`.
+- **Combinators:** `CompositeDistribution` (tuples), `RecordDistribution` (named fields),
+  `SequenceDistribution`, `OptionalDistribution` (missing data), `TransformDistribution`,
+  `ConditionalDistribution`, `WeightedDistribution`.
 - **Latent structure:** mixtures (plain, heterogeneous, hierarchical, joint, semi-supervised), LDA,
   PLSI, HMMs (standard, segmental, lookback, tree, quantized), PCFGs, Markov chains, hidden
   associations, IBP, random graphs (Erdős–Rényi, stochastic block), Spearman ranking, Bernoulli sets.
