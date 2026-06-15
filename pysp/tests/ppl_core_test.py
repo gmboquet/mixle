@@ -252,6 +252,16 @@ class PPLCoreTestCase(unittest.TestCase):
         with self.assertRaises(AttributeError):
             x._name = "nope"
 
+    def test_validation_errors(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(0, 1, 100))
+        with self.assertRaises(ValueError):                 # unknown how=
+            Normal(free, free).fit(data, how="bogus")
+        with self.assertRaises(ValueError):                 # empty data
+            Normal(free, free).fit([])
+        with self.assertRaises(ValueError):                 # query before fit
+            Normal(free, free).sample(3)
+
 
 if __name__ == "__main__":
     unittest.main()
