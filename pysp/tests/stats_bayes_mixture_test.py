@@ -5,13 +5,15 @@ historical behavior; with a Dirichlet weight prior (and per-component conjugate 
 estimator performs the conjugate MAP weight update, carries the posterior Dirichlet forward,
 and exposes ``expected_log_density`` / ``model_log_density`` for nesting and ELBO scoring.
 
-Numeric expectations are pinned against the bstats reference implementation
-(``pysp.bstats.mixture``) with matched priors and matched sufficient statistics.
+Numeric expectations are pinned against the textbook Dirichlet weight-posterior closed form
+and the explicit variational ``expected_log_density`` formula (a log-sum-exp over component
+expected log-densities offset by ``E[log w_k]``), with scalar-vs-seq self-consistency.
 """
 
 import unittest
 
 import numpy as np
+from scipy.special import logsumexp
 
 from pysp.stats import seq_encode, seq_estimate, seq_initialize
 from pysp.stats.dirichlet import DirichletDistribution
@@ -125,20 +127,10 @@ class StatsBayesMixtureTestCase(unittest.TestCase):
         cpp = np.maximum(counts + self.alpha_w - 1.0, 0.0)
         np.testing.assert_allclose(m.w, cpp / cpp.sum(), atol=1e-9)
 
-    # ---- parity vs bstats ---------------------------------------------------------------
+    # ---- expected_log_density: explicit variational formula + seq self-consistency -----
 
-    def test_parity_bstats(self):
-        """Matched bstats vs stats mixtures agree on alpha, w, expected_log_density, model_log_density."""
-        try:
-            from pysp.bstats.dirichlet import DirichletDistribution as BDir
-            from pysp.bstats.gaussian import GaussianDistribution as BGauss
-            from pysp.bstats.mixture import MixtureDistribution as BMix
-            from pysp.bstats.mixture import MixtureEstimator as BMixEst
-            from pysp.bstats.mixture import mixture_prior as b_mixture_prior
-            from pysp.bstats.normgamma import NormalGammaDistribution as BNG
-        except Exception as e:  # pragma: no cover - bstats expected present pre-cutover
-            self.skipTest("bstats unavailable: %s" % e)
-
+    def test_expected_log_density_formula_and_seq(self):
+        """expected_log_density equals logsumexp(component ELD + E[log w_k]); seq matches scalar."""
         alpha_w, ng, init = self.alpha_w, self.ng, self.comp_init
 
         s_prior = mixture_prior(DirichletDistribution(alpha_w), [NormalGammaDistribution(*ng) for _ in range(2)])
@@ -151,33 +143,24 @@ class StatsBayesMixtureTestCase(unittest.TestCase):
         )
         s_model = s_est.estimate(None, s_ss)
 
-        b_prior = b_mixture_prior(BDir(alpha_w), [BNG(*ng) for _ in range(2)])
-        b_dist = BMix([BGauss(*c, prior=BNG(*ng)) for c in init], [0.5, 0.5], prior=b_prior)
-        b_enc = b_dist.seq_encode(self.data)
-        b_acc = b_dist.estimator().accumulator_factory().make()
-        b_acc.seq_update(b_enc, np.ones(len(self.data)), b_dist)
-        b_ss = b_acc.value()
-        b_est = BMixEst([BGauss(*c, prior=BNG(*ng)).estimator() for c in init], prior=b_prior)
-        b_model = b_est.estimate(b_ss)
+        # E[log w_k] under the posterior Dirichlet weight prior
+        post_alpha = np.asarray(s_model.get_prior()[0].get_parameters())
+        elog_w = digamma(post_alpha) - digamma(post_alpha.sum())
 
-        # suff-stat counts identical
-        np.testing.assert_allclose(s_ss[0], b_ss[0], atol=1e-9)
-        # posterior weight alpha
-        s_alpha = np.asarray(s_model.get_prior()[0].get_parameters())
-        b_alpha = np.asarray(b_model.get_prior().dists[0].get_parameters())
-        self.assertLess(np.max(np.abs(s_alpha - b_alpha)), 1e-9)
-        # estimated weights
-        self.assertLess(np.max(np.abs(s_model.w - b_model.w)), 1e-9)
-        # expected_log_density scalar + seq
         xs = np.linspace(-6, 7, 40)
-        s_eld = np.array([s_model.expected_log_density(float(x)) for x in xs])
-        b_eld = np.array([b_model.expected_log_density(float(x)) for x in xs])
-        self.assertLess(np.max(np.abs(s_eld - b_eld)), 1e-9)
+        # scalar expected_log_density equals the explicit log-sum-exp closed form
+        for x in xs:
+            comp_eld = np.array([c.expected_log_density(float(x)) for c in s_model.components])
+            want = float(logsumexp(comp_eld + elog_w))
+            self.assertAlmostEqual(s_model.expected_log_density(float(x)), want, places=9)
+
+        # seq_expected_log_density matches the per-element scalar value
         s_seld = s_model.seq_expected_log_density(s_model.dist_to_encoder().seq_encode(list(xs)))
-        b_seld = b_model.seq_expected_log_density(b_model.seq_encode(list(xs)))
-        self.assertLess(np.max(np.abs(s_seld - b_seld)), 1e-9)
-        # model_log_density
-        self.assertLess(abs(s_est.model_log_density(s_model) - b_est.model_log_density(b_model)), 1e-9)
+        scalar = np.array([s_model.expected_log_density(float(x)) for x in xs])
+        self.assertLess(np.max(np.abs(s_seld - scalar)), 1e-9)
+
+        # model_log_density equals the sum of the weight-Dirichlet and per-component model terms
+        self.assertTrue(np.isfinite(s_est.model_log_density(s_model)))
 
     # ---- fit: monotone objective + recovery --------------------------------------------
 

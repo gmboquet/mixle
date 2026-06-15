@@ -717,6 +717,158 @@ def harmonic(alpha: float, offset: float = 1.0):
     return schedule
 
 
+def posterior_carry() -> str:
+    """Return the recursive-conjugate streaming mode name.
+
+    In ``posterior_carry`` mode each fitted posterior becomes the next batch's prior, i.e. the
+    stream performs exact recursive Bayesian updating: the conjugate posterior after batch ``t`` is
+    fed in as the conjugate prior for batch ``t + 1``.
+    """
+    return "posterior_carry"
+
+
+def forgetting(rho: float):
+    """Return a constant forgetting / power-prior schedule for streaming Bayes.
+
+    ``rho`` in ``(0, 1]`` down-weights each incoming batch's sufficient statistics by a constant
+    factor before the conjugate ``estimate`` call, so older evidence decays geometrically. ``rho=1``
+    recovers ordinary (un-forgotten) accumulation.
+    """
+    if rho <= 0.0 or rho > 1.0:
+        raise ValueError("forgetting(rho) requires 0 < rho <= 1.")
+
+    def schedule(t: int) -> float:
+        return float(rho)
+
+    return schedule
+
+
+def _stream_accumulate(
+    enc_data: Any,
+    estimator: ParameterEstimator,
+    model: SequenceEncodableProbabilityDistribution,
+) -> tuple[float, Any]:
+    """Accumulate one encoded batch's globally tied sufficient statistics.
+
+    Returns ``(nobs, suff_stat)`` where ``suff_stat`` is the accumulator ``value()`` after the
+    key-merge/key-replace pass that ties globally shared parameters across the batch.
+    """
+    accumulator = estimator.accumulator_factory().make()
+    nobs = 0.0
+    for sz, enc in enc_data:
+        nobs += sz
+        accumulator.seq_update(enc, np.ones(sz), model)
+
+    stats_dict: dict[Any, Any] = dict()
+    accumulator.key_merge(stats_dict)
+    accumulator.key_replace(stats_dict)
+    return nobs, accumulator
+
+
+class BayesianStreamingEstimator:
+    """Streaming / recursive-Bayes driver over the pysp.stats estimator protocol.
+
+    ``mode='posterior_carry'`` (the default) performs exact recursive conjugate updating: each fitted
+    posterior is carried forward as the next batch's prior by rebuilding the estimator from the fitted
+    model (``model.estimator()`` returns an estimator whose prior is the model's posterior).
+
+    ``mode='forgetting'`` applies a power-prior step: the current batch's accumulated sufficient
+    statistics are scaled by ``rho = schedule(step)`` (via the accumulator's ``scale``, which
+    preserves structural support metadata such as a categorical's ``min_val``) before the ordinary
+    conjugate ``estimate`` call, and the batch's contribution to ``nobs`` is scaled to match.
+
+    The public surface is ``BayesianStreamingEstimator(estimator, mode=..., schedule=...)`` plus
+    ``.update(data=None, enc_data=None)`` and ``.reset()``.
+    """
+
+    def __init__(
+        self,
+        estimator: ParameterEstimator,
+        mode: str | None = "posterior_carry",
+        schedule: Any | None = None,
+        model: SequenceEncodableProbabilityDistribution | None = None,
+        init_estimator: ParameterEstimator | None = None,
+        init_p: float = 0.1,
+        rng: RandomState = RandomState(),
+        num_chunks: int = 1,
+    ) -> None:
+        self.estimator = estimator
+        self.init_estimator = estimator if init_estimator is None else init_estimator
+        self.mode = posterior_carry() if mode is None else mode
+        self.schedule = schedule
+        if self.mode == "forgetting" and self.schedule is None:
+            self.schedule = forgetting(1.0)
+        if self.mode not in ("posterior_carry", "forgetting"):
+            raise ValueError("mode must be 'posterior_carry' or 'forgetting'.")
+        self.model = model
+        self.init_p = init_p
+        self.rng = rng
+        self.num_chunks = num_chunks
+        self.step = 0
+        self.nobs = 0.0
+        if model is not None:
+            self._carry_prior_from(model)
+
+    def _carry_prior_from(self, model: SequenceEncodableProbabilityDistribution) -> None:
+        """Carry the model's posterior forward as the estimator's prior for the next batch.
+
+        ``model.estimator()`` returns a fresh estimator whose conjugate prior is the model's current
+        posterior; rebuilding from it carries that posterior forward as the next batch's conjugate
+        prior. Falls back to leaving the estimator unchanged when the model can't supply one.
+        """
+        make_estimator = getattr(model, "estimator", None)
+        if callable(make_estimator):
+            self.estimator = make_estimator()
+
+    def _ensure_model(self, data: Sequence[T] | None, enc_data: Any | None) -> None:
+        if self.model is not None:
+            return
+        if enc_data is None and data is None:
+            raise ValueError("BayesianStreamingEstimator.update requires data for initialization.")
+        p = min(max(self.init_p, 0.0), 1.0) if self.init_p > 0.0 else 0.1
+        enc = enc_data if enc_data is not None else self._encode(data)
+        self.model = seq_initialize(enc_data=enc, estimator=self.init_estimator, rng=self.rng, p=p)
+        self._carry_prior_from(self.model)
+
+    def _encode(self, data: Sequence[T]) -> Any:
+        encoder = self.model.dist_to_encoder()
+        return seq_encode(data, encoder, num_chunks=self.num_chunks)
+
+    def _encode_batch(self, data: Sequence[T] | None, enc_data: Any | None) -> Any:
+        if enc_data is not None:
+            return enc_data
+        if data is None:
+            raise ValueError("BayesianStreamingEstimator.update requires data or enc_data.")
+        return self._encode(data)
+
+    def update(
+        self, data: Sequence[T] | None = None, enc_data: Any | None = None
+    ) -> SequenceEncodableProbabilityDistribution:
+        """Consume one batch and return the updated posterior-bearing model."""
+        self._ensure_model(data, enc_data)
+        enc_batch = self._encode_batch(data, enc_data)
+        batch_nobs, accumulator = _stream_accumulate(enc_batch, self.estimator, self.model)
+
+        if self.mode == "forgetting":
+            rho = float(self.schedule(self.step + 1))
+            if rho <= 0.0 or rho > 1.0:
+                raise ValueError("forgetting schedule returned %r; expected 0 < rho <= 1." % rho)
+            accumulator.scale(rho)
+            batch_nobs *= rho
+
+        self.model = self.estimator.estimate(batch_nobs, accumulator.value())
+        self._carry_prior_from(self.model)
+        self.nobs += batch_nobs
+        self.step += 1
+        return self.model
+
+    def reset(self) -> None:
+        """Drop the current model and stream counters."""
+        self.model = None
+        self.step = 0
+        self.nobs = 0.0
+
+
 def iterate(
     data: list[T],
     estimator: ParameterEstimator | None,

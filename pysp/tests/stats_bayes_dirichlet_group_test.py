@@ -3,8 +3,8 @@
 Covers the categorical (DictDirichlet prior) and integer-categorical (Dirichlet / SymmetricDirichlet
 prior) leaves, plus the ported DictDirichlet / SymmetricDirichlet prior families. Mirrors the proven
 Gaussian template: a frequentist leaf gains conjugate posterior estimation, ``expected_log_density``,
-and a posterior-returning ``fit`` while its MLE path stays unchanged. Numeric expectations mirror the
-historical bstats semantics.
+and a posterior-returning ``fit`` while its MLE path stays unchanged. Numeric expectations are pinned
+against textbook conjugate closed forms.
 """
 
 import unittest

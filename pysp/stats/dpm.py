@@ -52,6 +52,36 @@ from pysp.utils.special import betaln, digamma
 default_prior = GammaDistribution(2, 1)
 
 
+def _prior_cross_entropy(p: Any, q: Any) -> float:
+    """Cross entropy between two component priors that may factor over children.
+
+    For a leaf family ``get_prior()`` returns a single distribution and this is
+    just ``p.cross_entropy(q)``. For structured families (Composite, Sequence)
+    ``get_prior()`` returns a tuple/list of per-child priors; the joint prior
+    factors over the children, so the cross entropy is the sum over the matching
+    children. ``p`` and ``q`` always share the same nested structure here.
+    """
+    if p is None or q is None:
+        return 0.0
+    if isinstance(p, (tuple, list)):
+        return float(sum(_prior_cross_entropy(pc, qc) for pc, qc in zip(p, q)))
+    return float(p.cross_entropy(q))
+
+
+def _prior_entropy(p: Any) -> float:
+    """Entropy of a component prior that may factor over children.
+
+    Mirrors :func:`_prior_cross_entropy`: leaf priors expose ``entropy()``
+    directly, while structured priors are tuples/lists whose joint entropy is
+    the sum over the independent children.
+    """
+    if p is None:
+        return 0.0
+    if isinstance(p, (tuple, list)):
+        return float(sum(_prior_entropy(pc) for pc in p))
+    return float(p.entropy())
+
+
 def cbg(x: float, s1: float, s2: float) -> float:
     """Log-density of a compound Beta-Gamma stick fraction: x = 1 - exp(-y)
     with y ~ Exponential(alpha) and alpha ~ Gamma(s1, 1/s2), marginalized
@@ -561,11 +591,11 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
         # cross entropy of component priors and variational priors
         temp2 = 0.0
         for i in range(model.max_components):
-            temp2 += -model.components[i].get_prior().cross_entropy(model.component_priors[i])
+            temp2 += -_prior_cross_entropy(model.components[i].get_prior(), model.component_priors[i])
 
         # entropy of the variational approximation
         # entropy of variational component priors
-        temp42 = np.sum([-u.get_prior().entropy() for u in model.components])
+        temp42 = np.sum([-_prior_entropy(u.get_prior()) for u in model.components])
         temp4 = temp41 + temp42
 
         return temp1 + temp2 - temp4

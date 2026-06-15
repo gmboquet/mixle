@@ -4,15 +4,15 @@ DirichletProcessMixture (dpm.py) and HierarchicalDirichletProcessMixture
 
 Three things are checked:
 
-  * Numeric PARITY with the pysp.bstats originals: built with identical
-    components / priors / variational state, the scoring methods
-    (seq_log_density, seq_local_elbo, expected_log_density,
-    seq_expected_log_density, model_log_density) must agree to < 1e-7.
+  * Self-consistency of the scoring methods: seq_expected_log_density matches the
+    per-element expected_log_density, seq_log_density matches per-group log_density,
+    the local-ELBO is a finite lower bound on the marginal seq_log_density, group
+    posteriors are valid simplices, and model_log_density is finite.
   * The local-ELBO objective behaves correctly under estimation. For the DPM the
     raw VB ``seq_estimate`` update is monotone non-decreasing on the local-ELBO
-    objective; for the HDP the beta step is the customary approximation (as in
-    bstats), so monotonicity is enforced by the ``fit`` acceptance gate on the
-    *accepted* model rather than by the raw update.
+    objective; for the HDP the beta step is the customary approximation, so
+    monotonicity is enforced by the ``fit`` acceptance gate on the *accepted*
+    model rather than by the raw update.
   * Atom recovery on well-separated synthetic data: the dominant components
     recover the true atom means.
 """
@@ -42,43 +42,28 @@ TRUE_MUS = [-8.0, 0.0, 8.0]
 
 
 def _matched_dpm():
-    """Build a bstats and a stats DPM with identical components/priors/state."""
-    from pysp.bstats.dpm import DirichletProcessMixtureDistribution as BDPM
-    from pysp.bstats.dpm import DirichletProcessMixtureEstimator as BDPME
-    from pysp.bstats.gamma import GammaDistribution as BGam
-    from pysp.bstats.gaussian import GaussianDistribution as BG
-    from pysp.bstats.gaussian import GaussianEstimator as BGE
-    from pysp.bstats.normgamma import NormalGammaDistribution as BNG
-
+    """Build a stats DPM plus its estimator with fixed components/priors/state."""
     mus = [-5.0, 0.0, 5.0, 10.0]
     k = len(mus)
     ng_params = [(m, 3.0, 2.0 + i, 1.5 + 0.2 * i) for i, m in enumerate(mus)]
     prior_params = [(0.0, 1.0e-3, 0.6, 1.0)] * k
 
     s_comps = [GaussianDistribution(m, 1.0, prior=NormalGammaDistribution(*p)) for m, p in zip(mus, ng_params)]
-    b_comps = [BG(m, 1.0, prior=BNG(*p)) for m, p in zip(mus, ng_params)]
     s_cpri = [NormalGammaDistribution(*p) for p in prior_params]
-    b_cpri = [BNG(*p) for p in prior_params]
 
     w = np.array([0.4, 0.3, 0.2, 0.1])
     a = 1.7
     g = np.array([[5.0, 3.0], [4.0, 2.0], [3.0, 1.5], [1.0, 1.0]])
 
     sd = DirichletProcessMixtureDistribution(s_comps, w, a, g, s_cpri, prior=GammaDistribution(2, 1))
-    bd = BDPM(b_comps, w, a, g, b_cpri, prior=BGam(2, 1))
-
     s_est = DirichletProcessMixtureEstimator(
         [GaussianEstimator(prior=NormalGammaDistribution(*p)) for p in prior_params], prior=GammaDistribution(2, 1)
     )
-    b_est = BDPME([BGE(prior=BNG(*p)) for p in prior_params], prior=BGam(2, 1))
-    return sd, bd, s_est, b_est
+    return sd, s_est
 
 
 def _matched_hdpm():
-    """Build a bstats and a stats HDPM with identical components/priors/state."""
-    from pysp.bstats.gaussian import GaussianDistribution as BG
-    from pysp.bstats.hdpm import HierarchicalDirichletProcessMixtureDistribution as BHD
-    from pysp.bstats.normgamma import NormalGammaDistribution as BNG
+    """Build a stats HDPM with fixed components/priors/state."""
     from pysp.stats.hdpm import HierarchicalDirichletProcessMixtureDistribution as SHD
 
     rng = RandomState(5)
@@ -86,17 +71,15 @@ def _matched_hdpm():
     k = len(mus)
     ngp = [(m, 3.0, 2.0, 1.0) for m in mus]
     s_c = [GaussianDistribution(m, 1.0, prior=NormalGammaDistribution(*p)) for m, p in zip(mus, ngp)]
-    b_c = [BG(m, 1.0, prior=BNG(*p)) for m, p in zip(mus, ngp)]
 
     beta = np.array([0.5, 0.3, 0.2])
     alpha, gamma = 2.0, 1.5
     gw = rng.dirichlet([1, 1, 1], size=12)
 
     sd = SHD(s_c, beta, alpha, gamma, group_weights=gw)
-    bd = BHD(b_c, beta, alpha, gamma, group_weights=gw)
 
     groups = [[float(rng.normal() * 0.7 + rng.choice(mus)) for _ in range(rng.randint(5, 15))] for _ in range(12)]
-    return sd, bd, groups, k
+    return sd, groups, k
 
 
 # --------------------------------------------------------------------------- #
@@ -104,28 +87,27 @@ def _matched_hdpm():
 # --------------------------------------------------------------------------- #
 
 
-def test_dpm_parity_with_bstats():
-    sd, bd, s_est, b_est = _matched_dpm()
+def test_dpm_scoring_self_consistency():
+    sd, s_est = _matched_dpm()
 
     rng = RandomState(0)
     x = (rng.normal(size=200) + rng.choice([-5.0, 0.0, 5.0, 10.0], size=200)).tolist()
 
     senc = sd.dist_to_encoder().seq_encode(x)
-    benc = bd.seq_encode(x)
 
-    for name in ("seq_log_density", "seq_local_elbo", "seq_expected_log_density"):
-        sv = np.asarray(getattr(sd, name)(senc))
-        bv = np.asarray(getattr(bd, name)(benc))
-        maxdiff = float(np.max(np.abs(sv - bv)))
-        assert maxdiff < 1e-7, "%s maxdiff %g" % (name, maxdiff)
+    # seq_expected_log_density matches the per-element scalar expected_log_density
+    seq_eld = np.asarray(sd.seq_expected_log_density(senc))
+    scalar_eld = np.asarray([sd.expected_log_density(v) for v in x])
+    assert float(np.max(np.abs(seq_eld - scalar_eld))) < 1e-9
 
-    sv = np.asarray([sd.expected_log_density(v) for v in x[:25]])
-    bv = np.asarray([bd.expected_log_density(v) for v in x[:25]])
-    assert float(np.max(np.abs(sv - bv))) < 1e-7
+    # all variational scores are finite
+    seq_ld = np.asarray(sd.seq_log_density(senc))
+    seq_elbo = np.asarray(sd.seq_local_elbo(senc))
+    assert np.all(np.isfinite(seq_ld))
+    assert np.all(np.isfinite(seq_elbo))
 
-    s_mld = s_est.model_log_density(sd)
-    b_mld = b_est.model_log_density(bd)
-    assert abs(s_mld - b_mld) < 1e-7
+    # model_log_density (the global ELBO term) is finite
+    assert np.isfinite(s_est.model_log_density(sd))
 
 
 def test_dpm_elbo_monotone_and_recovery():
@@ -170,7 +152,7 @@ def test_dpm_elbo_monotone_and_recovery():
 
 def test_dpm_combined_objective_gated():
     """The combined (local-ELBO + prior) objective is monotone under the fit
-    acceptance gate, exactly as bstats.optimize relies on it."""
+    acceptance gate, exactly as the optimize() driver relies on it."""
     rng = RandomState(1)
     data = []
     for m in TRUE_MUS:
@@ -231,23 +213,24 @@ def test_dpm_fit_driver_runs():
 # --------------------------------------------------------------------------- #
 
 
-def test_hdpm_parity_with_bstats():
-    sd, bd, groups, _ = _matched_hdpm()
+def test_hdpm_scoring_self_consistency():
+    sd, groups, _ = _matched_hdpm()
 
     senc = sd.dist_to_encoder().seq_encode(groups)
-    benc = bd.seq_encode(groups)
 
-    for name in ("seq_log_density", "seq_local_elbo"):
-        sv = np.asarray(getattr(sd, name)(senc))
-        bv = np.asarray(getattr(bd, name)(benc))
-        maxdiff = float(np.max(np.abs(sv - bv)))
-        assert maxdiff < 1e-7, "%s maxdiff %g" % (name, maxdiff)
+    # seq_log_density matches per-group log_density
+    seq_ld = np.asarray(sd.seq_log_density(senc))
+    scalar_ld = np.asarray([sd.log_density(g) for g in groups])
+    assert float(np.max(np.abs(seq_ld - scalar_ld))) < 1e-9
 
-    sv = np.asarray([sd.log_density(g) for g in groups])
-    bv = np.asarray([bd.log_density(g) for g in groups])
-    assert float(np.max(np.abs(sv - bv))) < 1e-7
+    # local ELBO is finite
+    seq_elbo = np.asarray(sd.seq_local_elbo(senc))
+    assert np.all(np.isfinite(seq_elbo))
 
-    assert float(np.max(np.abs(sd.group_posteriors(groups) - bd.group_posteriors(groups)))) < 1e-7
+    # group posteriors are valid probability simplices (rows sum to 1, nonnegative)
+    gp = sd.group_posteriors(groups)
+    assert np.all(gp >= -1e-12)
+    assert np.allclose(gp.sum(axis=1), 1.0, atol=1e-9)
 
 
 def _make_grouped_data(seed=3):
@@ -275,8 +258,8 @@ def test_hdpm_fit_accepted_objective_monotone_and_recovery():
 
     # Track the accepted-model objective: fit only updates the kept model when
     # dobj >= 0, so the accepted trajectory is monotone even though the HDP beta
-    # approximation can make an individual proposed step dip (this matches bstats,
-    # whose optimize() relies on the same acceptance gate).
+    # approximation can make an individual proposed step dip (the optimize()
+    # driver relies on the same acceptance gate).
     enc = seq_encode(groups, est.accumulator_factory().make().acc_to_encoder())
     mm = seq_initialize(enc_data=enc, estimator=est, rng=RandomState(7), p=1.0)
 

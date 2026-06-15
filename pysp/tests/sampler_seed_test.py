@@ -4,7 +4,6 @@ import unittest
 import numpy as np
 from scipy.sparse import csr_matrix
 
-import pysp.bstats as bstats
 import pysp.stats as stats
 from pysp.stats.transform import AffineTransform
 
@@ -317,72 +316,43 @@ def _stats_public_distribution_catalog():
     }
 
 
-def _bstats_public_distribution_catalog():
-    comps = [bstats.GaussianDistribution(0.0, 1.0), bstats.GaussianDistribution(3.0, 2.0)]
-    dpm = bstats.DirichletProcessMixtureDistribution(
+def _bayes_only_distribution_catalog():
+    """Conjugate-prior / variational families that pysp.stats exposes only via
+    submodules (not ``pysp.stats.__all__``).  Families that *are* in
+    ``stats.__all__`` are already covered by ``_stats_public_distribution_catalog``.
+    """
+    from pysp.stats.catdirichlet import DictDirichletDistribution
+    from pysp.stats.dpm import DirichletProcessMixtureDistribution
+    from pysp.stats.hdpm import HierarchicalDirichletProcessMixtureDistribution
+    from pysp.stats.mvngamma import MultivariateNormalGammaDistribution
+    from pysp.stats.normgamma import NormalGammaDistribution
+    from pysp.stats.normwishart import NormalWishartDistribution
+
+    comps = [stats.GaussianDistribution(0.0, 1.0), stats.GaussianDistribution(3.0, 2.0)]
+    dpm = DirichletProcessMixtureDistribution(
         comps,
         np.asarray([0.55, 0.45]),
         1.5,
         np.asarray([[2.0, 3.0], [1.0, 1.0]]),
-        [c.get_prior() for c in comps],
+        [NormalGammaDistribution(0.0, 1.0, 1.0, 1.0), NormalGammaDistribution(3.0, 1.0, 1.0, 1.0)],
         name="dpm",
     )
 
     return {
-        "BernoulliDistribution": bstats.BernoulliDistribution(0.3),
-        "BernoulliSetDistribution": bstats.BernoulliSetDistribution({"a": 0.7, "b": 0.2, "c": 0.9}),
-        "BetaDistribution": bstats.BetaDistribution(2.0, 5.0),
-        "BinomialDistribution": bstats.BinomialDistribution(10, 0.4),
-        "CategoricalDistribution": bstats.CategoricalDistribution({"a": 0.4, "b": 0.6}),
-        "CompositeDistribution": bstats.CompositeDistribution(
-            [
-                bstats.CategoricalDistribution({"x": 0.5, "y": 0.5}),
-                bstats.GaussianDistribution(0.0, 1.0),
-            ]
-        ),
-        "DiagonalGaussianDistribution": bstats.DiagonalGaussianDistribution([0.5, -1.0], [1.0, 2.0]),
-        "DictDirichletDistribution": bstats.DictDirichletDistribution({"a": 1.0, "b": 2.0}),
-        "DirichletDistribution": bstats.DirichletDistribution([1.0, 2.0, 3.0]),
+        "DictDirichletDistribution": DictDirichletDistribution({"a": 1.0, "b": 2.0}),
         "DirichletProcessMixtureDistribution": dpm,
-        "ExponentialDistribution": bstats.ExponentialDistribution(2.0),
-        "GaussianDistribution": bstats.GaussianDistribution(1.0, 2.0),
-        "GammaDistribution": bstats.GammaDistribution(2.0, 3.0),
-        "GeometricDistribution": bstats.GeometricDistribution(0.25),
-        "HiddenMarkovModelDistribution": bstats.HiddenMarkovModelDistribution(
-            [bstats.GaussianDistribution(-5.0, 1.0), bstats.GaussianDistribution(5.0, 1.0)],
-            [0.7, 0.3],
-            [[0.9, 0.1], [0.2, 0.8]],
-            len_dist=bstats.CategoricalDistribution({4: 1.0}),
-        ),
-        "HierarchicalDirichletProcessMixtureDistribution": bstats.HierarchicalDirichletProcessMixtureDistribution(
-            [bstats.GaussianDistribution(-2.0, 1.0), bstats.GaussianDistribution(2.0, 1.0)],
+        "HierarchicalDirichletProcessMixtureDistribution": HierarchicalDirichletProcessMixtureDistribution(
+            [stats.GaussianDistribution(-2.0, 1.0), stats.GaussianDistribution(2.0, 1.0)],
             beta=[0.6, 0.4],
             alpha=3.0,
             gamma=2.0,
-            len_dist=bstats.CategoricalDistribution({5: 1.0}),
+            len_dist=stats.CategoricalDistribution({5: 1.0}),
         ),
-        "IgnoredDistribution": bstats.IgnoredDistribution(bstats.GaussianDistribution(0.0, 1.0)),
-        "IntegerCategoricalDistribution": bstats.IntegerCategoricalDistribution([0.2, 0.3, 0.5], min_index=0),
-        "LogGaussianDistribution": bstats.LogGaussianDistribution(0.0, 1.0),
-        "MarkovChainDistribution": bstats.MarkovChainDistribution(
-            [0.6, 0.4], [[0.7, 0.3], [0.2, 0.8]], len_dist=bstats.CategoricalDistribution({4: 1.0})
-        ),
-        "MixtureDistribution": bstats.MixtureDistribution(comps, [0.4, 0.6]),
-        "MultivariateGaussianDistribution": bstats.MultivariateGaussianDistribution(
-            [0.5, -1.0], [[1.0, 0.2], [0.2, 2.0]]
-        ),
-        "MultivariateNormalGammaDistribution": bstats.MultivariateNormalGammaDistribution(
+        "MultivariateNormalGammaDistribution": MultivariateNormalGammaDistribution(
             np.array([0.0, 1.0]), np.array([1.0, 1.5]), np.array([2.0, 3.0]), np.array([4.0, 5.0])
         ),
-        "NormalGammaDistribution": bstats.NormalGammaDistribution(0.0, 1.0, 2.0, 3.0),
-        "NormalWishartDistribution": bstats.NormalWishartDistribution([0.0, 1.0], 2.0, [[2.0, 0.0], [0.0, 2.0]], 5.0),
-        "NullDistribution": bstats.NullDistribution(),
-        "OptionalDistribution": bstats.OptionalDistribution(bstats.PoissonDistribution(2.0), p=0.25),
-        "PoissonDistribution": bstats.PoissonDistribution(3.0),
-        "SequenceDistribution": bstats.SequenceDistribution(
-            bstats.CategoricalDistribution({"a": 0.5, "b": 0.5}),
-            len_dist=bstats.CategoricalDistribution({2: 0.4, 3: 0.6}),
-        ),
+        "NormalGammaDistribution": NormalGammaDistribution(0.0, 1.0, 2.0, 3.0),
+        "NormalWishartDistribution": NormalWishartDistribution([0.0, 1.0], 2.0, [[2.0, 0.0], [0.0, 2.0]], 5.0),
     }
 
 
@@ -419,19 +389,18 @@ class SamplerSeedTestCase(unittest.TestCase):
             self.assert_repeatable_sampler(name, dist)
             self.assert_sized_sample_contract(name, dist, null_is_sentinel=True)
 
-    def test_all_public_bstats_samplers_are_seed_repeatable(self):
-        catalog = _bstats_public_distribution_catalog()
-        self.assert_catalog_matches_exports(bstats, catalog)
+    def test_bayes_only_samplers_are_seed_repeatable(self):
+        catalog = _bayes_only_distribution_catalog()
         for name, dist in sorted(catalog.items()):
             self.assert_repeatable_sampler(name, dist)
             self.assert_sized_sample_contract(name, dist)
 
-    def test_bstats_hmm_sampler_uses_one_transition_per_observation(self):
-        dist = bstats.HiddenMarkovModelDistribution(
-            [bstats.CategoricalDistribution({0: 1.0}), bstats.CategoricalDistribution({1: 1.0})],
+    def test_hmm_sampler_uses_one_transition_per_observation(self):
+        dist = stats.HiddenMarkovModelDistribution(
+            [stats.CategoricalDistribution({0: 1.0}), stats.CategoricalDistribution({1: 1.0})],
             [1.0, 0.0],
             [[0.0, 1.0], [1.0, 0.0]],
-            len_dist=bstats.CategoricalDistribution({6: 1.0}),
+            len_dist=stats.CategoricalDistribution({6: 1.0}),
         )
 
         self.assertEqual(_canonical(dist.sampler(seed=11).sample()), [0, 1, 0, 1, 0, 1])

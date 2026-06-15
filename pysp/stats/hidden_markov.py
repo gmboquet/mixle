@@ -94,7 +94,7 @@ def hmm_dirichlet_default_prior(num_states: int):
         Tuple ``(DirichletDistribution, list of S DirichletDistribution)``.
 
     """
-    from pysp.bstats.dirichlet import DirichletDistribution
+    from pysp.stats.dirichlet import DirichletDistribution
 
     return (
         DirichletDistribution(np.ones(num_states)),
@@ -251,7 +251,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             prior: ``(init_prior, row_priors)`` tuple or None.
 
         """
-        from pysp.bstats.dirichlet import DirichletDistribution
+        from pysp.stats.dirichlet import DirichletDistribution
 
         if prior is None:
             self.prior = None
@@ -2265,7 +2265,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
                 initial-state prior and all row priors are Dirichlet.
 
         """
-        from pysp.bstats.dirichlet import DirichletDistribution
+        from pysp.stats.dirichlet import DirichletDistribution
 
         if prior is None:
             self.prior = None
@@ -2337,7 +2337,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
             HiddenMarkovModelDistribution object.
 
         """
-        from pysp.bstats.dirichlet import DirichletDistribution
+        from pysp.stats.dirichlet import DirichletDistribution
 
         num_states, init_counts, state_counts, trans_counts, topic_ss, len_ss = suff_stat
 
