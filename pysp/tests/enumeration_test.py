@@ -7,6 +7,7 @@ EnumerationError contract.
 """
 
 import itertools
+import math
 import unittest
 
 import numpy as np
@@ -152,6 +153,23 @@ class EnumerationInvariantTestCase(unittest.TestCase):
             self.assertEqual([freeze(v) for v, _ in top3], [freeze(v) for v, _ in fresh], name)
             if expected is not None:
                 self.assertEqual(len(dist.enumerator().top_k(expected + 100)), expected, name)
+
+    def test_top_p_is_minimal_nucleus(self):
+        # top_p(p) must be the smallest descending-probability prefix whose mass reaches p:
+        # it agrees with the corresponding prefix of the full enumeration, its mass is >= p, and
+        # dropping its last item falls below p (minimality). max_items keeps infinite supports finite.
+        for name, dist, n, _ in self.cases:
+            for p in (0.5, 0.9):
+                nucleus = dist.enumerator().top_p(p, max_items=n)
+                prefix = dist.enumerator().top_k(len(nucleus))
+                self.assertEqual(
+                    [freeze(v) for v, _ in nucleus], [freeze(v) for v, _ in prefix], "%s: top_p != prefix" % name
+                )
+                mass = sum(math.exp(lp) for _, lp in nucleus)
+                if mass >= p and len(nucleus) >= 1 and len(nucleus) < n:
+                    mass_without_last = mass - math.exp(nucleus[-1][1])
+                    self.assertLess(mass_without_last, p + TOL, "%s: top_p not minimal" % name)
+        self.assertEqual(CategoricalDistribution({"a": 0.6, "b": 0.4}).enumerator().top_p(0.0), [])
 
 
 class BruteForceCrossCheckTestCase(unittest.TestCase):
