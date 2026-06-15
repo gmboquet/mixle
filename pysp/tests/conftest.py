@@ -33,6 +33,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "stats_bayes_setdist_test.py": ("bayes", "distribution"),
     "stats_bayes_wrappers_test.py": ("bayes",),
     "stats_bayes_dpm_test.py": ("bayes", "latent"),
+    "objective_resolution_test.py": ("bayes",),
     "categorical_test.py": ("distribution",),
     "chow_liu_tree_test.py": ("distribution", "latent"),
     "distribution_additions_test.py": ("distribution",),
