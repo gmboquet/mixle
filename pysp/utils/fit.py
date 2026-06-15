@@ -1,8 +1,8 @@
-"""Functions for estimating and validating pysparkplug models from observed data.
+"""Gradient-based (autograd) maximum-likelihood and MAP fitting.
 
-Useful functions for estimating pysparkplug 'SequenceEncodableProbabilityDistributions' from 'ParameterEstimator'
-objects.
-
+``fit_mle`` / ``fit_map`` optimize a distribution's parameters by gradient descent through a Torch
+backend (constraint reparameterization, optional declaration-backed priors), returning a
+``GradientFitResult``. This is the gradient counterpart of the EM drivers in ``estimation.py``.
 """
 
 from collections.abc import Mapping, Sequence
