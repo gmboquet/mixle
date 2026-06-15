@@ -17,12 +17,16 @@ import numpy as np
 
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
+    child_enumerator,
 )
+from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 FieldSpec = Any
 
@@ -235,6 +239,77 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> RecordDataEncoder:
         """Return a data encoder for this record field/source layout."""
         return RecordDataEncoder(tuple(zip(self.fields, self.sources)), [d.dist_to_encoder() for d in self.dists])
+
+    def _row_from_values(self, values: Sequence[Any]) -> dict[Any, Any]:
+        """Assemble a mapping record from per-field values (keyed by source, like the sampler)."""
+        return {source: value for source, value in zip(self.sources, values)}
+
+    def enumerator(self) -> RecordEnumerator:
+        """Creates RecordEnumerator iterating mapping records in descending joint probability order."""
+        return RecordEnumerator(self)
+
+    def structural_fine_bucket(self, value, quantizer) -> int:
+        """Sum of child structural buckets -- mirrors the count index's child convolution.
+
+        Like :meth:`CompositeDistribution.structural_fine_bucket`, but fields are addressed by
+        source name rather than tuple position.
+        """
+        return sum(
+            self.dists[i].structural_fine_bucket(_record_get(value, self.sources[i]), quantizer)
+            for i in range(self.count)
+        )
+
+    def quantized_count_index(self, quantizer, max_fine_bucket: int):
+        """Structural count index: the additive law -- the carrier's n-ary product over fields.
+
+        Identical reduction to :meth:`CompositeDistribution.quantized_count_index` (the joint
+        histogram is the convolution of the per-field histograms in the witness-retaining count
+        semiring); the only difference is that the unranked structural tuple is relabelled into a
+        mapping record keyed by source, so witnesses match what the model actually scores.
+        """
+        from pysp.utils.quantization.semiring import CountSemiring
+
+        semiring = CountSemiring()
+        children = []
+        truncated = False
+        for i, dist in enumerate(self.dists):
+            try:
+                child_index, child_truncated = dist.quantized_count_index(quantizer, max_fine_bucket)
+            except EnumerationError as e:
+                path = "RecordDistribution.dists[%d]" % i
+                new_path = path if not e.path else "%s -> %s" % (path, e.path)
+                raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
+            children.append(child_index)
+            truncated = truncated or child_truncated
+
+        joint = semiring.product(children, quantizer, max_fine_bucket)
+        sources = self.sources
+        relabelled = semiring.map_values(
+            joint, lambda values, sources=sources: {source: value for source, value in zip(sources, values)}
+        )
+        return relabelled, truncated
+
+
+class RecordEnumerator(DistributionEnumerator):
+    def __init__(self, dist: RecordDistribution) -> None:
+        """Enumerates mapping records over the field supports in descending joint probability order.
+
+        Joint log-density is the sum of per-field log-densities, so this is a best-first search over
+        the product of the (sorted) field enumerations -- the named-field analogue of
+        :class:`CompositeEnumerator`. All fields must support enumeration; the combined value is a
+        mapping keyed by source (matching :class:`RecordSampler`).
+
+        Args:
+            dist (RecordDistribution): Distribution whose support is enumerated.
+        """
+        super().__init__(dist)
+        streams = [
+            BufferedStream(child_enumerator(d, "RecordDistribution.dists[%d]" % i)) for i, d in enumerate(dist.dists)
+        ]
+        self._product = ProductEnumerator(streams, combine=dist._row_from_values)
+
+    def __next__(self) -> tuple[dict[Any, Any], float]:
+        return next(self._product)
 
 
 class RecordSampler(DistributionSampler):

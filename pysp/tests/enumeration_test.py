@@ -59,6 +59,9 @@ def make_cases():
         ("composite", CompositeDistribution((cat3, intcat)), 30, 9),
         ("composite_nested", CompositeDistribution((cat, CompositeDistribution((cat, intcat)))), 30, 12),
         ("composite_with_mixture", CompositeDistribution((cat, mix_geo)), 50, None),
+        ("record", RecordDistribution({"u": cat3, "v": intcat}), 30, 9),
+        ("record_nested", RecordDistribution({"u": cat, "w": CompositeDistribution((cat, intcat))}), 30, 12),
+        ("record_with_mixture", RecordDistribution({"u": cat, "g": mix_geo}), 50, None),
         (
             "mixture_overlap",
             MixtureDistribution(
@@ -180,6 +183,31 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
         dist = CompositeDistribution((cat, intcat))
         support = [(s, i) for s in "abc" for i in (0, 1)]
         self.assert_matches_brute(dist, support, "composite")
+
+    def test_record(self):
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
+        intcat = IntegerCategoricalDistribution(0, [0.6, 0.4])
+        dist = RecordDistribution({"u": cat, "v": intcat})
+        support = [{"u": s, "v": i} for s in "abc" for i in (0, 1)]
+        self.assert_matches_brute(dist, support, "record")
+
+    def test_record_nested_matches_composite_ranks(self):
+        # A Record over the same children as a Composite scores identically (sum of field
+        # log-densities), so count_dp_rank must agree row-for-row through the dict relabelling.
+        from pysp.utils.density_rank import count_dp_rank
+
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
+        intcat = IntegerCategoricalDistribution(0, [0.7, 0.2, 0.1])
+        rec = RecordDistribution({"u": cat, "w": CompositeDistribution((cat, intcat))})
+        comp = CompositeDistribution((cat, CompositeDistribution((cat, intcat))))
+        for s in "abc":
+            for s2 in "abc":
+                for i in (0, 1, 2):
+                    row = {"u": s, "w": (s2, i)}
+                    tup = (s, (s2, i))
+                    rr = count_dp_rank(rec, row, oversample=64)
+                    cr = count_dp_rank(comp, tup, oversample=64)
+                    self.assertEqual((rr.window_lower, rr.window_upper), (cr.window_lower, cr.window_upper), row)
 
     def test_sound_top_k_correct_for_nested_mixture(self):
         # Mixture of nested composite/sequence models: the tropical seek order is badly displaced,
