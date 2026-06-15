@@ -41,6 +41,7 @@ def best_of(
     out: IO = sys.stdout,
     print_iter: int = 1,
     reuse_estep_ll: bool = True,
+    objective: str = "auto",
 ) -> tuple[float, SequenceEncodableProbabilityDistribution]:
     """Performs EM algorithm for trials-number of randomized initial conditions. Returns the best model fit in terms of
         maximum log-likelihood value from validation data.
@@ -64,6 +65,8 @@ def best_of(
         reuse_estep_ll (bool): Default True. Forwarded to each trial's ``optimize`` call -- reuse the
             E-step likelihood for convergence instead of a separate scoring pass (see ``optimize``).
             Set False to force the exact historical per-iteration scoring behavior.
+        objective (str): Convergence/selection objective forwarded to each trial's ``optimize`` call;
+            ``'auto'`` (default) selects MLE / MAP / variational Bayes from the prior (see ``optimize``).
 
     Returns:
         Tuple of log-likelihood of best fitting model and the best fitting model from number of trials.
@@ -101,6 +104,7 @@ def best_of(
             out=out,
             print_iter=print_iter,
             reuse_estep_ll=reuse_estep_ll,
+            objective=objective,
         )
         _, vll = seq_log_density_sum(score_data, mm)
         out.write("Trial %d. VLL=%f\n" % (kk + 1, vll))
@@ -248,20 +252,32 @@ def _local_fused_step(enc_data, estimator, model):
     return nxt, getattr(accumulator, "_seq_ll", None)
 
 
-def _write_em_iter(out: IO | None, i: int, ll: float, dll: float, vll: float, has_vdata: bool) -> None:
-    """Write one EM progress line in the historical format."""
+def _write_em_iter(
+    out: IO | None, i: int, ll: float, dll: float, vll: float, has_vdata: bool, obj_label: str | None = None
+) -> None:
+    """Write one EM progress line.
+
+    With ``obj_label=None`` (plain maximum likelihood) the historical log-likelihood format is used;
+    for the penalized-LL / ELBO objectives ``obj_label`` (e.g. ``'penalized-LL'``, ``'ELBO'``) names
+    the quantity so the progress line is not mislabeled as a data log-likelihood.
+    """
     if out is None:
         return
-    if has_vdata:
-        out.write(
-            "Iteration %d: ln[p_mat(Data|Model)]=%e, ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e, "
-            "ln[p_mat(Valid Data|Model)]=%e\n" % (i, ll, dll, vll)
-        )
+    if obj_label is None:
+        if has_vdata:
+            out.write(
+                "Iteration %d: ln[p_mat(Data|Model)]=%e, ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e, "
+                "ln[p_mat(Valid Data|Model)]=%e\n" % (i, ll, dll, vll)
+            )
+        else:
+            out.write(
+                "Iteration %d: ln[p_mat(Data|Model)]=%e, "
+                "ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e\n" % (i, ll, dll)
+            )
+    elif has_vdata:
+        out.write("Iteration %d: %s=%e, d%s=%e, valid-%s=%e\n" % (i, obj_label, ll, obj_label, dll, obj_label, vll))
     else:
-        out.write(
-            "Iteration %d: ln[p_mat(Data|Model)]=%e, "
-            "ln[p_mat(Data|Model)]-ln[p_mat(Data|PrevModel)]=%e\n" % (i, ll, dll)
-        )
+        out.write("Iteration %d: %s=%e, d%s=%e\n" % (i, obj_label, ll, obj_label, dll))
 
 
 def _em_loop(
@@ -278,6 +294,7 @@ def _em_loop(
     monotone: bool = True,
     track_best: bool = True,
     fused_step_fn: Any | None = None,
+    obj_label: str | None = None,
 ) -> tuple[SequenceEncodableProbabilityDistribution, float]:
     """Canonical EM iteration shared by the public estimation entry points.
 
@@ -303,7 +320,18 @@ def _em_loop(
     """
     if fused_step_fn is not None:
         return _fused_em_loop(
-            enc_data, estimator, model, fused_step_fn, ll_fn, max_its, delta, enc_vdata, out, print_iter, track_best
+            enc_data,
+            estimator,
+            model,
+            fused_step_fn,
+            ll_fn,
+            max_its,
+            delta,
+            enc_vdata,
+            out,
+            print_iter,
+            track_best,
+            obj_label,
         )
 
     _, old_ll = ll_fn(enc_data, model)
@@ -322,7 +350,7 @@ def _em_loop(
 
         converged = (delta is not None) and (dll < delta)
         if converged or ((i + 1) % print_iter == 0):
-            _write_em_iter(out, i + 1, ll, dll, vll, has_v)
+            _write_em_iter(out, i + 1, ll, dll, vll, has_v, obj_label)
         if converged:
             break
 
@@ -335,7 +363,18 @@ def _em_loop(
 
 
 def _fused_em_loop(
-    enc_data, estimator, model, fused_step_fn, ll_fn, max_its, delta, enc_vdata, out, print_iter, track_best
+    enc_data,
+    estimator,
+    model,
+    fused_step_fn,
+    ll_fn,
+    max_its,
+    delta,
+    enc_vdata,
+    out,
+    print_iter,
+    track_best,
+    obj_label=None,
 ):
     """EM loop that reuses the E-step's likelihood normalizer instead of a separate score pass.
 
@@ -367,7 +406,7 @@ def _fused_em_loop(
         dll = (ll_model - prev_ll) if prev_ll is not None else float("inf")
         converged = (delta is not None) and (prev_ll is not None) and (dll < delta)
         if converged or ((i + 1) % print_iter == 0):
-            _write_em_iter(out, i + 1, ll_model, dll, score, has_v)
+            _write_em_iter(out, i + 1, ll_model, dll, score, has_v, obj_label)
         if converged:
             break
 
@@ -415,6 +454,7 @@ def optimize(
     root_only: bool = False,
     strategy: Any | None = None,
     reuse_estep_ll: bool = True,
+    objective: str = "auto",
 ) -> SequenceEncodableProbabilityDistribution:
     """Estimation of 'estimator' via EM algorithm for max_its iterations or until
         new_loglikelihood - old_loglikelihood < delta.
@@ -475,6 +515,14 @@ def optimize(
             the standard loop. Automatically falls back to the standard loop for engines/strategies/
             distributed backends or models that can't report the LL (no slowdown there). Set False to
             force the exact historical per-iteration scoring behavior.
+        objective (str): Convergence/selection objective. ``'auto'`` (default) makes the prior the
+            single switch -- a model exposing a variational ELBO (``seq_local_elbo``) is fit by
+            variational Bayes (``'vb'``), an estimator carrying a parameter prior by penalized
+            log-likelihood (``'map'``), and everything else by plain maximum likelihood (``'mle'``).
+            Pass ``'mle'`` / ``'map'`` / ``'vb'`` to force a specific objective. ``fit`` accepts the
+            same argument; both share this resolution so a Bayesian estimator is fit on the correct
+            objective regardless of the verb used. (Only ``'mle'`` is compatible with the fused
+            E-step shortcut; ``reuse_estep_ll`` is ignored for ``'map'``/``'vb'``.)
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
@@ -552,10 +600,23 @@ def optimize(
             vdata_for_encoding = _data_records_for_encoding(vdata, fields, est, mm)
             enc_vdata = seq_encode(vdata_for_encoding, data_encoder, num_chunks=num_chunks, chunk_size=chunk_size)
 
+        # The prior is the single switch: 'auto' uses the variational ELBO when the model exposes
+        # one (seq_local_elbo), the penalized log-likelihood when the estimator carries a prior, and
+        # the plain log-likelihood otherwise. So a Bayesian estimator converges/selects on the right
+        # objective whether the caller reaches for optimize() or fit().
+        resolved_objective = _resolve_objective(objective, estimator, mm)
+
         # Fused EM (reuse the E-step likelihood normalizer instead of a separate score pass) is only
-        # valid on the plain local encoded path with the default engine and exact E-step.
+        # valid for the plain-likelihood objective on the local encoded path with the default engine
+        # and exact E-step -- the reused normalizer is the data LL, not the penalized LL / ELBO.
         fused_step_fn = None
-        if reuse_estep_ll and engine is None and strategy is None and isinstance(enc_data, list):
+        if (
+            reuse_estep_ll
+            and resolved_objective == "mle"
+            and engine is None
+            and strategy is None
+            and isinstance(enc_data, list)
+        ):
             fused_step_fn = _local_fused_step
 
         best_model, _ = _em_loop(
@@ -563,13 +624,14 @@ def optimize(
             estimator,
             mm,
             step_fn=_em_step_fn(engine, strategy),
-            ll_fn=_ll_sum_fn(engine),
+            ll_fn=_objective_scorer(resolved_objective, estimator, engine),
             max_its=max_its,
             delta=delta,
             enc_vdata=enc_vdata,
             out=out,
             print_iter=print_iter,
             fused_step_fn=fused_step_fn,
+            obj_label={"mle": None, "map": "penalized-LL", "vb": "ELBO"}[resolved_objective],
         )
 
         return best_model
@@ -605,6 +667,47 @@ def _model_objective(estimator: ParameterEstimator, model: SequenceEncodableProb
     return 0.0 if rv is None else float(rv)
 
 
+_VALID_OBJECTIVES = ("auto", "mle", "map", "vb")
+
+
+def _resolve_objective(
+    objective: str, estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution
+) -> str:
+    """Resolve the convergence/selection objective for a fitting run.
+
+    The prior is the single switch: with ``objective='auto'`` (the default) a model that exposes a
+    variational ELBO (``seq_local_elbo``) is fit by ``'vb'``, an estimator that carries a parameter
+    prior (non-zero ``model_log_density``) by ``'map'`` (penalized log-likelihood), and everything
+    else by plain ``'mle'``. Pass an explicit ``'mle'`` / ``'map'`` / ``'vb'`` to override.
+    """
+    obj = (objective or "auto").lower()
+    if obj not in _VALID_OBJECTIVES:
+        raise ValueError("objective must be one of %r, got %r." % (_VALID_OBJECTIVES, objective))
+    if obj != "auto":
+        return obj
+    if hasattr(model, "seq_local_elbo"):
+        return "vb"
+    if _model_objective(estimator, model) != 0.0:
+        return "map"
+    return "mle"
+
+
+def _objective_scorer(resolved: str, estimator: ParameterEstimator, engine: Any | None):
+    """Return a ``(enc, model) -> (count, score)`` scorer for the resolved objective.
+
+    ``'mle'`` scores the plain data log-likelihood (and is the only objective compatible with the
+    fused-E-step shortcut). ``'map'`` / ``'vb'`` score the penalized log-likelihood / ELBO
+    ``_data_objective_sum + _model_objective`` (the data term auto-adapts to ``seq_local_elbo``).
+    """
+    if resolved == "mle":
+        return _ll_sum_fn(engine)
+
+    def scorer(enc: Any, model: SequenceEncodableProbabilityDistribution) -> tuple[float, float]:
+        return 0.0, _data_objective_sum(enc, model) + _model_objective(estimator, model)
+
+    return scorer
+
+
 def fit(
     data: Sequence[T] | None,
     estimator: ParameterEstimator,
@@ -619,24 +722,29 @@ def fit(
     enc_vdata: list[tuple[int, E0]] | None = None,
     out: IO | None = sys.stdout,
     print_iter: int = 1,
+    objective: str = "auto",
 ) -> SequenceEncodableProbabilityDistribution:
     """Fit a model in the Bayesian (variational / MAP) sense, returning the posterior-bearing model.
 
-    This is the posterior-returning counterpart of :func:`optimize`. Where ``optimize`` maximizes the
-    plain data log-likelihood (returning a point/MLE model), ``fit`` iterates the EM/VB update that
-    maximizes the penalized objective ``obj = data term + prior term``:
+    This is the posterior-returning counterpart of :func:`optimize`. ``fit`` iterates the EM/VB update
+    that maximizes the objective selected by ``objective`` (default ``'auto'``):
 
-      - ``data term`` is the observed-data log-likelihood (MAP estimators) or the local-ELBO
-        contributions (variational estimators exposing ``seq_local_elbo``);
-      - ``prior term`` is ``estimator.model_log_density(model)`` (the log-prior / ELBO global term).
+      - ``'auto'`` -- the prior is the single switch: ``'vb'`` when the model exposes ``seq_local_elbo``,
+        ``'map'`` when the estimator carries a parameter prior, else ``'mle'``;
+      - ``'mle'`` -- plain data log-likelihood (ignores any prior in the objective);
+      - ``'map'`` / ``'vb'`` -- penalized log-likelihood / ELBO ``obj = data term + prior term``, where the
+        data term is the observed-data LL (MAP) or local-ELBO contributions (variational), and the prior
+        term is ``estimator.model_log_density(model)``.
 
-    Convergence is checked on the combined objective, so the prior is part of the stopping rule, and
-    conjugate updates never decrease it. The returned model carries its conjugate posterior forward as
-    ``model.get_prior()``. An estimator with no prior (``model_log_density == 0``) reduces this to a
-    plain EM fit, so ``fit`` and ``optimize`` agree for frequentist estimators.
+    Convergence is checked on the chosen objective, so under ``'map'``/``'vb'`` the prior is part of the
+    stopping rule and conjugate updates never decrease it. The returned model carries its conjugate
+    posterior forward as ``model.get_prior()``. With no prior anywhere, every objective reduces to plain
+    EM, so ``fit`` and ``optimize`` agree for frequentist estimators. ``optimize`` accepts the same
+    ``objective`` argument; the two share this resolution so a Bayesian estimator is fit correctly
+    regardless of which verb the caller reaches for.
 
-    Args mirror :func:`optimize` (local encoded path). Returns the model with the best validation
-    log-likelihood seen during the run.
+    Args otherwise mirror :func:`optimize` (local encoded path). Returns the model with the best
+    validation log-likelihood seen during the run.
     """
     if data is None and enc_data is None:
         raise Exception("fit called with empty data or enc_data.")
@@ -656,15 +764,23 @@ def fit(
         else:
             mm = prev_estimate
 
-        old_obj = _data_objective_sum(enc_data, mm) + _model_objective(estimator, mm)
+        resolved_objective = _resolve_objective(objective, estimator, mm)
+
+        def _obj_terms(model: SequenceEncodableProbabilityDistribution) -> tuple[float, float]:
+            # (data term, prior/global term) for the resolved objective; 'mle' drops the prior term.
+            if resolved_objective == "mle":
+                return _ll_sum_fn(None)(enc_data, model)[1], 0.0
+            return _data_objective_sum(enc_data, model), _model_objective(estimator, model)
+
+        data_ll, model_ll = _obj_terms(mm)
+        old_obj = data_ll + model_ll
         _, best_vll = seq_log_density_sum(enc_vdata, mm)
         best_model = mm
 
         for i in range(max(1, max_its)):
             mm_next = seq_estimate(enc_data, estimator, mm)
 
-            data_ll = _data_objective_sum(enc_data, mm_next)
-            model_ll = _model_objective(estimator, mm_next)
+            data_ll, model_ll = _obj_terms(mm_next)
             obj = data_ll + model_ll
             _, vll = seq_log_density_sum(enc_vdata, mm_next)
             dobj = obj - old_obj
