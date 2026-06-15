@@ -14,6 +14,7 @@ from typing import Any, Optional
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.stats.beta import BetaDistribution
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -24,6 +25,7 @@ from pysp.stats.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.utils.special import digamma
 from pysp.utils.vector import gammaln
 
 E = tuple[np.ndarray, np.ndarray, np.ndarray, int, int]
@@ -120,7 +122,13 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         return engine.where(good, base, engine.asarray(-np.inf))
 
     def __init__(
-        self, p: float, n: int, min_val: int | None = None, name: str | None = None, keys: str | None = None
+        self,
+        p: float,
+        n: int,
+        min_val: int | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """BinomialDistribution object used for x~Binomial(n,p) with support (min_val, n-min_val-1).
 
@@ -162,6 +170,62 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.keys = keys
         self.min_val = min_val
+        self.set_prior(prior)
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Attach a Beta parameter prior and precompute conjugate-prior expectations.
+
+        With a Beta(a, b) prior on the success probability ``p`` this caches
+        ``(E[log p], E[log(1-p)]) = (digamma(a) - digamma(a+b), digamma(b) - digamma(a+b))``
+        so that ``expected_log_density`` evaluates the variational Bayes expectation
+        ``E_q[log p(x | p)]``. Any other prior (including ``None``) leaves the distribution a
+        plain point model.
+        """
+        self.prior = prior
+        if isinstance(prior, BetaDistribution):
+            a, b = prior.get_parameters()
+            self.expected_nparams = (digamma(a) - digamma(a + b), digamma(b) - digamma(a + b))
+            self.has_conj_prior = True
+        else:
+            self.expected_nparams = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: int) -> float:
+        """Variational expectation ``E_q[log p(x | p)]`` under the Beta prior.
+
+        Uses the cached digamma expectations of ``log p`` and ``log(1-p)``; falls back to the
+        plug-in ``log_density(x)`` when no conjugate prior is attached.
+        """
+        if not self.has_conj_prior:
+            return self.log_density(x)
+        n = self.n
+        try:
+            xx = float(x)
+        except Exception:
+            return -np.inf
+        if self.min_val is not None:
+            xx -= self.min_val
+        if not np.isfinite(xx) or np.floor(xx) != xx or xx < 0 or xx > n:
+            return -np.inf
+        xx = int(xx)
+        e1, e2 = self.expected_nparams
+        cc = gammaln(n + 1) - gammaln(xx + 1) - gammaln(n - xx + 1)
+        return cc + xx * e1 + (n - xx) * e2
+
+    def seq_expected_log_density(self, x: E) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations."""
+        if not self.has_conj_prior:
+            return self.seq_log_density(x)
+        ux, ix, _, _, _ = x
+        n = self.n
+        gn = gammaln(n + 1)
+        xx = ux - self.min_val if self.min_val is not None else ux
+        good = np.isfinite(xx) & (np.floor(xx) == xx) & (xx >= 0) & (xx <= n)
+        e1, e2 = self.expected_nparams
+        cc = np.full_like(xx, -np.inf, dtype=np.float64)
+        xg = xx[good]
+        cc[good] = (gn - gammaln(xg + 1) - gammaln(n - xg + 1)) + xg * e1 + (n - xg) * e2
+        return cc[ix]
 
     def __str__(self) -> str:
         """Get string representation of BinomialDistribution."""
@@ -326,6 +390,15 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         Returns:
             BinomialEstimator object.
         """
+        if self.prior is not None:
+            min_val = self.min_val if self.min_val is not None else 0
+            return BinomialEstimator(
+                max_val=self.n + min_val,
+                min_val=min_val,
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
+            )
         if pseudo_count is None:
             return BinomialEstimator(name=self.name, keys=self.keys)
         else:
@@ -784,6 +857,7 @@ class BinomialEstimator(ParameterEstimator):
         suff_stat: float | None = None,
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """Create a BinomialEstimator object for estimating BinomialDistribution.
 
@@ -812,6 +886,8 @@ class BinomialEstimator(ParameterEstimator):
         self.name = name
         self.min_val = min_val if min_val is not None else 0
         self.max_val = max_val
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, BetaDistribution)
 
     def accumulator_factory(self) -> BinomialAccumulatorFactory:
         """Creates a BinomialAccumulatorFactory object from member varaibles.
@@ -821,6 +897,39 @@ class BinomialEstimator(ParameterEstimator):
 
         """
         return BinomialAccumulatorFactory(self.max_val, self.min_val, self.name, self.keys)
+
+    def model_log_density(self, model: "BinomialDistribution") -> float:
+        """Log-density of the model's success probability under the Beta prior (ELBO global term)."""
+        if self.has_conj_prior:
+            return float(self.prior.log_density(model.p))
+        return 0.0
+
+    def _estimate_conjugate(self, suff_stat: tuple[float, float, int | None, int | None]) -> "BinomialDistribution":
+        """Closed-form Beta conjugate posterior update returning the MAP estimate.
+
+        The number of trials ``n`` is treated as known (recovered from the estimator's
+        ``min_val``/``max_val`` bounds). With a Beta(a, b) prior and weighted counts of
+        successes ``psum`` and failures ``fsum``, the posterior is Beta(a + psum, b + fsum)
+        and the returned point estimate is the posterior mode ``(a' - 1)/(a' + b' - 2)`` when
+        ``a', b' > 1``, falling back to the posterior mean ``a'/(a' + b')`` on the boundary;
+        the posterior is carried forward as the fitted model's prior.
+        """
+        count, total, _, _ = suff_stat
+        min_val = self.min_val if self.min_val is not None else 0
+        n = (self.max_val if self.max_val is not None else 0) - min_val
+        psum = total - min_val * count
+        fsum = count * n - psum
+
+        a, b = self.prior.get_parameters()
+        new_a = a + psum
+        new_b = b + fsum
+        if new_a > 1.0 and new_b > 1.0:
+            p = (new_a - 1.0) / (new_a + new_b - 2.0)
+        else:
+            p = new_a / (new_a + new_b)
+        return BinomialDistribution(
+            p, n, min_val=min_val, name=self.name, keys=self.keys, prior=BetaDistribution(new_a, new_b)
+        )
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, int | None, int | None]):
         """Estimate a BinomialDistribution from BinomialEstimator using sufficient statistics in suff_stat.
@@ -839,6 +948,8 @@ class BinomialEstimator(ParameterEstimator):
             BinomialDistribution estimated from suff_stat input and member variables suff_stat and pseudo_count.
 
         """
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
 
         count, sum, min_val, max_val = suff_stat
 

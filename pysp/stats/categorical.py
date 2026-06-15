@@ -28,6 +28,7 @@ from pysp.stats.pdist import (
 )
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.utils.special import digamma
 
 T = TypeVar("T")
 
@@ -59,6 +60,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         default_value: float = 0.0,
         name: str | None = None,
         prob_map: dict[Any, float] = MISSING,
+        prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
     ) -> None:
         """Defines a CategoricalDistribution object for data type T.
 
@@ -73,6 +75,10 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 the key (p_i).
             default_value float: Value for prob of observation outside support of CategorialDistribution.
             name (str): Assigns a name to the CategoricalDistribution object.
+            prior (Optional): Conjugate parameter prior over the category-probability simplex. A
+                :class:`~pysp.stats.catdirichlet.DictDirichletDistribution` enables the Bayesian /
+                variational machinery (``expected_log_density`` and the conjugate posterior update);
+                ``None`` (default) is a plain point model.
 
         Attributes:
             name (str): Assigns a name to the CategoricalDistribution object.
@@ -92,6 +98,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         self.default_value = max(0.0, min(default_value, 1.0))
         self.log_default_value = float(-np.inf if default_value == 0 else math.log(default_value))
         self.log1p_default_value = float(math.log1p(default_value))
+        self.set_prior(prior)
 
     def __str__(self) -> str:
         """Object string with member variables for CategoricalDistribution.
@@ -105,6 +112,61 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         s3 = repr(self.name)
 
         return "CategoricalDistribution({%s}, default_value=%s, name=%s)" % (s1, s2, s3)
+
+    def get_prior(self) -> Optional["SequenceEncodableProbabilityDistribution"]:
+        """Return the conjugate parameter prior over the category-probability simplex (or None)."""
+        return self.prior
+
+    def set_prior(self, prior: Optional["SequenceEncodableProbabilityDistribution"]) -> None:
+        """Attach a parameter prior and precompute conjugate-prior expectations.
+
+        With a DictDirichlet(alpha) prior over the category probabilities this caches the variational
+        expected log-probabilities E[log p_k] = digamma(alpha_k) - digamma(sum_k alpha_k) for each key
+        of ``pmap`` so that ``expected_log_density(x) = E[log p_x] - log(1 + default_value)``. A scalar
+        alpha is treated as a symmetric Dirichlet of dimension ``len(pmap)``. Any other prior
+        (including ``None``) leaves the distribution a plain point model.
+        """
+        from pysp.stats.catdirichlet import DictDirichletDistribution
+
+        self.prior = prior
+        if isinstance(prior, DictDirichletDistribution):
+            a = prior.get_parameters()
+            n = len(self.pmap)
+            if isinstance(a, float):
+                bb = digamma(a) - digamma(n * a)
+                b = {k: bb for k in self.pmap.keys()}
+            else:
+                asum = digamma(sum(a.values()))
+                b = {k: digamma(v) - asum for k, v in a.items()}
+            self.conj_prior_params = a
+            self.expected_nparams = b
+            self.has_conj_prior = True
+        else:
+            self.conj_prior_params = None
+            self.expected_nparams = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: Any) -> float:
+        """Variational expectation E_q[log p(x)] under the DictDirichlet prior.
+
+        Falls back to the plug-in ``log_density(x)`` when no conjugate prior is attached.
+        """
+        if not self.has_conj_prior:
+            return self.log_density(x)
+
+        if x not in self.pmap:
+            return self.log_default_value - self.log1p_default_value
+
+        return self.expected_nparams[x] - self.log1p_default_value
+
+    def seq_expected_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations."""
+        if not self.has_conj_prior:
+            return self.seq_log_density(x)
+
+        xs, val_map_inv = x
+        rv = np.asarray([self.expected_log_density(u) for u in val_map_inv])
+        return rv[xs]
 
     def density(self, x: Any) -> float:
         """Density evaluation of CategoricalDistribution.
@@ -263,10 +325,12 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             CategoricalEstimator object.
         """
         if pseudo_count is None:
-            return CategoricalEstimator(name=self.name)
+            return CategoricalEstimator(name=self.name, prior=self.prior)
 
         else:
-            return CategoricalEstimator(pseudo_count=pseudo_count, suff_stat=self.pmap, name=self.name)
+            return CategoricalEstimator(
+                pseudo_count=pseudo_count, suff_stat=self.pmap, name=self.name, prior=self.prior
+            )
 
     def dist_to_encoder(self) -> "CategoricalDataEncoder":
         """Creates a CategoricalDataEncoder object for sequence encoding data.
@@ -604,6 +668,7 @@ class CategoricalEstimator(ParameterEstimator):
         default_value: bool = False,
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """CategoricalEstimator used to estimate CategoricalDistribution from sufficient statistics and create
         AccumulatorFactory objects.
@@ -630,6 +695,27 @@ class CategoricalEstimator(ParameterEstimator):
         self.default_value = default_value
         self.name = name
         self.keys = keys
+        self.prior = prior
+        from pysp.stats.catdirichlet import DictDirichletDistribution
+
+        self.has_conj_prior = isinstance(prior, DictDirichletDistribution)
+
+    def get_prior(self) -> SequenceEncodableProbabilityDistribution | None:
+        """Return the conjugate parameter prior over the category-probability simplex (or None)."""
+        return self.prior
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Set the conjugate parameter prior over the category-probability simplex."""
+        from pysp.stats.catdirichlet import DictDirichletDistribution
+
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, DictDirichletDistribution)
+
+    def model_log_density(self, model: "CategoricalDistribution") -> float:
+        """Log-density of the model probability map under the DictDirichlet prior (ELBO global term)."""
+        if self.has_conj_prior:
+            return float(self.prior.log_density(model.pmap))
+        return 0.0
 
     def accumulator_factory(self) -> "CategoricalAccumulatorFactory":
         """Create CategoricalAccumulatorFactory with keys passed is set.
@@ -639,6 +725,38 @@ class CategoricalEstimator(ParameterEstimator):
 
         """
         return CategoricalAccumulatorFactory(self.keys)
+
+    def _estimate_conjugate(self, suff_stat: dict[Any, float]) -> "CategoricalDistribution":
+        """Dirichlet MAP estimate (counts + alpha - 1, clamped at the simplex boundary, posterior
+        mean when degenerate) carrying the posterior DictDirichlet forward as the new prior."""
+        from pysp.stats.catdirichlet import DictDirichletDistribution
+
+        count_map = suff_stat
+        conj_prior_params = self.prior.get_parameters()
+
+        if isinstance(conj_prior_params, float):
+            alpha = conj_prior_params
+            keys = count_map.keys()
+            # Dirichlet MAP sits on the boundary when alpha_k + n_k < 1
+            num = {k: max((alpha - 1) + count_map[k], 0.0) for k in keys}
+            cpp = {k: (alpha + count_map[k]) for k in keys}
+        else:
+            keys = set(conj_prior_params.keys()).union(count_map.keys())
+            num = {k: max((conj_prior_params.get(k, 0.0) - 1) + count_map.get(k, 0.0), 0.0) for k in keys}
+            cpp = {k: (conj_prior_params.get(k, 0.0) + count_map.get(k, 0.0)) for k in keys}
+
+        norm_const = sum(num.values())
+
+        if norm_const > 0:
+            p_map = {k: v / norm_const for k, v in num.items()}
+        else:
+            # fall back to the posterior mean when the MAP is degenerate
+            cpp_sum = sum(cpp.values())
+            p_map = {k: v / cpp_sum for k, v in cpp.items()}
+
+        return CategoricalDistribution(
+            pmap=p_map, default_value=0.0, name=self.name, prior=DictDirichletDistribution(cpp)
+        )
 
     def estimate(self, nobs: float | None, suff_stat: dict[Any, float]) -> "CategoricalDistribution":
         """Estimate a CategoricalDistribution from suff_stat value.
@@ -659,6 +777,9 @@ class CategoricalEstimator(ParameterEstimator):
                 (if it is not None).
 
         """
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
+
         stats_sum = sum(suff_stat.values())
 
         if self.default_value:

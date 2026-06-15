@@ -21,6 +21,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
+from pysp.stats.mvngamma import MultivariateNormalGammaDistribution
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -30,6 +31,7 @@ from pysp.stats.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.utils.aliasing import MISSING, coalesce_alias
+from pysp.utils.special import digamma
 
 
 class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
@@ -102,6 +104,7 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
         covariance: Sequence[float] | np.ndarray = MISSING,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """Create a DiagonalGaussianDistribution object with mean mu and covariance covar.
 
@@ -110,6 +113,10 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
             covar (Union[Sequence[float], np.ndarray]): Variance of each component.
             name (Optional[str]): Set name for object instance.
             keys (Optional[str]): Set keys for object isntance.
+            prior (Optional): Conjugate parameter prior over (mu, tau=1/covar). A
+                :class:`~pysp.stats.mvngamma.MultivariateNormalGammaDistribution` enables the
+                Bayesian/variational machinery (``expected_log_density`` and the conjugate
+                posterior update); ``None`` (default) is a plain point model.
 
         Attributes:
              dim (int): Dimension of the multivariate Gaussian. Determined by mean length.
@@ -134,6 +141,52 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         self.cb = self.mu / self.covar
         self.cc = (-0.5 * self.mu * self.mu / self.covar).sum() + self.log_c
         self.key = keys
+
+        self.set_prior(prior)
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Attach a parameter prior and precompute conjugate-prior expectations.
+
+        With a MultivariateNormalGamma(mu0, lam, a, b) prior over (mu, tau=1/covar) this
+        caches the expected natural parameters [ea, eb, e1, e2] with e1 = E[mu*tau] and
+        e2 = -0.5*E[tau] per component (ea, eb scalars summed over components), so that
+        ``expected_log_density(x) = x.e1 + (x*x).e2 - ea + eb``. Any other prior
+        (including ``None``) leaves the distribution a plain point model.
+        """
+        self.prior = prior
+
+        if isinstance(prior, MultivariateNormalGammaDistribution):
+            mu, lam, a, b = prior.get_parameters()
+
+            ea = np.sum((mu * mu) * (a / b) * 0.5 + (0.5 / lam) + 0.5 * (np.log(b) - digamma(a)))
+            e1 = mu * a / b
+            e2 = -0.5 * a / b
+            eb = -0.5 * np.log(2 * np.pi) * self.dim
+
+            self.conj_prior_params = [mu, lam, a, b]
+            self.expected_nparams = [ea, eb, e1, e2]
+            self.has_conj_prior = True
+        else:
+            self.conj_prior_params = None
+            self.expected_nparams = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x) -> float:
+        """Variational expectation E_q[log p(x | mu, tau)] under the prior.
+
+        Falls back to the plug-in ``log_density(x)`` when no conjugate prior is attached.
+        """
+        if self.has_conj_prior:
+            ea, eb, e1, e2 = self.expected_nparams
+            return np.dot(x, e1) + np.dot(np.power(x, 2), e2) - ea + eb
+        return self.log_density(x)
+
+    def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations."""
+        if self.has_conj_prior:
+            ea, eb, e1, e2 = self.expected_nparams
+            return np.dot(x, e1) + np.dot(x * x, e2) - ea + eb
+        return self.seq_log_density(x)
 
     def __str__(self) -> str:
         """Returns string representation of DiagonalGaussianDistribution object."""
@@ -251,9 +304,11 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return DiagonalGaussianEstimator(name=self.name, keys=self.key)
+            return DiagonalGaussianEstimator(name=self.name, keys=self.key, prior=self.prior)
         else:
-            return DiagonalGaussianEstimator(pseudo_count=(pseudo_count, pseudo_count), name=self.name, keys=self.key)
+            return DiagonalGaussianEstimator(
+                pseudo_count=(pseudo_count, pseudo_count), name=self.name, keys=self.key, prior=self.prior
+            )
 
     def dist_to_encoder(self) -> "DiagonalGaussianDataEncoder":
         """Returns a DiagonalGaussianDataEncoder object for encoding sequences of iid observations."""
@@ -510,6 +565,7 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         suff_stat: tuple[np.ndarray | None, np.ndarray | None] = (None, None),
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """DiagonalGaussianEstimator object for estimating diagonal Gaussian distributions from aggregated sufficient
             statistics.
@@ -522,6 +578,10 @@ class DiagonalGaussianEstimator(ParameterEstimator):
                 observations both having same dimension.
             name (Optinal[str]): Set name for object instance.
             keys (Optional[str]): Set keys for merging sufficient statistics.
+            prior (Optional): Conjugate MultivariateNormalGamma prior over (mu, tau=1/covar). When present,
+                ``estimate`` performs the closed-form per-component conjugate posterior update (returning the
+                joint MAP estimate and carrying the posterior forward as the fitted model's prior) instead
+                of the maximum-likelihood / pseudo-count update.
 
         Attributes:
             name (Optinal[str]): Name for object instance.
@@ -549,10 +609,53 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         self.prior_mu = None if suff_stat[0] is None else np.reshape(suff_stat[0], dim_loc)
         self.prior_covar = None if suff_stat[1] is None else np.reshape(suff_stat[1], dim_loc)
         self.key = keys
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, MultivariateNormalGammaDistribution)
 
     def accumulator_factory(self) -> "DiagonalGaussianAccumulatorFactory":
         """Returns a DiagonalGaussianAccumulatorFactory built from the estimator's attributes."""
         return DiagonalGaussianAccumulatorFactory(dim=self.dim, keys=self.key)
+
+    def model_log_density(self, model: "DiagonalGaussianDistribution") -> float:
+        """Log-density of the model parameters under the MultivariateNormalGamma prior (ELBO global term).
+
+        The prior is over (mu, tau=1/covar), so the model's covariance is inverted before scoring.
+        """
+        if self.has_conj_prior:
+            return float(self.prior.log_density((model.mu, 1.0 / model.covar)))
+        return 0.0
+
+    def _estimate_conjugate(self, suff_stat: tuple[np.ndarray, np.ndarray, float]) -> "DiagonalGaussianDistribution":
+        """Closed-form per-component NormalGamma conjugate posterior update returning the joint MAP estimate."""
+        sum_x, sum_xx, nobs_loc1 = suff_stat
+        sum_xxx = sum_x
+        nobs_loc2 = nobs_loc1
+
+        old_mu, old_lam, old_a, old_b = self.prior.get_parameters()
+
+        new_n = old_lam + nobs_loc1
+        new_a = old_a + (nobs_loc2 / 2.0)
+
+        if nobs_loc1 > 0:
+            sample_mean1 = sum_x / nobs_loc1
+        else:
+            sample_mean1 = 0
+
+        if nobs_loc2 > 0:
+            sample_mean2 = sum_xxx / nobs_loc2
+        else:
+            sample_mean2 = 0
+
+        new_mu = (sum_x + old_mu * old_lam) / (old_lam + nobs_loc1)
+
+        new_b0 = sum_xx - sample_mean2 * sum_xxx
+        new_b1 = (old_lam * nobs_loc1 / new_n) * np.power(sample_mean1 - old_mu, 2)
+        new_b = old_b + 0.5 * (new_b0 + new_b1)
+
+        new_sigma2 = new_b / (new_a - 0.5)
+
+        new_prior = MultivariateNormalGammaDistribution(new_mu, new_n, new_a, new_b)
+        return DiagonalGaussianDistribution(new_mu, new_sigma2, name=self.name, prior=new_prior)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, float]
@@ -572,6 +675,9 @@ class DiagonalGaussianEstimator(ParameterEstimator):
             DiagonalGaussianDistribution object.
 
         """
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
+
         nobs = suff_stat[2]
         pc1, pc2 = self.pseudo_count
 
