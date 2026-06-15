@@ -35,6 +35,7 @@ __all__ = [
     "best_first_union_max",
     "rerank_by_density",
     "stable_top_k",
+    "sound_top_k",
     "bounded_best_first_union_index",
     "QuantizedEnumerationIndex",
     "LazyQuantizedEnumerationIndex",
@@ -1076,3 +1077,85 @@ def stable_top_k(
         previous = current
         window *= growth
     return previous if previous is not None else []
+
+
+def sound_top_k(
+    dist: Any,
+    k: int,
+    start: int = 0,
+    budget_bits: float = 40.0,
+    oversample: int = 8,
+    bin_width_bits: float = 1.0,
+    max_budget_bits: float = 512.0,
+    total_mass: float = 1.0,
+    tol: float = 1.0e-12,
+) -> list[tuple[Any, float]]:
+    """Exact true-descending observations ranked ``[start, start+k)`` for ANY normalized model.
+
+    This is the sound counterpart to :func:`stable_top_k`: it makes NO assumption about how well the
+    underlying seek-index stream is ordered, so it is correct for deep / nested mixtures and HMMs
+    where the tropical order is badly displaced.
+
+    Idea -- a mass-threshold certificate. Pull distinct ``(value, log_prob)`` from the count-budget
+    seek stream (any order), accumulate the exact probability mass, and keep the best ``start+k`` by
+    probability in a heap. Because the model is normalized, the total probability of all *unpulled*
+    items is ``total_mass - accumulated``, and every individual unpulled item's probability is at
+    most that remaining mass. So once ``remaining < p_of_the_(start+k)-th-best`` no unseen item can
+    enter the top ``start+k``, and the heap is exactly the true top ``start+k`` -- independent of the
+    stream's ordering, the family, or any tropical/marginal gap. The deepest ranks are returned as
+    ``sorted_desc[start : start+k]``.
+
+    If the in-budget stream is exhausted before the certificate fires (its truncated tail might still
+    hold a needed item), the budget is doubled and the pass repeats, up to ``max_budget_bits``.
+    ``total_mass`` defaults to 1.0; passing a known upper bound on the model's total mass keeps the
+    certificate sound for sub-normalized models (over-estimating remaining only stops later).
+
+    Cost is ``O(number pulled)`` -- the prefix needed to certify, which is small when the
+    distribution is peaked and grows for flat ones. For top-k from rank 0, ``dist.enumerator()`` is
+    usually leaner; ``sound_top_k`` adds the soundness certificate and a start offset that the
+    sequential enumerator and the (unsound) window rerankers cannot provide.
+    """
+    from pysp.utils.quantization.core import count_budget_index
+
+    if k < 1:
+        raise ValueError("k must be a positive integer.")
+    if start < 0:
+        raise ValueError("start must be non-negative.")
+    need = start + k
+    budget = float(budget_bits)
+    while True:
+        # Consume the RAW (over-counted) seek index and de-duplicate here. The canonical-dedup
+        # distinct stream is lossy -- it can drop a valid value whose minimal tropical fine bucket
+        # is computed inconsistently with the convolution binning -- which would make the mass
+        # certificate unreachable. The raw index emits every (value, path/component) copy, so the
+        # self-dedup below recovers the complete distinct set (verified: accumulated mass -> 1).
+        index = count_budget_index(dist, budget_bits=budget, oversample=oversample, bin_width_bits=bin_width_bits)
+        heap: list[tuple[float, int, Any]] = []  # min-heap by log_prob, the best `need` so far
+        counter = itertools.count()
+        seen: set[Hashable] = set()
+        accumulated = 0.0
+        certified = False
+        for i in range(index.total_count):
+            value, lp = index.get(i)
+            key = freeze(value)
+            if key in seen:
+                continue
+            seen.add(key)
+            accumulated += math.exp(lp)
+            if len(heap) < need:
+                heapq.heappush(heap, (lp, next(counter), value))
+            elif lp > heap[0][0]:
+                heapq.heapreplace(heap, (lp, next(counter), value))
+            if len(heap) >= need:
+                remaining = max(0.0, total_mass - accumulated)
+                if remaining < math.exp(heap[0][0]) - tol:
+                    certified = True
+                    break
+        ordered = sorted(heap, key=lambda t: -t[0])
+        # Certified sound; or the whole in-budget index was consumed and it was NOT truncated, so
+        # the full support was seen and the heap is exact; or fewer than `need` distinct values exist.
+        if certified or not index.truncated or len(seen) < need:
+            return [(v, lp) for lp, _, v in ordered][start:need]
+        if budget >= max_budget_bits:
+            return [(v, lp) for lp, _, v in ordered][start:need]  # best effort at the budget cap
+        budget = min(budget * 2.0, max_budget_bits)
