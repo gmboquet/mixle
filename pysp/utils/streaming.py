@@ -1,8 +1,9 @@
-"""Functions for estimating and validating pysparkplug models from observed data.
+"""Online / streaming estimation over batched sufficient statistics.
 
-Useful functions for estimating pysparkplug 'SequenceEncodableProbabilityDistributions' from 'ParameterEstimator'
-objects.
-
+``streaming_accumulate`` folds one batch's sufficient statistics; ``StreamingEstimator`` and
+``IncrementalEstimator`` drive incremental fitting across a stream of batches (with optional
+forgetting/step schedules). Distinct from the Bayesian ``BayesianStreamingEstimator`` in
+``estimation.py``.
 """
 
 import copy
@@ -17,7 +18,7 @@ from pysp.stats import (
     seq_initialize,
     validate_estimator_keys,
 )
-from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
+from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
 T = TypeVar("T")
 E0 = TypeVar("E0")

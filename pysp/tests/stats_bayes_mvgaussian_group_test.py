@@ -11,12 +11,12 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.dmvn import DiagonalGaussianDistribution, DiagonalGaussianEstimator
-from pysp.stats.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
-from pysp.stats.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
-from pysp.stats.mvngamma import MultivariateNormalGammaDistribution
-from pysp.stats.normgamma import NormalGammaDistribution
-from pysp.stats.normwishart import NormalWishartDistribution
+from pysp.stats.bayes.mvngamma import MultivariateNormalGammaDistribution
+from pysp.stats.bayes.normgamma import NormalGammaDistribution
+from pysp.stats.bayes.normwishart import NormalWishartDistribution
+from pysp.stats.leaf.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
+from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution, DiagonalGaussianEstimator
+from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
 from pysp.utils.special import digamma
 
 

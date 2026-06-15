@@ -12,8 +12,8 @@ import unittest
 import numpy as np
 
 from pysp.stats import *
-from pysp.stats.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
-from pysp.stats.pdist import EnumerationError
+from pysp.stats.compute.pdist import EnumerationError
+from pysp.stats.latent.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
 from pysp.utils.enumeration import freeze, sound_top_k, supports_enumeration
 
 TOL = 1e-9
@@ -185,8 +185,8 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
         # Mixture of nested composite/sequence models: the tropical seek order is badly displaced,
         # so sound_top_k's mass certificate (not the ordering) must yield the exact true-descending
         # top-k AND an arbitrary [start, start+k) slice, matching the exact best-first enumerator.
-        from pysp.stats.composite import CompositeDistribution
-        from pysp.stats.sequence import SequenceDistribution
+        from pysp.stats.combinator.composite import CompositeDistribution
+        from pysp.stats.combinator.sequence import SequenceDistribution
 
         def nested(seed):
             r = np.random.RandomState(seed)

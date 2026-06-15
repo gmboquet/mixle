@@ -24,8 +24,8 @@ from pysp.stats import (
     seq_estimate,
     seq_initialize,
 )
-from pysp.stats.categorical import CategoricalDistribution
-from pysp.stats.lda import seq_posterior
+from pysp.stats.latent.lda import seq_posterior
+from pysp.stats.leaf.categorical import CategoricalDistribution
 from pysp.utils.optsutil import count_by_value
 
 DOCS = [

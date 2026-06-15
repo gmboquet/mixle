@@ -5,7 +5,7 @@ from typing import TypeVar
 
 import numpy as np
 
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution
+from pysp.stats.compute.pdist import SequenceEncodableProbabilityDistribution
 
 T = TypeVar("T")
 

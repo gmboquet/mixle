@@ -108,7 +108,7 @@ class GradientFitTestCase(unittest.TestCase):
         self.assertTrue(np.isfinite(ll))
 
     def test_uniform_ordered_bounds_use_declaration_constraint(self):
-        from pysp.stats.declarations import declaration_for
+        from pysp.stats.compute.declarations import declaration_for
 
         start = UniformDistribution(-3.0, 4.0)
         declaration = declaration_for(start)
@@ -593,7 +593,7 @@ class GradientFitTestCase(unittest.TestCase):
         import torch
 
         from pysp.engines import TorchEngine
-        from pysp.stats.backend import backend_seq_log_density
+        from pysp.stats.compute.backend import backend_seq_log_density
 
         engine = TorchEngine(dtype=torch.float64)
         cases = [

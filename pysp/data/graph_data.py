@@ -17,7 +17,7 @@ try:
 except Exception:  # pragma: no cover - scipy is a package dependency in normal use.
     sp = None
 
-from pysp.stats.pdist import DataSequenceEncoder
+from pysp.stats.compute.pdist import DataSequenceEncoder
 
 _EPS = 1.0e-12
 

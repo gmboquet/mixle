@@ -1,4 +1,4 @@
-"""Tests for pysp.stats.quantized_hmm.
+"""Tests for pysp.stats.latent.quantized_hmm.
 
 Covers the theta^k parameterization (row normalization, log-prob structure, structural zeros,
 stationary init mode), agreement with the dense HiddenMarkovModelDistribution, sampling, and EM
@@ -14,9 +14,9 @@ from numpy.random import RandomState
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats import seq_estimate, seq_initialize
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.hidden_markov import HiddenMarkovModelDistribution
-from pysp.stats.null_dist import NullDistribution
+from pysp.stats.combinator.null_dist import NullDistribution
+from pysp.stats.latent.hidden_markov import HiddenMarkovModelDistribution
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 
 try:
     from pysp.engines import TorchEngine
@@ -24,7 +24,7 @@ try:
     _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
-from pysp.stats.quantized_hmm import (
+from pysp.stats.latent.quantized_hmm import (
     QuantizedHiddenMarkovEstimator,
     QuantizedHiddenMarkovModelDistribution,
     QuantizedHiddenMarkovModelEnumerator,
@@ -313,7 +313,7 @@ class QuantizedHmmEngineTestCase(unittest.TestCase):
             self.engines.append(("torch", _TORCH))
 
     def test_scoring_and_estep_parity(self):
-        from pysp.stats.backend import backend_seq_log_density
+        from pysp.stats.compute.backend import backend_seq_log_density
 
         est = self.dist.estimator(pseudo_count=0.5)
         enc = self.dist.dist_to_encoder().seq_encode(self.data)

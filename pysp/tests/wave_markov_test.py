@@ -1,4 +1,4 @@
-"""Tests for pysp.stats.grammar, pysp.stats.markov_transform, and pysp.stats.sparse_markov_transform.
+"""Tests for pysp.stats.graph.grammar, pysp.stats.graph.markov_transform, and pysp.stats.graph.sparse_markov_transform.
 
 Covers: clean grammar module imports without cnrg, the in-tree grammar accumulator/sampler path, the
 GrammarDistribution.estimator() fix, markov_transform sample/estimate smoke on tiny data, and DataSequenceEncoder
@@ -14,9 +14,9 @@ import numpy as np
 
 
 def _make_markov_transform_dist(alpha=0.05, with_len=True):
-    from pysp.stats.categorical import CategoricalDistribution
-    from pysp.stats.composite import CompositeDistribution
-    from pysp.stats.markov_transform import MarkovTransformDistribution
+    from pysp.stats.combinator.composite import CompositeDistribution
+    from pysp.stats.graph.markov_transform import MarkovTransformDistribution
+    from pysp.stats.leaf.categorical import CategoricalDistribution
 
     nw = 3
     init_prob = np.asarray([0.5, 0.3, 0.2])
@@ -39,9 +39,9 @@ def _make_markov_transform_dist(alpha=0.05, with_len=True):
 
 
 def _make_sparse_assoc_dist(low_memory=False):
-    from pysp.stats.categorical import CategoricalDistribution
-    from pysp.stats.composite import CompositeDistribution
-    from pysp.stats.sparse_markov_transform import SparseMarkovAssociationDistribution
+    from pysp.stats.combinator.composite import CompositeDistribution
+    from pysp.stats.graph.sparse_markov_transform import SparseMarkovAssociationDistribution
+    from pysp.stats.leaf.categorical import CategoricalDistribution
 
     nw = 3
     init_prob = np.asarray([0.5, 0.3, 0.2])
@@ -60,7 +60,7 @@ def _make_sparse_assoc_dist(low_memory=False):
 
 class ImportTestCase(unittest.TestCase):
     def test_markov_transform_imports(self):
-        mod = importlib.import_module("pysp.stats.markov_transform")
+        mod = importlib.import_module("pysp.stats.graph.markov_transform")
         for name in (
             "MarkovTransformDistribution",
             "MarkovTransformSampler",
@@ -72,7 +72,7 @@ class ImportTestCase(unittest.TestCase):
             self.assertTrue(hasattr(mod, name), name)
 
     def test_sparse_markov_transform_imports(self):
-        mod = importlib.import_module("pysp.stats.sparse_markov_transform")
+        mod = importlib.import_module("pysp.stats.graph.sparse_markov_transform")
         for name in (
             "SparseMarkovAssociationDistribution",
             "SparseMarkovAssociationSampler",
@@ -85,7 +85,7 @@ class ImportTestCase(unittest.TestCase):
 
     def test_grammar_imports_without_cnrg(self):
         # The module must import cleanly even when the optional 'cnrg' package is absent.
-        mod = importlib.import_module("pysp.stats.grammar")
+        mod = importlib.import_module("pysp.stats.graph.grammar")
         for name in (
             "GrammarDistribution",
             "GrammarSampler",
@@ -100,7 +100,7 @@ class ImportTestCase(unittest.TestCase):
 class GrammarTestCase(unittest.TestCase):
     @staticmethod
     def _grammar():
-        from pysp.stats.grammar import VRG, GrammarRule
+        from pysp.stats.graph.grammar import VRG, GrammarRule
 
         graph = nx.Graph()
         graph.add_node(0, label="A", node_color="")
@@ -111,7 +111,7 @@ class GrammarTestCase(unittest.TestCase):
         return grammar
 
     def test_estimator_does_not_pass_distribution_as_pseudo_count(self):
-        from pysp.stats.grammar import GrammarDistribution, GrammarEstimator
+        from pysp.stats.graph.grammar import GrammarDistribution, GrammarEstimator
 
         dist = GrammarDistribution(None, 0.01, name="g")
         est = dist.estimator()
@@ -123,14 +123,14 @@ class GrammarTestCase(unittest.TestCase):
         self.assertEqual(est2.pseudo_count, 2.0)
 
     def test_accumulator_factory_and_alias(self):
-        from pysp.stats.grammar import GrammarAccumulatorFactory, GrammarEstimator
+        from pysp.stats.graph.grammar import GrammarAccumulatorFactory, GrammarEstimator
 
         est = GrammarEstimator()
         self.assertIsInstance(est.accumulator_factory(), GrammarAccumulatorFactory)
         self.assertIsInstance(est.accumulatorFactory(), GrammarAccumulatorFactory)
 
     def test_encoder_equality(self):
-        from pysp.stats.grammar import GrammarDataEncoder, GrammarDistribution
+        from pysp.stats.graph.grammar import GrammarDataEncoder, GrammarDistribution
 
         dist = GrammarDistribution(None, 0.01)
         enc = dist.dist_to_encoder()
@@ -141,7 +141,7 @@ class GrammarTestCase(unittest.TestCase):
         self.assertEqual(str(enc), "GrammarDataEncoder")
 
     def test_in_tree_grammar_accumulates_scores_and_samples_without_cnrg(self):
-        from pysp.stats.grammar import (
+        from pysp.stats.graph.grammar import (
             GrammarDistribution,
             GrammarEstimator,
             GrammarEstimatorAccumulator,
@@ -199,7 +199,7 @@ class MarkovTransformTestCase(unittest.TestCase):
         self.assertTrue(np.allclose(dist.seq_log_density(legacy), dist.seq_log_density(modern)))
 
     def test_encoder_equality(self):
-        from pysp.stats.markov_transform import MarkovTransformDataEncoder
+        from pysp.stats.graph.markov_transform import MarkovTransformDataEncoder
 
         enc1 = self.dist.dist_to_encoder()
         enc2 = self.dist.dist_to_encoder()
@@ -209,7 +209,7 @@ class MarkovTransformTestCase(unittest.TestCase):
         self.assertIn("MarkovTransformDataEncoder", str(enc1))
 
     def test_estimate_smoke(self):
-        from pysp.stats.markov_transform import (
+        from pysp.stats.graph.markov_transform import (
             MarkovTransformAccumulatorFactory,
             MarkovTransformDistribution,
             MarkovTransformEstimator,
@@ -240,7 +240,7 @@ class MarkovTransformTestCase(unittest.TestCase):
 
     def test_update_and_initialize_single_obs(self):
         dist = _make_markov_transform_dist(with_len=False)
-        from pysp.stats.markov_transform import MarkovTransformEstimator
+        from pysp.stats.graph.markov_transform import MarkovTransformEstimator
 
         est = MarkovTransformEstimator(dist.num_vals, alpha=0.05)
         acc = est.accumulator_factory().make()

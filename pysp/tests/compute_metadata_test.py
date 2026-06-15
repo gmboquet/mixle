@@ -117,7 +117,7 @@ from pysp.stats import (
     validate_declaration,
     validate_statistic_layout,
 )
-from pysp.stats.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
+from pysp.stats.latent.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
 
 
 def _assert_suff_close(test_case, actual, expected):
@@ -462,21 +462,22 @@ class ComputeMetadataTestCase(unittest.TestCase):
     def test_high_level_compute_utilities_do_not_import_concrete_distributions(self):
         pysp_root = Path(__file__).resolve().parents[1]
         targets = [
-            pysp_root / "stats" / "torch_mixture.py",
+            pysp_root / "stats" / "compute" / "torch_mixture.py",
             pysp_root / "utils" / "estimation.py",
             pysp_root / "utils" / "objectives.py",
             pysp_root / "utils" / "em.py",
-            pysp_root / "utils" / "automatic.py",
+            pysp_root / "utils" / "automatic" / "factories.py",
+            pysp_root / "utils" / "automatic" / "profiling.py",
             pysp_root / "utils" / "fisher.py",
             pysp_root / "planner.py",
         ] + sorted((pysp_root / "engines").glob("*.py"))
         allowed_modules = {
             "pysp.stats",
-            "pysp.stats.backend",
-            "pysp.stats.capabilities",
-            "pysp.stats.declarations",
-            "pysp.stats.gradient",
-            "pysp.stats.pdist",
+            "pysp.stats.compute.backend",
+            "pysp.stats.compute.capabilities",
+            "pysp.stats.compute.declarations",
+            "pysp.stats.compute.gradient",
+            "pysp.stats.compute.pdist",
         }
         concrete_suffixes = (
             "Accumulator",
@@ -509,7 +510,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
         self.assertEqual(violations, [])
 
     def test_torch_mixture_remains_a_compatibility_shim_not_an_omni_file(self):
-        torch_mixture_path = Path(__file__).resolve().parents[1] / "stats" / "torch_mixture.py"
+        torch_mixture_path = Path(__file__).resolve().parents[1] / "stats" / "compute" / "torch_mixture.py"
         tree = ast.parse(torch_mixture_path.read_text(), filename=str(torch_mixture_path))
         class_names = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
         exports = []

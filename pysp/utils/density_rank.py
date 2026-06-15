@@ -117,7 +117,7 @@ def density_rank(
 
 def _try_enumerator(dist: Any):
     """Return ``dist.enumerator()`` if supported, else ``None``."""
-    from pysp.stats.pdist import EnumerationError
+    from pysp.stats.compute.pdist import EnumerationError
 
     enum = getattr(dist, "enumerator", None)
     if enum is None:
@@ -202,7 +202,7 @@ def count_dp_rank(
     (dominant-path) cost and over-counts, so this returns a *tropical* rank, not the true-marginal
     rank -- use :func:`density_rank` (head enumeration + sampling) for those.
     """
-    from pysp.stats.pdist import EnumerationError
+    from pysp.stats.compute.pdist import EnumerationError
     from pysp.utils.quantization.core import Quantizer
 
     t = float(dist.log_density(value))
@@ -284,7 +284,7 @@ def count_dp_seek(
     For decomposable families this is exact up to quantization; for mixtures/HMMs it seeks into the
     tropical (dominant-component/path) projection and the bracket is that projection's error envelope.
     """
-    from pysp.stats.pdist import EnumerationError
+    from pysp.stats.compute.pdist import EnumerationError
     from pysp.utils.quantization.core import Quantizer
 
     if index < 0:
@@ -336,9 +336,9 @@ def _mass_histogram(dist, quantizer, max_fine_bucket):
     sequences pool the per-length L-fold self-convolution shifted/scaled by the length term, leaves
     sum probabilities over their own support. Used by :func:`cumulative_probability`.
     """
-    from pysp.stats.composite import CompositeDistribution
-    from pysp.stats.pdist import EnumerationError
-    from pysp.stats.sequence import SequenceDistribution
+    from pysp.stats.combinator.composite import CompositeDistribution
+    from pysp.stats.combinator.sequence import SequenceDistribution
+    from pysp.stats.compute.pdist import EnumerationError
 
     def convolve(a, b):
         out: dict[int, float] = {}
@@ -356,7 +356,7 @@ def _mass_histogram(dist, quantizer, max_fine_bucket):
         return joint
 
     if isinstance(dist, SequenceDistribution):
-        from pysp.stats.pdist import child_enumerator
+        from pysp.stats.compute.pdist import child_enumerator
 
         if dist.null_len_dist:
             raise EnumerationError(dist, reason="no length distribution is modeled")
@@ -435,8 +435,8 @@ def _joint_bucket_histogram(components, quantizer, max_fine_bucket):
     Returns ``{(b_1, ..., b_K): count}``. Raises EnumerationError for component structures not
     handled here (only Composite and atomic/enumerable leaves are supported).
     """
-    from pysp.stats.composite import CompositeDistribution
-    from pysp.stats.pdist import EnumerationError
+    from pysp.stats.combinator.composite import CompositeDistribution
+    from pysp.stats.compute.pdist import EnumerationError
     from pysp.utils.enumeration import freeze
 
     head = components[0]

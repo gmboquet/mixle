@@ -1,10 +1,10 @@
 """Tests that lag=0 lookback hidden Markov models behave as consistent ordinary HMMs.
 
-Covers pysp.stats.look_back_hmm (the typed lookback HMM). With lag=0 there is no initial segment:
+Covers pysp.stats.latent.look_back_hmm (the typed lookback HMM). With lag=0 there is no initial segment:
 the number of hidden positions is len(x), the first
 state is drawn from w and emits the window x[0:1], and a sampled length n yields exactly n emissions.
 Checks log_density against a hand-computed ordinary-HMM forward pass and against
-pysp.stats.hidden_markov.HiddenMarkovModelDistribution, that sampled sequence lengths match the
+pysp.stats.latent.hidden_markov.HiddenMarkovModelDistribution, that sampled sequence lengths match the
 length distribution's draws exactly, and that EM (scalar and vectorized paths) runs and agrees.
 """
 
@@ -13,14 +13,14 @@ import unittest
 import numpy as np
 from numpy.random import RandomState
 
-import pysp.stats.look_back_hmm as new_mod
+import pysp.stats.latent.look_back_hmm as new_mod
 from pysp.arithmetic import maxrandint
 from pysp.stats import seq_encode, seq_estimate, seq_initialize, seq_log_density_sum
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.hidden_markov import HiddenMarkovModelDistribution
-from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
-from pysp.stats.null_dist import NullDistribution, NullEstimator
-from pysp.stats.sequence import SequenceDistribution, SequenceEstimator
+from pysp.stats.combinator.null_dist import NullDistribution, NullEstimator
+from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
+from pysp.stats.latent.hidden_markov import HiddenMarkovModelDistribution
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.leaf.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 
 MODULES = [new_mod]
 

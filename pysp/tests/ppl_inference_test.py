@@ -1,8 +1,9 @@
 """Tests for pysp.ppl Bayesian inference: MAP and parameter MCMC (build slice 7)."""
-import numpy as np
 import unittest
 
-from pysp.ppl import Normal, Poisson, Exponential, Bernoulli, Gamma, Beta, free
+import numpy as np
+
+from pysp.ppl import Bernoulli, Beta, Exponential, Gamma, Normal, Poisson, free
 from pysp.ppl.inference import ConjugatePosterior
 
 

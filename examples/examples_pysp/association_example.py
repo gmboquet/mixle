@@ -1,11 +1,11 @@
 """Fit an integer hidden-association model to generated count-vector data."""
 
-import numpy as np
 import time
-from pysp.stats import *
-from pysp.utils.estimation import best_of, iterate, optimize
-from pysp.utils.evaluation import partition_data
 
+import numpy as np
+
+from pysp.stats import *
+from pysp.utils.estimation import optimize
 
 if __name__ == '__main__':
 

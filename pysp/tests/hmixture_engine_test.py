@@ -6,7 +6,7 @@ import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats import CategoricalDistribution, GaussianDistribution, GaussianEstimator, HierarchicalMixtureDistribution
-from pysp.stats.hmixture import HierarchicalMixtureEstimator
+from pysp.stats.latent.hmixture import HierarchicalMixtureEstimator
 
 try:
     from pysp.engines import TorchEngine

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from pysp.stats.pdist import DataSequenceEncoder, ParameterEstimator, SequenceEncodableProbabilityDistribution
+from pysp.stats.compute.pdist import DataSequenceEncoder, ParameterEstimator, SequenceEncodableProbabilityDistribution
 
 FieldSpec = str | Sequence[Any] | None
 
@@ -62,7 +62,7 @@ def seq_encode_dataframe(
 ):
     """Sequence-encode selected DataFrame columns with the ordinary stats API."""
     from pysp.stats import seq_encode
-    from pysp.stats.record import RecordDistribution, RecordEstimator
+    from pysp.stats.combinator.record import RecordDistribution, RecordEstimator
 
     if fields is None and model is not None and isinstance(model, RecordDistribution):
         fields = tuple(zip(model.fields, model.sources))

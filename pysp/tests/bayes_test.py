@@ -9,17 +9,17 @@ Covers:
     and the ELBO must increase monotonically for DPM variational inference.
 
 Conventions exercised here:
-  * conjugate priors live in pysp.stats.normgamma / normwishart / mvngamma /
+  * conjugate priors live in pysp.stats.bayes.normgamma / normwishart / mvngamma /
     catdirichlet / gamma / beta / dirichlet;
   * the estimator API is the 2-arg ``estimate(nobs, suff_stat)``, so calls become
     ``estimate(None, suff_stat)``;
   * the posterior fit driver is ``pysp.utils.estimation.fit``; it prints ``OBJ=``
     lines that the convergence checks parse;
-  * ``mixture_prior`` is in pysp.stats.mixture and returns the tuple
+  * ``mixture_prior`` is in pysp.stats.latent.mixture and returns the tuple
     ``(weight_prior, component_priors)``;
   * sequence encoders are obtained via ``dist.dist_to_encoder().seq_encode(...)``;
   * the Markov chain / HMM use dict-based parameterizations and integer states
-    (see pysp.stats.markov_chain / hidden_markov);
+    (see pysp.stats.graph.markov_chain / hidden_markov);
   * pysp.stats leaf distributions return -inf from scalar log_density for
     out-of-support values but raise ValueError at seq_encode time (a deliberate
     input-validation contract).
@@ -38,44 +38,44 @@ from pysp.stats import (
     seq_encode,
     seq_estimate,
 )
-from pysp.stats.beta import BetaDistribution
-from pysp.stats.binomial import BinomialDistribution, BinomialEstimator
-from pysp.stats.catdirichlet import DictDirichletDistribution
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.conditional import ConditionalDistribution
-from pysp.stats.dirichlet import DirichletDistribution
-from pysp.stats.dpm import DirichletProcessMixtureEstimator
-from pysp.stats.exponential import ExponentialDistribution, ExponentialEstimator
-from pysp.stats.gamma import GammaDistribution
-from pysp.stats.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.stats.geometric import GeometricDistribution
-from pysp.stats.hdpm import (
+from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
+from pysp.stats.bayes.dirichlet import DirichletDistribution
+from pysp.stats.bayes.dpm import DirichletProcessMixtureEstimator
+from pysp.stats.bayes.hdpm import (
     HierarchicalDirichletProcessMixtureDistribution,
     HierarchicalDirichletProcessMixtureEstimator,
 )
-from pysp.stats.hidden_markov import (
+from pysp.stats.bayes.mvngamma import MultivariateNormalGammaDistribution
+from pysp.stats.bayes.normgamma import NormalGammaDistribution
+from pysp.stats.bayes.normwishart import NormalWishartDistribution
+from pysp.stats.combinator.conditional import ConditionalDistribution
+from pysp.stats.combinator.optional import OptionalDistribution
+from pysp.stats.graph.markov_chain import MarkovChainDistribution, MarkovChainEstimator
+from pysp.stats.latent.hidden_markov import (
     HiddenMarkovModelDistribution,
     HiddenMarkovModelEstimator,
 )
-from pysp.stats.int_range import (
-    IntegerCategoricalDistribution,
-    IntegerCategoricalEstimator,
-)
-from pysp.stats.log_gaussian import LogGaussianDistribution
-from pysp.stats.markov_chain import MarkovChainDistribution, MarkovChainEstimator
-from pysp.stats.mixture import (
+from pysp.stats.latent.mixture import (
     MixtureDistribution,
     MixtureEstimator,
     mixture_prior,
 )
-from pysp.stats.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
-from pysp.stats.mvngamma import MultivariateNormalGammaDistribution
-from pysp.stats.normgamma import NormalGammaDistribution
-from pysp.stats.normwishart import NormalWishartDistribution
-from pysp.stats.optional import OptionalDistribution
-from pysp.stats.point_mass import PointMassDistribution
-from pysp.stats.poisson import PoissonDistribution, PoissonEstimator
-from pysp.stats.setdist import BernoulliSetDistribution
+from pysp.stats.leaf.beta import BetaDistribution
+from pysp.stats.leaf.binomial import BinomialDistribution, BinomialEstimator
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEstimator
+from pysp.stats.leaf.gamma import GammaDistribution
+from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.leaf.geometric import GeometricDistribution
+from pysp.stats.leaf.int_range import (
+    IntegerCategoricalDistribution,
+    IntegerCategoricalEstimator,
+)
+from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
+from pysp.stats.leaf.point_mass import PointMassDistribution
+from pysp.stats.leaf.poisson import PoissonDistribution, PoissonEstimator
+from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
+from pysp.stats.sets.setdist import BernoulliSetDistribution
 from pysp.utils.estimation import fit as fit_driver
 from pysp.utils.evaluation import k_fold_split_index
 from pysp.utils.special import stirling2
@@ -309,7 +309,7 @@ class PriorDensityTestCase(unittest.TestCase):
                     _encode(dist, data)
 
     def test_seq_expected_log_density_falls_back_without_conjugate_prior(self):
-        from pysp.stats.bernoulli import BernoulliDistribution
+        from pysp.stats.leaf.bernoulli import BernoulliDistribution
 
         cases = [
             (BernoulliDistribution(0.3), [True, False]),
