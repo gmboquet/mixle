@@ -34,6 +34,7 @@ from pysp.stats.pdist import (
 )
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.utils.special import digamma
 
 
 class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
@@ -69,6 +70,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         p_vec: list[float] | np.ndarray = MISSING,
         name: str | None = None,
         prob_vec: list[float] | np.ndarray = MISSING,
+        prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
     ) -> None:
         """IntegerCategoricalDistribution object defining an integer categorical distribution.
 
@@ -77,6 +79,11 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             p_vec (Union[List[float], np.ndarray]): Probability vector containing probability of each integer in the
                 support range.
             name (Optional[str]): Assign name to IntegerCategoricalDistribution object.
+            prior (Optional): Conjugate parameter prior over the probability vector. A
+                :class:`~pysp.stats.dirichlet.DirichletDistribution` or
+                :class:`~pysp.stats.symdirichlet.SymmetricDirichletDistribution` enables the Bayesian /
+                variational machinery (``expected_log_density`` and the conjugate posterior update);
+                ``None`` (default) is a plain point model.
 
         Attributes:
             p_vec (np.ndarray[float]): Must sum to 1.0. First probability is probability for p_mat(x_mat=min_val).
@@ -94,6 +101,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             self.log_p_vec = np.log(self.p_vec)
             self.num_vals = self.p_vec.shape[0]
             self.name = name
+        self.set_prior(prior)
 
     def __str__(self) -> str:
         """Return a string representation of IntegerCategoricalDistribution object."""
@@ -102,6 +110,73 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         s3 = repr(self.name)
 
         return "IntegerCategoricalDistribution(%s, %s, name=%s)" % (s1, s2, s3)
+
+    def get_parameters(self) -> np.ndarray:
+        """Return the probability vector p_vec (lets it be scored by a Dirichlet conjugate prior)."""
+        return self.p_vec
+
+    def get_prior(self) -> Optional["SequenceEncodableProbabilityDistribution"]:
+        """Return the conjugate parameter prior over the probability vector (or None)."""
+        return self.prior
+
+    def set_prior(self, prior: Optional["SequenceEncodableProbabilityDistribution"]) -> None:
+        """Attach a parameter prior and precompute conjugate-prior expectations.
+
+        With a Dirichlet(alpha) (or SymmetricDirichlet(alpha)) prior over the probability vector this
+        caches the variational expected log-probabilities
+        E[log p_k] = digamma(alpha_k) - digamma(sum_k alpha_k) so that
+        ``expected_log_density(x) = E[log p_{x - min_val}] - log(1 + default_value)``. Any other prior
+        (including ``None``) leaves the distribution a plain point model.
+        """
+        from pysp.stats.dirichlet import DirichletDistribution
+        from pysp.stats.symdirichlet import SymmetricDirichletDistribution
+
+        self.prior = prior
+
+        if isinstance(prior, DirichletDistribution):
+            cpp = prior.get_parameters()
+            if np.ndim(cpp) == 0:
+                cpp = np.ones(self.num_vals) * cpp
+            else:
+                cpp = np.asarray(cpp, dtype=float)
+            self.conj_prior_params = cpp
+            self.expected_nparams = digamma(cpp) - digamma(np.sum(cpp))
+            self.has_conj_prior = True
+        elif isinstance(prior, SymmetricDirichletDistribution):
+            cpp = np.ones(self.num_vals) * prior.get_parameters()
+            self.conj_prior_params = cpp
+            self.expected_nparams = digamma(cpp) - digamma(np.sum(cpp))
+            self.has_conj_prior = True
+        else:
+            self.conj_prior_params = None
+            self.expected_nparams = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: int) -> float:
+        """Variational expectation E_q[log p(x)] under the (symmetric) Dirichlet prior.
+
+        Falls back to the plug-in ``log_density(x)`` when no conjugate prior is attached.
+        """
+        if self.expected_nparams is None:
+            return self.log_density(x)
+
+        if (x < self.min_val) or (x > self.max_val):
+            return -np.inf
+
+        idx = int(x - self.min_val)
+        return float(self.expected_nparams[idx])
+
+    def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations."""
+        if self.expected_nparams is None:
+            return self.seq_log_density(x)
+
+        v = x - self.min_val
+        u = np.bitwise_and(v >= 0, v < self.num_vals)
+        rv = np.zeros(len(x))
+        rv.fill(-np.inf)
+        rv[u] = self.expected_nparams[v[u]]
+        return rv
 
     def density(self, x: int) -> float:
         """Evaluate the density of the integer categorical at observation x.
@@ -231,11 +306,11 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return IntegerCategoricalEstimator(name=self.name)
+            return IntegerCategoricalEstimator(name=self.name, prior=self.prior)
 
         else:
             return IntegerCategoricalEstimator(
-                pseudo_count=pseudo_count, suff_stat=(self.min_val, self.p_vec), name=self.name
+                pseudo_count=pseudo_count, suff_stat=(self.min_val, self.p_vec), name=self.name, prior=self.prior
             )
 
     def dist_to_encoder(self) -> "IntegerCategoricalDataEncoder":
@@ -661,6 +736,7 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         suff_stat: tuple[int, np.ndarray] | None = None,
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """IntegerCategoricalEstimator object for estimating IntegerCategoricalDistribution from aggregated sufficient
             statistics.
@@ -696,6 +772,29 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         self.suff_stat = suff_stat
         self.keys = keys
         self.name = name
+        self.prior = prior
+        self._set_has_conj_prior(prior)
+
+    def _set_has_conj_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        from pysp.stats.dirichlet import DirichletDistribution
+        from pysp.stats.symdirichlet import SymmetricDirichletDistribution
+
+        self.has_conj_prior = isinstance(prior, (DirichletDistribution, SymmetricDirichletDistribution))
+
+    def get_prior(self) -> SequenceEncodableProbabilityDistribution | None:
+        """Return the conjugate parameter prior over the probability vector (or None)."""
+        return self.prior
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Set the conjugate parameter prior over the probability vector."""
+        self.prior = prior
+        self._set_has_conj_prior(prior)
+
+    def model_log_density(self, model: "IntegerCategoricalDistribution") -> float:
+        """Log-density of the model probability vector under the (symmetric) Dirichlet prior."""
+        if self.has_conj_prior:
+            return float(self.prior.log_density(model.p_vec))
+        return 0.0
 
     def accumulator_factory(self) -> "IntegerCategoricalAccumulatorFactory":
         """Returns IntegerCategoricalAccumulatorFactory object from member sufficient statistics of
@@ -719,6 +818,34 @@ class IntegerCategoricalEstimator(ParameterEstimator):
 
         return IntegerCategoricalAccumulatorFactory(min_val, max_val, self.keys)
 
+    def _estimate_conjugate(self, suff_stat: tuple[int, np.ndarray]) -> "IntegerCategoricalDistribution":
+        """Dirichlet MAP estimate (counts + alpha - 1, clamped at the simplex boundary, posterior mean
+        when degenerate) carrying the posterior Dirichlet forward as the new prior."""
+        from pysp.stats.dirichlet import DirichletDistribution
+
+        min_val, count_vec = suff_stat
+        alpha0 = self.prior.get_parameters()
+        if np.ndim(alpha0) == 0:
+            alpha0 = np.ones(len(count_vec)) * alpha0
+        else:
+            alpha0 = np.asarray(alpha0, dtype=float)
+
+        posterior_params = count_vec + alpha0
+
+        # Dirichlet MAP sits on the boundary when alpha_k + n_k < 1
+        num = np.maximum(count_vec + (alpha0 - 1), 0.0)
+        norm_const = np.sum(num)
+
+        if norm_const > 0:
+            prob_vec = num / norm_const
+        else:
+            # fall back to the posterior mean when the MAP is degenerate
+            prob_vec = posterior_params / np.sum(posterior_params)
+
+        hyper_posterior = DirichletDistribution(posterior_params)
+
+        return IntegerCategoricalDistribution(min_val, prob_vec, name=self.name, prior=hyper_posterior)
+
     def estimate(
         self, nobs: float | None, suff_stat: tuple[int, np.ndarray] | None
     ) -> "IntegerCategoricalDistribution":
@@ -741,6 +868,9 @@ class IntegerCategoricalEstimator(ParameterEstimator):
             IntegerCategoricalDistribution object.
 
         """
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
+
         if self.pseudo_count is not None and self.suff_stat is None:
             pseudo_count_per_level = self.pseudo_count / float(len(suff_stat[1]))
             adjusted_nobs = suff_stat[1].sum() + self.pseudo_count
