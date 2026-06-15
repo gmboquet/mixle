@@ -2,7 +2,7 @@
 import numpy as np
 import unittest
 
-from pysp.ppl import Normal, Bernoulli, Poisson, Field, free
+from pysp.ppl import Normal, Bernoulli, Poisson, Field, Group, free
 
 
 class RegressionTestCase(unittest.TestCase):
@@ -72,6 +72,30 @@ class GLMTestCase(unittest.TestCase):
         self.assertAlmostEqual(m.params["x"]["mean"], 0.5, delta=0.1)
         self.assertAlmostEqual(m.params["intercept"]["mean"], 0.3, delta=0.1)
         self.assertGreater(float(m.result.predict({"x": [0.0]})[0]), 0.0)   # a rate
+
+
+class MixedEffectsTestCase(unittest.TestCase):
+
+    def test_random_intercept_lmm(self):
+        rng = np.random.RandomState(0)
+        G, n_per = 40, 30
+        u = rng.normal(0, 1.5, G)
+        ys, xs, subj = [], [], []
+        for gi in range(G):
+            x = rng.normal(0, 1, n_per)
+            y = 1.0 + 2.0 * x + u[gi] + rng.normal(0, 0.7, n_per)
+            ys += list(y); xs += list(x); subj += [gi] * n_per
+        m = Normal(free * Field("x") + free + Group("subject"), free).fit(
+            ys, given={"x": xs, "subject": subj})
+        r = m.result
+        self.assertAlmostEqual(r.coefficients["x"]["mean"], 2.0, delta=0.1)   # fixed slope
+        self.assertAlmostEqual(r.tau, 1.5, delta=0.4)                          # random-intercept sd
+        self.assertAlmostEqual(r.sigma, 0.7, delta=0.1)                       # residual sd
+        ge = np.array([r.group_effects[i] for i in range(G)])
+        self.assertGreater(np.corrcoef(ge, u)[0, 1], 0.95)                    # recovers BLUPs
+        # intercept absorbs the sample mean of the random effects
+        self.assertAlmostEqual(r.coefficients["intercept"]["mean"] + ge.mean() - u.mean(),
+                               1.0, delta=0.15)
 
 
 if __name__ == "__main__":

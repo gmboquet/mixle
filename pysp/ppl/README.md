@@ -68,6 +68,16 @@ m.posterior(a)                          # slope posterior draws
 m.result.predict({"x": [0, 1, 2]})      # predicted means
 ```
 
+Mixed-effects: a `Group("g")` term adds a per-group random intercept (lme4's `(1|g)`),
+fit by a linear-mixed-model EM:
+
+```python
+m = Normal(free*Field("x") + free + Group("subject"), free).fit(
+        y, given={"x": xs, "subject": ids})
+m.result.coefficients   # fixed effects;  m.result.tau / .sigma — variance components
+m.result.group_effects  # per-group random intercepts (BLUPs)
+```
+
 ## Mixtures — and EM "just works"
 
 ```python
