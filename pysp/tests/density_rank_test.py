@@ -155,5 +155,44 @@ class MixtureCrossRankTestCase(unittest.TestCase):
         self.assertLessEqual(max(errs), 2)
 
 
+class CumulativeProbabilityTestCase(unittest.TestCase):
+    """The unbiased mass-histogram DP gives EXACT cumulative probability for decomposable families."""
+
+    def test_composite_exact(self):
+        from pysp.utils.density_rank import cumulative_probability
+
+        rng = np.random.RandomState(0)
+        comp = CompositeDistribution(
+            tuple(IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(2)))) for _ in range(8))
+        )
+        support = list(itertools.product((0, 1), repeat=8))
+        lp = {x: comp.log_density(list(x)) for x in support}
+
+        def brute(x):
+            t = lp[x]
+            return sum(math.exp(lp[y]) for y in support if lp[y] >= t - 1e-12)
+
+        for x in support:
+            self.assertAlmostEqual(cumulative_probability(comp, list(x), oversample=16), brute(x), places=10)
+
+    def test_sequence_exact(self):
+        from pysp.utils.density_rank import cumulative_probability
+
+        rng = np.random.RandomState(0)
+        seq = SequenceDistribution(
+            IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(3)))),
+            len_dist=IntegerCategoricalDistribution(1, list(rng.dirichlet(np.ones(3)))),  # lengths 1..3
+        )
+        support = [list(t) for length in (1, 2, 3) for t in itertools.product(range(3), repeat=length)]
+        lp = {tuple(x): seq.log_density(x) for x in support}
+
+        def brute(x):
+            t = lp[tuple(x)]
+            return sum(math.exp(lp[tuple(y)]) for y in support if lp[tuple(y)] >= t - 1e-12)
+
+        for x in support:
+            self.assertAlmostEqual(cumulative_probability(seq, x, oversample=16), brute(x), places=10)
+
+
 if __name__ == "__main__":
     unittest.main()
