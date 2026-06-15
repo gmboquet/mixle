@@ -228,11 +228,18 @@ class ProbabilityDistribution:
         MARGINAL families (Mixture/HMM) it removes the component/path duplicates by one of two modes:
 
           - ``dedup='canonical'`` (default): a STATELESS predicate (``is_canonical_copy``) keeps a
-            value only at its dominant copy (best-weighted component / min-cost path), evaluated by
-            scoring the model. O(1) memory, and -- crucially -- random-accessible: ``start``/``stop``
+            value only at its dominant copy (best-weighted component / min-cost path), via the
+            value's structural fine bucket (``structural_fine_bucket`` -- the SAME sum-of-floored
+            sub-buckets the count index used, so nested composite/sequence values are binned
+            consistently and never dropped). O(1) memory and random-accessible: ``start``/``stop``
             select an arbitrary STRUCTURAL rank range, so you can begin anywhere and the work
-            partitions across workers with no shared state. Exact except for genuine bin ties between
-            equally-dominant copies (rare; tightened by larger ``oversample``).
+            partitions across workers with no shared state. GUARANTEE: every distinct in-budget value
+            is emitted at least once (completeness). It is NOT strictly once -- a value is emitted
+            once per component/path that ties within its minimal 1-bit coarse bin; that residue is
+            inherent to a stateless ``(value, coarse_bin)`` rule (the tied copies are
+            indistinguishable to it) and is bounded by the number of components/contributing paths
+            (not reduced by ``oversample``, which only refines the intermediate fine bucket). For a
+            strictly-once stream, use ``dedup='window'`` or de-duplicate downstream.
           - ``dedup='window'``: a bounded ``max_entries`` LRU over the stream (catches every duplicate
             within the window regardless of dominance, but is sequential -- ``start`` must be 0).
 
@@ -263,6 +270,19 @@ class ProbabilityDistribution:
         (Composite/Sequence/MarkovChain) never duplicate, so every copy is canonical.
         """
         return True
+
+    def structural_fine_bucket(self, value, quantizer) -> int:
+        """Minimum fine bucket where ``value`` is placed by this distribution's count index.
+
+        Mirrors ``quantized_count_index`` exactly so that stateless canonical-copy dedup can predict
+        the bucket the index actually used. The count DP bins a composite/nested value by a SUM of
+        *floored* per-factor buckets (a convolution), which differs from a single floor of the exact
+        joint log-density by up to the number of factors -- so a canonical check that used
+        ``fine_bucket(log_density(value))`` would mispredict and silently drop nested values. The
+        leaf default is that single floor (correct for atomic families); combinators
+        (Composite/Sequence/Mixture) override to recurse the same way their count index composes.
+        """
+        return quantizer.fine_bucket(float(self.log_density(value)))
 
     def quantized_multi_cross_index(
         self, others: list["ProbabilityDistribution"], max_bits, bin_width_bits: float = 1.0

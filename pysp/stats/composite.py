@@ -359,6 +359,10 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             counts, bin_width_bits=bin_width_bits, max_bits=max_bits, truncated=truncated, getter=getter
         )
 
+    def structural_fine_bucket(self, value, quantizer) -> int:
+        """Sum of child structural buckets -- mirrors the count index's child convolution."""
+        return sum(self.dists[i].structural_fine_bucket(value[i], quantizer) for i in range(self.count))
+
     def quantized_count_index(self, quantizer, max_fine_bucket: int):
         """Structural count index: the ADDITIVE law -- the carrier's n-ary product over children.
 

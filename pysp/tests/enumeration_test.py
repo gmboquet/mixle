@@ -14,7 +14,7 @@ import numpy as np
 from pysp.stats import *
 from pysp.stats.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
 from pysp.stats.pdist import EnumerationError
-from pysp.utils.enumeration import freeze, supports_enumeration
+from pysp.utils.enumeration import freeze, sound_top_k, supports_enumeration
 
 TOL = 1e-9
 
@@ -180,6 +180,34 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
         dist = CompositeDistribution((cat, intcat))
         support = [(s, i) for s in "abc" for i in (0, 1)]
         self.assert_matches_brute(dist, support, "composite")
+
+    def test_sound_top_k_correct_for_nested_mixture(self):
+        # Mixture of nested composite/sequence models: the tropical seek order is badly displaced,
+        # so sound_top_k's mass certificate (not the ordering) must yield the exact true-descending
+        # top-k AND an arbitrary [start, start+k) slice, matching the exact best-first enumerator.
+        from pysp.stats.composite import CompositeDistribution
+        from pysp.stats.sequence import SequenceDistribution
+
+        def nested(seed):
+            r = np.random.RandomState(seed)
+            seq = SequenceDistribution(
+                IntegerCategoricalDistribution(0, list(r.dirichlet(np.ones(4)))),
+                len_dist=IntegerCategoricalDistribution(1, list(r.dirichlet(np.ones(4)))),
+            )
+            return CompositeDistribution((seq, IntegerCategoricalDistribution(0, list(r.dirichlet(np.ones(5))))))
+
+        rng = np.random.RandomState(0)
+        mix = MixtureDistribution([nested(s) for s in (1, 2, 3)], list(rng.dirichlet(np.ones(3))))
+        exact = list(itertools.islice(mix.enumerator(), 20))
+
+        def tiers(pairs):
+            out = {}
+            for v, lp in pairs:
+                out.setdefault(round(lp, 6), set()).add(freeze(v))
+            return out
+
+        self.assertEqual(tiers(sound_top_k(mix, 8, budget_bits=30)), tiers(exact[:8]))
+        self.assertEqual(tiers(sound_top_k(mix, 5, start=10, budget_bits=30)), tiers(exact[10:15]))
 
     def test_mixture_overlapping(self):
         dist = MixtureDistribution(
