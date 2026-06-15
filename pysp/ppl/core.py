@@ -632,7 +632,8 @@ class RandomVariable:
 
     def fit(self, data: Sequence[Any], *, how: str = "auto", max_its: int = 100,
             delta: float = 1e-8, backend: str = "local", num_workers: Optional[int] = None,
-            print_iter: int = 0, **kw) -> "RandomVariable":
+            engine: Any = None, precision: Any = None, print_iter: int = 0,
+            **kw) -> "RandomVariable":
         """Estimate / infer parameters from ``data`` and return a bound RV.
 
         ``how``: ``'em'`` (EM/MLE, default for plain ``free`` models), ``'map'`` (maximize
@@ -710,6 +711,7 @@ class RandomVariable:
             fitted = optimize(
                 data, est, max_its=max_its, delta=delta,
                 backend=backend, num_workers=num_workers,
+                engine=engine, precision=precision,
                 print_iter=max(print_iter, 1), out=out, **kw,
             )
         finally:
