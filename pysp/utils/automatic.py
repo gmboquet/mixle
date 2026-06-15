@@ -64,16 +64,20 @@ def _estimator_provider(use_bstats: bool = False):
 _BAYES_DIRICHLET_ALPHA = 1.0 + 1.0e-12
 
 
+# The conjugate prior families are reached through the ``pysp.stats`` package
+# namespace (an allowed high-level dependency) rather than importing concrete
+# distribution submodules here, keeping this builder free of concrete-class
+# imports (see compute_metadata_test's import-hygiene guard).
 def _gaussian_default_prior():
-    from pysp.stats.normgamma import NormalGammaDistribution
+    import pysp.stats as provider
 
-    return NormalGammaDistribution(0.0, 1.0e-8, 0.500001, 1.0)
+    return provider.NormalGammaDistribution(0.0, 1.0e-8, 0.500001, 1.0)
 
 
 def _categorical_default_prior(vdict):
-    from pysp.stats.catdirichlet import DictDirichletDistribution
+    import pysp.stats as provider
 
-    return DictDirichletDistribution(_BAYES_DIRICHLET_ALPHA)
+    return provider.DictDirichletDistribution(_BAYES_DIRICHLET_ALPHA)
 
 
 def _integer_categorical_default_prior():
@@ -81,35 +85,35 @@ def _integer_categorical_default_prior():
     # symmetric scalar prior is the SymmetricDirichletDistribution, which the
     # IntegerCategorical conjugate path accepts and treats identically to a
     # scalar Dirichlet.
-    from pysp.stats.symdirichlet import SymmetricDirichletDistribution
+    import pysp.stats as provider
 
-    return SymmetricDirichletDistribution(_BAYES_DIRICHLET_ALPHA)
+    return provider.SymmetricDirichletDistribution(_BAYES_DIRICHLET_ALPHA)
 
 
 def _poisson_default_prior():
-    from pysp.stats.gamma import GammaDistribution
+    import pysp.stats as provider
 
-    return GammaDistribution(1.0001, 1.0e6)
+    return provider.GammaDistribution(1.0001, 1.0e6)
 
 
 def _exponential_default_prior():
-    from pysp.stats.gamma import GammaDistribution
+    import pysp.stats as provider
 
-    return GammaDistribution(1.0001, 1.0e6)
+    return provider.GammaDistribution(1.0001, 1.0e6)
 
 
 def _set_default_prior():
-    from pysp.stats.beta import BetaDistribution
+    import pysp.stats as provider
 
-    return BetaDistribution(1.0, 1.0)
+    return provider.BetaDistribution(1.0, 1.0)
 
 
 def _mvn_default_prior(dim: int):
-    from pysp.stats.normwishart import NormalWishartDistribution
+    import pysp.stats as provider
 
     # d-dimensional analogue of NormalGamma(0, 1e-8, 0.500001, 1.0):
     # nu = 2a + (d-1), W = (2b)^-1 * I
-    return NormalWishartDistribution(np.zeros(dim), 1.0e-8, np.eye(dim) * 0.5, dim + 2.0e-6)
+    return provider.NormalWishartDistribution(np.zeros(dim), 1.0e-8, np.eye(dim) * 0.5, dim + 2.0e-6)
 
 
 DictRecordDistribution = _estimator_provider(False).DictRecordDistribution
@@ -1787,7 +1791,8 @@ def get_dpm_mixture(
     """
     import sys
 
-    from pysp.stats.dpm import DirichletProcessMixtureEstimator
+    import pysp.stats as provider
+
     from pysp.utils.estimation import fit
 
     if rng is None:
@@ -1796,6 +1801,6 @@ def get_dpm_mixture(
         out = sys.stdout
 
     comp_ests = [get_estimator(data, pseudo_count=pseudo_count, use_bstats=True) for _ in range(max_components)]
-    est = DirichletProcessMixtureEstimator(comp_ests)
+    est = provider.DirichletProcessMixtureEstimator(comp_ests)
 
     return fit(data, est, max_its=max_its, delta=delta, rng=rng, print_iter=print_iter, out=out)
