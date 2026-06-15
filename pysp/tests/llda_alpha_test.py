@@ -1,4 +1,4 @@
-"""Tests for the coupled multi-label alpha update in pysp.stats.llda.
+"""Tests for the coupled multi-label alpha update in pysp.stats.latent.llda.
 
 Covers the single-label fast path (agreement with the per-row fixed-point update recomputed from the
 same per-label statistics), the coupled multi-label update (objective increase, stationarity in beta
@@ -12,8 +12,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma
 
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.llda import (
+from pysp.stats.latent.llda import (
     LLDADistribution,
     LLDAEstimator,
     LLDALabelSetStats,
@@ -22,6 +21,7 @@ from pysp.stats.llda import (
     update_alpha,
     update_alpha_coupled,
 )
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 
 VOCAB = ["w0", "w1", "w2", "w3"]
 PMATS = [[0.4, 0.4, 0.1, 0.1], [0.1, 0.1, 0.4, 0.4]]

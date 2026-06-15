@@ -134,14 +134,17 @@ class StreamingEstimatorTestCase(unittest.TestCase):
         self.assertEqual(binomial_stats[2:], (0, 5))
 
     def test_hmm_family_scaling_preserves_metadata(self):
-        from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-        from pysp.stats.gaussian import GaussianDistribution
-        from pysp.stats.hidden_markov_ind_pi import IndPiHiddenMarkovEstimator, IndPiHiddenMarkovModelDistribution
-        from pysp.stats.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-        from pysp.stats.int_range import IntegerCategoricalDistribution
-        from pysp.stats.look_back_hmm import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
-        from pysp.stats.sequence import SequenceDistribution, SequenceEstimator
-        from pysp.stats.tree_hmm import TreeHiddenMarkovModelDistribution
+        from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
+        from pysp.stats.graph.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
+        from pysp.stats.latent.hidden_markov_ind_pi import (
+            IndPiHiddenMarkovEstimator,
+            IndPiHiddenMarkovModelDistribution,
+        )
+        from pysp.stats.latent.look_back_hmm import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
+        from pysp.stats.latent.tree_hmm import TreeHiddenMarkovModelDistribution
+        from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
+        from pysp.stats.leaf.gaussian import GaussianDistribution
+        from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
 
         init_dist = SequenceDistribution(
             IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]), CategoricalDistribution({1: 1.0})

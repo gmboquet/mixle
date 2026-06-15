@@ -24,23 +24,23 @@ import numpy as np
 import scipy.integrate
 import scipy.stats
 
-from pysp.stats.bernoulli import (
+from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
+from pysp.stats.bayes.dirichlet import DirichletDistribution
+from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+from pysp.stats.compute.pdist import ProbabilityDistribution
+from pysp.stats.leaf.bernoulli import (
     BernoulliAccumulatorFactory,
     BernoulliDistribution,
     BernoulliEstimator,
 )
-from pysp.stats.beta import BetaDistribution, BetaSampler
-from pysp.stats.catdirichlet import DictDirichletDistribution
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.dirichlet import DirichletDistribution
-from pysp.stats.int_range import (
+from pysp.stats.leaf.beta import BetaDistribution, BetaSampler
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.leaf.int_range import (
     IntegerCategoricalAccumulator,
     IntegerCategoricalAccumulatorFactory,
     IntegerCategoricalDistribution,
     IntegerCategoricalEstimator,
 )
-from pysp.stats.pdist import ProbabilityDistribution
-from pysp.stats.symdirichlet import SymmetricDirichletDistribution
 
 
 def fit(data, est):

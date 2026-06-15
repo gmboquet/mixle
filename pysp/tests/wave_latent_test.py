@@ -11,10 +11,10 @@ import unittest
 import numpy as np
 
 from pysp.stats import *
-from pysp.stats.hmixture import HierarchicalMixtureDistribution
-from pysp.stats.jmixture import JointMixtureDistribution
-from pysp.stats.lda import LDADistribution
-from pysp.stats.pdist import EnumerationError
+from pysp.stats.compute.pdist import EnumerationError
+from pysp.stats.latent.hmixture import HierarchicalMixtureDistribution
+from pysp.stats.latent.jmixture import JointMixtureDistribution
+from pysp.stats.latent.lda import LDADistribution
 from pysp.utils.enumeration import freeze
 
 TOL = 1e-9

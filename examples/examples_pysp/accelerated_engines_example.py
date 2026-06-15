@@ -5,14 +5,14 @@ modules still own their likelihood math and ordinary estimators still own the
 M-step, so results match the ordinary vectorized sequence path.
 """
 
-import time
 import io
+import time
 
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE, TorchEngine, torch
 from pysp.stats import *
-from pysp.stats.kernel import NumbaKernelFactory
+from pysp.stats.compute.kernel import NumbaKernelFactory
 from pysp.utils.estimation import optimize
 from pysp.utils.fit import fit_map, fit_mle
 from pysp.utils.priors import DirichletPrior, MixturePrior, NormalGammaPrior

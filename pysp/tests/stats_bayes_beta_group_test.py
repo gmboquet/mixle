@@ -10,10 +10,10 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.bernoulli import BernoulliDistribution, BernoulliEstimator
-from pysp.stats.beta import BetaDistribution
-from pysp.stats.binomial import BinomialDistribution, BinomialEstimator
-from pysp.stats.geometric import GeometricDistribution, GeometricEstimator
+from pysp.stats.leaf.bernoulli import BernoulliDistribution, BernoulliEstimator
+from pysp.stats.leaf.beta import BetaDistribution
+from pysp.stats.leaf.binomial import BinomialDistribution, BinomialEstimator
+from pysp.stats.leaf.geometric import GeometricDistribution, GeometricEstimator
 from pysp.utils.special import digamma
 
 

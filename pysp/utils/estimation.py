@@ -20,7 +20,7 @@ from pysp.stats import (
     seq_log_density_sum,
     validate_estimator_keys,
 )
-from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
+from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
 T = TypeVar("T")
 E0 = TypeVar("E0")

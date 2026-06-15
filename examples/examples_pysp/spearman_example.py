@@ -1,7 +1,8 @@
 """Estimate a Spearman ranking model from encoded permutation observations."""
 
-from pysp.stats.spearman_rho import SpearmanRankingDistribution, SpearmanRankingEstimator
 import numpy as np
+
+from pysp.stats.graph.spearman_rho import SpearmanRankingDistribution, SpearmanRankingEstimator
 
 if __name__ == '__main__':
 

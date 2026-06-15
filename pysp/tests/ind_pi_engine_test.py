@@ -11,7 +11,7 @@ import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.hidden_markov_ind_pi import IndPiHiddenMarkovEstimator, IndPiHiddenMarkovModelDistribution
+from pysp.stats.latent.hidden_markov_ind_pi import IndPiHiddenMarkovEstimator, IndPiHiddenMarkovModelDistribution
 
 try:
     from pysp.engines import TorchEngine

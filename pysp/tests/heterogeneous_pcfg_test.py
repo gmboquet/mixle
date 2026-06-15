@@ -16,7 +16,7 @@ from pysp.stats import (
     seq_estimate,
     seq_initialize,
 )
-from pysp.stats.pdist import EnumerationError
+from pysp.stats.compute.pdist import EnumerationError
 
 
 class HeterogeneousPCFGTestCase(unittest.TestCase):

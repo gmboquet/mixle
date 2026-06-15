@@ -16,7 +16,7 @@ from typing import Any, TypeVar
 
 import numpy as np
 
-from pysp.stats.pdist import (
+from pysp.stats.compute.pdist import (
     ParameterEstimator,
 )
 
