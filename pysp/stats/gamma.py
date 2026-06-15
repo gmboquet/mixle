@@ -135,6 +135,26 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         """
         return self.k, self.theta
 
+    def cross_entropy(self, dist: "GammaDistribution") -> float:
+        """Cross entropy -E_self[log dist(x)] for a Gamma argument (closed form).
+
+        Used as the conjugate prior/posterior cross-entropy term in variational Bayes (e.g. the
+        ELBO global term in DPM for Poisson/Exponential-rate components).
+        """
+        if isinstance(dist, GammaDistribution):
+            k = self.k
+            t = self.theta
+            kk = dist.k
+            tt = dist.theta
+            return float(-((kk - 1) * (digamma(k) + np.log(t)) - gammaln(kk) - np.log(tt) * kk - k * t / tt))
+        raise NotImplementedError(
+            "GammaDistribution.cross_entropy is only implemented for Gamma arguments (got %s)." % type(dist).__name__
+        )
+
+    def entropy(self) -> float:
+        """Returns the differential entropy in nats."""
+        return float(self.k + np.log(self.theta) + gammaln(self.k) + (1 - self.k) * digamma(self.k))
+
     def density(self, x: float) -> float:
         """Density of gamma distribution evaluated at x.
 

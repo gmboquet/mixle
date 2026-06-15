@@ -1,11 +1,12 @@
 """Bayesian (conjugate / variational) behavior folded onto the Gamma-prior leaf group.
 
-Covers the bstats -> stats merge for the three leaf families whose conjugate parameter prior is
+Covers the conjugate-prior merge for the three leaf families whose conjugate parameter prior is
 a GammaDistribution: Poisson and Exponential (Gamma prior on the rate). Each family gains
 conjugate posterior estimation, ``expected_log_density``, and a posterior-returning ``fit`` while
-its MLE path stays byte-identical. Parity is asserted against the historical bstats sources at
-1e-12. Gamma itself is exercised for MLE parity (bstats Gamma has no conjugate estimate) and as
-the shared conjugate prior family.
+its MLE path stays byte-identical. Conjugate behavior is pinned against the textbook Gamma
+posterior closed form and the variational expected-log-density formula. Gamma itself is exercised
+for MLE self-consistency (Gamma has no conjugate estimate) and as the shared conjugate prior
+family.
 """
 
 import unittest
@@ -13,23 +14,12 @@ import unittest
 import numpy as np
 from scipy.special import gammaln
 
-from pysp.bstats.exponential import ExponentialEstimator as BExpEst
-from pysp.bstats.gamma import GammaDistribution as BGamma
-from pysp.bstats.gamma import GammaEstimator as BGammaEst
-from pysp.bstats.poisson import PoissonEstimator as BPoisEst
 from pysp.stats import seq_encode, seq_estimate, seq_initialize
 from pysp.stats.exponential import ExponentialDistribution, ExponentialEstimator
 from pysp.stats.gamma import GammaDistribution, GammaEstimator
 from pysp.stats.poisson import PoissonDistribution, PoissonEstimator
 from pysp.utils.estimation import _data_objective_sum, _model_objective, fit, optimize
 from pysp.utils.special import digamma
-
-
-def _safe_diff(a: float, b: float) -> float:
-    """abs(a - b) that treats matching infinities as zero."""
-    if a == b:
-        return 0.0
-    return abs(a - b)
 
 
 class StatsBayesPoissonTestCase(unittest.TestCase):
@@ -52,24 +42,17 @@ class StatsBayesPoissonTestCase(unittest.TestCase):
         self.assertEqual(m.lam, max(self.psum / self.n, 1.0e-12))
         self.assertIsNone(m.get_prior())
 
-    def test_conjugate_parity_with_bstats(self):
-        """Conjugate posterior, point estimate, and ELDs match the bstats Poisson at 1e-12."""
+    def test_conjugate_seq_matches_scalar(self):
+        """seq_expected_log_density matches the per-element scalar expected_log_density."""
         k, theta = 2.3, 1.7
         ss = (self.n, self.psum)
-        bd = BPoisEst(prior=BGamma(k, theta)).estimate(ss)
         sd = PoissonEstimator(prior=GammaDistribution(k, theta)).estimate(None, ss)
 
-        self.assertAlmostEqual(bd.prior.get_parameters()[0], sd.get_prior().get_parameters()[0], places=12)
-        self.assertAlmostEqual(bd.prior.get_parameters()[1], sd.get_prior().get_parameters()[1], places=12)
-        self.assertAlmostEqual(bd.lam, sd.lam, places=12)
-
         xs = [0, 1, 2, 3, 7, 15]
-        for x in xs:
-            self.assertAlmostEqual(bd.expected_log_density(x), sd.expected_log_density(x), places=12)
-
         xsa = np.asarray(xs, dtype=float)
         enc = (xsa, gammaln(xsa + 1.0))
-        self.assertTrue(np.allclose(bd.seq_expected_log_density(enc), sd.seq_expected_log_density(enc), atol=1e-12))
+        scalar = np.asarray([sd.expected_log_density(x) for x in xs])
+        self.assertTrue(np.allclose(sd.seq_expected_log_density(enc), scalar, atol=1e-12))
 
     def test_conjugate_posterior_closed_form(self):
         """estimate() with a Gamma prior matches the textbook Gamma posterior update."""
@@ -130,29 +113,16 @@ class StatsBayesExponentialTestCase(unittest.TestCase):
         self.assertEqual(m.beta, self.psum / self.n)
         self.assertIsNone(m.get_prior())
 
-    def test_conjugate_parity_with_bstats(self):
-        """Conjugate posterior, point rate, and ELDs match the bstats Exponential at 1e-12.
-
-        bstats Exponential is rate-parameterized (lam); stats is scale-parameterized (beta), so
-        the point estimate is compared as bstats.lam vs 1/stats.beta.
-        """
+    def test_conjugate_seq_matches_scalar(self):
+        """seq_expected_log_density matches the per-element scalar expected_log_density."""
         k, theta = 2.0, 3.0
         ss = (self.n, self.psum)
-        bd = BExpEst(prior=BGamma(k, theta)).estimate(ss)
         sd = ExponentialEstimator(prior=GammaDistribution(k, theta)).estimate(None, ss)
 
-        self.assertAlmostEqual(bd.prior.get_parameters()[0], sd.get_prior().get_parameters()[0], places=12)
-        self.assertAlmostEqual(bd.prior.get_parameters()[1], sd.get_prior().get_parameters()[1], places=12)
-        self.assertAlmostEqual(bd.lam, 1.0 / sd.beta, places=12)
-
-        xs = [-1.0, 0.0, 0.5, 1.5, 3.0]
-        for x in xs:
-            self.assertLess(_safe_diff(bd.expected_log_density(x), sd.expected_log_density(x)), 1e-12)
-
+        xs = [0.0, 0.5, 1.5, 3.0]
         xsa = np.asarray(xs)
-        be = np.nan_to_num(bd.seq_expected_log_density(xsa), neginf=0.0)
-        se = np.nan_to_num(sd.seq_expected_log_density(xsa), neginf=0.0)
-        self.assertTrue(np.allclose(be, se, atol=1e-12))
+        scalar = np.asarray([sd.expected_log_density(x) for x in xs])
+        self.assertTrue(np.allclose(sd.seq_expected_log_density(xsa), scalar, atol=1e-12))
 
     def test_conjugate_posterior_closed_form(self):
         """estimate() with a Gamma prior matches the Gamma posterior update on the rate."""
@@ -199,7 +169,7 @@ class StatsBayesExponentialTestCase(unittest.TestCase):
 
 
 class StatsBayesGammaTestCase(unittest.TestCase):
-    """Gamma has no conjugate estimate in bstats; verify MLE parity and prior-family role."""
+    """Gamma has no conjugate estimate; verify the MLE stationarity and prior-family role."""
 
     def setUp(self):
         rng = np.random.RandomState(13)
@@ -213,12 +183,17 @@ class StatsBayesGammaTestCase(unittest.TestCase):
         d = GammaDistribution(2.0, 3.0)
         self.assertEqual(d.get_parameters(), (2.0, 3.0))
 
-    def test_mle_parity_with_bstats(self):
-        """The MLE (k, theta) matches the bstats Gamma estimator at 1e-12."""
-        bd = BGammaEst().estimate((self.n, self.s, self.sl))
+    def test_mle_satisfies_stationarity(self):
+        """The MLE (k, theta) satisfies the Gamma likelihood stationarity equations.
+
+        For a Gamma(k, theta) the MLE solves theta = mean/k and
+        log(k) - digamma(k) = log(mean) - mean(log x); both hold to numerical tolerance.
+        """
         sd = GammaEstimator().estimate(None, (self.n, self.s, self.sl))
-        self.assertAlmostEqual(bd.k, sd.k, places=12)
-        self.assertAlmostEqual(bd.theta, sd.theta, places=12)
+        mean = self.s / self.n
+        mean_log = self.sl / self.n
+        self.assertAlmostEqual(sd.theta, mean / sd.k, places=10)
+        self.assertAlmostEqual(np.log(sd.k) - digamma(sd.k), np.log(mean) - mean_log, places=8)
 
     def test_mle_path_unchanged(self):
         """optimize() recovers the generating shape/scale via plain MLE."""

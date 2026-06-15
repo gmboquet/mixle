@@ -814,27 +814,20 @@ def _stick_breaking_log_det(phi: np.ndarray) -> float:
 
 
 def _seq_log_density_sum(dist: Any, encoded: Any) -> float:
-    """Return ``sum_i log p(x_i | dist)`` for a stats or bstats distribution."""
+    """Return ``sum_i log p(x_i | dist)`` for a stats distribution."""
     return float(np.sum(dist.seq_log_density(encoded)))
 
 
 def _encode_data(prototype: Any, data: Any) -> tuple[Any, Callable[[Any], Any]]:
     """Encode ``data`` once and return (encoded, encode_fn) for the family.
 
-    ``stats`` distributions encode through ``dist_to_encoder().seq_encode``;
-    ``bstats`` distributions expose ``seq_encode`` directly.  The returned
-    ``encode_fn`` lets re-encoding happen if a rebuilt distribution needs it
-    (categorical encodings depend only on the data, so the cached encoding is
-    reused across proposals).
+    ``stats`` distributions encode through ``dist_to_encoder().seq_encode``.
+    The returned ``encode_fn`` lets re-encoding happen if a rebuilt distribution
+    needs it (categorical encodings depend only on the data, so the cached
+    encoding is reused across proposals).
     """
-    if hasattr(prototype, "dist_to_encoder"):
-        encoder = prototype.dist_to_encoder()
-        return encoder.seq_encode(data), encoder.seq_encode
-    if hasattr(prototype, "seq_encode"):
-        return prototype.seq_encode(data), prototype.seq_encode
-    raise NotImplementedError(
-        "%s exposes neither seq_encode nor dist_to_encoder; cannot encode data." % type(prototype).__name__
-    )
+    encoder = prototype.dist_to_encoder()
+    return encoder.seq_encode(data), encoder.seq_encode
 
 
 def _make_builder(prototype: Any, ctor_kwargs: dict[str, Any]) -> Callable[..., Any]:
@@ -849,7 +842,7 @@ def _make_builder(prototype: Any, ctor_kwargs: dict[str, Any]) -> Callable[..., 
 def build_parameter_bridge(prototype: Any) -> ParameterBridge:
     """Build a :class:`ParameterBridge` for a prototype distribution.
 
-    Supported families (both ``pysp.stats`` and ``pysp.bstats`` variants):
+    Supported ``pysp.stats`` families:
 
     * Gaussian ``(mu, sigma2)`` -> ``(mu, log sigma2)``
     * Gamma ``(k, theta)`` -> ``(log k, log theta)``
@@ -1168,22 +1161,24 @@ def _finite_difference_gradient(log_target: LogTarget, eps: float = 1.0e-5) -> C
 
 
 def sample_conjugate_posterior(
-    bstats_dist: Any, data: Any, draws: int = 1000, seed: int | None = None, return_distributions: bool = False
+    dist: Any, data: Any, draws: int = 1000, seed: int | None = None, return_distributions: bool = False
 ) -> MCMCResult:
-    """Draw exact posterior parameter samples for a conjugate bstats leaf.
+    """Draw exact posterior parameter samples for a conjugate ``pysp.stats`` leaf.
 
-    For ``bstats`` distributions carrying a closed-form conjugate prior, the
+    For ``pysp.stats`` distributions carrying a closed-form conjugate prior, the
     posterior over parameters is available analytically.  This runs the
-    distribution's own conjugate ``estimate`` update over ``data`` to obtain the
-    posterior hyperparameters, then draws iid parameter samples from that
-    posterior.  This is an exact alternative to :func:`sample_parameter_posterior`.
+    distribution's own conjugate estimator over ``data`` to obtain the posterior
+    hyperparameters (read back via the fitted model's ``get_prior()``), then
+    draws iid parameter samples from that posterior.  This is an exact
+    alternative to :func:`sample_parameter_posterior`.
 
-    Supported leaves: ``bstats`` Gaussian (NormalGamma posterior, samples
-    ``(mu, sigma2)``), Poisson (Gamma posterior, samples ``lam``), and Bernoulli
-    (Beta posterior, samples ``p``).
+    Supported leaves: Gaussian (NormalGamma posterior, samples ``(mu, sigma2)``),
+    Poisson (Gamma posterior, samples ``lam``), and Bernoulli (Beta posterior,
+    samples ``p``).
 
     Args:
-        bstats_dist: A ``pysp.bstats`` distribution carrying a conjugate prior.
+        dist: A ``pysp.stats`` distribution; if it carries no conjugate prior a
+            non-informative default for the family is attached automatically.
         data: Observations for the family.
         draws: Number of iid posterior samples.
         seed: Seed for the RandomState.
@@ -1195,63 +1190,92 @@ def sample_conjugate_posterior(
     if draws < 0:
         raise ValueError("draws must be non-negative.")
     rng = np.random.RandomState(seed)
-    cls_name = type(bstats_dist).__name__
+    cls_name = type(dist).__name__
 
-    # run the family's conjugate posterior update via accumulate + estimate
-    posterior_dist = _bstats_posterior(bstats_dist, data)
-    prior = posterior_dist.get_prior()
+    if cls_name not in ("GaussianDistribution", "PoissonDistribution", "BernoulliDistribution"):
+        raise NotImplementedError(
+            "sample_conjugate_posterior supports Gaussian, Poisson, and Bernoulli leaves; got %s." % cls_name
+        )
+
+    # the stats leaves default to prior=None; supply a non-informative conjugate
+    # prior so the closed-form update has something to update against.
+    if dist.get_prior() is None:
+        default_prior = _default_conjugate_prior(cls_name)
+        if default_prior is not None:
+            dist.set_prior(default_prior)
+
+    # run the family's conjugate posterior update via accumulate + estimate; the
+    # fitted model carries the conjugate posterior as its prior.
+    posterior_dist = _conjugate_posterior(dist, data)
+    posterior = posterior_dist.get_prior()
 
     samples: list[Any] = []
     if cls_name == "GaussianDistribution":
-        from pysp.bstats.normgamma import NormalGammaDistribution
+        from pysp.stats.normgamma import NormalGammaDistribution
 
-        if not isinstance(prior, NormalGammaDistribution):
-            raise NotImplementedError("sample_conjugate_posterior(Gaussian) requires a NormalGamma prior.")
-        mu0, lam, a, b = prior.get_parameters()
-        for _ in range(draws):
-            tau = rng.gamma(shape=a, scale=1.0 / b)  # precision ~ Gamma(a, rate=b)
-            tau = max(tau, 1.0e-300)
-            mu = rng.normal(loc=mu0, scale=np.sqrt(1.0 / (lam * tau)))
+        if not isinstance(posterior, NormalGammaDistribution):
+            raise NotImplementedError("sample_conjugate_posterior(Gaussian) requires a NormalGamma posterior.")
+        mu0, lam, a, b = posterior.get_parameters()
+        for mu, tau in posterior.sampler(seed=rng.randint(0, 2**31 - 1)).sample(size=draws):
+            tau = max(float(tau), 1.0e-300)
             sigma2 = 1.0 / tau
-            samples.append(type(bstats_dist)(mu, sigma2) if return_distributions else (float(mu), float(sigma2)))
+            samples.append(type(dist)(float(mu), sigma2) if return_distributions else (float(mu), float(sigma2)))
     elif cls_name == "PoissonDistribution":
-        from pysp.bstats.gamma import GammaDistribution as BGamma
+        from pysp.stats.gamma import GammaDistribution
 
-        if not isinstance(prior, BGamma):
-            raise NotImplementedError("sample_conjugate_posterior(Poisson) requires a Gamma prior.")
-        k, theta = prior.get_parameters()
+        if not isinstance(posterior, GammaDistribution):
+            raise NotImplementedError("sample_conjugate_posterior(Poisson) requires a Gamma posterior.")
+        k, theta = posterior.get_parameters()
         for _ in range(draws):
             lam = rng.gamma(shape=k, scale=theta)
-            samples.append(type(bstats_dist)(lam) if return_distributions else float(lam))
-    elif cls_name == "BernoulliDistribution":
-        from pysp.bstats.beta import BetaDistribution as BBeta
+            samples.append(type(dist)(lam) if return_distributions else float(lam))
+    else:  # BernoulliDistribution
+        from pysp.stats.beta import BetaDistribution
 
-        if not isinstance(prior, BBeta):
-            raise NotImplementedError("sample_conjugate_posterior(Bernoulli) requires a Beta prior.")
-        a, b = prior.get_parameters()
+        if not isinstance(posterior, BetaDistribution):
+            raise NotImplementedError("sample_conjugate_posterior(Bernoulli) requires a Beta posterior.")
+        a, b = posterior.get_parameters()
         for _ in range(draws):
             p = rng.beta(a, b)
-            samples.append(type(bstats_dist)(p) if return_distributions else float(p))
-    else:
-        raise NotImplementedError(
-            "sample_conjugate_posterior supports bstats Gaussian, Poisson, and Bernoulli leaves; got %s." % cls_name
-        )
+            samples.append(type(dist)(p) if return_distributions else float(p))
 
     return MCMCResult(
         samples=samples, log_probs=np.zeros(len(samples), dtype=float), accepted=np.ones(len(samples), dtype=bool)
     )
 
 
-def _bstats_posterior(bstats_dist: Any, data: Any) -> Any:
-    """Run a bstats family's conjugate update over ``data`` and return the
-    estimated distribution (which carries the posterior as its prior)."""
-    estimator = bstats_dist.estimator()
+def _default_conjugate_prior(cls_name: str) -> Any:
+    """Non-informative conjugate prior for a ``pysp.stats`` leaf family.
+
+    The ``pysp.stats`` leaves default to ``prior=None``; the closed-form
+    posterior update needs an explicit prior, so attach a near-improper member of
+    the conjugate family.
+    """
+    if cls_name == "GaussianDistribution":
+        from pysp.stats.normgamma import NormalGammaDistribution
+
+        return NormalGammaDistribution(0.0, 1.0e-8, 0.500001, 1.0)
+    if cls_name == "PoissonDistribution":
+        from pysp.stats.gamma import GammaDistribution
+
+        return GammaDistribution(1.0001, 1.0e6)
+    if cls_name == "BernoulliDistribution":
+        from pysp.stats.beta import BetaDistribution
+
+        return BetaDistribution(1.000001, 1.000001)
+    return None
+
+
+def _conjugate_posterior(dist: Any, data: Any) -> Any:
+    """Run a family's conjugate update over ``data`` and return the estimated
+    distribution (which carries the conjugate posterior as its prior)."""
+    estimator = dist.estimator()
     factory = estimator.accumulator_factory()
     acc = factory.make()
-    encoded = bstats_dist.seq_encode(data)
+    encoded, _ = _encode_data(dist, data)
     weights = np.ones(len(data), dtype=float)
     acc.seq_update(encoded, weights, None)
-    return estimator.estimate(acc.value())
+    return estimator.estimate(float(len(data)), acc.value())
 
 
 def _copy_state(x: Any) -> Any:

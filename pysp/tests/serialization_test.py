@@ -5,10 +5,9 @@ import networkx as nx
 import numpy as np
 from scipy.sparse import csr_matrix
 
-import pysp.bstats as bstats
 import pysp.stats as stats
-from pysp.bstats.pdist import ParameterEstimator as BStatsParameterEstimator
-from pysp.bstats.pdist import ProbabilityDistribution as BStatsProbabilityDistribution
+from pysp.stats.dpm import DirichletProcessMixtureDistribution, DirichletProcessMixtureEstimator
+from pysp.stats.normgamma import NormalGammaDistribution
 from pysp.stats.select import SelectDistribution
 from pysp.utils.serialization import (
     SerializationError,
@@ -31,7 +30,7 @@ class DistributionSerializationTestCase(unittest.TestCase):
             self.assertAlmostEqual(loaded.log_density(probe), dist.log_density(probe), places=12)
         return loaded
 
-    def assert_bstats_roundtrip(self, dist, probes):
+    def assert_bayes_roundtrip(self, dist, probes):
         loaded = type(dist).from_json(dist.to_json())
         self.assertIsInstance(loaded, type(dist))
         for probe in probes:
@@ -128,35 +127,35 @@ class DistributionSerializationTestCase(unittest.TestCase):
         self.assertEqual(len(loaded.grammar.rule_list), 1)
         self.assertAlmostEqual(loaded.log_density(grammar), dist.log_density(grammar), places=12)
 
-    def test_bstats_json_round_trip_representative_models(self):
-        cat = bstats.CategoricalDistribution({"x": 0.7, "y": 0.3}, name="c")
-        self.assert_bstats_roundtrip(cat, ["x", "y"])
+    def test_bayes_json_round_trip_representative_models(self):
+        cat = stats.CategoricalDistribution({"x": 0.7, "y": 0.3}, name="c")
+        self.assert_bayes_roundtrip(cat, ["x", "y"])
 
-        mix = bstats.MixtureDistribution(
+        mix = stats.MixtureDistribution(
             [
-                bstats.GaussianDistribution(0.0, 1.0),
-                bstats.GaussianDistribution(2.0, 3.0),
+                stats.GaussianDistribution(0.0, 1.0),
+                stats.GaussianDistribution(2.0, 3.0),
             ],
             [0.25, 0.75],
             name="bm",
         )
-        self.assert_bstats_roundtrip(mix, [-0.5, 1.25])
+        self.assert_bayes_roundtrip(mix, [-0.5, 1.25])
 
-        dpm = bstats.DirichletProcessMixtureDistribution(
+        dpm = DirichletProcessMixtureDistribution(
             [
-                bstats.GaussianDistribution(0.0, 1.0),
-                bstats.GaussianDistribution(3.0, 2.0),
+                stats.GaussianDistribution(0.0, 1.0),
+                stats.GaussianDistribution(3.0, 2.0),
             ],
             np.asarray([0.55, 0.45]),
             1.5,
             np.asarray([[2.0, 3.0], [1.0, 1.0]]),
             [
-                bstats.GaussianDistribution(0.0, 1.0).get_prior(),
-                bstats.GaussianDistribution(3.0, 2.0).get_prior(),
+                NormalGammaDistribution(0.0, 1.0, 1.0, 1.0),
+                NormalGammaDistribution(3.0, 1.0, 1.0, 1.0),
             ],
             name="dpm",
         )
-        loaded = self.assert_bstats_roundtrip(dpm, [0.0, 2.0])
+        loaded = self.assert_bayes_roundtrip(dpm, [0.0, 2.0])
         np.testing.assert_allclose(loaded.g, dpm.g)
         self.assertEqual(len(loaded.component_priors), 2)
 
@@ -205,23 +204,23 @@ class DistributionSerializationTestCase(unittest.TestCase):
         transform_loaded = self.assert_estimator_roundtrip(transform)
         self.assertIsInstance(transform_loaded.transform, stats.AffineTransform)
 
-    def test_bstats_estimator_json_round_trip_representative_models(self):
-        mix = bstats.MixtureEstimator(
+    def test_bayes_estimator_json_round_trip_representative_models(self):
+        mix = stats.MixtureEstimator(
             [
-                bstats.GaussianEstimator(name="g0"),
-                bstats.GaussianEstimator(name="g1"),
+                stats.GaussianEstimator(name="g0"),
+                stats.GaussianEstimator(name="g1"),
             ],
-            fixed_w=np.asarray([0.4, 0.6]),
+            fixed_weights=np.asarray([0.4, 0.6]),
             name="bm",
         )
         mix_loaded = self.assert_estimator_roundtrip(mix)
-        np.testing.assert_allclose(mix_loaded.fixed_w, mix.fixed_w)
+        np.testing.assert_allclose(mix_loaded.fixed_weights, mix.fixed_weights)
         self.assertIsNotNone(mix_loaded.accumulator_factory().make())
 
-        dpm = bstats.DirichletProcessMixtureEstimator(
+        dpm = DirichletProcessMixtureEstimator(
             [
-                bstats.GaussianEstimator(name="g0"),
-                bstats.GaussianEstimator(name="g1"),
+                stats.GaussianEstimator(name="g0"),
+                stats.GaussianEstimator(name="g1"),
             ],
             name="dpm",
         )
@@ -229,10 +228,10 @@ class DistributionSerializationTestCase(unittest.TestCase):
         self.assertEqual(dpm_loaded.num_components, 2)
         self.assertIsNotNone(dpm_loaded.accumulator_factory().make())
 
-        intrange = bstats.IntegerCategoricalEstimator(min_index=2, max_index=5, default_value=0.1, name="ir")
+        intrange = stats.IntegerCategoricalEstimator(min_val=2, max_val=5, name="ir")
         intrange_loaded = self.assert_estimator_roundtrip(intrange)
-        self.assertEqual(intrange_loaded.minVal, 2)
-        self.assertEqual(intrange_loaded.maxVal, 5)
+        self.assertEqual(intrange_loaded.min_val, 2)
+        self.assertEqual(intrange_loaded.max_val, 5)
         self.assertIsNotNone(intrange_loaded.accumulator_factory().make())
 
     def test_select_estimator_requires_registered_callable(self):
@@ -274,10 +273,6 @@ class DistributionSerializationTestCase(unittest.TestCase):
         self.assertEqual(json.loads(text)[0]["__pysp_type__"], "object")
         loaded = stats.load_models(text)
         self.assertEqual([type(u) for u in loaded], [type(u) for u in models])
-
-        bmodel = bstats.GaussianDistribution(0.0, 1.0)
-        bloaded = bstats.load_models(bstats.dump_models(bmodel))
-        self.assertIsInstance(bloaded, bstats.GaussianDistribution)
 
         estimator = stats.MixtureEstimator([stats.GaussianEstimator(), stats.GaussianEstimator()])
         eloaded = stats.load_models(stats.dump_models(estimator))
@@ -331,12 +326,10 @@ class DistributionSerializationTestCase(unittest.TestCase):
         checked = 0
         for base in (
             stats.SequenceEncodableProbabilityDistribution,
-            BStatsProbabilityDistribution,
             stats.ParameterEstimator,
-            BStatsParameterEstimator,
         ):
             for cls in subclasses(base):
-                if cls.__module__.startswith(("pysp.stats.", "pysp.bstats.", "pysp.utils.automatic")):
+                if cls.__module__.startswith(("pysp.stats.", "pysp.utils.automatic")):
                     self.assertIn("%s.%s" % (cls.__module__, cls.__name__), ids)
                     checked += 1
         self.assertGreater(checked, 50)

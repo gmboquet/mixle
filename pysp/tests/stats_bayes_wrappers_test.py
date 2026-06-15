@@ -3,9 +3,9 @@
 These families (Composite, Sequence, Optional, Conditional, Ignored) own no parameters of their own;
 they DELEGATE conjugate priors to their wrapped children. This suite proves three things, additively:
 
-  * Parity: with matched conjugate priors, the stats wrapper's ``expected_log_density`` (scalar + seq)
-    and ``model_log_density`` agree with the pysp.bstats reference to < 1e-9 (where bstats has a
-    surface to compare against), and child conjugate posteriors propagate through the wrapper.
+  * Composition: the wrapper's ``expected_log_density`` (scalar + seq) is exactly the composition of
+    its children's ``expected_log_density`` (sum over composite fields / sequence elements / branches),
+    ``model_log_density`` sums the children's, and child conjugate posteriors propagate through.
   * MLE unchanged: ``prior=None`` (the default) leaves the existing point-estimate path byte-identical.
   * Prior round-trip: ``set_prior``/``get_prior`` distribute priors to and recover them from children.
 """
@@ -14,14 +14,6 @@ import unittest
 
 import numpy as np
 
-from pysp.bstats.beta import BetaDistribution as BBeta
-from pysp.bstats.catdirichlet import DictDirichletDistribution as BDir
-from pysp.bstats.categorical import CategoricalDistribution as BCat
-from pysp.bstats.composite import CompositeDistribution as BComp
-from pysp.bstats.gaussian import GaussianDistribution as BGauss
-from pysp.bstats.normgamma import NormalGammaDistribution as BNG
-from pysp.bstats.optional import OptionalDistribution as BOpt
-from pysp.bstats.sequence import SequenceDistribution as BSeq
 from pysp.stats.beta import BetaDistribution as SBeta
 from pysp.stats.catdirichlet import DictDirichletDistribution as SDir
 from pysp.stats.categorical import CategoricalDistribution as SCat
@@ -63,21 +55,19 @@ class CompositeBayesTest(unittest.TestCase):
     def _stats(self):
         return SComp([SGauss(GMU, GS2, prior=SNG(*NG)), SCat(dict(CATP), prior=SDir(dict(DIR)))])
 
-    def _bstats(self):
-        return BComp([BGauss(GMU, GS2, prior=BNG(*NG)), BCat(dict(CATP), prior=BDir(dict(DIR)))])
+    def test_expected_log_density_composes_children(self):
+        """The composite ELD is exactly the sum of its per-field children ELDs."""
+        s = self._stats()
+        ref = [s.dists[0].expected_log_density(x[0]) + s.dists[1].expected_log_density(x[1]) for x in self.obs]
+        self.assertLess(_maxdiff([s.expected_log_density(x) for x in self.obs], ref), 1e-9)
 
-    def test_expected_log_density_parity(self):
-        s, b = self._stats(), self._bstats()
-        self.assertLess(
-            _maxdiff([s.expected_log_density(x) for x in self.obs], [b.expected_log_density(x) for x in self.obs]),
-            1e-9,
-        )
-
-    def test_seq_expected_log_density_parity(self):
-        s, b = self._stats(), self._bstats()
+    def test_seq_expected_log_density_self_consistent(self):
+        """seq_expected_log_density matches the per-observation scalar value."""
+        s = self._stats()
         s_enc = s.dist_to_encoder().seq_encode(self.obs)
-        b_enc = b.seq_encode(self.obs)
-        self.assertLess(_maxdiff(s.seq_expected_log_density(s_enc), b.seq_expected_log_density(b_enc)), 1e-9)
+        self.assertLess(
+            _maxdiff(s.seq_expected_log_density(s_enc), [s.expected_log_density(x) for x in self.obs]), 1e-9
+        )
 
     def test_model_log_density_sums_children(self):
         est = SCompEst([SGaussEst(prior=SNG(*NG)), SCatEst(prior=SDir(dict(DIR)))])
@@ -135,20 +125,19 @@ class SequenceBayesTest(unittest.TestCase):
     def setUp(self):
         self.obs = [[-1.0, 0.5, 2.0], [], [0.3]]
 
-    def test_expected_log_density_parity(self):
+    def test_expected_log_density_composes_elements(self):
+        """The sequence ELD is the sum of the wrapped child's ELD over the elements."""
         s = SSeq(SGauss(GMU, GS2, prior=SNG(*NG)))
-        b = BSeq(BGauss(GMU, GS2, prior=BNG(*NG)))
-        self.assertLess(
-            _maxdiff([s.expected_log_density(x) for x in self.obs], [b.expected_log_density(x) for x in self.obs]),
-            1e-9,
-        )
+        ref = [sum(s.dist.expected_log_density(v) for v in seq) for seq in self.obs]
+        self.assertLess(_maxdiff([s.expected_log_density(x) for x in self.obs], ref), 1e-9)
 
-    def test_seq_expected_log_density_parity(self):
+    def test_seq_expected_log_density_self_consistent(self):
+        """seq_expected_log_density matches the per-sequence scalar value."""
         s = SSeq(SGauss(GMU, GS2, prior=SNG(*NG)))
-        b = BSeq(BGauss(GMU, GS2, prior=BNG(*NG)))
         s_enc = s.dist_to_encoder().seq_encode(self.obs)
-        b_enc = b.seq_encode(self.obs)
-        self.assertLess(_maxdiff(s.seq_expected_log_density(s_enc), b.seq_expected_log_density(b_enc)), 1e-9)
+        self.assertLess(
+            _maxdiff(s.seq_expected_log_density(s_enc), [s.expected_log_density(x) for x in self.obs]), 1e-9
+        )
 
     def test_set_prior_updates_entry_estimator(self):
         """Regression: SequenceEstimator.set_prior threads to the entry/len estimators (not a fixed dist)."""
@@ -183,28 +172,37 @@ class OptionalBayesTest(unittest.TestCase):
     def setUp(self):
         self.obs = [None, -1.0, 0.5, None, 2.7]
 
-    def test_expected_log_density_parity(self):
+    def test_expected_log_density_composes_branches(self):
+        """For present values the Optional ELD is E[log(1-p)] + child ELD; missing -> E[log p]."""
+        from pysp.utils.special import digamma
+
+        a, b = 2.0, 5.0
+        s = SOpt(SGauss(GMU, GS2, prior=SNG(*NG)), p=0.3, prior=(SBeta(a, b), SNG(*NG)))
+        e_log_p = digamma(a) - digamma(a + b)  # E[log p_missing]
+        e_log_1mp = digamma(b) - digamma(a + b)  # E[log (1 - p_missing)]
+        ref = []
+        for x in self.obs:
+            if x is None:
+                ref.append(e_log_p)
+            else:
+                ref.append(e_log_1mp + s.dist.expected_log_density(x))
+        self.assertLess(_maxdiff([s.expected_log_density(x) for x in self.obs], ref), 1e-9)
+
+    def test_seq_expected_log_density_self_consistent(self):
+        """seq_expected_log_density matches the per-observation scalar value."""
         s = SOpt(SGauss(GMU, GS2, prior=SNG(*NG)), p=0.3, prior=(SBeta(2.0, 5.0), SNG(*NG)))
-        b = BOpt(BGauss(GMU, GS2, prior=BNG(*NG)), p=0.3, prior=BBeta(2.0, 5.0))
+        s_enc = s.dist_to_encoder().seq_encode(self.obs)
         self.assertLess(
-            _maxdiff([s.expected_log_density(x) for x in self.obs], [b.expected_log_density(x) for x in self.obs]),
-            1e-9,
+            _maxdiff(s.seq_expected_log_density(s_enc), [s.expected_log_density(x) for x in self.obs]), 1e-9
         )
 
-    def test_seq_expected_log_density_parity(self):
-        s = SOpt(SGauss(GMU, GS2, prior=SNG(*NG)), p=0.3, prior=(SBeta(2.0, 5.0), SNG(*NG)))
-        b = BOpt(BGauss(GMU, GS2, prior=BNG(*NG)), p=0.3, prior=BBeta(2.0, 5.0))
-        s_enc = s.dist_to_encoder().seq_encode(self.obs)
-        b_enc = b.seq_encode(self.obs)
-        self.assertLess(_maxdiff(s.seq_expected_log_density(s_enc), b.seq_expected_log_density(b_enc)), 1e-9)
-
-    def test_conjugate_posterior_parity(self):
-        """Beta posterior on p + base posterior match the bstats closed form."""
+    def test_conjugate_posterior_closed_form(self):
+        """Beta posterior on p + base posterior match the textbook closed form."""
         psum, nsum = 12.0, 88.0
         sx, sxx, n = 30.0, 200.0, nsum
         s_est = SOpt(SGauss(GMU, GS2, prior=SNG(*NG)), p=0.3, prior=(SBeta(2.0, 5.0), SNG(*NG))).estimator()
         s_post = s_est.estimate(None, ([psum, nsum], (sx, sxx, n, n)))
-        # bstats closed form for p (posterior mode)
+        # textbook Beta posterior-mode closed form for p
         a, b = 2.0, 5.0
         self.assertAlmostEqual(s_post.p, (psum + a - 1.0) / (psum + nsum + a + b - 2.0), places=12)
         pa, pb = s_post.get_prior()[0].get_parameters()

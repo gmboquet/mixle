@@ -2,9 +2,9 @@
 
 Covers MultivariateGaussian (NormalWishart prior), DiagonalGaussian
 (MultivariateNormalGamma prior), and LogGaussian (NormalGamma prior). Each test
-asserts the conjugate posterior closed forms, the variational ``expected_log_density``,
-parity against the historical bstats implementation (bit-exact), and that the MLE
-path is unchanged when no prior is attached.
+asserts the conjugate posterior closed forms, the variational ``expected_log_density``
+(with scalar-vs-seq self-consistency), and that the MLE path is unchanged when no prior
+is attached.
 """
 
 import unittest
@@ -90,22 +90,15 @@ class StatsBayesMvGaussianGroupTestCase(unittest.TestCase):
         d0 = MultivariateGaussianDistribution(m0, np.eye(self.d))
         self.assertAlmostEqual(d0.expected_log_density(self.X[0]), d0.log_density(self.X[0]), places=12)
 
-    def test_mvn_parity_with_bstats(self):
-        """Bit-exact parity between stats and bstats for the conjugate update."""
-        from pysp.bstats.mvn import MultivariateGaussianEstimator as B_MVNEst
-        from pysp.bstats.normwishart import NormalWishartDistribution as B_NW
-
+    def test_mvn_seq_eld_matches_scalar(self):
+        """Full-batch seq_expected_log_density matches the per-row scalar value."""
         m0 = np.zeros(self.d)
         prior_args = (m0, 1e-2, np.eye(self.d) * 0.7, self.d + 3.0)
-        bm = B_MVNEst(self.d, prior=B_NW(*prior_args)).estimate((self.count, self.xsum, self.outer))
         sm = MultivariateGaussianEstimator(dim=self.d, prior=NormalWishartDistribution(*prior_args)).estimate(
             None, (self.xsum, self.outer, self.count)
         )
-        self.assertTrue(np.allclose(bm.mu, sm.mu, atol=1e-12))
-        self.assertTrue(np.allclose(bm.covar, sm.covar, atol=1e-12))
-        self.assertTrue(
-            np.allclose(bm.seq_expected_log_density(self.X), sm.seq_expected_log_density(self.X), atol=1e-12)
-        )
+        scalar = np.asarray([sm.expected_log_density(x) for x in self.X])
+        self.assertTrue(np.allclose(sm.seq_expected_log_density(self.X), scalar, atol=1e-12))
 
     # ------------------------- DiagonalGaussian -------------------------
     def test_dmvn_mle_path_unchanged(self):
@@ -160,23 +153,14 @@ class StatsBayesMvGaussianGroupTestCase(unittest.TestCase):
         d0 = DiagonalGaussianDistribution(mu0, np.ones(self.d))
         self.assertAlmostEqual(d0.expected_log_density(self.X[0]), d0.log_density(self.X[0]), places=12)
 
-    def test_dmvn_parity_with_bstats(self):
-        """Bit-exact parity between stats and bstats for the conjugate update."""
-        from pysp.bstats.dmvn import DiagonalGaussianEstimator as B_DMVNEst
-        from pysp.bstats.mvngamma import MultivariateNormalGammaDistribution as B_MVNG
-
+    def test_dmvn_seq_eld_matches_scalar(self):
+        """Full-batch seq_expected_log_density matches the per-row scalar value."""
         args = (np.zeros(self.d), np.ones(self.d) * 1e-2, np.ones(self.d) * 1.1, np.ones(self.d) * 0.9)
-        bm = B_DMVNEst(dim=self.d, prior=B_MVNG(*args)).estimate((self.xsum, self.sum2, self.count))
         sm = DiagonalGaussianEstimator(dim=self.d, prior=MultivariateNormalGammaDistribution(*args)).estimate(
             None, (self.xsum, self.sum2, self.count)
         )
-        self.assertTrue(np.allclose(bm.mu, sm.mu, atol=1e-12))
-        self.assertTrue(np.allclose(bm.covar, sm.covar, atol=1e-12))
-        self.assertTrue(
-            np.allclose(
-                bm.seq_expected_log_density((self.X, self.X * self.X)), sm.seq_expected_log_density(self.X), atol=1e-12
-            )
-        )
+        scalar = np.asarray([sm.expected_log_density(x) for x in self.X])
+        self.assertTrue(np.allclose(sm.seq_expected_log_density(self.X), scalar, atol=1e-12))
 
     # ----------------------------- LogGaussian --------------------------
     def test_log_gaussian_mle_path_unchanged(self):
@@ -223,20 +207,15 @@ class StatsBayesMvGaussianGroupTestCase(unittest.TestCase):
         d0 = LogGaussianDistribution(0.3, 2.0)
         self.assertAlmostEqual(d0.expected_log_density(1.1), d0.log_density(1.1), places=12)
 
-    def test_log_gaussian_parity_with_bstats(self):
-        """Bit-exact parity between stats and bstats for the conjugate update."""
-        from pysp.bstats.log_gaussian import LogGaussianEstimator as B_LGEst
-        from pysp.bstats.normgamma import NormalGammaDistribution as B_NG
-
+    def test_log_gaussian_seq_eld_matches_scalar(self):
+        """seq_expected_log_density on log-scale stats matches the per-element scalar value."""
         args = (0.0, 1e-2, 1.2, 0.8)
-        bm = B_LGEst(prior=B_NG(*args)).estimate((self.lsum, self.lsum2, self.lsum, self.n, self.n))
         sm = LogGaussianEstimator(prior=NormalGammaDistribution(*args)).estimate(
             None, (self.lsum, self.lsum2, self.n, self.n)
         )
-        self.assertAlmostEqual(bm.mu, sm.mu, places=12)
-        self.assertAlmostEqual(bm.sigma2, sm.sigma2, places=12)
         lq = np.log(self.xp[:10])
-        self.assertTrue(np.allclose(bm.seq_expected_log_density(lq), sm.seq_expected_log_density(lq), atol=1e-12))
+        scalar = np.asarray([sm.expected_log_density(np.exp(y)) for y in lq])
+        self.assertTrue(np.allclose(sm.seq_expected_log_density(lq), scalar, atol=1e-12))
 
 
 if __name__ == "__main__":

@@ -59,13 +59,13 @@ enc_data_type = tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.nd
 # The prior is over a FIXED ordered list of states ``states`` (length S): a Dirichlet on the
 # initial-state probabilities and an independent Dirichlet on each transition row.  It is carried
 # as ``prior = (states, init_prior, row_priors)`` where ``init_prior`` is a
-# pysp.bstats.dirichlet.DirichletDistribution and ``row_priors`` is a length-S list of the same.
+# pysp.stats.dirichlet.DirichletDistribution and ``row_priors`` is a length-S list of the same.
 # ``prior=None`` (the default) preserves the existing maximum-likelihood / pseudo-count path
 # byte-identically.
 
 
 def _bstats_dirichlet():
-    from pysp.bstats.dirichlet import DirichletDistribution
+    from pysp.stats.dirichlet import DirichletDistribution
 
     return DirichletDistribution
 
@@ -225,7 +225,7 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             prior: ``(states, init_prior, row_priors)`` tuple or None.
 
         """
-        from pysp.bstats.dirichlet import DirichletDistribution
+        from pysp.stats.dirichlet import DirichletDistribution
 
         if prior is None:
             self.prior = None
@@ -1547,7 +1547,7 @@ class MarkovChainEstimator(ParameterEstimator):
                 all priors are Dirichlet.
 
         """
-        from pysp.bstats.dirichlet import DirichletDistribution
+        from pysp.stats.dirichlet import DirichletDistribution
 
         if prior is None:
             self.prior = None
@@ -1627,7 +1627,7 @@ class MarkovChainEstimator(ParameterEstimator):
         pysp.bstats.markov_chain.MarkovChainEstimator.estimate exactly, mapping the stats dict-based
         sufficient statistics onto the fixed state ordering.
         """
-        from pysp.bstats.dirichlet import DirichletDistribution
+        from pysp.stats.dirichlet import DirichletDistribution
 
         init_count_map, trans_count_map, len_val = suff_stat
         states = self.prior_states

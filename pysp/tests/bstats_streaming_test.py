@@ -2,15 +2,14 @@ import unittest
 
 import numpy as np
 
-from pysp.bstats import (
-    BayesianStreamingEstimator,
+from pysp.stats import (
     BetaDistribution,
     BinomialDistribution,
     BinomialEstimator,
     CategoricalDistribution,
     CategoricalEstimator,
+    CompositeDistribution,
     CompositeEstimator,
-    DictDirichletDistribution,
     DirichletDistribution,
     ExponentialDistribution,
     ExponentialEstimator,
@@ -19,6 +18,7 @@ from pysp.bstats import (
     GaussianEstimator,
     GeometricDistribution,
     GeometricEstimator,
+    HiddenMarkovModelDistribution,
     HiddenMarkovModelEstimator,
     IntegerCategoricalDistribution,
     IntegerCategoricalEstimator,
@@ -28,39 +28,38 @@ from pysp.bstats import (
     OptionalEstimator,
     PoissonDistribution,
     PoissonEstimator,
+    SequenceDistribution,
     SequenceEstimator,
-    forgetting,
-    mixture_prior,
 )
-from pysp.bstats.normgamma import NormalGammaDistribution
+from pysp.stats.catdirichlet import DictDirichletDistribution
+from pysp.stats.mixture import mixture_prior
+from pysp.stats.normgamma import NormalGammaDistribution
+from pysp.utils.estimation import BayesianStreamingEstimator, forgetting
 
 
 def _accumulate(estimator, model, data):
-    enc = model.seq_encode(data)
+    """Accumulate one batch into the estimator's accumulator and return it.
+
+    Mirrors the streaming estimator's accumulation step (seq_update + key merge/replace) so the test
+    references reproduce the same globally tied sufficient statistics.
+    """
+    enc = model.dist_to_encoder().seq_encode(data)
     acc = estimator.accumulator_factory().make()
     acc.seq_update(enc, np.ones(len(data)), model)
-    return acc.value()
+    stats_dict = dict()
+    acc.key_merge(stats_dict)
+    acc.key_replace(stats_dict)
+    return acc
 
 
-def _scale_tuple(x, c):
-    if x is None:
-        return None
-    if isinstance(x, dict):
-        return {k: _scale_tuple(v, c) for k, v in x.items()}
-    if isinstance(x, tuple):
-        return tuple(_scale_tuple(v, c) for v in x)
-    if isinstance(x, list):
-        return [_scale_tuple(v, c) for v in x]
-    if isinstance(x, np.ndarray):
-        return x * c
-    return x * c
-
-
-def _scale_for_estimator(estimator, suff_stat, c):
-    hook = getattr(estimator, "scale_suff_stat", None)
-    if callable(hook):
-        return hook(suff_stat, c)
-    return _scale_tuple(suff_stat, c)
+def _estimate(estimator, model, data, rho=None):
+    """Accumulate, optionally forget (scale the accumulator by rho), then estimate."""
+    acc = _accumulate(estimator, model, data)
+    nobs = float(len(data))
+    if rho is not None:
+        acc.scale(rho)
+        nobs *= rho
+    return estimator.estimate(nobs, acc.value())
 
 
 def _posterior_stream_cases():
@@ -79,7 +78,12 @@ def _posterior_stream_cases():
 
     def binomial_case():
         prior = BetaDistribution(2.0, 3.0)
-        return (BinomialDistribution(10, 0.4, prior=prior), BinomialEstimator(10, prior=prior), [3, 7, 5, 2], [8, 4, 1])
+        return (
+            BinomialDistribution(0.4, 10, prior=prior),
+            BinomialEstimator(min_val=0, max_val=10, prior=prior),
+            [3, 7, 5, 2],
+            [8, 4, 1],
+        )
 
     def geometric_case():
         prior = BetaDistribution(2.0, 3.0)
@@ -97,8 +101,8 @@ def _posterior_stream_cases():
     def integer_categorical_case():
         prior = DirichletDistribution(np.asarray([2.0, 3.0, 4.0]))
         return (
-            IntegerCategoricalDistribution([0.2, 0.5, 0.3], min_index=2, prior=prior),
-            IntegerCategoricalEstimator(min_index=2, max_index=4, prior=prior),
+            IntegerCategoricalDistribution(2, [0.2, 0.5, 0.3], prior=prior),
+            IntegerCategoricalEstimator(min_val=2, max_val=4, prior=prior),
             [2, 3, 4, 3],
             [4, 2, 3],
         )
@@ -107,8 +111,8 @@ def _posterior_stream_cases():
         child_prior = NormalGammaDistribution(0.0, 1.0, 2.0, 3.0)
         prior = BetaDistribution(2.0, 5.0)
         return (
-            OptionalDistribution(GaussianDistribution(0.0, 1.0, prior=child_prior), p=0.25, prior=prior),
-            OptionalEstimator(GaussianEstimator(prior=child_prior), prior=prior),
+            OptionalDistribution(GaussianDistribution(0.0, 1.0, prior=child_prior), p=0.25, prior=(prior, child_prior)),
+            OptionalEstimator(GaussianEstimator(prior=child_prior), prior=(prior, child_prior)),
             [None, -1.0, 0.5, None, 2.0],
             [1.5, None, 0.0],
         )
@@ -127,9 +131,11 @@ def _posterior_stream_cases():
 class BayesianStreamingEstimatorTestCase(unittest.TestCase):
     def assertPriorClose(self, actual, expected):
         self.assertEqual(type(actual), type(expected))
-        if hasattr(actual, "dists"):
-            self.assertEqual(len(actual.dists), len(expected.dists))
-            for a, e in zip(actual.dists, expected.dists):
+        # Structured priors in pysp.stats are (possibly nested) tuples/lists, e.g. the optional
+        # joint prior ``(p_prior, dist_prior)`` and the mixture prior ``(weight_prior, comp_priors)``.
+        if isinstance(actual, (tuple, list)):
+            self.assertEqual(len(actual), len(expected))
+            for a, e in zip(actual, expected):
                 self.assertPriorClose(a, e)
             return
 
@@ -157,13 +163,13 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
 
         batch1 = [-1.0, 0.0, 2.0]
         model1 = stream.update(batch1)
-        expected1 = GaussianEstimator(prior=prior).estimate(_accumulate(GaussianEstimator(prior=prior), start, batch1))
+        expected1 = _estimate(GaussianEstimator(prior=prior), start, batch1)
         self.assertPriorClose(model1.get_prior(), expected1.get_prior())
 
         batch2 = [3.0, 4.0]
         model2 = stream.update(batch2)
         expected2_est = GaussianEstimator(prior=expected1.get_prior())
-        expected2 = expected2_est.estimate(_accumulate(expected2_est, model1, batch2))
+        expected2 = _estimate(expected2_est, model1, batch2)
         self.assertPriorClose(model2.get_prior(), expected2.get_prior())
         self.assertPriorClose(stream.estimator.get_prior(), model2.get_prior())
 
@@ -179,8 +185,7 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
 
         batch = [0.0, 2.0, 4.0]
         model = stream.update(batch)
-        raw_stats = _accumulate(GaussianEstimator(prior=prior), start, batch)
-        expected = GaussianEstimator(prior=prior).estimate(_scale_tuple(raw_stats, 0.5))
+        expected = _estimate(GaussianEstimator(prior=prior), start, batch, rho=0.5)
 
         self.assertPriorClose(model.get_prior(), expected.get_prior())
         self.assertAlmostEqual(stream.nobs, 1.5)
@@ -204,15 +209,16 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
         model = stream.update(data)
 
         expected_est = MixtureEstimator([GaussianEstimator(), GaussianEstimator()], prior=prior)
-        expected = expected_est.estimate(_accumulate(expected_est, start, data))
+        expected = _estimate(expected_est, start, data)
 
+        # mixture.get_prior() == (weight_prior, (component_priors...))
         np.testing.assert_allclose(
-            model.get_prior().dists[0].get_parameters(),
-            expected.get_prior().dists[0].get_parameters(),
+            model.get_prior()[0].get_parameters(),
+            expected.get_prior()[0].get_parameters(),
             rtol=1.0e-12,
             atol=1.0e-12,
         )
-        for actual_prior, expected_prior in zip(model.get_prior().dists[1].dists, expected.get_prior().dists[1].dists):
+        for actual_prior, expected_prior in zip(model.get_prior()[1], expected.get_prior()[1]):
             self.assertPriorClose(actual_prior, expected_prior)
 
     def test_mixture_forgetting_delegates_nested_support_metadata(self):
@@ -225,20 +231,20 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
         missing_priors = [BetaDistribution(2.0, 5.0), BetaDistribution(3.0, 4.0)]
         components = [
             OptionalDistribution(
-                IntegerCategoricalDistribution([0.70, 0.20, 0.10], min_index=2, prior=child_priors[0]),
+                IntegerCategoricalDistribution(2, [0.70, 0.20, 0.10], prior=child_priors[0]),
                 p=0.20,
-                prior=missing_priors[0],
+                prior=(missing_priors[0], child_priors[0]),
             ),
             OptionalDistribution(
-                IntegerCategoricalDistribution([0.15, 0.25, 0.60], min_index=2, prior=child_priors[1]),
+                IntegerCategoricalDistribution(2, [0.15, 0.25, 0.60], prior=child_priors[1]),
                 p=0.35,
-                prior=missing_priors[1],
+                prior=(missing_priors[1], child_priors[1]),
             ),
         ]
         component_estimators = [
             OptionalEstimator(
-                IntegerCategoricalEstimator(min_index=2, max_index=4, prior=child_priors[i]),
-                prior=missing_priors[i],
+                IntegerCategoricalEstimator(min_val=2, max_val=4, prior=child_priors[i]),
+                prior=(missing_priors[i], child_priors[i]),
             )
             for i in range(2)
         ]
@@ -253,77 +259,92 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
         expected_estimator = MixtureEstimator(
             [
                 OptionalEstimator(
-                    IntegerCategoricalEstimator(min_index=2, max_index=4, prior=child_priors[i]),
-                    prior=missing_priors[i],
+                    IntegerCategoricalEstimator(min_val=2, max_val=4, prior=child_priors[i]),
+                    prior=(missing_priors[i], child_priors[i]),
                 )
                 for i in range(2)
             ],
             prior=prior,
         )
-        raw_stats = _accumulate(expected_estimator, start, data)
-        expected = expected_estimator.estimate(expected_estimator.scale_suff_stat(raw_stats, rho))
+        expected = _estimate(expected_estimator, start, data, rho=rho)
 
         self.assertPriorClose(model.get_prior(), expected.get_prior())
         for component in model.components:
-            self.assertEqual(component.dist.min_index, 2)
+            self.assertEqual(component.dist.min_val, 2)
         self.assertAlmostEqual(stream.nobs, len(data) * rho)
 
     def test_nested_estimator_scalers_preserve_child_support_metadata(self):
-        entry_prior = DirichletDistribution(np.asarray([2.0, 3.0, 4.0]))
-        entry_stat = (2, np.asarray([5.0, 7.0, 11.0]))
-        len_prior = DirichletDistribution(np.asarray([1.5, 2.5, 3.5]))
-        len_stat = (0, np.asarray([3.0, 4.0, 5.0]))
+        # The streaming forgetting step scales the accumulator (acc.scale(rho)) before estimate.
+        # This must preserve structural support metadata (e.g. a categorical's min_val) carried in
+        # the sufficient statistics of nested optional/composite/sequence/HMM estimators.
         rho = 0.25
+        entry_prior = DirichletDistribution(np.asarray([2.0, 3.0, 4.0]))
+        len_prior = DirichletDistribution(np.asarray([1.5, 2.5, 3.5]))
 
-        opt_est = OptionalEstimator(
-            IntegerCategoricalEstimator(min_index=2, max_index=4, prior=entry_prior),
-            prior=BetaDistribution(2.0, 5.0),
+        opt_dist = OptionalDistribution(
+            IntegerCategoricalDistribution(2, [0.3, 0.3, 0.4], prior=entry_prior),
+            p=0.2,
+            prior=(BetaDistribution(2.0, 5.0), entry_prior),
         )
-        opt_scaled = opt_est.scale_suff_stat((2.0, 6.0, entry_stat), rho)
-        self.assertEqual(opt_scaled[2][0], 2)
-        np.testing.assert_allclose(opt_scaled[2][1], entry_stat[1] * rho)
+        opt_est = OptionalEstimator(
+            IntegerCategoricalEstimator(min_val=2, max_val=4, prior=entry_prior),
+            prior=(BetaDistribution(2.0, 5.0), entry_prior),
+        )
+        opt_model = _estimate(opt_est, opt_dist, [None, 2, 3, 4, 2], rho=rho)
+        self.assertEqual(opt_model.dist.min_val, 2)
 
-        comp_est = CompositeEstimator(
+        comp_dist = CompositeDistribution(
             [
-                IntegerCategoricalEstimator(min_index=2, max_index=4, prior=entry_prior),
-                IntegerCategoricalEstimator(min_index=2, max_index=4, prior=entry_prior),
+                IntegerCategoricalDistribution(2, [0.3, 0.3, 0.4], prior=entry_prior),
+                IntegerCategoricalDistribution(2, [0.3, 0.3, 0.4], prior=entry_prior),
             ]
         )
-        comp_scaled = comp_est.scale_suff_stat((entry_stat, entry_stat), rho)
-        self.assertEqual(comp_scaled[0][0], 2)
-        self.assertEqual(comp_scaled[1][0], 2)
-
-        seq_est = SequenceEstimator(
-            IntegerCategoricalEstimator(min_index=2, max_index=4, prior=entry_prior),
-            len_estimator=IntegerCategoricalEstimator(min_index=0, max_index=2, prior=len_prior),
+        comp_est = CompositeEstimator(
+            [
+                IntegerCategoricalEstimator(min_val=2, max_val=4, prior=entry_prior),
+                IntegerCategoricalEstimator(min_val=2, max_val=4, prior=entry_prior),
+            ]
         )
-        seq_scaled = seq_est.scale_suff_stat((entry_stat, len_stat), rho)
-        self.assertEqual(seq_scaled[0][0], 2)
-        self.assertEqual(seq_scaled[1][0], 0)
+        comp_model = _estimate(comp_est, comp_dist, [(2, 3), (4, 2), (3, 4)], rho=rho)
+        self.assertEqual(comp_model.dists[0].min_val, 2)
+        self.assertEqual(comp_model.dists[1].min_val, 2)
 
+        seq_dist = SequenceDistribution(
+            IntegerCategoricalDistribution(2, [0.3, 0.3, 0.4], prior=entry_prior),
+            len_dist=IntegerCategoricalDistribution(0, [0.3, 0.3, 0.4], prior=len_prior),
+        )
+        seq_est = SequenceEstimator(
+            IntegerCategoricalEstimator(min_val=2, max_val=4, prior=entry_prior),
+            len_estimator=IntegerCategoricalEstimator(min_val=0, max_val=2, prior=len_prior),
+        )
+        seq_model = _estimate(seq_est, seq_dist, [[2, 3], [4, 2], [3]], rho=rho)
+        self.assertEqual(seq_model.dist.min_val, 2)
+        self.assertEqual(seq_model.len_dist.min_val, 0)
+
+        hmm_dist = HiddenMarkovModelDistribution(
+            [
+                IntegerCategoricalDistribution(2, [0.3, 0.3, 0.4], prior=entry_prior),
+                IntegerCategoricalDistribution(2, [0.3, 0.3, 0.4], prior=entry_prior),
+            ],
+            [0.5, 0.5],
+            [[0.5, 0.5], [0.5, 0.5]],
+            len_dist=IntegerCategoricalDistribution(0, [0.3, 0.3, 0.4], prior=len_prior),
+        )
         hmm_est = HiddenMarkovModelEstimator(
             [
-                IntegerCategoricalEstimator(min_index=2, max_index=4, prior=entry_prior),
-                IntegerCategoricalEstimator(min_index=2, max_index=4, prior=entry_prior),
+                IntegerCategoricalEstimator(min_val=2, max_val=4, prior=entry_prior),
+                IntegerCategoricalEstimator(min_val=2, max_val=4, prior=entry_prior),
             ],
             prior=(
                 DirichletDistribution(np.ones(2)),
                 [DirichletDistribution(np.ones(2)), DirichletDistribution(np.ones(2))],
             ),
-            len_estimator=IntegerCategoricalEstimator(min_index=0, max_index=2, prior=len_prior),
+            len_estimator=IntegerCategoricalEstimator(min_val=0, max_val=2, prior=len_prior),
         )
-        hmm_stat = (
-            np.asarray([3.0, 5.0]),
-            np.asarray([[4.0, 1.0], [2.0, 6.0]]),
-            (entry_stat, entry_stat),
-            len_stat,
-        )
-        hmm_scaled = hmm_est.scale_suff_stat(hmm_stat, rho)
-        np.testing.assert_allclose(hmm_scaled[0], hmm_stat[0] * rho)
-        np.testing.assert_allclose(hmm_scaled[1], hmm_stat[1] * rho)
-        self.assertEqual(hmm_scaled[2][0][0], 2)
-        self.assertEqual(hmm_scaled[2][1][0], 2)
-        self.assertEqual(hmm_scaled[3][0], 0)
+        hmm_model = _estimate(hmm_est, hmm_dist, [[2, 3], [4, 2], [3, 4]], rho=rho)
+        self.assertEqual(hmm_model.topics[0].min_val, 2)
+        self.assertEqual(hmm_model.topics[1].min_val, 2)
+        self.assertEqual(hmm_model.len_dist.min_val, 0)
 
     def test_posterior_carry_across_conjugate_families(self):
         for name, factory in _posterior_stream_cases():
@@ -333,12 +354,12 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
 
                 model1 = stream.update(batch1)
                 expected_start, expected_estimator, _, _ = factory()
-                expected1 = expected_estimator.estimate(_accumulate(expected_estimator, expected_start, batch1))
+                expected1 = _estimate(expected_estimator, expected_start, batch1)
                 self.assertPriorClose(model1.get_prior(), expected1.get_prior())
 
                 model2 = stream.update(batch2)
                 expected2_estimator = expected1.estimator()
-                expected2 = expected2_estimator.estimate(_accumulate(expected2_estimator, expected1, batch2))
+                expected2 = _estimate(expected2_estimator, expected1, batch2)
                 self.assertPriorClose(model2.get_prior(), expected2.get_prior())
                 self.assertPriorClose(stream.estimator.get_prior(), model2.get_prior())
 
@@ -356,8 +377,7 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
 
                 model = stream.update(batch1)
                 expected_start, expected_estimator, _, _ = factory()
-                raw_stats = _accumulate(expected_estimator, expected_start, batch1)
-                expected = expected_estimator.estimate(_scale_for_estimator(expected_estimator, raw_stats, rho))
+                expected = _estimate(expected_estimator, expected_start, batch1, rho=rho)
 
                 self.assertPriorClose(model.get_prior(), expected.get_prior())
                 self.assertAlmostEqual(stream.nobs, len(batch1) * rho)

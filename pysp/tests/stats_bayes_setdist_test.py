@@ -1,17 +1,15 @@
 """Bayesian (conjugate / variational) behavior folded onto pysp.stats BernoulliSet.
 
-Follows the proven bstats -> stats merge template: the frequentist Bernoulli-set leaf gains a
+Follows the proven conjugate-prior merge template: the frequentist Bernoulli-set leaf gains a
 per-element Beta conjugate posterior estimate, ``expected_log_density``, and a posterior-returning
-estimate while its MLE path (``prior=None``) stays byte-identical. Numeric expectations mirror the
-historical ``pysp.bstats.setdist`` assertions.
+estimate while its MLE path (``prior=None``) stays byte-identical. Numeric expectations are pinned
+against the textbook per-element Beta posterior closed form and the Beta MAP mode.
 """
 
 import unittest
 
 import numpy as np
 
-import pysp.bstats.setdist as bsetdist
-from pysp.bstats.beta import BetaDistribution as BBetaDistribution
 from pysp.stats.beta import BetaDistribution
 from pysp.stats.setdist import (
     BernoulliSetDataEncoder,
@@ -65,13 +63,26 @@ class StatsBayesSetDistTestCase(unittest.TestCase):
             self.assertAlmostEqual(pa, self.a0 + v, places=12)
             self.assertAlmostEqual(pb, self.b0 + (self.tot - v), places=12)
 
-    def test_posterior_mode_parity_with_bstats(self):
-        """Posterior-mode inclusion probabilities match bstats (decoding its negative encoding)."""
+    def _beta_posterior_mode(self, beta_a, beta_b, obs_cnt, tot_cnt):
+        """Closed-form per-element Beta posterior-mode inclusion probability in plain [0, 1]."""
+        a = (beta_a - 1) + obs_cnt
+        b = (beta_b - 1) - obs_cnt + tot_cnt
+        if a > 0 and b > 0 and a > b:
+            return a / (a + b)
+        elif a > 0 and b > 0 and b > a:
+            return (a - 1) / (a + b - 2)
+        elif a == 0 and b == 0:
+            return 0.5
+        elif b > a:
+            return 0.0
+        return 1.0
+
+    def test_posterior_mode_closed_form(self):
+        """Inclusion probabilities equal the Beta posterior-mode closed form (plain [0, 1])."""
         m = BernoulliSetEstimator(prior=BetaDistribution(self.a0, self.b0)).estimate(None, self.suff_stat)
-        bp = bsetdist.bernoulli_beta_posterior_mode(self.obs, self.tot, (self.a0, self.b0))
-        bp_plain = {k: (1.0 + v if v < 0 else v) for k, v in bp.items()}
-        maxdiff = max(abs(bp_plain[k] - m.pmap[k]) for k in self.obs)
-        self.assertLess(maxdiff, 1.0e-9)
+        for k, v in self.obs.items():
+            mode = self._beta_posterior_mode(self.a0, self.b0, v, self.tot)
+            self.assertAlmostEqual(m.pmap[k], mode, places=9)
 
     # ----------------------------------------------- expected_log_density
     def _ref_expected_log_density(self, post, x):
@@ -107,12 +118,12 @@ class StatsBayesSetDistTestCase(unittest.TestCase):
         self.assertTrue(np.allclose(m.seq_expected_log_density(enc), m.seq_log_density(enc), atol=1.0e-12))
 
     # ------------------------------------------------- model_log_density
-    def test_model_log_density_parity_with_bstats_beta(self):
-        """model_log_density equals the summed Beta log-prior (parity vs bstats Beta)."""
+    def test_model_log_density_equals_summed_beta_prior(self):
+        """model_log_density equals the summed Beta log-prior over per-element point estimates."""
         prior = BetaDistribution(self.a0, self.b0)
         m = BernoulliSetEstimator(prior=prior).estimate(None, self.suff_stat)
         sm = BernoulliSetEstimator(prior=prior).model_log_density(m)
-        ref = sum(BBetaDistribution(self.a0, self.b0).log_density(p) for p in m.pmap.values())
+        ref = sum(BetaDistribution(self.a0, self.b0).log_density(p) for p in m.pmap.values())
         self.assertAlmostEqual(sm, ref, places=12)
 
     def test_model_log_density_zero_without_prior(self):

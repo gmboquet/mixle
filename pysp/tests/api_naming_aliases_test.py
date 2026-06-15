@@ -69,14 +69,6 @@ class ClassNameAliasTestCase(unittest.TestCase):
         self.assertIs(seg.SegmentalHiddenMarkovModelEstimator, seg.SegmentalHiddenMarkovEstimator)
         self.assertIs(tree.TreeHiddenMarkovModelEstimator, tree.TreeHiddenMarkovEstimator)
 
-    def test_bstats_accumulator_aliases(self):
-        from pysp.bstats import bernoulli, categorical, mixture, poisson
-
-        self.assertIs(categorical.CategoricalAccumulator, categorical.CategoricalEstimatorAccumulator)
-        self.assertIs(mixture.MixtureAccumulatorFactory, mixture.MixtureEstimatorAccumulatorFactory)
-        self.assertIs(poisson.PoissonAccumulator, poisson.PoissonEstimatorAccumulator)
-        self.assertIs(bernoulli.BernoulliAccumulatorFactory, bernoulli.BernoulliEstimatorAccumulatorFactory)
-
     def test_aliases_exported_from_package(self):
         from pysp.stats import (
             ConditionalEnumerator,
