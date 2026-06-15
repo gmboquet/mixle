@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.stats.beta import BetaDistribution
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -38,6 +39,7 @@ from pysp.stats.pdist import (
 )
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.enumeration import BufferedStream, ProductEnumerator
+from pysp.utils.special import digamma
 
 
 class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
@@ -75,6 +77,8 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
         prob_map: dict[Any, float] = MISSING,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
+        posteriors: dict[Any, tuple[float, float]] | None = None,
     ) -> None:
         """BernoulliSetDistribution object for creating a Bernoulli set distribution.
 
@@ -135,6 +139,92 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
             self.min_prob = min_prob
             self.num_required = 0
+
+        self.set_prior(prior, posteriors)
+
+    def set_prior(
+        self,
+        prior: SequenceEncodableProbabilityDistribution | None,
+        posteriors: dict[Any, tuple[float, float]] | None = None,
+    ) -> None:
+        """Attach a (per-element) Beta prior and precompute conjugate-prior expectations.
+
+        With a shared Beta(a, b) prior on each element's inclusion probability ``p_k`` this
+        caches the digamma expectations so that ``expected_log_density`` evaluates the
+        variational Bayes term ``E_q[log p(x | p)]`` via ``E[log p_k] = digamma(a_k) -
+        digamma(a_k + b_k)`` and ``E[log(1 - p_k)] = digamma(b_k) - digamma(a_k + b_k)``.
+        When ``posteriors`` (element -> (a_k, b_k)) is supplied, those per-element posterior
+        Beta parameters are used; otherwise the shared prior parameters are broadcast over
+        the support in ``pmap``. Any other prior (including ``None``) leaves the distribution
+        a plain point model.
+
+        Args:
+            prior: A shared ``BetaDistribution`` prior, or ``None``.
+            posteriors: Optional per-element posterior Beta parameters carried forward from a
+                conjugate update.
+        """
+        self.prior = prior
+        self.posteriors = posteriors
+        if isinstance(prior, BetaDistribution):
+            self.has_conj_prior = True
+            a0, b0 = prior.get_parameters()
+            self._elp = dict()
+            self._elnp = dict()
+            for k in self.pmap.keys():
+                if posteriors is not None and k in posteriors:
+                    a, b = posteriors[k]
+                else:
+                    a, b = a0, b0
+                dab = digamma(a + b)
+                self._elp[k] = digamma(a) - dab
+                self._elnp[k] = digamma(b) - dab
+            self._default_elp = digamma(a0) - digamma(a0 + b0)
+            self._default_elnp = digamma(b0) - digamma(a0 + b0)
+            self._nelnp_sum = sum(self._elnp.values())
+        else:
+            self.has_conj_prior = False
+            self._elp = None
+            self._elnp = None
+            self._default_elp = None
+            self._default_elnp = None
+            self._nelnp_sum = 0.0
+
+    def get_prior(self) -> SequenceEncodableProbabilityDistribution | None:
+        """Return the shared Beta prior (or ``None``)."""
+        return self.prior
+
+    def get_posteriors(self) -> dict[Any, tuple[float, float]] | None:
+        """Return the per-element posterior Beta parameters (or ``None``)."""
+        return self.posteriors
+
+    def expected_log_density(self, x: Sequence[Any]) -> float:
+        """Variational expectation ``E_q[log p(x | p)]`` under the per-element Beta prior.
+
+        Sums ``E[log p_k]`` over elements present in x plus ``E[log(1 - p_k)]`` over the
+        remaining support. Falls back to the plug-in ``log_density(x)`` when no conjugate
+        prior is attached.
+        """
+        if not self.has_conj_prior:
+            return self.log_density(x)
+        rv = self._nelnp_sum
+        for u in x:
+            elp = self._elp.get(u, self._default_elp)
+            elnp = self._elnp.get(u, self._default_elnp)
+            rv += elp - elnp
+        return rv
+
+    def seq_expected_log_density(self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations."""
+        if not self.has_conj_prior:
+            return self.seq_log_density(x)
+        sz, idx, val_map_inv, xs = x
+        diff_loc = np.asarray(
+            [self._elp.get(u, self._default_elp) - self._elnp.get(u, self._default_elnp) for u in val_map_inv],
+            dtype=np.float64,
+        )
+        rv = np.bincount(idx, weights=diff_loc[xs], minlength=sz)
+        rv += self._nelnp_sum
+        return rv
 
     def __str__(self) -> str:
         """Returns string representation of BernoulliSetDistribution object."""
@@ -318,10 +408,14 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return BernoulliSetEstimator(min_prob=self.min_prob, name=self.name)
+            return BernoulliSetEstimator(min_prob=self.min_prob, name=self.name, prior=self.prior)
         else:
             return BernoulliSetEstimator(
-                min_prob=self.min_prob, pseudo_count=pseudo_count, suff_stat=self.pmap, name=self.name
+                min_prob=self.min_prob,
+                pseudo_count=pseudo_count,
+                suff_stat=self.pmap,
+                name=self.name,
+                prior=self.prior,
             )
 
     def dist_to_encoder(self) -> "BernoulliSetDataEncoder":
@@ -631,6 +725,7 @@ class BernoulliSetEstimator(ParameterEstimator):
         suff_stat: dict[Any, float] | None = None,
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """BernoulliSetEstimator object for estimating Bernoulli set distribution from aggregated sufficient statistics.
 
@@ -654,10 +749,44 @@ class BernoulliSetEstimator(ParameterEstimator):
         self.keys = keys
         self.name = name
         self.min_prob = min_prob
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, BetaDistribution)
 
     def accumulator_factory(self) -> "BernoulliSetAccumulatorFactory":
         """Returns a BernoulliSetAccumulatorFactory for creating BernoulliSetAccumulator objects."""
         return BernoulliSetAccumulatorFactory(self.keys)
+
+    def model_log_density(self, model: "BernoulliSetDistribution") -> float:
+        """Log-density of the model's per-element probabilities under the shared Beta prior.
+
+        This is the global ELBO term: with a shared Beta(a, b) prior the contribution is the
+        sum over support elements of ``log Beta(p_k; a, b)``. Returns 0.0 when no conjugate
+        prior is attached.
+        """
+        if self.has_conj_prior:
+            return float(sum(self.prior.log_density(p) for p in model.pmap.values()))
+        return 0.0
+
+    def _estimate_conjugate(self, suff_stat: tuple[dict[Any, float], float]) -> "BernoulliSetDistribution":
+        """Closed-form per-element Beta conjugate update returning the posterior-mode estimate.
+
+        With a shared Beta(a, b) prior and per-element weighted inclusion count ``v`` out of
+        ``tot`` total weighted sets, the per-element posterior is Beta(a + v, b + tot - v) and
+        the returned probability is the corresponding posterior mode. The per-element
+        posteriors are carried forward as ``posteriors`` on the fitted model.
+        """
+        obs_cnt, tot_cnt = suff_stat
+        a0, b0 = self.prior.get_parameters()
+        pmap = dict()
+        posteriors = dict()
+        for k, v in obs_cnt.items():
+            post_a = a0 + v
+            post_b = b0 + (tot_cnt - v)
+            posteriors[k] = (post_a, post_b)
+            pmap[k] = _beta_posterior_mode(a0, b0, v, tot_cnt)
+        return BernoulliSetDistribution(
+            pmap, min_prob=self.min_prob, name=self.name, prior=self.prior, posteriors=posteriors
+        )
 
     def estimate(self, nobs: float | None, suff_stat: tuple[dict[Any, float], float]) -> "BernoulliSetDistribution":
         """Estimate a BernoulliSetDistribution from aggregated sufficient statistics.
@@ -670,6 +799,9 @@ class BernoulliSetEstimator(ParameterEstimator):
             BernoulliSetDistribution object.
 
         """
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
+
         if self.pseudo_count is not None and self.suff_stat is not None:
             keys = set(suff_stat[0].keys())
             keys.update(self.suff_stat.keys())
@@ -732,3 +864,37 @@ class BernoulliSetDataEncoder(DataSequenceEncoder):
         xs = np.asarray(xs, dtype=np.int32)
 
         return len(x), idx, val_map, xs
+
+
+def _beta_posterior_mode(beta_a: float, beta_b: float, obs_cnt: float, tot_cnt: float) -> float:
+    """Per-element Beta posterior-mode inclusion probability in plain ``[0, 1]`` form.
+
+    Mirrors the branches of ``pysp.bstats.setdist.bernoulli_beta_posterior_mode`` exactly,
+    but returns the probability directly (the bstats routine encodes probabilities above one
+    half as ``p - 1``). With prior Beta(beta_a, beta_b) and weighted inclusion count
+    ``obs_cnt`` out of ``tot_cnt`` total weighted sets, let ``a = (beta_a - 1) + obs_cnt`` and
+    ``b = (beta_b - 1) - obs_cnt + tot_cnt`` be the (mode-shifted) posterior counts.
+
+    Args:
+        beta_a (float): Prior Beta ``a`` parameter.
+        beta_b (float): Prior Beta ``b`` parameter.
+        obs_cnt (float): Weighted inclusion count for the element.
+        tot_cnt (float): Total weighted set count.
+
+    Returns:
+        Posterior-mode inclusion probability in ``[0, 1]``.
+    """
+    a = (beta_a - 1) + obs_cnt
+    b = (beta_b - 1) - obs_cnt + tot_cnt
+
+    if a > 0 and b > 0 and a > b:
+        # bstats returns -b / (a + b); plain p = 1 + (-b / (a + b)) = a / (a + b).
+        return a / (a + b)
+    elif a > 0 and b > 0 and b > a:
+        return (a - 1) / (a + b - 2)
+    elif a == 0 and b == 0:
+        return 0.5
+    elif b > a:
+        return 0.0
+    else:
+        return 1.0

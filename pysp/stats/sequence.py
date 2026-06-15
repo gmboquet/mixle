@@ -22,6 +22,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
+from pysp.stats.composite import _distribute_child_prior
 from pysp.stats.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -66,6 +67,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         len_normalized: bool | None = False,
         name: str | None = None,
+        prior: tuple[Any, Any] | None = None,
     ) -> None:
         """SequenceDistribution object for sequence of iid observations from distribution a of data type T.
 
@@ -75,6 +77,9 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
                 of sequences of observations (compatible with type int).
             len_normalized (Optional[bool]): If True, take geometric mean density for any density evaluation.
             name (Optional[str]): Set name to instance of SequenceDistribution.
+            prior (Optional): Joint parameter prior ``(entry_prior, length_prior)`` distributed to the
+                base distribution and length distribution via ``set_prior``. ``None`` (default) leaves
+                both children plain point models (existing behavior byte-identical).
 
         Attributes:
             dist (SequenceEncodableProbabilityDistribution): Base distribution of sequence (compatible with T).
@@ -91,6 +96,56 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
 
         self.null_len_dist = isinstance(self.len_dist, NullDistribution)
+        self.set_prior(prior)
+
+    def get_prior(self) -> tuple[Any, Any]:
+        """Return the joint prior as ``(entry_prior, length_prior)`` from the wrapped children."""
+        return self.dist.get_prior(), self.len_dist.get_prior()
+
+    def set_prior(self, prior: tuple[Any, Any] | None) -> None:
+        """Distribute ``(entry_prior, length_prior)`` to the base and length distributions.
+
+        ``prior=None`` is a no-op (children keep their existing priors, leaving the MLE path
+        byte-identical); otherwise the two-element prior is pushed to the base and length children via
+        their own ``set_prior``.
+        """
+        if prior is None:
+            return
+        self.dist.set_prior(prior[0])
+        self.len_dist.set_prior(prior[1])
+
+    def expected_log_density(self, x: Sequence[T]) -> float:
+        """Prior-expected log-density of the sequence ``x`` (sum over entries + length term)."""
+        rv = 0.0
+        for i in range(len(x)):
+            rv += self.dist.expected_log_density(x[i])
+
+        if self.len_normalized and len(x) > 0:
+            rv /= len(x)
+
+        if not self.null_len_dist:
+            rv += self.len_dist.expected_log_density(len(x))
+
+        return rv
+
+    def seq_expected_log_density(self, x: E) -> np.ndarray:
+        """Vectorized prior-expected log-density over sequence-encoded input ``x``."""
+        idx, icnt, inz, enc_seq, enc_nseq = x
+
+        if np.all(icnt == 0):
+            ll_sum = np.zeros(len(icnt), dtype=float)
+        else:
+            ll = self.dist.seq_expected_log_density(enc_seq)
+            ll_sum = np.bincount(idx, weights=ll, minlength=len(icnt))
+
+            if self.len_normalized:
+                ll_sum = ll_sum * icnt
+
+        if not self.null_len_dist and enc_nseq is not None:
+            nll = self.len_dist.seq_expected_log_density(enc_nseq)
+            ll_sum += nll
+
+        return ll_sum
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
@@ -896,6 +951,7 @@ class SequenceEstimator(ParameterEstimator):
         len_normalized: bool | None = False,
         name: str | None = None,
         keys: str | None = None,
+        prior: tuple[Any, Any] | None = None,
     ) -> None:
         """SequenceEstimator object for estimating SequenceDistribution from aggregated sufficient statistics.
 
@@ -931,6 +987,26 @@ class SequenceEstimator(ParameterEstimator):
         self.keys = keys
         self.len_normalized = len_normalized
         self.name = name
+        self.set_prior(prior)
+
+    def get_prior(self) -> tuple[Any, Any]:
+        """Return the joint prior as ``(entry_prior, length_prior)`` from the child estimators."""
+        return self.estimator.get_prior(), self.len_estimator.get_prior()
+
+    def set_prior(self, prior: tuple[Any, Any] | None) -> None:
+        """Distribute ``(entry_prior, length_prior)`` to the entry and length estimators.
+
+        ``prior=None`` is a no-op. The prior is pushed to the entry/length *estimators* (not to a
+        fixed ``len_dist``), so each child performs its own conjugate update.
+        """
+        if prior is None:
+            return
+        _distribute_child_prior(self.estimator, prior[0])
+        _distribute_child_prior(self.len_estimator, prior[1])
+
+    def model_log_density(self, model: "SequenceDistribution") -> float:
+        """Sum the entry and length estimators' ``model_log_density`` on the corresponding children."""
+        return self.estimator.model_log_density(model.dist) + self.len_estimator.model_log_density(model.len_dist)
 
     def accumulator_factory(self) -> "SequenceAccumulatorFactory":
         """Return SequenceAccumulatorFactory from len_estimator and estimator member variables with keys passed."""

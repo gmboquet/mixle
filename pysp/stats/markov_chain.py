@@ -54,6 +54,65 @@ suff_stat_type = tuple[dict[T, float], dict[T, dict[T, float]], Any | None]
 enc_data_type = tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Any]
 
 
+# --- Conjugate Dirichlet prior machinery (folded from pysp.bstats.markov_chain) ---
+#
+# The prior is over a FIXED ordered list of states ``states`` (length S): a Dirichlet on the
+# initial-state probabilities and an independent Dirichlet on each transition row.  It is carried
+# as ``prior = (states, init_prior, row_priors)`` where ``init_prior`` is a
+# pysp.bstats.dirichlet.DirichletDistribution and ``row_priors`` is a length-S list of the same.
+# ``prior=None`` (the default) preserves the existing maximum-likelihood / pseudo-count path
+# byte-identically.
+
+
+def _bstats_dirichlet():
+    from pysp.bstats.dirichlet import DirichletDistribution
+
+    return DirichletDistribution
+
+
+def markov_chain_dirichlet_default_prior(states: Sequence[T]):
+    """Returns the default ``(states, init_prior, row_priors)`` prior of unit-parameter Dirichlets.
+
+    Args:
+        states (Sequence[T]): Ordered list of the S state values the priors range over.
+
+    Returns:
+        Tuple ``(list_of_states, DirichletDistribution, list_of_DirichletDistribution)``.
+
+    """
+    dirichlet = _bstats_dirichlet()
+    states = list(states)
+    s = len(states)
+    return (
+        states,
+        dirichlet(np.ones(s)),
+        [dirichlet(np.ones(s)) for _ in range(s)],
+    )
+
+
+def _unpack_markov_chain_prior(prior):
+    """Normalize the prior into ``(states, init_prior, row_priors)``.
+
+    Accepts the ``(states, init_prior, row_priors)`` tuple form.
+
+    """
+    states, init_prior, row_priors = prior[0], prior[1], list(prior[2])
+    return list(states), init_prior, row_priors
+
+
+def _map_probs(counts: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Dirichlet MAP with boundary clamp; posterior mean when degenerate.
+
+    Mirrors pysp.bstats.markov_chain._map_probs exactly.
+    """
+    num = np.maximum(counts + alpha - 1.0, 0.0)
+    tot = num.sum()
+    if tot > 0:
+        return num / tot
+    cpp = counts + alpha
+    return cpp / cpp.sum()
+
+
 class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
     """Markov-chain distribution over finite-state sequences."""
 
@@ -64,6 +123,7 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         default_value: float = 0.0,
         name: str | None = None,
+        prior=None,
     ) -> None:
         """MarkovChainDistribution object defining a Markov chain compatible with data type T.
 
@@ -74,6 +134,9 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
                 observation sequence.
             default_value (float): Default probability for value outside support.
             name (Optional[str]): Set name to MarkovChainDistribution object.
+            prior: Optional ``(states, init_prior, row_priors)`` conjugate Dirichlet prior (see
+                set_prior()). ``None`` (default) is a plain point model whose estimation path is
+                unchanged.
 
         Attributes:
             init_prob_map (Dict[T, float]): Probability of each initial values of data type T.
@@ -141,6 +204,116 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         self.init_log_pvec[0] = self.log_dv
         self.trans_log_pvec[:, 0] = self.log_dv
         self.trans_log_pvec[0, :] = self.log_dv - np.log(num_keys + 1)
+
+        self.set_prior(prior)
+
+    def get_prior(self):
+        """Returns the conjugate prior in ``(states, init_prior, row_priors)`` form (or None)."""
+        if not self.has_conj_prior:
+            return None
+        return (list(self.prior_states), self.init_prior, list(self.row_priors))
+
+    def set_prior(self, prior) -> None:
+        """Set the conjugate Dirichlet prior and precompute its digamma expectations.
+
+        With Dirichlet ``init_prior`` and Dirichlet ``row_priors`` (each over the fixed ordered
+        ``states``) this caches the digamma expectations E[ln p_k] = psi(alpha_k) - psi(sum alpha)
+        used by expected_log_density and sets ``has_conj_prior`` accordingly. ``prior=None`` leaves
+        the distribution a plain point model.
+
+        Args:
+            prior: ``(states, init_prior, row_priors)`` tuple or None.
+
+        """
+        from pysp.bstats.dirichlet import DirichletDistribution
+
+        if prior is None:
+            self.prior = None
+            self.prior_states = None
+            self.init_prior = None
+            self.row_priors = None
+            self.e_log_init = None
+            self.e_log_trans = None
+            self.has_conj_prior = False
+            return
+
+        states, init_prior, row_priors = _unpack_markov_chain_prior(prior)
+        self.prior = prior
+        self.prior_states = states
+        self.init_prior = init_prior
+        self.row_priors = row_priors
+
+        if isinstance(init_prior, DirichletDistribution) and all(
+            isinstance(u, DirichletDistribution) for u in row_priors
+        ):
+            a0 = np.asarray(init_prior.get_parameters(), dtype=float)
+            self.e_log_init = digamma(a0) - digamma(a0.sum())
+            self.e_log_trans = np.zeros((len(states), len(states)))
+            for i, row_prior in enumerate(row_priors):
+                ai = np.asarray(row_prior.get_parameters(), dtype=float)
+                self.e_log_trans[i, :] = digamma(ai) - digamma(ai.sum())
+            self.has_conj_prior = True
+        else:
+            self.e_log_init = None
+            self.e_log_trans = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: list[T]) -> float:
+        """Variational E_q[log p(x)] under the Dirichlet priors over a state sequence.
+
+        Replaces the initial/transition log-probabilities with their digamma expectations
+        E[ln p_k] = psi(alpha_k) - psi(sum alpha); the length term is added as in log_density().
+        Falls back to the plug-in log_density(x) when no conjugate prior is set.
+
+        Args:
+            x (List[T]): An observed Markov chain state sequence.
+
+        Returns:
+            Expected log-density of the Markov chain at x.
+
+        """
+        if not self.has_conj_prior:
+            return self.log_density(x)
+
+        rv = 0.0
+        if len(x) != 0:
+            idx = {s: i for i, s in enumerate(self.prior_states)}
+            rv = float(self.e_log_init[idx[x[0]]])
+            for i in range(1, len(x)):
+                rv += float(self.e_log_trans[idx[x[i - 1]], idx[x[i]]])
+        rv += self.len_dist.log_density(len(x))
+        return rv
+
+    def seq_expected_log_density(self, x: enc_data_type) -> np.ndarray:
+        """Vectorized expected_log_density() at sequence-encoded input x.
+
+        Falls back to seq_log_density(x) when no conjugate prior is set.
+
+        Args:
+            x: Encoded sequences from seq_encode().
+
+        Returns:
+            Numpy array of expected log-densities, one per sequence.
+
+        """
+        if not self.has_conj_prior:
+            return self.seq_log_density(x)
+
+        sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
+
+        idx = {s: i for i, s in enumerate(self.prior_states)}
+        loc_key_map = np.asarray([idx[u] for u in inv_key_map])
+
+        rv = np.zeros(sz, dtype=float)
+        if len(idx1) > 0:
+            temp = self.e_log_trans[loc_key_map[prev_x], loc_key_map[next_x]]
+            rv = np.bincount(idx1, weights=temp, minlength=sz)
+        rv[idx0] += self.e_log_init[loc_key_map[init_x]]
+
+        if len_enc is not None:
+            rv += self.len_dist.seq_log_density(len_enc)
+
+        return rv
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import DistributionCapabilities, capabilities_for
@@ -472,7 +645,9 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         len_est = self.len_dist.estimator(pseudo_count=pseudo_count)
-        return MarkovChainEstimator(pseudo_count=pseudo_count, len_estimator=len_est, name=self.name)
+        return MarkovChainEstimator(
+            pseudo_count=pseudo_count, len_estimator=len_est, name=self.name, prior=self.get_prior()
+        )
 
     def dist_to_encoder(self) -> "MarkovChainDataEncoder":
         """Create MarkovChainDataEncoder object for encoding sequences of MarkovChainDistribution observations.
@@ -1325,6 +1500,7 @@ class MarkovChainEstimator(ParameterEstimator):
         len_estimator: ParameterEstimator | None = NullEstimator(),
         name: str | None = None,
         keys: str | None = None,
+        prior=None,
     ) -> None:
         """MarkovChainEstimator object for estimating MarkovChainDistribution object from aggregated data.
 
@@ -1334,6 +1510,10 @@ class MarkovChainEstimator(ParameterEstimator):
             len_estimator (Optional[ParameterEstimator]): ParameterEstimator for length of Markov sequences.
             name (Optional[str]): Set a name for instance of MarkovChainEstimator.
             keys (Optional[str]): Set keys for merging sufficient statistics of MarkovChainAccumulator objects.
+            prior: Optional ``(states, init_prior, row_priors)`` conjugate Dirichlet prior. When the
+                priors are all Dirichlet this enables the clamped Dirichlet MAP update (carrying the
+                posterior Dirichlets forward). ``None`` (default) preserves the existing MLE /
+                pseudo-count path byte-identically.
 
         Attributes:
             pseudo_count (Optional[float]): Used to re-weight sufficient statistics when merged with aggregated data.
@@ -1347,10 +1527,70 @@ class MarkovChainEstimator(ParameterEstimator):
         self.levels = levels
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.keys = keys
+        self.set_prior(prior)
 
     def accumulator_factory(self) -> "MarkovChainAccumulatorFactory":
         """Returns MarkovChainAccumulatorFactory for creating MarkovChainAccumulator."""
         return MarkovChainAccumulatorFactory(len_factory=self.len_estimator.accumulator_factory(), keys=self.keys)
+
+    def get_prior(self):
+        """Returns the conjugate prior in ``(states, init_prior, row_priors)`` form (or None)."""
+        if not self.has_conj_prior:
+            return None
+        return (list(self.prior_states), self.init_prior, list(self.row_priors))
+
+    def set_prior(self, prior) -> None:
+        """Set the conjugate Dirichlet prior and flag whether it admits the conjugate update.
+
+        Args:
+            prior: ``(states, init_prior, row_priors)`` tuple or None; has_conj_prior is set when
+                all priors are Dirichlet.
+
+        """
+        from pysp.bstats.dirichlet import DirichletDistribution
+
+        if prior is None:
+            self.prior = None
+            self.prior_states = None
+            self.init_prior = None
+            self.row_priors = None
+            self.has_conj_prior = False
+            return
+
+        states, init_prior, row_priors = _unpack_markov_chain_prior(prior)
+        self.prior = prior
+        self.prior_states = states
+        self.init_prior = init_prior
+        self.row_priors = row_priors
+        self.has_conj_prior = isinstance(init_prior, DirichletDistribution) and all(
+            isinstance(u, DirichletDistribution) for u in row_priors
+        )
+
+    def model_log_density(self, model: "MarkovChainDistribution") -> float:
+        """Log-density of the model's probabilities under the Dirichlet priors.
+
+        Sums the Dirichlet log-densities of the initial-state probabilities and each transition row
+        (floored at a tiny constant so MAP estimates that sit on the simplex boundary score
+        finitely). Returns 0.0 without a conjugate prior.
+
+        Args:
+            model (MarkovChainDistribution): Model to score.
+
+        Returns:
+            Prior log-density of the model parameters.
+
+        """
+        if not self.has_conj_prior:
+            return 0.0
+        tiny = 1.0e-300
+        states = self.prior_states
+        w = np.asarray([model.init_prob_map.get(s, 0.0) for s in states], dtype=float)
+        rv = float(self.init_prior.log_density(np.maximum(w, tiny)))
+        for i, s in enumerate(states):
+            row = model.transition_map.get(s, {})
+            tvec = np.asarray([row.get(s2, 0.0) for s2 in states], dtype=float)
+            rv += float(self.row_priors[i].log_density(np.maximum(tvec, tiny)))
+        return rv
 
     def estimate(self, nobs: float | None, suff_stat: suff_stat_type) -> "MarkovChainDistribution":
         """Estimate MarkovChainDistribution from aggregated sufficient statistics from observed data.
@@ -1371,10 +1611,66 @@ class MarkovChainEstimator(ParameterEstimator):
             MarkovChainDistribution object.
 
         """
-        if self.pseudo_count is not None:
+        if self.has_conj_prior:
+            return self._estimate_conjugate(nobs, suff_stat)
+        elif self.pseudo_count is not None:
             return self.estimate1(nobs, suff_stat)
         else:
             return self.estimate0(nobs, suff_stat)
+
+    def _estimate_conjugate(self, nobs: float | None, suff_stat: suff_stat_type) -> "MarkovChainDistribution":
+        """Clamped Dirichlet MAP estimate over the fixed prior ``states`` ordering.
+
+        The initial-state and per-row transition probabilities are the clamped Dirichlet MAP
+        (counts + alpha - 1, floored at zero and renormalized; posterior mean when degenerate) and
+        the posterior Dirichlets (counts + alpha) are carried forward as the new prior. Mirrors
+        pysp.bstats.markov_chain.MarkovChainEstimator.estimate exactly, mapping the stats dict-based
+        sufficient statistics onto the fixed state ordering.
+        """
+        from pysp.bstats.dirichlet import DirichletDistribution
+
+        init_count_map, trans_count_map, len_val = suff_stat
+        states = self.prior_states
+        s = len(states)
+        idx = {st: i for i, st in enumerate(states)}
+
+        init_counts = np.zeros(s, dtype=float)
+        for k, v in init_count_map.items():
+            if k in idx:
+                init_counts[idx[k]] += v
+
+        trans_counts = np.zeros((s, s), dtype=float)
+        for k1, row in trans_count_map.items():
+            if k1 not in idx:
+                continue
+            i = idx[k1]
+            for k2, v in row.items():
+                if k2 in idx:
+                    trans_counts[i, idx[k2]] += v
+
+        len_dist = self.len_estimator.estimate(nobs, len_val)
+
+        a0 = np.asarray(self.init_prior.get_parameters(), dtype=float)
+        init_probs = _map_probs(init_counts, a0)
+        init_posterior = DirichletDistribution(init_counts + a0)
+
+        trans_mat = np.zeros((s, s), dtype=float)
+        row_posteriors = []
+        for i in range(s):
+            ai = np.asarray(self.row_priors[i].get_parameters(), dtype=float)
+            trans_mat[i, :] = _map_probs(trans_counts[i, :], ai)
+            row_posteriors.append(DirichletDistribution(trans_counts[i, :] + ai))
+
+        init_prob_map = {states[i]: float(init_probs[i]) for i in range(s)}
+        transition_map = {states[i]: {states[j]: float(trans_mat[i, j]) for j in range(s)} for i in range(s)}
+
+        return MarkovChainDistribution(
+            init_prob_map,
+            transition_map,
+            len_dist=len_dist,
+            name=self.name,
+            prior=(states, init_posterior, row_posteriors),
+        )
 
     def estimate0(self, nobs: float | None, suff_stat: suff_stat_type) -> "MarkovChainDistribution":
         """Estimate MarkovChainDistribution from aggregated sufficient statistics from observed data.

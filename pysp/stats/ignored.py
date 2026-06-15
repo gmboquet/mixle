@@ -64,6 +64,22 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
     def __str__(self) -> str:
         return "IgnoredDistribution(%s)" % (str(self.dist))
 
+    def get_prior(self) -> Any:
+        """Delegate to the wrapped distribution's ``get_prior`` (Ignored owns no prior)."""
+        return self.dist.get_prior()
+
+    def set_prior(self, prior: Any) -> None:
+        """Delegate to the wrapped distribution's ``set_prior``; ``None`` keeps existing behavior."""
+        self.dist.set_prior(prior)
+
+    def expected_log_density(self, x: T) -> float:
+        """Delegate prior-expected log-density to the wrapped distribution."""
+        return self.dist.expected_log_density(x)
+
+    def seq_expected_log_density(self, x: E) -> np.ndarray:
+        """Delegate vectorized prior-expected log-density to the wrapped distribution."""
+        return self.dist.seq_expected_log_density(x)
+
     def density(self, x: T) -> float:
         """Evaluate the density of the IgnoredDistribution at x.
 
@@ -239,6 +255,14 @@ class IgnoredEstimator(ParameterEstimator):
 
     def accumulator_factory(self):
         return IgnoredAccumulatorFactory(self.dist.dist_to_encoder(), name=self.name)
+
+    def get_prior(self) -> Any:
+        """Delegate to the wrapped distribution's ``get_prior`` (Ignored estimates nothing of its own)."""
+        return self.dist.get_prior()
+
+    def set_prior(self, prior: Any) -> None:
+        """Delegate to the wrapped distribution's ``set_prior``; ``None`` keeps existing behavior."""
+        self.dist.set_prior(prior)
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> IgnoredDistribution:
         return IgnoredDistribution(self.dist, name=self.name)
