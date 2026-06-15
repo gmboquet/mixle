@@ -555,25 +555,39 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             return sr.zero(), truncated
         return total, truncated
 
-    def is_canonical_copy(self, value, coarse_bin: int, quantizer) -> bool:
-        """Stateless dedup: keep ``value`` only at its dominant (best-weighted) component's bin.
+    def _min_structural_fine_bucket(self, value, quantizer):
+        """Minimum over components of (component structural bucket + weight-term bucket), or None.
 
-        Mirrors the count-index construction -- a copy from component k sits at fine bucket
-        fine_bucket(log p_k(value)) + fine_bucket(log w_k) -- so the canonical bin is the minimum of
-        those over components. O(K) model evaluations, no state.
+        Uses each component's ``structural_fine_bucket`` -- the SUM-of-floored sub-buckets the count
+        index actually used -- not ``fine_bucket(log p_k(value))``. For a nested component (composite/
+        sequence) those differ by up to the number of sub-factors, and the old single-floor form
+        mispredicted the canonical bin and silently dropped such values from the distinct stream.
         """
         best = None
         for k in range(len(self.components)):
             if self.w[k] <= 0.0:
                 continue
-            lp = self.components[k].log_density(value)
-            if lp == -np.inf:
+            comp = self.components[k]
+            if comp.log_density(value) == -np.inf:
                 continue
-            fb = quantizer.fine_bucket(float(lp)) + quantizer.fine_bucket(float(self.log_w[k]))
-            cb = quantizer.coarse_bin(fb)
-            if best is None or cb < best:
-                best = cb
-        return best is not None and coarse_bin == best
+            fb = comp.structural_fine_bucket(value, quantizer) + quantizer.fine_bucket(float(self.log_w[k]))
+            if best is None or fb < best:
+                best = fb
+        return best
+
+    def structural_fine_bucket(self, value, quantizer) -> int:
+        """Dominant weighted-component structural bucket (mirrors the plus-of-scaled-children index)."""
+        best = self._min_structural_fine_bucket(value, quantizer)
+        return quantizer.fine_bucket(float(self.log_density(value))) if best is None else best
+
+    def is_canonical_copy(self, value, coarse_bin: int, quantizer) -> bool:
+        """Stateless dedup: keep ``value`` only at its dominant (best-weighted) component's bin.
+
+        The canonical bin is the coarse bin of the minimum, over components, of the component's
+        structural fine bucket shifted by the weight term. O(K) model evaluations, no state.
+        """
+        best = self._min_structural_fine_bucket(value, quantizer)
+        return best is not None and coarse_bin == quantizer.coarse_bin(best)
 
 
 class MixtureEnumerator(DistributionEnumerator):

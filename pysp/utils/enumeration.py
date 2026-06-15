@@ -33,6 +33,7 @@ __all__ = [
     "LengthFrontierMerge",
     "best_first_union",
     "best_first_union_max",
+    "sound_top_k",
     "bounded_best_first_union_index",
     "QuantizedEnumerationIndex",
     "LazyQuantizedEnumerationIndex",
@@ -971,3 +972,75 @@ def best_first_union_max(
     probability for markov/HMM enumerators.
     """
     return _best_first_union(streams, log_offsets, exact_log_density, np.max, tol)
+
+
+def sound_top_k(
+    dist: Any,
+    k: int,
+    start: int = 0,
+    budget_bits: float = 40.0,
+    oversample: int = 8,
+    bin_width_bits: float = 1.0,
+    max_budget_bits: float = 512.0,
+    total_mass: float = 1.0,
+    tol: float = 1.0e-12,
+) -> list[tuple[Any, float]]:
+    """Exact true-descending observations ranked ``[start, start+k)`` for ANY normalized model.
+
+    Mass-threshold certificate, correct regardless of the seek stream's ordering (so it holds for
+    deep/nested mixtures and HMMs where the tropical order is badly displaced): pull distinct
+    ``(value, log_prob)`` from the count-budget index, accumulate exact probability mass, and keep
+    the best ``start+k`` by probability. Since every unpulled item's probability is at most the
+    remaining mass ``total_mass - accumulated``, once ``remaining`` drops below the (start+k)-th best
+    probability the heap is exactly the true top ``start+k``; return ``sorted_desc[start:start+k]``.
+    If the in-budget stream is exhausted first, the budget is doubled (up to ``max_budget_bits``).
+    ``total_mass`` (default 1.0) may be a known upper bound for sub-normalized models.
+
+    Cost is ``O(number pulled)`` -- small for peaked distributions, large for flat ones, so for
+    top-k from rank 0 ``dist.enumerator()`` is usually leaner; this adds the soundness certificate
+    and the arbitrary start offset the sequential enumerator lacks.
+    """
+    from pysp.utils.quantization.core import count_budget_index
+
+    if k < 1:
+        raise ValueError("k must be a positive integer.")
+    if start < 0:
+        raise ValueError("start must be non-negative.")
+    need = start + k
+    budget = float(budget_bits)
+    while True:
+        # Consume the RAW (over-counted) seek index and de-duplicate here. The canonical-dedup
+        # distinct stream is lossy -- it can drop a valid value whose minimal tropical fine bucket
+        # is computed inconsistently with the convolution binning -- which would make the mass
+        # certificate unreachable. The raw index emits every (value, path/component) copy, so the
+        # self-dedup below recovers the complete distinct set (verified: accumulated mass -> 1).
+        index = count_budget_index(dist, budget_bits=budget, oversample=oversample, bin_width_bits=bin_width_bits)
+        heap: list[tuple[float, int, Any]] = []  # min-heap by log_prob, the best `need` so far
+        counter = itertools.count()
+        seen: set[Hashable] = set()
+        accumulated = 0.0
+        certified = False
+        for i in range(index.total_count):
+            value, lp = index.get(i)
+            key = freeze(value)
+            if key in seen:
+                continue
+            seen.add(key)
+            accumulated += math.exp(lp)
+            if len(heap) < need:
+                heapq.heappush(heap, (lp, next(counter), value))
+            elif lp > heap[0][0]:
+                heapq.heapreplace(heap, (lp, next(counter), value))
+            if len(heap) >= need:
+                remaining = max(0.0, total_mass - accumulated)
+                if remaining < math.exp(heap[0][0]) - tol:
+                    certified = True
+                    break
+        ordered = sorted(heap, key=lambda t: -t[0])
+        # Certified sound; or the whole in-budget index was consumed and it was NOT truncated, so
+        # the full support was seen and the heap is exact; or fewer than `need` distinct values exist.
+        if certified or not index.truncated or len(seen) < need:
+            return [(v, lp) for lp, _, v in ordered][start:need]
+        if budget >= max_budget_bits:
+            return [(v, lp) for lp, _, v in ordered][start:need]  # best effort at the budget cap
+        budget = min(budget * 2.0, max_budget_bits)
