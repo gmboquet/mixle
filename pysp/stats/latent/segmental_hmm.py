@@ -29,6 +29,7 @@ from pysp.stats.combinator.null_dist import (
 )
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -277,7 +278,7 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
             [d.dist_to_encoder() for d in self.emissions], self.len_dist.dist_to_encoder()
         )
 
-    def enumerator(self) -> "DistributionEnumerator":
+    def enumerator(self) -> DistributionEnumerator:
         """Enumerate segment sequences in descending marginal probability order.
 
         The segmental HMM has the *standard* HMM forward semantics -- each position emits one segment
