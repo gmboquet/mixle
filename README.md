@@ -107,8 +107,12 @@ Poisson(free * Field("x") + free).fit(y, given={"x": x})                        
 multiple chains (`chains=`, `parallel=True` for process-parallel) with Gelman-Rubin R̂ and
 pooled ESS. Constructors cover the scalar families plus `Mix`, `Seq`, `Markov`, `LDA`, `MVN`,
 `DiagGaussian`, `LocalLevel`, `AR1`, and `Graph` (a VMP factor graph for conjugate-Gaussian DAGs);
-`compare(...)` ranks fitted models. The `pysp.stats` classes are untouched — this is a thin
-surface over them.
+`compare(...)` ranks fitted models. **Constraints & inequalities** among random variables
+(`a < b`, `2*a - b >= 1`, combined with `& | ~`) drive both generative conditioning
+(`constrain(a < b)` — joint truncation with `.sample`/`.mean`/`.prob`/`.log_prob`) and
+constrained inference (`fit(..., constraints=a < b)` restricts the feasible parameter region
+for `map`/`mcmc`/`ensemble`). The `pysp.stats` classes are untouched — this is a thin surface
+over them.
 
 **Head-to-head speed** (`python -m pysp.ppl.benchmark_vs`, same machine/data/model vs the actual
 competing PPLs):
