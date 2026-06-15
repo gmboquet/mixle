@@ -200,6 +200,19 @@ class PPLCoreTestCase(unittest.TestCase):
         ranked = compare([m1, m2], data, by="aic")
         self.assertEqual(ranked[0]["model"], "MixtureDistribution")   # best first
 
+    def test_multivariate_gaussian(self):
+        from pysp.ppl import MVN, DiagGaussian
+        rng = np.random.RandomState(0)
+        mean, cov = np.array([1.0, -2.0]), np.array([[2.0, 0.8], [0.8, 1.0]])
+        data = list(rng.multivariate_normal(mean, cov, size=8000))
+        m = MVN(2).fit(data, max_its=2)
+        np.testing.assert_allclose(m.params["mean"], mean, atol=0.1)
+        np.testing.assert_allclose(m.params["cov"], cov, atol=0.15)
+        d2 = list(rng.multivariate_normal([3, 5], np.diag([1.0, 4.0]), size=8000))
+        md = DiagGaussian(2).fit(d2, max_its=2)
+        np.testing.assert_allclose(md.params["mean"], [3, 5], atol=0.15)
+        np.testing.assert_allclose(md.params["var"], [1.0, 4.0], atol=0.3)
+
     def test_moments(self):
         self.assertAlmostEqual(Normal(3, 2).mean(), 3.0, delta=0.1)
         self.assertAlmostEqual(Normal(3, 2).var(), 4.0, delta=0.2)

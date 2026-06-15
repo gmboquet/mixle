@@ -38,12 +38,14 @@ from pysp.stats.negative_binomial import NegativeBinomialDistribution, NegativeB
 from pysp.stats.dirichlet import DirichletDistribution, DirichletEstimator
 from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 from pysp.stats.lda import LDADistribution, LDAEstimator
+from pysp.stats.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
+from pysp.stats.dmvn import DiagonalGaussianDistribution, DiagonalGaussianEstimator
 
 __all__ = [
     "RandomVariable", "free", "lower",
     "Normal", "Poisson", "Gamma", "Exponential", "Categorical", "Bernoulli", "Geometric",
     "Beta", "StudentT", "LogNormal", "NegativeBinomial", "Dirichlet",
-    "Mix", "Seq", "Markov", "LDA", "Graph", "Field", "compare",
+    "Mix", "Seq", "Markov", "LDA", "MVN", "DiagGaussian", "Graph", "Field", "compare",
 ]
 
 
@@ -248,6 +250,43 @@ register_composite("LDA", _lda_dist, _lda_est, seed_fn=_lda_seed,
                    dist_cls=LDADistribution, read=_lda_read)
 
 
+# --- multivariate Gaussian (data are vectors) -------------------------------------
+def _mvn_dist(args, lower_child):
+    (dim,) = args
+    return MultivariateGaussianDistribution(np.zeros(dim), np.eye(dim))   # N(0, I) default
+
+
+def _mvn_est(args, lower_child_est, name, keys):
+    (dim,) = args
+    return MultivariateGaussianEstimator(dim)
+
+
+def _mvn_read(d, read_params):
+    return {"mean": np.asarray(d.mu), "cov": np.asarray(d.covar)}
+
+
+register_composite("MVN", _mvn_dist, _mvn_est, dist_cls=MultivariateGaussianDistribution,
+                   read=_mvn_read)
+
+
+def _diag_dist(args, lower_child):
+    (dim,) = args
+    return DiagonalGaussianDistribution(np.zeros(dim), np.ones(dim))
+
+
+def _diag_est(args, lower_child_est, name, keys):
+    (dim,) = args
+    return DiagonalGaussianEstimator(dim=dim)
+
+
+def _diag_read(d, read_params):
+    return {"mean": np.asarray(d.mu), "var": np.asarray(d.covar)}
+
+
+register_composite("DiagGaussian", _diag_dist, _diag_est,
+                   dist_cls=DiagonalGaussianDistribution, read=_diag_read)
+
+
 # --- constructors: conventional parameterizations, return symbolic RandomVariables ---
 def Normal(mean: Any, sd: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
     """Normal with mean and standard deviation (lowers to GaussianDistribution(mu, sd**2))."""
@@ -334,6 +373,17 @@ def Mix(components, weights=None, *, name: Optional[str] = None) -> RandomVariab
 def Seq(element, *, name: Optional[str] = None) -> RandomVariable:
     """IID sequence of ``element``. Fit on a list of sequences (each a list/array)."""
     return RandomVariable._sample("Sequence", (_as_rv(element),), name=name)
+
+
+def MVN(dim: int, *, name: Optional[str] = None) -> RandomVariable:
+    """Multivariate Gaussian of dimension ``dim`` (full covariance). Fit on a list of
+    length-``dim`` vectors; recovers mean and covariance."""
+    return RandomVariable._sample("MVN", (int(dim),), name=name)
+
+
+def DiagGaussian(dim: int, *, name: Optional[str] = None) -> RandomVariable:
+    """Diagonal-covariance multivariate Gaussian of dimension ``dim``."""
+    return RandomVariable._sample("DiagGaussian", (int(dim),), name=name)
 
 
 def LDA(num_topics: int, vocab_size: int, *, alpha: float = 1.0,
