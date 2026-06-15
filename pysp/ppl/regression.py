@@ -127,65 +127,85 @@ def _design(columns, given):
 class LMMResult:
     """Linear mixed model: fixed-effect coefficients + variance components + group effects."""
 
-    def __init__(self, names, beta, cov, tau, sigma, group_means, group_levels):
+    def __init__(self, names, beta, cov, Sigma, sigma, b, group_levels, re_names):
         self.names = names
         self.beta = beta
         self.cov = cov
-        self.tau = float(tau)              # random-intercept sd
-        self.sigma = float(sigma)          # residual sd
-        self.group_effects = dict(zip(group_levels, group_means))
+        self.random_cov = np.asarray(Sigma)        # random-effects covariance (q x q)
+        self.random_names = re_names               # ['intercept', slope names...]
+        self.tau = float(np.sqrt(Sigma[0, 0]))     # random-intercept sd (back-compat)
+        self.sigma = float(sigma)                  # residual sd
+        # per-group effects: intercept for back-compat, full vector under group_effects_full
+        self.group_effects = {lv: float(b[i, 0]) for i, lv in enumerate(group_levels)}
+        self.group_effects_full = {lv: b[i] for i, lv in enumerate(group_levels)}
         self.coefficients = {names[i]: {"mean": float(beta[i]), "sd": float(np.sqrt(cov[i, i]))}
                              for i in range(len(names))}
         self.acceptance_rate = None
         self.predictive = None
 
     def summary(self):
-        return {"coefficients": self.coefficients, "tau": self.tau, "sigma": self.sigma,
-                "n_groups": len(self.group_effects)}
+        return {"coefficients": self.coefficients, "random_cov": self.random_cov,
+                "sigma": self.sigma, "n_groups": len(self.group_effects)}
 
 
 def _lmm_fit(rv, y, given, linpred, max_iter, tol):
-    """Linear mixed model with one random intercept: y = X beta + u_group + eps,
-    u_g ~ N(0, tau^2), eps ~ N(0, sigma^2). Fitted by EM over the random effects."""
+    """Linear mixed model with one grouping factor (random intercept + optional random
+    slopes): y = X beta + Z b_g + eps, b_g ~ N(0, Sigma), eps ~ N(0, sigma^2). EM."""
     if len(linpred.groups) != 1:
-        raise NotImplementedError("exactly one random-intercept group is supported.")
-    gname = linpred.groups[0]
+        raise NotImplementedError("exactly one grouping factor is supported.")
+    gname, slopes = linpred.groups[0]
     if gname not in given:
         raise ValueError(f"group column {gname!r} not in given=.")
-    # fixed-effect design (coefs are free/Normal-prior; constants fold into offset)
     columns = _columns_of(linpred)
     est, _fixed = columns
     X, offset = _design(columns, given) if (est or _fixed) else (np.zeros((y.size, 0)), np.zeros(y.size))
     names = [f.name if f is not None else "intercept" for _, f in est]
-    if not names:                                       # always have an intercept in an LMM
+    if not names:
         X = np.ones((y.size, 1)); names = ["intercept"]
     N, p = X.shape
 
+    # random-effects design Z: intercept + slope columns
+    re_names = ["intercept"] + list(slopes)
+    zcols = [np.ones(N)] + [np.asarray(given[s], dtype=float).reshape(-1) for s in slopes]
+    Z = np.column_stack(zcols)
+    q = Z.shape[1]
     levels, g = np.unique(np.asarray(given[gname]), return_inverse=True)
     G = levels.size
     yv = y - offset
 
     beta = np.linalg.lstsq(X, yv, rcond=None)[0]
-    tau2 = max(float(np.var(yv)) * 0.5, 1e-3)
-    sigma2 = max(float(np.var(yv)) * 0.5, 1e-3)
-    u = np.zeros(G)
-    n_g = np.bincount(g, minlength=G).astype(float)
+    var0 = max(float(np.var(yv)), 1e-3)
+    Sigma = np.eye(q) * (0.5 * var0)
+    sigma2 = 0.5 * var0
+    b = np.zeros((G, q))
+    # precompute per-group Z slices
+    groups = [np.where(g == gi)[0] for gi in range(G)]
     for _ in range(max_iter):
         resid = yv - X @ beta
-        sum_r = np.bincount(g, weights=resid, minlength=G)        # per-group residual sum
-        var_g = 1.0 / (1.0 / tau2 + n_g / sigma2)                 # E-step: q(u_g)
-        u = var_g * (sum_r / sigma2)
-        beta_new = np.linalg.lstsq(X, yv - u[g], rcond=None)[0]   # M-step
-        tau2 = max(float(np.mean(u ** 2 + var_g)), 1e-8)
-        err = yv - X @ beta_new - u[g]
-        sigma2 = max(float((err @ err + np.sum(n_g * var_g)) / N), 1e-8)
+        Sinv = np.linalg.inv(Sigma)
+        SS = np.zeros((q, q))
+        err2 = 0.0
+        trace_term = 0.0
+        for gi, idx in enumerate(groups):
+            Zg, rg = Z[idx], resid[idx]
+            cov_g = np.linalg.inv(Sinv + Zg.T @ Zg / sigma2)     # E-step posterior of b_g
+            b_g = cov_g @ (Zg.T @ rg / sigma2)
+            b[gi] = b_g
+            SS += np.outer(b_g, b_g) + cov_g
+            pred = Zg @ b_g
+            err2 += float((rg - pred) @ (rg - pred))
+            trace_term += float(np.trace(Zg @ cov_g @ Zg.T))
+        Sigma = SS / G                                            # M-step
+        sigma2 = max((err2 + trace_term) / N, 1e-8)
+        Zb = np.einsum("nq,nq->n", Z, b[g])
+        beta_new = np.linalg.lstsq(X, yv - Zb, rcond=None)[0]
         if np.max(np.abs(beta_new - beta)) < tol:
             beta = beta_new
             break
         beta = beta_new
 
     cov = np.linalg.inv(X.T @ X / sigma2) if p else np.zeros((0, 0))
-    result = LMMResult(names, beta, cov, np.sqrt(tau2), np.sqrt(sigma2), u, list(levels))
+    result = LMMResult(names, beta, cov, Sigma, np.sqrt(sigma2), b, list(levels), re_names)
     return RandomVariable._bound(None, name=rv._name, result=result)
 
 

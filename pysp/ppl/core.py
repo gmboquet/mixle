@@ -79,20 +79,25 @@ def _combine_intercept(a, b):
 
 
 class Group:
-    """A random-intercept-by-group term for mixed-effects models: ``Group("subject")``
-    adds a per-group random intercept (like lme4's ``(1|subject)``)."""
+    """A by-group random-effects term for mixed-effects models. ``Group("subject")`` is a
+    random intercept (lme4's ``(1|subject)``); ``Group("subject", slopes=["x"])`` adds a
+    correlated random slope on ``x`` (``(1 + x | subject)``)."""
 
-    __slots__ = ("name",)
+    __slots__ = ("name", "slopes")
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, slopes=()):
         self.name = name
+        self.slopes = tuple(s.name if isinstance(s, Field) else s for s in slopes)
+
+    def _key(self):
+        return (self.name, self.slopes)
 
     def __add__(self, other):
-        return _LinearPredictor([], groups=[self.name]).__add__(other)
+        return _LinearPredictor([], groups=[self._key()]).__add__(other)
     __radd__ = __add__
 
     def __repr__(self):
-        return f"Group({self.name!r})"
+        return f"Group({self.name!r}, slopes={list(self.slopes)})"
 
 
 class _LinearPredictor:
@@ -114,7 +119,7 @@ class _LinearPredictor:
         if isinstance(other, Field):
             return _LinearPredictor(self.terms + [(1.0, other)], self.intercept, self.groups)
         if isinstance(other, Group):
-            return _LinearPredictor(self.terms, self.intercept, self.groups + [other.name])
+            return _LinearPredictor(self.terms, self.intercept, self.groups + [other._key()])
         return _LinearPredictor(self.terms, _combine_intercept(self.intercept, other), self.groups)
     __radd__ = __add__
 
@@ -390,8 +395,8 @@ class RandomVariable:
             return c.__add__(self)
         if isinstance(c, Field):
             return _LinearPredictor([(1.0, c)], self)
-        if isinstance(c, Group):                      # RV intercept + random group intercept
-            return _LinearPredictor([], self, [c.name])
+        if isinstance(c, Group):                      # RV intercept + random group effects
+            return _LinearPredictor([], self, [c._key()])
         if isinstance(c, RandomVariable):             # convolution of independent RVs
             return RandomVariable._sum(self, c)
         return self._affine(c, 1.0)
@@ -635,6 +640,12 @@ class RandomVariable:
         ``'auto'`` picks ``map`` when the model has priors else ``em``. EM threads pysp's
         parallel/distributed backends (``backend='mp'|'mpi'|'dask'``).
         """
+        valid_how = {"auto", "em", "map", "mcmc", "hmc", "vi", "vmp", "conjugate", "hierarchical"}
+        if how not in valid_how:
+            raise ValueError(f"unknown how={how!r}; choose from {sorted(valid_how)}.")
+        if hasattr(data, "__len__") and len(data) == 0:
+            raise ValueError("fit() received empty data.")
+
         # regression / GLM: a linear predictor (covariates) in a parameter slot
         if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
             from pysp.ppl import regression as _reg
