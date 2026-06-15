@@ -367,6 +367,34 @@ def _finalize_chains(rv, slots, results, build) -> RandomVariable:
     return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
 
 
+def ensemble_fit(rv: RandomVariable, data, *, draws: int = 1500, burn: int = 500,
+                 thin: int = 1, walkers: int | None = None, rng=None) -> RandomVariable:
+    """Affine-invariant ensemble MCMC (Goodman & Weare stretch move).
+
+    A population of walkers samples jointly with no per-dimension step tuning; it is invariant
+    to affine rescalings, so it mixes well on correlated / poorly-scaled posteriors and gives
+    very high ESS/sec on low/medium-dimensional models (no JIT-compile latency). Each ``draws``
+    sweep contributes all ``walkers`` states, so the pooled posterior has ``draws*walkers``
+    near-independent samples. Uses the fast NumPy scalar log-target (one eval per proposal)."""
+    from pysp.utils.mcmc import affine_invariant_ensemble
+
+    if rng is None:
+        rng = np.random.RandomState()
+    log_target, slots, _fam, build, _unpack, (dmean, dstd) = _build_target(rv, data)
+    d = len(slots)
+    if walkers is None:
+        walkers = max(2 * (d + 1), 8)
+    if walkers % 2:
+        walkers += 1
+    u0 = _init_u(slots, dmean, dstd)
+    spread = _init_scale(slots, dstd, len(data)) * math.sqrt(len(data))   # ~ prior/posterior width
+    p0 = u0[None, :] + 0.1 * spread[None, :] * rng.standard_normal((walkers, d))
+    p0[0] = u0
+    res = affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn,
+                                    thin=thin, rng=rng)
+    return _finalize(rv, slots, res, build)
+
+
 def mcmc_fit(rv: RandomVariable, data, *, draws: int = 2000, burn: int = 1000,
              thin: int = 1, scale: float | None = None, rng=None,
              chains: int = 1, parallel: bool = False) -> RandomVariable:

@@ -189,6 +189,85 @@ def metropolis_hastings(
     )
 
 
+def affine_invariant_ensemble(
+    log_target: Callable[[np.ndarray], float],
+    p0: np.ndarray,
+    num_samples: int,
+    burn_in: int = 0,
+    thin: int = 1,
+    a: float = 2.0,
+    rng: np.random.RandomState | None = None,
+) -> MCMCResult:
+    """Goodman & Weare affine-invariant ensemble sampler (the "stretch move").
+
+    A population of ``W`` walkers explores the target jointly; each walker is proposed along
+    the line to a randomly chosen complementary walker, so the sampler is invariant to affine
+    rescalings of the target and needs no per-dimension step tuning. It mixes far better than
+    random-walk Metropolis on correlated/poorly-scaled posteriors and, because every proposal
+    is one log-target evaluation, delivers very high ESS/sec on low/medium-dimensional models.
+
+    Args:
+        log_target: unnormalized log target for a single walker state ``(d,)``.
+        p0: initial ensemble, shape ``(W, d)`` with ``W`` even and ``W >= 2*d + 2``.
+        num_samples: retained *sweeps*; each sweep contributes all ``W`` walker states.
+        burn_in: sweeps to discard. thin: keep one sweep in ``thin``.
+        a: stretch scale (>1; 2.0 is the standard default).
+        rng: optional RandomState.
+
+    Returns:
+        MCMCResult whose ``samples`` are the pooled walker states (sweep-major), so its
+        diagnostics see ``W * num_samples / thin`` draws.
+    """
+    if a <= 1.0:
+        raise ValueError("stretch scale a must be > 1.")
+    if thin <= 0:
+        raise ValueError("thin must be positive.")
+    rng = np.random.RandomState() if rng is None else rng
+    p = np.array(p0, dtype=float)
+    if p.ndim != 2 or p.shape[0] < 2 or p.shape[0] % 2 != 0:
+        raise ValueError("p0 must be (W, d) with W even and >= 2.")
+    nwalkers, d = p.shape
+    lp = np.array([float(log_target(p[k])) for k in range(nwalkers)])
+    if not np.all(np.isfinite(lp)):
+        raise ValueError("some initial walkers have non-finite log target.")
+
+    half = nwalkers // 2
+    idx = np.arange(nwalkers)
+    samples: list[Any] = []
+    log_probs: list[float] = []
+    accepted: list[bool] = []
+    total = burn_in + num_samples * thin
+    for sweep in range(total):
+        for first in (True, False):
+            active = idx[:half] if first else idx[half:]
+            other = idx[half:] if first else idx[:half]
+            n = len(active)
+            # z ~ g(z) ∝ 1/sqrt(z) on [1/a, a]  (inverse-CDF sample)
+            z = ((a - 1.0) * rng.random_sample(n) + 1.0) ** 2 / a
+            partners = other[rng.randint(0, len(other), size=n)]
+            prop = p[partners] + z[:, None] * (p[active] - p[partners])
+            for i in range(n):
+                w = active[i]
+                lpp = float(log_target(prop[i]))
+                if np.isfinite(lpp):
+                    log_alpha = (d - 1) * np.log(z[i]) + lpp - lp[w]
+                    acc = np.log(rng.random_sample()) < log_alpha
+                else:
+                    acc = False
+                accepted.append(bool(acc))
+                if acc:
+                    p[w] = prop[i]
+                    lp[w] = lpp
+        if sweep >= burn_in and ((sweep - burn_in) % thin == 0):
+            for k in range(nwalkers):
+                samples.append(p[k].copy())
+                log_probs.append(lp[k])
+
+    return MCMCResult(
+        samples=samples, log_probs=np.asarray(log_probs, dtype=float), accepted=np.asarray(accepted, dtype=bool)
+    )
+
+
 def metropolis_within_gibbs(
     log_target: LogTarget,
     initial: Any,

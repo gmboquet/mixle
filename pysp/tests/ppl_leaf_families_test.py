@@ -166,6 +166,17 @@ class MultiChainDiagnosticsTestCase(unittest.TestCase):
         self.assertGreater(m.result.ess, 0.0)
         self.assertAlmostEqual(m.result.mean("arg0"), 5.0, delta=0.2)
 
+    def test_ensemble_sampler(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 2.0, 4000))
+        mu = Normal(0, 10, name="mu")
+        m = Normal(mu, free).fit(data, how="ensemble", draws=800, burn=300,
+                                 rng=np.random.RandomState(1))
+        self.assertAlmostEqual(float(m.result.mean("mu")), 5.0, delta=0.1)
+        # the stretch move mixes well across the walker ensemble
+        ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
+        self.assertGreater(ess, 250)
+
     def test_process_parallel_matches_sequential(self):
         rng = np.random.RandomState(0)
         data = list(rng.normal(-1.0, 1.5, 1200))
