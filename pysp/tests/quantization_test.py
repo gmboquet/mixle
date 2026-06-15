@@ -10,9 +10,17 @@ order).
 import math
 import unittest
 
+import numpy as np
+
 from pysp.stats import *
 from pysp.utils.enumeration import freeze
-from pysp.utils.quantization.core import CountHistogram, Quantizer, convolve_indices, leaf_count_index
+from pysp.utils.quantization.core import (
+    CountHistogram,
+    Quantizer,
+    convolve_indices,
+    count_budget_index,
+    leaf_count_index,
+)
 from pysp.utils.quantization.parallel import distributed_unrank
 from pysp.utils.quantization.semiring import CountSemiring, enumerate_and_bin, ordered_stream_from_count_index
 
@@ -37,6 +45,53 @@ class CountSemiringTestCase(unittest.TestCase):
         for k, v in truth.items():
             self.assertEqual(c.count_at(k), v)
         self.assertEqual(c.total(), a.total() * b.total())
+
+    def test_kronecker_and_naive_convolution_agree(self):
+        # CountHistogram.convolve switches to Kronecker substitution above a size threshold;
+        # the two backends must be bit-identical, including with huge (>2**128) counts, zero
+        # gaps, delta operands, and a depth cap. Force each backend by toggling the threshold.
+        import random
+
+        import pysp.utils.quantization.core as core
+
+        def brute(a, b, cap):
+            base = a.base + b.base
+            width = len(a.data) + len(b.data) - 1
+            if cap is not None:
+                width = min(width, cap - base + 1)
+            if width <= 0:
+                return CountHistogram.empty()
+            out = [0] * width
+            for i, ai in enumerate(a.data):
+                for j, bj in enumerate(b.data):
+                    if i + j < width:
+                        out[i + j] += ai * bj
+            return CountHistogram(base, out)
+
+        rng = random.Random(7)
+
+        def rand_hist(width, bits):
+            return CountHistogram(rng.randint(-5, 40), [rng.randrange(0, 1 << bits) for _ in range(width)])
+
+        cases = [
+            (CountHistogram(2, [1, 3, 0, 5]), CountHistogram(-1, [2, 0, 4])),
+            (CountHistogram(0, [7]), rand_hist(60, 200)),  # delta x wide, huge counts
+            (rand_hist(80, 300), rand_hist(70, 300)),  # wide x wide, > 2**128 counts
+            (rand_hist(50, 4), CountHistogram(3, [0, 0, 9, 0])),  # internal zeros
+        ]
+        saved = core._KRONECKER_MIN_PRODUCT
+        try:
+            for a, b in cases:
+                for cap in (None, a.base + b.base + 5):
+                    truth = brute(a, b, cap)
+                    core._KRONECKER_MIN_PRODUCT = 0  # force Kronecker
+                    kron = a.convolve(b, max_fine_bucket=cap)
+                    core._KRONECKER_MIN_PRODUCT = 10**18  # force naive
+                    naive = a.convolve(b, max_fine_bucket=cap)
+                    self.assertEqual((kron.base, kron.data), (truth.base, truth.data))
+                    self.assertEqual((naive.base, naive.data), (truth.base, truth.data))
+        finally:
+            core._KRONECKER_MIN_PRODUCT = saved
 
     def test_convolution_unranker_matches_brute_force(self):
         q = Quantizer(bin_width_bits=1.0, oversample=8)
@@ -367,6 +422,64 @@ class ParallelTestCase(unittest.TestCase):
         self.assertEqual(
             [(freeze(v), round(lp, 9)) for v, lp in serial], [(freeze(v), round(lp, 9)) for v, lp in dist_items]
         )
+
+
+class CanonicalDedupCompletenessTestCase(unittest.TestCase):
+    """The canonical distinct stream must emit EVERY distinct in-budget value (no drops).
+
+    Regression for the structural_fine_bucket fix: the old canonical predicate binned a nested
+    component by floor(log p_k(value)) while the count index binned it by a sum of floored
+    sub-buckets, mispredicting the canonical bin and silently dropping ~19% of values.
+    """
+
+    def _raw_distinct(self, dist, budget):
+        idx = count_budget_index(dist, budget_bits=budget, oversample=8)
+        out = {}
+        for i in range(idx.total_count):
+            v, lp = idx.get(i)
+            out.setdefault(freeze(v), lp)
+        return out
+
+    def _assert_complete(self, dist, budget, name):
+        raw = self._raw_distinct(dist, budget)
+        emitted = {}
+        for v, lp in dist.count_budget_distinct(budget_bits=budget, oversample=8):
+            emitted.setdefault(freeze(v), lp)
+        # completeness: the canonical distinct stream covers exactly the raw distinct value set
+        self.assertEqual(set(emitted), set(raw), "%s: canonical stream dropped/added values" % name)
+        # and recovers ~all probability mass (no missing values)
+        mass = sum(math.exp(lp) for lp in emitted.values())
+        self.assertGreater(mass, 0.999, "%s: distinct mass too low -> values dropped" % name)
+
+    def test_mixture_of_nested_composite_sequence(self):
+        def nested(seed):
+            r = np.random.RandomState(seed)
+            seq = SequenceDistribution(
+                IntegerCategoricalDistribution(0, list(r.dirichlet(np.ones(4)))),
+                len_dist=IntegerCategoricalDistribution(1, list(r.dirichlet(np.ones(4)))),
+            )
+            return CompositeDistribution((seq, IntegerCategoricalDistribution(0, list(r.dirichlet(np.ones(5))))))
+
+        rng = np.random.RandomState(0)
+        mix = MixtureDistribution([nested(s) for s in (1, 2, 3)], list(rng.dirichlet(np.ones(3))))
+        self._assert_complete(mix, 30, "nested-mixture")
+
+    def test_hmm_with_composite_emissions(self):
+        rng = np.random.RandomState(1)
+        # nested emissions: each state emits a Composite(IntCat, IntCat)
+        topics = [
+            CompositeDistribution(
+                (
+                    IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(3)))),
+                    IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(3)))),
+                )
+            )
+            for _ in range(2)
+        ]
+        hmm = HiddenMarkovModelDistribution(
+            topics, [0.6, 0.4], [[0.7, 0.3], [0.4, 0.6]], len_dist=IntegerCategoricalDistribution(1, [0.6, 0.4])
+        )
+        self._assert_complete(hmm, 24, "hmm-composite-emissions")
 
 
 if __name__ == "__main__":

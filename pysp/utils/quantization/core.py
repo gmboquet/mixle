@@ -43,6 +43,53 @@ from typing import Any
 _LOG2 = math.log(2.0)
 _TOL = 1.0e-9
 
+# Above this many scalar products (len(a) * len(b)) a convolution switches from the direct
+# double loop to Kronecker substitution. Below it, the big-integer pack/unpack overhead is not
+# worth it (and delta-shaped operands convolve trivially). Tuned from microbenchmarks.
+_KRONECKER_MIN_PRODUCT = 2048
+
+
+def _convolve_kronecker(a: list[int], b: list[int], width: int) -> list[int]:
+    """Exact integer convolution of ``a`` and ``b`` via one big-integer multiply.
+
+    Pack each histogram into a single integer whose base-``2**(8*slot)`` digits are the coefficients
+    (``slot`` bytes wide), multiply (CPython uses Karatsuba once the operands are large), and read
+    back the low ``width`` digits. ``slot`` is chosen so no output coefficient overflows its digit
+    -- the max output coefficient is ``< min(len a, len b) * max(a) * max(b)`` -- so digits never
+    carry into one another and the result is exact for arbitrarily large counts.
+
+    Packing and unpacking go through ``int.from_bytes`` / ``int.to_bytes`` so they are linear in the
+    output size; a digit-at-a-time shift/or would be quadratic and would erase the multiply's win.
+    """
+    max_a = max(a)
+    max_b = max(b)
+    if max_a == 0 or max_b == 0:
+        return [0] * width
+    terms = min(len(a), len(b))
+    bit_l = max_a.bit_length() + max_b.bit_length() + terms.bit_length() + 1
+    slot = (bit_l + 7) // 8  # bytes per coefficient (byte-aligned for clean unpacking)
+
+    buf_a = bytearray(slot * len(a))
+    for i, c in enumerate(a):
+        if c:
+            buf_a[i * slot : i * slot + slot] = c.to_bytes(slot, "little")
+    buf_b = bytearray(slot * len(b))
+    for i, c in enumerate(b):
+        if c:
+            buf_b[i * slot : i * slot + slot] = c.to_bytes(slot, "little")
+
+    product = int.from_bytes(buf_a, "little") * int.from_bytes(buf_b, "little")
+    prod_bytes = product.to_bytes((product.bit_length() + 7) // 8 or 1, "little")
+
+    out = [0] * width
+    avail = len(prod_bytes)
+    for k in range(width):
+        lo = k * slot
+        if lo >= avail:
+            break
+        out[k] = int.from_bytes(prod_bytes[lo : lo + slot], "little")
+    return out
+
 
 class Quantizer:
     """Maps exact log probabilities to fine buckets and coarse bins.
@@ -187,6 +234,14 @@ class CountHistogram:
 
         Optionally drop output buckets beyond ``max_fine_bucket`` during accumulation so a
         depth bound keeps the histogram width fixed regardless of how large the counts grow.
+
+        Two backends produce identical results: a direct double loop for small operands, and
+        Kronecker substitution (:func:`_convolve_kronecker`) for large ones. The latter packs
+        each integer histogram into one big integer (the polynomial evaluated at a power of two
+        wide enough that output coefficients cannot overlap) and multiplies once, pushing the
+        inner loop into CPython's sub-quadratic big-integer multiply. Exact for arbitrarily
+        large counts -- the counts here routinely exceed 2**128, so a floating-point FFT is not
+        an option.
         """
         a, b = self.data, other.data
         if not a or not b:
@@ -198,17 +253,26 @@ class CountHistogram:
             if cap <= 0:
                 return CountHistogram.empty()
             width = min(width, cap)
-        out = [0] * width
-        for i, ai in enumerate(a):
-            if not ai:
-                continue
-            hi = width - i
-            if hi <= 0:
-                break
-            for j in range(min(len(b), hi)):
-                bj = b[j]
-                if bj:
-                    out[i + j] += ai * bj
+        # Only output buckets [0, width) are kept, and out[k] (k < width) draws solely on
+        # a[i], b[j] with i, j < width, so trimming both inputs to that prefix bounds the work.
+        if len(a) > width:
+            a = a[:width]
+        if len(b) > width:
+            b = b[:width]
+        if len(a) * len(b) > _KRONECKER_MIN_PRODUCT:
+            out = _convolve_kronecker(a, b, width)
+        else:
+            out = [0] * width
+            for i, ai in enumerate(a):
+                if not ai:
+                    continue
+                hi = width - i
+                if hi <= 0:
+                    break
+                for j in range(min(len(b), hi)):
+                    bj = b[j]
+                    if bj:
+                        out[i + j] += ai * bj
         return CountHistogram(base, out)
 
 
