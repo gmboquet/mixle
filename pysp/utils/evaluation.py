@@ -1,8 +1,7 @@
-"""Functions for estimating and validating pysparkplug models from observed data.
+"""Held-out evaluation and data-partitioning utilities.
 
-Useful functions for estimating pysparkplug 'SequenceEncodableProbabilityDistributions' from 'ParameterEstimator'
-objects.
-
+Empirical KL divergence between a fitted model and data, plus index/data partitioning helpers
+(k-fold split, proportional split) used for validation and cross-validation.
 """
 
 from collections.abc import Sequence

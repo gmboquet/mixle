@@ -466,7 +466,8 @@ class ComputeMetadataTestCase(unittest.TestCase):
             pysp_root / "utils" / "estimation.py",
             pysp_root / "utils" / "objectives.py",
             pysp_root / "utils" / "em.py",
-            pysp_root / "utils" / "automatic.py",
+            pysp_root / "utils" / "automatic" / "factories.py",
+            pysp_root / "utils" / "automatic" / "profiling.py",
             pysp_root / "utils" / "fisher.py",
             pysp_root / "planner.py",
         ] + sorted((pysp_root / "engines").glob("*.py"))
