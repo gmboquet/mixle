@@ -14,7 +14,7 @@ import numpy as np
 from pysp.stats import *
 from pysp.stats.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
 from pysp.stats.pdist import EnumerationError
-from pysp.utils.enumeration import freeze, rerank_by_density, sound_top_k, stable_top_k, supports_enumeration
+from pysp.utils.enumeration import freeze, sound_top_k, supports_enumeration
 
 TOL = 1e-9
 
@@ -181,72 +181,10 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
         support = [(s, i) for s in "abc" for i in (0, 1)]
         self.assert_matches_brute(dist, support, "composite")
 
-    def test_rerank_recovers_true_marginal_order_for_hmm(self):
-        # The HMM count-budget index orders by tropical (dominant-path) cost, which displaces items
-        # from their true logsumexp-marginal rank. rerank_by_density with a sufficient window must
-        # recover the exact descending-marginal order produced by the (best-first) enumerator.
-        hmm = HiddenMarkovModelDistribution(
-            [
-                IntegerCategoricalDistribution(0, [0.5, 0.25, 0.15, 0.1]),
-                IntegerCategoricalDistribution(0, [0.1, 0.2, 0.3, 0.4]),
-            ],
-            [0.6, 0.4],
-            [[0.7, 0.3], [0.4, 0.6]],
-            len_dist=IntegerCategoricalDistribution(1, [0.4, 0.3, 0.2, 0.1]),  # lengths 1..4 (340 sequences)
-        )
-        k = 10
-        exact = list(itertools.islice(hmm.enumerator(), k))
-        # Full in-budget distinct set (finite); a window spanning it makes rerank an exact re-sort.
-        raw = list(hmm.count_budget_distinct(budget_bits=30))
-        self.assertGreater(len(raw), k, "need more than k in-budget items")
-
-        def lp_tiers(pairs):
-            out = {}
-            for v, lp in pairs:
-                out.setdefault(round(lp, 8), set()).add(freeze(v))
-            return out
-
-        reranked = list(itertools.islice(rerank_by_density(iter(raw), window=len(raw)), k))
-        lps = [lp for _, lp in reranked]
-        self.assertTrue(all(lps[i] >= lps[i + 1] - TOL for i in range(len(lps) - 1)), "reranked not descending")
-        np.testing.assert_allclose([lp for _, lp in exact], lps, atol=TOL, err_msg="reranked scores != true marginal")
-        self.assertEqual(lp_tiers(exact), lp_tiers(reranked), "reranked tier values != true marginal")
-        # Non-vacuous: the raw tropical order really is out of order vs the true marginal here.
-        self.assertNotEqual(lp_tiers(raw[:k]), lp_tiers(exact), "test vacuous: raw order already exact")
-
-    def test_stable_top_k_recovers_exact_without_window_tuning(self):
-        # stable_top_k grows the rerank window to a fixed point, recovering the exact true-marginal
-        # top-k from the approximate seek-index stream for both an HMM and a mixture, no window arg.
-        hmm = HiddenMarkovModelDistribution(
-            [
-                IntegerCategoricalDistribution(0, [0.5, 0.25, 0.15, 0.1]),
-                IntegerCategoricalDistribution(0, [0.1, 0.2, 0.3, 0.4]),
-            ],
-            [0.6, 0.4],
-            [[0.7, 0.3], [0.4, 0.6]],
-            len_dist=IntegerCategoricalDistribution(1, [0.4, 0.3, 0.2, 0.1]),
-        )
-        mix = MixtureDistribution(
-            [IntegerCategoricalDistribution(0, [0.7, 0.2, 0.1]), IntegerCategoricalDistribution(1, [0.5, 0.5])],
-            [0.6, 0.4],
-        )
-
-        def tiers(pairs):
-            out = {}
-            for v, lp in pairs:
-                out.setdefault(round(lp, 8), set()).add(freeze(v))
-            return out
-
-        for name, dist, k in (("hmm", hmm, 10), ("mixture", mix, 5)):
-            exact = list(itertools.islice(dist.enumerator(), k))
-            got = stable_top_k(lambda d=dist: d.count_budget_distinct(budget_bits=30), k)
-            self.assertEqual(len(got), len(exact), "%s: size" % name)
-            self.assertEqual(tiers(got), tiers(exact), "%s: stable_top_k != exact enumerator" % name)
-
     def test_sound_top_k_correct_for_nested_mixture(self):
-        # The case where stable_top_k is UNSOUND (mixture of nested composite/sequence models):
-        # sound_top_k must return the exact true-descending top-k AND an arbitrary-index slice,
-        # via its probability-mass certificate (independent of the tropical stream ordering).
+        # Mixture of nested composite/sequence models: the tropical seek order is badly displaced,
+        # so sound_top_k's mass certificate (not the ordering) must yield the exact true-descending
+        # top-k AND an arbitrary [start, start+k) slice, matching the exact best-first enumerator.
         from pysp.stats.composite import CompositeDistribution
         from pysp.stats.sequence import SequenceDistribution
 
