@@ -366,12 +366,37 @@ def _conj_bernoulli_beta(prior_args, fixed, stats, handle, index):
             "sample": lambda k, rng: rng.beta(A, B, k)}
 
 
+def _conj_binomial_beta(prior_args, fixed, stats, handle, index):
+    # Binomial(n, p) with p ~ Beta(a, b); n known (fixed slot 0). successes = sum_x,
+    # failures = n*N - sum_x -> posterior Beta(a + successes, b + failures).
+    a, b = float(prior_args[0]), float(prior_args[1])
+    n_trials = float(fixed[0])
+    N, sx = stats["n"], stats["sum"]
+    A, B = a + sx, b + n_trials * N - sx
+    return {"index": index, "handle": handle, "name": "Beta",
+            "mean": A / (A + B), "hyper": {"a": A, "b": B},
+            "sample": lambda k, rng: rng.beta(A, B, k)}
+
+
+def _conj_geometric_beta(prior_args, fixed, stats, handle, index):
+    # Geometric(p) on k>=1 with p ~ Beta(a, b): likelihood ∝ p^N (1-p)^(sum_x - N)
+    # -> posterior Beta(a + N, b + sum_x - N).
+    a, b = float(prior_args[0]), float(prior_args[1])
+    N, sx = stats["n"], stats["sum"]
+    A, B = a + N, b + sx - N
+    return {"index": index, "handle": handle, "name": "Beta",
+            "mean": A / (A + B), "hyper": {"a": A, "b": B},
+            "sample": lambda k, rng: rng.beta(A, B, k)}
+
+
 # (likelihood family, slot index, prior family) -> closed-form posterior builder
 _CONJUGATE = {
     ("Normal", 0, "Normal"): _conj_normal_mean,       # unknown mean, known variance
     ("Poisson", 0, "Gamma"): _conj_poisson_gamma,
     ("Exponential", 0, "Gamma"): _conj_exponential_gamma,
     ("Bernoulli", 0, "Beta"): _conj_bernoulli_beta,
+    ("Binomial", 1, "Beta"): _conj_binomial_beta,
+    ("Geometric", 0, "Beta"): _conj_geometric_beta,
 }
 
 
