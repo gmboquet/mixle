@@ -206,3 +206,84 @@ def count_dp_rank(
                     strictly_more += 1
         return CountDPRankResult(window_lower + strictly_more, window_lower, window_upper, t, oversample)
     return CountDPRankResult((window_lower + window_upper) // 2, window_lower, window_upper, t, oversample)
+
+
+def _joint_bucket_histogram(components, quantizer, max_fine_bucket):
+    """Joint K-dim count histogram of (bucket(log p_1(y)), ..., bucket(log p_K(y))) over the support.
+
+    Built structurally for homogeneous (same-structure) components, with NO enumeration of the joint
+    support: composites convolve the per-field joint histograms (bucket tuples add, counts multiply);
+    leaves enumerate their own (small) support and key by the K-tuple of per-component buckets.
+    Returns ``{(b_1, ..., b_K): count}``. Raises EnumerationError for component structures not
+    handled here (only Composite and atomic/enumerable leaves are supported).
+    """
+    from pysp.stats.composite import CompositeDistribution
+    from pysp.stats.pdist import EnumerationError
+    from pysp.utils.enumeration import freeze
+
+    head = components[0]
+    if isinstance(head, CompositeDistribution):
+        arity = head.count
+        joint = {(0,) * len(components): 1}
+        for f in range(arity):
+            field = _joint_bucket_histogram([c.dists[f] for c in components], quantizer, max_fine_bucket)
+            nxt: dict[tuple[int, ...], int] = {}
+            for ka, ca in joint.items():
+                for kb, cb in field.items():
+                    key = tuple(ka[j] + kb[j] for j in range(len(ka)))
+                    if max(key) <= max_fine_bucket:
+                        nxt[key] = nxt.get(key, 0) + ca * cb
+            joint = nxt
+        return joint
+    # Leaf: enumerate the union of component supports, key by the per-component bucket tuple.
+    values: dict[Any, Any] = {}
+    for comp in components:
+        try:
+            enum = comp.enumerator()
+        except EnumerationError as e:
+            raise EnumerationError(comp, reason="component does not support cross-rank: %s" % e.reason) from None
+        for v, _lp in enum:
+            values.setdefault(freeze(v), v)
+    hist: dict[tuple[int, ...], int] = {}
+    for v in values.values():
+        key = tuple(quantizer.fine_bucket(float(c.log_density(v))) for c in components)
+        if all(b <= max_fine_bucket for b in key):
+            hist[key] = hist.get(key, 0) + 1
+    return hist
+
+
+def mixture_cross_rank(mixture, value, oversample: int = 64, bin_width_bits: float = 1.0, depth_bits: float = 64.0):
+    """True-marginal rank of ``value`` under a homogeneous mixture, at arbitrary depth.
+
+    ``count_dp_rank`` on a mixture gives only the TROPICAL (dominant-component) rank -- it bins by the
+    best single component, so a value built from several components is badly mis-ranked. This computes
+    the true rank against the actual marginal ``p = sum_k w_k p_k`` by building the JOINT K-dimensional
+    count histogram of the per-component log-prob buckets (structurally, no enumeration of the joint
+    support -- see :func:`_joint_bucket_histogram`) and counting joint bins whose representative
+    marginal probability exceeds ``p(value)``.
+
+    Quantization-approximate: a joint bin's marginal probability is evaluated at the bucket midpoints,
+    so bins straddling the threshold may be mis-counted; the error shrinks as ``oversample`` grows.
+    Cost is EXPONENTIAL in the number of components K (the histogram is K-dimensional), so this is for
+    SMALL-K mixtures (a few components) of same-structured decomposable components; it needs no
+    enumeration, so it scales to deep ranks. For non-mixtures use :func:`count_dp_rank`; for the head
+    of any model use :func:`density_rank`.
+    """
+    from pysp.utils.quantization.core import Quantizer
+
+    comps = [c for c, w in zip(mixture.components, mixture.w, strict=False) if w > 0.0]
+    log_w = [float(lw) for lw, w in zip(mixture.log_w, mixture.w, strict=False) if w > 0.0]
+    q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
+    max_fb = int(math.ceil(depth_bits * oversample / bin_width_bits))
+    joint = _joint_bucket_histogram(comps, q, max_fb)
+
+    t = float(mixture.log_density(value))
+    px = math.exp(t)
+    bits_per_bucket = bin_width_bits / oversample
+    rank = 0
+    for key, cnt in joint.items():
+        # representative marginal probability of this joint bin (per-component bucket midpoints)
+        p = sum(math.exp(lw) * 2.0 ** (-(key[j] + 0.5) * bits_per_bucket) for j, lw in enumerate(log_w))
+        if p > px * (1.0 + 1.0e-9):
+            rank += cnt
+    return rank
