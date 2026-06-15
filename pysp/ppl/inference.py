@@ -25,9 +25,30 @@ _NEG_INF = -1e300
 class _Slot:
     index: int           # position in the family's argument tuple
     prior: Any           # a concrete prior distribution, or None for a flat `free` slot
-    positive: bool       # sampled in log-space when True
+    positive: bool       # sampled in log-space when True (kept for back-compat; see `support`)
     name: str | None  # parameter name (prior's name, else "argN")
     handle: Any          # the prior RandomVariable (for .posterior(handle)), or None
+    support: str = "real"  # 'real' | 'positive' (log) | 'unit' (logit) reparameterization
+
+
+def _to_value(support: str, u: float):
+    """Map an unconstrained scalar to the constrained parameter, with the log|Jacobian|."""
+    if support == "positive":
+        return math.exp(u), float(u)
+    if support == "unit":
+        v = 1.0 / (1.0 + math.exp(-u))
+        return v, math.log(v) + math.log1p(-v)   # d sigmoid/du = v(1-v)
+    return float(u), 0.0
+
+
+def _to_u(support: str, val: float) -> float:
+    """Inverse of :func:`_to_value` (constrained value -> unconstrained)."""
+    if support == "positive":
+        return math.log(max(float(val), 1e-12))
+    if support == "unit":
+        p = min(max(float(val), 1e-6), 1.0 - 1e-6)
+        return math.log(p / (1.0 - p))
+    return float(val)
 
 
 class Posterior:
@@ -86,41 +107,57 @@ def _slots_of(rv: RandomVariable, fam) -> list[_Slot]:
     for i, a in enumerate(rv._args):
         if isinstance(a, RandomVariable):
             slots.append(_Slot(i, lower(a, target="dist"), fam.positive[i],
-                               a.name or f"arg{i}", a))
+                               a.name or f"arg{i}", a, fam.support[i]))
         elif a is free:
-            slots.append(_Slot(i, None, fam.positive[i], f"arg{i}", None))
+            slots.append(_Slot(i, None, fam.positive[i], f"arg{i}", None, fam.support[i]))
     if not slots:
         raise ValueError("model has no `free`/prior parameters to infer.")
     return slots
 
 
 def _encoder_for(fam):
-    kwargs = fam.seed_at(0.0, 1.0) if fam.seed_at else fam.to_dist(*([1.0] * fam.arity))
+    # A valid probe distribution to obtain the data encoder. Use support-aware defaults
+    # (0 for real, 1 for positive, 0.5 for unit) so bounded families (Bernoulli/Beta/...) are
+    # constructed with in-range params; fall back to all-ones if a family needs it.
+    if fam.seed_at:
+        kwargs = fam.seed_at(0.0, 1.0)
+    else:
+        defaults = {"real": 0.0, "positive": 1.0, "unit": 0.5}
+        try:
+            kwargs = fam.to_dist(*[defaults[s] for s in fam.support])
+        except Exception:
+            kwargs = fam.to_dist(*([1.0] * fam.arity))
     return fam.dist_cls(**kwargs).dist_to_encoder()
 
 
-def _build_target(rv: RandomVariable, data):
-    """Return (log_target(u), slots, fam, enc, (dmean,dstd)) for unconstrained vector u."""
+def _target_parts(rv: RandomVariable, data):
+    """Encoder-free pieces shared by the numerical and autograd targets:
+    (fam, slots, build, unpack, (dmean, dstd)). Building the pysp encoder is deferred to
+    callers that need it (the autograd path scores the raw data tensor and never does)."""
     fam = _require_flat(rv)
     slots = _slots_of(rv, fam)
     arr = np.asarray(data, dtype=float)
     dmean, dstd = float(arr.mean()), float(arr.std() or 1.0)
-    enc = _encoder_for(fam).seq_encode(list(data))
 
     def unpack(u):
         vals, logj = {}, 0.0
         for k, s in enumerate(slots):
-            if s.positive:
-                v = math.exp(u[k])
-                logj += float(u[k])   # Jacobian of exp transform
-            else:
-                v = float(u[k])
+            v, lj = _to_value(s.support, u[k])
             vals[s.index] = v
+            logj += lj
         return vals, logj
 
     def build(vals):
         args = [vals.get(i, rv._args[i]) for i in range(len(rv._args))]
         return fam.make_dist(tuple(args), rv._name)
+
+    return fam, slots, build, unpack, (dmean, dstd)
+
+
+def _build_target(rv: RandomVariable, data):
+    """Return (log_target(u), slots, fam, build, unpack, (dmean,dstd)) for unconstrained u."""
+    fam, slots, build, unpack, (dmean, dstd) = _target_parts(rv, data)
+    enc = _encoder_for(fam).seq_encode(list(data))
 
     def log_target(u):
         vals, logj = unpack(u)
@@ -143,19 +180,21 @@ def _build_target(rv: RandomVariable, data):
 def _init_u(slots, dmean, dstd) -> np.ndarray:
     u0 = []
     for s in slots:
-        if s.positive:
-            u0.append(math.log(max(dstd, 1e-2)))
+        if s.support == "positive":
+            u0.append(_to_u("positive", max(dstd, 1e-2)))
+        elif s.support == "unit":
+            u0.append(0.0)                       # logit(0.5)
         else:
             u0.append(dmean)
     return np.asarray(u0, dtype=float)
 
 
 def _init_scale(slots, dstd, n) -> np.ndarray:
-    """Per-slot proposal scale ~ posterior width: location std ~ dstd/sqrt(n); a
-    log-space (positive) slot ~ 1/sqrt(n). Adaptation then tunes the magnitude."""
+    """Per-slot proposal scale ~ posterior width: a location (real) slot ~ dstd/sqrt(n);
+    a transformed (positive/unit) slot ~ 1/sqrt(n). Adaptation then tunes the magnitude."""
     root = math.sqrt(max(n, 1))
     return np.asarray(
-        [max((1.0 if s.positive else dstd) / root, 1e-3) for s in slots], dtype=float)
+        [max((dstd if s.support == "real" else 1.0) / root, 1e-3) for s in slots], dtype=float)
 
 
 def _finalize(rv, slots, res, build) -> RandomVariable:
@@ -164,7 +203,12 @@ def _finalize(rv, slots, res, build) -> RandomVariable:
     u = np.asarray(res.samples, dtype=float).reshape(len(res.samples), -1)
     vals = np.empty_like(u)
     for k, s in enumerate(slots):
-        vals[:, k] = np.exp(u[:, k]) if s.positive else u[:, k]
+        if s.support == "positive":
+            vals[:, k] = np.exp(u[:, k])
+        elif s.support == "unit":
+            vals[:, k] = 1.0 / (1.0 + np.exp(-u[:, k]))
+        else:
+            vals[:, k] = u[:, k]
     mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
     post = Posterior(slots, vals, res)
 
@@ -182,11 +226,16 @@ def _finalize(rv, slots, res, build) -> RandomVariable:
 
 def mcmc_fit(rv: RandomVariable, data, *, draws: int = 2000, burn: int = 1000,
              thin: int = 1, scale: float | None = None, rng=None) -> RandomVariable:
+    from pysp.ppl import autograd as _ag
     from pysp.utils.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
     if rng is None:
         rng = np.random.RandomState()
-    log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+    ag = _ag.grad_target(rv, data)
+    if ag is not None:        # Torch-scored target (fast; also avoids the encoder probe)
+        log_target, slots, build, dmean, dstd = ag.log_target, ag.slots, ag.build, ag.dmean, ag.dstd
+    else:
+        log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
     u0 = _init_u(slots, dmean, dstd)
     init_scale = (scale * np.ones(len(u0))) if scale is not None \
         else _init_scale(slots, dstd, len(data))
