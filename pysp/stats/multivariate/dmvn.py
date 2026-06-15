@@ -233,6 +233,18 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         rv += self.cc
         return rv
 
+    def density_cumulative(self, x: Sequence[float] | np.ndarray) -> float:
+        """Exact probability-ordered cumulative ``G(x) = P(p(Y) >= p(x))`` -- the highest-density-region
+        mass through ``x`` (multivariate analogue of a CDF). For a diagonal Gaussian the squared
+        Mahalanobis distance ``sum_i (x_i-mu_i)^2/var_i`` is chi-square(dim), so ``G = chi2.cdf(maha2, dim)``.
+        Used by :func:`pysp.utils.density_rank.density_rank` to return an EXACT cumulative.
+        """
+        from scipy.stats import chi2
+
+        diff = np.asarray(x, dtype=float) - self.mu
+        maha2 = float(np.sum(diff * diff / self.covar))
+        return float(chi2.cdf(maha2, df=self.dim))
+
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized evaluation of the log-density at a sequence-encoded input x.
 
