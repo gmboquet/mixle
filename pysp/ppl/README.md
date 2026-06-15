@@ -20,9 +20,10 @@ untouched; this is a thin, optional dialect. Design: [../../notes/ppl-syntax-spe
 ```python
 from pysp.ppl import (
     Normal, Poisson, Gamma, Exponential, Bernoulli, Geometric, Beta, Categorical,
-    StudentT, LogNormal, NegativeBinomial,        # heavy-tailed / positive / count
-    Mix, Seq, Markov,                             # mixture / sequence / HMM
-    free,
+    StudentT, LogNormal, NegativeBinomial, Dirichlet,   # heavy-tailed / positive / count / simplex
+    MVN, DiagGaussian,                            # multivariate (vector data)
+    Mix, Seq, Markov, LDA,                         # mixture / sequence / HMM / topic model
+    Field, Graph, compare, free,                  # regression / VMP graph / model selection
 )
 ```
 
@@ -287,10 +288,11 @@ Also: a conjugate-exponential **VMP engine** (`how="vmp"` and `Graph`) with mess
 nodes + monotone ELBO — arbitrary conjugate-Gaussian DAGs, deep hierarchies, and **shared
 variable instances** (one handle reused across factors → one node combining all messages).
 
-Also: **linear regression** (`Field`, OLS + Bayesian), **Dirichlet-Categorical** VMP nodes,
-**RV+RV convolution** (`x + y`), **event conditioning** (`.given`), and a **Bayesian mixture
-via VBEM** (discrete per-datapoint latents).
+Also: **regression & GLMs** (`Field`: linear/OLS, Bayesian, logistic, Poisson),
+**multivariate Gaussian** (`MVN`, `DiagGaussian`), **LDA** topic models,
+**Dirichlet-Categorical** VMP nodes, **RV+RV convolution** (`x + y`), **event conditioning**
+(`.given`), **Bayesian mixture via VBEM**, **moments** (`mean`/`var`), and **model
+comparison** (`log_likelihood`, `aic`/`bic`, `compare`). 12 scalar families + 6 structured.
 
-Future: LDA / topic models in-graph, exact numerical (FFT) convolution for non-conjugate
-continuous sums, analytic gradients for faster HMC.
-```
+Future: LDA in-graph as VMP factors, exact (FFT) convolution for non-conjugate continuous
+sums, analytic gradients for faster HMC.
