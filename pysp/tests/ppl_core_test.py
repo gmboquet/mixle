@@ -87,6 +87,33 @@ class PPLCoreTestCase(unittest.TestCase):
         self.assertAlmostEqual(emis[0], -5.0, delta=0.4)
         self.assertAlmostEqual(emis[1], 5.0, delta=0.4)
 
+    def test_poisson_mixture(self):
+        rng = np.random.RandomState(0)
+        data = list(np.concatenate([rng.poisson(2, 4000), rng.poisson(15, 4000)]).astype(float))
+        m = Mix([Poisson(free), Poisson(free)]).fit(data, rng=np.random.RandomState(1))
+        rates = sorted(c.lam for c in m.dist.components)
+        self.assertAlmostEqual(rates[0], 2.0, delta=0.4)
+        self.assertAlmostEqual(rates[1], 15.0, delta=0.6)
+
+    def test_categorical_hmm(self):
+        rng = np.random.RandomState(0)
+        A = np.array([[0.92, 0.08], [0.08, 0.92]])
+        E = [np.array([.7, .2, .1]), np.array([.1, .2, .7])]
+        seqs = []
+        for _ in range(400):
+            s = rng.randint(2)
+            seq = []
+            for _t in range(25):
+                seq.append(int(rng.choice(3, p=E[s])))
+                s = rng.choice(2, p=A[s])
+            seqs.append(seq)
+        h = Markov(Categorical({0: .34, 1: .33, 2: .33}), states=2).fit(
+            seqs, max_its=80, rng=np.random.RandomState(2))
+        emis = sorted([[t.pmap[k] for k in (0, 1, 2)] for t in h.dist.topics], key=lambda p: p[0])
+        # one state favors category 0, the other favors category 2
+        self.assertGreater(emis[1][0], 0.5)
+        self.assertGreater(emis[0][2], 0.5)
+
     def test_unresolved_free_raises(self):
         with self.assertRaises(ValueError):
             _ = Normal(free, free).dist  # must fit first

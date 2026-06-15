@@ -265,18 +265,26 @@ def read_params(dist):
     return dist
 
 
-def seed_child(rv: "RandomVariable", value: Any, scale: float):
-    """Build a concrete distribution for a child RV located at a data ``value``.
+def seed_child(rv: "RandomVariable", value: Any, scale: float, rng=None):
+    """Build a concrete distribution for a child RV to break EM symmetry.
 
-    Bound children are used as-is; flat ``free`` children use their family ``seed_at``.
-    Returns None when the child can't be seeded (caller falls back to default init).
+    Continuous families with a ``seed_at`` are located at the data ``value``; a Categorical
+    is seeded with a random (non-degenerate) Dirichlet draw over its support. Returns None
+    when the child can't be seeded (caller falls back to default init).
     """
+    rng = rng or np.random.RandomState(0)
     if rv._kind == "bound":
         return rv._dist
     if rv._kind == "sample" and not isinstance(rv._family, CompositeFamily):
         fam = rv._family
         if fam.seed_at is not None:
             return fam.dist_cls(**fam.seed_at(value, scale))
+        if fam.name == "Categorical":
+            from pysp.stats.categorical import CategoricalDistribution
+            spec = rv._args[0]
+            keys = list(spec.keys()) if isinstance(spec, dict) else list(range(len(spec)))
+            w = rng.dirichlet(np.ones(len(keys)))            # random, valid (no zeros->inf)
+            return CategoricalDistribution(pmap=dict(zip(keys, w)))
     return None
 
 

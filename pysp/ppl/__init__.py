@@ -145,7 +145,7 @@ def _mix_seed(args, data, rng, seed_child):
     arr = np.asarray(data, dtype=float)
     scale = float(np.std(arr)) if arr.ndim == 1 and arr.size > 1 else 1.0
     idx = _kmeanspp_idx(arr, len(comps), rng)
-    children = [seed_child(c, data[i], scale) for c, i in zip(comps, idx)]
+    children = [seed_child(c, data[i], scale, rng) for c, i in zip(comps, idx)]
     if any(ch is None for ch in children):
         return None  # a component can't be seeded -> fall back to pysp default init
     w = np.ones(len(comps)) / len(comps) if weights is None else np.asarray(weights, float)
@@ -207,7 +207,7 @@ def _hmm_seed(args, data, rng, seed_child):
         return None
     scale = float(np.std(arr)) or 1.0
     idx = _kmeanspp_idx(arr, k, rng)
-    topics = [seed_child(c, arr[i], scale) for c, i in zip(comps, idx)]
+    topics = [seed_child(c, arr[i], scale, rng) for c, i in zip(comps, idx)]
     if any(t is None for t in topics):
         return None
     return HiddenMarkovModelDistribution(topics, w=np.ones(k) / k,
