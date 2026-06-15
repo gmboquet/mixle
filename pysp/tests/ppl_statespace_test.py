@@ -1,8 +1,9 @@
 """Tests for linear-Gaussian state-space models (Kalman/RTS + EM)."""
-import numpy as np
 import unittest
 
-from pysp.ppl import LocalLevel, AR1
+import numpy as np
+
+from pysp.ppl import AR1, LocalLevel
 
 
 class StateSpaceTestCase(unittest.TestCase):

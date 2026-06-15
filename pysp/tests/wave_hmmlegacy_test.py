@@ -1,4 +1,4 @@
-"""Tests for the modernized legacy modules pysp.stats.hidden_markov_ind_pi and pysp.stats.llda.
+"""Tests for the modernized legacy modules pysp.stats.latent.hidden_markov_ind_pi and pysp.stats.latent.llda.
 
 Covers import, DataSequenceEncoder round-trips, scalar vs vectorized agreement, and short
 seq_estimate smoke runs on tiny synthetic data with fixed seeds.
@@ -10,8 +10,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.stats import seq_estimate, seq_initialize
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.hidden_markov_ind_pi import (
+from pysp.stats.latent.hidden_markov_ind_pi import (
     IndPiHiddenMarkovDataEncoder,
     IndPiHiddenMarkovEstimator,
     IndPiHiddenMarkovEstimatorAccumulator,
@@ -19,13 +18,14 @@ from pysp.stats.hidden_markov_ind_pi import (
     IndPiHiddenMarkovModelDistribution,
     IndPiHiddenMarkovSampler,
 )
-from pysp.stats.llda import (
+from pysp.stats.latent.llda import (
     LLDADataEncoder,
     LLDADistribution,
     LLDAEstimator,
     LLDAEstimatorAccumulator,
     LLDAEstimatorAccumulatorFactory,
 )
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 
 
 def make_ind_pi_dist(use_numba=True, n_rows=2):

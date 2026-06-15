@@ -3,9 +3,9 @@
 #import os
 
 import numpy as np
-from pysp.stats.look_back_hmm import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
-from pysp.stats.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
+
 from pysp.stats import *
+from pysp.stats.latent.look_back_hmm import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
 from pysp.utils.estimation import optimize
 
 if __name__ == '__main__':

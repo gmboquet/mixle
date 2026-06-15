@@ -16,11 +16,11 @@ The conjugate Dirichlet priors are the pysp.stats DirichletDistribution.
 import numpy as np
 import pytest
 
-import pysp.stats.gaussian as sgauss
-import pysp.stats.hidden_markov as shmm
-import pysp.stats.markov_chain as smc
-from pysp.stats.dirichlet import DirichletDistribution as Dir
-from pysp.stats.normgamma import NormalGammaDistribution as sNG
+import pysp.stats.graph.markov_chain as smc
+import pysp.stats.latent.hidden_markov as shmm
+import pysp.stats.leaf.gaussian as sgauss
+from pysp.stats.bayes.dirichlet import DirichletDistribution as Dir
+from pysp.stats.bayes.normgamma import NormalGammaDistribution as sNG
 
 TOL = 1e-9
 S = 3
@@ -201,7 +201,7 @@ def test_hmm_expected_log_density_numba_path():
 
 
 def test_hmm_mle_unchanged_without_prior():
-    from pysp.stats.poisson import PoissonDistribution
+    from pysp.stats.leaf.poisson import PoissonDistribution
 
     topics = [sgauss.GaussianDistribution(-1.0, 1.0), sgauss.GaussianDistribution(2.0, 1.0)]
     hd = shmm.HiddenMarkovModelDistribution(

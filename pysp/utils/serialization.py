@@ -94,7 +94,9 @@ def _iter_distribution_modules(package_name: str) -> Iterable[Any]:
     if package_path is None:
         return
     prefix = package.__name__ + "."
-    for info in pkgutil.iter_modules(package_path, prefix):
+    # walk_packages (not iter_modules) so distributions grouped into subpackages
+    # (pysp.stats.leaf, pysp.stats.latent, ...) are still discovered for the registry.
+    for info in pkgutil.walk_packages(package_path, prefix):
         try:
             yield importlib.import_module(info.name)
         except ModuleNotFoundError as err:
@@ -109,8 +111,8 @@ def ensure_pysp_serialization_registry() -> None:
     if _REGISTRY_READY:
         return
 
-    from pysp.stats.pdist import ParameterEstimator as StatsEstimator
-    from pysp.stats.pdist import ProbabilityDistribution as StatsDistribution
+    from pysp.stats.compute.pdist import ParameterEstimator as StatsEstimator
+    from pysp.stats.compute.pdist import ProbabilityDistribution as StatsDistribution
 
     for package_name in ("pysp.stats",):
         for module in _iter_distribution_modules(package_name):
@@ -119,7 +121,7 @@ def ensure_pysp_serialization_registry() -> None:
                     continue
                 if issubclass(cls, (StatsDistribution, StatsEstimator)):
                     register_serializable_class(cls)
-                elif cls.__module__ == "pysp.stats.transform" and cls.__name__.endswith("Transform"):
+                elif cls.__module__ == "pysp.stats.combinator.transform" and cls.__name__.endswith("Transform"):
                     register_serializable_class(cls)
                 elif getattr(cls, "__pysp_serializable__", False):
                     register_serializable_class(cls)

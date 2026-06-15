@@ -396,7 +396,7 @@ def _group_stats(data):
 
 def _hier_normal_normal(rv, n_i, sum_i, sumsq_i, max_its, tol):
     """mu_i ~ Normal(m, tau^2); y_ij ~ Normal(mu_i, sigma^2). Exact conjugate EM."""
-    from pysp.stats.gaussian import GaussianDistribution
+    from pysp.stats.leaf.gaussian import GaussianDistribution
     N = float(n_i.sum())
     gbar = sum_i / np.maximum(n_i, 1.0)
     m, tau2 = float(gbar.mean()), float(gbar.var()) or 1.0
@@ -424,7 +424,7 @@ def _hier_normal_normal(rv, n_i, sum_i, sumsq_i, max_its, tol):
 def _hier_gamma_poisson(rv, n_i, sum_i, sumsq_i, max_its, tol):
     """lambda_i ~ Gamma(a, b); y_ij ~ Poisson(lambda_i). Conjugate E-step +
     moment-matched population M-step (law of total variance)."""
-    from pysp.stats.gamma import GammaDistribution
+    from pysp.stats.leaf.gamma import GammaDistribution
     gm = sum_i / np.maximum(n_i, 1.0)
     m = float(gm.mean()); v = float(gm.var()) or m
     b = m / max(v, 1e-6); a = m * b
@@ -446,7 +446,7 @@ def _hier_gamma_poisson(rv, n_i, sum_i, sumsq_i, max_its, tol):
 
 def _hier_beta_bernoulli(rv, n_i, sum_i, sumsq_i, max_its, tol):
     """p_i ~ Beta(a, b); y_ij ~ Bernoulli(p_i). Conjugate E-step + moment-matched M-step."""
-    from pysp.stats.beta import BetaDistribution
+    from pysp.stats.leaf.beta import BetaDistribution
     gp = sum_i / np.maximum(n_i, 1.0)
     m = float(gp.mean()); v = float(gp.var()) or (m * (1 - m))
     s = max(m * (1 - m) / max(v, 1e-6) - 1, 1e-3); a = m * s; b = (1 - m) * s

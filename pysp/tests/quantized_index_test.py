@@ -16,7 +16,7 @@ from pysp.stats import (
     NullDistribution,
     PoissonDistribution,
 )
-from pysp.stats.pdist import EnumerationError
+from pysp.stats.compute.pdist import EnumerationError
 from pysp.tests.enumeration_test import make_cases
 from pysp.utils.enumeration import BufferedStream, QuantizedEnumerationIndex, bounded_best_first_union_index, freeze
 

@@ -10,7 +10,7 @@ Self-contained random data only.
 import numpy as np
 
 from pysp.stats import *
-from pysp.stats.transform import AffineTransform
+from pysp.stats.combinator.transform import AffineTransform
 from pysp.utils.estimation import optimize
 
 if __name__ == '__main__':

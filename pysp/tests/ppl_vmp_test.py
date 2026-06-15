@@ -1,8 +1,9 @@
 """Tests for the VMP engine (variational message passing)."""
-import numpy as np
 import unittest
 
-from pysp.ppl import Normal, Gamma, Graph, Categorical, Dirichlet, Mix, free
+import numpy as np
+
+from pysp.ppl import Categorical, Dirichlet, Gamma, Graph, Mix, Normal, free
 
 
 class VMPTestCase(unittest.TestCase):

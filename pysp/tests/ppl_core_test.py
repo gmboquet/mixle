@@ -1,9 +1,10 @@
 """Smoke + correctness tests for the pysp.ppl facade (build slices 1-2)."""
-import numpy as np
 import unittest
 
-from pysp.ppl import Normal, Poisson, Gamma, Exponential, Categorical, Mix, Seq, Markov, free, compare
-from pysp.stats.gaussian import GaussianDistribution
+import numpy as np
+
+from pysp.ppl import Categorical, Exponential, Gamma, Markov, Mix, Normal, Poisson, Seq, compare, free
+from pysp.stats.leaf.gaussian import GaussianDistribution
 
 
 class PPLCoreTestCase(unittest.TestCase):
@@ -163,7 +164,7 @@ class PPLCoreTestCase(unittest.TestCase):
         self.assertAlmostEqual(q.log_prob(1.0), exact, delta=0.02)
 
     def test_new_families_recover(self):
-        from pysp.ppl import StudentT, LogNormal, NegativeBinomial
+        from pysp.ppl import LogNormal, NegativeBinomial, StudentT
         rng = np.random.RandomState(0)
         st = StudentT(free, free, free).fit(list(rng.standard_t(5, size=20000) * 2 + 1), max_its=60)
         self.assertAlmostEqual(st.dist.loc, 1.0, delta=0.15)
@@ -178,7 +179,7 @@ class PPLCoreTestCase(unittest.TestCase):
         self.assertAlmostEqual(nb.dist.p, 0.4, delta=0.08)
 
     def test_predict_plugin_and_bayesian(self):
-        from pysp.ppl import Poisson, Gamma
+        from pysp.ppl import Gamma, Poisson
         rng = np.random.RandomState(0)
         # plug-in predictive from a point fit
         pe = Normal(free, free).fit(list(rng.normal(5, 2, 5000)))

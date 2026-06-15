@@ -75,7 +75,7 @@ markers = [
     "automatic: automatic model detection/profiling tests.",
     "enumeration: support enumeration and quantized-index tests.",
     "fisher: Fisher information/view tests.",
-    "htsne: HTSNE affinity and embedding tests.",
+    "hvis: model-based embedding (t-SNE / UMAP / ...) affinity and embedding tests.",
     "graph: random graph and graph-structured model tests.",
     "knowledge_graph: knowledge graph model tests.",
     "pomdp: partially observable Markov decision process tests.",

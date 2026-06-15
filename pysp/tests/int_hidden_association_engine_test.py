@@ -5,7 +5,10 @@ import unittest
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats.int_hidden_association import IntegerHiddenAssociationDistribution, IntegerHiddenAssociationEstimator
+from pysp.stats.latent.int_hidden_association import (
+    IntegerHiddenAssociationDistribution,
+    IntegerHiddenAssociationEstimator,
+)
 
 try:
     from pysp.engines import TorchEngine

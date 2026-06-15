@@ -358,7 +358,7 @@ class AutomaticScientificProfilingTestCase(unittest.TestCase):
 
     def test_bayesian_gaussian_provider_carries_conjugate_default_prior(self):
         from pysp.stats import GaussianEstimator
-        from pysp.stats.normgamma import NormalGammaDistribution
+        from pysp.stats.bayes.normgamma import NormalGammaDistribution
 
         est = get_estimator([1.0, 2.0, 3.0] * 20, use_bstats=True)
 

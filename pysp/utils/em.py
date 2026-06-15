@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 
 from pysp.stats import seq_estimate, seq_log_density_sum
-from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
+from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 from pysp.utils.estimation import _engine_seq_estimate, _engine_seq_log_density_sum, _local_encoded_chunks
 
 

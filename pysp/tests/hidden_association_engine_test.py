@@ -5,9 +5,9 @@ import unittest
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.conditional import ConditionalDistribution, ConditionalDistributionEstimator
-from pysp.stats.hidden_association import HiddenAssociationDistribution, HiddenAssociationEstimator
+from pysp.stats.combinator.conditional import ConditionalDistribution, ConditionalDistributionEstimator
+from pysp.stats.latent.hidden_association import HiddenAssociationDistribution, HiddenAssociationEstimator
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 
 try:
     from pysp.engines import TorchEngine

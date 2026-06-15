@@ -12,7 +12,7 @@ import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats import CategoricalDistribution, HiddenMarkovModelDistribution
-from pysp.stats.hidden_markov import hmm_engine_forward_backward, hmm_pad_log_emissions
+from pysp.stats.latent.hidden_markov import hmm_engine_forward_backward, hmm_pad_log_emissions
 
 try:
     from pysp.engines import TorchEngine

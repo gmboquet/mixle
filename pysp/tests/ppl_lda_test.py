@@ -1,6 +1,7 @@
 """Test LDA / topic model through the pysp.ppl surface."""
-import numpy as np
 import unittest
+
+import numpy as np
 
 from pysp.ppl import LDA
 

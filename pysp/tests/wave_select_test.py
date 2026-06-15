@@ -1,4 +1,4 @@
-"""Tests for pysp.stats.select fixes (routing, factory, value()), the select and conditional
+"""Tests for pysp.stats.combinator.select fixes (routing, factory, value()), the select and conditional
 enumerators, and ss_mixture scalar-vs-vectorized accumulation.
 
 The routing tests use two children with very different densities so that any encoder-group /
@@ -10,12 +10,12 @@ import unittest
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.stats.categorical import CategoricalDistribution
-from pysp.stats.conditional import ConditionalDistribution
-from pysp.stats.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.stats.pdist import EnumerationError
-from pysp.stats.select import SelectDistribution, SelectEstimator
-from pysp.stats.ss_mixture import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureEstimator
+from pysp.stats.combinator.conditional import ConditionalDistribution
+from pysp.stats.combinator.select import SelectDistribution, SelectEstimator
+from pysp.stats.compute.pdist import EnumerationError
+from pysp.stats.latent.ss_mixture import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureEstimator
+from pysp.stats.leaf.categorical import CategoricalDistribution
+from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
 
 TOL = 1e-9
 

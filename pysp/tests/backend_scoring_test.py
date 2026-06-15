@@ -75,7 +75,7 @@ from pysp.stats import (
     generated_stacked_params,
     generated_stacked_sufficient_statistics,
 )
-from pysp.stats.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
+from pysp.stats.latent.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 if HAS_TORCH:

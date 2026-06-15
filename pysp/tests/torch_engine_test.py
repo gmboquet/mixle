@@ -1,4 +1,4 @@
-"""Tests for the PyTorch estimation engine (pysp.stats.torch_mixture).
+"""Tests for the PyTorch estimation engine (pysp.stats.compute.torch_mixture).
 
 Parity is checked against the legacy seq_* path on CPU float64; the gradient
 MLE path is checked for likelihood improvement and parameter recovery.
@@ -26,7 +26,7 @@ from pysp.stats import (
 )
 
 if HAS_TORCH:
-    from pysp.stats.torch_mixture import TorchMixture
+    from pysp.stats.compute.torch_mixture import TorchMixture
 else:
     TorchMixture = None
 from pysp.tests.kernels_test import make_estimator, make_mixture
