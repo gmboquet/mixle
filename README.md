@@ -102,10 +102,27 @@ Poisson(free * Field("x") + free).fit(y, given={"x": x})                        
 ```
 
 `.fit(..., how=...)` picks the inference engine — `auto` (default), `em`, `map`, `conjugate`,
-`hierarchical`, `vi`, `vmp`, `mcmc`, or `hmc`. Constructors cover the scalar families plus `Mix`,
-`Seq`, `Markov`, `LDA`, `MVN`, `DiagGaussian`, `LocalLevel`, `AR1`, and `Graph` (a VMP factor graph
-for conjugate-Gaussian DAGs); `compare(...)` ranks fitted models. The `pysp.stats` classes are
-untouched — this is a thin surface over them.
+`conjugate_mixture` (exact posterior for a mixture of conjugate priors), `hierarchical`, `vi`,
+`vmp`, `mcmc`, `hmc`, or `ensemble` (affine-invariant Goodman & Weare). MCMC/HMC support
+multiple chains (`chains=`, `parallel=True` for process-parallel) with Gelman-Rubin R̂ and
+pooled ESS. Constructors cover the scalar families plus `Mix`, `Seq`, `Markov`, `LDA`, `MVN`,
+`DiagGaussian`, `LocalLevel`, `AR1`, and `Graph` (a VMP factor graph for conjugate-Gaussian DAGs);
+`compare(...)` ranks fitted models. The `pysp.stats` classes are untouched — this is a thin
+surface over them.
+
+**Head-to-head speed** (`python -m pysp.ppl.benchmark_vs`, same machine/data/model vs the actual
+competing PPLs):
+
+| task | pysp.ppl | competitor | result |
+| ---- | -------- | ---------- | ------ |
+| Poisson-Gamma posterior, N=200k | **5 ms** (exact, 1 pass) | NumPyro NUTS 5690 ms | **~1000× faster**, identical |
+| Beta-Bernoulli posterior, N=100k | **3 ms** (exact) | NumPyro NUTS 3619 ms | **~1400× faster**, identical |
+| Gaussian MLE, N=500k | **45 ms** (EM) | Pyro SVI 11778 ms | **~260× faster**, same answer |
+| Gaussian posterior (ESS/sec) | **8945** (`how='ensemble'`) | emcee 7883 · NumPyro 624 | **highest mixing throughput** |
+
+For conjugate / exponential-family / mixture models pysp returns the *exact* posterior with no
+sampling; for general posteriors the ensemble sampler leads on ESS/sec. See
+[`pysp/ppl/BENCHMARKS.md`](pysp/ppl/BENCHMARKS.md).
 
 ## Core concepts
 
