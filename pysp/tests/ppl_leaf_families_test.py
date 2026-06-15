@@ -14,6 +14,7 @@ from pysp.ppl import (
     Beta,
     Binomial,
     Gamma,
+    Geometric,
     Laplace,
     Logistic,
     Normal,
@@ -96,6 +97,28 @@ class UnitIntervalBayesTestCase(unittest.TestCase):
         m = Weibull(Gamma(2, 1, name="shape"), free).fit(list(rng.weibull(1.5, 4000) * 2.0), how="map")
         self.assertAlmostEqual(m.params["shape"], 1.5, delta=0.3)
         self.assertAlmostEqual(m.params["scale"], 2.0, delta=0.3)
+
+
+class ConjugatePairsTestCase(unittest.TestCase):
+    """New closed-form conjugate posteriors (exact, instant) must match MCMC."""
+
+    def test_binomial_beta(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.binomial(10, 0.35, 4000).astype(float))
+        from pysp.ppl.inference import ConjugatePosterior
+
+        m = Binomial(10, Beta(2, 2, name="p")).fit(data)            # auto -> conjugate
+        self.assertIsInstance(m.result, ConjugatePosterior)
+        self.assertAlmostEqual(float(m.result.mean("p")), 0.35, delta=0.02)
+
+    def test_geometric_beta(self):
+        rng = np.random.RandomState(1)
+        data = list(rng.geometric(0.3, 4000).astype(float))         # k >= 1
+        from pysp.ppl.inference import ConjugatePosterior
+
+        m = Geometric(Beta(2, 2, name="p")).fit(data)
+        self.assertIsInstance(m.result, ConjugatePosterior)
+        self.assertAlmostEqual(float(m.result.mean("p")), 0.3, delta=0.02)
 
 
 if __name__ == "__main__":
