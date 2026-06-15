@@ -1792,7 +1792,6 @@ def get_dpm_mixture(
     import sys
 
     import pysp.stats as provider
-
     from pysp.utils.estimation import fit
 
     if rng is None:
