@@ -17,8 +17,10 @@ from pysp.ppl import (
     Geometric,
     Laplace,
     Logistic,
+    Mix,
     Normal,
     Pareto,
+    Poisson,
     Rayleigh,
     Uniform,
     Weibull,
@@ -119,6 +121,35 @@ class ConjugatePairsTestCase(unittest.TestCase):
         m = Geometric(Beta(2, 2, name="p")).fit(data)
         self.assertIsInstance(m.result, ConjugatePosterior)
         self.assertAlmostEqual(float(m.result.mean("p")), 0.3, delta=0.02)
+
+
+class ConjugateMixturePriorTestCase(unittest.TestCase):
+    """A Mix(...) of conjugate priors has an exact reweighted-mixture-of-conjugates posterior."""
+
+    def test_normal_bimodal_prior_selects_component(self):
+        from pysp.ppl.inference import ConjugateMixturePosterior
+
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 1.0, 2000))
+        m = Normal(Mix([Normal(-5, 2), Normal(5, 2)]), 1.0).fit(data)   # auto -> conjugate mixture
+        self.assertIsInstance(m.result, ConjugateMixturePosterior)
+        self.assertAlmostEqual(m.result.mean(), 5.0, delta=0.1)
+        # the +5 component must dominate the posterior mixture weights
+        self.assertGreater(m.result.weights[1], 0.99)
+
+    def test_matches_mcmc(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 1.0, 2000))
+        exact = Normal(Mix([Normal(-5, 2), Normal(5, 2)]), 1.0).fit(data)
+        mcmc = Normal(Mix([Normal(-5, 2), Normal(5, 2)]), 1.0).fit(
+            data, how="mcmc", draws=3000, burn=1000, rng=np.random.RandomState(1))
+        self.assertAlmostEqual(exact.result.mean(), float(np.mean(mcmc.result.samples())), delta=0.05)
+
+    def test_poisson_mixture_of_gammas(self):
+        rng = np.random.RandomState(2)
+        data = list(rng.poisson(3.5, 2000).astype(float))
+        m = Poisson(Mix([Gamma(1, 1), Gamma(20, 2)])).fit(data)
+        self.assertAlmostEqual(m.result.mean(), 3.5, delta=0.2)
 
 
 if __name__ == "__main__":

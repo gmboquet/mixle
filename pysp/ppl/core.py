@@ -647,7 +647,8 @@ class RandomVariable:
         ``'auto'`` picks ``map`` when the model has priors else ``em``. EM threads pysp's
         parallel/distributed backends (``backend='mp'|'mpi'|'dask'``).
         """
-        valid_how = {"auto", "em", "map", "mcmc", "hmc", "vi", "vmp", "conjugate", "hierarchical"}
+        valid_how = {"auto", "em", "map", "mcmc", "hmc", "vi", "vmp", "conjugate",
+                     "conjugate_mixture", "hierarchical"}
         if how not in valid_how:
             raise ValueError(f"unknown how={how!r}; choose from {sorted(valid_how)}.")
         if hasattr(data, "__len__") and len(data) == 0:
@@ -678,15 +679,22 @@ class RandomVariable:
                 how = "hierarchical"
             elif self._has_priors():
                 from pysp.ppl import inference as _inf
-                how = "conjugate" if _inf.conjugate_spec(self) is not None else "map"
+                if _inf.conjugate_spec(self) is not None:
+                    how = "conjugate"
+                elif _inf.conjugate_mixture_spec(self) is not None:
+                    how = "conjugate_mixture"
+                else:
+                    how = "map"
             elif partial_free:
                 how = "map"
             else:
                 how = "em"
         elif how == "em" and partial_free:
             how = "map"   # EM cannot hold some params fixed; MLE the free slots instead
-        if how in ("map", "mcmc", "hmc", "vi", "vmp", "conjugate", "hierarchical"):
+        if how in ("map", "mcmc", "hmc", "vi", "vmp", "conjugate", "conjugate_mixture", "hierarchical"):
             from pysp.ppl import inference as _inf
+            if how == "conjugate_mixture":
+                return _inf.conjugate_mixture_fit(self, data, **kw)
             if how == "mcmc":
                 return _inf.mcmc_fit(self, data, **kw)
             if how == "hmc":
