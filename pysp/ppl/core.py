@@ -651,6 +651,12 @@ class RandomVariable:
             from pysp.ppl import regression as _reg
             return _reg.regression_fit(self, data, **kw)
 
+        # state-space time-series models (Kalman/RTS + EM)
+        if self._kind == "sample" and isinstance(self._family, CompositeFamily) \
+                and self._family.name == "StateSpace":
+            from pysp.ppl import statespace as _ss
+            return _ss.statespace_fit(self, data, **kw)
+
         grouped = self._kind == "sample" and any(
             isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args)
         if how == "auto":
