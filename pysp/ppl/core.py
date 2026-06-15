@@ -231,6 +231,28 @@ def register_composite(name, dist_fn, est_fn, seed_fn=None, dist_cls=None, read=
     return fam
 
 
+def _count_params(p) -> int:
+    """Heuristic free-parameter count: numeric leaves in a params structure."""
+    if isinstance(p, dict):
+        return sum(_count_params(v) for v in p.values())
+    if isinstance(p, (list, tuple)):
+        return sum(_count_params(v) for v in p)
+    arr = np.asarray(p)
+    return int(arr.size) if arr.dtype.kind in "fiu" else 0
+
+
+def compare(models, data, *, by: str = "aic"):
+    """Compare fitted models on ``data``. Returns rows sorted best-first by ``by``
+    ('aic' | 'bic' | 'loglik')."""
+    rows = []
+    for m in models:
+        ll = m.log_likelihood(data)
+        rows.append({"model": (m.name or type(m.dist).__name__), "loglik": ll,
+                     "aic": m.aic(data), "bic": m.bic(data)})
+    keys = {"loglik": lambda r: -r["loglik"], "aic": lambda r: r["aic"], "bic": lambda r: r["bic"]}
+    return sorted(rows, key=keys[by])
+
+
 def read_params(dist):
     """Fitted parameters for any distribution in PPL (construction) vocabulary, recursing
     into composite children. Falls back to the raw distribution if unregistered."""
@@ -488,6 +510,22 @@ class RandomVariable:
         data = list(x)
         enc = d.dist_to_encoder().seq_encode(data)
         return np.asarray(d.seq_log_density(enc))
+
+    def log_likelihood(self, data) -> float:
+        """Total log-likelihood of ``data`` under the fitted model (sum of log_prob)."""
+        return float(np.sum(self.log_prob(list(data))))
+
+    def aic(self, data, k: Optional[int] = None) -> float:
+        """Akaike information criterion (lower is better). ``k`` defaults to a heuristic
+        parameter count from ``.params``."""
+        k = k if k is not None else _count_params(self.params)
+        return 2.0 * k - 2.0 * self.log_likelihood(data)
+
+    def bic(self, data, k: Optional[int] = None) -> float:
+        """Bayesian information criterion (lower is better)."""
+        k = k if k is not None else _count_params(self.params)
+        n = len(list(data))
+        return k * math.log(n) - 2.0 * self.log_likelihood(data)
 
     def mean(self, samples: int = 20000, seed: int = 0):
         """Expected value of the random variable (Monte-Carlo; works for any RV —

@@ -18,7 +18,7 @@ from typing import Any, Optional
 import numpy as np
 
 from pysp.ppl.core import (
-    RandomVariable, free, lower, register_family, register_composite, Family, Field,
+    RandomVariable, free, lower, register_family, register_composite, Family, Field, compare,
 )
 
 from pysp.stats.mixture import MixtureDistribution, MixtureEstimator
@@ -43,7 +43,7 @@ __all__ = [
     "RandomVariable", "free", "lower",
     "Normal", "Poisson", "Gamma", "Exponential", "Categorical", "Bernoulli", "Geometric",
     "Beta", "StudentT", "LogNormal", "NegativeBinomial", "Dirichlet",
-    "Mix", "Seq", "Markov", "LDA", "Graph", "Field",
+    "Mix", "Seq", "Markov", "LDA", "Graph", "Field", "compare",
 ]
 
 

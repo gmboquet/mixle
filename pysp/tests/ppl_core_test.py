@@ -2,7 +2,7 @@
 import numpy as np
 import unittest
 
-from pysp.ppl import Normal, Poisson, Gamma, Exponential, Categorical, Mix, Seq, Markov, free
+from pysp.ppl import Normal, Poisson, Gamma, Exponential, Categorical, Mix, Seq, Markov, free, compare
 from pysp.stats.gaussian import GaussianDistribution
 
 
@@ -188,6 +188,17 @@ class PPLCoreTestCase(unittest.TestCase):
             [list(rng.normal(2, 1.5, rng.randint(5, 15))) for _ in range(1500)], max_its=40)
         self.assertEqual(set(sq.params), {"element"})
         self.assertEqual(set(sq.params["element"]), {"mean", "sd"})
+
+    def test_model_comparison(self):
+        rng = np.random.RandomState(0)
+        data = list(np.concatenate([rng.normal(-4, 1, 3000), rng.normal(4, 1, 3000)]))  # bimodal
+        m1 = Normal(free, free).fit(data)
+        m2 = Mix([Normal(free, free), Normal(free, free)]).fit(data, rng=np.random.RandomState(1))
+        # the mixture fits much better
+        self.assertGreater(m2.log_likelihood(data), m1.log_likelihood(data))
+        self.assertLess(m2.aic(data), m1.aic(data))
+        ranked = compare([m1, m2], data, by="aic")
+        self.assertEqual(ranked[0]["model"], "MixtureDistribution")   # best first
 
     def test_moments(self):
         self.assertAlmostEqual(Normal(3, 2).mean(), 3.0, delta=0.1)
