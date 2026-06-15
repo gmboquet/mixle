@@ -49,6 +49,13 @@ def make_cases():
         len_dist=IntegerCategoricalDistribution(0, [0.1, 0.3, 0.4, 0.2]),
     )
 
+    seg_hmm = SegmentalHiddenMarkovModelDistribution(
+        emissions=[CategoricalDistribution({"a": 0.8, "b": 0.2}), CategoricalDistribution({"b": 0.6, "c": 0.4})],
+        w=[0.7, 0.3],
+        transitions=[[0.9, 0.1], [0.4, 0.6]],
+        len_dist=IntegerCategoricalDistribution(0, [0.1, 0.3, 0.4, 0.2]),
+    )
+
     return [
         ("categorical", cat3, 10, 3),
         ("intcat_zero_prob", intcat, 10, 3),
@@ -104,6 +111,7 @@ def make_cases():
         ("markov_chain", mc, 30, 15),
         ("hmm", hmm, 60, 40),
         ("ind_pi_hmm", ind_pi_hmm, 60, 40),
+        ("segmental_hmm", seg_hmm, 60, 40),
     ]
 
 
@@ -208,6 +216,27 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
         dist = RecordDistribution({"u": cat, "v": intcat})
         support = [{"u": s, "v": i} for s in "abc" for i in (0, 1)]
         self.assert_matches_brute(dist, support, "record")
+
+    def test_segmental_hmm(self):
+        # Segments here are structured composite tuples scored by different emission classes per
+        # state -- exercising the "arbitrary segment" generality on top of the standard HMM forward.
+        e0 = CompositeDistribution(
+            (CategoricalDistribution({"x": 0.7, "y": 0.3}), IntegerCategoricalDistribution(0, [0.6, 0.4]))
+        )
+        e1 = CompositeDistribution(
+            (CategoricalDistribution({"x": 0.2, "y": 0.8}), IntegerCategoricalDistribution(0, [0.5, 0.5]))
+        )
+        dist = SegmentalHiddenMarkovModelDistribution(
+            emissions=[e0, e1],
+            w=[0.6, 0.4],
+            transitions=[[0.7, 0.3], [0.5, 0.5]],
+            len_dist=IntegerCategoricalDistribution(0, [0.2, 0.5, 0.3]),
+        )
+        seg_alpha = [("x", 0), ("x", 1), ("y", 0), ("y", 1)]
+        support = [[]]
+        for length in (1, 2):
+            support += [list(t) for t in itertools.product(seg_alpha, repeat=length)]
+        self.assert_matches_brute(dist, support, "segmental_hmm")
 
     def test_conditional_enumeration_matches_brute(self):
         # Most-probable-completion query: enumerating with some fields/positions fixed must equal the
