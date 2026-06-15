@@ -285,6 +285,27 @@ m.result          # inference metadata: posterior draws, summary, diagnostics
 See [../../notes/ppl-syntax-spec.md](../../notes/ppl-syntax-spec.md) for the full charter
 and invariants.
 
+## Performance & execution stack
+
+The PPL is a thin lowering layer — it inherits pysparkplug's full execution stack rather
+than reimplementing scoring. Nothing in the hot path is a Python per-element loop.
+
+- **NumPy vectorization** — `log_prob`/`fit` run the vectorized `seq_log_density` /
+  `seq_update` kernels (a 200k-point Gaussian EM fits in <20 ms).
+- **Numba** — inherited through the distribution kernels pysp already JIT-compiles.
+- **Torch engine** — `fit(..., engine=TorchEngine())` runs the E-step/scoring on the torch
+  ComputeEngine (GPU-capable); verified to match the NumPy result.
+- **Parallel / distributed EM** — `fit(..., backend="mp"|"mpi"|"dask", num_workers=…,
+  comm=…, client=…)` threads straight through to `optimize`; pass an **RDD as `enc_data`**
+  for the Spark/RDD path. `precision="float32"|"auto"` is also forwarded.
+
+These apply to the **EM/MLE path** — i.e. all the standard models (scalar families,
+mixtures, HMMs, sequences, LDA, MVN) via `.fit()` / `fit(how="em")`. The Bayesian/VB paths
+(`conjugate`, `hierarchical`, `vmp`, `vi`, `mcmc`, `hmc`, regression, state-space) are
+vectorized NumPy and single-machine: conjugate is one O(N) pass; hierarchical/VMP are
+vectorized over groups; MCMC/HMC/VI score each step through the vectorized `seq_log_density`.
+Distributing those is future work; the heavy-data workhorses already scale.
+
 ## Status
 
 Implemented & tested: EM (parallel backends), mixtures (k-means++ init) + responsibilities,
