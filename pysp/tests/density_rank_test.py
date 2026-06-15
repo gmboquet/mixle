@@ -17,7 +17,7 @@ from pysp.stats.int_range import IntegerCategoricalDistribution
 from pysp.stats.mixture import MixtureDistribution
 from pysp.stats.poisson import PoissonDistribution
 from pysp.stats.sequence import SequenceDistribution
-from pysp.utils.density_rank import count_dp_rank, density_rank
+from pysp.utils.density_rank import count_dp_rank, count_dp_seek, density_rank
 
 
 class DensityRankTestCase(unittest.TestCase):
@@ -107,6 +107,51 @@ class CountDPRankTestCase(unittest.TestCase):
         self.assertGreater(r.rank, 10**6)  # deep
         self.assertLessEqual(r.window_lower, r.rank)
         self.assertLessEqual(r.rank, r.window_upper)
+
+
+class CountDPSeekTestCase(unittest.TestCase):
+    """count_dp_seek: arbitrary-index unranking (inverse of count_dp_rank) with a true-rank bracket."""
+
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.sizes = (5, 4, 6)
+        self.dist = CompositeDistribution(
+            tuple(IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(s)))) for s in self.sizes)
+        )
+        support = [list(t) for t in itertools.product(*[range(s) for s in self.sizes])]
+        self.order = sorted(support, key=lambda x: -self.dist.log_density(x))
+
+    def test_seek_returns_ith_value_and_bracket_near_index(self):
+        slack = 3  # quantization can reorder near-tied values by a few ranks
+        for i in (0, 1, 20, 50, len(self.order) - 1):
+            r = count_dp_seek(self.dist, i, oversample=64)
+            # the value sits at the i-th descending-probability position (log-prob matches the true
+            # i-th up to the small near-tie quantization slack)
+            self.assertAlmostEqual(r.log_prob, self.dist.log_density(self.order[i]), delta=0.05)
+            # the reported true-rank bracket agrees with the requested index within that slack
+            self.assertLessEqual(r.rank_lower - slack, i)
+            self.assertLessEqual(i, r.rank_upper + slack)
+
+    def test_round_trip_rank_of_seek(self):
+        # rank(seek(i)) returns to i (within small quantization slack from near-ties).
+        for i in range(0, 120, 11):
+            v = count_dp_seek(self.dist, i, oversample=64).value
+            self.assertLessEqual(abs(count_dp_rank(self.dist, v, oversample=64).rank - i), 2)
+
+    def test_deep_seek_without_enumerating_prefix(self):
+        # Seek a deep index in an infinite-support sequence: no prefix enumeration, valid value + bracket.
+        seq = SequenceDistribution(
+            IntegerCategoricalDistribution(0, [0.4, 0.3, 0.2, 0.1]), len_dist=PoissonDistribution(8.0)
+        )
+        r = count_dp_seek(seq, 10_000_000, oversample=16)
+        self.assertEqual(len(r.value), 12)  # a deep, long sequence
+        self.assertLessEqual(r.rank_lower, r.rank_upper)
+
+    def test_out_of_range_raises(self):
+        with self.assertRaises(IndexError):
+            count_dp_seek(self.dist, 10_000)  # finite support has 120 values
+        with self.assertRaises(IndexError):
+            count_dp_seek(self.dist, -1)
 
 
 class MixtureCrossRankTestCase(unittest.TestCase):

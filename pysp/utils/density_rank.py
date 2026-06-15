@@ -154,6 +154,30 @@ class CountDPRankResult:
     oversample: int
 
 
+def _window_bracket(index, fb, smear, t, resolve_max, tol):
+    """Smear-window rank bracket around fine bucket ``fb`` for log-prob ``t``.
+
+    Returns ``(window_lower, window_upper, exact_rank)``: the count safely below the smear window,
+    that plus the in-window count, and -- when the window holds at most ``resolve_max`` items -- the
+    exact count strictly more probable than ``t`` (else ``None``). Shared by rank and seek so the two
+    stay consistent.
+    """
+    hist = index.hist
+    lo_b, hi_b = fb - smear, fb + smear
+    window_lower = sum(hist.count_at(b) for b in range(hist.base, lo_b))
+    window_count = sum(hist.count_at(b) for b in range(lo_b, hi_b + 1))
+    window_upper = window_lower + window_count
+    if window_count <= resolve_max:
+        strictly_more = sum(
+            1
+            for b in range(lo_b, hi_b + 1)
+            for off in range(hist.count_at(b))
+            if float(index.get_in_bucket(b, off)[1]) > t + tol
+        )
+        return window_lower, window_upper, window_lower + strictly_more
+    return window_lower, window_upper, None
+
+
 def count_dp_rank(
     dist: Any,
     value: Any,
@@ -188,24 +212,118 @@ def count_dp_rank(
     index, _truncated = dist.quantized_count_index(q, max_fine_bucket=fb + smear)
     if index is None:
         raise EnumerationError(dist, reason="no structural count index for rank")
-    hist = index.hist
 
-    lo_b = fb - smear
-    hi_b = fb + smear
-    window_lower = sum(hist.count_at(b) for b in range(hist.base, lo_b))
-    window_count = sum(hist.count_at(b) for b in range(lo_b, hi_b + 1))
-    window_upper = window_lower + window_count
+    wl, wu, exact_rank = _window_bracket(index, fb, smear, t, resolve_max, tol)
+    rank = exact_rank if exact_rank is not None else (wl + wu) // 2
+    return CountDPRankResult(rank, wl, wu, t, oversample)
 
-    if window_count <= resolve_max:
-        # Resolve the smear window exactly: count its items strictly more probable than value.
-        strictly_more = 0
-        for b in range(lo_b, hi_b + 1):
-            for off in range(hist.count_at(b)):
-                _v, lp = index.get_in_bucket(b, off)
-                if float(lp) > t + tol:
-                    strictly_more += 1
-        return CountDPRankResult(window_lower + strictly_more, window_lower, window_upper, t, oversample)
-    return CountDPRankResult((window_lower + window_upper) // 2, window_lower, window_upper, t, oversample)
+
+def _locate_bucket(hist, target_index):
+    """Return ``(fine_bucket, offset)`` of the value at descending-probability ``target_index``.
+
+    Buckets are scanned in increasing order (= descending probability). Returns ``None`` if
+    ``target_index`` is at or beyond the histogram's total count.
+    """
+    cum = 0
+    for b in range(hist.base, hist.base + len(hist.data)):
+        c = hist.count_at(b)
+        if cum + c > target_index:
+            return b, target_index - cum
+        cum += c
+    return None
+
+
+@dataclass
+class CountDPSeekResult:
+    """The observation at an arbitrary descending-probability index -- the inverse of a rank query.
+
+    Attributes:
+        value: the observation at (approximately) descending-probability ``index``.
+        log_prob: ``log p(value)``.
+        index: the requested 0-based index.
+        rank_lower, rank_upper: the TRUE rank of ``value`` is bracketed in ``[rank_lower, rank_upper]``
+            by the smear window. A *tight* bracket means the model is in the separated / near-exact
+            regime here, so the seek is trustworthy; a *wide* one means many near-ties around ``value``.
+        exact: the smear window was resolved exactly (then ``rank_lower == rank_upper`` is the true
+            rank). For decomposable families (composite/sequence/markov) the count index is exact, so
+            seek is exact up to quantization. For mixtures/HMMs the index is the TROPICAL projection
+            (dominant component/path), so the bracket is the tropical error envelope -- a guaranteed
+            bound only when ``smear`` covers the <= log2(K)-bit tropical displacement; otherwise it is
+            the approximate tropical bracket (raise ``smear`` for rigor; see :func:`count_dp_rank`).
+        oversample: the quantizer oversample used (higher -> finer buckets -> tighter bracket).
+    """
+
+    value: Any
+    log_prob: float
+    index: int
+    rank_lower: int
+    rank_upper: int
+    exact: bool
+    oversample: int
+
+
+def count_dp_seek(
+    dist: Any,
+    index: int,
+    oversample: int = 64,
+    bin_width_bits: float = 1.0,
+    smear: int | None = None,
+    resolve_max: int = 8192,
+    tol: float = 1.0e-9,
+    max_fine_bucket_cap: int = 1 << 30,
+) -> CountDPSeekResult:
+    """Seek the observation at descending-probability ``index`` -- the inverse of :func:`count_dp_rank`.
+
+    Walks the structural count histogram in ascending-bucket (= descending-probability) order until
+    the cumulative count passes ``index``, then unranks within that bucket. No prefix enumeration, so
+    arbitrary *deep* indices are reachable directly. The depth bound is grown geometrically until the
+    index (plus a smear margin) is covered or the support is exhausted.
+
+    Returns the value together with a provable bracket ``[rank_lower, rank_upper]`` on its true rank
+    (the smear window): a tight bracket certifies the seek is in the separated / near-exact regime.
+    For decomposable families this is exact up to quantization; for mixtures/HMMs it seeks into the
+    tropical (dominant-component/path) projection and the bracket is that projection's error envelope.
+    """
+    from pysp.stats.pdist import EnumerationError
+    from pysp.utils.quantization.core import Quantizer
+
+    if index < 0:
+        raise IndexError("index must be non-negative")
+    q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
+    smear = oversample if smear is None else int(smear)
+
+    # Deepen the depth bound until the located bucket's smear window is fully built, or the
+    # structural count stops growing (support exhausted). The per-family ``truncated`` flag is not
+    # reliable across all families, so drive the loop off coverage + total() growth instead.
+    mfb = max(2 * smear, 64)
+    idx = None
+    prev_total = -1
+    while True:
+        idx, _truncated = dist.quantized_count_index(q, max_fine_bucket=mfb)
+        if idx is None:
+            raise EnumerationError(dist, reason="no structural count index for seek")
+        total = idx.total()
+        located = _locate_bucket(idx.hist, index)
+        if located is not None:
+            built_top = idx.hist.base + len(idx.hist.data) - 1
+            if located[0] + smear <= built_top:
+                break  # value found and its smear window is fully built
+        if (total == prev_total and total > 0) or mfb >= max_fine_bucket_cap:
+            break  # deepening adds nothing further (support exhausted) or runaway guard hit
+        prev_total = total
+        mfb *= 2
+
+    located = _locate_bucket(idx.hist, index)
+    if located is None:
+        raise IndexError("index %d is beyond the structural support count %d" % (index, idx.total()))
+    b_star, offset = located
+    value, lp = idx.get_in_bucket(b_star, offset)
+    lp = float(lp)
+    fb_v = q.fine_bucket(lp)
+    wl, wu, exact_rank = _window_bracket(idx, fb_v, smear, lp, resolve_max, tol)
+    if exact_rank is not None:
+        return CountDPSeekResult(value, lp, index, exact_rank, exact_rank, True, oversample)
+    return CountDPSeekResult(value, lp, index, wl, wu, False, oversample)
 
 
 def _mass_histogram(dist, quantizer, max_fine_bucket):
