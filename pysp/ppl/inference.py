@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from pysp.ppl.core import CompositeFamily, RandomVariable, free, lower
+from pysp.ppl.core import CompositeFamily, Constraint, RandomVariable, free, lower
 
 _NEG_INF = -1e300
 
@@ -367,8 +367,76 @@ def _finalize_chains(rv, slots, results, build) -> RandomVariable:
     return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
 
 
+# ----------------------------------------------------- inequality / region constraints
+def _vals_from_u(slots, u) -> dict:
+    """Constrained parameter values keyed by slot index, from one unconstrained vector ``u``."""
+    vals = {}
+    for k, s in enumerate(slots):
+        uk = float(u[k])
+        if s.support == "positive":
+            vals[s.index] = math.exp(uk)
+        elif s.support == "unit":
+            vals[s.index] = 1.0 / (1.0 + math.exp(-uk))
+        else:
+            vals[s.index] = uk
+    return vals
+
+
+def _feasibility(constraints, slots):
+    """Compile ``constraints`` (a Constraint or list) into ``feasible(u) -> bool`` over the
+    model's parameter slots. Constraint variables must be the model's prior RVs (slot handles)."""
+    if constraints is None:
+        return None
+    if isinstance(constraints, Constraint):
+        constraints = [constraints]
+    constraints = list(constraints)
+    if not constraints:
+        return None
+    handle_to_index = {id(s.handle): s.index for s in slots if s.handle is not None}
+    for c in constraints:
+        for lv in c.leaves:
+            if id(lv) not in handle_to_index:
+                raise ValueError(
+                    "a constraint references an RV that is not a prior parameter of this model; "
+                    "give that parameter a (possibly vague) prior so it can be constrained, e.g. "
+                    "Normal(Normal(0, 100, name='m'), 1).")
+
+    def feasible(u):
+        vals = _vals_from_u(slots, u)
+        env = {lv: vals[handle_to_index[id(lv)]] for c in constraints for lv in c.leaves}
+        return all(bool(np.all(np.asarray(c.eval(env)))) for c in constraints)
+
+    return feasible
+
+
+def _project_init(u0, feasible, rng):
+    """Nudge an initial point into the feasible region by growing random jitter."""
+    if feasible(u0):
+        return u0
+    base = np.maximum(np.abs(u0), 1.0)
+    for t in range(20000):
+        cand = u0 + (0.1 + 0.02 * t) * base * rng.standard_normal(len(u0))
+        if feasible(cand):
+            return cand
+    raise ValueError("could not find a parameter point satisfying the constraints; "
+                     "check that the region is non-empty and consistent with the supports.")
+
+
+def _constrain_target(log_target, feasible):
+    """Wrap a log-target so it is -inf outside the feasible region (samplers reject it; the
+    region is a hard truncation of the joint posterior)."""
+    if feasible is None:
+        return log_target
+
+    def clt(u):
+        return log_target(u) if feasible(u) else -np.inf
+
+    return clt
+
+
 def ensemble_fit(rv: RandomVariable, data, *, draws: int = 1500, burn: int = 500,
-                 thin: int = 1, walkers: int | None = None, rng=None) -> RandomVariable:
+                 thin: int = 1, walkers: int | None = None, constraints=None,
+                 rng=None) -> RandomVariable:
     """Affine-invariant ensemble MCMC (Goodman & Weare stretch move).
 
     A population of walkers samples jointly with no per-dimension step tuning; it is invariant
@@ -386,10 +454,18 @@ def ensemble_fit(rv: RandomVariable, data, *, draws: int = 1500, burn: int = 500
         walkers = max(2 * (d + 1), 8)
     if walkers % 2:
         walkers += 1
+    feasible = _feasibility(constraints, slots)
+    log_target = _constrain_target(log_target, feasible)
     u0 = _init_u(slots, dmean, dstd)
+    if feasible is not None:
+        u0 = _project_init(u0, feasible, rng)
     spread = _init_scale(slots, dstd, len(data)) * math.sqrt(len(data))   # ~ prior/posterior width
     p0 = u0[None, :] + 0.1 * spread[None, :] * rng.standard_normal((walkers, d))
     p0[0] = u0
+    if feasible is not None:        # every walker must start feasible (finite log-target)
+        for k in range(walkers):
+            if not feasible(p0[k]):
+                p0[k] = _project_init(u0, feasible, rng)
     res = affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn,
                                     thin=thin, rng=rng)
     return _finalize(rv, slots, res, build)
@@ -397,7 +473,7 @@ def ensemble_fit(rv: RandomVariable, data, *, draws: int = 1500, burn: int = 500
 
 def mcmc_fit(rv: RandomVariable, data, *, draws: int = 2000, burn: int = 1000,
              thin: int = 1, scale: float | None = None, rng=None,
-             chains: int = 1, parallel: bool = False) -> RandomVariable:
+             chains: int = 1, parallel: bool = False, constraints=None) -> RandomVariable:
     from pysp.ppl import autograd as _ag
     from pysp.utils.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
@@ -408,7 +484,12 @@ def mcmc_fit(rv: RandomVariable, data, *, draws: int = 2000, burn: int = 1000,
         log_target, slots, build, dmean, dstd = ag.log_target, ag.slots, ag.build, ag.dmean, ag.dstd
     else:
         log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+    feasible = _feasibility(constraints, slots)
+    log_target = _constrain_target(log_target, feasible)
     u0 = _init_u(slots, dmean, dstd)
+    if feasible is not None:
+        u0 = _project_init(u0, feasible, rng)
+        parallel = False     # process workers rebuild the target without the constraint closure
     init_scale = (scale * np.ones(len(u0))) if scale is not None \
         else _init_scale(slots, dstd, len(data))
 
@@ -426,12 +507,15 @@ def mcmc_fit(rv: RandomVariable, data, *, draws: int = 2000, burn: int = 1000,
 
 def hmc_fit(rv: RandomVariable, data, *, draws: int = 1000, burn: int = 500,
             step_size: float | None = None, num_steps: int = 15, thin: int = 1,
-            rng=None, chains: int = 1, parallel: bool = False) -> RandomVariable:
+            rng=None, chains: int = 1, parallel: bool = False,
+            constraints=None) -> RandomVariable:
     """Hamiltonian Monte Carlo over the parameter posterior.
 
     Uses pysp's ``hamiltonian_monte_carlo`` with a numerical gradient of the joint
     log-target and a diagonal mass matrix preconditioned to the data-informed posterior
-    scale, so trajectories are well-conditioned without manual tuning.
+    scale, so trajectories are well-conditioned without manual tuning. Inequality
+    ``constraints`` truncate the posterior (trajectories leaving the region are rejected);
+    for hard constraints ``how='ensemble'`` or ``'mcmc'`` usually mixes better.
     """
     from pysp.ppl import autograd as _ag
     from pysp.utils.mcmc import hamiltonian_monte_carlo
@@ -459,7 +543,12 @@ def hmc_fit(rv: RandomVariable, data, *, draws: int = 1000, burn: int = 500,
                 g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
             return g
 
+    feasible = _feasibility(constraints, slots)
+    log_target = _constrain_target(log_target, feasible)
     u0 = _init_u(slots, dmean, dstd)
+    if feasible is not None:
+        u0 = _project_init(u0, feasible, rng)
+        parallel = False     # process workers rebuild the target without the constraint closure
     scale = _init_scale(slots, dstd, len(data))     # ~ posterior std per dim
     mass = 1.0 / (scale ** 2)                        # precondition: M ~ inverse posterior cov
     if step_size is None:
@@ -933,13 +1022,13 @@ def hierarchical_fit(rv: RandomVariable, data, *, max_its: int = 300,
     return RandomVariable._bound(pop, name=rv._name, result=post)
 
 
-def map_fit(rv: RandomVariable, data, *, rng=None) -> RandomVariable:
+def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None) -> RandomVariable:
     from scipy.optimize import minimize
 
     from pysp.ppl import autograd as _ag
 
     g = _ag.grad_target(rv, data)
-    if g is not None:
+    if g is not None and constraints is None:
         # analytic-gradient MAP: L-BFGS on the joint posterior (fast, scales with #params)
         u0 = _init_u(g.slots, g.dmean, g.dstd)
 
@@ -951,10 +1040,19 @@ def map_fit(rv: RandomVariable, data, *, rng=None) -> RandomVariable:
         vals, _ = g.unpack(res.x)
         return RandomVariable._bound(g.build(vals), name=rv._name)
 
-    # derivative-free fallback (no Torch, or an unsupported family)
+    # derivative-free path (no Torch, an unsupported family, or a constrained region)
     log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+    feasible = _feasibility(constraints, slots)
     u0 = _init_u(slots, dmean, dstd)
-    res = minimize(lambda u: -log_target(u), u0, method="Nelder-Mead",
+    if feasible is not None:
+        u0 = _project_init(u0, feasible, np.random.RandomState() if rng is None else rng)
+
+    def objective(u):
+        if feasible is not None and not feasible(u):
+            return 1e18      # keep the constrained MAP inside the feasible region
+        return -log_target(u)
+
+    res = minimize(objective, u0, method="Nelder-Mead",
                    options={"xatol": 1e-6, "fatol": 1e-6, "maxiter": 5000})
     vals, _ = unpack(res.x)
     return RandomVariable._bound(build(vals), name=rv._name)
