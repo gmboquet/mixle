@@ -301,6 +301,14 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         s3 = repr(self.key)
         return "DirichletDistribution(%s, name=%s, keys=%s)" % (s1, s2, s3)
 
+    def get_parameters(self) -> np.ndarray:
+        """Return the concentration vector alpha.
+
+        Lets a DirichletDistribution serve as a conjugate prior (on a Categorical/Mixture weight
+        simplex) under the unified Bayesian estimation protocol.
+        """
+        return self.alpha
+
     def density(self, x: list[float] | np.ndarray) -> float:
         """Evaluate the density of a dirichlet observation.
 
