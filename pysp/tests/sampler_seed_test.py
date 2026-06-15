@@ -317,9 +317,10 @@ def _stats_public_distribution_catalog():
 
 
 def _bayes_only_distribution_catalog():
-    """Conjugate-prior / variational families that pysp.stats exposes only via
-    submodules (not ``pysp.stats.__all__``).  Families that *are* in
-    ``stats.__all__`` are already covered by ``_stats_public_distribution_catalog``.
+    """Conjugate-prior / variational families folded in from the former pysp.bstats.
+
+    These are now exported from ``pysp.stats.__all__`` alongside the frequentist
+    families; this catalog is merged into the public seed-repeatability sweep.
     """
     from pysp.stats.catdirichlet import DictDirichletDistribution
     from pysp.stats.dpm import DirichletProcessMixtureDistribution
@@ -327,6 +328,7 @@ def _bayes_only_distribution_catalog():
     from pysp.stats.mvngamma import MultivariateNormalGammaDistribution
     from pysp.stats.normgamma import NormalGammaDistribution
     from pysp.stats.normwishart import NormalWishartDistribution
+    from pysp.stats.symdirichlet import SymmetricDirichletDistribution
 
     comps = [stats.GaussianDistribution(0.0, 1.0), stats.GaussianDistribution(3.0, 2.0)]
     dpm = DirichletProcessMixtureDistribution(
@@ -353,6 +355,7 @@ def _bayes_only_distribution_catalog():
         ),
         "NormalGammaDistribution": NormalGammaDistribution(0.0, 1.0, 2.0, 3.0),
         "NormalWishartDistribution": NormalWishartDistribution([0.0, 1.0], 2.0, [[2.0, 0.0], [0.0, 2.0]], 5.0),
+        "SymmetricDirichletDistribution": SymmetricDirichletDistribution(2.0, dim=3),
     }
 
 
@@ -383,7 +386,7 @@ class SamplerSeedTestCase(unittest.TestCase):
                 self.assertEqual(len(sample), 4)
 
     def test_all_public_stats_samplers_are_seed_repeatable(self):
-        catalog = _stats_public_distribution_catalog()
+        catalog = {**_stats_public_distribution_catalog(), **_bayes_only_distribution_catalog()}
         self.assert_catalog_matches_exports(stats, catalog)
         for name, dist in sorted(catalog.items()):
             self.assert_repeatable_sampler(name, dist)
