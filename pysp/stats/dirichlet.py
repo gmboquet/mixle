@@ -301,6 +301,42 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         s3 = repr(self.key)
         return "DirichletDistribution(%s, name=%s, keys=%s)" % (s1, s2, s3)
 
+    def get_parameters(self) -> np.ndarray:
+        """Return the concentration vector alpha.
+
+        Lets a DirichletDistribution serve as a conjugate prior (on a Categorical/Mixture weight
+        simplex) under the unified Bayesian estimation protocol.
+        """
+        return self.alpha
+
+    def cross_entropy(self, dist: "SequenceEncodableProbabilityDistribution") -> float:
+        """Cross entropy -E_self[log dist(x)] for a Dirichlet argument.
+
+        Accepts another :class:`DirichletDistribution` (full concentration vector) or a
+        :class:`~pysp.stats.symdirichlet.SymmetricDirichletDistribution` (scalar concentration
+        broadcast to this distribution's dimension). Both arise as the conjugate prior/posterior
+        over the same simplex during variational Bayes (e.g. the ELBO global term in DPM).
+        """
+        from pysp.stats.symdirichlet import SymmetricDirichletDistribution
+
+        a = self.alpha
+        if isinstance(dist, DirichletDistribution):
+            aa = dist.alpha
+        elif isinstance(dist, SymmetricDirichletDistribution):
+            aa = dist.alpha * np.ones(self.dim)
+        else:
+            raise NotImplementedError(
+                "DirichletDistribution.cross_entropy is only implemented for Dirichlet arguments (got %s)."
+                % type(dist).__name__
+            )
+        return float(-((gammaln(np.sum(aa)) - np.sum(gammaln(aa))) + np.dot(digamma(a) - digamma(np.sum(a)), aa - 1)))
+
+    def entropy(self) -> float:
+        """Returns the differential entropy in nats."""
+        a = self.alpha
+        a0 = np.sum(a)
+        return float(-((gammaln(a0) - np.sum(gammaln(a))) + np.dot(digamma(a) - digamma(a0), a - 1)))
+
     def density(self, x: list[float] | np.ndarray) -> float:
         """Evaluate the density of a dirichlet observation.
 

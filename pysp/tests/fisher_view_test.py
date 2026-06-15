@@ -298,26 +298,26 @@ class FisherViewTestCase(unittest.TestCase):
         self.assertEqual(fv.shape, stats.shape)
         self.assertTrue(np.all(np.isfinite(fv)))
 
-    def test_bstats_combinators_have_encoded_parity(self):
-        from pysp.bstats.binomial import BinomialDistribution as BayesianBinomialDistribution
-        from pysp.bstats.categorical import CategoricalDistribution as BayesianCategoricalDistribution
-        from pysp.bstats.dirichlet import DirichletDistribution as BayesianDirichletDistribution
-        from pysp.bstats.dmvn import DiagonalGaussianDistribution as BayesianDiagonalGaussianDistribution
-        from pysp.bstats.exponential import ExponentialDistribution as BayesianExponentialDistribution
-        from pysp.bstats.gamma import GammaDistribution as BayesianGammaDistribution
-        from pysp.bstats.gaussian import GaussianDistribution as BayesianGaussianDistribution
-        from pysp.bstats.hidden_markov import HiddenMarkovModelDistribution as BayesianHiddenMarkovModelDistribution
-        from pysp.bstats.int_range import IntegerCategoricalDistribution as BayesianIntegerCategoricalDistribution
-        from pysp.bstats.log_gaussian import LogGaussianDistribution as BayesianLogGaussianDistribution
-        from pysp.bstats.mvn import MultivariateGaussianDistribution as BayesianMultivariateGaussianDistribution
-        from pysp.bstats.optional import OptionalDistribution as BayesianOptionalDistribution
-        from pysp.bstats.sequence import SequenceDistribution as BayesianSequenceDistribution
+    def test_bayes_combinators_have_encoded_parity(self):
+        from pysp.stats.binomial import BinomialDistribution as BayesianBinomialDistribution
+        from pysp.stats.categorical import CategoricalDistribution as BayesianCategoricalDistribution
+        from pysp.stats.dirichlet import DirichletDistribution as BayesianDirichletDistribution
+        from pysp.stats.dmvn import DiagonalGaussianDistribution as BayesianDiagonalGaussianDistribution
+        from pysp.stats.exponential import ExponentialDistribution as BayesianExponentialDistribution
+        from pysp.stats.gamma import GammaDistribution as BayesianGammaDistribution
+        from pysp.stats.gaussian import GaussianDistribution as BayesianGaussianDistribution
+        from pysp.stats.hidden_markov import HiddenMarkovModelDistribution as BayesianHiddenMarkovModelDistribution
+        from pysp.stats.int_range import IntegerCategoricalDistribution as BayesianIntegerCategoricalDistribution
+        from pysp.stats.log_gaussian import LogGaussianDistribution as BayesianLogGaussianDistribution
+        from pysp.stats.mvn import MultivariateGaussianDistribution as BayesianMultivariateGaussianDistribution
+        from pysp.stats.optional import OptionalDistribution as BayesianOptionalDistribution
+        from pysp.stats.sequence import SequenceDistribution as BayesianSequenceDistribution
 
         cases = [
             (
                 BayesianSequenceDistribution(
                     BayesianGaussianDistribution(0.0, 1.0),
-                    len_dist=BayesianIntegerCategoricalDistribution([0.2, 0.5, 0.3], min_index=1),
+                    len_dist=BayesianIntegerCategoricalDistribution(1, [0.2, 0.5, 0.3]),
                 ),
                 [[-1.0, 0.0], [1.0], [2.0, 2.5, 3.0]],
             ),
@@ -326,7 +326,7 @@ class FisherViewTestCase(unittest.TestCase):
                 [None, -1.0, 0.5, None, 2.0],
             ),
             (
-                BayesianBinomialDistribution(5, 0.4),
+                BayesianBinomialDistribution(0.4, 5),
                 [0, 2, 5, 1],
             ),
             (
@@ -338,7 +338,7 @@ class FisherViewTestCase(unittest.TestCase):
                     [BayesianGaussianDistribution(-1.0, 1.0), BayesianGaussianDistribution(2.0, 1.5)],
                     [0.6, 0.4],
                     [[0.8, 0.2], [0.3, 0.7]],
-                    len_dist=BayesianIntegerCategoricalDistribution([0.3, 0.4, 0.3], min_index=1),
+                    len_dist=BayesianIntegerCategoricalDistribution(1, [0.3, 0.4, 0.3]),
                 ),
                 [[-1.0, -0.5], [2.0, 2.5, -1.0], [0.0]],
             ),
@@ -696,8 +696,8 @@ class FisherViewTestCase(unittest.TestCase):
         self.assertEqual(fv.shape, (4,))
         self.assertTrue(np.all(np.isfinite(fv)))
 
-    def test_bstats_distribution_inherits_to_fisher(self):
-        from pysp.bstats.gaussian import GaussianDistribution as BayesianGaussianDistribution
+    def test_bayes_distribution_inherits_to_fisher(self):
+        from pysp.stats.gaussian import GaussianDistribution as BayesianGaussianDistribution
 
         dist = BayesianGaussianDistribution(0.0, 1.0)
         view = dist.to_fisher()
@@ -708,8 +708,8 @@ class FisherViewTestCase(unittest.TestCase):
         self.assertGreater(mat.shape[1], 0)
         self.assertTrue(np.all(np.isfinite(mat)))
 
-    def test_bstats_categorical_default_mass_uses_generic_view(self):
-        from pysp.bstats.categorical import CategoricalDistribution as BayesianCategoricalDistribution
+    def test_bayes_categorical_default_mass_uses_generic_view(self):
+        from pysp.stats.categorical import CategoricalDistribution as BayesianCategoricalDistribution
 
         dist = BayesianCategoricalDistribution({"a": 0.5}, default_value=0.5)
         view = dist.to_fisher()

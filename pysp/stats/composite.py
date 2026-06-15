@@ -36,6 +36,23 @@ E = TypeVar("E")
 SS = TypeVar("SS")
 
 
+def _distribute_child_prior(child: Any, prior: Any) -> None:
+    """Push a parameter prior onto a child distribution/estimator (structural-wrapper helper).
+
+    Prefers the child's ``set_prior`` when it exists. Leaf *estimators* that predate the unified
+    Bayesian surface expose only a ``prior`` attribute (set in ``__init__``); for those this writes
+    the attribute directly and refreshes ``has_conj_prior`` so the child's ``estimate`` takes its
+    conjugate branch (the prior attached to such a leaf is its conjugate prior by construction).
+    """
+    set_prior = getattr(child, "set_prior", None)
+    if callable(set_prior):
+        set_prior(prior)
+        return
+    child.prior = prior
+    if hasattr(child, "has_conj_prior"):
+        child.has_conj_prior = prior is not None
+
+
 class CompositeDistribution(SequenceEncodableProbabilityDistribution):
     """Product distribution over heterogeneous component variables."""
 
@@ -46,7 +63,11 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             engine_ready=intersect_engine_ready(tuple(self.dists)), kernel_status="numba_adapter"
         )
 
-    def __init__(self, dists: Sequence[SequenceEncodableProbabilityDistribution]) -> None:
+    def __init__(
+        self,
+        dists: Sequence[SequenceEncodableProbabilityDistribution],
+        prior: Sequence[SequenceEncodableProbabilityDistribution] | None = None,
+    ) -> None:
         """CompositeDistribution for modeling independent distributions of from (Dist_0,Dist_1,...,Dist_{n-1}).
 
         Data type must be (T_0, T_1, ..., T_{n-1}), where data type T_k is consistent with distribution Dist_k. The
@@ -56,6 +77,10 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
         Args:
             dists (Sequence[SequenceEncodableProbabilityDistribution]): Distributions given by Dist_k above.
+            prior (Optional): Per-component parameter priors. ``CompositeDistribution`` is a structural
+                wrapper, so the joint prior factors over the components: a sequence of one prior per
+                component (in component order) is distributed to the children via ``set_prior``. ``None``
+                (default) leaves every child a plain point model (existing behavior byte-identical).
 
         Attributes:
             dists: (Sequence[SequenceEncodableProbabilityDistribution]): Distributions given by Dist_k above.
@@ -64,6 +89,43 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """
         self.dists = dists
         self.count = len(dists)
+        self.set_prior(prior)
+
+    def get_prior(self) -> list[SequenceEncodableProbabilityDistribution | None]:
+        """Return the joint prior as the list of per-component child priors (in component order)."""
+        return [d.get_prior() for d in self.dists]
+
+    def set_prior(self, prior: Sequence[SequenceEncodableProbabilityDistribution | None] | None) -> None:
+        """Distribute per-component parameter priors to the wrapped child distributions.
+
+        ``CompositeDistribution`` owns no parameters of its own; the joint prior factors over the
+        independent components. ``prior=None`` is a no-op (children keep their existing priors,
+        leaving the MLE path byte-identical); otherwise ``prior`` must be a sequence of exactly
+        ``count`` child priors that are pushed to the children via their own ``set_prior``.
+        """
+        if prior is None:
+            return
+        prior = list(prior)
+        if len(prior) != self.count:
+            raise ValueError(
+                "CompositeDistribution.set_prior expected %d priors but got %d." % (self.count, len(prior))
+            )
+        for d, p in zip(self.dists, prior):
+            d.set_prior(p)
+
+    def expected_log_density(self, x: tuple[Any, ...]) -> float:
+        """Prior-expected log-density: sum of the component ``expected_log_density`` values at ``x``."""
+        rv = self.dists[0].expected_log_density(x[0])
+        for i in range(1, self.count):
+            rv += self.dists[i].expected_log_density(x[i])
+        return rv
+
+    def seq_expected_log_density(self, x: E) -> np.ndarray:
+        """Vectorized prior-expected log-density: sum of the component ``seq_expected_log_density`` values."""
+        rv = self.dists[0].seq_expected_log_density(x[0])
+        for i in range(1, self.count):
+            rv += self.dists[i].seq_expected_log_density(x[i])
+        return rv
 
     def compute_declaration(self):
         from pysp.stats.declarations import DistributionDeclaration, StatisticSpec, declaration_for
@@ -767,7 +829,12 @@ class CompositeAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class CompositeEstimator(ParameterEstimator):
-    def __init__(self, estimators: Sequence[ParameterEstimator], keys: str | None = None) -> None:
+    def __init__(
+        self,
+        estimators: Sequence[ParameterEstimator],
+        keys: str | None = None,
+        prior: Sequence[Any] | None = None,
+    ) -> None:
         """CompositeEstimator object used to estimate CompositeDistribution from sufficient statistics of each
             component.
 
@@ -775,6 +842,9 @@ class CompositeEstimator(ParameterEstimator):
             estimators (List[ParameterEstimator]): List of ParameterEstimator objects for each component of
                 CompositeEstimator.
             keys (Optional[str]): Keys used for merging sufficient statistics of CompositeEstimator objects.
+            prior (Optional): Per-component parameter priors distributed to the child estimators via
+                ``set_prior``. ``None`` (default) leaves each child estimator's prior untouched, so the
+                MLE path stays byte-identical. Each child estimator performs its own conjugate update.
 
         Attributes:
             estimators (List[ParameterEstimator]): List of ParameterEstimator objects for each component of
@@ -786,6 +856,32 @@ class CompositeEstimator(ParameterEstimator):
         self.estimators = estimators
         self.count = len(estimators)
         self.keys = keys
+        self.set_prior(prior)
+
+    def get_prior(self) -> list[Any]:
+        """Return the joint prior as the list of per-component child estimator priors (in order)."""
+        return [est.get_prior() for est in self.estimators]
+
+    def set_prior(self, prior: Sequence[Any] | None) -> None:
+        """Distribute per-component parameter priors to the child estimators.
+
+        ``prior=None`` is a no-op (children keep their existing priors). Otherwise ``prior`` must be a
+        sequence of exactly ``count`` priors pushed to the children via their own ``set_prior``.
+        """
+        if prior is None:
+            return
+        prior = list(prior)
+        if len(prior) != self.count:
+            raise ValueError("CompositeEstimator.set_prior expected %d priors but got %d." % (self.count, len(prior)))
+        for est, p in zip(self.estimators, prior):
+            _distribute_child_prior(est, p)
+
+    def model_log_density(self, model: "CompositeDistribution") -> float:
+        """Sum the child estimators' ``model_log_density`` on the corresponding child models (ELBO global term)."""
+        rv = 0.0
+        for est, d in zip(self.estimators, model.dists):
+            rv += est.model_log_density(d)
+        return rv
 
     def accumulator_factory(self) -> "CompositeAccumulatorFactory":
         """Creates CompositeAccumulatorFactory from each ParameterEstimator in estimators.

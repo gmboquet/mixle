@@ -1,9 +1,10 @@
 """Automatic detection of data type for estimators.
 
-Builds estimators for pysp.stats by default; pass use_bstats=True to build the
-Bayesian (conjugate-prior) estimators from pysp.bstats instead. get_dpm_mixture
-fits a Dirichlet process mixture over automatically-typed data with
-variational inference.
+Builds estimators for pysp.stats. By default the plain maximum-likelihood
+estimators are produced; pass use_bstats=True to build the Bayesian path, which
+attaches the conjugate default prior for each family so estimation performs the
+closed-form conjugate / MAP update. get_dpm_mixture fits a Dirichlet process
+mixture over automatically-typed data with variational inference.
 """
 
 import math
@@ -41,11 +42,78 @@ VALIDATION_VARIANCE_FLOOR = 1.0e-12
 
 
 def _estimator_provider(use_bstats: bool = False):
-    if use_bstats:
-        import pysp.bstats as provider
-    else:
-        import pysp.stats as provider
+    # Both the plain (MLE) and Bayesian (conjugate-prior) paths build pysp.stats
+    # estimators now; ``use_bstats`` only selects whether a conjugate default
+    # prior is attached (see the get_* helpers below). The parameter name is kept
+    # for backwards compatibility -- it now means "build the Bayesian path".
+    import pysp.stats as provider
+
     return provider
+
+
+# Conjugate default priors, one per family. Each is attached when use_bstats=True
+# so the stats estimator runs its closed-form conjugate / MAP update during
+# estimation. Hyperparameters:
+#   gaussian:     NormalGammaDistribution(0.0, 1.0e-8, 0.500001, 1.0)
+#   categorical:  DictDirichletDistribution(1.0 + 1.0e-12)
+#   int_range:    SymmetricDirichletDistribution(1.0 + 1.0e-12)  (scalar symmetric)
+#   poisson:      GammaDistribution(1.0001, 1.0e6)
+#   exponential:  GammaDistribution(1.0001, 1.0e6)
+#   setdist:      BetaDistribution(1, 1)
+#   mvn:          NormalWishart(zeros(d), 1e-8, eye(d)*0.5, d + 2e-6)
+_BAYES_DIRICHLET_ALPHA = 1.0 + 1.0e-12
+
+
+# The conjugate prior families are reached through the ``pysp.stats`` package
+# namespace (an allowed high-level dependency) rather than importing concrete
+# distribution submodules here, keeping this builder free of concrete-class
+# imports (see compute_metadata_test's import-hygiene guard).
+def _gaussian_default_prior():
+    import pysp.stats as provider
+
+    return provider.NormalGammaDistribution(0.0, 1.0e-8, 0.500001, 1.0)
+
+
+def _categorical_default_prior(vdict):
+    import pysp.stats as provider
+
+    return provider.DictDirichletDistribution(_BAYES_DIRICHLET_ALPHA)
+
+
+def _integer_categorical_default_prior():
+    # The stats DirichletDistribution requires an explicit alpha vector, so the
+    # symmetric scalar prior is the SymmetricDirichletDistribution, which the
+    # IntegerCategorical conjugate path accepts and treats identically to a
+    # scalar Dirichlet.
+    import pysp.stats as provider
+
+    return provider.SymmetricDirichletDistribution(_BAYES_DIRICHLET_ALPHA)
+
+
+def _poisson_default_prior():
+    import pysp.stats as provider
+
+    return provider.GammaDistribution(1.0001, 1.0e6)
+
+
+def _exponential_default_prior():
+    import pysp.stats as provider
+
+    return provider.GammaDistribution(1.0001, 1.0e6)
+
+
+def _set_default_prior():
+    import pysp.stats as provider
+
+    return provider.BetaDistribution(1.0, 1.0)
+
+
+def _mvn_default_prior(dim: int):
+    import pysp.stats as provider
+
+    # d-dimensional analogue of NormalGamma(0, 1e-8, 0.500001, 1.0):
+    # nu = 2a + (d-1), W = (2b)^-1 * I
+    return provider.NormalWishartDistribution(np.zeros(dim), 1.0e-8, np.eye(dim) * 0.5, dim + 2.0e-6)
 
 
 DictRecordDistribution = _estimator_provider(False).DictRecordDistribution
@@ -69,9 +137,7 @@ def get_length_estimator(
     cutoff = max(MAX_LENGTH_CATEGORICAL_DISTINCT, MAX_LENGTH_CATEGORICAL_FRACTION * n)
     if len(len_dict) <= cutoff and _dense_integer_support(len_dict):
         return get_integer_categorical_estimator(dict(len_dict), pseudo_count, emp_suff_stat, use_bstats=use_bstats)
-    if use_bstats:
-        return _estimator_provider(True).PoissonEstimator()
-    return get_poisson_estimator(dict(len_dict), pseudo_count, emp_suff_stat)
+    return get_poisson_estimator(dict(len_dict), pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
 
 def get_sequence_estimator(
@@ -98,7 +164,7 @@ def get_set_estimator(
     """Bernoulli set model with membership probabilities from observed sets."""
     BernoulliSetEstimator = _estimator_provider(use_bstats).BernoulliSetEstimator
     if use_bstats:
-        return BernoulliSetEstimator()
+        return BernoulliSetEstimator(prior=_set_default_prior())
     suff_stat = None
     if emp_suff_stat and num_sets > 0:
         suff_stat = {k: v / num_sets for k, v in member_dict.items()}
@@ -122,8 +188,7 @@ def get_categorical_estimator(
 ) -> "ParameterEstimator":
     provider = _estimator_provider(use_bstats)
     if use_bstats:
-        alpha = 1.0 if pseudo_count is None else pseudo_count
-        return provider.CategoricalEstimator(prior=provider.DictDirichletDistribution({k: alpha for k in vdict.keys()}))
+        return provider.CategoricalEstimator(prior=_categorical_default_prior(vdict))
 
     if emp_suff_stat:
         cnt = sum(vdict.values())
@@ -154,7 +219,9 @@ def get_integer_categorical_estimator(
     min_val, max_val, width = _integer_range(vdict)
 
     if use_bstats:
-        return _estimator_provider(True).IntegerCategoricalEstimator(min_val=min_val, max_val=max_val)
+        return _estimator_provider(True).IntegerCategoricalEstimator(
+            min_val=min_val, max_val=max_val, prior=_integer_categorical_default_prior()
+        )
 
     suff_stat = None
     if emp_suff_stat:
@@ -171,8 +238,11 @@ def get_integer_categorical_estimator(
 
 
 def get_poisson_estimator(
-    vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True
+    vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
+
+    if use_bstats:
+        return _estimator_provider(True).PoissonEstimator(prior=_poisson_default_prior())
 
     if emp_suff_stat:
         ss_0 = 0.0
@@ -221,15 +291,7 @@ def get_gaussian_estimator(
         ss_2 = None
 
     if use_bstats:
-        provider = _estimator_provider(True)
-
-        # weakly data-informed normal-gamma prior centered on the empirical
-        # moments (when available)
-        mu0 = ss_1 if ss_1 is not None else 0.0
-        v0 = ss_2 if (ss_2 is not None and ss_2 > 0) else 1.0
-        a0 = 1.001
-        prior = provider.NormalGammaDistribution(mu0, 1.0e-3, a0, a0 * v0)
-        return provider.GaussianEstimator(prior=prior)
+        return _estimator_provider(True).GaussianEstimator(prior=_gaussian_default_prior())
 
     return _estimator_provider(False).GaussianEstimator(
         pseudo_count=(pseudo_count, pseudo_count), suff_stat=(ss_1, ss_2)
@@ -237,7 +299,9 @@ def get_gaussian_estimator(
 
 
 def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> "ParameterEstimator":
-    return _estimator_provider(use_bstats).MultivariateGaussianEstimator(dim=dim)
+    if use_bstats:
+        return _estimator_provider(True).MultivariateGaussianEstimator(dim=dim, prior=_mvn_default_prior(dim))
+    return _estimator_provider(False).MultivariateGaussianEstimator(dim=dim)
 
 
 @dataclass
@@ -1198,8 +1262,8 @@ def analyze_structure(
     observed_rows = [u for u in rows if u is not None]
     if use_bstats and observed_rows and all(isinstance(u, dict) for u in observed_rows):
         warnings.append(
-            "dict records are profiled by key, but bstats automatic estimator construction "
-            "currently leaves dict-valued observations ignored"
+            "dict records are profiled by key, but the Bayesian (conjugate-prior) automatic "
+            "estimator construction currently leaves dict-valued observations ignored"
         )
     for field_profile in fields:
         if (
@@ -1514,9 +1578,7 @@ class DatumNode:
             if recommendation == "categorical":
                 return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
             if recommendation == "poisson":
-                if use_bstats:
-                    return _estimator_provider(True).PoissonEstimator()
-                return get_poisson_estimator(self.vdict, pseudo_count, emp_suff_stat)
+                return get_poisson_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
             return get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
         return get_ignored_estimator(use_bstats=use_bstats)
@@ -1710,8 +1772,9 @@ def get_dpm_mixture(
     """Fit a Dirichlet process mixture to automatically-typed data.
 
     Component estimators are constructed with get_estimator(use_bstats=True)
-    (one independent instance per stick), and the truncated stick-breaking
-    posterior is fit with variational inference via pysp.bstats.bestimation.optimize.
+    (one independent conjugate-prior instance per stick), and the truncated
+    stick-breaking posterior is fit with variational inference via
+    pysp.utils.estimation.fit.
 
     Args:
         data: Sequence of observations of any auto-detectable type.
@@ -1728,8 +1791,8 @@ def get_dpm_mixture(
     """
     import sys
 
-    from pysp.bstats import DirichletProcessMixtureEstimator
-    from pysp.bstats.bestimation import optimize
+    import pysp.stats as provider
+    from pysp.utils.estimation import fit
 
     if rng is None:
         rng = np.random.RandomState()
@@ -1737,6 +1800,6 @@ def get_dpm_mixture(
         out = sys.stdout
 
     comp_ests = [get_estimator(data, pseudo_count=pseudo_count, use_bstats=True) for _ in range(max_components)]
-    est = DirichletProcessMixtureEstimator(comp_ests)
+    est = provider.DirichletProcessMixtureEstimator(comp_ests)
 
-    return optimize(data, est, max_its=max_its, delta=delta, rng=rng, print_iter=print_iter, out=out)
+    return fit(data, est, max_its=max_its, delta=delta, rng=rng, print_iter=print_iter, out=out)

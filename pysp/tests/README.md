@@ -24,7 +24,10 @@ separately so they can be enabled in dedicated jobs.
 - `enumeration`: finite/infinite support enumerators and quantized indexes.
 - `fisher`: Fisher views, sufficient statistics, and model metrics.
 - `htsne`: affinity construction and embedding behavior.
-- `hmm`, `pcfg`, `latent`, `bstats`, `automatic`: subsystem integration.
+- `hmm`, `pcfg`, `latent`, `automatic`: subsystem integration. Bayesian
+  behavior (conjugate priors, variational families) now lives in `pysp.stats`
+  and is exercised under the `distribution`, `serialization`, and `stochastic`
+  markers rather than a separate marker.
 - `kernel`, `torch`, `numba`, `parallel`, `planner`, `mpi`: implementation
   backends and resource-planning surfaces.
 - `stochastic`, `slow`, `benchmark`, `optional`: CI scheduling tiers.

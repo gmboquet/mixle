@@ -632,7 +632,7 @@ def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> tuple[np.nd
 
     Uses the model's seq_posterior/seq_component_log_density when available and
     otherwise computes both from the component distributions and log weights,
-    which covers pysp.stats mixtures and pysp.bstats DPM models alike.
+    which covers pysp.stats finite mixtures and Dirichlet process mixtures alike.
     """
     if enc_data is None:
         if hasattr(mix_model, "dist_to_encoder"):

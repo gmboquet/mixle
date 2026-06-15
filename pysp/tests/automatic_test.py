@@ -127,7 +127,7 @@ class AutomaticDetectionTestCase(unittest.TestCase):
             ll = model.log_density(data[0])
             self.assertTrue(np.isfinite(ll) or ll == -np.inf)
 
-    def test_bstats_estimators_constructible(self):
+    def test_bayesian_estimators_constructible(self):
         for data in (
             [("a", 1.5, [1.0, 2.0]), ("b", 2.5, [0.5, 1.5])] * 30,
             [["a", "b"], ["a"], ["b", "c", "a"]] * 20,
@@ -193,15 +193,18 @@ class AutomaticDetectionTestCase(unittest.TestCase):
         self.assertEqual(profile.recommend().dim, 3)
         self.assertEqual(len(profile.fields), 3)
 
-    def test_bstats_integral_float_record_fields_are_fittable(self):
-        from pysp.bstats import estimate as bstats_estimate
-        from pysp.bstats import initialize as bstats_initialize
+    def test_bayesian_integral_float_record_fields_are_fittable(self):
+        from pysp.stats import initialize
+        from pysp.stats.normgamma import NormalGammaDistribution
+        from pysp.utils.estimation import fit
 
         data = [(0.0, float(i % 4) + 0.25) for i in range(80)]
         est = get_estimator(data, use_bstats=True)
         self.assertEqual(type(est.estimators[0]).__name__, "GaussianEstimator")
-        init = bstats_initialize(data, est, rng=np.random.RandomState(1), p=1.0)
-        model = bstats_estimate(data, est, init)
+        # Bayesian path: each Gaussian leaf carries the conjugate default prior.
+        self.assertIsInstance(est.estimators[0].prior, NormalGammaDistribution)
+        init = initialize(data, est, rng=np.random.RandomState(1), p=1.0)
+        model = fit(data, est, prev_estimate=init, rng=np.random.RandomState(1))
         self.assertTrue(np.isfinite(model.log_density(data[0])) or model.log_density(data[0]) == -np.inf)
 
 

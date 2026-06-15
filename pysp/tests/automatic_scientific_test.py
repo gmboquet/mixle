@@ -351,19 +351,24 @@ class AutomaticScientificProfilingTestCase(unittest.TestCase):
         self.assertIn(frozenset((signal_path, mirror_path)), hint_pairs)
         self.assertNotIn(frozenset((signal_path, noise_path)), hint_pairs)
 
-    def test_bstats_dict_records_warn_about_estimator_gap(self):
+    def test_bayesian_dict_records_warn_about_estimator_gap(self):
         data = [{"kind": "a", "count": 1}, {"kind": "b"}] * 40
         profile = analyze_structure(data, pairwise=False, use_bstats=True)
-        self.assertTrue(any("bstats automatic estimator" in warning for warning in profile.warnings))
+        self.assertTrue(any("Bayesian (conjugate-prior) automatic" in warning for warning in profile.warnings))
 
-    def test_bstats_gaussian_provider_uses_public_prior_export(self):
-        import pysp.bstats as bstats
+    def test_bayesian_gaussian_provider_carries_conjugate_default_prior(self):
+        from pysp.stats import GaussianEstimator
+        from pysp.stats.normgamma import NormalGammaDistribution
 
         est = get_estimator([1.0, 2.0, 3.0] * 20, use_bstats=True)
 
-        self.assertTrue(hasattr(bstats, "NormalGammaDistribution"))
-        self.assertIsInstance(est, bstats.GaussianEstimator)
-        self.assertIsInstance(est.prior, bstats.NormalGammaDistribution)
+        # The Bayesian path now builds a pysp.stats estimator carrying the
+        # conjugate default NormalGamma prior, so estimation runs the
+        # closed-form conjugate / MAP update.
+        self.assertIsInstance(est, GaussianEstimator)
+        self.assertIsInstance(est.prior, NormalGammaDistribution)
+        self.assertTrue(est.has_conj_prior)
+        self.assertEqual((est.prior.mu, est.prior.lam, est.prior.a, est.prior.b), (0.0, 1.0e-8, 0.500001, 1.0))
 
     def test_stratified_pair_budget_can_find_late_field_dependency(self):
         rng = np.random.RandomState(15)

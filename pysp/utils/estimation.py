@@ -578,6 +578,120 @@ def optimize(
             enc_data.close()
 
 
+def _data_objective_sum(enc_data: Any, model: SequenceEncodableProbabilityDistribution) -> float:
+    """Data-dependent part of the Bayesian fit objective.
+
+    For variational models exposing ``seq_local_elbo`` (e.g. variational mixtures, DPM) this is the
+    sum of per-observation local ELBO contributions; otherwise it is the observed-data log-likelihood
+    at the current (MAP) parameter estimates.
+    """
+    if hasattr(model, "seq_local_elbo"):
+        return float(sum(model.seq_local_elbo(u[1]).sum() for u in enc_data))
+    _, rv = seq_log_density_sum(enc_data, model)
+    return rv
+
+
+def _model_objective(estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution) -> float:
+    """Prior/global part of the Bayesian fit objective.
+
+    For MAP estimators this is the log-prior density of the estimated parameters; for variational
+    estimators it is the data-independent part of the ELBO (prior cross-entropies plus variational
+    entropies). Returns ``0.0`` when the estimator carries no usable prior.
+    """
+    fn = getattr(estimator, "model_log_density", None)
+    if fn is None:
+        return 0.0
+    rv = fn(model)
+    return 0.0 if rv is None else float(rv)
+
+
+def fit(
+    data: Sequence[T] | None,
+    estimator: ParameterEstimator,
+    max_its: int = 10,
+    delta: float | None = 1.0e-6,
+    init_estimator: ParameterEstimator | None = None,
+    init_p: float = 0.1,
+    rng: RandomState = RandomState(),
+    prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
+    vdata: Sequence[T] | None = None,
+    enc_data: list[tuple[int, E0]] | None = None,
+    enc_vdata: list[tuple[int, E0]] | None = None,
+    out: IO | None = sys.stdout,
+    print_iter: int = 1,
+) -> SequenceEncodableProbabilityDistribution:
+    """Fit a model in the Bayesian (variational / MAP) sense, returning the posterior-bearing model.
+
+    This is the posterior-returning counterpart of :func:`optimize`. Where ``optimize`` maximizes the
+    plain data log-likelihood (returning a point/MLE model), ``fit`` iterates the EM/VB update that
+    maximizes the penalized objective ``obj = data term + prior term``:
+
+      - ``data term`` is the observed-data log-likelihood (MAP estimators) or the local-ELBO
+        contributions (variational estimators exposing ``seq_local_elbo``);
+      - ``prior term`` is ``estimator.model_log_density(model)`` (the log-prior / ELBO global term).
+
+    Convergence is checked on the combined objective, so the prior is part of the stopping rule, and
+    conjugate updates never decrease it. The returned model carries its conjugate posterior forward as
+    ``model.get_prior()``. An estimator with no prior (``model_log_density == 0``) reduces this to a
+    plain EM fit, so ``fit`` and ``optimize`` agree for frequentist estimators.
+
+    Args mirror :func:`optimize` (local encoded path). Returns the model with the best validation
+    log-likelihood seen during the run.
+    """
+    if data is None and enc_data is None:
+        raise Exception("fit called with empty data or enc_data.")
+
+    est = estimator if init_estimator is None else init_estimator
+    div_error = np.seterr(divide="ignore")
+    try:
+        encoder = _resolve_encoder(est, prev_estimate)
+        if enc_data is None:
+            enc_data = seq_encode(data, encoder)
+        if enc_vdata is None:
+            enc_vdata = enc_data if vdata is None else seq_encode(vdata, encoder)
+
+        if prev_estimate is None:
+            p = 0.10 if init_p <= 0.0 else min(max(init_p, 0.0), 1.0)
+            mm = seq_initialize(enc_data=enc_data, estimator=est, rng=rng, p=p)
+        else:
+            mm = prev_estimate
+
+        old_obj = _data_objective_sum(enc_data, mm) + _model_objective(estimator, mm)
+        _, best_vll = seq_log_density_sum(enc_vdata, mm)
+        best_model = mm
+
+        for i in range(max(1, max_its)):
+            mm_next = seq_estimate(enc_data, estimator, mm)
+
+            data_ll = _data_objective_sum(enc_data, mm_next)
+            model_ll = _model_objective(estimator, mm_next)
+            obj = data_ll + model_ll
+            _, vll = seq_log_density_sum(enc_vdata, mm_next)
+            dobj = obj - old_obj
+
+            if (dobj >= 0) or (delta is None):
+                mm = mm_next
+                if best_vll < vll:
+                    best_vll = vll
+                    best_model = mm
+
+            converged = (delta is not None) and (dobj < delta)
+            if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
+                label = "Terminating" if converged else "Iteration"
+                out.write(
+                    "%s %d. OBJ=%f, dOBJ=%e, LL=%f, MLL=%f, VLL=%f\n"
+                    % (label, i + 1, obj, dobj, data_ll, model_ll, vll)
+                )
+            if converged:
+                break
+
+            old_obj = obj
+
+        return best_model
+    finally:
+        np.seterr(**div_error)
+
+
 def constant(rho: float):
     """Return a constant streaming step-size schedule."""
     if rho <= 0.0 or rho > 1.0:
@@ -601,6 +715,158 @@ def harmonic(alpha: float, offset: float = 1.0):
         return float((offset + tt - 1.0) ** (-alpha))
 
     return schedule
+
+
+def posterior_carry() -> str:
+    """Return the recursive-conjugate streaming mode name.
+
+    In ``posterior_carry`` mode each fitted posterior becomes the next batch's prior, i.e. the
+    stream performs exact recursive Bayesian updating: the conjugate posterior after batch ``t`` is
+    fed in as the conjugate prior for batch ``t + 1``.
+    """
+    return "posterior_carry"
+
+
+def forgetting(rho: float):
+    """Return a constant forgetting / power-prior schedule for streaming Bayes.
+
+    ``rho`` in ``(0, 1]`` down-weights each incoming batch's sufficient statistics by a constant
+    factor before the conjugate ``estimate`` call, so older evidence decays geometrically. ``rho=1``
+    recovers ordinary (un-forgotten) accumulation.
+    """
+    if rho <= 0.0 or rho > 1.0:
+        raise ValueError("forgetting(rho) requires 0 < rho <= 1.")
+
+    def schedule(t: int) -> float:
+        return float(rho)
+
+    return schedule
+
+
+def _stream_accumulate(
+    enc_data: Any,
+    estimator: ParameterEstimator,
+    model: SequenceEncodableProbabilityDistribution,
+) -> tuple[float, Any]:
+    """Accumulate one encoded batch's globally tied sufficient statistics.
+
+    Returns ``(nobs, suff_stat)`` where ``suff_stat`` is the accumulator ``value()`` after the
+    key-merge/key-replace pass that ties globally shared parameters across the batch.
+    """
+    accumulator = estimator.accumulator_factory().make()
+    nobs = 0.0
+    for sz, enc in enc_data:
+        nobs += sz
+        accumulator.seq_update(enc, np.ones(sz), model)
+
+    stats_dict: dict[Any, Any] = dict()
+    accumulator.key_merge(stats_dict)
+    accumulator.key_replace(stats_dict)
+    return nobs, accumulator
+
+
+class BayesianStreamingEstimator:
+    """Streaming / recursive-Bayes driver over the pysp.stats estimator protocol.
+
+    ``mode='posterior_carry'`` (the default) performs exact recursive conjugate updating: each fitted
+    posterior is carried forward as the next batch's prior by rebuilding the estimator from the fitted
+    model (``model.estimator()`` returns an estimator whose prior is the model's posterior).
+
+    ``mode='forgetting'`` applies a power-prior step: the current batch's accumulated sufficient
+    statistics are scaled by ``rho = schedule(step)`` (via the accumulator's ``scale``, which
+    preserves structural support metadata such as a categorical's ``min_val``) before the ordinary
+    conjugate ``estimate`` call, and the batch's contribution to ``nobs`` is scaled to match.
+
+    The public surface is ``BayesianStreamingEstimator(estimator, mode=..., schedule=...)`` plus
+    ``.update(data=None, enc_data=None)`` and ``.reset()``.
+    """
+
+    def __init__(
+        self,
+        estimator: ParameterEstimator,
+        mode: str | None = "posterior_carry",
+        schedule: Any | None = None,
+        model: SequenceEncodableProbabilityDistribution | None = None,
+        init_estimator: ParameterEstimator | None = None,
+        init_p: float = 0.1,
+        rng: RandomState = RandomState(),
+        num_chunks: int = 1,
+    ) -> None:
+        self.estimator = estimator
+        self.init_estimator = estimator if init_estimator is None else init_estimator
+        self.mode = posterior_carry() if mode is None else mode
+        self.schedule = schedule
+        if self.mode == "forgetting" and self.schedule is None:
+            self.schedule = forgetting(1.0)
+        if self.mode not in ("posterior_carry", "forgetting"):
+            raise ValueError("mode must be 'posterior_carry' or 'forgetting'.")
+        self.model = model
+        self.init_p = init_p
+        self.rng = rng
+        self.num_chunks = num_chunks
+        self.step = 0
+        self.nobs = 0.0
+        if model is not None:
+            self._carry_prior_from(model)
+
+    def _carry_prior_from(self, model: SequenceEncodableProbabilityDistribution) -> None:
+        """Carry the model's posterior forward as the estimator's prior for the next batch.
+
+        ``model.estimator()`` returns a fresh estimator whose conjugate prior is the model's current
+        posterior; rebuilding from it carries that posterior forward as the next batch's conjugate
+        prior. Falls back to leaving the estimator unchanged when the model can't supply one.
+        """
+        make_estimator = getattr(model, "estimator", None)
+        if callable(make_estimator):
+            self.estimator = make_estimator()
+
+    def _ensure_model(self, data: Sequence[T] | None, enc_data: Any | None) -> None:
+        if self.model is not None:
+            return
+        if enc_data is None and data is None:
+            raise ValueError("BayesianStreamingEstimator.update requires data for initialization.")
+        p = min(max(self.init_p, 0.0), 1.0) if self.init_p > 0.0 else 0.1
+        enc = enc_data if enc_data is not None else self._encode(data)
+        self.model = seq_initialize(enc_data=enc, estimator=self.init_estimator, rng=self.rng, p=p)
+        self._carry_prior_from(self.model)
+
+    def _encode(self, data: Sequence[T]) -> Any:
+        encoder = self.model.dist_to_encoder()
+        return seq_encode(data, encoder, num_chunks=self.num_chunks)
+
+    def _encode_batch(self, data: Sequence[T] | None, enc_data: Any | None) -> Any:
+        if enc_data is not None:
+            return enc_data
+        if data is None:
+            raise ValueError("BayesianStreamingEstimator.update requires data or enc_data.")
+        return self._encode(data)
+
+    def update(
+        self, data: Sequence[T] | None = None, enc_data: Any | None = None
+    ) -> SequenceEncodableProbabilityDistribution:
+        """Consume one batch and return the updated posterior-bearing model."""
+        self._ensure_model(data, enc_data)
+        enc_batch = self._encode_batch(data, enc_data)
+        batch_nobs, accumulator = _stream_accumulate(enc_batch, self.estimator, self.model)
+
+        if self.mode == "forgetting":
+            rho = float(self.schedule(self.step + 1))
+            if rho <= 0.0 or rho > 1.0:
+                raise ValueError("forgetting schedule returned %r; expected 0 < rho <= 1." % rho)
+            accumulator.scale(rho)
+            batch_nobs *= rho
+
+        self.model = self.estimator.estimate(batch_nobs, accumulator.value())
+        self._carry_prior_from(self.model)
+        self.nobs += batch_nobs
+        self.step += 1
+        return self.model
+
+    def reset(self) -> None:
+        """Drop the current model and stream counters."""
+        self.model = None
+        self.step = 0
+        self.nobs = 0.0
 
 
 def iterate(

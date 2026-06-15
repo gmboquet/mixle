@@ -71,7 +71,7 @@ markers = [
     "stochastic: tests whose assertions depend on random sampling.",
     "integration: end-to-end workflow tests across multiple modules.",
     "distribution: distribution interface, density, sampler, estimator, and encoder tests.",
-    "bstats: Bayesian stats distribution and optimizer tests.",
+    "bayes: Bayesian (conjugate/variational) distribution and fit/streaming tests.",
     "automatic: automatic model detection/profiling tests.",
     "enumeration: support enumeration and quantized-index tests.",
     "fisher: Fisher information/view tests.",

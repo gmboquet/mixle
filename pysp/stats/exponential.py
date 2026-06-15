@@ -15,6 +15,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
+from pysp.stats.gamma import GammaDistribution
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -23,6 +24,7 @@ from pysp.stats.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.special import digamma
 
 
 class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
@@ -80,7 +82,12 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         xx = engine.asarray(x)
         return engine.where(xx >= 0.0, xx * 0.0, engine.asarray(-np.inf))
 
-    def __init__(self, beta: float, name: str | None = None):
+    def __init__(
+        self,
+        beta: float,
+        name: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
+    ):
         """ExponentialDistribution object for scale beta, with mean beta.
 
         Data type: float.
@@ -91,6 +98,10 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         Args:
             beta (float): Positive valued real number defining scale of exponential distribution.
             name (Optional[str]): Assign a name to ExponentialDistribution object.
+            prior (Optional): Conjugate parameter prior over the rate ``1/beta``. A
+                :class:`~pysp.stats.gamma.GammaDistribution` enables the Bayesian/variational
+                machinery (``expected_log_density`` and the conjugate posterior update); ``None``
+                (default) is a plain point model.
 
         Attributes:
             beta (float): Positive valued real number defining scale of exponential distribution.
@@ -103,10 +114,53 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         self.beta = float(beta)
         self.log_beta = np.log(self.beta)
         self.name = name
+        self.set_prior(prior)
 
     def __str__(self) -> str:
         """Returns string representation of ExponentialDistribution instance."""
         return "ExponentialDistribution(%s, name=%s)" % (repr(self.beta), repr(self.name))
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Attach a parameter prior and precompute the conjugate Gamma expectations.
+
+        The exponential rate is ``1/beta``; with a Gamma(k, theta) prior on that rate this
+        caches the variational expected natural parameters so that
+        ``expected_log_density(x) = e1*x - ea`` where the natural parameter is ``eta = -rate``,
+        ``E[eta] = -k*theta`` and ``E[-log(-eta)] = psi(k) + ln theta`` (mapping the prior's
+        ``(k, theta)`` to the bstats ``[a, b] = [k, 1/theta]`` form). Any other prior (including
+        ``None``) leaves the distribution a plain point model.
+        """
+        self.prior = prior
+        if isinstance(prior, GammaDistribution):
+            k, theta = prior.get_parameters()
+            a, b = k, 1.0 / theta
+            self.conj_prior_params = (a, b)
+            e1 = -a / b
+            ea = -(digamma(a) - log(b))
+            self.expected_nparams = (ea, 0.0, e1)
+            self.has_conj_prior = True
+        else:
+            self.conj_prior_params = None
+            self.expected_nparams = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: float) -> float:
+        """Variational expectation E_q[log p(x | rate)] under the Gamma prior.
+
+        Falls back to the plug-in ``log_density(x)`` when no conjugate prior is attached.
+        """
+        if not self.has_conj_prior:
+            return self.log_density(x)
+        ea, eb, e1 = self.expected_nparams
+        return -inf if x < 0 else e1 * x + (eb - ea)
+
+    def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations."""
+        if not self.has_conj_prior:
+            return self.seq_log_density(x)
+        ea, eb, e1 = self.expected_nparams
+        rv = e1 * x + (eb - ea)
+        return np.where(x >= 0.0, rv, -np.inf)
 
     def density(self, x: float) -> float:
         """Evaluate the density of exponential distribution with scale beta.
@@ -212,9 +266,11 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return ExponentialEstimator(name=self.name)
+            return ExponentialEstimator(name=self.name, prior=self.prior)
         else:
-            return ExponentialEstimator(pseudo_count=pseudo_count, suff_stat=self.beta, name=self.name)
+            return ExponentialEstimator(
+                pseudo_count=pseudo_count, suff_stat=self.beta, name=self.name, prior=self.prior
+            )
 
     def dist_to_encoder(self) -> "ExponentialDataEncoder":
         """Returns an ExponentialDataEncoder object."""
@@ -437,6 +493,7 @@ class ExponentialEstimator(ParameterEstimator):
         suff_stat: float | None = None,
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """ExponentialEstimator object estimates ExponentialDistribution from aggregated sufficient statistics.
 
@@ -445,6 +502,10 @@ class ExponentialEstimator(ParameterEstimator):
             suff_stat (Optional[float]): Positive float value for scale of exponential distribution.
             name (Optional[str]): Assign a name to ExponentialEstimator.
             keys (Optional[str]): Assign keys to ExponentialEstimator for combining sufficient statistics.
+            prior (Optional): Conjugate Gamma prior over the rate ``1/beta``. When present,
+                ``estimate`` performs the closed-form conjugate posterior update (returning the
+                Gamma-posterior-mode rate and carrying the posterior forward as the fitted model's
+                prior) instead of the maximum-likelihood / pseudo-count update.
 
         Attributes:
             pseudo_count (Optional[float]): Used to weight sufficient statistics.
@@ -457,10 +518,34 @@ class ExponentialEstimator(ParameterEstimator):
         self.suff_stat = suff_stat
         self.keys = keys
         self.name = name
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, GammaDistribution)
 
     def accumulator_factory(self) -> "ExponentialAccumulatorFactory":
         """Create ExponentialAccumulatorFactory object with keys passed."""
         return ExponentialAccumulatorFactory(self.keys)
+
+    def model_log_density(self, model: "ExponentialDistribution") -> float:
+        """Log-density of the model's rate (1/beta) under the Gamma prior (ELBO global term)."""
+        if self.has_conj_prior:
+            return float(self.prior.log_density(1.0 / model.beta))
+        return 0.0
+
+    def _estimate_conjugate(self, suff_stat: tuple[float, float]) -> "ExponentialDistribution":
+        """Closed-form Gamma conjugate posterior update returning the posterior-mode estimate.
+
+        The Gamma prior is over the rate; ``[a, b] = [k, 1/theta]`` maps the prior's (k, theta).
+        The posterior is Gamma(n, 1/s) with ``n = count + a`` and ``s = sum + b``, the posterior-mode
+        rate is ``(n - 1)/s``, and the returned scale is its reciprocal ``s/(n - 1)``.
+        """
+        k, theta = self.prior.get_parameters()
+        a, b = k, 1.0 / theta
+
+        n = suff_stat[0] + a
+        s = suff_stat[1] + b
+
+        rate = (n - 1.0) / s
+        return ExponentialDistribution(1.0 / rate, name=self.name, prior=GammaDistribution(n, 1.0 / s))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "ExponentialDistribution":
         """Estimate ExponentialDistribution from suff_stat arg.
@@ -477,6 +562,9 @@ class ExponentialEstimator(ParameterEstimator):
             ExponentialDistribution object.
 
         """
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
+
         if self.pseudo_count is not None and self.suff_stat is not None:
             p = (suff_stat[1] + self.suff_stat * self.pseudo_count) / (suff_stat[0] + self.pseudo_count)
         elif self.pseudo_count is not None and self.suff_stat is None:
