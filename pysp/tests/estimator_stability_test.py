@@ -2,9 +2,6 @@ import unittest
 
 import numpy as np
 
-from pysp.bstats.dirichlet import DirichletDistribution as BayesianDirichletDistribution
-from pysp.bstats.dirichlet import DirichletEstimator as BayesianDirichletEstimator
-from pysp.bstats.gamma import GammaEstimator as BayesianGammaEstimator
 from pysp.stats.dirichlet import DirichletDistribution, DirichletEstimator
 from pysp.stats.gamma import GammaDistribution, GammaEstimator
 
@@ -28,11 +25,18 @@ class GammaEstimatorStabilityTestCase(unittest.TestCase):
         ss = (len(data), float(data.sum()), float(np.log(data).sum()))
         self.assert_valid_gamma(GammaEstimator().estimate(None, ss), float(data.mean()))
 
-    def test_bstats_gamma_nearly_degenerate_data_stays_finite(self):
+    def test_gamma_conjugate_map_nearly_degenerate_data_stays_finite(self):
+        # The Bayesian/conjugate path (pseudo_count-regularized MAP) must stay finite
+        # on the same near-degenerate data that the MLE path handles.
         for value in (1.0e-9, 2.0, 1.0e9):
             data = np.full(40, value)
             ss = (len(data), float(data.sum()), float(np.log(data).sum()))
-            self.assert_valid_gamma(BayesianGammaEstimator().estimate(ss), value)
+            est = GammaDistribution(2.0, value if value > 0 else 1.0).estimator(pseudo_count=1.0)
+            dist = est.estimate(None, ss)
+            self.assertTrue(np.isfinite(dist.k))
+            self.assertTrue(np.isfinite(dist.theta))
+            self.assertGreater(dist.k, 0.0)
+            self.assertGreater(dist.theta, 0.0)
 
     def test_gamma_nonpositive_density_is_zero_not_nan(self):
         dist = GammaDistribution(2.0, 3.0)
@@ -45,11 +49,8 @@ class DirichletEstimatorStabilityTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(dist.alpha)))
         self.assertTrue(np.all(dist.alpha > 0.0))
 
-    def dirichlet_suff_stat(self, data, bayesian=False):
-        if bayesian:
-            enc = BayesianDirichletDistribution(np.ones(len(data[0]))).seq_encode(data)
-        else:
-            enc = DirichletDistribution(np.ones(len(data[0]))).dist_to_encoder().seq_encode(data)
+    def dirichlet_suff_stat(self, data):
+        enc = DirichletDistribution(np.ones(len(data[0]))).dist_to_encoder().seq_encode(data)
         return len(data), enc[0].sum(axis=0), enc[1].sum(axis=0), enc[2].sum(axis=0)
 
     def test_stats_dirichlet_zero_count_returns_valid_default(self):
@@ -80,9 +81,12 @@ class DirichletEstimatorStabilityTestCase(unittest.TestCase):
         data = np.vstack([base + [0.0, 0.0, 0.0], base + [1.0e-12, -1.0e-12, 0.0]] * 20)
         self.assert_valid_dirichlet(DirichletEstimator(dim=3).estimate(None, self.dirichlet_suff_stat(data)))
 
-    def test_bstats_dirichlet_zero_count_and_zero_entries_stay_finite(self):
+    def test_dirichlet_conjugate_map_zero_count_and_zero_entries_stay_finite(self):
+        # The pseudo_count-regularized (conjugate-MAP) path must also stay finite on
+        # zero-count and degenerate-entry data.
+        est0 = DirichletDistribution([2.0, 3.0, 4.0]).estimator(pseudo_count=2.0)
         ss0 = (0.0, np.zeros(3), np.zeros(3), np.zeros(3))
-        self.assert_valid_dirichlet(BayesianDirichletEstimator(dim=3).estimate(ss0))
+        self.assert_valid_dirichlet(est0.estimate(None, ss0))
 
         data = np.asarray(
             [
@@ -91,9 +95,9 @@ class DirichletEstimatorStabilityTestCase(unittest.TestCase):
                 [0.2, 0.3, 0.5],
             ]
         )
-        ss = self.dirichlet_suff_stat(data, bayesian=True)
-        self.assert_valid_dirichlet(BayesianDirichletEstimator(dim=3).estimate(ss))
-        self.assert_valid_dirichlet(BayesianDirichletEstimator(dim=3, use_mpe=True).estimate(ss))
+        ss = self.dirichlet_suff_stat(data)
+        self.assert_valid_dirichlet(DirichletEstimator(dim=3, pseudo_count=2.0).estimate(None, ss))
+        self.assert_valid_dirichlet(DirichletEstimator(dim=3, pseudo_count=2.0, use_mpe=True).estimate(None, ss))
 
 
 if __name__ == "__main__":

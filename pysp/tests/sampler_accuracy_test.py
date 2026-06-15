@@ -3,7 +3,6 @@ import unittest
 
 import numpy as np
 
-import pysp.bstats as bstats
 import pysp.stats as stats
 
 
@@ -142,13 +141,15 @@ class SamplerAccuracyTestCase(unittest.TestCase):
         )
         self.assert_markov_transition_rates(hmm.sampler(seed=47).sample(size=n), init, trans)
 
-        bhmm = bstats.HiddenMarkovModelDistribution(
-            [bstats.CategoricalDistribution({0: 1.0}), bstats.CategoricalDistribution({1: 1.0})],
+        # The numba-backed HMM sampler path must reproduce the same transition rates.
+        hmm_numba = stats.HiddenMarkovModelDistribution(
+            [stats.CategoricalDistribution({0: 1.0}), stats.CategoricalDistribution({1: 1.0})],
             init,
             trans,
-            len_dist=bstats.CategoricalDistribution({30: 1.0}),
+            len_dist=stats.CategoricalDistribution({30: 1.0}),
+            use_numba=True,
         )
-        self.assert_markov_transition_rates(bhmm.sampler(seed=53).sample(size=n), init, trans)
+        self.assert_markov_transition_rates(hmm_numba.sampler(seed=53).sample(size=n), init, trans)
 
     def test_nested_child_samplers_are_not_reusing_identical_streams(self):
         n = 30_000

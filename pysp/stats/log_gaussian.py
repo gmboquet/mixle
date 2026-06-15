@@ -15,6 +15,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
+from pysp.stats.normgamma import NormalGammaDistribution
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -23,6 +24,7 @@ from pysp.stats.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.special import digamma
 
 
 class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
@@ -89,13 +91,23 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
         """Return log-Gaussian base measure for generated scoring."""
         return -engine.asarray(x)
 
-    def __init__(self, mu: float, sigma2: float, name: str | None = None) -> None:
+    def __init__(
+        self,
+        mu: float,
+        sigma2: float,
+        name: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
+    ) -> None:
         """LogGaussianDistribution object defines Gaussian distribution with mean mu and variance sigma2.
 
         Args:
             mu (float): Real-valued number.
             sigma2 (float): Positive real-valued number.
             name (Optional[str]): String for name of object.
+            prior (Optional): Conjugate parameter prior over (mu, tau=1/sigma2) of log(X). A
+                :class:`~pysp.stats.normgamma.NormalGammaDistribution` enables the
+                Bayesian/variational machinery (``expected_log_density`` and the conjugate
+                posterior update); ``None`` (default) is a plain point model.
 
         Attributes:
             mu (float): Location parameter for log-Gaussian distribution.
@@ -110,6 +122,49 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
         self.log_const = -0.5 * log(2.0 * pi * self.sigma2)
         self.const = 1.0 / sqrt(2.0 * pi * self.sigma2)
         self.name = name
+        self.set_prior(prior)
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Attach a parameter prior and precompute conjugate-prior expectations.
+
+        With a NormalGamma(mu0, lam, a, b) prior over (mu, tau=1/sigma2) of log(X) this caches
+        the variational expected natural parameters [ea, eb, e1, e2] exactly as in the Gaussian
+        case, so that ``expected_log_density(x) = y*(e1 + y*e2) - ea + eb - y`` with y = log(x).
+        Any other prior (including ``None``) leaves the distribution a plain point model.
+        """
+        self.prior = prior
+        if isinstance(prior, NormalGammaDistribution):
+            mu, lam, a, b = prior.get_parameters()
+            ea = (mu * mu) * (a / b) * 0.5 + (0.5 / lam) + 0.5 * (np.log(b) - digamma(a))
+            e1 = mu * a / b
+            e2 = -0.5 * a / b
+            eb = -0.5 * np.log(2 * np.pi)
+            self.expected_nparams = [ea, eb, e1, e2]
+            self.has_conj_prior = True
+        else:
+            self.expected_nparams = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: float) -> float:
+        """Variational expectation E_q[log p(x | mu, tau)] under the NormalGamma prior.
+
+        With a conjugate prior this is the Gaussian VB expected log-likelihood evaluated at
+        log(x), plus the Jacobian term -log(x); without a prior it falls back to log_density(x).
+        """
+        if self.has_conj_prior:
+            if x <= 0:
+                return -np.inf
+            y = np.log(x)
+            ea, eb, e1, e2 = self.expected_nparams
+            return y * (e1 + y * e2) - ea + eb - y
+        return self.log_density(x)
+
+    def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded (logged) observations."""
+        if self.has_conj_prior:
+            ea, eb, e1, e2 = self.expected_nparams
+            return x * (e1 + x * e2) - ea + eb - x
+        return self.seq_log_density(x)
 
     def __str__(self) -> str:
         """Returns string representation of object instance."""
@@ -247,9 +302,11 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
         """
         if pseudo_count is not None:
             suff_stat = (self.mu, self.sigma2)
-            return LogGaussianEstimator(pseudo_count=(pseudo_count, pseudo_count), suff_stat=suff_stat, name=self.name)
+            return LogGaussianEstimator(
+                pseudo_count=(pseudo_count, pseudo_count), suff_stat=suff_stat, name=self.name, prior=self.prior
+            )
         else:
-            return LogGaussianEstimator(name=self.name)
+            return LogGaussianEstimator(name=self.name, prior=self.prior)
 
     def dist_to_encoder(self) -> "LogGaussianDataEncoder":
         """Returns a LogGaussianDataEncoder object for encoding sequences of data."""
@@ -500,6 +557,7 @@ class LogGaussianEstimator(ParameterEstimator):
         suff_stat: tuple[float | None, float | None] = (None, None),
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ):
         """LogGaussianEstimator object used to estimate LogGaussianDistribution from aggregated sufficient statistics.
 
@@ -508,6 +566,10 @@ class LogGaussianEstimator(ParameterEstimator):
             suff_stat (Tuple[Optional[float], Optional[float]]): Tuple of float and positive float.
             name (Optional[str]): Assign a name to LogGaussianEstimator.
             keys (Optional[str]): Assign keys to LogGaussianEstimator for combining sufficient statistics.
+            prior (Optional): Conjugate NormalGamma prior over (mu, tau=1/sigma2) of log(X). When present,
+                ``estimate`` performs the closed-form conjugate posterior update (returning the joint
+                MAP estimate and carrying the posterior forward as the fitted model's prior) instead
+                of the maximum-likelihood / pseudo-count update.
 
         Attributes:
             pseudo_count (Tuple[Optional[float], Optional[float]]): Weights for suff_stat.
@@ -520,10 +582,44 @@ class LogGaussianEstimator(ParameterEstimator):
         self.suff_stat = suff_stat
         self.keys = keys
         self.name = name
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, NormalGammaDistribution)
 
     def accumulator_factory(self) -> "LogGaussianAccumulatorFactory":
         """Return GaussianAccumulatorFactory with name and keys passed."""
         return LogGaussianAccumulatorFactory(self.name, self.keys)
+
+    def model_log_density(self, model: "LogGaussianDistribution") -> float:
+        """Log-density of the model parameters under the NormalGamma prior (ELBO global term).
+
+        The prior is over (mu, tau=1/sigma2) of log(X), so the model's (mu, sigma2) is mapped.
+        """
+        if self.has_conj_prior:
+            return float(self.prior.log_density((model.mu, 1.0 / model.sigma2)))
+        return 0.0
+
+    def _estimate_conjugate(self, suff_stat: tuple[float, float, float, float]) -> "LogGaussianDistribution":
+        """Closed-form NormalGamma conjugate posterior update on log-scale statistics."""
+        sum_x, sum_xx, nobs_loc1, nobs_loc2 = suff_stat
+        sum_xxx = sum_x
+        old_mu, old_lam, old_a, old_b = self.prior.get_parameters()
+
+        new_n = old_lam + nobs_loc1
+        new_a = old_a + (nobs_loc2 / 2.0)
+
+        sample_mean1 = sum_x / nobs_loc1 if nobs_loc1 > 0 else 0.0
+        sample_mean2 = sum_xxx / nobs_loc2 if nobs_loc2 > 0 else 0.0
+
+        new_mu = (sum_x + old_mu * old_lam) / (old_lam + nobs_loc1)
+
+        new_b0 = sum_xx - sample_mean2 * sum_xxx
+        new_b1 = (old_lam * nobs_loc1 / new_n) * np.power(sample_mean1 - old_mu, 2)
+        new_b = old_b + 0.5 * (new_b0 + new_b1)
+
+        new_sigma2 = new_b / (new_a - 0.5)
+        new_sigma2 = new_sigma2 if new_sigma2 > 0 else 1.0
+        new_prior = NormalGammaDistribution(new_mu, new_n, new_a, new_b)
+        return LogGaussianDistribution(new_mu, new_sigma2, name=self.name, prior=new_prior)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> "LogGaussianDistribution":
         """Estimate a LogGaussianDistribution object from sufficient statistics aggregated from data.
@@ -544,6 +640,9 @@ class LogGaussianEstimator(ParameterEstimator):
             LogGaussianDistribution object.
 
         """
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
+
         log_x, log_x2 = suff_stat[0], suff_stat[1]
         nobs_loc1, nobs_loc2 = suff_stat[2], suff_stat[3]
 

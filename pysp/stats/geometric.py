@@ -17,6 +17,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
+from pysp.stats.beta import BetaDistribution
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -27,6 +28,7 @@ from pysp.stats.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.utils.special import digamma
 
 
 class GeometricDistribution(SequenceEncodableProbabilityDistribution):
@@ -57,7 +59,12 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         xx = engine.asarray(x)
         return xx * 0.0 + engine.asarray(1.0), xx
 
-    def __init__(self, p: float, name: str | None = None) -> None:
+    def __init__(
+        self,
+        p: float,
+        name: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
+    ) -> None:
         """GeometricDistribution object defining geometric distribution with probability of success p.
 
         Mean: 1/p, Variance: (1-p)/p^2.
@@ -65,6 +72,10 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         Args:
             p (float): Must between (0,1).
             name (Optional[str]): Assign name to GeometricDistribution object.
+            prior (Optional): Conjugate Beta prior on the success probability ``p``. A
+                :class:`~pysp.stats.beta.BetaDistribution` enables the Bayesian/variational
+                machinery (``expected_log_density`` and the conjugate posterior update);
+                ``None`` (default) is a plain point model.
 
         Attributes:
             p (float): Probability of success, must between (0,1).
@@ -79,10 +90,51 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         self.log_p = np.log(self.p)
         self.log_1p = np.log1p(-self.p)
         self.name = name
+        self.set_prior(prior)
 
     def __str__(self) -> str:
         """Return string representation of GeometricDistribution instance."""
         return "GeometricDistribution(%s, name=%s)" % (repr(self.p), repr(self.name))
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Attach a Beta parameter prior and precompute conjugate-prior expectations.
+
+        With a Beta(a, b) prior on the success probability ``p`` this caches the digamma
+        terms ``(digamma(a), digamma(b), digamma(a+b))`` so that ``expected_log_density``
+        evaluates the variational Bayes expectation ``E_q[log p(x | p)]`` via
+        ``E[log p] = digamma(a) - digamma(a+b)`` and ``E[log(1-p)] = digamma(b) - digamma(a+b)``.
+        Any other prior (including ``None``) leaves the distribution a plain point model.
+        """
+        self.prior = prior
+        if isinstance(prior, BetaDistribution):
+            a, b = prior.get_parameters()
+            self.conj_prior_params = (digamma(a), digamma(b), digamma(a + b))
+            self.has_conj_prior = True
+        else:
+            self.conj_prior_params = (0, 0, 0)
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: int) -> float:
+        """Variational expectation ``E_q[log p(x | p)]`` under the Beta prior.
+
+        Uses the cached digamma expectations of ``log p`` and ``log(1-p)``; falls back to
+        the plug-in ``log_density(x)`` when no conjugate prior is attached.
+        """
+        if self.has_conj_prior:
+            ga, gb, gab = self.conj_prior_params
+            if x < 1:
+                return -np.inf
+            return (gb - gab) * (x - 1) + (ga - gab)
+        return self.log_density(x)
+
+    def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations."""
+        if self.has_conj_prior:
+            ga, gb, gab = self.conj_prior_params
+            rv = (x - 1) * (gb - gab) + (ga - gab)
+            rv = np.where(x < 1, -np.inf, rv)
+            return rv
+        return self.seq_log_density(x)
 
     def density(self, x: int) -> float:
         """Density of geometric distribution evaluated at x.
@@ -191,9 +243,9 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return GeometricEstimator(name=self.name)
+            return GeometricEstimator(name=self.name, prior=self.prior)
         else:
-            return GeometricEstimator(pseudo_count=pseudo_count, suff_stat=self.p, name=self.name)
+            return GeometricEstimator(pseudo_count=pseudo_count, suff_stat=self.p, name=self.name, prior=self.prior)
 
     def dist_to_encoder(self) -> "GeometricDataEncoder":
         """Returns GeometricDataEncoder object for encoding sequence of GeometricDistribution observations."""
@@ -514,6 +566,7 @@ class GeometricEstimator(ParameterEstimator):
         suff_stat: float | None = None,
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """GeometricEstimator object for estimating GeometricDistribution object from aggregated sufficient statistics.
 
@@ -522,6 +575,10 @@ class GeometricEstimator(ParameterEstimator):
             suff_stat (Optional[float]): Probability of success (value between (0,1)).
             name (Optional[str]): Assign a name to the object instance.
             keys (Optional[str]): GeometricAccumulator objects with same key merge sufficient statistics.
+            prior (Optional): Conjugate Beta prior on the success probability ``p``. When present,
+                ``estimate`` performs the closed-form conjugate posterior update (returning the
+                posterior-mode MAP estimate and carrying the posterior forward as the fitted
+                model's prior) instead of the maximum-likelihood / pseudo-count update.
 
         Attributes:
             pseudo_count (Optional[float]): Assigned from pseudo_count arg.
@@ -534,10 +591,40 @@ class GeometricEstimator(ParameterEstimator):
         self.suff_stat = max(min(suff_stat, 1.0), 0.0) if suff_stat is not None else None
         self.keys = keys
         self.name = name
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, BetaDistribution)
 
     def accumulator_factory(self) -> "GeometricAccumulatorFactory":
         """Create GeometricAccumulatorFactory object with name and keys passed."""
         return GeometricAccumulatorFactory(name=self.name, keys=self.keys)
+
+    def model_log_density(self, model: "GeometricDistribution") -> float:
+        """Log-density of the model's success probability under the Beta prior (ELBO global term)."""
+        if self.has_conj_prior:
+            return float(self.prior.log_density(model.p))
+        return 0.0
+
+    def _estimate_conjugate(self, suff_stat: tuple[float, float]) -> "GeometricDistribution":
+        """Closed-form Beta conjugate posterior update returning the MAP estimate.
+
+        With a Beta(a, b) prior and statistics ``(count, sum)`` the posterior is
+        Beta(a + count, b + sum - count) and the returned point estimate is the posterior
+        mode ``(a' - 1) / (a' + b' - 2)``, clamped to 0, 1, or 1/2 on the boundary where
+        the mode is undefined; the posterior is carried forward as the fitted model's prior.
+        """
+        ocnt, osum = suff_stat
+        old_a, old_b = self.prior.get_parameters()
+        a = old_a + ocnt
+        b = old_b + osum - ocnt
+        if a > 1 and b > 1:
+            p = (a - 1) / (a + b - 2)
+        elif a <= 1 and b > 1:
+            p = 0.0
+        elif a > 1 and b <= 1:
+            p = 1.0
+        else:
+            p = 0.5
+        return GeometricDistribution(p, name=self.name, prior=BetaDistribution(a, b))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "GeometricDistribution":
         """Estimate geometric distribution from aggregated sufficient statistics (suff_stat).
@@ -562,6 +649,9 @@ class GeometricEstimator(ParameterEstimator):
             GeometricDistribution object.
 
         """
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
+
         if self.pseudo_count is not None and self.suff_stat is not None:
             p = (suff_stat[0] + self.pseudo_count * self.suff_stat) / (suff_stat[1] + self.pseudo_count)
         elif self.pseudo_count is not None and self.suff_stat is None:

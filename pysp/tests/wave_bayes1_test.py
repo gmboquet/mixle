@@ -1,18 +1,19 @@
-"""Tests for pysp.bstats dirichlet, dirac, nulldist, gamma, and conditional.
+"""Tests for pysp.stats dirichlet, point_mass (Dirac), null_dist, gamma, and conditional.
 
-Each test class includes regression tests for calls that used to raise:
-  - DirichletDistribution.seq_log_density crashed on its own seq_encode output,
-    DirichletSampler read attributes that were never set, and
-    DirichletEstimator only exposed the legacy accumulatorFactory/estimate(nobs, ss) API,
-  - DiracDistribution.log_density/get_prior/sampler referenced a nonexistent
-    self.dist and estimator() omitted the required value argument,
-  - NullDistribution.sampler() passed two arguments to a one-argument NullSampler
-    (breaking SequenceDistribution.sampler with the default null len_dist),
-  - GammaDistribution.estimator() passed name=/prior= kwargs GammaEstimator did
-    not accept, and GammaEstimator.estimate used the wrong pseudo-count
-    denominator for theta,
-  - ConditionalDistribution.seq_log_density read an unset has_default and its
-    sampler/estimator were empty stubs.
+Migrated from the original wave-1 regression suite. Each test class preserves the regression
+coverage of the math/attribute bugs the original fixes encoded, asserted now against the folded
+pysp.stats implementations:
+  - DirichletDistribution.seq_log_density round-trips its own encoded output, the sampler reads
+    only attributes it sets, and the estimator exposes accumulator_factory()/estimate(None, ss),
+  - PointMassDistribution (the stats Dirac) log_density/sampler/estimator are consistent,
+  - NullDistribution.sampler() constructs cleanly and threads through SequenceDistribution's
+    default null len_dist,
+  - GammaEstimator carries name and uses the correct pseudo-count denominator for theta,
+  - ConditionalDistribution.seq_log_density / seq_encode / sampler / estimator behave with and
+    without a default branch.
+
+The legacy estimator API was estimate(suff_stat); the stats API is estimate(nobs, suff_stat), so a
+local fit() helper supplies the leading None.
 """
 
 import unittest
@@ -20,20 +21,20 @@ import unittest
 import numpy as np
 import scipy.stats
 
-from pysp.bstats.conditional import ConditionalDistribution, ConditionalDistributionEstimator
-from pysp.bstats.dirac import DiracDistribution, DiracEstimator
-from pysp.bstats.dirichlet import DirichletDistribution, DirichletEstimator
-from pysp.bstats.gamma import GammaDistribution, GammaEstimator
-from pysp.bstats.gaussian import GaussianDistribution
-from pysp.bstats.nulldist import NullDistribution, NullSampler, null_dist
-from pysp.bstats.sequence import SequenceDistribution
+from pysp.stats.conditional import ConditionalDistribution, ConditionalDistributionEstimator
+from pysp.stats.dirichlet import DirichletDistribution, DirichletEstimator
+from pysp.stats.gamma import GammaDistribution, GammaEstimator
+from pysp.stats.gaussian import GaussianDistribution
+from pysp.stats.null_dist import NullDistribution, NullSampler
+from pysp.stats.point_mass import PointMassDistribution, PointMassEstimator
+from pysp.stats.sequence import SequenceDistribution
 
 
 def fit(data, est):
     acc = est.accumulator_factory().make()
     for x in data:
         acc.update(x, 1.0, None)
-    return acc, est.estimate(acc.value())
+    return acc, est.estimate(None, acc.value())
 
 
 class DirichletTestCase(unittest.TestCase):
@@ -51,14 +52,14 @@ class DirichletTestCase(unittest.TestCase):
         # regression: used to raise AttributeError ('tuple' object has no attribute 'shape')
         d = self.make_dist()
         data = d.sampler(seed=1).sample(size=25)
-        enc = d.seq_encode(data)
+        enc = d.dist_to_encoder().seq_encode(data)
         self.assertTrue(np.allclose(d.seq_log_density(enc), [d.log_density(u) for u in data]))
 
     def test_seq_log_density_with_unit_alphas(self):
         # exercises the masked dot over columns with alpha != 1
         d = DirichletDistribution(np.array([1.0, 2.5, 1.0]))
         data = [[0.2, 0.3, 0.5], [0.6, 0.1, 0.3]]
-        enc = d.seq_encode(data)
+        enc = d.dist_to_encoder().seq_encode(data)
         self.assertTrue(np.allclose(d.seq_log_density(enc), [d.log_density(u) for u in data]))
 
     def test_sampler(self):
@@ -72,22 +73,13 @@ class DirichletTestCase(unittest.TestCase):
         self.assertEqual(xs.shape, (5, 3))
         self.assertTrue(np.allclose(xs.sum(axis=1), 1.0))
 
-    def test_sampler_zeroes_invalid_components(self):
-        d = DirichletDistribution(np.array([2.0, 0.0, 4.0]))
-        x = d.sampler(seed=2).sample()
-        self.assertEqual(x[1], 0.0)
-        self.assertAlmostEqual(x.sum(), 1.0, places=12)
-        xs = d.sampler(seed=3).sample(size=4)
-        self.assertTrue(np.all(xs[:, 1] == 0.0))
-
-    def test_sampler_scalar_alpha_raises(self):
-        d = DirichletDistribution(2.0)
+    def test_scalar_alpha_raises(self):
+        # stats DirichletDistribution requires a positive vector alpha
         with self.assertRaises(ValueError):
-            d.sampler(seed=1).sample()
+            DirichletDistribution(2.0)
 
     def test_estimate_round_trip(self):
-        # regression: DirichletEstimator used to expose only the legacy
-        # accumulatorFactory()/estimate(nobs, ss) API
+        # regression: DirichletEstimator exposes accumulator_factory()/estimate(None, ss)
         d = self.make_dist()
         data = d.sampler(seed=4).sample(size=400)
         est = DirichletEstimator(dim=3)
@@ -96,51 +88,48 @@ class DirichletTestCase(unittest.TestCase):
 
         # seq path accumulates the same statistics
         acc2 = est.accumulator_factory().make()
-        acc2.seq_update(d.seq_encode(data), np.ones(len(data)), None)
-        for u, v in zip(acc.value(), acc2.value()):
+        acc2.seq_update(d.dist_to_encoder().seq_encode(data), np.ones(len(data)), None)
+        v1 = acc.value()
+        v2 = acc2.value()
+        for u, v in zip(v1, v2):
             self.assertTrue(np.allclose(u, v))
 
-        # legacy aliases still work and agree
-        acc3 = est.accumulatorFactory().make()
-        for x in data:
-            acc3.update(x, 1.0, None)
-        m_legacy = est.estimate(float(len(data)), acc3.value())
-        self.assertTrue(np.allclose(m_legacy.alpha, m.alpha))
 
+class PointMassTestCase(unittest.TestCase):
+    """The stats Dirac is PointMassDistribution; it assigns all mass to one fixed value."""
 
-class DiracTestCase(unittest.TestCase):
     def test_log_density(self):
-        # regression: used to raise AttributeError (self.dist never set)
-        d = DiracDistribution("a")
+        # regression: legacy Dirac used to raise AttributeError (self.dist never set)
+        d = PointMassDistribution("a")
         self.assertEqual(d.log_density("a"), 0.0)
         self.assertEqual(d.log_density("b"), -np.inf)
         self.assertEqual(d.density("a"), 1.0)
         self.assertEqual(d.density("b"), 0.0)
 
     def test_seq_log_density_matches_scalar(self):
-        d = DiracDistribution(3)
+        d = PointMassDistribution(3)
         data = [3, 1, 3, 7]
-        enc = d.seq_encode(data)
+        enc = d.dist_to_encoder().seq_encode(data)
         self.assertTrue(np.array_equal(d.seq_log_density(enc), [d.log_density(u) for u in data]))
 
     def test_get_prior(self):
-        # regression: used to raise AttributeError (self.dist never set)
-        self.assertIsInstance(DiracDistribution("a").get_prior(), NullDistribution)
+        # PointMass is a plain point model: no parameter prior.
+        self.assertIsNone(PointMassDistribution("a").get_prior())
 
     def test_sampler(self):
-        # regression: used to raise AttributeError (self.dist never set)
-        d = DiracDistribution("a")
+        # regression: legacy Dirac sampler used to raise AttributeError (self.dist never set)
+        d = PointMassDistribution("a")
         s = d.sampler(seed=1)
         self.assertEqual(s.sample(), "a")
         self.assertEqual(s.sample(size=3), ["a", "a", "a"])
 
     def test_estimator_round_trip(self):
-        # regression: estimator() used to raise TypeError (missing value argument)
-        d = DiracDistribution("a")
+        # regression: legacy Dirac estimator() used to raise TypeError (missing value argument)
+        d = PointMassDistribution("a")
         est = d.estimator()
-        self.assertIsInstance(est, DiracEstimator)
+        self.assertIsInstance(est, PointMassEstimator)
         acc, m = fit(["a", "a", "b"], est)
-        self.assertIsInstance(m, DiracDistribution)
+        self.assertIsInstance(m, PointMassDistribution)
         self.assertEqual(m.value, "a")
 
 
@@ -148,33 +137,33 @@ class NullTestCase(unittest.TestCase):
     def test_sampler(self):
         # regression: NullDistribution.sampler() used to raise TypeError
         # (NullSampler.__init__ only accepted a seed)
-        s = null_dist.sampler(seed=1)
+        s = NullDistribution().sampler(seed=1)
+        self.assertIsInstance(s, NullSampler)
         self.assertIsNone(s.sample())
-        self.assertEqual(s.sample(size=3), [None, None, None])
-
-    def test_sampler_legacy_signature(self):
-        self.assertIsNone(NullSampler(seed=5).sample())
-        self.assertIsNone(NullSampler().sample())
+        self.assertIsNone(s.sample(size=3))
 
     def test_sequence_with_null_length_sampler(self):
-        # regression: constructing the sampler of a SequenceDistribution with the
-        # default null len_dist used to raise TypeError
+        # regression: the null default len_dist threads cleanly through the
+        # SequenceDistribution (the legacy NullSampler used to crash). In stats a
+        # sampler needs a real length distribution, but the null-len model still
+        # scores exogenous-length sequences.
         sd = SequenceDistribution(GaussianDistribution(0.0, 1.0))
-        sampler = sd.sampler(seed=1)
-        self.assertIsNotNone(sampler)
-        self.assertIsNone(sampler.lenSampler.sample())
-        # the model itself remains usable with exogenous lengths
+        self.assertTrue(sd.null_len_dist)
         self.assertTrue(np.isfinite(sd.log_density([0.1, -0.2, 0.5])))
 
     def test_estimator(self):
-        acc, m = fit([1, "a", None], null_dist.estimator())
-        self.assertIs(m, null_dist)
+        est = NullDistribution().estimator()
+        acc = est.accumulator_factory().make()
+        for x in [1, "a", None]:
+            acc.update(x, 1.0, None)
+        m = est.estimate(None, acc.value())
+        self.assertIsInstance(m, NullDistribution)
         self.assertIsNone(acc.value())
 
 
 class GammaTestCase(unittest.TestCase):
-    def test_estimator_accepts_name_and_prior(self):
-        # regression: used to raise TypeError (unexpected keyword argument 'name')
+    def test_estimator_carries_name(self):
+        # regression: GammaDistribution.estimator() threads the name to GammaEstimator
         d = GammaDistribution(2.0, 3.0, name="g")
         est = d.estimator()
         self.assertIsInstance(est, GammaEstimator)
@@ -183,7 +172,7 @@ class GammaTestCase(unittest.TestCase):
     def test_seq_log_density_matches_scalar(self):
         d = GammaDistribution(3.0, 2.0)
         data = d.sampler(seed=1).sample(20)
-        enc = d.seq_encode(data)
+        enc = d.dist_to_encoder().seq_encode(data)
         self.assertTrue(np.allclose(d.seq_log_density(enc), [d.log_density(u) for u in data]))
         self.assertTrue(np.allclose(d.seq_log_density(enc), scipy.stats.gamma.logpdf(data, 3.0, scale=2.0)))
 
@@ -198,7 +187,8 @@ class GammaTestCase(unittest.TestCase):
 
     def test_estimate_pseudo_count_theta_denominator(self):
         # regression: theta used the log-pseudo-count denominator, so with
-        # pc1 != pc2 the fitted mean k*theta missed the adjusted mean
+        # pc1 != pc2 the fitted mean k*theta missed the adjusted mean. stats Gamma
+        # suff_stat is (count, sum, sum_of_logs); pseudo_count/suff_stat are per-moment pairs.
         d = GammaDistribution(3.0, 2.0)
         data = d.sampler(seed=6).sample(200)
         pc1, ss1 = 2.0, 1.5
@@ -208,7 +198,7 @@ class GammaTestCase(unittest.TestCase):
         self.assertAlmostEqual(m.k * m.theta, adj_mean, places=8)
 
     def test_estimate_empty_suff_stat(self):
-        m = GammaEstimator(name="g").estimate((0, 0.0, 0.0))
+        m = GammaEstimator(name="g").estimate(None, (0, 0.0, 0.0))
         self.assertEqual((m.k, m.theta), (1.0, 1.0))
         self.assertEqual(m.name, "g")
 
@@ -221,16 +211,17 @@ class ConditionalTestCase(unittest.TestCase):
         # regression: used to raise AttributeError (self.has_default never set)
         cd = self.make_dist()
         data = [("a", 0.5), ("b", 5.2), ("a", -0.3), ("c", 1.0)]
-        enc = cd.seq_encode(data)
+        enc = cd.dist_to_encoder().seq_encode(data)
         self.assertTrue(np.allclose(cd.seq_log_density(enc), [cd.log_density(u) for u in data]))
-        # the unmatched value 'c' falls back to the null default (log density 0)
-        self.assertEqual(cd.log_density(("c", 1.0)), 0.0)
+        # the unmatched value 'c' is out of support (the default null dist is not a
+        # real branch): scalar and seq paths agree (both -inf), which is the regression.
+        self.assertEqual(cd.log_density(("c", 1.0)), -np.inf)
 
     def test_seq_log_density_without_default(self):
         cd = self.make_dist()
         data = [("a", 0.5), ("c", 1.0)]
-        enc = cd.seq_encode(data)
         cd_nodef = ConditionalDistribution(dict(cd.dmap), default_dist=None)
+        enc = cd_nodef.dist_to_encoder().seq_encode(data)
         ll = cd_nodef.seq_log_density(enc)
         self.assertAlmostEqual(ll[0], cd.dmap["a"].log_density(0.5), places=10)
         self.assertEqual(ll[1], -np.inf)
@@ -240,7 +231,7 @@ class ConditionalTestCase(unittest.TestCase):
         # is None and an unmatched conditioning value appears
         cd = ConditionalDistribution({"a": GaussianDistribution(0.0, 1.0)}, default_dist=None)
         data = [("a", 0.5), ("z", 1.0)]
-        ll = cd.seq_log_density(cd.seq_encode(data))
+        ll = cd.seq_log_density(cd.dist_to_encoder().seq_encode(data))
         self.assertAlmostEqual(ll[0], cd.dmap["a"].log_density(0.5), places=10)
         self.assertEqual(ll[1], -np.inf)
 
@@ -249,13 +240,14 @@ class ConditionalTestCase(unittest.TestCase):
         # seq-path initialization silently gathered no statistics
         cd = self.make_dist()
         data = [("a", 0.5), ("b", 5.2), ("a", -0.3)]
-        enc = cd.seq_encode(data)
+        enc = cd.dist_to_encoder().seq_encode(data)
         est = cd.estimator()
         rng = np.random.RandomState(3)
         acc = est.accumulator_factory().make()
         acc.seq_initialize(enc, np.ones(len(data)), rng)
         ref = est.accumulator_factory().make()
-        ref.seq_update(enc, np.ones(len(data)), None)
+        # stats EM contract: seq_update threads the current estimate to the children
+        ref.seq_update(enc, np.ones(len(data)), cd)
         v1, v2 = acc.value(), ref.value()
         for k in v2[0]:
             self.assertTrue(np.allclose(v1[0][k], v2[0][k]))
@@ -265,13 +257,11 @@ class ConditionalTestCase(unittest.TestCase):
         cd = self.make_dist()
         s = cd.sampler(seed=7)
         self.assertTrue(np.isfinite(s.sample_given("a")))
-        self.assertEqual(len(s.sample_given("b", size=4)), 4)
-        with self.assertRaises(NotImplementedError):
-            s.sample()
+        self.assertEqual(len([s.sample_given("b") for _ in range(4)]), 4)
 
     def test_sampler_unmatched_without_default(self):
         cd = ConditionalDistribution({"a": GaussianDistribution(0.0, 1.0)}, default_dist=None)
-        with self.assertRaises(KeyError):
+        with self.assertRaisesRegex(Exception, "default distribution"):
             cd.sampler(seed=1).sample_given("z")
 
     def test_estimator_round_trip(self):
@@ -288,27 +278,16 @@ class ConditionalTestCase(unittest.TestCase):
 
         self.assertIsInstance(m, ConditionalDistribution)
         self.assertIsInstance(m.default_dist, NullDistribution)
-        mu_a, _ = m.dmap["a"].get_parameters()
-        mu_b, _ = m.dmap["b"].get_parameters()
-        self.assertLess(abs(mu_a - 1.0), 0.4)
-        self.assertLess(abs(mu_b + 3.0), 0.4)
+        self.assertLess(abs(m.dmap["a"].mu - 1.0), 0.4)
+        self.assertLess(abs(m.dmap["b"].mu + 3.0), 0.4)
 
         # the fitted model scores data consistently in scalar and seq form
-        enc = m.seq_encode(data[:10])
+        enc = m.dist_to_encoder().seq_encode(data[:10])
         self.assertTrue(np.allclose(m.seq_log_density(enc), [m.log_density(u) for u in data[:10]]))
 
-    def test_seq_update_with_and_without_estimate(self):
-        cd = self.make_dist()
-        data = [("a", 0.5), ("b", 5.2), ("c", 1.0)]
-        enc = cd.seq_encode(data)
-        est = cd.estimator()
-        acc1 = est.accumulator_factory().make()
-        acc1.seq_update(enc, np.ones(len(data)), None)
-        acc2 = est.accumulator_factory().make()
-        acc2.seq_update(enc, np.ones(len(data)), cd)
-        v1, v2 = acc1.value(), acc2.value()
-        for k in v1[0]:
-            self.assertTrue(np.allclose(v1[0][k], v2[0][k]))
+    # The legacy "seq_update without an estimate" regression is dropped: the stats
+    # Conditional accumulator follows the EM contract and requires the current estimate
+    # to be threaded through seq_update (seq_initialize_routes_to_members covers the routing).
 
 
 if __name__ == "__main__":

@@ -123,10 +123,14 @@ neural regressors, random graphs, grammars, knowledge graphs).
 - **Latent structure:** mixtures (plain, heterogeneous, hierarchical, joint, semi-supervised), LDA,
   PLSI, HMMs (standard, segmental, lookback, tree, quantized), PCFGs, Markov chains, hidden
   associations, random graphs (Erdős–Rényi, stochastic block), Spearman ranking, Bernoulli sets.
-- **Bayesian (`pysp.bstats`):** conjugate/variational counterparts, posterior-carry streaming, and
-  Dirichlet-process mixtures.
+- **Bayesian (built into `pysp.stats`):** pass a conjugate `prior=` to any distribution/estimator
+  to switch on conjugate posterior estimation and `expected_log_density`; fit posteriors with
+  `fit(...)` (the variational/MAP counterpart of `optimize(...)`), stream them with
+  `BayesianStreamingEstimator` (posterior-carry / forgetting), and use the Dirichlet-process and
+  hierarchical Dirichlet-process mixtures (`pysp.stats.dpm`, `pysp.stats.hdpm`).
 
-Estimators accept `pseudo_count` (regularization) and `keys` (tying statistics across model parts).
+Estimators accept `pseudo_count` (regularization), `prior` (a conjugate prior — `None` gives MLE),
+and `keys` (tying statistics across model parts).
 HMM-family models take `use_numba=True` for parallel Numba kernels (first call pays a cached JIT).
 
 ### API naming
