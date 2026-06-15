@@ -22,6 +22,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
+from pysp.stats.composite import _distribute_child_prior
 from pysp.stats.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -88,6 +89,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         given_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         name: str | None = None,
         keys: str | None = None,
+        prior: tuple[dict[Any, Any], Any, Any] | None = None,
     ) -> None:
         """ConditionalDistribution object for data types x=Tuple[T0, T1].
 
@@ -136,6 +138,67 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         self.has_given = not isinstance(self.given_dist, NullDistribution)
         self.name = name
         self.keys = keys
+        self.set_prior(prior)
+
+    def get_prior(self) -> tuple[dict[Any, Any], Any, Any]:
+        """Return the joint prior as ``(per_branch_priors, default_prior, given_prior)``.
+
+        ``per_branch_priors`` is a dict keyed like ``dmap`` of each conditional branch's prior.
+        """
+        branch = {k: v.get_prior() for k, v in self.dmap.items()}
+        return branch, self.default_dist.get_prior(), self.given_dist.get_prior()
+
+    def set_prior(self, prior: tuple[dict[Any, Any], Any, Any] | None) -> None:
+        """Distribute per-branch priors to the conditional branches, default, and given distributions.
+
+        ``prior=None`` is a no-op (children keep their existing priors, leaving the MLE path
+        byte-identical). Otherwise ``prior`` is ``(per_branch_priors, default_prior, given_prior)``: each
+        ``dmap`` branch prior is pushed to the matching child via ``set_prior``, and the default/given
+        priors are pushed to ``default_dist``/``given_dist``.
+        """
+        if prior is None:
+            return
+        branch, default_prior, given_prior = prior
+        for k, p in branch.items():
+            if k in self.dmap:
+                self.dmap[k].set_prior(p)
+        self.default_dist.set_prior(default_prior)
+        self.given_dist.set_prior(given_prior)
+
+    def expected_log_density(self, x: tuple[T0, T1]) -> float:
+        """Prior-expected log-density: selected branch ``expected_log_density`` + given term.
+
+        Mirrors ``log_density``: unmatched conditioning values with no default score ``-inf``.
+        """
+        if self.has_default:
+            rv = self.dmap.get(x[0], self.default_dist).expected_log_density(x[1])
+        else:
+            if x[0] in self.dmap:
+                rv = self.dmap[x[0]].expected_log_density(x[1])
+            else:
+                return -np.inf
+
+        rv += self.given_dist.expected_log_density(x[0])
+        return rv
+
+    def seq_expected_log_density(self, x: E0) -> np.ndarray:
+        """Vectorized prior-expected log-density mirroring ``seq_log_density``."""
+        sz, cond_vals, eobs_vals, idx_vals, given_enc = x
+        rv = np.zeros(sz, dtype=float)
+
+        for i in range(len(cond_vals)):
+            if self.has_default:
+                rv[idx_vals[i]] = self.dmap.get(cond_vals[i], self.default_dist).seq_expected_log_density(eobs_vals[i])
+            else:
+                if cond_vals[i] in self.dmap:
+                    rv[idx_vals[i]] += self.dmap[cond_vals[i]].seq_expected_log_density(eobs_vals[i])
+                else:
+                    rv[idx_vals[i]] = -np.inf
+
+        if self.has_given:
+            rv += self.given_dist.seq_expected_log_density(given_enc)
+
+        return rv
 
     def compute_capabilities(self):
         from pysp.stats.capabilities import DistributionCapabilities, intersect_engine_ready
@@ -1163,6 +1226,7 @@ class ConditionalDistributionEstimator(ParameterEstimator):
         given_estimator: ParameterEstimator | None = NullEstimator(),
         name: str | None = None,
         keys: str | None = None,
+        prior: tuple[dict[Any, Any], Any, Any] | None = None,
     ) -> None:
         """ConditionalDistributionEstimator object used to estimate ConditionalDistribution from aggregated data.
 
@@ -1191,6 +1255,37 @@ class ConditionalDistributionEstimator(ParameterEstimator):
         self.keys = keys
         self.given_estimator = given_estimator if given_estimator is not None else NullEstimator()
         self.name = name
+        self.set_prior(prior)
+
+    def get_prior(self) -> tuple[dict[Any, Any], Any, Any]:
+        """Return the joint prior as ``(per_branch_priors, default_prior, given_prior)`` from child estimators."""
+        branch = {k: v.get_prior() for k, v in self.estimator_map.items()}
+        return branch, self.default_estimator.get_prior(), self.given_estimator.get_prior()
+
+    def set_prior(self, prior: tuple[dict[Any, Any], Any, Any] | None) -> None:
+        """Distribute per-branch priors to the child estimators (branches, default, given).
+
+        ``prior=None`` is a no-op. Each branch prior is pushed to the matching estimator via
+        ``set_prior``; default/given priors go to the default/given estimators.
+        """
+        if prior is None:
+            return
+        branch, default_prior, given_prior = prior
+        for k, p in branch.items():
+            if k in self.estimator_map:
+                _distribute_child_prior(self.estimator_map[k], p)
+        _distribute_child_prior(self.default_estimator, default_prior)
+        _distribute_child_prior(self.given_estimator, given_prior)
+
+    def model_log_density(self, model: "ConditionalDistribution") -> float:
+        """Sum each branch's estimator ``model_log_density`` plus the default and given terms."""
+        rv = 0.0
+        for k, est in self.estimator_map.items():
+            if k in model.dmap:
+                rv += est.model_log_density(model.dmap[k])
+        rv += self.default_estimator.model_log_density(model.default_dist)
+        rv += self.given_estimator.model_log_density(model.given_dist)
+        return rv
 
     def accumulator_factory(self) -> "ConditionalDistributionAccumulatorFactory":
         """Creates ConditionalDistributionAccumulatorFactory from estimator member values.
