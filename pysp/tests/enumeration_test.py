@@ -209,6 +209,44 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
         support = [{"u": s, "v": i} for s in "abc" for i in (0, 1)]
         self.assert_matches_brute(dist, support, "record")
 
+    def test_conditional_enumeration_matches_brute(self):
+        # Most-probable-completion query: enumerating with some fields/positions fixed must equal the
+        # brute-force list of consistent full outcomes sorted by joint log_density, and each yielded
+        # log_prob is the full joint log_density (fixed parts enter as a constant offset).
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
+        cat2 = CategoricalDistribution({"p": 0.7, "q": 0.3})
+        intcat = IntegerCategoricalDistribution(0, [0.6, 0.3, 0.1])
+
+        rec = RecordDistribution({"u": cat, "v": cat2, "n": intcat})
+        rec_support = [{"u": u, "v": v, "n": n} for u in "abc" for v in "pq" for n in (0, 1, 2)]
+        for given in ({"v": "q"}, {"u": "a", "n": 1}, {"u": "b", "v": "p", "n": 0}):
+            got = list(rec.conditional_enumerator(given))
+            cons = sorted(
+                (r for r in rec_support if all(r[k] == val for k, val in given.items())),
+                key=lambda r: -rec.log_density(r),
+            )
+            self.assertEqual([v for v, _ in got], cons, "record given=%r" % given)
+            for v, lp in got:
+                self.assertAlmostEqual(lp, rec.log_density(v), delta=TOL, msg="record lp given=%r" % given)
+
+        comp = CompositeDistribution((cat, cat2, intcat))
+        comp_support = [(u, v, n) for u in "abc" for v in "pq" for n in (0, 1, 2)]
+        for given in ({1: "q"}, {0: "a", 2: 1}):
+            got = list(comp.conditional_enumerator(given))
+            cons = sorted(
+                (t for t in comp_support if all(t[k] == val for k, val in given.items())),
+                key=lambda t: -comp.log_density(t),
+            )
+            self.assertEqual([v for v, _ in got], cons, "composite given=%r" % given)
+
+        # impossible fixed value -> empty; bad key -> ValueError
+        self.assertEqual(list(rec.conditional_enumerator({"u": "ZZ"})), [])
+        self.assertEqual(list(comp.conditional_enumerator({0: "ZZ"})), [])
+        with self.assertRaises(ValueError):
+            rec.conditional_enumerator({"nope": 1})
+        with self.assertRaises(ValueError):
+            comp.conditional_enumerator({9: "a"})
+
     def test_record_nested_matches_composite_ranks(self):
         # A Record over the same children as a Composite scores identically (sum of field
         # log-densities), so count_dp_rank must agree row-for-row through the dict relabelling.

@@ -248,6 +248,27 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
         """Creates RecordEnumerator iterating mapping records in descending joint probability order."""
         return RecordEnumerator(self)
 
+    def conditional_enumerator(self, given: Mapping[Any, Any]) -> RecordConditionalEnumerator:
+        """Enumerate complete records consistent with the fixed fields in ``given``.
+
+        ``given`` is a mapping ``{source: value}`` pinning a subset of fields (the canonical
+        most-probable-completion / imputation query: "fill in the rest, best first"). Because the
+        fields are independent, ``P(record | given)`` is proportional to the joint ``P(record)``, so
+        descending order over the *free* fields is also descending conditional order. Each yielded
+        value is a complete record with the fixed fields merged back in, and its ``log_prob`` is the
+        full joint ``log_density`` (the enumerator contract: ``lp == dist.log_density(value)``) -- the
+        fixed fields enter as a constant offset, which only shifts every score by the same amount.
+
+        Raises ValueError if ``given`` names a field this record does not have.
+        """
+        if not isinstance(given, Mapping):
+            raise TypeError("given must be a mapping of {source: value}.")
+        valid_sources = set(self.sources)
+        unknown = [k for k in given if k not in valid_sources]
+        if unknown:
+            raise ValueError("given names fields not in this record: %r" % unknown)
+        return RecordConditionalEnumerator(self, dict(given))
+
     def structural_fine_bucket(self, value, quantizer) -> int:
         """Sum of child structural buckets -- mirrors the count index's child convolution.
 
@@ -307,6 +328,43 @@ class RecordEnumerator(DistributionEnumerator):
             BufferedStream(child_enumerator(d, "RecordDistribution.dists[%d]" % i)) for i, d in enumerate(dist.dists)
         ]
         self._product = ProductEnumerator(streams, combine=dist._row_from_values)
+
+    def __next__(self) -> tuple[dict[Any, Any], float]:
+        return next(self._product)
+
+
+class RecordConditionalEnumerator(DistributionEnumerator):
+    def __init__(self, dist: RecordDistribution, given: dict[Any, Any]) -> None:
+        """Enumerate complete records consistent with the fixed fields ``given``, best-first.
+
+        Best-first over the product of the *free* fields' enumerations, offset by the fixed fields'
+        summed log-density so each emitted score is the full joint ``log_density``. If a fixed value
+        is impossible (its field assigns it ``-inf``) the support is empty.
+
+        Args:
+            dist (RecordDistribution): Distribution whose conditional support is enumerated.
+            given (dict): Fixed ``{source: value}`` assignments (already validated by the caller).
+        """
+        super().__init__(dist)
+        free_idx = [i for i in range(dist.count) if dist.sources[i] not in given]
+        with np.errstate(divide="ignore"):
+            fixed_lp = sum(
+                dist.dists[i].log_density(given[dist.sources[i]]) for i in range(dist.count) if dist.sources[i] in given
+            )
+        if fixed_lp == -np.inf:
+            self._product: Any = iter(())
+            return
+        free_sources = [dist.sources[i] for i in free_idx]
+
+        def combine(free_values: Sequence[Any], _given=given, _free_sources=free_sources) -> dict[Any, Any]:
+            row = dict(_given)
+            row.update(zip(_free_sources, free_values))
+            return row
+
+        streams = [
+            BufferedStream(child_enumerator(dist.dists[i], "RecordDistribution.dists[%d]" % i)) for i in free_idx
+        ]
+        self._product = ProductEnumerator(streams, combine=combine, offset=float(fixed_lp))
 
     def __next__(self) -> tuple[dict[Any, Any], float]:
         return next(self._product)
