@@ -76,8 +76,8 @@ Two t-SNE engines are provided:
 humap embeds the same model-based kNN graph with UMAP (umap-learn).
 
 This package preserves the public API of the former single-module
-``pysp.utils.htsne``: every name below remains importable from
-``pysp.utils.htsne``. The implementation is split into:
+``pysp.utils.hvis``: every name below remains importable from
+``pysp.utils.hvis``. The implementation is split into:
 
 - ``affinity`` - factor/affinity computation and probability calibration
 - ``neighbors`` - sparse model-distance graphs, RP-trees, and kNN
@@ -89,193 +89,193 @@ This package preserves the public API of the former single-module
 # name the former single-module htsne exposed (the documented public surface in
 # __all__ plus the private helpers that pysp.tests.htsne_test imports directly).
 # The `name as name` redundant-alias form marks these as deliberate re-exports.
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _affinity_factors as _affinity_factors,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _calibrate_row as _calibrate_row,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _component_inv_covariances as _component_inv_covariances,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _factor_n as _factor_n,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _factor_parts as _factor_parts,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _factor_similarity_block as _factor_similarity_block,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _factor_similarity_candidates as _factor_similarity_candidates,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _factor_weight as _factor_weight,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _field_log_densities as _field_log_densities,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _field_log_density_features as _field_log_density_features,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _fisher_similarity_block as _fisher_similarity_block,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _hbeta as _hbeta,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _is_fisher_factor as _is_fisher_factor,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _is_local_factor as _is_local_factor,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _is_prebuilt_affinity as _is_prebuilt_affinity,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _leaf_feature_matrix as _leaf_feature_matrix,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _local_similarity_block as _local_similarity_block,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _observed_fisher_vectors as _observed_fisher_vectors,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _posteriors_and_loglikes as _posteriors_and_loglikes,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _resolve_affinity as _resolve_affinity,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     balanced_factors as balanced_factors,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     conditional_pmat as conditional_pmat,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     fisher_factors as fisher_factors,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     get_pmat as get_pmat,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     local_factors as local_factors,
 )
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     model_log_affinity as model_log_affinity,
 )
-from pysp.utils.htsne.embed import (
+from pysp.utils.hvis.embed import (
     dpmsne as dpmsne,
 )
-from pysp.utils.htsne.embed import (
+from pysp.utils.hvis.embed import (
     htsne as htsne,
 )
-from pysp.utils.htsne.embed import (
+from pysp.utils.hvis.embed import (
     humap as humap,
 )
-from pysp.utils.htsne.neighbors import (
+from pysp.utils.hvis.neighbors import (
     _augment_candidates as _augment_candidates,
 )
-from pysp.utils.htsne.neighbors import (
+from pysp.utils.hvis.neighbors import (
     _build_rp_tree as _build_rp_tree,
 )
-from pysp.utils.htsne.neighbors import (
+from pysp.utils.hvis.neighbors import (
     _candidate_features as _candidate_features,
 )
-from pysp.utils.htsne.neighbors import (
+from pysp.utils.hvis.neighbors import (
     _candidate_log_affinity as _candidate_log_affinity,
 )
-from pysp.utils.htsne.neighbors import (
+from pysp.utils.hvis.neighbors import (
     _query_rp_tree as _query_rp_tree,
 )
-from pysp.utils.htsne.neighbors import (
+from pysp.utils.hvis.neighbors import (
     _RPTreeNode as _RPTreeNode,
 )
-from pysp.utils.htsne.neighbors import (
+from pysp.utils.hvis.neighbors import (
     approx_sparse_model_distances as approx_sparse_model_distances,
 )
-from pysp.utils.htsne.neighbors import (
+from pysp.utils.hvis.neighbors import (
     model_knn as model_knn,
 )
-from pysp.utils.htsne.neighbors import (
+from pysp.utils.hvis.neighbors import (
     sparse_model_distances as sparse_model_distances,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _barnes_hut_negative_forces as _barnes_hut_negative_forces,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _BHNode as _BHNode,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _build_bh_tree as _build_bh_tree,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _csr_without_diagonal as _csr_without_diagonal,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _exact_negative_forces as _exact_negative_forces,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _exact_tsne_gradient as _exact_tsne_gradient,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _flatten_bh_tree as _flatten_bh_tree,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _kl as _kl,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _negative_forces as _negative_forces,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _numba_barnes_hut_negative_forces as _numba_barnes_hut_negative_forces,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _python_barnes_hut_negative_forces as _python_barnes_hut_negative_forces,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _sparse_conditional_pmat as _sparse_conditional_pmat,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _sparse_joint_pmat as _sparse_joint_pmat,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _sparse_positive_forces as _sparse_positive_forces,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _sparse_positive_forces_from_edges as _sparse_positive_forces_from_edges,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _sparse_positive_forces_symmetric_from_edges as _sparse_positive_forces_symmetric_from_edges,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _sparse_tsne_kl as _sparse_tsne_kl,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _sparse_tsne_kl_from_edges as _sparse_tsne_kl_from_edges,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _tsne_barnes_hut as _tsne_barnes_hut,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     _tsne_barnes_hut_from_p as _tsne_barnes_hut_from_p,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     t_kernel as t_kernel,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     tsne_barnes_hut as tsne_barnes_hut,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     tsne_exact as tsne_exact,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     update_alpha as update_alpha,
 )
-from pysp.utils.htsne.tsne import (
+from pysp.utils.hvis.tsne import (
     update_embed as update_embed,
 )
 
