@@ -10,9 +10,17 @@ order).
 import math
 import unittest
 
+import numpy as np
+
 from pysp.stats import *
 from pysp.utils.enumeration import freeze
-from pysp.utils.quantization.core import CountHistogram, Quantizer, convolve_indices, leaf_count_index
+from pysp.utils.quantization.core import (
+    CountHistogram,
+    Quantizer,
+    convolve_indices,
+    count_budget_index,
+    leaf_count_index,
+)
 from pysp.utils.quantization.parallel import distributed_unrank
 from pysp.utils.quantization.semiring import CountSemiring, enumerate_and_bin, ordered_stream_from_count_index
 
@@ -414,6 +422,64 @@ class ParallelTestCase(unittest.TestCase):
         self.assertEqual(
             [(freeze(v), round(lp, 9)) for v, lp in serial], [(freeze(v), round(lp, 9)) for v, lp in dist_items]
         )
+
+
+class CanonicalDedupCompletenessTestCase(unittest.TestCase):
+    """The canonical distinct stream must emit EVERY distinct in-budget value (no drops).
+
+    Regression for the structural_fine_bucket fix: the old canonical predicate binned a nested
+    component by floor(log p_k(value)) while the count index binned it by a sum of floored
+    sub-buckets, mispredicting the canonical bin and silently dropping ~19% of values.
+    """
+
+    def _raw_distinct(self, dist, budget):
+        idx = count_budget_index(dist, budget_bits=budget, oversample=8)
+        out = {}
+        for i in range(idx.total_count):
+            v, lp = idx.get(i)
+            out.setdefault(freeze(v), lp)
+        return out
+
+    def _assert_complete(self, dist, budget, name):
+        raw = self._raw_distinct(dist, budget)
+        emitted = {}
+        for v, lp in dist.count_budget_distinct(budget_bits=budget, oversample=8):
+            emitted.setdefault(freeze(v), lp)
+        # completeness: the canonical distinct stream covers exactly the raw distinct value set
+        self.assertEqual(set(emitted), set(raw), "%s: canonical stream dropped/added values" % name)
+        # and recovers ~all probability mass (no missing values)
+        mass = sum(math.exp(lp) for lp in emitted.values())
+        self.assertGreater(mass, 0.999, "%s: distinct mass too low -> values dropped" % name)
+
+    def test_mixture_of_nested_composite_sequence(self):
+        def nested(seed):
+            r = np.random.RandomState(seed)
+            seq = SequenceDistribution(
+                IntegerCategoricalDistribution(0, list(r.dirichlet(np.ones(4)))),
+                len_dist=IntegerCategoricalDistribution(1, list(r.dirichlet(np.ones(4)))),
+            )
+            return CompositeDistribution((seq, IntegerCategoricalDistribution(0, list(r.dirichlet(np.ones(5))))))
+
+        rng = np.random.RandomState(0)
+        mix = MixtureDistribution([nested(s) for s in (1, 2, 3)], list(rng.dirichlet(np.ones(3))))
+        self._assert_complete(mix, 30, "nested-mixture")
+
+    def test_hmm_with_composite_emissions(self):
+        rng = np.random.RandomState(1)
+        # nested emissions: each state emits a Composite(IntCat, IntCat)
+        topics = [
+            CompositeDistribution(
+                (
+                    IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(3)))),
+                    IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(3)))),
+                )
+            )
+            for _ in range(2)
+        ]
+        hmm = HiddenMarkovModelDistribution(
+            topics, [0.6, 0.4], [[0.7, 0.3], [0.4, 0.6]], len_dist=IntegerCategoricalDistribution(1, [0.6, 0.4])
+        )
+        self._assert_complete(hmm, 24, "hmm-composite-emissions")
 
 
 if __name__ == "__main__":
