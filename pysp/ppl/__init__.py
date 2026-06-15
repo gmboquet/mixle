@@ -36,12 +36,14 @@ from pysp.stats.student_t import StudentTDistribution, StudentTEstimator
 from pysp.stats.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
 from pysp.stats.negative_binomial import NegativeBinomialDistribution, NegativeBinomialEstimator
 from pysp.stats.dirichlet import DirichletDistribution, DirichletEstimator
+from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.lda import LDADistribution, LDAEstimator
 
 __all__ = [
     "RandomVariable", "free", "lower",
     "Normal", "Poisson", "Gamma", "Exponential", "Categorical", "Bernoulli", "Geometric",
     "Beta", "StudentT", "LogNormal", "NegativeBinomial", "Dirichlet",
-    "Mix", "Seq", "Markov", "Graph", "Field",
+    "Mix", "Seq", "Markov", "LDA", "Graph", "Field",
 ]
 
 
@@ -219,6 +221,33 @@ register_composite("Markov", _hmm_dist, _hmm_est, seed_fn=_hmm_seed,
                    dist_cls=HiddenMarkovModelDistribution, read=_hmm_read)
 
 
+# --- LDA / topic model: documents are bags of (word_id, count) --------------------
+def _lda_dist(args, lower_child):
+    k, V, alpha = args
+    topics = [IntegerCategoricalDistribution(0, np.ones(V) / V) for _ in range(k)]
+    return LDADistribution(topics, np.full(k, float(alpha)))
+
+
+def _lda_est(args, lower_child_est, name, keys):
+    k, V, alpha = args
+    return LDAEstimator([IntegerCategoricalEstimator(min_val=0, max_val=V - 1) for _ in range(k)],
+                        fixed_alpha=np.full(k, float(alpha)))
+
+
+def _lda_seed(args, data, rng, seed_child):
+    k, V, alpha = args
+    topics = [IntegerCategoricalDistribution(0, rng.dirichlet(0.5 * np.ones(V))) for _ in range(k)]
+    return LDADistribution(topics, np.full(k, float(alpha)))
+
+
+def _lda_read(d, read_params):
+    return {"topics": [np.asarray(t.p_vec) for t in d.topics], "alpha": np.asarray(d.alpha)}
+
+
+register_composite("LDA", _lda_dist, _lda_est, seed_fn=_lda_seed,
+                   dist_cls=LDADistribution, read=_lda_read)
+
+
 # --- constructors: conventional parameterizations, return symbolic RandomVariables ---
 def Normal(mean: Any, sd: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
     """Normal with mean and standard deviation (lowers to GaussianDistribution(mu, sd**2))."""
@@ -305,6 +334,14 @@ def Mix(components, weights=None, *, name: Optional[str] = None) -> RandomVariab
 def Seq(element, *, name: Optional[str] = None) -> RandomVariable:
     """IID sequence of ``element``. Fit on a list of sequences (each a list/array)."""
     return RandomVariable._sample("Sequence", (_as_rv(element),), name=name)
+
+
+def LDA(num_topics: int, vocab_size: int, *, alpha: float = 1.0,
+        name: Optional[str] = None) -> RandomVariable:
+    """Latent Dirichlet allocation. Fit on a list of documents, each a bag of
+    ``(word_id, count)`` pairs over word ids ``0..vocab_size-1``. Topics are recovered
+    as word distributions; alpha (the document-topic Dirichlet) is fixed by default."""
+    return RandomVariable._sample("LDA", (int(num_topics), int(vocab_size), float(alpha)), name=name)
 
 
 def Markov(emission, states: int, *, name: Optional[str] = None) -> RandomVariable:
