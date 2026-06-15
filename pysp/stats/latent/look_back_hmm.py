@@ -51,7 +51,9 @@ from pysp.stats.combinator.null_dist import (
 )
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
@@ -403,6 +405,20 @@ class LookbackHiddenMarkovDistribution(SequenceEncodableProbabilityDistribution)
 
         """
         return LookbackHiddenMarkovSampler(self, seed)
+
+    def enumerator(self) -> DistributionEnumerator:
+        """Not supported: lookback emissions condition on the previous ``lag`` observations.
+
+        Unlike the standard / segmental HMM, each emission depends on the preceding ``lag`` symbols,
+        so the effective state is ``(hidden_state, last lag observations)``. Best-first enumeration
+        over that augmented (and, for large/continuous alphabets, unbounded) state space is not
+        implemented; use :meth:`sampler` or the exact ``log_density`` / ``viterbi_sequence`` instead.
+        """
+        raise EnumerationError(
+            self,
+            reason="lookback emissions condition on the previous lag observations; enumeration over the "
+            "augmented (state, observation-history) space is not supported",
+        )
 
     def estimator(self, pseudo_count: float | None = None) -> "LookbackHiddenMarkovEstimator":
         """Create a LookbackHiddenMarkovEstimator from this distribution.
