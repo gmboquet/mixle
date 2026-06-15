@@ -396,6 +396,14 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         """Returns SequenceEnumerator iterating sequences in descending probability order."""
         return SequenceEnumerator(self)
 
+    def structural_fine_bucket(self, value, quantizer) -> int:
+        """Sum of per-element buckets plus the length term -- mirrors the count index's per-length
+        L-fold element convolution shifted by the length-term bucket."""
+        total = sum(self.dist.structural_fine_bucket(x, quantizer) for x in value)
+        if not self.null_len_dist:
+            total += self.len_dist.structural_fine_bucket(len(value), quantizer)
+        return total
+
     def quantized_count_index(self, quantizer, max_fine_bucket: int):
         """Structural count index: per-length L-fold self-convolution of the element histogram.
 

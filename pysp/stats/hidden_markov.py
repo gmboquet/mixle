@@ -879,8 +879,12 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         INF = float("inf")
 
         def emit_fb(o, s):
-            lp = self.topics[s].log_density(o)
-            return INF if lp == -np.inf else quantizer.fine_bucket(float(lp))
+            # Structural bucket (sum-of-floored sub-buckets), matching the count DP's
+            # child_count_index(topics[s]); a single floor of the joint log-density would
+            # mispredict and drop nested (composite/sequence) emissions.
+            if self.topics[s].log_density(o) == -np.inf:
+                return INF
+            return self.topics[s].structural_fine_bucket(o, quantizer)
 
         # v[s] = minimal joint fine bucket of a length-(t+1) path-prefix ending in state s.
         v = []
@@ -906,7 +910,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         min_fb = min(v)
         if min_fb == INF:
             return True
-        min_fb += quantizer.fine_bucket(float(self.len_dist.log_density(len(value))))
+        min_fb += self.len_dist.structural_fine_bucket(len(value), quantizer)
         return coarse_bin == quantizer.coarse_bin(int(min_fb))
 
 
