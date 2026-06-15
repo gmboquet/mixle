@@ -107,6 +107,18 @@ class LogisticDistribution(SequenceEncodableProbabilityDistribution):
             xx[:, None], params["loc"][None, :], params["scale"][None, :], engine
         )
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact). The continuous 'index of' a value."""
+        from scipy.stats import logistic as _sp
+
+        return float(_sp.cdf(x, loc=self.loc, scale=self.scale))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from scipy.stats import logistic as _sp
+
+        return float(_sp.ppf(q, loc=self.loc, scale=self.scale))
+
     def sampler(self, seed: int | None = None) -> "LogisticSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LogisticSampler(self, seed)

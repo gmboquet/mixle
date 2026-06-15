@@ -269,6 +269,18 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
             engine.sum(ww * log_vals[:, None], axis=0),
         )
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact). The continuous 'index of' a value."""
+        from scipy.stats import gamma as _sp
+
+        return float(_sp.cdf(x, self.k, scale=self.theta))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from scipy.stats import gamma as _sp
+
+        return float(_sp.ppf(q, self.k, scale=self.theta))
+
     def sampler(self, seed: int | None = None) -> "GammaSampler":
         """Create a GammaSampler object from GammaDistribution.
 

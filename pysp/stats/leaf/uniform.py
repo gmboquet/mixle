@@ -111,6 +111,18 @@ class UniformDistribution(SequenceEncodableProbabilityDistribution):
         max_val = engine.max(engine.where(mask, vals, engine.asarray(-np.inf)), axis=0)
         return count, min_val, max_val
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact). The continuous 'index of' a value."""
+        from scipy.stats import uniform as _sp
+
+        return float(_sp.cdf(x, loc=self.low, scale=self.high - self.low))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from scipy.stats import uniform as _sp
+
+        return float(_sp.ppf(q, loc=self.low, scale=self.high - self.low))
+
     def sampler(self, seed: int | None = None) -> "UniformSampler":
         """Return a sampler for drawing observations from this distribution."""
         return UniformSampler(self, seed)
