@@ -64,6 +64,9 @@ class Posterior:
         self.raw = raw
         self.acceptance_rate = getattr(raw, "acceptance_rate", None)
         self.predictive = None                   # set by the fitter (posterior predictive)
+        self.rhat = None                         # {param: Gelman-Rubin R-hat} (multi-chain)
+        self.ess = None                          # combined effective sample size (multi-chain)
+        self.n_chains = 1
 
     def _col(self, param) -> int:
         for k, s in enumerate(self._slots):
@@ -89,6 +92,10 @@ class Posterior:
                 "q97.5": float(np.percentile(col, 97.5)),
             }
         out["_acceptance_rate"] = self.acceptance_rate
+        if self.rhat is not None:
+            out["_rhat"] = self.rhat
+            out["_ess"] = self.ess
+            out["_n_chains"] = self.n_chains
         return out
 
 
@@ -224,8 +231,145 @@ def _finalize(rv, slots, res, build) -> RandomVariable:
     return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
 
 
+def _u_to_vals(slots, u) -> np.ndarray:
+    """Map an (n, d) unconstrained sample array to constrained parameter values per slot."""
+    u = np.asarray(u, dtype=float).reshape(len(u), -1)
+    vals = np.empty_like(u)
+    for k, s in enumerate(slots):
+        if s.support == "positive":
+            vals[:, k] = np.exp(u[:, k])
+        elif s.support == "unit":
+            vals[:, k] = 1.0 / (1.0 + np.exp(-u[:, k]))
+        else:
+            vals[:, k] = u[:, k]
+    return vals
+
+
+def _gelman_rubin(chains_u: np.ndarray) -> np.ndarray:
+    """Per-dimension Gelman-Rubin R-hat from (n_chains, n_draws, d) unconstrained samples."""
+    m, n, _ = chains_u.shape
+    if m < 2 or n < 2:
+        return np.full(chains_u.shape[-1], np.nan)
+    chain_means = chains_u.mean(axis=1)
+    W = chains_u.var(axis=1, ddof=1).mean(axis=0)
+    B = n * chain_means.var(axis=0, ddof=1)
+    var_hat = (n - 1) / n * W + B / n
+    return np.sqrt(np.maximum(var_hat / np.where(W > 0, W, 1.0), 0.0))
+
+
+def _mcmc_worker(seed, rv, data, kw):
+    """Module-level (picklable) single MCMC chain: rebuilds the target in-process and runs."""
+    from pysp.ppl import autograd as _ag
+    from pysp.utils.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
+
+    ag = _ag.grad_target(rv, data)
+    if ag is not None:
+        log_target, slots, _, dmean, dstd = ag.log_target, ag.slots, ag.build, ag.dmean, ag.dstd
+    else:
+        log_target, slots, _fam, _build, _unpack, (dmean, dstd) = _build_target(rv, data)
+    u0 = _init_u(slots, dmean, dstd)
+    scale = kw.get("scale")
+    init_scale = (scale * np.ones(len(u0))) if scale is not None \
+        else _init_scale(slots, dstd, len(data))
+    proposal = AdaptiveRandomWalkProposal(init_scale.copy())
+    return metropolis_hastings(log_target, u0, proposal, num_samples=kw["draws"],
+                               burn_in=kw["burn"], thin=kw["thin"],
+                               rng=np.random.RandomState(seed))
+
+
+def _hmc_worker(seed, rv, data, kw):
+    """Module-level (picklable) single HMC chain: rebuilds the analytic-gradient target and runs."""
+    from pysp.ppl import autograd as _ag
+    from pysp.utils.mcmc import hamiltonian_monte_carlo
+
+    ag = _ag.grad_target(rv, data)
+    if ag is not None:
+        slots, dmean, dstd = ag.slots, ag.dmean, ag.dstd
+        log_target, grad = ag.log_target, ag.grad
+    else:
+        log_target, slots, _fam, _build, _unpack, (dmean, dstd) = _build_target(rv, data)
+        grad = _finite_diff_grad(log_target, _init_u(slots, dmean, dstd))
+    u0 = _init_u(slots, dmean, dstd)
+    scale = _init_scale(slots, dstd, len(data))
+    mass = 1.0 / (scale ** 2)
+    step_size = kw["step_size"] if kw["step_size"] is not None else 2.5 / kw["num_steps"]
+    return hamiltonian_monte_carlo(log_target, grad, u0, num_samples=kw["draws"],
+                                   step_size=step_size, num_steps=kw["num_steps"], mass=mass,
+                                   burn_in=kw["burn"], thin=kw["thin"],
+                                   rng=np.random.RandomState(seed))
+
+
+def _finite_diff_grad(log_target, u_ref):
+    eps = 1e-5 * np.maximum(np.abs(np.asarray(u_ref, dtype=float)), 1.0)
+
+    def grad(u):
+        u = np.asarray(u, dtype=float)
+        g = np.empty(len(u))
+        for i in range(len(u)):
+            up = u.copy()
+            up[i] += eps[i]
+            um = u.copy()
+            um[i] -= eps[i]
+            g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
+        return g
+
+    return grad
+
+
+def _run_chains(run_one, worker, worker_args, chains: int, parallel, rng):
+    """Run ``chains`` independent chains.
+
+    ``parallel`` selects the backend: ``False``/``None`` -> sequential; ``True`` or
+    ``"process"`` -> a process pool (genuine parallelism — the model pickles cleanly,
+    so each worker rebuilds its own Torch target and they run on separate cores);
+    ``"thread"`` -> a thread pool (rarely a win: the Torch path is GIL-bound).
+    """
+    seeds = [int(rng.randint(1, 2 ** 31)) for _ in range(chains)]
+    mode = "process" if parallel is True else (parallel or "off")
+    if chains > 1 and mode == "process":
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(max_workers=chains) as ex:
+            futs = [ex.submit(worker, s, *worker_args) for s in seeds]
+            return [f.result() for f in futs]
+    if chains > 1 and mode == "thread":
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=chains) as ex:
+            return list(ex.map(run_one, seeds))
+    return [run_one(s) for s in seeds]
+
+
+def _finalize_chains(rv, slots, results, build) -> RandomVariable:
+    """Combine multiple chains: pool value-space draws, attach R-hat and combined ESS."""
+    us = [np.asarray(r.samples, dtype=float).reshape(len(r.samples), -1) for r in results]
+    n = min(len(u) for u in us)
+    rhat = _gelman_rubin(np.stack([u[:n] for u in us], axis=0))
+    vals = _u_to_vals(slots, np.concatenate(us, axis=0))
+    mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
+    post = Posterior(slots, vals, results[0])
+    post.n_chains = len(results)
+    post.rhat = {s.name: float(rhat[k]) for k, s in enumerate(slots)}
+    try:
+        post.ess = float(sum(np.atleast_1d(r.effective_sample_size()).min() for r in results))
+    except Exception:
+        post.ess = None
+
+    def predictive(n_, rng_):
+        idx = rng_.randint(len(vals), size=n_)
+        out = []
+        for j in idx:
+            d = build({s.index: float(vals[j, k]) for k, s in enumerate(slots)})
+            out.append(d.sampler(seed=int(rng_.randint(1, 2 ** 31))).sample())
+        return np.asarray(out)
+
+    post.predictive = predictive
+    return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
+
+
 def mcmc_fit(rv: RandomVariable, data, *, draws: int = 2000, burn: int = 1000,
-             thin: int = 1, scale: float | None = None, rng=None) -> RandomVariable:
+             thin: int = 1, scale: float | None = None, rng=None,
+             chains: int = 1, parallel: bool = False) -> RandomVariable:
     from pysp.ppl import autograd as _ag
     from pysp.utils.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
@@ -239,15 +383,22 @@ def mcmc_fit(rv: RandomVariable, data, *, draws: int = 2000, burn: int = 1000,
     u0 = _init_u(slots, dmean, dstd)
     init_scale = (scale * np.ones(len(u0))) if scale is not None \
         else _init_scale(slots, dstd, len(data))
-    proposal = AdaptiveRandomWalkProposal(init_scale)
-    res = metropolis_hastings(log_target, u0, proposal, num_samples=draws,
-                              burn_in=burn, thin=thin, rng=rng)
-    return _finalize(rv, slots, res, build)
+
+    def run_one(seed):
+        proposal = AdaptiveRandomWalkProposal(init_scale.copy())   # per-chain adaptive state
+        return metropolis_hastings(log_target, u0, proposal, num_samples=draws,
+                                   burn_in=burn, thin=thin, rng=np.random.RandomState(seed))
+
+    if chains == 1:
+        return _finalize(rv, slots, run_one(int(rng.randint(1, 2 ** 31))), build)
+    kw = {"draws": draws, "burn": burn, "thin": thin, "scale": scale}
+    results = _run_chains(run_one, _mcmc_worker, (rv, data, kw), chains, parallel, rng)
+    return _finalize_chains(rv, slots, results, build)
 
 
 def hmc_fit(rv: RandomVariable, data, *, draws: int = 1000, burn: int = 500,
             step_size: float | None = None, num_steps: int = 15, thin: int = 1,
-            rng=None) -> RandomVariable:
+            rng=None, chains: int = 1, parallel: bool = False) -> RandomVariable:
     """Hamiltonian Monte Carlo over the parameter posterior.
 
     Uses pysp's ``hamiltonian_monte_carlo`` with a numerical gradient of the joint
@@ -286,10 +437,17 @@ def hmc_fit(rv: RandomVariable, data, *, draws: int = 1000, burn: int = 500,
     if step_size is None:
         step_size = 2.5 / num_steps                  # tuned: acc~0.98, near-max ESS (preconditioned)
 
-    res = hamiltonian_monte_carlo(log_target, grad, u0, num_samples=draws,
-                                  step_size=step_size, num_steps=num_steps, mass=mass,
-                                  burn_in=burn, thin=thin, rng=rng)
-    return _finalize(rv, slots, res, build)
+    def run_one(seed):
+        return hamiltonian_monte_carlo(log_target, grad, u0, num_samples=draws,
+                                       step_size=step_size, num_steps=num_steps, mass=mass,
+                                       burn_in=burn, thin=thin, rng=np.random.RandomState(seed))
+
+    if chains == 1:
+        return _finalize(rv, slots, run_one(int(rng.randint(1, 2 ** 31))), build)
+    kw = {"draws": draws, "burn": burn, "thin": thin,
+          "step_size": step_size, "num_steps": num_steps}
+    results = _run_chains(run_one, _hmc_worker, (rv, data, kw), chains, parallel, rng)
+    return _finalize_chains(rv, slots, results, build)
 
 
 # ---------------------------------------------------- closed-form conjugate Bayes
