@@ -90,6 +90,43 @@ class GraphDistributionTestCase(unittest.TestCase):
         with self.assertRaises(EnumerationError):
             stats.ErdosRenyiGraphDistribution(0.3).enumerator()
 
+    def test_stochastic_block_enumeration_matches_brute_force(self):
+        import itertools
+
+        from pysp.data.graph_data import _edge_indices
+        from pysp.stats.compute.pdist import EnumerationError
+
+        bp = np.array([[0.7, 0.2], [0.2, 0.5]])
+        assign = [0, 0, 1, 1]
+        for directed, self_loops, prior in [(False, False, False), (False, False, True), (True, True, True)]:
+            dist = stats.StochasticBlockGraphDistribution(
+                bp,
+                block_assignments=assign,
+                directed=directed,
+                self_loops=self_loops,
+                include_assignment_prior=prior,
+                block_prior=[0.5, 0.5],
+            )
+            n = len(assign)
+            edges = list(_edge_indices(n, directed, self_loops))
+            brute = []
+            for bits in itertools.product((0, 1), repeat=len(edges)):
+                adj = np.zeros((n, n), dtype=np.int8)
+                for (i, j), v in zip(edges, bits):
+                    adj[i, j] = v
+                    if not directed:
+                        adj[j, i] = v
+                brute.append((adj, dist.log_density(adj)))
+            brute.sort(key=lambda t: -t[1])
+            items = list(dist.enumerator())
+            self.assertEqual(len(items), len(brute))
+            np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in brute], atol=1e-9)
+            for v, lp in items:
+                self.assertAlmostEqual(lp, dist.log_density(v), places=9)
+
+        with self.assertRaises(EnumerationError):
+            stats.StochasticBlockGraphDistribution(bp).enumerator()  # no fixed assignments
+
     def test_stochastic_block_matches_legacy_model_and_estimates_probabilities(self):
         assignments = np.asarray([0, 0, 1, 1])
         adj = np.asarray(
