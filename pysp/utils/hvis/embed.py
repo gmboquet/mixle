@@ -9,7 +9,7 @@ import sys
 
 import numpy as np
 
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _affinity_factors,
     _factor_n,
     _is_prebuilt_affinity,
@@ -17,12 +17,12 @@ from pysp.utils.htsne.affinity import (
     _resolve_affinity,
     get_pmat,
 )
-from pysp.utils.htsne.neighbors import (
+from pysp.utils.hvis.neighbors import (
     approx_sparse_model_distances,
     model_knn,
     sparse_model_distances,
 )
-from pysp.utils.htsne.tsne import _tsne_barnes_hut, tsne_exact
+from pysp.utils.hvis.tsne import _tsne_barnes_hut, tsne_exact
 
 
 def htsne(

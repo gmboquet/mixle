@@ -9,7 +9,7 @@ materialized.
 import numpy as np
 import scipy.sparse
 
-from pysp.utils.htsne.affinity import (
+from pysp.utils.hvis.affinity import (
     _affinity_factors,
     _factor_n,
     _factor_parts,

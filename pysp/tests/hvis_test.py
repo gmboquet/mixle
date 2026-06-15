@@ -1,4 +1,4 @@
-"""Tests for model-based t-SNE (pysp.utils.htsne).
+"""Tests for model-based t-SNE (pysp.utils.hvis).
 
 Kept fast by fitting a small mixture once in setUpClass and reusing it; no DPM
 fitting is exercised here (htsne accepts a prefit mix_model).
@@ -32,7 +32,7 @@ from pysp.stats import (
     seq_initialize,
 )
 from pysp.utils.fisher import FisherView
-from pysp.utils.htsne import (
+from pysp.utils.hvis import (
     _barnes_hut_negative_forces,
     _exact_negative_forces,
     _exact_tsne_gradient,
@@ -164,7 +164,7 @@ class HTSNETestCase(unittest.TestCase):
     def setUpClass(cls):
         cls.n = 240
         cls.data, cls.labels, cls.model = make_data_and_model(cls.n)
-        from pysp.utils.htsne import _posteriors_and_loglikes
+        from pysp.utils.hvis import _posteriors_and_loglikes
 
         cls.z, cls.l = _posteriors_and_loglikes(cls.model, data=cls.data)
 
@@ -696,7 +696,7 @@ class HTSNETestCase(unittest.TestCase):
         np.testing.assert_allclose(y_bh, y_dense, atol=1.0e-10)
 
     def test_barnes_hut_respects_max_iterations(self):
-        mod = importlib.import_module("pysp.utils.htsne")
+        mod = importlib.import_module("pysp.utils.hvis")
         rng = np.random.RandomState(16)
         n = 12
         a = rng.rand(n, n)
@@ -949,7 +949,7 @@ class HTSNETestCase(unittest.TestCase):
         # certainty: two long observations of the same topic and two short ones
         # of the same topic should both have near-1 affinity
         data, labels, model = self._varlen_data_and_model(60)
-        from pysp.utils.htsne import _posteriors_and_loglikes
+        from pysp.utils.hvis import _posteriors_and_loglikes
 
         z, _ = _posteriors_and_loglikes(model, data=data)
         s = np.dot(z, z.T)
@@ -989,7 +989,7 @@ class HTSNETestCase(unittest.TestCase):
             self.assertLess(gap, 2.0 * spread)
 
     def test_sequence_field_log_density_sums_unless_len_normalized(self):
-        from pysp.utils.htsne import _field_log_density_features
+        from pysp.utils.hvis import _field_log_density_features
 
         data = [[0], [0, 0, 0]]
         len_dist = PoissonDistribution(2.0)
@@ -1201,7 +1201,7 @@ class HTSNETestCase(unittest.TestCase):
         self.assertGreater(separation_ratio(y, self.labels), 2.0)
 
     def test_auto_affinity_resolution(self):
-        from pysp.utils.htsne import _resolve_affinity
+        from pysp.utils.hvis import _resolve_affinity
 
         # composite components + raw data -> local factor list (one per leaf field)
         r = _resolve_affinity("auto", self.model, self.data, None)
@@ -1223,7 +1223,7 @@ class HTSNETestCase(unittest.TestCase):
     def test_balanced_decomposes_sequences_and_optionals(self):
         # sequence-of-records components flatten into element fields + length;
         # the old implementation refused anything without top-level .dists
-        from pysp.utils.htsne import balanced_factors
+        from pysp.utils.hvis import balanced_factors
 
         data, labels, model = self._varlen_data_and_model(60)
         factors = balanced_factors(model, data)
@@ -1238,7 +1238,7 @@ class HTSNETestCase(unittest.TestCase):
         self.assertGreater(separation_ratio(y, labels), 1.5)
 
     def test_optional_missing_inner_field_does_not_create_nan_affinities(self):
-        from pysp.utils.htsne import balanced_factors
+        from pysp.utils.hvis import balanced_factors
 
         model = MixtureDistribution(
             [
@@ -1255,7 +1255,7 @@ class HTSNETestCase(unittest.TestCase):
             self.assertFalse(np.isnan(log_s).any())
 
     def test_evidence_cap_bounds_field_influence(self):
-        from pysp.utils.htsne import balanced_factors, model_log_affinity
+        from pysp.utils.hvis import balanced_factors, model_log_affinity
 
         factors = balanced_factors(self.model, self.data)
         la_inf = model_log_affinity(None, None, affinity=factors)
@@ -1271,7 +1271,7 @@ class HTSNETestCase(unittest.TestCase):
         if mild.any():
             self.assertTrue(np.allclose(la_cap[off][mild], la_inf[off][mild], atol=1.0e-10))
         # single-factor affinities ignore the cap (it could only create ties)
-        from pysp.utils.htsne import _posteriors_and_loglikes
+        from pysp.utils.hvis import _posteriors_and_loglikes
 
         z, _ = _posteriors_and_loglikes(self.model, data=self.data)
         la1 = model_log_affinity(z, affinity="bhattacharyya")
@@ -1279,7 +1279,7 @@ class HTSNETestCase(unittest.TestCase):
         self.assertTrue(np.allclose(np.nan_to_num(la1, neginf=-1e30), np.nan_to_num(la1c, neginf=-1e30)))
 
     def test_field_weights_apply_to_whole_field_coefficient(self):
-        from pysp.utils.htsne import balanced_factors, model_log_affinity
+        from pysp.utils.hvis import balanced_factors, model_log_affinity
 
         factors = balanced_factors(self.model, self.data, field_weights=[2.0, 0.0])
         la = model_log_affinity(None, None, affinity=factors, evidence_cap=None)
@@ -1291,7 +1291,7 @@ class HTSNETestCase(unittest.TestCase):
         self.assertTrue(np.allclose(la[off], expected[off], atol=1.0e-12))
 
     def test_optional_without_missing_probability_has_no_gate_field(self):
-        from pysp.utils.htsne import balanced_factors, model_log_affinity
+        from pysp.utils.hvis import balanced_factors, model_log_affinity
 
         model = MixtureDistribution(
             [
@@ -1308,7 +1308,7 @@ class HTSNETestCase(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(la[off])))
 
     def test_field_weights_validated_against_flattened_fields(self):
-        from pysp.utils.htsne import balanced_factors
+        from pysp.utils.hvis import balanced_factors
 
         with self.assertRaises(ValueError):
             balanced_factors(self.model, self.data, field_weights=[1.0])
