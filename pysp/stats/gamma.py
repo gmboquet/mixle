@@ -127,6 +127,14 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         """Return string representation of GammaDistribution object."""
         return "GammaDistribution(%s, %s, name=%s)" % (repr(self.k), repr(self.theta), repr(self.name))
 
+    def get_parameters(self) -> tuple[float, float]:
+        """Return the (shape k, scale theta) pair.
+
+        Lets a GammaDistribution serve as a conjugate prior (on a Poisson/Exponential rate, or a
+        Gamma scale) under the unified Bayesian estimation protocol.
+        """
+        return self.k, self.theta
+
     def density(self, x: float) -> float:
         """Density of gamma distribution evaluated at x.
 
