@@ -41,24 +41,30 @@ Normal(free, free).fit(data, backend="mp", num_workers=8)     # multiprocess EM
 # backend="mpi" / "dask" also supported (see pysp.utils.estimation.optimize)
 ```
 
-## Regression (covariates with `Field`)
+## Regression & GLMs (covariates with `Field`)
 
-A linear predictor in the mean slot makes it a regression. Coefficients can be `free` (OLS)
-or Normal priors (Bayesian / ridge — closed-form Gaussian posterior); `sigma` constant or
-`free`. Pass the response positionally and covariates via `given=`.
+A linear predictor in a parameter slot makes a regression; the **outer family sets the link**:
 
 ```python
-from pysp.ppl import Normal, Field, free
+from pysp.ppl import Normal, Bernoulli, Poisson, Field, free
 
-# OLS, multiple covariates
-m = Normal(free*Field("x") + free*Field("z") + free, free).fit(y, given={"x": xs, "z": zs})
-m.params                  # {'x': {...}, 'z': {...}, 'intercept': {...}};  m.result.sigma
+Normal(free*Field("x") + free, free)    # linear regression  (identity link)
+Bernoulli(free*Field("x") + free)       # logistic regression (logit link)
+Poisson(free*Field("x") + free)         # Poisson regression  (log link)
+```
 
-# Bayesian: coefficient posteriors + prediction
-a, b = Normal(0, 10), Normal(0, 10)
+Coefficients are `free` (MLE) or Normal priors (Bayesian / ridge — MAP). Fit with the
+response positionally and covariates via `given=`; fitting is IRLS (Fisher scoring).
+
+```python
+m = Bernoulli(free*Field("x") + free*Field("z") + free).fit(y, given={"x": xs, "z": zs})
+m.params                                # {'x': {...}, 'z': {...}, 'intercept': {...}}
+m.result.predict({"x": [0], "z": [0]})  # probability (through the link)
+
+a, b = Normal(0, 10), Normal(0, 10)     # Bayesian linear regression
 m = Normal(a*Field("x") + b, free).fit(y, given={"x": xs})
-m.posterior(a)                          # posterior draws for the slope
-m.result.predict({"x": [0, 1, 2]})      # predict at new covariates
+m.posterior(a)                          # slope posterior draws
+m.result.predict({"x": [0, 1, 2]})      # predicted means
 ```
 
 ## Mixtures — and EM "just works"
@@ -240,6 +246,7 @@ m.params          # fitted params in the SAME parameterization you built with: {
 m.components      # composite sub-models as RandomVariables (query each: c.params, c.sample, ...)
 m.dist            # the underlying pysp distribution (full original API — escape hatch)
 m.sample(n)       # draw
+m.mean(); m.var() # moments (Monte-Carlo; works for any RV)
 m.log_prob(x)     # density (scalar or vectorized)
 m.posterior(x)    # latent-state posterior (data) OR parameter posterior (name/handle)
 m.predict(n)      # posterior-predictive draws (Bayesian) or plug-in predictive (point fit)

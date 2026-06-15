@@ -189,6 +189,13 @@ class PPLCoreTestCase(unittest.TestCase):
         self.assertEqual(set(sq.params), {"element"})
         self.assertEqual(set(sq.params["element"]), {"mean", "sd"})
 
+    def test_moments(self):
+        self.assertAlmostEqual(Normal(3, 2).mean(), 3.0, delta=0.1)
+        self.assertAlmostEqual(Normal(3, 2).var(), 4.0, delta=0.2)
+        self.assertAlmostEqual(Normal(0, 1).exp().mean(), np.exp(0.5), delta=0.1)   # lognormal
+        # moment of a convolution
+        self.assertAlmostEqual((Normal(0, 1) + Normal(5, 2)).mean(), 5.0, delta=0.1)
+
     def test_immutability(self):
         x = Normal(0.0, 1.0)
         with self.assertRaises(AttributeError):

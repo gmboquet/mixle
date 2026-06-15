@@ -489,6 +489,15 @@ class RandomVariable:
         enc = d.dist_to_encoder().seq_encode(data)
         return np.asarray(d.seq_log_density(enc))
 
+    def mean(self, samples: int = 20000, seed: int = 0):
+        """Expected value of the random variable (Monte-Carlo; works for any RV —
+        concrete, transformed, convolved, or conditioned)."""
+        return float(np.mean(np.asarray(self.sample(samples, seed=seed), dtype=float)))
+
+    def var(self, samples: int = 20000, seed: int = 0):
+        """Variance of the random variable (Monte-Carlo)."""
+        return float(np.var(np.asarray(self.sample(samples, seed=seed), dtype=float)))
+
     def prob_of_event(self):
         """P(event) under the base distribution (Monte-Carlo), for a conditioned RV."""
         if self._kind != "given":
@@ -556,8 +565,8 @@ class RandomVariable:
         ``'auto'`` picks ``map`` when the model has priors else ``em``. EM threads pysp's
         parallel/distributed backends (``backend='mp'|'mpi'|'dask'``).
         """
-        # regression: a linear predictor (covariates) in the mean slot
-        if self._kind == "sample" and self._args and isinstance(self._args[0], _LinearPredictor):
+        # regression / GLM: a linear predictor (covariates) in a parameter slot
+        if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
             from pysp.ppl import regression as _reg
             return _reg.regression_fit(self, data, **kw)
 
