@@ -212,6 +212,34 @@ fitted, objective = fit_map(enc, model, engine=TorchEngine(device="cpu", dtype="
                                 weights=DirichletPrior([2.0, 2.0])))
 ```
 
+## Enumeration & ranking
+
+Discrete and structured models can **enumerate their support in descending-probability order** and
+answer exact **rank / cumulative-probability** queries — even when the support is enormous or
+unbounded.
+
+```python
+from pysp.utils.density_rank import density_rank, count_dp_seek
+
+dist.enumerator().top_k(5)          # the 5 most probable (value, log_prob), in order
+density_rank(dist, value)           # exact-head + sampling rank & CDF of an observation
+count_dp_seek(dist, index=10_000)   # the ~10,000th most probable value, by structural count-DP
+```
+
+For decomposable families (`Composite` / `Sequence` / `MarkovChain`), rank↔value is an exact count
+dynamic program at any depth (`count_dp_rank`, `count_dp_seek`, `cumulative_probability`,
+`mixture_cross_rank`). For very large or infinite supports, **budget-bounded quantized indexes** seek
+and unrank over just the most-probable region without enumerating everything:
+
+```python
+index = dist.count_budget_index(budget_bits=20)               # index the top ~2**20 values
+for value, log_prob in dist.count_budget_distinct(budget_bits=20):
+    ...
+```
+
+`pysp.utils.enumeration` provides the shared machinery (bounded best-first union, quantization,
+Kronecker-substitution count convolution).
+
 ## Distribution catalog
 
 ~75 composable families live in `pysp.stats`, grouped into subpackages (`leaf`, `multivariate`,
