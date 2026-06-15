@@ -462,6 +462,37 @@ class DistributionEnumerator:
         """Return the k most probable (value, log_prob) pairs (fewer if the support is smaller)."""
         return list(itertools.islice(self, k))
 
+    def top_p(self, p: float, max_items: int | None = None) -> list[tuple[Any, float]]:
+        """Return the smallest descending-probability prefix whose total probability reaches ``p``.
+
+        The nucleus / minimal high-probability set: because values are yielded in non-increasing
+        probability order, the returned prefix is a minimum-size set of outcomes whose summed mass is
+        ``>= p`` (e.g. ``p=0.95`` gives a 95%-coverage support set -- the discrete analogue of nucleus
+        sampling). Accumulation stops as soon as the cumulative probability reaches ``p``.
+
+        ``max_items`` caps how many values are pulled so an infinite or heavy-tailed support cannot
+        run away; if the cap is hit before the threshold, the (sub-threshold) prefix gathered so far
+        is returned. ``p >= 1.0`` on an infinite support therefore requires ``max_items``.
+
+        Args:
+            p (float): Target cumulative probability; ``p <= 0`` returns the empty set.
+            max_items (Optional[int]): Hard cap on the number of values pulled.
+
+        Returns:
+            List of (value, log_prob) pairs in non-increasing probability order.
+
+        """
+        if p <= 0.0:
+            return []
+        out: list[tuple[Any, float]] = []
+        total = 0.0
+        for value, log_prob in self:
+            out.append((value, log_prob))
+            total += math.exp(log_prob)
+            if total >= p or (max_items is not None and len(out) >= max_items):
+                break
+        return out
+
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0):
         """Precompute a bounded bit-quantized index over this enumeration.
 
