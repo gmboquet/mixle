@@ -1,7 +1,7 @@
 """Structural quantized enumeration: count the support without enumerating it.
 
 The smart-enumeration index (see :mod:`pysp.utils.enumeration` and
-:class:`pysp.stats.pdist.DistributionEnumerator`) is a *seek structure* over a
+:class:`pysp.stats.compute.pdist.DistributionEnumerator`) is a *seek structure* over a
 distribution's exact descending-probability enumeration: it precomputes how many
 support values fall in each quantized log-probability bin so that an arbitrary rank
 can be resolved and unranked without walking the prefix.
@@ -344,7 +344,7 @@ def leaf_count_index(
 
 def child_count_index(child, path: str, quantizer: Quantizer, max_fine_bucket: int) -> tuple[CountIndex, bool]:
     """Build child.quantized_count_index(...), annotating EnumerationError with the child's path."""
-    from pysp.stats.pdist import EnumerationError
+    from pysp.stats.compute.pdist import EnumerationError
 
     try:
         return child.quantized_count_index(quantizer, max_fine_bucket)

@@ -15,7 +15,7 @@ from pysp.stats import (
     seq_estimate,
     seq_initialize,
 )
-from pysp.stats.pdist import ParameterEstimator
+from pysp.stats.compute.pdist import ParameterEstimator
 
 
 @dataclass

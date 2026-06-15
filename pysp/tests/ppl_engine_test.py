@@ -1,9 +1,10 @@
 """Execution-stack tests for pysp.ppl: vectorization, torch engine, parallel backends."""
 import time
-import numpy as np
 import unittest
 
-from pysp.ppl import Normal, Mix, free
+import numpy as np
+
+from pysp.ppl import Mix, Normal, free
 
 
 class EngineTestCase(unittest.TestCase):

@@ -4,7 +4,6 @@ For each family we instantiate a known distribution, draw an i.i.d. sample, fit 
 with the one-pass ``estimate`` helper, and print the true vs. recovered parameters. Fully
 self-contained (random data only). This is the quickest tour of pysparkplug's scalar leaf families.
 """
-import numpy as np
 
 from pysp.stats import *
 

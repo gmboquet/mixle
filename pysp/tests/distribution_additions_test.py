@@ -260,7 +260,7 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
 
     def test_fused_kernel_log_density_matches_seq(self):
         try:
-            from pysp.stats.fused_kernels import CompiledMixture
+            from pysp.stats.compute.fused_kernels import CompiledMixture
         except Exception as exc:
             self.skipTest("compiled kernels unavailable: %s" % exc)
 
@@ -286,7 +286,7 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
 class StandardDistributionTorchTestCase(unittest.TestCase):
     def test_torch_em_matches_seq_for_bernoulli_mixture(self):
         try:
-            from pysp.stats.torch_mixture import TorchMixture
+            from pysp.stats.compute.torch_mixture import TorchMixture
         except Exception as exc:
             self.skipTest("torch engine unavailable: %s" % exc)
 
@@ -310,7 +310,7 @@ class StandardDistributionTorchTestCase(unittest.TestCase):
 
     def test_torch_em_matches_seq_for_negative_binomial_mixture(self):
         try:
-            from pysp.stats.torch_mixture import TorchMixture
+            from pysp.stats.compute.torch_mixture import TorchMixture
         except Exception as exc:
             self.skipTest("torch engine unavailable: %s" % exc)
 
@@ -340,7 +340,7 @@ class StandardDistributionTorchTestCase(unittest.TestCase):
 
     def test_torch_log_density_matches_seq_for_new_continuous_leaves(self):
         try:
-            from pysp.stats.torch_mixture import TorchMixture
+            from pysp.stats.compute.torch_mixture import TorchMixture
         except Exception as exc:
             self.skipTest("torch engine unavailable: %s" % exc)
 

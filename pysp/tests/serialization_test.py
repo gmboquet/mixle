@@ -6,9 +6,9 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 import pysp.stats as stats
-from pysp.stats.dpm import DirichletProcessMixtureDistribution, DirichletProcessMixtureEstimator
-from pysp.stats.normgamma import NormalGammaDistribution
-from pysp.stats.select import SelectDistribution
+from pysp.stats.bayes.dpm import DirichletProcessMixtureDistribution, DirichletProcessMixtureEstimator
+from pysp.stats.bayes.normgamma import NormalGammaDistribution
+from pysp.stats.combinator.select import SelectDistribution
 from pysp.utils.serialization import (
     SerializationError,
     from_serializable,
@@ -110,7 +110,7 @@ class DistributionSerializationTestCase(unittest.TestCase):
         self.assertEqual(sparse_loaded.cond_prob_mat.getformat(), "csr")
 
     def test_grammar_distribution_json_round_trip(self):
-        from pysp.stats.grammar import VRG, GrammarDistribution, GrammarRule
+        from pysp.stats.graph.grammar import VRG, GrammarDistribution, GrammarRule
 
         graph = nx.Graph()
         graph.add_node(0, label="A", node_color="")

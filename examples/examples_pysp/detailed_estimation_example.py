@@ -1,5 +1,6 @@
 """Detailed example of estimation and model validation with a test set."""
 import numpy as np
+
 from pysp.stats import *
 from pysp.utils.evaluation import empirical_kl_divergence, partition_data
 

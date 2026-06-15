@@ -19,26 +19,26 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.beta import BetaDistribution
-from pysp.stats.composite import (
+from pysp.stats.combinator.composite import (
     CompositeAccumulatorFactory,
     CompositeDistribution,
     CompositeEstimator,
 )
-from pysp.stats.exponential import ExponentialDistribution, ExponentialEstimator
-from pysp.stats.gamma import GammaDistribution
-from pysp.stats.mixture import MixtureDistribution
-from pysp.stats.poisson import (
-    PoissonAccumulator,
-    PoissonDistribution,
-    PoissonEstimator,
-)
-from pysp.stats.sequence import (
+from pysp.stats.combinator.sequence import (
     SequenceAccumulator,
     SequenceAccumulatorFactory,
     SequenceEstimator,
 )
-from pysp.stats.setdist import (
+from pysp.stats.latent.mixture import MixtureDistribution
+from pysp.stats.leaf.beta import BetaDistribution
+from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEstimator
+from pysp.stats.leaf.gamma import GammaDistribution
+from pysp.stats.leaf.poisson import (
+    PoissonAccumulator,
+    PoissonDistribution,
+    PoissonEstimator,
+)
+from pysp.stats.sets.setdist import (
     BernoulliSetAccumulator,
     BernoulliSetAccumulatorFactory,
     BernoulliSetEstimator,

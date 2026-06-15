@@ -18,7 +18,7 @@ import unittest
 
 import numpy as np
 
-import pysp.stats.look_back_hmm as look_back_mod
+import pysp.stats.latent.look_back_hmm as look_back_mod
 from pysp.stats import (
     CategoricalDistribution,
     CategoricalEstimator,
@@ -29,11 +29,11 @@ from pysp.stats import (
     seq_encode,
     seq_log_density_sum,
 )
-from pysp.stats.hidden_markov_ind_pi import IndPiHiddenMarkovEstimator, IndPiHiddenMarkovModelDistribution
-from pysp.stats.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
-from pysp.stats.segmental_hmm import SegmentalHiddenMarkovModelDistribution
-from pysp.stats.tree_hmm import TreeHiddenMarkovEstimator, TreeHiddenMarkovModelDistribution
+from pysp.stats.graph.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
+from pysp.stats.latent.hidden_markov_ind_pi import IndPiHiddenMarkovEstimator, IndPiHiddenMarkovModelDistribution
+from pysp.stats.latent.segmental_hmm import SegmentalHiddenMarkovModelDistribution
+from pysp.stats.latent.tree_hmm import TreeHiddenMarkovEstimator, TreeHiddenMarkovModelDistribution
+from pysp.stats.leaf.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 from pysp.utils.estimation import optimize
 
 

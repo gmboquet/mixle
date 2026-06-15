@@ -2,7 +2,6 @@
 This is similar to step_edit_example.py"""
 import numpy as np
 
-
 from pysp.stats import *
 from pysp.utils.estimation import optimize
 

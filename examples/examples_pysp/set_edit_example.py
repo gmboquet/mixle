@@ -1,7 +1,6 @@
 """Example of Bernoulli set edit distribution. Transition probabilities for sets are printed out for fit."""
 import numpy as np
 
-
 from pysp.stats import *
 from pysp.utils.estimation import optimize
 

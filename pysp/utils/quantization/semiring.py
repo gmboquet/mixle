@@ -12,7 +12,7 @@ The enumeration system has two orthogonal computational modes:
 
   Axis B -- ordered access: produce values in strict descending probability order, lazily. This is
     a best-first *search*, not a fold, and a semiring cannot generate it; it is the existing
-    ``enumerator()`` machinery (:class:`pysp.stats.pdist.DistributionEnumerator`), aliased here as
+    ``enumerator()`` machinery (:class:`pysp.stats.compute.pdist.DistributionEnumerator`), aliased here as
     :class:`OrderedStream` for symmetry.
 
 The two axes trade in one currency -- ``(value, log_prob)`` pairs under a shared

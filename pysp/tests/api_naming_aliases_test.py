@@ -38,7 +38,8 @@ class CoalesceAliasHelperTestCase(unittest.TestCase):
 
 class ClassNameAliasTestCase(unittest.TestCase):
     def test_estimator_accumulator_aliases(self):
-        from pysp.stats import hmixture, jmixture, lda, optional, select, ss_mixture
+        from pysp.stats.combinator import optional, select
+        from pysp.stats.latent import hmixture, jmixture, lda, ss_mixture
 
         self.assertIs(lda.LDAAccumulator, lda.LDAEstimatorAccumulator)
         self.assertIs(lda.LDAAccumulatorFactory, lda.LDAEstimatorAccumulatorFactory)
@@ -49,12 +50,13 @@ class ClassNameAliasTestCase(unittest.TestCase):
         self.assertIs(optional.OptionalAccumulatorFactory, optional.OptionalEstimatorAccumulatorFactory)
 
     def test_family_stem_aliases(self):
-        from pysp.stats import conditional as cond
-        from pysp.stats import grammar, mvnmixture
-        from pysp.stats import hidden_markov as hm
-        from pysp.stats import quantized_hmm as qhmm
-        from pysp.stats import segmental_hmm as seg
-        from pysp.stats import tree_hmm as tree
+        from pysp.stats.combinator import conditional as cond
+        from pysp.stats.graph import grammar
+        from pysp.stats.latent import hidden_markov as hm
+        from pysp.stats.latent import mvnmixture
+        from pysp.stats.latent import quantized_hmm as qhmm
+        from pysp.stats.latent import segmental_hmm as seg
+        from pysp.stats.latent import tree_hmm as tree
 
         self.assertIs(hm.HiddenMarkovModelEstimator, hm.HiddenMarkovEstimator)
         self.assertIs(hm.HiddenMarkovModelSampler, hm.HiddenMarkovSampler)
@@ -98,14 +100,14 @@ class ClassNameAliasTestCase(unittest.TestCase):
 
 class WeightsAliasTestCase(unittest.TestCase):
     def _components(self):
-        from pysp.stats.categorical import CategoricalDistribution
+        from pysp.stats.leaf.categorical import CategoricalDistribution
 
         return [CategoricalDistribution({"a": 1.0}), CategoricalDistribution({"a": 0.5, "b": 0.5})]
 
     def test_mixture_family_weights(self):
-        from pysp.stats.heterogeneous_mixture import HeterogeneousMixtureDistribution
-        from pysp.stats.mixture import MixtureDistribution
-        from pysp.stats.ss_mixture import SemiSupervisedMixtureDistribution
+        from pysp.stats.latent.heterogeneous_mixture import HeterogeneousMixtureDistribution
+        from pysp.stats.latent.mixture import MixtureDistribution
+        from pysp.stats.latent.ss_mixture import SemiSupervisedMixtureDistribution
 
         for cls in (MixtureDistribution, HeterogeneousMixtureDistribution, SemiSupervisedMixtureDistribution):
             comps = self._components()
@@ -118,7 +120,7 @@ class WeightsAliasTestCase(unittest.TestCase):
                 cls(comps)
 
     def test_gaussian_mixture_weights(self):
-        from pysp.stats.mvnmixture import GaussianMixtureDistribution
+        from pysp.stats.latent.mvnmixture import GaussianMixtureDistribution
 
         mu = [[0.0, 0.0], [3.0, 3.0]]
         sig2 = [[1.0, 1.0], [1.0, 1.0]]
@@ -127,7 +129,7 @@ class WeightsAliasTestCase(unittest.TestCase):
         self.assertTrue(np.allclose(a.w, b.w))
 
     def test_hmm_family_weights_and_transitions(self):
-        from pysp.stats.hidden_markov import HiddenMarkovModelDistribution
+        from pysp.stats.latent.hidden_markov import HiddenMarkovModelDistribution
 
         comps = self._components()
         trans = [[0.5, 0.5], [0.2, 0.8]]
@@ -143,8 +145,8 @@ class WeightsAliasTestCase(unittest.TestCase):
 
 class ProbMapVecCovarAliasTestCase(unittest.TestCase):
     def test_prob_map(self):
-        from pysp.stats.categorical import CategoricalDistribution
-        from pysp.stats.setdist import BernoulliSetDistribution
+        from pysp.stats.leaf.categorical import CategoricalDistribution
+        from pysp.stats.sets.setdist import BernoulliSetDistribution
 
         self.assertEqual(
             CategoricalDistribution(prob_map={"a": 0.6, "b": 0.4}).pmap,
@@ -155,8 +157,8 @@ class ProbMapVecCovarAliasTestCase(unittest.TestCase):
             CategoricalDistribution({"a": 1.0}, prob_map={"a": 1.0})
 
     def test_prob_vec(self):
-        from pysp.stats.int_multinomial import IntegerMultinomialDistribution
-        from pysp.stats.int_range import IntegerCategoricalDistribution
+        from pysp.stats.leaf.int_multinomial import IntegerMultinomialDistribution
+        from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
 
         self.assertTrue(
             np.allclose(
@@ -172,8 +174,8 @@ class ProbMapVecCovarAliasTestCase(unittest.TestCase):
         )
 
     def test_covariance(self):
-        from pysp.stats.dmvn import DiagonalGaussianDistribution
-        from pysp.stats.mvn import MultivariateGaussianDistribution
+        from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution
+        from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
 
         cov = [[2.0, 0.0], [0.0, 3.0]]
         self.assertTrue(
@@ -194,11 +196,11 @@ class ProbMapVecCovarAliasTestCase(unittest.TestCase):
 
 class NumValuesMaxIterAliasTestCase(unittest.TestCase):
     def test_num_values(self):
-        from pysp.stats.int_edit_setdist import IntegerBernoulliEditEstimator
-        from pysp.stats.int_edit_stepsetdist import IntegerStepBernoulliEditEstimator
-        from pysp.stats.int_setdist import IntegerBernoulliSetEstimator
-        from pysp.stats.markov_transform import MarkovTransformEstimator
-        from pysp.stats.sparse_markov_transform import SparseMarkovAssociationEstimator
+        from pysp.stats.graph.markov_transform import MarkovTransformEstimator
+        from pysp.stats.graph.sparse_markov_transform import SparseMarkovAssociationEstimator
+        from pysp.stats.sets.int_edit_setdist import IntegerBernoulliEditEstimator
+        from pysp.stats.sets.int_edit_stepsetdist import IntegerStepBernoulliEditEstimator
+        from pysp.stats.sets.int_setdist import IntegerBernoulliSetEstimator
 
         for cls in (
             MarkovTransformEstimator,
@@ -213,7 +215,7 @@ class NumValuesMaxIterAliasTestCase(unittest.TestCase):
                 cls(6, num_values=6)
 
     def test_max_iter(self):
-        from pysp.stats.categorical import CategoricalDistribution
+        from pysp.stats.leaf.categorical import CategoricalDistribution
         from pysp.utils.em import RestartEM
 
         model = CategoricalDistribution({"a": 1.0})

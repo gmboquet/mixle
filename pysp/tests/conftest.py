@@ -48,7 +48,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "heterogeneous_pcfg_test.py": ("pcfg", "integration", "slow"),
     "hidden_association_keys_test.py": ("latent",),
     "hmm_keys_test.py": ("hmm",),
-    "htsne_test.py": ("htsne", "integration", "slow"),
+    "hvis_test.py": ("hvis", "integration", "slow"),
     "ibp_test.py": ("distribution", "latent"),
     "int_hidden_association_test.py": ("latent",),
     "kernels_ext_test.py": ("kernel", "integration"),
@@ -97,7 +97,7 @@ NODEID_MARKERS: tuple[tuple[str, MarkerTuple], ...] = (
     ("MPIBackend", ("mpi", "optional", "parallel")),
     ("MPS", ("torch", "optional")),
     ("numba", ("numba",)),
-    ("umap", ("optional", "htsne")),
+    ("umap", ("optional", "hvis")),
 )
 
 

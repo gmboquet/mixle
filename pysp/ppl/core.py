@@ -153,13 +153,13 @@ def _convolve(da, db):
     """Closed-form distribution of da + db for independent operands, or None."""
     ta, tb = type(da).__name__, type(db).__name__
     if ta == tb == "GaussianDistribution":
-        from pysp.stats.gaussian import GaussianDistribution
+        from pysp.stats.leaf.gaussian import GaussianDistribution
         return GaussianDistribution(da.mu + db.mu, da.sigma2 + db.sigma2)
     if ta == tb == "PoissonDistribution":
-        from pysp.stats.poisson import PoissonDistribution
+        from pysp.stats.leaf.poisson import PoissonDistribution
         return PoissonDistribution(da.lam + db.lam)
     if ta == tb == "GammaDistribution" and abs(da.theta - db.theta) < 1e-12:
-        from pysp.stats.gamma import GammaDistribution
+        from pysp.stats.leaf.gamma import GammaDistribution
         return GammaDistribution(da.k + db.k, da.theta)        # same scale
     return None
 
@@ -307,7 +307,7 @@ def seed_child(rv: "RandomVariable", value: Any, scale: float, rng=None):
         if fam.seed_at is not None:
             return fam.dist_cls(**fam.seed_at(value, scale))
         if fam.name == "Categorical":
-            from pysp.stats.categorical import CategoricalDistribution
+            from pysp.stats.leaf.categorical import CategoricalDistribution
             spec = rv._args[0]
             keys = list(spec.keys()) if isinstance(spec, dict) else list(range(len(spec)))
             w = rng.dirichlet(np.ones(len(keys)))            # random, valid (no zeros->inf)
@@ -379,7 +379,7 @@ class RandomVariable:
 
     # -- algebra (deterministic transforms + convolution) -------------------
     def _affine(self, loc, scale) -> "RandomVariable":
-        from pysp.stats.transform import AffineTransform
+        from pysp.stats.combinator.transform import AffineTransform
         return RandomVariable._apply(self, AffineTransform(loc=float(loc), scale=float(scale)))
 
     def __mul__(self, c):
@@ -419,11 +419,11 @@ class RandomVariable:
         return self._affine(0.0, -1.0)
 
     def exp(self) -> "RandomVariable":
-        from pysp.stats.transform import ExpTransform
+        from pysp.stats.combinator.transform import ExpTransform
         return RandomVariable._apply(self, ExpTransform())
 
     def log(self) -> "RandomVariable":
-        from pysp.stats.transform import LogTransform
+        from pysp.stats.combinator.transform import LogTransform
         return RandomVariable._apply(self, LogTransform())
 
     # -- conditioning: comparisons build Events; .given restricts the RV -----
@@ -747,7 +747,7 @@ def lower(rv: "RandomVariable", *, target: str = "dist"):
     if rv._kind == "apply":
         if target != "dist":
             raise NotImplementedError("fitting through an RV transform is a later slice.")
-        from pysp.stats.transform import TransformDistribution
+        from pysp.stats.combinator.transform import TransformDistribution
         base, transform = rv._args
         d = TransformDistribution(lower(base, target="dist"), transform)
         cache[target] = d

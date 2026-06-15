@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 
 import pysp.utils.vector as vec
-from pysp.stats.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
+from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 from pysp.utils.special import digamma
 
 _EPS = 1.0e-300

@@ -32,11 +32,11 @@ from pysp.stats import (
     seq_encode,
     seq_log_density_sum,
 )
-from pysp.stats.heterogeneous_mixture import HeterogeneousMixtureEstimator
-from pysp.stats.hmixture import HierarchicalMixtureEstimator
-from pysp.stats.jmixture import JointMixtureEstimator
-from pysp.stats.mvnmixture import GaussianMixtureDistribution, GaussianMixtureEstimator
-from pysp.stats.ss_mixture import SemiSupervisedMixtureEstimator
+from pysp.stats.latent.heterogeneous_mixture import HeterogeneousMixtureEstimator
+from pysp.stats.latent.hmixture import HierarchicalMixtureEstimator
+from pysp.stats.latent.jmixture import JointMixtureEstimator
+from pysp.stats.latent.mvnmixture import GaussianMixtureDistribution, GaussianMixtureEstimator
+from pysp.stats.latent.ss_mixture import SemiSupervisedMixtureEstimator
 from pysp.utils.estimation import optimize
 
 

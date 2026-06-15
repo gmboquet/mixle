@@ -1,4 +1,4 @@
-"""Tests for the extended torch engine families (pysp.stats.torch_mixture).
+"""Tests for the extended torch engine families (pysp.stats.compute.torch_mixture).
 
 Covers Gamma, LogGaussian, Binomial, DiagonalGaussian, Optional and Ignored
 on cpu float64. For each family: seq_log_density parity with the legacy seq_*
@@ -41,7 +41,7 @@ from pysp.stats import (
 )
 
 if HAS_TORCH:
-    from pysp.stats.torch_mixture import TorchMixture
+    from pysp.stats.compute.torch_mixture import TorchMixture
 else:
     TorchMixture = None
 from pysp.tests.kernels_ext_test import dist_params
