@@ -218,19 +218,21 @@ class CapabilityMatrixTestCase(unittest.TestCase):
         from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
         from pysp.utils.density_rank import density_rank
 
+        # (name, dist, value, expected density_rank method): families with no enumerator still expose a
+        # CDF -- Monte-Carlo for most, exact-analytic where a closed-form cumulative exists (MVN).
         cases = [
-            ("gaussian", GaussianDistribution(0.0, 1.0), 0.5),
-            ("gamma", GammaDistribution(2.0, 2.0), 3.0),
-            ("student_t", StudentTDistribution(5.0, 0.0, 1.0), 0.5),
-            ("mvn", MultivariateGaussianDistribution(np.zeros(2), np.eye(2)), np.zeros(2)),
-            ("erdos_renyi_unsized", ErdosRenyiGraphDistribution(0.3), None),
+            ("gaussian", GaussianDistribution(0.0, 1.0), 0.5, "sampling"),
+            ("gamma", GammaDistribution(2.0, 2.0), 3.0, "sampling"),
+            ("student_t", StudentTDistribution(5.0, 0.0, 1.0), 0.5, "sampling"),
+            ("mvn", MultivariateGaussianDistribution(np.zeros(2), np.eye(2)), np.array([0.5, 0.5]), "exact-analytic"),
+            ("erdos_renyi_unsized", ErdosRenyiGraphDistribution(0.3), None, None),
         ]
-        for name, dist, x in cases:
+        for name, dist, x, expected_method in cases:
             self.assertFalse(supports_enumeration(dist), "%s: should not enumerate" % name)
             if x is None:
                 continue
             r = density_rank(dist, x, n_samples=3000, seed=1)
-            self.assertEqual(r.method, "sampling", "%s: expected sampling CDF" % name)
+            self.assertEqual(r.method, expected_method, "%s: unexpected CDF method" % name)
             self.assertTrue(0.0 <= r.cumulative_probability <= 1.0, "%s: cdf out of range" % name)
 
 
