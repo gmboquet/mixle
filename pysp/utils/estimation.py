@@ -578,6 +578,120 @@ def optimize(
             enc_data.close()
 
 
+def _data_objective_sum(enc_data: Any, model: SequenceEncodableProbabilityDistribution) -> float:
+    """Data-dependent part of the Bayesian fit objective.
+
+    For variational models exposing ``seq_local_elbo`` (e.g. variational mixtures, DPM) this is the
+    sum of per-observation local ELBO contributions; otherwise it is the observed-data log-likelihood
+    at the current (MAP) parameter estimates.
+    """
+    if hasattr(model, "seq_local_elbo"):
+        return float(sum(model.seq_local_elbo(u[1]).sum() for u in enc_data))
+    _, rv = seq_log_density_sum(enc_data, model)
+    return rv
+
+
+def _model_objective(estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution) -> float:
+    """Prior/global part of the Bayesian fit objective.
+
+    For MAP estimators this is the log-prior density of the estimated parameters; for variational
+    estimators it is the data-independent part of the ELBO (prior cross-entropies plus variational
+    entropies). Returns ``0.0`` when the estimator carries no usable prior.
+    """
+    fn = getattr(estimator, "model_log_density", None)
+    if fn is None:
+        return 0.0
+    rv = fn(model)
+    return 0.0 if rv is None else float(rv)
+
+
+def fit(
+    data: Sequence[T] | None,
+    estimator: ParameterEstimator,
+    max_its: int = 10,
+    delta: float | None = 1.0e-6,
+    init_estimator: ParameterEstimator | None = None,
+    init_p: float = 0.1,
+    rng: RandomState = RandomState(),
+    prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
+    vdata: Sequence[T] | None = None,
+    enc_data: list[tuple[int, E0]] | None = None,
+    enc_vdata: list[tuple[int, E0]] | None = None,
+    out: IO | None = sys.stdout,
+    print_iter: int = 1,
+) -> SequenceEncodableProbabilityDistribution:
+    """Fit a model in the Bayesian (variational / MAP) sense, returning the posterior-bearing model.
+
+    This is the posterior-returning counterpart of :func:`optimize`. Where ``optimize`` maximizes the
+    plain data log-likelihood (returning a point/MLE model), ``fit`` iterates the EM/VB update that
+    maximizes the penalized objective ``obj = data term + prior term``:
+
+      - ``data term`` is the observed-data log-likelihood (MAP estimators) or the local-ELBO
+        contributions (variational estimators exposing ``seq_local_elbo``);
+      - ``prior term`` is ``estimator.model_log_density(model)`` (the log-prior / ELBO global term).
+
+    Convergence is checked on the combined objective, so the prior is part of the stopping rule, and
+    conjugate updates never decrease it. The returned model carries its conjugate posterior forward as
+    ``model.get_prior()``. An estimator with no prior (``model_log_density == 0``) reduces this to a
+    plain EM fit, so ``fit`` and ``optimize`` agree for frequentist estimators.
+
+    Args mirror :func:`optimize` (local encoded path). Returns the model with the best validation
+    log-likelihood seen during the run.
+    """
+    if data is None and enc_data is None:
+        raise Exception("fit called with empty data or enc_data.")
+
+    est = estimator if init_estimator is None else init_estimator
+    div_error = np.seterr(divide="ignore")
+    try:
+        encoder = _resolve_encoder(est, prev_estimate)
+        if enc_data is None:
+            enc_data = seq_encode(data, encoder)
+        if enc_vdata is None:
+            enc_vdata = enc_data if vdata is None else seq_encode(vdata, encoder)
+
+        if prev_estimate is None:
+            p = 0.10 if init_p <= 0.0 else min(max(init_p, 0.0), 1.0)
+            mm = seq_initialize(enc_data=enc_data, estimator=est, rng=rng, p=p)
+        else:
+            mm = prev_estimate
+
+        old_obj = _data_objective_sum(enc_data, mm) + _model_objective(estimator, mm)
+        _, best_vll = seq_log_density_sum(enc_vdata, mm)
+        best_model = mm
+
+        for i in range(max(1, max_its)):
+            mm_next = seq_estimate(enc_data, estimator, mm)
+
+            data_ll = _data_objective_sum(enc_data, mm_next)
+            model_ll = _model_objective(estimator, mm_next)
+            obj = data_ll + model_ll
+            _, vll = seq_log_density_sum(enc_vdata, mm_next)
+            dobj = obj - old_obj
+
+            if (dobj >= 0) or (delta is None):
+                mm = mm_next
+                if best_vll < vll:
+                    best_vll = vll
+                    best_model = mm
+
+            converged = (delta is not None) and (dobj < delta)
+            if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
+                label = "Terminating" if converged else "Iteration"
+                out.write(
+                    "%s %d. OBJ=%f, dOBJ=%e, LL=%f, MLL=%f, VLL=%f\n"
+                    % (label, i + 1, obj, dobj, data_ll, model_ll, vll)
+                )
+            if converged:
+                break
+
+            old_obj = obj
+
+        return best_model
+    finally:
+        np.seterr(**div_error)
+
+
 def constant(rho: float):
     """Return a constant streaming step-size schedule."""
     if rho <= 0.0 or rho > 1.0:
