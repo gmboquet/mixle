@@ -33,8 +33,6 @@ __all__ = [
     "LengthFrontierMerge",
     "best_first_union",
     "best_first_union_max",
-    "rerank_by_density",
-    "stable_top_k",
     "sound_top_k",
     "bounded_best_first_union_index",
     "QuantizedEnumerationIndex",
@@ -976,109 +974,6 @@ def best_first_union_max(
     return _best_first_union(streams, log_offsets, exact_log_density, np.max, tol)
 
 
-def rerank_by_density(stream: Iterator[tuple[Any, float]], window: int) -> Iterator[tuple[Any, float]]:
-    """Re-sort an approximately-descending ``(value, log_prob)`` stream into true descending order.
-
-    The count-budget seek index orders values by a *quantized, structural* cost. For the
-    non-decomposable marginal families it is the **tropical (dominant-path) cost**: an HMM
-    observation is binned by its best state path, but its exact ``log_density`` is the logsumexp over
-    all paths, which is at least as large, so an item lands no earlier than its true rank -- the
-    stream is "pessimistic". Every emitted pair already carries the *exact* marginal ``log_prob``
-    (the index recomputes ``log_density`` on unranking), so true descending order is recovered by a
-    bounded look-ahead: hold a ``window`` of buffered items and always emit the current
-    highest-probability one.
-
-    This is exact wherever no item's true rank is more than ``window`` positions ahead of where it
-    appears in ``stream``. The tropical-vs-marginal gap is bounded in BITS (by ~log2(#contributing
-    components/paths)), but that bit gap can correspond to an UNBOUNDED *rank* displacement: a
-    moderately-probable observation assembled from many components/paths can sit arbitrarily deep in
-    the tropical stream. So this is a best-effort reordering, **not** a guarantee -- it is reliable
-    only when displacement is small (e.g. HMMs with few states), and can silently omit a true
-    top-item for deep or nested mixtures. For GUARANTEED true descending order use the exact
-    best-first ``enumerator()`` (it re-scores against a valid logsumexp bound); use this only to
-    cheaply improve an approximate seek where occasional misordering is acceptable.
-
-    The window also de-duplicates: a value already buffered is dropped on arrival. The marginal
-    count index over-counts -- it emits an observation once per contributing path -- and its
-    stateless canonical filter still leaks copies that share the minimal tropical fine bucket, so
-    co-located identical copies would otherwise corrupt the order. Dedup is bounded to the window
-    (co-located copies are caught; copies farther apart than ``window`` are not), matching the
-    O(window) memory budget. The result is distinct values in true descending probability order.
-    """
-    if window < 1:
-        raise ValueError("window must be a positive integer.")
-    counter = itertools.count()
-    heap: list[tuple[float, int, Hashable, Any]] = []
-    buffered: set[Hashable] = set()  # freeze-keys currently in the heap, to drop co-located repeats
-    it = iter(stream)
-
-    def push(value: Any, log_prob: float) -> None:
-        key = freeze(value)
-        if key in buffered:
-            return
-        buffered.add(key)
-        heapq.heappush(heap, (-float(log_prob), next(counter), key, value))
-
-    for value, log_prob in it:
-        push(value, log_prob)
-        if len(heap) >= window:
-            break
-    while heap:
-        neg_lp, _, key, value = heapq.heappop(heap)
-        buffered.discard(key)
-        yield value, -neg_lp
-        try:
-            v2, lp2 = next(it)
-        except StopIteration:
-            continue
-        push(v2, lp2)
-
-
-def stable_top_k(
-    make_stream: Callable[[], Iterator[tuple[Any, float]]],
-    k: int,
-    start_window: int | None = None,
-    max_window: int = 1 << 20,
-    growth: int = 2,
-    tol: float = 1.0e-9,
-) -> list[tuple[Any, float]]:
-    """Best-effort true-descending top-k from an approximately-descending stream, without tuning a window.
-
-    Reranks with a geometrically growing window and stops when the top-k is a *fixed point* across
-    two successive window sizes.
-
-    IMPORTANT -- the fixed point is necessary but NOT sufficient: if a true top-k item is displaced
-    so deep in the approximate stream that two consecutive windows both miss it, they agree on a
-    WRONG top-k and this returns it. That happens for models with a large tropical-vs-marginal gap
-    (deep or nested mixtures, HMMs with many paths), where rank displacement is effectively
-    unbounded. Demonstrated to return a wrong top-8 on a mixture of nested composite/sequence models.
-
-    Use this only when the approximate stream's displacement is known to be small. For GUARANTEED
-    true descending top-k of any model, use ``dist.enumerator().top_k(k)`` -- the exact best-first
-    search is correct by construction (it re-scores against a valid logsumexp upper bound).
-
-    ``make_stream`` must return a FRESH approximately-descending ``(value, log_prob)`` iterator on
-    each call (e.g. ``lambda: dist.count_budget_distinct(...)``); each doubling replays it.
-    """
-    if k < 1:
-        raise ValueError("k must be a positive integer.")
-    window = start_window if start_window is not None else max(2 * k, 64)
-    previous: list[tuple[Any, float]] | None = None
-    while window <= max_window:
-        current = list(itertools.islice(rerank_by_density(make_stream(), window), k))
-        if previous is not None and len(previous) == len(current):
-            same = all(
-                freeze(pv) == freeze(cv) and abs(plp - clp) <= tol for (pv, plp), (cv, clp) in zip(previous, current)
-            )
-            if same:
-                return current
-        if len(current) < k:
-            return current  # stream exhausted: fewer than k distinct values exist
-        previous = current
-        window *= growth
-    return previous if previous is not None else []
-
-
 def sound_top_k(
     dist: Any,
     k: int,
@@ -1092,28 +987,18 @@ def sound_top_k(
 ) -> list[tuple[Any, float]]:
     """Exact true-descending observations ranked ``[start, start+k)`` for ANY normalized model.
 
-    This is the sound counterpart to :func:`stable_top_k`: it makes NO assumption about how well the
-    underlying seek-index stream is ordered, so it is correct for deep / nested mixtures and HMMs
-    where the tropical order is badly displaced.
+    Mass-threshold certificate, correct regardless of the seek stream's ordering (so it holds for
+    deep/nested mixtures and HMMs where the tropical order is badly displaced): pull distinct
+    ``(value, log_prob)`` from the count-budget index, accumulate exact probability mass, and keep
+    the best ``start+k`` by probability. Since every unpulled item's probability is at most the
+    remaining mass ``total_mass - accumulated``, once ``remaining`` drops below the (start+k)-th best
+    probability the heap is exactly the true top ``start+k``; return ``sorted_desc[start:start+k]``.
+    If the in-budget stream is exhausted first, the budget is doubled (up to ``max_budget_bits``).
+    ``total_mass`` (default 1.0) may be a known upper bound for sub-normalized models.
 
-    Idea -- a mass-threshold certificate. Pull distinct ``(value, log_prob)`` from the count-budget
-    seek stream (any order), accumulate the exact probability mass, and keep the best ``start+k`` by
-    probability in a heap. Because the model is normalized, the total probability of all *unpulled*
-    items is ``total_mass - accumulated``, and every individual unpulled item's probability is at
-    most that remaining mass. So once ``remaining < p_of_the_(start+k)-th-best`` no unseen item can
-    enter the top ``start+k``, and the heap is exactly the true top ``start+k`` -- independent of the
-    stream's ordering, the family, or any tropical/marginal gap. The deepest ranks are returned as
-    ``sorted_desc[start : start+k]``.
-
-    If the in-budget stream is exhausted before the certificate fires (its truncated tail might still
-    hold a needed item), the budget is doubled and the pass repeats, up to ``max_budget_bits``.
-    ``total_mass`` defaults to 1.0; passing a known upper bound on the model's total mass keeps the
-    certificate sound for sub-normalized models (over-estimating remaining only stops later).
-
-    Cost is ``O(number pulled)`` -- the prefix needed to certify, which is small when the
-    distribution is peaked and grows for flat ones. For top-k from rank 0, ``dist.enumerator()`` is
-    usually leaner; ``sound_top_k`` adds the soundness certificate and a start offset that the
-    sequential enumerator and the (unsound) window rerankers cannot provide.
+    Cost is ``O(number pulled)`` -- small for peaked distributions, large for flat ones, so for
+    top-k from rank 0 ``dist.enumerator()`` is usually leaner; this adds the soundness certificate
+    and the arbitrary start offset the sequential enumerator lacks.
     """
     from pysp.utils.quantization.core import count_budget_index
 
