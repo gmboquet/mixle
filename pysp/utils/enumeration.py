@@ -988,10 +988,14 @@ def rerank_by_density(stream: Iterator[tuple[Any, float]], window: int) -> Itera
     highest-probability one.
 
     This is exact wherever no item's true rank is more than ``window`` positions ahead of where it
-    appears in ``stream`` -- i.e. ``window`` must exceed the maximum tropical-vs-marginal rank
-    displacement (empirically small; bounded by the per-item path-count gap). It turns the seek
-    index's O(1) arbitrary-index access into true-marginal-ordered access at O(window) extra work,
-    without the full best-first search.
+    appears in ``stream``. The tropical-vs-marginal gap is bounded in BITS (by ~log2(#contributing
+    components/paths)), but that bit gap can correspond to an UNBOUNDED *rank* displacement: a
+    moderately-probable observation assembled from many components/paths can sit arbitrarily deep in
+    the tropical stream. So this is a best-effort reordering, **not** a guarantee -- it is reliable
+    only when displacement is small (e.g. HMMs with few states), and can silently omit a true
+    top-item for deep or nested mixtures. For GUARANTEED true descending order use the exact
+    best-first ``enumerator()`` (it re-scores against a valid logsumexp bound); use this only to
+    cheaply improve an approximate seek where occasional misordering is acceptable.
 
     The window also de-duplicates: a value already buffered is dropped on arrival. The marginal
     count index over-counts -- it emits an observation once per contributing path -- and its
@@ -1037,18 +1041,23 @@ def stable_top_k(
     growth: int = 2,
     tol: float = 1.0e-9,
 ) -> list[tuple[Any, float]]:
-    """Verified true-descending top-k from an approximately-descending stream, without tuning a window.
+    """Best-effort true-descending top-k from an approximately-descending stream, without tuning a window.
 
-    :func:`rerank_by_density` is exact only when its ``window`` exceeds the (unknown) maximum
-    rank displacement of the approximate stream. This wrapper removes that guess: it reranks with a
-    growing window and stops when the top-k is a *fixed point* -- identical across two successive
-    window sizes -- which means no item outside the smaller window could have displaced the top-k,
-    so the result is the true descending top-k.
+    Reranks with a geometrically growing window and stops when the top-k is a *fixed point* across
+    two successive window sizes.
+
+    IMPORTANT -- the fixed point is necessary but NOT sufficient: if a true top-k item is displaced
+    so deep in the approximate stream that two consecutive windows both miss it, they agree on a
+    WRONG top-k and this returns it. That happens for models with a large tropical-vs-marginal gap
+    (deep or nested mixtures, HMMs with many paths), where rank displacement is effectively
+    unbounded. Demonstrated to return a wrong top-8 on a mixture of nested composite/sequence models.
+
+    Use this only when the approximate stream's displacement is known to be small. For GUARANTEED
+    true descending top-k of any model, use ``dist.enumerator().top_k(k)`` -- the exact best-first
+    search is correct by construction (it re-scores against a valid logsumexp upper bound).
 
     ``make_stream`` must return a FRESH approximately-descending ``(value, log_prob)`` iterator on
-    each call (the seek index's distinct stream, e.g. ``lambda: dist.count_budget_distinct(...)``).
-    Each doubling replays the stream, so prefer a cheap factory (replay over a pre-built index)
-    when k or the window is large. Returns up to k pairs in exact descending probability order.
+    each call (e.g. ``lambda: dist.count_budget_distinct(...)``); each doubling replays it.
     """
     if k < 1:
         raise ValueError("k must be a positive integer.")
