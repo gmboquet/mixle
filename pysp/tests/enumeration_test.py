@@ -180,6 +180,60 @@ class EnumerationInvariantTestCase(unittest.TestCase):
         self.assertEqual(CategoricalDistribution({"a": 0.6, "b": 0.4}).enumerator().top_p(0.0), [])
 
 
+class CapabilityMatrixTestCase(unittest.TestCase):
+    """The four capabilities -- enumeration, arbitrary-index unranking, rank, CDF -- are reachable
+    for every family through the shared entry points: ``enumerator()`` for enumeration, its
+    ``quantized_index`` for unranking, and ``density_rank`` for rank + CDF (exact head when the family
+    enumerates, Monte-Carlo CDF otherwise). This pins that contract across the family matrix."""
+
+    def test_every_enumerable_family_supports_all_four(self):
+        from pysp.utils.density_rank import density_rank
+
+        cases = make_cases()
+        cases.append(("erdos_renyi", ErdosRenyiGraphDistribution(0.3, num_nodes=4), 10, None))
+        cases.append(
+            (
+                "stochastic_block",
+                StochasticBlockGraphDistribution(np.array([[0.7, 0.2], [0.2, 0.5]]), block_assignments=[0, 0, 1, 1]),
+                10,
+                None,
+            )
+        )
+        for name, dist, _, _ in cases:
+            # cap 1: enumeration yields a most-probable value
+            first = next(iter(dist.enumerator()))
+            value = first[0]
+            # cap 2: arbitrary-index unranking index builds from the enumeration
+            dist.enumerator().quantized_index(max_bits=10.0)
+            # caps 3 + 4: rank ("index of") and CDF via the exact head (enumerable => exact)
+            r = density_rank(dist, value, n_samples=200, seed=0)
+            self.assertIn(r.method, ("exact-head", "exact-exhausted"), "%s: rank not exact" % name)
+            self.assertTrue(0.0 <= r.cumulative_probability <= 1.0 + TOL, "%s: cdf out of range" % name)
+            self.assertEqual(r.rank, 0, "%s: most-probable value should rank 0" % name)
+
+    def test_nonenumerable_families_have_sampling_cdf(self):
+        # Continuous / coupled families cannot enumerate (uncountable or non-decomposable support), so
+        # enumeration + unranking + exact rank are N/A -- but CDF ("probability-ordered cumulative")
+        # is still available for any samplable family via density_rank's Monte-Carlo fallback.
+        from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
+        from pysp.utils.density_rank import density_rank
+
+        cases = [
+            ("gaussian", GaussianDistribution(0.0, 1.0), 0.5),
+            ("gamma", GammaDistribution(2.0, 2.0), 3.0),
+            ("student_t", StudentTDistribution(5.0, 0.0, 1.0), 0.5),
+            ("mvn", MultivariateGaussianDistribution(np.zeros(2), np.eye(2)), np.zeros(2)),
+            ("erdos_renyi_unsized", ErdosRenyiGraphDistribution(0.3), None),
+        ]
+        for name, dist, x in cases:
+            self.assertFalse(supports_enumeration(dist), "%s: should not enumerate" % name)
+            if x is None:
+                continue
+            r = density_rank(dist, x, n_samples=3000, seed=1)
+            self.assertEqual(r.method, "sampling", "%s: expected sampling CDF" % name)
+            self.assertTrue(0.0 <= r.cumulative_probability <= 1.0, "%s: cdf out of range" % name)
+
+
 class BruteForceCrossCheckTestCase(unittest.TestCase):
     """Independently constructs small supports, scores them with log_density, and compares."""
 
