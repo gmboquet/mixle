@@ -23,6 +23,7 @@ from typing import Any, Optional
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.stats.gamma import GammaDistribution
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -33,6 +34,7 @@ from pysp.stats.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.utils.special import digamma
 from pysp.utils.vector import gammaln
 
 
@@ -95,12 +97,21 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         good = (vals >= 0) & (engine.floor(vals) == vals)
         return engine.where(good, -log_fact, engine.asarray(-np.inf))
 
-    def __init__(self, lam: float, name: str | None = None) -> None:
+    def __init__(
+        self,
+        lam: float,
+        name: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
+    ) -> None:
         """PoissonDistribution object defining Poisson distribution with mean lam > 0.0.
 
         Args:
             lam (float): Positive real-valued number.
             name (Optional[str]): String name for object instance.
+            prior (Optional): Conjugate parameter prior over the rate ``lam``. A
+                :class:`~pysp.stats.gamma.GammaDistribution` enables the
+                Bayesian/variational machinery (``expected_log_density`` and the
+                conjugate posterior update); ``None`` (default) is a plain point model.
 
         Attributes:
             lam (float): Mean of Poisson distribution.
@@ -112,10 +123,47 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         self.lam = float(lam)
         self.log_lambda = log(self.lam)
         self.name = name
+        self.set_prior(prior)
 
     def __str__(self) -> str:
         """Returns string representation of PoissonDistribution object."""
         return "PoissonDistribution(%s, name=%s)" % (repr(self.lam), repr(self.name))
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Attach a parameter prior and cache the conjugate Gamma expectations.
+
+        With a Gamma(k, theta) prior over the rate ``lam`` this caches (k, theta) so that
+        ``expected_log_density(x) = (psi(k) + ln theta)*x - k*theta - gammaln(x+1)`` (the
+        VB E-step term using E[ln lam] = psi(k) + ln theta and E[lam] = k*theta). Any other
+        prior (including ``None``) leaves the distribution a plain point model.
+        """
+        self.prior = prior
+        if isinstance(prior, GammaDistribution):
+            self.conj_prior_params = prior.get_parameters()
+            self.has_conj_prior = True
+        else:
+            self.conj_prior_params = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: float) -> float:
+        """Variational expectation E_q[log p(x | lam)] under the Gamma prior.
+
+        Falls back to the plug-in ``log_density(x)`` when no conjugate prior is attached.
+        """
+        if self.has_conj_prior:
+            k, theta = self.conj_prior_params
+            return (digamma(k) + np.log(theta)) * x - k * theta - gammaln(x + 1.0)
+        return self.log_density(x)
+
+    def seq_expected_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations."""
+        if not self.has_conj_prior:
+            return self.seq_log_density(x)
+        vals, log_fact = x
+        k, theta = self.conj_prior_params
+        rv = (digamma(k) + np.log(theta)) * vals - k * theta - log_fact
+        good = np.isfinite(vals) & (vals >= 0) & (np.floor(vals) == vals)
+        return np.where(good, rv, -np.inf)
 
     def density(self, x: int) -> float:
         """Evaluate the density of Poisson distribution at observation x.
@@ -239,9 +287,9 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return PoissonEstimator(name=self.name)
+            return PoissonEstimator(name=self.name, prior=self.prior)
         else:
-            return PoissonEstimator(pseudo_count=pseudo_count, suff_stat=self.lam, name=self.name)
+            return PoissonEstimator(pseudo_count=pseudo_count, suff_stat=self.lam, name=self.name, prior=self.prior)
 
     def dist_to_encoder(self) -> "PoissonDataEncoder":
         """Return PoissonDataEncoder object."""
@@ -576,6 +624,7 @@ class PoissonEstimator(ParameterEstimator):
         suff_stat: float | None = None,
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """PoissonEstimator object for estimating PoissonDistribution object from aggregated sufficient statistics.
 
@@ -584,6 +633,10 @@ class PoissonEstimator(ParameterEstimator):
             suff_stat (Optional[float]): Optional non-negative float.
             name (Optional[str]): Assign a name to PoissonEstimator.
             keys (Optional[str]): Assign keys to PoissonEstimator for combining sufficient statistics.
+            prior (Optional): Conjugate Gamma prior over the rate ``lam``. When present,
+                ``estimate`` performs the closed-form conjugate posterior update (returning the
+                Gamma posterior mode and carrying the posterior forward as the fitted model's
+                prior) instead of the maximum-likelihood / pseudo-count update.
 
         Attributes:
             pseudo_count (Optional[float]): Re-weight suff_stat.
@@ -596,10 +649,37 @@ class PoissonEstimator(ParameterEstimator):
         self.suff_stat = suff_stat
         self.name = name
         self.keys = keys
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, GammaDistribution)
 
     def accumulator_factory(self) -> "PoissonAccumulatorFactory":
         """Return PoissonAccumulatorFactory object with name and keys passed."""
         return PoissonAccumulatorFactory(self.keys)
+
+    def model_log_density(self, model: "PoissonDistribution") -> float:
+        """Log-density of the model's rate under the Gamma prior (ELBO global term)."""
+        if self.has_conj_prior:
+            return float(self.prior.log_density(model.lam))
+        return 0.0
+
+    def _estimate_conjugate(self, suff_stat: tuple[float, float]) -> "PoissonDistribution":
+        """Closed-form Gamma conjugate posterior update returning the posterior-mode estimate."""
+        nobs, psum = suff_stat
+        k, theta = self.prior.get_parameters()
+
+        new_k = k + psum
+        new_theta = theta / (nobs * theta + 1.0)
+
+        # posterior mode of Gamma(k, theta) is (k-1)*theta for k >= 1; fall back to the
+        # posterior mean when the mode is at the boundary
+        if new_k >= 1.0:
+            posterior_mode = (new_k - 1.0) * new_theta
+        else:
+            posterior_mode = new_k * new_theta
+
+        posterior_mode = max(posterior_mode, 1.0e-128)
+
+        return PoissonDistribution(posterior_mode, name=self.name, prior=GammaDistribution(new_k, new_theta))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "PoissonDistribution":
         """Estimate lambda of PoissonDistribution from aggregated sufficient statistcs suff_stat.
@@ -616,6 +696,9 @@ class PoissonEstimator(ParameterEstimator):
             PoissonDistribution object.
 
         """
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
+
         nobs, psum = suff_stat
 
         if self.pseudo_count is not None and self.suff_stat is not None:
