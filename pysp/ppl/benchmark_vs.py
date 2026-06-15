@@ -25,7 +25,7 @@ import time
 import numpy as np
 
 from pysp.ppl import Bernoulli, Beta, Gamma, Normal, Poisson, free
-from pysp.ppl.inference import conjugate_fit, hmc_fit, mcmc_fit
+from pysp.ppl.inference import conjugate_fit, ensemble_fit, hmc_fit, mcmc_fit
 
 
 def _have(mod: str) -> bool:
@@ -195,6 +195,10 @@ def task_gaussian_mcmc(n=20_000, draws=2000, warmup=1000):
                                      rng=np.random.RandomState(3)))
     ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
     print(f"  pysp.ppl  RW-Metropolis    {t*1e3:9.1f} ms   mean={m.dist.mu:.4f}   ESS={ess:.0f}  ESS/s={ess/t:8.0f}")
+    (m, t) = _timed(lambda: ensemble_fit(Normal(mu, free), data, draws=draws, burn=warmup,
+                                         rng=np.random.RandomState(3)))
+    ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
+    print(f"  pysp.ppl  ensemble (G&W)   {t*1e3:9.1f} ms   mean={m.dist.mu:.4f}   ESS={ess:.0f}  ESS/s={ess/t:8.0f}")
     (m, t) = _timed(lambda: hmc_fit(Normal(mu, free), data, draws=draws // 2, burn=warmup // 2,
                                     rng=np.random.RandomState(3)))
     ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
