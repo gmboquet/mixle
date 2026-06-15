@@ -78,27 +78,49 @@ def _combine_intercept(a, b):
     raise ValueError("a linear predictor may have only one symbolic intercept.")
 
 
+class Group:
+    """A random-intercept-by-group term for mixed-effects models: ``Group("subject")``
+    adds a per-group random intercept (like lme4's ``(1|subject)``)."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __add__(self, other):
+        return _LinearPredictor([], groups=[self.name]).__add__(other)
+    __radd__ = __add__
+
+    def __repr__(self):
+        return f"Group({self.name!r})"
+
+
 class _LinearPredictor:
-    """A linear predictor Σ coef_k · Field_k (+ intercept). Coeffs are RVs (Gaussian
-    priors), ``free`` (OLS), or constants. Built by operator overloading."""
+    """A linear predictor Σ coef_k · Field_k (+ intercept) (+ random intercepts by group).
+    Coeffs are RVs (Gaussian priors), ``free`` (OLS), or constants."""
 
-    __slots__ = ("terms", "intercept")
+    __slots__ = ("terms", "intercept", "groups")
 
-    def __init__(self, terms, intercept=None):
+    def __init__(self, terms, intercept=None, groups=None):
         self.terms = list(terms)         # list of (coef, Field)
         self.intercept = intercept       # RandomVariable | free | float | None
+        self.groups = list(groups or [])  # random-intercept group names
 
     def __add__(self, other):
         if isinstance(other, _LinearPredictor):
             return _LinearPredictor(self.terms + other.terms,
-                                    _combine_intercept(self.intercept, other.intercept))
+                                    _combine_intercept(self.intercept, other.intercept),
+                                    self.groups + other.groups)
         if isinstance(other, Field):
-            return _LinearPredictor(self.terms + [(1.0, other)], self.intercept)
-        return _LinearPredictor(self.terms, _combine_intercept(self.intercept, other))
+            return _LinearPredictor(self.terms + [(1.0, other)], self.intercept, self.groups)
+        if isinstance(other, Group):
+            return _LinearPredictor(self.terms, self.intercept, self.groups + [other.name])
+        return _LinearPredictor(self.terms, _combine_intercept(self.intercept, other), self.groups)
     __radd__ = __add__
 
     def __repr__(self):
-        return f"_LinearPredictor({self.terms!r}, intercept={self.intercept!r})"
+        return (f"_LinearPredictor({self.terms!r}, intercept={self.intercept!r}, "
+                f"groups={self.groups!r})")
 
 
 class Event:
@@ -368,6 +390,8 @@ class RandomVariable:
             return c.__add__(self)
         if isinstance(c, Field):
             return _LinearPredictor([(1.0, c)], self)
+        if isinstance(c, Group):                      # RV intercept + random group intercept
+            return _LinearPredictor([], self, [c.name])
         if isinstance(c, RandomVariable):             # convolution of independent RVs
             return RandomVariable._sum(self, c)
         return self._affine(c, 1.0)

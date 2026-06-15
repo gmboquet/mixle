@@ -124,8 +124,79 @@ def _design(columns, given):
     return X, offset
 
 
+class LMMResult:
+    """Linear mixed model: fixed-effect coefficients + variance components + group effects."""
+
+    def __init__(self, names, beta, cov, tau, sigma, group_means, group_levels):
+        self.names = names
+        self.beta = beta
+        self.cov = cov
+        self.tau = float(tau)              # random-intercept sd
+        self.sigma = float(sigma)          # residual sd
+        self.group_effects = dict(zip(group_levels, group_means))
+        self.coefficients = {names[i]: {"mean": float(beta[i]), "sd": float(np.sqrt(cov[i, i]))}
+                             for i in range(len(names))}
+        self.acceptance_rate = None
+        self.predictive = None
+
+    def summary(self):
+        return {"coefficients": self.coefficients, "tau": self.tau, "sigma": self.sigma,
+                "n_groups": len(self.group_effects)}
+
+
+def _lmm_fit(rv, y, given, linpred, max_iter, tol):
+    """Linear mixed model with one random intercept: y = X beta + u_group + eps,
+    u_g ~ N(0, tau^2), eps ~ N(0, sigma^2). Fitted by EM over the random effects."""
+    if len(linpred.groups) != 1:
+        raise NotImplementedError("exactly one random-intercept group is supported.")
+    gname = linpred.groups[0]
+    if gname not in given:
+        raise ValueError(f"group column {gname!r} not in given=.")
+    # fixed-effect design (coefs are free/Normal-prior; constants fold into offset)
+    columns = _columns_of(linpred)
+    est, _fixed = columns
+    X, offset = _design(columns, given) if (est or _fixed) else (np.zeros((y.size, 0)), np.zeros(y.size))
+    names = [f.name if f is not None else "intercept" for _, f in est]
+    if not names:                                       # always have an intercept in an LMM
+        X = np.ones((y.size, 1)); names = ["intercept"]
+    N, p = X.shape
+
+    levels, g = np.unique(np.asarray(given[gname]), return_inverse=True)
+    G = levels.size
+    yv = y - offset
+
+    beta = np.linalg.lstsq(X, yv, rcond=None)[0]
+    tau2 = max(float(np.var(yv)) * 0.5, 1e-3)
+    sigma2 = max(float(np.var(yv)) * 0.5, 1e-3)
+    u = np.zeros(G)
+    n_g = np.bincount(g, minlength=G).astype(float)
+    for _ in range(max_iter):
+        resid = yv - X @ beta
+        sum_r = np.bincount(g, weights=resid, minlength=G)        # per-group residual sum
+        var_g = 1.0 / (1.0 / tau2 + n_g / sigma2)                 # E-step: q(u_g)
+        u = var_g * (sum_r / sigma2)
+        beta_new = np.linalg.lstsq(X, yv - u[g], rcond=None)[0]   # M-step
+        tau2 = max(float(np.mean(u ** 2 + var_g)), 1e-8)
+        err = yv - X @ beta_new - u[g]
+        sigma2 = max(float((err @ err + np.sum(n_g * var_g)) / N), 1e-8)
+        if np.max(np.abs(beta_new - beta)) < tol:
+            beta = beta_new
+            break
+        beta = beta_new
+
+    cov = np.linalg.inv(X.T @ X / sigma2) if p else np.zeros((0, 0))
+    result = LMMResult(names, beta, cov, np.sqrt(tau2), np.sqrt(sigma2), u, list(levels))
+    return RandomVariable._bound(None, name=rv._name, result=result)
+
+
 def regression_fit(rv: RandomVariable, data, *, given=None, max_iter: int = 100,
                    tol: float = 1e-9, **_) -> RandomVariable:
+    linpred0 = next((a for a in rv._args if isinstance(a, _LinearPredictor)), None)
+    if linpred0 is not None and linpred0.groups:           # mixed-effects model
+        if rv._family.name != "Normal":
+            raise NotImplementedError("mixed-effects models require a Normal response.")
+        return _lmm_fit(rv, np.asarray(data, float).reshape(-1), given or {}, linpred0,
+                        max_iter, tol)
     fam = rv._family.name
     link = _LINK.get(fam)
     if link is None:
