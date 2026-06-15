@@ -2,7 +2,7 @@
 import numpy as np
 import unittest
 
-from pysp.ppl import Normal, Field, free
+from pysp.ppl import Normal, Bernoulli, Poisson, Field, free
 
 
 class RegressionTestCase(unittest.TestCase):
@@ -43,6 +43,35 @@ class RegressionTestCase(unittest.TestCase):
             given={"x": list(self.x)})
         self.assertAlmostEqual(m.result.sigma, 0.5, delta=1e-9)   # fixed, not estimated
         self.assertAlmostEqual(m.params["x"]["mean"], 2.0, delta=0.05)
+
+
+class GLMTestCase(unittest.TestCase):
+
+    def test_logistic_regression(self):
+        rng = np.random.RandomState(0)
+        N = 6000
+        x, z = rng.normal(0, 1, N), rng.normal(0, 1, N)
+        p = 1.0 / (1.0 + np.exp(-(2.0 * x - 1.0 * z + 0.5)))
+        y = (rng.random(N) < p).astype(float)
+        m = Bernoulli(free * Field("x") + free * Field("z") + free).fit(
+            list(y), given={"x": list(x), "z": list(z)})
+        c = m.params
+        self.assertAlmostEqual(c["x"]["mean"], 2.0, delta=0.2)
+        self.assertAlmostEqual(c["z"]["mean"], -1.0, delta=0.2)
+        self.assertAlmostEqual(c["intercept"]["mean"], 0.5, delta=0.2)
+        # prediction returns a probability through the logit link
+        prob = float(m.result.predict({"x": [0.0], "z": [0.0]})[0])
+        self.assertAlmostEqual(prob, 1.0 / (1.0 + np.exp(-0.5)), delta=0.05)
+
+    def test_poisson_regression(self):
+        rng = np.random.RandomState(1)
+        N = 6000
+        x = rng.normal(0, 1, N)
+        y = rng.poisson(np.exp(0.5 * x + 0.3)).astype(float)
+        m = Poisson(free * Field("x") + free).fit(list(y), given={"x": list(x)})
+        self.assertAlmostEqual(m.params["x"]["mean"], 0.5, delta=0.1)
+        self.assertAlmostEqual(m.params["intercept"]["mean"], 0.3, delta=0.1)
+        self.assertGreater(float(m.result.predict({"x": [0.0]})[0]), 0.0)   # a rate
 
 
 if __name__ == "__main__":
