@@ -41,14 +41,20 @@ def _scorers():
 
     from pysp.stats.leaf.bernoulli import BernoulliDistribution
     from pysp.stats.leaf.beta import BetaDistribution
+    from pysp.stats.leaf.binomial import BinomialDistribution
     from pysp.stats.leaf.exponential import ExponentialDistribution
     from pysp.stats.leaf.gamma import GammaDistribution
     from pysp.stats.leaf.gaussian import GaussianDistribution
     from pysp.stats.leaf.geometric import GeometricDistribution
+    from pysp.stats.leaf.laplace import LaplaceDistribution
     from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
+    from pysp.stats.leaf.logistic import LogisticDistribution
     from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution
+    from pysp.stats.leaf.pareto import ParetoDistribution
     from pysp.stats.leaf.poisson import PoissonDistribution
+    from pysp.stats.leaf.rayleigh import RayleighDistribution
     from pysp.stats.leaf.student_t import StudentTDistribution
+    from pysp.stats.leaf.weibull import WeibullDistribution
 
     G = GaussianDistribution.backend_log_density_from_params
     return {
@@ -73,6 +79,18 @@ def _scorers():
         "NegativeBinomial": (lambda x, t: (t.lgamma(x + 1.0),),
                              lambda a, dt, x, e: NegativeBinomialDistribution.backend_log_density_from_params(
                                  x, dt[0], a[0], a[1], e)),
+        "Weibull": (lambda x, t: (t.log(x),),
+                    lambda a, dt, x, e: WeibullDistribution.backend_log_density_from_params(x, dt[0], a[0], a[1], e)),
+        "Laplace": (lambda x, t: (),
+                    lambda a, dt, x, e: LaplaceDistribution.backend_log_density_from_params(x, a[0], a[1], e)),
+        "Logistic": (lambda x, t: (),
+                     lambda a, dt, x, e: LogisticDistribution.backend_log_density_from_params(x, a[0], a[1], e)),
+        "Pareto": (lambda x, t: (t.log(x),),
+                   lambda a, dt, x, e: ParetoDistribution.backend_log_density_from_params(x, dt[0], a[0], a[1], e)),
+        "Rayleigh": (lambda x, t: (x * x, t.log(x)),
+                     lambda a, dt, x, e: RayleighDistribution.backend_log_density_from_params(x, dt[0], dt[1], a[0], e)),
+        "Binomial": (lambda x, t: (),
+                     lambda a, dt, x, e: BinomialDistribution.backend_log_density_from_params(x, a[0], a[1], None, e)),
     }
 
 
@@ -120,9 +138,13 @@ class GradTarget:
         logj = u.new_zeros(())
         for k, s in enumerate(self.slots):
             uk = u[k]
-            if s.positive:
+            if s.support == "positive":
                 vals[s.index] = torch.exp(uk)
                 logj = logj + uk
+            elif s.support == "unit":
+                v = torch.sigmoid(uk)
+                vals[s.index] = v
+                logj = logj + torch.log(v) + torch.log1p(-v)
             else:
                 vals[s.index] = uk
         full = [vals[i] if i in vals else self._t(self._fixed[i]) for i in range(len(self._rv._args))]
@@ -184,7 +206,12 @@ class GradTarget:
         U = mean_np + std_np * Z
         vals = np.empty_like(U)
         for k, s in enumerate(self.slots):
-            vals[:, k] = np.exp(U[:, k]) if s.positive else U[:, k]
+            if s.support == "positive":
+                vals[:, k] = np.exp(U[:, k])
+            elif s.support == "unit":
+                vals[:, k] = 1.0 / (1.0 + np.exp(-U[:, k]))
+            else:
+                vals[:, k] = U[:, k]
         return vals, mean_np, std_np
 
 
@@ -199,7 +226,7 @@ def grad_target(rv: RandomVariable, data) -> GradTarget | None:
         return None
     if rv._kind != "sample" or isinstance(rv._family, CompositeFamily):
         return None
-    from pysp.ppl.inference import _build_target, _require_flat
+    from pysp.ppl.inference import _require_flat, _target_parts
 
     try:
         scorers = _scorers()
@@ -213,5 +240,5 @@ def grad_target(rv: RandomVariable, data) -> GradTarget | None:
             if isinstance(a._family, CompositeFamily) or a._family.name not in scorers:
                 return None
     _require_flat(rv)
-    _, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+    fam, slots, build, unpack, (dmean, dstd) = _target_parts(rv, data)
     return GradTarget(rv, data, slots, build, unpack, dmean, dstd)

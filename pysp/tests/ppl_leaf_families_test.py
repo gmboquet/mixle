@@ -1,0 +1,102 @@
+"""pysp.ppl: the expanded leaf-family surface + per-slot constraint transforms.
+
+Covers the newly registered families (Weibull/Laplace/Logistic/Uniform/Rayleigh/Pareto/Binomial),
+partial-`free` models (some slots fixed, some estimated), and unit-interval (logit) reparameterized
+Bayesian inference for probability parameters.
+"""
+
+import unittest
+
+import numpy as np
+
+from pysp.ppl import (
+    Bernoulli,
+    Beta,
+    Binomial,
+    Gamma,
+    Laplace,
+    Logistic,
+    Normal,
+    Pareto,
+    Rayleigh,
+    Uniform,
+    Weibull,
+    free,
+)
+
+
+class LeafFamilyMLETestCase(unittest.TestCase):
+    def setUp(self):
+        self.rng = np.random.RandomState(0)
+
+    def test_weibull(self):
+        m = Weibull(free, free).fit(list(self.rng.weibull(1.5, 4000) * 2.0))
+        self.assertAlmostEqual(m.params["shape"], 1.5, delta=0.2)
+        self.assertAlmostEqual(m.params["scale"], 2.0, delta=0.2)
+
+    def test_laplace(self):
+        m = Laplace(free, free).fit(list(self.rng.laplace(1.0, 2.0, 4000)))
+        self.assertAlmostEqual(m.params["loc"], 1.0, delta=0.2)
+        self.assertAlmostEqual(m.params["scale"], 2.0, delta=0.2)
+
+    def test_logistic(self):
+        m = Logistic(free, free).fit(list(self.rng.logistic(0.5, 1.5, 4000)))
+        self.assertAlmostEqual(m.params["loc"], 0.5, delta=0.2)
+        self.assertAlmostEqual(m.params["scale"], 1.5, delta=0.2)
+
+    def test_uniform(self):
+        m = Uniform(free, free).fit(list(self.rng.uniform(-2.0, 5.0, 4000)))
+        self.assertAlmostEqual(m.params["low"], -2.0, delta=0.1)
+        self.assertAlmostEqual(m.params["high"], 5.0, delta=0.1)
+
+    def test_rayleigh(self):
+        m = Rayleigh(free).fit(list(self.rng.rayleigh(2.0, 4000)))
+        self.assertAlmostEqual(m.params["sigma"], 2.0, delta=0.2)
+
+    def test_pareto(self):
+        m = Pareto(free, free).fit(list(self.rng.pareto(3.0, 4000) + 1.0))
+        self.assertAlmostEqual(m.params["alpha"], 3.0, delta=0.4)
+
+
+class PartialFreeTestCase(unittest.TestCase):
+    def test_binomial_fixed_n(self):
+        # n is structural (fixed); only p is estimated -> partial-free MLE
+        rng = np.random.RandomState(1)
+        m = Binomial(10, free).fit(list(rng.binomial(10, 0.3, 6000).astype(float)))
+        self.assertEqual(m.params["n"], 10)
+        self.assertAlmostEqual(m.params["p"], 0.3, delta=0.02)
+
+    def test_normal_fixed_mean(self):
+        rng = np.random.RandomState(2)
+        m = Normal(0.0, free).fit(list(rng.normal(0.0, 2.5, 6000)))
+        self.assertAlmostEqual(m.params["mean"], 0.0, delta=1e-9)   # held fixed
+        self.assertAlmostEqual(m.params["sd"], 2.5, delta=0.1)
+
+
+class UnitIntervalBayesTestCase(unittest.TestCase):
+    """Probability params use a logit reparameterization for gradient/MCMC inference."""
+
+    def test_bernoulli_p_mcmc(self):
+        rng = np.random.RandomState(1)
+        data = list((rng.uniform(size=5000) < 0.7).astype(float))
+        m = Bernoulli(Beta(2, 2, name="p")).fit(data, how="mcmc", draws=1500, burn=500,
+                                                rng=np.random.RandomState(1))
+        self.assertAlmostEqual(float(m.result.mean("p")), 0.7, delta=0.03)
+        self.assertTrue(0.0 < m.dist.p < 1.0)
+
+    def test_binomial_p_mcmc(self):
+        rng = np.random.RandomState(2)
+        data = list(rng.binomial(10, 0.4, 4000).astype(float))
+        m = Binomial(10, Beta(2, 2, name="p")).fit(data, how="mcmc", draws=1200, burn=400,
+                                                   rng=np.random.RandomState(2))
+        self.assertAlmostEqual(float(m.result.mean("p")), 0.4, delta=0.03)
+
+    def test_weibull_shape_prior_map(self):
+        rng = np.random.RandomState(3)
+        m = Weibull(Gamma(2, 1, name="shape"), free).fit(list(rng.weibull(1.5, 4000) * 2.0), how="map")
+        self.assertAlmostEqual(m.params["shape"], 1.5, delta=0.3)
+        self.assertAlmostEqual(m.params["scale"], 2.0, delta=0.3)
+
+
+if __name__ == "__main__":
+    unittest.main()
