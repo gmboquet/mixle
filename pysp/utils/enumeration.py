@@ -533,23 +533,32 @@ class ProductEnumerator:
     def __iter__(self) -> "ProductEnumerator":
         return self
 
-    def _score(self, idx: tuple[int, ...]) -> float:
-        return self.offset + sum(self.streams[k].get(i)[1] for k, i in enumerate(idx))
-
     def __next__(self) -> tuple[Any, float]:
         if not self._heap:
             raise StopIteration
         _, _, idx = heapq.heappop(self._heap)
         if len(idx) == 0:
             return (self.combine(()), self.offset)
-        # Recompute the score from per-coordinate log probs to avoid float drift.
-        score = self._score(idx)
-        value = self.combine(tuple(self.streams[k].get(i)[0] for k, i in enumerate(idx)))
+        # Fetch each coordinate's (value, log_prob) once and reuse it for the combined value, the
+        # exact reported score, and the successor keys -- the previous O(n) re-sum per successor
+        # (and a second O(n) fetch for the value) made __next__ quadratic in the number of fields.
+        items = [self.streams[k].get(i) for k, i in enumerate(idx)]
+        value = self.combine(tuple(it[0] for it in items))
+        score = self.offset + sum(it[1] for it in items)
         for k in range(len(idx)):
+            nxt = self.streams[k].get(idx[k] + 1)
+            if nxt is None:
+                continue
             succ = idx[:k] + (idx[k] + 1,) + idx[k + 1 :]
-            if succ not in self._visited and self.streams[k].get(idx[k] + 1) is not None:
-                self._visited.add(succ)
-                heapq.heappush(self._heap, (-self._score(succ), next(self._counter), succ))
+            if succ in self._visited:
+                continue
+            self._visited.add(succ)
+            # Advancing one coordinate only changes that coordinate's term, so the successor score
+            # is the (exact, freshly re-summed) parent score plus that single delta. Re-basing on the
+            # exact ``score`` every pop keeps each heap key within one ULP of exact -- no accumulating
+            # drift -- so the pop order matches exact descending order except among true near-ties.
+            succ_key = score + (nxt[1] - items[k][1])
+            heapq.heappush(self._heap, (-succ_key, next(self._counter), succ))
         return (value, score)
 
 
