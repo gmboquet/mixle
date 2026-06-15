@@ -24,6 +24,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
+from pysp.stats.normwishart import NormalWishartDistribution
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -111,6 +112,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         name: str | None = None,
         keys: str | None = None,
         covariance: list[list[float]] | np.ndarray = MISSING,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """MultivariateGaussianDistribution object for multivariate Gaussian with mean mu and covaraince 'covar'.
 
@@ -119,6 +121,10 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             covar (Union[List[List[float]], np.ndarray]): Covariance matrix, should be N by N and positive definite.
             name (Optional[str]): Set name to object.
             keys (Optional[str]): Set keys for distribution.
+            prior (Optional): Conjugate parameter prior over (mu, Lambda=covar^-1). A
+                :class:`~pysp.stats.normwishart.NormalWishartDistribution` enables the
+                Bayesian/variational machinery (``expected_log_density`` and the conjugate
+                posterior update); ``None`` (default) is a plain point model.
 
         Attributes:
             dim (int): N is the dim of multivariate normal.
@@ -147,6 +153,47 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             self.log_det = float(2.0 * np.log(vec.diag(self.chol[0])).sum())
             self.inv_covar = scipy.linalg.cho_solve(self.chol, np.eye(self.dim))
             self.chol_const = -0.5 * (len(self.mu) * np.log(2.0 * pi) + self.log_det)
+
+        self.set_prior(prior)
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Attach a parameter prior and precompute conjugate-prior expectations.
+
+        With a NormalWishart(m0, kappa, W, nu) prior over (mu, Lambda=covar^-1) this
+        caches the prior parameters and E[ln|Lambda|], the quantities needed by
+        ``expected_log_density``. Any other prior (including ``None``) leaves the
+        distribution a plain point model.
+        """
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, NormalWishartDistribution)
+
+        if self.has_conj_prior:
+            self.conj_prior_params = prior.get_parameters()
+            self.e_log_det = prior.expected_log_det()
+        else:
+            self.conj_prior_params = None
+            self.e_log_det = None
+
+    def expected_log_density(self, x) -> float:
+        """Variational expectation E_q[log p(x | mu, Lambda)] under the NormalWishart prior.
+
+        Falls back to the plug-in ``log_density(x)`` when no conjugate prior is attached.
+        """
+        if self.has_conj_prior:
+            m0, kappa, w_mat, nu = self.conj_prior_params
+            diff = np.asarray(x, dtype=float) - m0
+            e_quad = self.dim / kappa + nu * float(np.dot(diff, np.dot(w_mat, diff)))
+            return 0.5 * self.e_log_det - 0.5 * self.dim * np.log(2.0 * np.pi) - 0.5 * e_quad
+        return self.log_density(x)
+
+    def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations."""
+        if self.has_conj_prior:
+            m0, kappa, w_mat, nu = self.conj_prior_params
+            diff = x - m0
+            e_quad = self.dim / kappa + nu * np.sum(np.dot(diff, w_mat) * diff, axis=1)
+            return 0.5 * self.e_log_det - 0.5 * self.dim * np.log(2.0 * np.pi) - 0.5 * e_quad
+        return self.seq_log_density(x)
 
     def __str__(self) -> str:
         """Returns string representation of MultivariateGaussianDistribution object."""
@@ -294,11 +341,11 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
 
         """
         if pseudo_count is None:
-            return MultivariateGaussianEstimator(name=self.name)
+            return MultivariateGaussianEstimator(name=self.name, prior=self.prior)
         else:
             pseudo_count = (pseudo_count, pseudo_count)
             return MultivariateGaussianEstimator(
-                pseudo_count=pseudo_count, suff_stat=(self.mu, self.covar), name=self.name
+                pseudo_count=pseudo_count, suff_stat=(self.mu, self.covar), name=self.name, prior=self.prior
             )
 
     def dist_to_encoder(self) -> "MultivariateGaussianDataEncoder":
@@ -556,6 +603,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         suff_stat: tuple[np.ndarray | None, np.ndarray | None] | None = (None, None),
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """MultivariateGaussianEstimator object for estimating multivariate normal distribution from sufficient stats.
 
@@ -566,6 +614,10 @@ class MultivariateGaussianEstimator(ParameterEstimator):
                 from previous data or used to regularize.
             name (Optional[str]): Set name for object instance.
             keys (Optional[str]): Set keys for estimator.
+            prior (Optional): Conjugate NormalWishart prior over (mu, Lambda=covar^-1). When present,
+                ``estimate`` performs the closed-form conjugate posterior update (returning the joint
+                MAP estimate and carrying the posterior forward as the fitted model's prior) instead
+                of the maximum-likelihood / pseudo-count update.
 
         Attributes:
             dim (int): Dimension of multivariate normal.
@@ -592,10 +644,56 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         self.prior_covar = None if suff_stat[1] is None else np.reshape(suff_stat[1], (dim_loc, dim_loc))
         self.name = name
         self.key = keys
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, NormalWishartDistribution)
 
     def accumulator_factory(self) -> "MultivariateGaussianAccumulatorFactory":
         """Returns a MultivariateGaussianAccumulatorFactory built from the estimator's attributes."""
         return MultivariateGaussianAccumulatorFactory(dim=self.dim, keys=self.key, name=self.name)
+
+    def model_log_density(self, model: "MultivariateGaussianDistribution") -> float:
+        """Log-density of the model parameters under the NormalWishart prior (ELBO global term).
+
+        The prior is over (mu, Lambda=covar^-1), so the model's covariance is inverted before scoring.
+        """
+        if self.has_conj_prior:
+            return float(self.prior.log_density((model.mu, np.linalg.inv(model.covar))))
+        return 0.0
+
+    def _estimate_conjugate(
+        self, suff_stat: tuple[np.ndarray, np.ndarray, float]
+    ) -> "MultivariateGaussianDistribution":
+        """Closed-form NormalWishart conjugate posterior update returning the joint MAP estimate."""
+        xsum, outer_sum, count = suff_stat
+        d = self.dim if self.dim is not None else len(xsum)
+
+        m0, kappa0, w0, nu0 = self.prior.get_parameters()
+
+        kappa_n = kappa0 + count
+        nu_n = nu0 + count
+        m_n = (kappa0 * m0 + xsum) / kappa_n
+
+        if count > 0:
+            xbar = xsum / count
+            scatter = outer_sum - count * np.outer(xbar, xbar)
+            dmu = xbar - m0
+            w_n_inv = np.linalg.inv(w0) + scatter + (kappa0 * count / kappa_n) * np.outer(dmu, dmu)
+        else:
+            w_n_inv = np.linalg.inv(w0)
+
+        # keep the inverse-scale symmetric despite accumulation round-off
+        w_n_inv = 0.5 * (w_n_inv + w_n_inv.T)
+        w_n = np.linalg.inv(w_n_inv)
+
+        # joint MAP precision is (nu_n - d) W_n for nu_n > d; fall back to
+        # the posterior mean nu_n W_n at the boundary
+        if nu_n > d:
+            covar = w_n_inv / (nu_n - d)
+        else:
+            covar = w_n_inv / nu_n
+
+        posterior = NormalWishartDistribution(m_n, kappa_n, w_n, nu_n)
+        return MultivariateGaussianDistribution(m_n, covar, name=self.name, prior=posterior)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, float]
@@ -615,6 +713,9 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             MultivariateGaussianDistribution
 
         """
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
+
         nobs = suff_stat[2]
         pc1, pc2 = self.pseudo_count
 

@@ -108,6 +108,14 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.keys),
         )
 
+    def get_parameters(self) -> tuple[float, float]:
+        """Return the (a, b) shape pair.
+
+        Lets a BetaDistribution serve as a conjugate prior (on a Bernoulli/Geometric/Binomial
+        success probability) under the unified Bayesian estimation protocol.
+        """
+        return self.a, self.b
+
     def density(self, x: float) -> float:
         """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))

@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.stats.beta import BetaDistribution
 from pysp.stats.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -20,6 +21,7 @@ from pysp.stats.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.special import digamma
 
 
 class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
@@ -72,7 +74,13 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         p = params["p"]
         return -engine.log(engine.asarray(1.0) - p)
 
-    def __init__(self, p: float, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        p: float,
+        name: str | None = None,
+        keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
+    ) -> None:
         if p <= 0.0 or p >= 1.0:
             raise ValueError("BernoulliDistribution requires p in (0, 1).")
         self.p = float(p)
@@ -80,9 +88,48 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         self.log_1p = math.log1p(-self.p)
         self.name = name
         self.keys = keys
+        self.set_prior(prior)
 
     def __str__(self) -> str:
         return "BernoulliDistribution(%s, name=%s, keys=%s)" % (repr(self.p), repr(self.name), repr(self.keys))
+
+    def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
+        """Attach a Beta parameter prior and precompute conjugate-prior expectations.
+
+        With a Beta(a, b) prior on the success probability ``p`` this caches the
+        digamma terms so that ``expected_log_density`` evaluates the variational Bayes
+        expectation ``E_q[log p(x | p)]`` via ``E[log p] = digamma(a) - digamma(a+b)``
+        and ``E[log(1-p)] = digamma(b) - digamma(a+b)``. Any other prior (including
+        ``None``) leaves the distribution a plain point model.
+        """
+        self.prior = prior
+        if isinstance(prior, BetaDistribution):
+            a, b = prior.get_parameters()
+            self.conj_prior_params = (digamma(a), digamma(b), digamma(a + b))
+            self.has_conj_prior = True
+        else:
+            self.conj_prior_params = None
+            self.has_conj_prior = False
+
+    def expected_log_density(self, x: bool | int) -> float:
+        """Variational expectation ``E_q[log p(x | p)]`` under the Beta prior.
+
+        Falls back to the plug-in ``log_density(x)`` when no conjugate prior is attached.
+        """
+        if self.has_conj_prior:
+            xx = self._as_bool(x)
+            if xx is None:
+                return -np.inf
+            da, db, dab = self.conj_prior_params
+            return da - dab if xx else db - dab
+        return self.log_density(x)
+
+    def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Vectorized ``expected_log_density`` over sequence-encoded observations."""
+        if self.has_conj_prior:
+            da, db, dab = self.conj_prior_params
+            return np.where(x, da - dab, db - dab)
+        return self.seq_log_density(x)
 
     @staticmethod
     def _as_bool(x: Any) -> bool | None:
@@ -150,8 +197,10 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
     def estimator(self, pseudo_count: float | None = None) -> "BernoulliEstimator":
         """Return an estimator for fitting this distribution from data."""
         if pseudo_count is None:
-            return BernoulliEstimator(name=self.name, keys=self.keys)
-        return BernoulliEstimator(pseudo_count=pseudo_count, suff_stat=self.p, name=self.name, keys=self.keys)
+            return BernoulliEstimator(name=self.name, keys=self.keys, prior=self.prior)
+        return BernoulliEstimator(
+            pseudo_count=pseudo_count, suff_stat=self.p, name=self.name, keys=self.keys, prior=self.prior
+        )
 
     def dist_to_encoder(self) -> "BernoulliDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
@@ -265,16 +314,43 @@ class BernoulliEstimator(ParameterEstimator):
         suff_stat: float | None = None,
         name: str | None = None,
         keys: str | None = None,
+        prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.name = name
         self.keys = keys
+        self.prior = prior
+        self.has_conj_prior = isinstance(prior, BetaDistribution)
 
     def accumulator_factory(self) -> BernoulliAccumulatorFactory:
         return BernoulliAccumulatorFactory(name=self.name, keys=self.keys)
 
+    def model_log_density(self, model: "BernoulliDistribution") -> float:
+        """Log-density of the model's success probability under the Beta prior (ELBO global term)."""
+        if self.has_conj_prior:
+            return float(self.prior.log_density(model.p))
+        return 0.0
+
+    def _estimate_conjugate(self, suff_stat: tuple[float, float]) -> "BernoulliDistribution":
+        """Closed-form Beta conjugate posterior update returning the MAP estimate.
+
+        With a Beta(a, b) prior and weighted counts of successes ``psum`` and failures
+        ``nsum``, the posterior is Beta(a + psum, b + nsum) and the returned point
+        estimate is the posterior mode ``(psum + a - 1) / (psum + nsum + a + b - 2)``;
+        the posterior is carried forward as the fitted model's prior.
+        """
+        count, psum = suff_stat
+        nsum = count - psum
+        a, b = self.prior.get_parameters()
+        new_a = a + psum
+        new_b = b + nsum
+        p = (psum + a - 1.0) / (psum + nsum + a + b - 2.0)
+        return BernoulliDistribution(p, name=self.name, keys=self.keys, prior=BetaDistribution(new_a, new_b))
+
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> BernoulliDistribution:
+        if self.has_conj_prior:
+            return self._estimate_conjugate(suff_stat)
         count, psum = suff_stat
         if self.pseudo_count is not None:
             prior_p = 0.5 if self.suff_stat is None else self.suff_stat

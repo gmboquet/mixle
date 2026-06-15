@@ -6,6 +6,24 @@ estimate Distributions from data sets.
 from __future__ import annotations
 
 __all__ = [
+    # Bayesian (conjugate/variational) families folded in from the former pysp.bstats
+    "mixture_prior",
+    "DictDirichletDistribution",
+    "DictDirichletSampler",
+    "SymmetricDirichletDistribution",
+    "SymmetricDirichletSampler",
+    "NormalGammaDistribution",
+    "NormalGammaSampler",
+    "NormalWishartDistribution",
+    "NormalWishartSampler",
+    "MultivariateNormalGammaDistribution",
+    "MultivariateNormalGammaSampler",
+    "DirichletProcessMixtureDistribution",
+    "DirichletProcessMixtureEstimator",
+    "DirichletProcessMixtureSampler",
+    "HierarchicalDirichletProcessMixtureDistribution",
+    "HierarchicalDirichletProcessMixtureEstimator",
+    "HierarchicalDirichletProcessMixtureSampler",
     "initialize",
     "estimate",
     "seq_encode",
@@ -446,6 +464,7 @@ from pysp.stats.cat_multinomial import (
     MultinomialEstimator,
     MultinomialSampler,
 )
+from pysp.stats.catdirichlet import DictDirichletDistribution, DictDirichletSampler
 from pysp.stats.categorical import (
     CategoricalDataEncoder,
     CategoricalDistribution,
@@ -522,6 +541,11 @@ from pysp.stats.dmvn import (
     DiagonalGaussianEstimator,
     DiagonalGaussianSampler,
 )
+from pysp.stats.dpm import (
+    DirichletProcessMixtureDistribution,
+    DirichletProcessMixtureEstimator,
+    DirichletProcessMixtureSampler,
+)
 from pysp.stats.encoded import EncodedData, ResidentEncodedPayload, as_encoded_data, move_encoded_payload
 from pysp.stats.erdos_renyi_graph import (
     ErdosRenyiGraphAccumulator,
@@ -544,6 +568,11 @@ from pysp.stats.geometric import (
     GeometricEnumerator,
     GeometricEstimator,
     GeometricSampler,
+)
+from pysp.stats.hdpm import (
+    HierarchicalDirichletProcessMixtureDistribution,
+    HierarchicalDirichletProcessMixtureEstimator,
+    HierarchicalDirichletProcessMixtureSampler,
 )
 from pysp.stats.heterogeneous_mixture import (
     HeterogeneousMixtureDataEncoder,
@@ -706,6 +735,7 @@ from pysp.stats.mixture import (
     MixtureEnumerator,
     MixtureEstimator,
     MixtureSampler,
+    mixture_prior,
 )
 from pysp.stats.mvn import (
     MultivariateGaussianDataEncoder,
@@ -713,6 +743,7 @@ from pysp.stats.mvn import (
     MultivariateGaussianEstimator,
     MultivariateGaussianSampler,
 )
+from pysp.stats.mvngamma import MultivariateNormalGammaDistribution, MultivariateNormalGammaSampler
 from pysp.stats.negative_binomial import (
     NegativeBinomialDataEncoder,
     NegativeBinomialDistribution,
@@ -720,6 +751,8 @@ from pysp.stats.negative_binomial import (
     NegativeBinomialEstimator,
     NegativeBinomialSampler,
 )
+from pysp.stats.normgamma import NormalGammaDistribution, NormalGammaSampler
+from pysp.stats.normwishart import NormalWishartDistribution, NormalWishartSampler
 from pysp.stats.null_dist import NullDataEncoder, NullDistribution, NullEnumerator, NullEstimator, NullSampler
 from pysp.stats.optional import (
     OptionalDataEncoder,
@@ -839,6 +872,7 @@ from pysp.stats.stochastic_block_graph import (
     StochasticBlockGraphSampler,
 )
 from pysp.stats.student_t import StudentTDataEncoder, StudentTDistribution, StudentTEstimator, StudentTSampler
+from pysp.stats.symdirichlet import SymmetricDirichletDistribution, SymmetricDirichletSampler
 from pysp.stats.transform import (
     AffineTransform,
     ExpTransform,

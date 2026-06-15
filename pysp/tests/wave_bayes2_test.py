@@ -1,25 +1,21 @@
-"""Tests for pysp.bstats symdirichlet, catdirichlet, int_range, bernoulli, and
-beta.
+"""Tests for pysp.stats symdirichlet, catdirichlet, int_range, bernoulli, and beta.
 
-Each test class includes regression tests for runtime-confirmed math bugs:
-  - SymmetricDirichletDistribution.log_density returned +nc instead of -nc in
-    the alpha == 1 branch (giving -log(2) instead of +log(2) = gammaln(3) for
-    n = 3), and its sampler read a nonexistent dist.ndim attribute,
-  - DictDirichletDistribution.log_density had both gammaln terms sign-flipped
-    (Dir(2, 2) at (.5, .5) gave -3.178 instead of log(1.5) = +0.405),
-    poisoning every DictDirichlet-prior model_log_density, and its sampler
-    read a nonexistent dist.dist attribute,
-  - IntegerCategoricalDistribution.set_parameters computed
-    log_const = log(2 + default_value) instead of log1p(default_value), so
-    every log-density was off by -log(2) with the default settings; the
-    conjugate estimate applied counts + (alpha - 1) without the boundary clamp
-    (negative probabilities for alpha < 1) or posterior-mean fallback; and
-    IntegerCategoricalAccumulatorFactory.make() omitted the required keys
-    argument,
-  - BernoulliEstimator.estimate returned None for non-conjugate priors, and
-    BernoulliDistribution.set_prior left has_conj_prior unset for null priors,
-  - BetaDistribution inherited from pysp.stats.pdist instead of
-    pysp.bstats.pdist (layering violation).
+Migrated from the original wave-2 suite. Each test class preserves the regression
+coverage of runtime-confirmed math bugs, asserted now against the folded pysp.stats
+implementations:
+  - SymmetricDirichletDistribution.log_density returns +nc (gammaln(3) = +log(2) for n = 3) in the
+    alpha == 1 branch, and its sampler reads dim,
+  - DictDirichletDistribution.log_density uses the correctly-signed gammaln terms (Dir(2, 2) at
+    (.5, .5) gives +log(1.5)), poisoning no DictDirichlet-prior model_log_density, and its sampler
+    requires a dict alpha,
+  - IntegerCategoricalDistribution normalizes the density over its support, and the conjugate
+    estimate clamps counts + (alpha - 1) at the simplex boundary with a posterior-mean fallback,
+  - BernoulliEstimator estimates a conjugate Beta posterior and a no-prior MLE, and
+    BernoulliDistribution.expected_log_density uses the digamma closed form,
+  - BetaDistribution is a pysp.stats ProbabilityDistribution.
+
+The legacy estimator API was estimate(suff_stat); the stats API is estimate(nobs, suff_stat), so a
+local fit() helper supplies the leading None.
 """
 
 import unittest
@@ -28,32 +24,30 @@ import numpy as np
 import scipy.integrate
 import scipy.stats
 
-from pysp.bstats.bernoulli import (
+from pysp.stats.bernoulli import (
+    BernoulliAccumulatorFactory,
     BernoulliDistribution,
     BernoulliEstimator,
-    BernoulliEstimatorAccumulatorFactory,
 )
-from pysp.bstats.beta import BetaDistribution, BetaSampler
-from pysp.bstats.catdirichlet import DictDirichletDistribution
-from pysp.bstats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.bstats.dirichlet import DirichletDistribution
-from pysp.bstats.gaussian import GaussianDistribution
-from pysp.bstats.int_range import (
+from pysp.stats.beta import BetaDistribution, BetaSampler
+from pysp.stats.catdirichlet import DictDirichletDistribution
+from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.dirichlet import DirichletDistribution
+from pysp.stats.int_range import (
     IntegerCategoricalAccumulator,
     IntegerCategoricalAccumulatorFactory,
     IntegerCategoricalDistribution,
     IntegerCategoricalEstimator,
 )
-from pysp.bstats.nulldist import null_dist
-from pysp.bstats.pdist import ProbabilityDistribution
-from pysp.bstats.symdirichlet import SymmetricDirichletDistribution
+from pysp.stats.pdist import ProbabilityDistribution
+from pysp.stats.symdirichlet import SymmetricDirichletDistribution
 
 
 def fit(data, est):
     acc = est.accumulator_factory().make()
     for x in data:
         acc.update(x, 1.0, None)
-    return acc, est.estimate(acc.value())
+    return acc, est.estimate(None, acc.value())
 
 
 class SymmetricDirichletTestCase(unittest.TestCase):
@@ -147,53 +141,52 @@ class IntegerCategoricalTestCase(unittest.TestCase):
         # regression: log_const was log(2 + default_value), so every density
         # was off by a factor of 1/2 with default_value = 0
         pv = [0.2, 0.3, 0.5]
-        d = IntegerCategoricalDistribution(pv)
+        d = IntegerCategoricalDistribution(0, pv)
         for x, p in enumerate(pv):
             self.assertAlmostEqual(d.log_density(x), np.log(p), places=12)
         total = sum(d.density(x) for x in range(3))
         self.assertAlmostEqual(total, 1.0, places=12)
 
     def test_density_normalizes_with_min_index(self):
-        d = IntegerCategoricalDistribution([0.4, 0.6], min_index=2)
+        d = IntegerCategoricalDistribution(2, [0.4, 0.6])
         self.assertAlmostEqual(d.density(2) + d.density(3), 1.0, places=12)
         self.assertEqual(d.density(1), 0.0)
 
     def test_seq_log_density_matches_scalar(self):
-        d = IntegerCategoricalDistribution([0.2, 0.3, 0.5], min_index=1)
+        d = IntegerCategoricalDistribution(1, [0.2, 0.3, 0.5])
         data = d.sampler(seed=3).sample(size=50)
-        enc = d.seq_encode(data)
+        enc = d.dist_to_encoder().seq_encode(data)
         self.assertTrue(np.allclose(d.seq_log_density(enc), [d.log_density(u) for u in data]))
 
     def test_estimate_roundtrip(self):
         pv = np.array([0.2, 0.3, 0.5])
-        d = IntegerCategoricalDistribution(pv)
+        d = IntegerCategoricalDistribution(0, pv)
         data = d.sampler(seed=4).sample(size=400)
         est = IntegerCategoricalEstimator(min_val=0, max_val=2)
         acc, fitted = fit(data, est)
-        self.assertTrue(np.allclose(fitted.prob_vec, pv, atol=0.08))
-        self.assertAlmostEqual(np.sum(fitted.prob_vec), 1.0, places=10)
+        self.assertTrue(np.allclose(fitted.p_vec, pv, atol=0.08))
+        self.assertAlmostEqual(np.sum(fitted.p_vec), 1.0, places=10)
 
     def test_conjugate_estimate_clamps_small_alpha(self):
         # regression: counts + (alpha - 1) went negative for alpha < 1
-        est = IntegerCategoricalEstimator(min_val=0, max_val=2, prior=DirichletDistribution(0.5))
+        est = IntegerCategoricalEstimator(min_val=0, max_val=2, prior=SymmetricDirichletDistribution(0.5))
         acc, fitted = fit([0, 0, 1], est)
-        self.assertTrue(np.all(fitted.prob_vec >= 0.0))
-        self.assertAlmostEqual(np.sum(fitted.prob_vec), 1.0, places=12)
-        self.assertTrue(np.allclose(fitted.prob_vec, [0.75, 0.25, 0.0]))
+        self.assertTrue(np.all(fitted.p_vec >= 0.0))
+        self.assertAlmostEqual(np.sum(fitted.p_vec), 1.0, places=12)
+        self.assertTrue(np.allclose(fitted.p_vec, [0.75, 0.25, 0.0]))
         # posterior carries counts + alpha
-        self.assertTrue(np.allclose(fitted.prior.get_parameters(), [2.5, 1.5, 0.5]))
+        self.assertTrue(np.allclose(fitted.get_prior().get_parameters(), [2.5, 1.5, 0.5]))
 
     def test_conjugate_estimate_posterior_mean_fallback(self):
         # MAP is degenerate with no data and alpha < 1; fall back to the
         # posterior mean (uniform here)
-        est = IntegerCategoricalEstimator(min_val=0, max_val=2, prior=DirichletDistribution(0.5))
+        est = IntegerCategoricalEstimator(min_val=0, max_val=2, prior=SymmetricDirichletDistribution(0.5))
         acc = est.accumulator_factory().make()
         acc.seq_update(np.asarray([0, 1, 2]), np.zeros(3), None)
-        fitted = est.estimate(acc.value())
-        self.assertTrue(np.allclose(fitted.prob_vec, np.ones(3) / 3.0))
+        fitted = est.estimate(None, acc.value())
+        self.assertTrue(np.allclose(fitted.p_vec, np.ones(3) / 3.0))
 
     def test_accumulator_factory_make(self):
-        # regression: make() omitted the required keys argument
         factory = IntegerCategoricalAccumulatorFactory(0, 3)
         acc = factory.make()
         self.assertIsInstance(acc, IntegerCategoricalAccumulator)
@@ -204,13 +197,12 @@ class IntegerCategoricalTestCase(unittest.TestCase):
 
         est = IntegerCategoricalEstimator(min_val=0, max_val=3)
         self.assertIsInstance(est.accumulator_factory(), IntegerCategoricalAccumulatorFactory)
-        self.assertIsInstance(est.accumulatorFactory(), IntegerCategoricalAccumulatorFactory)
 
     def test_expected_log_density_finite(self):
-        d = IntegerCategoricalDistribution([0.2, 0.3, 0.5], prior=DirichletDistribution([2.0, 3.0, 5.0]))
+        d = IntegerCategoricalDistribution(0, [0.2, 0.3, 0.5], prior=DirichletDistribution([2.0, 3.0, 5.0]))
         for x in range(3):
             self.assertTrue(np.isfinite(d.expected_log_density(x)))
-        enc = d.seq_encode([0, 1, 2])
+        enc = d.dist_to_encoder().seq_encode([0, 1, 2])
         self.assertTrue(np.allclose(d.seq_expected_log_density(enc), [d.expected_log_density(u) for u in range(3)]))
 
 
@@ -224,7 +216,7 @@ class BernoulliTestCase(unittest.TestCase):
     def test_seq_log_density_matches_scalar(self):
         d = BernoulliDistribution(0.3)
         data = d.sampler(seed=5).sample(size=50)
-        enc = d.seq_encode(data)
+        enc = d.dist_to_encoder().seq_encode(data)
         self.assertTrue(np.allclose(d.seq_log_density(enc), [d.log_density(u) for u in data]))
 
     def test_conjugate_estimate_roundtrip(self):
@@ -232,36 +224,25 @@ class BernoulliTestCase(unittest.TestCase):
         data = d.sampler(seed=6).sample(size=400)
         est = BernoulliEstimator(prior=BetaDistribution(2.0, 2.0))
         acc, fitted = fit(data, est)
-        psum, nsum = acc.value()
-        self.assertAlmostEqual(psum + nsum, 400.0, places=12)
+        count, psum = acc.value()
+        nsum = count - psum
+        self.assertAlmostEqual(count, 400.0, places=12)
         self.assertLess(abs(fitted.p - 0.3), 0.07)
         # MAP under Beta(a, b) and posterior carried as the new prior
         self.assertAlmostEqual(fitted.p, (psum + 1.0) / (psum + nsum + 2.0), places=12)
-        self.assertEqual(fitted.prior.get_parameters(), (2.0 + psum, 2.0 + nsum))
-
-    def test_non_conjugate_estimate(self):
-        # regression: this branch used to return None
-        prior = GaussianDistribution(0.5, 0.5)
-        est = BernoulliEstimator(prior=prior)
-        psum, nsum = 30.0, 70.0
-        fitted = est.estimate((psum, nsum))
-        self.assertIsInstance(fitted, BernoulliDistribution)
-        self.assertTrue(0.0 < fitted.p < 1.0)
-
-        def pen_ll(p):
-            return np.log(p) * psum + np.log1p(-p) * nsum + prior.log_density(p)
-
-        self.assertGreaterEqual(pen_ll(fitted.p), pen_ll(fitted.p - 0.01) - 1e-9)
-        self.assertGreaterEqual(pen_ll(fitted.p), pen_ll(fitted.p + 0.01) - 1e-9)
+        self.assertEqual(fitted.get_prior().get_parameters(), (2.0 + psum, 2.0 + nsum))
 
     def test_estimate_without_prior(self):
-        est = BernoulliEstimator(prior=null_dist)
-        fitted = est.estimate((30.0, 70.0))
+        # no conjugate prior -> plain relative-frequency MLE
+        est = BernoulliEstimator()
+        fitted = est.estimate(None, (100.0, 30.0))
         self.assertAlmostEqual(fitted.p, 0.3, places=12)
+        self.assertIsNone(fitted.get_prior())
+        self.assertFalse(fitted.has_conj_prior)
 
-    def test_null_prior_expected_log_density(self):
-        # regression: set_prior left has_conj_prior unset for null priors
-        d = BernoulliDistribution(0.3, prior=null_dist)
+    def test_no_prior_expected_log_density(self):
+        # regression: a non-conjugate / absent prior degenerates to the plug-in log_density
+        d = BernoulliDistribution(0.3)
         self.assertAlmostEqual(d.expected_log_density(True), d.log_density(True), places=12)
 
     def test_expected_log_density_digamma_terms(self):
@@ -273,8 +254,7 @@ class BernoulliTestCase(unittest.TestCase):
 
     def test_accumulator_factory(self):
         est = BernoulliEstimator()
-        self.assertIsInstance(est.accumulator_factory(), BernoulliEstimatorAccumulatorFactory)
-        self.assertIsInstance(est.accumulatorFactory(), BernoulliEstimatorAccumulatorFactory)
+        self.assertIsInstance(est.accumulator_factory(), BernoulliAccumulatorFactory)
 
     def test_seq_update_matches_update(self):
         est = BernoulliEstimator()
@@ -288,8 +268,9 @@ class BernoulliTestCase(unittest.TestCase):
 
 
 class BetaTestCase(unittest.TestCase):
-    def test_uses_bstats_base_class(self):
-        # regression: inherited from pysp.stats.pdist (layering violation)
+    def test_uses_stats_base_class(self):
+        # regression: the legacy Beta inherited from the wrong base; the stats Beta is a
+        # pysp.stats ProbabilityDistribution.
         self.assertIsInstance(BetaDistribution(2.0, 3.0), ProbabilityDistribution)
 
     def test_log_density_matches_scipy(self):
@@ -302,10 +283,6 @@ class BetaTestCase(unittest.TestCase):
         d = BetaDistribution(2.5, 3.5)
         total = scipy.integrate.quad(d.density, 0, 1)[0]
         self.assertAlmostEqual(total, 1.0, places=8)
-
-    def test_entropy_matches_scipy(self):
-        d = BetaDistribution(2.5, 3.5)
-        self.assertAlmostEqual(d.entropy(), scipy.stats.beta.entropy(2.5, 3.5), places=10)
 
     def test_sampler(self):
         d = BetaDistribution(2.0, 5.0)

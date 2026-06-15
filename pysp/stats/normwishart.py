@@ -1,18 +1,27 @@
 """Normal-Wishart distribution over (mu, Lambda) for a d-dimensional Gaussian
 with unknown mean and precision matrix.
 
-q(mu, Lambda) = N(mu | m, (kappa*Lambda)^{-1}) * Wishart(Lambda | W, nu)
+    q(mu, Lambda) = N(mu | m, (kappa*Lambda)^{-1}) * Wishart(Lambda | W, nu)
 
-with scale matrix W (d x d positive definite) and degrees of freedom
-nu > d - 1. This is the conjugate prior for the multivariate Gaussian and the
-d-dimensional generalization of NormalGammaDistribution (d=1: nu = 2a,
-W = 1/(2b)).
+with scale matrix W (d x d positive definite) and degrees of freedom nu > d - 1.
+This is the conjugate prior for the multivariate
+:class:`~pysp.stats.mvn.MultivariateGaussianDistribution` (see its ``prior=``
+argument) and the d-dimensional generalization of NormalGamma (d=1: nu = 2a,
+W = 1/(2b)). It is a parameter prior: it is scored on ``(mu, Lambda)`` parameter
+pairs, not fit from data by EM.
 """
 
-import numpy as np
-from scipy.special import digamma, gammaln
+from typing import Any, Optional
 
-from pysp.bstats.pdist import ProbabilityDistribution
+import numpy as np
+
+from pysp.stats.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+)
+from pysp.utils.special import digamma, gammaln
 
 
 def _multigammaln(a: float, d: int) -> float:
@@ -25,7 +34,7 @@ def _multidigamma(a: float, d: int) -> float:
     return sum(digamma(a + (1.0 - i) / 2.0) for i in range(1, d + 1))
 
 
-class NormalWishartDistribution(ProbabilityDistribution):
+class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
     """Normal-Wishart distribution over (mu, Lambda); conjugate prior for the
     multivariate Gaussian with unknown mean and precision matrix."""
 
@@ -36,8 +45,8 @@ class NormalWishartDistribution(ProbabilityDistribution):
         w_mat,
         nu: float,
         name: str | None = None,
-        prior: ProbabilityDistribution | None = None,
-    ):
+        prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
+    ) -> None:
         """NormalWishartDistribution object.
 
         Args:
@@ -46,15 +55,14 @@ class NormalWishartDistribution(ProbabilityDistribution):
             w_mat: (d, d) positive-definite Wishart scale matrix W.
             nu (float): Degrees of freedom nu > d - 1.
             name (Optional[str]): Name of object.
-            prior (Optional[ProbabilityDistribution]): Hyper-prior (stored
-                for interface compatibility).
+            prior (Optional): Hyper-prior (stored for interface compatibility).
 
         """
         self.name = name
         self.prior = prior
         self.set_parameters((mu, kappa, w_mat, nu))
 
-    def __str__(self):
+    def __str__(self) -> str:
         mu = ",".join(map(str, self.mu.tolist()))
         w = ",".join(map(str, self.w_mat.flatten().tolist()))
         return "NormalWishartDistribution([%s], %f, [%s], %f, name=%s, prior=%s)" % (
@@ -70,7 +78,7 @@ class NormalWishartDistribution(ProbabilityDistribution):
         """Returns the parameter tuple (mu, kappa, w_mat, nu)."""
         return self.mu, self.kappa, self.w_mat, self.nu
 
-    def set_parameters(self, params):
+    def set_parameters(self, params) -> None:
         """Set the parameters and refresh the cached Wishart log-normalizer.
 
         Args:
@@ -107,27 +115,13 @@ class NormalWishartDistribution(ProbabilityDistribution):
         return self.nu * self.w_mat
 
     def density(self, x) -> float:
-        """Density at x = (mu, Lambda); see log_density().
-
-        Args:
-            x: Tuple (mu, Lambda) with Lambda a positive-definite matrix.
-
-        Returns:
-            Density at x.
-
-        """
+        """Density at x = (mu, Lambda); see log_density()."""
         return np.exp(self.log_density(x))
 
     def log_density(self, x) -> float:
         """Log density at x = (mu, Lambda) with Lambda a precision matrix.
 
-        Args:
-            x: Tuple (mu, Lambda); returns -inf when Lambda is not
-                positive definite.
-
-        Returns:
-            Log-density at x.
-
+        Returns -inf when Lambda is not positive definite.
         """
         mu, lam = x
         mu = np.asarray(mu, dtype=float)
@@ -148,17 +142,8 @@ class NormalWishartDistribution(ProbabilityDistribution):
 
         return c_norm + c_wish
 
-    def cross_entropy(self, dist: ProbabilityDistribution) -> float:
-        """H(self, dist) = -E_self[log dist] for NormalWishart dist.
-
-        Args:
-            dist (ProbabilityDistribution): NormalWishartDistribution to
-                evaluate against (other types raise NotImplementedError).
-
-        Returns:
-            Cross-entropy in nats.
-
-        """
+    def cross_entropy(self, dist: "NormalWishartDistribution") -> float:
+        """H(self, dist) = -E_self[log dist] for a NormalWishart argument."""
         if not isinstance(dist, NormalWishartDistribution):
             raise NotImplementedError(
                 "NormalWishartDistribution.cross_entropy is only implemented for NormalWishart arguments (got %s)."
@@ -182,48 +167,37 @@ class NormalWishartDistribution(ProbabilityDistribution):
         """Returns the entropy of the Normal-Wishart distribution (in nats)."""
         return self.cross_entropy(self)
 
-    def sampler(self, seed: int | None = None):
-        """Create a NormalWishartSampler for this distribution.
+    def seq_log_density(self, x) -> np.ndarray:
+        """Vectorized log-density over a sequence of (mu, Lambda) pairs."""
+        return np.asarray([self.log_density(xx) for xx in x], dtype=float)
 
-        Args:
-            seed (Optional[int]): Seed for the random number generator.
-
-        Returns:
-            NormalWishartSampler object.
-
-        """
+    def sampler(self, seed: int | None = None) -> "NormalWishartSampler":
+        """Create a NormalWishartSampler for this distribution."""
         return NormalWishartSampler(self, seed)
 
+    def estimator(self, pseudo_count: float | None = None) -> "ParameterEstimator":
+        """NormalWishart is a parameter prior and is not fit from data by EM."""
+        raise NotImplementedError("NormalWishartDistribution is a parameter prior; it has no data estimator.")
 
-class NormalWishartSampler:
+    def dist_to_encoder(self) -> "NormalWishartDataEncoder":
+        """Returns a NormalWishartDataEncoder object for encoding (mu, Lambda) pairs."""
+        return NormalWishartDataEncoder()
+
+
+class NormalWishartSampler(DistributionSampler):
     """Draws (mu, Lambda) samples from a NormalWishartDistribution."""
 
-    def __init__(self, dist: NormalWishartDistribution, seed: int | None = None):
-        """NormalWishartSampler object.
-
-        Args:
-            dist (NormalWishartDistribution): Distribution to sample from.
-            seed (Optional[int]): Seed for the random number generator.
-
-        """
+    def __init__(self, dist: NormalWishartDistribution, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
-    def sample(self, size=None):
+    def sample(self, size=None) -> Any:
         """Draw size samples (a single (mu, Lambda) pair when size is None).
 
         Lambda is drawn from the Wishart factor, then mu from
         N(m, (kappa*Lambda)^-1).
-
-        Args:
-            size (Optional[int]): Number of samples to draw.
-
-        Returns:
-            A tuple (mu, Lambda) if size is None, else a list of size such tuples.
-
         """
         if size is None:
-            d = self.dist.dim
             lam = scipy_wishart_sample(self.rng, self.dist.nu, self.dist.w_mat)
             covar = np.linalg.inv(lam * self.dist.kappa)
             mu = self.rng.multivariate_normal(self.dist.mu, covar)
@@ -243,3 +217,16 @@ def scipy_wishart_sample(rng: np.random.RandomState, nu: float, w_mat: np.ndarra
             a_mat[i, j] = rng.normal()
     la = np.dot(chol, a_mat)
     return np.dot(la, la.T)
+
+
+class NormalWishartDataEncoder(DataSequenceEncoder):
+    """Encodes a sequence of (mu, Lambda) parameter pairs (identity passthrough)."""
+
+    def __str__(self) -> str:
+        return "NormalWishartDataEncoder"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, NormalWishartDataEncoder)
+
+    def seq_encode(self, x: Any) -> Any:
+        return list(x)
