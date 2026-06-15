@@ -236,7 +236,7 @@ record.conditional_enumerator({"country": "US"}).top_k(5)   # 5 likeliest record
 
 For decomposable families (`Composite` / `Record` / `Sequence` / `MarkovChain`), rank↔value is an exact count
 dynamic program at any depth (`count_dp_rank`, `count_dp_seek`, `cumulative_probability`,
-`mixture_cross_rank`). For very large or infinite supports, **budget-bounded quantized indexes** seek
+`count_dp_top_p` — the nucleus *size* without enumerating it, `mixture_cross_rank`). For very large or infinite supports, **budget-bounded quantized indexes** seek
 and unrank over just the most-probable region without enumerating everything:
 
 ```python
