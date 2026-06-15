@@ -119,20 +119,70 @@ Each model family implements five cooperating pieces:
 | `...Accumulator`  | Collects sufficient statistics (E-step), mergeable across partitions       |
 | `...DataEncoder`  | `seq_encode(data)` flattens raw Python data into NumPy for the fast path   |
 
-Driver functions in `pysp.utils.estimation` tie these together — `optimize` runs EM to
-convergence, and the same call scales out by swapping the data argument or the back-end:
-
-```python
-optimize(data, est, max_its=100)                         # local, vectorized NumPy/Numba
-optimize(rdd,  est, backend='spark')                     # Spark RDDs
-optimize(data, est, backend='dask', client=client)       # Dask workers
-optimize(data, est, engine=TorchEngine(...))             # GPU / autograd
-```
+Driver functions in `pysp.utils.estimation` tie these together — `optimize(data, est)` runs EM to
+convergence locally (vectorized NumPy/Numba), and the *same call* scales out to Spark, Dask, Torch,
+or MPI by swapping one argument (see [Engines & orchestration](#engines--orchestration)).
 
 Also available: `best_of` (random restarts), `StreamingEstimator` / `IncrementalEstimator`
 (online EM), `fit_mle` / `fit_map` (autograd fitting with typed priors), `RecordDistribution` /
 `field(...)` (named dict/DataFrame observations), and `pysp.utils.automatic.get_estimator(data)`
 (infer an estimator straight from raw data).
+
+## Engines & orchestration
+
+Distributions own the likelihood and sufficient-statistic math; **compute engines** supply the
+array ops, device, and precision — so the same EM contract runs unchanged on NumPy, Numba, Torch
+(CPU / GPU / multi-device), or a symbolic backend.
+
+```python
+from pysp.engines import TorchEngine
+
+optimize(data, est, engine=TorchEngine(device="cuda", dtype="float32"))   # GPU
+optimize(data, est, engine=TorchEngine(mesh=mesh, shard="components"))    # multi-GPU (DTensor)
+```
+
+**Precision is data-aware.** `precision='auto'` chooses float32/float64 from the data and engine
+(sufficient statistics always accumulate in float64, so reduced precision stays numerically safe):
+
+```python
+optimize(data, est, precision="auto")
+optimize(data, est, engine=TorchEngine(device="cuda"), precision="float32")
+```
+
+**Scale by swapping the back-end, not the model** — local and distributed go through identical math:
+
+```python
+optimize(data, est)                                   # local NumPy / Numba
+optimize(data, est, backend="mp", num_workers=8)      # multiprocessing
+optimize(rdd,  est, backend="spark")                  # Spark
+optimize(data, est, backend="dask", client=client)    # Dask
+optimize(data, est, backend="mpi", comm=comm)         # MPI / torchrun
+```
+
+**The planner** (`pysp.planner`) turns a hardware budget into a memory-aware *placement* — chunking,
+device assignment, and (on Torch) model sharding — that you compute once and reuse:
+
+```python
+from pysp.planner import plan, Resources
+
+placement = plan(data, model=model, estimator=est, resources=Resources.local(num_cpus=8))
+optimize(data, est, placement=placement)
+optimize(data, est, resources=Resources.local(num_cpus=8))   # or let optimize plan it for you
+```
+
+`Resources.{single_cpu, local, from_spark, from_dask, from_mpi, from_specs}` describe the hardware;
+`plan(...)` sizes the model and encoded data and returns a `Placement`.
+
+**Symbolic export.** The `SymbolicEngine` runs a distribution's density through SymPy, so a model can
+emit its closed-form log-density as LaTeX / SymPy / Sage:
+
+```python
+from pysp.engines import SYMBOLIC_ENGINE, to_latex
+
+x = SYMBOLIC_ENGINE.symbol("x")
+to_latex(GaussianDistribution(0.0, 1.0).backend_seq_log_density(x, SYMBOLIC_ENGINE))
+# '- 0.5 x^{2} - 0.918938533204673'
+```
 
 ## Frequentist & Bayesian — one switch
 
@@ -193,9 +243,6 @@ over `max_its`. Passing both spellings raises `TypeError`.
 
 ## Beyond fitting
 
-- **Engines** — distributions own the likelihood/statistic math; `pysp.engines`
-  (`TorchEngine`, `NumbaKernelFactory`, `SymbolicEngine`) supplies array ops and device/precision
-  policy. The same EM contract runs through any engine.
 - **Inference & analysis** — `pysp.utils.mcmc` (Metropolis–Hastings / HMC / VMP), `pysp.utils.em`
   (hard, annealed, ECM, Monte-Carlo, variational, online, restart EM), `pysp.utils.fisher`
   (Fisher-geometry views), and `pysp.utils.hvis` (model-based embeddings — t-SNE / UMAP).
