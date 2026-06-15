@@ -18,7 +18,8 @@ import numpy as np
 
 from pysp.utils.estimation import optimize
 
-__all__ = ["RandomVariable", "free", "lower", "register_family", "Family"]
+__all__ = ["RandomVariable", "free", "lower", "register_family", "Family",
+           "Constraint", "Event", "constrain"]
 
 
 # --------------------------------------------------------------------------- free
@@ -136,25 +137,135 @@ class _LinearPredictor:
                 f"groups={self.groups!r})")
 
 
-class Event:
-    """A predicate over an RV's value, produced by comparisons (``x > 0``) and consumed by
-    ``rv.given(event)``. Combine with ``&``."""
+class Constraint:
+    """A boolean relation over one or more random variables.
 
-    __slots__ = ("rv", "pred", "desc")
+    Produced by comparisons on RVs — ``x > 0`` (RV vs constant), ``a < b`` (RV vs RV), or
+    ``2 * a - b >= 1`` (linear/transformed expressions on either side) — and combined with
+    ``&`` (and), ``|`` (or), ``~`` (not). A constraint over a single RV is consumed by
+    ``rv.given(c)`` (truncation); a constraint over several RVs is consumed by
+    ``constrain(c)`` (joint conditioning) or ``fit(..., constraints=c)`` (feasible region).
 
-    def __init__(self, rv, pred, desc):
-        self.rv = rv
-        self.pred = pred           # value(s) -> bool mask
+    ``leaves`` are the distinct leaf RVs the relation depends on; ``pred(env)`` evaluates the
+    relation given ``env``, a dict mapping each leaf RV to its value(s).
+    """
+
+    __slots__ = ("leaves", "pred", "desc")
+
+    def __init__(self, leaves, pred, desc):
+        self.leaves = tuple(leaves)
+        self.pred = pred           # env: {leaf_rv -> value(s)} -> bool mask
         self.desc = desc
 
+    @property
+    def rv(self):
+        """The single RV this constraint restricts (back-compat for one-variable events)."""
+        if len(self.leaves) != 1:
+            raise AttributeError("constraint involves multiple RVs; use .leaves.")
+        return self.leaves[0]
+
+    def eval(self, env):
+        return self.pred(env)
+
     def contains(self, x):
-        return self.pred(x)
+        """Evaluate a single-variable constraint directly on that variable's value(s)."""
+        if len(self.leaves) != 1:
+            raise TypeError("contains(x) is only valid for a one-variable constraint; use eval(env).")
+        return self.pred({self.leaves[0]: x})
+
+    def _merge_leaves(self, other):
+        seen, out = set(), []
+        for lv in self.leaves + other.leaves:
+            if id(lv) not in seen:
+                seen.add(id(lv))
+                out.append(lv)
+        return tuple(out)
 
     def __and__(self, other):
-        return Event(self.rv, lambda x: self.pred(x) & other.pred(x), f"({self.desc} & {other.desc})")
+        return Constraint(self._merge_leaves(other),
+                          lambda env: self.pred(env) & other.pred(env),
+                          f"({self.desc} & {other.desc})")
+
+    def __or__(self, other):
+        return Constraint(self._merge_leaves(other),
+                          lambda env: self.pred(env) | other.pred(env),
+                          f"({self.desc} | {other.desc})")
+
+    def __invert__(self):
+        return Constraint(self.leaves, lambda env: ~np.asarray(self.pred(env)), f"~{self.desc}")
+
+    def __bool__(self):
+        raise TypeError(
+            "a Constraint has no truth value — Python chained comparisons (a < b < c) and "
+            "`and`/`or` are not supported; combine with & | ~ instead, e.g. (a < b) & (b < c).")
 
     def __repr__(self):
-        return f"Event({self.desc})"
+        return f"Constraint({self.desc})"
+
+
+Event = Constraint   # back-compat alias
+
+
+def _expr_leaves(rv) -> list:
+    """The leaf (sample/bound) RVs an expression RV depends on, in left-to-right order."""
+    if not isinstance(rv, RandomVariable):
+        return []
+    if rv._kind in ("apply",):
+        return _expr_leaves(rv._args[0])
+    if rv._kind == "sum":
+        out = _expr_leaves(rv._args[0])
+        seen = {id(x) for x in out}
+        for lv in _expr_leaves(rv._args[1]):
+            if id(lv) not in seen:
+                out.append(lv)
+                seen.add(id(lv))
+        return out
+    return [rv]    # sample / bound / given: an atomic leaf
+
+
+def _eval_expr(rv, env):
+    """Numerically evaluate an expression RV given ``env`` (leaf RV -> value)."""
+    if not isinstance(rv, RandomVariable):
+        return rv      # a constant
+    if rv._kind == "apply":
+        base, transform = rv._args
+        return transform.forward(_eval_expr(base, env))
+    if rv._kind == "sum":
+        a, b = rv._args
+        return _eval_expr(a, env) + _eval_expr(b, env)
+    if rv not in env:
+        raise KeyError(f"no value supplied for {rv!r} when evaluating a constraint.")
+    return env[rv]
+
+
+_CMP = {">": lambda a, b: a > b, ">=": lambda a, b: a >= b,
+        "<": lambda a, b: a < b, "<=": lambda a, b: a <= b}
+
+
+def _make_constraint(lhs, op, rhs) -> Constraint:
+    """Build a Constraint from ``lhs <op> rhs`` where each side is an RV/expression or constant."""
+    leaves, seen = [], set()
+    for side in (lhs, rhs):
+        for lv in _expr_leaves(side):
+            if id(lv) not in seen:
+                seen.add(id(lv))
+                leaves.append(lv)
+    cmp = _CMP[op]
+
+    def pred(env):
+        return cmp(np.asarray(_eval_expr(lhs, env)), np.asarray(_eval_expr(rhs, env)))
+
+    return Constraint(leaves, pred, f"{_expr_desc(lhs)} {op} {_expr_desc(rhs)}")
+
+
+def _expr_desc(rv) -> str:
+    if not isinstance(rv, RandomVariable):
+        return repr(rv)
+    if rv._kind == "apply":
+        return f"f({_expr_desc(rv._args[0])})"
+    if rv._kind == "sum":
+        return f"({_expr_desc(rv._args[0])} + {_expr_desc(rv._args[1])})"
+    return rv._name or "rv"
 
 
 def _convolve(da, db):
@@ -448,18 +559,24 @@ class RandomVariable:
         from pysp.stats.combinator.transform import LogTransform
         return RandomVariable._apply(self, LogTransform())
 
-    # -- conditioning: comparisons build Events; .given restricts the RV -----
-    def __gt__(self, v): return Event(self, lambda x: np.asarray(x) > v, f"> {v}")
-    def __ge__(self, v): return Event(self, lambda x: np.asarray(x) >= v, f">= {v}")
-    def __lt__(self, v): return Event(self, lambda x: np.asarray(x) < v, f"< {v}")
-    def __le__(self, v): return Event(self, lambda x: np.asarray(x) <= v, f"<= {v}")
+    # -- relations: comparisons build Constraints (RV vs constant / RV / linear expr) ----
+    def __gt__(self, other): return _make_constraint(self, ">", other)
+    def __ge__(self, other): return _make_constraint(self, ">=", other)
+    def __lt__(self, other): return _make_constraint(self, "<", other)
+    def __le__(self, other): return _make_constraint(self, "<=", other)
 
-    def given(self, event) -> RandomVariable:
-        """Condition this RV on an event (e.g. ``x.given(x > 0)`` -> truncation). The
-        result samples by rejection and scores with the renormalized density."""
-        if not isinstance(event, Event):
-            raise TypeError("given() expects an Event from a comparison, e.g. x > 0.")
-        return RandomVariable("given", args=(self, event))
+    def given(self, constraint) -> RandomVariable:
+        """Condition this RV on a constraint over *itself* (e.g. ``x.given(x > 0)`` ->
+        truncation). The result samples by rejection and scores with the renormalized
+        density. For relations among *several* RVs (``a < b``) use ``constrain(...)``."""
+        if not isinstance(constraint, Constraint):
+            raise TypeError("given() expects a Constraint from a comparison, e.g. x > 0.")
+        extra = [lv for lv in constraint.leaves if lv is not self]
+        if extra:
+            raise ValueError(
+                "given() conditions an RV on a relation over itself only; this constraint also "
+                "involves other RVs — use constrain(constraint) for a joint conditioning.")
+        return RandomVariable("given", args=(self, constraint))
 
     # -- introspection ------------------------------------------------------
     @property
@@ -473,6 +590,14 @@ class RandomVariable:
     @property
     def name(self) -> str | None:
         return self._name
+
+    @property
+    def columns(self) -> list:
+        """For a ``constrain(...)`` joint RV: the variable names, in sample-column order."""
+        if self._kind != "joint":
+            raise TypeError("columns is only defined for a constrain(...) RV.")
+        leaves = self._args[0]
+        return [lv._name or f"rv{i}" for i, lv in enumerate(leaves)]
 
     @property
     def dist(self):
@@ -514,6 +639,22 @@ class RandomVariable:
 
     # -- query verbs (valid once concrete) ----------------------------------
     def sample(self, n: int | None = None, seed: int | None = None):
+        if self._kind == "joint":                     # joint rejection sampling under a relation
+            leaves, constraint = self._args
+            rng = np.random.RandomState(seed)
+            k = n if n is not None else 1
+            kept = []
+            have = 0
+            while have < k:
+                batch = max(k * 2, 1024)
+                cols = {lv: np.asarray(lv.sample(batch, seed=int(rng.randint(1, 2 ** 31))),
+                                      dtype=float) for lv in leaves}
+                mask = np.asarray(constraint.eval(cols))
+                block = np.stack([cols[lv][mask] for lv in leaves], axis=1)   # (m, K)
+                kept.append(block)
+                have += len(block)
+            out = np.concatenate(kept, axis=0)[:k]
+            return out if n is not None else out[0]
         if self._kind == "sum":                       # convolution: sample operands and add
             rng = np.random.RandomState(seed)
             a, b = self._args
@@ -544,6 +685,16 @@ class RandomVariable:
         return kde
 
     def log_prob(self, x):
+        if self._kind == "joint":                     # joint density of independent leaves / Z
+            leaves, constraint = self._args
+            xa = np.atleast_2d(np.asarray(x, dtype=float))
+            if xa.shape[1] != len(leaves):
+                raise ValueError(f"expected {len(leaves)} columns, got shape {xa.shape}.")
+            logZ = math.log(self.prob())
+            env = {lv: xa[:, j] for j, lv in enumerate(leaves)}
+            base_lp = sum(np.atleast_1d(lv.log_prob(xa[:, j])) for j, lv in enumerate(leaves))
+            out = np.where(np.asarray(constraint.eval(env)), base_lp - logZ, -np.inf)
+            return float(out[0]) if np.ndim(x) == 1 else out
         if self._kind == "sum":                       # exact convolution if closed-form, else KDE
             a, b = self._args
             cd = None
@@ -588,12 +739,29 @@ class RandomVariable:
 
     def mean(self, samples: int = 20000, seed: int = 0):
         """Expected value of the random variable (Monte-Carlo; works for any RV —
-        concrete, transformed, convolved, or conditioned)."""
-        return float(np.mean(np.asarray(self.sample(samples, seed=seed), dtype=float)))
+        concrete, transformed, convolved, or conditioned). For a joint ``constrain(...)``
+        RV this is the per-variable mean vector."""
+        s = np.asarray(self.sample(samples, seed=seed), dtype=float)
+        return s.mean(axis=0) if self._kind == "joint" else float(np.mean(s))
 
     def var(self, samples: int = 20000, seed: int = 0):
-        """Variance of the random variable (Monte-Carlo)."""
-        return float(np.var(np.asarray(self.sample(samples, seed=seed), dtype=float)))
+        """Variance of the random variable (Monte-Carlo); per-variable for a joint RV."""
+        s = np.asarray(self.sample(samples, seed=seed), dtype=float)
+        return s.var(axis=0) if self._kind == "joint" else float(np.var(s))
+
+    def prob(self, samples: int = 40000, seed: int = 999):
+        """Probability that the relation holds (Monte-Carlo), for a ``constrain(...)`` RV."""
+        if self._kind != "joint":
+            raise TypeError("prob() is only defined for a constrain(...) RV.")
+        p = self._cache.get("_pjoint")
+        if p is None:
+            leaves, constraint = self._args
+            rng = np.random.RandomState(seed)
+            cols = {lv: np.asarray(lv.sample(samples, seed=int(rng.randint(1, 2 ** 31))),
+                                  dtype=float) for lv in leaves}
+            p = max(float(np.mean(np.asarray(constraint.eval(cols)))), 1e-9)
+            self._cache["_pjoint"] = p
+        return p
 
     def prob_of_event(self):
         """P(event) under the base distribution (Monte-Carlo), for a conditioned RV."""
@@ -690,9 +858,16 @@ class RandomVariable:
         partial_free = (flat and not self._has_priors()
                         and any(_is_free(a) for a in self._args)
                         and not all(_is_free(a) for a in self._args))
+        has_constraints = kw.get("constraints") is not None
+        if has_constraints and how in ("em", "conjugate", "conjugate_mixture", "vi", "vmp"):
+            raise ValueError(
+                f"how={how!r} cannot honor inequality constraints; use 'map', 'mcmc', 'hmc', "
+                "or 'ensemble' (or how='auto').")
         if how == "auto":
             if grouped:
                 how = "hierarchical"
+            elif has_constraints:
+                how = "map"      # constraints truncate the region; the conjugate paths can't
             elif self._has_priors():
                 from pysp.ppl import inference as _inf
                 if _inf.conjugate_spec(self) is not None:
@@ -769,6 +944,35 @@ class RandomVariable:
         inner = ", ".join("free" if _is_free(a) else repr(a) for a in self._args)
         nm = f", name={self._name!r}" if self._name else ""
         return f"RV({self._family.name}({inner}){nm})"
+
+
+def constrain(*constraints) -> RandomVariable:
+    """A joint random variable formed by conditioning several RVs on a relation among them.
+
+    ``constrain(a < b)`` is the pair ``(a, b)`` restricted to ``a < b``; pass several
+    constraints (or combine with ``& | ~``) for richer regions, e.g.
+    ``constrain(a < b, b < c)`` orders three variables. The result samples by joint rejection
+    and answers ``.sample(n)`` (an ``(n, k)`` array, columns in ``.columns`` order),
+    ``.mean()``/``.var()`` (per-variable), ``.prob()`` (probability the relation holds), and
+    ``.log_prob(x)`` (renormalized joint density of the independent variables on the region).
+    """
+    if not constraints:
+        raise ValueError("constrain() needs at least one constraint.")
+    for c in constraints:
+        if not isinstance(c, Constraint):
+            raise TypeError("constrain() expects Constraints from comparisons, e.g. a < b.")
+    combined = constraints[0]
+    for c in constraints[1:]:
+        combined = combined & c
+    leaves = combined.leaves
+    if len(leaves) < 1:
+        raise ValueError("constraint references no random variables.")
+    for lv in leaves:
+        if lv._kind not in ("sample", "bound") or lv.has_free:
+            raise ValueError(
+                "constrain() variables must be concrete RVs (a distribution with fixed "
+                "parameters), not models with `free` holes; fit those first.")
+    return RandomVariable("joint", args=(leaves, combined), name=None)
 
 
 def _rv_reconstruct(kind, fam_name, args, name, keys, dist, scope):

@@ -158,6 +158,37 @@ q.log_prob(1.0)              # renormalized density
 q.prob_of_event()            # P(x > 0)
 ```
 
+## Constraints & inequalities among random variables
+
+Comparisons build a `Constraint` — `x > 0` (RV vs constant), `a < b` (RV vs RV), or
+`2*a - b >= 1` (linear/transformed expressions on either side) — combined with `&` `|` `~`.
+The *same* constraint object works two ways.
+
+**Generative — `constrain(...)`** conditions several RVs on a relation among them:
+
+```python
+a, b, c = Normal(0, 1, name="a"), Normal(0, 1, name="b"), Normal(0, 1, name="c")
+ordered = constrain(a < b, b < c)     # the ordered triple (combine with & under the hood)
+ordered.sample(1000)                  # (1000, 3) array, columns in ordered.columns
+ordered.mean()                        # per-variable means
+ordered.prob()                        # P(a < b < c)  ->  ~1/6
+ordered.log_prob(x)                   # renormalized joint density on the region
+
+tails = constrain((x < -1) | (x > 1)) # boolean combinators; ~c negates
+```
+
+(Python's chained `a < b < c` is intentionally rejected — use `(a < b) & (b < c)`.)
+
+**Inference — `fit(..., constraints=...)`** restricts the feasible parameter region. The
+constrained variables are the model's (named) priors; `map`/`mcmc`/`ensemble` honor a hard
+truncation of the posterior, e.g. an identifiability ordering:
+
+```python
+a = Normal(2, 5, name="alpha");  b = Normal(5, 5, name="beta")
+Beta(a, b).fit(data, constraints=a < b)            # auto -> constrained MAP
+Beta(a, b).fit(data, how="ensemble", constraints=a < b)   # full posterior on the region
+```
+
 ## Bayesian mixture via VBEM (discrete latents)
 
 `Mix(...).fit(how="vmp")` runs variational Bayes for a Gaussian mixture — per-datapoint

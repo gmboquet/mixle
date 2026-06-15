@@ -18,10 +18,13 @@ from typing import Any
 import numpy as np
 
 from pysp.ppl.core import (
+    Constraint,
+    Event,
     Field,
     Group,
     RandomVariable,
     compare,
+    constrain,
     free,
     lower,
     register_composite,
@@ -60,7 +63,7 @@ __all__ = [
     "Binomial", "Weibull", "Laplace", "Logistic", "Uniform", "Rayleigh", "Pareto",
     "Beta", "StudentT", "LogNormal", "NegativeBinomial", "Dirichlet",
     "Mix", "Seq", "Markov", "LDA", "MVN", "DiagGaussian", "LocalLevel", "AR1",
-    "Graph", "Field", "Group", "compare",
+    "Graph", "Field", "Group", "compare", "constrain", "Constraint", "Event",
 ]
 
 
