@@ -298,11 +298,13 @@ Also: a conjugate-exponential **VMP engine** (`how="vmp"` and `Graph`) with mess
 nodes + monotone ELBO — arbitrary conjugate-Gaussian DAGs, deep hierarchies, and **shared
 variable instances** (one handle reused across factors → one node combining all messages).
 
-Also: **regression & GLMs** (`Field`: linear/OLS, Bayesian, logistic, Poisson),
-**multivariate Gaussian** (`MVN`, `DiagGaussian`), **LDA** topic models,
-**Dirichlet-Categorical** VMP nodes, **RV+RV convolution** (`x + y`), **event conditioning**
-(`.given`), **Bayesian mixture via VBEM**, **moments** (`mean`/`var`), and **model
-comparison** (`log_likelihood`, `aic`/`bic`, `compare`). 12 scalar families + 6 structured.
+Also: **regression & GLMs** (`Field`: linear/OLS, Bayesian, logistic, Poisson) and
+**mixed-effects** models (`Group` random intercepts, LMM EM), **mixtures & HMMs with any
+emission family** (Gaussian / Poisson / Categorical / …), **multivariate Gaussian**
+(`MVN`, `DiagGaussian`), **LDA** topic models, **Dirichlet-Categorical** VMP nodes,
+**RV+RV convolution** (`x + y`), **event conditioning** (`.given`), **Bayesian mixture via
+VBEM**, **moments** (`mean`/`var`), and **model comparison** (`log_likelihood`, `aic`/`bic`,
+`compare`). 12 scalar families + multivariate + 6 structured model types.
 
 Future: LDA in-graph as VMP factors, exact (FFT) convolution for non-conjugate continuous
 sums, analytic gradients for faster HMC.
