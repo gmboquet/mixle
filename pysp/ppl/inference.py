@@ -450,6 +450,163 @@ def conjugate_fit(rv: RandomVariable, data) -> RandomVariable:
     return RandomVariable._bound(fitted, name=rv._name, result=cpost)
 
 
+# ------------------------------------------------ mixtures of conjugate priors (exact)
+def _logbeta(a, b):
+    return math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+
+
+# (likelihood, slot, prior) -> log marginal likelihood of the data under one prior
+# component, up to an additive component-INDEPENDENT constant (enough to reweight a
+# mixture-of-conjugate-priors exactly). Same keys as _CONJUGATE.
+def _logm_normal_mean(pa, fixed, stats):
+    m0, s0 = float(pa[0]), float(pa[1])
+    sigma2 = float(fixed[1]) ** 2
+    n, sx = stats["n"], stats["sum"]
+    prec0 = 1.0 / s0 ** 2
+    precP = prec0 + n / sigma2
+    bb = m0 * prec0 + sx / sigma2
+    return 0.5 * math.log(prec0 / precP) + 0.5 * (bb * bb / precP - m0 * m0 * prec0)
+
+
+def _logm_poisson_gamma(pa, fixed, stats):
+    a, b = float(pa[0]), float(pa[1])
+    n, sx = stats["n"], stats["sum"]
+    return math.lgamma(a + sx) - math.lgamma(a) + a * math.log(b) - (a + sx) * math.log(b + n)
+
+
+def _logm_exponential_gamma(pa, fixed, stats):
+    a, b = float(pa[0]), float(pa[1])
+    n, sx = stats["n"], stats["sum"]
+    return math.lgamma(a + n) - math.lgamma(a) + a * math.log(b) - (a + n) * math.log(b + sx)
+
+
+def _logm_bernoulli_beta(pa, fixed, stats):
+    a, b = float(pa[0]), float(pa[1])
+    n, sx = stats["n"], stats["sum"]
+    return _logbeta(a + sx, b + n - sx) - _logbeta(a, b)
+
+
+def _logm_binomial_beta(pa, fixed, stats):
+    a, b = float(pa[0]), float(pa[1])
+    n_tr, N, sx = float(fixed[0]), stats["n"], stats["sum"]
+    return _logbeta(a + sx, b + n_tr * N - sx) - _logbeta(a, b)
+
+
+def _logm_geometric_beta(pa, fixed, stats):
+    a, b = float(pa[0]), float(pa[1])
+    N, sx = stats["n"], stats["sum"]
+    return _logbeta(a + N, b + sx - N) - _logbeta(a, b)
+
+
+_CONJ_LOGM = {
+    ("Normal", 0, "Normal"): _logm_normal_mean,
+    ("Poisson", 0, "Gamma"): _logm_poisson_gamma,
+    ("Exponential", 0, "Gamma"): _logm_exponential_gamma,
+    ("Bernoulli", 0, "Beta"): _logm_bernoulli_beta,
+    ("Binomial", 1, "Beta"): _logm_binomial_beta,
+    ("Geometric", 0, "Beta"): _logm_geometric_beta,
+}
+
+
+class ConjugateMixturePosterior:
+    """Exact posterior for a mixture-of-conjugate-priors model.
+
+    The posterior is again a mixture: the per-component conjugate posteriors with weights
+    reweighted by each component's marginal likelihood, ``w'_k ∝ w_k · m_k``. Sampling draws
+    a component by ``w'`` then samples that component's conjugate posterior.
+    """
+
+    def __init__(self, entries, weights, param_name):
+        self.entries = entries            # list of per-component conjugate posterior dicts
+        self.weights = np.asarray(weights, dtype=float)   # posterior mixing weights w'
+        self.param_name = param_name
+        self.acceptance_rate = None
+        self.predictive = None
+
+    def mean(self, param=None):
+        return float(np.sum(self.weights * np.array([e["mean"] for e in self.entries])))
+
+    def samples(self, param=None, n: int = 4000, rng=None):
+        rng = rng or np.random.RandomState()
+        comp = rng.choice(len(self.entries), size=n, p=self.weights)
+        out = np.empty(n)
+        for k, e in enumerate(self.entries):
+            m = comp == k
+            cnt = int(m.sum())
+            if cnt:
+                out[m] = np.atleast_1d(e["sample"](cnt, rng))
+        return out
+
+    def summary(self) -> dict:
+        return {"posterior": "mixture", "weights": self.weights.tolist(),
+                "components": [{"mean": e["mean"], "hyper": e["hyper"]} for e in self.entries],
+                "mean": self.mean()}
+
+
+def conjugate_mixture_spec(rv: RandomVariable):
+    """Return (builder, logm, slot_index, component_rvs, prior_weights) when exactly one slot
+    is a ``Mix`` of conjugate priors (all forming the same registered conjugate pair) and every
+    other slot is a fixed constant; else None."""
+    if rv._kind != "sample" or isinstance(rv._family, CompositeFamily):
+        return None
+    if any(a is free for a in rv._args):
+        return None
+    mix_slots = [(i, a) for i, a in enumerate(rv._args)
+                 if isinstance(a, RandomVariable) and isinstance(a._family, CompositeFamily)
+                 and a._family.name == "Mixture"]
+    other_rv = [a for a in rv._args if isinstance(a, RandomVariable)
+                and not (isinstance(a._family, CompositeFamily) and a._family.name == "Mixture")]
+    if len(mix_slots) != 1 or other_rv:
+        return None
+    i, mix = mix_slots[0]
+    comps, weights = mix._args
+    comps = list(comps)
+    if not comps:
+        return None
+    fam_names = {c._family.name for c in comps
+                if c._kind == "sample" and not isinstance(c._family, CompositeFamily)}
+    if len(fam_names) != 1:
+        return None  # all components must be the same flat conjugate prior family
+    key = (rv._family.name, i, next(iter(fam_names)))
+    if key not in _CONJUGATE or key not in _CONJ_LOGM:
+        return None
+    w = np.ones(len(comps)) / len(comps) if weights is None else np.asarray(weights, dtype=float)
+    return _CONJUGATE[key], _CONJ_LOGM[key], i, comps, w / w.sum()
+
+
+def conjugate_mixture_fit(rv: RandomVariable, data) -> RandomVariable:
+    spec = conjugate_mixture_spec(rv)
+    if spec is None:
+        raise NotImplementedError("model is not a mixture of registered conjugate priors.")
+    builder, logm, idx, comps, w = spec
+    fam = rv._family
+    arr = np.asarray(data, dtype=float)
+    stats = {"n": float(arr.size), "sum": float(arr.sum()), "sum2": float((arr * arr).sum())}
+    fixed = {j: rv._args[j] for j in range(len(rv._args)) if j != idx}
+
+    entries = [builder(c._args, fixed, stats, c, idx) for c in comps]
+    logw = np.log(w) + np.array([logm(c._args, fixed, stats) for c in comps])
+    logw -= logw.max()
+    post_w = np.exp(logw)
+    post_w /= post_w.sum()
+
+    post = ConjugateMixturePosterior(entries, post_w, comps[0].name or f"arg{idx}")
+    pmean = post.mean()
+    full = [pmean if j == idx else rv._args[j] for j in range(len(rv._args))]
+    fitted = fam.make_dist(tuple(full), rv._name)
+
+    def predictive(n, rng):
+        pvals = np.atleast_1d(post.samples(n=n, rng=rng))
+        out = []
+        for v in pvals:
+            args = [float(v) if j == idx else rv._args[j] for j in range(len(rv._args))]
+            out.append(fam.make_dist(tuple(args), rv._name).sampler(seed=int(rng.randint(1, 2 ** 31))).sample())
+        return np.asarray(out)
+
+    post.predictive = predictive
+    return RandomVariable._bound(fitted, name=rv._name, result=post)
+
+
 # ----------------------------------------------- hierarchical random effects (VB/EM)
 class HierarchicalPosterior:
     """Per-group posteriors q(mu_i) = Normal(group_means[i], group_vars[i]) plus the
