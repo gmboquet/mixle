@@ -109,5 +109,51 @@ class CountDPRankTestCase(unittest.TestCase):
         self.assertLessEqual(r.rank, r.window_upper)
 
 
+class MixtureCrossRankTestCase(unittest.TestCase):
+    """mixture_cross_rank gives the TRUE marginal rank (not the tropical/dominant-component rank)."""
+
+    def test_composite_mixture_true_rank_beats_tropical(self):
+        from pysp.utils.density_rank import count_dp_rank, mixture_cross_rank
+
+        rng = np.random.RandomState(0)
+        fields = (4, 3, 5)
+
+        def comp(seed):
+            r = np.random.RandomState(seed)
+            return CompositeDistribution(
+                tuple(IntegerCategoricalDistribution(0, list(r.dirichlet(np.ones(s)))) for s in fields)
+            )
+
+        mix = MixtureDistribution([comp(1), comp(2), comp(3)], list(rng.dirichlet(np.ones(3))))
+        support = [list(t) for t in itertools.product(*[range(s) for s in fields])]
+        lp = {tuple(x): mix.log_density(x) for x in support}
+
+        def brute(x):
+            return sum(1 for y in support if lp[tuple(y)] > lp[tuple(x)] + 1e-9)
+
+        cross_err = max(abs(mixture_cross_rank(mix, x, oversample=128) - brute(x)) for x in support)
+        self.assertLessEqual(cross_err, 6)  # true-marginal rank, only small quantization error
+        # On the worst value the tropical count_dp_rank bracket is wide, while cross-rank stays close.
+        worst = max(support, key=lambda x: count_dp_rank(mix, x, oversample=64).window_upper)
+        cr = count_dp_rank(mix, worst, oversample=64)
+        self.assertGreater(cr.window_upper - cr.window_lower, 6)  # tropical can't pin the rank
+        self.assertLessEqual(abs(mixture_cross_rank(mix, worst, oversample=128) - brute(worst)), 6)
+
+    def test_leaf_mixture_true_rank(self):
+        from pysp.utils.density_rank import mixture_cross_rank
+
+        rng = np.random.RandomState(1)
+        mix = MixtureDistribution(
+            [IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(12)))) for _ in range(2)], [0.6, 0.4]
+        )
+        lp = {y: mix.log_density(y) for y in range(12)}
+
+        def brute(y):
+            return sum(1 for z in range(12) if lp[z] > lp[y] + 1e-9)
+
+        errs = [abs(mixture_cross_rank(mix, y, oversample=128) - brute(y)) for y in range(12)]
+        self.assertLessEqual(max(errs), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
