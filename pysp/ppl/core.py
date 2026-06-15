@@ -37,11 +37,18 @@ class _Free:
         return NotImplemented
     __rmul__ = __mul__
 
+    def __reduce__(self):           # preserve singleton identity across pickling
+        return (_free_singleton, ())
+
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return "free"
 
 
 free = _Free()
+
+
+def _free_singleton():
+    return free
 
 
 def _is_free(x: Any) -> bool:
@@ -349,6 +356,15 @@ class RandomVariable:
 
     def __setattr__(self, *a):  # enforce immutability (I2)
         raise AttributeError("RandomVariable is immutable")
+
+    def __reduce__(self):
+        # Picklable so models can cross a process boundary (parallel chains,
+        # distributed fits). Families live in the module-level registry and are
+        # restored by name; transient _result/_cache are dropped.
+        fam_name = self._family.name if self._family is not None else None
+        return (_rv_reconstruct,
+                (self._kind, fam_name, self._args, self._name, self._keys,
+                 self._dist, self._scope))
 
     # -- constructors -------------------------------------------------------
     @classmethod
@@ -750,6 +766,14 @@ class RandomVariable:
         inner = ", ".join("free" if _is_free(a) else repr(a) for a in self._args)
         nm = f", name={self._name!r}" if self._name else ""
         return f"RV({self._family.name}({inner}){nm})"
+
+
+def _rv_reconstruct(kind, fam_name, args, name, keys, dist, scope):
+    """Rebuild a RandomVariable from its picklable structural fields."""
+    if kind == "bound":
+        return RandomVariable._bound(dist, name=name)
+    family = _FAMILIES[fam_name] if fam_name is not None else None
+    return RandomVariable(kind, family=family, args=args, name=name, keys=keys, scope=scope)
 
 
 # -------------------------------------------------------------------- the lowering

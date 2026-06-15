@@ -152,5 +152,31 @@ class ConjugateMixturePriorTestCase(unittest.TestCase):
         self.assertAlmostEqual(m.result.mean(), 3.5, delta=0.2)
 
 
+class MultiChainDiagnosticsTestCase(unittest.TestCase):
+    """Multiple chains -> Gelman-Rubin R-hat + combined ESS; process-parallel matches sequential."""
+
+    def test_rhat_and_combined_ess(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 2.0, 1500))
+        m = Normal(free, free).fit(data, how="mcmc", draws=1500, burn=500, chains=4,
+                                   rng=np.random.RandomState(1))
+        self.assertEqual(m.result.n_chains, 4)
+        for r in m.result.rhat.values():           # converged: R-hat ~ 1
+            self.assertLess(r, 1.1)
+        self.assertGreater(m.result.ess, 0.0)
+        self.assertAlmostEqual(m.result.mean("arg0"), 5.0, delta=0.2)
+
+    def test_process_parallel_matches_sequential(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(-1.0, 1.5, 1200))
+        seq = Normal(free, free).fit(data, how="hmc", draws=800, burn=300, chains=3,
+                                     parallel=False, rng=np.random.RandomState(7))
+        par = Normal(free, free).fit(data, how="hmc", draws=800, burn=300, chains=3,
+                                     parallel=True, rng=np.random.RandomState(7))
+        # identical seeds + deterministic chains -> identical posterior means
+        self.assertAlmostEqual(seq.result.mean("arg0"), par.result.mean("arg0"), places=6)
+        self.assertAlmostEqual(seq.result.mean("arg1"), par.result.mean("arg1"), places=6)
+
+
 if __name__ == "__main__":
     unittest.main()
