@@ -11,7 +11,8 @@ Algebra, conditioning, latent-arg Compound, and MCMC routing land in later slice
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 
@@ -175,10 +176,10 @@ class Family:
     """
 
     __slots__ = ("name", "dist_cls", "est_cls", "to_dist", "arity", "seed_at", "positive",
-                 "init_fit", "read")
+                 "init_fit", "read", "support")
 
     def __init__(self, name, dist_cls, est_cls, to_dist, arity, seed_at=None, positive=None,
-                 init_fit=None, read=None):
+                 init_fit=None, read=None, support=None):
         self.name = name
         self.dist_cls = dist_cls
         self.est_cls = est_cls
@@ -189,6 +190,11 @@ class Family:
         self.seed_at = seed_at
         # per-slot positivity (for unconstrained-space MCMC/MAP); default all real.
         self.positive = tuple(positive) if positive is not None else (False,) * arity
+        # per-slot constraint/support for gradient & MCMC reparameterization:
+        # 'real' (identity), 'positive' (log), or 'unit' (logit, for probabilities).
+        # Defaults from `positive`; pass `support=` to mark unit-interval params.
+        self.support = (tuple(support) if support is not None
+                        else tuple("positive" if p else "real" for p in self.positive))
         # init_fit(data) -> a concrete Distribution to warm-start EM for families whose
         # MLE is sensitive to initialization (e.g. negative-binomial dispersion).
         self.init_fit = init_fit
@@ -196,14 +202,14 @@ class Family:
         # fitted params come back in the *same* parameterization the user wrote (sd, not sigma2).
         self.read = read
 
-    def make_dist(self, args: Tuple[Any, ...], name: Optional[str]):
+    def make_dist(self, args: tuple[Any, ...], name: str | None):
         kwargs = self.to_dist(*args)
         if name is not None:
             kwargs.setdefault("name", name)
         return self.dist_cls(**kwargs)
 
-    def make_estimator(self, name: Optional[str], keys: Optional[str]):
-        kwargs: Dict[str, Any] = {}
+    def make_estimator(self, name: str | None, keys: str | None):
+        kwargs: dict[str, Any] = {}
         if name is not None:
             kwargs["name"] = name
         if keys is not None:
@@ -236,15 +242,15 @@ class CompositeFamily:
         self.read = read
 
 
-_FAMILIES: Dict[str, Any] = {}
-_DIST_TO_FAMILY: Dict[type, "Family"] = {}        # reverse map for reading fitted params
-_DIST_TO_COMPOSITE_READ: Dict[type, Any] = {}     # composite dist type -> read(dist, read_params)
+_FAMILIES: dict[str, Any] = {}
+_DIST_TO_FAMILY: dict[type, Family] = {}        # reverse map for reading fitted params
+_DIST_TO_COMPOSITE_READ: dict[type, Any] = {}     # composite dist type -> read(dist, read_params)
 
 
 def register_family(name, dist_cls, est_cls, to_dist, arity, seed_at=None, positive=None,
-                    init_fit=None, read=None) -> Family:
+                    init_fit=None, read=None, support=None) -> Family:
     fam = Family(name, dist_cls, est_cls, to_dist, arity, seed_at=seed_at, positive=positive,
-                 init_fit=init_fit, read=read)
+                 init_fit=init_fit, read=read, support=support)
     _FAMILIES[name] = fam
     _DIST_TO_FAMILY[dist_cls] = fam
     return fam
@@ -292,7 +298,7 @@ def read_params(dist):
     return dist
 
 
-def seed_child(rv: "RandomVariable", value: Any, scale: float, rng=None):
+def seed_child(rv: RandomVariable, value: Any, scale: float, rng=None):
     """Build a concrete distribution for a child RV to break EM symmetry.
 
     Continuous families with a ``seed_at`` are located at the data ``value``; a Categorical
@@ -346,11 +352,11 @@ class RandomVariable:
 
     # -- constructors -------------------------------------------------------
     @classmethod
-    def _sample(cls, family_name, args, *, name=None, keys=None, scope="shared") -> "RandomVariable":
+    def _sample(cls, family_name, args, *, name=None, keys=None, scope="shared") -> RandomVariable:
         fam = _FAMILIES[family_name]
         return cls("sample", family=fam, args=args, name=name, keys=keys, scope=scope)
 
-    def each(self) -> "RandomVariable":
+    def each(self) -> RandomVariable:
         """Mark this prior as per-group (a random effect / local latent). Used in a
         parameter slot: ``Normal(Normal(m, t).each(), s)`` is a hierarchical model.
         """
@@ -364,21 +370,21 @@ class RandomVariable:
         return self._scope
 
     @classmethod
-    def _bound(cls, dist, *, name=None, result=None) -> "RandomVariable":
+    def _bound(cls, dist, *, name=None, result=None) -> RandomVariable:
         return cls("bound", dist=dist, name=name or getattr(dist, "name", None), result=result)
 
     @classmethod
-    def _apply(cls, base, transform) -> "RandomVariable":
+    def _apply(cls, base, transform) -> RandomVariable:
         # Apply node: a deterministic transform of one RV (algebra rung 1).
         return cls("apply", args=(base, transform))
 
     @classmethod
-    def _sum(cls, a, b) -> "RandomVariable":
+    def _sum(cls, a, b) -> RandomVariable:
         # Convolution node: the distribution of a + b for independent a, b.
         return cls("sum", args=(a, b))
 
     # -- algebra (deterministic transforms + convolution) -------------------
-    def _affine(self, loc, scale) -> "RandomVariable":
+    def _affine(self, loc, scale) -> RandomVariable:
         from pysp.stats.combinator.transform import AffineTransform
         return RandomVariable._apply(self, AffineTransform(loc=float(loc), scale=float(scale)))
 
@@ -418,11 +424,11 @@ class RandomVariable:
     def __neg__(self):
         return self._affine(0.0, -1.0)
 
-    def exp(self) -> "RandomVariable":
+    def exp(self) -> RandomVariable:
         from pysp.stats.combinator.transform import ExpTransform
         return RandomVariable._apply(self, ExpTransform())
 
-    def log(self) -> "RandomVariable":
+    def log(self) -> RandomVariable:
         from pysp.stats.combinator.transform import LogTransform
         return RandomVariable._apply(self, LogTransform())
 
@@ -432,7 +438,7 @@ class RandomVariable:
     def __lt__(self, v): return Event(self, lambda x: np.asarray(x) < v, f"< {v}")
     def __le__(self, v): return Event(self, lambda x: np.asarray(x) <= v, f"<= {v}")
 
-    def given(self, event) -> "RandomVariable":
+    def given(self, event) -> RandomVariable:
         """Condition this RV on an event (e.g. ``x.given(x > 0)`` -> truncation). The
         result samples by rejection and scores with the renormalized density."""
         if not isinstance(event, Event):
@@ -449,7 +455,7 @@ class RandomVariable:
         return self._kind == "sample" and any(_is_free(a) for a in self._args)
 
     @property
-    def name(self) -> Optional[str]:
+    def name(self) -> str | None:
         return self._name
 
     @property
@@ -491,7 +497,7 @@ class RandomVariable:
         return self._result
 
     # -- query verbs (valid once concrete) ----------------------------------
-    def sample(self, n: Optional[int] = None, seed: Optional[int] = None):
+    def sample(self, n: int | None = None, seed: int | None = None):
         if self._kind == "sum":                       # convolution: sample operands and add
             rng = np.random.RandomState(seed)
             a, b = self._args
@@ -552,13 +558,13 @@ class RandomVariable:
         """Total log-likelihood of ``data`` under the fitted model (sum of log_prob)."""
         return float(np.sum(self.log_prob(list(data))))
 
-    def aic(self, data, k: Optional[int] = None) -> float:
+    def aic(self, data, k: int | None = None) -> float:
         """Akaike information criterion (lower is better). ``k`` defaults to a heuristic
         parameter count from ``.params``."""
         k = k if k is not None else _count_params(self.params)
         return 2.0 * k - 2.0 * self.log_likelihood(data)
 
-    def bic(self, data, k: Optional[int] = None) -> float:
+    def bic(self, data, k: int | None = None) -> float:
         """Bayesian information criterion (lower is better)."""
         k = k if k is not None else _count_params(self.params)
         n = len(list(data))
@@ -631,9 +637,9 @@ class RandomVariable:
                 and any(isinstance(a, RandomVariable) for a in self._args))
 
     def fit(self, data: Sequence[Any], *, how: str = "auto", max_its: int = 100,
-            delta: float = 1e-8, backend: str = "local", num_workers: Optional[int] = None,
+            delta: float = 1e-8, backend: str = "local", num_workers: int | None = None,
             engine: Any = None, precision: Any = None, print_iter: int = 0,
-            **kw) -> "RandomVariable":
+            **kw) -> RandomVariable:
         """Estimate / infer parameters from ``data`` and return a bound RV.
 
         ``how``: ``'em'`` (EM/MLE, default for plain ``free`` models), ``'map'`` (maximize
@@ -660,14 +666,25 @@ class RandomVariable:
 
         grouped = self._kind == "sample" and any(
             isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args)
+        # partial-free: a flat model with some `free` slots and some fixed constants (no priors).
+        # The all-free EM estimator can't hold params fixed, so fit only the free slots by
+        # maximum likelihood (MAP with no prior term), with the fixed args held constant.
+        flat = self._kind == "sample" and not isinstance(self._family, CompositeFamily)
+        partial_free = (flat and not self._has_priors()
+                        and any(_is_free(a) for a in self._args)
+                        and not all(_is_free(a) for a in self._args))
         if how == "auto":
             if grouped:
                 how = "hierarchical"
             elif self._has_priors():
                 from pysp.ppl import inference as _inf
                 how = "conjugate" if _inf.conjugate_spec(self) is not None else "map"
+            elif partial_free:
+                how = "map"
             else:
                 how = "em"
+        elif how == "em" and partial_free:
+            how = "map"   # EM cannot hold some params fixed; MLE the free slots instead
         if how in ("map", "mcmc", "hmc", "vi", "vmp", "conjugate", "hierarchical"):
             from pysp.ppl import inference as _inf
             if how == "mcmc":
@@ -728,7 +745,7 @@ class RandomVariable:
 
 
 # -------------------------------------------------------------------- the lowering
-def lower(rv: "RandomVariable", *, target: str = "dist"):
+def lower(rv: RandomVariable, *, target: str = "dist"):
     """The one routing site: symbolic RandomVariable -> existing pysp object.
 
     ``target='dist'`` returns a concrete ``*Distribution`` (needs no ``free`` holes);

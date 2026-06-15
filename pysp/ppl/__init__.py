@@ -13,38 +13,51 @@ dialect. See notes/ppl-syntax-spec.md.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
 from pysp.ppl.core import (
-    RandomVariable, free, lower, register_family, register_composite, Family, Field, Group,
+    Field,
+    Group,
+    RandomVariable,
     compare,
+    free,
+    lower,
+    register_composite,
+    register_family,
 )
-
-from pysp.stats.latent.mixture import MixtureDistribution, MixtureEstimator
-from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
-from pysp.stats.latent.hidden_markov import HiddenMarkovModelDistribution, HiddenMarkovEstimator
-from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.stats.leaf.poisson import PoissonDistribution, PoissonEstimator
-from pysp.stats.leaf.gamma import GammaDistribution, GammaEstimator
-from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEstimator
-from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.leaf.bernoulli import BernoulliDistribution, BernoulliEstimator
-from pysp.stats.leaf.geometric import GeometricDistribution, GeometricEstimator
-from pysp.stats.leaf.beta import BetaDistribution, BetaEstimator
-from pysp.stats.leaf.student_t import StudentTDistribution, StudentTEstimator
-from pysp.stats.leaf.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
-from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution, NegativeBinomialEstimator
 from pysp.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
-from pysp.stats.leaf.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
+from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator, HiddenMarkovModelDistribution
 from pysp.stats.latent.lda import LDADistribution, LDAEstimator
-from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
+from pysp.stats.latent.mixture import MixtureDistribution, MixtureEstimator
+from pysp.stats.leaf.bernoulli import BernoulliDistribution, BernoulliEstimator
+from pysp.stats.leaf.beta import BetaDistribution, BetaEstimator
+from pysp.stats.leaf.binomial import BinomialDistribution, BinomialEstimator
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEstimator
+from pysp.stats.leaf.gamma import GammaDistribution, GammaEstimator
+from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.leaf.geometric import GeometricDistribution, GeometricEstimator
+from pysp.stats.leaf.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.leaf.laplace import LaplaceDistribution, LaplaceEstimator
+from pysp.stats.leaf.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
+from pysp.stats.leaf.logistic import LogisticDistribution, LogisticEstimator
+from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution, NegativeBinomialEstimator
+from pysp.stats.leaf.pareto import ParetoDistribution, ParetoEstimator
+from pysp.stats.leaf.poisson import PoissonDistribution, PoissonEstimator
+from pysp.stats.leaf.rayleigh import RayleighDistribution, RayleighEstimator
+from pysp.stats.leaf.student_t import StudentTDistribution, StudentTEstimator
+from pysp.stats.leaf.uniform import UniformDistribution, UniformEstimator
+from pysp.stats.leaf.weibull import WeibullDistribution, WeibullEstimator
 from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution, DiagonalGaussianEstimator
+from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
 
 __all__ = [
     "RandomVariable", "free", "lower",
     "Normal", "Poisson", "Gamma", "Exponential", "Categorical", "Bernoulli", "Geometric",
+    "Binomial", "Weibull", "Laplace", "Logistic", "Uniform", "Rayleigh", "Pareto",
     "Beta", "StudentT", "LogNormal", "NegativeBinomial", "Dirichlet",
     "Mix", "Seq", "Markov", "LDA", "MVN", "DiagGaussian", "LocalLevel", "AR1",
     "Graph", "Field", "Group", "compare",
@@ -71,9 +84,9 @@ register_family("Exponential", ExponentialDistribution, ExponentialEstimator,
                 seed_at=lambda v, s: {"beta": max(float(v), 1e-2)}, positive=(True,),
                 read=lambda d: {"rate": 1.0 / d.beta})
 register_family("Bernoulli", BernoulliDistribution, BernoulliEstimator,
-                lambda p: {"p": float(p)}, arity=1, read=lambda d: {"p": d.p})
+                lambda p: {"p": float(p)}, arity=1, support=("unit",), read=lambda d: {"p": d.p})
 register_family("Geometric", GeometricDistribution, GeometricEstimator,
-                lambda p: {"p": float(p)}, arity=1, read=lambda d: {"p": d.p})
+                lambda p: {"p": float(p)}, arity=1, support=("unit",), read=lambda d: {"p": d.p})
 register_family("Beta", BetaDistribution, BetaEstimator,
                 lambda a, b: {"a": float(a), "b": float(b)}, arity=2, positive=(True, True),
                 read=lambda d: {"a": d.a, "b": d.b})
@@ -111,6 +124,32 @@ def _cat_args(probs):
 
 
 register_family("Categorical", CategoricalDistribution, CategoricalEstimator, _cat_args, arity=1)
+
+register_family("Weibull", WeibullDistribution, WeibullEstimator,
+                lambda shape, scale: {"shape": float(shape), "scale": float(scale)}, arity=2,
+                positive=(True, True), seed_at=lambda v, s: {"shape": 1.5, "scale": max(float(v), 1e-2)},
+                read=lambda d: {"shape": d.shape, "scale": d.scale})
+register_family("Laplace", LaplaceDistribution, LaplaceEstimator,
+                lambda loc, scale: {"mu": float(loc), "b": float(scale)}, arity=2,
+                positive=(False, True), seed_at=lambda v, s: {"mu": float(v), "b": max(float(s), 1e-2)},
+                read=lambda d: {"loc": d.mu, "scale": d.b})
+register_family("Logistic", LogisticDistribution, LogisticEstimator,
+                lambda loc, scale: {"loc": float(loc), "scale": float(scale)}, arity=2,
+                positive=(False, True), seed_at=lambda v, s: {"loc": float(v), "scale": max(float(s), 1e-2)},
+                read=lambda d: {"loc": d.loc, "scale": d.scale})
+register_family("Uniform", UniformDistribution, UniformEstimator,
+                lambda low, high: {"low": float(low), "high": float(high)}, arity=2,
+                read=lambda d: {"low": d.low, "high": d.high})
+register_family("Rayleigh", RayleighDistribution, RayleighEstimator,
+                lambda sigma: {"sigma": float(sigma)}, arity=1, positive=(True,),
+                seed_at=lambda v, s: {"sigma": max(float(v), 1e-2)},
+                read=lambda d: {"sigma": d.sigma})
+register_family("Pareto", ParetoDistribution, ParetoEstimator,
+                lambda xm, alpha: {"xm": float(xm), "alpha": float(alpha)}, arity=2,
+                positive=(True, True), read=lambda d: {"xm": d.xm, "alpha": d.alpha})
+register_family("Binomial", BinomialDistribution, BinomialEstimator,
+                lambda n, p: {"p": float(p), "n": int(n)}, arity=2, support=("real", "unit"),
+                read=lambda d: {"n": d.n, "p": d.p})
 
 
 def _mix_dist(args, lower_child):
@@ -298,38 +337,38 @@ register_composite("StateSpace", _ss_err, _ss_err)
 
 
 # --- constructors: conventional parameterizations, return symbolic RandomVariables ---
-def Normal(mean: Any, sd: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
+def Normal(mean: Any, sd: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Normal with mean and standard deviation (lowers to GaussianDistribution(mu, sd**2))."""
     return RandomVariable._sample("Normal", (mean, sd), name=name, keys=keys)
 
 
-def Poisson(rate: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
+def Poisson(rate: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     return RandomVariable._sample("Poisson", (rate,), name=name, keys=keys)
 
 
-def Gamma(shape: Any, rate: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
+def Gamma(shape: Any, rate: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Gamma with shape and rate (lowers to GammaDistribution(k=shape, theta=1/rate))."""
     return RandomVariable._sample("Gamma", (shape, rate), name=name, keys=keys)
 
 
-def Exponential(rate: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
+def Exponential(rate: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Exponential with rate (mean 1/rate; lowers to ExponentialDistribution(beta=1/rate))."""
     return RandomVariable._sample("Exponential", (rate,), name=name, keys=keys)
 
 
-def Bernoulli(p: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
+def Bernoulli(p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     return RandomVariable._sample("Bernoulli", (p,), name=name, keys=keys)
 
 
-def Geometric(p: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
+def Geometric(p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     return RandomVariable._sample("Geometric", (p,), name=name, keys=keys)
 
 
-def Beta(a: Any, b: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
+def Beta(a: Any, b: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     return RandomVariable._sample("Beta", (a, b), name=name, keys=keys)
 
 
-def Dirichlet(alpha: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
+def Dirichlet(alpha: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Dirichlet over a simplex; used as a prior on Categorical probabilities (VMP)."""
     return RandomVariable._sample("Dirichlet", (alpha,), name=name, keys=keys)
 
@@ -341,27 +380,62 @@ def Graph():
     return _Graph()
 
 
-def StudentT(df: Any, loc: Any, scale: Any, *, name: Optional[str] = None,
-             keys: Optional[str] = None) -> RandomVariable:
+def StudentT(df: Any, loc: Any, scale: Any, *, name: str | None = None,
+             keys: str | None = None) -> RandomVariable:
     """Student-t with degrees of freedom, location, scale (heavy-tailed Normal)."""
     return RandomVariable._sample("StudentT", (df, loc, scale), name=name, keys=keys)
 
 
-def LogNormal(mu: Any, sigma: Any, *, name: Optional[str] = None,
-              keys: Optional[str] = None) -> RandomVariable:
+def LogNormal(mu: Any, sigma: Any, *, name: str | None = None,
+              keys: str | None = None) -> RandomVariable:
     """Log-normal: log(X) ~ Normal(mu, sigma)."""
     return RandomVariable._sample("LogNormal", (mu, sigma), name=name, keys=keys)
 
 
-def NegativeBinomial(r: Any, p: Any, *, name: Optional[str] = None,
-                     keys: Optional[str] = None) -> RandomVariable:
+def NegativeBinomial(r: Any, p: Any, *, name: str | None = None,
+                     keys: str | None = None) -> RandomVariable:
     """Negative binomial with r failures and success probability p."""
     return RandomVariable._sample("NegativeBinomial", (r, p), name=name, keys=keys)
 
 
-def Categorical(probs: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
+def Categorical(probs: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Categorical from a probability dict {value: p} or a list of probabilities."""
     return RandomVariable._sample("Categorical", (probs,), name=name, keys=keys)
+
+
+def Weibull(shape: Any, scale: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Weibull with shape (k) and scale (lambda)."""
+    return RandomVariable._sample("Weibull", (shape, scale), name=name, keys=keys)
+
+
+def Laplace(loc: Any, scale: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Laplace (double-exponential) with location and scale (b)."""
+    return RandomVariable._sample("Laplace", (loc, scale), name=name, keys=keys)
+
+
+def Logistic(loc: Any, scale: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Logistic with location and scale."""
+    return RandomVariable._sample("Logistic", (loc, scale), name=name, keys=keys)
+
+
+def Uniform(low: Any, high: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Continuous uniform on [low, high]."""
+    return RandomVariable._sample("Uniform", (low, high), name=name, keys=keys)
+
+
+def Rayleigh(sigma: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Rayleigh with scale sigma."""
+    return RandomVariable._sample("Rayleigh", (sigma,), name=name, keys=keys)
+
+
+def Pareto(scale: Any, shape: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Pareto with minimum value xm (scale) and tail index alpha (shape)."""
+    return RandomVariable._sample("Pareto", (scale, shape), name=name, keys=keys)
+
+
+def Binomial(n: Any, p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Binomial with n trials and success probability p (n is fixed/known)."""
+    return RandomVariable._sample("Binomial", (n, p), name=name, keys=keys)
 
 
 def _as_rv(c: Any) -> RandomVariable:
@@ -370,7 +444,7 @@ def _as_rv(c: Any) -> RandomVariable:
     return RandomVariable._bound(c)  # a concrete pysp distribution
 
 
-def Mix(components, weights=None, *, name: Optional[str] = None) -> RandomVariable:
+def Mix(components, weights=None, *, name: str | None = None) -> RandomVariable:
     """Finite mixture over component RandomVariables (or concrete distributions).
 
     ``Mix([Normal(free, free), Normal(free, free)]).fit(data)`` fits a 2-component
@@ -380,42 +454,42 @@ def Mix(components, weights=None, *, name: Optional[str] = None) -> RandomVariab
     return RandomVariable._sample("Mixture", (comps, weights), name=name)
 
 
-def Seq(element, *, name: Optional[str] = None) -> RandomVariable:
+def Seq(element, *, name: str | None = None) -> RandomVariable:
     """IID sequence of ``element``. Fit on a list of sequences (each a list/array)."""
     return RandomVariable._sample("Sequence", (_as_rv(element),), name=name)
 
 
-def LocalLevel(*, name: Optional[str] = None) -> RandomVariable:
+def LocalLevel(*, name: str | None = None) -> RandomVariable:
     """Local-level state-space model (random walk + noise) for a time series. Fit on a 1-D
     series; recovers level/observation noise and smoothed states (Kalman/RTS + EM)."""
     return RandomVariable._sample("StateSpace", (False,), name=name)
 
 
-def AR1(*, name: Optional[str] = None) -> RandomVariable:
+def AR1(*, name: str | None = None) -> RandomVariable:
     """AR(1)-plus-noise state-space model; estimates the autoregressive coefficient phi."""
     return RandomVariable._sample("StateSpace", (True,), name=name)
 
 
-def MVN(dim: int, *, name: Optional[str] = None) -> RandomVariable:
+def MVN(dim: int, *, name: str | None = None) -> RandomVariable:
     """Multivariate Gaussian of dimension ``dim`` (full covariance). Fit on a list of
     length-``dim`` vectors; recovers mean and covariance."""
     return RandomVariable._sample("MVN", (int(dim),), name=name)
 
 
-def DiagGaussian(dim: int, *, name: Optional[str] = None) -> RandomVariable:
+def DiagGaussian(dim: int, *, name: str | None = None) -> RandomVariable:
     """Diagonal-covariance multivariate Gaussian of dimension ``dim``."""
     return RandomVariable._sample("DiagGaussian", (int(dim),), name=name)
 
 
 def LDA(num_topics: int, vocab_size: int, *, alpha: float = 1.0,
-        name: Optional[str] = None) -> RandomVariable:
+        name: str | None = None) -> RandomVariable:
     """Latent Dirichlet allocation. Fit on a list of documents, each a bag of
     ``(word_id, count)`` pairs over word ids ``0..vocab_size-1``. Topics are recovered
     as word distributions; alpha (the document-topic Dirichlet) is fixed by default."""
     return RandomVariable._sample("LDA", (int(num_topics), int(vocab_size), float(alpha)), name=name)
 
 
-def Markov(emission, states: int, *, name: Optional[str] = None) -> RandomVariable:
+def Markov(emission, states: int, *, name: str | None = None) -> RandomVariable:
     """Hidden Markov model with ``states`` latent states emitting ``emission``.
 
     ``Markov(Normal(free, free), states=2).fit(sequences)`` fits a 2-state Gaussian HMM;
