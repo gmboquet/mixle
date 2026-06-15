@@ -94,6 +94,8 @@ Other structured models, one line each:
 Markov(Normal(free, free), states=2).fit(sequences)   # 2-state Gaussian HMM
 Seq(Normal(free, free)).fit(list_of_sequences)        # iid sequence model
 LDA(num_topics=10, vocab_size=5000).fit(docs)         # topic model; docs are (word_id, count) bags
+LocalLevel().fit(timeseries)                          # state space: trend smoothing (Kalman/RTS)
+AR1().fit(timeseries)                                 # AR(1) + noise; estimates phi, forecasts
 ```
 
 ## Bayesian inference

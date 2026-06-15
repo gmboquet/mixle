@@ -46,7 +46,8 @@ __all__ = [
     "RandomVariable", "free", "lower",
     "Normal", "Poisson", "Gamma", "Exponential", "Categorical", "Bernoulli", "Geometric",
     "Beta", "StudentT", "LogNormal", "NegativeBinomial", "Dirichlet",
-    "Mix", "Seq", "Markov", "LDA", "MVN", "DiagGaussian", "Graph", "Field", "Group", "compare",
+    "Mix", "Seq", "Markov", "LDA", "MVN", "DiagGaussian", "LocalLevel", "AR1",
+    "Graph", "Field", "Group", "compare",
 ]
 
 
@@ -288,6 +289,14 @@ register_composite("DiagGaussian", _diag_dist, _diag_est,
                    dist_cls=DiagonalGaussianDistribution, read=_diag_read)
 
 
+# --- linear-Gaussian state space (time series) ------------------------------------
+def _ss_err(*a, **k):
+    raise NotImplementedError("state-space models are fit via fit(); they have no single dist.")
+
+
+register_composite("StateSpace", _ss_err, _ss_err)
+
+
 # --- constructors: conventional parameterizations, return symbolic RandomVariables ---
 def Normal(mean: Any, sd: Any, *, name: Optional[str] = None, keys: Optional[str] = None) -> RandomVariable:
     """Normal with mean and standard deviation (lowers to GaussianDistribution(mu, sd**2))."""
@@ -374,6 +383,17 @@ def Mix(components, weights=None, *, name: Optional[str] = None) -> RandomVariab
 def Seq(element, *, name: Optional[str] = None) -> RandomVariable:
     """IID sequence of ``element``. Fit on a list of sequences (each a list/array)."""
     return RandomVariable._sample("Sequence", (_as_rv(element),), name=name)
+
+
+def LocalLevel(*, name: Optional[str] = None) -> RandomVariable:
+    """Local-level state-space model (random walk + noise) for a time series. Fit on a 1-D
+    series; recovers level/observation noise and smoothed states (Kalman/RTS + EM)."""
+    return RandomVariable._sample("StateSpace", (False,), name=name)
+
+
+def AR1(*, name: Optional[str] = None) -> RandomVariable:
+    """AR(1)-plus-noise state-space model; estimates the autoregressive coefficient phi."""
+    return RandomVariable._sample("StateSpace", (True,), name=name)
 
 
 def MVN(dim: int, *, name: Optional[str] = None) -> RandomVariable:
