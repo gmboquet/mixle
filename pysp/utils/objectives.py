@@ -14,9 +14,9 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.stats.backend import backend_seq_log_density
-from pysp.stats.gradient import GradientFitError
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution
+from pysp.stats.compute.backend import backend_seq_log_density
+from pysp.stats.compute.gradient import GradientFitError
+from pysp.stats.compute.pdist import SequenceEncodableProbabilityDistribution
 from pysp.utils.fit import _gradient_build_state, _gradient_raw_state, _gradient_shadow_state, _torch_for_gradient_fit
 
 ObjectiveCallable = Callable[[Any, Any, Any], Any]

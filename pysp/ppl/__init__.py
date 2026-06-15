@@ -22,25 +22,25 @@ from pysp.ppl.core import (
     compare,
 )
 
-from pysp.stats.mixture import MixtureDistribution, MixtureEstimator
-from pysp.stats.sequence import SequenceDistribution, SequenceEstimator
-from pysp.stats.hidden_markov import HiddenMarkovModelDistribution, HiddenMarkovEstimator
-from pysp.stats.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.stats.poisson import PoissonDistribution, PoissonEstimator
-from pysp.stats.gamma import GammaDistribution, GammaEstimator
-from pysp.stats.exponential import ExponentialDistribution, ExponentialEstimator
-from pysp.stats.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.bernoulli import BernoulliDistribution, BernoulliEstimator
-from pysp.stats.geometric import GeometricDistribution, GeometricEstimator
-from pysp.stats.beta import BetaDistribution, BetaEstimator
-from pysp.stats.student_t import StudentTDistribution, StudentTEstimator
-from pysp.stats.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
-from pysp.stats.negative_binomial import NegativeBinomialDistribution, NegativeBinomialEstimator
-from pysp.stats.dirichlet import DirichletDistribution, DirichletEstimator
-from pysp.stats.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
-from pysp.stats.lda import LDADistribution, LDAEstimator
-from pysp.stats.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
-from pysp.stats.dmvn import DiagonalGaussianDistribution, DiagonalGaussianEstimator
+from pysp.stats.latent.mixture import MixtureDistribution, MixtureEstimator
+from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
+from pysp.stats.latent.hidden_markov import HiddenMarkovModelDistribution, HiddenMarkovEstimator
+from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.leaf.poisson import PoissonDistribution, PoissonEstimator
+from pysp.stats.leaf.gamma import GammaDistribution, GammaEstimator
+from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEstimator
+from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.leaf.bernoulli import BernoulliDistribution, BernoulliEstimator
+from pysp.stats.leaf.geometric import GeometricDistribution, GeometricEstimator
+from pysp.stats.leaf.beta import BetaDistribution, BetaEstimator
+from pysp.stats.leaf.student_t import StudentTDistribution, StudentTEstimator
+from pysp.stats.leaf.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
+from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution, NegativeBinomialEstimator
+from pysp.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
+from pysp.stats.leaf.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.latent.lda import LDADistribution, LDAEstimator
+from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
+from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution, DiagonalGaussianEstimator
 
 __all__ = [
     "RandomVariable", "free", "lower",

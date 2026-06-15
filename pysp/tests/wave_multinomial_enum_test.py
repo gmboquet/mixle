@@ -17,7 +17,7 @@ import unittest
 import numpy as np
 
 from pysp.stats import *
-from pysp.stats.pdist import EnumerationError
+from pysp.stats.compute.pdist import EnumerationError
 
 TOL = 1e-9
 

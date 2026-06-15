@@ -424,71 +424,32 @@ __all__ = [
 ]
 
 ### Abstract Classes
-from pysp.stats.backend import (
-    BackendScoringError,
-    backend_log_density_sum,
-    backend_seq_component_log_density,
-    backend_seq_log_density,
+from pysp.stats.bayes.catdirichlet import DictDirichletDistribution, DictDirichletSampler
+from pysp.stats.bayes.dirichlet import DirichletDataEncoder, DirichletDistribution, DirichletEstimator, DirichletSampler
+from pysp.stats.bayes.dpm import (
+    DirichletProcessMixtureDistribution,
+    DirichletProcessMixtureEstimator,
+    DirichletProcessMixtureSampler,
 )
-
-### Discrete base distributions
-from pysp.stats.bernoulli import (
-    BernoulliDataEncoder,
-    BernoulliDistribution,
-    BernoulliEnumerator,
-    BernoulliEstimator,
-    BernoulliSampler,
+from pysp.stats.bayes.hdpm import (
+    HierarchicalDirichletProcessMixtureDistribution,
+    HierarchicalDirichletProcessMixtureEstimator,
+    HierarchicalDirichletProcessMixtureSampler,
 )
-
-### Continuous base distributions
-from pysp.stats.beta import BetaDataEncoder, BetaDistribution, BetaEstimator, BetaSampler
-from pysp.stats.binomial import (
-    BinomialDataEncoder,
-    BinomialDistribution,
-    BinomialEnumerator,
-    BinomialEstimator,
-    BinomialSampler,
-)
-from pysp.stats.capabilities import (
-    DistributionCapabilities,
-    capabilities_for,
-    numpy_only_distribution_types,
-    register_capabilities,
-    registered_capability_types,
-    supported_engines,
-)
-from pysp.stats.cat_multinomial import (
-    MultinomialDataEncoder,
-    MultinomialDistribution,
-    MultinomialEnumerator,
-    MultinomialEstimator,
-    MultinomialSampler,
-)
-from pysp.stats.catdirichlet import DictDirichletDistribution, DictDirichletSampler
-from pysp.stats.categorical import (
-    CategoricalDataEncoder,
-    CategoricalDistribution,
-    CategoricalEnumerator,
-    CategoricalEstimator,
-    CategoricalSampler,
-)
-from pysp.stats.chow_liu_tree import (
-    ChowLiuTreeDataEncoder,
-    ChowLiuTreeDistribution,
-    ChowLiuTreeEnumerator,
-    ChowLiuTreeEstimator,
-    ChowLiuTreeSampler,
-)
+from pysp.stats.bayes.mvngamma import MultivariateNormalGammaDistribution, MultivariateNormalGammaSampler
+from pysp.stats.bayes.normgamma import NormalGammaDistribution, NormalGammaSampler
+from pysp.stats.bayes.normwishart import NormalWishartDistribution, NormalWishartSampler
+from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution, SymmetricDirichletSampler
 
 ### combinators distributions
-from pysp.stats.composite import (
+from pysp.stats.combinator.composite import (
     CompositeDataEncoder,
     CompositeDistribution,
     CompositeEnumerator,
     CompositeEstimator,
     CompositeSampler,
 )
-from pysp.stats.conditional import (
+from pysp.stats.combinator.conditional import (
     ConditionalAccumulator,
     ConditionalAccumulatorFactory,
     ConditionalDataEncoder,
@@ -500,7 +461,70 @@ from pysp.stats.conditional import (
     ConditionalEnumerator,
     ConditionalEstimator,
 )
-from pysp.stats.declarations import (
+from pysp.stats.combinator.ignored import IgnoredDataEncoder, IgnoredDistribution, IgnoredEstimator, IgnoredSampler
+from pysp.stats.combinator.null_dist import (
+    NullDataEncoder,
+    NullDistribution,
+    NullEnumerator,
+    NullEstimator,
+    NullSampler,
+)
+from pysp.stats.combinator.optional import (
+    OptionalDataEncoder,
+    OptionalDistribution,
+    OptionalEnumerator,
+    OptionalEstimator,
+    OptionalSampler,
+)
+from pysp.stats.combinator.record import (
+    DictRecordDataEncoder,
+    DictRecordDistribution,
+    DictRecordEstimator,
+    DictRecordSampler,
+    RecordDataEncoder,
+    RecordDistribution,
+    RecordEstimator,
+    RecordSampler,
+    field,
+    record,
+    record_estimator,
+)
+from pysp.stats.combinator.select import SelectDistribution, SelectEnumerator, SelectEstimator
+from pysp.stats.combinator.sequence import (
+    SequenceDataEncoder,
+    SequenceDistribution,
+    SequenceEnumerator,
+    SequenceEstimator,
+    SequenceSampler,
+)
+from pysp.stats.combinator.transform import (
+    AffineTransform,
+    ExpTransform,
+    IdentityTransform,
+    LogitTransform,
+    LogTransform,
+    TransformDataEncoder,
+    TransformDistribution,
+    TransformEnumerator,
+    TransformEstimator,
+    TransformSampler,
+)
+from pysp.stats.combinator.weighted import WeightedDataEncoder, WeightedDistribution, WeightedEstimator
+from pysp.stats.compute.backend import (
+    BackendScoringError,
+    backend_log_density_sum,
+    backend_seq_component_log_density,
+    backend_seq_log_density,
+)
+from pysp.stats.compute.capabilities import (
+    DistributionCapabilities,
+    capabilities_for,
+    numpy_only_distribution_types,
+    register_capabilities,
+    registered_capability_types,
+    supported_engines,
+)
+from pysp.stats.compute.declarations import (
     DistributionDeclaration,
     ExponentialFamilySpec,
     ParameterSpec,
@@ -528,60 +552,113 @@ from pysp.stats.declarations import (
     validate_declaration,
     validate_statistic_layout,
 )
-from pysp.stats.dirac_length import (
-    DiracLengthMixtureDistribution,
-    DiracLengthMixtureEnumerator,
-    DiracLengthMixtureEstimator,
-    DiracLengthMixtureSampler,
+from pysp.stats.compute.encoded import EncodedData, ResidentEncodedPayload, as_encoded_data, move_encoded_payload
+from pysp.stats.compute.kernel import (
+    EngineNotSupportedError,
+    GeneratedNumbaKernel,
+    GeneratedNumbaKernelFactory,
+    GenericKernel,
+    GenericKernelFactory,
+    Kernel,
+    KernelFactory,
+    NumbaKernel,
+    NumbaKernelFactory,
+    kernel_for,
+    register_kernel_factory,
 )
-from pysp.stats.dirichlet import DirichletDataEncoder, DirichletDistribution, DirichletEstimator, DirichletSampler
-from pysp.stats.dmvn import (
-    DiagonalGaussianDataEncoder,
-    DiagonalGaussianDistribution,
-    DiagonalGaussianEstimator,
-    DiagonalGaussianSampler,
+from pysp.stats.compute.pdist import (
+    DataSequenceEncoder,
+    DistributionEnumerator,
+    DistributionSampler,
+    EnumerationError,
+    KeyValidationError,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    encoded_nbytes,
+    scale_suff_stat,
+    validate_estimator_keys,
 )
-from pysp.stats.dpm import (
-    DirichletProcessMixtureDistribution,
-    DirichletProcessMixtureEstimator,
-    DirichletProcessMixtureSampler,
+from pysp.stats.compute.stacked import (
+    StackedComponentParams,
+    StackedMixtureKernel,
+    StackedMixtureKernelFactory,
+    StackedMixtureResidentStats,
+    StackedMixtureShardEstimate,
+    estimate_component_shard_value,
+    stacked_component_log_density,
+    stacked_component_params,
+    stacked_component_strategy,
+    tie_component_shard_values,
 )
-from pysp.stats.encoded import EncodedData, ResidentEncodedPayload, as_encoded_data, move_encoded_payload
-from pysp.stats.erdos_renyi_graph import (
+from pysp.stats.graph.chow_liu_tree import (
+    ChowLiuTreeDataEncoder,
+    ChowLiuTreeDistribution,
+    ChowLiuTreeEnumerator,
+    ChowLiuTreeEstimator,
+    ChowLiuTreeSampler,
+)
+from pysp.stats.graph.erdos_renyi_graph import (
     ErdosRenyiGraphAccumulator,
     ErdosRenyiGraphAccumulatorFactory,
     ErdosRenyiGraphDistribution,
     ErdosRenyiGraphEstimator,
     ErdosRenyiGraphSampler,
 )
-from pysp.stats.exponential import (
-    ExponentialDataEncoder,
-    ExponentialDistribution,
-    ExponentialEstimator,
-    ExponentialSampler,
+from pysp.stats.graph.icltree import (
+    ICLTreeDataEncoder,
+    ICLTreeDistribution,
+    ICLTreeEnumerator,
+    ICLTreeEstimator,
+    ICLTreeSampler,
 )
-from pysp.stats.gamma import GammaDataEncoder, GammaDistribution, GammaEstimator, GammaSampler
-from pysp.stats.gaussian import GaussianDataEncoder, GaussianDistribution, GaussianEstimator, GaussianSampler
-from pysp.stats.geometric import (
-    GeometricDataEncoder,
-    GeometricDistribution,
-    GeometricEnumerator,
-    GeometricEstimator,
-    GeometricSampler,
+from pysp.stats.graph.int_markovchain import (
+    IntegerMarkovChainDataEncoder,
+    IntegerMarkovChainDistribution,
+    IntegerMarkovChainEnumerator,
+    IntegerMarkovChainEstimator,
+    IntegerMarkovChainSampler,
 )
-from pysp.stats.hdpm import (
-    HierarchicalDirichletProcessMixtureDistribution,
-    HierarchicalDirichletProcessMixtureEstimator,
-    HierarchicalDirichletProcessMixtureSampler,
+from pysp.stats.graph.markov_chain import (
+    MarkovChainDataEncoder,
+    MarkovChainDistribution,
+    MarkovChainEnumerator,
+    MarkovChainEstimator,
+    MarkovChainSampler,
 )
-from pysp.stats.heterogeneous_mixture import (
+from pysp.stats.graph.sparse_markov_transform import (
+    SparseMarkovAssociationDataEncoder,
+    SparseMarkovAssociationDistribution,
+    SparseMarkovAssociationEstimator,
+    SparseMarkovAssociationSampler,
+)
+from pysp.stats.graph.spearman_rho import (
+    SpearmanRankingDataEncoder,
+    SpearmanRankingDistribution,
+    SpearmanRankingEnumerator,
+    SpearmanRankingEstimator,
+    SpearmanRankingSampler,
+)
+from pysp.stats.graph.stochastic_block_graph import (
+    StochasticBlockGraphAccumulator,
+    StochasticBlockGraphAccumulatorFactory,
+    StochasticBlockGraphDistribution,
+    StochasticBlockGraphEstimator,
+    StochasticBlockGraphSampler,
+)
+from pysp.stats.latent.dirac_length import (
+    DiracLengthMixtureDistribution,
+    DiracLengthMixtureEnumerator,
+    DiracLengthMixtureEstimator,
+    DiracLengthMixtureSampler,
+)
+from pysp.stats.latent.heterogeneous_mixture import (
     HeterogeneousMixtureDataEncoder,
     HeterogeneousMixtureDistribution,
     HeterogeneousMixtureEnumerator,
     HeterogeneousMixtureEstimator,
     HeterogeneousMixtureSampler,
 )
-from pysp.stats.heterogeneous_pcfg import (
+from pysp.stats.latent.heterogeneous_pcfg import (
     HeterogeneousPCFGDataEncoder,
     HeterogeneousPCFGDistribution,
     HeterogeneousPCFGEnumerator,
@@ -589,13 +666,13 @@ from pysp.stats.heterogeneous_pcfg import (
     HeterogeneousPCFGSampler,
     InducedHeterogeneousPCFGEstimator,
 )
-from pysp.stats.hidden_association import (
+from pysp.stats.latent.hidden_association import (
     HiddenAssociationDataEncoder,
     HiddenAssociationDistribution,
     HiddenAssociationEstimator,
     HiddenAssociationSampler,
 )
-from pysp.stats.hidden_markov import (
+from pysp.stats.latent.hidden_markov import (
     HiddenMarkovDataEncoder,
     HiddenMarkovEstimator,
     HiddenMarkovModelAccumulator,
@@ -609,127 +686,42 @@ from pysp.stats.hidden_markov import (
 )
 
 ### Reduced Generic Distributions
-from pysp.stats.hmixture import (
+from pysp.stats.latent.hmixture import (
     HierarchicalMixtureDataEncoder,
     HierarchicalMixtureDistribution,
     HierarchicalMixtureEnumerator,
     HierarchicalMixtureEstimator,
     HierarchicalMixtureSampler,
 )
-from pysp.stats.ibp import (
+from pysp.stats.latent.ibp import (
     IndianBuffetProcessDataEncoder,
     IndianBuffetProcessDistribution,
     IndianBuffetProcessEstimator,
     IndianBuffetProcessSampler,
 )
-from pysp.stats.icltree import (
-    ICLTreeDataEncoder,
-    ICLTreeDistribution,
-    ICLTreeEnumerator,
-    ICLTreeEstimator,
-    ICLTreeSampler,
-)
-from pysp.stats.ignored import IgnoredDataEncoder, IgnoredDistribution, IgnoredEstimator, IgnoredSampler
-from pysp.stats.int_edit_setdist import (
-    IntegerBernoulliEditDataEncoder,
-    IntegerBernoulliEditDistribution,
-    IntegerBernoulliEditEnumerator,
-    IntegerBernoulliEditEstimator,
-    IntegerBernoulliEditSampler,
-)
-from pysp.stats.int_edit_stepsetdist import (
-    IntegerStepBernoulliEditDataEncoder,
-    IntegerStepBernoulliEditDistribution,
-    IntegerStepBernoulliEditEnumerator,
-    IntegerStepBernoulliEditEstimator,
-    IntegerStepBernoulliEditSampler,
-)
-from pysp.stats.int_hidden_association import (
+from pysp.stats.latent.int_hidden_association import (
     IntegerHiddenAssociationDataEncoder,
     IntegerHiddenAssociationDistribution,
     IntegerHiddenAssociationEstimator,
     IntegerHiddenAssociationSampler,
 )
-from pysp.stats.int_markovchain import (
-    IntegerMarkovChainDataEncoder,
-    IntegerMarkovChainDistribution,
-    IntegerMarkovChainEnumerator,
-    IntegerMarkovChainEstimator,
-    IntegerMarkovChainSampler,
-)
-from pysp.stats.int_multinomial import (
-    IntegerMultinomialDataEncoder,
-    IntegerMultinomialDistribution,
-    IntegerMultinomialEnumerator,
-    IntegerMultinomialEstimator,
-    IntegerMultinomialSampler,
-)
-from pysp.stats.int_plsi import (
+from pysp.stats.latent.int_plsi import (
     IntegerPLSIDataEncoder,
     IntegerPLSIDistribution,
     IntegerPLSIEstimator,
     IntegerPLSISampler,
 )
-from pysp.stats.int_range import (
-    IntegerCategoricalDataEncoder,
-    IntegerCategoricalDistribution,
-    IntegerCategoricalEnumerator,
-    IntegerCategoricalEstimator,
-    IntegerCategoricalSampler,
-)
-from pysp.stats.int_setdist import (
-    IntegerBernoulliSetDataEncoder,
-    IntegerBernoulliSetDistribution,
-    IntegerBernoulliSetEnumerator,
-    IntegerBernoulliSetEstimator,
-    IntegerBernoulliSetSampler,
-)
-from pysp.stats.int_spike import (
-    IntegerUniformSpikeDataEncoder,
-    IntegerUniformSpikeDistribution,
-    IntegerUniformSpikeEnumerator,
-    IntegerUniformSpikeEstimator,
-    IntegerUniformSpikeSampler,
-)
-from pysp.stats.jmixture import (
+from pysp.stats.latent.jmixture import (
     JointMixtureDataEncoder,
     JointMixtureDistribution,
     JointMixtureEnumerator,
     JointMixtureEstimator,
     JointMixtureSampler,
 )
-from pysp.stats.kernel import (
-    EngineNotSupportedError,
-    GeneratedNumbaKernel,
-    GeneratedNumbaKernelFactory,
-    GenericKernel,
-    GenericKernelFactory,
-    Kernel,
-    KernelFactory,
-    NumbaKernel,
-    NumbaKernelFactory,
-    kernel_for,
-    register_kernel_factory,
-)
-from pysp.stats.laplace import LaplaceDataEncoder, LaplaceDistribution, LaplaceEstimator, LaplaceSampler
-from pysp.stats.lda import LDADataEncoder, LDADistribution, LDAEstimator, LDASampler
-from pysp.stats.log_gaussian import (
-    LogGaussianDataEncoder,
-    LogGaussianDistribution,
-    LogGaussianEstimator,
-    LogGaussianSampler,
-)
-from pysp.stats.logistic import LogisticDataEncoder, LogisticDistribution, LogisticEstimator, LogisticSampler
-from pysp.stats.markov_chain import (
-    MarkovChainDataEncoder,
-    MarkovChainDistribution,
-    MarkovChainEnumerator,
-    MarkovChainEstimator,
-    MarkovChainSampler,
-)
+from pysp.stats.latent.lda import LDADataEncoder, LDADistribution, LDAEstimator, LDASampler
 
 ### Generic Distributions
-from pysp.stats.mixture import (
+from pysp.stats.latent.mixture import (
     MixtureDataEncoder,
     MixtureDistribution,
     MixtureEnumerator,
@@ -737,78 +729,13 @@ from pysp.stats.mixture import (
     MixtureSampler,
     mixture_prior,
 )
-from pysp.stats.mvn import (
-    MultivariateGaussianDataEncoder,
-    MultivariateGaussianDistribution,
-    MultivariateGaussianEstimator,
-    MultivariateGaussianSampler,
-)
-from pysp.stats.mvngamma import MultivariateNormalGammaDistribution, MultivariateNormalGammaSampler
-from pysp.stats.negative_binomial import (
-    NegativeBinomialDataEncoder,
-    NegativeBinomialDistribution,
-    NegativeBinomialEnumerator,
-    NegativeBinomialEstimator,
-    NegativeBinomialSampler,
-)
-from pysp.stats.normgamma import NormalGammaDistribution, NormalGammaSampler
-from pysp.stats.normwishart import NormalWishartDistribution, NormalWishartSampler
-from pysp.stats.null_dist import NullDataEncoder, NullDistribution, NullEnumerator, NullEstimator, NullSampler
-from pysp.stats.optional import (
-    OptionalDataEncoder,
-    OptionalDistribution,
-    OptionalEnumerator,
-    OptionalEstimator,
-    OptionalSampler,
-)
-from pysp.stats.pareto import ParetoDataEncoder, ParetoDistribution, ParetoEstimator, ParetoSampler
-from pysp.stats.pdist import (
-    DataSequenceEncoder,
-    DistributionEnumerator,
-    DistributionSampler,
-    EnumerationError,
-    KeyValidationError,
-    ParameterEstimator,
-    SequenceEncodableProbabilityDistribution,
-    encoded_nbytes,
-    scale_suff_stat,
-    validate_estimator_keys,
-)
-from pysp.stats.point_mass import (
-    PointMassDataEncoder,
-    PointMassDistribution,
-    PointMassEnumerator,
-    PointMassEstimator,
-    PointMassSampler,
-)
-from pysp.stats.poisson import (
-    PoissonDataEncoder,
-    PoissonDistribution,
-    PoissonEnumerator,
-    PoissonEstimator,
-    PoissonSampler,
-)
-from pysp.stats.quantized_hmm import (
+from pysp.stats.latent.quantized_hmm import (
     QuantizedHiddenMarkovEstimator,
     QuantizedHiddenMarkovModelDistribution,
     QuantizedHiddenMarkovModelEnumerator,
     QuantizedHiddenMarkovModelEstimator,
 )
-from pysp.stats.rayleigh import RayleighDataEncoder, RayleighDistribution, RayleighEstimator, RayleighSampler
-from pysp.stats.record import (
-    DictRecordDataEncoder,
-    DictRecordDistribution,
-    DictRecordEstimator,
-    DictRecordSampler,
-    RecordDataEncoder,
-    RecordDistribution,
-    RecordEstimator,
-    RecordSampler,
-    field,
-    record,
-    record_estimator,
-)
-from pysp.stats.segmental_hmm import (
+from pysp.stats.latent.segmental_hmm import (
     SegmentalHiddenMarkovDataEncoder,
     SegmentalHiddenMarkovDistribution,
     SegmentalHiddenMarkovEstimator,
@@ -818,89 +745,168 @@ from pysp.stats.segmental_hmm import (
     SegmentalHiddenMarkovModelSampler,
     SegmentalHiddenMarkovSampler,
 )
-from pysp.stats.select import SelectDistribution, SelectEnumerator, SelectEstimator
-from pysp.stats.sequence import (
-    SequenceDataEncoder,
-    SequenceDistribution,
-    SequenceEnumerator,
-    SequenceEstimator,
-    SequenceSampler,
-)
-from pysp.stats.setdist import (
-    BernoulliSetDataEncoder,
-    BernoulliSetDistribution,
-    BernoulliSetEnumerator,
-    BernoulliSetEstimator,
-    BernoulliSetSampler,
-)
-from pysp.stats.sparse_markov_transform import (
-    SparseMarkovAssociationDataEncoder,
-    SparseMarkovAssociationDistribution,
-    SparseMarkovAssociationEstimator,
-    SparseMarkovAssociationSampler,
-)
-from pysp.stats.spearman_rho import (
-    SpearmanRankingDataEncoder,
-    SpearmanRankingDistribution,
-    SpearmanRankingEnumerator,
-    SpearmanRankingEstimator,
-    SpearmanRankingSampler,
-)
-from pysp.stats.ss_mixture import (
+from pysp.stats.latent.ss_mixture import (
     SemiSupervisedMixtureDataEncoder,
     SemiSupervisedMixtureDistribution,
     SemiSupervisedMixtureEstimator,
     SemiSupervisedMixtureSampler,
 )
-from pysp.stats.stacked import (
-    StackedComponentParams,
-    StackedMixtureKernel,
-    StackedMixtureKernelFactory,
-    StackedMixtureResidentStats,
-    StackedMixtureShardEstimate,
-    estimate_component_shard_value,
-    stacked_component_log_density,
-    stacked_component_params,
-    stacked_component_strategy,
-    tie_component_shard_values,
-)
-from pysp.stats.stochastic_block_graph import (
-    StochasticBlockGraphAccumulator,
-    StochasticBlockGraphAccumulatorFactory,
-    StochasticBlockGraphDistribution,
-    StochasticBlockGraphEstimator,
-    StochasticBlockGraphSampler,
-)
-from pysp.stats.student_t import StudentTDataEncoder, StudentTDistribution, StudentTEstimator, StudentTSampler
-from pysp.stats.symdirichlet import SymmetricDirichletDistribution, SymmetricDirichletSampler
-from pysp.stats.transform import (
-    AffineTransform,
-    ExpTransform,
-    IdentityTransform,
-    LogitTransform,
-    LogTransform,
-    TransformDataEncoder,
-    TransformDistribution,
-    TransformEnumerator,
-    TransformEstimator,
-    TransformSampler,
-)
-from pysp.stats.tree_hmm import (
+from pysp.stats.latent.tree_hmm import (
     TreeHiddenMarkovEstimator,
     TreeHiddenMarkovModelDistribution,
     TreeHiddenMarkovModelEstimator,
     TreeHiddenMarkovModelSampler,
     TreeHiddenMarkovSampler,
 )
-from pysp.stats.uniform import UniformDataEncoder, UniformDistribution, UniformEstimator, UniformSampler
-from pysp.stats.vmf import (
+
+### Discrete base distributions
+from pysp.stats.leaf.bernoulli import (
+    BernoulliDataEncoder,
+    BernoulliDistribution,
+    BernoulliEnumerator,
+    BernoulliEstimator,
+    BernoulliSampler,
+)
+
+### Continuous base distributions
+from pysp.stats.leaf.beta import BetaDataEncoder, BetaDistribution, BetaEstimator, BetaSampler
+from pysp.stats.leaf.binomial import (
+    BinomialDataEncoder,
+    BinomialDistribution,
+    BinomialEnumerator,
+    BinomialEstimator,
+    BinomialSampler,
+)
+from pysp.stats.leaf.cat_multinomial import (
+    MultinomialDataEncoder,
+    MultinomialDistribution,
+    MultinomialEnumerator,
+    MultinomialEstimator,
+    MultinomialSampler,
+)
+from pysp.stats.leaf.categorical import (
+    CategoricalDataEncoder,
+    CategoricalDistribution,
+    CategoricalEnumerator,
+    CategoricalEstimator,
+    CategoricalSampler,
+)
+from pysp.stats.leaf.exponential import (
+    ExponentialDataEncoder,
+    ExponentialDistribution,
+    ExponentialEstimator,
+    ExponentialSampler,
+)
+from pysp.stats.leaf.gamma import GammaDataEncoder, GammaDistribution, GammaEstimator, GammaSampler
+from pysp.stats.leaf.gaussian import GaussianDataEncoder, GaussianDistribution, GaussianEstimator, GaussianSampler
+from pysp.stats.leaf.geometric import (
+    GeometricDataEncoder,
+    GeometricDistribution,
+    GeometricEnumerator,
+    GeometricEstimator,
+    GeometricSampler,
+)
+from pysp.stats.leaf.int_multinomial import (
+    IntegerMultinomialDataEncoder,
+    IntegerMultinomialDistribution,
+    IntegerMultinomialEnumerator,
+    IntegerMultinomialEstimator,
+    IntegerMultinomialSampler,
+)
+from pysp.stats.leaf.int_range import (
+    IntegerCategoricalDataEncoder,
+    IntegerCategoricalDistribution,
+    IntegerCategoricalEnumerator,
+    IntegerCategoricalEstimator,
+    IntegerCategoricalSampler,
+)
+from pysp.stats.leaf.int_spike import (
+    IntegerUniformSpikeDataEncoder,
+    IntegerUniformSpikeDistribution,
+    IntegerUniformSpikeEnumerator,
+    IntegerUniformSpikeEstimator,
+    IntegerUniformSpikeSampler,
+)
+from pysp.stats.leaf.laplace import LaplaceDataEncoder, LaplaceDistribution, LaplaceEstimator, LaplaceSampler
+from pysp.stats.leaf.log_gaussian import (
+    LogGaussianDataEncoder,
+    LogGaussianDistribution,
+    LogGaussianEstimator,
+    LogGaussianSampler,
+)
+from pysp.stats.leaf.logistic import LogisticDataEncoder, LogisticDistribution, LogisticEstimator, LogisticSampler
+from pysp.stats.leaf.negative_binomial import (
+    NegativeBinomialDataEncoder,
+    NegativeBinomialDistribution,
+    NegativeBinomialEnumerator,
+    NegativeBinomialEstimator,
+    NegativeBinomialSampler,
+)
+from pysp.stats.leaf.pareto import ParetoDataEncoder, ParetoDistribution, ParetoEstimator, ParetoSampler
+from pysp.stats.leaf.point_mass import (
+    PointMassDataEncoder,
+    PointMassDistribution,
+    PointMassEnumerator,
+    PointMassEstimator,
+    PointMassSampler,
+)
+from pysp.stats.leaf.poisson import (
+    PoissonDataEncoder,
+    PoissonDistribution,
+    PoissonEnumerator,
+    PoissonEstimator,
+    PoissonSampler,
+)
+from pysp.stats.leaf.rayleigh import RayleighDataEncoder, RayleighDistribution, RayleighEstimator, RayleighSampler
+from pysp.stats.leaf.student_t import StudentTDataEncoder, StudentTDistribution, StudentTEstimator, StudentTSampler
+from pysp.stats.leaf.uniform import UniformDataEncoder, UniformDistribution, UniformEstimator, UniformSampler
+from pysp.stats.leaf.weibull import WeibullDataEncoder, WeibullDistribution, WeibullEstimator, WeibullSampler
+from pysp.stats.multivariate.dmvn import (
+    DiagonalGaussianDataEncoder,
+    DiagonalGaussianDistribution,
+    DiagonalGaussianEstimator,
+    DiagonalGaussianSampler,
+)
+from pysp.stats.multivariate.mvn import (
+    MultivariateGaussianDataEncoder,
+    MultivariateGaussianDistribution,
+    MultivariateGaussianEstimator,
+    MultivariateGaussianSampler,
+)
+from pysp.stats.multivariate.vmf import (
     VonMisesFisherDataEncoder,
     VonMisesFisherDistribution,
     VonMisesFisherEstimator,
     VonMisesFisherSampler,
 )
-from pysp.stats.weibull import WeibullDataEncoder, WeibullDistribution, WeibullEstimator, WeibullSampler
-from pysp.stats.weighted import WeightedDataEncoder, WeightedDistribution, WeightedEstimator
+from pysp.stats.sets.int_edit_setdist import (
+    IntegerBernoulliEditDataEncoder,
+    IntegerBernoulliEditDistribution,
+    IntegerBernoulliEditEnumerator,
+    IntegerBernoulliEditEstimator,
+    IntegerBernoulliEditSampler,
+)
+from pysp.stats.sets.int_edit_stepsetdist import (
+    IntegerStepBernoulliEditDataEncoder,
+    IntegerStepBernoulliEditDistribution,
+    IntegerStepBernoulliEditEnumerator,
+    IntegerStepBernoulliEditEstimator,
+    IntegerStepBernoulliEditSampler,
+)
+from pysp.stats.sets.int_setdist import (
+    IntegerBernoulliSetDataEncoder,
+    IntegerBernoulliSetDistribution,
+    IntegerBernoulliSetEnumerator,
+    IntegerBernoulliSetEstimator,
+    IntegerBernoulliSetSampler,
+)
+from pysp.stats.sets.setdist import (
+    BernoulliSetDataEncoder,
+    BernoulliSetDistribution,
+    BernoulliSetEnumerator,
+    BernoulliSetEstimator,
+    BernoulliSetSampler,
+)
 from pysp.utils.optional_deps import RDD_TYPES, pyspark
 
 

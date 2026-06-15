@@ -1,6 +1,7 @@
 """Fit a joint mixture model that couples two heterogeneous observation views."""
 
 import numpy as np
+
 from pysp.stats import *
 from pysp.utils.estimation import best_of
 from pysp.utils.evaluation import empirical_kl_divergence, partition_data

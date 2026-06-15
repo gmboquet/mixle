@@ -38,8 +38,8 @@ from pysp.stats import (
     seq_estimate,
     seq_log_density_sum,
 )
-from pysp.stats.kernel import GenericKernel, KernelFactory
-from pysp.stats.stacked import StackedMixtureKernel, estimate_component_shard_value, tie_component_shard_values
+from pysp.stats.compute.kernel import GenericKernel, KernelFactory
+from pysp.stats.compute.stacked import StackedMixtureKernel, estimate_component_shard_value, tie_component_shard_values
 from pysp.utils.estimation import optimize
 
 
@@ -300,7 +300,7 @@ class ComputeKernelTestCase(unittest.TestCase):
         # score must match the legacy seq path on the legacy seq_encode payload
         # that the engine estimation path feeds kernels
         from pysp.stats import seq_encode
-        from pysp.stats.kernel import GenericKernel
+        from pysp.stats.compute.kernel import GenericKernel
 
         mix = MixtureDistribution([GaussianDistribution(-2.0, 1.0), GaussianDistribution(2.0, 1.0)], [0.5, 0.5])
         comp = MixtureDistribution(

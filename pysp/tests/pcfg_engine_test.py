@@ -15,7 +15,7 @@ from pysp.stats import (
     HeterogeneousPCFGDistribution,
     StudentTDistribution,
 )
-from pysp.stats.backend import backend_seq_log_density
+from pysp.stats.compute.backend import backend_seq_log_density
 
 try:
     from pysp.engines import TorchEngine

@@ -1211,7 +1211,7 @@ def sample_conjugate_posterior(
 
     samples: list[Any] = []
     if cls_name == "GaussianDistribution":
-        from pysp.stats.normgamma import NormalGammaDistribution
+        from pysp.stats.bayes.normgamma import NormalGammaDistribution
 
         if not isinstance(posterior, NormalGammaDistribution):
             raise NotImplementedError("sample_conjugate_posterior(Gaussian) requires a NormalGamma posterior.")
@@ -1221,7 +1221,7 @@ def sample_conjugate_posterior(
             sigma2 = 1.0 / tau
             samples.append(type(dist)(float(mu), sigma2) if return_distributions else (float(mu), float(sigma2)))
     elif cls_name == "PoissonDistribution":
-        from pysp.stats.gamma import GammaDistribution
+        from pysp.stats.leaf.gamma import GammaDistribution
 
         if not isinstance(posterior, GammaDistribution):
             raise NotImplementedError("sample_conjugate_posterior(Poisson) requires a Gamma posterior.")
@@ -1230,7 +1230,7 @@ def sample_conjugate_posterior(
             lam = rng.gamma(shape=k, scale=theta)
             samples.append(type(dist)(lam) if return_distributions else float(lam))
     else:  # BernoulliDistribution
-        from pysp.stats.beta import BetaDistribution
+        from pysp.stats.leaf.beta import BetaDistribution
 
         if not isinstance(posterior, BetaDistribution):
             raise NotImplementedError("sample_conjugate_posterior(Bernoulli) requires a Beta posterior.")
@@ -1252,15 +1252,15 @@ def _default_conjugate_prior(cls_name: str) -> Any:
     the conjugate family.
     """
     if cls_name == "GaussianDistribution":
-        from pysp.stats.normgamma import NormalGammaDistribution
+        from pysp.stats.bayes.normgamma import NormalGammaDistribution
 
         return NormalGammaDistribution(0.0, 1.0e-8, 0.500001, 1.0)
     if cls_name == "PoissonDistribution":
-        from pysp.stats.gamma import GammaDistribution
+        from pysp.stats.leaf.gamma import GammaDistribution
 
         return GammaDistribution(1.0001, 1.0e6)
     if cls_name == "BernoulliDistribution":
-        from pysp.stats.beta import BetaDistribution
+        from pysp.stats.leaf.beta import BetaDistribution
 
         return BetaDistribution(1.000001, 1.000001)
     return None

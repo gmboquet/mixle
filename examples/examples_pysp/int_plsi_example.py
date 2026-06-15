@@ -1,8 +1,6 @@
 """Integer PLSI example on generated data."""
-import sys
 import numpy as np
 
-import pysp.utils.optsutil as ops
 from pysp.stats import *
 from pysp.utils.estimation import optimize
 

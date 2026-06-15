@@ -14,7 +14,7 @@ from numpy.random import RandomState
 from pysp.stats import (
     seq_log_density,
 )
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution
+from pysp.stats.compute.pdist import SequenceEncodableProbabilityDistribution
 
 T = TypeVar("T")
 E0 = TypeVar("E0")

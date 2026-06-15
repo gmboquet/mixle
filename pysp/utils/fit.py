@@ -11,8 +11,8 @@ from typing import IO, Any, TypeVar
 
 import numpy as np
 
-from pysp.stats.gradient import GradientFitError
-from pysp.stats.pdist import SequenceEncodableProbabilityDistribution
+from pysp.stats.compute.gradient import GradientFitError
+from pysp.stats.compute.pdist import SequenceEncodableProbabilityDistribution
 from pysp.utils.priors import as_prior_dict
 
 T = TypeVar("T")
@@ -106,7 +106,7 @@ def _tensor_param(value, engine, torch, transform=None):
 
 
 def _gradient_raw_state(dist, engine, torch, leaves):
-    from pysp.stats.declarations import declaration_for
+    from pysp.stats.compute.declarations import declaration_for
 
     hook = getattr(dist, "gradient_fit_state", None)
     if callable(hook):
@@ -257,7 +257,7 @@ def _gradient_enc_chunks(enc):
 
 
 def _gradient_score_state(state, enc, engine, torch):
-    from pysp.stats.backend import backend_seq_log_density
+    from pysp.stats.compute.backend import backend_seq_log_density
 
     score_fn = getattr(state, "score", None)
     if callable(score_fn):

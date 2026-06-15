@@ -10,7 +10,7 @@ import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats import ErdosRenyiGraphDistribution, StochasticBlockGraphDistribution
-from pysp.stats.backend import backend_seq_log_density
+from pysp.stats.compute.backend import backend_seq_log_density
 
 try:
     from pysp.engines import TorchEngine

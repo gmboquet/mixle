@@ -5,7 +5,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 import pysp.stats as stats
-from pysp.stats.transform import AffineTransform
+from pysp.stats.combinator.transform import AffineTransform
 
 
 def _canonical(x):
@@ -322,13 +322,13 @@ def _bayes_only_distribution_catalog():
     These are now exported from ``pysp.stats.__all__`` alongside the frequentist
     families; this catalog is merged into the public seed-repeatability sweep.
     """
-    from pysp.stats.catdirichlet import DictDirichletDistribution
-    from pysp.stats.dpm import DirichletProcessMixtureDistribution
-    from pysp.stats.hdpm import HierarchicalDirichletProcessMixtureDistribution
-    from pysp.stats.mvngamma import MultivariateNormalGammaDistribution
-    from pysp.stats.normgamma import NormalGammaDistribution
-    from pysp.stats.normwishart import NormalWishartDistribution
-    from pysp.stats.symdirichlet import SymmetricDirichletDistribution
+    from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
+    from pysp.stats.bayes.dpm import DirichletProcessMixtureDistribution
+    from pysp.stats.bayes.hdpm import HierarchicalDirichletProcessMixtureDistribution
+    from pysp.stats.bayes.mvngamma import MultivariateNormalGammaDistribution
+    from pysp.stats.bayes.normgamma import NormalGammaDistribution
+    from pysp.stats.bayes.normwishart import NormalWishartDistribution
+    from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
 
     comps = [stats.GaussianDistribution(0.0, 1.0), stats.GaussianDistribution(3.0, 2.0)]
     dpm = DirichletProcessMixtureDistribution(

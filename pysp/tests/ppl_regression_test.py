@@ -1,8 +1,9 @@
 """Tests for pysp.ppl linear regression (Field + linear predictor)."""
-import numpy as np
 import unittest
 
-from pysp.ppl import Normal, Bernoulli, Poisson, Field, Group, free
+import numpy as np
+
+from pysp.ppl import Bernoulli, Field, Group, Normal, Poisson, free
 
 
 class RegressionTestCase(unittest.TestCase):

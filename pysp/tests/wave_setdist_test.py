@@ -14,8 +14,8 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.pdist import EnumerationError
-from pysp.stats.setdist import BernoulliSetDistribution, BernoulliSetEnumerator
+from pysp.stats.compute.pdist import EnumerationError
+from pysp.stats.sets.setdist import BernoulliSetDistribution, BernoulliSetEnumerator
 
 TOL = 1e-9
 
@@ -132,7 +132,7 @@ class SetDistImportSmokeTestCase(unittest.TestCase):
     """Import smoke test for the five set/association modules and their five-part protocol classes."""
 
     MODULES = {
-        "pysp.stats.setdist": [
+        "pysp.stats.sets.setdist": [
             "BernoulliSetDistribution",
             "BernoulliSetSampler",
             "BernoulliSetEstimator",
@@ -141,7 +141,7 @@ class SetDistImportSmokeTestCase(unittest.TestCase):
             "BernoulliSetDataEncoder",
             "BernoulliSetEnumerator",
         ],
-        "pysp.stats.int_edit_setdist": [
+        "pysp.stats.sets.int_edit_setdist": [
             "IntegerBernoulliEditDistribution",
             "IntegerBernoulliEditSampler",
             "IntegerBernoulliEditEstimator",
@@ -149,7 +149,7 @@ class SetDistImportSmokeTestCase(unittest.TestCase):
             "IntegerBernoulliEditAccumulatorFactory",
             "IntegerBernoulliEditDataEncoder",
         ],
-        "pysp.stats.int_edit_stepsetdist": [
+        "pysp.stats.sets.int_edit_stepsetdist": [
             "IntegerStepBernoulliEditDistribution",
             "IntegerStepBernoulliEditSampler",
             "IntegerStepBernoulliEditEstimator",
@@ -157,7 +157,7 @@ class SetDistImportSmokeTestCase(unittest.TestCase):
             "IntegerStepBernoulliEditAccumulatorFactory",
             "IntegerStepBernoulliEditDataEncoder",
         ],
-        "pysp.stats.hidden_association": [
+        "pysp.stats.latent.hidden_association": [
             "HiddenAssociationDistribution",
             "HiddenAssociationSampler",
             "HiddenAssociationEstimator",
@@ -165,7 +165,7 @@ class SetDistImportSmokeTestCase(unittest.TestCase):
             "HiddenAssociationAccumulatorFactory",
             "HiddenAssociationDataEncoder",
         ],
-        "pysp.stats.int_hidden_association": [
+        "pysp.stats.latent.int_hidden_association": [
             "IntegerHiddenAssociationDistribution",
             "IntegerHiddenAssociationSampler",
             "IntegerHiddenAssociationEstimator",
