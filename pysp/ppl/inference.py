@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
-from pysp.ppl.core import RandomVariable, free, lower, CompositeFamily
+from pysp.ppl.core import CompositeFamily, RandomVariable, free, lower
 
 _NEG_INF = -1e300
 
@@ -26,7 +26,7 @@ class _Slot:
     index: int           # position in the family's argument tuple
     prior: Any           # a concrete prior distribution, or None for a flat `free` slot
     positive: bool       # sampled in log-space when True
-    name: Optional[str]  # parameter name (prior's name, else "argN")
+    name: str | None  # parameter name (prior's name, else "argN")
     handle: Any          # the prior RandomVariable (for .posterior(handle)), or None
 
 
@@ -37,7 +37,7 @@ class Posterior:
     RandomVariable handle, its name, or its slot index.
     """
 
-    def __init__(self, slots: List[_Slot], value_samples: np.ndarray, raw: Any):
+    def __init__(self, slots: list[_Slot], value_samples: np.ndarray, raw: Any):
         self._slots = slots
         self._samples = value_samples            # (n_draws, n_params), value space
         self.raw = raw
@@ -81,8 +81,8 @@ def _require_flat(rv: RandomVariable):
     return rv._family
 
 
-def _slots_of(rv: RandomVariable, fam) -> List[_Slot]:
-    slots: List[_Slot] = []
+def _slots_of(rv: RandomVariable, fam) -> list[_Slot]:
+    slots: list[_Slot] = []
     for i, a in enumerate(rv._args):
         if isinstance(a, RandomVariable):
             slots.append(_Slot(i, lower(a, target="dist"), fam.positive[i],
@@ -111,7 +111,8 @@ def _build_target(rv: RandomVariable, data):
         vals, logj = {}, 0.0
         for k, s in enumerate(slots):
             if s.positive:
-                v = math.exp(u[k]); logj += float(u[k])   # Jacobian of exp transform
+                v = math.exp(u[k])
+                logj += float(u[k])   # Jacobian of exp transform
             else:
                 v = float(u[k])
             vals[s.index] = v
@@ -180,8 +181,8 @@ def _finalize(rv, slots, res, build) -> RandomVariable:
 
 
 def mcmc_fit(rv: RandomVariable, data, *, draws: int = 2000, burn: int = 1000,
-             thin: int = 1, scale: Optional[float] = None, rng=None) -> RandomVariable:
-    from pysp.utils.mcmc import metropolis_hastings, AdaptiveRandomWalkProposal
+             thin: int = 1, scale: float | None = None, rng=None) -> RandomVariable:
+    from pysp.utils.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
     if rng is None:
         rng = np.random.RandomState()
@@ -196,7 +197,7 @@ def mcmc_fit(rv: RandomVariable, data, *, draws: int = 2000, burn: int = 1000,
 
 
 def hmc_fit(rv: RandomVariable, data, *, draws: int = 1000, burn: int = 500,
-            step_size: Optional[float] = None, num_steps: int = 15, thin: int = 1,
+            step_size: float | None = None, num_steps: int = 15, thin: int = 1,
             rng=None) -> RandomVariable:
     """Hamiltonian Monte Carlo over the parameter posterior.
 
@@ -204,27 +205,37 @@ def hmc_fit(rv: RandomVariable, data, *, draws: int = 1000, burn: int = 500,
     log-target and a diagonal mass matrix preconditioned to the data-informed posterior
     scale, so trajectories are well-conditioned without manual tuning.
     """
+    from pysp.ppl import autograd as _ag
     from pysp.utils.mcmc import hamiltonian_monte_carlo
 
     if rng is None:
         rng = np.random.RandomState()
-    log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+
+    ag = _ag.grad_target(rv, data)
+    if ag is not None:
+        # analytic-gradient HMC (one backprop per gradient, vs O(#params) target evals)
+        slots, build, dmean, dstd = ag.slots, ag.build, ag.dmean, ag.dstd
+        log_target, grad = ag.log_target, ag.grad
+    else:
+        log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+        eps = 1e-5 * np.maximum(np.abs(_init_u(slots, dmean, dstd)), 1.0)
+
+        def grad(u):
+            u = np.asarray(u, dtype=float)
+            g = np.empty(len(u))
+            for i in range(len(u)):
+                up = u.copy()
+                up[i] += eps[i]
+                um = u.copy()
+                um[i] -= eps[i]
+                g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
+            return g
+
     u0 = _init_u(slots, dmean, dstd)
     scale = _init_scale(slots, dstd, len(data))     # ~ posterior std per dim
     mass = 1.0 / (scale ** 2)                        # precondition: M ~ inverse posterior cov
     if step_size is None:
         step_size = 2.5 / num_steps                  # tuned: acc~0.98, near-max ESS (preconditioned)
-
-    eps = 1e-5 * np.maximum(np.abs(u0), 1.0)
-
-    def grad(u):
-        u = np.asarray(u, dtype=float)
-        g = np.empty(len(u))
-        for i in range(len(u)):
-            up = u.copy(); up[i] += eps[i]
-            um = u.copy(); um[i] -= eps[i]
-            g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
-        return g
 
     res = hamiltonian_monte_carlo(log_target, grad, u0, num_samples=draws,
                                   step_size=step_size, num_steps=num_steps, mass=mass,
@@ -426,15 +437,18 @@ def _hier_gamma_poisson(rv, n_i, sum_i, sumsq_i, max_its, tol):
     moment-matched population M-step (law of total variance)."""
     from pysp.stats.leaf.gamma import GammaDistribution
     gm = sum_i / np.maximum(n_i, 1.0)
-    m = float(gm.mean()); v = float(gm.var()) or m
-    b = m / max(v, 1e-6); a = m * b
+    m = float(gm.mean())
+    v = float(gm.var()) or m
+    b = m / max(v, 1e-6)
+    a = m * b
     prev = None
     for _ in range(max_its):
         A, B = a + sum_i, b + n_i                       # posterior Gamma(A_i, B_i) per group
         Elam, Vlam = A / B, A / (B * B)
         m = float(Elam.mean())
         v = float(np.var(Elam) + Vlam.mean())           # total variance
-        b = m / max(v, 1e-8); a = m * b
+        b = m / max(v, 1e-8)
+        a = m * b
         cur = (a, b)
         if prev is not None and max(abs(x - y) for x, y in zip(cur, prev)) < tol:
             break
@@ -448,8 +462,11 @@ def _hier_beta_bernoulli(rv, n_i, sum_i, sumsq_i, max_its, tol):
     """p_i ~ Beta(a, b); y_ij ~ Bernoulli(p_i). Conjugate E-step + moment-matched M-step."""
     from pysp.stats.leaf.beta import BetaDistribution
     gp = sum_i / np.maximum(n_i, 1.0)
-    m = float(gp.mean()); v = float(gp.var()) or (m * (1 - m))
-    s = max(m * (1 - m) / max(v, 1e-6) - 1, 1e-3); a = m * s; b = (1 - m) * s
+    m = float(gp.mean())
+    v = float(gp.var()) or (m * (1 - m))
+    s = max(m * (1 - m) / max(v, 1e-6) - 1, 1e-3)
+    a = m * s
+    b = (1 - m) * s
     prev = None
     for _ in range(max_its):
         A, B = a + sum_i, b + (n_i - sum_i)             # posterior Beta(A_i, B_i)
@@ -457,7 +474,9 @@ def _hier_beta_bernoulli(rv, n_i, sum_i, sumsq_i, max_its, tol):
         Vp = A * B / ((A + B) ** 2 * (A + B + 1))
         m = float(Ep.mean())
         v = float(np.var(Ep) + Vp.mean())
-        s = max(m * (1 - m) / max(v, 1e-8) - 1, 1e-3); a = m * s; b = (1 - m) * s
+        s = max(m * (1 - m) / max(v, 1e-8) - 1, 1e-3)
+        a = m * s
+        b = (1 - m) * s
         cur = (a, b)
         if prev is not None and max(abs(x - y) for x, y in zip(cur, prev)) < tol:
             break
@@ -500,6 +519,22 @@ def hierarchical_fit(rv: RandomVariable, data, *, max_its: int = 300,
 def map_fit(rv: RandomVariable, data, *, rng=None) -> RandomVariable:
     from scipy.optimize import minimize
 
+    from pysp.ppl import autograd as _ag
+
+    g = _ag.grad_target(rv, data)
+    if g is not None:
+        # analytic-gradient MAP: L-BFGS on the joint posterior (fast, scales with #params)
+        u0 = _init_u(g.slots, g.dmean, g.dstd)
+
+        def neg(u):
+            v, gr = g.value_and_grad(u)
+            return -v, -gr
+
+        res = minimize(neg, u0, jac=True, method="L-BFGS-B", options={"maxiter": 1000})
+        vals, _ = g.unpack(res.x)
+        return RandomVariable._bound(g.build(vals), name=rv._name)
+
+    # derivative-free fallback (no Torch, or an unsupported family)
     log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
     u0 = _init_u(slots, dmean, dstd)
     res = minimize(lambda u: -log_target(u), u0, method="Nelder-Mead",
@@ -519,48 +554,54 @@ class _VIResult:
 
 
 def vi_fit(rv: RandomVariable, data, *, samples: int = 4000, mc: int = 16,
-           max_iter: int = 4000, rng=None) -> RandomVariable:
-    """Mean-field variational Bayes (ADVI-style).
+           max_iter: int = 4000, steps: int = 600, lr: float = 0.05, rng=None) -> RandomVariable:
+    """Mean-field variational Bayes (ADVI).
 
     Fits a diagonal-Gaussian variational posterior q(u) = N(mean, diag(std^2)) in the
-    unconstrained space to the joint log-target, by maximizing a reparameterized
-    Monte-Carlo ELBO (common random numbers -> smooth, deterministic objective optimized
-    with scipy). Works for *non-conjugate* priors the closed-form registry can't handle;
-    returns a variational Posterior with draws and posterior-predictive.
+    unconstrained space by maximizing a reparameterized Monte-Carlo ELBO. With Torch it
+    uses analytic-gradient Adam (fast, scales); otherwise it falls back to a derivative-free
+    ELBO optimization. Works for *non-conjugate* priors the closed-form registry can't
+    handle; returns a variational Posterior with draws and posterior-predictive.
     """
-    from scipy.optimize import minimize
+    from pysp.ppl import autograd as _ag
 
     if rng is None:
         rng = np.random.RandomState()
-    log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
-    d = len(slots)
-    u0 = _init_u(slots, dmean, dstd)
-    s0 = _init_scale(slots, dstd, len(data))
-    eps = rng.standard_normal((mc, d))                      # common random numbers
 
-    half_entropy_const = 0.5 * d * (1.0 + math.log(2.0 * math.pi))
+    ag = _ag.grad_target(rv, data)
+    if ag is not None:
+        slots, build = ag.slots, ag.build
+        u0 = _init_u(slots, ag.dmean, ag.dstd)
+        s0 = _init_scale(slots, ag.dstd, len(data))
+        vals, mean, std = ag.advi(u0, s0, samples=samples, mc=mc, steps=steps, lr=lr, rng=rng)
+    else:
+        from scipy.optimize import minimize
 
-    def neg_elbo(phi):
-        mean, log_std = phi[:d], phi[d:]
-        std = np.exp(log_std)
-        U = mean + std * eps                                # (mc, d) reparameterized
-        ll = float(np.mean([log_target(U[i]) for i in range(mc)]))
-        entropy = float(np.sum(log_std)) + half_entropy_const
-        return -(ll + entropy)
+        log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+        d = len(slots)
+        u0 = _init_u(slots, dmean, dstd)
+        s0 = _init_scale(slots, dstd, len(data))
+        eps = rng.standard_normal((mc, d))                  # common random numbers
+        half_entropy_const = 0.5 * d * (1.0 + math.log(2.0 * math.pi))
 
-    phi0 = np.concatenate([u0, np.log(s0)])
-    res = minimize(neg_elbo, phi0, method="Nelder-Mead",
-                   options={"maxiter": max_iter, "xatol": 1e-5, "fatol": 1e-5})
-    mean, std = res.x[:d], np.exp(res.x[d:])
+        def neg_elbo(phi):
+            mean, log_std = phi[:d], phi[d:]
+            std = np.exp(log_std)
+            U = mean + std * eps
+            ll = float(np.mean([log_target(U[i]) for i in range(mc)]))
+            return -(ll + float(np.sum(log_std)) + half_entropy_const)
 
-    Z = rng.standard_normal((samples, d))
-    U = mean + std * Z
-    vals = np.empty_like(U)
-    for k, s in enumerate(slots):
-        vals[:, k] = np.exp(U[:, k]) if s.positive else U[:, k]
+        res = minimize(neg_elbo, np.concatenate([u0, np.log(s0)]), method="Nelder-Mead",
+                       options={"maxiter": max_iter, "xatol": 1e-5, "fatol": 1e-5})
+        mean, std = res.x[:d], np.exp(res.x[d:])
+        Z = rng.standard_normal((samples, d))
+        U = mean + std * Z
+        vals = np.empty_like(U)
+        for k, s in enumerate(slots):
+            vals[:, k] = np.exp(U[:, k]) if s.positive else U[:, k]
+
     mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
-
-    post = Posterior(slots, vals, _VIResult(-res.fun, mean, std))
+    post = Posterior(slots, vals, _VIResult(0.0, mean, std))
 
     def predictive(n, r):
         idx = r.randint(len(vals), size=n)
