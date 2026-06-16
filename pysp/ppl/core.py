@@ -32,6 +32,12 @@ __all__ = [
     "eq",
     "equal",
     "ne",
+    "increasing",
+    "decreasing",
+    "monotone",
+    "convex",
+    "concave",
+    "lipschitz",
 ]
 
 
@@ -441,6 +447,70 @@ equal = eq  # readable alias
 def ne(lhs, rhs) -> Constraint:
     """Build an inequality relation ``lhs != rhs`` (boolean only; no smooth penalty surface)."""
     return _make_constraint(lhs, "!=", rhs)
+
+
+# ----------------------------------------------------- differential / shape constraints
+# Constraints on the *shape* of a vector-valued RV / expression (a discretized function),
+# expressed through finite differences: the first difference governs monotonicity / smoothness,
+# the second difference governs curvature (convexity). Each carries a continuous residual so it
+# works with the soft-penalty inference path as well as generative ``constrain(...)``.
+def _diff(a, order: int = 1):
+    return np.diff(np.asarray(a, dtype=float), n=order, axis=-1)
+
+
+def _shape_constraint(v, test, violation, desc) -> Constraint:
+    return Constraint(
+        _expr_leaves(v),
+        lambda env: np.all(test(_eval_expr(v, env)), axis=-1),
+        desc,
+        lambda env: np.asarray(violation(_eval_expr(v, env))).ravel(),
+    )
+
+
+def increasing(v, *, strict: bool = False) -> Constraint:
+    """The entries of a vector RV/expression are non-decreasing (``strict`` -> strictly increasing)."""
+    cmp = (lambda d: d > 0) if strict else (lambda d: d >= 0)
+    return _shape_constraint(
+        v, lambda x: cmp(_diff(x)), lambda x: np.maximum(0.0, -_diff(x)), f"increasing({_expr_desc(v)})"
+    )
+
+
+def decreasing(v, *, strict: bool = False) -> Constraint:
+    """The entries of a vector RV/expression are non-increasing (``strict`` -> strictly decreasing)."""
+    cmp = (lambda d: d < 0) if strict else (lambda d: d <= 0)
+    return _shape_constraint(
+        v, lambda x: cmp(_diff(x)), lambda x: np.maximum(0.0, _diff(x)), f"decreasing({_expr_desc(v)})"
+    )
+
+
+def monotone(v) -> Constraint:
+    """The entries are monotone — non-decreasing *or* non-increasing."""
+    return increasing(v) | decreasing(v)
+
+
+def convex(v) -> Constraint:
+    """The entries are convex: the second difference is non-negative everywhere."""
+    return _shape_constraint(
+        v, lambda x: _diff(x, 2) >= 0, lambda x: np.maximum(0.0, -_diff(x, 2)), f"convex({_expr_desc(v)})"
+    )
+
+
+def concave(v) -> Constraint:
+    """The entries are concave: the second difference is non-positive everywhere."""
+    return _shape_constraint(
+        v, lambda x: _diff(x, 2) <= 0, lambda x: np.maximum(0.0, _diff(x, 2)), f"concave({_expr_desc(v)})"
+    )
+
+
+def lipschitz(v, bound: float) -> Constraint:
+    """Bounded first difference: ``|v[i+1] - v[i]| <= bound`` (a discrete smoothness constraint)."""
+    b = float(bound)
+    return _shape_constraint(
+        v,
+        lambda x: np.abs(_diff(x)) <= b,
+        lambda x: np.maximum(0.0, np.abs(_diff(x)) - b),
+        f"lipschitz({_expr_desc(v)}, {b})",
+    )
 
 
 def _expr_desc(rv) -> str:
