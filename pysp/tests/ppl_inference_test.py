@@ -119,6 +119,18 @@ class PPLVITestCase(unittest.TestCase):
         self.assertAlmostEqual(m.dist.mu, 5.0, delta=0.3)
         self.assertAlmostEqual(np.sqrt(m.dist.sigma2), 2.0, delta=0.3)
 
+    def test_vi_batched_target_across_supports(self):
+        # the batched ADVI ELBO must broadcast priors over positive (Gamma) and unit (Beta)
+        # supports, not just the real line.
+        rng = np.random.RandomState(3)
+        pois = list(rng.poisson(3.5, 4000).astype(float))
+        mp = Poisson(Gamma(2, 1, name="rate")).fit(pois, how="vi", rng=np.random.RandomState(4))
+        self.assertAlmostEqual(mp.params["rate"], 3.5, delta=0.3)
+
+        bern = list((rng.uniform(size=4000) < 0.3).astype(float))
+        mb = Bernoulli(Beta(2, 2, name="p")).fit(bern, how="vi", rng=np.random.RandomState(5))
+        self.assertAlmostEqual(mb.params["p"], 0.3, delta=0.05)
+
 
 class PPLConjugateTestCase(unittest.TestCase):
     def test_normal_normal_conjugate_is_exact_and_auto(self):

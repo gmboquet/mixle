@@ -193,6 +193,41 @@ class GradTarget:
                 plp = plp + apply_p(pargs, prep_p(xt, torch), xt, self._eng).sum()
         return ll + plp + logj
 
+    def _logtarget_batch(self, U):
+        """Vectorized joint log-target for a batch ``U`` of shape ``(B, d)`` -> ``(B,)``.
+
+        Identical math to :meth:`_logtarget_tensor` but with a leading batch axis: each
+        inferred parameter becomes ``(B, 1)`` and broadcasts against the ``(N,)`` data, so all
+        ``B`` points are scored in a single pass (no Python loop). Used by the batched ADVI ELBO.
+        """
+        torch = self._torch
+        B = U.shape[0]
+        vals: dict[int, Any] = {}
+        logj = U.new_zeros(B)
+        for k, s in enumerate(self.slots):
+            uk = U[:, k]
+            if s.support == "positive":
+                vals[s.index] = torch.exp(uk)
+                logj = logj + uk
+            elif s.support == "unit":
+                v = torch.sigmoid(uk)
+                vals[s.index] = v
+                logj = logj + torch.log(v) + torch.log1p(-v)
+            else:
+                vals[s.index] = uk
+        full = [vals[i].reshape(B, 1) if i in vals else self._t(self._fixed[i]) for i in range(len(self._rv._args))]
+        _, apply = self._scorers[self._fam.name]
+        ll = apply(full, self._data_terms, self._x, self._eng).sum(dim=1)  # (B, N) -> (B,)
+        plp = U.new_zeros(B)
+        for s in self.slots:
+            if s.handle is not None:
+                pf = s.handle._family.name
+                prep_p, apply_p = self._scorers[pf]
+                pargs = [self._t(z) for z in s.handle._args]
+                xt = vals[s.index].reshape(B, 1)
+                plp = plp + apply_p(pargs, prep_p(xt, torch), xt, self._eng).sum(dim=1)
+        return ll + plp + logj
+
     def log_target(self, u_np) -> float:
         torch = self._torch
         with torch.no_grad():
@@ -227,10 +262,8 @@ class GradTarget:
             opt.zero_grad()
             eps = torch.randn((mc, d), dtype=torch.float64, generator=gen)
             std = torch.exp(log_std)
-            ll = mean.new_zeros(())
-            for i in range(mc):
-                ll = ll + self._logtarget_tensor(mean + std * eps[i])
-            ll = ll / mc
+            U = mean + std * eps  # (mc, d) reparameterized draws
+            ll = self._logtarget_batch(U).mean()  # all mc samples scored in one pass
             elbo = ll + log_std.sum() + half_entropy_const
             (-elbo).backward()
             opt.step()
