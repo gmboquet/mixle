@@ -1624,15 +1624,18 @@ def vi_fit(
     steps: int = 600,
     lr: float = 0.05,
     batch_size: int | None = None,
+    family: str = "meanfield",
+    alpha: float = 1.0,
     rng=None,
 ) -> RandomVariable:
-    """Mean-field variational Bayes (ADVI).
+    """Variational Bayes (ADVI) — a Gaussian variational posterior fit by reparameterized-MC Adam.
 
-    Fits a diagonal-Gaussian variational posterior q(u) = N(mean, diag(std^2)) in the
-    unconstrained space by maximizing a reparameterized Monte-Carlo ELBO. With Torch it
-    uses analytic-gradient Adam (fast, scales); otherwise it falls back to a derivative-free
-    ELBO optimization. Works for *non-conjugate* priors the closed-form registry can't
-    handle; returns a variational Posterior with draws and posterior-predictive.
+    ``family='meanfield'`` (diagonal q, default) or ``'fullrank'`` (full covariance via a Cholesky
+    factor, capturing posterior correlations). ``alpha`` selects the tilted Renyi objective:
+    ``alpha=1`` is the KL-ELBO (default), ``alpha=0`` the importance-weighted (IWAE) bound, and
+    ``alpha<1`` is mass-covering (widens the often-too-narrow KL fit). ``batch_size`` subsamples the
+    data per step (SGVB). Without Torch it falls back to derivative-free mean-field ELBO. Works for
+    *non-conjugate* priors; returns a variational Posterior with draws and posterior-predictive.
     """
     from pysp.ppl import autograd as _ag
 
@@ -1644,7 +1647,18 @@ def vi_fit(
         slots, build = ag.slots, ag.build
         u0 = _init_u(slots, ag.dmean, ag.dstd)
         s0 = _init_scale(slots, ag.dstd, len(data))
-        vals, mean, std = ag.advi(u0, s0, samples=samples, mc=mc, steps=steps, lr=lr, rng=rng, batch_size=batch_size)
+        vals, mean, std = ag.advi(
+            u0,
+            s0,
+            samples=samples,
+            mc=mc,
+            steps=steps,
+            lr=lr,
+            rng=rng,
+            batch_size=batch_size,
+            family=family,
+            alpha=alpha,
+        )
     else:
         from scipy.optimize import minimize
 

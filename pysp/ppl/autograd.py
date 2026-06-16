@@ -248,42 +248,90 @@ class GradTarget:
     def grad(self, u_np) -> np.ndarray:
         return self.value_and_grad(u_np)[1]
 
-    # -- ADVI (reparameterized mean-field VB, Adam) ---------------------------
+    # -- ADVI: mean-field or full-rank Gaussian q, KL or tilted (Renyi-alpha) objective --------
     def advi(
-        self, u0, s0, *, samples: int, mc: int, steps: int, lr: float, rng, batch_size: int | None = None
+        self,
+        u0,
+        s0,
+        *,
+        samples: int,
+        mc: int,
+        steps: int,
+        lr: float,
+        rng,
+        batch_size: int | None = None,
+        family: str = "meanfield",
+        alpha: float = 1.0,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Optimize a diagonal-Gaussian q(u)=N(mean, diag(std^2)) by maximizing a
-        reparameterized Monte-Carlo ELBO with Adam. Returns (value_samples, mean_u, std_u).
-        ``batch_size`` subsamples that many data points per step (stochastic VI / SGVB), scaling
-        the minibatch likelihood by ``N/batch_size`` so VB scales to large data."""
+        """Fit a Gaussian variational posterior by reparameterized-MC stochastic optimization (Adam).
+
+        ``family``: ``meanfield`` (diagonal q — independent params) or ``fullrank`` (a full
+        covariance via a Cholesky factor — captures posterior correlations).
+        ``alpha``: the Renyi / tilted objective ``L_alpha = 1/(1-alpha) log E_q[(p/q)^(1-alpha)]``.
+        ``alpha=1`` is the usual KL-ELBO; ``alpha=0`` is the importance-weighted (IWAE) bound — both
+        mass-covering directions that widen the often-too-narrow KL fit (the importance weights
+        ``w=p/q`` are *tilted* by ``1-alpha``). ``batch_size`` subsamples the data per step (SGVB).
+        Returns ``(value_samples, mean_u, scale_u)``."""
         torch = self._torch
         d = len(self.slots)
         n_data = int(self._x.shape[0])
         use_mb = batch_size is not None and 0 < int(batch_size) < n_data
-        mean = torch.tensor(np.asarray(u0, dtype=float), dtype=torch.float64, requires_grad=True)
-        log_std = torch.tensor(np.log(np.asarray(s0, dtype=float)), dtype=torch.float64, requires_grad=True)
-        opt = torch.optim.Adam([mean, log_std], lr=lr)
-        half_entropy_const = 0.5 * d * (1.0 + math.log(2.0 * math.pi))
+        half_d_log2pi = 0.5 * d * math.log(2.0 * math.pi)
+        entropy_const = 0.5 * d * (1.0 + math.log(2.0 * math.pi))
         gen = torch.Generator().manual_seed(int(rng.randint(1, 2**31)))
+        mean = torch.tensor(np.asarray(u0, dtype=float), dtype=torch.float64, requires_grad=True)
+        if family == "fullrank":
+            # L_raw holds the Cholesky factor: strict-lower entries free, diagonal in log-space.
+            l_raw = torch.tensor(np.diag(np.log(np.asarray(s0, dtype=float))), dtype=torch.float64, requires_grad=True)
+            params = [mean, l_raw]
+        elif family == "meanfield":
+            log_std = torch.tensor(np.log(np.asarray(s0, dtype=float)), dtype=torch.float64, requires_grad=True)
+            params = [mean, log_std]
+        else:
+            raise ValueError(f"unknown variational family {family!r}; use 'meanfield' or 'fullrank'.")
+        opt = torch.optim.Adam(params, lr=lr)
+
+        def variational(eps):
+            # -> (U draws (mc,d), log q(U) per sample, exact entropy H[q])
+            if family == "fullrank":
+                chol = torch.tril(l_raw, -1) + torch.diag(torch.exp(torch.diagonal(l_raw)))
+                u = mean + eps @ chol.T
+                log_diag = torch.diagonal(l_raw)  # = log of chol's diagonal
+            else:
+                chol = torch.exp(log_std)
+                u = mean + chol * eps
+                log_diag = log_std
+            log_q = -0.5 * (eps * eps).sum(dim=1) - log_diag.sum() - half_d_log2pi
+            return u, log_q, log_diag.sum() + entropy_const
+
         for _ in range(steps):
             opt.zero_grad()
             eps = torch.randn((mc, d), dtype=torch.float64, generator=gen)
-            std = torch.exp(log_std)
-            U = mean + std * eps  # (mc, d) reparameterized draws
-            if use_mb:  # stochastic minibatch of the data (SGVB) — scales VB to large data
+            u, log_q, entropy = variational(eps)
+            if use_mb:  # stochastic minibatch of the data (SGVB)
                 idx = torch.as_tensor(rng.choice(n_data, size=int(batch_size), replace=False))
-                xb = self._x[idx]
-                dtb = tuple(t[idx] for t in self._data_terms)
-                ll = self._logtarget_batch(U, xb, dtb, n_data / float(batch_size)).mean()
+                log_p = self._logtarget_batch(
+                    u, self._x[idx], tuple(t[idx] for t in self._data_terms), n_data / float(batch_size)
+                )
             else:
-                ll = self._logtarget_batch(U).mean()  # all mc samples scored in one pass
-            elbo = ll + log_std.sum() + half_entropy_const
-            (-elbo).backward()
+                log_p = self._logtarget_batch(u)
+            if alpha == 1.0:  # standard ELBO with the exact (low-variance) entropy term
+                obj = log_p.mean() + entropy
+            else:  # tilted Renyi-alpha bound: tilt the importance weights w=p/q by (1-alpha)
+                log_w = log_p - log_q
+                obj = (torch.logsumexp((1.0 - alpha) * log_w, dim=0) - math.log(mc)) / (1.0 - alpha)
+            (-obj).backward()
             opt.step()
+
         mean_np = mean.detach().numpy()
-        std_np = torch.exp(log_std).detach().numpy()
-        Z = rng.standard_normal((samples, d))
-        U = mean_np + std_np * Z
+        z = rng.standard_normal((samples, d))
+        if family == "fullrank":
+            chol = (torch.tril(l_raw, -1) + torch.diag(torch.exp(torch.diagonal(l_raw)))).detach().numpy()
+            U = mean_np + z @ chol.T
+            scale_np = np.sqrt(np.sum(chol * chol, axis=1))  # marginal std per dim
+        else:
+            scale_np = torch.exp(log_std).detach().numpy()
+            U = mean_np + scale_np * z
         vals = np.empty_like(U)
         for k, s in enumerate(self.slots):
             if s.support == "positive":
@@ -292,7 +340,7 @@ class GradTarget:
                 vals[:, k] = 1.0 / (1.0 + np.exp(-U[:, k]))
             else:
                 vals[:, k] = U[:, k]
-        return vals, mean_np, std_np
+        return vals, mean_np, scale_np
 
 
 def grad_target(rv: RandomVariable, data) -> GradTarget | None:
