@@ -24,6 +24,7 @@ from pysp.ppl.core import (
     Field,
     Group,
     RandomVariable,
+    _SimplexSpec,
     compare,
     constrain,
     eq,
@@ -367,14 +368,18 @@ register_composite("Sequence", _seq_dist, _seq_est, dist_cls=SequenceDistributio
 
 # --- Markov / HMM: latent-state sequence model ------------------------------------
 def _hmm_dist(args, lower_child):
-    comps, _ = args
+    comps = args[0]
     topics = [lower_child(c) for c in comps]
     k = len(topics)
-    return HiddenMarkovModelDistribution(topics, w=np.ones(k) / k, transitions=np.ones((k, k)) / k)
+    trans = args[1] if len(args) > 1 else None
+    init = args[2] if len(args) > 2 else None
+    T = np.asarray(trans, dtype=float) if isinstance(trans, np.ndarray) else np.ones((k, k)) / k
+    w = np.asarray(init, dtype=float) if isinstance(init, np.ndarray) else np.ones(k) / k
+    return HiddenMarkovModelDistribution(topics, w=w, transitions=T)
 
 
 def _hmm_est(args, lower_child_est, name, keys):
-    comps, _ = args
+    comps = args[0]
     return HiddenMarkovEstimator([lower_child_est(c) for c in comps], name=name)
 
 
@@ -384,7 +389,7 @@ def _flatten_obs(data):
 
 
 def _hmm_seed(args, data, rng, seed_child):
-    comps, _ = args
+    comps = args[0]
     k = len(comps)
     arr = _flatten_obs(data)
     if arr.size < k:
@@ -630,12 +635,40 @@ def LDA(num_topics: int, vocab_size: int, *, alpha: float = 1.0, name: str | Non
     return RandomVariable._sample("LDA", (int(num_topics), int(vocab_size), float(alpha)), name=name)
 
 
-def Markov(emission, states: int, *, name: str | None = None) -> RandomVariable:
-    """Hidden Markov model with ``states`` latent states emitting ``emission``.
+def _simplex_arg(spec, rows: int, k: int):
+    """Turn a transitions=/initial= argument into a stored value: a fixed array stays an array;
+    ``free`` or a ``Dirichlet`` prior becomes a ``_SimplexSpec`` (estimable simplex / simplex
+    rows); ``None`` stays None (EM estimates / uniform default)."""
+    if spec is None:
+        return None
+    if isinstance(spec, RandomVariable) and spec._kind == "sample" and spec._family.name == "Dirichlet":
+        return _SimplexSpec(spec._args[0], rows=rows, name=spec._name)
+    if spec is free:
+        return _SimplexSpec(np.ones(k), rows=rows)
+    return np.asarray(spec, dtype=float)  # a fixed transition matrix / initial distribution
 
-    ``Markov(Normal(free, free), states=2).fit(sequences)`` fits a 2-state Gaussian HMM;
-    emissions are k-means++ seeded so states separate. ``.posterior(sequences)`` gives
-    state posteriors.
+
+def Markov(
+    emission, states: int | None = None, *, transitions=None, initial=None, name: str | None = None
+) -> RandomVariable:
+    """Hidden Markov model over latent states emitting ``emission``.
+
+    ``Markov(Normal(free, free), states=2).fit(sequences)`` fits a 2-state Gaussian HMM by EM
+    (emissions k-means++ seeded so states separate); ``.posterior(sequences)`` gives state
+    posteriors. For per-state priors pass a **list** of emissions, one per state:
+    ``Markov([Normal(m0, 1), Normal(m1, 1)])``. The **transition matrix** and **initial
+    distribution** are inferable parameters too: pass ``transitions=free`` /
+    ``transitions=Dirichlet(alpha)`` (each row a simplex) and/or ``initial=free`` /
+    ``initial=Dirichlet(alpha)`` and fit with ``how='mcmc'|'ensemble'|'map'`` (typically with an
+    ordered-emission constraint for identifiability).
     """
-    comps = tuple(_as_rv(emission) for _ in range(states))
-    return RandomVariable._sample("Markov", (comps, None), name=name)
+    if isinstance(emission, (list, tuple)):
+        comps = tuple(_as_rv(e) for e in emission)
+        states = len(comps)
+    else:
+        if states is None:
+            raise ValueError("Markov(emission, states=...) needs states, or a list of emissions.")
+        comps = tuple(_as_rv(emission) for _ in range(states))
+    trans = _simplex_arg(transitions, states, states)
+    init = _simplex_arg(initial, 1, states)
+    return RandomVariable._sample("Markov", (comps, trans, init), name=name)
