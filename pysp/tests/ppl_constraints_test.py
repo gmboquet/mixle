@@ -11,7 +11,40 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import Beta, Constraint, Normal, constrain, free
+from pysp.ppl import MVN, Beta, Constraint, Normal, constrain, free
+
+
+class VectorEntryRelationTestCase(unittest.TestCase):
+    """Relations between the entries of a vector-valued RV: v[i] indexing + entrywise constraints."""
+
+    def test_ordered_entries(self):
+        v = MVN(3, name="v")
+        ordered = constrain((v[0] < v[1]) & (v[1] < v[2]))
+        S = ordered.sample(5000, seed=1)
+        self.assertEqual(S.shape, (5000, 3))
+        self.assertTrue(np.all((S[:, 0] < S[:, 1]) & (S[:, 1] < S[:, 2])))
+        self.assertEqual(ordered.columns, ["v[0]", "v[1]", "v[2]"])
+
+    def test_whole_vector_all_positive(self):
+        v = MVN(3)
+        P = constrain(v > 0).sample(3000, seed=2)
+        self.assertEqual(P.shape, (3000, 3))  # not silently collapsed
+        self.assertTrue(np.all(P > 0))
+
+    def test_linear_relation_between_entries(self):
+        v = MVN(3)
+        L = constrain(v[0] + v[1] < v[2]).sample(3000, seed=3)
+        self.assertTrue(np.all(L[:, 0] + L[:, 1] < L[:, 2]))
+
+    def test_nonlinear_relation_between_entries(self):
+        v = MVN(2)
+        N = constrain(v[0] * v[1] > 0).sample(3000, seed=4)
+        self.assertTrue(np.all(N[:, 0] * N[:, 1] > 0))  # same sign
+
+    def test_entry_index_is_a_derived_rv(self):
+        v = MVN(3)
+        self.assertAlmostEqual(float(np.mean(v[0].sample(20000, seed=5))), 0.0, delta=0.1)
+        self.assertAlmostEqual(constrain(v[0] < v[1]).prob(), 0.5, delta=0.03)
 
 
 class GenerativeRelationTestCase(unittest.TestCase):
