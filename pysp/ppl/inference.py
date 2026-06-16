@@ -176,6 +176,10 @@ def _is_dirichlet_rv(a) -> bool:
     )
 
 
+def _is_struct_spec(a) -> bool:
+    return isinstance(a, (_SimplexSpec, _VectorSpec, _CholeskySpec, _OrderedSpec))
+
+
 def _struct_spec_for(node, a):
     """The structural-parameter spec for a composite argument ``a``, or ``None``. Handles an
     explicit ``_SimplexSpec`` / ``_VectorSpec`` / ``_CholeskySpec`` (mixture weights, HMM
@@ -272,7 +276,10 @@ def _collect_composite(rv: RandomVariable):
                     collect(a)  # child model
             return
         for i, a in enumerate(node._args):
-            if isinstance(a, RandomVariable):
+            if _is_struct_spec(a):  # a vector/matrix leaf parameter (Dirichlet alpha, Categorical probs)
+                for prior, support, nm in _spec_slot_defs(a):
+                    slots.append(_Slot(len(slots), prior, support == "positive", nm, None, support))
+            elif isinstance(a, RandomVariable):
                 slots.append(
                     _Slot(len(slots), lower(a, target="dist"), fam.positive[i], a.name or f"arg{i}", a, fam.support[i])
                 )
@@ -312,7 +319,9 @@ def _collect_composite(rv: RandomVariable):
                 )
             new_args = []
             for a in node._args:
-                if a is free or isinstance(a, RandomVariable):
+                if _is_struct_spec(a):
+                    new_args.append(_spec_assemble(a, take(len(_spec_slot_defs(a)))))
+                elif a is free or isinstance(a, RandomVariable):
                     new_args.append(take(1)[0])
                 else:
                     new_args.append(a)
@@ -353,7 +362,9 @@ def _target_parts(rv: RandomVariable, data):
     """Encoder-free pieces shared by the numerical and autograd targets:
     (fam, slots, build, unpack, (dmean, dstd)). Building the pysp encoder is deferred to
     callers that need it (the autograd path scores the raw data tensor and never does)."""
-    if rv._kind == "sample" and isinstance(rv._family, CompositeFamily):
+    if rv._kind == "sample" and (isinstance(rv._family, CompositeFamily) or any(_is_struct_spec(a) for a in rv._args)):
+        # composites, and flat leaves with a vector/matrix parameter (Dirichlet alpha,
+        # Categorical probs), use the general collect/rebuild target.
         return _composite_target_parts(rv, data)
     fam = _require_flat(rv)
     slots = _slots_of(rv, fam)
