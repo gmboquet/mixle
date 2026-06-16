@@ -8,6 +8,7 @@ dispatches. See notes/ppl-syntax-spec.md for the design charter and invariants.
 Slice 1-2 of the build order: the wrapper + ``free`` holes + ``fit`` (EM core).
 Algebra, conditioning, latent-arg Compound, and MCMC routing land in later slices.
 """
+
 from __future__ import annotations
 
 import math
@@ -18,8 +19,19 @@ import numpy as np
 
 from pysp.utils.estimation import optimize
 
-__all__ = ["RandomVariable", "free", "lower", "register_family", "Family",
-           "Constraint", "Event", "constrain"]
+__all__ = [
+    "RandomVariable",
+    "free",
+    "lower",
+    "register_family",
+    "Family",
+    "Constraint",
+    "Event",
+    "constrain",
+    "eq",
+    "equal",
+    "ne",
+]
 
 
 # --------------------------------------------------------------------------- free
@@ -32,13 +44,14 @@ class _Free:
 
     __slots__ = ()
 
-    def __mul__(self, other):       # free * Field -> an OLS regression coefficient
+    def __mul__(self, other):  # free * Field -> an OLS regression coefficient
         if isinstance(other, Field):
             return _LinearPredictor([(self, other)])
         return NotImplemented
+
     __rmul__ = __mul__
 
-    def __reduce__(self):           # preserve singleton identity across pickling
+    def __reduce__(self):  # preserve singleton identity across pickling
         return (_free_singleton, ())
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
@@ -65,12 +78,14 @@ class Field:
     def __init__(self, name: str):
         self.name = name
 
-    def __mul__(self, coef):     # Field * coef
+    def __mul__(self, coef):  # Field * coef
         return _LinearPredictor([(coef, self)])
+
     __rmul__ = __mul__
 
     def __add__(self, other):
         return _LinearPredictor([(1.0, self)]).__add__(other)
+
     __radd__ = __add__
 
     def __repr__(self):
@@ -103,6 +118,7 @@ class Group:
 
     def __add__(self, other):
         return _LinearPredictor([], groups=[self._key()]).__add__(other)
+
     __radd__ = __add__
 
     def __repr__(self):
@@ -116,25 +132,27 @@ class _LinearPredictor:
     __slots__ = ("terms", "intercept", "groups")
 
     def __init__(self, terms, intercept=None, groups=None):
-        self.terms = list(terms)         # list of (coef, Field)
-        self.intercept = intercept       # RandomVariable | free | float | None
+        self.terms = list(terms)  # list of (coef, Field)
+        self.intercept = intercept  # RandomVariable | free | float | None
         self.groups = list(groups or [])  # random-intercept group names
 
     def __add__(self, other):
         if isinstance(other, _LinearPredictor):
-            return _LinearPredictor(self.terms + other.terms,
-                                    _combine_intercept(self.intercept, other.intercept),
-                                    self.groups + other.groups)
+            return _LinearPredictor(
+                self.terms + other.terms,
+                _combine_intercept(self.intercept, other.intercept),
+                self.groups + other.groups,
+            )
         if isinstance(other, Field):
             return _LinearPredictor(self.terms + [(1.0, other)], self.intercept, self.groups)
         if isinstance(other, Group):
             return _LinearPredictor(self.terms, self.intercept, self.groups + [other._key()])
         return _LinearPredictor(self.terms, _combine_intercept(self.intercept, other), self.groups)
+
     __radd__ = __add__
 
     def __repr__(self):
-        return (f"_LinearPredictor({self.terms!r}, intercept={self.intercept!r}, "
-                f"groups={self.groups!r})")
+        return f"_LinearPredictor({self.terms!r}, intercept={self.intercept!r}, groups={self.groups!r})"
 
 
 class Constraint:
@@ -150,12 +168,17 @@ class Constraint:
     relation given ``env``, a dict mapping each leaf RV to its value(s).
     """
 
-    __slots__ = ("leaves", "pred", "desc")
+    __slots__ = ("leaves", "pred", "desc", "residual")
 
-    def __init__(self, leaves, pred, desc):
+    def __init__(self, leaves, pred, desc, residual=None):
         self.leaves = tuple(leaves)
-        self.pred = pred           # env: {leaf_rv -> value(s)} -> bool mask
+        self.pred = pred  # env: {leaf_rv -> value(s)} -> bool mask
         self.desc = desc
+        # Optional continuous violation r(env): a 1-D array that is 0 where the relation holds
+        # (a hinge for inequalities, the signed gap for equalities). Enables the soft-penalty path
+        # ``fit(..., penalty=w)`` so equality / convex / algebraic constraints can be honored by
+        # gradient inference. ``None`` means penalty-mode is unavailable (e.g. a negated relation).
+        self.residual = residual
 
     @property
     def rv(self):
@@ -182,28 +205,40 @@ class Constraint:
         return tuple(out)
 
     def __and__(self, other):
-        return Constraint(self._merge_leaves(other),
-                          lambda env: self.pred(env) & other.pred(env),
-                          f"({self.desc} & {other.desc})")
+        # AND must satisfy both, so the residual stacks both violations (all must reach 0).
+        residual = _combine_residuals(self.residual, other.residual, "and")
+        return Constraint(
+            self._merge_leaves(other),
+            lambda env: self.pred(env) & other.pred(env),
+            f"({self.desc} & {other.desc})",
+            residual,
+        )
 
     def __or__(self, other):
-        return Constraint(self._merge_leaves(other),
-                          lambda env: self.pred(env) | other.pred(env),
-                          f"({self.desc} | {other.desc})")
+        # OR is satisfied when either holds, so the residual is the smaller of the two magnitudes.
+        residual = _combine_residuals(self.residual, other.residual, "or")
+        return Constraint(
+            self._merge_leaves(other),
+            lambda env: self.pred(env) | other.pred(env),
+            f"({self.desc} | {other.desc})",
+            residual,
+        )
 
     def __invert__(self):
-        return Constraint(self.leaves, lambda env: ~np.asarray(self.pred(env)), f"~{self.desc}")
+        # Negation has no smooth penalty surface; only the hard (boolean) mode survives.
+        return Constraint(self.leaves, lambda env: ~np.asarray(self.pred(env)), f"~{self.desc}", None)
 
     def __bool__(self):
         raise TypeError(
             "a Constraint has no truth value — Python chained comparisons (a < b < c) and "
-            "`and`/`or` are not supported; combine with & | ~ instead, e.g. (a < b) & (b < c).")
+            "`and`/`or` are not supported; combine with & | ~ instead, e.g. (a < b) & (b < c)."
+        )
 
     def __repr__(self):
         return f"Constraint({self.desc})"
 
 
-Event = Constraint   # back-compat alias
+Event = Constraint  # back-compat alias
 
 
 def _expr_leaves(rv) -> list:
@@ -220,13 +255,13 @@ def _expr_leaves(rv) -> list:
                 out.append(lv)
                 seen.add(id(lv))
         return out
-    return [rv]    # sample / bound / given: an atomic leaf
+    return [rv]  # sample / bound / given: an atomic leaf
 
 
 def _eval_expr(rv, env):
     """Numerically evaluate an expression RV given ``env`` (leaf RV -> value)."""
     if not isinstance(rv, RandomVariable):
-        return rv      # a constant
+        return rv  # a constant
     if rv._kind == "apply":
         base, transform = rv._args
         return transform.forward(_eval_expr(base, env))
@@ -238,8 +273,41 @@ def _eval_expr(rv, env):
     return env[rv]
 
 
-_CMP = {">": lambda a, b: a > b, ">=": lambda a, b: a >= b,
-        "<": lambda a, b: a < b, "<=": lambda a, b: a <= b}
+_CMP = {
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    "==": lambda a, b: np.isclose(a, b),
+    "!=": lambda a, b: ~np.isclose(a, b),
+}
+
+# Continuous violation r(a, b) >= 0 (0 where the relation holds): a hinge for inequalities, the
+# signed gap for equality. Used by the soft-penalty inference path (fit(..., penalty=w)).
+_RESIDUAL = {
+    ">": lambda a, b: np.maximum(0.0, b - a),
+    ">=": lambda a, b: np.maximum(0.0, b - a),
+    "<": lambda a, b: np.maximum(0.0, a - b),
+    "<=": lambda a, b: np.maximum(0.0, a - b),
+    "==": lambda a, b: a - b,
+}
+
+
+def _combine_residuals(ra, rb, mode):
+    """Combine two constraint residual closures for ``&`` (stack) / ``|`` (min magnitude)."""
+    if ra is None or rb is None:
+        return None
+    if mode == "and":
+        return lambda env: np.concatenate([np.atleast_1d(ra(env)).ravel(), np.atleast_1d(rb(env)).ravel()])
+
+    def or_residual(env):
+        va = np.atleast_1d(ra(env)).ravel()
+        vb = np.atleast_1d(rb(env)).ravel()
+        mag_a = float(np.sqrt(np.sum(va * va)))
+        mag_b = float(np.sqrt(np.sum(vb * vb)))
+        return va if mag_a <= mag_b else vb
+
+    return or_residual
 
 
 def _make_constraint(lhs, op, rhs) -> Constraint:
@@ -255,7 +323,33 @@ def _make_constraint(lhs, op, rhs) -> Constraint:
     def pred(env):
         return cmp(np.asarray(_eval_expr(lhs, env)), np.asarray(_eval_expr(rhs, env)))
 
-    return Constraint(leaves, pred, f"{_expr_desc(lhs)} {op} {_expr_desc(rhs)}")
+    residual = None
+    if op in _RESIDUAL:
+        res_fn = _RESIDUAL[op]
+
+        def residual(env):
+            return np.asarray(res_fn(np.asarray(_eval_expr(lhs, env)), np.asarray(_eval_expr(rhs, env))))
+
+    return Constraint(leaves, pred, f"{_expr_desc(lhs)} {op} {_expr_desc(rhs)}", residual)
+
+
+def eq(lhs, rhs) -> Constraint:
+    """Build an equality relation ``lhs == rhs`` over RVs/expressions/constants.
+
+    ``==`` is not overloaded on ``RandomVariable`` (RVs are used as dict keys by identity), so build
+    equalities with this function or ``rv.eq(...)``. Equalities have measure zero and cannot be honored
+    by rejection, so consume them with the soft-penalty inference path, e.g.
+    ``model.fit(data, constraints=eq(a + b, 1.0), penalty=100.0)``.
+    """
+    return _make_constraint(lhs, "==", rhs)
+
+
+equal = eq  # readable alias
+
+
+def ne(lhs, rhs) -> Constraint:
+    """Build an inequality relation ``lhs != rhs`` (boolean only; no smooth penalty surface)."""
+    return _make_constraint(lhs, "!=", rhs)
 
 
 def _expr_desc(rv) -> str:
@@ -273,13 +367,16 @@ def _convolve(da, db):
     ta, tb = type(da).__name__, type(db).__name__
     if ta == tb == "GaussianDistribution":
         from pysp.stats.leaf.gaussian import GaussianDistribution
+
         return GaussianDistribution(da.mu + db.mu, da.sigma2 + db.sigma2)
     if ta == tb == "PoissonDistribution":
         from pysp.stats.leaf.poisson import PoissonDistribution
+
         return PoissonDistribution(da.lam + db.lam)
     if ta == tb == "GammaDistribution" and abs(da.theta - db.theta) < 1e-12:
         from pysp.stats.leaf.gamma import GammaDistribution
-        return GammaDistribution(da.k + db.k, da.theta)        # same scale
+
+        return GammaDistribution(da.k + db.k, da.theta)  # same scale
     return None
 
 
@@ -293,11 +390,32 @@ class Family:
     the paired ``*Estimator`` for the all-``free`` case.
     """
 
-    __slots__ = ("name", "dist_cls", "est_cls", "to_dist", "arity", "seed_at", "positive",
-                 "init_fit", "read", "support")
+    __slots__ = (
+        "name",
+        "dist_cls",
+        "est_cls",
+        "to_dist",
+        "arity",
+        "seed_at",
+        "positive",
+        "init_fit",
+        "read",
+        "support",
+    )
 
-    def __init__(self, name, dist_cls, est_cls, to_dist, arity, seed_at=None, positive=None,
-                 init_fit=None, read=None, support=None):
+    def __init__(
+        self,
+        name,
+        dist_cls,
+        est_cls,
+        to_dist,
+        arity,
+        seed_at=None,
+        positive=None,
+        init_fit=None,
+        read=None,
+        support=None,
+    ):
         self.name = name
         self.dist_cls = dist_cls
         self.est_cls = est_cls
@@ -311,8 +429,9 @@ class Family:
         # per-slot constraint/support for gradient & MCMC reparameterization:
         # 'real' (identity), 'positive' (log), or 'unit' (logit, for probabilities).
         # Defaults from `positive`; pass `support=` to mark unit-interval params.
-        self.support = (tuple(support) if support is not None
-                        else tuple("positive" if p else "real" for p in self.positive))
+        self.support = (
+            tuple(support) if support is not None else tuple("positive" if p else "real" for p in self.positive)
+        )
         # init_fit(data) -> a concrete Distribution to warm-start EM for families whose
         # MLE is sensitive to initialization (e.g. negative-binomial dispersion).
         self.init_fit = init_fit
@@ -361,14 +480,25 @@ class CompositeFamily:
 
 
 _FAMILIES: dict[str, Any] = {}
-_DIST_TO_FAMILY: dict[type, Family] = {}        # reverse map for reading fitted params
-_DIST_TO_COMPOSITE_READ: dict[type, Any] = {}     # composite dist type -> read(dist, read_params)
+_DIST_TO_FAMILY: dict[type, Family] = {}  # reverse map for reading fitted params
+_DIST_TO_COMPOSITE_READ: dict[type, Any] = {}  # composite dist type -> read(dist, read_params)
 
 
-def register_family(name, dist_cls, est_cls, to_dist, arity, seed_at=None, positive=None,
-                    init_fit=None, read=None, support=None) -> Family:
-    fam = Family(name, dist_cls, est_cls, to_dist, arity, seed_at=seed_at, positive=positive,
-                 init_fit=init_fit, read=read, support=support)
+def register_family(
+    name, dist_cls, est_cls, to_dist, arity, seed_at=None, positive=None, init_fit=None, read=None, support=None
+) -> Family:
+    fam = Family(
+        name,
+        dist_cls,
+        est_cls,
+        to_dist,
+        arity,
+        seed_at=seed_at,
+        positive=positive,
+        init_fit=init_fit,
+        read=read,
+        support=support,
+    )
     _FAMILIES[name] = fam
     _DIST_TO_FAMILY[dist_cls] = fam
     return fam
@@ -394,14 +524,37 @@ def _count_params(p) -> int:
 
 def compare(models, data, *, by: str = "aic"):
     """Compare fitted models on ``data``. Returns rows sorted best-first by ``by``
-    ('aic' | 'bic' | 'loglik')."""
+    ('aic' | 'bic' | 'loglik' | 'waic' | 'loo').
+
+    ``'waic'`` and ``'loo'`` are the Bayesian predictive criteria (integrating over parameter
+    uncertainty via the posterior draws of a Bayesian fit); ``'aic'``/``'bic'`` use the point estimate.
+    Each row also reports ``elpd`` differences from the best model (``d_elpd``) for waic/loo.
+    """
     rows = []
     for m in models:
         ll = m.log_likelihood(data)
-        rows.append({"model": (m.name or type(m.dist).__name__), "loglik": ll,
-                     "aic": m.aic(data), "bic": m.bic(data)})
-    keys = {"loglik": lambda r: -r["loglik"], "aic": lambda r: r["aic"], "bic": lambda r: r["bic"]}
-    return sorted(rows, key=keys[by])
+        row = {"model": (m.name or type(m.dist).__name__), "loglik": ll, "aic": m.aic(data), "bic": m.bic(data)}
+        if by in ("waic", "loo"):
+            res = m.waic(data) if by == "waic" else m.loo(data)
+            row[by] = res[by]
+            row["elpd"] = res["elpd_waic" if by == "waic" else "elpd_loo"]
+            row["se"] = res["se"]
+            if by == "loo":
+                row["khat_max"] = res["khat_max"]
+        rows.append(row)
+    keys = {
+        "loglik": lambda r: -r["loglik"],
+        "aic": lambda r: r["aic"],
+        "bic": lambda r: r["bic"],
+        "waic": lambda r: r["waic"],
+        "loo": lambda r: r["loo"],
+    }
+    rows = sorted(rows, key=keys[by])
+    if by in ("waic", "loo"):
+        best = rows[0]["elpd"]
+        for r in rows:
+            r["d_elpd"] = r["elpd"] - best
+    return rows
 
 
 def read_params(dist):
@@ -432,9 +585,10 @@ def seed_child(rv: RandomVariable, value: Any, scale: float, rng=None):
             return fam.dist_cls(**fam.seed_at(value, scale))
         if fam.name == "Categorical":
             from pysp.stats.leaf.categorical import CategoricalDistribution
+
             spec = rv._args[0]
             keys = list(spec.keys()) if isinstance(spec, dict) else list(range(len(spec)))
-            w = rng.dirichlet(np.ones(len(keys)))            # random, valid (no zeros->inf)
+            w = rng.dirichlet(np.ones(len(keys)))  # random, valid (no zeros->inf)
             return CategoricalDistribution(pmap=dict(zip(keys, w)))
     return None
 
@@ -449,11 +603,9 @@ class RandomVariable:
     state. Construct via the family functions in :mod:`pysp.ppl` or ``fit``.
     """
 
-    __slots__ = ("_kind", "_family", "_args", "_name", "_keys", "_dist", "_result",
-                 "_cache", "_scope")
+    __slots__ = ("_kind", "_family", "_args", "_name", "_keys", "_dist", "_result", "_cache", "_scope")
 
-    def __init__(self, kind, *, family=None, args=(), name=None, keys=None, dist=None,
-                 result=None, scope="shared"):
+    def __init__(self, kind, *, family=None, args=(), name=None, keys=None, dist=None, result=None, scope="shared"):
         # Private; use the classmethods / family functions. Treated as immutable.
         object.__setattr__(self, "_kind", kind)
         object.__setattr__(self, "_family", family)
@@ -473,9 +625,7 @@ class RandomVariable:
         # distributed fits). Families live in the module-level registry and are
         # restored by name; transient _result/_cache are dropped.
         fam_name = self._family.name if self._family is not None else None
-        return (_rv_reconstruct,
-                (self._kind, fam_name, self._args, self._name, self._keys,
-                 self._dist, self._scope))
+        return (_rv_reconstruct, (self._kind, fam_name, self._args, self._name, self._keys, self._dist, self._scope))
 
     # -- constructors -------------------------------------------------------
     @classmethod
@@ -489,8 +639,9 @@ class RandomVariable:
         """
         if self._kind != "sample":
             raise TypeError("each() applies to a distribution used as a prior.")
-        return RandomVariable("sample", family=self._family, args=self._args,
-                              name=self._name, keys=self._keys, scope="grouped")
+        return RandomVariable(
+            "sample", family=self._family, args=self._args, name=self._name, keys=self._keys, scope="grouped"
+        )
 
     @property
     def scope(self) -> str:
@@ -513,31 +664,34 @@ class RandomVariable:
     # -- algebra (deterministic transforms + convolution) -------------------
     def _affine(self, loc, scale) -> RandomVariable:
         from pysp.stats.combinator.transform import AffineTransform
+
         return RandomVariable._apply(self, AffineTransform(loc=float(loc), scale=float(scale)))
 
     def __mul__(self, c):
-        if isinstance(c, Field):                      # coef * covariate -> regression term
+        if isinstance(c, Field):  # coef * covariate -> regression term
             return _LinearPredictor([(self, c)])
         if isinstance(c, RandomVariable):
             raise NotImplementedError("RV * RV (products) is not supported; use sums (+).")
         return self._affine(0.0, c)
+
     __rmul__ = __mul__
 
     def __add__(self, c):
-        if isinstance(c, _LinearPredictor):           # RV is an intercept
+        if isinstance(c, _LinearPredictor):  # RV is an intercept
             return c.__add__(self)
         if isinstance(c, Field):
             return _LinearPredictor([(1.0, c)], self)
-        if isinstance(c, Group):                      # RV intercept + random group effects
+        if isinstance(c, Group):  # RV intercept + random group effects
             return _LinearPredictor([], self, [c._key()])
-        if isinstance(c, RandomVariable):             # convolution of independent RVs
+        if isinstance(c, RandomVariable):  # convolution of independent RVs
             return RandomVariable._sum(self, c)
         return self._affine(c, 1.0)
+
     __radd__ = __add__
 
     def __sub__(self, c):
         if isinstance(c, RandomVariable):
-            return RandomVariable._sum(self, c._affine(0.0, -1.0))   # a + (-b)
+            return RandomVariable._sum(self, c._affine(0.0, -1.0))  # a + (-b)
         return self._affine(-float(c), 1.0)
 
     def __rsub__(self, c):
@@ -553,17 +707,33 @@ class RandomVariable:
 
     def exp(self) -> RandomVariable:
         from pysp.stats.combinator.transform import ExpTransform
+
         return RandomVariable._apply(self, ExpTransform())
 
     def log(self) -> RandomVariable:
         from pysp.stats.combinator.transform import LogTransform
+
         return RandomVariable._apply(self, LogTransform())
 
     # -- relations: comparisons build Constraints (RV vs constant / RV / linear expr) ----
-    def __gt__(self, other): return _make_constraint(self, ">", other)
-    def __ge__(self, other): return _make_constraint(self, ">=", other)
-    def __lt__(self, other): return _make_constraint(self, "<", other)
-    def __le__(self, other): return _make_constraint(self, "<=", other)
+    def __gt__(self, other):
+        return _make_constraint(self, ">", other)
+
+    def __ge__(self, other):
+        return _make_constraint(self, ">=", other)
+
+    def __lt__(self, other):
+        return _make_constraint(self, "<", other)
+
+    def __le__(self, other):
+        return _make_constraint(self, "<=", other)
+
+    # ``==`` / ``!=`` stay identity-based (RVs are dict keys), so equalities use explicit methods.
+    def eq(self, other):
+        return _make_constraint(self, "==", other)
+
+    def ne(self, other):
+        return _make_constraint(self, "!=", other)
 
     def given(self, constraint) -> RandomVariable:
         """Condition this RV on a constraint over *itself* (e.g. ``x.given(x > 0)`` ->
@@ -575,7 +745,8 @@ class RandomVariable:
         if extra:
             raise ValueError(
                 "given() conditions an RV on a relation over itself only; this constraint also "
-                "involves other RVs — use constrain(constraint) for a joint conditioning.")
+                "involves other RVs — use constrain(constraint) for a joint conditioning."
+            )
         return RandomVariable("given", args=(self, constraint))
 
     # -- introspection ------------------------------------------------------
@@ -615,7 +786,7 @@ class RandomVariable:
             children = list(d.components)
         elif hasattr(d, "topics"):
             children = list(d.topics)
-        elif hasattr(d, "dist") and not hasattr(d, "mu"):   # SequenceDistribution.dist
+        elif hasattr(d, "dist") and not hasattr(d, "mu"):  # SequenceDistribution.dist
             children = [d.dist]
         else:
             raise TypeError(f"{type(d).__name__} has no sub-models to expose as components.")
@@ -629,7 +800,7 @@ class RandomVariable:
         """
         d = lower(self, target="dist")
         if d is None and self._result is not None and hasattr(self._result, "coefficients"):
-            return self._result.coefficients          # regression: report coefficients
+            return self._result.coefficients  # regression: report coefficients
         return read_params(d)
 
     @property
@@ -639,7 +810,7 @@ class RandomVariable:
 
     # -- query verbs (valid once concrete) ----------------------------------
     def sample(self, n: int | None = None, seed: int | None = None):
-        if self._kind == "joint":                     # joint rejection sampling under a relation
+        if self._kind == "joint":  # joint rejection sampling under a relation
             leaves, constraint = self._args
             rng = np.random.RandomState(seed)
             k = n if n is not None else 1
@@ -647,15 +818,14 @@ class RandomVariable:
             have = 0
             while have < k:
                 batch = max(k * 2, 1024)
-                cols = {lv: np.asarray(lv.sample(batch, seed=int(rng.randint(1, 2 ** 31))),
-                                      dtype=float) for lv in leaves}
+                cols = {lv: np.asarray(lv.sample(batch, seed=int(rng.randint(1, 2**31))), dtype=float) for lv in leaves}
                 mask = np.asarray(constraint.eval(cols))
-                block = np.stack([cols[lv][mask] for lv in leaves], axis=1)   # (m, K)
+                block = np.stack([cols[lv][mask] for lv in leaves], axis=1)  # (m, K)
                 kept.append(block)
                 have += len(block)
             out = np.concatenate(kept, axis=0)[:k]
             return out if n is not None else out[0]
-        if self._kind == "sum":                       # convolution: sample operands and add
+        if self._kind == "sum":  # convolution: sample operands and add
             rng = np.random.RandomState(seed)
             a, b = self._args
             k = n if n is not None else 1
@@ -663,7 +833,7 @@ class RandomVariable:
             ys = np.asarray(b.sample(k, seed=int(rng.randint(1, 2**31))))
             out = xs + ys
             return out if n is not None else float(out[0])
-        if self._kind == "given":                     # rejection sampling from the region
+        if self._kind == "given":  # rejection sampling from the region
             base, event = self._args
             rng = np.random.RandomState(seed)
             k = n if n is not None else 1
@@ -679,13 +849,14 @@ class RandomVariable:
         kde = self._cache.get("_kde")
         if kde is None:
             from scipy.stats import gaussian_kde
+
             s = np.asarray(self.sample(40000, seed=12345))
             kde = gaussian_kde(s)
             self._cache["_kde"] = kde
         return kde
 
     def log_prob(self, x):
-        if self._kind == "joint":                     # joint density of independent leaves / Z
+        if self._kind == "joint":  # joint density of independent leaves / Z
             leaves, constraint = self._args
             xa = np.atleast_2d(np.asarray(x, dtype=float))
             if xa.shape[1] != len(leaves):
@@ -695,7 +866,7 @@ class RandomVariable:
             base_lp = sum(np.atleast_1d(lv.log_prob(xa[:, j])) for j, lv in enumerate(leaves))
             out = np.where(np.asarray(constraint.eval(env)), base_lp - logZ, -np.inf)
             return float(out[0]) if np.ndim(x) == 1 else out
-        if self._kind == "sum":                       # exact convolution if closed-form, else KDE
+        if self._kind == "sum":  # exact convolution if closed-form, else KDE
             a, b = self._args
             cd = None
             try:
@@ -737,6 +908,50 @@ class RandomVariable:
         n = len(list(data))
         return k * math.log(n) - 2.0 * self.log_likelihood(data)
 
+    def pointwise_log_likelihood(self, data) -> np.ndarray:
+        """Return the ``(n_draws, n_obs)`` log-likelihood matrix used by WAIC / PSIS-LOO.
+
+        For a Bayesian fit (``how='mcmc'|'hmc'|'ensemble'|'vi'``) each row is the log-likelihood of the
+        data under one posterior draw; for a point-estimate fit it is a single row.
+        """
+        r = self._result
+        if r is not None and hasattr(r, "pointwise_log_likelihood") and getattr(r, "build", None) is not None:
+            return r.pointwise_log_likelihood(data)
+        return np.asarray(self.log_prob(list(data)), dtype=float)[None, :]
+
+    def waic(self, data) -> dict:
+        """Widely Applicable Information Criterion from the posterior (lower ``waic`` is better).
+
+        Returns ``{elpd_waic, p_waic, waic, se, n_draws, pointwise}``. Estimates out-of-sample
+        predictive accuracy by integrating over parameter uncertainty -- the Bayesian analogue of
+        ``aic``/``bic`` -- and falls back to a point estimate for non-Bayesian fits.
+        """
+        from pysp.ppl import diagnostics as _diag
+
+        return _diag.waic(self.pointwise_log_likelihood(data))
+
+    def loo(self, data) -> dict:
+        """Pareto-Smoothed Importance-Sampling Leave-One-Out cross-validation (lower ``loo`` better).
+
+        Returns ``{elpd_loo, p_loo, loo, se, khat_max, n_draws, pointwise}``. ``khat_max`` above ~0.7
+        signals an unreliable estimate (refit with more posterior draws or prefer ``waic``).
+        """
+        from pysp.ppl import diagnostics as _diag
+
+        return _diag.psis_loo(self.pointwise_log_likelihood(data))
+
+    def summary(self):
+        """Posterior summary of a Bayesian fit, or the fitted params for a point estimate.
+
+        For ``how='mcmc'|'hmc'|'ensemble'|'vi'`` returns a per-parameter dict of
+        ``{mean, std, q2.5, q97.5}`` (the 95% credible interval) plus ``_acceptance_rate`` and, for
+        multi-chain runs, ``_rhat`` / ``_ess`` / ``_n_chains``. For ``map``/``em`` it returns ``.params``.
+        """
+        r = self._result
+        if r is not None and callable(getattr(r, "summary", None)):
+            return r.summary()
+        return self.params
+
     def mean(self, samples: int = 20000, seed: int = 0):
         """Expected value of the random variable (Monte-Carlo; works for any RV —
         concrete, transformed, convolved, or conditioned). For a joint ``constrain(...)``
@@ -757,8 +972,7 @@ class RandomVariable:
         if p is None:
             leaves, constraint = self._args
             rng = np.random.RandomState(seed)
-            cols = {lv: np.asarray(lv.sample(samples, seed=int(rng.randint(1, 2 ** 31))),
-                                  dtype=float) for lv in leaves}
+            cols = {lv: np.asarray(lv.sample(samples, seed=int(rng.randint(1, 2**31))), dtype=float) for lv in leaves}
             p = max(float(np.mean(np.asarray(constraint.eval(cols)))), 1e-9)
             self._cache["_pjoint"] = p
         return p
@@ -782,6 +996,7 @@ class RandomVariable:
         fitted distribution).
         """
         import numpy as _np
+
         rng = rng or _np.random.RandomState()
         r = self._result
         pred = getattr(r, "predictive", None) if r is not None else None
@@ -798,14 +1013,11 @@ class RandomVariable:
           RV was fit with ``how='mcmc'`` (read from ``.result``).
         """
         # Parameter posterior: a handle/name/index against an MCMC result.
-        if isinstance(x, (RandomVariable, str, int)) and self._result is not None \
-                and hasattr(self._result, "samples"):
+        if isinstance(x, (RandomVariable, str, int)) and self._result is not None and hasattr(self._result, "samples"):
             return self._result.samples(x)
         d = lower(self, target="dist")
         if not (hasattr(d, "seq_posterior") or hasattr(d, "posterior")):
-            raise NotImplementedError(
-                f"{type(d).__name__} exposes no posterior (no latent to infer)."
-            )
+            raise NotImplementedError(f"{type(d).__name__} exposes no posterior (no latent to infer).")
         if np.isscalar(x):
             return np.asarray(d.posterior(x))
         enc = d.dist_to_encoder().seq_encode(list(x))
@@ -816,14 +1028,26 @@ class RandomVariable:
     # -- resolve ------------------------------------------------------------
     def _has_priors(self) -> bool:
         # A prior is an RV in a *flat* family slot; composite children are sub-models.
-        return (self._kind == "sample"
-                and not isinstance(self._family, CompositeFamily)
-                and any(isinstance(a, RandomVariable) for a in self._args))
+        return (
+            self._kind == "sample"
+            and not isinstance(self._family, CompositeFamily)
+            and any(isinstance(a, RandomVariable) for a in self._args)
+        )
 
-    def fit(self, data: Sequence[Any], *, how: str = "auto", max_its: int = 100,
-            delta: float = 1e-8, backend: str = "local", num_workers: int | None = None,
-            engine: Any = None, precision: Any = None, print_iter: int = 0,
-            **kw) -> RandomVariable:
+    def fit(
+        self,
+        data: Sequence[Any],
+        *,
+        how: str = "auto",
+        max_its: int = 100,
+        delta: float = 1e-8,
+        backend: str = "local",
+        num_workers: int | None = None,
+        engine: Any = None,
+        precision: Any = None,
+        print_iter: int = 0,
+        **kw,
+    ) -> RandomVariable:
         """Estimate / infer parameters from ``data`` and return a bound RV.
 
         ``how``: ``'em'`` (EM/MLE, default for plain ``free`` models), ``'map'`` (maximize
@@ -831,8 +1055,19 @@ class RandomVariable:
         ``'auto'`` picks ``map`` when the model has priors else ``em``. EM threads pysp's
         parallel/distributed backends (``backend='mp'|'mpi'|'dask'``).
         """
-        valid_how = {"auto", "em", "map", "mcmc", "hmc", "ensemble", "vi", "vmp", "conjugate",
-                     "conjugate_mixture", "hierarchical"}
+        valid_how = {
+            "auto",
+            "em",
+            "map",
+            "mcmc",
+            "hmc",
+            "ensemble",
+            "vi",
+            "vmp",
+            "conjugate",
+            "conjugate_mixture",
+            "hierarchical",
+        }
         if how not in valid_how:
             raise ValueError(f"unknown how={how!r}; choose from {sorted(valid_how)}.")
         if hasattr(data, "__len__") and len(data) == 0:
@@ -841,35 +1076,42 @@ class RandomVariable:
         # regression / GLM: a linear predictor (covariates) in a parameter slot
         if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
             from pysp.ppl import regression as _reg
+
             return _reg.regression_fit(self, data, **kw)
 
         # state-space time-series models (Kalman/RTS + EM)
-        if self._kind == "sample" and isinstance(self._family, CompositeFamily) \
-                and self._family.name == "StateSpace":
+        if self._kind == "sample" and isinstance(self._family, CompositeFamily) and self._family.name == "StateSpace":
             from pysp.ppl import statespace as _ss
+
             return _ss.statespace_fit(self, data, **kw)
 
         grouped = self._kind == "sample" and any(
-            isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args)
+            isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args
+        )
         # partial-free: a flat model with some `free` slots and some fixed constants (no priors).
         # The all-free EM estimator can't hold params fixed, so fit only the free slots by
         # maximum likelihood (MAP with no prior term), with the fixed args held constant.
         flat = self._kind == "sample" and not isinstance(self._family, CompositeFamily)
-        partial_free = (flat and not self._has_priors()
-                        and any(_is_free(a) for a in self._args)
-                        and not all(_is_free(a) for a in self._args))
+        partial_free = (
+            flat
+            and not self._has_priors()
+            and any(_is_free(a) for a in self._args)
+            and not all(_is_free(a) for a in self._args)
+        )
         has_constraints = kw.get("constraints") is not None
         if has_constraints and how in ("em", "conjugate", "conjugate_mixture", "vi", "vmp"):
             raise ValueError(
                 f"how={how!r} cannot honor inequality constraints; use 'map', 'mcmc', 'hmc', "
-                "or 'ensemble' (or how='auto').")
+                "or 'ensemble' (or how='auto')."
+            )
         if how == "auto":
             if grouped:
                 how = "hierarchical"
             elif has_constraints:
-                how = "map"      # constraints truncate the region; the conjugate paths can't
+                how = "map"  # constraints truncate the region; the conjugate paths can't
             elif self._has_priors():
                 from pysp.ppl import inference as _inf
+
                 if _inf.conjugate_spec(self) is not None:
                     how = "conjugate"
                 elif _inf.conjugate_mixture_spec(self) is not None:
@@ -881,10 +1123,10 @@ class RandomVariable:
             else:
                 how = "em"
         elif how == "em" and partial_free:
-            how = "map"   # EM cannot hold some params fixed; MLE the free slots instead
-        if how in ("map", "mcmc", "hmc", "ensemble", "vi", "vmp", "conjugate",
-                   "conjugate_mixture", "hierarchical"):
+            how = "map"  # EM cannot hold some params fixed; MLE the free slots instead
+        if how in ("map", "mcmc", "hmc", "ensemble", "vi", "vmp", "conjugate", "conjugate_mixture", "hierarchical"):
             from pysp.ppl import inference as _inf
+
             if how == "conjugate_mixture":
                 return _inf.conjugate_mixture_fit(self, data, **kw)
             if how == "mcmc":
@@ -897,6 +1139,7 @@ class RandomVariable:
                 return _inf.vi_fit(self, data, **kw)
             if how == "vmp":
                 from pysp.ppl import vmp as _vmp
+
                 if isinstance(self._family, CompositeFamily) and self._family.name == "Mixture":
                     comps = self._args[0]
                     return _vmp.mixture_vmp(data, len(comps), **kw)
@@ -909,29 +1152,45 @@ class RandomVariable:
         # EM / MLE path
         est = lower(self, target="estimator")
         # Warm-start finicky flat-family MLEs (e.g. negative-binomial) from a moment match.
-        if "prev_estimate" not in kw and self._kind == "sample" \
-                and not isinstance(self._family, CompositeFamily) \
-                and getattr(self._family, "init_fit", None) is not None:
+        if (
+            "prev_estimate" not in kw
+            and self._kind == "sample"
+            and not isinstance(self._family, CompositeFamily)
+            and getattr(self._family, "init_fit", None) is not None
+        ):
             seed = self._family.init_fit(data)
             if seed is not None:
                 kw["prev_estimate"] = seed
         # Auto-seed latent composites (mixtures, ...) at distinct data points so EM
         # escapes the symmetric global-mean fixed point — "it just works".
-        if "prev_estimate" not in kw and self._kind == "sample" \
-                and isinstance(self._family, CompositeFamily) and self._family.seed_fn is not None:
+        if (
+            "prev_estimate" not in kw
+            and self._kind == "sample"
+            and isinstance(self._family, CompositeFamily)
+            and self._family.seed_fn is not None
+        ):
             import numpy as _np
+
             rng = kw.get("rng") or _np.random.RandomState()
             seed = self._family.seed_fn(self._args, data, rng, seed_child)
             if seed is not None:
                 kw["prev_estimate"] = seed
         import sys
+
         out = open("/dev/null", "w") if not print_iter else sys.stdout
         try:
             fitted = optimize(
-                data, est, max_its=max_its, delta=delta,
-                backend=backend, num_workers=num_workers,
-                engine=engine, precision=precision,
-                print_iter=max(print_iter, 1), out=out, **kw,
+                data,
+                est,
+                max_its=max_its,
+                delta=delta,
+                backend=backend,
+                num_workers=num_workers,
+                engine=engine,
+                precision=precision,
+                print_iter=max(print_iter, 1),
+                out=out,
+                **kw,
             )
         finally:
             if not print_iter:
@@ -971,7 +1230,8 @@ def constrain(*constraints) -> RandomVariable:
         if lv._kind not in ("sample", "bound") or lv.has_free:
             raise ValueError(
                 "constrain() variables must be concrete RVs (a distribution with fixed "
-                "parameters), not models with `free` holes; fit those first.")
+                "parameters), not models with `free` holes; fit those first."
+            )
     return RandomVariable("joint", args=(leaves, combined), name=None)
 
 
@@ -1004,6 +1264,7 @@ def lower(rv: RandomVariable, *, target: str = "dist"):
         if target != "dist":
             raise NotImplementedError("fitting through an RV transform is a later slice.")
         from pysp.stats.combinator.transform import TransformDistribution
+
         base, transform = rv._args
         d = TransformDistribution(lower(base, target="dist"), transform)
         cache[target] = d
@@ -1017,8 +1278,7 @@ def lower(rv: RandomVariable, *, target: str = "dist"):
         if target == "dist":
             result = fam.dist_fn(rv._args, lambda c: lower(c, target="dist"))
         elif target == "estimator":
-            result = fam.est_fn(rv._args, lambda c: lower(c, target="estimator"),
-                                rv._name, rv._keys)
+            result = fam.est_fn(rv._args, lambda c: lower(c, target="estimator"), rv._name, rv._keys)
         else:
             raise ValueError(f"unknown lowering target {target!r}")
         cache[target] = result
@@ -1028,8 +1288,7 @@ def lower(rv: RandomVariable, *, target: str = "dist"):
         if not all(_is_free(a) for a in rv._args):
             if any(_is_free(a) for a in rv._args):
                 raise NotImplementedError(
-                    f"{fam.name}: partial `free` (some args fixed) is a later slice; "
-                    "use all-free or all-fixed for now."
+                    f"{fam.name}: partial `free` (some args fixed) is a later slice; use all-free or all-fixed for now."
                 )
             # No holes: estimator of a fully-specified model is its own estimator.
             est = lower(rv, target="dist").estimator()
@@ -1040,13 +1299,9 @@ def lower(rv: RandomVariable, *, target: str = "dist"):
 
     if target == "dist":
         if any(_is_free(a) for a in rv._args):
-            raise ValueError(
-                f"{fam.name} has unresolved `free` parameters; call .fit(data) first."
-            )
+            raise ValueError(f"{fam.name} has unresolved `free` parameters; call .fit(data) first.")
         if any(isinstance(a, RandomVariable) for a in rv._args):
-            raise NotImplementedError(
-                "latent/random parameters (a distribution in a slot) land in build slice 5."
-            )
+            raise NotImplementedError("latent/random parameters (a distribution in a slot) land in build slice 5.")
         d = fam.make_dist(rv._args, rv._name)
         cache[target] = d
         return d

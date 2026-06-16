@@ -302,7 +302,17 @@ m.mean(); m.var() # moments (Monte-Carlo; works for any RV)
 m.log_prob(x)     # density (scalar or vectorized)
 m.posterior(x)    # latent-state posterior (data) OR parameter posterior (name/handle)
 m.predict(n)      # posterior-predictive draws (Bayesian) or plug-in predictive (point fit)
+m.waic(data)      # WAIC: Bayesian predictive accuracy {waic, elpd_waic, p_waic, se, ...}
+m.loo(data)       # PSIS-LOO cross-validation {loo, elpd_loo, p_loo, se, khat_max, ...}
 m.result          # inference metadata: posterior draws, summary, diagnostics
+```
+
+Model comparison spans plug-in and predictive criteria:
+
+```python
+compare([m1, m2], data, by="waic")   # 'aic' | 'bic' | 'loglik' | 'waic' | 'loo'
+#   waic/loo integrate over posterior uncertainty (the modern Stan/ArviZ criteria);
+#   rows sort best-first and report d_elpd (elpd difference from the best model).
 ```
 
 ## Design guarantees
@@ -358,7 +368,8 @@ emission family** (Gaussian / Poisson / Categorical / …), **multivariate Gauss
 (`MVN`, `DiagGaussian`), **LDA** topic models, **Dirichlet-Categorical** VMP nodes,
 **RV+RV convolution** (`x + y`), **event conditioning** (`.given`), **Bayesian mixture via
 VBEM**, **moments** (`mean`/`var`), and **model comparison** (`log_likelihood`, `aic`/`bic`,
-`compare`). 12 scalar families + multivariate + 6 structured model types.
+plus Bayesian predictive **WAIC** and **PSIS-LOO** via `m.waic`/`m.loo`/`compare(by="waic"|"loo")`).
+12 scalar families + multivariate + 6 structured model types.
 
 Future: LDA in-graph as VMP factors, exact (FFT) convolution for non-conjugate continuous
 sums, analytic gradients for faster HMC.
