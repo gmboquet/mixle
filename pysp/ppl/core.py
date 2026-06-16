@@ -260,7 +260,7 @@ def _expr_leaves(rv) -> list:
     """The leaf (sample/bound) RVs an expression RV depends on, in left-to-right order."""
     if not isinstance(rv, RandomVariable):
         return []
-    if rv._kind in ("apply", "pow"):
+    if rv._kind in ("apply", "pow", "select"):
         return _expr_leaves(rv._args[0])
     if rv._kind in ("sum", "prod"):
         out = _expr_leaves(rv._args[0])
@@ -289,9 +289,22 @@ def _eval_expr(rv, env):
     if rv._kind == "pow":
         base, exponent = rv._args
         return _eval_expr(base, env) ** exponent
+    if rv._kind == "select":
+        base, index = rv._args
+        return np.asarray(_eval_expr(base, env))[..., index]
     if rv not in env:
         raise KeyError(f"no value supplied for {rv!r} when evaluating a constraint.")
     return env[rv]
+
+
+def _row_mask(mask) -> np.ndarray:
+    """Reduce a constraint's per-sample mask to one boolean per row. A relation between scalars
+    is already ``(n,)``; a whole-vector relation (``v > 0``) yields ``(n, d)`` and means *all
+    entries* hold, so reduce the trailing axes with ``all``."""
+    m = np.asarray(mask)
+    if m.ndim > 1:
+        m = m.all(axis=tuple(range(1, m.ndim)))
+    return m
 
 
 _CMP = {
@@ -384,6 +397,8 @@ def _expr_desc(rv) -> str:
         return f"({_expr_desc(rv._args[0])} * {_expr_desc(rv._args[1])})"
     if rv._kind == "pow":
         return f"({_expr_desc(rv._args[0])} ** {rv._args[1]})"
+    if rv._kind == "select":
+        return f"{_expr_desc(rv._args[0])}[{rv._args[1]}]"
     return rv._name or "rv"
 
 
@@ -697,6 +712,17 @@ class RandomVariable:
         # Power expression node (base ** const). Same status as a product node.
         return cls("pow", args=(base, float(exponent)))
 
+    @classmethod
+    def _select(cls, base, index) -> RandomVariable:
+        # Entry-selection node base[i]: picks component `index` of a vector-valued RV. Valid in
+        # constraint / solver expressions and as a derived RV (sample/mean).
+        return cls("select", args=(base, int(index)))
+
+    def __getitem__(self, index) -> RandomVariable:
+        if not isinstance(index, int):
+            raise TypeError("RandomVariable indexing selects a single integer entry, e.g. v[0].")
+        return RandomVariable._select(self, index)
+
     # -- algebra (deterministic transforms + convolution) -------------------
     def _affine(self, loc, scale) -> RandomVariable:
         from pysp.stats.combinator.transform import AffineTransform
@@ -805,11 +831,17 @@ class RandomVariable:
 
     @property
     def columns(self) -> list:
-        """For a ``constrain(...)`` joint RV: the variable names, in sample-column order."""
+        """For a ``constrain(...)`` joint RV: the variable names, in sample-column order. A
+        vector-valued variable expands to one name per entry (``v[0]``, ``v[1]``, ...)."""
         if self._kind != "joint":
             raise TypeError("columns is only defined for a constrain(...) RV.")
         leaves = self._args[0]
-        return [lv._name or f"rv{i}" for i, lv in enumerate(leaves)]
+        names = []
+        for i, lv in enumerate(leaves):
+            base = lv._name or f"rv{i}"
+            w = int(np.asarray(lv.sample(1, seed=0)).reshape(1, -1).shape[1])
+            names.extend([base] if w == 1 else [f"{base}[{j}]" for j in range(w)])
+        return names
 
     @property
     def dist(self):
@@ -860,12 +892,17 @@ class RandomVariable:
             while have < k:
                 batch = max(k * 2, 1024)
                 cols = {lv: np.asarray(lv.sample(batch, seed=int(rng.randint(1, 2**31))), dtype=float) for lv in leaves}
-                mask = np.asarray(constraint.eval(cols))
-                block = np.stack([cols[lv][mask] for lv in leaves], axis=1)  # (m, K)
+                mask = _row_mask(constraint.eval(cols))  # per-row; vector relations reduce over entries
+                block = np.concatenate([cols[lv][mask].reshape(int(mask.sum()), -1) for lv in leaves], axis=1)
                 kept.append(block)
                 have += len(block)
             out = np.concatenate(kept, axis=0)[:k]
             return out if n is not None else out[0]
+        if self._kind == "select":  # entry of a vector RV: sample base, take the component
+            base, index = self._args
+            k = n if n is not None else 1
+            xs = np.asarray(base.sample(k, seed=seed), dtype=float)[..., index]
+            return xs if n is not None else float(xs[0])
         if self._kind == "sum":  # convolution: sample operands and add
             rng = np.random.RandomState(seed)
             a, b = self._args
@@ -912,13 +949,18 @@ class RandomVariable:
     def log_prob(self, x):
         if self._kind == "joint":  # joint density of independent leaves / Z
             leaves, constraint = self._args
+            widths = [int(np.asarray(lv.sample(1, seed=0)).reshape(1, -1).shape[1]) for lv in leaves]
+            if any(w > 1 for w in widths):
+                raise NotImplementedError(
+                    "joint log_prob over vector-valued variables is not supported yet; use .sample / .mean / .prob."
+                )
             xa = np.atleast_2d(np.asarray(x, dtype=float))
             if xa.shape[1] != len(leaves):
                 raise ValueError(f"expected {len(leaves)} columns, got shape {xa.shape}.")
             logZ = math.log(self.prob())
             env = {lv: xa[:, j] for j, lv in enumerate(leaves)}
             base_lp = sum(np.atleast_1d(lv.log_prob(xa[:, j])) for j, lv in enumerate(leaves))
-            out = np.where(np.asarray(constraint.eval(env)), base_lp - logZ, -np.inf)
+            out = np.where(_row_mask(constraint.eval(env)), base_lp - logZ, -np.inf)
             return float(out[0]) if np.ndim(x) == 1 else out
         if self._kind == "sum":  # exact convolution if closed-form, else KDE
             a, b = self._args
@@ -1027,7 +1069,7 @@ class RandomVariable:
             leaves, constraint = self._args
             rng = np.random.RandomState(seed)
             cols = {lv: np.asarray(lv.sample(samples, seed=int(rng.randint(1, 2**31))), dtype=float) for lv in leaves}
-            p = max(float(np.mean(np.asarray(constraint.eval(cols)))), 1e-9)
+            p = max(float(np.mean(_row_mask(constraint.eval(cols)))), 1e-9)
             self._cache["_pjoint"] = p
         return p
 
