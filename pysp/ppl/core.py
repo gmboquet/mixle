@@ -248,9 +248,9 @@ class Constraint:
     relation given ``env``, a dict mapping each leaf RV to its value(s).
     """
 
-    __slots__ = ("leaves", "pred", "desc", "residual")
+    __slots__ = ("leaves", "pred", "desc", "residual", "soft")
 
-    def __init__(self, leaves, pred, desc, residual=None):
+    def __init__(self, leaves, pred, desc, residual=None, soft=False):
         self.leaves = tuple(leaves)
         self.pred = pred  # env: {leaf_rv -> value(s)} -> bool mask
         self.desc = desc
@@ -259,6 +259,9 @@ class Constraint:
         # ``fit(..., penalty=w)`` so equality / convex / algebraic constraints can be honored by
         # gradient inference. ``None`` means penalty-mode is unavailable (e.g. a negated relation).
         self.residual = residual
+        # ``soft``: a measure-zero relation (equality / ODE residual) that cannot be honored by
+        # rejection, so ``fit`` auto-selects the soft-penalty path for it (no ``penalty=`` needed).
+        self.soft = soft
 
     @property
     def rv(self):
@@ -292,6 +295,7 @@ class Constraint:
             lambda env: self.pred(env) & other.pred(env),
             f"({self.desc} & {other.desc})",
             residual,
+            self.soft or other.soft,
         )
 
     def __or__(self, other):
@@ -302,6 +306,7 @@ class Constraint:
             lambda env: self.pred(env) | other.pred(env),
             f"({self.desc} | {other.desc})",
             residual,
+            self.soft or other.soft,
         )
 
     def __invert__(self):
@@ -429,7 +434,8 @@ def _make_constraint(lhs, op, rhs) -> Constraint:
         def residual(env):
             return np.asarray(res_fn(np.asarray(_eval_expr(lhs, env)), np.asarray(_eval_expr(rhs, env))))
 
-    return Constraint(leaves, pred, f"{_expr_desc(lhs)} {op} {_expr_desc(rhs)}", residual)
+    # equality is measure-zero -> mark soft so fit() auto-uses the penalty path (no rejection)
+    return Constraint(leaves, pred, f"{_expr_desc(lhs)} {op} {_expr_desc(rhs)}", residual, soft=(op == "=="))
 
 
 def eq(lhs, rhs) -> Constraint:
@@ -532,6 +538,7 @@ def ode_residual(v, f, dt: float = 1.0, *, tol: float = 1e-2) -> Constraint:
         lambda env: np.all(np.abs(resid(env)) <= tol, axis=-1),
         f"ode_residual({_expr_desc(v)})",
         lambda env: np.asarray(resid(env)).ravel(),
+        soft=True,  # an ODE residual is measure-zero -> always the penalty path
     )
 
 

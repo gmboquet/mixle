@@ -62,6 +62,13 @@ class SoftConstraintInferenceTestCase(unittest.TestCase):
         fit = Beta(a, b).fit(self.data, how="map", constraints=eq(a, b), penalty=200.0)
         self.assertAlmostEqual(fit.params["a"], fit.params["b"], delta=0.1)
 
+    def test_equality_auto_penalty_no_kwarg(self):
+        # an equality is measure-zero -> fit auto-selects the penalty path; no penalty= needed,
+        # and how='auto' must not fail trying to find a feasible point by rejection.
+        a, b = self._model()
+        fit = Beta(a, b).fit(self.data, constraints=eq(a + b, 8.0))  # auto -> map + auto penalty
+        self.assertAlmostEqual(fit.params["a"] + fit.params["b"], 8.0, delta=0.3)
+
     def test_equality_ensemble(self):
         a, b = self._model()
         fit = Beta(a, b).fit(
