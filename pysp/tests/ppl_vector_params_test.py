@@ -9,7 +9,34 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import MVN, DiagGaussian, free, ordered
+from pysp.ppl import MVN, Categorical, DiagGaussian, Dirichlet, free, ordered
+
+
+class LeafVectorParameterTestCase(unittest.TestCase):
+    """Leaf distributions whose parameter is a vector: Categorical probs (simplex), Dirichlet
+    alpha (positive vector)."""
+
+    def test_categorical_probs_simplex(self):
+        rng = np.random.RandomState(0)
+        cats = list(rng.choice(3, size=4000, p=[0.5, 0.3, 0.2]))
+        m = Categorical(free, dim=3).fit(
+            cats, how="ensemble", draws=800, burn=300, walkers=16, rng=np.random.RandomState(1)
+        )
+        p = np.array([m.dist.pmap.get(i, 0.0) for i in range(3)])
+        self.assertAlmostEqual(float(p.sum()), 1.0, places=6)  # on the simplex
+        self.assertTrue(np.allclose(p, [0.5, 0.3, 0.2], atol=0.05))
+
+    def test_categorical_free_needs_dim(self):
+        with self.assertRaises(ValueError):
+            Categorical(free)
+
+    def test_dirichlet_alpha_vector(self):
+        rng = np.random.RandomState(0)
+        data = [list(x) for x in rng.dirichlet([2.0, 3.0, 5.0], size=3000)]
+        m = Dirichlet(free, dim=3).fit(data, how="map")
+        alpha = np.asarray(m.params["alpha"])
+        self.assertTrue(np.all(alpha > 0))  # positive vector
+        self.assertTrue(np.allclose(alpha, [2.0, 3.0, 5.0], atol=0.6))
 
 
 class MVNParameterInferenceTestCase(unittest.TestCase):

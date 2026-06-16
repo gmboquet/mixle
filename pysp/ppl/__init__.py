@@ -528,8 +528,16 @@ def Beta(a: Any, b: Any, *, name: str | None = None, keys: str | None = None) ->
     return RandomVariable._sample("Beta", (a, b), name=name, keys=keys)
 
 
-def Dirichlet(alpha: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Dirichlet over a simplex; used as a prior on Categorical probabilities (VMP)."""
+def Dirichlet(
+    alpha: Any, *, dim: int | None = None, name: str | None = None, keys: str | None = None
+) -> RandomVariable:
+    """Dirichlet over a simplex; used as a prior on Categorical probabilities (VMP). The
+    concentration ``alpha`` is also an inferable parameter: ``Dirichlet(free, dim=K)`` estimates
+    a positive ``K``-vector from observed simplex data via ``how='mcmc'|'ensemble'|'map'``."""
+    if alpha is free:
+        if dim is None:
+            raise ValueError("Dirichlet(free, dim=K) needs the dimension dim.")
+        alpha = _VectorSpec(int(dim), "positive", name="alpha")
     return RandomVariable._sample("Dirichlet", (alpha,), name=name, keys=keys)
 
 
@@ -556,8 +564,16 @@ def NegativeBinomial(r: Any, p: Any, *, name: str | None = None, keys: str | Non
     return RandomVariable._sample("NegativeBinomial", (r, p), name=name, keys=keys)
 
 
-def Categorical(probs: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Categorical from a probability dict {value: p} or a list of probabilities."""
+def Categorical(
+    probs: Any, *, dim: int | None = None, name: str | None = None, keys: str | None = None
+) -> RandomVariable:
+    """Categorical from a probability dict {value: p} or a list of probabilities. The probability
+    vector is also an inferable simplex parameter: ``Categorical(free, dim=K)`` estimates the K
+    category probabilities (on the simplex) via ``how='mcmc'|'ensemble'|'map'``."""
+    if probs is free:
+        if dim is None:
+            raise ValueError("Categorical(free, dim=K) needs the number of categories dim.")
+        probs = _SimplexSpec(np.ones(int(dim)), rows=1, name="p")
     return RandomVariable._sample("Categorical", (probs,), name=name, keys=keys)
 
 
