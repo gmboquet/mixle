@@ -29,7 +29,6 @@ __all__ = [
     "Constraint",
     "Event",
     "constrain",
-    "param",
     "eq",
     "equal",
     "ne",
@@ -45,13 +44,19 @@ __all__ = [
 
 # --------------------------------------------------------------------------- free
 class _Free:
-    """The single ``free`` token: an argument slot to be estimated (MLE).
+    """The ``free`` token: an argument slot to be estimated.
 
-    In IR terms it is ``Var(prior=flat, scope=shared, policy=point)``. It is a
-    singleton; identity (``arg is free``) is the test used during lowering.
+    Bare ``free`` is a scalar slot (identity ``arg is free`` is the test used during lowering).
+    *Called*, it is a **vector/matrix parameter handle** you can both place in a slot and reference
+    in constraints: ``free(dim)`` (a real vector), ``free(dim, name="mu")`` (named, for readout),
+    ``free(dim, kind="ordered"|"simplex"|"cholesky")``, ``free(dim, support="positive")``. This
+    subsumes the old ``param(...)`` helper — one token for "estimate this".
     """
 
     __slots__ = ()
+
+    def __call__(self, dim: int, *, name=None, kind: str = "vector", support: str = "real"):
+        return _param_handle(int(dim), name=name, kind=kind, support=support)
 
     def __mul__(self, other):  # free * Field -> an OLS regression coefficient
         if isinstance(other, Field):
@@ -1525,19 +1530,13 @@ def constrain(*constraints) -> RandomVariable:
     return RandomVariable("joint", args=(leaves, combined), name=None)
 
 
-def param(name: str, dim: int, *, support: str = "real", kind: str = "vector") -> RandomVariable:
-    """A referenceable vector/matrix *parameter handle*.
-
-    Pass it to a constructor's structural slot **and** reference it in constraints, so the
-    constraint applies to the inferred parameter::
-
-        m = param("mu", 3, kind="ordered")
-        MVN(3, mean=m, cov=free).fit(X, how="ensemble", constraints=increasing(m))
-        S = param("S", 3, kind="cholesky"); MVN(3, mean=free, cov=S)
+def _param_handle(dim: int, *, name=None, kind: str = "vector", support: str = "real") -> RandomVariable:
+    """Build a referenceable vector/matrix parameter handle (the result of calling ``free(...)``).
 
     ``kind``: ``vector`` (entries on ``support`` real/positive/unit), ``ordered`` (increasing),
-    ``simplex`` (sums to 1), or ``cholesky`` (an SPD covariance). The handle behaves like a
-    vector RV in constraint expressions — ``m[i]``, ``m[0] < m[1]``, ``increasing(m)``, etc.
+    ``simplex`` (sums to 1), or ``cholesky`` (an SPD covariance). Placed in a constructor slot and
+    referenced in constraints — ``m = free(3, name="mu"); MVN(3, mean=m).fit(X, constraints=increasing(m))``.
+    The handle behaves like a vector RV in constraint expressions (``m[i]``, ``m[0] < m[1]``, ...).
     """
     dim = int(dim)
     if kind == "vector":
@@ -1549,7 +1548,7 @@ def param(name: str, dim: int, *, support: str = "real", kind: str = "vector") -
     elif kind == "cholesky":
         spec = _CholeskySpec(dim, name)
     else:
-        raise ValueError(f"unknown param kind {kind!r}; use vector/ordered/simplex/cholesky.")
+        raise ValueError(f"unknown free(...) kind {kind!r}; use vector/ordered/simplex/cholesky.")
     return RandomVariable("param", args=(spec,), name=name)
 
 

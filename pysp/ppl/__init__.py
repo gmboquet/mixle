@@ -43,7 +43,6 @@ from pysp.ppl.core import (
     ne,
     ode_residual,
     ordered,
-    param,
     register_composite,
     register_family,
 )
@@ -111,7 +110,6 @@ __all__ = [
     "Group",
     "compare",
     "constrain",
-    "param",
     "Constraint",
     "Event",
     "eq",
