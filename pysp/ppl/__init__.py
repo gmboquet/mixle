@@ -41,7 +41,9 @@ from pysp.ppl.core import (
     lower,
     monotone,
     ne,
+    ode_residual,
     ordered,
+    param,
     register_composite,
     register_family,
 )
@@ -109,6 +111,7 @@ __all__ = [
     "Group",
     "compare",
     "constrain",
+    "param",
     "Constraint",
     "Event",
     "eq",
@@ -120,6 +123,7 @@ __all__ = [
     "convex",
     "concave",
     "lipschitz",
+    "ode_residual",
 ]
 
 

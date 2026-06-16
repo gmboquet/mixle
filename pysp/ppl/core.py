@@ -29,6 +29,7 @@ __all__ = [
     "Constraint",
     "Event",
     "constrain",
+    "param",
     "eq",
     "equal",
     "ne",
@@ -38,6 +39,7 @@ __all__ = [
     "convex",
     "concave",
     "lipschitz",
+    "ode_residual",
 ]
 
 
@@ -510,6 +512,26 @@ def lipschitz(v, bound: float) -> Constraint:
         lambda x: np.abs(_diff(x)) <= b,
         lambda x: np.maximum(0.0, np.abs(_diff(x)) - b),
         f"lipschitz({_expr_desc(v)}, {b})",
+    )
+
+
+def ode_residual(v, f, dt: float = 1.0, *, tol: float = 1e-2) -> Constraint:
+    """A differential-equation constraint: ``v`` (a function sampled on a uniform grid of spacing
+    ``dt``) satisfies ``dv/dt = f(v)``. The signed residual ``diff(v)/dt - f(v[:-1])`` feeds the
+    soft-penalty inference path — ``fit(..., constraints=ode_residual(y, f), penalty=w)`` fits a
+    physics-informed curve. Like an equality it is measure-zero, so consume it with ``penalty=``
+    rather than by rejection."""
+    step = float(dt)
+
+    def resid(env):
+        y = np.asarray(_eval_expr(v, env), dtype=float)
+        return np.diff(y, axis=-1) / step - np.asarray(f(y[..., :-1]), dtype=float)
+
+    return Constraint(
+        _expr_leaves(v),
+        lambda env: np.all(np.abs(resid(env)) <= tol, axis=-1),
+        f"ode_residual({_expr_desc(v)})",
+        lambda env: np.asarray(resid(env)).ravel(),
     )
 
 
@@ -1257,6 +1279,25 @@ class RandomVariable:
             and any(isinstance(a, RandomVariable) for a in self._args)
         )
 
+    def _has_struct_param(self) -> bool:
+        # A structural vector/matrix parameter (a spec or a param(...) handle) anywhere in the tree
+        # -> the model needs inference (map/mcmc/...), not the EM estimator that ignores it.
+        if self._kind != "sample":
+            return False
+        stack = list(self._args)
+        while stack:
+            a = stack.pop()
+            if isinstance(a, (_SimplexSpec, _VectorSpec, _CholeskySpec, _OrderedSpec)):
+                return True
+            if isinstance(a, RandomVariable):
+                if a._kind == "param":
+                    return True
+                if a._kind == "sample":
+                    stack.extend(a._args)
+            elif isinstance(a, (list, tuple)):
+                stack.extend(a)
+        return False
+
     def fit(
         self,
         data: Sequence[Any],
@@ -1322,6 +1363,7 @@ class RandomVariable:
             and not all(_is_free(a) for a in self._args)
         )
         has_constraints = kw.get("constraints") is not None
+        struct_param = self._has_struct_param()
         if has_constraints and how in ("em", "conjugate", "conjugate_mixture", "vi", "vmp"):
             raise ValueError(
                 f"how={how!r} cannot honor inequality constraints; use 'map', 'mcmc', 'hmc', "
@@ -1341,12 +1383,12 @@ class RandomVariable:
                     how = "conjugate_mixture"
                 else:
                     how = "map"
-            elif partial_free:
-                how = "map"
+            elif partial_free or struct_param:
+                how = "map"  # a vector/matrix parameter needs inference, not the EM estimator
             else:
                 how = "em"
-        elif how == "em" and partial_free:
-            how = "map"  # EM cannot hold some params fixed; MLE the free slots instead
+        elif how == "em" and (partial_free or struct_param):
+            how = "map"  # EM can't hold params fixed / infer a structural vector param
         if how in ("map", "mcmc", "hmc", "ensemble", "vi", "vmp", "conjugate", "conjugate_mixture", "hierarchical"):
             from pysp.ppl import inference as _inf
 
@@ -1456,6 +1498,34 @@ def constrain(*constraints) -> RandomVariable:
                 "parameters), not models with `free` holes; fit those first."
             )
     return RandomVariable("joint", args=(leaves, combined), name=None)
+
+
+def param(name: str, dim: int, *, support: str = "real", kind: str = "vector") -> RandomVariable:
+    """A referenceable vector/matrix *parameter handle*.
+
+    Pass it to a constructor's structural slot **and** reference it in constraints, so the
+    constraint applies to the inferred parameter::
+
+        m = param("mu", 3, kind="ordered")
+        MVN(3, mean=m, cov=free).fit(X, how="ensemble", constraints=increasing(m))
+        S = param("S", 3, kind="cholesky"); MVN(3, mean=free, cov=S)
+
+    ``kind``: ``vector`` (entries on ``support`` real/positive/unit), ``ordered`` (increasing),
+    ``simplex`` (sums to 1), or ``cholesky`` (an SPD covariance). The handle behaves like a
+    vector RV in constraint expressions — ``m[i]``, ``m[0] < m[1]``, ``increasing(m)``, etc.
+    """
+    dim = int(dim)
+    if kind == "vector":
+        spec = _VectorSpec(dim, support, name)
+    elif kind == "ordered":
+        spec = _OrderedSpec(dim, name)
+    elif kind == "simplex":
+        spec = _SimplexSpec(np.ones(dim), rows=1, name=name)
+    elif kind == "cholesky":
+        spec = _CholeskySpec(dim, name)
+    else:
+        raise ValueError(f"unknown param kind {kind!r}; use vector/ordered/simplex/cholesky.")
+    return RandomVariable("param", args=(spec,), name=name)
 
 
 def _rv_reconstruct(kind, fam_name, args, name, keys, dist, scope):
