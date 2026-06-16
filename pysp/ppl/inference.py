@@ -8,6 +8,7 @@ exact same target, scored with the existing vectorized ``seq_log_density`` and p
 Scope (this slice): flat ``Sample`` models (e.g. ``Normal(Normal(0,10), free)``). Latent
 composites and the fast conjugate VB E-step are separate slices.
 """
+
 from __future__ import annotations
 
 import math
@@ -23,11 +24,11 @@ _NEG_INF = -1e300
 
 @dataclass
 class _Slot:
-    index: int           # position in the family's argument tuple
-    prior: Any           # a concrete prior distribution, or None for a flat `free` slot
-    positive: bool       # sampled in log-space when True (kept for back-compat; see `support`)
+    index: int  # position in the family's argument tuple
+    prior: Any  # a concrete prior distribution, or None for a flat `free` slot
+    positive: bool  # sampled in log-space when True (kept for back-compat; see `support`)
     name: str | None  # parameter name (prior's name, else "argN")
-    handle: Any          # the prior RandomVariable (for .posterior(handle)), or None
+    handle: Any  # the prior RandomVariable (for .posterior(handle)), or None
     support: str = "real"  # 'real' | 'positive' (log) | 'unit' (logit) reparameterization
 
 
@@ -37,7 +38,7 @@ def _to_value(support: str, u: float):
         return math.exp(u), float(u)
     if support == "unit":
         v = 1.0 / (1.0 + math.exp(-u))
-        return v, math.log(v) + math.log1p(-v)   # d sigmoid/du = v(1-v)
+        return v, math.log(v) + math.log1p(-v)  # d sigmoid/du = v(1-v)
     return float(u), 0.0
 
 
@@ -60,13 +61,29 @@ class Posterior:
 
     def __init__(self, slots: list[_Slot], value_samples: np.ndarray, raw: Any):
         self._slots = slots
-        self._samples = value_samples            # (n_draws, n_params), value space
+        self._samples = value_samples  # (n_draws, n_params), value space
         self.raw = raw
         self.acceptance_rate = getattr(raw, "acceptance_rate", None)
-        self.predictive = None                   # set by the fitter (posterior predictive)
-        self.rhat = None                         # {param: Gelman-Rubin R-hat} (multi-chain)
-        self.ess = None                          # combined effective sample size (multi-chain)
+        self.predictive = None  # set by the fitter (posterior predictive)
+        self.build = None  # set by the fitter: vals-dict -> concrete dist
+        self.rhat = None  # {param: Gelman-Rubin R-hat} (multi-chain)
+        self.ess = None  # combined effective sample size (multi-chain)
         self.n_chains = 1
+
+    def pointwise_log_likelihood(self, data) -> np.ndarray:
+        """Return the ``(n_draws, n_obs)`` log-likelihood of ``data`` under each posterior draw.
+
+        This is the input to the predictive model-comparison diagnostics (WAIC, PSIS-LOO).
+        """
+        if self.build is None:
+            raise ValueError("this posterior cannot recompute the pointwise log-likelihood.")
+        data = list(data)
+        rows = []
+        for j in range(self._samples.shape[0]):
+            d = self.build({s.index: float(self._samples[j, k]) for k, s in enumerate(self._slots)})
+            enc = d.dist_to_encoder().seq_encode(data)
+            rows.append(np.asarray(d.seq_log_density(enc), dtype=float))
+        return np.asarray(rows)
 
     def _col(self, param) -> int:
         for k, s in enumerate(self._slots):
@@ -87,7 +104,8 @@ class Posterior:
         for k, s in enumerate(self._slots):
             col = self._samples[:, k]
             out[s.name] = {
-                "mean": float(col.mean()), "std": float(col.std()),
+                "mean": float(col.mean()),
+                "std": float(col.std()),
                 "q2.5": float(np.percentile(col, 2.5)),
                 "q97.5": float(np.percentile(col, 97.5)),
             }
@@ -113,8 +131,7 @@ def _slots_of(rv: RandomVariable, fam) -> list[_Slot]:
     slots: list[_Slot] = []
     for i, a in enumerate(rv._args):
         if isinstance(a, RandomVariable):
-            slots.append(_Slot(i, lower(a, target="dist"), fam.positive[i],
-                               a.name or f"arg{i}", a, fam.support[i]))
+            slots.append(_Slot(i, lower(a, target="dist"), fam.positive[i], a.name or f"arg{i}", a, fam.support[i]))
         elif a is free:
             slots.append(_Slot(i, None, fam.positive[i], f"arg{i}", None, fam.support[i]))
     if not slots:
@@ -190,7 +207,7 @@ def _init_u(slots, dmean, dstd) -> np.ndarray:
         if s.support == "positive":
             u0.append(_to_u("positive", max(dstd, 1e-2)))
         elif s.support == "unit":
-            u0.append(0.0)                       # logit(0.5)
+            u0.append(0.0)  # logit(0.5)
         else:
             u0.append(dmean)
     return np.asarray(u0, dtype=float)
@@ -200,8 +217,7 @@ def _init_scale(slots, dstd, n) -> np.ndarray:
     """Per-slot proposal scale ~ posterior width: a location (real) slot ~ dstd/sqrt(n);
     a transformed (positive/unit) slot ~ 1/sqrt(n). Adaptation then tunes the magnitude."""
     root = math.sqrt(max(n, 1))
-    return np.asarray(
-        [max((dstd if s.support == "real" else 1.0) / root, 1e-3) for s in slots], dtype=float)
+    return np.asarray([max((dstd if s.support == "real" else 1.0) / root, 1e-3) for s in slots], dtype=float)
 
 
 def _finalize(rv, slots, res, build) -> RandomVariable:
@@ -224,10 +240,11 @@ def _finalize(rv, slots, res, build) -> RandomVariable:
         out = []
         for j in idx:
             d = build({s.index: float(vals[j, k]) for k, s in enumerate(slots)})
-            out.append(d.sampler(seed=int(rng.randint(1, 2 ** 31))).sample())
+            out.append(d.sampler(seed=int(rng.randint(1, 2**31))).sample())
         return np.asarray(out)
 
     post.predictive = predictive
+    post.build = build
     return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
 
 
@@ -269,12 +286,17 @@ def _mcmc_worker(seed, rv, data, kw):
         log_target, slots, _fam, _build, _unpack, (dmean, dstd) = _build_target(rv, data)
     u0 = _init_u(slots, dmean, dstd)
     scale = kw.get("scale")
-    init_scale = (scale * np.ones(len(u0))) if scale is not None \
-        else _init_scale(slots, dstd, len(data))
+    init_scale = (scale * np.ones(len(u0))) if scale is not None else _init_scale(slots, dstd, len(data))
     proposal = AdaptiveRandomWalkProposal(init_scale.copy())
-    return metropolis_hastings(log_target, u0, proposal, num_samples=kw["draws"],
-                               burn_in=kw["burn"], thin=kw["thin"],
-                               rng=np.random.RandomState(seed))
+    return metropolis_hastings(
+        log_target,
+        u0,
+        proposal,
+        num_samples=kw["draws"],
+        burn_in=kw["burn"],
+        thin=kw["thin"],
+        rng=np.random.RandomState(seed),
+    )
 
 
 def _hmc_worker(seed, rv, data, kw):
@@ -291,12 +313,20 @@ def _hmc_worker(seed, rv, data, kw):
         grad = _finite_diff_grad(log_target, _init_u(slots, dmean, dstd))
     u0 = _init_u(slots, dmean, dstd)
     scale = _init_scale(slots, dstd, len(data))
-    mass = 1.0 / (scale ** 2)
+    mass = 1.0 / (scale**2)
     step_size = kw["step_size"] if kw["step_size"] is not None else 2.5 / kw["num_steps"]
-    return hamiltonian_monte_carlo(log_target, grad, u0, num_samples=kw["draws"],
-                                   step_size=step_size, num_steps=kw["num_steps"], mass=mass,
-                                   burn_in=kw["burn"], thin=kw["thin"],
-                                   rng=np.random.RandomState(seed))
+    return hamiltonian_monte_carlo(
+        log_target,
+        grad,
+        u0,
+        num_samples=kw["draws"],
+        step_size=step_size,
+        num_steps=kw["num_steps"],
+        mass=mass,
+        burn_in=kw["burn"],
+        thin=kw["thin"],
+        rng=np.random.RandomState(seed),
+    )
 
 
 def _finite_diff_grad(log_target, u_ref):
@@ -324,7 +354,7 @@ def _run_chains(run_one, worker, worker_args, chains: int, parallel, rng):
     so each worker rebuilds its own Torch target and they run on separate cores);
     ``"thread"`` -> a thread pool (rarely a win: the Torch path is GIL-bound).
     """
-    seeds = [int(rng.randint(1, 2 ** 31)) for _ in range(chains)]
+    seeds = [int(rng.randint(1, 2**31)) for _ in range(chains)]
     mode = "process" if parallel is True else (parallel or "off")
     if chains > 1 and mode == "process":
         from concurrent.futures import ProcessPoolExecutor
@@ -360,23 +390,28 @@ def _finalize_chains(rv, slots, results, build) -> RandomVariable:
         out = []
         for j in idx:
             d = build({s.index: float(vals[j, k]) for k, s in enumerate(slots)})
-            out.append(d.sampler(seed=int(rng_.randint(1, 2 ** 31))).sample())
+            out.append(d.sampler(seed=int(rng_.randint(1, 2**31))).sample())
         return np.asarray(out)
 
     post.predictive = predictive
+    post.build = build
     return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
 
 
 # ----------------------------------------------------- inequality / region constraints
 def _vals_from_u(slots, u) -> dict:
-    """Constrained parameter values keyed by slot index, from one unconstrained vector ``u``."""
+    """Constrained parameter values keyed by slot index, from one unconstrained vector ``u``.
+
+    The exp / logit links are clamped so a wide derivative-free or penalized excursion in ``u`` cannot
+    overflow (it saturates the constrained value instead of raising).
+    """
     vals = {}
     for k, s in enumerate(slots):
         uk = float(u[k])
         if s.support == "positive":
-            vals[s.index] = math.exp(uk)
+            vals[s.index] = math.exp(min(uk, 700.0))
         elif s.support == "unit":
-            vals[s.index] = 1.0 / (1.0 + math.exp(-uk))
+            vals[s.index] = 1.0 / (1.0 + math.exp(-max(min(uk, 700.0), -700.0)))
         else:
             vals[s.index] = uk
     return vals
@@ -399,7 +434,8 @@ def _feasibility(constraints, slots):
                 raise ValueError(
                     "a constraint references an RV that is not a prior parameter of this model; "
                     "give that parameter a (possibly vague) prior so it can be constrained, e.g. "
-                    "Normal(Normal(0, 100, name='m'), 1).")
+                    "Normal(Normal(0, 100, name='m'), 1)."
+                )
 
     def feasible(u):
         vals = _vals_from_u(slots, u)
@@ -418,8 +454,10 @@ def _project_init(u0, feasible, rng):
         cand = u0 + (0.1 + 0.02 * t) * base * rng.standard_normal(len(u0))
         if feasible(cand):
             return cand
-    raise ValueError("could not find a parameter point satisfying the constraints; "
-                     "check that the region is non-empty and consistent with the supports.")
+    raise ValueError(
+        "could not find a parameter point satisfying the constraints; "
+        "check that the region is non-empty and consistent with the supports."
+    )
 
 
 def _constrain_target(log_target, feasible):
@@ -434,9 +472,73 @@ def _constrain_target(log_target, feasible):
     return clt
 
 
-def ensemble_fit(rv: RandomVariable, data, *, draws: int = 1500, burn: int = 500,
-                 thin: int = 1, walkers: int | None = None, constraints=None,
-                 rng=None) -> RandomVariable:
+def _soft_penalty(constraints, slots, weight):
+    """Compile ``constraints`` into a smooth penalty ``penalty(u) -> float`` (<= 0) over the model's
+    parameter slots, using each constraint's continuous ``residual``.
+
+    The penalty ``-0.5 * weight * sum(residual^2)`` is added to the joint log-target so gradient /
+    MCMC inference can honor equality, convex, and algebraic relations (which hard rejection cannot).
+    ``weight`` plays the role of an inverse tolerance: larger weights enforce the relation more tightly.
+    """
+    if constraints is None or weight is None:
+        return None
+    if isinstance(constraints, Constraint):
+        constraints = [constraints]
+    constraints = list(constraints)
+    if not constraints:
+        return None
+    handle_to_index = {id(s.handle): s.index for s in slots if s.handle is not None}
+    for c in constraints:
+        if c.residual is None:
+            raise ValueError(
+                "a constraint has no smooth penalty surface (e.g. a negated/!= relation) and cannot be "
+                "used with penalty=...; drop penalty to enforce it by rejection instead."
+            )
+        for lv in c.leaves:
+            if id(lv) not in handle_to_index:
+                raise ValueError(
+                    "a constraint references an RV that is not a prior parameter of this model; "
+                    "give that parameter a (possibly vague) prior so it can be constrained."
+                )
+    w = float(weight)
+    if w <= 0.0:
+        raise ValueError("penalty weight must be positive.")
+
+    def penalty(u):
+        vals = _vals_from_u(slots, u)
+        env = {lv: vals[handle_to_index[id(lv)]] for c in constraints for lv in c.leaves}
+        total = 0.0
+        for c in constraints:
+            r = np.atleast_1d(np.asarray(c.residual(env), dtype=float)).ravel()
+            total += float(np.sum(r * r))
+        return -0.5 * w * total
+
+    return penalty
+
+
+def _penalize_target(log_target, penalty):
+    """Add a smooth penalty term to a log-target (soft constraints)."""
+    if penalty is None:
+        return log_target
+
+    def plt(u):
+        return log_target(u) + penalty(u)
+
+    return plt
+
+
+def ensemble_fit(
+    rv: RandomVariable,
+    data,
+    *,
+    draws: int = 1500,
+    burn: int = 500,
+    thin: int = 1,
+    walkers: int | None = None,
+    constraints=None,
+    penalty=None,
+    rng=None,
+) -> RandomVariable:
     """Affine-invariant ensemble MCMC (Goodman & Weare stretch move).
 
     A population of walkers samples jointly with no per-dimension step tuning; it is invariant
@@ -454,61 +556,88 @@ def ensemble_fit(rv: RandomVariable, data, *, draws: int = 1500, burn: int = 500
         walkers = max(2 * (d + 1), 8)
     if walkers % 2:
         walkers += 1
-    feasible = _feasibility(constraints, slots)
+    soft = _soft_penalty(constraints, slots, penalty)
+    feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _constrain_target(log_target, feasible)
+    log_target = _penalize_target(log_target, soft)
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
-    spread = _init_scale(slots, dstd, len(data)) * math.sqrt(len(data))   # ~ prior/posterior width
+    spread = _init_scale(slots, dstd, len(data)) * math.sqrt(len(data))  # ~ prior/posterior width
     p0 = u0[None, :] + 0.1 * spread[None, :] * rng.standard_normal((walkers, d))
     p0[0] = u0
-    if feasible is not None:        # every walker must start feasible (finite log-target)
+    if feasible is not None:  # every walker must start feasible (finite log-target)
         for k in range(walkers):
             if not feasible(p0[k]):
                 p0[k] = _project_init(u0, feasible, rng)
-    res = affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn,
-                                    thin=thin, rng=rng)
+    res = affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn, thin=thin, rng=rng)
     return _finalize(rv, slots, res, build)
 
 
-def mcmc_fit(rv: RandomVariable, data, *, draws: int = 2000, burn: int = 1000,
-             thin: int = 1, scale: float | None = None, rng=None,
-             chains: int = 1, parallel: bool = False, constraints=None) -> RandomVariable:
+def mcmc_fit(
+    rv: RandomVariable,
+    data,
+    *,
+    draws: int = 2000,
+    burn: int = 1000,
+    thin: int = 1,
+    scale: float | None = None,
+    rng=None,
+    chains: int = 1,
+    parallel: bool = False,
+    constraints=None,
+    penalty=None,
+) -> RandomVariable:
     from pysp.ppl import autograd as _ag
     from pysp.utils.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
     if rng is None:
         rng = np.random.RandomState()
     ag = _ag.grad_target(rv, data)
-    if ag is not None:        # Torch-scored target (fast; also avoids the encoder probe)
+    if ag is not None:  # Torch-scored target (fast; also avoids the encoder probe)
         log_target, slots, build, dmean, dstd = ag.log_target, ag.slots, ag.build, ag.dmean, ag.dstd
     else:
         log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
-    feasible = _feasibility(constraints, slots)
+    soft = _soft_penalty(constraints, slots, penalty)
+    feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _constrain_target(log_target, feasible)
+    log_target = _penalize_target(log_target, soft)
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
-        parallel = False     # process workers rebuild the target without the constraint closure
-    init_scale = (scale * np.ones(len(u0))) if scale is not None \
-        else _init_scale(slots, dstd, len(data))
+        parallel = False  # process workers rebuild the target without the constraint closure
+    if soft is not None:
+        parallel = False  # the penalty closure does not survive process pickling
+    init_scale = (scale * np.ones(len(u0))) if scale is not None else _init_scale(slots, dstd, len(data))
 
     def run_one(seed):
-        proposal = AdaptiveRandomWalkProposal(init_scale.copy())   # per-chain adaptive state
-        return metropolis_hastings(log_target, u0, proposal, num_samples=draws,
-                                   burn_in=burn, thin=thin, rng=np.random.RandomState(seed))
+        proposal = AdaptiveRandomWalkProposal(init_scale.copy())  # per-chain adaptive state
+        return metropolis_hastings(
+            log_target, u0, proposal, num_samples=draws, burn_in=burn, thin=thin, rng=np.random.RandomState(seed)
+        )
 
     if chains == 1:
-        return _finalize(rv, slots, run_one(int(rng.randint(1, 2 ** 31))), build)
+        return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
     kw = {"draws": draws, "burn": burn, "thin": thin, "scale": scale}
     results = _run_chains(run_one, _mcmc_worker, (rv, data, kw), chains, parallel, rng)
     return _finalize_chains(rv, slots, results, build)
 
 
-def hmc_fit(rv: RandomVariable, data, *, draws: int = 1000, burn: int = 500,
-            step_size: float | None = None, num_steps: int = 15, thin: int = 1,
-            rng=None, chains: int = 1, parallel: bool = False,
-            constraints=None) -> RandomVariable:
+def hmc_fit(
+    rv: RandomVariable,
+    data,
+    *,
+    draws: int = 1000,
+    burn: int = 500,
+    step_size: float | None = None,
+    num_steps: int = 15,
+    thin: int = 1,
+    rng=None,
+    chains: int = 1,
+    parallel: bool = False,
+    constraints=None,
+    penalty=None,
+) -> RandomVariable:
     """Hamiltonian Monte Carlo over the parameter posterior.
 
     Uses pysp's ``hamiltonian_monte_carlo`` with a numerical gradient of the joint
@@ -523,7 +652,9 @@ def hmc_fit(rv: RandomVariable, data, *, draws: int = 1000, burn: int = 500,
     if rng is None:
         rng = np.random.RandomState()
 
-    ag = _ag.grad_target(rv, data)
+    # A soft penalty must enter the leapfrog gradient, so fall back to the numeric-gradient path
+    # (its grad closure differentiates the penalized target via late binding of ``log_target``).
+    ag = None if penalty is not None else _ag.grad_target(rv, data)
     if ag is not None:
         # analytic-gradient HMC (one backprop per gradient, vs O(#params) target evals)
         slots, build, dmean, dstd = ag.slots, ag.build, ag.dmean, ag.dstd
@@ -543,26 +674,36 @@ def hmc_fit(rv: RandomVariable, data, *, draws: int = 1000, burn: int = 500,
                 g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
             return g
 
-    feasible = _feasibility(constraints, slots)
+    soft = _soft_penalty(constraints, slots, penalty)
+    feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _constrain_target(log_target, feasible)
+    log_target = _penalize_target(log_target, soft)
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
-        parallel = False     # process workers rebuild the target without the constraint closure
-    scale = _init_scale(slots, dstd, len(data))     # ~ posterior std per dim
-    mass = 1.0 / (scale ** 2)                        # precondition: M ~ inverse posterior cov
+        parallel = False  # process workers rebuild the target without the constraint closure
+    scale = _init_scale(slots, dstd, len(data))  # ~ posterior std per dim
+    mass = 1.0 / (scale**2)  # precondition: M ~ inverse posterior cov
     if step_size is None:
-        step_size = 2.5 / num_steps                  # tuned: acc~0.98, near-max ESS (preconditioned)
+        step_size = 2.5 / num_steps  # tuned: acc~0.98, near-max ESS (preconditioned)
 
     def run_one(seed):
-        return hamiltonian_monte_carlo(log_target, grad, u0, num_samples=draws,
-                                       step_size=step_size, num_steps=num_steps, mass=mass,
-                                       burn_in=burn, thin=thin, rng=np.random.RandomState(seed))
+        return hamiltonian_monte_carlo(
+            log_target,
+            grad,
+            u0,
+            num_samples=draws,
+            step_size=step_size,
+            num_steps=num_steps,
+            mass=mass,
+            burn_in=burn,
+            thin=thin,
+            rng=np.random.RandomState(seed),
+        )
 
     if chains == 1:
-        return _finalize(rv, slots, run_one(int(rng.randint(1, 2 ** 31))), build)
-    kw = {"draws": draws, "burn": burn, "thin": thin,
-          "step_size": step_size, "num_steps": num_steps}
+        return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
+    kw = {"draws": draws, "burn": burn, "thin": thin, "step_size": step_size, "num_steps": num_steps}
     results = _run_chains(run_one, _hmc_worker, (rv, data, kw), chains, parallel, rng)
     return _finalize_chains(rv, slots, results, build)
 
@@ -598,47 +739,66 @@ class ConjugatePosterior:
         return self._entry(param)["mean"]
 
     def summary(self) -> dict:
-        return {nm: {"mean": e["mean"], "posterior": e["name"], "hyper": e["hyper"]}
-                for nm, e in self.post.items()}
+        return {nm: {"mean": e["mean"], "posterior": e["name"], "hyper": e["hyper"]} for nm, e in self.post.items()}
 
 
 def _conj_normal_mean(prior_args, fixed, stats, handle, index):
     m0, s0 = float(prior_args[0]), float(prior_args[1])  # prior mean, sd
-    sigma2 = float(fixed[1]) ** 2                          # known variance (slot 1)
+    sigma2 = float(fixed[1]) ** 2  # known variance (slot 1)
     n, sx = stats["n"], stats["sum"]
-    prec = 1.0 / s0 ** 2 + n / sigma2
-    pm = (m0 / s0 ** 2 + sx / sigma2) / prec
+    prec = 1.0 / s0**2 + n / sigma2
+    pm = (m0 / s0**2 + sx / sigma2) / prec
     pv = 1.0 / prec
-    return {"index": index, "handle": handle, "name": "Normal",
-            "mean": pm, "hyper": {"mean": pm, "sd": math.sqrt(pv)},
-            "sample": lambda k, rng: rng.normal(pm, math.sqrt(pv), k)}
+    return {
+        "index": index,
+        "handle": handle,
+        "name": "Normal",
+        "mean": pm,
+        "hyper": {"mean": pm, "sd": math.sqrt(pv)},
+        "sample": lambda k, rng: rng.normal(pm, math.sqrt(pv), k),
+    }
 
 
 def _conj_poisson_gamma(prior_args, fixed, stats, handle, index):
-    a, b = float(prior_args[0]), float(prior_args[1])     # Gamma(shape, rate) prior
+    a, b = float(prior_args[0]), float(prior_args[1])  # Gamma(shape, rate) prior
     n, sx = stats["n"], stats["sum"]
     A, B = a + sx, b + n
-    return {"index": index, "handle": handle, "name": "Gamma",
-            "mean": A / B, "hyper": {"shape": A, "rate": B},
-            "sample": lambda k, rng: rng.gamma(A, 1.0 / B, k)}
+    return {
+        "index": index,
+        "handle": handle,
+        "name": "Gamma",
+        "mean": A / B,
+        "hyper": {"shape": A, "rate": B},
+        "sample": lambda k, rng: rng.gamma(A, 1.0 / B, k),
+    }
 
 
 def _conj_exponential_gamma(prior_args, fixed, stats, handle, index):
-    a, b = float(prior_args[0]), float(prior_args[1])     # Gamma prior on rate
+    a, b = float(prior_args[0]), float(prior_args[1])  # Gamma prior on rate
     n, sx = stats["n"], stats["sum"]
     A, B = a + n, b + sx
-    return {"index": index, "handle": handle, "name": "Gamma",
-            "mean": A / B, "hyper": {"shape": A, "rate": B},
-            "sample": lambda k, rng: rng.gamma(A, 1.0 / B, k)}
+    return {
+        "index": index,
+        "handle": handle,
+        "name": "Gamma",
+        "mean": A / B,
+        "hyper": {"shape": A, "rate": B},
+        "sample": lambda k, rng: rng.gamma(A, 1.0 / B, k),
+    }
 
 
 def _conj_bernoulli_beta(prior_args, fixed, stats, handle, index):
     a, b = float(prior_args[0]), float(prior_args[1])
     n, sx = stats["n"], stats["sum"]
     A, B = a + sx, b + n - sx
-    return {"index": index, "handle": handle, "name": "Beta",
-            "mean": A / (A + B), "hyper": {"a": A, "b": B},
-            "sample": lambda k, rng: rng.beta(A, B, k)}
+    return {
+        "index": index,
+        "handle": handle,
+        "name": "Beta",
+        "mean": A / (A + B),
+        "hyper": {"a": A, "b": B},
+        "sample": lambda k, rng: rng.beta(A, B, k),
+    }
 
 
 def _conj_binomial_beta(prior_args, fixed, stats, handle, index):
@@ -648,9 +808,14 @@ def _conj_binomial_beta(prior_args, fixed, stats, handle, index):
     n_trials = float(fixed[0])
     N, sx = stats["n"], stats["sum"]
     A, B = a + sx, b + n_trials * N - sx
-    return {"index": index, "handle": handle, "name": "Beta",
-            "mean": A / (A + B), "hyper": {"a": A, "b": B},
-            "sample": lambda k, rng: rng.beta(A, B, k)}
+    return {
+        "index": index,
+        "handle": handle,
+        "name": "Beta",
+        "mean": A / (A + B),
+        "hyper": {"a": A, "b": B},
+        "sample": lambda k, rng: rng.beta(A, B, k),
+    }
 
 
 def _conj_geometric_beta(prior_args, fixed, stats, handle, index):
@@ -659,14 +824,19 @@ def _conj_geometric_beta(prior_args, fixed, stats, handle, index):
     a, b = float(prior_args[0]), float(prior_args[1])
     N, sx = stats["n"], stats["sum"]
     A, B = a + N, b + sx - N
-    return {"index": index, "handle": handle, "name": "Beta",
-            "mean": A / (A + B), "hyper": {"a": A, "b": B},
-            "sample": lambda k, rng: rng.beta(A, B, k)}
+    return {
+        "index": index,
+        "handle": handle,
+        "name": "Beta",
+        "mean": A / (A + B),
+        "hyper": {"a": A, "b": B},
+        "sample": lambda k, rng: rng.beta(A, B, k),
+    }
 
 
 # (likelihood family, slot index, prior family) -> closed-form posterior builder
 _CONJUGATE = {
-    ("Normal", 0, "Normal"): _conj_normal_mean,       # unknown mean, known variance
+    ("Normal", 0, "Normal"): _conj_normal_mean,  # unknown mean, known variance
     ("Poisson", 0, "Gamma"): _conj_poisson_gamma,
     ("Exponential", 0, "Gamma"): _conj_exponential_gamma,
     ("Bernoulli", 0, "Beta"): _conj_bernoulli_beta,
@@ -718,7 +888,7 @@ def conjugate_fit(rv: RandomVariable, data) -> RandomVariable:
         for v in pvals:
             args = [float(v) if i == idx else rv._args[i] for i in range(len(rv._args))]
             d = fam.make_dist(tuple(args), rv._name)
-            out.append(d.sampler(seed=int(rng.randint(1, 2 ** 31))).sample())
+            out.append(d.sampler(seed=int(rng.randint(1, 2**31))).sample())
         return np.asarray(out)
 
     cpost.predictive = predictive
@@ -737,7 +907,7 @@ def _logm_normal_mean(pa, fixed, stats):
     m0, s0 = float(pa[0]), float(pa[1])
     sigma2 = float(fixed[1]) ** 2
     n, sx = stats["n"], stats["sum"]
-    prec0 = 1.0 / s0 ** 2
+    prec0 = 1.0 / s0**2
     precP = prec0 + n / sigma2
     bb = m0 * prec0 + sx / sigma2
     return 0.5 * math.log(prec0 / precP) + 0.5 * (bb * bb / precP - m0 * m0 * prec0)
@@ -792,8 +962,8 @@ class ConjugateMixturePosterior:
     """
 
     def __init__(self, entries, weights, param_name):
-        self.entries = entries            # list of per-component conjugate posterior dicts
-        self.weights = np.asarray(weights, dtype=float)   # posterior mixing weights w'
+        self.entries = entries  # list of per-component conjugate posterior dicts
+        self.weights = np.asarray(weights, dtype=float)  # posterior mixing weights w'
         self.param_name = param_name
         self.acceptance_rate = None
         self.predictive = None
@@ -813,9 +983,12 @@ class ConjugateMixturePosterior:
         return out
 
     def summary(self) -> dict:
-        return {"posterior": "mixture", "weights": self.weights.tolist(),
-                "components": [{"mean": e["mean"], "hyper": e["hyper"]} for e in self.entries],
-                "mean": self.mean()}
+        return {
+            "posterior": "mixture",
+            "weights": self.weights.tolist(),
+            "components": [{"mean": e["mean"], "hyper": e["hyper"]} for e in self.entries],
+            "mean": self.mean(),
+        }
 
 
 def conjugate_mixture_spec(rv: RandomVariable):
@@ -826,11 +999,17 @@ def conjugate_mixture_spec(rv: RandomVariable):
         return None
     if any(a is free for a in rv._args):
         return None
-    mix_slots = [(i, a) for i, a in enumerate(rv._args)
-                 if isinstance(a, RandomVariable) and isinstance(a._family, CompositeFamily)
-                 and a._family.name == "Mixture"]
-    other_rv = [a for a in rv._args if isinstance(a, RandomVariable)
-                and not (isinstance(a._family, CompositeFamily) and a._family.name == "Mixture")]
+    mix_slots = [
+        (i, a)
+        for i, a in enumerate(rv._args)
+        if isinstance(a, RandomVariable) and isinstance(a._family, CompositeFamily) and a._family.name == "Mixture"
+    ]
+    other_rv = [
+        a
+        for a in rv._args
+        if isinstance(a, RandomVariable)
+        and not (isinstance(a._family, CompositeFamily) and a._family.name == "Mixture")
+    ]
     if len(mix_slots) != 1 or other_rv:
         return None
     i, mix = mix_slots[0]
@@ -838,8 +1017,7 @@ def conjugate_mixture_spec(rv: RandomVariable):
     comps = list(comps)
     if not comps:
         return None
-    fam_names = {c._family.name for c in comps
-                if c._kind == "sample" and not isinstance(c._family, CompositeFamily)}
+    fam_names = {c._family.name for c in comps if c._kind == "sample" and not isinstance(c._family, CompositeFamily)}
     if len(fam_names) != 1:
         return None  # all components must be the same flat conjugate prior family
     key = (rv._family.name, i, next(iter(fam_names)))
@@ -875,7 +1053,7 @@ def conjugate_mixture_fit(rv: RandomVariable, data) -> RandomVariable:
         out = []
         for v in pvals:
             args = [float(v) if j == idx else rv._args[j] for j in range(len(rv._args))]
-            out.append(fam.make_dist(tuple(args), rv._name).sampler(seed=int(rng.randint(1, 2 ** 31))).sample())
+            out.append(fam.make_dist(tuple(args), rv._name).sampler(seed=int(rng.randint(1, 2**31))).sample())
         return np.asarray(out)
 
     post.predictive = predictive
@@ -891,7 +1069,7 @@ class HierarchicalPosterior:
     def __init__(self, group_means, group_vars, hyper):
         self.group_means = np.asarray(group_means)
         self.group_vars = np.asarray(group_vars)
-        self.hyper = hyper            # {'m':..., 'tau':..., 'sigma':...}
+        self.hyper = hyper  # {'m':..., 'tau':..., 'sigma':...}
         self.acceptance_rate = None
 
     def samples(self, param=None):
@@ -899,8 +1077,7 @@ class HierarchicalPosterior:
         return self.group_means
 
     def summary(self) -> dict:
-        return {"hyper": self.hyper, "n_groups": int(self.group_means.size),
-                "group_means": self.group_means}
+        return {"hyper": self.hyper, "n_groups": int(self.group_means.size), "group_means": self.group_means}
 
 
 def _group_stats(data):
@@ -914,6 +1091,7 @@ def _group_stats(data):
 def _hier_normal_normal(rv, n_i, sum_i, sumsq_i, max_its, tol):
     """mu_i ~ Normal(m, tau^2); y_ij ~ Normal(mu_i, sigma^2). Exact conjugate EM."""
     from pysp.stats.leaf.gaussian import GaussianDistribution
+
     N = float(n_i.sum())
     gbar = sum_i / np.maximum(n_i, 1.0)
     m, tau2 = float(gbar.mean()), float(gbar.var()) or 1.0
@@ -925,9 +1103,9 @@ def _hier_normal_normal(rv, n_i, sum_i, sumsq_i, max_its, tol):
         v_i = 1.0 / (1.0 / tau2 + n_i / sigma2)
         mhat = (m / tau2 + sum_i / sigma2) * v_i
         m = float(mhat.mean())
-        tau2 = max(float(np.mean(mhat ** 2 + v_i) - m ** 2), 1e-8)
+        tau2 = max(float(np.mean(mhat**2 + v_i) - m**2), 1e-8)
         if not sigma_fixed:
-            resid = sumsq_i - 2.0 * mhat * sum_i + n_i * (mhat ** 2 + v_i)
+            resid = sumsq_i - 2.0 * mhat * sum_i + n_i * (mhat**2 + v_i)
             sigma2 = max(float(resid.sum() / N), 1e-8)
         cur = (m, tau2, sigma2)
         if prev is not None and max(abs(a - b) for a, b in zip(cur, prev)) < tol:
@@ -942,6 +1120,7 @@ def _hier_gamma_poisson(rv, n_i, sum_i, sumsq_i, max_its, tol):
     """lambda_i ~ Gamma(a, b); y_ij ~ Poisson(lambda_i). Conjugate E-step +
     moment-matched population M-step (law of total variance)."""
     from pysp.stats.leaf.gamma import GammaDistribution
+
     gm = sum_i / np.maximum(n_i, 1.0)
     m = float(gm.mean())
     v = float(gm.var()) or m
@@ -949,17 +1128,17 @@ def _hier_gamma_poisson(rv, n_i, sum_i, sumsq_i, max_its, tol):
     a = m * b
     prev = None
     for _ in range(max_its):
-        A, B = a + sum_i, b + n_i                       # posterior Gamma(A_i, B_i) per group
+        A, B = a + sum_i, b + n_i  # posterior Gamma(A_i, B_i) per group
         Elam, Vlam = A / B, A / (B * B)
         m = float(Elam.mean())
-        v = float(np.var(Elam) + Vlam.mean())           # total variance
+        v = float(np.var(Elam) + Vlam.mean())  # total variance
         b = m / max(v, 1e-8)
         a = m * b
         cur = (a, b)
         if prev is not None and max(abs(x - y) for x, y in zip(cur, prev)) < tol:
             break
         prev = cur
-    pop = GammaDistribution(k=a, theta=1.0 / b, name=rv._name)   # population over rates
+    pop = GammaDistribution(k=a, theta=1.0 / b, name=rv._name)  # population over rates
     hyper = {"shape": a, "rate": b, "mean": a / b}
     return pop, Elam, Vlam, hyper
 
@@ -967,6 +1146,7 @@ def _hier_gamma_poisson(rv, n_i, sum_i, sumsq_i, max_its, tol):
 def _hier_beta_bernoulli(rv, n_i, sum_i, sumsq_i, max_its, tol):
     """p_i ~ Beta(a, b); y_ij ~ Bernoulli(p_i). Conjugate E-step + moment-matched M-step."""
     from pysp.stats.leaf.beta import BetaDistribution
+
     gp = sum_i / np.maximum(n_i, 1.0)
     m = float(gp.mean())
     v = float(gp.var()) or (m * (1 - m))
@@ -975,7 +1155,7 @@ def _hier_beta_bernoulli(rv, n_i, sum_i, sumsq_i, max_its, tol):
     b = (1 - m) * s
     prev = None
     for _ in range(max_its):
-        A, B = a + sum_i, b + (n_i - sum_i)             # posterior Beta(A_i, B_i)
+        A, B = a + sum_i, b + (n_i - sum_i)  # posterior Beta(A_i, B_i)
         Ep = A / (A + B)
         Vp = A * B / ((A + B) ** 2 * (A + B + 1))
         m = float(Ep.mean())
@@ -1000,8 +1180,7 @@ _HIERARCHICAL = {
 }
 
 
-def hierarchical_fit(rv: RandomVariable, data, *, max_its: int = 300,
-                     tol: float = 1e-8) -> RandomVariable:
+def hierarchical_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8) -> RandomVariable:
     """Conjugate hierarchical (random-effects) EM, dispatched by conjugate pair.
 
     Supports Normal-Normal (exact), Gamma-Poisson, and Beta-Bernoulli. ``data`` is a list
@@ -1014,21 +1193,20 @@ def hierarchical_fit(rv: RandomVariable, data, *, max_its: int = 300,
     key = (fam.name, prior._family.name)
     impl = _HIERARCHICAL.get(key)
     if impl is None:
-        raise NotImplementedError(
-            f"hierarchical pair {key} not supported; have {sorted(_HIERARCHICAL)}.")
+        raise NotImplementedError(f"hierarchical pair {key} not supported; have {sorted(_HIERARCHICAL)}.")
     n_i, sum_i, sumsq_i = _group_stats(data)
     pop, group_means, group_vars, hyper = impl(rv, n_i, sum_i, sumsq_i, max_its, tol)
     post = HierarchicalPosterior(group_means, group_vars, hyper)
     return RandomVariable._bound(pop, name=rv._name, result=post)
 
 
-def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None) -> RandomVariable:
+def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None, penalty=None) -> RandomVariable:
     from scipy.optimize import minimize
 
     from pysp.ppl import autograd as _ag
 
     g = _ag.grad_target(rv, data)
-    if g is not None and constraints is None:
+    if g is not None and constraints is None and penalty is None:
         # analytic-gradient MAP: L-BFGS on the joint posterior (fast, scales with #params)
         u0 = _init_u(g.slots, g.dmean, g.dstd)
 
@@ -1040,20 +1218,22 @@ def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None) -> RandomVa
         vals, _ = g.unpack(res.x)
         return RandomVariable._bound(g.build(vals), name=rv._name)
 
-    # derivative-free path (no Torch, an unsupported family, or a constrained region)
+    # derivative-free path (no Torch, an unsupported family, or a constrained / penalized region)
     log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
-    feasible = _feasibility(constraints, slots)
+    soft = _soft_penalty(constraints, slots, penalty)
+    # penalty=... enforces the constraints softly (a log-joint term), so it replaces hard rejection.
+    feasible = None if soft is not None else _feasibility(constraints, slots)
+    log_target = _penalize_target(log_target, soft)
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, np.random.RandomState() if rng is None else rng)
 
     def objective(u):
         if feasible is not None and not feasible(u):
-            return 1e18      # keep the constrained MAP inside the feasible region
+            return 1e18  # keep the constrained MAP inside the feasible region
         return -log_target(u)
 
-    res = minimize(objective, u0, method="Nelder-Mead",
-                   options={"xatol": 1e-6, "fatol": 1e-6, "maxiter": 5000})
+    res = minimize(objective, u0, method="Nelder-Mead", options={"xatol": 1e-6, "fatol": 1e-6, "maxiter": 5000})
     vals, _ = unpack(res.x)
     return RandomVariable._bound(build(vals), name=rv._name)
 
@@ -1068,8 +1248,17 @@ class _VIResult:
         self.acceptance_rate = None
 
 
-def vi_fit(rv: RandomVariable, data, *, samples: int = 4000, mc: int = 16,
-           max_iter: int = 4000, steps: int = 600, lr: float = 0.05, rng=None) -> RandomVariable:
+def vi_fit(
+    rv: RandomVariable,
+    data,
+    *,
+    samples: int = 4000,
+    mc: int = 16,
+    max_iter: int = 4000,
+    steps: int = 600,
+    lr: float = 0.05,
+    rng=None,
+) -> RandomVariable:
     """Mean-field variational Bayes (ADVI).
 
     Fits a diagonal-Gaussian variational posterior q(u) = N(mean, diag(std^2)) in the
@@ -1096,7 +1285,7 @@ def vi_fit(rv: RandomVariable, data, *, samples: int = 4000, mc: int = 16,
         d = len(slots)
         u0 = _init_u(slots, dmean, dstd)
         s0 = _init_scale(slots, dstd, len(data))
-        eps = rng.standard_normal((mc, d))                  # common random numbers
+        eps = rng.standard_normal((mc, d))  # common random numbers
         half_entropy_const = 0.5 * d * (1.0 + math.log(2.0 * math.pi))
 
         def neg_elbo(phi):
@@ -1106,8 +1295,12 @@ def vi_fit(rv: RandomVariable, data, *, samples: int = 4000, mc: int = 16,
             ll = float(np.mean([log_target(U[i]) for i in range(mc)]))
             return -(ll + float(np.sum(log_std)) + half_entropy_const)
 
-        res = minimize(neg_elbo, np.concatenate([u0, np.log(s0)]), method="Nelder-Mead",
-                       options={"maxiter": max_iter, "xatol": 1e-5, "fatol": 1e-5})
+        res = minimize(
+            neg_elbo,
+            np.concatenate([u0, np.log(s0)]),
+            method="Nelder-Mead",
+            options={"maxiter": max_iter, "xatol": 1e-5, "fatol": 1e-5},
+        )
         mean, std = res.x[:d], np.exp(res.x[d:])
         Z = rng.standard_normal((samples, d))
         U = mean + std * Z
@@ -1123,8 +1316,9 @@ def vi_fit(rv: RandomVariable, data, *, samples: int = 4000, mc: int = 16,
         out = []
         for j in idx:
             dd = build({s.index: float(vals[j, k]) for k, s in enumerate(slots)})
-            out.append(dd.sampler(seed=int(r.randint(1, 2 ** 31))).sample())
+            out.append(dd.sampler(seed=int(r.randint(1, 2**31))).sample())
         return np.asarray(out)
 
     post.predictive = predictive
+    post.build = build
     return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
