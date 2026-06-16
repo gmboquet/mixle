@@ -151,9 +151,15 @@ class PPLCoreTestCase(unittest.TestCase):
         d = Normal(5, 1) - Normal(2, 1)  # -> Normal(3, sqrt(2))
         self.assertAlmostEqual(float(np.mean(d.sample(100000, seed=3))), 3.0, delta=0.05)
 
-    def test_rv_product_rejected(self):
-        with self.assertRaises(NotImplementedError):
-            _ = Normal(0, 1) * Normal(0, 1)
+    def test_rv_product_is_expression_not_distribution(self):
+        # a * b builds a product *expression* (usable in constraints / as a derived RV),
+        # but it has no tractable density, so lowering it to a distribution is rejected.
+        p = Normal(0, 1) * Normal(0, 1)
+        self.assertEqual(p._kind, "prod")
+        s = np.asarray(p.sample(10000, seed=0))
+        self.assertEqual(s.shape, (10000,))
+        with self.assertRaises(ValueError):
+            _ = p.dist  # not lowerable
 
     def test_conditioning_truncated_normal(self):
         x = Normal(0, 1)

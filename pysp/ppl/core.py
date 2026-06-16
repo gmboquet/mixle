@@ -245,9 +245,9 @@ def _expr_leaves(rv) -> list:
     """The leaf (sample/bound) RVs an expression RV depends on, in left-to-right order."""
     if not isinstance(rv, RandomVariable):
         return []
-    if rv._kind in ("apply",):
+    if rv._kind in ("apply", "pow"):
         return _expr_leaves(rv._args[0])
-    if rv._kind == "sum":
+    if rv._kind in ("sum", "prod"):
         out = _expr_leaves(rv._args[0])
         seen = {id(x) for x in out}
         for lv in _expr_leaves(rv._args[1]):
@@ -268,6 +268,12 @@ def _eval_expr(rv, env):
     if rv._kind == "sum":
         a, b = rv._args
         return _eval_expr(a, env) + _eval_expr(b, env)
+    if rv._kind == "prod":
+        a, b = rv._args
+        return _eval_expr(a, env) * _eval_expr(b, env)
+    if rv._kind == "pow":
+        base, exponent = rv._args
+        return _eval_expr(base, env) ** exponent
     if rv not in env:
         raise KeyError(f"no value supplied for {rv!r} when evaluating a constraint.")
     return env[rv]
@@ -359,6 +365,10 @@ def _expr_desc(rv) -> str:
         return f"f({_expr_desc(rv._args[0])})"
     if rv._kind == "sum":
         return f"({_expr_desc(rv._args[0])} + {_expr_desc(rv._args[1])})"
+    if rv._kind == "prod":
+        return f"({_expr_desc(rv._args[0])} * {_expr_desc(rv._args[1])})"
+    if rv._kind == "pow":
+        return f"({_expr_desc(rv._args[0])} ** {rv._args[1]})"
     return rv._name or "rv"
 
 
@@ -661,6 +671,17 @@ class RandomVariable:
         # Convolution node: the distribution of a + b for independent a, b.
         return cls("sum", args=(a, b))
 
+    @classmethod
+    def _prod(cls, a, b) -> RandomVariable:
+        # Product expression node (a * b). Valid in constraint / solver expressions and as a
+        # derived RV (sample/mean); not lowerable to a distribution (no tractable density).
+        return cls("prod", args=(a, b))
+
+    @classmethod
+    def _pow(cls, base, exponent) -> RandomVariable:
+        # Power expression node (base ** const). Same status as a product node.
+        return cls("pow", args=(base, float(exponent)))
+
     # -- algebra (deterministic transforms + convolution) -------------------
     def _affine(self, loc, scale) -> RandomVariable:
         from pysp.stats.combinator.transform import AffineTransform
@@ -670,11 +691,16 @@ class RandomVariable:
     def __mul__(self, c):
         if isinstance(c, Field):  # coef * covariate -> regression term
             return _LinearPredictor([(self, c)])
-        if isinstance(c, RandomVariable):
-            raise NotImplementedError("RV * RV (products) is not supported; use sums (+).")
+        if isinstance(c, RandomVariable):  # product expression (constraints/solver; not a dist)
+            return RandomVariable._prod(self, c)
         return self._affine(0.0, c)
 
     __rmul__ = __mul__
+
+    def __pow__(self, p):
+        if isinstance(p, RandomVariable):
+            raise NotImplementedError("RV ** RV is not supported; the exponent must be constant.")
+        return RandomVariable._pow(self, p)
 
     def __add__(self, c):
         if isinstance(c, _LinearPredictor):  # RV is an intercept
@@ -698,8 +724,8 @@ class RandomVariable:
         return self._affine(c, -1.0) if not isinstance(c, RandomVariable) else c.__sub__(self)
 
     def __truediv__(self, c):
-        if isinstance(c, RandomVariable):
-            raise NotImplementedError("RV / RV (ratios) is not supported.")
+        if isinstance(c, RandomVariable):  # ratio expression: a / b = a * b**-1
+            return RandomVariable._prod(self, RandomVariable._pow(c, -1.0))
         return self._affine(0.0, 1.0 / float(c))
 
     def __neg__(self):
@@ -833,6 +859,19 @@ class RandomVariable:
             ys = np.asarray(b.sample(k, seed=int(rng.randint(1, 2**31))))
             out = xs + ys
             return out if n is not None else float(out[0])
+        if self._kind == "prod":  # product of independent RVs: sample operands and multiply
+            rng = np.random.RandomState(seed)
+            a, b = self._args
+            k = n if n is not None else 1
+            xs = np.asarray(a.sample(k, seed=int(rng.randint(1, 2**31))))
+            ys = np.asarray(b.sample(k, seed=int(rng.randint(1, 2**31))))
+            out = xs * ys
+            return out if n is not None else float(out[0])
+        if self._kind == "pow":  # power of an RV by a constant exponent
+            base, exponent = self._args
+            k = n if n is not None else 1
+            xs = np.asarray(base.sample(k, seed=seed)) ** exponent
+            return xs if n is not None else float(xs[0])
         if self._kind == "given":  # rejection sampling from the region
             base, event = self._args
             rng = np.random.RandomState(seed)
