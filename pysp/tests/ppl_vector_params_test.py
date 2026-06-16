@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import MVN, free
+from pysp.ppl import MVN, DiagGaussian, free, ordered
 
 
 class MVNParameterInferenceTestCase(unittest.TestCase):
@@ -42,6 +42,36 @@ class MVNParameterInferenceTestCase(unittest.TestCase):
     def test_mean_only(self):
         m = MVN(2, mean=free).fit(self.X, how="map")  # covariance fixed at I
         self.assertTrue(np.allclose(m.params["mean"], self.true_mu, atol=0.2))
+
+    def test_ordered_mean_is_increasing(self):
+        rng = np.random.RandomState(1)
+        mu = np.array([-1.0, 0.5, 2.0])  # genuinely ordered
+        X = [list(x) for x in (mu + rng.standard_normal((3000, 3)))]
+        m = MVN(3, mean=ordered, cov=free).fit(
+            X, how="ensemble", draws=1000, burn=400, walkers=30, rng=np.random.RandomState(2)
+        )
+        mm = np.asarray(m.params["mean"])
+        self.assertTrue(np.all(np.diff(mm) > 0))  # increasing by construction
+        self.assertTrue(np.allclose(mm, mu, atol=0.3))
+
+
+class DiagGaussianParameterTestCase(unittest.TestCase):
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.mu = np.array([2.0, -1.0, 0.5])
+        self.sd = np.array([1.0, 2.0, 0.5])
+        self.X = [list(x) for x in (self.mu + self.sd * rng.standard_normal((3000, 3)))]
+
+    def test_mean_and_variance(self):
+        m = DiagGaussian(3, mean=free, var=free).fit(self.X, how="map")
+        self.assertTrue(np.allclose(m.params["mean"], self.mu, atol=0.2))
+        var = np.asarray(m.params["var"])
+        self.assertTrue(np.allclose(var, self.sd**2, atol=0.4))
+        self.assertTrue(np.all(var > 0))  # positive variances by construction
+
+    def test_em_default_still_works(self):
+        m = DiagGaussian(3).fit(self.X)
+        self.assertTrue(np.allclose(m.params["mean"], self.mu, atol=0.2))
 
 
 if __name__ == "__main__":

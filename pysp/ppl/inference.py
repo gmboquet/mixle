@@ -24,6 +24,7 @@ from pysp.ppl.core import (
     Constraint,
     RandomVariable,
     _CholeskySpec,
+    _OrderedSpec,
     _SimplexSpec,
     _VectorSpec,
     free,
@@ -180,7 +181,7 @@ def _struct_spec_for(node, a):
     explicit ``_SimplexSpec`` / ``_VectorSpec`` / ``_CholeskySpec`` (mixture weights, HMM
     transition matrix / initial, MVN mean / covariance), a bare ``Dirichlet(alpha)`` prior (one
     simplex), and a bare ``free`` simplex sized to the component count (mixture weights)."""
-    if isinstance(a, (_SimplexSpec, _VectorSpec, _CholeskySpec)):
+    if isinstance(a, (_SimplexSpec, _VectorSpec, _CholeskySpec, _OrderedSpec)):
         return a
     if _is_dirichlet_rv(a):
         return _SimplexSpec(np.asarray(a._args[0], dtype=float), rows=1, name=a.name)
@@ -209,6 +210,9 @@ def _spec_slot_defs(spec):
     if isinstance(spec, _VectorSpec):  # independent entries on one support
         base = spec.name or "v"
         return [(None, spec.support, f"{base}{i}") for i in range(spec.dim)]
+    if isinstance(spec, _OrderedSpec):  # real base + positive increments -> increasing vector
+        base = spec.name or "o"
+        return [(None, "real" if i == 0 else "positive", f"{base}{i}") for i in range(spec.dim)]
     if isinstance(spec, _CholeskySpec):  # lower-triangular Cholesky entries (diag positive)
         base = spec.name or "L"
         return [
@@ -227,6 +231,8 @@ def _spec_assemble(spec, values):
         return w[0] if spec.rows == 1 else w
     if isinstance(spec, _VectorSpec):
         return g
+    if isinstance(spec, _OrderedSpec):  # cumulative sum of positive increments -> strictly increasing
+        return g[0] + np.concatenate([[0.0], np.cumsum(g[1:])])
     if isinstance(spec, _CholeskySpec):
         d = spec.dim
         L = np.zeros((d, d))
