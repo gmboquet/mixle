@@ -259,6 +259,25 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         maha2 = float((diff * soln).sum())
         return float(chi2.cdf(maha2, df=self.dim))
 
+    def density_quantile(self, q: float) -> np.ndarray:
+        """Inverse of :meth:`density_cumulative`: a representative point at cumulative-density index ``q``.
+
+        The multivariate analogue of a quantile / inverse-CDF: a coordinate-wise quantile is undefined
+        without a total order on R^d, but the density ordering gives one. ``q`` is the highest-density
+        region mass, so the boundary is the squared-Mahalanobis level ``chi2.ppf(q, dim)``; we return a
+        representative point on that contour, ``mu + sqrt(level) * L[:, 0]`` where ``covar = L L^T``
+        (so its Mahalanobis distance is exactly the level). Sweeping ``q`` enumerates the support in
+        descending density.
+        """
+        from scipy.stats import chi2
+
+        qf = float(q)
+        if not 0.0 <= qf <= 1.0:
+            raise ValueError("q must be in [0, 1].")
+        radius = float(np.sqrt(chi2.ppf(qf, df=self.dim)))
+        chol_lower = np.linalg.cholesky(self.covar)
+        return self.mu + radius * chol_lower[:, 0]
+
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized evaluation of the log-density at a sequence-encoded input x.
 
