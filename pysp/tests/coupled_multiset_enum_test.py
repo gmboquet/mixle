@@ -75,5 +75,25 @@ class IntegerPLSIEnumerationTestCase(unittest.TestCase):
         self.assertEqual(len({freeze(v) for v, _ in items}), len(items))
 
 
+class IBPEnumerationTestCase(unittest.TestCase):
+    def test_matches_brute_force_both_formats(self):
+        from pysp.stats.latent.ibp import IndianBuffetProcessDistribution
+
+        for fmt in ("dense", "sparse"):
+            dist = IndianBuffetProcessDistribution(num_features=4, feature_probs=[0.6, 0.3, 0.2, 0.45], data_format=fmt)
+            brute = []
+            for bits in itertools.product((0, 1), repeat=4):
+                x = list(bits) if fmt != "sparse" else [k for k, b in enumerate(bits) if b]
+                brute.append((x, dist.log_density(x)))
+            brute.sort(key=lambda t: -t[1])
+            items = list(dist.enumerator())
+            self.assertEqual(len(items), len(brute))
+            np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in brute], atol=1e-9)
+            for v, lp in items:
+                self.assertAlmostEqual(lp, dist.log_density(v), delta=1e-9)
+            self.assertEqual(tiers(items), tiers(brute))
+            self.assertAlmostEqual(np.logaddexp.reduce([lp for _, lp in items]), 0.0, delta=1e-8)
+
+
 if __name__ == "__main__":
     unittest.main()
