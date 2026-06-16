@@ -19,7 +19,7 @@ from typing import Any
 
 import numpy as np
 
-from pysp.ppl.core import CompositeFamily, Constraint, RandomVariable, free, lower
+from pysp.ppl.core import CompositeFamily, Constraint, RandomVariable, _SimplexSpec, free, lower
 
 _NEG_INF = -1e300
 
@@ -166,16 +166,20 @@ def _is_dirichlet_rv(a) -> bool:
     )
 
 
-def _simplex_alpha(node, a):
-    """Concentration vector for a composite's simplex argument ``a`` (mixture weights, a
-    transition row): the Dirichlet prior's alpha, or a symmetric Dirichlet(1) for a ``free``
-    simplex sized to the component count. Returns ``None`` if ``a`` is not a simplex parameter."""
+def _simplex_spec_for(node, a):
+    """The simplex spec for a composite argument ``a``, or ``None`` if it is not a simplex
+    parameter. Handles an explicit ``_SimplexSpec`` (HMM transition matrix = ``rows`` simplices,
+    initial distribution = one simplex), a ``Dirichlet(alpha)`` prior (one simplex), and a bare
+    ``free`` simplex (symmetric ``Dirichlet(1)`` sized to the component count, e.g. mixture
+    weights)."""
+    if isinstance(a, _SimplexSpec):
+        return a
     if _is_dirichlet_rv(a):
-        return np.asarray(a._args[0], dtype=float)
-    if a is free:  # free weights -> symmetric Dirichlet(1) over the component count
+        return _SimplexSpec(np.asarray(a._args[0], dtype=float), rows=1, name=a.name)
+    if a is free:
         for other in node._args:
             if isinstance(other, (list, tuple)):
-                return np.ones(len(other), dtype=float)
+                return _SimplexSpec(np.ones(len(other), dtype=float), rows=1)
     return None
 
 
@@ -204,20 +208,23 @@ def _collect_composite(rv: RandomVariable):
                         if isinstance(c, RandomVariable):
                             collect(c)
                     continue
-                alpha = _simplex_alpha(node, a)
-                if alpha is not None:  # simplex parameter (weights / transition row)
-                    base = (a.name if isinstance(a, RandomVariable) else None) or "w"
-                    for k in range(len(alpha)):
-                        slots.append(
-                            _Slot(
-                                len(slots),
-                                GammaDistribution(k=float(alpha[k]), theta=1.0),
-                                True,
-                                f"{base}{k}",
-                                None,
-                                "positive",
+                spec = _simplex_spec_for(node, a)
+                if spec is not None:  # simplex parameter(s): weights / initial (1 row) or a transition matrix
+                    base = spec.name or "w"
+                    kk = len(spec.alpha)
+                    for r in range(spec.rows):
+                        for j in range(kk):
+                            nm = f"{base}{j}" if spec.rows == 1 else f"{base}{r}_{j}"
+                            slots.append(
+                                _Slot(
+                                    len(slots),
+                                    GammaDistribution(k=float(spec.alpha[j]), theta=1.0),
+                                    True,
+                                    nm,
+                                    None,
+                                    "positive",
+                                )
                             )
-                        )
                 elif isinstance(a, RandomVariable):
                     collect(a)  # child model
             return
@@ -249,11 +256,13 @@ def _collect_composite(rv: RandomVariable):
                     if isinstance(a, (list, tuple)):
                         new_args.append([build_node(c) if isinstance(c, RandomVariable) else c for c in a])
                         continue
-                    alpha = _simplex_alpha(node, a)
-                    if alpha is not None:  # normalize the Gamma draws into a simplex
-                        g = np.asarray(take(len(alpha)), dtype=float)
-                        s = g.sum()
-                        new_args.append(g / s if s > 0 else np.ones_like(g) / len(g))
+                    spec = _simplex_spec_for(node, a)
+                    if spec is not None:  # normalize the Gamma draws into simplex row(s)
+                        kk = len(spec.alpha)
+                        g = np.asarray(take(spec.rows * kk), dtype=float).reshape(spec.rows, kk)
+                        s = g.sum(axis=1, keepdims=True)
+                        w = g / np.where(s > 0, s, 1.0)
+                        new_args.append(w[0] if spec.rows == 1 else w)
                     elif isinstance(a, RandomVariable):
                         new_args.append(build_node(a))
                     else:
