@@ -698,21 +698,25 @@ def _best_first_union(
     counter = itertools.count()
     # Per-stream head ranks; heads heap holds (-(offset + head_lp), counter, k, rank).
     heads: list[tuple[float, int, int, int]] = []
-    live = {}
+    # Live head scores keyed by stream index, maintained incrementally (only the consumed head
+    # changes per pop). The bound reads these directly instead of re-fetching each head from its
+    # stream, so a recompute is a single bound_fn over the cached scores -- no per-head get() calls.
+    head_scores: dict[int, float] = {}
     for k, s in enumerate(streams):
         if log_offsets[k] == -np.inf:
             continue
         item = s.get(0)
         if item is not None:
-            heapq.heappush(heads, (-(log_offsets[k] + item[1]), next(counter), k, 0))
-            live[k] = 0
+            score = log_offsets[k] + item[1]
+            heapq.heappush(heads, (-score, next(counter), k, 0))
+            head_scores[k] = score
     seen = set()
     buffer: list[tuple[float, int, Any]] = []
 
     def compute_bound() -> float:
-        if not live:
+        if not head_scores:
             return -np.inf
-        return bound_fn(np.asarray([log_offsets[k] + streams[k].get(r)[1] for k, r in live.items()]))
+        return bound_fn(np.fromiter(head_scores.values(), dtype=float, count=len(head_scores)))
 
     # The bound depends only on the live heads, which change only when a head is consumed;
     # cache it and recompute after each head pop instead of on every buffer-drain iteration.
@@ -738,10 +742,11 @@ def _best_first_union(
                 heapq.heappush(buffer, (-lp, next(counter), v))
         nxt = streams[k].get(rank + 1)
         if nxt is not None:
-            live[k] = rank + 1
-            heapq.heappush(heads, (-(log_offsets[k] + nxt[1]), next(counter), k, rank + 1))
+            score = log_offsets[k] + nxt[1]
+            head_scores[k] = score
+            heapq.heappush(heads, (-score, next(counter), k, rank + 1))
         else:
-            del live[k]
+            del head_scores[k]
         bound = compute_bound()
 
 
