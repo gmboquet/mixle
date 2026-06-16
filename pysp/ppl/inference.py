@@ -1064,6 +1064,16 @@ def nuts_fit(
     return _finalize_chains(rv, slots, results, build)
 
 
+def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:
+    """Draw the parameter posterior with an automatically chosen sampler (``how='sample'``) — so
+    the user doesn't pick among mcmc/hmc/nuts/ensemble. Low/medium-dimensional models use the
+    affine-invariant ``ensemble`` (highest ESS/sec, handles constraints by rejection); larger
+    models use ``nuts`` (auto-tuned HMC for correlated, higher-dimensional posteriors). Takes the
+    common knobs (draws, burn, thin, rng, chains, parallel, constraints, penalty)."""
+    d = len(_target_parts(rv, data)[1])
+    return ensemble_fit(rv, data, **kw) if d <= 12 else nuts_fit(rv, data, **kw)
+
+
 # ---------------------------------------------------- closed-form conjugate Bayes
 class ConjugatePosterior:
     """Exact closed-form posterior over a conjugate parameter.

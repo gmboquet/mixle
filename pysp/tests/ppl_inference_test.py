@@ -97,6 +97,17 @@ class PPLHierarchicalTestCase(unittest.TestCase):
         self.assertGreater(np.corrcoef(fit.result.group_means, p)[0, 1], 0.8)
 
 
+class PPLAutoSamplerTestCase(unittest.TestCase):
+    def test_sample_auto_picks_and_recovers(self):
+        # how='sample' chooses the sampler for you (ensemble for low-dim) and recovers params
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 2.0, size=3000))
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="sample", draws=600, burn=200, rng=np.random.RandomState(1)
+        )
+        self.assertAlmostEqual(float(m.result.mean("mu")), 5.0, delta=0.2)
+
+
 class PPLNUTSTestCase(unittest.TestCase):
     def setUp(self):
         rng = np.random.RandomState(0)
