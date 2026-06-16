@@ -179,6 +179,18 @@ tails = constrain((x < -1) | (x > 1)) # boolean combinators; ~c negates
 
 (Python's chained `a < b < c` is intentionally rejected — use `(a < b) & (b < c)`.)
 
+**Differential / shape constraints** act on a vector RV (a discretized function) via finite
+differences — monotonicity (first difference), curvature (second difference), bounded variation:
+
+```python
+v = MVN(20, name="v")
+constrain(increasing(v))     # constrain(decreasing(v)) / monotone(v)
+constrain(convex(v))         # constrain(concave(v))     -- second difference
+constrain(lipschitz(v, 0.5)) # |v[i+1]-v[i]| <= 0.5      -- bounded variation
+```
+
+Each carries a continuous residual, so it also feeds the soft-penalty inference path.
+
 **Inference — `fit(..., constraints=...)`** restricts the feasible parameter region. The
 constrained variables are the model's (named) priors; `map`/`mcmc`/`ensemble` honor a hard
 truncation of the posterior, e.g. an identifiability ordering:
