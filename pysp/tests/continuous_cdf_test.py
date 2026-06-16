@@ -119,6 +119,29 @@ class MultivariateCumulativeTestCase(unittest.TestCase):
         samp = sum(1 for y in ys if float(d5.log_density(y)) >= t - 1e-9) / 60000
         self.assertAlmostEqual(d5.density_cumulative(x5), samp, delta=0.02)
 
+    def test_density_quantile_inverts_cumulative(self):
+        # density_quantile is the multivariate arbitrary-index (inverse-CDF in the density ordering):
+        # density_cumulative(density_quantile(q)) == q, and density falls monotonically as q grows
+        # (sweeping q enumerates the support in descending density).
+        import numpy as np
+
+        from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution
+        from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
+        from pysp.stats.multivariate.vmf import VonMisesFisherDistribution
+
+        dists = [
+            MultivariateGaussianDistribution(np.array([0.5, -1.0]), np.array([[2.0, 0.3], [0.3, 1.0]])),
+            DiagonalGaussianDistribution(np.array([0.0, 1.0, 2.0]), np.array([1.0, 2.0, 0.5])),
+            VonMisesFisherDistribution(np.array([1.0, 0.0, 0.0]), 3.0),
+        ]
+        for d in dists:
+            for q in (0.1, 0.3, 0.5, 0.7, 0.9):
+                self.assertAlmostEqual(d.density_cumulative(d.density_quantile(q)), q, delta=1e-6)
+            lps = [d.log_density(d.density_quantile(q)) for q in (0.1, 0.5, 0.9)]
+            self.assertTrue(all(lps[i] >= lps[i + 1] - 1e-9 for i in range(len(lps) - 1)))
+            with self.assertRaises(ValueError):
+                d.density_quantile(1.5)
+
 
 if __name__ == "__main__":
     unittest.main()
