@@ -1325,6 +1325,7 @@ class RandomVariable:
             "map",
             "mcmc",
             "hmc",
+            "nuts",
             "ensemble",
             "vi",
             "vmp",
@@ -1389,7 +1390,18 @@ class RandomVariable:
                 how = "em"
         elif how == "em" and (partial_free or struct_param):
             how = "map"  # EM can't hold params fixed / infer a structural vector param
-        if how in ("map", "mcmc", "hmc", "ensemble", "vi", "vmp", "conjugate", "conjugate_mixture", "hierarchical"):
+        if how in (
+            "map",
+            "mcmc",
+            "hmc",
+            "nuts",
+            "ensemble",
+            "vi",
+            "vmp",
+            "conjugate",
+            "conjugate_mixture",
+            "hierarchical",
+        ):
             from pysp.ppl import inference as _inf
 
             if how == "conjugate_mixture":
@@ -1398,6 +1410,8 @@ class RandomVariable:
                 return _inf.mcmc_fit(self, data, **kw)
             if how == "hmc":
                 return _inf.hmc_fit(self, data, **kw)
+            if how == "nuts":
+                return _inf.nuts_fit(self, data, **kw)
             if how == "ensemble":
                 return _inf.ensemble_fit(self, data, **kw)
             if how == "vi":
