@@ -1333,6 +1333,7 @@ class RandomVariable:
             "mcmc",
             "hmc",
             "nuts",
+            "sample",
             "ensemble",
             "vi",
             "vmp",
@@ -1402,6 +1403,7 @@ class RandomVariable:
             "mcmc",
             "hmc",
             "nuts",
+            "sample",
             "ensemble",
             "vi",
             "vmp",
@@ -1419,6 +1421,8 @@ class RandomVariable:
                 return _inf.hmc_fit(self, data, **kw)
             if how == "nuts":
                 return _inf.nuts_fit(self, data, **kw)
+            if how == "sample":
+                return _inf.sample_fit(self, data, **kw)
             if how == "ensemble":
                 return _inf.ensemble_fit(self, data, **kw)
             if how == "vi":
