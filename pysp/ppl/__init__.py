@@ -11,6 +11,7 @@ with ``.fit(data)``; query with ``.sample`` / ``.log_prob`` / ``.posterior``.
 The 86 ``pysp.stats`` distribution classes are untouched; this is a thin, optional
 dialect. See notes/ppl-syntax-spec.md.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -25,8 +26,11 @@ from pysp.ppl.core import (
     RandomVariable,
     compare,
     constrain,
+    eq,
+    equal,
     free,
     lower,
+    ne,
     register_composite,
     register_family,
 )
@@ -58,66 +62,165 @@ from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution, DiagonalG
 from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
 
 __all__ = [
-    "RandomVariable", "free", "lower",
-    "Normal", "Poisson", "Gamma", "Exponential", "Categorical", "Bernoulli", "Geometric",
-    "Binomial", "Weibull", "Laplace", "Logistic", "Uniform", "Rayleigh", "Pareto",
-    "Beta", "StudentT", "LogNormal", "NegativeBinomial", "Dirichlet",
-    "Mix", "Seq", "Markov", "LDA", "MVN", "DiagGaussian", "LocalLevel", "AR1",
-    "Graph", "Field", "Group", "compare", "constrain", "Constraint", "Event",
+    "RandomVariable",
+    "free",
+    "lower",
+    "Normal",
+    "Poisson",
+    "Gamma",
+    "Exponential",
+    "Categorical",
+    "Bernoulli",
+    "Geometric",
+    "Binomial",
+    "Weibull",
+    "Laplace",
+    "Logistic",
+    "Uniform",
+    "Rayleigh",
+    "Pareto",
+    "Beta",
+    "StudentT",
+    "LogNormal",
+    "NegativeBinomial",
+    "Dirichlet",
+    "Mix",
+    "Seq",
+    "Markov",
+    "LDA",
+    "MVN",
+    "DiagGaussian",
+    "LocalLevel",
+    "AR1",
+    "Graph",
+    "Field",
+    "Group",
+    "compare",
+    "constrain",
+    "Constraint",
+    "Event",
+    "eq",
+    "equal",
+    "ne",
 ]
 
 
 # --- family registration: (user-facing args) -> (underlying *Distribution kwargs) ---
-register_family("Normal", GaussianDistribution, GaussianEstimator,
-                lambda mean, sd: {"mu": float(mean), "sigma2": float(sd) ** 2}, arity=2,
-                seed_at=lambda v, s: {"mu": float(v), "sigma2": (float(s) ** 2) or 1.0},
-                positive=(False, True),
-                read=lambda d: {"mean": d.mu, "sd": float(np.sqrt(d.sigma2))})
-register_family("Poisson", PoissonDistribution, PoissonEstimator,
-                lambda rate: {"lam": float(rate)}, arity=1,
-                seed_at=lambda v, s: {"lam": max(float(v), 1e-2)}, positive=(True,),
-                read=lambda d: {"rate": d.lam})
-register_family("Gamma", GammaDistribution, GammaEstimator,
-                lambda shape, rate: {"k": float(shape), "theta": 1.0 / float(rate)}, arity=2,
-                seed_at=lambda v, s: {"k": 1.0, "theta": max(float(v), 1e-2)},
-                positive=(True, True),
-                read=lambda d: {"shape": d.k, "rate": 1.0 / d.theta})
-register_family("Exponential", ExponentialDistribution, ExponentialEstimator,
-                lambda rate: {"beta": 1.0 / float(rate)}, arity=1,
-                seed_at=lambda v, s: {"beta": max(float(v), 1e-2)}, positive=(True,),
-                read=lambda d: {"rate": 1.0 / d.beta})
-register_family("Bernoulli", BernoulliDistribution, BernoulliEstimator,
-                lambda p: {"p": float(p)}, arity=1, support=("unit",), read=lambda d: {"p": d.p})
-register_family("Geometric", GeometricDistribution, GeometricEstimator,
-                lambda p: {"p": float(p)}, arity=1, support=("unit",), read=lambda d: {"p": d.p})
-register_family("Beta", BetaDistribution, BetaEstimator,
-                lambda a, b: {"a": float(a), "b": float(b)}, arity=2, positive=(True, True),
-                read=lambda d: {"a": d.a, "b": d.b})
-register_family("Dirichlet", DirichletDistribution, DirichletEstimator,
-                lambda alpha: {"alpha": np.asarray(alpha, dtype=float)}, arity=1,
-                read=lambda d: {"alpha": np.asarray(d.alpha),
-                                "mean": np.asarray(d.alpha) / float(np.sum(d.alpha))})
-register_family("StudentT", StudentTDistribution, StudentTEstimator,
-                lambda df, loc, scale: {"df": float(df), "loc": float(loc), "scale": float(scale)},
-                arity=3, seed_at=lambda v, s: {"df": 5.0, "loc": float(v), "scale": (float(s) or 1.0)},
-                positive=(True, False, True),
-                read=lambda d: {"df": d.df, "loc": d.loc, "scale": d.scale})
-register_family("LogNormal", LogGaussianDistribution, LogGaussianEstimator,
-                lambda mu, sigma: {"mu": float(mu), "sigma2": float(sigma) ** 2}, arity=2,
-                seed_at=lambda v, s: {"mu": float(np.log(max(v, 1e-3))), "sigma2": 1.0},
-                positive=(False, True),
-                read=lambda d: {"mu": d.mu, "sigma": float(np.sqrt(d.sigma2))})
+register_family(
+    "Normal",
+    GaussianDistribution,
+    GaussianEstimator,
+    lambda mean, sd: {"mu": float(mean), "sigma2": float(sd) ** 2},
+    arity=2,
+    seed_at=lambda v, s: {"mu": float(v), "sigma2": (float(s) ** 2) or 1.0},
+    positive=(False, True),
+    read=lambda d: {"mean": d.mu, "sd": float(np.sqrt(d.sigma2))},
+)
+register_family(
+    "Poisson",
+    PoissonDistribution,
+    PoissonEstimator,
+    lambda rate: {"lam": float(rate)},
+    arity=1,
+    seed_at=lambda v, s: {"lam": max(float(v), 1e-2)},
+    positive=(True,),
+    read=lambda d: {"rate": d.lam},
+)
+register_family(
+    "Gamma",
+    GammaDistribution,
+    GammaEstimator,
+    lambda shape, rate: {"k": float(shape), "theta": 1.0 / float(rate)},
+    arity=2,
+    seed_at=lambda v, s: {"k": 1.0, "theta": max(float(v), 1e-2)},
+    positive=(True, True),
+    read=lambda d: {"shape": d.k, "rate": 1.0 / d.theta},
+)
+register_family(
+    "Exponential",
+    ExponentialDistribution,
+    ExponentialEstimator,
+    lambda rate: {"beta": 1.0 / float(rate)},
+    arity=1,
+    seed_at=lambda v, s: {"beta": max(float(v), 1e-2)},
+    positive=(True,),
+    read=lambda d: {"rate": 1.0 / d.beta},
+)
+register_family(
+    "Bernoulli",
+    BernoulliDistribution,
+    BernoulliEstimator,
+    lambda p: {"p": float(p)},
+    arity=1,
+    support=("unit",),
+    read=lambda d: {"p": d.p},
+)
+register_family(
+    "Geometric",
+    GeometricDistribution,
+    GeometricEstimator,
+    lambda p: {"p": float(p)},
+    arity=1,
+    support=("unit",),
+    read=lambda d: {"p": d.p},
+)
+register_family(
+    "Beta",
+    BetaDistribution,
+    BetaEstimator,
+    lambda a, b: {"a": float(a), "b": float(b)},
+    arity=2,
+    positive=(True, True),
+    read=lambda d: {"a": d.a, "b": d.b},
+)
+register_family(
+    "Dirichlet",
+    DirichletDistribution,
+    DirichletEstimator,
+    lambda alpha: {"alpha": np.asarray(alpha, dtype=float)},
+    arity=1,
+    read=lambda d: {"alpha": np.asarray(d.alpha), "mean": np.asarray(d.alpha) / float(np.sum(d.alpha))},
+)
+register_family(
+    "StudentT",
+    StudentTDistribution,
+    StudentTEstimator,
+    lambda df, loc, scale: {"df": float(df), "loc": float(loc), "scale": float(scale)},
+    arity=3,
+    seed_at=lambda v, s: {"df": 5.0, "loc": float(v), "scale": (float(s) or 1.0)},
+    positive=(True, False, True),
+    read=lambda d: {"df": d.df, "loc": d.loc, "scale": d.scale},
+)
+register_family(
+    "LogNormal",
+    LogGaussianDistribution,
+    LogGaussianEstimator,
+    lambda mu, sigma: {"mu": float(mu), "sigma2": float(sigma) ** 2},
+    arity=2,
+    seed_at=lambda v, s: {"mu": float(np.log(max(v, 1e-3))), "sigma2": 1.0},
+    positive=(False, True),
+    read=lambda d: {"mu": d.mu, "sigma": float(np.sqrt(d.sigma2))},
+)
+
+
 def _nb_init(data):
     a = np.asarray(data, dtype=float)
     mu, var = float(a.mean()), float(a.var())
-    r0 = mu * mu / max(var - mu, 1e-3)          # moment match: var = mu + mu^2/r
+    r0 = mu * mu / max(var - mu, 1e-3)  # moment match: var = mu + mu^2/r
     p0 = r0 / (r0 + mu)
     return NegativeBinomialDistribution(max(r0, 1e-2), min(max(p0, 1e-3), 1 - 1e-3))
 
 
-register_family("NegativeBinomial", NegativeBinomialDistribution, NegativeBinomialEstimator,
-                lambda r, p: {"r": float(r), "p": float(p)}, arity=2, positive=(True, False),
-                init_fit=_nb_init, read=lambda d: {"r": d.r, "p": d.p})
+register_family(
+    "NegativeBinomial",
+    NegativeBinomialDistribution,
+    NegativeBinomialEstimator,
+    lambda r, p: {"r": float(r), "p": float(p)},
+    arity=2,
+    positive=(True, False),
+    init_fit=_nb_init,
+    read=lambda d: {"r": d.r, "p": d.p},
+)
 
 
 def _cat_args(probs):
@@ -128,31 +231,72 @@ def _cat_args(probs):
 
 register_family("Categorical", CategoricalDistribution, CategoricalEstimator, _cat_args, arity=1)
 
-register_family("Weibull", WeibullDistribution, WeibullEstimator,
-                lambda shape, scale: {"shape": float(shape), "scale": float(scale)}, arity=2,
-                positive=(True, True), seed_at=lambda v, s: {"shape": 1.5, "scale": max(float(v), 1e-2)},
-                read=lambda d: {"shape": d.shape, "scale": d.scale})
-register_family("Laplace", LaplaceDistribution, LaplaceEstimator,
-                lambda loc, scale: {"mu": float(loc), "b": float(scale)}, arity=2,
-                positive=(False, True), seed_at=lambda v, s: {"mu": float(v), "b": max(float(s), 1e-2)},
-                read=lambda d: {"loc": d.mu, "scale": d.b})
-register_family("Logistic", LogisticDistribution, LogisticEstimator,
-                lambda loc, scale: {"loc": float(loc), "scale": float(scale)}, arity=2,
-                positive=(False, True), seed_at=lambda v, s: {"loc": float(v), "scale": max(float(s), 1e-2)},
-                read=lambda d: {"loc": d.loc, "scale": d.scale})
-register_family("Uniform", UniformDistribution, UniformEstimator,
-                lambda low, high: {"low": float(low), "high": float(high)}, arity=2,
-                read=lambda d: {"low": d.low, "high": d.high})
-register_family("Rayleigh", RayleighDistribution, RayleighEstimator,
-                lambda sigma: {"sigma": float(sigma)}, arity=1, positive=(True,),
-                seed_at=lambda v, s: {"sigma": max(float(v), 1e-2)},
-                read=lambda d: {"sigma": d.sigma})
-register_family("Pareto", ParetoDistribution, ParetoEstimator,
-                lambda xm, alpha: {"xm": float(xm), "alpha": float(alpha)}, arity=2,
-                positive=(True, True), read=lambda d: {"xm": d.xm, "alpha": d.alpha})
-register_family("Binomial", BinomialDistribution, BinomialEstimator,
-                lambda n, p: {"p": float(p), "n": int(n)}, arity=2, support=("real", "unit"),
-                read=lambda d: {"n": d.n, "p": d.p})
+register_family(
+    "Weibull",
+    WeibullDistribution,
+    WeibullEstimator,
+    lambda shape, scale: {"shape": float(shape), "scale": float(scale)},
+    arity=2,
+    positive=(True, True),
+    seed_at=lambda v, s: {"shape": 1.5, "scale": max(float(v), 1e-2)},
+    read=lambda d: {"shape": d.shape, "scale": d.scale},
+)
+register_family(
+    "Laplace",
+    LaplaceDistribution,
+    LaplaceEstimator,
+    lambda loc, scale: {"mu": float(loc), "b": float(scale)},
+    arity=2,
+    positive=(False, True),
+    seed_at=lambda v, s: {"mu": float(v), "b": max(float(s), 1e-2)},
+    read=lambda d: {"loc": d.mu, "scale": d.b},
+)
+register_family(
+    "Logistic",
+    LogisticDistribution,
+    LogisticEstimator,
+    lambda loc, scale: {"loc": float(loc), "scale": float(scale)},
+    arity=2,
+    positive=(False, True),
+    seed_at=lambda v, s: {"loc": float(v), "scale": max(float(s), 1e-2)},
+    read=lambda d: {"loc": d.loc, "scale": d.scale},
+)
+register_family(
+    "Uniform",
+    UniformDistribution,
+    UniformEstimator,
+    lambda low, high: {"low": float(low), "high": float(high)},
+    arity=2,
+    read=lambda d: {"low": d.low, "high": d.high},
+)
+register_family(
+    "Rayleigh",
+    RayleighDistribution,
+    RayleighEstimator,
+    lambda sigma: {"sigma": float(sigma)},
+    arity=1,
+    positive=(True,),
+    seed_at=lambda v, s: {"sigma": max(float(v), 1e-2)},
+    read=lambda d: {"sigma": d.sigma},
+)
+register_family(
+    "Pareto",
+    ParetoDistribution,
+    ParetoEstimator,
+    lambda xm, alpha: {"xm": float(xm), "alpha": float(alpha)},
+    arity=2,
+    positive=(True, True),
+    read=lambda d: {"xm": d.xm, "alpha": d.alpha},
+)
+register_family(
+    "Binomial",
+    BinomialDistribution,
+    BinomialEstimator,
+    lambda n, p: {"p": float(p), "n": int(n)},
+    arity=2,
+    support=("real", "unit"),
+    read=lambda d: {"n": d.n, "p": d.p},
+)
 
 
 def _mix_dist(args, lower_child):
@@ -197,12 +341,10 @@ def _mix_seed(args, data, rng, seed_child):
 
 
 def _mix_read(d, read_params):
-    return {"components": [read_params(c) for c in d.components],
-            "weights": np.asarray(d.w)}
+    return {"components": [read_params(c) for c in d.components], "weights": np.asarray(d.w)}
 
 
-register_composite("Mixture", _mix_dist, _mix_est, seed_fn=_mix_seed,
-                   dist_cls=MixtureDistribution, read=_mix_read)
+register_composite("Mixture", _mix_dist, _mix_est, seed_fn=_mix_seed, dist_cls=MixtureDistribution, read=_mix_read)
 
 
 # --- Sequence: iid elements (+ optional length model) -----------------------------
@@ -220,8 +362,7 @@ def _seq_read(d, read_params):
     return {"element": read_params(d.dist)}
 
 
-register_composite("Sequence", _seq_dist, _seq_est,
-                   dist_cls=SequenceDistribution, read=_seq_read)
+register_composite("Sequence", _seq_dist, _seq_est, dist_cls=SequenceDistribution, read=_seq_read)
 
 
 # --- Markov / HMM: latent-state sequence model ------------------------------------
@@ -229,8 +370,7 @@ def _hmm_dist(args, lower_child):
     comps, _ = args
     topics = [lower_child(c) for c in comps]
     k = len(topics)
-    return HiddenMarkovModelDistribution(topics, w=np.ones(k) / k,
-                                         transitions=np.ones((k, k)) / k)
+    return HiddenMarkovModelDistribution(topics, w=np.ones(k) / k, transitions=np.ones((k, k)) / k)
 
 
 def _hmm_est(args, lower_child_est, name, keys):
@@ -254,17 +394,20 @@ def _hmm_seed(args, data, rng, seed_child):
     topics = [seed_child(c, arr[i], scale, rng) for c, i in zip(comps, idx)]
     if any(t is None for t in topics):
         return None
-    return HiddenMarkovModelDistribution(topics, w=np.ones(k) / k,
-                                         transitions=np.ones((k, k)) / k)
+    return HiddenMarkovModelDistribution(topics, w=np.ones(k) / k, transitions=np.ones((k, k)) / k)
 
 
 def _hmm_read(d, read_params):
-    return {"states": [read_params(t) for t in d.topics],
-            "transitions": np.asarray(d.transitions), "initial": np.asarray(d.w)}
+    return {
+        "states": [read_params(t) for t in d.topics],
+        "transitions": np.asarray(d.transitions),
+        "initial": np.asarray(d.w),
+    }
 
 
-register_composite("Markov", _hmm_dist, _hmm_est, seed_fn=_hmm_seed,
-                   dist_cls=HiddenMarkovModelDistribution, read=_hmm_read)
+register_composite(
+    "Markov", _hmm_dist, _hmm_est, seed_fn=_hmm_seed, dist_cls=HiddenMarkovModelDistribution, read=_hmm_read
+)
 
 
 # --- LDA / topic model: documents are bags of (word_id, count) --------------------
@@ -276,8 +419,9 @@ def _lda_dist(args, lower_child):
 
 def _lda_est(args, lower_child_est, name, keys):
     k, V, alpha = args
-    return LDAEstimator([IntegerCategoricalEstimator(min_val=0, max_val=V - 1) for _ in range(k)],
-                        fixed_alpha=np.full(k, float(alpha)))
+    return LDAEstimator(
+        [IntegerCategoricalEstimator(min_val=0, max_val=V - 1) for _ in range(k)], fixed_alpha=np.full(k, float(alpha))
+    )
 
 
 def _lda_seed(args, data, rng, seed_child):
@@ -290,14 +434,13 @@ def _lda_read(d, read_params):
     return {"topics": [np.asarray(t.p_vec) for t in d.topics], "alpha": np.asarray(d.alpha)}
 
 
-register_composite("LDA", _lda_dist, _lda_est, seed_fn=_lda_seed,
-                   dist_cls=LDADistribution, read=_lda_read)
+register_composite("LDA", _lda_dist, _lda_est, seed_fn=_lda_seed, dist_cls=LDADistribution, read=_lda_read)
 
 
 # --- multivariate Gaussian (data are vectors) -------------------------------------
 def _mvn_dist(args, lower_child):
     (dim,) = args
-    return MultivariateGaussianDistribution(np.zeros(dim), np.eye(dim))   # N(0, I) default
+    return MultivariateGaussianDistribution(np.zeros(dim), np.eye(dim))  # N(0, I) default
 
 
 def _mvn_est(args, lower_child_est, name, keys):
@@ -309,8 +452,7 @@ def _mvn_read(d, read_params):
     return {"mean": np.asarray(d.mu), "cov": np.asarray(d.covar)}
 
 
-register_composite("MVN", _mvn_dist, _mvn_est, dist_cls=MultivariateGaussianDistribution,
-                   read=_mvn_read)
+register_composite("MVN", _mvn_dist, _mvn_est, dist_cls=MultivariateGaussianDistribution, read=_mvn_read)
 
 
 def _diag_dist(args, lower_child):
@@ -327,8 +469,7 @@ def _diag_read(d, read_params):
     return {"mean": np.asarray(d.mu), "var": np.asarray(d.covar)}
 
 
-register_composite("DiagGaussian", _diag_dist, _diag_est,
-                   dist_cls=DiagonalGaussianDistribution, read=_diag_read)
+register_composite("DiagGaussian", _diag_dist, _diag_est, dist_cls=DiagonalGaussianDistribution, read=_diag_read)
 
 
 # --- linear-Gaussian state space (time series) ------------------------------------
@@ -380,23 +521,21 @@ def Graph():
     """A VMP factor graph for arbitrary conjugate-Gaussian DAGs with shared variables.
     See pysp.ppl.vmp.Graph."""
     from pysp.ppl.vmp import Graph as _Graph
+
     return _Graph()
 
 
-def StudentT(df: Any, loc: Any, scale: Any, *, name: str | None = None,
-             keys: str | None = None) -> RandomVariable:
+def StudentT(df: Any, loc: Any, scale: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Student-t with degrees of freedom, location, scale (heavy-tailed Normal)."""
     return RandomVariable._sample("StudentT", (df, loc, scale), name=name, keys=keys)
 
 
-def LogNormal(mu: Any, sigma: Any, *, name: str | None = None,
-              keys: str | None = None) -> RandomVariable:
+def LogNormal(mu: Any, sigma: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Log-normal: log(X) ~ Normal(mu, sigma)."""
     return RandomVariable._sample("LogNormal", (mu, sigma), name=name, keys=keys)
 
 
-def NegativeBinomial(r: Any, p: Any, *, name: str | None = None,
-                     keys: str | None = None) -> RandomVariable:
+def NegativeBinomial(r: Any, p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Negative binomial with r failures and success probability p."""
     return RandomVariable._sample("NegativeBinomial", (r, p), name=name, keys=keys)
 
@@ -484,8 +623,7 @@ def DiagGaussian(dim: int, *, name: str | None = None) -> RandomVariable:
     return RandomVariable._sample("DiagGaussian", (int(dim),), name=name)
 
 
-def LDA(num_topics: int, vocab_size: int, *, alpha: float = 1.0,
-        name: str | None = None) -> RandomVariable:
+def LDA(num_topics: int, vocab_size: int, *, alpha: float = 1.0, name: str | None = None) -> RandomVariable:
     """Latent Dirichlet allocation. Fit on a list of documents, each a bag of
     ``(word_id, count)`` pairs over word ids ``0..vocab_size-1``. Topics are recovered
     as word distributions; alpha (the document-topic Dirichlet) is fixed by default."""
