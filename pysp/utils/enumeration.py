@@ -98,12 +98,16 @@ class BufferedStream:
         self._done = False
 
     def get(self, i: int) -> tuple[Any, float] | None:
-        while not self._done and len(self._buf) <= i:
+        buf = self._buf
+        # Fast path: already buffered (the common case -- coordinates are re-read every pop).
+        if i < len(buf):
+            return buf[i]
+        while not self._done and len(buf) <= i:
             try:
-                self._buf.append(next(self._it))
+                buf.append(next(self._it))
             except StopIteration:
                 self._done = True
-        return self._buf[i] if i < len(self._buf) else None
+        return buf[i] if i < len(buf) else None
 
 
 class QuantizedEnumerationIndex:
@@ -525,7 +529,7 @@ class ProductEnumerator:
         self._counter = itertools.count()
         # heap entries: (-score, tie_counter, index_tuple, min_coord_allowed_to_advance)
         self._heap: list[tuple[float, int, tuple[int, ...], int]] = []
-        n = len(self.streams)
+        self._n = n = len(self.streams)
         if n == 0:
             # Empty product: the single empty tuple with probability one.
             self._heap.append((-offset, next(self._counter), (), 0))
@@ -543,17 +547,19 @@ class ProductEnumerator:
         if not self._heap:
             raise StopIteration
         _, _, idx, min_coord = heapq.heappop(self._heap)
-        if len(idx) == 0:
+        n = self._n
+        if n == 0:
             return (self.combine(()), self.offset)
         # Fetch each coordinate's (value, log_prob) once and reuse it for the combined value, the
         # exact reported score, and the successor keys -- the previous O(n) re-sum per successor
         # (and a second O(n) fetch for the value) made __next__ quadratic in the number of fields.
-        items = [self.streams[k].get(i) for k, i in enumerate(idx)]
+        streams = self.streams
+        items = [streams[k].get(idx[k]) for k in range(n)]
         value = self.combine(tuple(it[0] for it in items))
         score = self.offset + sum(it[1] for it in items)
         # Only advance coordinates at or above ``min_coord`` (canonical, duplicate-free generation).
-        for k in range(min_coord, len(idx)):
-            nxt = self.streams[k].get(idx[k] + 1)
+        for k in range(min_coord, n):
+            nxt = streams[k].get(idx[k] + 1)
             if nxt is None:
                 continue
             succ = idx[:k] + (idx[k] + 1,) + idx[k + 1 :]
