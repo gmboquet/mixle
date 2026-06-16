@@ -315,7 +315,7 @@ message-passing core.
 | `"conjugate"` | closed-form posterior | conjugate prior + known other params |
 | `"hierarchical"` | conjugate VB/EM random effects | `.each()` group priors |
 | `"map"` | maximize joint (scipy) | priors, point estimate |
-| `"vi"` | mean-field ADVI (reparameterized ELBO) | non-conjugate priors, fast approximate posterior |
+| `"vi"` | ADVI — `family='meanfield'|'fullrank'`, tilted Renyi `alpha=`, `batch_size=` (SGVB) | non-conjugate priors, scalable approximate posterior |
 | `"vmp"` | variational message passing (closed-form, ELBO) | conjugate-exponential models (e.g. Gaussian mean+precision) |
 | `"mcmc"` | adaptive Metropolis (`pysp.utils.mcmc`) | full posterior, fast throughput |
 | `"hmc"` | Hamiltonian MC, preconditioned (fixed step) | full posterior |

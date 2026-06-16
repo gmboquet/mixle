@@ -97,6 +97,37 @@ class PPLHierarchicalTestCase(unittest.TestCase):
         self.assertGreater(np.corrcoef(fit.result.group_means, p)[0, 1], 0.8)
 
 
+class PPLVariationalFamilyTestCase(unittest.TestCase):
+    """Richer VB: full-rank Gaussian q (captures parameter correlations) and the tilted
+    Renyi-alpha objective (alpha<1 is mass-covering, widening the too-narrow KL fit)."""
+
+    def test_fullrank_captures_correlation(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.gamma(3.0, 1.0 / 2.0, 300))  # Gamma(shape,rate) posterior is strongly correlated
+        mf = Gamma(free, free).fit(data, how="vi", family="meanfield", steps=1500, rng=np.random.RandomState(1))
+        fr = Gamma(free, free).fit(data, how="vi", family="fullrank", steps=1500, rng=np.random.RandomState(1))
+
+        def corr(m):
+            return float(np.corrcoef(m.result.samples("arg0"), m.result.samples("arg1"))[0, 1])
+
+        self.assertLess(abs(corr(mf)), 0.2)  # mean-field forces independence
+        self.assertGreater(corr(fr), 0.8)  # full-rank recovers the strong correlation
+        self.assertAlmostEqual(fr.params["shape"], 3.0, delta=0.6)
+
+    def test_tilted_alpha_widens_posterior(self):
+        rng = np.random.RandomState(1)
+        data = list(rng.normal(5.0, 2.0, 400))
+        kl = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="vi", alpha=1.0, steps=400, rng=np.random.RandomState(2)
+        )
+        iwae = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="vi", alpha=0.0, mc=16, steps=400, rng=np.random.RandomState(2)
+        )
+        self.assertAlmostEqual(iwae.params["mean"], 5.0, delta=0.25)
+        # the tilted (importance-weighted) objective is mass-covering -> not narrower than KL
+        self.assertGreaterEqual(float(np.std(iwae.posterior("mu"))), 0.9 * float(np.std(kl.posterior("mu"))))
+
+
 class PPLAutoSamplerTestCase(unittest.TestCase):
     def test_sample_auto_picks_and_recovers(self):
         # how='sample' chooses the sampler for you (ensemble for low-dim) and recovers params
