@@ -8,6 +8,7 @@ ordinary ``dist.log_density(x)`` models easy to sample from.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -408,6 +409,160 @@ def hamiltonian_monte_carlo(
         accepted=np.asarray(accepted, dtype=bool),
         transition_labels=tuple("hmc" for _ in accepted),
     )
+
+
+def nuts(
+    log_target: LogTarget,
+    grad_log_target: Callable[[Any], Any],
+    initial: Any,
+    num_samples: int,
+    warmup: int = 1000,
+    mass: Any = 1.0,
+    target_accept: float = 0.8,
+    max_tree_depth: int = 10,
+    thin: int = 1,
+    rng: np.random.RandomState | None = None,
+) -> MCMCResult:
+    """No-U-Turn Sampler (Hoffman & Gelman 2014, efficient NUTS with dual-averaging step size).
+
+    Auto-tunes the leapfrog trajectory length (recursive tree doubling, U-turn termination) and,
+    during ``warmup``, the step size to hit ``target_accept`` — so unlike fixed-step HMC it needs
+    no manual tuning and mixes well on correlated / higher-dimensional posteriors. ``grad_log_target``
+    returns the gradient of the (unnormalized) log target; ``mass`` is a diagonal mass matrix.
+    """
+    if num_samples < 0 or warmup < 0 or thin <= 0:
+        raise ValueError("require num_samples>=0, warmup>=0, thin>0.")
+    rng = np.random.RandomState() if rng is None else rng
+    theta0 = _numeric_state(initial)
+    shape = theta0.shape
+    mass_arr = _numeric_mass(mass, shape)
+    minv = 1.0 / mass_arr  # diagonal inverse mass (momentum -> velocity)
+    sqrt_m = np.sqrt(mass_arr)
+    delta_max = 1000.0
+
+    def logp(theta):
+        return float(log_target(_restore_numeric_state(theta)))
+
+    def gradient(theta):
+        return _numeric_gradient(grad_log_target, theta, shape)
+
+    def kinetic(r):
+        return 0.5 * float(np.sum(r * r * minv))
+
+    def leapfrog(theta, r, eps):
+        r = r + 0.5 * eps * gradient(theta)
+        theta = theta + eps * (minv * r)
+        r = r + 0.5 * eps * gradient(theta)
+        return theta, r
+
+    def no_uturn(tm, tp, rm, rp):
+        d = tp - tm
+        return float(np.dot(d, minv * rm)) >= 0 and float(np.dot(d, minv * rp)) >= 0
+
+    cur = theta0
+    cur_lp = logp(cur)
+    if not np.isfinite(cur_lp):
+        raise ValueError("initial state has non-finite log target.")
+    eps = _find_reasonable_eps(cur, cur_lp, logp, leapfrog, kinetic, sqrt_m, shape, rng)
+    mu = math.log(10.0 * eps)
+    log_eps_bar, h_bar, gamma, t0, kappa = 0.0, 0.0, 0.05, 10.0, 0.75
+
+    samples: list[Any] = []
+    log_probs: list[float] = []
+    depths: list[int] = []
+    total = warmup + num_samples * thin
+
+    def build_tree(theta, r, logu, v, j, eps, joint0):
+        if j == 0:
+            theta1, r1 = leapfrog(theta, r, v * eps)
+            lp1 = logp(theta1)
+            joint1 = lp1 - kinetic(r1)
+            n1 = 1 if logu <= joint1 else 0
+            s1 = 1 if (joint1 - logu) > -delta_max and np.isfinite(joint1) else 0
+            a = min(1.0, math.exp(min(joint1 - joint0, 0.0))) if np.isfinite(joint1) else 0.0
+            return theta1, r1, theta1, r1, theta1, lp1, n1, s1, a, 1
+        tm, rm, tp, rp, tpr, lpr, n1, s1, a1, na1 = build_tree(theta, r, logu, v, j - 1, eps, joint0)
+        if s1 == 1:
+            if v == -1:
+                tm, rm, _, _, t2, lp2, n2, s2, a2, na2 = build_tree(tm, rm, logu, v, j - 1, eps, joint0)
+            else:
+                _, _, tp, rp, t2, lp2, n2, s2, a2, na2 = build_tree(tp, rp, logu, v, j - 1, eps, joint0)
+            if n2 > 0 and rng.random_sample() < n2 / max(n1 + n2, 1):
+                tpr, lpr = t2, lp2
+            a1 += a2
+            na1 += na2
+            n1 += n2
+            s1 = s2 if no_uturn(tm, tp, rm, rp) else 0
+        return tm, rm, tp, rp, tpr, lpr, n1, s1, a1, na1
+
+    for it in range(total):
+        r0 = sqrt_m * rng.standard_normal(shape)
+        joint0 = cur_lp - kinetic(r0)
+        logu = joint0 - rng.exponential()  # log of a slice height u ~ Uniform(0, exp(joint0))
+        tm = tp = cur
+        rm = rp = r0
+        theta_new, lp_new, n, s, j = cur, cur_lp, 1, 1, 0
+        alpha, n_alpha = 0.0, 1
+        while s == 1 and j < max_tree_depth:
+            v = -1 if rng.random_sample() < 0.5 else 1
+            if v == -1:
+                tm, rm, _, _, tpr, lpr, n_p, s_p, alpha, n_alpha = build_tree(tm, rm, logu, v, j, eps, joint0)
+            else:
+                _, _, tp, rp, tpr, lpr, n_p, s_p, alpha, n_alpha = build_tree(tp, rp, logu, v, j, eps, joint0)
+            if s_p == 1 and rng.random_sample() < min(1.0, n_p / max(n, 1)):
+                theta_new, lp_new = tpr, lpr
+            n += n_p
+            s = s_p if no_uturn(tm, tp, rm, rp) else 0
+            j += 1
+        cur, cur_lp = theta_new, lp_new
+
+        accept_stat = alpha / max(n_alpha, 1)
+        if it < warmup:  # dual-averaging adaptation of the step size
+            m1 = it + 1
+            h_bar = (1.0 - 1.0 / (m1 + t0)) * h_bar + (target_accept - accept_stat) / (m1 + t0)
+            log_eps = mu - math.sqrt(m1) / gamma * h_bar
+            eta = m1 ** (-kappa)
+            log_eps_bar = eta * log_eps + (1.0 - eta) * log_eps_bar
+            eps = math.exp(log_eps)
+        elif it == warmup:
+            eps = math.exp(log_eps_bar)
+
+        if it >= warmup and ((it - warmup) % thin == 0):
+            samples.append(_restore_numeric_state(cur))
+            log_probs.append(cur_lp)
+            depths.append(j)
+
+    res = MCMCResult(
+        samples=samples,
+        log_probs=np.asarray(log_probs, dtype=float),
+        accepted=np.ones(len(samples), dtype=bool),  # NUTS always moves (multinomial over the tree)
+        transition_labels=tuple("nuts" for _ in samples),
+    )
+    object.__setattr__(res, "tree_depth", np.asarray(depths, dtype=int))  # frozen dataclass
+    object.__setattr__(res, "step_size", float(eps))
+    return res
+
+
+def _find_reasonable_eps(theta, lp0, logp, leapfrog, kinetic, sqrt_m, shape, rng) -> float:
+    """Heuristic initial step size: double/halve until one leapfrog step moves the acceptance
+    probability across 0.5 (Hoffman & Gelman Algorithm 4)."""
+    eps = 1.0
+    r = sqrt_m * rng.standard_normal(shape)
+    joint0 = lp0 - kinetic(r)
+
+    def joint_after(step):
+        t1, r1 = leapfrog(theta, r, step)
+        lp1 = logp(t1)
+        return (lp1 - kinetic(r1)) if np.isfinite(lp1) else -np.inf
+
+    j1 = joint_after(eps)
+    a = 1.0 if (j1 - joint0) > math.log(0.5) else -1.0
+    while np.isfinite(j1) and a * (j1 - joint0) > a * math.log(0.5):
+        eps *= 2.0**a
+        j1 = joint_after(eps)
+        if eps < 1e-10 or eps > 1e10:
+            break
+    return float(eps)
 
 
 def sample_distribution(

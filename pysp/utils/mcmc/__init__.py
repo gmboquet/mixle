@@ -41,6 +41,7 @@ from .samplers import (
     hamiltonian_monte_carlo,
     metropolis_hastings,
     metropolis_within_gibbs,
+    nuts,
     posterior_predictive,
     sample_distribution,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "hamiltonian_monte_carlo",
     "metropolis_hastings",
     "metropolis_within_gibbs",
+    "nuts",
     "posterior_predictive",
     "sample_conjugate_posterior",
     "sample_distribution",
