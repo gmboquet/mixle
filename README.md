@@ -255,7 +255,9 @@ LogGaussian, Logistic, Pareto, Rayleigh, Student-t, Uniform, Weibull) has an exa
 "arbitrary index"; a quantile grid enumerates the support in order). Multivariate Gaussians expose an
 exact probability-ordered cumulative (the chi-square-of-Mahalanobis highest-density-region mass), and
 von Mises–Fisher exposes one too (the cosine-marginal tail), both surfaced via `density_rank` as method
-`exact-analytic`. For any other samplable family (Dirichlet and the parameter priors, MVN mixtures, the
+`exact-analytic`. Those families also invert it — `density_quantile(q)` returns a representative point at
+cumulative-density index `q` (on the `q`-HDR contour), the multivariate "arbitrary index"; sweeping `q`
+enumerates the support in descending density. For any other samplable family (Dirichlet and the parameter priors, MVN mixtures, the
 coupled topic/association models), `density_rank` returns the cumulative probability by Monte Carlo.
 Enumeration, arbitrary-index, and discrete rank are only defined where the support is countable and
 ordered, so for multivariate / uncountable supports the CDF is the operation that applies.
