@@ -782,6 +782,22 @@ def _constrain_target(log_target, feasible):
     return clt
 
 
+_DEFAULT_PENALTY = 1000.0  # tight enough that an auto-penalized equality is effectively enforced
+
+
+def _auto_penalty(constraints, penalty):
+    """Effective penalty weight: the user's ``penalty`` if given, else a default when any
+    constraint is *soft* (equality / ODE residual — measure-zero, so rejection can't honor it),
+    else ``None`` (hard inequalities go to the feasible-region path). Lets ``fit(constraints=...)``
+    just work without the user choosing rejection vs penalty."""
+    if penalty is not None:
+        return penalty
+    if constraints is None:
+        return None
+    cs = [constraints] if isinstance(constraints, Constraint) else list(constraints)
+    return _DEFAULT_PENALTY if any(getattr(c, "soft", False) for c in cs) else None
+
+
 def _soft_penalty(constraints, slots, weight):
     """Compile ``constraints`` into a smooth penalty ``penalty(u) -> float`` (<= 0) over the model's
     parameter slots, using each constraint's continuous ``residual``.
@@ -864,7 +880,7 @@ def ensemble_fit(
         walkers = max(2 * (d + 1), 8)
     if walkers % 2:
         walkers += 1
-    soft = _soft_penalty(constraints, slots, penalty)
+    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
     feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _constrain_target(log_target, feasible)
     log_target = _penalize_target(log_target, soft)
@@ -912,7 +928,7 @@ def mcmc_fit(
         log_target, slots, build, dmean, dstd = ag.log_target, ag.slots, ag.build, ag.dmean, ag.dstd
     else:
         log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
-    soft = _soft_penalty(constraints, slots, penalty)
+    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
     feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _constrain_target(log_target, feasible)
     log_target = _penalize_target(log_target, soft)
@@ -968,7 +984,7 @@ def hmc_fit(
 
     # A soft penalty must enter the leapfrog gradient, so fall back to the numeric-gradient path
     # (its grad closure differentiates the penalized target via late binding of ``log_target``).
-    ag = None if penalty is not None else _ag.grad_target(rv, data)
+    ag = None if _auto_penalty(constraints, penalty) is not None else _ag.grad_target(rv, data)
     if ag is not None:
         # analytic-gradient HMC (one backprop per gradient, vs O(#params) target evals)
         slots, build, dmean, dstd = ag.slots, ag.build, ag.dmean, ag.dstd
@@ -988,7 +1004,7 @@ def hmc_fit(
                 g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
             return g
 
-    soft = _soft_penalty(constraints, slots, penalty)
+    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
     feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _constrain_target(log_target, feasible)
     log_target = _penalize_target(log_target, soft)
@@ -1050,7 +1066,7 @@ def nuts_fit(
     if rng is None:
         rng = np.random.RandomState()
 
-    ag = None if penalty is not None else _ag.grad_target(rv, data)
+    ag = None if _auto_penalty(constraints, penalty) is not None else _ag.grad_target(rv, data)
     if ag is not None:
         slots, build, dmean, dstd = ag.slots, ag.build, ag.dmean, ag.dstd
         log_target, grad = ag.log_target, ag.grad
@@ -1069,7 +1085,7 @@ def nuts_fit(
                 g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
             return g
 
-    soft = _soft_penalty(constraints, slots, penalty)
+    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
     feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _constrain_target(log_target, feasible)
     log_target = _penalize_target(log_target, soft)
@@ -1612,7 +1628,7 @@ def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None, penalty=Non
 
     # derivative-free path (no Torch, an unsupported family, or a constrained / penalized region)
     log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
-    soft = _soft_penalty(constraints, slots, penalty)
+    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
     # penalty=... enforces the constraints softly (a log-joint term), so it replaces hard rejection.
     feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _penalize_target(log_target, soft)
