@@ -561,6 +561,34 @@ def _hmc_worker(seed, rv, data, kw):
     )
 
 
+def _nuts_worker(seed, rv, data, kw):
+    """Module-level (picklable) single NUTS chain: rebuilds the analytic-gradient target and runs."""
+    from pysp.ppl import autograd as _ag
+    from pysp.utils.mcmc import nuts
+
+    ag = _ag.grad_target(rv, data)
+    if ag is not None:
+        slots, dmean, dstd = ag.slots, ag.dmean, ag.dstd
+        log_target, grad = ag.log_target, ag.grad
+    else:
+        log_target, slots, _fam, _build, _unpack, (dmean, dstd) = _build_target(rv, data)
+        grad = _finite_diff_grad(log_target, _init_u(slots, dmean, dstd))
+    u0 = _init_u(slots, dmean, dstd)
+    mass = 1.0 / (_init_scale(slots, dstd, len(data)) ** 2)
+    return nuts(
+        log_target,
+        grad,
+        u0,
+        num_samples=kw["draws"],
+        warmup=kw["burn"],
+        mass=mass,
+        target_accept=kw["target_accept"],
+        max_tree_depth=kw["max_tree_depth"],
+        thin=kw["thin"],
+        rng=np.random.RandomState(seed),
+    )
+
+
 def _ensemble_p0(slots, dmean, dstd, n_data, walkers, rng):
     """Dispersed initial ensemble (walkers, d): walker 0 at the data-informed point, the rest
     jittered by the prior/posterior width so the stretch move starts spread out."""
@@ -991,6 +1019,84 @@ def hmc_fit(
         return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
     kw = {"draws": draws, "burn": burn, "thin": thin, "step_size": step_size, "num_steps": num_steps}
     results = _run_chains(run_one, _hmc_worker, (rv, data, kw), chains, parallel, rng)
+    return _finalize_chains(rv, slots, results, build)
+
+
+def nuts_fit(
+    rv: RandomVariable,
+    data,
+    *,
+    draws: int = 1000,
+    burn: int = 1000,
+    thin: int = 1,
+    target_accept: float = 0.8,
+    max_tree_depth: int = 10,
+    rng=None,
+    chains: int = 1,
+    parallel: bool = False,
+    constraints=None,
+    penalty=None,
+) -> RandomVariable:
+    """No-U-Turn Sampler over the parameter posterior — auto-tuned HMC (trajectory length +
+    dual-averaging step size), the default choice for correlated / higher-dimensional posteriors.
+
+    Uses the analytic Torch gradient when available (else a numeric gradient), preconditioned by a
+    diagonal mass matrix at the data-informed scale. ``warmup`` (= ``burn``) adapts the step size
+    to ``target_accept``. Inequality ``constraints`` truncate the posterior; ``penalty`` adds a
+    smooth penalty (which enters the gradient via the numeric-gradient path)."""
+    from pysp.ppl import autograd as _ag
+    from pysp.utils.mcmc import nuts
+
+    if rng is None:
+        rng = np.random.RandomState()
+
+    ag = None if penalty is not None else _ag.grad_target(rv, data)
+    if ag is not None:
+        slots, build, dmean, dstd = ag.slots, ag.build, ag.dmean, ag.dstd
+        log_target, grad = ag.log_target, ag.grad
+    else:
+        log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+        eps = 1e-5 * np.maximum(np.abs(_init_u(slots, dmean, dstd)), 1.0)
+
+        def grad(u):  # late binding of log_target so the penalty (added below) enters the gradient
+            u = np.asarray(u, dtype=float)
+            g = np.empty(len(u))
+            for i in range(len(u)):
+                up = u.copy()
+                up[i] += eps[i]
+                um = u.copy()
+                um[i] -= eps[i]
+                g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
+            return g
+
+    soft = _soft_penalty(constraints, slots, penalty)
+    feasible = None if soft is not None else _feasibility(constraints, slots)
+    log_target = _constrain_target(log_target, feasible)
+    log_target = _penalize_target(log_target, soft)
+    u0 = _init_u(slots, dmean, dstd)
+    if feasible is not None:
+        u0 = _project_init(u0, feasible, rng)
+        parallel = False  # process workers rebuild the target without the constraint closure
+    mass = 1.0 / (_init_scale(slots, dstd, len(data)) ** 2)  # precondition ~ inverse posterior cov
+
+    def run_one(seed):
+        return nuts(
+            log_target,
+            grad,
+            u0,
+            num_samples=draws,
+            warmup=burn,
+            mass=mass,
+            target_accept=target_accept,
+            max_tree_depth=max_tree_depth,
+            thin=thin,
+            rng=np.random.RandomState(seed),
+        )
+
+    if chains == 1:
+        return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
+    kw = {"draws": draws, "burn": burn, "thin": thin, "target_accept": target_accept, "max_tree_depth": max_tree_depth}
+    results = _run_chains(run_one, _nuts_worker, (rv, data, kw), chains, parallel, rng)
     return _finalize_chains(rv, slots, results, build)
 
 

@@ -21,6 +21,7 @@ from pysp.utils.mcmc import (
     hamiltonian_monte_carlo,
     metropolis_hastings,
     metropolis_within_gibbs,
+    nuts,
     posterior_predictive,
     sample_conjugate_posterior,
     sample_distribution,
@@ -144,6 +145,32 @@ class MCMCTestCase(unittest.TestCase):
         self.assertLess(abs(float(samples[:, 0].var()) - 1.0), 0.25)
         self.assertLess(abs(float(samples[:, 1].var()) - 4.0), 0.6)
         self.assertGreater(result.acceptance_rate, 0.8)
+
+    def test_nuts_samples_correlated_gaussian(self):
+        mean = np.asarray([2.0, -3.0])
+        cov = np.asarray([[1.0, 0.8], [0.8, 1.0]])
+        prec = np.linalg.inv(cov)
+
+        def log_target(x):
+            xx = np.asarray(x, dtype=float) - mean
+            return float(-0.5 * xx @ prec @ xx)
+
+        def grad_log_target(x):
+            return -prec @ (np.asarray(x, dtype=float) - mean)
+
+        result = nuts(
+            log_target,
+            grad_log_target,
+            np.zeros(2),
+            num_samples=2000,
+            warmup=500,
+            rng=np.random.RandomState(0),
+        )
+        s = np.asarray(result.samples, dtype=float)
+        self.assertEqual(s.shape, (2000, 2))
+        self.assertTrue(np.allclose(s.mean(0), mean, atol=0.15))
+        self.assertLess(abs(np.cov(s.T)[0, 1] - 0.8), 0.2)  # recovers the correlation
+        self.assertGreater(result.step_size, 0.0)  # adapted
 
     def test_posterior_predictive_uses_retained_states(self):
         result = hamiltonian_monte_carlo(

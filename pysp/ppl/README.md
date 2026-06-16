@@ -318,8 +318,9 @@ message-passing core.
 | `"vi"` | mean-field ADVI (reparameterized ELBO) | non-conjugate priors, fast approximate posterior |
 | `"vmp"` | variational message passing (closed-form, ELBO) | conjugate-exponential models (e.g. Gaussian mean+precision) |
 | `"mcmc"` | adaptive Metropolis (`pysp.utils.mcmc`) | full posterior, fast throughput |
-| `"hmc"` | Hamiltonian MC, preconditioned | full posterior, best mixing |
-| `"ensemble"` | affine-invariant ensemble (Goodman & Weare) | full posterior, highest ESS/sec |
+| `"hmc"` | Hamiltonian MC, preconditioned (fixed step) | full posterior |
+| `"nuts"` | No-U-Turn Sampler (auto-tuned HMC, dual-averaging) | correlated / higher-dim posteriors |
+| `"ensemble"` | affine-invariant ensemble (Goodman & Weare) | low/medium-dim, highest ESS/sec |
 | `"auto"` (default) | hierarchical → conjugate(/mixture) → map (if priors) → em | — |
 
 `map`/`mcmc`/`hmc`/`ensemble` work on **composite** models too (mixtures, sequences): the leaf

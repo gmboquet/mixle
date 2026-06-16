@@ -97,6 +97,37 @@ class PPLHierarchicalTestCase(unittest.TestCase):
         self.assertGreater(np.corrcoef(fit.result.group_means, p)[0, 1], 0.8)
 
 
+class PPLNUTSTestCase(unittest.TestCase):
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.data = list(rng.normal(5.0, 2.0, size=3000))
+
+    def test_nuts_recovers_params(self):
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            self.data, how="nuts", draws=800, burn=500, rng=np.random.RandomState(1)
+        )
+        self.assertAlmostEqual(m.dist.mu, 5.0, delta=0.2)
+        self.assertAlmostEqual(np.sqrt(m.dist.sigma2), 2.0, delta=0.2)
+        # NUTS adapts its step size and reports tree depth per draw
+        self.assertGreater(m.result.raw.step_size, 0.0)
+
+    def test_nuts_high_ess_per_draw(self):
+        # NUTS mixes well: effective sample size is a large fraction of the draws
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            self.data, how="nuts", draws=1000, burn=500, rng=np.random.RandomState(2)
+        )
+        ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
+        self.assertGreater(ess, 300)
+
+    def test_nuts_multichain_rhat(self):
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            self.data, how="nuts", draws=600, burn=400, chains=3, rng=np.random.RandomState(3)
+        )
+        self.assertEqual(m.result.n_chains, 3)
+        for r in m.result.rhat.values():
+            self.assertLess(r, 1.1)
+
+
 class PPLVITestCase(unittest.TestCase):
     def setUp(self):
         rng = np.random.RandomState(0)
