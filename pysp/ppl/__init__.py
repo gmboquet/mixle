@@ -25,6 +25,7 @@ from pysp.ppl.core import (
     Group,
     RandomVariable,
     _CholeskySpec,
+    _OrderedSpec,
     _SimplexSpec,
     _VectorSpec,
     compare,
@@ -34,6 +35,7 @@ from pysp.ppl.core import (
     free,
     lower,
     ne,
+    ordered,
     register_composite,
     register_family,
 )
@@ -67,6 +69,7 @@ from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, Multiv
 __all__ = [
     "RandomVariable",
     "free",
+    "ordered",
     "lower",
     "Normal",
     "Poisson",
@@ -466,13 +469,16 @@ register_composite("MVN", _mvn_dist, _mvn_est, dist_cls=MultivariateGaussianDist
 
 
 def _diag_dist(args, lower_child):
-    (dim,) = args
-    return DiagonalGaussianDistribution(np.zeros(dim), np.ones(dim))
+    dim = args[0]
+    mean = args[1] if len(args) > 1 else None
+    var = args[2] if len(args) > 2 else None
+    mu = np.asarray(mean, dtype=float) if isinstance(mean, np.ndarray) else np.zeros(dim)
+    covar = np.asarray(var, dtype=float) if isinstance(var, np.ndarray) else np.ones(dim)
+    return DiagonalGaussianDistribution(mu, covar)
 
 
 def _diag_est(args, lower_child_est, name, keys):
-    (dim,) = args
-    return DiagonalGaussianEstimator(dim=dim)
+    return DiagonalGaussianEstimator(dim=args[0])
 
 
 def _diag_read(d, read_params):
@@ -622,23 +628,36 @@ def AR1(*, name: str | None = None) -> RandomVariable:
     return RandomVariable._sample("StateSpace", (True,), name=name)
 
 
+def _mean_spec(mean, dim):
+    """Mean-vector parameter spec: ``free`` -> real vector, ``ordered`` -> increasing vector."""
+    if mean is free:
+        return _VectorSpec(dim, "real", name="m")
+    if mean is ordered:
+        return _OrderedSpec(dim, name="m")
+    return mean
+
+
 def MVN(dim: int, *, mean=None, cov=None, name: str | None = None) -> RandomVariable:
     """Multivariate Gaussian of dimension ``dim`` (full covariance). Fit on a list of
     length-``dim`` vectors; ``MVN(dim).fit(X)`` recovers mean and covariance by EM.
 
     The **mean vector** and **covariance matrix** are also inferable parameters: pass
-    ``mean=free`` (a ``dim``-vector estimated on the real line) and/or ``cov=free`` (a full
-    SPD covariance via its Cholesky factor) and fit with ``how='mcmc'|'ensemble'|'map'`` —
-    optionally with constraints on the mean entries (``constrain(...)`` over ``m[i]``)."""
+    ``mean=free`` (a ``dim``-vector on the real line) or ``mean=ordered`` (increasing entries,
+    for identifiability) and/or ``cov=free`` (a full SPD covariance via its Cholesky factor) and
+    fit with ``how='mcmc'|'ensemble'|'map'``."""
     dim = int(dim)
-    mean_spec = _VectorSpec(dim, "real", name="m") if mean is free else mean
     cov_spec = _CholeskySpec(dim, name="S") if cov is free else cov
-    return RandomVariable._sample("MVN", (dim, mean_spec, cov_spec), name=name)
+    return RandomVariable._sample("MVN", (dim, _mean_spec(mean, dim), cov_spec), name=name)
 
 
-def DiagGaussian(dim: int, *, name: str | None = None) -> RandomVariable:
-    """Diagonal-covariance multivariate Gaussian of dimension ``dim``."""
-    return RandomVariable._sample("DiagGaussian", (int(dim),), name=name)
+def DiagGaussian(dim: int, *, mean=None, var=None, name: str | None = None) -> RandomVariable:
+    """Diagonal-covariance multivariate Gaussian of dimension ``dim``. ``DiagGaussian(dim).fit(X)``
+    recovers mean and per-axis variance by EM; the **mean vector** (``mean=free`` / ``ordered``)
+    and **diagonal variances** (``var=free``, a positive vector) are also inferable parameters via
+    ``how='mcmc'|'ensemble'|'map'``."""
+    dim = int(dim)
+    var_spec = _VectorSpec(dim, "positive", name="s2") if var is free else var
+    return RandomVariable._sample("DiagGaussian", (dim, _mean_spec(mean, dim), var_spec), name=name)
 
 
 def LDA(num_topics: int, vocab_size: int, *, alpha: float = 1.0, name: str | None = None) -> RandomVariable:
