@@ -139,5 +139,86 @@ class IntegerHiddenAssociationEnumerationTestCase(unittest.TestCase):
             dist.enumerator()
 
 
+class HiddenAssociationEnumerationTestCase(unittest.TestCase):
+    def _dist(self):
+        from pysp.stats.combinator.conditional import ConditionalDistribution
+        from pysp.stats.latent.hidden_association import HiddenAssociationDistribution
+        from pysp.stats.leaf.categorical import CategoricalDistribution
+        from pysp.stats.leaf.int_multinomial import IntegerMultinomialDistribution
+        from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
+
+        cond = ConditionalDistribution(
+            {
+                0: CategoricalDistribution({"a": 0.6, "b": 0.3, "c": 0.1}),
+                1: CategoricalDistribution({"a": 0.1, "b": 0.4, "c": 0.5}),
+            }
+        )
+        given = IntegerMultinomialDistribution(0, [0.7, 0.3])
+        return HiddenAssociationDistribution(
+            cond, given_dist=given, len_dist=IntegerCategoricalDistribution(0, [0.3, 0.5, 0.2])
+        )
+
+    def test_top_k_scores_match_brute_force_superset(self):
+        dist = self._dist()
+
+        def bags_int(nv, n):
+            if nv == 1:
+                yield [(0, n)] if n > 0 else []
+                return
+            for c0 in range(n + 1):
+                for r in bags_int(nv - 1, n - c0):
+                    yield ([(0, c0)] if c0 > 0 else []) + [(w + 1, c) for w, c in r]
+
+        def bags_sym(syms, n):
+            if len(syms) == 1:
+                yield [(syms[0], n)] if n > 0 else []
+                return
+            for c0 in range(n + 1):
+                for r in bags_sym(syms[1:], n - c0):
+                    yield ([(syms[0], c0)] if c0 > 0 else []) + r
+
+        brute = []
+        for n1 in range(1, 9):
+            for s1 in bags_int(2, n1):
+                for n2 in (0, 1, 2):
+                    for s2 in bags_sym(["a", "b", "c"], n2):
+                        lp = dist.log_density((s1, s2))
+                        if lp > -np.inf and not np.isnan(lp):
+                            brute.append(((s1, s2), lp))
+        brute.sort(key=lambda t: -t[1])
+        k = 20
+        items = list(itertools.islice(dist.enumerator(), k))
+        # The descending score sequence must match exactly (tie-order within equal scores is free).
+        np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in brute[:k]], atol=1e-9)
+        for i in range(k - 1):
+            self.assertGreaterEqual(items[i][1], items[i + 1][1] - 1e-9)
+        for v, lp in items:
+            self.assertAlmostEqual(lp, dist.log_density(v), delta=1e-9)
+        # Values strictly above the boundary score must coincide as sets (tie-aware).
+        cutoff = items[-1][1]
+
+        def canon(v):
+            return (freeze(v[0]), frozenset((e, c) for e, c in v[1]))
+
+        e_above = {canon(v) for v, lp in items if lp > cutoff + 1e-9}
+        b_above = {canon(v) for v, lp in brute[:k] if lp > cutoff + 1e-9}
+        self.assertEqual(e_above, b_above)
+
+
+class LLDANonEnumerableTestCase(unittest.TestCase):
+    def test_llda_raises_enumeration_error(self):
+        from pysp.stats.compute.pdist import EnumerationError
+
+        # LLDA's log_density is a variational ELBO, so it is intentionally not enumerable.
+        from pysp.stats.latent.llda import LLDADistribution
+        from pysp.utils.enumeration import supports_enumeration
+
+        topics = [np.log([0.6, 0.3, 0.1]), np.log([0.1, 0.4, 0.5])]
+        dist = LLDADistribution(topics, [1.0, 1.0])
+        with self.assertRaises(EnumerationError):
+            dist.enumerator()
+        self.assertFalse(supports_enumeration(dist))
+
+
 if __name__ == "__main__":
     unittest.main()
