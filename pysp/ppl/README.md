@@ -321,7 +321,13 @@ message-passing core.
 | `"hmc"` | Hamiltonian MC, preconditioned (fixed step) | full posterior |
 | `"nuts"` | No-U-Turn Sampler (auto-tuned HMC, dual-averaging) | correlated / higher-dim posteriors |
 | `"ensemble"` | affine-invariant ensemble (Goodman & Weare) | low/medium-dim, highest ESS/sec |
+| `"sample"` | **auto-picks the sampler** (ensemble low-dim, NUTS higher-dim) | just want the posterior |
 | `"auto"` (default) | hierarchical → conjugate(/mixture) → map (if priors) → em | — |
+
+You rarely need to name a sampler: `how="sample"` chooses one. Constraints also just work —
+`fit(constraints=...)` auto-uses rejection for inequalities and a soft penalty for equalities /
+ODE residuals (no `penalty=` needed), and you only add `name=` to a prior if you want to read it
+back by name (constraints match by identity).
 
 `map`/`mcmc`/`hmc`/`ensemble` work on **composite** models too (mixtures, sequences): the leaf
 `free`/prior parameters are collected across the tree and a concrete model is rebuilt per

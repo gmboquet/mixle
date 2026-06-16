@@ -9,11 +9,11 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import MVN, Categorical, DiagGaussian, Dirichlet, free, increasing, ode_residual, ordered, param
+from pysp.ppl import MVN, Categorical, DiagGaussian, Dirichlet, free, increasing, ode_residual, ordered
 
 
 class ParamHandleConstraintTestCase(unittest.TestCase):
-    """param(...) handles let constraints reference a vector PARAMETER during inference."""
+    """free(...) handles let constraints reference a vector PARAMETER during inference."""
 
     def setUp(self):
         rng = np.random.RandomState(1)
@@ -21,7 +21,7 @@ class ParamHandleConstraintTestCase(unittest.TestCase):
         self.X = [list(x) for x in (self.mu + rng.standard_normal((3000, 3)))]
 
     def test_shape_constraint_on_vector_parameter(self):
-        m = param("mu", 3)
+        m = free(3, name="mu")
         fit = MVN(3, mean=m, cov=free).fit(
             self.X,
             how="ensemble",
@@ -35,7 +35,7 @@ class ParamHandleConstraintTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.diff(mm) > 0))  # increasing enforced on the inferred mean
 
     def test_entry_constraints_on_vector_parameter(self):
-        m = param("mu", 3)
+        m = free(3, name="mu")
         fit = MVN(3, mean=m, cov=free).fit(
             self.X,
             how="ensemble",
@@ -49,7 +49,7 @@ class ParamHandleConstraintTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.diff(mm) > 0))
 
     def test_param_model_auto_routes_to_inference(self):
-        m = param("mu", 3)
+        m = free(3, name="mu")
         fit = MVN(3, mean=m, cov=free).fit(self.X)  # auto must not pick EM (which ignores the param)
         self.assertTrue(np.allclose(np.asarray(fit.params["mean"]), self.mu, atol=0.3))
 
@@ -57,7 +57,7 @@ class ParamHandleConstraintTestCase(unittest.TestCase):
 class ODEResidualTestCase(unittest.TestCase):
     def test_residual_small_on_true_solution(self):
         t = np.arange(0, 2, 0.1)
-        y = param("y", len(t))
+        y = free(len(t), name="y")
         c = ode_residual(y, lambda yy: -0.5 * yy, dt=0.1)  # dy/dt = -0.5 y
         r_true = np.abs(c.residual({y: np.exp(-0.5 * t)}))
         r_bad = np.abs(c.residual({y: np.sin(3 * t)}))
