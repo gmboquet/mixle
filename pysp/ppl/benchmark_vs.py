@@ -18,6 +18,7 @@ What it measures, and why pysp wins:
   wall-clock and ESS/sec comparison of pysp's MCMC/HMC against NumPyro NUTS and emcee.
 * **MLE / EM** (large-N Gaussian): pysp closed-form EM vs the gradient-PPL (Pyro SVI) route.
 """
+
 from __future__ import annotations
 
 import time
@@ -48,7 +49,7 @@ def _ess(x: np.ndarray) -> float:
     var = np.dot(x, x) / n
     if var == 0:
         return float(n)
-    acf = np.correlate(x, x, mode="full")[n - 1:] / (var * n)
+    acf = np.correlate(x, x, mode="full")[n - 1 :] / (var * n)
     tau = 1.0
     for k in range(1, n):
         if acf[k] <= 0:
@@ -125,8 +126,7 @@ def emcee_gaussian(data, draws, walkers=32, seed=0):
         return -0.5 * np.sum(((x - mu) / sig) ** 2) - n * ls
 
     rng = np.random.RandomState(seed)
-    p0 = np.column_stack([rng.normal(x.mean(), 1.0, walkers),
-                          rng.normal(np.log(x.std() or 1.0), 0.05, walkers)])
+    p0 = np.column_stack([rng.normal(x.mean(), 1.0, walkers), rng.normal(np.log(x.std() or 1.0), 0.05, walkers)])
     sampler = emcee.EnsembleSampler(walkers, 2, logp)
     sampler.run_mcmc(p0, draws, progress=False)
     chain = sampler.get_chain(discard=draws // 2, flat=True)
@@ -164,12 +164,14 @@ def task_poisson_gamma(n=200_000, draws=2000, warmup=1000):
     data = list(rng.poisson(3.5, n).astype(float))
     print(f"\n[Poisson-Gamma posterior, N={n:,}]  true rate=3.5")
     (m, t) = _timed(lambda: conjugate_fit(Poisson(Gamma(2.0, 1.0, name="rate")), data))
-    print(f"  pysp.ppl  EXACT (1 pass)   {t*1e3:9.1f} ms   rate={m.dist.lam:.4f}   (no sampling)")
+    print(f"  pysp.ppl  EXACT (1 pass)   {t * 1e3:9.1f} ms   rate={m.dist.lam:.4f}   (no sampling)")
     rows = [("pysp exact", t, m.dist.lam, None)]
     if _have("numpyro"):
         (res, t) = _timed(np_poisson_gamma, np.asarray(data), draws, warmup)
         mean, ess = res
-        print(f"  NumPyro   NUTS {draws}d      {t*1e3:9.1f} ms   rate={mean:.4f}   ESS={ess:.0f}  ({t/rows[0][1]:.0f}x slower)")
+        print(
+            f"  NumPyro   NUTS {draws}d      {t * 1e3:9.1f} ms   rate={mean:.4f}   ESS={ess:.0f}  ({t / rows[0][1]:.0f}x slower)"
+        )
         rows.append(("numpyro nuts", t, mean, ess))
     return rows
 
@@ -179,11 +181,13 @@ def task_beta_bernoulli(n=100_000, draws=2000, warmup=1000):
     data = list((rng.uniform(size=n) < 0.37).astype(float))
     print(f"\n[Beta-Bernoulli posterior, N={n:,}]  true p=0.37")
     (m, t0) = _timed(lambda: conjugate_fit(Bernoulli(Beta(2.0, 2.0, name="p")), data))
-    print(f"  pysp.ppl  EXACT (1 pass)   {t0*1e3:9.1f} ms   p={m.dist.p:.4f}   (no sampling)")
+    print(f"  pysp.ppl  EXACT (1 pass)   {t0 * 1e3:9.1f} ms   p={m.dist.p:.4f}   (no sampling)")
     if _have("numpyro"):
         (res, t) = _timed(np_beta_bernoulli, np.asarray(data), draws, warmup)
         mean, ess = res
-        print(f"  NumPyro   NUTS {draws}d      {t*1e3:9.1f} ms   p={mean:.4f}   ESS={ess:.0f}  ({t/t0:.0f}x slower)")
+        print(
+            f"  NumPyro   NUTS {draws}d      {t * 1e3:9.1f} ms   p={mean:.4f}   ESS={ess:.0f}  ({t / t0:.0f}x slower)"
+        )
 
 
 def task_gaussian_mcmc(n=20_000, draws=2000, warmup=1000):
@@ -191,26 +195,35 @@ def task_gaussian_mcmc(n=20_000, draws=2000, warmup=1000):
     data = list(rng.normal(5.0, 2.0, n))
     print(f"\n[Gaussian mean posterior, N={n:,}]  true mean=5.0   (ESS/sec = mixing efficiency)")
     mu = Normal(0, 10, name="mu")
-    (m, t) = _timed(lambda: mcmc_fit(Normal(mu, free), data, draws=draws, burn=warmup,
-                                     rng=np.random.RandomState(3)))
+    (m, t) = _timed(lambda: mcmc_fit(Normal(mu, free), data, draws=draws, burn=warmup, rng=np.random.RandomState(3)))
     ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
-    print(f"  pysp.ppl  RW-Metropolis    {t*1e3:9.1f} ms   mean={m.dist.mu:.4f}   ESS={ess:.0f}  ESS/s={ess/t:8.0f}")
-    (m, t) = _timed(lambda: ensemble_fit(Normal(mu, free), data, draws=draws, burn=warmup,
-                                         rng=np.random.RandomState(3)))
+    print(
+        f"  pysp.ppl  RW-Metropolis    {t * 1e3:9.1f} ms   mean={m.dist.mu:.4f}   ESS={ess:.0f}  ESS/s={ess / t:8.0f}"
+    )
+    (m, t) = _timed(
+        lambda: ensemble_fit(Normal(mu, free), data, draws=draws, burn=warmup, rng=np.random.RandomState(3))
+    )
     ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
-    print(f"  pysp.ppl  ensemble (G&W)   {t*1e3:9.1f} ms   mean={m.dist.mu:.4f}   ESS={ess:.0f}  ESS/s={ess/t:8.0f}")
-    (m, t) = _timed(lambda: hmc_fit(Normal(mu, free), data, draws=draws // 2, burn=warmup // 2,
-                                    rng=np.random.RandomState(3)))
+    print(
+        f"  pysp.ppl  ensemble (G&W)   {t * 1e3:9.1f} ms   mean={m.dist.mu:.4f}   ESS={ess:.0f}  ESS/s={ess / t:8.0f}"
+    )
+    (m, t) = _timed(
+        lambda: hmc_fit(Normal(mu, free), data, draws=draws // 2, burn=warmup // 2, rng=np.random.RandomState(3))
+    )
     ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
-    print(f"  pysp.ppl  HMC (analytic g) {t*1e3:9.1f} ms   mean={m.dist.mu:.4f}   ESS={ess:.0f}  ESS/s={ess/t:8.0f}")
+    print(
+        f"  pysp.ppl  HMC (analytic g) {t * 1e3:9.1f} ms   mean={m.dist.mu:.4f}   ESS={ess:.0f}  ESS/s={ess / t:8.0f}"
+    )
     if _have("numpyro"):
         (res, t) = _timed(np_gaussian, np.asarray(data), draws, warmup)
         mean, ess = res
-        print(f"  NumPyro   NUTS             {t*1e3:9.1f} ms   mean={mean:.4f}   ESS={ess:.0f}  ESS/s={ess/t:8.0f}  (incl JIT compile)")
+        print(
+            f"  NumPyro   NUTS             {t * 1e3:9.1f} ms   mean={mean:.4f}   ESS={ess:.0f}  ESS/s={ess / t:8.0f}  (incl JIT compile)"
+        )
     if _have("emcee"):
         (res, t) = _timed(emcee_gaussian, data, draws)
         mean, ess = res
-        print(f"  emcee     ensemble         {t*1e3:9.1f} ms   mean={mean:.4f}   ESS={ess:.0f}  ESS/s={ess/t:8.0f}")
+        print(f"  emcee     ensemble         {t * 1e3:9.1f} ms   mean={mean:.4f}   ESS={ess:.0f}  ESS/s={ess / t:8.0f}")
 
 
 def task_gaussian_mle(n=500_000):
@@ -218,10 +231,10 @@ def task_gaussian_mle(n=500_000):
     data = list(rng.normal(5.0, 2.0, n))
     print(f"\n[Gaussian MLE, N={n:,}]  true mean=5.0 sd=2.0")
     (m, t0) = _timed(lambda: Normal(free, free).fit(data))
-    print(f"  pysp.ppl  closed-form EM   {t0*1e3:9.1f} ms   mean={m.dist.mu:.4f} sd={np.sqrt(m.dist.sigma2):.4f}")
+    print(f"  pysp.ppl  closed-form EM   {t0 * 1e3:9.1f} ms   mean={m.dist.mu:.4f} sd={np.sqrt(m.dist.sigma2):.4f}")
     if _have("pyro"):
         (mean, t) = _timed(pyro_gaussian_svi, data)
-        print(f"  Pyro      SVI (AutoNormal) {t*1e3:9.1f} ms   mean={mean:.4f}   ({t/t0:.0f}x slower)")
+        print(f"  Pyro      SVI (AutoNormal) {t * 1e3:9.1f} ms   mean={mean:.4f}   ({t / t0:.0f}x slower)")
 
 
 def main():

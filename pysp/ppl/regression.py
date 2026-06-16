@@ -11,11 +11,13 @@ Coefficients may be Normal priors (Bayesian / ridge — MAP) or ``free`` (MLE). 
 IRLS (Fisher scoring) with optional Gaussian-prior penalty and a Laplace coefficient
 covariance. Fit with ``.fit(y, given={"x": xs})``.
 """
+
 from __future__ import annotations
 
 import numpy as np
 
-from pysp.ppl.core import RandomVariable, Field, _LinearPredictor, free as FREE
+from pysp.ppl.core import RandomVariable, _LinearPredictor
+from pysp.ppl.core import free as FREE
 
 # family -> canonical link name
 _LINK = {"Normal": "identity", "Bernoulli": "logit", "Poisson": "log"}
@@ -45,15 +47,16 @@ class RegressionResult:
     """Posterior over regression coefficients + residual scale, with prediction."""
 
     def __init__(self, names, idx_of, beta, cov, sigma, columns, link="identity"):
-        self.names = names                       # column names (covariates + 'intercept')
-        self.beta = beta                         # posterior mean coefficients
-        self.cov = cov                           # posterior covariance
+        self.names = names  # column names (covariates + 'intercept')
+        self.beta = beta  # posterior mean coefficients
+        self.cov = cov  # posterior covariance
         self.sigma = float(sigma)
         self.link = link
-        self._idx_of = idx_of                    # id(coef handle) -> column index
-        self._columns = columns                  # list of (kind, payload) for predict
-        self.coefficients = {names[i]: {"mean": float(beta[i]), "sd": float(np.sqrt(cov[i, i]))}
-                             for i in range(len(names))}
+        self._idx_of = idx_of  # id(coef handle) -> column index
+        self._columns = columns  # list of (kind, payload) for predict
+        self.coefficients = {
+            names[i]: {"mean": float(beta[i]), "sd": float(np.sqrt(cov[i, i]))} for i in range(len(names))
+        }
         self.acceptance_rate = None
         self.predictive = None
 
@@ -93,9 +96,9 @@ class RegressionResult:
 
 def _columns_of(linpred: _LinearPredictor):
     """Return (est_columns, fixed_columns): estimated coefs (RV prior / free) vs constants."""
-    cols = list(linpred.terms)                                  # (coef, Field)
+    cols = list(linpred.terms)  # (coef, Field)
     if linpred.intercept is not None:
-        cols.append((linpred.intercept, None))                 # None field -> intercept (ones)
+        cols.append((linpred.intercept, None))  # None field -> intercept (ones)
     est, fixed = [], []
     for coef, field in cols:
         if isinstance(coef, RandomVariable) or coef is FREE:
@@ -111,7 +114,8 @@ def _design(columns, given):
     n = None
     for _, field in est + fixed:
         if field is not None:
-            n = len(np.asarray(given[field.name]).reshape(-1)); break
+            n = len(np.asarray(given[field.name]).reshape(-1))
+            break
     if n is None:
         raise ValueError("need at least one covariate to size the design matrix.")
     mat = []
@@ -131,21 +135,26 @@ class LMMResult:
         self.names = names
         self.beta = beta
         self.cov = cov
-        self.random_cov = np.asarray(Sigma)        # random-effects covariance (q x q)
-        self.random_names = re_names               # ['intercept', slope names...]
-        self.tau = float(np.sqrt(Sigma[0, 0]))     # random-intercept sd (back-compat)
-        self.sigma = float(sigma)                  # residual sd
+        self.random_cov = np.asarray(Sigma)  # random-effects covariance (q x q)
+        self.random_names = re_names  # ['intercept', slope names...]
+        self.tau = float(np.sqrt(Sigma[0, 0]))  # random-intercept sd (back-compat)
+        self.sigma = float(sigma)  # residual sd
         # per-group effects: intercept for back-compat, full vector under group_effects_full
         self.group_effects = {lv: float(b[i, 0]) for i, lv in enumerate(group_levels)}
         self.group_effects_full = {lv: b[i] for i, lv in enumerate(group_levels)}
-        self.coefficients = {names[i]: {"mean": float(beta[i]), "sd": float(np.sqrt(cov[i, i]))}
-                             for i in range(len(names))}
+        self.coefficients = {
+            names[i]: {"mean": float(beta[i]), "sd": float(np.sqrt(cov[i, i]))} for i in range(len(names))
+        }
         self.acceptance_rate = None
         self.predictive = None
 
     def summary(self):
-        return {"coefficients": self.coefficients, "random_cov": self.random_cov,
-                "sigma": self.sigma, "n_groups": len(self.group_effects)}
+        return {
+            "coefficients": self.coefficients,
+            "random_cov": self.random_cov,
+            "sigma": self.sigma,
+            "n_groups": len(self.group_effects),
+        }
 
 
 def _lmm_fit(rv, y, given, linpred, max_iter, tol):
@@ -161,7 +170,8 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
     X, offset = _design(columns, given) if (est or _fixed) else (np.zeros((y.size, 0)), np.zeros(y.size))
     names = [f.name if f is not None else "intercept" for _, f in est]
     if not names:
-        X = np.ones((y.size, 1)); names = ["intercept"]
+        X = np.ones((y.size, 1))
+        names = ["intercept"]
     N, p = X.shape
 
     # random-effects design Z: intercept + slope columns
@@ -188,14 +198,14 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
         trace_term = 0.0
         for gi, idx in enumerate(groups):
             Zg, rg = Z[idx], resid[idx]
-            cov_g = np.linalg.inv(Sinv + Zg.T @ Zg / sigma2)     # E-step posterior of b_g
+            cov_g = np.linalg.inv(Sinv + Zg.T @ Zg / sigma2)  # E-step posterior of b_g
             b_g = cov_g @ (Zg.T @ rg / sigma2)
             b[gi] = b_g
             SS += np.outer(b_g, b_g) + cov_g
             pred = Zg @ b_g
             err2 += float((rg - pred) @ (rg - pred))
             trace_term += float(np.trace(Zg @ cov_g @ Zg.T))
-        Sigma = SS / G                                            # M-step
+        Sigma = SS / G  # M-step
         sigma2 = max((err2 + trace_term) / N, 1e-8)
         Zb = np.einsum("nq,nq->n", Z, b[g])
         beta_new = np.linalg.lstsq(X, yv - Zb, rcond=None)[0]
@@ -209,19 +219,18 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
     return RandomVariable._bound(None, name=rv._name, result=result)
 
 
-def regression_fit(rv: RandomVariable, data, *, given=None, max_iter: int = 100,
-                   tol: float = 1e-9, **_) -> RandomVariable:
+def regression_fit(
+    rv: RandomVariable, data, *, given=None, max_iter: int = 100, tol: float = 1e-9, **_
+) -> RandomVariable:
     linpred0 = next((a for a in rv._args if isinstance(a, _LinearPredictor)), None)
-    if linpred0 is not None and linpred0.groups:           # mixed-effects model
+    if linpred0 is not None and linpred0.groups:  # mixed-effects model
         if rv._family.name != "Normal":
             raise NotImplementedError("mixed-effects models require a Normal response.")
-        return _lmm_fit(rv, np.asarray(data, float).reshape(-1), given or {}, linpred0,
-                        max_iter, tol)
+        return _lmm_fit(rv, np.asarray(data, float).reshape(-1), given or {}, linpred0, max_iter, tol)
     fam = rv._family.name
     link = _LINK.get(fam)
     if link is None:
-        raise NotImplementedError(f"regression for family {fam} is not supported "
-                                  f"(have {sorted(_LINK)}).")
+        raise NotImplementedError(f"regression for family {fam} is not supported (have {sorted(_LINK)}).")
     linpred = next(a for a in rv._args if isinstance(a, _LinearPredictor))
     scale = rv._args[1] if fam == "Normal" else None
     given = given or {}
@@ -249,7 +258,7 @@ def regression_fit(rv: RandomVariable, data, *, given=None, max_iter: int = 100,
         eta = offset + X @ beta
         mu = _link_inv(link, eta)
         W = _irls_weight(link, mu)
-        z = (eta - offset) + (y - mu) / W                 # working response (predictor space)
+        z = (eta - offset) + (y - mu) / W  # working response (predictor space)
         WX = X * W[:, None]
         A = X.T @ WX + P0
         cov = np.linalg.inv(A)
@@ -259,14 +268,14 @@ def regression_fit(rv: RandomVariable, data, *, given=None, max_iter: int = 100,
             break
         beta = new_beta
 
-    if fam == "Normal":                                    # residual scale
+    if fam == "Normal":  # residual scale
         sigma_fixed = not (scale is FREE or isinstance(scale, RandomVariable))
         if sigma_fixed:
             sigma = float(scale)
         else:
             resid = y - (offset + X @ beta)
             sigma = float(np.sqrt(max(resid @ resid / N, 1e-8)))
-        cov = cov * (sigma ** 2)                            # OLS coef cov scales with sigma^2
+        cov = cov * (sigma**2)  # OLS coef cov scales with sigma^2
     else:
         sigma = float("nan")
 

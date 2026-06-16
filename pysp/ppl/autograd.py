@@ -12,6 +12,7 @@ scorer (e.g. Categorical), :func:`grad_target` returns ``None`` and the caller f
 to the numerical path. The target is numerically identical to
 ``pysp.ppl.inference._build_target`` so results and tests are unchanged — only faster.
 """
+
 from __future__ import annotations
 
 import math
@@ -58,39 +59,67 @@ def _scorers():
 
     G = GaussianDistribution.backend_log_density_from_params
     return {
-        "Normal": (lambda x, t: (x,),
-                   lambda a, dt, x, e: G(x, a[0], a[1] ** 2, e)),
-        "LogNormal": (lambda x, t: (x,),
-                      lambda a, dt, x, e: LogGaussianDistribution.backend_log_density_from_params(x, a[0], a[1] ** 2, e)),
-        "Exponential": (lambda x, t: (x,),
-                        lambda a, dt, x, e: ExponentialDistribution.backend_log_density_from_params(x, 1.0 / a[0], e)),
-        "Bernoulli": (lambda x, t: (x,),
-                      lambda a, dt, x, e: BernoulliDistribution.backend_log_density_from_params(x, a[0], e)),
-        "Geometric": (lambda x, t: (x,),
-                      lambda a, dt, x, e: GeometricDistribution.backend_log_density_from_params(x, a[0], e)),
-        "StudentT": (lambda x, t: (x,),
-                     lambda a, dt, x, e: StudentTDistribution.backend_log_density_from_params(x, a[0], a[1], a[2], e)),
-        "Poisson": (lambda x, t: (t.lgamma(x + 1.0),),
-                    lambda a, dt, x, e: PoissonDistribution.backend_log_density_from_params(x, dt[0], a[0], e)),
-        "Gamma": (lambda x, t: (t.log(x),),
-                  lambda a, dt, x, e: GammaDistribution.backend_log_density_from_params(x, dt[0], a[0], 1.0 / a[1], e)),
-        "Beta": (lambda x, t: (t.log(x), t.log1p(-x)),
-                 lambda a, dt, x, e: BetaDistribution.backend_log_density_from_params(dt[0], dt[1], a[0], a[1], e)),
-        "NegativeBinomial": (lambda x, t: (t.lgamma(x + 1.0),),
-                             lambda a, dt, x, e: NegativeBinomialDistribution.backend_log_density_from_params(
-                                 x, dt[0], a[0], a[1], e)),
-        "Weibull": (lambda x, t: (t.log(x),),
-                    lambda a, dt, x, e: WeibullDistribution.backend_log_density_from_params(x, dt[0], a[0], a[1], e)),
-        "Laplace": (lambda x, t: (),
-                    lambda a, dt, x, e: LaplaceDistribution.backend_log_density_from_params(x, a[0], a[1], e)),
-        "Logistic": (lambda x, t: (),
-                     lambda a, dt, x, e: LogisticDistribution.backend_log_density_from_params(x, a[0], a[1], e)),
-        "Pareto": (lambda x, t: (t.log(x),),
-                   lambda a, dt, x, e: ParetoDistribution.backend_log_density_from_params(x, dt[0], a[0], a[1], e)),
-        "Rayleigh": (lambda x, t: (x * x, t.log(x)),
-                     lambda a, dt, x, e: RayleighDistribution.backend_log_density_from_params(x, dt[0], dt[1], a[0], e)),
-        "Binomial": (lambda x, t: (),
-                     lambda a, dt, x, e: BinomialDistribution.backend_log_density_from_params(x, a[0], a[1], None, e)),
+        "Normal": (lambda x, t: (x,), lambda a, dt, x, e: G(x, a[0], a[1] ** 2, e)),
+        "LogNormal": (
+            lambda x, t: (x,),
+            lambda a, dt, x, e: LogGaussianDistribution.backend_log_density_from_params(x, a[0], a[1] ** 2, e),
+        ),
+        "Exponential": (
+            lambda x, t: (x,),
+            lambda a, dt, x, e: ExponentialDistribution.backend_log_density_from_params(x, 1.0 / a[0], e),
+        ),
+        "Bernoulli": (
+            lambda x, t: (x,),
+            lambda a, dt, x, e: BernoulliDistribution.backend_log_density_from_params(x, a[0], e),
+        ),
+        "Geometric": (
+            lambda x, t: (x,),
+            lambda a, dt, x, e: GeometricDistribution.backend_log_density_from_params(x, a[0], e),
+        ),
+        "StudentT": (
+            lambda x, t: (x,),
+            lambda a, dt, x, e: StudentTDistribution.backend_log_density_from_params(x, a[0], a[1], a[2], e),
+        ),
+        "Poisson": (
+            lambda x, t: (t.lgamma(x + 1.0),),
+            lambda a, dt, x, e: PoissonDistribution.backend_log_density_from_params(x, dt[0], a[0], e),
+        ),
+        "Gamma": (
+            lambda x, t: (t.log(x),),
+            lambda a, dt, x, e: GammaDistribution.backend_log_density_from_params(x, dt[0], a[0], 1.0 / a[1], e),
+        ),
+        "Beta": (
+            lambda x, t: (t.log(x), t.log1p(-x)),
+            lambda a, dt, x, e: BetaDistribution.backend_log_density_from_params(dt[0], dt[1], a[0], a[1], e),
+        ),
+        "NegativeBinomial": (
+            lambda x, t: (t.lgamma(x + 1.0),),
+            lambda a, dt, x, e: NegativeBinomialDistribution.backend_log_density_from_params(x, dt[0], a[0], a[1], e),
+        ),
+        "Weibull": (
+            lambda x, t: (t.log(x),),
+            lambda a, dt, x, e: WeibullDistribution.backend_log_density_from_params(x, dt[0], a[0], a[1], e),
+        ),
+        "Laplace": (
+            lambda x, t: (),
+            lambda a, dt, x, e: LaplaceDistribution.backend_log_density_from_params(x, a[0], a[1], e),
+        ),
+        "Logistic": (
+            lambda x, t: (),
+            lambda a, dt, x, e: LogisticDistribution.backend_log_density_from_params(x, a[0], a[1], e),
+        ),
+        "Pareto": (
+            lambda x, t: (t.log(x),),
+            lambda a, dt, x, e: ParetoDistribution.backend_log_density_from_params(x, dt[0], a[0], a[1], e),
+        ),
+        "Rayleigh": (
+            lambda x, t: (x * x, t.log(x)),
+            lambda a, dt, x, e: RayleighDistribution.backend_log_density_from_params(x, dt[0], dt[1], a[0], e),
+        ),
+        "Binomial": (
+            lambda x, t: (),
+            lambda a, dt, x, e: BinomialDistribution.backend_log_density_from_params(x, a[0], a[1], None, e),
+        ),
     }
 
 
@@ -123,8 +152,11 @@ class GradTarget:
         prep, _ = self._scorers[self._fam.name]
         self._data_terms = prep(self._x, torch)
         # fixed (non-inferred) args as python floats
-        self._fixed = {i: float(rv._args[i]) for i in range(len(rv._args))
-                       if not (rv._args[i] is free or isinstance(rv._args[i], RandomVariable))}
+        self._fixed = {
+            i: float(rv._args[i])
+            for i in range(len(rv._args))
+            if not (rv._args[i] is free or isinstance(rv._args[i], RandomVariable))
+        }
 
     # -- the target -----------------------------------------------------------
     def _t(self, v):
@@ -179,7 +211,9 @@ class GradTarget:
         return self.value_and_grad(u_np)[1]
 
     # -- ADVI (reparameterized mean-field VB, Adam) ---------------------------
-    def advi(self, u0, s0, *, samples: int, mc: int, steps: int, lr: float, rng) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def advi(
+        self, u0, s0, *, samples: int, mc: int, steps: int, lr: float, rng
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Optimize a diagonal-Gaussian q(u)=N(mean, diag(std^2)) by maximizing a
         reparameterized Monte-Carlo ELBO with Adam. Returns (value_samples, mean_u, std_u)."""
         torch = self._torch
@@ -188,7 +222,7 @@ class GradTarget:
         log_std = torch.tensor(np.log(np.asarray(s0, dtype=float)), dtype=torch.float64, requires_grad=True)
         opt = torch.optim.Adam([mean, log_std], lr=lr)
         half_entropy_const = 0.5 * d * (1.0 + math.log(2.0 * math.pi))
-        gen = torch.Generator().manual_seed(int(rng.randint(1, 2 ** 31)))
+        gen = torch.Generator().manual_seed(int(rng.randint(1, 2**31)))
         for _ in range(steps):
             opt.zero_grad()
             eps = torch.randn((mc, d), dtype=torch.float64, generator=gen)
