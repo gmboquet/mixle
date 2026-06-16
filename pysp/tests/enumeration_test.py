@@ -215,16 +215,38 @@ class CapabilityMatrixTestCase(unittest.TestCase):
         # Continuous / coupled families cannot enumerate (uncountable or non-decomposable support), so
         # enumeration + unranking + exact rank are N/A -- but CDF ("probability-ordered cumulative")
         # is still available for any samplable family via density_rank's Monte-Carlo fallback.
+        from pysp.stats.bayes.dirichlet import DirichletDistribution
+        from pysp.stats.bayes.normgamma import NormalGammaDistribution
+        from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+        from pysp.stats.latent.mvnmixture import GaussianMixtureDistribution
         from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
+        from pysp.stats.multivariate.vmf import VonMisesFisherDistribution
         from pysp.utils.density_rank import density_rank
 
         # (name, dist, value, expected density_rank method): families with no enumerator still expose a
-        # CDF -- Monte-Carlo for most, exact-analytic where a closed-form cumulative exists (MVN).
+        # CDF -- exact-analytic where a closed-form probability-ordered cumulative exists (the
+        # multivariate Gaussian via chi-square, von Mises-Fisher via the cosine marginal), Monte-Carlo
+        # otherwise (continuous leaves' probability-ordered CDF, parameter priors, MVN mixtures).
         cases = [
             ("gaussian", GaussianDistribution(0.0, 1.0), 0.5, "sampling"),
             ("gamma", GammaDistribution(2.0, 2.0), 3.0, "sampling"),
             ("student_t", StudentTDistribution(5.0, 0.0, 1.0), 0.5, "sampling"),
             ("mvn", MultivariateGaussianDistribution(np.zeros(2), np.eye(2)), np.array([0.5, 0.5]), "exact-analytic"),
+            (
+                "vmf",
+                VonMisesFisherDistribution(np.array([1.0, 0.0, 0.0]), 3.0),
+                np.array([0.0, 1.0, 0.0]),
+                "exact-analytic",
+            ),
+            ("dirichlet", DirichletDistribution(np.array([2.0, 3.0, 1.5])), np.array([0.3, 0.4, 0.3]), "sampling"),
+            ("symdirichlet", SymmetricDirichletDistribution(2.0, 4), np.array([0.25, 0.25, 0.25, 0.25]), "sampling"),
+            ("normgamma", NormalGammaDistribution(0.0, 1.0, 2.0, 1.0), (0.0, 1.0), "sampling"),
+            (
+                "mvnmixture",
+                GaussianMixtureDistribution([np.zeros(2), np.ones(2)], [np.ones(2), np.ones(2)], [0.6, 0.4]),
+                np.array([0.2, 0.3]),
+                "sampling",
+            ),
             ("erdos_renyi_unsized", ErdosRenyiGraphDistribution(0.3), None, None),
         ]
         for name, dist, x, expected_method in cases:
