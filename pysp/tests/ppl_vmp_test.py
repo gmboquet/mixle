@@ -49,6 +49,13 @@ class VMPTestCase(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             Normal(0.0, 1.0).fit(self.data, how="vmp")  # nothing to infer
 
+    def test_free_slot_gives_clear_error(self):
+        # vmp needs priors, not the point-estimate `free`; the error must say so (not a TypeError)
+        with self.assertRaises(NotImplementedError) as cm:
+            Normal(Normal(0, 10, name="mu"), free).fit(self.data, how="vmp")
+        self.assertIn("free", str(cm.exception))
+        self.assertIn("vi", str(cm.exception))
+
 
 class VMPGraphTestCase(unittest.TestCase):
     def test_shared_variable_combines_evidence(self):
