@@ -204,7 +204,12 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at x.
 
         """
-        return -inf if (x < self.min_val or x > self.max_val) else self.log_p_vec[x - self.min_val]
+        xi = int(x)
+        # Accept integer-valued floats (e.g. a count total summed as float64); reject non-integers
+        # and out-of-support values. Indexing log_p_vec with a raw float raises, hence the cast.
+        if xi != x or xi < self.min_val or xi > self.max_val:
+            return -inf
+        return self.log_p_vec[xi - self.min_val]
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized evaluation of IntegerCategorical log_density() for sequence encoded iid observations x.
@@ -216,12 +221,19 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of floats containing log_density() evaluated at each observation in x.
 
         """
-        v = x - self.min_val
-        u = np.bitwise_and(v >= 0, v < self.num_vals)
-        rv = np.zeros(len(x))
-        rv.fill(-np.inf)
+        x = np.asarray(x)
+        rv = np.full(x.shape[0], -np.inf)
+        if np.issubdtype(x.dtype, np.integer):
+            v = x - self.min_val
+            u = np.bitwise_and(v >= 0, v < self.num_vals)
+            rv[u] = self.log_p_vec[v[u]]
+            return rv
+        # Float input (e.g. count totals summed as float64): accept integer-valued entries by casting
+        # the index to int, and reject non-integer values (indexing log_p_vec with a float raises).
+        xi = np.rint(x).astype(np.int64)
+        v = xi - self.min_val
+        u = (v >= 0) & (v < self.num_vals) & (np.abs(x - xi) < 1.0e-9)
         rv[u] = self.log_p_vec[v[u]]
-
         return rv
 
     @staticmethod
