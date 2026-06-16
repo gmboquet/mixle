@@ -9,7 +9,60 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import MVN, Categorical, DiagGaussian, Dirichlet, free, ordered
+from pysp.ppl import MVN, Categorical, DiagGaussian, Dirichlet, free, increasing, ode_residual, ordered, param
+
+
+class ParamHandleConstraintTestCase(unittest.TestCase):
+    """param(...) handles let constraints reference a vector PARAMETER during inference."""
+
+    def setUp(self):
+        rng = np.random.RandomState(1)
+        self.mu = np.array([-1.0, 0.5, 2.0])  # ordered
+        self.X = [list(x) for x in (self.mu + rng.standard_normal((3000, 3)))]
+
+    def test_shape_constraint_on_vector_parameter(self):
+        m = param("mu", 3)
+        fit = MVN(3, mean=m, cov=free).fit(
+            self.X,
+            how="ensemble",
+            constraints=increasing(m),
+            draws=800,
+            burn=300,
+            walkers=24,
+            rng=np.random.RandomState(2),
+        )
+        mm = np.asarray(fit.params["mean"])
+        self.assertTrue(np.all(np.diff(mm) > 0))  # increasing enforced on the inferred mean
+
+    def test_entry_constraints_on_vector_parameter(self):
+        m = param("mu", 3)
+        fit = MVN(3, mean=m, cov=free).fit(
+            self.X,
+            how="ensemble",
+            constraints=(m[0] < m[1]) & (m[1] < m[2]),
+            draws=800,
+            burn=300,
+            walkers=24,
+            rng=np.random.RandomState(3),
+        )
+        mm = np.asarray(fit.params["mean"])
+        self.assertTrue(np.all(np.diff(mm) > 0))
+
+    def test_param_model_auto_routes_to_inference(self):
+        m = param("mu", 3)
+        fit = MVN(3, mean=m, cov=free).fit(self.X)  # auto must not pick EM (which ignores the param)
+        self.assertTrue(np.allclose(np.asarray(fit.params["mean"]), self.mu, atol=0.3))
+
+
+class ODEResidualTestCase(unittest.TestCase):
+    def test_residual_small_on_true_solution(self):
+        t = np.arange(0, 2, 0.1)
+        y = param("y", len(t))
+        c = ode_residual(y, lambda yy: -0.5 * yy, dt=0.1)  # dy/dt = -0.5 y
+        r_true = np.abs(c.residual({y: np.exp(-0.5 * t)}))
+        r_bad = np.abs(c.residual({y: np.sin(3 * t)}))
+        self.assertLess(float(r_true.max()), 0.05)  # ~ forward-Euler discretization error
+        self.assertGreater(float(r_bad.max()), 1.0)
 
 
 class LeafVectorParameterTestCase(unittest.TestCase):
