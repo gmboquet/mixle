@@ -1543,6 +1543,7 @@ def vi_fit(
     max_iter: int = 4000,
     steps: int = 600,
     lr: float = 0.05,
+    batch_size: int | None = None,
     rng=None,
 ) -> RandomVariable:
     """Mean-field variational Bayes (ADVI).
@@ -1563,7 +1564,7 @@ def vi_fit(
         slots, build = ag.slots, ag.build
         u0 = _init_u(slots, ag.dmean, ag.dstd)
         s0 = _init_scale(slots, ag.dstd, len(data))
-        vals, mean, std = ag.advi(u0, s0, samples=samples, mc=mc, steps=steps, lr=lr, rng=rng)
+        vals, mean, std = ag.advi(u0, s0, samples=samples, mc=mc, steps=steps, lr=lr, rng=rng, batch_size=batch_size)
     else:
         from scipy.optimize import minimize
 

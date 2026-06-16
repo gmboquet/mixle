@@ -131,6 +131,24 @@ class PPLVITestCase(unittest.TestCase):
         mb = Bernoulli(Beta(2, 2, name="p")).fit(bern, how="vi", rng=np.random.RandomState(5))
         self.assertAlmostEqual(mb.params["p"], 0.3, delta=0.05)
 
+    def test_minibatch_vi_scales(self):
+        # stochastic minibatch VI (SGVB) recovers the same answer from a small per-step shard,
+        # so VB scales to large data.
+        rng = np.random.RandomState(6)
+        data = list(rng.normal(5.0, 2.0, 50000))
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="vi", steps=300, batch_size=256, rng=np.random.RandomState(7)
+        )
+        self.assertAlmostEqual(m.params["mean"], 5.0, delta=0.2)
+
+    def test_minibatch_vi_positive_support(self):
+        rng = np.random.RandomState(8)
+        data = list(rng.poisson(3.5, 50000).astype(float))
+        m = Poisson(Gamma(2, 1, name="rate")).fit(
+            data, how="vi", steps=300, batch_size=256, rng=np.random.RandomState(9)
+        )
+        self.assertAlmostEqual(m.params["rate"], 3.5, delta=0.3)
+
 
 class PPLConjugateTestCase(unittest.TestCase):
     def test_normal_normal_conjugate_is_exact_and_auto(self):

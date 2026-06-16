@@ -193,14 +193,17 @@ class GradTarget:
                 plp = plp + apply_p(pargs, prep_p(xt, torch), xt, self._eng).sum()
         return ll + plp + logj
 
-    def _logtarget_batch(self, U):
+    def _logtarget_batch(self, U, x=None, data_terms=None, lik_scale=1.0):
         """Vectorized joint log-target for a batch ``U`` of shape ``(B, d)`` -> ``(B,)``.
 
         Identical math to :meth:`_logtarget_tensor` but with a leading batch axis: each
         inferred parameter becomes ``(B, 1)`` and broadcasts against the ``(N,)`` data, so all
         ``B`` points are scored in a single pass (no Python loop). Used by the batched ADVI ELBO.
-        """
+        ``x``/``data_terms``/``lik_scale`` select a data *minibatch* (the likelihood is summed over
+        the subset and rescaled by ``lik_scale = N/B`` for an unbiased full-data estimate)."""
         torch = self._torch
+        x = self._x if x is None else x
+        data_terms = self._data_terms if data_terms is None else data_terms
         B = U.shape[0]
         vals: dict[int, Any] = {}
         logj = U.new_zeros(B)
@@ -217,7 +220,7 @@ class GradTarget:
                 vals[s.index] = uk
         full = [vals[i].reshape(B, 1) if i in vals else self._t(self._fixed[i]) for i in range(len(self._rv._args))]
         _, apply = self._scorers[self._fam.name]
-        ll = apply(full, self._data_terms, self._x, self._eng).sum(dim=1)  # (B, N) -> (B,)
+        ll = apply(full, data_terms, x, self._eng).sum(dim=1) * lik_scale  # (B, N) -> (B,)
         plp = U.new_zeros(B)
         for s in self.slots:
             if s.handle is not None:
@@ -247,12 +250,16 @@ class GradTarget:
 
     # -- ADVI (reparameterized mean-field VB, Adam) ---------------------------
     def advi(
-        self, u0, s0, *, samples: int, mc: int, steps: int, lr: float, rng
+        self, u0, s0, *, samples: int, mc: int, steps: int, lr: float, rng, batch_size: int | None = None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Optimize a diagonal-Gaussian q(u)=N(mean, diag(std^2)) by maximizing a
-        reparameterized Monte-Carlo ELBO with Adam. Returns (value_samples, mean_u, std_u)."""
+        reparameterized Monte-Carlo ELBO with Adam. Returns (value_samples, mean_u, std_u).
+        ``batch_size`` subsamples that many data points per step (stochastic VI / SGVB), scaling
+        the minibatch likelihood by ``N/batch_size`` so VB scales to large data."""
         torch = self._torch
         d = len(self.slots)
+        n_data = int(self._x.shape[0])
+        use_mb = batch_size is not None and 0 < int(batch_size) < n_data
         mean = torch.tensor(np.asarray(u0, dtype=float), dtype=torch.float64, requires_grad=True)
         log_std = torch.tensor(np.log(np.asarray(s0, dtype=float)), dtype=torch.float64, requires_grad=True)
         opt = torch.optim.Adam([mean, log_std], lr=lr)
@@ -263,7 +270,13 @@ class GradTarget:
             eps = torch.randn((mc, d), dtype=torch.float64, generator=gen)
             std = torch.exp(log_std)
             U = mean + std * eps  # (mc, d) reparameterized draws
-            ll = self._logtarget_batch(U).mean()  # all mc samples scored in one pass
+            if use_mb:  # stochastic minibatch of the data (SGVB) — scales VB to large data
+                idx = torch.as_tensor(rng.choice(n_data, size=int(batch_size), replace=False))
+                xb = self._x[idx]
+                dtb = tuple(t[idx] for t in self._data_terms)
+                ll = self._logtarget_batch(U, xb, dtb, n_data / float(batch_size)).mean()
+            else:
+                ll = self._logtarget_batch(U).mean()  # all mc samples scored in one pass
             elbo = ll + log_std.sum() + half_entropy_const
             (-elbo).backward()
             opt.step()
