@@ -174,6 +174,28 @@ class MultiChainDiagnosticsTestCase(unittest.TestCase):
         ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
         self.assertGreater(ess, 250)
 
+    def test_ensemble_multichain_rhat(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 2.0, 2000))
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="ensemble", chains=4, draws=400, burn=150, rng=np.random.RandomState(1)
+        )
+        self.assertEqual(m.result.n_chains, 4)
+        for r in m.result.rhat.values():
+            self.assertLess(r, 1.1)
+        self.assertAlmostEqual(float(m.result.mean("mu")), 5.0, delta=0.2)
+
+    def test_ensemble_parallel_chains(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(-1.0, 1.5, 2000))
+        seq = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="ensemble", chains=3, parallel=False, draws=300, burn=100, rng=np.random.RandomState(7)
+        )
+        par = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="ensemble", chains=3, parallel=True, draws=300, burn=100, rng=np.random.RandomState(7)
+        )
+        self.assertAlmostEqual(seq.result.mean("mu"), par.result.mean("mu"), places=5)
+
     def test_process_parallel_matches_sequential(self):
         rng = np.random.RandomState(0)
         data = list(rng.normal(-1.0, 1.5, 1200))
