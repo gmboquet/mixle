@@ -713,24 +713,33 @@ def _best_first_union(
     seen = set()
     buffer: list[tuple[float, int, Any]] = []
 
-    def compute_bound() -> float:
-        if not head_scores:
-            return -np.inf
+    def exact_bound() -> float:
         return bound_fn(np.fromiter(head_scores.values(), dtype=float, count=len(head_scores)))
 
-    # The bound depends only on the live heads, which change only when a head is consumed;
-    # cache it and recompute after each head pop instead of on every buffer-drain iteration.
-    bound = compute_bound()
+    # A buffered item is releasable once its probability is >= the bound on every unreleased item,
+    # ``bound_fn`` over the live head scores. Both callers' bounds satisfy
+    # ``max(scores) <= bound_fn(scores) <= max(scores) + log(#scores)`` (logsumexp and max), so we
+    # avoid the O(#components) exact ``bound_fn`` on most pops: the heap top is ``max(scores)``, so
+    # ``btop >= max + logK`` certifies release and ``btop < max`` certifies non-release outright --
+    # the exact bound is only needed inside the ``logK``-wide uncertain band.
     while True:
-        if buffer and -buffer[0][0] >= bound - tol:
-            neg_lp, _, v = heapq.heappop(buffer)
-            yield (v, -neg_lp)
-            continue
-        if not heads:
-            if buffer:
+        if buffer:
+            btop = -buffer[0][0]
+            if not heads:
+                release = True
+            else:
+                mh = -heads[0][0]
+                if btop >= mh + math.log(len(head_scores)) - tol:
+                    release = True  # cheap upper bound on the frontier certifies release
+                elif btop < mh - tol:
+                    release = False  # frontier (>= mh) strictly exceeds btop: cannot release yet
+                else:
+                    release = btop >= exact_bound() - tol  # uncertain band: exact frontier needed
+            if release:
                 neg_lp, _, v = heapq.heappop(buffer)
                 yield (v, -neg_lp)
                 continue
+        if not heads:
             return
         _, _, k, rank = heapq.heappop(heads)
         v = streams[k].get(rank)[0]
@@ -747,7 +756,6 @@ def _best_first_union(
             heapq.heappush(heads, (-score, next(counter), k, rank + 1))
         else:
             del head_scores[k]
-        bound = compute_bound()
 
 
 def best_first_union(
