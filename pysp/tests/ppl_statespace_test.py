@@ -1,4 +1,5 @@
 """Tests for linear-Gaussian state-space models (Kalman/RTS + EM)."""
+
 import unittest
 
 import numpy as np
@@ -7,7 +8,6 @@ from pysp.ppl import AR1, LocalLevel
 
 
 class StateSpaceTestCase(unittest.TestCase):
-
     def test_local_level_smoothing(self):
         rng = np.random.RandomState(0)
         T = 600

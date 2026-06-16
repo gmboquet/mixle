@@ -72,7 +72,7 @@ class PartialFreeTestCase(unittest.TestCase):
     def test_normal_fixed_mean(self):
         rng = np.random.RandomState(2)
         m = Normal(0.0, free).fit(list(rng.normal(0.0, 2.5, 6000)))
-        self.assertAlmostEqual(m.params["mean"], 0.0, delta=1e-9)   # held fixed
+        self.assertAlmostEqual(m.params["mean"], 0.0, delta=1e-9)  # held fixed
         self.assertAlmostEqual(m.params["sd"], 2.5, delta=0.1)
 
 
@@ -82,16 +82,14 @@ class UnitIntervalBayesTestCase(unittest.TestCase):
     def test_bernoulli_p_mcmc(self):
         rng = np.random.RandomState(1)
         data = list((rng.uniform(size=5000) < 0.7).astype(float))
-        m = Bernoulli(Beta(2, 2, name="p")).fit(data, how="mcmc", draws=1500, burn=500,
-                                                rng=np.random.RandomState(1))
+        m = Bernoulli(Beta(2, 2, name="p")).fit(data, how="mcmc", draws=1500, burn=500, rng=np.random.RandomState(1))
         self.assertAlmostEqual(float(m.result.mean("p")), 0.7, delta=0.03)
         self.assertTrue(0.0 < m.dist.p < 1.0)
 
     def test_binomial_p_mcmc(self):
         rng = np.random.RandomState(2)
         data = list(rng.binomial(10, 0.4, 4000).astype(float))
-        m = Binomial(10, Beta(2, 2, name="p")).fit(data, how="mcmc", draws=1200, burn=400,
-                                                   rng=np.random.RandomState(2))
+        m = Binomial(10, Beta(2, 2, name="p")).fit(data, how="mcmc", draws=1200, burn=400, rng=np.random.RandomState(2))
         self.assertAlmostEqual(float(m.result.mean("p")), 0.4, delta=0.03)
 
     def test_weibull_shape_prior_map(self):
@@ -109,13 +107,13 @@ class ConjugatePairsTestCase(unittest.TestCase):
         data = list(rng.binomial(10, 0.35, 4000).astype(float))
         from pysp.ppl.inference import ConjugatePosterior
 
-        m = Binomial(10, Beta(2, 2, name="p")).fit(data)            # auto -> conjugate
+        m = Binomial(10, Beta(2, 2, name="p")).fit(data)  # auto -> conjugate
         self.assertIsInstance(m.result, ConjugatePosterior)
         self.assertAlmostEqual(float(m.result.mean("p")), 0.35, delta=0.02)
 
     def test_geometric_beta(self):
         rng = np.random.RandomState(1)
-        data = list(rng.geometric(0.3, 4000).astype(float))         # k >= 1
+        data = list(rng.geometric(0.3, 4000).astype(float))  # k >= 1
         from pysp.ppl.inference import ConjugatePosterior
 
         m = Geometric(Beta(2, 2, name="p")).fit(data)
@@ -131,7 +129,7 @@ class ConjugateMixturePriorTestCase(unittest.TestCase):
 
         rng = np.random.RandomState(0)
         data = list(rng.normal(5.0, 1.0, 2000))
-        m = Normal(Mix([Normal(-5, 2), Normal(5, 2)]), 1.0).fit(data)   # auto -> conjugate mixture
+        m = Normal(Mix([Normal(-5, 2), Normal(5, 2)]), 1.0).fit(data)  # auto -> conjugate mixture
         self.assertIsInstance(m.result, ConjugateMixturePosterior)
         self.assertAlmostEqual(m.result.mean(), 5.0, delta=0.1)
         # the +5 component must dominate the posterior mixture weights
@@ -142,7 +140,8 @@ class ConjugateMixturePriorTestCase(unittest.TestCase):
         data = list(rng.normal(5.0, 1.0, 2000))
         exact = Normal(Mix([Normal(-5, 2), Normal(5, 2)]), 1.0).fit(data)
         mcmc = Normal(Mix([Normal(-5, 2), Normal(5, 2)]), 1.0).fit(
-            data, how="mcmc", draws=3000, burn=1000, rng=np.random.RandomState(1))
+            data, how="mcmc", draws=3000, burn=1000, rng=np.random.RandomState(1)
+        )
         self.assertAlmostEqual(exact.result.mean(), float(np.mean(mcmc.result.samples())), delta=0.05)
 
     def test_poisson_mixture_of_gammas(self):
@@ -158,10 +157,9 @@ class MultiChainDiagnosticsTestCase(unittest.TestCase):
     def test_rhat_and_combined_ess(self):
         rng = np.random.RandomState(0)
         data = list(rng.normal(5.0, 2.0, 1500))
-        m = Normal(free, free).fit(data, how="mcmc", draws=1500, burn=500, chains=4,
-                                   rng=np.random.RandomState(1))
+        m = Normal(free, free).fit(data, how="mcmc", draws=1500, burn=500, chains=4, rng=np.random.RandomState(1))
         self.assertEqual(m.result.n_chains, 4)
-        for r in m.result.rhat.values():           # converged: R-hat ~ 1
+        for r in m.result.rhat.values():  # converged: R-hat ~ 1
             self.assertLess(r, 1.1)
         self.assertGreater(m.result.ess, 0.0)
         self.assertAlmostEqual(m.result.mean("arg0"), 5.0, delta=0.2)
@@ -170,8 +168,7 @@ class MultiChainDiagnosticsTestCase(unittest.TestCase):
         rng = np.random.RandomState(0)
         data = list(rng.normal(5.0, 2.0, 4000))
         mu = Normal(0, 10, name="mu")
-        m = Normal(mu, free).fit(data, how="ensemble", draws=800, burn=300,
-                                 rng=np.random.RandomState(1))
+        m = Normal(mu, free).fit(data, how="ensemble", draws=800, burn=300, rng=np.random.RandomState(1))
         self.assertAlmostEqual(float(m.result.mean("mu")), 5.0, delta=0.1)
         # the stretch move mixes well across the walker ensemble
         ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
@@ -180,10 +177,12 @@ class MultiChainDiagnosticsTestCase(unittest.TestCase):
     def test_process_parallel_matches_sequential(self):
         rng = np.random.RandomState(0)
         data = list(rng.normal(-1.0, 1.5, 1200))
-        seq = Normal(free, free).fit(data, how="hmc", draws=800, burn=300, chains=3,
-                                     parallel=False, rng=np.random.RandomState(7))
-        par = Normal(free, free).fit(data, how="hmc", draws=800, burn=300, chains=3,
-                                     parallel=True, rng=np.random.RandomState(7))
+        seq = Normal(free, free).fit(
+            data, how="hmc", draws=800, burn=300, chains=3, parallel=False, rng=np.random.RandomState(7)
+        )
+        par = Normal(free, free).fit(
+            data, how="hmc", draws=800, burn=300, chains=3, parallel=True, rng=np.random.RandomState(7)
+        )
         # identical seeds + deterministic chains -> identical posterior means
         self.assertAlmostEqual(seq.result.mean("arg0"), par.result.mean("arg0"), places=6)
         self.assertAlmostEqual(seq.result.mean("arg1"), par.result.mean("arg1"), places=6)

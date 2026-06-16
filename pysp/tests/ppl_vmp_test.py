@@ -1,4 +1,5 @@
 """Tests for the VMP engine (variational message passing)."""
+
 import unittest
 
 import numpy as np
@@ -7,10 +8,9 @@ from pysp.ppl import Categorical, Dirichlet, Gamma, Graph, Mix, Normal, free
 
 
 class VMPTestCase(unittest.TestCase):
-
     def setUp(self):
         rng = np.random.RandomState(0)
-        self.data = list(rng.normal(5.0, 2.0, size=4000))   # mean 5, sd 2, precision 0.25
+        self.data = list(rng.normal(5.0, 2.0, size=4000))  # mean 5, sd 2, precision 0.25
 
     def test_gaussian_mean_and_precision_recovered(self):
         # the conjugate registry needs a KNOWN variance; VMP infers both jointly
@@ -24,7 +24,7 @@ class VMPTestCase(unittest.TestCase):
         trace = m.result.elbo_trace
         self.assertGreater(trace.size, 1)
         diffs = np.diff(trace)
-        self.assertTrue(np.all(diffs >= -1e-6))           # non-decreasing (up to numerics)
+        self.assertTrue(np.all(diffs >= -1e-6))  # non-decreasing (up to numerics)
 
     def test_vmp_posterior_and_predictive(self):
         m = Normal(Normal(0, 10), Gamma(1, 1)).fit(self.data, how="vmp")
@@ -47,11 +47,10 @@ class VMPTestCase(unittest.TestCase):
 
     def test_unsupported_model_raises(self):
         with self.assertRaises(NotImplementedError):
-            Normal(0.0, 1.0).fit(self.data, how="vmp")    # nothing to infer
+            Normal(0.0, 1.0).fit(self.data, how="vmp")  # nothing to infer
 
 
 class VMPGraphTestCase(unittest.TestCase):
-
     def test_shared_variable_combines_evidence(self):
         # the SAME mu instance appears in two factors -> one node, messages combined
         rng = np.random.RandomState(0)
@@ -117,17 +116,14 @@ class VMPGraphTestCase(unittest.TestCase):
         dA = list(rng.choice(3, 2500, p=[0.5, 0.3, 0.2]))
         dB = list(rng.choice(3, 2500, p=[0.1, 0.3, 0.6]))
         fit = Graph().observe(Categorical(pi), dA).observe(Categorical(pi), dB).fit()
-        est = fit.posterior(pi)["mean"]                       # pooled ~ [0.3, 0.3, 0.4]
+        est = fit.posterior(pi)["mean"]  # pooled ~ [0.3, 0.3, 0.4]
         self.assertTrue(np.allclose(est, [0.3, 0.3, 0.4], atol=0.05))
 
 
 class MixtureVMPTestCase(unittest.TestCase):
-
     def test_bayesian_gmm_vbem(self):
         rng = np.random.RandomState(0)
-        data = list(np.concatenate([rng.normal(-6, 1, 3000),
-                                     rng.normal(0, 0.7, 3000),
-                                     rng.normal(6, 1.2, 3000)]))
+        data = list(np.concatenate([rng.normal(-6, 1, 3000), rng.normal(0, 0.7, 3000), rng.normal(6, 1.2, 3000)]))
         m = Mix([Normal(free, free)] * 3).fit(data, how="vmp", rng=np.random.RandomState(1))
         r = m.result
         means = sorted(c["mean"] for c in r.components)
