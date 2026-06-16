@@ -490,6 +490,29 @@ def _hmc_worker(seed, rv, data, kw):
     )
 
 
+def _ensemble_p0(slots, dmean, dstd, n_data, walkers, rng):
+    """Dispersed initial ensemble (walkers, d): walker 0 at the data-informed point, the rest
+    jittered by the prior/posterior width so the stretch move starts spread out."""
+    d = len(slots)
+    u0 = _init_u(slots, dmean, dstd)
+    spread = _init_scale(slots, dstd, n_data) * math.sqrt(n_data)
+    p0 = u0[None, :] + 0.1 * spread[None, :] * rng.standard_normal((walkers, d))
+    p0[0] = u0
+    return p0
+
+
+def _ensemble_worker(seed, rv, data, kw):
+    """Module-level (picklable) single ensemble run: rebuilds the NumPy target and runs."""
+    from pysp.utils.mcmc import affine_invariant_ensemble
+
+    log_target, slots, _fam, _build, _unpack, (dmean, dstd) = _build_target(rv, data)
+    rng = np.random.RandomState(seed)
+    p0 = _ensemble_p0(slots, dmean, dstd, len(data), kw["walkers"], rng)
+    return affine_invariant_ensemble(
+        log_target, p0, num_samples=kw["draws"], burn_in=kw["burn"], thin=kw["thin"], rng=rng
+    )
+
+
 def _finite_diff_grad(log_target, u_ref):
     eps = 1e-5 * np.maximum(np.abs(np.asarray(u_ref, dtype=float)), 1.0)
 
@@ -699,6 +722,8 @@ def ensemble_fit(
     constraints=None,
     penalty=None,
     rng=None,
+    chains: int = 1,
+    parallel: bool = False,
 ) -> RandomVariable:
     """Affine-invariant ensemble MCMC (Goodman & Weare stretch move).
 
@@ -706,7 +731,9 @@ def ensemble_fit(
     to affine rescalings, so it mixes well on correlated / poorly-scaled posteriors and gives
     very high ESS/sec on low/medium-dimensional models (no JIT-compile latency). Each ``draws``
     sweep contributes all ``walkers`` states, so the pooled posterior has ``draws*walkers``
-    near-independent samples. Uses the fast NumPy scalar log-target (one eval per proposal)."""
+    near-independent samples. Uses the fast NumPy scalar log-target (one eval per proposal).
+    ``chains>1`` runs independent ensembles for Gelman-Rubin R-hat / pooled ESS (``parallel``
+    spreads them over a process pool)."""
     from pysp.utils.mcmc import affine_invariant_ensemble
 
     if rng is None:
@@ -721,18 +748,24 @@ def ensemble_fit(
     feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _constrain_target(log_target, feasible)
     log_target = _penalize_target(log_target, soft)
-    u0 = _init_u(slots, dmean, dstd)
-    if feasible is not None:
-        u0 = _project_init(u0, feasible, rng)
-    spread = _init_scale(slots, dstd, len(data)) * math.sqrt(len(data))  # ~ prior/posterior width
-    p0 = u0[None, :] + 0.1 * spread[None, :] * rng.standard_normal((walkers, d))
-    p0[0] = u0
-    if feasible is not None:  # every walker must start feasible (finite log-target)
-        for k in range(walkers):
-            if not feasible(p0[k]):
-                p0[k] = _project_init(u0, feasible, rng)
-    res = affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn, thin=thin, rng=rng)
-    return _finalize(rv, slots, res, build)
+    if feasible is not None or soft is not None:
+        parallel = False  # process workers rebuild the target without the constraint/penalty closure
+
+    def run_one(seed):
+        crng = np.random.RandomState(seed)
+        p0 = _ensemble_p0(slots, dmean, dstd, len(data), walkers, crng)
+        if feasible is not None:  # every walker must start feasible (finite log-target)
+            p0[0] = _project_init(p0[0], feasible, crng)
+            for k in range(walkers):
+                if not feasible(p0[k]):
+                    p0[k] = _project_init(p0[0], feasible, crng)
+        return affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn, thin=thin, rng=crng)
+
+    if chains == 1:
+        return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
+    kw = {"draws": draws, "burn": burn, "thin": thin, "walkers": walkers}
+    results = _run_chains(run_one, _ensemble_worker, (rv, data, kw), chains, parallel, rng)
+    return _finalize_chains(rv, slots, results, build)
 
 
 def mcmc_fit(
