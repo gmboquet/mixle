@@ -506,6 +506,14 @@ class ProductEnumerator:
     probs, in non-increasing order. Standard k-best lattice search: a max-heap over
     index tuples, with successors advancing one coordinate; correctness follows from
     each child stream being sorted (coordinate-wise monotonicity).
+
+    Duplicate-free successor rule: each heap entry carries the lowest coordinate it is
+    allowed to advance, and a node only spawns successors for coordinates at or above
+    that index. Every tuple is then reached by exactly one path -- the one that
+    increments coordinates in non-decreasing index order -- so no ``visited`` set (and
+    no O(n) per-successor tuple hashing) is needed. Best-first order is preserved
+    because each successor's score is <= its generating node's (a sorted coordinate
+    only decreases when advanced), so canonical edges are score-monotone.
     """
 
     def __init__(
@@ -515,20 +523,18 @@ class ProductEnumerator:
         self.combine = combine
         self.offset = offset
         self._counter = itertools.count()
-        self._heap: list[tuple[float, int, tuple[int, ...]]] = []
-        self._visited = set()
+        # heap entries: (-score, tie_counter, index_tuple, min_coord_allowed_to_advance)
+        self._heap: list[tuple[float, int, tuple[int, ...], int]] = []
         n = len(self.streams)
         if n == 0:
             # Empty product: the single empty tuple with probability one.
-            self._heap.append((-offset, next(self._counter), ()))
-            self._visited.add(())
+            self._heap.append((-offset, next(self._counter), (), 0))
         else:
             heads = [s.get(0) for s in self.streams]
             if all(h is not None for h in heads):
                 root = (0,) * n
                 score = offset + sum(h[1] for h in heads)
-                self._heap.append((-score, next(self._counter), root))
-                self._visited.add(root)
+                self._heap.append((-score, next(self._counter), root, 0))
 
     def __iter__(self) -> "ProductEnumerator":
         return self
@@ -536,7 +542,7 @@ class ProductEnumerator:
     def __next__(self) -> tuple[Any, float]:
         if not self._heap:
             raise StopIteration
-        _, _, idx = heapq.heappop(self._heap)
+        _, _, idx, min_coord = heapq.heappop(self._heap)
         if len(idx) == 0:
             return (self.combine(()), self.offset)
         # Fetch each coordinate's (value, log_prob) once and reuse it for the combined value, the
@@ -545,20 +551,18 @@ class ProductEnumerator:
         items = [self.streams[k].get(i) for k, i in enumerate(idx)]
         value = self.combine(tuple(it[0] for it in items))
         score = self.offset + sum(it[1] for it in items)
-        for k in range(len(idx)):
+        # Only advance coordinates at or above ``min_coord`` (canonical, duplicate-free generation).
+        for k in range(min_coord, len(idx)):
             nxt = self.streams[k].get(idx[k] + 1)
             if nxt is None:
                 continue
             succ = idx[:k] + (idx[k] + 1,) + idx[k + 1 :]
-            if succ in self._visited:
-                continue
-            self._visited.add(succ)
             # Advancing one coordinate only changes that coordinate's term, so the successor score
             # is the (exact, freshly re-summed) parent score plus that single delta. Re-basing on the
             # exact ``score`` every pop keeps each heap key within one ULP of exact -- no accumulating
             # drift -- so the pop order matches exact descending order except among true near-ties.
             succ_key = score + (nxt[1] - items[k][1])
-            heapq.heappush(self._heap, (-succ_key, next(self._counter), succ))
+            heapq.heappush(self._heap, (-succ_key, next(self._counter), succ, k))
         return (value, score)
 
 
