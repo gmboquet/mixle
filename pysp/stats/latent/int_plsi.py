@@ -389,21 +389,36 @@ def multinomial_bag_stream(log_p_vec, min_val, len_dist, combine):
     alone -- matching :class:`IntegerMultinomialEnumerator`. Shared by the coupled bag-of-counts models.
     """
     entries = [(int(min_val + k), float(lp)) for k, lp in enumerate(log_p_vec) if lp > -np.inf]
-    if not entries:
-        return iter([(combine(()), 0.0)])
     entries.sort(key=lambda u: -u[1])
-    elem_buf = BufferedStream(iter(entries))
+    return bag_stream(iter(entries), len_dist, combine)
+
+
+def bag_stream(element_stream, len_dist, combine):
+    """Enumerate bags (multisets) drawn from a sorted element stream, in descending bag-score order.
+
+    ``element_stream`` is a descending ``(value, log_prob)`` iterator over the element distribution
+    (any enumerable element distribution -- a fixed categorical, or e.g. a per-document/per-given
+    mixture). A bag scores by the sum of its elements' log-probs plus ``log P_len(n)`` from
+    ``len_dist``; bags enumerate by the per-size multiset best-first search
+    (:class:`MultisetProductEnumerator`) under a length frontier. When ``len_dist`` is Null there is no
+    length term and a synthetic ``n*log p_max`` frontier orders the (countably infinite) support by the
+    element term alone. ``combine`` maps the tuple of ``(value, count)`` pairs to the emitted bag.
+    """
+    elem_buf = BufferedStream(iter(element_stream))
+    head = elem_buf.get(0)
+    if head is None:
+        return iter([(combine(()), 0.0)])
     if isinstance(len_dist, NullDistribution):
-        lp_max = entries[0][1]
+        lp_max = float(head[1])
         if lp_max >= 0.0:
             raise EnumerationError(
-                len_dist, reason="a category has probability one and no length distribution bounds the bag size"
+                len_dist, reason="an element has probability one and no length distribution bounds the bag size"
             )
         len_stream = BufferedStream((n, n * lp_max) for n in itertools.count())
         return LengthFrontierMerge(
             len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=combine, offset=0.0)
         )
-    len_stream = BufferedStream(child_enumerator(len_dist, "IntegerPLSIDistribution.len_dist"))
+    len_stream = BufferedStream(child_enumerator(len_dist, "bag_stream.len_dist"))
     return LengthFrontierMerge(
         len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=combine, offset=lp_len)
     )

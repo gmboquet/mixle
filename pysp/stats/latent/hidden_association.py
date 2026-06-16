@@ -53,12 +53,18 @@ from pysp.stats.combinator.null_dist import (
 )
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
+    child_enumerator,
 )
+from pysp.stats.latent.int_plsi import bag_stream
+from pysp.stats.latent.mixture import MixtureDistribution
+from pysp.utils.enumeration import BufferedStream, frontier_merge
 from pysp.utils.optsutil import count_by_value
 
 T = TypeVar("T")  ### value data type
@@ -270,6 +276,41 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
+    def emission_mixture(self, s1: list[tuple[T, float]]) -> MixtureDistribution | None:
+        """The per-emission distribution ``q(.|S1)`` as a mixture, or None for an empty/degenerate S1.
+
+        ``q(emitted|S1) = sum_u (c_u/n1) P(emitted|u)`` is a finite mixture of the conditional emission
+        distributions ``cond_dist.dmap[u]`` weighted by the given-bag's normalized counts -- enumerable
+        whenever those component distributions are. Requires ``cond_dist`` to be a
+        :class:`ConditionalDistribution` (so the per-given components are available).
+        """
+        if not isinstance(self.cond_dist, ConditionalDistribution):
+            raise EnumerationError(self, reason="enumeration requires cond_dist to be a ConditionalDistribution")
+        n1 = float(sum(c for _, c in s1))
+        if not s1 or n1 <= 0.0:
+            return None
+        comps, weights = [], []
+        for u, c in s1:
+            comps.append(self.cond_dist.dmap.get(u, self.cond_dist.default_dist))
+            weights.append(c / n1)
+        return MixtureDistribution(comps, weights)
+
+    def enumerator(self) -> DistributionEnumerator:
+        """Enumerate ``(S1, S2)`` observations in descending probability order.
+
+        The model factors as ``given_dist(S1) * [prod_e q(e|S1)^{c_e}] * P_len(n)``: the emitted bag S2
+        is drawn iid from the per-given mixture ``q(.|S1)`` (see :meth:`emission_mixture`). Enumeration
+        is a conditional product -- the outer stream enumerates S1 from ``given_dist`` and, for each S1,
+        the inner stream enumerates S2 as a multiset best-first search over ``q(.|S1)``'s own enumeration
+        under ``len_dist``, merged by descending total score with ``given_dist(S1)`` as the frontier
+        bound. Requires an enumerable non-null ``given_dist`` and a ConditionalDistribution ``cond_dist``.
+        """
+        if isinstance(self.given_dist, NullDistribution):
+            raise EnumerationError(self, reason="enumeration requires a non-null given_dist over the S1 bags")
+        if not isinstance(self.cond_dist, ConditionalDistribution):
+            raise EnumerationError(self, reason="enumeration requires cond_dist to be a ConditionalDistribution")
+        return HiddenAssociationEnumerator(self)
+
     def sampler(self, seed: int | None = None) -> "HiddenAssociationSampler":
         """Create a HiddenAssociationSampler object from this distribution.
 
@@ -304,6 +345,34 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> "HiddenAssociationDataEncoder":
         """Returns a HiddenAssociationDataEncoder object for encoding sequences of data."""
         return HiddenAssociationDataEncoder()
+
+
+class HiddenAssociationEnumerator(DistributionEnumerator):
+    def __init__(self, dist: "HiddenAssociationDistribution") -> None:
+        """Conditional-product enumeration of ``(S1, S2)`` (S1 from given_dist, S2 from q(.|S1)).
+
+        Args:
+            dist (HiddenAssociationDistribution): Distribution whose support is enumerated.
+        """
+        super().__init__(dist)
+        len_dist = dist.len_dist
+
+        def make_inner(s1, lp1):
+            q = dist.emission_mixture(s1)
+            if q is None:
+                return iter(())  # degenerate empty S1
+
+            def combine(pairs, s1=s1):
+                return (s1, list(pairs))
+
+            element_stream = child_enumerator(q, "HiddenAssociationDistribution.cond_dist")
+            return ((value, lp1 + lp2) for value, lp2 in bag_stream(element_stream, len_dist, combine))
+
+        outer = BufferedStream(child_enumerator(dist.given_dist, "HiddenAssociationDistribution.given_dist"))
+        self._merge = frontier_merge(outer, make_inner)
+
+    def __next__(self):
+        return next(self._merge)
 
 
 class HiddenAssociationSampler(DistributionSampler):

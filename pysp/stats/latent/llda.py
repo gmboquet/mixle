@@ -35,7 +35,9 @@ from scipy.special import digamma, gammaln
 from pysp.arithmetic import *
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
@@ -328,6 +330,21 @@ class LLDADistribution(SequenceEncodableProbabilityDistribution):
         alpha_sum = engine.sum(document_alphas, axis=1)
         elob7 = engine.gammaln(alpha_sum) - engine.sum(engine.gammaln(document_alphas), axis=1)
         return elob3 + elob5 + elob6 + elob7
+
+    def enumerator(self) -> DistributionEnumerator:
+        """Not supported: LLDA's ``log_density`` is a variational lower bound, not the true marginal.
+
+        Each document's score is an ELBO obtained by running per-document variational inference
+        (``seq_posterior``), not the exact marginal probability, so enumerating "in descending
+        probability order" is ill-defined -- the ELBO ranking need not match the true-probability
+        ranking, and the per-document optimum isn't a closed-form density over a countable support.
+        Use :meth:`sampler` and the (approximate) ``log_density`` directly.
+        """
+        raise EnumerationError(
+            self,
+            reason="LLDA log_density is a per-document variational lower bound (ELBO), not an exact "
+            "marginal probability, so there is no well-defined descending-probability enumeration",
+        )
 
     def sampler(self, seed=None):
         """Create an LLDASampler object with seed passed.
