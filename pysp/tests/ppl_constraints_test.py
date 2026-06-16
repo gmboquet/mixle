@@ -11,7 +11,55 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import MVN, Beta, Constraint, Normal, constrain, free
+from pysp.ppl import (
+    MVN,
+    Beta,
+    Constraint,
+    Normal,
+    concave,
+    constrain,
+    convex,
+    decreasing,
+    free,
+    increasing,
+    lipschitz,
+    monotone,
+)
+
+
+class ShapeConstraintTestCase(unittest.TestCase):
+    """Differential / shape constraints on a vector RV: monotonicity (first difference),
+    convexity (second difference), bounded variation (Lipschitz)."""
+
+    def test_increasing_and_decreasing(self):
+        v = MVN(5, name="v")
+        I = constrain(increasing(v)).sample(3000, seed=1)
+        self.assertTrue(np.all(np.diff(I, axis=1) >= -1e-9))
+        D = constrain(decreasing(v)).sample(3000, seed=2)
+        self.assertTrue(np.all(np.diff(D, axis=1) <= 1e-9))
+
+    def test_convex_and_concave(self):
+        v = MVN(5, name="v")
+        C = constrain(convex(v)).sample(3000, seed=3)
+        self.assertTrue(np.all(np.diff(C, axis=1, n=2) >= -1e-9))
+        K = constrain(concave(v)).sample(3000, seed=4)
+        self.assertTrue(np.all(np.diff(K, axis=1, n=2) <= 1e-9))
+
+    def test_monotone_is_either_direction(self):
+        v = MVN(4, name="v")
+        M = constrain(monotone(v)).sample(3000, seed=5)
+        up = np.all(np.diff(M, axis=1) >= -1e-9, axis=1)
+        down = np.all(np.diff(M, axis=1) <= 1e-9, axis=1)
+        self.assertTrue(np.all(up | down))
+
+    def test_lipschitz_bounds_variation(self):
+        v = MVN(5, name="v")
+        L = constrain(lipschitz(v, 1.0)).sample(3000, seed=6)
+        self.assertTrue(np.all(np.abs(np.diff(L, axis=1)) <= 1.0 + 1e-9))
+
+    def test_increasing_probability(self):
+        v = MVN(5, name="v")  # iid entries: P(strictly increasing) = 1/5!
+        self.assertAlmostEqual(constrain(increasing(v, strict=True)).prob(), 1.0 / 120.0, delta=0.004)
 
 
 class VectorEntryRelationTestCase(unittest.TestCase):
