@@ -155,6 +155,21 @@ class _LinearPredictor:
         return f"_LinearPredictor({self.terms!r}, intercept={self.intercept!r}, groups={self.groups!r})"
 
 
+class _SimplexSpec:
+    """A structural simplex-valued parameter of a combinator: mixture weights and an HMM
+    initial distribution (``rows=1``, a single K-simplex) or an HMM transition matrix
+    (``rows=K``, K independent simplex rows). ``alpha`` is the per-row Dirichlet concentration
+    (a symmetric ``Dirichlet(1)`` for a ``free`` simplex). Inference expands it via the Gamma
+    representation of the Dirichlet (one positive slot per entry, normalized per row)."""
+
+    __slots__ = ("alpha", "rows", "name")
+
+    def __init__(self, alpha, rows: int = 1, name: str | None = None):
+        self.alpha = np.asarray(alpha, dtype=float)
+        self.rows = int(rows)
+        self.name = name
+
+
 class Constraint:
     """A boolean relation over one or more random variables.
 

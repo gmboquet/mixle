@@ -10,7 +10,48 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import Dirichlet, Gamma, Mix, Normal, free
+from pysp.ppl import Dirichlet, Gamma, Markov, Mix, Normal, free
+
+
+class HMMStructuralParameterTestCase(unittest.TestCase):
+    """An HMM's transition matrix (rows of simplices) and initial distribution are inferable."""
+
+    def _sequences(self):
+        rng = np.random.RandomState(0)
+        true_t = np.array([[0.9, 0.1], [0.2, 0.8]])
+        mu = [-3.0, 3.0]
+
+        def simulate(length):
+            s = rng.randint(2)
+            out = []
+            for _ in range(length):
+                out.append(rng.normal(mu[s], 1.0))
+                s = rng.choice(2, p=true_t[s])
+            return out
+
+        return [simulate(rng.randint(8, 15)) for _ in range(400)]
+
+    def test_transition_matrix_and_initial_inferred(self):
+        seqs = self._sequences()
+        m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
+        fit = Markov([Normal(m0, 1.0), Normal(m1, 1.0)], transitions=free, initial=free).fit(
+            seqs, how="ensemble", constraints=m0 < m1, draws=800, burn=300, rng=np.random.RandomState(1)
+        )
+        t = fit.params["transitions"]
+        self.assertEqual(t.shape, (2, 2))
+        self.assertTrue(np.allclose(t.sum(axis=1), 1.0))  # each row a valid simplex
+        self.assertAlmostEqual(t[0, 0], 0.9, delta=0.1)  # self-transition of the low state
+        self.assertAlmostEqual(t[1, 1], 0.8, delta=0.1)
+        self.assertAlmostEqual(fit.result.mean("m0"), -3.0, delta=0.4)
+        self.assertAlmostEqual(fit.result.mean("m1"), 3.0, delta=0.4)
+        self.assertTrue(np.allclose(np.sum(fit.params["initial"]), 1.0))
+
+    def test_em_default_still_works(self):
+        seqs = self._sequences()
+        m = Markov(Normal(free, free), states=2).fit(seqs)  # transitions=None -> EM
+        t = m.params["transitions"]
+        self.assertEqual(t.shape, (2, 2))
+        self.assertTrue(np.allclose(t.sum(axis=1), 1.0))
 
 
 class MixtureWeightsAsParameterTestCase(unittest.TestCase):
