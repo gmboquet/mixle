@@ -236,6 +236,33 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         z = np.asarray(x).copy()
         return np.dot(z, self.mu) * self.kappa + self.log_const
 
+    def density_cumulative(self, x: Sequence[float] | np.ndarray) -> float:
+        """Exact probability-ordered cumulative ``G(x) = P(p(Y) >= p(x))`` (the HDR mass at x).
+
+        A coordinate-wise CDF is undefined on the sphere (no total order), but since the density is
+        monotone in the cosine ``t = mu . x`` (``p(y) >= p(x)`` iff ``mu.y >= mu.x`` for ``kappa >= 0``),
+        the highest-density-region mass is the upper tail of the cosine marginal, whose density is
+        ``f(s) proportional to exp(kappa s) (1 - s^2)^((p-3)/2)`` on ``[-1, 1]``. ``G`` is that tail
+        integral (computed by quadrature; the ``exp(kappa(s-1))`` shift keeps it stable for large
+        kappa and cancels in the ratio). Returned to density_rank as method ``exact-analytic``.
+        """
+        from scipy.integrate import quad
+
+        xx = np.asarray(x, dtype=float)
+        nrm = float(np.linalg.norm(xx))
+        if nrm > 0.0:
+            xx = xx / nrm
+        t = float(np.clip(np.dot(self.mu, xx), -1.0, 1.0))
+        k = float(self.kappa)
+        a = (self.dim - 3.0) / 2.0
+
+        def f(s: float) -> float:
+            return exp(k * (s - 1.0)) * (max(1.0 - s * s, 0.0) ** a)
+
+        num, _ = quad(f, t, 1.0, limit=200)
+        den, _ = quad(f, -1.0, 1.0, limit=200)
+        return float(min(1.0, max(0.0, num / den))) if den > 0.0 else 0.0
+
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized evaluation of log-density at sequence encoded input x.
 
