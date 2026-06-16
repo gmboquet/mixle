@@ -286,7 +286,14 @@ message-passing core.
 | `"vmp"` | variational message passing (closed-form, ELBO) | conjugate-exponential models (e.g. Gaussian mean+precision) |
 | `"mcmc"` | adaptive Metropolis (`pysp.utils.mcmc`) | full posterior, fast throughput |
 | `"hmc"` | Hamiltonian MC, preconditioned | full posterior, best mixing |
-| `"auto"` (default) | hierarchical → conjugate → map (if priors) → em | — |
+| `"ensemble"` | affine-invariant ensemble (Goodman & Weare) | full posterior, highest ESS/sec |
+| `"auto"` (default) | hierarchical → conjugate(/mixture) → map (if priors) → em | — |
+
+`map`/`mcmc`/`hmc`/`ensemble` work on **composite** models too (mixtures, sequences): the leaf
+`free`/prior parameters are collected across the tree and a concrete model is rebuilt per
+evaluation. Mixtures need an identifiability constraint (ordered component means) to break
+label-switching — e.g. `Mix([Normal(m0, 1), Normal(m1, 1)]).fit(data, how="ensemble",
+constraints=m0 < m1)`.
 
 ## The result object
 
