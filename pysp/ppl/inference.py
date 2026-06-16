@@ -5,8 +5,10 @@ A model whose parameter slots hold *distributions* (priors) or ``free`` defines 
 exact same target, scored with the existing vectorized ``seq_log_density`` and pysp's
 ``pysp.utils.mcmc`` kernels — no new inference engine.
 
-Scope (this slice): flat ``Sample`` models (e.g. ``Normal(Normal(0,10), free)``). Latent
-composites and the fast conjugate VB E-step are separate slices.
+Flat ``Sample`` models (``Normal(Normal(0,10), free)``) and *composite* models (mixtures,
+sequences) are both supported: composites collect their leaf ``free``/prior parameters across
+the tree and rebuild a concrete model per evaluation (``_collect_composite``). Mixtures need an
+identifiability constraint (e.g. ordered component means) to break label-switching.
 """
 
 from __future__ import annotations
@@ -119,10 +121,11 @@ class Posterior:
 
 # --------------------------------------------------------------------------- core
 def _require_flat(rv: RandomVariable):
+    # Composites are handled by _composite_target_parts before this is reached; this guards
+    # the remaining non-`sample` kinds (apply/sum/given/joint), which have no parameters to fit.
     if rv._kind != "sample" or isinstance(rv._family, CompositeFamily):
         raise NotImplementedError(
-            "parameter MCMC/MAP currently supports flat models like "
-            "Normal(Normal(0,10), free); composites are a later slice."
+            f"parameter MCMC/MAP needs a `sample` model (a family with free/prior slots); got kind {rv._kind!r}."
         )
     return rv._family
 
@@ -154,10 +157,101 @@ def _encoder_for(fam):
     return fam.dist_cls(**kwargs).dist_to_encoder()
 
 
+def _collect_composite(rv: RandomVariable):
+    """Walk a composite model, collect every leaf ``free``/prior parameter as a slot, and
+    return ``(slots, rebuild)`` where ``rebuild(vals)`` reconstructs a fully-concrete RV with
+    each parameter substituted by its value (keyed by ``slot.index``). Composite arguments that
+    are child models (an RV, or a list of RVs) are recursed into; non-RV args (mixture weights,
+    sequence lengths, ...) are kept fixed. ``collect`` and ``rebuild`` traverse identically so
+    the k-th parameter encountered is ``slots[k]``."""
+    slots: list[_Slot] = []
+
+    def collect(node: RandomVariable):
+        fam = node._family
+        if isinstance(fam, CompositeFamily):
+            for a in node._args:
+                if isinstance(a, RandomVariable):
+                    collect(a)
+                elif isinstance(a, (list, tuple)):
+                    for c in a:
+                        if isinstance(c, RandomVariable):
+                            collect(c)
+            return
+        for i, a in enumerate(node._args):
+            if isinstance(a, RandomVariable):
+                slots.append(
+                    _Slot(len(slots), lower(a, target="dist"), fam.positive[i], a.name or f"arg{i}", a, fam.support[i])
+                )
+            elif a is free:
+                slots.append(_Slot(len(slots), None, fam.positive[i], f"arg{i}", None, fam.support[i]))
+
+    collect(rv)
+    if not slots:
+        raise ValueError("model has no `free`/prior parameters to infer.")
+
+    def rebuild(vals):
+        counter = [0]
+
+        def build_node(node: RandomVariable):
+            fam = node._family
+            if isinstance(fam, CompositeFamily):
+                new_args = []
+                for a in node._args:
+                    if isinstance(a, RandomVariable):
+                        new_args.append(build_node(a))
+                    elif isinstance(a, (list, tuple)):
+                        new_args.append([build_node(c) if isinstance(c, RandomVariable) else c for c in a])
+                    else:
+                        new_args.append(a)
+                return RandomVariable._sample(
+                    fam.name, tuple(new_args), name=node._name, keys=node._keys, scope=node._scope
+                )
+            new_args = []
+            for a in node._args:
+                if a is free or isinstance(a, RandomVariable):
+                    new_args.append(vals[counter[0]])
+                    counter[0] += 1
+                else:
+                    new_args.append(a)
+            return RandomVariable._sample(
+                fam.name, tuple(new_args), name=node._name, keys=node._keys, scope=node._scope
+            )
+
+        return build_node(rv)
+
+    return slots, rebuild
+
+
+def _composite_target_parts(rv: RandomVariable, data):
+    """``_target_parts`` for a composite model (mixtures, sequences): parameters are the leaf
+    ``free``/prior slots collected across the tree; ``build`` rebuilds + lowers the composite."""
+    slots, rebuild = _collect_composite(rv)
+    try:
+        arr = np.asarray(data, dtype=float)
+        dmean, dstd = float(arr.mean()), float(arr.std() or 1.0)
+    except (ValueError, TypeError):
+        dmean, dstd = 0.0, 1.0  # non-scalar data (sequences/vectors): use neutral init
+
+    def unpack(u):
+        vals, logj = {}, 0.0
+        for k, s in enumerate(slots):
+            v, lj = _to_value(s.support, u[k])
+            vals[s.index] = v
+            logj += lj
+        return vals, logj
+
+    def build(vals):
+        return lower(rebuild(vals), target="dist")
+
+    return None, slots, build, unpack, (dmean, dstd)
+
+
 def _target_parts(rv: RandomVariable, data):
     """Encoder-free pieces shared by the numerical and autograd targets:
     (fam, slots, build, unpack, (dmean, dstd)). Building the pysp encoder is deferred to
     callers that need it (the autograd path scores the raw data tensor and never does)."""
+    if rv._kind == "sample" and isinstance(rv._family, CompositeFamily):
+        return _composite_target_parts(rv, data)
     fam = _require_flat(rv)
     slots = _slots_of(rv, fam)
     arr = np.asarray(data, dtype=float)
@@ -181,7 +275,11 @@ def _target_parts(rv: RandomVariable, data):
 def _build_target(rv: RandomVariable, data):
     """Return (log_target(u), slots, fam, build, unpack, (dmean,dstd)) for unconstrained u."""
     fam, slots, build, unpack, (dmean, dstd) = _target_parts(rv, data)
-    enc = _encoder_for(fam).seq_encode(list(data))
+    if fam is not None:
+        enc = _encoder_for(fam).seq_encode(list(data))
+    else:  # composite: encode through a concrete instance built at the initial point
+        v0, _ = unpack(_init_u(slots, dmean, dstd))
+        enc = build(v0).dist_to_encoder().seq_encode(list(data))
 
     def log_target(u):
         vals, logj = unpack(u)
