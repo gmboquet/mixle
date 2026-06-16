@@ -253,11 +253,12 @@ discrete enumeration: every univariate continuous leaf (Gaussian, Gamma, Exponen
 LogGaussian, Logistic, Pareto, Rayleigh, Student-t, Uniform, Weibull) has an exact `cdf(x)` (the
 "index of" `x`) and `quantile(q)` (the value at cumulative-probability index `q` — the continuous
 "arbitrary index"; a quantile grid enumerates the support in order). Multivariate Gaussians expose an
-exact probability-ordered cumulative (the chi-square-of-Mahalanobis highest-density-region mass) via
-`density_rank`. For any other samplable family (von Mises–Fisher, Dirichlet and the parameter priors,
-the coupled topic/association models), `density_rank` returns the cumulative probability by Monte
-Carlo. Enumeration, arbitrary-index, and discrete rank are only defined where the support is countable
-and ordered, so for multivariate / uncountable supports the CDF is the operation that applies.
+exact probability-ordered cumulative (the chi-square-of-Mahalanobis highest-density-region mass), and
+von Mises–Fisher exposes one too (the cosine-marginal tail), both surfaced via `density_rank` as method
+`exact-analytic`. For any other samplable family (Dirichlet and the parameter priors, MVN mixtures, the
+coupled topic/association models), `density_rank` returns the cumulative probability by Monte Carlo.
+Enumeration, arbitrary-index, and discrete rank are only defined where the support is countable and
+ordered, so for multivariate / uncountable supports the CDF is the operation that applies.
 
 ## Distribution catalog
 
