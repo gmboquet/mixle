@@ -25,6 +25,7 @@ from pysp.ppl.core import (
     RandomVariable,
     _CholeskySpec,
     _OrderedSpec,
+    _row_mask,
     _SimplexSpec,
     _VectorSpec,
     free,
@@ -176,17 +177,33 @@ def _is_dirichlet_rv(a) -> bool:
     )
 
 
+def _spec_of(a):
+    """The structural spec carried by an arg: a bare spec, or the spec inside a ``param(...)``
+    handle (an RV of kind ``param``). ``None`` if the arg is not a structural parameter."""
+    if isinstance(a, (_SimplexSpec, _VectorSpec, _CholeskySpec, _OrderedSpec)):
+        return a
+    if isinstance(a, RandomVariable) and a._kind == "param":
+        return a._args[0]
+    return None
+
+
+def _handle_of(a):
+    """The referenceable handle for a structural parameter (a ``param(...)`` RV), else ``None``."""
+    return a if (isinstance(a, RandomVariable) and a._kind == "param") else None
+
+
 def _is_struct_spec(a) -> bool:
-    return isinstance(a, (_SimplexSpec, _VectorSpec, _CholeskySpec, _OrderedSpec))
+    return _spec_of(a) is not None
 
 
 def _struct_spec_for(node, a):
     """The structural-parameter spec for a composite argument ``a``, or ``None``. Handles an
-    explicit ``_SimplexSpec`` / ``_VectorSpec`` / ``_CholeskySpec`` (mixture weights, HMM
-    transition matrix / initial, MVN mean / covariance), a bare ``Dirichlet(alpha)`` prior (one
-    simplex), and a bare ``free`` simplex sized to the component count (mixture weights)."""
-    if isinstance(a, (_SimplexSpec, _VectorSpec, _CholeskySpec, _OrderedSpec)):
-        return a
+    explicit spec or a ``param(...)`` handle (mixture weights, HMM transition / initial, MVN
+    mean / covariance), a bare ``Dirichlet(alpha)`` prior (one simplex), and a bare ``free``
+    simplex sized to the component count (mixture weights)."""
+    s = _spec_of(a)
+    if s is not None:
+        return s
     if _is_dirichlet_rv(a):
         return _SimplexSpec(np.asarray(a._args[0], dtype=float), rows=1, name=a.name)
     if a is free:
@@ -270,15 +287,17 @@ def _collect_composite(rv: RandomVariable):
                     continue
                 spec = _struct_spec_for(node, a)
                 if spec is not None:  # structural vector/matrix parameter -> scalar slots
+                    handle = _handle_of(a)  # a param(...) handle is referenceable in constraints
                     for prior, support, nm in _spec_slot_defs(spec):
-                        slots.append(_Slot(len(slots), prior, support == "positive", nm, None, support))
+                        slots.append(_Slot(len(slots), prior, support == "positive", nm, handle, support))
                 elif isinstance(a, RandomVariable):
                     collect(a)  # child model
             return
         for i, a in enumerate(node._args):
-            if _is_struct_spec(a):  # a vector/matrix leaf parameter (Dirichlet alpha, Categorical probs)
-                for prior, support, nm in _spec_slot_defs(a):
-                    slots.append(_Slot(len(slots), prior, support == "positive", nm, None, support))
+            if _spec_of(a) is not None:  # a vector/matrix leaf parameter (Dirichlet alpha, Categorical probs)
+                handle = _handle_of(a)
+                for prior, support, nm in _spec_slot_defs(_spec_of(a)):
+                    slots.append(_Slot(len(slots), prior, support == "positive", nm, handle, support))
             elif isinstance(a, RandomVariable):
                 slots.append(
                     _Slot(len(slots), lower(a, target="dist"), fam.positive[i], a.name or f"arg{i}", a, fam.support[i])
@@ -319,8 +338,9 @@ def _collect_composite(rv: RandomVariable):
                 )
             new_args = []
             for a in node._args:
-                if _is_struct_spec(a):
-                    new_args.append(_spec_assemble(a, take(len(_spec_slot_defs(a)))))
+                spec = _spec_of(a)
+                if spec is not None:
+                    new_args.append(_spec_assemble(spec, take(len(_spec_slot_defs(spec)))))
                 elif a is free or isinstance(a, RandomVariable):
                     new_args.append(take(1)[0])
                 else:
@@ -652,6 +672,41 @@ def _vals_from_u(slots, u) -> dict:
     return vals
 
 
+def _handle_groups(slots):
+    """Map ``id(handle) -> (handle, [slot indices in spec order])`` for every constrained handle.
+    A scalar prior RV owns one slot; a ``param(...)`` vector/matrix handle owns several."""
+    groups: dict = {}
+    for s in slots:
+        if s.handle is not None:
+            groups.setdefault(id(s.handle), (s.handle, []))[1].append(s.index)
+    return groups
+
+
+def _check_constraint_handles(constraints, groups):
+    for c in constraints:
+        for lv in c.leaves:
+            if id(lv) not in groups:
+                raise ValueError(
+                    "a constraint references an RV that is not a parameter of this model; constrain "
+                    "a scalar prior (give the slot a prior) or a param(...) vector/matrix handle that "
+                    "is also passed to the model."
+                )
+
+
+def _constraint_env(constraints, groups, vals):
+    """Resolve each constrained handle to its value: a scalar prior -> its slot value; a
+    ``param(...)`` handle -> its slots assembled into the vector/matrix via the bijector."""
+    env = {}
+    for c in constraints:
+        for lv in c.leaves:
+            if lv in env:
+                continue
+            handle, idxs = groups[id(lv)]
+            spec = _spec_of(handle)
+            env[lv] = _spec_assemble(spec, [vals[i] for i in idxs]) if spec is not None else vals[idxs[0]]
+    return env
+
+
 def _feasibility(constraints, slots):
     """Compile ``constraints`` (a Constraint or list) into ``feasible(u) -> bool`` over the
     model's parameter slots. Constraint variables must be the model's prior RVs (slot handles)."""
@@ -662,20 +717,12 @@ def _feasibility(constraints, slots):
     constraints = list(constraints)
     if not constraints:
         return None
-    handle_to_index = {id(s.handle): s.index for s in slots if s.handle is not None}
-    for c in constraints:
-        for lv in c.leaves:
-            if id(lv) not in handle_to_index:
-                raise ValueError(
-                    "a constraint references an RV that is not a prior parameter of this model; "
-                    "give that parameter a (possibly vague) prior so it can be constrained, e.g. "
-                    "Normal(Normal(0, 100, name='m'), 1)."
-                )
+    groups = _handle_groups(slots)
+    _check_constraint_handles(constraints, groups)
 
     def feasible(u):
-        vals = _vals_from_u(slots, u)
-        env = {lv: vals[handle_to_index[id(lv)]] for c in constraints for lv in c.leaves}
-        return all(bool(np.all(np.asarray(c.eval(env)))) for c in constraints)
+        env = _constraint_env(constraints, groups, _vals_from_u(slots, u))
+        return all(bool(np.all(_row_mask(c.eval(env)))) for c in constraints)
 
     return feasible
 
@@ -722,26 +769,20 @@ def _soft_penalty(constraints, slots, weight):
     constraints = list(constraints)
     if not constraints:
         return None
-    handle_to_index = {id(s.handle): s.index for s in slots if s.handle is not None}
     for c in constraints:
         if c.residual is None:
             raise ValueError(
                 "a constraint has no smooth penalty surface (e.g. a negated/!= relation) and cannot be "
                 "used with penalty=...; drop penalty to enforce it by rejection instead."
             )
-        for lv in c.leaves:
-            if id(lv) not in handle_to_index:
-                raise ValueError(
-                    "a constraint references an RV that is not a prior parameter of this model; "
-                    "give that parameter a (possibly vague) prior so it can be constrained."
-                )
+    groups = _handle_groups(slots)
+    _check_constraint_handles(constraints, groups)
     w = float(weight)
     if w <= 0.0:
         raise ValueError("penalty weight must be positive.")
 
     def penalty(u):
-        vals = _vals_from_u(slots, u)
-        env = {lv: vals[handle_to_index[id(lv)]] for c in constraints for lv in c.leaves}
+        env = _constraint_env(constraints, groups, _vals_from_u(slots, u))
         total = 0.0
         for c in constraints:
             r = np.atleast_1d(np.asarray(c.residual(env), dtype=float)).ravel()
