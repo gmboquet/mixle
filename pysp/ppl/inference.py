@@ -507,23 +507,17 @@ def _gelman_rubin(chains_u: np.ndarray) -> np.ndarray:
 
 
 def _mcmc_worker(seed, rv, data, kw):
-    """Module-level (picklable) single MCMC chain: rebuilds the target in-process and runs."""
-    from pysp.ppl import autograd as _ag
+    """Module-level (picklable) single RW-Metropolis chain (parallel path: no constraints)."""
     from pysp.utils.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
-    ag = _ag.grad_target(rv, data)
-    if ag is not None:
-        log_target, slots, _, dmean, dstd = ag.log_target, ag.slots, ag.build, ag.dmean, ag.dstd
-    else:
-        log_target, slots, _fam, _build, _unpack, (dmean, dstd) = _build_target(rv, data)
+    log_target, _grad, slots, _build, dmean, dstd, _f = _prepare_target(rv, data, None, None, want_grad=False)
     u0 = _init_u(slots, dmean, dstd)
     scale = kw.get("scale")
     init_scale = (scale * np.ones(len(u0))) if scale is not None else _init_scale(slots, dstd, len(data))
-    proposal = AdaptiveRandomWalkProposal(init_scale.copy())
     return metropolis_hastings(
         log_target,
         u0,
-        proposal,
+        AdaptiveRandomWalkProposal(init_scale.copy()),
         num_samples=kw["draws"],
         burn_in=kw["burn"],
         thin=kw["thin"],
@@ -532,20 +526,12 @@ def _mcmc_worker(seed, rv, data, kw):
 
 
 def _hmc_worker(seed, rv, data, kw):
-    """Module-level (picklable) single HMC chain: rebuilds the analytic-gradient target and runs."""
-    from pysp.ppl import autograd as _ag
+    """Module-level (picklable) single HMC chain (parallel path: no constraints)."""
     from pysp.utils.mcmc import hamiltonian_monte_carlo
 
-    ag = _ag.grad_target(rv, data)
-    if ag is not None:
-        slots, dmean, dstd = ag.slots, ag.dmean, ag.dstd
-        log_target, grad = ag.log_target, ag.grad
-    else:
-        log_target, slots, _fam, _build, _unpack, (dmean, dstd) = _build_target(rv, data)
-        grad = _finite_diff_grad(log_target, _init_u(slots, dmean, dstd))
+    log_target, grad, slots, _build, dmean, dstd, _f = _prepare_target(rv, data, None, None, want_grad=True)
     u0 = _init_u(slots, dmean, dstd)
-    scale = _init_scale(slots, dstd, len(data))
-    mass = 1.0 / (scale**2)
+    mass = 1.0 / (_init_scale(slots, dstd, len(data)) ** 2)
     step_size = kw["step_size"] if kw["step_size"] is not None else 2.5 / kw["num_steps"]
     return hamiltonian_monte_carlo(
         log_target,
@@ -562,17 +548,10 @@ def _hmc_worker(seed, rv, data, kw):
 
 
 def _nuts_worker(seed, rv, data, kw):
-    """Module-level (picklable) single NUTS chain: rebuilds the analytic-gradient target and runs."""
-    from pysp.ppl import autograd as _ag
+    """Module-level (picklable) single NUTS chain (parallel path: no constraints)."""
     from pysp.utils.mcmc import nuts
 
-    ag = _ag.grad_target(rv, data)
-    if ag is not None:
-        slots, dmean, dstd = ag.slots, ag.dmean, ag.dstd
-        log_target, grad = ag.log_target, ag.grad
-    else:
-        log_target, slots, _fam, _build, _unpack, (dmean, dstd) = _build_target(rv, data)
-        grad = _finite_diff_grad(log_target, _init_u(slots, dmean, dstd))
+    log_target, grad, slots, _build, dmean, dstd, _f = _prepare_target(rv, data, None, None, want_grad=True)
     u0 = _init_u(slots, dmean, dstd)
     mass = 1.0 / (_init_scale(slots, dstd, len(data)) ** 2)
     return nuts(
@@ -601,32 +580,17 @@ def _ensemble_p0(slots, dmean, dstd, n_data, walkers, rng):
 
 
 def _ensemble_worker(seed, rv, data, kw):
-    """Module-level (picklable) single ensemble run: rebuilds the NumPy target and runs."""
+    """Module-level (picklable) single ensemble run (parallel path: no constraints)."""
     from pysp.utils.mcmc import affine_invariant_ensemble
 
-    log_target, slots, _fam, _build, _unpack, (dmean, dstd) = _build_target(rv, data)
+    log_target, _grad, slots, _build, dmean, dstd, _f = _prepare_target(
+        rv, data, None, None, want_grad=False, numpy_only=True
+    )
     rng = np.random.RandomState(seed)
     p0 = _ensemble_p0(slots, dmean, dstd, len(data), kw["walkers"], rng)
     return affine_invariant_ensemble(
         log_target, p0, num_samples=kw["draws"], burn_in=kw["burn"], thin=kw["thin"], rng=rng
     )
-
-
-def _finite_diff_grad(log_target, u_ref):
-    eps = 1e-5 * np.maximum(np.abs(np.asarray(u_ref, dtype=float)), 1.0)
-
-    def grad(u):
-        u = np.asarray(u, dtype=float)
-        g = np.empty(len(u))
-        for i in range(len(u)):
-            up = u.copy()
-            up[i] += eps[i]
-            um = u.copy()
-            um[i] -= eps[i]
-            g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
-        return g
-
-    return grad
 
 
 def _run_chains(run_one, worker, worker_args, chains: int, parallel, rng):
@@ -847,6 +811,46 @@ def _penalize_target(log_target, penalty):
     return plt
 
 
+def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=False):
+    """Shared sampler setup: build the joint log-target (analytic-Torch when available, else the
+    numeric encoder target), optionally its gradient, then layer on constraints/penalty.
+
+    Returns ``(log_target, grad, slots, build, dmean, dstd, feasible)``. The gradient closure binds
+    ``log_target`` late, so a soft penalty added afterwards also enters the gradient. ``numpy_only``
+    forces the encoder target (the ensemble sampler wants the fast scalar NumPy eval); ``want_grad``
+    is for HMC/NUTS. Used by every sampler fit and its parallel worker — one place, no duplication."""
+    from pysp.ppl import autograd as _ag
+
+    eff = _auto_penalty(constraints, penalty)
+    ag = None if (numpy_only or eff is not None) else _ag.grad_target(rv, data)
+    if ag is not None:
+        slots, build, dmean, dstd = ag.slots, ag.build, ag.dmean, ag.dstd
+        log_target = ag.log_target
+        grad = ag.grad if want_grad else None
+    else:
+        log_target, slots, _fam, build, _unpack, (dmean, dstd) = _build_target(rv, data)
+        grad = None
+        if want_grad:
+            eps = 1e-5 * np.maximum(np.abs(_init_u(slots, dmean, dstd)), 1.0)
+
+            def grad(u):  # late binding of log_target -> the penalty (added below) enters the gradient
+                u = np.asarray(u, dtype=float)
+                g = np.empty(len(u))
+                for i in range(len(u)):
+                    up = u.copy()
+                    up[i] += eps[i]
+                    um = u.copy()
+                    um[i] -= eps[i]
+                    g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
+                return g
+
+    soft = _soft_penalty(constraints, slots, eff)
+    feasible = None if soft is not None else _feasibility(constraints, slots)
+    log_target = _constrain_target(log_target, feasible)
+    log_target = _penalize_target(log_target, soft)
+    return log_target, grad, slots, build, dmean, dstd, feasible
+
+
 def ensemble_fit(
     rv: RandomVariable,
     data,
@@ -874,17 +878,15 @@ def ensemble_fit(
 
     if rng is None:
         rng = np.random.RandomState()
-    log_target, slots, _fam, build, _unpack, (dmean, dstd) = _build_target(rv, data)
+    log_target, _grad, slots, build, dmean, dstd, feasible = _prepare_target(
+        rv, data, constraints, penalty, want_grad=False, numpy_only=True
+    )
     d = len(slots)
     if walkers is None:
         walkers = max(2 * (d + 1), 8)
     if walkers % 2:
         walkers += 1
-    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
-    feasible = None if soft is not None else _feasibility(constraints, slots)
-    log_target = _constrain_target(log_target, feasible)
-    log_target = _penalize_target(log_target, soft)
-    if feasible is not None or soft is not None:
+    if constraints is not None:
         parallel = False  # process workers rebuild the target without the constraint/penalty closure
 
     def run_one(seed):
@@ -918,26 +920,18 @@ def mcmc_fit(
     constraints=None,
     penalty=None,
 ) -> RandomVariable:
-    from pysp.ppl import autograd as _ag
     from pysp.utils.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
     if rng is None:
         rng = np.random.RandomState()
-    ag = _ag.grad_target(rv, data)
-    if ag is not None:  # Torch-scored target (fast; also avoids the encoder probe)
-        log_target, slots, build, dmean, dstd = ag.log_target, ag.slots, ag.build, ag.dmean, ag.dstd
-    else:
-        log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
-    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
-    feasible = None if soft is not None else _feasibility(constraints, slots)
-    log_target = _constrain_target(log_target, feasible)
-    log_target = _penalize_target(log_target, soft)
+    log_target, _grad, slots, build, dmean, dstd, feasible = _prepare_target(
+        rv, data, constraints, penalty, want_grad=False
+    )
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
-        parallel = False  # process workers rebuild the target without the constraint closure
-    if soft is not None:
-        parallel = False  # the penalty closure does not survive process pickling
+    if constraints is not None:
+        parallel = False  # constraint/penalty closures do not survive process pickling
     init_scale = (scale * np.ones(len(u0))) if scale is not None else _init_scale(slots, dstd, len(data))
 
     def run_one(seed):
@@ -976,44 +970,19 @@ def hmc_fit(
     ``constraints`` truncate the posterior (trajectories leaving the region are rejected);
     for hard constraints ``how='ensemble'`` or ``'mcmc'`` usually mixes better.
     """
-    from pysp.ppl import autograd as _ag
     from pysp.utils.mcmc import hamiltonian_monte_carlo
 
     if rng is None:
         rng = np.random.RandomState()
-
-    # A soft penalty must enter the leapfrog gradient, so fall back to the numeric-gradient path
-    # (its grad closure differentiates the penalized target via late binding of ``log_target``).
-    ag = None if _auto_penalty(constraints, penalty) is not None else _ag.grad_target(rv, data)
-    if ag is not None:
-        # analytic-gradient HMC (one backprop per gradient, vs O(#params) target evals)
-        slots, build, dmean, dstd = ag.slots, ag.build, ag.dmean, ag.dstd
-        log_target, grad = ag.log_target, ag.grad
-    else:
-        log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
-        eps = 1e-5 * np.maximum(np.abs(_init_u(slots, dmean, dstd)), 1.0)
-
-        def grad(u):
-            u = np.asarray(u, dtype=float)
-            g = np.empty(len(u))
-            for i in range(len(u)):
-                up = u.copy()
-                up[i] += eps[i]
-                um = u.copy()
-                um[i] -= eps[i]
-                g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
-            return g
-
-    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
-    feasible = None if soft is not None else _feasibility(constraints, slots)
-    log_target = _constrain_target(log_target, feasible)
-    log_target = _penalize_target(log_target, soft)
+    log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
+        rv, data, constraints, penalty, want_grad=True
+    )
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
-        parallel = False  # process workers rebuild the target without the constraint closure
-    scale = _init_scale(slots, dstd, len(data))  # ~ posterior std per dim
-    mass = 1.0 / (scale**2)  # precondition: M ~ inverse posterior cov
+    if constraints is not None:
+        parallel = False  # constraint/penalty closures do not survive process pickling
+    mass = 1.0 / (_init_scale(slots, dstd, len(data)) ** 2)  # precondition: M ~ inverse posterior cov
     if step_size is None:
         step_size = 2.5 / num_steps  # tuned: acc~0.98, near-max ESS (preconditioned)
 
@@ -1060,39 +1029,18 @@ def nuts_fit(
     diagonal mass matrix at the data-informed scale. ``warmup`` (= ``burn``) adapts the step size
     to ``target_accept``. Inequality ``constraints`` truncate the posterior; ``penalty`` adds a
     smooth penalty (which enters the gradient via the numeric-gradient path)."""
-    from pysp.ppl import autograd as _ag
     from pysp.utils.mcmc import nuts
 
     if rng is None:
         rng = np.random.RandomState()
-
-    ag = None if _auto_penalty(constraints, penalty) is not None else _ag.grad_target(rv, data)
-    if ag is not None:
-        slots, build, dmean, dstd = ag.slots, ag.build, ag.dmean, ag.dstd
-        log_target, grad = ag.log_target, ag.grad
-    else:
-        log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
-        eps = 1e-5 * np.maximum(np.abs(_init_u(slots, dmean, dstd)), 1.0)
-
-        def grad(u):  # late binding of log_target so the penalty (added below) enters the gradient
-            u = np.asarray(u, dtype=float)
-            g = np.empty(len(u))
-            for i in range(len(u)):
-                up = u.copy()
-                up[i] += eps[i]
-                um = u.copy()
-                um[i] -= eps[i]
-                g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
-            return g
-
-    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
-    feasible = None if soft is not None else _feasibility(constraints, slots)
-    log_target = _constrain_target(log_target, feasible)
-    log_target = _penalize_target(log_target, soft)
+    log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
+        rv, data, constraints, penalty, want_grad=True
+    )
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
-        parallel = False  # process workers rebuild the target without the constraint closure
+    if constraints is not None:
+        parallel = False  # constraint/penalty closures do not survive process pickling
     mass = 1.0 / (_init_scale(slots, dstd, len(data)) ** 2)  # precondition ~ inverse posterior cov
 
     def run_one(seed):
