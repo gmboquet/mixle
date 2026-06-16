@@ -41,12 +41,17 @@ from pysp.stats.combinator.null_dist import (
 )
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
+    child_enumerator,
 )
+from pysp.stats.latent.int_plsi import multinomial_bag_stream
+from pysp.utils.enumeration import BufferedStream, frontier_merge
 from pysp.utils.optional_deps import numba
 from pysp.utils.optsutil import count_by_value
 
@@ -221,10 +226,10 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         a = self.alpha / nw
         b = 1 - self.alpha
 
-        cx = np.asarray([u[1] for u in x[0]])
-        vx = np.asarray([u[0] for u in x[0]])
-        cy = np.asarray([u[1] for u in x[1]])
-        vy = np.asarray([u[0] for u in x[1]])
+        cx = np.asarray([u[1] for u in x[0]], dtype=float)
+        vx = np.asarray([u[0] for u in x[0]], dtype=int)
+        cy = np.asarray([u[1] for u in x[1]], dtype=float)
+        vy = np.asarray([u[0] for u in x[1]], dtype=int)
 
         n1 = np.sum(cx)
         n2 = np.sum(cy)
@@ -341,6 +346,41 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
         return rv
 
+    def conditional_word_log_probs(self, s1: list[tuple[int, float]]) -> np.ndarray | None:
+        """Log of the per-emission word distribution ``q(.|S1)`` for a given S1 bag, or None if empty.
+
+        ``q(w|S1) = (1-alpha) * sum_u (c_u/n1) * sum_s cond_weights[u,s] * state_prob_mat[s,w] + alpha/W``
+        -- the smoothed mixture the model uses to score each emitted word. Returns None for an empty S1
+        (``n1 = 0``), whose conditional is degenerate (the model's own density is undefined there).
+        """
+        if not s1:
+            return None
+        vx = np.asarray([u[0] for u in s1], dtype=int)
+        cx = np.asarray([u[1] for u in s1], dtype=float)
+        n1 = float(cx.sum())
+        if n1 <= 0.0:
+            return None
+        a = self.alpha / self.num_vals2
+        b = 1.0 - self.alpha
+        state_weight = (self.cond_weights[vx, :] * (cx / n1)[:, None]).sum(axis=0)  # (num_states,)
+        q = b * (state_weight @ self.state_prob_mat) + a  # (num_vals2,)
+        with np.errstate(divide="ignore"):
+            return np.log(q)
+
+    def enumerator(self) -> DistributionEnumerator:
+        """Enumerate ``(S1, S2)`` observations in descending probability order.
+
+        The model factors as ``prev_dist(S1) * [prod_w q(w|S1)^{c_w}] * P_len(n2)``: the emitted bag S2
+        is a trial-count multinomial whose word distribution ``q(.|S1)`` depends on the given bag S1.
+        Enumeration is a conditional product -- the outer stream enumerates S1 from ``prev_dist`` and,
+        for each S1, the inner stream enumerates S2 by the multinomial bag search under ``len_dist``,
+        merged by descending total score with ``prev_dist(S1)`` as the outer frontier bound. Requires an
+        enumerable, non-null ``prev_dist`` so the S1 support is defined.
+        """
+        if not self.has_prev_dist:
+            raise EnumerationError(self, reason="enumeration requires a non-null prev_dist over the S1 bags")
+        return IntegerHiddenAssociationEnumerator(self)
+
     def sampler(self, seed: int | None = None) -> "IntegerHiddenAssociationSampler":
         """Create an IntegerHiddenAssociationSampler object from this distribution.
 
@@ -389,6 +429,33 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         prev_encoder = self.prev_dist.dist_to_encoder()
         len_encoder = self.len_dist.dist_to_encoder()
         return IntegerHiddenAssociationDataEncoder(prev_encoder, len_encoder, self.use_numba)
+
+
+class IntegerHiddenAssociationEnumerator(DistributionEnumerator):
+    def __init__(self, dist: "IntegerHiddenAssociationDistribution") -> None:
+        """Conditional-product enumeration of ``(S1, S2)`` (S1 from prev_dist, S2 multinomial given S1).
+
+        Args:
+            dist (IntegerHiddenAssociationDistribution): Distribution whose support is enumerated.
+        """
+        super().__init__(dist)
+        len_dist = dist.len_dist
+
+        def make_inner(s1, lp1):
+            log_q = dist.conditional_word_log_probs(s1)
+            if log_q is None:
+                return iter(())  # degenerate empty S1: the model density itself is undefined there
+
+            def combine(pairs, s1=s1):
+                return (s1, [(int(w), int(c)) for w, c in sorted(pairs)])
+
+            return ((value, lp1 + lp2) for value, lp2 in multinomial_bag_stream(log_q, 0, len_dist, combine))
+
+        outer = BufferedStream(child_enumerator(dist.prev_dist, "IntegerHiddenAssociationDistribution.prev_dist"))
+        self._merge = frontier_merge(outer, make_inner)
+
+    def __next__(self):
+        return next(self._merge)
 
 
 class IntegerHiddenAssociationSampler(DistributionSampler):
