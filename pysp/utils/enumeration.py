@@ -622,6 +622,62 @@ class LengthFrontierMerge:
             heapq.heappush(self._heap, (-head[1], next(self._counter), sid))
 
 
+def frontier_merge(
+    outer_stream: BufferedStream, make_stream: Callable[[Any, float], Iterator[tuple[Any, float]]]
+) -> Iterator[tuple[Any, float]]:
+    """Merge per-outer-key inner streams, instantiating outer keys lazily from a sorted outer stream.
+
+    The general form of :class:`LengthFrontierMerge` for arbitrary (not necessarily integer) outer
+    keys: ``outer_stream`` yields ``(key, lp_key)`` in descending ``lp_key`` order, and
+    ``make_stream(key, lp_key)`` returns a sorted ``(value, log_prob)`` iterator whose log-probs are
+    ``<= lp_key`` (true whenever the inner contribution is ``<= 0`` and ``lp_key`` is folded in as an
+    offset). The next un-instantiated key's ``lp_key`` is then an upper bound on anything its stream
+    could produce, so keys are instantiated only when they can beat the best instantiated head.
+    Supports of distinct keys must be disjoint (no de-duplication). Used for conditional products where
+    the inner distribution depends on the outer value (e.g. hidden-association S2 given S1).
+    """
+    counter = itertools.count()
+    heap: list[tuple[float, int, int]] = []
+    heads: dict[int, tuple[Any, float]] = {}
+    streams: dict[int, Iterator[tuple[Any, float]]] = {}
+    next_rank = 0
+
+    def pop() -> tuple[Any, float]:
+        _, _, sid = heapq.heappop(heap)
+        value, lp = heads.pop(sid)
+        try:
+            nxt = next(streams[sid])
+            heads[sid] = nxt
+            heapq.heappush(heap, (-nxt[1], next(counter), sid))
+        except StopIteration:
+            del streams[sid]
+        return (value, lp)
+
+    while True:
+        frontier = outer_stream.get(next_rank)
+        if frontier is None:
+            if heap:
+                yield pop()
+                continue
+            return
+        if heap and -heap[0][0] >= frontier[1]:
+            yield pop()
+            continue
+        key, lp_key = frontier
+        sid = next_rank
+        next_rank += 1
+        if lp_key == -np.inf:
+            continue
+        stream = iter(make_stream(key, lp_key))
+        try:
+            head = next(stream)
+        except StopIteration:
+            continue
+        streams[sid] = stream
+        heads[sid] = head
+        heapq.heappush(heap, (-head[1], next(counter), sid))
+
+
 def _best_first_union(
     streams: Sequence[BufferedStream],
     log_offsets: Sequence[float],
