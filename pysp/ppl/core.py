@@ -22,6 +22,7 @@ from pysp.utils.estimation import optimize
 __all__ = [
     "RandomVariable",
     "free",
+    "ordered",
     "lower",
     "register_family",
     "Family",
@@ -180,6 +181,37 @@ class _VectorSpec:
         self.dim = int(dim)
         self.support = support
         self.name = name
+
+
+class _OrderedSpec:
+    """A strictly-increasing vector parameter (``v[0] < v[1] < ...``): one real base entry plus
+    ``dim-1`` positive increments, assembled as a cumulative sum. Gives ordered means *by
+    construction* (the standard mixture/HMM identifiability device) with no rejection."""
+
+    __slots__ = ("dim", "name")
+
+    def __init__(self, dim: int, name: str | None = None):
+        self.dim = int(dim)
+        self.name = name
+
+
+class _Ordered:
+    """The ``ordered`` token: an estimable vector parameter constrained to be increasing."""
+
+    __slots__ = ()
+
+    def __reduce__(self):
+        return (_ordered_singleton, ())
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return "ordered"
+
+
+ordered = _Ordered()
+
+
+def _ordered_singleton():
+    return ordered
 
 
 class _CholeskySpec:
