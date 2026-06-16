@@ -92,6 +92,33 @@ class MultivariateCumulativeTestCase(unittest.TestCase):
         # the mode has nothing strictly more probable -> G == 0
         self.assertAlmostEqual(density_rank(mvn, mvn.mu).cumulative_probability, 0.0, delta=1e-9)
 
+    def test_vmf_exact_cumulative(self):
+        import numpy as np
+
+        from pysp.stats.multivariate.vmf import VonMisesFisherDistribution
+        from pysp.utils.density_rank import density_rank
+
+        # d=3: closed form G = (e^k - e^{k t}) / (e^k - e^{-k}), t = mu . x
+        mu = np.array([1.0, 0.0, 0.0])
+        k = 4.0
+        d3 = VonMisesFisherDistribution(mu, k)
+        for x in (mu, np.array([0.0, 1.0, 0.0]), np.array([-1.0, 0.0, 0.0])):
+            xx = x / np.linalg.norm(x)
+            t = float(mu @ xx)
+            closed = (math.exp(k) - math.exp(k * t)) / (math.exp(k) - math.exp(-k))
+            self.assertAlmostEqual(d3.density_cumulative(xx), closed, places=6)
+        # mode -> 0; density_rank routes through the exact cumulative
+        self.assertAlmostEqual(d3.density_cumulative(mu), 0.0, delta=1e-9)
+        self.assertEqual(density_rank(d3, mu, n_samples=1).method, "exact-analytic")
+
+        # higher dimension (no elementary closed form): quadrature matches Monte-Carlo
+        d5 = VonMisesFisherDistribution(np.array([1.0, 0.0, 0.0, 0.0, 0.0]), 3.0)
+        x5 = d5.sampler(0).sample()
+        t = float(d5.log_density(x5))
+        ys = d5.sampler(1).sample(60000)
+        samp = sum(1 for y in ys if float(d5.log_density(y)) >= t - 1e-9) / 60000
+        self.assertAlmostEqual(d5.density_cumulative(x5), samp, delta=0.02)
+
 
 if __name__ == "__main__":
     unittest.main()
