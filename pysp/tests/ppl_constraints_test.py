@@ -54,6 +54,30 @@ class GenerativeRelationTestCase(unittest.TestCase):
         s2 = np.asarray(constrain(c2).sample(20000, seed=6))[:, 0]
         self.assertTrue(np.all(s2 <= 0))
 
+    def test_nonlinear_product_constraint(self):
+        a, b = Normal(2, 0.5, name="a"), Normal(2, 0.5, name="b")
+        S = constrain(a * b > 3).sample(20000, seed=10)
+        self.assertTrue(np.all(S[:, 0] * S[:, 1] > 3))
+
+    def test_nonlinear_power_constraint(self):
+        x = Normal(0, 1, name="x")
+        s = np.asarray(constrain(x**2 < 1).sample(20000, seed=11))[:, 0]
+        self.assertTrue(np.all(s**2 < 1))  # |x| < 1
+
+    def test_nonlinear_ratio_constraint(self):
+        c, d = Normal(4, 0.5, name="c"), Normal(2, 0.5, name="d")
+        R = constrain(c / d > 1.5).sample(10000, seed=12)
+        self.assertTrue(np.all(R[:, 0] / R[:, 1] > 1.5))
+
+    def test_nonlinear_constraint_in_inference(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.beta(2.0, 5.0, 3000))
+        pa, pb = Normal(2, 5, name="pa"), Normal(5, 5, name="pb")
+        m = Beta(pa, pb).fit(
+            data, how="ensemble", constraints=pa * pb < 12, draws=600, burn=200, rng=np.random.RandomState(13)
+        )
+        self.assertLessEqual(m.params["a"] * m.params["b"], 12.0 + 1e-6)
+
     def test_chained_comparison_is_rejected(self):
         a, b, c = Normal(0, 1), Normal(0, 1), Normal(0, 1)
         with self.assertRaises(TypeError):
