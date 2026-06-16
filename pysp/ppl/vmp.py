@@ -24,7 +24,7 @@ import math
 import numpy as np
 from scipy.special import digamma, gammaln
 
-from pysp.ppl.core import RandomVariable
+from pysp.ppl.core import RandomVariable, free
 
 _LOG2PI = math.log(2.0 * math.pi)
 
@@ -368,6 +368,13 @@ def vmp_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8, 
     if rv._kind != "sample" or rv._family.name != "Normal" or len(rv._args) != 2:
         raise NotImplementedError("vmp supports Normal(mean, scale) Gaussian models.")
     mean_spec, scale_spec = rv._args
+    if any(a is free for a in rv._args):
+        raise NotImplementedError(
+            "vmp is closed-form variational message passing and needs a *prior* (or a fixed "
+            "constant) on each parameter, not the point-estimate token `free`; give the slot a "
+            "conjugate prior — Normal(Normal(0, 10), Gamma(1, 1)) for unknown mean+precision — "
+            "or use how='vi' (general mean-field VB) or how='map'/'mcmc' for `free` parameters."
+        )
     if not (isinstance(mean_spec, RandomVariable) or isinstance(scale_spec, RandomVariable)):
         raise NotImplementedError("nothing to infer: give the mean and/or scale a prior.")
 
