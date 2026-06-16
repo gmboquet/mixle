@@ -189,6 +189,27 @@ Beta(a, b).fit(data, constraints=a < b)            # auto -> constrained MAP
 Beta(a, b).fit(data, how="ensemble", constraints=a < b)   # full posterior on the region
 ```
 
+## Vector / matrix parameters
+
+Structural parameters of a combinator are inferable, each reparameterized to its natural
+manifold (no explicit constraint or Jacobian needed — the transform is exact):
+
+```python
+# mixture weights / HMM transition matrix (simplex via the Gamma representation)
+Mix([...], free).fit(data, how="ensemble")
+Markov([Normal(m0,1), Normal(m1,1)], transitions=free, initial=free).fit(seqs, how="ensemble")
+
+# MVN mean vector + full covariance (covariance = L Lᵀ, SPD by construction)
+MVN(d, mean=free, cov=free).fit(X, how="ensemble")
+DiagGaussian(d, mean=free, var=free).fit(X, how="map")      # diagonal variances (positive)
+
+# ordered mean vector (increasing by construction — identifiability, no rejection)
+MVN(d, mean=ordered, cov=free).fit(X, how="ensemble")
+```
+
+Manifolds covered: real / positive / unit vectors, the **simplex** (and rows of a stochastic
+matrix), **SPD covariance** (Cholesky), and **ordered** vectors.
+
 ## Bayesian mixture via VBEM (discrete latents)
 
 `Mix(...).fit(how="vmp")` runs variational Bayes for a Gaussian mixture — per-datapoint
