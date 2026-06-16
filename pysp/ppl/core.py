@@ -170,6 +170,31 @@ class _SimplexSpec:
         self.name = name
 
 
+class _VectorSpec:
+    """A vector-valued parameter of a combinator (e.g. an MVN mean): ``dim`` independent scalar
+    slots of one ``support`` (``real``/``positive``/``unit``), assembled into a vector."""
+
+    __slots__ = ("dim", "support", "name")
+
+    def __init__(self, dim: int, support: str = "real", name: str | None = None):
+        self.dim = int(dim)
+        self.support = support
+        self.name = name
+
+
+class _CholeskySpec:
+    """A covariance-matrix parameter (e.g. an MVN covariance): the ``dim*(dim+1)/2`` lower-
+    triangular Cholesky entries (diagonal in log-space, off-diagonal on the real line). ``rebuild``
+    forms ``L`` and returns ``Sigma = L Lᵀ`` — symmetric positive-definite by construction, so no
+    explicit PSD constraint or Jacobian is needed (the prior, if any, lives on the entries)."""
+
+    __slots__ = ("dim", "name")
+
+    def __init__(self, dim: int, name: str | None = None):
+        self.dim = int(dim)
+        self.name = name
+
+
 class Constraint:
     """A boolean relation over one or more random variables.
 

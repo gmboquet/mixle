@@ -19,7 +19,16 @@ from typing import Any
 
 import numpy as np
 
-from pysp.ppl.core import CompositeFamily, Constraint, RandomVariable, _SimplexSpec, free, lower
+from pysp.ppl.core import (
+    CompositeFamily,
+    Constraint,
+    RandomVariable,
+    _CholeskySpec,
+    _SimplexSpec,
+    _VectorSpec,
+    free,
+    lower,
+)
 
 _NEG_INF = -1e300
 
@@ -166,13 +175,12 @@ def _is_dirichlet_rv(a) -> bool:
     )
 
 
-def _simplex_spec_for(node, a):
-    """The simplex spec for a composite argument ``a``, or ``None`` if it is not a simplex
-    parameter. Handles an explicit ``_SimplexSpec`` (HMM transition matrix = ``rows`` simplices,
-    initial distribution = one simplex), a ``Dirichlet(alpha)`` prior (one simplex), and a bare
-    ``free`` simplex (symmetric ``Dirichlet(1)`` sized to the component count, e.g. mixture
-    weights)."""
-    if isinstance(a, _SimplexSpec):
+def _struct_spec_for(node, a):
+    """The structural-parameter spec for a composite argument ``a``, or ``None``. Handles an
+    explicit ``_SimplexSpec`` / ``_VectorSpec`` / ``_CholeskySpec`` (mixture weights, HMM
+    transition matrix / initial, MVN mean / covariance), a bare ``Dirichlet(alpha)`` prior (one
+    simplex), and a bare ``free`` simplex sized to the component count (mixture weights)."""
+    if isinstance(a, (_SimplexSpec, _VectorSpec, _CholeskySpec)):
         return a
     if _is_dirichlet_rv(a):
         return _SimplexSpec(np.asarray(a._args[0], dtype=float), rows=1, name=a.name)
@@ -181,6 +189,50 @@ def _simplex_spec_for(node, a):
             if isinstance(other, (list, tuple)):
                 return _SimplexSpec(np.ones(len(other), dtype=float), rows=1)
     return None
+
+
+def _spec_slot_defs(spec):
+    """The scalar slots a structural spec expands to: a list of (prior, support, name)."""
+    from pysp.stats.leaf.gamma import GammaDistribution
+
+    if isinstance(spec, _SimplexSpec):  # Gamma representation of the Dirichlet, one slot per entry
+        base, kk = spec.name or "w", len(spec.alpha)
+        return [
+            (
+                GammaDistribution(k=float(spec.alpha[j]), theta=1.0),
+                "positive",
+                f"{base}{j}" if spec.rows == 1 else f"{base}{r}_{j}",
+            )
+            for r in range(spec.rows)
+            for j in range(kk)
+        ]
+    if isinstance(spec, _VectorSpec):  # independent entries on one support
+        base = spec.name or "v"
+        return [(None, spec.support, f"{base}{i}") for i in range(spec.dim)]
+    if isinstance(spec, _CholeskySpec):  # lower-triangular Cholesky entries (diag positive)
+        base = spec.name or "L"
+        return [
+            (None, "positive" if i == j else "real", f"{base}{i}_{j}") for i in range(spec.dim) for j in range(i + 1)
+        ]
+    raise TypeError(f"unknown structural spec {type(spec).__name__}")
+
+
+def _spec_assemble(spec, values):
+    """Assemble a structural spec's scalar values into its vector/matrix parameter value."""
+    g = np.asarray(values, dtype=float)
+    if isinstance(spec, _SimplexSpec):
+        m = g.reshape(spec.rows, len(spec.alpha))
+        s = m.sum(axis=1, keepdims=True)
+        w = m / np.where(s > 0, s, 1.0)
+        return w[0] if spec.rows == 1 else w
+    if isinstance(spec, _VectorSpec):
+        return g
+    if isinstance(spec, _CholeskySpec):
+        d = spec.dim
+        L = np.zeros((d, d))
+        L[np.tril_indices(d)] = g  # row-major lower-triangular fill matches the slot order above
+        return L @ L.T
+    raise TypeError(f"unknown structural spec {type(spec).__name__}")
 
 
 def _collect_composite(rv: RandomVariable):
@@ -195,8 +247,6 @@ def _collect_composite(rv: RandomVariable):
     Child models (an RV, or a list of RVs) are recursed into; other args (lengths, fixed
     weights) are kept. ``collect`` and ``rebuild`` traverse identically, so the k-th parameter
     encountered is ``slots[k]``."""
-    from pysp.stats.leaf.gamma import GammaDistribution
-
     slots: list[_Slot] = []
 
     def collect(node: RandomVariable):
@@ -208,23 +258,10 @@ def _collect_composite(rv: RandomVariable):
                         if isinstance(c, RandomVariable):
                             collect(c)
                     continue
-                spec = _simplex_spec_for(node, a)
-                if spec is not None:  # simplex parameter(s): weights / initial (1 row) or a transition matrix
-                    base = spec.name or "w"
-                    kk = len(spec.alpha)
-                    for r in range(spec.rows):
-                        for j in range(kk):
-                            nm = f"{base}{j}" if spec.rows == 1 else f"{base}{r}_{j}"
-                            slots.append(
-                                _Slot(
-                                    len(slots),
-                                    GammaDistribution(k=float(spec.alpha[j]), theta=1.0),
-                                    True,
-                                    nm,
-                                    None,
-                                    "positive",
-                                )
-                            )
+                spec = _struct_spec_for(node, a)
+                if spec is not None:  # structural vector/matrix parameter -> scalar slots
+                    for prior, support, nm in _spec_slot_defs(spec):
+                        slots.append(_Slot(len(slots), prior, support == "positive", nm, None, support))
                 elif isinstance(a, RandomVariable):
                     collect(a)  # child model
             return
@@ -256,13 +293,10 @@ def _collect_composite(rv: RandomVariable):
                     if isinstance(a, (list, tuple)):
                         new_args.append([build_node(c) if isinstance(c, RandomVariable) else c for c in a])
                         continue
-                    spec = _simplex_spec_for(node, a)
-                    if spec is not None:  # normalize the Gamma draws into simplex row(s)
-                        kk = len(spec.alpha)
-                        g = np.asarray(take(spec.rows * kk), dtype=float).reshape(spec.rows, kk)
-                        s = g.sum(axis=1, keepdims=True)
-                        w = g / np.where(s > 0, s, 1.0)
-                        new_args.append(w[0] if spec.rows == 1 else w)
+                    spec = _struct_spec_for(node, a)
+                    if spec is not None:  # assemble scalar draws into the vector/matrix value
+                        n_slots = len(_spec_slot_defs(spec))
+                        new_args.append(_spec_assemble(spec, take(n_slots)))
                     elif isinstance(a, RandomVariable):
                         new_args.append(build_node(a))
                     else:
