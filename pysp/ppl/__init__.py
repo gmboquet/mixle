@@ -24,7 +24,9 @@ from pysp.ppl.core import (
     Field,
     Group,
     RandomVariable,
+    _CholeskySpec,
     _SimplexSpec,
+    _VectorSpec,
     compare,
     constrain,
     eq,
@@ -444,13 +446,16 @@ register_composite("LDA", _lda_dist, _lda_est, seed_fn=_lda_seed, dist_cls=LDADi
 
 # --- multivariate Gaussian (data are vectors) -------------------------------------
 def _mvn_dist(args, lower_child):
-    (dim,) = args
-    return MultivariateGaussianDistribution(np.zeros(dim), np.eye(dim))  # N(0, I) default
+    dim = args[0]
+    mean = args[1] if len(args) > 1 else None
+    cov = args[2] if len(args) > 2 else None
+    mu = np.asarray(mean, dtype=float) if isinstance(mean, np.ndarray) else np.zeros(dim)
+    covar = np.asarray(cov, dtype=float) if isinstance(cov, np.ndarray) else np.eye(dim)
+    return MultivariateGaussianDistribution(mu, covar)
 
 
 def _mvn_est(args, lower_child_est, name, keys):
-    (dim,) = args
-    return MultivariateGaussianEstimator(dim)
+    return MultivariateGaussianEstimator(args[0])
 
 
 def _mvn_read(d, read_params):
@@ -617,10 +622,18 @@ def AR1(*, name: str | None = None) -> RandomVariable:
     return RandomVariable._sample("StateSpace", (True,), name=name)
 
 
-def MVN(dim: int, *, name: str | None = None) -> RandomVariable:
+def MVN(dim: int, *, mean=None, cov=None, name: str | None = None) -> RandomVariable:
     """Multivariate Gaussian of dimension ``dim`` (full covariance). Fit on a list of
-    length-``dim`` vectors; recovers mean and covariance."""
-    return RandomVariable._sample("MVN", (int(dim),), name=name)
+    length-``dim`` vectors; ``MVN(dim).fit(X)`` recovers mean and covariance by EM.
+
+    The **mean vector** and **covariance matrix** are also inferable parameters: pass
+    ``mean=free`` (a ``dim``-vector estimated on the real line) and/or ``cov=free`` (a full
+    SPD covariance via its Cholesky factor) and fit with ``how='mcmc'|'ensemble'|'map'`` —
+    optionally with constraints on the mean entries (``constrain(...)`` over ``m[i]``)."""
+    dim = int(dim)
+    mean_spec = _VectorSpec(dim, "real", name="m") if mean is free else mean
+    cov_spec = _CholeskySpec(dim, name="S") if cov is free else cov
+    return RandomVariable._sample("MVN", (dim, mean_spec, cov_spec), name=name)
 
 
 def DiagGaussian(dim: int, *, name: str | None = None) -> RandomVariable:
