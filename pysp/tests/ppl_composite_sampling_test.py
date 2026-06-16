@@ -10,7 +10,59 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import Gamma, Mix, Normal
+from pysp.ppl import Dirichlet, Gamma, Mix, Normal, free
+
+
+class MixtureWeightsAsParameterTestCase(unittest.TestCase):
+    """Mixture weights are an inferable simplex parameter (Gamma representation of the
+    Dirichlet): a Dirichlet(alpha) prior or `free`, recovered alongside the components."""
+
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        n = 4000
+        z = rng.uniform(size=n) < 0.7  # 70% / 30% split
+        self.data = list(np.where(z, rng.normal(-3, 1, n), rng.normal(3, 1, n)))
+
+    def test_dirichlet_prior_weights(self):
+        m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
+        w = Dirichlet([1.0, 1.0], name="w")
+        fit = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], w).fit(
+            self.data, how="ensemble", constraints=m0 < m1, draws=1000, burn=400, rng=np.random.RandomState(1)
+        )
+        wts = fit.params["weights"]
+        self.assertAlmostEqual(wts[0], 0.7, delta=0.05)
+        self.assertAlmostEqual(wts[1], 0.3, delta=0.05)
+        self.assertAlmostEqual(float(np.sum(wts)), 1.0, places=6)  # stayed on the simplex
+
+    def test_free_weights(self):
+        m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
+        fit = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], free).fit(
+            self.data, how="ensemble", constraints=m0 < m1, draws=1000, burn=400, rng=np.random.RandomState(2)
+        )
+        wts = fit.params["weights"]
+        self.assertAlmostEqual(wts[0], 0.7, delta=0.05)
+        self.assertAlmostEqual(float(np.sum(wts)), 1.0, places=6)
+
+    def test_three_component_weights(self):
+        rng = np.random.RandomState(3)
+        n = 4500  # 50/30/20 over means -5, 0, 5
+        u = rng.uniform(size=n)
+        x = np.where(u < 0.5, rng.normal(-5, 1, n), np.where(u < 0.8, rng.normal(0, 1, n), rng.normal(5, 1, n)))
+        m0, m1, m2 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1"), Normal(0, 10, name="m2")
+        fit = Mix([Normal(m0, 1.0), Normal(m1, 1.0), Normal(m2, 1.0)], Dirichlet([1.0, 1.0, 1.0])).fit(
+            list(x),
+            how="ensemble",
+            constraints=(m0 < m1) & (m1 < m2),
+            draws=2500,
+            burn=1000,
+            walkers=24,
+            rng=np.random.RandomState(4),
+        )
+        wts = fit.params["weights"]
+        self.assertEqual(len(wts), 3)
+        self.assertAlmostEqual(float(np.sum(wts)), 1.0, places=6)
+        self.assertAlmostEqual(wts[0], 0.5, delta=0.07)
+        self.assertAlmostEqual(wts[2], 0.2, delta=0.07)
 
 
 class CompositeMixtureSamplingTestCase(unittest.TestCase):

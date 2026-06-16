@@ -157,25 +157,69 @@ def _encoder_for(fam):
     return fam.dist_cls(**kwargs).dist_to_encoder()
 
 
+def _is_dirichlet_rv(a) -> bool:
+    return (
+        isinstance(a, RandomVariable)
+        and a._kind == "sample"
+        and not isinstance(a._family, CompositeFamily)
+        and a._family.name == "Dirichlet"
+    )
+
+
+def _simplex_alpha(node, a):
+    """Concentration vector for a composite's simplex argument ``a`` (mixture weights, a
+    transition row): the Dirichlet prior's alpha, or a symmetric Dirichlet(1) for a ``free``
+    simplex sized to the component count. Returns ``None`` if ``a`` is not a simplex parameter."""
+    if _is_dirichlet_rv(a):
+        return np.asarray(a._args[0], dtype=float)
+    if a is free:  # free weights -> symmetric Dirichlet(1) over the component count
+        for other in node._args:
+            if isinstance(other, (list, tuple)):
+                return np.ones(len(other), dtype=float)
+    return None
+
+
 def _collect_composite(rv: RandomVariable):
-    """Walk a composite model, collect every leaf ``free``/prior parameter as a slot, and
-    return ``(slots, rebuild)`` where ``rebuild(vals)`` reconstructs a fully-concrete RV with
-    each parameter substituted by its value (keyed by ``slot.index``). Composite arguments that
-    are child models (an RV, or a list of RVs) are recursed into; non-RV args (mixture weights,
-    sequence lengths, ...) are kept fixed. ``collect`` and ``rebuild`` traverse identically so
-    the k-th parameter encountered is ``slots[k]``."""
+    """Walk a composite model, collect every free/prior parameter as a slot, and return
+    ``(slots, rebuild)`` where ``rebuild(vals)`` reconstructs a fully-concrete RV.
+
+    Parameters come in two shapes. *Leaf* free/prior args (a component mean, a rate) are scalar
+    slots. *Simplex* args of a combinator — mixture weights / a transition row, given as a
+    ``Dirichlet(alpha)`` prior or ``free`` — are expanded via the Gamma representation of the
+    Dirichlet: K positive slots ``g_k ~ Gamma(alpha_k, 1)`` that ``rebuild`` normalizes to
+    ``w = g / sum(g)`` (so ``w ~ Dirichlet(alpha)`` exactly, with no simplex Jacobian needed).
+    Child models (an RV, or a list of RVs) are recursed into; other args (lengths, fixed
+    weights) are kept. ``collect`` and ``rebuild`` traverse identically, so the k-th parameter
+    encountered is ``slots[k]``."""
+    from pysp.stats.leaf.gamma import GammaDistribution
+
     slots: list[_Slot] = []
 
     def collect(node: RandomVariable):
         fam = node._family
         if isinstance(fam, CompositeFamily):
             for a in node._args:
-                if isinstance(a, RandomVariable):
-                    collect(a)
-                elif isinstance(a, (list, tuple)):
+                if isinstance(a, (list, tuple)):
                     for c in a:
                         if isinstance(c, RandomVariable):
                             collect(c)
+                    continue
+                alpha = _simplex_alpha(node, a)
+                if alpha is not None:  # simplex parameter (weights / transition row)
+                    base = (a.name if isinstance(a, RandomVariable) else None) or "w"
+                    for k in range(len(alpha)):
+                        slots.append(
+                            _Slot(
+                                len(slots),
+                                GammaDistribution(k=float(alpha[k]), theta=1.0),
+                                True,
+                                f"{base}{k}",
+                                None,
+                                "positive",
+                            )
+                        )
+                elif isinstance(a, RandomVariable):
+                    collect(a)  # child model
             return
         for i, a in enumerate(node._args):
             if isinstance(a, RandomVariable):
@@ -192,15 +236,26 @@ def _collect_composite(rv: RandomVariable):
     def rebuild(vals):
         counter = [0]
 
+        def take(n):
+            out = [vals[counter[0] + j] for j in range(n)]
+            counter[0] += n
+            return out
+
         def build_node(node: RandomVariable):
             fam = node._family
             if isinstance(fam, CompositeFamily):
                 new_args = []
                 for a in node._args:
-                    if isinstance(a, RandomVariable):
-                        new_args.append(build_node(a))
-                    elif isinstance(a, (list, tuple)):
+                    if isinstance(a, (list, tuple)):
                         new_args.append([build_node(c) if isinstance(c, RandomVariable) else c for c in a])
+                        continue
+                    alpha = _simplex_alpha(node, a)
+                    if alpha is not None:  # normalize the Gamma draws into a simplex
+                        g = np.asarray(take(len(alpha)), dtype=float)
+                        s = g.sum()
+                        new_args.append(g / s if s > 0 else np.ones_like(g) / len(g))
+                    elif isinstance(a, RandomVariable):
+                        new_args.append(build_node(a))
                     else:
                         new_args.append(a)
                 return RandomVariable._sample(
@@ -209,8 +264,7 @@ def _collect_composite(rv: RandomVariable):
             new_args = []
             for a in node._args:
                 if a is free or isinstance(a, RandomVariable):
-                    new_args.append(vals[counter[0]])
-                    counter[0] += 1
+                    new_args.append(take(1)[0])
                 else:
                     new_args.append(a)
             return RandomVariable._sample(
