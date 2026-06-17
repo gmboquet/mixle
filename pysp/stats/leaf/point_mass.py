@@ -101,6 +101,10 @@ class PointMassDistribution(SequenceEncodableProbabilityDistribution):
         """Return per-component empty statistics for fixed point masses."""
         return tuple(None for _ in range(int(params["num_components"])))
 
+    def support_size(self) -> int:
+        """A single atom."""
+        return 1
+
     def sampler(self, seed: int | None = None) -> "PointMassSampler":
         """Return a sampler for drawing observations from this distribution."""
         return PointMassSampler(self, seed)

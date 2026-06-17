@@ -87,7 +87,12 @@ def _merge_component_shards(shards):
 
 class ComputeKernelTestCase(unittest.TestCase):
     class FakeTorchEngine(NumpyEngine):
+        # Borrows NumpyEngine's array ops but represents a non-host (torch-like) engine: kernel
+        # dispatch is capability-based, so it must declare a torch-like capability profile rather
+        # than inherit numpy's (numba-capable, host-accumulating) one.
         name = "torch"
+        supports_numba = False
+        resident_estep = True
 
     def test_gaussian_kernel_matches_legacy_seq_paths(self):
         dist = GaussianDistribution(0.5, 2.0)
@@ -239,6 +244,29 @@ class ComputeKernelTestCase(unittest.TestCase):
 
         with self.assertRaises(EngineNotSupportedError):
             dist.kernel(engine=self.FakeTorchEngine())
+
+    def test_kernel_dispatch_is_capability_based_not_name_based(self):
+        # A brand-new backend routes purely by its capability flags -- no name special-casing, no core
+        # edits. Same engine name, opposite flags => opposite kernel choice for a numba-capable family.
+        class FlagEngine(NumpyEngine):
+            name = "custom-accelerator"
+
+        class NumbaCapable(FlagEngine):
+            supports_numba = True
+            resident_estep = False
+
+        class GenericOnly(FlagEngine):
+            supports_numba = False
+            resident_estep = True
+
+        class TorchReadyGaussian(GaussianDistribution):
+            engine_ready = ("numpy", "torch", "custom-accelerator")
+
+        dist = TorchReadyGaussian(0.0, 1.0)
+        self.assertIsInstance(dist.kernel(engine=NumbaCapable()), GeneratedNumbaKernel)
+        self.assertIsInstance(dist.kernel(engine=GenericOnly()), GenericKernel)
+        # An engine-like object that declares no flags falls back to the safe defaults (no numba).
+        self.assertIsInstance(dist.kernel(engine=self.FakeTorchEngine()), GenericKernel)
 
     def test_generic_kernel_allows_distribution_engine_opt_in(self):
         class TorchReadyGaussian(GaussianDistribution):

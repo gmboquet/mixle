@@ -32,9 +32,32 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.stats.leaf.categorical import CategoricalFisherView
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.utils.special import digamma
+
+
+class IntegerCategoricalFisherView(CategoricalFisherView):
+    # Marker for fisher._structured_values_matrix's int-categorical fast path (decoupled from import).
+    _fisher_integer_categorical = True
+
+    def __init__(self, dist: Any) -> None:
+        min_val = int(getattr(dist, "min_val", getattr(dist, "min_index", 0)))
+        max_val = int(getattr(dist, "max_val", getattr(dist, "max_index", min_val)))
+        probs = np.asarray(dist.p_vec if hasattr(dist, "p_vec") else dist.prob_vec, dtype=np.float64)
+        keys = list(range(min_val, max_val + 1))
+        super().__init__(dist, keys, probs)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        x = np.asarray(enc_data, dtype=np.int64)
+        min_val = int(getattr(self.dist, "min_val", getattr(self.dist, "min_index", 0)))
+        cols = x - min_val
+        mat = np.zeros((len(x), len(self.keys)), dtype=np.float64)
+        rows = np.arange(len(x), dtype=np.int64)
+        good = (cols >= 0) & (cols < len(self.keys))
+        mat[rows[good], cols[good]] = 1.0
+        return mat
 
 
 class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
@@ -291,6 +314,16 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             count_mat = engine.zeros((tuple(getattr(ww, "shape", (0, 0)))[1], 0))
         min_vals = engine.asarray(np.full(int(tuple(getattr(ww, "shape", (0, 0)))[1]), int(params["min_val"])))
         return min_vals, count_mat
+
+    def support_size(self) -> int:
+        """Number of integer values in the range."""
+        return int(self.num_vals)
+
+    def to_fisher(self, **kwargs):
+        """Return the integer-categorical one-hot Fisher view."""
+        if hasattr(self, "p_vec") or hasattr(self, "prob_vec"):
+            return IntegerCategoricalFisherView(self)
+        return super().to_fisher(**kwargs)
 
     def sampler(self, seed: int | None = None) -> "IntegerCategoricalSampler":
         """IntegerCategoricalSampler object for sampling from IntegerCategoricalDistribution instance.

@@ -1333,14 +1333,13 @@ def vec_bincount4(x, w, out):
 
 def _register_int_plsi_engine_kernel():
     """Register the engine-resident integer-PLSI kernel (idempotent; called at import)."""
-    from pysp.engines import NUMPY_ENGINE
     from pysp.stats.compute.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
     class IntegerPLSIKernel(GenericKernel):
         def accumulate(self, enc, weights):
             if self.estimator is None:
                 raise ValueError("IntegerPLSIKernel.accumulate requires an estimator.")
-            if self.engine.name == NUMPY_ENGINE.name:
+            if not getattr(self.engine, "resident_estep", True):
                 return super().accumulate(enc, weights)
             host_enc = getattr(enc, "host_payload", enc)
             accumulator = self.estimator.accumulator_factory().make()

@@ -322,6 +322,9 @@ def _stats_public_distribution_catalog():
             stats.IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]),
             [[0.7, 0.2, 0.1, 0.0], [0.1, 0.6, 0.2, 0.1], [0.0, 0.1, 0.3, 0.6]],
         ),
+        "TruncatedDistribution": stats.TruncatedDistribution(
+            stats.IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]), allowed=[0, 1]
+        ),
         "LDADistribution": stats.LDADistribution(
             [
                 stats.IntegerCategoricalDistribution(0, [0.7, 0.3]),

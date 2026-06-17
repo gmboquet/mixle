@@ -19,11 +19,11 @@ def child_seq_update(accumulator: Any, enc: Any, weights: Any, estimate: Any, en
     """Route a child accumulator's E-step through the active engine when possible.
 
     Structural distributions (sequence, composite, optional, ...) delegate accumulation to child
-    accumulators. On a non-numpy engine this prefers the child's ``seq_update_engine`` so nested
-    families stay engine-resident; otherwise it falls back to the host ``seq_update`` with numpy
-    weights. This is the recursion that pushes engine residency down a model tree.
+    accumulators. When the engine prefers staying resident (``resident_estep``) this uses the child's
+    ``seq_update_engine`` so nested families stay engine-resident; otherwise it falls back to the host
+    ``seq_update`` with numpy weights. This is the recursion that pushes engine residency down a model tree.
     """
-    if engine.name != NUMPY_ENGINE.name and callable(getattr(accumulator, "seq_update_engine", None)):
+    if getattr(engine, "resident_estep", True) and callable(getattr(accumulator, "seq_update_engine", None)):
         accumulator.seq_update_engine(enc, weights, estimate, engine)
         return
     w = weights

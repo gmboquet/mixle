@@ -20,6 +20,15 @@ class ComputeEngine(ABC):
     dtype = None
     device = "cpu"
 
+    # Capability flags for kernel/E-step dispatch -- routed on these instead of the engine name so
+    # new backends opt in by setting flags rather than by editing core dispatch ("register, don't
+    # branch"). ``supports_numba``: the engine operates on host numpy arrays, so numba-compiled /
+    # pure-numpy kernels and the numpy ``seq_log_density`` fallback apply (numpy sets this True).
+    # ``resident_estep``: prefer an engine-resident ``seq_update_engine`` over round-tripping the
+    # E-step through host numpy (every non-host engine, e.g. torch/jax, wants this -- the default).
+    supports_numba = False
+    resident_estep = True
+
     @property
     def precision(self) -> str:
         """Return the engine dtype policy as a stable user-facing name."""

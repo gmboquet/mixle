@@ -404,6 +404,14 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         len_child = None if self.null_len_dist else recurse(self.len_dist, engine, torch, leaves)
         return SequenceGradientFitState(self, child, len_child)
 
+    def to_fisher(self, **kwargs):
+        """Structural Fisher view for the sequence."""
+        if hasattr(self, "dist"):
+            from pysp.utils.fisher import SequenceFisherView
+
+            return SequenceFisherView(self)
+        return super().to_fisher(**kwargs)
+
     def sampler(self, seed: int | None = None) -> "SequenceSampler":
         """Create a SequenceSampler object from instance of SequenceDistribution.
 
