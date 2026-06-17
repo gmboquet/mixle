@@ -698,7 +698,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
     def test_generated_stacked_strategy_reports_dispatch_source(self):
         self.assertEqual(generated_stacked_strategy(GaussianDistribution), "exp_family")
         self.assertEqual(generated_stacked_strategy(BinomialDistribution), "exp_family")
-        self.assertEqual(generated_stacked_strategy(GeometricDistribution), "backend_log_density_from_params")
+        self.assertEqual(generated_stacked_strategy(GeometricDistribution), "exp_family")
         self.assertEqual(generated_stacked_strategy(DiagonalGaussianDistribution), "exp_family")
         self.assertEqual(generated_stacked_strategy(IntegerCategoricalDistribution), "none")
         self.assertEqual(generated_stacked_strategy(MultivariateGaussianDistribution), "exp_family")
@@ -706,7 +706,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
 
         self.assertEqual(stacked_component_strategy(GaussianDistribution), "generated_exp_family")
         self.assertEqual(stacked_component_strategy(BinomialDistribution), "generated_exp_family")
-        self.assertEqual(stacked_component_strategy(GeometricDistribution), "generated_backend_hook")
+        self.assertEqual(stacked_component_strategy(GeometricDistribution), "generated_exp_family")
         self.assertEqual(stacked_component_strategy(LaplaceDistribution), "generated_backend_hook")
         self.assertEqual(stacked_component_strategy(UniformDistribution), "generated_backend_hook")
         self.assertEqual(stacked_component_strategy(DiagonalGaussianDistribution), "generated_exp_family")
