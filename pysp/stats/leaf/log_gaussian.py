@@ -283,6 +283,22 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
             count,
         )
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact). The continuous 'index of' a value."""
+        import math
+
+        from scipy.stats import lognorm as _sp
+
+        return float(_sp.cdf(x, self.sigma2**0.5, scale=math.exp(self.mu)))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        import math
+
+        from scipy.stats import lognorm as _sp
+
+        return float(_sp.ppf(q, self.sigma2**0.5, scale=math.exp(self.mu)))
+
     def sampler(self, seed: int | None = None) -> "LogGaussianSampler":
         """Create an LogGaussianSampler object from parameters of LogGaussianDistribution instance.
 

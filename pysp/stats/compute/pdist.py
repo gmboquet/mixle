@@ -192,6 +192,72 @@ class ProbabilityDistribution:
         """
         return self.enumerator().quantized_index(max_bits=max_bits, bin_width_bits=bin_width_bits)
 
+    def density_quantile(self, q: float, n_samples: int = 20000, seed: int | None = None) -> Any:
+        """Return a representative value at cumulative-density index ``q`` (descending-density order).
+
+        The arbitrary-index / inverse of the probability-ordered cumulative that
+        :func:`pysp.utils.density_rank.density_rank` computes (``G(x) = P(p(Y) >= p(x))``): ``q = 0``
+        is the mode, ``q -> 1`` walks into the tail.  Families with a closed form override this
+        (univariate continuous leaves expose the spatial ``quantile``; multivariate Gaussians and von
+        Mises-Fisher override ``density_quantile`` exactly); the default here is the universal
+        **Monte-Carlo representative** for any samplable family whose support is uncountable or coupled
+        (parameter priors, continuous mixtures, ...): draw ``n_samples`` points, order them by
+        descending density, and return the one at fractional rank ``q``.  Stochastic and approximate --
+        use the exact methods (``enumerator``/``count_dp_seek`` for discrete) where available.
+
+        Args:
+            q (float): Cumulative-density index in ``[0, 1]``.
+            n_samples (int): Monte-Carlo sample budget.
+            seed (Optional[int]): Sampler seed (reproducible).
+        """
+        if not 0.0 <= q <= 1.0:
+            raise ValueError("q must be in [0, 1].")
+        samples = self.sampler(seed).sample(int(n_samples))
+        with np.errstate(divide="ignore"):
+            lps = np.asarray([float(self.log_density(y)) for y in samples], dtype=np.float64)
+        order = np.argsort(-lps, kind="stable")
+        pick = int(round(q * (len(order) - 1))) if len(order) > 1 else 0
+        return samples[int(order[pick])]
+
+    def density_enumeration(
+        self, num_points: int, n_samples: int = 20000, seed: int | None = None
+    ) -> list[tuple[Any, float]]:
+        """Return ``num_points`` representative ``(value, log_density)`` pairs in descending density.
+
+        The continuous analogue of :meth:`enumerator` (which enumerates a countable support exactly):
+        for an uncountable or coupled support there is no exact element enumeration, so this returns a
+        **Monte-Carlo representative** sweep -- ``n_samples`` draws ordered by descending density,
+        keeping the ``num_points`` most probable (distinct) representatives, i.e. "the support,
+        most-probable region first".  Stochastic and approximate; prefer :meth:`enumerator` where the
+        support is countable.
+
+        Args:
+            num_points (int): Number of representatives to return.
+            n_samples (int): Monte-Carlo sample budget.
+            seed (Optional[int]): Sampler seed (reproducible).
+        """
+        from pysp.utils.enumeration import freeze
+
+        samples = self.sampler(seed).sample(int(n_samples))
+        with np.errstate(divide="ignore"):
+            scored = sorted(((float(self.log_density(y)), y) for y in samples), key=lambda t: -t[0])
+        out: list[tuple[Any, float]] = []
+        seen: set = set()
+        for lp, y in scored:
+            if lp == -np.inf:
+                continue
+            try:
+                key = freeze(y)
+            except TypeError:
+                key = id(y)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((y, lp))
+            if len(out) >= int(num_points):
+                break
+        return out
+
     def quantized_count_index(self, quantizer, max_fine_bucket: int):
         """Build a structural CountIndex over this distribution's support, bounded by depth.
 
@@ -461,6 +527,37 @@ class DistributionEnumerator:
     def top_k(self, k: int) -> list[tuple[Any, float]]:
         """Return the k most probable (value, log_prob) pairs (fewer if the support is smaller)."""
         return list(itertools.islice(self, k))
+
+    def top_p(self, p: float, max_items: int | None = None) -> list[tuple[Any, float]]:
+        """Return the smallest descending-probability prefix whose total probability reaches ``p``.
+
+        The nucleus / minimal high-probability set: because values are yielded in non-increasing
+        probability order, the returned prefix is a minimum-size set of outcomes whose summed mass is
+        ``>= p`` (e.g. ``p=0.95`` gives a 95%-coverage support set -- the discrete analogue of nucleus
+        sampling). Accumulation stops as soon as the cumulative probability reaches ``p``.
+
+        ``max_items`` caps how many values are pulled so an infinite or heavy-tailed support cannot
+        run away; if the cap is hit before the threshold, the (sub-threshold) prefix gathered so far
+        is returned. ``p >= 1.0`` on an infinite support therefore requires ``max_items``.
+
+        Args:
+            p (float): Target cumulative probability; ``p <= 0`` returns the empty set.
+            max_items (Optional[int]): Hard cap on the number of values pulled.
+
+        Returns:
+            List of (value, log_prob) pairs in non-increasing probability order.
+
+        """
+        if p <= 0.0:
+            return []
+        out: list[tuple[Any, float]] = []
+        total = 0.0
+        for value, log_prob in self:
+            out.append((value, log_prob))
+            total += math.exp(log_prob)
+            if total >= p or (max_items is not None and len(out) >= max_items):
+                break
+        return out
 
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0):
         """Precompute a bounded bit-quantized index over this enumeration.

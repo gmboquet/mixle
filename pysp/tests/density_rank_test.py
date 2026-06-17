@@ -239,5 +239,64 @@ class CumulativeProbabilityTestCase(unittest.TestCase):
             self.assertAlmostEqual(cumulative_probability(seq, x, oversample=16), brute(x), places=10)
 
 
+class CountDPTopPTestCase(unittest.TestCase):
+    """count_dp_top_p reports the nucleus SIZE (without enumerating it) as a provable bracket."""
+
+    def _true_nucleus_size(self, dist, p):
+        return len(dist.enumerator().top_p(p, max_items=200000))
+
+    def test_bracket_contains_true_nucleus_size(self):
+        from pysp.stats.leaf.categorical import CategoricalDistribution
+        from pysp.utils.density_rank import count_dp_top_p
+
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
+        intc = IntegerCategoricalDistribution(0, [0.6, 0.3, 0.1])
+        comp = CompositeDistribution((cat, intc, cat))
+        for p in (0.3, 0.5, 0.8, 0.95, 1.0):
+            r = count_dp_top_p(comp, p, oversample=64)
+            true = self._true_nucleus_size(comp, p)
+            self.assertLessEqual(r.size_lower, true, "p=%s lower" % p)
+            self.assertLessEqual(true, r.size_upper, "p=%s upper" % p)
+            if not r.truncated:
+                self.assertGreaterEqual(r.covered_mass, p - 1e-9, "p=%s mass" % p)
+
+    def test_leaf_bracket_is_exact(self):
+        # A leaf has no convolution smear, so the bracket collapses to the exact nucleus size.
+        from pysp.stats.leaf.categorical import CategoricalDistribution
+        from pysp.utils.density_rank import count_dp_top_p
+
+        leaf = CategoricalDistribution({i: w for i, w in enumerate([0.3, 0.25, 0.15, 0.1, 0.08, 0.06, 0.04, 0.02])})
+        for p in (0.3, 0.55, 0.8, 0.95, 1.0):
+            r = count_dp_top_p(leaf, p, oversample=64)
+            true = self._true_nucleus_size(leaf, p)
+            self.assertEqual((r.size_lower, r.size_upper), (true, true), "p=%s" % p)
+
+    def test_huge_support_without_enumeration(self):
+        # A support too large to enumerate (6**12) still returns a bracket quickly.
+        from pysp.stats.leaf.categorical import CategoricalDistribution
+        from pysp.utils.density_rank import count_dp_top_p
+
+        rng = np.random.RandomState(0)
+        big = CompositeDistribution(
+            tuple(
+                CategoricalDistribution({i: pp for i, pp in enumerate(rng.dirichlet(np.ones(6) * 0.5))})
+                for _ in range(12)
+            )
+        )
+        r = count_dp_top_p(big, 0.9, oversample=32)
+        self.assertLessEqual(r.size_lower, r.size_upper)
+        self.assertGreater(r.size_lower, 0)
+        self.assertGreaterEqual(r.covered_mass, 0.9 - 1e-9)
+
+    def test_edge_cases(self):
+        from pysp.stats.leaf.categorical import CategoricalDistribution
+        from pysp.utils.density_rank import count_dp_top_p
+
+        leaf = CategoricalDistribution({"a": 0.6, "b": 0.4})
+        self.assertEqual((count_dp_top_p(leaf, 0.0).size_lower, count_dp_top_p(leaf, 0.0).size_upper), (0, 0))
+        with self.assertRaises(ValueError):
+            count_dp_top_p(leaf, 1.5)
+
+
 if __name__ == "__main__":
     unittest.main()
