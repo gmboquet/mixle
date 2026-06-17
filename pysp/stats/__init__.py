@@ -456,6 +456,13 @@ __all__ = [
     "TruncatedEstimator",
     "TruncatedDataEncoder",
     "TruncatedEnumerator",
+    "ExponentialTiltedDistribution",
+    "ExponentialTiltedSampler",
+    "ExponentialTiltedEstimator",
+    "ExponentialTiltedDataEncoder",
+    "ExponentialTiltedEnumerator",
+    "register_exponential_tilt",
+    "registered_tilt_families",
     "IdentityTransform",
     "AffineTransform",
     "ExpTransform",
@@ -531,6 +538,15 @@ from pysp.stats.combinator.conditional import (
     ConditionalDistributionSampler,
     ConditionalEnumerator,
     ConditionalEstimator,
+)
+from pysp.stats.combinator.exponential_tilt import (
+    ExponentialTiltedDataEncoder,
+    ExponentialTiltedDistribution,
+    ExponentialTiltedEnumerator,
+    ExponentialTiltedEstimator,
+    ExponentialTiltedSampler,
+    register_exponential_tilt,
+    registered_tilt_families,
 )
 from pysp.stats.combinator.finite_stochastic_transform import (
     FiniteStochasticTransformDataEncoder,
