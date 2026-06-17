@@ -811,7 +811,7 @@ class MixtureSampler(DistributionSampler):
         self.dist = dist
         self.comp_samplers = [d.sampler(seed=rng_loc.randint(0, maxrandint)) for d in self.dist.components]
 
-    def sample(self, size: int | None = None) -> list[Any] | Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[Any] | Any:
         """Draw iid samples from a mixture distribution.
 
         The data type drawn from 'comp_samplers' is type T, corresponding to the data type of the mixture components.
@@ -819,8 +819,13 @@ class MixtureSampler(DistributionSampler):
         If size is None, a single sample (of data type T) is drawn and returned. If size is not None, 'size'-iid
         mixture samples are drawn and returned as a List with data type List[T].
 
+        With ``batched=True`` (default) each component sampler is invoked once with the number of draws assigned to
+        it and the results are scattered back into draw order. Because every component sampler owns an independent
+        ``RandomState``, this yields the same draws as the legacy per-draw loop (``batched=False``) but far faster.
+
         Args:
             size (Optional[int]): Number of iid samples to draw.
+            batched (bool): Vectorize component draws (default); set False for the legacy per-draw loop.
 
         Returns:
             Data type T or List[T].
@@ -830,8 +835,29 @@ class MixtureSampler(DistributionSampler):
 
         if size is None:
             return self.comp_samplers[comp_state].sample()
-        else:
+        if not batched:
             return [self.comp_samplers[i].sample() for i in comp_state]
+
+        comp_state = np.asarray(comp_state)
+        draws_by_comp = {}
+        all_array = True
+        for c in range(self.dist.num_components):
+            count = int(np.count_nonzero(comp_state == c))
+            if count:
+                drawn = self.comp_samplers[c].sample(size=count)
+                draws_by_comp[c] = drawn
+                all_array = all_array and isinstance(drawn, np.ndarray)
+        if all_array:
+            dtype = next(iter(draws_by_comp.values())).dtype if draws_by_comp else float
+            out_arr = np.empty(size, dtype=dtype)
+            for c, drawn in draws_by_comp.items():
+                out_arr[comp_state == c] = drawn
+            return list(out_arr)
+        out: list[Any] = [None] * size
+        for c, drawn in draws_by_comp.items():
+            for m, pos in enumerate(np.nonzero(comp_state == c)[0]):
+                out[pos] = drawn[m]
+        return out
 
 
 class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
