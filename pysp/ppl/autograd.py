@@ -343,27 +343,153 @@ class GradTarget:
         return vals, mean_np, scale_np
 
 
-def grad_target(rv: RandomVariable, data) -> GradTarget | None:
-    """Build a Torch autograd target for a flat model, or ``None`` if unavailable.
-
-    Returns ``None`` (caller falls back to the numerical path) when Torch is missing, the
-    model is not a flat ``Sample``, or any family involved (likelihood or a prior) has no
-    Torch scorer.
+class MixtureGradTarget(GradTarget):
+    """Differentiable joint log-target for a finite **mixture of leaf components** — the analytic
+    composite case. Overrides the per-batch likelihood with ``logsumexp_k(log w_k + comp_k(x))``
+    so HMC / NUTS / full-rank & tilted VB get analytic gradients over the component parameters and
+    (Gamma-represented) mixture weights. Other combinators (HMM, sequence) stay on the numeric path.
     """
-    if not torch_available():
-        return None
-    if rv._kind != "sample" or isinstance(rv._family, CompositeFamily):
-        return None
-    from pysp.ppl.inference import _require_flat, _target_parts
 
+    def __init__(self, rv, data, slots, build, dmean, dstd, comp_layouts, weight, comp_family):
+        import torch
+
+        from pysp.engines import TorchEngine
+
+        self._torch = torch
+        self._rv = rv
+        self.slots = slots
+        self.build = build
+        self.unpack = None
+        self.dmean = dmean
+        self.dstd = dstd
+        self._eng = TorchEngine(dtype="float64")
+        self._scorers = _scorers()
+        self._x = torch.tensor(np.asarray(data, dtype=float), dtype=torch.float64)
+        self._data_terms = self._scorers[comp_family][0](self._x, torch)  # prep shared across same-family comps
+        self._comp_layouts = comp_layouts  # per comp: (fam_name, [('slot', idx, support) | ('const', value)])
+        self._weight = weight  # ('fixed', w) | ('slots', [idx...], alpha)
+
+    def _logtarget_tensor(self, u):
+        return self._logtarget_batch(u.reshape(1, -1))[0]
+
+    def _logtarget_batch(self, U):
+        torch = self._torch
+        B = U.shape[0]
+        vals: dict[int, Any] = {}
+        logj = U.new_zeros(B)
+        for k, s in enumerate(self.slots):
+            uk = U[:, k]
+            if s.support == "positive":
+                vals[s.index] = torch.exp(uk)
+                logj = logj + uk
+            elif s.support == "unit":
+                v = torch.sigmoid(uk)
+                vals[s.index] = v
+                logj = logj + torch.log(v) + torch.log1p(-v)
+            else:
+                vals[s.index] = uk
+        comp_ld = []  # each (B, N): per-point log density of component k
+        for fam_name, layout in self._comp_layouts:
+            prep, apply = self._scorers[fam_name]
+            args = [vals[e[1]].reshape(B, 1) if e[0] == "slot" else self._t(e[1]) for e in layout]
+            comp_ld.append(apply(args, self._data_terms, self._x, self._eng))
+        stacked = torch.stack(comp_ld, dim=0)  # (K, B, N)
+        if self._weight[0] == "fixed":
+            w_const = torch.as_tensor(np.asarray(self._weight[1], dtype=float), dtype=torch.float64)
+            log_w = torch.log(w_const).reshape(-1, 1, 1)  # (K,1,1)
+        else:
+            g = torch.stack([vals[i] for i in self._weight[1]], dim=1)  # (B, K)
+            log_w = torch.log(g / g.sum(dim=1, keepdim=True)).T.reshape(len(self._weight[1]), B, 1)
+        ll = torch.logsumexp(log_w + stacked, dim=0).sum(dim=1)  # (B, N) -> (B,)
+        plp = U.new_zeros(B)
+        for s in self.slots:
+            if s.handle is not None:  # component-parameter prior
+                prep_p, apply_p = self._scorers[s.handle._family.name]
+                pargs = [self._t(z) for z in s.handle._args]
+                xt = vals[s.index].reshape(B, 1)
+                plp = plp + apply_p(pargs, prep_p(xt, torch), xt, self._eng).sum(dim=1)
+        if self._weight[0] == "slots":  # Gamma(alpha_k, 1) prior on each unnormalized weight (Dirichlet rep)
+            for j, wi in enumerate(self._weight[1]):
+                a = float(self._weight[2][j])
+                plp = plp + ((a - 1.0) * torch.log(vals[wi]) - vals[wi] - math.lgamma(a))
+        return ll + plp + logj
+
+
+def _mixture_grad_target(rv, data, scorers):
+    """Build a MixtureGradTarget for a Mix of same-family leaf components, or None if it isn't one
+    (heterogeneous components, a composite component, or a missing Torch scorer)."""
+    comps, weights_arg = rv._args[0], rv._args[1]
+    if not comps:
+        return None
+    fam0 = comps[0]._family.name
+    for c in comps:  # all components: same leaf family with a Torch scorer, scalar args only
+        if c._kind != "sample" or isinstance(c._family, CompositeFamily) or c._family.name != fam0:
+            return None
+        if fam0 not in scorers:
+            return None
+        for a in c._args:
+            if isinstance(a, RandomVariable) and (
+                isinstance(a._family, CompositeFamily) or a._family.name not in scorers
+            ):
+                return None
+    from pysp.ppl.inference import _collect_composite
+
+    slots, _rebuild = _collect_composite(rv)
+    build = lambda v: __import__("pysp.ppl.core", fromlist=["lower"]).lower(_rebuild(v), target="dist")  # noqa: E731
+    # map slots -> (component, arg) and the trailing weight slots, replicating _collect_composite's order
+    idx = 0
+    comp_layouts = []
+    for c in comps:
+        layout = []
+        for j, a in enumerate(c._args):
+            if isinstance(a, RandomVariable) or a is free:
+                layout.append(("slot", idx, c._family.support[j]))
+                idx += 1
+            else:
+                layout.append(("const", float(a)))
+        comp_layouts.append((c._family.name, layout))
+    k = len(comps)
+    if weights_arg is None or isinstance(weights_arg, np.ndarray):
+        w = np.ones(k) / k if weights_arg is None else np.asarray(weights_arg, dtype=float)
+        weight = ("fixed", w)
+    else:  # free / Dirichlet -> the trailing K weight slots (Gamma representation)
+        if isinstance(weights_arg, RandomVariable) and weights_arg._family.name == "Dirichlet":
+            alpha = np.asarray(weights_arg._args[0], dtype=float)
+        else:
+            alpha = np.ones(k)
+        weight = ("slots", list(range(idx, idx + k)), alpha)
+        idx += k
+    if idx != len(slots):  # structure we didn't model (e.g. nested) -> fall back
+        return None
+    arr = np.asarray(data, dtype=float)
+    dmean, dstd = float(arr.mean()), float(arr.std() or 1.0)
+    return MixtureGradTarget(rv, data, slots, build, dmean, dstd, comp_layouts, weight, fam0)
+
+
+def grad_target(rv: RandomVariable, data):
+    """Build a Torch autograd target for a flat model or a mixture-of-leaves, or ``None``.
+
+    Returns ``None`` (caller falls back to the numerical path) when Torch is missing, or the model
+    is neither a flat ``Sample`` nor a supported mixture, or any family has no Torch scorer.
+    """
+    if not torch_available() or rv._kind != "sample":
+        return None
     try:
         scorers = _scorers()
     except Exception:
         return None
+    if isinstance(rv._family, CompositeFamily):
+        if rv._family.name == "Mixture":
+            try:
+                return _mixture_grad_target(rv, data, scorers)
+            except Exception:
+                return None
+        return None
+    from pysp.ppl.inference import _require_flat, _target_parts
+
     if rv._family.name not in scorers:
         return None
-    # every prior's family must also have a Torch scorer
-    for a in rv._args:
+    for a in rv._args:  # every prior's family must also have a Torch scorer
         if isinstance(a, RandomVariable):
             if isinstance(a._family, CompositeFamily) or a._family.name not in scorers:
                 return None
