@@ -14,11 +14,11 @@ Each undirected edge has a positive weight ``w[i, j]``. A spanning tree T has pr
 
 and by the Matrix-Tree theorem Z equals any first cofactor of the weighted graph Laplacian
 L = diag(W 1) - W, i.e. ``det(L[1:, 1:])``. Sampling uses Wilson's loop-erased-random-walk algorithm,
-which draws exactly from this weighted uniform-spanning-tree law. Estimation matches the empirical edge
-frequencies to the model edge marginals (an exponential family over trees, fit by projected gradient
-ascent on the log-weights); the per-edge marginal ``w[i,j] * R_eff(i,j)`` is read from the Laplacian
-pseudoinverse. Exact finite enumeration scans all positive-edge subsets of size n-1, keeps the
-spanning trees, and sorts them by fitted probability.
+which draws exactly from this weighted uniform-spanning-tree law. Estimation matches empirical or
+smoothed edge frequencies to the model edge marginals (an exponential family over trees, fit by
+projected gradient ascent on the log-weights); the per-edge marginal ``w[i,j] * R_eff(i,j)`` is read
+from the Laplacian pseudoinverse. Exact finite enumeration scans all positive-edge subsets of size
+n-1, keeps the spanning trees, and sorts them by fitted probability.
 """
 
 from collections.abc import Sequence
@@ -64,6 +64,20 @@ def _edge_marginals(weights: np.ndarray) -> np.ndarray:
     diag = np.diag(lap_pinv)
     r_eff = diag[:, None] + diag[None, :] - 2.0 * lap_pinv
     return weights * r_eff
+
+
+def _smoothed_edge_target(
+    edge_counts: np.ndarray,
+    count: float,
+    candidate: np.ndarray,
+    pseudo_count: float | None,
+) -> np.ndarray:
+    """Return empirical edge marginals, optionally smoothed toward the uniform tree law."""
+    target = edge_counts / count
+    if pseudo_count:
+        prior_marginals = _edge_marginals(np.where(candidate, 1.0, 0.0))
+        target = (count * target + pseudo_count * prior_marginals) / (count + pseudo_count)
+    return target * candidate
 
 
 class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
@@ -306,7 +320,7 @@ class SpanningTreeAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class SpanningTreeEstimator(ParameterEstimator):
-    """Maximum-likelihood estimator for the edge weights (matches empirical and model edge marginals)."""
+    """Estimate edge weights by matching empirical or smoothed tree edge marginals."""
 
     def __init__(
         self,
@@ -320,6 +334,8 @@ class SpanningTreeEstimator(ParameterEstimator):
     ) -> None:
         if dim is None or dim < 2:
             raise ValueError("SpanningTreeEstimator requires the number of nodes dim >= 2.")
+        if pseudo_count is not None and pseudo_count < 0.0:
+            raise ValueError("SpanningTreeEstimator requires a non-negative pseudo_count.")
         self.dim = int(dim)
         self.pseudo_count = pseudo_count
         self.max_steps = max_steps
@@ -339,11 +355,7 @@ class SpanningTreeEstimator(ParameterEstimator):
         if count <= 0.0 or not np.any(candidate):
             return SpanningTreeDistribution(np.ones((n, n)) - np.eye(n), name=self.name, keys=self.keys)
 
-        target = edge_counts / count  # empirical edge frequencies (symmetric)
-        if self.pseudo_count:
-            # Laplace-style smoothing toward a uniform spanning tree over the candidate edges.
-            target = target + self.pseudo_count / max(count, 1.0)
-            target *= candidate
+        target = _smoothed_edge_target(edge_counts, count, candidate, self.pseudo_count)
 
         log_w = np.where(candidate, 0.0, -np.inf)
         weights = np.where(candidate, 1.0, 0.0)

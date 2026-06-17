@@ -8,7 +8,7 @@ from collections import Counter
 import numpy as np
 
 from pysp.stats import SpanningTreeDistribution
-from pysp.stats.graph.spanning_tree import _edge_marginals
+from pysp.stats.graph.spanning_tree import _edge_marginals, _smoothed_edge_target
 from pysp.utils.estimation import fit
 
 
@@ -114,6 +114,31 @@ class SpanningTreeTestCase(unittest.TestCase):
         data = true.sampler(seed=1).sample(6000)
         fitted = fit(data, true.estimator(), max_its=1, rng=np.random.RandomState(0), print_iter=0)
         np.testing.assert_allclose(_edge_marginals(fitted.weights), _edge_marginals(true.weights), atol=0.05)
+
+    def test_pseudo_count_target_stays_in_spanning_tree_polytope(self):
+        trees = [
+            [(0, 1), (1, 2), (2, 3)],
+            [(0, 2), (1, 2), (1, 3)],
+        ]
+        acc = SpanningTreeDistribution(_W).estimator().accumulator_factory().make()
+        for tree in trees:
+            acc.update(tree, 1.0, None)
+        count, edge_counts = acc.value()
+        candidate = (edge_counts + edge_counts.T) > 0.0
+        np.fill_diagonal(candidate, False)
+
+        target = _smoothed_edge_target(edge_counts, count, candidate, pseudo_count=5.0)
+        raw = edge_counts / count
+        prior = _edge_marginals(np.where(candidate, 1.0, 0.0))
+        expected = (count * raw + 5.0 * prior) / (count + 5.0)
+
+        np.testing.assert_allclose(target, expected * candidate, atol=1.0e-12)
+        self.assertAlmostEqual(float(target.sum() / 2.0), 3.0, places=12)
+        np.testing.assert_allclose(target[~candidate], 0.0, atol=1.0e-12)
+
+    def test_negative_pseudo_count_raises(self):
+        with self.assertRaises(ValueError):
+            SpanningTreeDistribution(_W).estimator(pseudo_count=-1.0)
 
     def test_encoder_rejects_non_trees(self):
         dist = SpanningTreeDistribution(_W)
