@@ -24,6 +24,10 @@ __all__ = [
     "HierarchicalDirichletProcessMixtureDistribution",
     "HierarchicalDirichletProcessMixtureEstimator",
     "HierarchicalDirichletProcessMixtureSampler",
+    "PitmanYorProcessDistribution",
+    "PitmanYorProcessSampler",
+    "PitmanYorProcessEstimator",
+    "PitmanYorProcessDataEncoder",
     "initialize",
     "estimate",
     "seq_encode",
@@ -128,6 +132,10 @@ __all__ = [
     "LogisticSampler",
     "LogisticEstimator",
     "LogisticDataEncoder",
+    "LogSeriesDistribution",
+    "LogSeriesSampler",
+    "LogSeriesEstimator",
+    "LogSeriesDataEncoder",
     "BinomialDistribution",
     "BinomialSampler",
     "BinomialEstimator",
@@ -188,6 +196,10 @@ __all__ = [
     "GaussianSampler",
     "GaussianEstimator",
     "GaussianDataEncoder",
+    "InverseGammaDistribution",
+    "InverseGammaSampler",
+    "InverseGammaEstimator",
+    "InverseGammaDataEncoder",
     "InverseGaussianDistribution",
     "InverseGaussianSampler",
     "InverseGaussianEstimator",
@@ -197,6 +209,14 @@ __all__ = [
     "GeometricEstimator",
     "GeometricDataEncoder",
     "GeometricEnumerator",
+    "GumbelDistribution",
+    "GumbelSampler",
+    "GumbelEstimator",
+    "GumbelDataEncoder",
+    "HalfNormalDistribution",
+    "HalfNormalSampler",
+    "HalfNormalEstimator",
+    "HalfNormalDataEncoder",
     "NegativeBinomialDistribution",
     "NegativeBinomialSampler",
     "NegativeBinomialEstimator",
@@ -218,6 +238,10 @@ __all__ = [
     "UniformSampler",
     "UniformEstimator",
     "UniformDataEncoder",
+    "VonMisesDistribution",
+    "VonMisesSampler",
+    "VonMisesEstimator",
+    "VonMisesDataEncoder",
     "WeibullDistribution",
     "WeibullSampler",
     "WeibullEstimator",
@@ -326,6 +350,10 @@ __all__ = [
     "MarkovChainEstimator",
     "MarkovChainDataEncoder",
     "MarkovChainEnumerator",
+    "ProbabilisticPCADistribution",
+    "ProbabilisticPCASampler",
+    "ProbabilisticPCAEstimator",
+    "ProbabilisticPCADataEncoder",
     "MixtureDistribution",
     "MixtureSampler",
     "MixtureEstimator",
@@ -385,6 +413,25 @@ __all__ = [
     "SpearmanRankingEstimator",
     "SpearmanRankingDataEncoder",
     "SpearmanRankingEnumerator",
+    "PlackettLuceDistribution",
+    "PlackettLuceSampler",
+    "PlackettLuceEstimator",
+    "PlackettLuceDataEncoder",
+    "MallowsDistribution",
+    "MallowsSampler",
+    "MallowsEstimator",
+    "MallowsDataEncoder",
+    "SpanningTreeDistribution",
+    "SpanningTreeSampler",
+    "SpanningTreeEstimator",
+    "SpanningTreeDataEncoder",
+    "MatchingDistribution",
+    "MatchingSampler",
+    "MatchingEstimator",
+    "MatchingDataEncoder",
+    "RandomDotProductGraphDistribution",
+    "RandomDotProductGraphSampler",
+    "RandomDotProductGraphEstimator",
     "SemiSupervisedMixtureDistribution",
     "SemiSupervisedMixtureSampler",
     "SemiSupervisedMixtureEstimator",
@@ -417,6 +464,10 @@ __all__ = [
     "VonMisesFisherSampler",
     "VonMisesFisherEstimator",
     "VonMisesFisherDataEncoder",
+    "MultivariateStudentTDistribution",
+    "MultivariateStudentTSampler",
+    "MultivariateStudentTEstimator",
+    "MultivariateStudentTDataEncoder",
     "WeightedDistribution",
     "WeightedDataEncoder",
     "WeightedEstimator",
@@ -448,6 +499,12 @@ from pysp.stats.bayes.hdpm import (
 from pysp.stats.bayes.mvngamma import MultivariateNormalGammaDistribution, MultivariateNormalGammaSampler
 from pysp.stats.bayes.normgamma import NormalGammaDistribution, NormalGammaSampler
 from pysp.stats.bayes.normwishart import NormalWishartDistribution, NormalWishartSampler
+from pysp.stats.bayes.pitman_yor import (
+    PitmanYorProcessDataEncoder,
+    PitmanYorProcessDistribution,
+    PitmanYorProcessEstimator,
+    PitmanYorProcessSampler,
+)
 from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution, SymmetricDirichletSampler
 
 ### combinators distributions
@@ -634,12 +691,41 @@ from pysp.stats.graph.int_markovchain import (
     IntegerMarkovChainEstimator,
     IntegerMarkovChainSampler,
 )
+from pysp.stats.graph.mallows import (
+    MallowsDataEncoder,
+    MallowsDistribution,
+    MallowsEstimator,
+    MallowsSampler,
+)
 from pysp.stats.graph.markov_chain import (
     MarkovChainDataEncoder,
     MarkovChainDistribution,
     MarkovChainEnumerator,
     MarkovChainEstimator,
     MarkovChainSampler,
+)
+from pysp.stats.graph.matching import (
+    MatchingDataEncoder,
+    MatchingDistribution,
+    MatchingEstimator,
+    MatchingSampler,
+)
+from pysp.stats.graph.plackett_luce import (
+    PlackettLuceDataEncoder,
+    PlackettLuceDistribution,
+    PlackettLuceEstimator,
+    PlackettLuceSampler,
+)
+from pysp.stats.graph.rdpg import (
+    RandomDotProductGraphDistribution,
+    RandomDotProductGraphEstimator,
+    RandomDotProductGraphSampler,
+)
+from pysp.stats.graph.spanning_tree import (
+    SpanningTreeDataEncoder,
+    SpanningTreeDistribution,
+    SpanningTreeEstimator,
+    SpanningTreeSampler,
 )
 from pysp.stats.graph.sparse_markov_transform import (
     SparseMarkovAssociationDataEncoder,
@@ -745,6 +831,12 @@ from pysp.stats.latent.mixture import (
     MixtureSampler,
     mixture_prior,
 )
+from pysp.stats.latent.ppca import (
+    ProbabilisticPCADataEncoder,
+    ProbabilisticPCADistribution,
+    ProbabilisticPCAEstimator,
+    ProbabilisticPCASampler,
+)
 from pysp.stats.latent.quantized_hmm import (
     QuantizedHiddenMarkovEstimator,
     QuantizedHiddenMarkovModelDistribution,
@@ -815,18 +907,24 @@ from pysp.stats.leaf.exponential import (
 )
 from pysp.stats.leaf.gamma import GammaDataEncoder, GammaDistribution, GammaEstimator, GammaSampler
 from pysp.stats.leaf.gaussian import GaussianDataEncoder, GaussianDistribution, GaussianEstimator, GaussianSampler
-from pysp.stats.leaf.inverse_gaussian import (
-    InverseGaussianDataEncoder,
-    InverseGaussianDistribution,
-    InverseGaussianEstimator,
-    InverseGaussianSampler,
-)
 from pysp.stats.leaf.geometric import (
     GeometricDataEncoder,
     GeometricDistribution,
     GeometricEnumerator,
     GeometricEstimator,
     GeometricSampler,
+)
+from pysp.stats.leaf.gumbel import (
+    GumbelDataEncoder,
+    GumbelDistribution,
+    GumbelEstimator,
+    GumbelSampler,
+)
+from pysp.stats.leaf.half_normal import (
+    HalfNormalDataEncoder,
+    HalfNormalDistribution,
+    HalfNormalEstimator,
+    HalfNormalSampler,
 )
 from pysp.stats.leaf.int_multinomial import (
     IntegerMultinomialDataEncoder,
@@ -849,6 +947,18 @@ from pysp.stats.leaf.int_spike import (
     IntegerUniformSpikeEstimator,
     IntegerUniformSpikeSampler,
 )
+from pysp.stats.leaf.inverse_gamma import (
+    InverseGammaDataEncoder,
+    InverseGammaDistribution,
+    InverseGammaEstimator,
+    InverseGammaSampler,
+)
+from pysp.stats.leaf.inverse_gaussian import (
+    InverseGaussianDataEncoder,
+    InverseGaussianDistribution,
+    InverseGaussianEstimator,
+    InverseGaussianSampler,
+)
 from pysp.stats.leaf.laplace import LaplaceDataEncoder, LaplaceDistribution, LaplaceEstimator, LaplaceSampler
 from pysp.stats.leaf.log_gaussian import (
     LogGaussianDataEncoder,
@@ -857,6 +967,12 @@ from pysp.stats.leaf.log_gaussian import (
     LogGaussianSampler,
 )
 from pysp.stats.leaf.logistic import LogisticDataEncoder, LogisticDistribution, LogisticEstimator, LogisticSampler
+from pysp.stats.leaf.logseries import (
+    LogSeriesDataEncoder,
+    LogSeriesDistribution,
+    LogSeriesEstimator,
+    LogSeriesSampler,
+)
 from pysp.stats.leaf.negative_binomial import (
     NegativeBinomialDataEncoder,
     NegativeBinomialDistribution,
@@ -882,6 +998,12 @@ from pysp.stats.leaf.poisson import (
 from pysp.stats.leaf.rayleigh import RayleighDataEncoder, RayleighDistribution, RayleighEstimator, RayleighSampler
 from pysp.stats.leaf.student_t import StudentTDataEncoder, StudentTDistribution, StudentTEstimator, StudentTSampler
 from pysp.stats.leaf.uniform import UniformDataEncoder, UniformDistribution, UniformEstimator, UniformSampler
+from pysp.stats.leaf.von_mises import (
+    VonMisesDataEncoder,
+    VonMisesDistribution,
+    VonMisesEstimator,
+    VonMisesSampler,
+)
 from pysp.stats.leaf.weibull import WeibullDataEncoder, WeibullDistribution, WeibullEstimator, WeibullSampler
 from pysp.stats.multivariate.dmvn import (
     DiagonalGaussianDataEncoder,
@@ -894,6 +1016,12 @@ from pysp.stats.multivariate.mvn import (
     MultivariateGaussianDistribution,
     MultivariateGaussianEstimator,
     MultivariateGaussianSampler,
+)
+from pysp.stats.multivariate.mvt import (
+    MultivariateStudentTDataEncoder,
+    MultivariateStudentTDistribution,
+    MultivariateStudentTEstimator,
+    MultivariateStudentTSampler,
 )
 from pysp.stats.multivariate.vmf import (
     VonMisesFisherDataEncoder,
@@ -940,7 +1068,10 @@ def _register_builtin_compute_metadata() -> None:
         GaussianDistribution,
         LogGaussianDistribution,
         GammaDistribution,
+        InverseGammaDistribution,
         InverseGaussianDistribution,
+        GumbelDistribution,
+        HalfNormalDistribution,
         BernoulliDistribution,
         StudentTDistribution,
         LogisticDistribution,
@@ -962,6 +1093,9 @@ def _register_builtin_compute_metadata() -> None:
         IntegerStepBernoulliEditDistribution,
         SpearmanRankingDistribution,
         VonMisesFisherDistribution,
+        MultivariateStudentTDistribution,
+        VonMisesDistribution,
+        LogSeriesDistribution,
     ):
         register_capabilities(dist_type, backend_caps)
 
@@ -1006,7 +1140,10 @@ def _register_builtin_compute_metadata() -> None:
         BernoulliDistribution,
         CategoricalDistribution,
         GammaDistribution,
+        InverseGammaDistribution,
         InverseGaussianDistribution,
+        GumbelDistribution,
+        HalfNormalDistribution,
         LogGaussianDistribution,
         BinomialDistribution,
         NegativeBinomialDistribution,
@@ -1031,6 +1168,9 @@ def _register_builtin_compute_metadata() -> None:
         IntegerBernoulliSetDistribution,
         SpearmanRankingDistribution,
         VonMisesFisherDistribution,
+        MultivariateStudentTDistribution,
+        VonMisesDistribution,
+        LogSeriesDistribution,
     ):
         register_declaration(dist_type.compute_declaration())
 

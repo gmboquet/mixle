@@ -22,12 +22,18 @@ from pysp.stats import (
     GammaDistribution,
     GaussianDistribution,
     GeometricDistribution,
+    GumbelDistribution,
+    HalfNormalDistribution,
+    InverseGammaDistribution,
+    InverseGaussianDistribution,
     LaplaceDistribution,
     LogisticDistribution,
+    LogSeriesDistribution,
     ParetoDistribution,
     PoissonDistribution,
     StudentTDistribution,
     UniformDistribution,
+    VonMisesDistribution,
     WeibullDistribution,
 )
 
@@ -40,13 +46,19 @@ def _samples(rng, kind):
         "poisson": lambda: [int(v) for v in rng.poisson(3.0, size=400)],
         "exponential": lambda: list(rng.exponential(2.0, size=400)),
         "gamma": lambda: list(rng.gamma(2.0, 2.0, size=400)),
+        "inverse_gamma": lambda: list(1.0 / rng.gamma(3.0, 1.0 / 2.0, size=400)),
+        "inverse_gaussian": lambda: list(rng.wald(2.0, 3.0, size=400)),
+        "gumbel": lambda: list(rng.gumbel(0.5, 1.3, size=400)),
+        "half_normal": lambda: list(np.abs(rng.normal(0.0, 1.5, size=400))),
         "geometric": lambda: [int(v) + 1 for v in rng.geometric(0.3, size=400)],
         "laplace": lambda: list(rng.laplace(0.5, 1.3, size=400)),
         "logistic": lambda: list(rng.logistic(0.0, 1.0, size=400)),
+        "log_series": lambda: [int(v) for v in rng.logseries(0.6, size=400)],
         "studentt": lambda: list(rng.standard_t(5.0, size=400)),
         "weibull": lambda: [abs(v) + 1.0e-3 for v in rng.weibull(1.5, size=400) * 2.0],
         "pareto": lambda: [(v + 1.0) for v in rng.pareto(2.5, size=400)],
         "uniform": lambda: list(rng.uniform(-1.0, 2.0, size=400)),
+        "von_mises": lambda: list(rng.vonmises(0.7, 2.5, size=400)),
     }[kind]()
 
 
@@ -58,14 +70,20 @@ CASES = [
     ("poisson", PoissonDistribution(3.0), "poisson"),
     ("exponential", ExponentialDistribution(2.0), "exponential"),
     ("gamma", GammaDistribution(2.0, 2.0), "gamma"),
+    ("inverse_gamma", InverseGammaDistribution(3.0, 2.0), "inverse_gamma"),
+    ("inverse_gaussian", InverseGaussianDistribution(2.0, 3.0), "inverse_gaussian"),
+    ("half_normal", HalfNormalDistribution(1.5), "half_normal"),
     ("geometric", GeometricDistribution(0.3), "geometric"),
     # non-exp-family leaves lit up by the generic symbolic->numba compiler
+    ("gumbel", GumbelDistribution(0.5, 1.3), "gumbel"),
     ("laplace", LaplaceDistribution(0.5, 1.3), "laplace"),
     ("logistic", LogisticDistribution(0.0, 1.0), "logistic"),
+    ("log_series", LogSeriesDistribution(0.6), "log_series"),
     ("studentt", StudentTDistribution(5.0, 0.0, 1.0), "studentt"),
     ("weibull", WeibullDistribution(1.5, 2.0), "weibull"),
     ("pareto", ParetoDistribution(1.0, 2.5), "pareto"),
     ("uniform", UniformDistribution(-1.0, 2.0), "uniform"),
+    ("von_mises", VonMisesDistribution(0.7, 2.5), "von_mises"),
 ]
 
 
