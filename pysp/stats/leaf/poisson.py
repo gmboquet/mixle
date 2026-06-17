@@ -38,6 +38,15 @@ from pysp.utils.special import digamma
 from pysp.utils.vector import gammaln
 
 
+def _fisher_mean_var(dist):
+    lam = float(dist.lam)
+    return lam, lam
+
+
+def _fisher_encoded(enc_data):
+    return np.asarray(enc_data[0], dtype=np.float64)
+
+
 class PoissonDistribution(SequenceEncodableProbabilityDistribution):
     """Poisson distribution over non-negative integer counts with rate ``lam``."""
 
@@ -267,6 +276,12 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         vals = engine.asarray(x[0])
         ww = engine.asarray(weights)
         return engine.sum(ww, axis=0), engine.sum(ww * vals[:, None], axis=0)
+
+    def to_fisher(self, **kwargs):
+        """Return the Poisson's count-family Fisher view."""
+        from pysp.utils.fisher import CountFisherView, _count_data
+
+        return CountFisherView(self, _fisher_mean_var, _count_data, _fisher_encoded)
 
     def sampler(self, seed: int | None = None) -> "PoissonSampler":
         """Create PoissonSampler object with PoissonDistribution instance and seed (Optional[int]) passed.

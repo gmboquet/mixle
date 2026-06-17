@@ -2432,62 +2432,10 @@ def _as_float_array(data: Any) -> np.ndarray:
     return np.asarray(data, dtype=np.float64)
 
 
-def _poisson_mean_var(dist: Any) -> tuple[float, float]:
-    lam = float(dist.lam)
-    return lam, lam
-
-
-def _exponential_mean_var(dist: Any) -> tuple[float, float]:
-    if hasattr(dist, "beta"):
-        mean = float(dist.beta)
-    else:
-        mean = 1.0 / float(dist.lam)
-    return mean, mean * mean
-
-
-def _negative_binomial_mean_var(dist: Any) -> tuple[float, float]:
-    r = float(dist.r)
-    p = float(dist.p)
-    return r * (1.0 - p) / p, r * (1.0 - p) / (p * p)
-
-
-def _geometric_mean_var(dist: Any) -> tuple[float, float]:
-    p = float(dist.p)
-    return 1.0 / p, (1.0 - p) / (p * p)
-
-
-def _binomial_mean_var(dist: Any) -> tuple[float, float]:
-    shift = 0.0 if getattr(dist, "min_val", None) is None else float(dist.min_val)
-    n = float(dist.n)
-    p = float(dist.p)
-    return shift + n * p, n * p * (1.0 - p)
-
-
-def _bernoulli_mean_var(dist: Any) -> tuple[float, float]:
-    p = float(dist.p)
-    return p, p * (1.0 - p)
-
-
+# CountFisherView shared extractors (the per-family mean_var / encoded helpers now live in each
+# count distribution's own module, which imports these and CountFisherView).
 def _count_data(data: Any) -> np.ndarray:
     return _as_float_array(data)
-
-
-def _poisson_encoded(enc_data: Any) -> np.ndarray:
-    return np.asarray(enc_data[0], dtype=np.float64)
-
-
-def _first_encoded(enc_data: Any) -> np.ndarray:
-    if isinstance(enc_data, tuple):
-        return np.asarray(enc_data[0], dtype=np.float64)
-    return np.asarray(enc_data, dtype=np.float64)
-
-
-def _binomial_encoded(enc_data: Any) -> np.ndarray:
-    if isinstance(enc_data, tuple):
-        if len(enc_data) >= 3:
-            return np.asarray(enc_data[2], dtype=np.float64)
-        return np.asarray(enc_data[0], dtype=np.float64)
-    return np.asarray(enc_data, dtype=np.float64)
 
 
 def _identity_encoded(enc_data: Any) -> np.ndarray:
@@ -2531,20 +2479,8 @@ def _legacy_to_fisher(dist: Any, **kwargs: Any) -> FisherView:
     if tname == "IntegerCategoricalDistribution" and (hasattr(dist, "p_vec") or hasattr(dist, "prob_vec")):
         return IntegerCategoricalFisherView(dist)
 
-    if tname == "BernoulliDistribution" and hasattr(dist, "p"):
-        return CountFisherView(dist, _bernoulli_mean_var, _count_data, _identity_encoded)
-
-    if tname == "PoissonDistribution" and hasattr(dist, "lam"):
-        return CountFisherView(dist, _poisson_mean_var, _count_data, _poisson_encoded)
-
-    if tname == "ExponentialDistribution" and (hasattr(dist, "beta") or hasattr(dist, "lam")):
-        return CountFisherView(dist, _exponential_mean_var, _count_data, _identity_encoded)
-
     if tname == "GammaDistribution" and hasattr(dist, "k") and hasattr(dist, "theta"):
         return GammaFisherView(dist)
-
-    if tname == "NegativeBinomialDistribution" and hasattr(dist, "r") and hasattr(dist, "p"):
-        return CountFisherView(dist, _negative_binomial_mean_var, _count_data, _first_encoded)
 
     if tname == "BetaDistribution" and hasattr(dist, "a") and hasattr(dist, "b"):
         return BetaFisherView(dist)
@@ -2556,12 +2492,6 @@ def _legacy_to_fisher(dist: Any, **kwargs: Any) -> FisherView:
 
     if tname == "IndianBuffetProcessDistribution" and hasattr(dist, "feature_probs"):
         return IndianBuffetProcessFisherView(dist)
-
-    if tname == "GeometricDistribution" and hasattr(dist, "p"):
-        return CountFisherView(dist, _geometric_mean_var, _count_data, _identity_encoded)
-
-    if tname == "BinomialDistribution" and hasattr(dist, "p") and hasattr(dist, "n"):
-        return CountFisherView(dist, _binomial_mean_var, _count_data, _binomial_encoded)
 
     if tname == "SequenceDistribution" and hasattr(dist, "dist"):
         return SequenceFisherView(dist)

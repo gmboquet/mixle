@@ -31,6 +31,21 @@ from pysp.utils.vector import gammaln
 E = tuple[np.ndarray, np.ndarray, np.ndarray, int, int]
 
 
+def _fisher_mean_var(dist):
+    shift = 0.0 if getattr(dist, "min_val", None) is None else float(dist.min_val)
+    n = float(dist.n)
+    p = float(dist.p)
+    return shift + n * p, n * p * (1.0 - p)
+
+
+def _fisher_encoded(enc_data):
+    if isinstance(enc_data, tuple):
+        if len(enc_data) >= 3:
+            return np.asarray(enc_data[2], dtype=np.float64)
+        return np.asarray(enc_data[0], dtype=np.float64)
+    return np.asarray(enc_data, dtype=np.float64)
+
+
 class BinomialDistribution(SequenceEncodableProbabilityDistribution):
     """Binomial distribution over ``min_val + {0, ..., n}`` with success probability ``p``."""
 
@@ -378,6 +393,12 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
     def support_size(self) -> int:
         """``n + 1`` outcomes ``min_val + {0, ..., n}``."""
         return int(self.n) + 1
+
+    def to_fisher(self, **kwargs):
+        """Return the Binomial's count-family Fisher view."""
+        from pysp.utils.fisher import CountFisherView, _count_data
+
+        return CountFisherView(self, _fisher_mean_var, _count_data, _fisher_encoded)
 
     def sampler(self, seed: int | None = None) -> "BinomialSampler":
         """Returns BinomialSampler for generating samples from BinomialDistribution(n,p,min_val).
