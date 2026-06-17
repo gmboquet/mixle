@@ -126,6 +126,18 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
         min_val = -engine.max(engine.where(mask, -vals[:, None], engine.asarray(-np.inf)), axis=0)
         return count, sum_logs, min_val
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact). The continuous 'index of' a value."""
+        from scipy.stats import pareto as _sp
+
+        return float(_sp.cdf(x, self.alpha, scale=self.xm))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from scipy.stats import pareto as _sp
+
+        return float(_sp.ppf(q, self.alpha, scale=self.xm))
+
     def sampler(self, seed: int | None = None) -> "ParetoSampler":
         """Return a sampler for drawing observations from this distribution."""
         return ParetoSampler(self, seed)

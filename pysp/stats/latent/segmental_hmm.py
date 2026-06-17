@@ -29,6 +29,7 @@ from pysp.stats.combinator.null_dist import (
 )
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -275,6 +276,27 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         """Return the data encoder used by this distribution for vectorized methods."""
         return SegmentalHiddenMarkovDataEncoder(
             [d.dist_to_encoder() for d in self.emissions], self.len_dist.dist_to_encoder()
+        )
+
+    def enumerator(self) -> DistributionEnumerator:
+        """Enumerate segment sequences in descending marginal probability order.
+
+        The segmental HMM has the *standard* HMM forward semantics -- each position emits one segment
+        from its state's distribution, scored independently -- so it reuses
+        :class:`HiddenMarkovModelEnumerator` directly via its per-state emission (``topics``),
+        ``log_w``, ``log_transitions``, and ``len_dist``. Each segment is drawn from the union of the
+        per-state emission supports, so every emission distribution must itself support enumeration
+        (and a length distribution must be modeled).
+        """
+        from pysp.stats.latent.hidden_markov import HiddenMarkovModelEnumerator
+
+        return HiddenMarkovModelEnumerator(
+            self,
+            topics=self.emissions,
+            log_w=self.log_w,
+            log_transitions=self.log_transitions,
+            len_dist=self.len_dist,
+            path_root="SegmentalHiddenMarkovModelDistribution",
         )
 
 

@@ -258,13 +258,21 @@ unbounded.
 from pysp.utils.density_rank import density_rank, count_dp_seek
 
 dist.enumerator().top_k(5)          # the 5 most probable (value, log_prob), in order
+dist.enumerator().top_p(0.95)       # smallest set covering 95% of the mass (discrete nucleus)
 density_rank(dist, value)           # exact-head + sampling rank & CDF of an observation
 count_dp_seek(dist, index=10_000)   # the ~10,000th most probable value, by structural count-DP
 ```
 
-For decomposable families (`Composite` / `Sequence` / `MarkovChain`), rank↔value is an exact count
+`Composite` / `Record` also support **conditional enumeration** — most-probable completions given
+some fields, best-first:
+
+```python
+record.conditional_enumerator({"country": "US"}).top_k(5)   # 5 likeliest records with country=US
+```
+
+For decomposable families (`Composite` / `Record` / `Sequence` / `MarkovChain`), rank↔value is an exact count
 dynamic program at any depth (`count_dp_rank`, `count_dp_seek`, `cumulative_probability`,
-`mixture_cross_rank`). For very large or infinite supports, **budget-bounded quantized indexes** seek
+`count_dp_top_p` — the nucleus *size* without enumerating it, `mixture_cross_rank`). For very large or infinite supports, **budget-bounded quantized indexes** seek
 and unrank over just the most-probable region without enumerating everything:
 
 ```python
@@ -276,6 +284,22 @@ for value, log_prob in dist.count_budget_distinct(budget_bits=20):
 `pysp.utils.enumeration` provides the shared machinery (bounded best-first union, quantization,
 Kronecker-substitution count convolution).
 
+**Continuous families** realize the same four operations through the CDF and its inverse instead of
+discrete enumeration: every univariate continuous leaf (Gaussian, Gamma, Exponential, Beta, Laplace,
+LogGaussian, Logistic, Pareto, Rayleigh, Student-t, Uniform, Weibull) has an exact `cdf(x)` (the
+"index of" `x`) and `quantile(q)` (the value at cumulative-probability index `q` — the continuous
+"arbitrary index"; a quantile grid enumerates the support in order). Multivariate Gaussians expose an
+exact probability-ordered cumulative (the chi-square-of-Mahalanobis highest-density-region mass), and
+von Mises–Fisher exposes one too (the cosine-marginal tail), both surfaced via `density_rank` as method
+`exact-analytic`. Those families also invert it — `density_quantile(q)` returns a representative point at
+cumulative-density index `q` (on the `q`-HDR contour), the multivariate "arbitrary index"; sweeping `q`
+enumerates the support in descending density. For any other samplable family (Dirichlet and the parameter
+priors, MVN mixtures, the coupled topic/association models), `density_rank` returns the cumulative
+probability by Monte Carlo, and every distribution inherits a Monte-Carlo `density_quantile(q)`
+(representative arbitrary index) and `density_enumeration(num_points)` (descending-density representative
+sweep) — so all four operations are reachable for every samplable family, *exactly* where the support is
+countable or has a closed-form density quantile, and as *stochastic representatives* otherwise.
+
 ## Distribution catalog
 
 ~90 composable families live in `pysp.stats`, grouped into subpackages (`leaf`, `multivariate`,
@@ -286,8 +310,9 @@ Kronecker-substitution count convolution).
   Exponential, Gamma, Inverse Gamma, Inverse Gaussian, Half-Normal, Gumbel, Beta, Weibull, Rayleigh,
   Pareto, Poisson, Bernoulli, Geometric, Binomial, Negative Binomial, Log-Series, von Mises, Dirichlet,
   categorical, plus multivariate / diagonal Gaussian, von Mises–Fisher, and multivariate Student-t.
-- **Combinators:** `CompositeDistribution` (tuples), `SequenceDistribution`, `OptionalDistribution`
-  (missing data), `TransformDistribution`, `ConditionalDistribution`, `WeightedDistribution`.
+- **Combinators:** `CompositeDistribution` (tuples), `RecordDistribution` (named fields),
+  `SequenceDistribution`, `OptionalDistribution` (missing data), `TransformDistribution`,
+  `ConditionalDistribution`, `WeightedDistribution`.
 - **Latent structure:** mixtures (plain, heterogeneous, hierarchical, joint, semi-supervised), LDA,
   PLSI, probabilistic PCA, HMMs (standard, segmental, lookback, tree, quantized), PCFGs, Markov chains,
   hidden associations, IBP, Pitman-Yor processes, Bernoulli sets.

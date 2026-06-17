@@ -1192,9 +1192,12 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
 
         """
         super().__init__(dist)
-        if dist.has_topics:
+        # ``getattr`` defaults let chain-forward HMM variants (e.g. SegmentalHiddenMarkovModel) that
+        # share the standard forward semantics but lack the taus/terminal_values machinery reuse this
+        # enumerator without defining those attributes.
+        if getattr(dist, "has_topics", False):
             raise EnumerationError(dist, reason="taus/topics parameterization is not supported")
-        if dist.terminal_values is not None:
+        if getattr(dist, "terminal_values", None) is not None:
             raise EnumerationError(dist, reason="terminal_values semantics are not supported")
         len_dist = dist.len_dist if len_dist is None else len_dist
         if len_dist is None or isinstance(len_dist, NullDistribution):

@@ -104,6 +104,13 @@ def density_rank(
             # value is among the least probable, and the accumulated mass is exact.
             return DensityRankResult(min(1.0, mass), strictly_more, True, 0.0, t, "exact-exhausted")
 
+    # Exact analytic cumulative when the family provides one (e.g. the multivariate Gaussian's
+    # chi-square-of-Mahalanobis highest-density-region mass): no enumeration, no sampling.
+    exact_cumulative = getattr(dist, "density_cumulative", None)
+    if callable(exact_cumulative):
+        g = float(exact_cumulative(value))
+        return DensityRankResult(min(1.0, max(0.0, g)), None, True, 0.0, t, "exact-analytic")
+
     # Sampling fallback: estimate G(value) = P(log p(Y) >= t).
     samples = dist.sampler(seed).sample(n_samples)
     hits = 0
@@ -262,6 +269,39 @@ class CountDPSeekResult:
     oversample: int
 
 
+@dataclass
+class CountDPTopPResult:
+    """How many of the most-probable outcomes cover probability mass ``target`` -- the nucleus SIZE.
+
+    The structural / at-depth counterpart of ``DistributionEnumerator.top_p``: where that materializes
+    the nucleus (fine when it is small), this reports its size for decomposable families WITHOUT
+    enumerating it, so it scales to huge supports where the nucleus itself is too large to list.
+
+    Attributes:
+        size_lower, size_upper: provable bracket on the nucleus size -- the number of most-probable
+            outcomes whose summed mass first reaches ``target``. Both bounds hold regardless of the
+            within-bucket ordering: ``size_upper`` includes whole probability buckets until the mass
+            covers ``target`` (a valid covering set, so the true nucleus is no larger), and
+            ``size_lower`` caps every item in bucket ``b`` at its maximum possible probability
+            ``2**(-b * bits_per_bucket)`` (an over-estimate of coverage, so fewer items provably
+            cannot reach ``target``).
+        covered_mass: exact mass of the ``size_upper`` whole-bucket cover (``>= target`` unless truncated).
+        log_prob_threshold: approximate log-prob at the cover boundary.
+        target: the requested cumulative-probability target ``p``.
+        truncated: the depth bound was hit before the mass reached ``target`` (then ``size_upper`` is a
+            floor on the true size, not a cover).
+        oversample: the quantizer oversample used (higher -> finer buckets -> tighter bracket).
+    """
+
+    size_lower: int
+    size_upper: int
+    covered_mass: float
+    log_prob_threshold: float
+    target: float
+    truncated: bool
+    oversample: int
+
+
 def count_dp_seek(
     dist: Any,
     index: int,
@@ -337,6 +377,7 @@ def _mass_histogram(dist, quantizer, max_fine_bucket):
     sum probabilities over their own support. Used by :func:`cumulative_probability`.
     """
     from pysp.stats.combinator.composite import CompositeDistribution
+    from pysp.stats.combinator.record import RecordDistribution
     from pysp.stats.combinator.sequence import SequenceDistribution
     from pysp.stats.compute.pdist import EnumerationError
 
@@ -349,7 +390,10 @@ def _mass_histogram(dist, quantizer, max_fine_bucket):
                     out[k] = out.get(k, 0.0) + ma * mb
         return out
 
-    if isinstance(dist, CompositeDistribution):
+    # Composite and Record are both products of independent fields, so the joint mass histogram is
+    # the convolution of the per-field histograms (mass multiplies, bits add) regardless of whether
+    # fields are addressed by position or by name.
+    if isinstance(dist, (CompositeDistribution, RecordDistribution)):
         joint = {0: 1.0}
         for f in range(dist.count):
             joint = convolve(joint, _mass_histogram(dist.dists[f], quantizer, max_fine_bucket))
@@ -424,6 +468,100 @@ def cumulative_probability(dist, value, oversample: int = 64, bin_width_bits: fl
             if float(lp) >= t - 1.0e-9:
                 band += math.exp(float(lp))
     return min(1.0, bulk + band)
+
+
+def count_dp_top_p(
+    dist: Any,
+    p: float,
+    oversample: int = 64,
+    bin_width_bits: float = 1.0,
+    tol: float = 1.0e-9,
+    max_fine_bucket_cap: int = 1 << 30,
+) -> CountDPTopPResult:
+    """Nucleus SIZE: how many most-probable outcomes cover mass ``p``, for decomposable families.
+
+    The structural counterpart of ``dist.enumerator().top_p(p)`` -- it returns the *size* of the
+    minimal high-probability set (and its boundary), computed from the exact per-bucket mass
+    (:func:`_mass_histogram`) and per-bucket counts (the count index) WITHOUT enumerating the nucleus,
+    so it works when the nucleus is far too large to list. The size is returned as a provable bracket
+    ``[size_lower, size_upper]`` (see :class:`CountDPTopPResult`); the bracket is tight when the mass
+    is concentrated and widens with quantization smear (raise ``oversample`` to tighten).
+
+    For mixtures/HMMs the mass histogram has no exact decomposition -- use the enumerator's ``top_p``
+    (exact for a small nucleus) there instead.
+    """
+    if not 0.0 <= p <= 1.0:
+        raise ValueError("p must be in [0, 1].")
+    from pysp.stats.compute.pdist import EnumerationError
+    from pysp.utils.quantization.core import Quantizer
+
+    q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
+    bits_per_bucket = bin_width_bits / oversample
+    if p <= 0.0:
+        return CountDPTopPResult(0, 0, 0.0, float("inf"), p, False, oversample)
+
+    # Deepen the depth bound until the whole-bucket cover reaches p, or the covered mass stalls.
+    mfb = 64
+    prev_mass = -1.0
+    mass: dict[int, float] = {}
+    while True:
+        mass = _mass_histogram(dist, q, mfb)
+        total = sum(mass.values())
+        if total >= p - tol or (abs(total - prev_mass) <= tol and total > 0.0) or mfb >= max_fine_bucket_cap:
+            break
+        prev_mass = total
+        mfb *= 2
+
+    index, _truncated = dist.quantized_count_index(q, max_fine_bucket=mfb)
+    if index is None:
+        raise EnumerationError(dist, reason="no structural count index for top_p")
+    counts = index.hist
+    buckets = sorted(mass)
+
+    # Upper bound: include whole probability buckets (descending prob = ascending bucket) until the
+    # exact cumulative mass reaches p. The set of all items in those buckets covers p, so the true
+    # nucleus is no larger than its size.
+    cum_mass = 0.0
+    cum_count = 0
+    size_upper = 0
+    boundary_bucket = buckets[-1] if buckets else 0
+    covered_mass = 0.0
+    truncated = True
+    for b in buckets:
+        cum_mass += mass[b]
+        cum_count += counts.count_at(b)
+        if cum_mass >= p - tol:
+            size_upper = cum_count
+            boundary_bucket = b
+            covered_mass = cum_mass
+            truncated = False
+            break
+    else:
+        size_upper = cum_count
+        covered_mass = cum_mass
+
+    # Lower bound: cap each item in bucket b at its maximum possible probability 2**(-b*bits_per_bucket)
+    # (a structural bucket is a sum of floored child buckets <= the true floored bits, so the true
+    # probability never exceeds this cap). If even these caps cannot reach p with c items, the true
+    # nucleus needs more than c, so this is a provable floor.
+    cap_mass = 0.0
+    cap_count = 0
+    size_lower = cum_count  # if caps never reach p (only when truncated), the floor is everything seen
+    for b in buckets:
+        c = counts.count_at(b)
+        cap_here = 2.0 ** (-b * bits_per_bucket)
+        if cap_mass + c * cap_here >= p - tol:
+            residual = p - cap_mass
+            need = math.ceil(residual / cap_here - tol)
+            size_lower = cap_count + max(0, min(need, c))
+            break
+        cap_mass += c * cap_here
+        cap_count += c
+
+    log_prob_threshold = -float(boundary_bucket) * bits_per_bucket * math.log(2.0)
+    return CountDPTopPResult(
+        int(size_lower), int(size_upper), float(covered_mass), log_prob_threshold, p, truncated, oversample
+    )
 
 
 def _joint_bucket_histogram(components, quantizer, max_fine_bucket):

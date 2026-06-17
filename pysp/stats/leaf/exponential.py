@@ -248,6 +248,18 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         ww = engine.asarray(weights)
         return engine.sum(ww, axis=0), engine.sum(ww * xx[:, None], axis=0)
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact). The continuous 'index of' a value."""
+        from scipy.stats import expon as _sp
+
+        return float(_sp.cdf(x, scale=self.beta))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from scipy.stats import expon as _sp
+
+        return float(_sp.ppf(q, scale=self.beta))
+
     def sampler(self, seed: int | None = None) -> "ExponentialSampler":
         """Create an ExponentialSampler object with scale beta.
 

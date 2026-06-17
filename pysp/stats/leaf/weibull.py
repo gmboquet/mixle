@@ -183,6 +183,18 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
         rv = engine.where((shape < 1.0) & is_zero, engine.asarray(np.inf), rv)
         return rv
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact). The continuous 'index of' a value."""
+        from scipy.stats import weibull_min as _sp
+
+        return float(_sp.cdf(x, self.shape, scale=self.scale))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from scipy.stats import weibull_min as _sp
+
+        return float(_sp.ppf(q, self.shape, scale=self.scale))
+
     def sampler(self, seed: int | None = None) -> "WeibullSampler":
         """Return a sampler for drawing observations from this distribution."""
         return WeibullSampler(self, seed)
