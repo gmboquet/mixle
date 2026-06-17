@@ -31,7 +31,45 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.utils.aliasing import MISSING, coalesce_alias
+from pysp.utils.fisher import FixedFisherView
 from pysp.utils.special import digamma
+
+
+class DiagonalGaussianFisherView(FixedFisherView):
+    def __init__(self, dist: Any) -> None:
+        self.dim = int(dist.dim if hasattr(dist, "dim") else len(dist.mu))
+        labels = [("sum", str(i)) for i in range(self.dim)]
+        labels.extend(("sum2", str(i)) for i in range(self.dim))
+        labels.append(("count",))
+        super().__init__(dist, labels)
+
+    def _as_matrix(self, data: Any) -> np.ndarray:
+        return np.asarray(data, dtype=np.float64).reshape((-1, self.dim))
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        x = self._as_matrix(data)
+        return np.hstack((x, x * x, np.ones((x.shape[0], 1), dtype=np.float64)))
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        x = enc_data[0] if isinstance(enc_data, tuple) else enc_data
+        return self._statistics_from_data(np.asarray(x, dtype=np.float64), estimate=estimate)
+
+    def _model_mean(self) -> np.ndarray:
+        mu = np.asarray(self.dist.mu, dtype=np.float64).reshape(-1)
+        var = np.asarray(self.dist.covar, dtype=np.float64).reshape(-1)
+        return np.concatenate((mu, mu * mu + var, np.asarray([1.0])))
+
+    def _model_fisher(self) -> np.ndarray:
+        mu = np.asarray(self.dist.mu, dtype=np.float64).reshape(-1)
+        var = np.asarray(self.dist.covar, dtype=np.float64).reshape(-1)
+        dim = self.dim
+        out = np.zeros((2 * dim + 1, 2 * dim + 1), dtype=np.float64)
+        out[:dim, :dim] = np.diag(var)
+        diag = 2.0 * mu * var
+        out[np.arange(dim), dim + np.arange(dim)] = diag
+        out[dim + np.arange(dim), np.arange(dim)] = diag
+        out[dim + np.arange(dim), dim + np.arange(dim)] = 2.0 * var * var + 4.0 * mu * mu * var
+        return out
 
 
 class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
@@ -315,6 +353,10 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
             (xx[:, None, :] - mu[None, :, :]) * (xx[:, None, :] - mu[None, :, :]) / covar[None, :, :], axis=2
         )
         return log_c[None, :] - 0.5 * quad
+
+    def to_fisher(self, **kwargs):
+        """Return this distribution's own Fisher view."""
+        return DiagonalGaussianFisherView(self)
 
     def sampler(self, seed: int | None = None) -> "DiagonalGaussianSampler":
         """Create a DiagonalGaussianSampler for sampling from this distribution.
