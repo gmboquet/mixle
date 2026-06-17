@@ -6,11 +6,14 @@ Mixtures need an identifiability constraint (ordered component means) to break l
 — the standard requirement, and exactly what the constraint surface provides.
 """
 
+import importlib.util
 import unittest
 
 import numpy as np
 
 from pysp.ppl import Dirichlet, Gamma, Markov, Mix, Normal, free
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 class HMMStructuralParameterTestCase(unittest.TestCase):
@@ -106,6 +109,7 @@ class MixtureWeightsAsParameterTestCase(unittest.TestCase):
         self.assertAlmostEqual(wts[2], 0.2, delta=0.08)
 
 
+@unittest.skipUnless(HAS_TORCH, "torch is not installed")
 class MixtureAutogradTestCase(unittest.TestCase):
     """A mixture of leaf components gets analytic Torch gradients (MixtureGradTarget): the
     autograd log-target matches the numeric one, and NUTS / full-rank VB work on it."""

@@ -47,7 +47,12 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_declaration(cls):
-        from pysp.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        from pysp.stats.compute.declarations import (
+            DistributionDeclaration,
+            ExponentialFamilySpec,
+            ParameterSpec,
+            StatisticSpec,
+        )
 
         return DistributionDeclaration(
             name="geometric",
@@ -55,7 +60,12 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
             parameters=(ParameterSpec("p", constraint="unit_interval"),),
             statistics=(StatisticSpec("count"), StatisticSpec("sum")),
             support="positive_integer",
-            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            ),
         )
 
     @staticmethod
@@ -63,6 +73,29 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         """Return per-row Geometric sufficient statistics in accumulator order."""
         xx = engine.asarray(x)
         return xx * 0.0 + engine.asarray(1.0), xx
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
+        """Return Geometric sufficient statistic ``T(x) = (x,)`` (support x = 1, 2, ...)."""
+        return (engine.asarray(x),)
+
+    @staticmethod
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return Geometric natural parameter ``eta = log(1 - p)``."""
+        return (engine.log(engine.asarray(1.0) - params["p"]),)
+
+    @staticmethod
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
+        """Return Geometric log partition ``A = log(1 - p) - log(p)``."""
+        p = params["p"]
+        return engine.log(engine.asarray(1.0) - p) - engine.log(p)
+
+    @staticmethod
+    def exp_family_from_natural(eta: Any) -> "GeometricDistribution":
+        """Return the Geometric with natural parameter ``eta = log(1 - p)``."""
+        import numpy as _np
+
+        return GeometricDistribution(float(1.0 - _np.exp(float(eta[0]))))
 
     def __init__(
         self,

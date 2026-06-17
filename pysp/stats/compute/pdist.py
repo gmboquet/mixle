@@ -140,6 +140,29 @@ class ProbabilityDistribution:
 
         return _legacy_to_fisher(self, **kwargs)
 
+    def to_exponential_family(self, engine: Any = None):
+        """Return the canonical exponential-family view, or ``None``.
+
+        The canonical form is ``p(x) = h(x) * exp(<eta, T(x)> - A(eta))``.  The default
+        reads ``declaration_for(self).exponential_family`` (the per-family
+        ``ExponentialFamilySpec``) and wraps it in an
+        :class:`~pysp.stats.exp_family.ExponentialFamilyForm`; it returns ``None`` when
+        this family is not a (single) exponential family.  There is no type switch --
+        adding a family is a matter of providing its spec.
+        """
+        from pysp.engines import NUMPY_ENGINE
+        from pysp.stats.compute.declarations import declaration_for
+        from pysp.stats.exp_family import ExponentialFamilyForm
+
+        declaration = declaration_for(self)
+        if declaration is None or declaration.exponential_family is None:
+            return None
+        return ExponentialFamilyForm(
+            distribution=self,
+            spec=declaration.exponential_family,
+            engine=NUMPY_ENGINE if engine is None else engine,
+        )
+
     def get_prior(self) -> Optional["ProbabilityDistribution"]:
         """Return the conjugate/parameter prior carried by this distribution, if any.
 
@@ -517,7 +540,18 @@ class DistributionSampler:
         return self.rng.randint(0, maxrandint)
 
     @abstractmethod
-    def sample(self, size: int | None = None) -> Any: ...
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Draw observations.
+
+        Combinator samplers (mixture/sequence/...) accept ``batched``. With
+        ``batched=True`` (the default) each child stream is drawn in one vectorized
+        call instead of a per-draw Python loop -- far faster. Because every child
+        sampler owns an independent ``RandomState``, batching consumes each stream
+        in the same order as the loop, so the draws are identical to the legacy
+        path. ``batched=False`` forces that legacy per-draw loop as a guaranteed-
+        stable reference. Leaf samplers are already vectorized and ignore the flag.
+        """
+        ...
 
 
 class DistributionEnumerator:

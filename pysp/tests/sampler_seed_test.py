@@ -219,6 +219,7 @@ def _stats_public_distribution_catalog():
         "DirichletDistribution": stats.DirichletDistribution([1.0, 2.0, 3.0]),
         "DiagonalGaussianDistribution": stats.DiagonalGaussianDistribution([0.5, -1.0], [1.0, 2.0]),
         "ExponentialDistribution": stats.ExponentialDistribution(2.0),
+        "ExponentiallyModifiedGaussianDistribution": stats.ExponentiallyModifiedGaussianDistribution(0.0, 1.0, 1.0),
         "GammaDistribution": stats.GammaDistribution(2.0, 3.0),
         "InverseGammaDistribution": stats.InverseGammaDistribution(3.0, 2.0),
         "GaussianDistribution": stats.GaussianDistribution(1.0, 2.0),
@@ -325,6 +326,7 @@ def _stats_public_distribution_catalog():
         "TruncatedDistribution": stats.TruncatedDistribution(
             stats.IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]), allowed=[0, 1]
         ),
+        "CensoredDistribution": stats.CensoredDistribution(stats.GaussianDistribution(0.0, 1.0)),
         "ExponentialTiltedDistribution": stats.ExponentialTiltedDistribution(stats.PoissonDistribution(3.0), theta=0.4),
         "LDADistribution": stats.LDADistribution(
             [
