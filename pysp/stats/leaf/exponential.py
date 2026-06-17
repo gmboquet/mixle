@@ -27,6 +27,11 @@ from pysp.stats.leaf.gamma import GammaDistribution
 from pysp.utils.special import digamma
 
 
+def _fisher_mean_var(dist):
+    mean = float(dist.beta) if hasattr(dist, "beta") else 1.0 / float(dist.lam)
+    return mean, mean * mean
+
+
 class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
     """Exponential distribution on non-negative real values with scale ``beta``."""
 
@@ -259,6 +264,12 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         from scipy.stats import expon as _sp
 
         return float(_sp.ppf(q, scale=self.beta))
+
+    def to_fisher(self, **kwargs):
+        """Return the Exponential's count-family Fisher view."""
+        from pysp.utils.fisher import CountFisherView, _count_data, _identity_encoded
+
+        return CountFisherView(self, _fisher_mean_var, _count_data, _identity_encoded)
 
     def sampler(self, seed: int | None = None) -> "ExponentialSampler":
         """Create an ExponentialSampler object with scale beta.
