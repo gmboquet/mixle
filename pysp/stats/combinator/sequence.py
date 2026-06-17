@@ -412,6 +412,26 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             return SequenceFisherView(self)
         return super().to_fisher(**kwargs)
 
+    def to_exponential_family(self, engine: Any = None):
+        """Return the iid exponential-family view, or ``None``.
+
+        An iid sequence of an exponential family is itself an exponential family with
+        the shared element ``eta`` and ``T(x) = sum_t T_0(x_t)``.  This holds only when
+        the length is not separately modeled and not length-normalized (a length term
+        or normalization breaks the single-exp-family form); otherwise returns ``None``,
+        as does a non-exp-family element.
+        """
+        from pysp.engines import NUMPY_ENGINE
+        from pysp.stats.exp_family import IIDExponentialFamilyForm, to_exponential_family
+
+        if not self.null_len_dist or self.len_normalized:
+            return None
+        eng = NUMPY_ENGINE if engine is None else engine
+        element = to_exponential_family(self.dist, engine=eng)
+        if element is None:
+            return None
+        return IIDExponentialFamilyForm(distribution=self, element=element, engine=eng)
+
     def sampler(self, seed: int | None = None) -> "SequenceSampler":
         """Create a SequenceSampler object from instance of SequenceDistribution.
 
