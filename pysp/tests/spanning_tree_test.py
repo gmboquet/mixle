@@ -53,6 +53,44 @@ class SpanningTreeTestCase(unittest.TestCase):
         enc = dist.dist_to_encoder().seq_encode(trees)
         np.testing.assert_allclose(dist.seq_log_density(enc), [dist.log_density(t) for t in trees])
 
+    def test_enumerator_matches_brute_force_order(self):
+        dist = SpanningTreeDistribution(_W)
+        brute = [(list(t), dist.log_density(t)) for t in _all_trees(4)]
+        brute.sort(key=lambda u: -u[1])
+        items = list(dist.enumerator())
+
+        self.assertEqual([t for t, _ in items], [t for t, _ in brute])
+        np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in brute], atol=1.0e-12)
+        self.assertAlmostEqual(float(np.logaddexp.reduce([lp for _, lp in items])), 0.0, places=10)
+
+    def test_enumerator_respects_sparse_support(self):
+        weights = np.array(
+            [
+                [0.0, 2.0, 1.0, 0.0],
+                [2.0, 0.0, 3.0, 4.0],
+                [1.0, 3.0, 0.0, 5.0],
+                [0.0, 4.0, 5.0, 0.0],
+            ]
+        )
+        dist = SpanningTreeDistribution(weights)
+        support = [
+            list(t)
+            for t in _all_trees(4)
+            if all(weights[i, j] > 0.0 for i, j in t)
+        ]
+        brute = [(t, dist.log_density(t)) for t in support]
+        brute.sort(key=lambda u: -u[1])
+
+        items = list(dist.enumerator())
+        self.assertEqual([t for t, _ in items], [t for t, _ in brute])
+        self.assertAlmostEqual(float(np.logaddexp.reduce([lp for _, lp in items])), 0.0, places=10)
+
+    def test_enumerator_candidate_cap_is_explicit(self):
+        dist = SpanningTreeDistribution(_W)
+        with self.assertRaises(ValueError):
+            dist.enumerator(max_edge_subsets=1)
+        self.assertEqual(len(list(dist.enumerator(max_edge_subsets=None))), 4 ** (4 - 2))
+
     def test_edge_marginals_sum_to_n_minus_1(self):
         dist = SpanningTreeDistribution(_W)
         self.assertAlmostEqual(_edge_marginals(dist.weights).sum() / 2.0, 3.0, places=10)

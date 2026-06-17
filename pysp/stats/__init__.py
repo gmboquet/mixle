@@ -427,6 +427,7 @@ __all__ = [
     "SpanningTreeSampler",
     "SpanningTreeEstimator",
     "SpanningTreeDataEncoder",
+    "SpanningTreeEnumerator",
     "MatchingDistribution",
     "MatchingSampler",
     "MatchingEstimator",
@@ -730,6 +731,7 @@ from pysp.stats.graph.rdpg import (
 from pysp.stats.graph.spanning_tree import (
     SpanningTreeDataEncoder,
     SpanningTreeDistribution,
+    SpanningTreeEnumerator,
     SpanningTreeEstimator,
     SpanningTreeSampler,
 )
