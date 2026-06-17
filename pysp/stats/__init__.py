@@ -466,6 +466,10 @@ __all__ = [
     "ExponentiallyModifiedGaussianSampler",
     "ExponentiallyModifiedGaussianEstimator",
     "ExponentiallyModifiedGaussianDataEncoder",
+    "SkellamDistribution",
+    "SkellamSampler",
+    "SkellamEstimator",
+    "SkellamDataEncoder",
     "ExponentialTiltedDistribution",
     "ExponentialTiltedSampler",
     "ExponentialTiltedEstimator",
@@ -1010,6 +1014,12 @@ from pysp.stats.leaf.poisson import (
     PoissonSampler,
 )
 from pysp.stats.leaf.rayleigh import RayleighDataEncoder, RayleighDistribution, RayleighEstimator, RayleighSampler
+from pysp.stats.leaf.skellam import (
+    SkellamDataEncoder,
+    SkellamDistribution,
+    SkellamEstimator,
+    SkellamSampler,
+)
 from pysp.stats.leaf.student_t import StudentTDataEncoder, StudentTDistribution, StudentTEstimator, StudentTSampler
 from pysp.stats.leaf.uniform import UniformDataEncoder, UniformDistribution, UniformEstimator, UniformSampler
 from pysp.stats.leaf.von_mises import (
