@@ -93,6 +93,88 @@ class RegressionResult:
     def summary(self):
         return {"coefficients": self.coefficients, "sigma": self.sigma}
 
+    def to_exponential_family(self, engine=None):
+        """Return the conditional exponential-family view ``p(y|x)`` for a canonical link.
+
+        For a canonical link the linear predictor *is* the natural parameter:
+        ``eta(x) = offset + X @ beta`` is the logit (Bernoulli) / log-rate (Poisson)
+        directly, and the mean ``mu(x)/sigma^2`` paired with ``-1/(2 sigma^2)`` for the
+        Normal.  The returned
+        :class:`~pysp.stats.exp_family.ConditionalExponentialFamilyForm` exposes
+        ``natural_parameters(x)``, ``sufficient_statistics(y)``, ``log_partition``,
+        ``log_base_measure(y)``, ``mean(x)`` (the inverse link == :meth:`predict`), and
+        ``log_density(y, x)``.
+        """
+        from pysp.engines import NUMPY_ENGINE
+        from pysp.stats.exp_family import ConditionalExponentialFamilyForm
+
+        eng = NUMPY_ENGINE if engine is None else engine
+        link = self.link
+
+        def _eta_linear(given):
+            X, offset = _design(self._columns, given)
+            return offset + X @ self.beta
+
+        if link == "logit":
+            from pysp.stats.leaf.bernoulli import BernoulliDistribution
+
+            response = BernoulliDistribution(0.5)
+
+            def natural_fn(given):
+                return _eta_linear(given)[:, None]
+
+            def log_partition_fn(eta):
+                e = np.asarray(eta, float).reshape(-1)
+                return np.logaddexp(0.0, e)  # log(1 + e^eta)
+
+            dispersion = None
+        elif link == "log":
+            from pysp.stats.leaf.poisson import PoissonDistribution
+
+            response = PoissonDistribution(1.0)
+
+            def natural_fn(given):
+                return _eta_linear(given)[:, None]
+
+            def log_partition_fn(eta):
+                return np.exp(np.asarray(eta, float).reshape(-1))  # A = lambda = e^eta
+
+            dispersion = None
+        elif link == "identity":
+            from pysp.stats.leaf.gaussian import GaussianDistribution
+
+            sigma2 = self.sigma**2
+            response = GaussianDistribution(0.0, sigma2)
+
+            def natural_fn(given):
+                mu = _eta_linear(given)
+                eta1 = mu / sigma2
+                eta2 = np.full_like(mu, -0.5 / sigma2)
+                return np.column_stack([eta1, eta2])
+
+            def log_partition_fn(eta):
+                e = np.atleast_2d(np.asarray(eta, float))
+                eta1, eta2 = e[:, 0], e[:, 1]
+                # A(eta) = -eta1^2/(4 eta2) - 0.5 log(-eta2/pi)
+                #        = mu^2/(2 sigma^2) + 0.5 log(2 pi sigma^2)
+                return -(eta1 * eta1) / (4.0 * eta2) - 0.5 * np.log(-eta2 / np.pi)
+
+            dispersion = sigma2
+        else:
+            raise NotImplementedError("no canonical exponential-family map for link %r." % link)
+
+        def mean_fn(given):
+            return _link_inv(link, _eta_linear(given))
+
+        return ConditionalExponentialFamilyForm(
+            response_family=response,
+            natural_fn=natural_fn,
+            log_partition_fn=log_partition_fn,
+            mean_fn=mean_fn,
+            dispersion=dispersion,
+            engine=eng,
+        )
+
 
 def _columns_of(linpred: _LinearPredictor):
     """Return (est_columns, fixed_columns): estimated coefs (RV prior / free) vs constants."""
