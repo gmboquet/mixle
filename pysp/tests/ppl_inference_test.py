@@ -1,11 +1,14 @@
 """Tests for pysp.ppl Bayesian inference: MAP and parameter MCMC (build slice 7)."""
 
+import importlib.util
 import unittest
 
 import numpy as np
 
 from pysp.ppl import Bernoulli, Beta, Exponential, Gamma, Normal, Poisson, free
 from pysp.ppl.inference import ConjugatePosterior
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 class PPLInferenceTestCase(unittest.TestCase):
@@ -101,6 +104,7 @@ class PPLVariationalFamilyTestCase(unittest.TestCase):
     """Richer VB: full-rank Gaussian q (captures parameter correlations) and the tilted
     Renyi-alpha objective (alpha<1 is mass-covering, widening the too-narrow KL fit)."""
 
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_fullrank_captures_correlation(self):
         rng = np.random.RandomState(0)
         data = list(rng.gamma(3.0, 1.0 / 2.0, 300))  # Gamma(shape,rate) posterior is strongly correlated
@@ -192,6 +196,7 @@ class PPLVITestCase(unittest.TestCase):
         self.assertAlmostEqual(m.dist.mu, 5.0, delta=0.3)
         self.assertAlmostEqual(np.sqrt(m.dist.sigma2), 2.0, delta=0.3)
 
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_vi_batched_target_across_supports(self):
         # the batched ADVI ELBO must broadcast priors over positive (Gamma) and unit (Beta)
         # supports, not just the real line.
