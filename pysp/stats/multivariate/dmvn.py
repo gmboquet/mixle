@@ -643,6 +643,8 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
+        min_covar: float | None = None,
+        ridge: float | None = None,
     ) -> None:
         """DiagonalGaussianEstimator object for estimating diagonal Gaussian distributions from aggregated sufficient
             statistics.
@@ -659,6 +661,11 @@ class DiagonalGaussianEstimator(ParameterEstimator):
                 ``estimate`` performs the closed-form per-component conjugate posterior update (returning the
                 joint MAP estimate and carrying the posterior forward as the fitted model's prior) instead
                 of the maximum-likelihood / pseudo-count update.
+            min_covar (Optional[float]): Absolute per-coordinate variance floor applied in the MLE M-step.
+                ``None`` (default) uses a tiny ``1e-8``. Negatives / NaNs are clamped to this floor.
+            ridge (Optional[float]): Relative variance floor coefficient. ``None`` (default) uses ``1e-6``;
+                each coordinate variance is floored at ``max(min_covar, ridge * mean(var))`` so the
+                safeguard is data-scaled. Bias is negligible at the defaults.
 
         Attributes:
             name (Optinal[str]): Name for object instance.
@@ -688,6 +695,8 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         self.key = keys
         self.prior = prior
         self.has_conj_prior = isinstance(prior, MultivariateNormalGammaDistribution)
+        self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
+        self.ridge = 1.0e-6 if ridge is None else float(ridge)
 
     def accumulator_factory(self) -> "DiagonalGaussianAccumulatorFactory":
         """Returns a DiagonalGaussianAccumulatorFactory built from the estimator's attributes."""
@@ -767,6 +776,16 @@ class DiagonalGaussianEstimator(ParameterEstimator):
             covar = (suff_stat[1] + (pc2 * self.prior_covar) - (mu * mu * nobs)) / (nobs + pc2)
         else:
             covar = (suff_stat[1] / nobs) - (mu * mu)
+
+        # P1 variance floor: clamp non-finite / non-positive coordinates and apply a
+        # data-scaled floor max(min_covar, ridge * mean(var)) so a component holding
+        # few points cannot produce zero/negative/NaN variances. Bias is negligible.
+        covar = np.asarray(covar, dtype=float)
+        finite = np.isfinite(covar)
+        if not finite.all():
+            covar = np.where(finite, covar, self.min_covar)
+        floor = max(self.min_covar, self.ridge * float(np.mean(covar[covar > 0.0])) if np.any(covar > 0.0) else 0.0)
+        covar = np.maximum(covar, floor)
 
         return DiagonalGaussianDistribution(mu, covar, name=self.name)
 
