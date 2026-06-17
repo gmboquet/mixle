@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from .proposals import Proposal, RandomWalkProposal
-from .samplers import LogTarget, MCMCResult, hamiltonian_monte_carlo, metropolis_hastings
+from .samplers import LogTarget, MCMCResult, hamiltonian_monte_carlo, metropolis_hastings, nuts
 
 # ---------------------------------------------------------------------------
 # Parameter posterior: flatten/unflatten bridge + samplers
@@ -329,6 +329,7 @@ def sample_parameter_posterior(
     initial: Any = None,
     step_size: float = 0.05,
     num_steps: int = 20,
+    grad_log_target: Callable[[Any], Any] | None = None,
     return_distributions: bool = False,
 ) -> MCMCResult:
     """Sample the parameter posterior ``p(theta | data)`` of a distribution.
@@ -346,8 +347,9 @@ def sample_parameter_posterior(
         data: Observations accepted by the family's encoder.
         prior: ``None`` (flat), a callable ``theta -> log p(theta)``, or a
             distribution with ``log_density`` over the parameter representation.
-        sampler: ``'mh'`` (Metropolis-Hastings) or ``'hmc'`` (Hamiltonian Monte
-            Carlo with finite-difference gradients).
+        sampler: ``'mh'`` (Metropolis-Hastings), ``'hmc'`` (Hamiltonian Monte
+            Carlo), or ``'nuts'`` (No-U-Turn Sampler, self-tuning). HMC/NUTS use
+            ``grad_log_target`` if given, else a finite-difference gradient.
         steps: Number of retained posterior samples.
         burn_in: Number of initial transitions to discard.
         thin: Keep one sample every ``thin`` transitions.
@@ -356,7 +358,12 @@ def sample_parameter_posterior(
             random walk (MH only).
         initial: Optional starting ``theta``; defaults to the prototype's
             parameters.
-        step_size, num_steps: HMC leapfrog controls.
+        step_size, num_steps: HMC leapfrog controls (NUTS self-tunes step size).
+        grad_log_target: Optional exact gradient of ``log_target`` in the
+            unconstrained space (e.g. from
+            :func:`pysp.utils.mcmc.gradients.torch_gradient`). Replaces the
+            finite-difference gradient for HMC/NUTS -- one backward pass per step
+            instead of ``O(dim)`` target evaluations.
         return_distributions: If True, ``samples`` are rebuilt distribution
             objects instead of parameter-space values.
 
@@ -400,7 +407,7 @@ def sample_parameter_posterior(
             rng=rng,
         )
     elif sampler == "hmc":
-        grad = _finite_difference_gradient(log_target)
+        grad = grad_log_target if grad_log_target is not None else _finite_difference_gradient(log_target)
         raw = hamiltonian_monte_carlo(
             log_target,
             grad_log_target=grad,
@@ -412,8 +419,19 @@ def sample_parameter_posterior(
             thin=thin,
             rng=rng,
         )
+    elif sampler == "nuts":
+        grad = grad_log_target if grad_log_target is not None else _finite_difference_gradient(log_target)
+        raw = nuts(
+            log_target,
+            grad_log_target=grad,
+            initial=phi0 if bridge.dim > 1 else float(phi0[0]),
+            num_samples=steps,
+            warmup=burn_in,
+            thin=thin,
+            rng=rng,
+        )
     else:
-        raise ValueError("sampler must be 'mh' or 'hmc'.")
+        raise ValueError("sampler must be 'mh', 'hmc', or 'nuts'.")
 
     mapped: list[Any] = []
     for phi in raw.samples:

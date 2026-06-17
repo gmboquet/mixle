@@ -1496,14 +1496,13 @@ def vec_bincount2(x, w, out):
 
 def _register_int_hidden_association_engine_kernel():
     """Register the engine-resident integer-hidden-association kernel (idempotent; called at import)."""
-    from pysp.engines import NUMPY_ENGINE
     from pysp.stats.compute.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
     class IntegerHiddenAssociationKernel(GenericKernel):
         def accumulate(self, enc, weights):
             if self.estimator is None:
                 raise ValueError("IntegerHiddenAssociationKernel.accumulate requires an estimator.")
-            if self.engine.name == NUMPY_ENGINE.name:
+            if not getattr(self.engine, "resident_estep", True):
                 return super().accumulate(enc, weights)
             host_enc = getattr(enc, "host_payload", enc)
             accumulator = self.estimator.accumulator_factory().make()

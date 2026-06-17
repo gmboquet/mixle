@@ -30,6 +30,7 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.utils.enumeration import BufferedStream, ProductEnumerator
+from pysp.utils.fisher import FixedFisherView
 
 SS = tuple[np.ndarray, float, float | None]
 
@@ -104,6 +105,26 @@ def _to_binary_vector(x: Any, num_features: int, data_format: str) -> np.ndarray
     if idx.size:
         rv[np.unique(idx)] = True
     return rv
+
+
+class IndianBuffetProcessFisherView(FixedFisherView):
+    def __init__(self, dist: Any) -> None:
+        self.num_features = int(dist.num_features)
+        super().__init__(dist, [("feature", str(i)) for i in range(self.num_features)])
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        enc = self.dist.dist_to_encoder().seq_encode(list(data))
+        return self._statistics_from_encoded(enc, estimate=estimate)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        return np.asarray(enc_data, dtype=np.float64).reshape((-1, self.num_features))
+
+    def _model_mean(self) -> np.ndarray:
+        return np.asarray(self.dist.feature_probs, dtype=np.float64).copy()
+
+    def _model_fisher(self) -> np.ndarray:
+        p = np.asarray(self.dist.feature_probs, dtype=np.float64)
+        return np.diag(p * (1.0 - p))
 
 
 class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
@@ -285,6 +306,10 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         each carrying its exact ``log_density``.
         """
         return IndianBuffetProcessEnumerator(self)
+
+    def to_fisher(self, **kwargs):
+        """Return this distribution's own Fisher view."""
+        return IndianBuffetProcessFisherView(self)
 
     def sampler(self, seed: int | None = None) -> "IndianBuffetProcessSampler":
         """Return a sampler for drawing observations from this distribution."""

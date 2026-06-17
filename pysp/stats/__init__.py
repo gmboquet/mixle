@@ -451,6 +451,11 @@ __all__ = [
     "FiniteStochasticTransformEstimator",
     "FiniteStochasticTransformDataEncoder",
     "FiniteStochasticTransformEnumerator",
+    "TruncatedDistribution",
+    "TruncatedSampler",
+    "TruncatedEstimator",
+    "TruncatedDataEncoder",
+    "TruncatedEnumerator",
     "IdentityTransform",
     "AffineTransform",
     "ExpTransform",
@@ -581,6 +586,13 @@ from pysp.stats.combinator.transform import (
     TransformEnumerator,
     TransformEstimator,
     TransformSampler,
+)
+from pysp.stats.combinator.truncated import (
+    TruncatedDataEncoder,
+    TruncatedDistribution,
+    TruncatedEnumerator,
+    TruncatedEstimator,
+    TruncatedSampler,
 )
 from pysp.stats.combinator.weighted import WeightedDataEncoder, WeightedDistribution, WeightedEstimator
 from pysp.stats.compute.backend import (

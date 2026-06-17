@@ -19,6 +19,7 @@ rebuilt distribution objects).
 from __future__ import annotations
 
 from .conjugate import sample_conjugate_posterior
+from .gradients import torch_available, torch_gradient, value_and_torch_gradient
 from .parameter_bridge import (
     ParameterBridge,
     build_parameter_bridge,
@@ -38,11 +39,13 @@ from .samplers import (
     MCMCResult,
     affine_invariant_ensemble,
     distribution_log_target,
+    gelman_rubin,
     hamiltonian_monte_carlo,
     metropolis_hastings,
     metropolis_within_gibbs,
     nuts,
     posterior_predictive,
+    run_chains,
     sample_distribution,
 )
 
@@ -60,12 +63,17 @@ __all__ = [
     "affine_invariant_ensemble",
     "build_parameter_bridge",
     "distribution_log_target",
+    "gelman_rubin",
     "hamiltonian_monte_carlo",
     "metropolis_hastings",
     "metropolis_within_gibbs",
     "nuts",
     "posterior_predictive",
+    "run_chains",
     "sample_conjugate_posterior",
     "sample_distribution",
     "sample_parameter_posterior",
+    "torch_available",
+    "torch_gradient",
+    "value_and_torch_gradient",
 ]

@@ -2460,14 +2460,13 @@ def level_state_prob(levels, num_states, tr_mat, init_prob, out):
 
 def _register_tree_hmm_engine_kernel():
     """Register the engine-resident tree-HMM kernel (idempotent; called at import)."""
-    from pysp.engines import NUMPY_ENGINE
     from pysp.stats.compute.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
     class TreeHiddenMarkovKernel(GenericKernel):
         def accumulate(self, enc, weights):
             if self.estimator is None:
                 raise ValueError("TreeHiddenMarkovKernel.accumulate requires an estimator.")
-            if self.engine.name == NUMPY_ENGINE.name:
+            if not getattr(self.engine, "resident_estep", True):
                 return super().accumulate(enc, weights)
             host_enc = getattr(enc, "host_payload", enc)
             accumulator = self.estimator.accumulator_factory().make()

@@ -28,6 +28,18 @@ from pysp.stats.compute.pdist import (
 from pysp.utils.vector import gammaln
 
 
+def _fisher_mean_var(dist):
+    r = float(dist.r)
+    p = float(dist.p)
+    return r * (1.0 - p) / p, r * (1.0 - p) / (p * p)
+
+
+def _fisher_encoded(enc_data):
+    if isinstance(enc_data, tuple):
+        return np.asarray(enc_data[0], dtype=np.float64)
+    return np.asarray(enc_data, dtype=np.float64)
+
+
 class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
     """Negative binomial distribution over non-negative integer counts."""
 
@@ -149,6 +161,12 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         return cls.backend_log_density_from_params(
             vals[:, None], log_fact[:, None], params["r"][None, :], params["p"][None, :], engine
         )
+
+    def to_fisher(self, **kwargs):
+        """Return the NegativeBinomial's count-family Fisher view."""
+        from pysp.utils.fisher import CountFisherView, _count_data
+
+        return CountFisherView(self, _fisher_mean_var, _count_data, _fisher_encoded)
 
     def sampler(self, seed: int | None = None) -> "NegativeBinomialSampler":
         """Return a sampler for drawing observations from this distribution."""
