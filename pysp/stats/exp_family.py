@@ -199,6 +199,124 @@ class ExponentialFamilyForm:
 
 
 @dataclass(frozen=True)
+class ProductExponentialFamilyForm:
+    """Canonical exponential-family view of an independent product of distributions.
+
+    A product of exponential families is itself an exponential family with
+    ``eta = concat(eta_i)``, ``T(x) = concat(T_i(x_i))``, ``A = sum A_i``, and
+    ``log h(x) = sum log h_i(x_i)`` (the closure rule for an independent product).
+    Used for :class:`~pysp.stats.combinator.composite.CompositeDistribution`.
+    """
+
+    distribution: ProbabilityDistribution
+    components: tuple[ExponentialFamilyForm, ...]
+    engine: Any = NUMPY_ENGINE
+    extract: Any = None  # callable mapping batch x -> tuple(per-component batch)
+
+    def _split(self, x: Any) -> tuple[Any, ...]:
+        if self.extract is not None:
+            return tuple(self.extract(x))
+        rows = list(x)
+        return tuple([row[i] for row in rows] for i in range(len(self.components)))
+
+    @property
+    def dim(self) -> int:
+        """Total natural-parameter dimension (sum over components)."""
+        return int(sum(c.dim for c in self.components))
+
+    def natural_parameters(self) -> np.ndarray:
+        """Return the concatenated natural parameters of all components."""
+        return np.concatenate([c.natural_parameters() for c in self.components])
+
+    def sufficient_statistics(self, x: Any) -> np.ndarray:
+        """Return concatenated per-component sufficient statistics ``(n, dim)``."""
+        parts = self._split(x)
+        blocks = [
+            np.asarray(self.engine.to_numpy(c.sufficient_statistics(part)), dtype=np.float64)
+            for c, part in zip(self.components, parts)
+        ]
+        return np.concatenate(blocks, axis=1)
+
+    def log_partition(self, eta: Any = None) -> Any:
+        """Return ``A = sum_i A_i`` (current parameters only; ``eta`` override unsupported)."""
+        if eta is not None:
+            raise NotImplementedError("ProductExponentialFamilyForm.log_partition(eta) is unsupported.")
+        return sum(float(self.engine.to_numpy(c.log_partition())) for c in self.components)
+
+    def log_base_measure(self, x: Any) -> np.ndarray:
+        """Return ``log h(x) = sum_i log h_i(x_i)`` row-wise."""
+        parts = self._split(x)
+        total = None
+        for c, part in zip(self.components, parts):
+            lh = np.asarray(self.engine.to_numpy(c.log_base_measure(part)), dtype=np.float64)
+            total = lh if total is None else total + lh
+        return total
+
+    def log_density(self, x: Any) -> np.ndarray:
+        """Return the reconstructed log-density ``sum_i log p_i(x_i)`` row-wise."""
+        parts = self._split(x)
+        total = None
+        for c, part in zip(self.components, parts):
+            lp = np.asarray(self.engine.to_numpy(c.log_density(part)), dtype=np.float64)
+            total = lp if total is None else total + lp
+        return total
+
+    def mean_parameters(self, **kwargs: Any) -> np.ndarray:
+        """Return the concatenated mean parameters of all components."""
+        return np.concatenate([c.mean_parameters(**kwargs) for c in self.components])
+
+
+@dataclass(frozen=True)
+class IIDExponentialFamilyForm:
+    """Canonical exponential-family view of an iid sequence of a fixed leaf family.
+
+    For a fixed-length-agnostic iid sequence the joint sufficient statistic is the
+    sum of the per-element statistics, ``T(x) = sum_t T_0(x_t)``, the natural
+    parameters are shared (``eta = eta_0``), and ``A`` / ``log h`` scale with the
+    element count.  Used for :class:`~pysp.stats.combinator.sequence.SequenceDistribution`
+    when the length is not separately modeled.
+    """
+
+    distribution: ProbabilityDistribution
+    element: ExponentialFamilyForm
+    engine: Any = NUMPY_ENGINE
+
+    @property
+    def dim(self) -> int:
+        """Natural-parameter dimension (same as the element family)."""
+        return self.element.dim
+
+    def natural_parameters(self) -> np.ndarray:
+        """Return the shared element natural parameters."""
+        return self.element.natural_parameters()
+
+    def sufficient_statistics(self, x: Any) -> np.ndarray:
+        """Return per-sequence summed element statistics ``(n, dim)``."""
+        rows = []
+        for seq in x:
+            t = np.asarray(self.engine.to_numpy(self.element.sufficient_statistics(list(seq))), dtype=np.float64)
+            rows.append(t.sum(axis=0) if t.shape[0] else np.zeros(self.element.dim))
+        return np.asarray(rows, dtype=np.float64)
+
+    def log_partition(self, eta: Any = None) -> Any:
+        """Return the per-element ``A`` (the joint scales by the element count)."""
+        if eta is not None:
+            raise NotImplementedError("IIDExponentialFamilyForm.log_partition(eta) is unsupported.")
+        return self.element.log_partition()
+
+    def log_density(self, x: Any) -> np.ndarray:
+        """Return the reconstructed iid log-density ``sum_t log p_0(x_t)`` per sequence."""
+        out = []
+        for seq in x:
+            seq = list(seq)
+            if not seq:
+                out.append(0.0)
+                continue
+            out.append(float(np.sum(self.engine.to_numpy(self.element.log_density(seq)))))
+        return np.asarray(out, dtype=np.float64)
+
+
+@dataclass(frozen=True)
 class ConditionalExponentialFamilyForm:
     """Canonical exponential-family view of a conditional model ``p(y | x)``.
 
