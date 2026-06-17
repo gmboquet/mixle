@@ -52,10 +52,17 @@ from pysp.ppl import Normal, Bernoulli, Poisson, Field, free
 Normal(free*Field("x") + free, free)    # linear regression  (identity link)
 Bernoulli(free*Field("x") + free)       # logistic regression (logit link)
 Poisson(free*Field("x") + free)         # Poisson regression  (log link)
+
+# heteroskedastic: a linear predictor in the *scale* slot (log link) -> location-scale regression
+Normal(free*Field("x") + free, free*Field("x") + free)   # mean AND log-sd vary with x
+LogNormal(free, free*Field("z") + free)                  # positive, right-skewed; dispersion ~ z
 ```
 
 Coefficients are `free` (MLE) or Normal priors (Bayesian / ridge — MAP). Fit with the
-response positionally and covariates via `given=`; fitting is IRLS (Fisher scoring).
+response positionally and covariates via `given=`. Homoskedastic GLMs fit by IRLS (Fisher
+scoring); a scale-slot linear predictor switches to a location-scale fit (separate mean and
+log-scale coefficients, `result.coefficients` / `result.scale_coefficients`,
+`result.predict(...)` returns `loc`/`scale`).
 
 ```python
 m = Bernoulli(free*Field("x") + free*Field("z") + free).fit(y, given={"x": xs, "z": zs})
