@@ -24,6 +24,11 @@ from pysp.stats.leaf.beta import BetaDistribution
 from pysp.utils.special import digamma
 
 
+def _fisher_mean_var(dist):
+    p = float(dist.p)
+    return p, p * (1.0 - p)
+
+
 class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
     """Bernoulli distribution over {False, True} with success probability p."""
 
@@ -198,6 +203,12 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
     def support_size(self) -> int:
         """The two outcomes {0, 1}."""
         return 2
+
+    def to_fisher(self, **kwargs):
+        """Return the Bernoulli's count-family Fisher view."""
+        from pysp.utils.fisher import CountFisherView, _count_data, _identity_encoded
+
+        return CountFisherView(self, _fisher_mean_var, _count_data, _identity_encoded)
 
     def sampler(self, seed: int | None = None) -> "BernoulliSampler":
         """Return a sampler for drawing observations from this distribution."""
