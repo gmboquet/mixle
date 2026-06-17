@@ -25,7 +25,7 @@ exponential-family compute path, exactly as for the Gamma family.
 
 import math
 from collections.abc import Sequence
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -190,9 +190,7 @@ class InverseGaussianDistribution(SequenceEncodableProbabilityDistribution):
         return np.where(np.isfinite(vals) & (vals > 0.0), rv, -np.inf)
 
     @staticmethod
-    def backend_log_density_from_params(
-        vals: Any, inv_vals: Any, log_vals: Any, mu: Any, lam: Any, engine: Any
-    ) -> Any:
+    def backend_log_density_from_params(vals: Any, inv_vals: Any, log_vals: Any, mu: Any, lam: Any, engine: Any) -> Any:
         """Engine-neutral inverse Gaussian log-density from explicit parameters."""
         two = engine.asarray(2.0)
         rv = (
@@ -267,9 +265,7 @@ class InverseGaussianDistribution(SequenceEncodableProbabilityDistribution):
             return InverseGaussianEstimator(name=self.name, keys=self.keys)
         # E[x] = mu, E[1/x] = 1/mu + 1/lam for the inverse Gaussian.
         suff_stat = (self.mu, 1.0 / self.mu + 1.0 / self.lam)
-        return InverseGaussianEstimator(
-            pseudo_count=pseudo_count, suff_stat=suff_stat, name=self.name, keys=self.keys
-        )
+        return InverseGaussianEstimator(pseudo_count=pseudo_count, suff_stat=suff_stat, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "InverseGaussianDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
