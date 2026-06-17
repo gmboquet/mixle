@@ -28,7 +28,12 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_declaration(cls):
-        from pysp.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        from pysp.stats.compute.declarations import (
+            DistributionDeclaration,
+            ExponentialFamilySpec,
+            ParameterSpec,
+            StatisticSpec,
+        )
 
         return DistributionDeclaration(
             name="pareto",
@@ -43,7 +48,42 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
                 StatisticSpec("min_val", kind="support_bound", additive=False, scales=False),
             ),
             support="positive_tail",
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure_from_params=cls.exp_family_base_measure_from_params,
+                # h(x) = 1/x on the support [xm, inf) depends on the per-component scale xm, so the
+                # fixed-base stacked loop does not apply; stacked scoring uses the backend hooks while
+                # the scalar canonical map / to_exponential_family view still uses the spec above.
+                fixed_base=False,
+            ),
         )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: tuple[Any, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the Pareto sufficient statistic ``T(x) = (log x,)`` (scale ``xm`` fixed)."""
+        return (engine.asarray(x[1]),)
+
+    @staticmethod
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the Pareto natural parameter ``eta = -alpha`` (scale ``xm`` fixed)."""
+        return (-engine.asarray(params["alpha"]),)
+
+    @staticmethod
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
+        """Return the Pareto log partition ``A = -log(alpha) - alpha * log(xm)``."""
+        alpha = engine.asarray(params["alpha"])
+        xm = engine.asarray(params["xm"])
+        return -engine.log(alpha) - alpha * engine.log(xm)
+
+    @staticmethod
+    def exp_family_base_measure_from_params(x: tuple[Any, Any], params: dict[str, Any], engine: Any) -> Any:
+        """Return the Pareto base measure ``log h(x) = -log(x)`` on ``[xm, inf)`` (``-inf`` below ``xm``)."""
+        vals = engine.asarray(x[0])
+        log_vals = engine.asarray(x[1])
+        xm = engine.asarray(params["xm"])
+        return engine.where(vals >= xm, -log_vals, engine.asarray(-np.inf))
 
     def __init__(self, xm: float, alpha: float, name: str | None = None, keys: str | None = None) -> None:
         if xm <= 0.0 or alpha <= 0.0 or not np.isfinite(xm) or not np.isfinite(alpha):
