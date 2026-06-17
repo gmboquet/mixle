@@ -34,6 +34,7 @@ __all__ = [
     "PlacementShard",
     "Resources",
     "SparkEncodedData",
+    "available_encoded_data_backends",
     "calibrate_resources",
     "encoded_data",
     "estimate_estimator_stat_nbytes",
@@ -41,6 +42,7 @@ __all__ = [
     "is_encoded_data_handle",
     "model_sharding_plan",
     "plan",
+    "register_encoded_data_backend",
 ]
 
 
@@ -644,47 +646,71 @@ def encoded_data(
     root: int = 0,
     root_only: bool = False,
 ) -> EncodedDataHandle:
-    """Return an encoded-data handle, preserving existing compatible handles."""
+    """Return an encoded-data handle, preserving existing compatible handles.
+
+    Backend dispatch goes through a registry (see :func:`register_encoded_data_backend`)
+    rather than a hard-coded branch, so a new distributed framework (Lightning, Ray, JAX,
+    ...) plugs in by registering a factory -- the same "register, don't branch" pattern the
+    compute engines use -- without editing this function.
+    """
     if is_encoded_data_handle(data):
         return data
     backend_name = str(backend or "local").lower()
-    if backend_name in ("mp", "multiprocessing"):
-        from pysp.utils.parallel.multiprocessing import MPEncodedData
-
-        return MPEncodedData(data, estimator=estimator, encoder=encoder, num_workers=num_workers, sub_chunks=sub_chunks)
-    if backend_name == "mpi":
-        from pysp.utils.parallel.mpi import MPIEncodedData
-
-        return MPIEncodedData(
-            data, estimator=estimator, encoder=encoder, sub_chunks=sub_chunks, comm=comm, root=root, root_only=root_only
+    factory = _ENCODED_DATA_BACKENDS.get(backend_name)
+    if factory is None:
+        raise ValueError(
+            "unknown encoded-data backend %r; registered backends: %s"
+            % (backend, ", ".join(available_encoded_data_backends()))
         )
-    if backend_name == "spark":
-        return SparkEncodedData(data, estimator=estimator, model=model, encoder=encoder)
-    if backend_name == "dask":
-        return DaskEncodedData(
-            data,
-            estimator=estimator,
-            model=model,
-            encoder=encoder,
-            client=client,
-            num_partitions=num_chunks or num_workers,
-            sub_chunks=sub_chunks,
-        )
-    if backend_name == "torchrun":
-        from pysp.utils.parallel.torchrun import TorchRunEncodedData
+    return factory(
+        data,
+        estimator=estimator,
+        model=model,
+        encoder=encoder,
+        placement=placement,
+        resources=resources,
+        engine=engine,
+        precision=precision,
+        num_chunks=num_chunks,
+        sub_chunks=sub_chunks,
+        num_workers=num_workers,
+        client=client,
+        comm=comm,
+        root=root,
+        root_only=root_only,
+    )
 
-        return TorchRunEncodedData(
-            data,
-            estimator=estimator,
-            model=model,
-            encoder=encoder,
-            sub_chunks=sub_chunks,
-            group=comm,
-            root=root,
-            root_only=root_only,
-        )
-    if backend_name != "local":
-        raise ValueError("unknown encoded-data backend %r" % backend)
+
+# --- encoded-data backend registry ("register, don't branch") ----------------------------
+# A backend factory has signature ``factory(data, **params) -> EncodedDataHandle`` where
+# ``params`` are the keyword arguments of :func:`encoded_data`. Built-in backends are
+# registered at import time below; third-party frameworks register their own.
+_ENCODED_DATA_BACKENDS: dict[str, Any] = {}
+
+
+def register_encoded_data_backend(name: str, factory: Any, aliases: tuple[str, ...] = ()) -> None:
+    """Register an encoded-data backend factory under ``name`` (and any ``aliases``).
+
+    ``factory`` is called as ``factory(data, **params)`` with the keyword arguments of
+    :func:`encoded_data`; it should accept ``**_`` for the parameters it ignores and return
+    an :class:`EncodedDataHandle`. This is the extension point for new parallel/distributed
+    frameworks -- registering is all that is needed, no core edits.
+    """
+    if not callable(factory):
+        raise TypeError("backend factory must be callable.")
+    _ENCODED_DATA_BACKENDS[name.lower()] = factory
+    for alias in aliases:
+        _ENCODED_DATA_BACKENDS[alias.lower()] = factory
+
+
+def available_encoded_data_backends() -> list[str]:
+    """Return the sorted names of all registered encoded-data backends."""
+    return sorted(_ENCODED_DATA_BACKENDS)
+
+
+def _local_backend(
+    data, *, estimator, model, encoder, placement, resources, engine, precision, num_chunks, sub_chunks, **_
+):
     return LocalEncodedData(
         data,
         estimator=estimator,
@@ -697,6 +723,59 @@ def encoded_data(
         num_chunks=num_chunks,
         sub_chunks=sub_chunks,
     )
+
+
+def _mp_backend(data, *, estimator, encoder, num_workers, sub_chunks, **_):
+    from pysp.utils.parallel.multiprocessing import MPEncodedData
+
+    return MPEncodedData(data, estimator=estimator, encoder=encoder, num_workers=num_workers, sub_chunks=sub_chunks)
+
+
+def _mpi_backend(data, *, estimator, encoder, sub_chunks, comm, root, root_only, **_):
+    from pysp.utils.parallel.mpi import MPIEncodedData
+
+    return MPIEncodedData(
+        data, estimator=estimator, encoder=encoder, sub_chunks=sub_chunks, comm=comm, root=root, root_only=root_only
+    )
+
+
+def _spark_backend(data, *, estimator, model, encoder, **_):
+    return SparkEncodedData(data, estimator=estimator, model=model, encoder=encoder)
+
+
+def _dask_backend(data, *, estimator, model, encoder, client, num_chunks, num_workers, sub_chunks, **_):
+    return DaskEncodedData(
+        data,
+        estimator=estimator,
+        model=model,
+        encoder=encoder,
+        client=client,
+        num_partitions=num_chunks or num_workers,
+        sub_chunks=sub_chunks,
+    )
+
+
+def _torchrun_backend(data, *, estimator, model, encoder, sub_chunks, comm, root, root_only, **_):
+    from pysp.utils.parallel.torchrun import TorchRunEncodedData
+
+    return TorchRunEncodedData(
+        data,
+        estimator=estimator,
+        model=model,
+        encoder=encoder,
+        sub_chunks=sub_chunks,
+        group=comm,
+        root=root,
+        root_only=root_only,
+    )
+
+
+register_encoded_data_backend("local", _local_backend)
+register_encoded_data_backend("mp", _mp_backend, aliases=("multiprocessing",))
+register_encoded_data_backend("mpi", _mpi_backend)
+register_encoded_data_backend("spark", _spark_backend)
+register_encoded_data_backend("dask", _dask_backend)
+register_encoded_data_backend("torchrun", _torchrun_backend)
 
 
 class LocalEncodedData(EncodedDataHandle):
