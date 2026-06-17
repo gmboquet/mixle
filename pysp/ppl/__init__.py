@@ -105,6 +105,13 @@ __all__ = [
     "DiagGaussian",
     "LocalLevel",
     "AR1",
+    "PDE",
+    "DiffusionOperator",
+    "AdvectionOperator",
+    "AdvectionDiffusionOperator",
+    "make_operator",
+    "register_dynamics_operator",
+    "available_dynamics_operators",
     "Graph",
     "Field",
     "Group",
@@ -510,6 +517,23 @@ def _ss_err(*a, **k):
 register_composite("StateSpace", _ss_err, _ss_err)
 
 
+# --- PDE-constrained latent field (spatiotemporal) --------------------------------
+def _pde_err(*a, **k):
+    raise NotImplementedError("PDE models are fit via fit(); they have no single dist.")
+
+
+register_composite("PDEStateSpace", _pde_err, _pde_err)
+
+from pysp.ppl.dynamics import (  # noqa: E402  (after composite registration)
+    AdvectionDiffusionOperator,
+    AdvectionOperator,
+    DiffusionOperator,
+    available_dynamics_operators,
+    make_operator,
+    register_dynamics_operator,
+)
+
+
 # --- constructors: conventional parameterizations, return symbolic RandomVariables ---
 def Normal(mean: Any, sd: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Normal with mean and standard deviation (lowers to GaussianDistribution(mu, sd**2))."""
@@ -656,6 +680,18 @@ def LocalLevel(*, name: str | None = None) -> RandomVariable:
 def AR1(*, name: str | None = None) -> RandomVariable:
     """AR(1)-plus-noise state-space model; estimates the autoregressive coefficient phi."""
     return RandomVariable._sample("StateSpace", (True,), name=name)
+
+
+def PDE(operator: Any, *, name: str | None = None) -> RandomVariable:
+    """PDE-constrained latent-field model for spatiotemporal data.
+
+    ``operator`` is a :class:`pysp.ppl.dynamics.DynamicsOperator` (e.g. ``DiffusionOperator``,
+    ``AdvectionOperator``) whose method-of-lines discretization fixes the linear state
+    transition. Fit on a ``(T, m)`` array of noisy field observations: the Kalman/RTS smoother
+    recovers the latent field and EM estimates the process/observation noise levels while the
+    physics-derived dynamics are held fixed. Pass ``dt=`` and an optional sensor operator ``H=``
+    to ``fit()``."""
+    return RandomVariable._sample("PDEStateSpace", (operator,), name=name)
 
 
 def _mean_spec(mean, dim):
