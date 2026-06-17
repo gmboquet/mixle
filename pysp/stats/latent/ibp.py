@@ -22,12 +22,14 @@ from scipy.special import betaln, digamma
 
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 SS = tuple[np.ndarray, float, float | None]
 
@@ -272,6 +274,18 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         """Per-row VB contribution; rows are observed, so there is no local entropy."""
         return self.seq_expected_log_density(x)
 
+    def enumerator(self) -> DistributionEnumerator:
+        """Enumerate feature rows in descending probability order.
+
+        The plug-in row density factorizes over features -- ``log p(z) = sum_k [z_k log pi_k +
+        (1-z_k) log(1-pi_k)]`` with ``pi_k = E_q[feature_probs]`` -- so the truncated IBP row is a
+        product of independent Bernoulli features and enumerates by best-first over the per-feature
+        supports (the same structure as the Erdos-Renyi graph). Rows are emitted in the configured
+        ``data_format`` (a dense 0/1 list, or a sorted list of active feature indices when sparse),
+        each carrying its exact ``log_density``.
+        """
+        return IndianBuffetProcessEnumerator(self)
+
     def sampler(self, seed: int | None = None) -> "IndianBuffetProcessSampler":
         """Return a sampler for drawing observations from this distribution."""
         return IndianBuffetProcessSampler(self, seed)
@@ -293,6 +307,36 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> "IndianBuffetProcessDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return IndianBuffetProcessDataEncoder(self.num_features, self.data_format)
+
+
+class IndianBuffetProcessEnumerator(DistributionEnumerator):
+    def __init__(self, dist: IndianBuffetProcessDistribution) -> None:
+        """Best-first enumeration of IBP feature rows over independent Bernoulli features.
+
+        Args:
+            dist (IndianBuffetProcessDistribution): Distribution whose rows are enumerated.
+        """
+        super().__init__(dist)
+        sparse = dist.data_format == "sparse"
+        streams = []
+        for k in range(dist.num_features):
+            opts = []
+            if dist.log_pvec[k] > -np.inf:
+                opts.append((1, float(dist.log_pvec[k])))
+            if dist.log_nvec[k] > -np.inf:
+                opts.append((0, float(dist.log_nvec[k])))
+            opts.sort(key=lambda u: -u[1])
+            streams.append(BufferedStream(iter(opts)))
+
+        def combine(values: tuple[int, ...]) -> list[int]:
+            if sparse:
+                return [k for k, v in enumerate(values) if v]
+            return [int(v) for v in values]
+
+        self._product = ProductEnumerator(streams, combine=combine)
+
+    def __next__(self) -> tuple[list[int], float]:
+        return next(self._product)
 
 
 class IndianBuffetProcessSampler(DistributionSampler):

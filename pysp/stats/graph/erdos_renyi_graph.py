@@ -17,15 +17,19 @@ from pysp.data.graph_data import (
     _bernoulli_log_likelihood,
     _clip_prob,
     _edge_counts,
+    _edge_indices,
     _extract_observation,
 )
 from pysp.stats.compute.pdist import (
+    DistributionEnumerator,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 
 class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
@@ -147,6 +151,19 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
     def sampler(self, seed: int | None = None) -> "ErdosRenyiGraphSampler":
         return ErdosRenyiGraphSampler(self, seed)
 
+    def enumerator(self) -> DistributionEnumerator:
+        """Enumerate binary graphs in descending probability order (requires ``num_nodes``).
+
+        The edges are independent Bernoulli(p) over the free positions ``_edge_indices(n, directed,
+        self_loops)``, so the graph distribution is a product of edge factors and enumerates by
+        best-first over the per-edge supports -- exactly like a composite of Bernoullis, with the
+        combined value assembled into an adjacency matrix (mirrored for the undirected case). Each
+        graph carries its exact ``log_density``. ``num_nodes`` must be set so the edge set is finite.
+        """
+        if self.num_nodes is None:
+            raise EnumerationError(self, reason="num_nodes must be set to enumerate graphs")
+        return ErdosRenyiGraphEnumerator(self)
+
     def estimator(self, pseudo_count: float | None = None) -> "ErdosRenyiGraphEstimator":
         return ErdosRenyiGraphEstimator(
             directed=self.directed,
@@ -160,6 +177,42 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> GraphDataEncoder:
         return GraphDataEncoder(directed=self.directed)
+
+
+class ErdosRenyiGraphEnumerator(DistributionEnumerator):
+    def __init__(self, dist: ErdosRenyiGraphDistribution) -> None:
+        """Best-first enumeration of binary graphs over independent edge factors.
+
+        Args:
+            dist (ErdosRenyiGraphDistribution): Distribution whose graphs are enumerated (its
+                ``num_nodes`` must be set).
+        """
+        super().__init__(dist)
+        n = dist.num_nodes
+        edges = list(_edge_indices(n, dist.directed, dist.self_loops))
+        directed = dist.directed
+        # Each free edge is an independent Bernoulli(p): present (1) at log_p, absent (0) at log_1p,
+        # ordered by descending probability so the per-edge stream is sorted.
+        present, absent = (1, 0)
+        edge_pair = (
+            [(present, dist.log_p), (absent, dist.log_1p)]
+            if dist.log_p >= dist.log_1p
+            else [(absent, dist.log_1p), (present, dist.log_p)]
+        )
+
+        def combine(edge_values: tuple[int, ...]) -> np.ndarray:
+            adj = np.zeros((n, n), dtype=np.int8)
+            for (i, j), v in zip(edges, edge_values):
+                adj[i, j] = v
+                if not directed:
+                    adj[j, i] = v
+            return adj
+
+        streams = [BufferedStream(iter(list(edge_pair))) for _ in edges]
+        self._product = ProductEnumerator(streams, combine=combine)
+
+    def __next__(self) -> tuple[np.ndarray, float]:
+        return next(self._product)
 
 
 class ErdosRenyiGraphSampler(DistributionSampler):

@@ -236,6 +236,76 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         z = np.asarray(x).copy()
         return np.dot(z, self.mu) * self.kappa + self.log_const
 
+    def density_cumulative(self, x: Sequence[float] | np.ndarray) -> float:
+        """Exact probability-ordered cumulative ``G(x) = P(p(Y) >= p(x))`` (the HDR mass at x).
+
+        A coordinate-wise CDF is undefined on the sphere (no total order), but since the density is
+        monotone in the cosine ``t = mu . x`` (``p(y) >= p(x)`` iff ``mu.y >= mu.x`` for ``kappa >= 0``),
+        the highest-density-region mass is the upper tail of the cosine marginal, whose density is
+        ``f(s) proportional to exp(kappa s) (1 - s^2)^((p-3)/2)`` on ``[-1, 1]``. ``G`` is that tail
+        integral (computed by quadrature; the ``exp(kappa(s-1))`` shift keeps it stable for large
+        kappa and cancels in the ratio). Returned to density_rank as method ``exact-analytic``.
+        """
+        from scipy.integrate import quad
+
+        xx = np.asarray(x, dtype=float)
+        nrm = float(np.linalg.norm(xx))
+        if nrm > 0.0:
+            xx = xx / nrm
+        t = float(np.clip(np.dot(self.mu, xx), -1.0, 1.0))
+        k = float(self.kappa)
+        a = (self.dim - 3.0) / 2.0
+
+        def f(s: float) -> float:
+            return exp(k * (s - 1.0)) * (max(1.0 - s * s, 0.0) ** a)
+
+        num, _ = quad(f, t, 1.0, limit=200)
+        den, _ = quad(f, -1.0, 1.0, limit=200)
+        return float(min(1.0, max(0.0, num / den))) if den > 0.0 else 0.0
+
+    def density_quantile(self, q: float) -> np.ndarray:
+        """Inverse of :meth:`density_cumulative`: a representative unit vector at cumulative-density ``q``.
+
+        ``q`` is the highest-density-region mass; since the density is monotone in the cosine
+        ``t = mu . y``, the boundary is the cosine ``t_q`` with tail mass ``q``, found by bisection on
+        the cosine marginal. The returned representative is a unit vector at that cosine from ``mu``
+        (``t_q * mu + sqrt(1 - t_q^2) * perp`` for a fixed ``perp`` orthogonal to ``mu``). Sweeping ``q``
+        enumerates the sphere in descending density (concentric caps about ``mu``).
+        """
+        from scipy.integrate import quad
+
+        qf = float(q)
+        if not 0.0 <= qf <= 1.0:
+            raise ValueError("q must be in [0, 1].")
+        k = float(self.kappa)
+        a = (self.dim - 3.0) / 2.0
+
+        def f(s: float) -> float:
+            return exp(k * (s - 1.0)) * (max(1.0 - s * s, 0.0) ** a)
+
+        den, _ = quad(f, -1.0, 1.0, limit=200)
+
+        def tail(t: float) -> float:
+            return quad(f, t, 1.0, limit=200)[0] / den if den > 0.0 else 0.0
+
+        # tail(t) decreases from 1 at t=-1 to 0 at t=1; bisect for tail(t_q) = q.
+        lo, hi = -1.0, 1.0
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            if tail(mid) > qf:
+                lo = mid
+            else:
+                hi = mid
+        t_q = 0.5 * (lo + hi)
+        # A unit direction orthogonal to mu (use whichever axis is least aligned with mu).
+        axis = int(np.argmin(np.abs(self.mu)))
+        e = np.zeros(self.dim)
+        e[axis] = 1.0
+        perp = e - np.dot(e, self.mu) * self.mu
+        norm = float(np.linalg.norm(perp))
+        perp = perp / norm if norm > 0.0 else e
+        return t_q * self.mu + float(np.sqrt(max(0.0, 1.0 - t_q * t_q))) * perp
+
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized evaluation of log-density at sequence encoded input x.
 

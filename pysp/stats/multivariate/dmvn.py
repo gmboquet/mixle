@@ -233,6 +233,36 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         rv += self.cc
         return rv
 
+    def density_cumulative(self, x: Sequence[float] | np.ndarray) -> float:
+        """Exact probability-ordered cumulative ``G(x) = P(p(Y) >= p(x))`` -- the highest-density-region
+        mass through ``x`` (multivariate analogue of a CDF). For a diagonal Gaussian the squared
+        Mahalanobis distance ``sum_i (x_i-mu_i)^2/var_i`` is chi-square(dim), so ``G = chi2.cdf(maha2, dim)``.
+        Used by :func:`pysp.utils.density_rank.density_rank` to return an EXACT cumulative.
+        """
+        from scipy.stats import chi2
+
+        diff = np.asarray(x, dtype=float) - self.mu
+        maha2 = float(np.sum(diff * diff / self.covar))
+        return float(chi2.cdf(maha2, df=self.dim))
+
+    def density_quantile(self, q: float) -> np.ndarray:
+        """Inverse of :meth:`density_cumulative`: a representative point at cumulative-density index ``q``.
+
+        ``q`` is the highest-density-region mass, whose boundary is the squared-Mahalanobis level
+        ``chi2.ppf(q, dim)``; a representative point on that contour offsets the first coordinate by
+        ``sqrt(level * var_0)`` (Mahalanobis distance exactly the level). Sweeping ``q`` enumerates the
+        support in descending density.
+        """
+        from scipy.stats import chi2
+
+        qf = float(q)
+        if not 0.0 <= qf <= 1.0:
+            raise ValueError("q must be in [0, 1].")
+        level = float(chi2.ppf(qf, df=self.dim))
+        point = self.mu.copy()
+        point[0] = point[0] + float(np.sqrt(level * self.covar[0]))
+        return point
+
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized evaluation of the log-density at a sequence-encoded input x.
 

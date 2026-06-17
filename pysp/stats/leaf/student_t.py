@@ -127,6 +127,18 @@ class StudentTDistribution(SequenceEncodableProbabilityDistribution):
             xx[:, None], params["df"][None, :], params["loc"][None, :], params["scale"][None, :], engine
         )
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact). The continuous 'index of' a value."""
+        from scipy.stats import t as _sp
+
+        return float(_sp.cdf(x, self.df, loc=self.loc, scale=self.scale))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from scipy.stats import t as _sp
+
+        return float(_sp.ppf(q, self.df, loc=self.loc, scale=self.scale))
+
     def sampler(self, seed: int | None = None) -> "StudentTSampler":
         """Return a sampler for drawing observations from this distribution."""
         return StudentTSampler(self, seed)
