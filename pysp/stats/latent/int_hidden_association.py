@@ -52,7 +52,7 @@ from pysp.stats.compute.pdist import (
 )
 from pysp.stats.latent.int_plsi import multinomial_bag_stream
 from pysp.utils.enumeration import BufferedStream, frontier_merge
-from pysp.utils.optional_deps import numba
+from pysp.utils.optional_deps import HAS_NUMBA, numba
 from pysp.utils.optsutil import count_by_value
 
 E0 = tuple[tuple[list[tuple[np.ndarray, ...]], Any | None, Any | None], None]
@@ -1082,7 +1082,7 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
         len_estimator: ParameterEstimator | None = NullEstimator(),
         suff_stat: Any | None = None,
         pseudo_count: float | None = None,
-        use_numba: bool = False,
+        use_numba: bool | None = None,
         name: str | None = None,
         keys: tuple[str | None, str | None] | None = (None, None),
     ) -> None:
@@ -1100,7 +1100,8 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
                 with Tuple[int, int].
             suff_stat (Optional[Any]): Kept for consistency.
             pseudo_count (Optional[float]): Kept for consistency.
-            use_numba (bool): If true Numba is used for encoding and vectorized function calls.
+            use_numba (Optional[bool]): If True, Numba is used for encoding and vectorized function calls. If None
+                (default), numba is used automatically when installed (HAS_NUMBA); the paths are bit-identical.
             name (Optional[str]): Set a name to the object instance.
             keys (Optional[Tuple[Optional[str], Optional[str]]]): Set the keys for weights and transitions.
 
@@ -1129,7 +1130,7 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
         self.num_vals = num_vals
         self.num_states = num_states
         self.alpha = alpha
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
         self.name = name
         self.keys = keys if keys is not None else (None, None)
 
