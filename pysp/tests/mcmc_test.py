@@ -15,6 +15,7 @@ from pysp.utils.mcmc import (
     BlockProposal,
     IndependentProposal,
     LangevinProposal,
+    MCMCResult,
     MixtureProposal,
     RandomWalkProposal,
     build_parameter_bridge,
@@ -56,6 +57,24 @@ class MCMCTestCase(unittest.TestCase):
         self.assertLess(abs(summary["mean"] - 1.0), 0.15)
         self.assertGreater(summary["ess"], 50.0)
         self.assertGreater(summary["mcse"], 0.0)
+
+    def test_effective_sample_size_handles_mixed_constant_vector_coordinates(self):
+        samples = [np.asarray([3.0, float(i)], dtype=float) for i in range(40)]
+        result = MCMCResult(
+            samples=samples,
+            log_probs=np.zeros(len(samples), dtype=float),
+            accepted=np.ones(len(samples), dtype=bool),
+        )
+
+        ess = result.effective_sample_size(max_lag=10)
+        self.assertEqual(ess.shape, (2,))
+        self.assertEqual(float(ess[0]), float(len(samples)))
+        self.assertGreater(float(ess[1]), 0.0)
+        self.assertLessEqual(float(ess[1]), float(len(samples)))
+
+        summary = result.summary(max_lag=10)
+        self.assertEqual(float(np.asarray(summary["mcse"])[0]), 0.0)
+        self.assertGreater(float(np.asarray(summary["mcse"])[1]), 0.0)
 
     def test_mixture_proposal_samples_with_exact_proposal_density(self):
         proposal = MixtureProposal(
