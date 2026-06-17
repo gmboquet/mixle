@@ -1355,32 +1355,80 @@ class HiddenMarkovSampler(DistributionSampler):
 
         self.state_sampler = MarkovChainDistribution(p_map, t_map).sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample_seq(self, size: int | None = None) -> list[Any] | list[list[Any]]:
+    def _sample_emissions_batched(self, state_seqs: list[list[Any]]) -> list[list[Any]]:
+        """Draw all emissions for a batch of state paths, grouped by hidden state.
+
+        Each emission sampler is invoked once with the number of token positions assigned to its
+        state and the draws are scattered back into sequence/position order. Because every emission
+        sampler owns an independent RandomState and is consumed in state order, this is byte-identical
+        to drawing the emissions one at a time in nested order over (sequence, position).
+        """
+        # Flatten (sequence_index, position) and the hidden state at each position.
+        flat_states: list[int] = []
+        flat_seq: list[int] = []
+        flat_pos: list[int] = []
+        for si, seq in enumerate(state_seqs):
+            for pi, st in enumerate(seq):
+                flat_states.append(st)
+                flat_seq.append(si)
+                flat_pos.append(pi)
+
+        out: list[list[Any]] = [[None] * len(seq) for seq in state_seqs]
+        if not flat_states:
+            return out
+
+        flat_states_arr = np.asarray(flat_states)
+        for st in range(self.num_states):
+            pos_mask = np.flatnonzero(flat_states_arr == st)
+            count = len(pos_mask)
+            if count == 0:
+                continue
+            drawn = self.obs_samplers[st].sample(size=count)
+            for m, idx in enumerate(pos_mask):
+                out[flat_seq[idx]][flat_pos[idx]] = drawn[m]
+        return out
+
+    def sample_seq(self, size: int | None = None, *, batched: bool = True) -> list[Any] | list[list[Any]]:
         """Sample iid HMM sequences.
 
         If size is None, 1 sample is drawn and a List[T] is returned. If size > 0, 'size' samples are drawn and a List
         of length 'size' with HMM sequences (List[T]) is returned.
 
+        With ``batched=True`` (default) the hidden-state paths for the whole batch are drawn in a
+        single vectorized pass (the MarkovChainSampler advances all chains across time at once) and
+        the emissions are drawn by grouping token positions by hidden state and invoking each emission
+        sampler once. Emission batching is byte-identical to the legacy nested loop (each emission
+        sampler owns an independent RandomState consumed in state order), but vectorizing the state
+        path changes the RNG consumption order, so the state paths (and therefore the emissions
+        conditioned on them) are only statistically equivalent to ``batched=False`` -- not
+        byte-identical. Set ``batched=False`` to reproduce the exact legacy output for a given seed.
+
         Args:
             size (Optional[int]): Number of iid HMM sequences to sample.
+            batched (bool): Vectorize state-path and emission draws (default); set False for the
+                legacy per-draw loop.
 
         Returns:
             List[T] or List[List[T]] depending on size arg.
 
         """
-        if size is None:
-            n = self.len_sampler.sample()
-            state_seq = self.state_sampler.sample_seq(n)
-            obs_seq = [self.obs_samplers[state_seq[i]].sample() for i in range(n)]
-
-            return obs_seq
-
-        else:
+        if not batched:
+            if size is None:
+                n = self.len_sampler.sample()
+                state_seq = self.state_sampler.sample_seq(n, batched=False)
+                return [self.obs_samplers[state_seq[i]].sample() for i in range(n)]
             n = self.len_sampler.sample(size=size)
-            state_seq = [self.state_sampler.sample_seq(size=nn) for nn in n]
-            obs_seq = [[self.obs_samplers[j].sample() for j in nn] for nn in state_seq]
+            state_seq = [self.state_sampler.sample_seq(size=nn, batched=False) for nn in n]
+            return [[self.obs_samplers[j].sample() for j in nn] for nn in state_seq]
 
-            return obs_seq
+        if size is None:
+            n = int(self.len_sampler.sample())
+            state_seq = self.state_sampler.sample_paths([n])[0]
+            return self._sample_emissions_batched([state_seq])[0]
+
+        n = np.asarray(self.len_sampler.sample(size=size), dtype=np.int64).reshape(-1)
+        state_seqs = self.state_sampler.sample_paths(n)
+        return self._sample_emissions_batched(state_seqs)
 
     def sample_terminal(self, terminal_set: set[T]) -> list[T]:
         """Sample an HMM sequence, until a terminal value is samples from the emission distribution.
@@ -1401,22 +1449,29 @@ class HiddenMarkovSampler(DistributionSampler):
 
         return rv
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw iid samples from HMM.
 
         If a 'len_sampler' is set, call 'sample_seq()' (See HiddenMarkovSampler.sample_seq() for details).
         If 'len_sampler' is the NullDistributionSampler(), 'sample_terminal()' is called. (See
         HiddenMarkovSampler.sample_terminal() for details).
 
+        With ``batched=True`` (default) the length-distribution path uses the vectorized
+        :meth:`sample_seq` (statistically equivalent, not byte-identical -- see its docstring). The
+        terminal-value path is inherently sequential and always uses the legacy loop. ``batched=False``
+        reproduces the exact legacy output for a given seed.
+
         Args:
             size (Optional[int]): Number of iid HMM sequences to sample.
+            batched (bool): Vectorize state-path and emission draws on the length-distribution path
+                (default); set False for the legacy per-draw loop.
 
         Returns:
             List[T] or List[List[T]] depending on arg size.
 
         """
         if self.len_sampler is not None:
-            return self.sample_seq(size=size)
+            return self.sample_seq(size=size, batched=batched)
 
         elif self.terminal_set is not None:
             if size is None:
