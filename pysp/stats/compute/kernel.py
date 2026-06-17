@@ -84,7 +84,9 @@ class GenericKernel(Kernel):
         try:
             return backend_seq_log_density(self.dist, enc, self.engine)
         except BackendScoringError:
-            if self.engine.name != NUMPY_ENGINE.name:
+            # The numpy seq_log_density fallback returns host numpy arrays, so it is only valid on a
+            # numpy-host engine; other engines must surface the failure.
+            if not getattr(self.engine, "supports_numba", False):
                 raise
         return self.dist.seq_log_density(enc)
 
@@ -112,10 +114,10 @@ class GenericKernel(Kernel):
             return generated_sufficient_statistics(self.dist, getattr(enc, "engine_payload", enc), weights, self.engine)
         accumulator = self.estimator.accumulator_factory().make()
         enc = getattr(enc, "host_payload", enc)
-        # Engine-resident E-step: when the accumulator provides a backend update and we are off the
-        # numpy engine, run the sufficient-statistic accumulation on the active engine instead of
-        # falling back to the host seq_update path.
-        if self.engine.name != NUMPY_ENGINE.name and callable(getattr(accumulator, "seq_update_engine", None)):
+        # Engine-resident E-step: when the accumulator provides a backend update and the engine
+        # prefers staying resident, run the sufficient-statistic accumulation on the active engine
+        # instead of falling back to the host seq_update path.
+        if getattr(self.engine, "resident_estep", True) and callable(getattr(accumulator, "seq_update_engine", None)):
             accumulator.seq_update_engine(enc, weights, self.dist, self.engine)
             return accumulator.value()
         weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
@@ -161,8 +163,8 @@ class NumbaKernel(Kernel):
         engine: ComputeEngine = NUMPY_ENGINE,
         estimator: ParameterEstimator | None = None,
     ) -> None:
-        if engine.name != NUMPY_ENGINE.name:
-            raise ValueError("NumbaKernel currently supports only the numpy engine.")
+        if not getattr(engine, "supports_numba", False):
+            raise ValueError("NumbaKernel requires a numba-capable (host numpy) engine.")
         from pysp.stats.compute.fused_kernels import CompiledMixture
 
         self.dist = dist
@@ -208,8 +210,8 @@ class GeneratedNumbaKernel(Kernel):
         engine: ComputeEngine = NUMPY_ENGINE,
         estimator: ParameterEstimator | None = None,
     ) -> None:
-        if engine.name != NUMPY_ENGINE.name:
-            raise ValueError("GeneratedNumbaKernel currently supports only the numpy engine.")
+        if not getattr(engine, "supports_numba", False):
+            raise ValueError("GeneratedNumbaKernel requires a numba-capable (host numpy) engine.")
         if not _generated_numba_kernel_available(dist):
             raise ValueError("%s has no declaration-generated numba scorer." % type(dist).__name__)
         self.dist = dist
@@ -340,7 +342,7 @@ class GeneratedNumbaKernelFactory(KernelFactory):
         estimator: ParameterEstimator | None = None,
     ) -> Kernel:
         """Build a generated numba kernel on numpy when available, else fall back."""
-        if engine.name == NUMPY_ENGINE.name and _generated_numba_kernel_available(dist):
+        if getattr(engine, "supports_numba", False) and _generated_numba_kernel_available(dist):
             try:
                 return GeneratedNumbaKernel(dist, engine=engine, estimator=estimator)
             except ValueError:
@@ -351,7 +353,7 @@ class GeneratedNumbaKernelFactory(KernelFactory):
 def _stacked_kernel_after_numba_decline(
     dist: SequenceEncodableProbabilityDistribution, engine: ComputeEngine, estimator: ParameterEstimator | None
 ) -> Kernel | None:
-    if engine.name != NUMPY_ENGINE.name:
+    if not engine.supports_numba:
         return None
     components = getattr(dist, "components", None)
     log_w = getattr(dist, "log_w", None)
