@@ -190,6 +190,52 @@ class GeneralizedEM:
         return EMStepResult(model, old_value, False)
 
 
+class MonotonicEM:
+    """Objective-gated wrapper that rejects log-likelihood-decreasing or non-finite steps.
+
+    Wraps any base EM-family strategy (``StandardEM`` by default). After the base step it
+    evaluates the objective on the candidate; if the candidate objective is non-finite, or
+    (with ``require_improvement``) it decreases beyond ``tolerance``, the previous model is
+    kept and the step is marked rejected. This is the robust-path guard against the
+    singular-covariance / NaN cascade and against EM steps that overshoot.
+    """
+
+    def __init__(
+        self,
+        base_strategy: Any | None = None,
+        require_improvement: bool = True,
+        tolerance: float = 1.0e-9,
+    ) -> None:
+        self.base_strategy = StandardEM() if base_strategy is None else base_strategy
+        self.require_improvement = bool(require_improvement)
+        self.tolerance = float(tolerance)
+
+    def step(
+        self,
+        enc_data: Any,
+        estimator: ParameterEstimator,
+        model: SequenceEncodableProbabilityDistribution,
+        engine: Any | None = None,
+        objective: Callable[[Any], float] | None = None,
+    ) -> EMStepResult:
+        """Run the base step, then reject it if the objective is non-finite or decreases."""
+        objective = observed_log_likelihood(enc_data, engine=engine) if objective is None else objective
+        old_value = objective(model)
+        try:
+            base_result = self.base_strategy.step(enc_data, estimator, model, engine=engine, objective=objective)
+            candidate = base_result.model
+            new_value = objective(candidate) if base_result.objective is None else base_result.objective
+        except (np.linalg.LinAlgError, FloatingPointError, ValueError, RuntimeError):
+            # M-step blew up (e.g. a singular covariance slipped through): keep the last good model.
+            return EMStepResult(model, old_value, False, metadata={"rejected": "exception"})
+
+        if not np.isfinite(new_value):
+            return EMStepResult(model, old_value, False, metadata={"rejected": "nonfinite"})
+        if self.require_improvement and new_value + self.tolerance < old_value:
+            return EMStepResult(model, old_value, False, metadata={"rejected": "decrease"})
+        return EMStepResult(candidate, new_value, True)
+
+
 class ConditionalMaximizationEM:
     """Expectation/conditional-maximization over caller-supplied CM steps."""
 
@@ -626,11 +672,17 @@ def run_em(
     strategy = StandardEM() if strategy is None else strategy
     objective = observed_log_likelihood(enc_data, engine=engine) if objective is None else objective
     model = initial_model
+    last_good = model
     old_value = objective(model)
     for _ in range(max(1, int(max_its))):
         result = strategy.step(enc_data, estimator, model, engine=engine, objective=objective)
-        model = result.model
-        value = objective(model) if result.objective is None else result.objective
+        candidate = result.model
+        value = objective(candidate) if result.objective is None else result.objective
+        # NaN/inf guard: never propagate a non-finite step; roll back to the last good model.
+        if not np.isfinite(value):
+            return last_good
+        model = candidate
+        last_good = model
         if delta is not None and abs(value - old_value) < delta:
             break
         old_value = value
