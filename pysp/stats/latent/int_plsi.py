@@ -1155,10 +1155,9 @@ class IntegerPLSIDataEncoder(DataSequenceEncoder):
         """
         xv = []
         xc = []
-        xd = []
-        xi = []
-        xn = []
-        xm = []
+        counts_per_doc = np.empty(len(x), dtype=np.int32)
+        xn = np.empty(len(x), dtype=np.float64)
+        xm = np.empty(len(x), dtype=np.int32)
 
         for i, (d_id, xx) in enumerate(x):
             v = [u[0] for u in xx]
@@ -1166,17 +1165,14 @@ class IntegerPLSIDataEncoder(DataSequenceEncoder):
 
             xv.extend(v)
             xc.extend(c)
-            xd.extend([d_id] * len(v))
-            xi.extend([i] * len(v))
-            xn.append(np.sum(c))
-            xm.append(d_id)
+            counts_per_doc[i] = len(v)
+            xn[i] = np.sum(c)
+            xm[i] = d_id
 
         xv = np.asarray(xv, dtype=np.int32)
         xc = np.asarray(xc, dtype=np.float64)
-        xd = np.asarray(xd, dtype=np.int32)
-        xi = np.asarray(xi, dtype=np.int32)
-        xn = np.asarray(xn, dtype=np.float64)
-        xm = np.asarray(xm, dtype=np.int32)
+        xd = np.repeat(xm, counts_per_doc)
+        xi = np.repeat(np.arange(len(x), dtype=np.int32), counts_per_doc)
 
         nn = self.len_encoder.seq_encode(xn)
 

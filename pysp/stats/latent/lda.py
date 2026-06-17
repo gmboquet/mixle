@@ -1215,18 +1215,11 @@ class LDADataEncoder(DataSequenceEncoder):
         """
         num_documents = len(x)
 
-        tx = []
-        ctx = []
-        nx = []
-        tidx = []
-        for i in range(len(x)):
-            nx.append(len(x[i]))
-            for j in range(len(x[i])):
-                tidx.append(i)
-                tx.append(x[i][j][0])
-                ctx.append(x[i][j][1])
+        nx = np.fromiter((len(doc) for doc in x), dtype=np.intp, count=num_documents)
+        tx = [pair[0] for doc in x for pair in doc]
+        ctx = [pair[1] for doc in x for pair in doc]
 
-        idx = np.asarray(tidx)
+        idx = np.repeat(np.arange(num_documents), nx)
         counts = np.asarray(ctx)
         gammas = None
         enc_data = self.encoder.seq_encode(tx)

@@ -2637,22 +2637,13 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
         if not self.use_numba:
             return self._seq_encode(x)
 
-        idx = []
-        xs = []
-        sz = []
-        seq_x = []
+        sz_list = [len(xx) for xx in x]
+        sz = np.asarray(sz_list, dtype=np.int32)
+        idx = np.repeat(np.arange(len(x), dtype=np.int32), sz)
+        xs = list(itertools.chain.from_iterable(x))
 
-        for i, xx in enumerate(x):
-            idx.extend([i] * len(xx))
-            xs.extend(xx)
-            sz.append(len(xx))
-            if sz[-1] > 0:
-                seq_x.extend([xx[j] for j in range(sz[-1])])
+        len_enc = self.len_encoder.seq_encode(sz_list)
 
-        len_enc = self.len_encoder.seq_encode(sz)
-
-        idx = np.asarray(idx, dtype=np.int32)
-        sz = np.asarray(sz, dtype=np.int32)
         xs = self.emission_encoder.seq_encode(xs)
 
         return None, ((idx, sz, xs), len_enc)
