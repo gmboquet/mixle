@@ -303,6 +303,10 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             {val_map_inv[j]: float(counts[j, k]) for j in range(len(val_map_inv))} for k in range(counts.shape[1])
         )
 
+    def support_size(self) -> int:
+        """Number of categories in the support."""
+        return len(self.pmap)
+
     def sampler(self, seed: int | None = None) -> "CategoricalSampler":
         """Creates CategoricalSampler for sampling from CategoricalDistribution.
 
