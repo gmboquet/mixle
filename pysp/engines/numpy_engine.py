@@ -16,6 +16,10 @@ class NumpyEngine(ComputeEngine):
 
     name = "numpy"
     supports_autograd = False
+    # NumPy is the host array library: numba / pure-numpy kernels apply, and the E-step accumulates
+    # on the host (no engine-resident round-trip to avoid).
+    supports_numba = True
+    resident_estep = False
 
     device = "cpu"
 
