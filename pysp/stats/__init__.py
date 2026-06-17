@@ -431,6 +431,7 @@ __all__ = [
     "MatchingSampler",
     "MatchingEstimator",
     "MatchingDataEncoder",
+    "MatchingEnumerator",
     "RandomDotProductGraphDistribution",
     "RandomDotProductGraphSampler",
     "RandomDotProductGraphEstimator",
@@ -710,6 +711,7 @@ from pysp.stats.graph.markov_chain import (
 from pysp.stats.graph.matching import (
     MatchingDataEncoder,
     MatchingDistribution,
+    MatchingEnumerator,
     MatchingEstimator,
     MatchingSampler,
 )
