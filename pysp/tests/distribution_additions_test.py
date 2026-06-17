@@ -14,6 +14,12 @@ from pysp.stats import (
     ExpTransform,
     GaussianDistribution,
     GaussianEstimator,
+    GumbelDistribution,
+    GumbelEstimator,
+    HalfNormalDistribution,
+    HalfNormalEstimator,
+    InverseGaussianDistribution,
+    InverseGaussianEstimator,
     LaplaceDistribution,
     LaplaceEstimator,
     LogisticDistribution,
@@ -59,6 +65,9 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
             WeibullDistribution(1.5, 2.0, name="weibull", keys="k"),
             ParetoDistribution(2.0, 3.0, name="pareto", keys="k"),
             RayleighDistribution(2.0, name="rayleigh", keys="k"),
+            InverseGaussianDistribution(2.0, 3.0, name="invgauss", keys="k"),
+            HalfNormalDistribution(1.5, name="halfnorm", keys="k"),
+            GumbelDistribution(loc=2.0, scale=1.5, name="gumbel", keys="k"),
         ]
         for dist in dists:
             self.assertEqual(str(eval(str(dist))), str(dist))
@@ -77,6 +86,9 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
             WeibullDistribution(1.5, 2.0),
             ParetoDistribution(2.0, 3.0),
             RayleighDistribution(2.0),
+            InverseGaussianDistribution(2.0, 3.0),
+            HalfNormalDistribution(1.5),
+            GumbelDistribution(loc=2.0, scale=1.5),
         ]
         for dist in dists:
             data = dist.sampler(3).sample(50)
@@ -156,6 +168,21 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
         ray = RayleighDistribution(2.0)
         self.assertAlmostEqual(ray.log_density(1.5), scipy.stats.rayleigh.logpdf(1.5, scale=2.0), places=10)
 
+        # scipy parameterizes invgauss(mu_shape, scale=lam) with mean = mu_shape * lam, matching
+        # InverseGaussianDistribution(mu, lam) when mu_shape = mu / lam.
+        ig = InverseGaussianDistribution(2.0, 3.0)
+        for x in [0.5, 1.5, 4.0]:
+            self.assertAlmostEqual(ig.log_density(x), scipy.stats.invgauss.logpdf(x, 2.0 / 3.0, scale=3.0), places=10)
+
+        hn = HalfNormalDistribution(1.5)
+        for x in [0.0, 0.75, 3.0]:
+            self.assertAlmostEqual(hn.log_density(x), scipy.stats.halfnorm.logpdf(x, scale=1.5), places=10)
+        self.assertEqual(hn.log_density(-0.5), -np.inf)
+
+        gum = GumbelDistribution(loc=2.0, scale=1.5)
+        for x in [-1.0, 2.0, 5.5]:
+            self.assertAlmostEqual(gum.log_density(x), scipy.stats.gumbel_r.logpdf(x, loc=2.0, scale=1.5), places=10)
+
     def test_closed_form_estimators(self):
         acc = BernoulliEstimator().accumulator_factory().make()
         data = [True, False, True, True, False]
@@ -219,6 +246,31 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
         fitted = WeibullEstimator().estimate(None, (n * mean0, n * second0, n))
         self.assertAlmostEqual(fitted.shape, shape0, places=6)
         self.assertAlmostEqual(fitted.scale, scale0, places=6)
+
+        # Inverse Gaussian MLE is closed form: mu = mean(x), 1/lam = mean(1/x) - 1/mu.
+        ig_data = np.asarray([0.5, 1.0, 2.0, 4.0])
+        acc = InverseGaussianEstimator().accumulator_factory().make()
+        acc.seq_update(InverseGaussianDistribution(1.0, 1.0).dist_to_encoder().seq_encode(ig_data), np.ones(4), None)
+        fitted = InverseGaussianEstimator().estimate(None, acc.value())
+        mu_hat = float(np.mean(ig_data))
+        self.assertAlmostEqual(fitted.mu, mu_hat, places=10)
+        self.assertAlmostEqual(fitted.lam, 1.0 / (np.mean(1.0 / ig_data) - 1.0 / mu_hat), places=8)
+
+        # Half-normal MLE is closed form: sigma = sqrt(mean(x**2)).
+        hn_data = np.asarray([0.5, 1.0, 2.0, 3.0])
+        acc = HalfNormalEstimator().accumulator_factory().make()
+        acc.seq_update(HalfNormalDistribution(1.0).dist_to_encoder().seq_encode(hn_data), np.ones(4), None)
+        fitted = HalfNormalEstimator().estimate(None, acc.value())
+        self.assertAlmostEqual(fitted.sigma, np.sqrt(np.mean(hn_data**2)), places=10)
+
+        # Gumbel moment estimator inverts mean = loc + scale*gamma and var = (pi^2/6) scale^2.
+        euler_gamma = 0.5772156649015328606
+        loc0, scale0, n = 1.5, 2.0, 100.0
+        mean0 = loc0 + scale0 * euler_gamma
+        var0 = (np.pi**2 / 6.0) * scale0**2
+        fitted = GumbelEstimator().estimate(None, (n * mean0, n * (var0 + mean0**2), n))
+        self.assertAlmostEqual(fitted.scale, scale0, places=6)
+        self.assertAlmostEqual(fitted.loc, loc0, places=6)
 
         pm = PointMassEstimator("fixed").estimate(None, None)
         self.assertIsInstance(pm, PointMassDistribution)
