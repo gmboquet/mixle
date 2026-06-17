@@ -325,6 +325,7 @@ def _stats_public_distribution_catalog():
         "TruncatedDistribution": stats.TruncatedDistribution(
             stats.IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]), allowed=[0, 1]
         ),
+        "ExponentialTiltedDistribution": stats.ExponentialTiltedDistribution(stats.PoissonDistribution(3.0), theta=0.4),
         "LDADistribution": stats.LDADistribution(
             [
                 stats.IntegerCategoricalDistribution(0, [0.7, 0.3]),
