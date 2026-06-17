@@ -335,6 +335,14 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         return tuple((value_by_component[i], length_by_component[i]) for i in range(num_components))
 
+    def to_fisher(self, **kwargs):
+        """Structural Fisher view for the multinomial bag."""
+        if hasattr(self, "dist") and hasattr(self, "len_dist"):
+            from pysp.utils.fisher import MultinomialFisherView
+
+            return MultinomialFisherView(self)
+        return super().to_fisher(**kwargs)
+
     def sampler(self, seed: int | None = None) -> MultinomialSampler:
         """Create a MultinomialSampler object from MultinomialDistribution object instance.
 

@@ -287,6 +287,14 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
         pair_scores = ll1[:, :, None] + engine.asarray(self.log_taus12)[None, :, :] + ll2[:, None, :]
         return engine.logsumexp(pair_scores, axis=(1, 2))
 
+    def to_fisher(self, **kwargs):
+        """Structural Fisher view for the joint mixture."""
+        if hasattr(self, "components1") and hasattr(self, "components2"):
+            from pysp.utils.fisher import JointMixtureFisherView
+
+            return JointMixtureFisherView(self)
+        return super().to_fisher(**kwargs)
+
     def sampler(self, seed: int | None = None) -> "JointMixtureSampler":
         """Create a JointMixtureSampler object for sampling from this distribution.
 

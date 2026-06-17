@@ -559,6 +559,14 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             total += s
         return total
 
+    def to_fisher(self, **kwargs):
+        """Structural Fisher view for the mixture."""
+        if hasattr(self, "components") and hasattr(self, "w"):
+            from pysp.utils.fisher import MixtureFisherView
+
+            return MixtureFisherView(self)
+        return super().to_fisher(**kwargs)
+
     def sampler(self, seed: int | None = None) -> "MixtureSampler":
         """Create MixtureSampler for sampling from MixtureDistribution instance.
 
