@@ -188,6 +188,10 @@ __all__ = [
     "GaussianSampler",
     "GaussianEstimator",
     "GaussianDataEncoder",
+    "InverseGaussianDistribution",
+    "InverseGaussianSampler",
+    "InverseGaussianEstimator",
+    "InverseGaussianDataEncoder",
     "GeometricDistribution",
     "GeometricSampler",
     "GeometricEstimator",
@@ -811,6 +815,12 @@ from pysp.stats.leaf.exponential import (
 )
 from pysp.stats.leaf.gamma import GammaDataEncoder, GammaDistribution, GammaEstimator, GammaSampler
 from pysp.stats.leaf.gaussian import GaussianDataEncoder, GaussianDistribution, GaussianEstimator, GaussianSampler
+from pysp.stats.leaf.inverse_gaussian import (
+    InverseGaussianDataEncoder,
+    InverseGaussianDistribution,
+    InverseGaussianEstimator,
+    InverseGaussianSampler,
+)
 from pysp.stats.leaf.geometric import (
     GeometricDataEncoder,
     GeometricDistribution,
@@ -930,6 +940,7 @@ def _register_builtin_compute_metadata() -> None:
         GaussianDistribution,
         LogGaussianDistribution,
         GammaDistribution,
+        InverseGaussianDistribution,
         BernoulliDistribution,
         StudentTDistribution,
         LogisticDistribution,
@@ -995,6 +1006,7 @@ def _register_builtin_compute_metadata() -> None:
         BernoulliDistribution,
         CategoricalDistribution,
         GammaDistribution,
+        InverseGaussianDistribution,
         LogGaussianDistribution,
         BinomialDistribution,
         NegativeBinomialDistribution,

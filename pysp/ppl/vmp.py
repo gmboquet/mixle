@@ -16,6 +16,7 @@ touching it (parameter tying / shared latents). Priors that are themselves handl
 parent nodes — hierarchies of any depth. Use :class:`Graph` directly for multi-factor
 models, or ``fit(how="vmp")`` which auto-builds a single-factor graph.
 """
+
 from __future__ import annotations
 
 import math
@@ -23,22 +24,32 @@ import math
 import numpy as np
 from scipy.special import digamma, gammaln
 
-from pysp.ppl.core import RandomVariable
+from pysp.ppl.core import RandomVariable, free
 
 _LOG2PI = math.log(2.0 * math.pi)
 
 
 # ----------------------------------------------------------------- nodes & constants
 class MeanConst:
-    def __init__(self, v): self.v = float(v)
-    def ex(self): return self.v
-    def ex2(self): return self.v * self.v
+    def __init__(self, v):
+        self.v = float(v)
+
+    def ex(self):
+        return self.v
+
+    def ex2(self):
+        return self.v * self.v
 
 
 class PrecConst:
-    def __init__(self, v): self.v = float(v)
-    def et(self): return self.v
-    def elogt(self): return math.log(self.v)
+    def __init__(self, v):
+        self.v = float(v)
+
+    def et(self):
+        return self.v
+
+    def elogt(self):
+        return math.log(self.v)
 
 
 class GaussianVNode:
@@ -49,13 +60,16 @@ class GaussianVNode:
     is_gaussian = True
 
     def __init__(self, prior_mean, prior_prec):
-        self.prior_mean = prior_mean        # MeanConst or GaussianVNode
-        self.prior_prec = prior_prec        # PrecConst (link precision)
-        self.inbox = []                     # list of () -> (eta1, eta2)
+        self.prior_mean = prior_mean  # MeanConst or GaussianVNode
+        self.prior_prec = prior_prec  # PrecConst (link precision)
+        self.inbox = []  # list of () -> (eta1, eta2)
         self.m, self.s2 = prior_mean.ex(), 1.0 / prior_prec.et()
 
-    def ex(self): return self.m
-    def ex2(self): return self.m * self.m + self.s2
+    def ex(self):
+        return self.m
+
+    def ex2(self):
+        return self.m * self.m + self.s2
 
     def update(self):
         pt = self.prior_prec.et()
@@ -63,11 +77,13 @@ class GaussianVNode:
         e2 = -0.5 * pt
         for msg in self.inbox:
             a, b = msg()
-            e1 += a; e2 += b
+            e1 += a
+            e2 += b
         self.s2 = -0.5 / e2
         self.m = e1 * self.s2
 
-    def entropy(self): return 0.5 * (_LOG2PI + 1.0 + math.log(self.s2))
+    def entropy(self):
+        return 0.5 * (_LOG2PI + 1.0 + math.log(self.s2))
 
     def cross_prior(self):
         pm, pt = self.prior_mean, self.prior_prec
@@ -85,8 +101,11 @@ class GammaVNode:
         self.a, self.b = float(a0), float(b0)
         self.inbox = []
 
-    def et(self): return self.a / self.b
-    def elogt(self): return digamma(self.a) - math.log(self.b)
+    def et(self):
+        return self.a / self.b
+
+    def elogt(self):
+        return digamma(self.a) - math.log(self.b)
 
     def update(self):
         self.a = self.a0 + sum(msg()[0] for msg in self.inbox)
@@ -96,8 +115,7 @@ class GammaVNode:
         return self.a - math.log(self.b) + gammaln(self.a) + (1.0 - self.a) * digamma(self.a)
 
     def cross_prior(self):
-        return (self.a0 * math.log(self.b0) - gammaln(self.a0)
-                + (self.a0 - 1.0) * self.elogt() - self.b0 * self.et())
+        return self.a0 * math.log(self.b0) - gammaln(self.a0) + (self.a0 - 1.0) * self.elogt() - self.b0 * self.et()
 
 
 class DirichletVNode:
@@ -110,16 +128,16 @@ class DirichletVNode:
         self.alpha = self.alpha0.copy()
         self.inbox = []
 
-    def expected(self):                                # E[pi]
+    def expected(self):  # E[pi]
         return self.alpha / self.alpha.sum()
 
-    def expected_log(self):                            # E[log pi_k]
+    def expected_log(self):  # E[log pi_k]
         return digamma(self.alpha) - digamma(self.alpha.sum())
 
     def update(self):
         total = self.alpha0.copy()
         for msg in self.inbox:
-            total = total + msg()                       # accumulate expected counts (sharing!)
+            total = total + msg()  # accumulate expected counts (sharing!)
         self.alpha = total
 
     def _log_beta(self, a):
@@ -127,8 +145,7 @@ class DirichletVNode:
 
     def entropy(self):
         a, a0, K = self.alpha, self.alpha.sum(), self.alpha.size
-        return (self._log_beta(a) + (a0 - K) * digamma(a0)
-                - float(np.sum((a - 1.0) * digamma(a))))
+        return self._log_beta(a) + (a0 - K) * digamma(a0) - float(np.sum((a - 1.0) * digamma(a)))
 
     def cross_prior(self):
         return -self._log_beta(self.alpha0) + float(np.sum((self.alpha0 - 1.0) * self.expected_log()))
@@ -143,7 +160,7 @@ class _CategoricalFactor:
 
     def wire(self):
         if isinstance(self.pi, DirichletVNode):
-            self.pi.inbox.append(lambda: self.counts)   # message = observed counts
+            self.pi.inbox.append(lambda: self.counts)  # message = observed counts
 
     def elbo(self):
         if isinstance(self.pi, DirichletVNode):
@@ -175,7 +192,7 @@ class _GraphFactor:
 # --------------------------------------------------------------------------- results
 class GraphResult:
     def __init__(self, node_of, elbo_trace):
-        self._node_of = node_of            # id(rv) -> node
+        self._node_of = node_of  # id(rv) -> node
         self.elbo = elbo_trace[-1]
         self.elbo_trace = np.asarray(elbo_trace)
         self.acceptance_rate = None
@@ -220,10 +237,10 @@ class Graph:
     """
 
     def __init__(self):
-        self._obs = []                     # (model_rv, data)
-        self._nodes = {}                   # id(rv) -> node
+        self._obs = []  # (model_rv, data)
+        self._nodes = {}  # id(rv) -> node
 
-    def observe(self, model, data) -> "Graph":
+    def observe(self, model, data) -> Graph:
         self._obs.append((model, data))
         return self
 
@@ -233,35 +250,34 @@ class Graph:
         if spec._family.name != "Normal":
             raise NotImplementedError("graph mean priors must be Normal.")
         if id(spec) in self._nodes:
-            return self._nodes[id(spec)]            # SHARED instance -> one node
+            return self._nodes[id(spec)]  # SHARED instance -> one node
         mean_arg, scale_arg = spec._args
         prior_mean = self._mean_of(mean_arg) if isinstance(mean_arg, RandomVariable) else MeanConst(mean_arg)
         prior_prec = PrecConst(1.0 / float(scale_arg) ** 2)
         node = GaussianVNode(prior_mean, prior_prec)
         self._nodes[id(spec)] = node
-        if isinstance(prior_mean, GaussianVNode):    # child -> parent message (hierarchy)
-            prior_mean.inbox.append(
-                lambda c=node: (c.prior_prec.et() * c.ex(), -0.5 * c.prior_prec.et()))
+        if isinstance(prior_mean, GaussianVNode):  # child -> parent message (hierarchy)
+            prior_mean.inbox.append(lambda c=node: (c.prior_prec.et() * c.ex(), -0.5 * c.prior_prec.et()))
         return node
 
     def _prec_of(self, spec):
         if not isinstance(spec, RandomVariable):
-            return PrecConst(1.0 / float(spec) ** 2)     # constant sd -> precision
+            return PrecConst(1.0 / float(spec) ** 2)  # constant sd -> precision
         if spec._family.name != "Gamma":
             raise NotImplementedError("graph precision priors must be Gamma.")
         if id(spec) in self._nodes:
-            return self._nodes[id(spec)]                 # SHARED precision
+            return self._nodes[id(spec)]  # SHARED precision
         node = GammaVNode(spec._args[0], spec._args[1])
         self._nodes[id(spec)] = node
         return node
 
     def _pi_of(self, spec):
         if not isinstance(spec, RandomVariable):
-            return np.asarray(spec, dtype=float)         # constant probability vector
+            return np.asarray(spec, dtype=float)  # constant probability vector
         if spec._family.name != "Dirichlet":
             raise NotImplementedError("graph categorical priors must be Dirichlet.")
         if id(spec) in self._nodes:
-            return self._nodes[id(spec)]                 # SHARED simplex
+            return self._nodes[id(spec)]  # SHARED simplex
         node = DirichletVNode(spec._args[0])
         self._nodes[id(spec)] = node
         return node
@@ -269,8 +285,7 @@ class Graph:
     def _make_factor(self, model, data):
         fam = model._family.name
         if fam == "Normal":
-            return _GraphFactor(self._mean_of(model._args[0]),
-                                self._prec_of(model._args[1]), data)
+            return _GraphFactor(self._mean_of(model._args[0]), self._prec_of(model._args[1]), data)
         if fam == "Categorical":
             pi = self._pi_of(model._args[0])
             K = pi.alpha0.size if isinstance(pi, DirichletVNode) else len(pi)
@@ -293,10 +308,12 @@ class Graph:
                 n.update()
             for n in dirichlet:
                 n.update()
-            elbo = (sum(f.elbo() for f in factors)
-                    + sum(n.cross_prior() + n.entropy() for n in gaussian)
-                    + sum(n.cross_prior() + n.entropy() for n in gamma)
-                    + sum(n.cross_prior() + n.entropy() for n in dirichlet))
+            elbo = (
+                sum(f.elbo() for f in factors)
+                + sum(n.cross_prior() + n.entropy() for n in gaussian)
+                + sum(n.cross_prior() + n.entropy() for n in gamma)
+                + sum(n.cross_prior() + n.entropy() for n in dirichlet)
+            )
             trace.append(elbo)
             if len(trace) > 1 and abs(trace[-1] - trace[-2]) < tol:
                 break
@@ -314,10 +331,10 @@ class _VMPFit:
         self.elbo_trace = gres.elbo_trace
         self.elbo = gres.elbo
         self.acceptance_rate = None
-        self.q_mu = ({"mean": mean_node.m, "sd": math.sqrt(mean_node.s2)}
-                     if mean_node is not None else None)
-        self.q_tau = ({"shape": prec_node.a, "rate": prec_node.b, "mean": prec_node.et()}
-                      if prec_node is not None else None)
+        self.q_mu = {"mean": mean_node.m, "sd": math.sqrt(mean_node.s2)} if mean_node is not None else None
+        self.q_tau = (
+            {"shape": prec_node.a, "rate": prec_node.b, "mean": prec_node.et()} if prec_node is not None else None
+        )
         self.predictive = None
 
     def posterior(self, handle):
@@ -331,15 +348,13 @@ class _VMPFit:
             return rng.gamma(self._prec.a, 1.0 / self._prec.b, n)
         if param == "sd" and self._prec is not None:
             return 1.0 / np.sqrt(rng.gamma(self._prec.a, 1.0 / self._prec.b, n))
-        return self._g.samples(param, n=n, rng=rng)     # any node handle
+        return self._g.samples(param, n=n, rng=rng)  # any node handle
 
     def summary(self) -> dict:
-        return {"q_mu": self.q_mu, "q_tau": self.q_tau, "elbo": self.elbo,
-                "iterations": int(self.elbo_trace.size)}
+        return {"q_mu": self.q_mu, "q_tau": self.q_tau, "elbo": self.elbo, "iterations": int(self.elbo_trace.size)}
 
 
-def vmp_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8,
-            rng=None) -> RandomVariable:
+def vmp_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8, rng=None) -> RandomVariable:
     """Auto-build a single-factor VMP graph for a nested Gaussian model and fit it.
 
     Handles ``Normal(mean, scale)`` where ``mean`` is a (possibly deeply nested) Normal
@@ -353,6 +368,13 @@ def vmp_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8,
     if rv._kind != "sample" or rv._family.name != "Normal" or len(rv._args) != 2:
         raise NotImplementedError("vmp supports Normal(mean, scale) Gaussian models.")
     mean_spec, scale_spec = rv._args
+    if any(a is free for a in rv._args):
+        raise NotImplementedError(
+            "vmp is closed-form variational message passing and needs a *prior* (or a fixed "
+            "constant) on each parameter, not the point-estimate token `free`; give the slot a "
+            "conjugate prior — Normal(Normal(0, 10), Gamma(1, 1)) for unknown mean+precision — "
+            "or use how='vi' (general mean-field VB) or how='map'/'mcmc' for `free` parameters."
+        )
     if not (isinstance(mean_spec, RandomVariable) or isinstance(scale_spec, RandomVariable)):
         raise NotImplementedError("nothing to infer: give the mean and/or scale a prior.")
 
@@ -368,8 +390,7 @@ def vmp_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8,
     result = _VMPFit(res, mean_node, prec_node)
 
     def predictive(n, r):
-        mu = (r.normal(mean_node.m, math.sqrt(mean_node.s2), n)
-              if mean_node is not None else np.full(n, mean_val))
+        mu = r.normal(mean_node.m, math.sqrt(mean_node.s2), n) if mean_node is not None else np.full(n, mean_val)
         if prec_node is not None:
             tau = r.gamma(prec_node.a, 1.0 / prec_node.b, n)
             return mu + r.normal(0.0, 1.0, n) / np.sqrt(tau)
@@ -404,9 +425,9 @@ def _kmeanspp(x, k, rng):
 
 class MixtureVMPResult:
     def __init__(self, weights, comps, responsibilities, elbo_trace):
-        self.weights = np.asarray(weights)               # E[pi]
-        self.components = comps                           # [{'mean','sd'}, ...]
-        self.responsibilities = np.asarray(responsibilities)   # (N, K)
+        self.weights = np.asarray(weights)  # E[pi]
+        self.components = comps  # [{'mean','sd'}, ...]
+        self.responsibilities = np.asarray(responsibilities)  # (N, K)
         self.elbo = elbo_trace[-1]
         self.elbo_trace = np.asarray(elbo_trace)
         self.acceptance_rate = None
@@ -416,11 +437,10 @@ class MixtureVMPResult:
         return {"weights": self.weights, "components": self.components, "elbo": self.elbo}
 
 
-def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None,
-                m0=None, s0=None, a0=1.0, b0=1.0, alpha0=1.0):
+def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None, m0=None, s0=None, a0=1.0, b0=1.0, alpha0=1.0):
     """Bayesian Gaussian mixture by variational message passing (VBEM)."""
-    from pysp.stats.leaf.gaussian import GaussianDistribution
     from pysp.stats.latent.mixture import MixtureDistribution
+    from pysp.stats.leaf.gaussian import GaussianDistribution
 
     x = np.asarray(data, dtype=float).reshape(-1)
     N = x.size
@@ -431,33 +451,32 @@ def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None,
     if s0 is None:
         s0 = 10.0 * math.sqrt(var)
 
-    m = x[_kmeanspp(x, K, rng)].astype(float)            # component means (q means)
+    m = x[_kmeanspp(x, K, rng)].astype(float)  # component means (q means)
     s2 = np.full(K, var)
     a = np.full(K, a0 + N / (2.0 * K))
-    b = np.full(K, b0 + 0.5 * var * N / K)               # so E[tau] ~ 1/var initially
+    b = np.full(K, b0 + 0.5 * var * N / K)  # so E[tau] ~ 1/var initially
     alpha = np.full(K, alpha0 + N / K)
 
     trace = []
     for _ in range(max_its):
         Elogpi = digamma(alpha) - digamma(alpha.sum())
         Etau, Elogtau = a / b, digamma(a) - np.log(b)
-        diff2 = (x[:, None] - m[None, :]) ** 2 + s2[None, :]              # E[(x-mu)^2]
-        log_rho = (Elogpi[None, :] + 0.5 * Elogtau[None, :] - 0.5 * _LOG2PI
-                   - 0.5 * Etau[None, :] * diff2)
+        diff2 = (x[:, None] - m[None, :]) ** 2 + s2[None, :]  # E[(x-mu)^2]
+        log_rho = Elogpi[None, :] + 0.5 * Elogtau[None, :] - 0.5 * _LOG2PI - 0.5 * Etau[None, :] * diff2
         log_norm = _logsumexp(log_rho, axis=1, keepdims=True)
-        r = np.exp(log_rho - log_norm)                                    # responsibilities
+        r = np.exp(log_rho - log_norm)  # responsibilities
         Nk = r.sum(0)
         sumx = (r * x[:, None]).sum(0)
 
-        prec = 1.0 / s0 ** 2 + Nk * Etau                                  # q(mu_k)
+        prec = 1.0 / s0**2 + Nk * Etau  # q(mu_k)
         s2 = 1.0 / prec
-        m = (m0 / s0 ** 2 + Etau * sumx) * s2
+        m = (m0 / s0**2 + Etau * sumx) * s2
         diff2 = (x[:, None] - m[None, :]) ** 2 + s2[None, :]
-        a = a0 + 0.5 * Nk                                                 # q(tau_k)
+        a = a0 + 0.5 * Nk  # q(tau_k)
         b = b0 + 0.5 * (r * diff2).sum(0)
-        alpha = alpha0 + Nk                                               # q(pi)
+        alpha = alpha0 + Nk  # q(pi)
 
-        elbo = float(np.sum(log_norm))                                    # data evidence proxy
+        elbo = float(np.sum(log_norm))  # data evidence proxy
         trace.append(elbo)
         if len(trace) > 1 and abs(trace[-1] - trace[-2]) < tol:
             break
@@ -466,7 +485,6 @@ def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None,
     weights = alpha / alpha.sum()
     sds = 1.0 / np.sqrt(Etau)
     comps = [{"mean": float(m[k]), "sd": float(sds[k])} for k in range(K)]
-    fitted = MixtureDistribution([GaussianDistribution(float(m[k]), float(sds[k] ** 2))
-                                  for k in range(K)], w=weights)
+    fitted = MixtureDistribution([GaussianDistribution(float(m[k]), float(sds[k] ** 2)) for k in range(K)], w=weights)
     result = MixtureVMPResult(weights, comps, r, trace)
     return RandomVariable._bound(fitted, result=result)

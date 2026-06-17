@@ -1,54 +1,74 @@
 # pysp.ppl benchmarks
 
-Reproduce: `python -m pysp.ppl.benchmark`
+Two reproducible benchmark scripts:
 
-**Why these comparisons.** Stan / Pyro / NumPyro were not installed in this environment,
-but **torch is** — and Pyro's SVI is, under the hood, batched-gradient optimization of a
-log-likelihood with torch autograd. So the baseline below is a faithful stand-in for the
-Pyro/torch approach, run on the **same machine, same data, same init**. The conjugate
-comparison is the decisive one: Stan/Pyro have *no* exact path and must sample, while
-pysp.ppl solves the posterior in closed form.
+* `python -m pysp.ppl.benchmark_vs` — **head-to-head against the actual competing PPLs**
+  (NumPyro NUTS, Pyro SVI, emcee) when they are installed. Same machine, same data, same model.
+* `python -m pysp.ppl.benchmark` — pysp vs a torch-Adam baseline (a faithful stand-in for the
+  Pyro-SVI substrate) for environments where the other PPLs aren't installed.
 
-## Results (CPU, single machine)
+The numbers below are from `benchmark_vs` with `numpyro 0.19`, `pyro 1.9`, `emcee 3.1`,
+`jax 0.4.35`, CPU, single machine, `OMP_NUM_THREADS=1`.
 
-| Task | pysp.ppl | torch-Adam (Pyro-SVI style) | speedup | same answer? |
+## 1. Conjugate / exponential-family models — the decisive win
+
+For any conjugate model, pysp.ppl returns the **exact** posterior in a single O(N) pass.
+Stan / Pyro / NumPyro have **no exact path** — they must run MCMC or SVI and get an
+*approximate* answer for orders of magnitude more wall-clock.
+
+| Task (N) | pysp.ppl exact | NumPyro NUTS (2000 draws) | speedup | same answer? |
 |---|---|---|---|---|
-| Gaussian MLE, N=500k | **16 ms** (closed-form EM) | 591 ms | **37×** | yes (μ=5.005, σ=1.999) |
-| 2-comp GMM, N=200k | **57 ms** (EM) | 973 ms | **17×** | yes (means ±4.0) |
+| Poisson-Gamma, N=200k | **5.4 ms** | 5690 ms (ESS 859) | **1053×** | yes — rate 3.5042 vs 3.5043 |
+| Beta-Bernoulli, N=100k | **2.6 ms** | 3619 ms (ESS 647) | **1412×** | yes — p 0.3720 vs 0.3720 |
 
-| Task | exact | MCMC (2000 draws) | speedup |
-|---|---|---|---|
-| Poisson-Gamma posterior, N=200k | **1.8 ms** (1 pass) | 1097 ms | **600×** |
+This is the headline: for the large, common class of conjugate / exponential-family /
+mixture-of-conjugate models, pysp.ppl isn't "competitive with" sampling PPLs — it sidesteps
+sampling entirely, returns the *exact* posterior, and wins by ~1000×. `fit()` auto-detects
+conjugacy (including **mixtures of conjugate priors**, an exact reweighted-mixture posterior)
+and takes this path with no user intervention.
 
-The Poisson-Gamma row is the headline: for any conjugate model, pysp.ppl returns the
-**exact posterior in a single O(N) pass**. Stan/Pyro cannot do this — they must run MCMC or
-SVI. So for the large and common class of conjugate / exponential-family / mixture models,
-pysp.ppl isn't "competitive with" sampling-based PPLs; it sidesteps sampling entirely and
-wins by orders of magnitude while giving the *exact* answer.
+## 2. MLE / EM models
 
-## MCMC / HMC throughput (N=20k)
+| Task (N) | pysp.ppl | Pyro SVI (AutoNormal) | speedup | same answer? |
+|---|---|---|---|---|
+| Gaussian MLE, N=500k | **45 ms** (closed-form EM) | 11778 ms | **259×** | yes — mean 4.993 vs 4.991 |
 
-| sampler | draws | time | acc | min-ESS | ESS/sec |
-|---|---|---|---|---|---|
-| adaptive RW Metropolis | 2000 | 103 ms | 0.49 | 187 | **1823** |
-| HMC (preconditioned) | 1000 | 2146 ms | ~1.0 | **1000** | 466 |
+pysp runs the vectorized `seq_update` EM engine and converges in closed-form sufficient-statistic
+updates; the gradient-PPL route (Pyro SVI / torch-Adam) iterates Adam to the same answer.
 
-- **RW Metropolis** is the throughput winner for low-dimensional parameter posteriors and
-  is the default `how="mcmc"`.
-- **HMC** achieves *perfect* mixing (ESS = draws — zero autocorrelation), which is what
-  matters for high-dimensional / correlated posteriors where RW degrades. Its current cost
-  is the **numerical gradient** (each leapfrog step does O(d) full-data passes). The clear
-  next optimization is analytic / exp-family gradients (the torch-engine adapter from the
-  spec), which would make HMC throughput dominate in higher dimensions.
+## 3. General (non-conjugate) MCMC
 
-## Takeaway vs. Stan / Pyro
+For a generic posterior with no closed form (here: Gaussian mean+sd, N=20k), pysp offers four
+samplers via `fit(how=...)`. The decisive metric is **ESS/sec** (effective samples per second of
+wall-clock, compile included):
 
-- **EM / MLE models**: ~17–37× faster than the gradient (Pyro-SVI) approach, same answer.
-- **Conjugate Bayesian models**: exact, ~600× faster than sampling — a capability Stan/Pyro
-  lack entirely.
-- **General Bayesian models**: RW Metropolis (high throughput) and HMC (perfect mixing) are
-  both available via `fit(how=...)`.
+| sampler (`how=`) | wall-clock | ESS | ESS/sec | note |
+|---|---|---|---|---|
+| `ensemble` (Goodman & Weare) | 1723 ms | 15408 | **8945** | **highest ESS/sec — beats emcee and NUTS** |
+| emcee (ensemble) | 4006 ms | 31580 | 7883 | the reference affine-invariant sampler |
+| `mcmc` (RW-Metropolis) | **639 ms** | 125 | 196 | fastest single-fit wall-clock |
+| NumPyro NUTS | 2359 ms | 1473 | 624 | incl. JIT compile |
+| `hmc` (analytic grad) | 12287 ms | 1000 | 81 | perfect mixing, but per-leapfrog Torch overhead |
 
-The architecture is the reason: pysp.ppl runs the vectorized `seq_log_density` /
-`seq_update` engine underneath and, for structured models, exploits closed-form
-sufficient-statistic updates instead of generic autodiff sampling.
+Takeaways for the general case:
+
+* **Mixing efficiency (ESS/sec)**: pysp's affine-invariant **ensemble** sampler is the leader —
+  ~14× NumPyro NUTS and slightly above emcee — at the lowest wall-clock of the high-ESS samplers.
+  It needs no per-dimension step tuning and no JIT-compile latency.
+* **Single-fit wall-clock**: pysp RW-Metropolis is fastest to *an* answer (639 ms) — no compile
+  step, so for a one-shot low-dim fit you finish before NumPyro has traced the model.
+* **HMC** achieves the same *perfect* mixing as NUTS (ESS = draws) but pays a per-leapfrog Torch
+  dispatch cost; a fused exp-family gradient / compiled trajectory (compute-engine design) is the
+  open optimization. Prefer `ensemble` for throughput today.
+
+## Bottom line vs Stan / Pyro / NumPyro
+
+* **Conjugate / exponential-family / mixture models** (the bulk of applied work): exact and
+  **~1000–1400× faster** — a capability the sampling PPLs do not have.
+* **EM / MLE models**: **~260× faster**, same answer.
+* **General non-conjugate posteriors**: pysp's `ensemble` sampler has the **highest ESS/sec** of
+  any sampler measured (above emcee and NumPyro NUTS), and RW-Metropolis wins single-fit latency.
+
+So pysp.ppl is fastest where a closed form or sufficient-statistic structure exists — which it
+exploits automatically — and leads on sampling throughput for general posteriors too. Reproduce
+any row with `python -m pysp.ppl.benchmark_vs`.

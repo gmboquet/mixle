@@ -222,6 +222,7 @@ def _stats_public_distribution_catalog():
         "GammaDistribution": stats.GammaDistribution(2.0, 3.0),
         "GaussianDistribution": stats.GaussianDistribution(1.0, 2.0),
         "GeometricDistribution": stats.GeometricDistribution(0.25),
+        "InverseGaussianDistribution": stats.InverseGaussianDistribution(2.0, 3.0),
         "NegativeBinomialDistribution": stats.NegativeBinomialDistribution(3.0, 0.45),
         "ParetoDistribution": stats.ParetoDistribution(2.0, 3.0),
         "RayleighDistribution": stats.RayleighDistribution(2.0),

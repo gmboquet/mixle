@@ -1,4 +1,5 @@
 """Tests for pysp.ppl Bayesian inference: MAP and parameter MCMC (build slice 7)."""
+
 import unittest
 
 import numpy as np
@@ -8,7 +9,6 @@ from pysp.ppl.inference import ConjugatePosterior
 
 
 class PPLInferenceTestCase(unittest.TestCase):
-
     def setUp(self):
         rng = np.random.RandomState(0)
         self.data = list(rng.normal(5.0, 2.0, size=3000))
@@ -26,8 +26,7 @@ class PPLInferenceTestCase(unittest.TestCase):
 
     def test_mcmc_posterior(self):
         mu = Normal(0, 10, name="mu")
-        m = Normal(mu, free).fit(self.data, how="mcmc", draws=1500, burn=800,
-                                 rng=np.random.RandomState(1))
+        m = Normal(mu, free).fit(self.data, how="mcmc", draws=1500, burn=800, rng=np.random.RandomState(1))
         self.assertAlmostEqual(m.dist.mu, 5.0, delta=0.2)
         self.assertAlmostEqual(np.sqrt(m.dist.sigma2), 2.0, delta=0.2)
         # decent mixing (adaptive RW targets ~0.44)
@@ -49,23 +48,20 @@ class PPLInferenceTestCase(unittest.TestCase):
 
 
 class PPLHMCTestCase(unittest.TestCase):
-
     def test_hmc_recovers_and_mixes(self):
         rng = np.random.RandomState(0)
         data = list(rng.normal(5.0, 2.0, size=3000))
         mu = Normal(0, 10, name="mu")
-        m = Normal(mu, free).fit(data, how="hmc", draws=1000, burn=500,
-                                 rng=np.random.RandomState(1))
+        m = Normal(mu, free).fit(data, how="hmc", draws=1000, burn=500, rng=np.random.RandomState(1))
         self.assertAlmostEqual(m.dist.mu, 5.0, delta=0.2)
         self.assertAlmostEqual(np.sqrt(m.dist.sigma2), 2.0, delta=0.2)
         # HMC mixes far better than RW: high ESS relative to draws
         ess = np.atleast_1d(m.result.raw.effective_sample_size())
-        self.assertGreater(ess.min(), 400)   # out of 1000 draws
+        self.assertGreater(ess.min(), 400)  # out of 1000 draws
         self.assertEqual(len(m.posterior("mu")), 1000)
 
 
 class PPLHierarchicalTestCase(unittest.TestCase):
-
     def test_normal_normal_random_effects(self):
         rng = np.random.RandomState(0)
         m_true, tau_true, sigma_true = 10.0, 3.0, 1.0
@@ -85,7 +81,7 @@ class PPLHierarchicalTestCase(unittest.TestCase):
     def test_gamma_poisson_random_effects(self):
         rng = np.random.RandomState(0)
         G = 300
-        lam = rng.gamma(4.0, 1 / 2.0, G)            # rates ~ Gamma(shape=4, rate=2), mean 2
+        lam = rng.gamma(4.0, 1 / 2.0, G)  # rates ~ Gamma(shape=4, rate=2), mean 2
         data = [list(rng.poisson(lam[i], rng.randint(5, 20)).astype(float)) for i in range(G)]
         fit = Poisson(Gamma(1, 1).each()).fit(data)
         self.assertAlmostEqual(fit.result.hyper["mean"], 2.0, delta=0.3)
@@ -94,15 +90,87 @@ class PPLHierarchicalTestCase(unittest.TestCase):
     def test_beta_bernoulli_random_effects(self):
         rng = np.random.RandomState(0)
         G = 300
-        p = rng.beta(2.0, 5.0, G)                    # p_i ~ Beta(2,5), mean 0.286
+        p = rng.beta(2.0, 5.0, G)  # p_i ~ Beta(2,5), mean 0.286
         data = [list((rng.random(rng.randint(10, 40)) < p[i]).astype(float)) for i in range(G)]
         fit = Bernoulli(Beta(1, 1).each()).fit(data)
         self.assertAlmostEqual(fit.result.hyper["mean"], 0.286, delta=0.06)
         self.assertGreater(np.corrcoef(fit.result.group_means, p)[0, 1], 0.8)
 
 
-class PPLVITestCase(unittest.TestCase):
+class PPLVariationalFamilyTestCase(unittest.TestCase):
+    """Richer VB: full-rank Gaussian q (captures parameter correlations) and the tilted
+    Renyi-alpha objective (alpha<1 is mass-covering, widening the too-narrow KL fit)."""
 
+    def test_fullrank_captures_correlation(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.gamma(3.0, 1.0 / 2.0, 300))  # Gamma(shape,rate) posterior is strongly correlated
+        mf = Gamma(free, free).fit(data, how="vi", family="meanfield", steps=1500, rng=np.random.RandomState(1))
+        fr = Gamma(free, free).fit(data, how="vi", family="fullrank", steps=1500, rng=np.random.RandomState(1))
+
+        def corr(m):
+            return float(np.corrcoef(m.result.samples("arg0"), m.result.samples("arg1"))[0, 1])
+
+        self.assertLess(abs(corr(mf)), 0.2)  # mean-field forces independence
+        self.assertGreater(corr(fr), 0.8)  # full-rank recovers the strong correlation
+        self.assertAlmostEqual(fr.params["shape"], 3.0, delta=0.6)
+
+    def test_tilted_alpha_widens_posterior(self):
+        rng = np.random.RandomState(1)
+        data = list(rng.normal(5.0, 2.0, 400))
+        kl = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="vi", alpha=1.0, steps=400, rng=np.random.RandomState(2)
+        )
+        iwae = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="vi", alpha=0.0, mc=16, steps=400, rng=np.random.RandomState(2)
+        )
+        self.assertAlmostEqual(iwae.params["mean"], 5.0, delta=0.25)
+        # the tilted (importance-weighted) objective is mass-covering -> not narrower than KL
+        self.assertGreaterEqual(float(np.std(iwae.posterior("mu"))), 0.9 * float(np.std(kl.posterior("mu"))))
+
+
+class PPLAutoSamplerTestCase(unittest.TestCase):
+    def test_sample_auto_picks_and_recovers(self):
+        # how='sample' chooses the sampler for you (ensemble for low-dim) and recovers params
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 2.0, size=3000))
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="sample", draws=600, burn=200, rng=np.random.RandomState(1)
+        )
+        self.assertAlmostEqual(float(m.result.mean("mu")), 5.0, delta=0.2)
+
+
+class PPLNUTSTestCase(unittest.TestCase):
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.data = list(rng.normal(5.0, 2.0, size=3000))
+
+    def test_nuts_recovers_params(self):
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            self.data, how="nuts", draws=800, burn=500, rng=np.random.RandomState(1)
+        )
+        self.assertAlmostEqual(m.dist.mu, 5.0, delta=0.2)
+        self.assertAlmostEqual(np.sqrt(m.dist.sigma2), 2.0, delta=0.2)
+        # NUTS adapts its step size and reports tree depth per draw
+        self.assertGreater(m.result.raw.step_size, 0.0)
+
+    def test_nuts_high_ess_per_draw(self):
+        # NUTS mixes well: effective sample size is a large fraction of the draws
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            self.data, how="nuts", draws=1000, burn=500, rng=np.random.RandomState(2)
+        )
+        ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
+        self.assertGreater(ess, 300)
+
+    def test_nuts_multichain_rhat(self):
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            self.data, how="nuts", draws=600, burn=400, chains=3, rng=np.random.RandomState(3)
+        )
+        self.assertEqual(m.result.n_chains, 3)
+        for r in m.result.rhat.values():
+            self.assertLess(r, 1.1)
+
+
+class PPLVITestCase(unittest.TestCase):
     def setUp(self):
         rng = np.random.RandomState(0)
         self.data = list(rng.normal(5.0, 2.0, size=3000))
@@ -119,13 +187,43 @@ class PPLVITestCase(unittest.TestCase):
     def test_vi_handles_non_conjugate(self):
         # sd has a Gamma prior -> not a registered conjugate pair; VI must handle it
         m = Normal(Normal(0, 10, name="mu"), Gamma(2, 1, name="sd")).fit(
-            self.data, how="vi", rng=np.random.RandomState(2))
+            self.data, how="vi", rng=np.random.RandomState(2)
+        )
         self.assertAlmostEqual(m.dist.mu, 5.0, delta=0.3)
         self.assertAlmostEqual(np.sqrt(m.dist.sigma2), 2.0, delta=0.3)
 
+    def test_vi_batched_target_across_supports(self):
+        # the batched ADVI ELBO must broadcast priors over positive (Gamma) and unit (Beta)
+        # supports, not just the real line.
+        rng = np.random.RandomState(3)
+        pois = list(rng.poisson(3.5, 4000).astype(float))
+        mp = Poisson(Gamma(2, 1, name="rate")).fit(pois, how="vi", rng=np.random.RandomState(4))
+        self.assertAlmostEqual(mp.params["rate"], 3.5, delta=0.3)
+
+        bern = list((rng.uniform(size=4000) < 0.3).astype(float))
+        mb = Bernoulli(Beta(2, 2, name="p")).fit(bern, how="vi", rng=np.random.RandomState(5))
+        self.assertAlmostEqual(mb.params["p"], 0.3, delta=0.05)
+
+    def test_minibatch_vi_scales(self):
+        # stochastic minibatch VI (SGVB) recovers the same answer from a small per-step shard,
+        # so VB scales to large data.
+        rng = np.random.RandomState(6)
+        data = list(rng.normal(5.0, 2.0, 50000))
+        m = Normal(Normal(0, 10, name="mu"), free).fit(
+            data, how="vi", steps=300, batch_size=256, rng=np.random.RandomState(7)
+        )
+        self.assertAlmostEqual(m.params["mean"], 5.0, delta=0.2)
+
+    def test_minibatch_vi_positive_support(self):
+        rng = np.random.RandomState(8)
+        data = list(rng.poisson(3.5, 50000).astype(float))
+        m = Poisson(Gamma(2, 1, name="rate")).fit(
+            data, how="vi", steps=300, batch_size=256, rng=np.random.RandomState(9)
+        )
+        self.assertAlmostEqual(m.params["rate"], 3.5, delta=0.3)
+
 
 class PPLConjugateTestCase(unittest.TestCase):
-
     def test_normal_normal_conjugate_is_exact_and_auto(self):
         rng = np.random.RandomState(0)
         data = list(rng.normal(5.0, 2.0, size=4000))
