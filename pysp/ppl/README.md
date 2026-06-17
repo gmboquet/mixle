@@ -58,20 +58,23 @@ Normal(free*Field("x") + free, free*Field("x") + free)   # mean AND log-sd vary 
 LogNormal(free, free*Field("z") + free)                  # positive, right-skewed; dispersion ~ z
 ```
 
-Coefficients are `free` (MLE) or Normal priors (Bayesian / ridge — MAP). Fit with the
-response positionally and covariates via `given=`. Homoskedastic GLMs fit by IRLS (Fisher
-scoring); a scale-slot linear predictor switches to a location-scale fit (separate mean and
-log-scale coefficients, `result.coefficients` / `result.scale_coefficients`,
-`result.predict(...)` returns `loc`/`scale`).
+Coefficients are `free` (MLE) or Normal penalty handles. Fit with the response
+positionally and covariates via `given=`. Homoskedastic GLMs fit by IRLS (Fisher
+scoring); for Normal responses the coefficient covariance is a scale-adjusted
+inverse-curvature diagnostic for the ridge convention, not a full
+Gaussian-prior posterior. A scale-slot linear predictor switches to a
+location-scale fit (separate mean and log-scale coefficients,
+`result.coefficients` / `result.scale_coefficients`, `result.predict(...)`
+returns `loc`/`scale`).
 
 ```python
 m = Bernoulli(free*Field("x") + free*Field("z") + free).fit(y, given={"x": xs, "z": zs})
 m.params                                # {'x': {...}, 'z': {...}, 'intercept': {...}}
 m.result.predict({"x": [0], "z": [0]})  # probability (through the link)
 
-a, b = Normal(0, 10), Normal(0, 10)     # Bayesian linear regression
+a, b = Normal(0, 10), Normal(0, 10)     # ridge-penalized linear regression
 m = Normal(a*Field("x") + b, free).fit(y, given={"x": xs})
-m.posterior(a)                          # slope posterior draws
+m.posterior(a)                          # Gaussian coefficient-approximation draws
 m.result.predict({"x": [0, 1, 2]})      # predicted means
 ```
 
