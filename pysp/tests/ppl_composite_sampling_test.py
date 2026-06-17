@@ -106,6 +106,46 @@ class MixtureWeightsAsParameterTestCase(unittest.TestCase):
         self.assertAlmostEqual(wts[2], 0.2, delta=0.08)
 
 
+class MixtureAutogradTestCase(unittest.TestCase):
+    """A mixture of leaf components gets analytic Torch gradients (MixtureGradTarget): the
+    autograd log-target matches the numeric one, and NUTS / full-rank VB work on it."""
+
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.data = list(np.concatenate([rng.normal(-3, 1, 1500), rng.normal(3, 1, 1500)]))
+
+    def test_autograd_logtarget_matches_numeric(self):
+        from pysp.ppl import autograd as ag
+        from pysp.ppl.inference import _build_target, _init_u
+
+        m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
+        mix = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], free)
+        g = ag.grad_target(mix, self.data)
+        self.assertEqual(type(g).__name__, "MixtureGradTarget")
+        lt_np, slots, *_ = _build_target(mix, self.data)
+        u0 = _init_u(slots, g.dmean, g.dstd)
+        for u in (u0, u0 + 0.3, u0 - 0.2):
+            self.assertAlmostEqual(g.log_target(u), lt_np(u), places=3)
+
+    def test_nuts_on_mixture(self):
+        m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
+        fit = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], free).fit(
+            self.data, how="nuts", constraints=m0 < m1, draws=500, burn=400, rng=np.random.RandomState(1)
+        )
+        self.assertAlmostEqual(fit.result.mean("m0"), -3.0, delta=0.4)
+        self.assertAlmostEqual(fit.result.mean("m1"), 3.0, delta=0.4)
+
+    def test_fullrank_vi_on_mixture(self):
+        # VB's unimodal q picks one labeling, so no ordering constraint is needed
+        m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
+        fit = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], free).fit(
+            self.data, how="vi", family="fullrank", steps=600, rng=np.random.RandomState(3)
+        )
+        means = sorted([fit.result.mean("m0"), fit.result.mean("m1")])
+        self.assertAlmostEqual(means[0], -3.0, delta=0.4)
+        self.assertAlmostEqual(means[1], 3.0, delta=0.4)
+
+
 class CompositeMixtureSamplingTestCase(unittest.TestCase):
     def setUp(self):
         rng = np.random.RandomState(0)
