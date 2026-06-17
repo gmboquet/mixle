@@ -34,6 +34,65 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.utils.aliasing import MISSING, coalesce_alias
+from pysp.utils.fisher import FixedFisherView
+
+
+class MultivariateGaussianFisherView(FixedFisherView):
+    def __init__(self, dist: Any) -> None:
+        self.dim = int(dist.dim if hasattr(dist, "dim") else len(dist.mu))
+        self._tri = np.triu_indices(self.dim)
+        labels = [("sum", str(i)) for i in range(self.dim)]
+        labels.extend(("sum2", str(i), str(j)) for i, j in zip(self._tri[0], self._tri[1]))
+        labels.append(("count",))
+        super().__init__(dist, labels)
+
+    def _as_matrix(self, data: Any) -> np.ndarray:
+        return np.asarray(data, dtype=np.float64).reshape((-1, self.dim))
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        x = self._as_matrix(data)
+        i, j = self._tri
+        xx = x[:, i] * x[:, j]
+        return np.hstack((x, xx, np.ones((x.shape[0], 1), dtype=np.float64)))
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        return self._statistics_from_data(np.asarray(enc_data, dtype=np.float64), estimate=estimate)
+
+    def _model_mean(self) -> np.ndarray:
+        mu = np.asarray(self.dist.mu, dtype=np.float64).reshape(-1)
+        cov = np.asarray(self.dist.covar, dtype=np.float64).reshape((self.dim, self.dim))
+        second = cov + np.outer(mu, mu)
+        return np.concatenate((mu, second[self._tri], np.asarray([1.0])))
+
+    def _model_fisher(self) -> np.ndarray:
+        mu = np.asarray(self.dist.mu, dtype=np.float64).reshape(-1)
+        cov = np.asarray(self.dist.covar, dtype=np.float64).reshape((self.dim, self.dim))
+        dim = self.dim
+        pairs = list(zip(self._tri[0], self._tri[1]))
+        m = len(pairs)
+        out = np.zeros((dim + m + 1, dim + m + 1), dtype=np.float64)
+        out[:dim, :dim] = cov
+
+        for a, (j, k) in enumerate(pairs):
+            col = dim + a
+            cross = mu[j] * cov[:, k] + mu[k] * cov[:, j]
+            out[:dim, col] = cross
+            out[col, :dim] = cross
+
+        for a, (i, j) in enumerate(pairs):
+            ia = dim + a
+            for b, (k, l) in enumerate(pairs):
+                ib = dim + b
+                out[ia, ib] = (
+                    cov[i, k] * cov[j, l]
+                    + cov[i, l] * cov[j, k]
+                    + mu[i] * mu[k] * cov[j, l]
+                    + mu[i] * mu[l] * cov[j, k]
+                    + mu[j] * mu[k] * cov[i, l]
+                    + mu[j] * mu[l] * cov[i, k]
+                )
+
+        return 0.5 * (out + out.T)
 
 
 class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution):
@@ -355,6 +414,10 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         sum_xx = engine.sum(ww[:, :, None, None] * outer[:, None, :, :], axis=0)
         counts = engine.sum(ww, axis=0)
         return sum_x, sum_xx, counts
+
+    def to_fisher(self, **kwargs):
+        """Return this distribution's own Fisher view."""
+        return MultivariateGaussianFisherView(self)
 
     def sampler(self, seed: int | None = None):
         """Create a MultivariateGaussianSampler for sampling from this distribution.

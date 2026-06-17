@@ -27,6 +27,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.fisher import FixedFisherView
 from pysp.utils.special import *
 
 _MIN_DIRICHLET_ALPHA = 1.0e-10
@@ -229,6 +230,43 @@ def find_alpha(current_alpha, mlp, thresh) -> tuple[np.ndarray, int]:
     if not _valid_alpha(alpha, len(current_alpha)):
         return dirichlet_param_solve(current_alpha, mlp, thresh)
     return alpha, its
+
+
+class DirichletFisherView(FixedFisherView):
+    def __init__(self, dist: Any) -> None:
+        alpha = np.asarray(dist.alpha, dtype=np.float64).reshape(-1)
+        self.alpha = alpha
+        self.dim = len(alpha)
+        labels = [("log", str(i)) for i in range(self.dim)]
+        labels.append(("count",))
+        super().__init__(dist, labels)
+
+    def _matrix_from_values(self, values: Any, log_values: Any | None = None) -> np.ndarray:
+        if log_values is None:
+            x = np.asarray(values, dtype=np.float64).reshape((-1, self.dim))
+            log_x = np.log(np.maximum(x, np.finfo(np.float64).tiny))
+        else:
+            log_x = np.asarray(log_values, dtype=np.float64).reshape((-1, self.dim))
+        return np.hstack((log_x, np.ones((log_x.shape[0], 1), dtype=np.float64)))
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        return self._matrix_from_values(data)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        if isinstance(enc_data, tuple):
+            return self._matrix_from_values(None, enc_data[0])
+        return self._matrix_from_values(enc_data)
+
+    def _model_mean(self) -> np.ndarray:
+        a0 = float(np.sum(self.alpha))
+        return np.concatenate((digamma(self.alpha) - digamma(a0), np.asarray([1.0])))
+
+    def _model_fisher(self) -> np.ndarray:
+        a0 = float(np.sum(self.alpha))
+        cov = np.diag(trigamma(self.alpha)) - trigamma(a0)
+        out = np.zeros((self.dim + 1, self.dim + 1), dtype=np.float64)
+        out[: self.dim, : self.dim] = cov
+        return out
 
 
 class DirichletDistribution(SequenceEncodableProbabilityDistribution):
@@ -446,6 +484,13 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
             engine.sum(ww[extra] * engine.asarray(x[1])[:, None, :], axis=0),
             engine.sum(ww[extra] * engine.asarray(x[2])[:, None, :], axis=0),
         )
+
+    def to_fisher(self, **kwargs):
+        """Return the Dirichlet's log-coordinate Fisher view (generic fallback for degenerate alpha)."""
+        alpha = np.asarray(self.alpha, dtype=np.float64)
+        if alpha.ndim > 0 and np.all(np.isfinite(alpha)) and np.all(alpha > 0.0):
+            return DirichletFisherView(self)
+        return super().to_fisher(**kwargs)
 
     def sampler(self, seed: int | None = None) -> "DirichletSampler":
         """Create a DirichletSampler for sampling from this distribution.

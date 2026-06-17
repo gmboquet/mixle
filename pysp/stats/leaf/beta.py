@@ -16,7 +16,48 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.special import digamma, gammaln
+from pysp.utils.fisher import FixedFisherView
+from pysp.utils.special import digamma, gammaln, trigamma
+
+
+class BetaFisherView(FixedFisherView):
+    def __init__(self, dist: Any) -> None:
+        super().__init__(dist, [("count",), ("log_x",), ("log1m_x",)])
+
+    @staticmethod
+    def _matrix_from_values(x: Any, log_x: Any | None = None, log1m_x: Any | None = None) -> np.ndarray:
+        xx = np.asarray(x, dtype=np.float64).reshape(-1)
+        lx = np.log(xx) if log_x is None else np.asarray(log_x, dtype=np.float64).reshape(-1)
+        l1 = np.log1p(-xx) if log1m_x is None else np.asarray(log1m_x, dtype=np.float64).reshape(-1)
+        return np.column_stack((np.ones_like(xx, dtype=np.float64), lx, l1))
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        return self._matrix_from_values(data)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        if isinstance(enc_data, tuple):
+            x = enc_data[2] if len(enc_data) > 2 else None
+            if x is None:
+                x = np.exp(enc_data[0])
+            return self._matrix_from_values(x, enc_data[0], enc_data[1])
+        return self._matrix_from_values(enc_data)
+
+    def _model_mean(self) -> np.ndarray:
+        a = float(self.dist.a)
+        b = float(self.dist.b)
+        ab = a + b
+        return np.asarray([1.0, digamma(a) - digamma(ab), digamma(b) - digamma(ab)], dtype=np.float64)
+
+    def _model_fisher(self) -> np.ndarray:
+        a = float(self.dist.a)
+        b = float(self.dist.b)
+        tab = trigamma(a + b)
+        out = np.zeros((3, 3), dtype=np.float64)
+        out[1, 1] = trigamma(a) - tab
+        out[1, 2] = -tab
+        out[2, 1] = -tab
+        out[2, 2] = trigamma(b) - tab
+        return out
 
 
 class BetaDistribution(SequenceEncodableProbabilityDistribution):
@@ -183,6 +224,10 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         from scipy.stats import beta as _sp
 
         return float(_sp.ppf(q, self.a, self.b))
+
+    def to_fisher(self, **kwargs):
+        """Return this distribution's own Fisher view."""
+        return BetaFisherView(self)
 
     def sampler(self, seed: int | None = None) -> "BetaSampler":
         """Return a sampler for drawing observations from this distribution."""
