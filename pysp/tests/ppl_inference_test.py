@@ -126,6 +126,8 @@ class PPLVariationalFamilyTestCase(unittest.TestCase):
         self.assertAlmostEqual(iwae.params["mean"], 5.0, delta=0.25)
         # the tilted (importance-weighted) objective is mass-covering -> not narrower than KL
         self.assertGreaterEqual(float(np.std(iwae.posterior("mu"))), 0.9 * float(np.std(kl.posterior("mu"))))
+        self.assertEqual(iwae.result.raw.objective_kind, "renyi_tilted")
+        self.assertEqual(iwae.result.raw.alpha, 0.0)
 
 
 class PPLAutoSamplerTestCase(unittest.TestCase):
@@ -183,6 +185,9 @@ class PPLVITestCase(unittest.TestCase):
         # variational posterior draws + ELBO available
         self.assertEqual(len(m.posterior("mu")), 4000)
         self.assertTrue(np.isfinite(m.result.raw.elbo))
+        self.assertNotEqual(m.result.raw.elbo, 0.0)
+        self.assertEqual(m.result.raw.objective_kind, "kl_elbo")
+        self.assertEqual(m.result.raw.family, "meanfield")
 
     def test_vi_handles_non_conjugate(self):
         # sd has a Gamma prior -> not a registered conjugate pair; VI must handle it
