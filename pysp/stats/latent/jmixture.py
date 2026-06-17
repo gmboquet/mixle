@@ -1070,14 +1070,13 @@ JointMixtureAccumulatorFactory = JointMixtureEstimatorAccumulatorFactory
 
 def _register_joint_mixture_engine_kernel():
     """Register the engine-resident joint-mixture kernel (idempotent; called at import)."""
-    from pysp.engines import NUMPY_ENGINE
     from pysp.stats.compute.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
     class JointMixtureKernel(GenericKernel):
         def accumulate(self, enc, weights):
             if self.estimator is None:
                 raise ValueError("JointMixtureKernel.accumulate requires an estimator.")
-            if self.engine.name == NUMPY_ENGINE.name:
+            if not getattr(self.engine, "resident_estep", True):
                 return super().accumulate(enc, weights)
             host_enc = getattr(enc, "host_payload", enc)
             accumulator = self.estimator.accumulator_factory().make()

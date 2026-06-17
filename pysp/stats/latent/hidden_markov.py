@@ -646,17 +646,17 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.stats.compute.backend import BackendScoringError, backend_seq_log_density
 
         if self.has_topics:
-            if engine.name == "numpy":
+            if getattr(engine, "supports_numba", False):
                 return self.seq_log_density(x)
             raise BackendScoringError("HMM backend scoring does not support taus/topic-mixture emissions.")
         if self.terminal_values is not None:
-            if engine.name == "numpy":
+            if getattr(engine, "supports_numba", False):
                 return self.seq_log_density(x)
             raise BackendScoringError("HMM backend scoring does not support terminal-value semantics.")
 
         x0, x1 = x
         if x1 is not None:
-            if engine.name == "numpy":
+            if getattr(engine, "supports_numba", False):
                 return self.seq_log_density(x)
             raise BackendScoringError("HMM backend scoring requires the standard non-numba encoding.")
 
@@ -3014,7 +3014,6 @@ def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=No
 
 def _register_hmm_engine_kernel():
     """Register the engine-resident HMM kernel (idempotent; called at import)."""
-    from pysp.engines import NUMPY_ENGINE
     from pysp.stats.compute.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
     class HiddenMarkovModelKernel(GenericKernel):
@@ -3028,7 +3027,7 @@ def _register_hmm_engine_kernel():
         def accumulate(self, enc, weights):
             if self.estimator is None:
                 raise ValueError("HiddenMarkovModelKernel.accumulate requires an estimator.")
-            if self.engine.name == NUMPY_ENGINE.name:
+            if not getattr(self.engine, "resident_estep", True):
                 return super().accumulate(enc, weights)
             host_enc = getattr(enc, "host_payload", enc)
             accumulator = self.estimator.accumulator_factory().make()
