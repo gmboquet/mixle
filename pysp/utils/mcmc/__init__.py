@@ -19,6 +19,7 @@ rebuilt distribution objects).
 from __future__ import annotations
 
 from .conjugate import sample_conjugate_posterior
+from .gradients import torch_available, torch_gradient, value_and_torch_gradient
 from .parameter_bridge import (
     ParameterBridge,
     build_parameter_bridge,
@@ -72,4 +73,7 @@ __all__ = [
     "sample_conjugate_posterior",
     "sample_distribution",
     "sample_parameter_posterior",
+    "torch_available",
+    "torch_gradient",
+    "value_and_torch_gradient",
 ]
