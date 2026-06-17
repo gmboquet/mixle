@@ -16,6 +16,7 @@ import numpy as np
 
 from pysp.stats.compute.pdist import EnumerationError
 from pysp.stats.sets.setdist import BernoulliSetDistribution, BernoulliSetEnumerator
+from pysp.stats.sets.int_edit_stepsetdist import IntegerStepBernoulliEditEstimator
 
 TOL = 1e-9
 
@@ -38,6 +39,48 @@ def tiers(pairs):
     out = {}
     for v, lp in pairs:
         out.setdefault(round(lp, 8), set()).add(canon(v))
+    return out
+
+
+def expected_two_level(successes, trials, min_prob=0.0):
+    """Independent brute-force implementation of the two-level threshold fit."""
+    successes = np.asarray(successes, dtype=float)
+    trials = np.asarray(trials, dtype=float)
+    obs = np.flatnonzero(trials > 0)
+    if len(obs) == 0:
+        return np.full(len(successes), 0.5)
+
+    def clip(x):
+        if min_prob <= 0.0:
+            return float(x)
+        return float(np.clip(x, min_prob, 1.0 - min_prob))
+
+    sidx = obs[np.argsort(-(successes[obs] / trials[obs]))]
+    cs = np.cumsum(successes[sidx])
+    ct = np.cumsum(trials[sidx])
+    tot_s = cs[-1]
+    tot_t = ct[-1]
+
+    best_ll = -np.inf
+    best = None
+    for i in range(len(obs)):
+        sh, th = cs[i], ct[i]
+        p = clip(sh / th)
+        ll = (sh * np.log(p) if sh > 0 else 0.0) + ((th - sh) * np.log1p(-p) if th > sh else 0.0)
+        if i + 1 < len(obs):
+            sl, tl = tot_s - sh, tot_t - th
+            q = clip(sl / tl)
+            ll += (sl * np.log(q) if sl > 0 else 0.0) + ((tl - sl) * np.log1p(-q) if tl > sl else 0.0)
+        else:
+            q = 0.0
+        if ll > best_ll:
+            best_ll = ll
+            best = (p, q, i)
+
+    p, q, k = best
+    out = np.full(len(successes), clip(tot_s / tot_t))
+    out[sidx[: k + 1]] = p
+    out[sidx[k + 1 :]] = q
     return out
 
 
@@ -126,6 +169,89 @@ class BernoulliSetEnumeratorTestCase(unittest.TestCase):
 
     def test_enumerator_type(self):
         self.assertIsInstance(self.dist.enumerator(), BernoulliSetEnumerator)
+
+
+class StepBernoulliEditEstimatorTestCase(unittest.TestCase):
+    def test_pseudo_count_enters_threshold_fit(self):
+        count_mat = np.array(
+            [
+                [0.0, 0.0, 10.0],
+                [10.0, 0.0, 0.0],
+                [0.0, 10.0, 0.0],
+            ]
+        )
+        tot_sum = 10.0
+        est = IntegerStepBernoulliEditEstimator(num_vals=3, pseudo_count=4.0, min_prob=0.0)
+        dist = est.estimate(None, (count_mat, tot_sum, None))
+
+        s1 = count_mat[:, 0] + count_mat[:, 2]
+        s0 = tot_sum - s1
+        expected_removal = expected_two_level(count_mat[:, 0] + 1.0, s1 + 2.0)
+        expected_addition = expected_two_level(count_mat[:, 1] + 1.0, s0 + 2.0)
+
+        np.testing.assert_allclose(np.exp(dist.log_edit_pmat[:, 1]), expected_removal, atol=1.0e-12)
+        np.testing.assert_allclose(np.exp(dist.log_edit_pmat[:, 2]), expected_addition, atol=1.0e-12)
+        self.assertTrue(np.all(np.exp(dist.log_edit_pmat[:, 1]) > 0.0))
+        self.assertTrue(np.all(np.exp(dist.log_edit_pmat[:, 2]) > 0.0))
+
+    def test_reference_pseudo_count_enters_threshold_fit(self):
+        count_mat = np.array(
+            [
+                [1.0, 0.0, 9.0],
+                [8.0, 1.0, 1.0],
+                [0.0, 7.0, 0.0],
+            ]
+        )
+        reference = np.array(
+            [
+                [0.8, 0.2, 0.2, 0.8],
+                [0.3, 0.7, 0.7, 0.3],
+                [0.6, 0.4, 0.4, 0.6],
+            ]
+        )
+        tot_sum = 10.0
+        alpha = 6.0
+        est = IntegerStepBernoulliEditEstimator(
+            num_vals=3, pseudo_count=alpha, suff_stat=reference, min_prob=0.0
+        )
+        dist = est.estimate(None, (count_mat, tot_sum, None))
+
+        s1 = count_mat[:, 0] + count_mat[:, 2]
+        s0 = tot_sum - s1
+        expected_removal = expected_two_level(
+            count_mat[:, 0] + alpha * reference[:, 1],
+            s1 + alpha * (reference[:, 1] + reference[:, 3]),
+        )
+        expected_addition = expected_two_level(
+            count_mat[:, 1] + alpha * reference[:, 2],
+            s0 + alpha * (reference[:, 0] + reference[:, 2]),
+        )
+
+        np.testing.assert_allclose(np.exp(dist.log_edit_pmat[:, 1]), expected_removal, atol=1.0e-12)
+        np.testing.assert_allclose(np.exp(dist.log_edit_pmat[:, 2]), expected_addition, atol=1.0e-12)
+
+    def test_min_probability_floor_enters_threshold_fit(self):
+        count_mat = np.array(
+            [
+                [0.0, 0.0, 10.0],
+                [10.0, 0.0, 0.0],
+                [0.0, 10.0, 0.0],
+            ]
+        )
+        est = IntegerStepBernoulliEditEstimator(num_vals=3, pseudo_count=None, min_prob=0.05)
+        dist = est.estimate(None, (count_mat, 10.0, None))
+
+        probs = np.exp(dist.log_edit_pmat)
+        self.assertGreaterEqual(float(np.min(probs)), 0.05 - 1.0e-12)
+        self.assertLessEqual(float(np.max(probs)), 0.95 + 1.0e-12)
+        np.testing.assert_allclose(probs[:, 0] + probs[:, 2], 1.0, atol=1.0e-12)
+        np.testing.assert_allclose(probs[:, 1] + probs[:, 3], 1.0, atol=1.0e-12)
+
+    def test_invalid_step_estimator_regularization_raises(self):
+        with self.assertRaises(ValueError):
+            IntegerStepBernoulliEditEstimator(num_vals=3, pseudo_count=-1.0)
+        with self.assertRaises(ValueError):
+            IntegerStepBernoulliEditEstimator(num_vals=3, min_prob=0.75)
 
 
 class SetDistImportSmokeTestCase(unittest.TestCase):
