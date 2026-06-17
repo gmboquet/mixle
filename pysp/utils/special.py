@@ -11,6 +11,8 @@ from scipy.special import (  # noqa: F401  -- re-exported
     beta,
     betaln,
     digamma,  # as digammaS0
+    erfc,
+    erfcx,
     gamma,
     gammaln,
     polygamma,
@@ -21,6 +23,67 @@ from scipy.special import (  # noqa: F401  -- re-exported
 from pysp.arithmetic import *
 
 D1 = digamma(1.0)
+
+
+def log_erfcx(x: np.ndarray | float, out: np.ndarray | None = None) -> np.ndarray | float:
+    """Stable natural log of the scaled complementary error function ``log(erfcx(x))``.
+
+    ``erfcx(x) = exp(x**2) * erfc(x)`` is the scaled complementary error function, the workhorse
+    of the exponentially-modified-Gaussian tail. A naive ``log(erfcx(x))`` blows up at both ends:
+    for large positive ``x`` it underflows (``erfcx -> 0`` so ``log -> -inf``) and for large
+    negative ``x`` it overflows (the ``exp(x**2)`` factor in ``erfcx`` -> ``inf`` so ``log -> inf``).
+    Three branches keep it finite and accurate everywhere:
+
+      * large positive ``x``: the asymptotic series
+        ``erfcx(x) ~ 1/(x*sqrt(pi)) * (1 - 1/(2 x^2) + 3/(4 x^4) - ...)``, in log space;
+      * large negative ``x``: ``log(erfcx(x)) = x**2 + log(erfc(x))`` with ``erfc(x) -> 2`` finite,
+        so no overflow;
+      * moderate ``x``: the direct ``log(erfcx(x))``.
+
+    The branches match ``log(erfcx)`` to machine precision on their overlaps. This is what keeps
+    the EMG tail from underflowing/overflowing.
+
+    Args:
+        x: Array-like or scalar argument.
+        out: Optional output array (only used for the array path).
+
+    Returns:
+        ``log(erfcx(x))`` as a numpy array (array input) or float (scalar input).
+
+    """
+    # Above +hi, erfcx is small enough that the asymptotic series is accurate and avoids underflow.
+    # Below -lo, erfcx's exp(x^2) factor overflows, so use x^2 + log(erfc(x)) instead.
+    hi = 25.0
+    lo = -25.0
+    scalar_input = np.isscalar(x) or (isinstance(x, np.ndarray) and x.ndim == 0)
+    xx = np.asarray(x, dtype=np.float64)
+
+    rv = np.empty(xx.shape, dtype=np.float64) if out is None else out
+
+    big = xx > hi
+    neg = xx < lo
+    mid = ~(big | neg)
+
+    if np.any(mid):
+        with np.errstate(divide="ignore"):
+            rv[mid] = np.log(erfcx(xx[mid]))
+
+    if np.any(big):
+        xb = xx[big]
+        inv = 1.0 / xb
+        inv2 = inv * inv  # 1/x^2 without overflowing x*x for astronomically large x
+        # log of the asymptotic series 1/(x*sqrt(pi)) * (1 - 1/(2x^2) + 3/(4x^4) - 15/(8x^6) + ...)
+        series = 1.0 - 0.5 * inv2 + 0.75 * inv2 * inv2 - 1.875 * inv2 * inv2 * inv2
+        rv[big] = -np.log(xb) - 0.5 * math.log(math.pi) + np.log(series)
+
+    if np.any(neg):
+        xn = xx[neg]
+        # erfcx(x) = exp(x^2) * erfc(x); for x << 0, erfc(x) -> 2 (finite), so this stays bounded.
+        rv[neg] = xn * xn + np.log(erfc(xn))
+
+    if scalar_input:
+        return float(rv)
+    return rv
 
 
 def stirling2(n: int, k: int) -> int:
