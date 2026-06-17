@@ -1363,6 +1363,16 @@ class RandomVariable:
 
             return _ss.statespace_fit(self, data, **kw)
 
+        # PDE-constrained latent-field models (method-of-lines + multivariate Kalman/RTS + EM)
+        if (
+            self._kind == "sample"
+            and isinstance(self._family, CompositeFamily)
+            and self._family.name == "PDEStateSpace"
+        ):
+            from pysp.ppl import pde as _pde
+
+            return _pde.pde_fit(self, data, **kw)
+
         grouped = self._kind == "sample" and any(
             isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args
         )
