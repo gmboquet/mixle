@@ -489,14 +489,24 @@ class LDASampler(DistributionSampler):
         self.dirichlet_sampler = DirichletDistribution(dist.alpha).sampler(self.rng.randint(0, maxrandint))
         self.len_dist = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: int | None = None) -> Sequence[Any] | Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Sequence[Any] | Any:
         """Draw one or 'size' documents from the LDA model.
 
         Note: Sample return value is not counted by value! Each document is returned as a flat list
         of sampled topic values (use pysp.utils.optsutil.count_by_value to obtain (value, count) pairs).
 
+        With ``batched=True`` (default), when ``size`` is not None the per-document lengths, Dirichlet
+        proportions and topic-count multinomials are drawn first, then every token across the whole
+        batch is grouped by topic and each topic sampler is invoked once. Because the topic samplers
+        are consumed in topic order rather than per-document order, the token draws are statistically
+        equivalent but NOT byte-identical to ``batched=False``. The length, Dirichlet and multinomial
+        draws are byte-identical (same order). Set ``batched=False`` to reproduce the exact legacy
+        per-document output for a given seed.
+
         Args:
             size (Optional[int]): Number of documents to sample. If None, a single document is returned.
+            batched (bool): Vectorize token draws across documents (default); set False for the legacy
+                per-document loop.
 
         Returns:
             A single document (list of values) if size is None, else a list of 'size' documents.
@@ -506,16 +516,38 @@ class LDASampler(DistributionSampler):
             n = self.len_dist.sample()
             weights = self.dirichlet_sampler.sample()
             topic_counts = self.rng.multinomial(n, pvals=weights)
-            topics = []
             rv = []
             for i in np.flatnonzero(topic_counts):
-                topics.extend([i] * topic_counts[i])
-                rv.extend(self.comp_samplers[i].sample(size=topic_counts[i]))
+                rv.extend(self.comp_samplers[i].sample(size=int(topic_counts[i])))
 
             return rv
 
-        else:
-            return [self.sample() for i in range(size)]
+        if not batched:
+            return [self.sample(batched=False) for i in range(size)]
+
+        # Draw the structural variates per document (byte-identical order to the loop), then group
+        # every token across all documents by topic and draw each topic sampler once.
+        lengths = np.asarray(self.len_dist.sample(size=size)).astype(int).reshape(-1)
+        per_doc_counts = []
+        for n in lengths:
+            weights = self.dirichlet_sampler.sample()
+            per_doc_counts.append(self.rng.multinomial(int(n), pvals=weights))
+        per_doc_counts = np.asarray(per_doc_counts).reshape(size, self.n_topics)
+
+        # Number of tokens per topic across the whole batch, and a stable doc-major slot layout.
+        docs: list[list[Any]] = [[] for _ in range(size)]
+        for topic in range(self.n_topics):
+            total = int(per_doc_counts[:, topic].sum())
+            if total == 0:
+                continue
+            drawn = self.comp_samplers[topic].sample(size=total)
+            offset = 0
+            for d in range(size):
+                c = int(per_doc_counts[d, topic])
+                if c:
+                    docs[d].extend(drawn[offset : offset + c])
+                    offset += c
+        return docs
 
 
 class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
