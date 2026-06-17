@@ -24,11 +24,46 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.special import digamma, gammaln
+from pysp.utils.fisher import FixedFisherView
+from pysp.utils.special import digamma, gammaln, trigamma
 
 _MIN_GAMMA_PARAM = 1.0e-12
 _MIN_GAMMA_SCALE = float(np.finfo(float).tiny)
 _MAX_GAMMA_SHAPE = 1.0e12
+
+
+class GammaFisherView(FixedFisherView):
+    def __init__(self, dist: Any) -> None:
+        super().__init__(dist, [("count",), ("sum_log",), ("sum",)])
+
+    @staticmethod
+    def _matrix_from_values(x: Any, log_x: Any | None = None) -> np.ndarray:
+        xx = np.asarray(x, dtype=np.float64).reshape(-1)
+        lx = np.log(xx) if log_x is None else np.asarray(log_x, dtype=np.float64).reshape(-1)
+        return np.column_stack((np.ones_like(xx, dtype=np.float64), lx, xx))
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        return self._matrix_from_values(data)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        if isinstance(enc_data, tuple):
+            return self._matrix_from_values(enc_data[0], enc_data[1])
+        return self._matrix_from_values(enc_data)
+
+    def _model_mean(self) -> np.ndarray:
+        k = float(self.dist.k)
+        theta = float(self.dist.theta)
+        return np.asarray([1.0, digamma(k) + math.log(theta), k * theta], dtype=np.float64)
+
+    def _model_fisher(self) -> np.ndarray:
+        k = float(self.dist.k)
+        theta = float(self.dist.theta)
+        out = np.zeros((3, 3), dtype=np.float64)
+        out[1, 1] = trigamma(k)
+        out[1, 2] = theta
+        out[2, 1] = theta
+        out[2, 2] = k * theta * theta
+        return out
 
 
 class GammaDistribution(SequenceEncodableProbabilityDistribution):
@@ -280,6 +315,10 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         from scipy.stats import gamma as _sp
 
         return float(_sp.ppf(q, self.k, scale=self.theta))
+
+    def to_fisher(self, **kwargs):
+        """Return this distribution's own Fisher view."""
+        return GammaFisherView(self)
 
     def sampler(self, seed: int | None = None) -> "GammaSampler":
         """Create a GammaSampler object from GammaDistribution.

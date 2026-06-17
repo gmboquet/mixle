@@ -28,9 +28,44 @@ from pysp.stats.compute.pdist import (
 )
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.utils.fisher import FixedFisherView
 from pysp.utils.special import digamma
 
 T = TypeVar("T")
+
+
+class CategoricalFisherView(FixedFisherView):
+    def __init__(self, dist: Any, keys: Sequence[Any], probs: Sequence[float]) -> None:
+        self.keys = list(keys)
+        self.key_index: dict[Any, int] = {k: i for i, k in enumerate(self.keys)}
+        p = np.asarray(probs, dtype=np.float64)
+        total = p.sum()
+        self.probs = p / total if total > 0.0 else np.ones(len(self.keys), dtype=np.float64) / max(len(self.keys), 1)
+        super().__init__(dist, [(repr(k),) for k in self.keys])
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        mat = np.zeros((len(data), len(self.keys)), dtype=np.float64)
+        for i, x in enumerate(data):
+            j = self.key_index.get(x)
+            if j is not None:
+                mat[i, j] = 1.0
+        return mat
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        xs, values = enc_data
+        value_to_col = np.asarray([self.key_index.get(v, -1) for v in values], dtype=np.int64)
+        cols = value_to_col[np.asarray(xs, dtype=np.int64)]
+        mat = np.zeros((len(cols), len(self.keys)), dtype=np.float64)
+        rows = np.arange(len(cols), dtype=np.int64)
+        good = cols >= 0
+        mat[rows[good], cols[good]] = 1.0
+        return mat
+
+    def _model_mean(self) -> np.ndarray:
+        return self.probs.copy()
+
+    def _model_fisher(self) -> np.ndarray:
+        return np.diag(self.probs) - np.outer(self.probs, self.probs)
 
 
 class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
@@ -306,6 +341,18 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
     def support_size(self) -> int:
         """Number of categories in the support."""
         return len(self.pmap)
+
+    def to_fisher(self, **kwargs):
+        """Return the categorical's one-hot Fisher view (generic fallback for default-augmented maps)."""
+        if hasattr(self, "pmap") and not getattr(self, "no_default", False):
+            keys = sorted(self.pmap.keys(), key=repr)
+            probs = [self.pmap[k] / (1.0 + getattr(self, "default_value", 0.0)) for k in keys]
+            return CategoricalFisherView(self, keys, probs)
+        if hasattr(self, "prob_map") and getattr(self, "default_value", 0.0) == 0.0:
+            keys = sorted(self.prob_map.keys(), key=repr)
+            probs = [self.prob_map[k] / (1.0 + getattr(self, "default_value", 0.0)) for k in keys]
+            return CategoricalFisherView(self, keys, probs)
+        return super().to_fisher(**kwargs)
 
     def sampler(self, seed: int | None = None) -> "CategoricalSampler":
         """Creates CategoricalSampler for sampling from CategoricalDistribution.
