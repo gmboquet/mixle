@@ -55,6 +55,10 @@ from pysp.stats.leaf.bernoulli import BernoulliDistribution, BernoulliEstimator
 from pysp.stats.leaf.beta import BetaDistribution, BetaEstimator
 from pysp.stats.leaf.binomial import BinomialDistribution, BinomialEstimator
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.leaf.exgaussian import (
+    ExponentiallyModifiedGaussianDistribution,
+    ExponentiallyModifiedGaussianEstimator,
+)
 from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEstimator
 from pysp.stats.leaf.gamma import GammaDistribution, GammaEstimator
 from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
@@ -95,6 +99,7 @@ __all__ = [
     "Beta",
     "StudentT",
     "LogNormal",
+    "EMG",
     "NegativeBinomial",
     "Dirichlet",
     "Mix",
@@ -227,6 +232,18 @@ register_family(
     seed_at=lambda v, s: {"mu": float(np.log(max(v, 1e-3))), "sigma2": 1.0},
     positive=(False, True),
     read=lambda d: {"mu": d.mu, "sigma": float(np.sqrt(d.sigma2))},
+)
+
+
+register_family(
+    "EMG",
+    ExponentiallyModifiedGaussianDistribution,
+    ExponentiallyModifiedGaussianEstimator,
+    lambda mu, sigma, rate: {"mu": float(mu), "sigma2": float(sigma) ** 2, "lam": float(rate)},
+    arity=3,
+    seed_at=lambda v, s: {"mu": float(v), "sigma2": (float(s) ** 2) or 1.0, "lam": 1.0},
+    positive=(False, True, True),
+    read=lambda d: {"mu": d.mu, "sigma": float(np.sqrt(d.sigma2)), "rate": d.lam},
 )
 
 
@@ -595,6 +612,15 @@ def StudentT(df: Any, loc: Any, scale: Any, *, name: str | None = None, keys: st
 def LogNormal(mu: Any, sigma: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Log-normal: log(X) ~ Normal(mu, sigma)."""
     return RandomVariable._sample("LogNormal", (mu, sigma), name=name, keys=keys)
+
+
+def EMG(mu: Any, sigma: Any, rate: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Exponentially-modified Gaussian: ``X = Normal(mu, sigma) + Exponential(rate)`` (right-skewed).
+
+    Lowers to ``ExponentiallyModifiedGaussianDistribution(mu, sigma**2, lam=rate)``; ``rate`` is the
+    exponential component's rate (its mean is ``1/rate``). The MLE is iterative with no closed form,
+    so ``EMG(free, free, free).fit(data)`` uses a consistent method-of-moments estimate."""
+    return RandomVariable._sample("EMG", (mu, sigma, rate), name=name, keys=keys)
 
 
 def NegativeBinomial(r: Any, p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
