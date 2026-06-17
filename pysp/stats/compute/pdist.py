@@ -500,7 +500,18 @@ class DistributionSampler:
         return self.rng.randint(0, maxrandint)
 
     @abstractmethod
-    def sample(self, size: int | None = None) -> Any: ...
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Draw observations.
+
+        Combinator samplers (mixture/sequence/...) accept ``batched``. With
+        ``batched=True`` (the default) each child stream is drawn in one vectorized
+        call instead of a per-draw Python loop -- far faster. Because every child
+        sampler owns an independent ``RandomState``, batching consumes each stream
+        in the same order as the loop, so the draws are identical to the legacy
+        path. ``batched=False`` forces that legacy per-draw loop as a guaranteed-
+        stable reference. Leaf samplers are already vectorized and ignore the flag.
+        """
+        ...
 
 
 class DistributionEnumerator:
