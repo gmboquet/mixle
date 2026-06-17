@@ -220,9 +220,14 @@ def _stats_public_distribution_catalog():
         "DiagonalGaussianDistribution": stats.DiagonalGaussianDistribution([0.5, -1.0], [1.0, 2.0]),
         "ExponentialDistribution": stats.ExponentialDistribution(2.0),
         "GammaDistribution": stats.GammaDistribution(2.0, 3.0),
+        "InverseGammaDistribution": stats.InverseGammaDistribution(3.0, 2.0),
         "GaussianDistribution": stats.GaussianDistribution(1.0, 2.0),
-        "GeometricDistribution": stats.GeometricDistribution(0.25),
         "InverseGaussianDistribution": stats.InverseGaussianDistribution(2.0, 3.0),
+        "GumbelDistribution": stats.GumbelDistribution(2.0, 1.5),
+        "VonMisesDistribution": stats.VonMisesDistribution(0.7, 2.5),
+        "HalfNormalDistribution": stats.HalfNormalDistribution(1.5),
+        "GeometricDistribution": stats.GeometricDistribution(0.25),
+        "LogSeriesDistribution": stats.LogSeriesDistribution(0.6),
         "NegativeBinomialDistribution": stats.NegativeBinomialDistribution(3.0, 0.45),
         "ParetoDistribution": stats.ParetoDistribution(2.0, 3.0),
         "RayleighDistribution": stats.RayleighDistribution(2.0),
@@ -268,6 +273,19 @@ def _stats_public_distribution_catalog():
         "MultivariateGaussianDistribution": stats.MultivariateGaussianDistribution(
             [0.5, -1.0], [[1.0, 0.2], [0.2, 2.0]]
         ),
+        "MultivariateStudentTDistribution": stats.MultivariateStudentTDistribution(
+            6.0, [0.5, -1.0], [[1.0, 0.2], [0.2, 2.0]]
+        ),
+        "ProbabilisticPCADistribution": stats.ProbabilisticPCADistribution(
+            [[1.0, 0.2], [0.3, 0.8], [0.5, 0.1], [-0.2, 0.6]], [0.0, 1.0, -1.0, 0.5], 0.5
+        ),
+        "PlackettLuceDistribution": stats.PlackettLuceDistribution([1.5, 0.5, -0.5, -1.5]),
+        "MallowsDistribution": stats.MallowsDistribution([0, 2, 1, 3], theta=1.0),
+        "SpanningTreeDistribution": stats.SpanningTreeDistribution(
+            [[0.0, 2.0, 1.0, 3.0], [2.0, 0.0, 4.0, 1.0], [1.0, 4.0, 0.0, 2.0], [3.0, 1.0, 2.0, 0.0]]
+        ),
+        "PitmanYorProcessDistribution": stats.PitmanYorProcessDistribution(1.5, 0.3, num_elements=8),
+        "MatchingDistribution": stats.MatchingDistribution([[2.0, 1.0, 3.0], [1.0, 4.0, 1.0], [2.0, 1.0, 5.0]]),
         "NullDistribution": stats.NullDistribution(),
         "OptionalDistribution": stats.OptionalDistribution(stats.PoissonDistribution(2.0), p=0.25),
         "PoissonDistribution": stats.PoissonDistribution(3.0),
@@ -317,6 +335,9 @@ def _stats_public_distribution_catalog():
         "ErdosRenyiGraphDistribution": stats.ErdosRenyiGraphDistribution(0.4, num_nodes=6),
         "StochasticBlockGraphDistribution": stats.StochasticBlockGraphDistribution(
             [[0.8, 0.2], [0.2, 0.7]], [0, 0, 1, 1, 0, 1]
+        ),
+        "RandomDotProductGraphDistribution": stats.RandomDotProductGraphDistribution(
+            [[0.7, 0.1], [0.6, 0.2], [0.1, 0.7], [0.2, 0.6], [0.5, 0.5], [0.3, 0.3]]
         ),
     }
 
