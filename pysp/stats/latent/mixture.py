@@ -858,6 +858,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         accumulators: Sequence[SequenceEncodableStatisticAccumulator],
         keys: tuple[str | None, str | None] = (None, None),
         name: str | None = None,
+        init: str = "dirichlet",
     ) -> None:
         """MixtureAccumulator object used to aggregate the sufficient statistics of observed data.
 
@@ -865,6 +866,8 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Sequence of
                 SequenceEncodableStatisticAccumulator objects for the components of the mixture.
             keys (Tuple[Optional[str], Optional[str]]): Set keys for weights and mixture components.
+            init (str): Initialization strategy: ``"dirichlet"`` (legacy random responsibilities) or
+                ``"kmeans++"`` (k-means++ seeding when the encoded data is a numeric matrix).
 
         Attributes:
             accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Sequence of
@@ -884,6 +887,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.weight_key = keys[0]
         self.comp_key = keys[1]
         self.name = name
+        self.init = init
         # Data log-likelihood accumulated as a byproduct of the E-step (the posterior normalizer),
         # only when _track_ll is enabled. Used by the fused-EM fast path in
         # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
@@ -1061,7 +1065,13 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         keep_len = np.count_nonzero(keep_idx)
         ww = np.zeros((sz, self.num_components))
 
-        if keep_len > 0:
+        responsibilities = None
+        if self.init == "kmeans++" and keep_len > 0:
+            responsibilities = self._kmeanspp_responsibilities(x, keep_idx)
+
+        if responsibilities is not None:
+            ww = responsibilities
+        elif keep_len > 0:
             ww[keep_idx, :] = self._w_rng.dirichlet(
                 alpha=np.ones(self.num_components) / (self.num_components**2), size=keep_len
             )
@@ -1070,6 +1080,73 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         for i in range(self.num_components):
             self.accumulators[i].seq_initialize(x, ww[:, i], self._acc_rng[i])
             self.comp_counts[i] += np.sum(ww[:, i])
+
+    def _feature_matrix(self, x: Any, keep_idx: np.ndarray) -> np.ndarray | None:
+        """Best-effort extraction of a dense (kept_n, d) numeric feature matrix from encoded data.
+
+        Returns ``None`` (so we fall back to the Dirichlet path) when the encoded data is not a
+        simple real-valued array — e.g. composite/tuple encodings, ragged sequences, non-numeric
+        dtypes. k-means++ only makes sense for vector-space leaves (Gaussian / diagonal Gaussian).
+        """
+        try:
+            arr = np.asarray(x)
+        except (TypeError, ValueError):
+            return None
+        if arr.dtype == object or not np.issubdtype(arr.dtype, np.number):
+            return None
+        if arr.ndim == 1:
+            arr = arr[:, None]
+        elif arr.ndim != 2:
+            return None
+        if arr.shape[0] != len(keep_idx):
+            return None
+        arr = arr[keep_idx]
+        if arr.shape[0] == 0 or not np.isfinite(arr).all():
+            return None
+        return np.asarray(arr, dtype=float)
+
+    def _kmeanspp_responsibilities(self, x: Any, keep_idx: np.ndarray) -> np.ndarray | None:
+        """P4 k-means++ seeding: assign near-hard responsibilities from nearest k-means++ center.
+
+        Falls back to ``None`` (legacy Dirichlet init) when a numeric feature matrix cannot be
+        extracted from the encoded data. This sidesteps the random-Dirichlet EM saddle for
+        Gaussian-mixture initialization with no new dependency.
+        """
+        feats = self._feature_matrix(x, keep_idx)
+        if feats is None:
+            return None
+
+        n, _ = feats.shape
+        k = self.num_components
+        rng = self._w_rng
+        centers_idx = np.empty(k, dtype=int)
+        centers_idx[0] = rng.randint(n)
+        closest_sq = np.sum((feats - feats[centers_idx[0]]) ** 2, axis=1)
+
+        for c in range(1, k):
+            total = float(closest_sq.sum())
+            if total <= 0.0 or not np.isfinite(total):
+                centers_idx[c] = rng.randint(n)
+            else:
+                probs = closest_sq / total
+                centers_idx[c] = int(rng.choice(n, p=probs))
+            new_sq = np.sum((feats - feats[centers_idx[c]]) ** 2, axis=1)
+            closest_sq = np.minimum(closest_sq, new_sq)
+
+        centers = feats[centers_idx]
+        # squared distances (n, k); assign each kept point to its nearest center
+        dists = np.sum((feats[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+        assign = np.argmin(dists, axis=1)
+
+        sz = len(keep_idx)
+        ww = np.zeros((sz, k))
+        # soft-ish responsibilities: dominant mass on nearest center, small floor on the rest so
+        # no component starts byte-degenerate even if a center captures few points.
+        kept_rows = np.nonzero(keep_idx)[0]
+        floor = 1.0e-3 / k
+        ww[kept_rows, :] = floor
+        ww[kept_rows, assign] = 1.0 - floor * (k - 1)
+        return ww
 
     def combine(self, suff_stat: tuple[np.ndarray, tuple[T2, ...]]) -> "MixtureAccumulator":
         """Merge the sufficient statistics of suff_stat with MixtureAccumulator instance.
@@ -1207,6 +1284,7 @@ class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
         factories: Sequence[StatisticAccumulatorFactory],
         keys: tuple[str | None, str | None] = (None, None),
         name: str | None = None,
+        init: str = "dirichlet",
     ) -> None:
         """MixtureAccumulatorFactory object for creating MixtureAccumulator objects.
 
@@ -1215,6 +1293,7 @@ class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
                 components.
             dim (int): Number of mixture components.
             keys (Tuple[Optional[str], Optional[str]]): Assign keys for weights and component aggregations.
+            init (str): Initialization strategy passed to the accumulator (``"dirichlet"`` or ``"kmeans++"``).
 
         Attributes:
             factories (Sequence[StatisticAccumulatorFactory]): Sequence of StatisticAccumulatorFactory for the mixture
@@ -1226,11 +1305,14 @@ class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
         self.factories = factories
         self.keys = keys
         self.name = name
+        self.init = init
 
     def make(self) -> "MixtureAccumulator":
         """Return MixtureAccumulator object with SequenceEncodableStatisticAccumulator objects for the components
         and keys passed."""
-        return MixtureAccumulator([factory.make() for factory in self.factories], keys=self.keys, name=self.name)
+        return MixtureAccumulator(
+            [factory.make() for factory in self.factories], keys=self.keys, name=self.name, init=self.init
+        )
 
 
 class MixtureEstimator(ParameterEstimator):
@@ -1243,6 +1325,9 @@ class MixtureEstimator(ParameterEstimator):
         name: str | None = None,
         keys: tuple[str | None, str | None] = (None, None),
         prior: SequenceEncodableProbabilityDistribution | None = None,
+        w_min: float = 0.0,
+        robust: bool = False,
+        init: str | None = None,
     ) -> None:
         """MixtureEstimator object used to estimate MixtureDistribution from aggregated sufficient statistics.
 
@@ -1254,6 +1339,15 @@ class MixtureEstimator(ParameterEstimator):
             pseudo_count (Optional[float]): Used to re-weight the member variable sufficient statistics in estimation.
             name (Optional[str]): Set a name to the MixtureEstimator object.
             keys (Tuple[Optional[str], Optional[str]]): Set keys for the weights and component distributions.
+            w_min (float): MLE weight floor (P3). Component weights are clamped at ``>= w_min`` and the
+                weight vector is renormalized, so a collapsing component cannot reach exactly zero
+                weight (which would freeze it out of all subsequent EM iterations). ``0.0`` (default)
+                disables the floor and preserves byte-identical behaviour.
+            robust (bool): Enable the bundled robust path (P1 component floors are always on; this
+                additionally turns on k-means++ initialization and a small ``w_min`` weight floor).
+            init (Optional[str]): Initialization strategy for the accumulator. ``"kmeans++"`` seeds
+                responsibilities from k-means++ centers; ``"dirichlet"`` (default unless ``robust``)
+                keeps the legacy random-Dirichlet path. ``None`` defers to ``robust``.
 
         Attributes:
             estimators (Sequence[ParameterEstimator]): Sequence of ParameterEstimator objects for the mixture
@@ -1272,6 +1366,14 @@ class MixtureEstimator(ParameterEstimator):
         self.keys = keys
         self.name = name
         self.fixed_weights = np.asarray(fixed_weights) if fixed_weights is not None else None
+        self.robust = bool(robust)
+        # In robust mode default to k-means++ init and a tiny data-independent weight floor.
+        if init is None:
+            init = "kmeans++" if self.robust else "dirichlet"
+        self.init = init
+        if w_min <= 0.0 and self.robust:
+            w_min = 1.0e-4 / self.num_components
+        self.w_min = float(w_min)
         self.prior = None
         self.has_conj_prior = False
         self.set_prior(prior)
@@ -1279,7 +1381,7 @@ class MixtureEstimator(ParameterEstimator):
     def accumulator_factory(self) -> "MixtureAccumulatorFactory":
         """Returns MixtureAccumulatorFactory object passing component StatisticAccumulatorFactory objects and keys."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
-        return MixtureAccumulatorFactory(est_factories, keys=self.keys, name=self.name)
+        return MixtureAccumulatorFactory(est_factories, keys=self.keys, name=self.name, init=self.init)
 
     def get_prior(self) -> SequenceEncodableProbabilityDistribution | None:
         """Return the joint mixture prior, or ``None`` for a plain MLE estimator.
@@ -1392,6 +1494,16 @@ class MixtureEstimator(ParameterEstimator):
                 w = np.ones(num_components) / float(num_components)
             else:
                 w = counts / counts.sum()
+
+        # P3 MLE weight floor: clamp component weights at >= w_min and renormalize so a
+        # collapsing component cannot reach exactly zero weight (which would permanently
+        # freeze it out of subsequent EM iterations). Only applied on the plain MLE path
+        # (not fixed_weights / conjugate-prior paths) and only when w_min > 0.
+        if self.w_min > 0.0 and self.fixed_weights is None:
+            w = np.asarray(w, dtype=float)
+            w = np.where(np.isfinite(w), w, 0.0)
+            w = np.maximum(w, self.w_min)
+            w = w / w.sum()
 
         return MixtureDistribution(components, w, name=self.name)
 
