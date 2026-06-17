@@ -1,4 +1,5 @@
 """Tests for pysp.ppl linear regression (Field + linear predictor)."""
+
 import unittest
 
 import numpy as np
@@ -7,7 +8,6 @@ from pysp.ppl import Bernoulli, Field, Group, Normal, Poisson, free
 
 
 class RegressionTestCase(unittest.TestCase):
-
     def setUp(self):
         rng = np.random.RandomState(0)
         self.N = 4000
@@ -18,7 +18,8 @@ class RegressionTestCase(unittest.TestCase):
 
     def test_ols_multi_covariate(self):
         m = Normal(free * Field("x") + free * Field("z") + free, free).fit(
-            list(self.y), given={"x": list(self.x), "z": list(self.z)})
+            list(self.y), given={"x": list(self.x), "z": list(self.z)}
+        )
         c = m.params
         self.assertAlmostEqual(c["x"]["mean"], 2.0, delta=0.05)
         self.assertAlmostEqual(c["z"]["mean"], -1.5, delta=0.05)
@@ -28,7 +29,8 @@ class RegressionTestCase(unittest.TestCase):
     def test_bayesian_regression_posterior_and_predict(self):
         a, b = Normal(0, 10), Normal(0, 10)
         m = Normal(a * Field("x") + b, free).fit(
-            list(self.y - (-1.5 * self.z)), given={"x": list(self.x)})  # drop z term
+            list(self.y - (-1.5 * self.z)), given={"x": list(self.x)}
+        )  # drop z term
         # coefficient posterior available by handle, name, index
         self.assertAlmostEqual(m.posterior(a).mean(), 2.0, delta=0.1)
         self.assertAlmostEqual(m.result.coefficients["x"]["mean"], 2.0, delta=0.1)
@@ -40,22 +42,20 @@ class RegressionTestCase(unittest.TestCase):
 
     def test_known_sigma(self):
         m = Normal(free * Field("x") + free, 0.5).fit(
-            list(2.0 * self.x + 0.7 + np.random.RandomState(1).normal(0, 0.5, self.N)),
-            given={"x": list(self.x)})
-        self.assertAlmostEqual(m.result.sigma, 0.5, delta=1e-9)   # fixed, not estimated
+            list(2.0 * self.x + 0.7 + np.random.RandomState(1).normal(0, 0.5, self.N)), given={"x": list(self.x)}
+        )
+        self.assertAlmostEqual(m.result.sigma, 0.5, delta=1e-9)  # fixed, not estimated
         self.assertAlmostEqual(m.params["x"]["mean"], 2.0, delta=0.05)
 
 
 class GLMTestCase(unittest.TestCase):
-
     def test_logistic_regression(self):
         rng = np.random.RandomState(0)
         N = 6000
         x, z = rng.normal(0, 1, N), rng.normal(0, 1, N)
         p = 1.0 / (1.0 + np.exp(-(2.0 * x - 1.0 * z + 0.5)))
         y = (rng.random(N) < p).astype(float)
-        m = Bernoulli(free * Field("x") + free * Field("z") + free).fit(
-            list(y), given={"x": list(x), "z": list(z)})
+        m = Bernoulli(free * Field("x") + free * Field("z") + free).fit(list(y), given={"x": list(x), "z": list(z)})
         c = m.params
         self.assertAlmostEqual(c["x"]["mean"], 2.0, delta=0.2)
         self.assertAlmostEqual(c["z"]["mean"], -1.0, delta=0.2)
@@ -72,11 +72,10 @@ class GLMTestCase(unittest.TestCase):
         m = Poisson(free * Field("x") + free).fit(list(y), given={"x": list(x)})
         self.assertAlmostEqual(m.params["x"]["mean"], 0.5, delta=0.1)
         self.assertAlmostEqual(m.params["intercept"]["mean"], 0.3, delta=0.1)
-        self.assertGreater(float(m.result.predict({"x": [0.0]})[0]), 0.0)   # a rate
+        self.assertGreater(float(m.result.predict({"x": [0.0]})[0]), 0.0)  # a rate
 
 
 class MixedEffectsTestCase(unittest.TestCase):
-
     def test_random_intercept_lmm(self):
         rng = np.random.RandomState(0)
         G, n_per = 40, 30
@@ -85,19 +84,18 @@ class MixedEffectsTestCase(unittest.TestCase):
         for gi in range(G):
             x = rng.normal(0, 1, n_per)
             y = 1.0 + 2.0 * x + u[gi] + rng.normal(0, 0.7, n_per)
-            ys += list(y); xs += list(x); subj += [gi] * n_per
-        m = Normal(free * Field("x") + free + Group("subject"), free).fit(
-            ys, given={"x": xs, "subject": subj})
+            ys += list(y)
+            xs += list(x)
+            subj += [gi] * n_per
+        m = Normal(free * Field("x") + free + Group("subject"), free).fit(ys, given={"x": xs, "subject": subj})
         r = m.result
-        self.assertAlmostEqual(r.coefficients["x"]["mean"], 2.0, delta=0.1)   # fixed slope
-        self.assertAlmostEqual(r.tau, 1.5, delta=0.4)                          # random-intercept sd
-        self.assertAlmostEqual(r.sigma, 0.7, delta=0.1)                       # residual sd
+        self.assertAlmostEqual(r.coefficients["x"]["mean"], 2.0, delta=0.1)  # fixed slope
+        self.assertAlmostEqual(r.tau, 1.5, delta=0.4)  # random-intercept sd
+        self.assertAlmostEqual(r.sigma, 0.7, delta=0.1)  # residual sd
         ge = np.array([r.group_effects[i] for i in range(G)])
-        self.assertGreater(np.corrcoef(ge, u)[0, 1], 0.95)                    # recovers BLUPs
+        self.assertGreater(np.corrcoef(ge, u)[0, 1], 0.95)  # recovers BLUPs
         # intercept absorbs the sample mean of the random effects
-        self.assertAlmostEqual(r.coefficients["intercept"]["mean"] + ge.mean() - u.mean(),
-                               1.0, delta=0.15)
-
+        self.assertAlmostEqual(r.coefficients["intercept"]["mean"] + ge.mean() - u.mean(), 1.0, delta=0.15)
 
     def test_random_slopes_lmm(self):
         rng = np.random.RandomState(0)
@@ -108,13 +106,16 @@ class MixedEffectsTestCase(unittest.TestCase):
         for gi in range(G):
             x = rng.normal(0, 1, n_per)
             y = 1.0 + 2.0 * x + u0[gi] + u1[gi] * x + rng.normal(0, 0.5, n_per)
-            ys += list(y); xs += list(x); subj += [gi] * n_per
+            ys += list(y)
+            xs += list(x)
+            subj += [gi] * n_per
         m = Normal(free * Field("x") + free + Group("subject", slopes=["x"]), free).fit(
-            ys, given={"x": xs, "subject": subj})
+            ys, given={"x": xs, "subject": subj}
+        )
         r = m.result
         sds = np.sqrt(np.diag(r.random_cov))
-        self.assertAlmostEqual(sds[0], 1.0, delta=0.25)    # random intercept sd
-        self.assertAlmostEqual(sds[1], 0.8, delta=0.25)    # random slope sd
+        self.assertAlmostEqual(sds[0], 1.0, delta=0.25)  # random intercept sd
+        self.assertAlmostEqual(sds[1], 0.8, delta=0.25)  # random slope sd
         self.assertAlmostEqual(r.sigma, 0.5, delta=0.1)
         bslope = np.array([r.group_effects_full[i][1] for i in range(G)])
         self.assertGreater(np.corrcoef(bslope, u1)[0, 1], 0.95)

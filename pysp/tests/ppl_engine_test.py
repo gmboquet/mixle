@@ -1,4 +1,5 @@
 """Execution-stack tests for pysp.ppl: vectorization, torch engine, parallel backends."""
+
 import time
 import unittest
 
@@ -8,7 +9,6 @@ from pysp.ppl import Mix, Normal, free
 
 
 class EngineTestCase(unittest.TestCase):
-
     def setUp(self):
         rng = np.random.RandomState(0)
         self.data = list(rng.normal(5.0, 2.0, size=200000))
@@ -23,6 +23,7 @@ class EngineTestCase(unittest.TestCase):
 
     def test_torch_engine_matches_numpy(self):
         from pysp.engines import TorchEngine
+
         m_np = Normal(free, free).fit(self.data)
         m_t = Normal(free, free).fit(self.data, engine=TorchEngine())
         self.assertAlmostEqual(m_np.dist.mu, m_t.dist.mu, places=3)
@@ -34,8 +35,9 @@ class EngineTestCase(unittest.TestCase):
         data = list(np.concatenate([rng.normal(-5, 1, 20000), rng.normal(5, 1, 20000)]))
         try:
             m = Mix([Normal(free, free), Normal(free, free)]).fit(
-                data, backend="mp", num_workers=2, rng=np.random.RandomState(2))
-        except Exception as e:                       # environment without usable mp
+                data, backend="mp", num_workers=2, rng=np.random.RandomState(2)
+            )
+        except Exception as e:  # environment without usable mp
             self.skipTest(f"mp backend unavailable: {e}")
         means = sorted(c.mu for c in m.dist.components)
         self.assertAlmostEqual(means[0], -5.0, delta=0.3)

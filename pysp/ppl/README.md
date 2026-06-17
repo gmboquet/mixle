@@ -158,6 +158,70 @@ q.log_prob(1.0)              # renormalized density
 q.prob_of_event()            # P(x > 0)
 ```
 
+## Constraints & inequalities among random variables
+
+Comparisons build a `Constraint` — `x > 0` (RV vs constant), `a < b` (RV vs RV), or
+`2*a - b >= 1` (linear/transformed expressions on either side) — combined with `&` `|` `~`.
+The *same* constraint object works two ways.
+
+**Generative — `constrain(...)`** conditions several RVs on a relation among them:
+
+```python
+a, b, c = Normal(0, 1, name="a"), Normal(0, 1, name="b"), Normal(0, 1, name="c")
+ordered = constrain(a < b, b < c)     # the ordered triple (combine with & under the hood)
+ordered.sample(1000)                  # (1000, 3) array, columns in ordered.columns
+ordered.mean()                        # per-variable means
+ordered.prob()                        # P(a < b < c)  ->  ~1/6
+ordered.log_prob(x)                   # renormalized joint density on the region
+
+tails = constrain((x < -1) | (x > 1)) # boolean combinators; ~c negates
+```
+
+(Python's chained `a < b < c` is intentionally rejected — use `(a < b) & (b < c)`.)
+
+**Differential / shape constraints** act on a vector RV (a discretized function) via finite
+differences — monotonicity (first difference), curvature (second difference), bounded variation:
+
+```python
+v = MVN(20, name="v")
+constrain(increasing(v))     # constrain(decreasing(v)) / monotone(v)
+constrain(convex(v))         # constrain(concave(v))     -- second difference
+constrain(lipschitz(v, 0.5)) # |v[i+1]-v[i]| <= 0.5      -- bounded variation
+```
+
+Each carries a continuous residual, so it also feeds the soft-penalty inference path.
+
+**Inference — `fit(..., constraints=...)`** restricts the feasible parameter region. The
+constrained variables are the model's (named) priors; `map`/`mcmc`/`ensemble` honor a hard
+truncation of the posterior, e.g. an identifiability ordering:
+
+```python
+a = Normal(2, 5, name="alpha");  b = Normal(5, 5, name="beta")
+Beta(a, b).fit(data, constraints=a < b)            # auto -> constrained MAP
+Beta(a, b).fit(data, how="ensemble", constraints=a < b)   # full posterior on the region
+```
+
+## Vector / matrix parameters
+
+Structural parameters of a combinator are inferable, each reparameterized to its natural
+manifold (no explicit constraint or Jacobian needed — the transform is exact):
+
+```python
+# mixture weights / HMM transition matrix (simplex via the Gamma representation)
+Mix([...], free).fit(data, how="ensemble")
+Markov([Normal(m0,1), Normal(m1,1)], transitions=free, initial=free).fit(seqs, how="ensemble")
+
+# MVN mean vector + full covariance (covariance = L Lᵀ, SPD by construction)
+MVN(d, mean=free, cov=free).fit(X, how="ensemble")
+DiagGaussian(d, mean=free, var=free).fit(X, how="map")      # diagonal variances (positive)
+
+# ordered mean vector (increasing by construction — identifiability, no rejection)
+MVN(d, mean=ordered, cov=free).fit(X, how="ensemble")
+```
+
+Manifolds covered: real / positive / unit vectors, the **simplex** (and rows of a stochastic
+matrix), **SPD covariance** (Cholesky), and **ordered** vectors.
+
 ## Bayesian mixture via VBEM (discrete latents)
 
 `Mix(...).fit(how="vmp")` runs variational Bayes for a Gaussian mixture — per-datapoint
@@ -251,11 +315,25 @@ message-passing core.
 | `"conjugate"` | closed-form posterior | conjugate prior + known other params |
 | `"hierarchical"` | conjugate VB/EM random effects | `.each()` group priors |
 | `"map"` | maximize joint (scipy) | priors, point estimate |
-| `"vi"` | mean-field ADVI (reparameterized ELBO) | non-conjugate priors, fast approximate posterior |
+| `"vi"` | ADVI — `family='meanfield'|'fullrank'`, tilted Renyi `alpha=`, `batch_size=` (SGVB) | non-conjugate priors, scalable approximate posterior |
 | `"vmp"` | variational message passing (closed-form, ELBO) | conjugate-exponential models (e.g. Gaussian mean+precision) |
 | `"mcmc"` | adaptive Metropolis (`pysp.utils.mcmc`) | full posterior, fast throughput |
-| `"hmc"` | Hamiltonian MC, preconditioned | full posterior, best mixing |
-| `"auto"` (default) | hierarchical → conjugate → map (if priors) → em | — |
+| `"hmc"` | Hamiltonian MC, preconditioned (fixed step) | full posterior |
+| `"nuts"` | No-U-Turn Sampler (auto-tuned HMC, dual-averaging) | correlated / higher-dim posteriors |
+| `"ensemble"` | affine-invariant ensemble (Goodman & Weare) | low/medium-dim, highest ESS/sec |
+| `"sample"` | **auto-picks the sampler** (ensemble low-dim, NUTS higher-dim) | just want the posterior |
+| `"auto"` (default) | hierarchical → conjugate(/mixture) → map (if priors) → em | — |
+
+You rarely need to name a sampler: `how="sample"` chooses one. Constraints also just work —
+`fit(constraints=...)` auto-uses rejection for inequalities and a soft penalty for equalities /
+ODE residuals (no `penalty=` needed), and you only add `name=` to a prior if you want to read it
+back by name (constraints match by identity).
+
+`map`/`mcmc`/`hmc`/`ensemble` work on **composite** models too (mixtures, sequences): the leaf
+`free`/prior parameters are collected across the tree and a concrete model is rebuilt per
+evaluation. Mixtures need an identifiability constraint (ordered component means) to break
+label-switching — e.g. `Mix([Normal(m0, 1), Normal(m1, 1)]).fit(data, how="ensemble",
+constraints=m0 < m1)`.
 
 ## The result object
 
@@ -271,7 +349,17 @@ m.mean(); m.var() # moments (Monte-Carlo; works for any RV)
 m.log_prob(x)     # density (scalar or vectorized)
 m.posterior(x)    # latent-state posterior (data) OR parameter posterior (name/handle)
 m.predict(n)      # posterior-predictive draws (Bayesian) or plug-in predictive (point fit)
+m.waic(data)      # WAIC: Bayesian predictive accuracy {waic, elpd_waic, p_waic, se, ...}
+m.loo(data)       # PSIS-LOO cross-validation {loo, elpd_loo, p_loo, se, khat_max, ...}
 m.result          # inference metadata: posterior draws, summary, diagnostics
+```
+
+Model comparison spans plug-in and predictive criteria:
+
+```python
+compare([m1, m2], data, by="waic")   # 'aic' | 'bic' | 'loglik' | 'waic' | 'loo'
+#   waic/loo integrate over posterior uncertainty (the modern Stan/ArviZ criteria);
+#   rows sort best-first and report d_elpd (elpd difference from the best model).
 ```
 
 ## Design guarantees
@@ -327,7 +415,8 @@ emission family** (Gaussian / Poisson / Categorical / …), **multivariate Gauss
 (`MVN`, `DiagGaussian`), **LDA** topic models, **Dirichlet-Categorical** VMP nodes,
 **RV+RV convolution** (`x + y`), **event conditioning** (`.given`), **Bayesian mixture via
 VBEM**, **moments** (`mean`/`var`), and **model comparison** (`log_likelihood`, `aic`/`bic`,
-`compare`). 12 scalar families + multivariate + 6 structured model types.
+plus Bayesian predictive **WAIC** and **PSIS-LOO** via `m.waic`/`m.loo`/`compare(by="waic"|"loo")`).
+12 scalar families + multivariate + 6 structured model types.
 
 Future: LDA in-graph as VMP factors, exact (FFT) convolution for non-conjugate continuous
 sums, analytic gradients for faster HMC.
