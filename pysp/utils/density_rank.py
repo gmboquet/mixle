@@ -136,6 +136,89 @@ def _try_enumerator(dist: Any):
 
 
 @dataclass
+class TruncatedSumBound:
+    """Bounds on a descending-probability sum truncated after the top ``num_enumerated`` items.
+
+    Attributes:
+        num_enumerated: how many top items were enumerated (``< k`` means the support was exhausted).
+        enumerated_mass: exact summed probability of the enumerated items (a *lower* bound on the total).
+        last_log_prob: ``log p`` of the smallest enumerated item; every un-enumerated item is ``<= `` this.
+        support_size: the distribution's support cardinality (``None`` if infinite/unknown), or the number
+            enumerated when the support was exhausted.
+        exhausted: the enumerator ran dry within ``k`` -- the enumerated items ARE the whole support, so
+            the tail is exactly zero and the bounds are exact.
+        tail_upper_bound: provable upper bound on the un-enumerated mass: ``(support_size - num_enumerated)
+            * exp(last_log_prob)`` (0 when exhausted; ``None`` when the support size is unknown).
+        total_upper_bound: ``enumerated_mass + tail_upper_bound`` -- an upper bound on the full sum
+            (``<= 1`` for a normalized model; bounds the partition function for an unnormalized one).
+    """
+
+    num_enumerated: int
+    enumerated_mass: float
+    last_log_prob: float
+    support_size: int | None
+    exhausted: bool
+    tail_upper_bound: float | None
+    total_upper_bound: float | None
+
+
+def truncated_sum_bound(dist: Any, k: int) -> TruncatedSumBound:
+    """Bound a distribution's descending-probability sum by truncating after the top ``k`` items.
+
+    Enumerates the ``k`` most probable outcomes (descending), so any un-enumerated outcome has
+    probability ``<= p_k`` (the smallest enumerated). With the support cardinality ``N =
+    dist.support_size()`` the un-enumerated mass is then bounded by ``(N - k) * p_k`` -- a finite,
+    cheap upper bound on the truncated tail that uses only ``k`` evaluations and the support size. If
+    the enumerator is exhausted within ``k`` the bounds are exact (the tail is zero). Requires an
+    enumerable family; raises EnumerationError otherwise.
+
+    This is the truncation-based distribution upper bound: e.g. it certifies how much mass a top-``k``
+    summary misses, or upper-bounds an unnormalized model's partition function.
+    """
+    from pysp.stats.compute.pdist import EnumerationError
+
+    if k < 0:
+        raise ValueError("k must be non-negative.")
+    enumerator = _try_enumerator(dist)
+    if enumerator is None:
+        raise EnumerationError(dist, reason="truncated_sum_bound requires an enumerable support")
+
+    mass = 0.0
+    last_lp = float("inf")
+    n = 0
+    exhausted = False
+    for value, lp in enumerator:
+        mass += math.exp(float(lp))
+        last_lp = float(lp)
+        n += 1
+        if n >= k:
+            # Peek whether the support continues beyond k.
+            if next(enumerator, None) is None:
+                exhausted = True
+            break
+    else:
+        exhausted = True
+
+    support_size = dist.support_size() if not exhausted else n
+    if exhausted:
+        tail_upper: float | None = 0.0
+    elif support_size is None:
+        tail_upper = None
+    else:
+        tail_upper = max(0, support_size - n) * math.exp(last_lp)
+    total_upper = None if tail_upper is None else (mass + tail_upper)
+    return TruncatedSumBound(
+        num_enumerated=n,
+        enumerated_mass=mass,
+        last_log_prob=(last_lp if n > 0 else float("-inf")),
+        support_size=support_size,
+        exhausted=exhausted,
+        tail_upper_bound=tail_upper,
+        total_upper_bound=total_upper,
+    )
+
+
+@dataclass
 class CountDPRankResult:
     """Approximate rank of an observation from the count DP, for decomposable families.
 

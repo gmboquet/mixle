@@ -226,6 +226,16 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
         """Return legacy sequence log-density callables for this distribution."""
         return [self.seq_log_density]
 
+    def support_size(self) -> int | None:
+        """Product of field support sizes (``None`` if any field is infinite)."""
+        total = 1
+        for d in self.dists:
+            s = d.support_size()
+            if s is None:
+                return None
+            total *= s
+        return total
+
     def sampler(self, seed: int | None = None) -> RecordSampler:
         """Return a sampler that draws mapping records field-by-field."""
         return RecordSampler(self, seed)

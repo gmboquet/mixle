@@ -31,6 +31,11 @@ from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationInde
 from pysp.utils.special import digamma
 
 
+def _fisher_mean_var(dist):
+    p = float(dist.p)
+    return 1.0 / p, (1.0 - p) / (p * p)
+
+
 class GeometricDistribution(SequenceEncodableProbabilityDistribution):
     """Geometric distribution on ``{1, 2, ...}`` with success probability ``p``."""
 
@@ -219,6 +224,12 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         """Return an ``(n, k)`` matrix of geometric log densities."""
         xx = engine.asarray(x)
         return cls.backend_log_density_from_params(xx[:, None], params["p"][None, :], engine)
+
+    def to_fisher(self, **kwargs):
+        """Return the Geometric's count-family Fisher view."""
+        from pysp.utils.fisher import CountFisherView, _count_data, _identity_encoded
+
+        return CountFisherView(self, _fisher_mean_var, _count_data, _identity_encoded)
 
     def sampler(self, seed: int | None = None) -> "GeometricSampler":
         """Creates GeometricSampler object from GeometricDistribution instance.
