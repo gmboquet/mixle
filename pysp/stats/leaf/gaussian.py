@@ -611,6 +611,7 @@ class GaussianEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
+        min_covar: float | None = None,
     ):
         """GaussianEstimator object used to estimate GaussianDistribution from aggregated sufficient statistics.
 
@@ -623,6 +624,10 @@ class GaussianEstimator(ParameterEstimator):
                 ``estimate`` performs the closed-form conjugate posterior update (returning the joint
                 MAP estimate and carrying the posterior forward as the fitted model's prior) instead
                 of the maximum-likelihood / pseudo-count update.
+            min_covar (Optional[float]): Absolute variance floor applied in the MLE M-step. ``None``
+                (default) uses a tiny ``1e-8`` floor; the estimated variance is also floored at a
+                relative ``1e-6 * sigma2`` to keep the safeguard data-scaled. Set explicitly to widen
+                the floor for hard / high-dimensional cases. Bias is negligible at the default.
 
         Attributes:
             pseudo_count (Tuple[Optional[float], Optional[float]]): Weights for suff_stat.
@@ -637,6 +642,7 @@ class GaussianEstimator(ParameterEstimator):
         self.name = name
         self.prior = prior
         self.has_conj_prior = isinstance(prior, NormalGammaDistribution)
+        self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
 
     def accumulator_factory(self) -> "GaussianAccumulatorFactory":
         """Return GaussianAccumulatorFactory with name and keys passed."""
@@ -718,8 +724,14 @@ class GaussianEstimator(ParameterEstimator):
         else:
             sigma2 = suff_stat[1] / nobs_loc2 - mu * mu
 
-        if sigma2 <= 1.0e-12 or not np.isfinite(sigma2):
-            sigma2 = 1.0e-12
+        # P1 variance floor: clamp non-finite / non-positive variance and apply a
+        # data-scaled floor max(abs_floor, rel * sigma2) so a degenerate component
+        # cannot produce a zero/negative/NaN variance. Bias is negligible at the
+        # default abs_floor=1e-8 / rel=1e-6.
+        if not np.isfinite(sigma2) or sigma2 <= 0.0:
+            sigma2 = self.min_covar
+        else:
+            sigma2 = max(sigma2, self.min_covar, 1.0e-6 * sigma2)
 
         return GaussianDistribution(mu, sigma2, name=self.name)
 
