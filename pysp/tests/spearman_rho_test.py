@@ -26,6 +26,14 @@ class SpearmanRankingEstimatorRhoTestCase(unittest.TestCase):
         dist = _estimate(SpearmanRankingEstimator(4, rho=2.5), self.data)
         self.assertEqual(dist.rho, 2.5)
 
+    def test_consensus_is_rank_vector_not_item_order(self):
+        data = [[2, 0, 1], [2, 0, 1], [2, 1, 0]]
+
+        dist = _estimate(SpearmanRankingEstimator(3, rho=1.0), data)
+
+        np.testing.assert_array_equal(dist.sigma, np.asarray([2, 0, 1]))
+        self.assertGreater(dist.log_density([2, 0, 1]), dist.log_density([1, 2, 0]))
+
     def test_invalid_rho_raises(self):
         with self.assertRaises(ValueError):
             SpearmanRankingEstimator(4, rho=-1.0)
