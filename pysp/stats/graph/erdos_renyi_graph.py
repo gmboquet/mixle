@@ -109,7 +109,20 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         return _bernoulli_log_likelihood(successes, total, self.p)
 
     def seq_log_density(self, x: Sequence[GraphObservation]) -> np.ndarray:
-        return np.asarray([self.log_density(obs) for obs in x], dtype=np.float64)
+        # Extract (opportunities, successes) per graph once (ragged adjacency forces the per-graph
+        # extraction), then score the whole batch with one vectorized Bernoulli log-likelihood instead
+        # of a Python log_density call per graph.
+        if len(x) == 0:
+            return np.zeros(0, dtype=np.float64)
+        counts = np.asarray(
+            [
+                _edge_counts(_extract_observation(o, directed=self.directed).adjacency, self.directed, self.self_loops)
+                for o in x
+            ],
+            dtype=np.float64,
+        ).reshape(-1, 2)
+        total, successes = counts[:, 0], counts[:, 1]
+        return successes * self.log_p + (total - successes) * self.log_1p
 
     def backend_seq_log_density(self, x: Sequence[GraphObservation], engine: Any) -> Any:
         """Engine-routed Bernoulli edge log-likelihood.
