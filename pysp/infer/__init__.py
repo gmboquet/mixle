@@ -1,16 +1,22 @@
-"""Bring-your-own-target inference facade.
+"""Bring-your-own-target, engine-agnostic inference facade.
 
 A small public surface so external consumers can run pysp's samplers / VI on an *arbitrary*
-differentiable target without reaching into ``pysp.ppl`` internals:
+differentiable target without reaching into ``pysp.ppl`` internals — and run it on whichever
+**engine** fits their hardware and target:
 
-* :func:`nuts` — fast (fused ``value_and_grad``) NUTS over a user log-target, multi-chain, with
-  R-hat / ESS diagnostics returned alongside the draws.
+* :func:`nuts` — multi-chain No-U-Turn Sampler with R-hat / ESS diagnostics, dispatched to a
+  registered backend (``numpy`` / ``numba`` / ``torch`` / ``jax``) selected by ``backend="auto"``.
+  Every backend returns the **same** :class:`NutsResult`, so downstream code is backend-blind.
+* :func:`nuts_torch` — the torch-native NUTS, kept as a direct entry point (also the ``"torch"``
+  backend).
 * :func:`advi` — automatic-differentiation VI over a user *batched* torch target.
-* :mod:`pysp.infer.diagnostics` (re-exported here as :func:`rhat` / :func:`ess`) — convergence
+* :func:`available_backends` — the installed inference engines.
+* :mod:`pysp.infer.diagnostics` (re-exported as :func:`rhat` / :func:`ess`) — convergence
   diagnostics over plain ``(n_chains, n_draws, d)`` arrays.
 
-These wrap :func:`pysp.utils.mcmc.nuts` and the ADVI core in :mod:`pysp.ppl.autograd`; the
-samplers themselves stay model-agnostic.
+The backend registry lives in :mod:`pysp.infer.backends` (`register, don't branch`); each backend
+self-registers at import, behind a try/except so a missing optional engine never breaks
+``import pysp.infer``.
 """
 
 from __future__ import annotations
@@ -21,9 +27,27 @@ from typing import Any
 
 import numpy as np
 
+from .backends import (
+    InferenceBackend,
+    available_backends,
+    get_inference_backend,
+    register_inference_backend,
+    select_backend,
+)
 from .diagnostics import ess, rhat
 
-__all__ = ["NutsResult", "AdviResult", "nuts", "nuts_torch", "advi", "rhat", "ess"]
+__all__ = [
+    "NutsResult",
+    "AdviResult",
+    "nuts",
+    "nuts_torch",
+    "advi",
+    "rhat",
+    "ess",
+    "available_backends",
+    "InferenceBackend",
+    "register_inference_backend",
+]
 
 
 @dataclass(frozen=True)
@@ -52,6 +76,80 @@ class AdviResult:
 
 
 def nuts(
+    target: Callable[..., Any],
+    *,
+    backend: str = "auto",
+    dim: int | None = None,
+    init: Any = None,
+    num_samples: int = 1000,
+    warmup: int = 1000,
+    chains: int = 1,
+    mass: Any = 1.0,
+    target_accept: float = 0.8,
+    max_tree_depth: int = 10,
+    thin: int = 1,
+    rng: np.random.RandomState | int | None = None,
+    **backend_kwargs: Any,
+) -> NutsResult:
+    """No-U-Turn Sampler over an arbitrary log-target, dispatched to a registered engine.
+
+    The ``target`` contract depends on the backend (the kinds cannot be auto-converted across
+    autodiff systems):
+
+    * ``numpy`` / ``numba``: a fused ``value_and_grad(theta) -> (logp, grad)`` (njit-jitted for
+      ``numba``). The caller supplies the (analytic) gradient.
+    * ``torch`` / ``jax``: a scalar ``logp(theta)``; the backend builds ``value_and_grad`` by
+      autodiff (``torch.func`` / NumPyro).
+
+    Args:
+        target: the log-target, per the contract above.
+        backend: ``"auto"`` (default), or one of :func:`available_backends`. ``"auto"`` honors an
+            explicit choice elsewhere, otherwise prefers the always-present ``numpy`` path for a
+            plain numpy ``value_and_grad``; pass ``backend="numba"`` to run an ``@njit`` target,
+            ``"jax"`` / ``"torch"`` for an autodiff scalar ``logp``.
+        dim: parameter dimension. Required unless ``init`` is given.
+        init: initial state, shape ``(dim,)`` or ``(chains, dim)`` for per-chain starts. Defaults
+            to zeros. A 1-D ``init`` is reused (jittered after the first) across chains.
+        num_samples: retained post-warmup draws per chain.
+        warmup: step-size adaptation / burn-in iterations per chain.
+        chains: number of independent chains (>= 2 to get a meaningful R-hat).
+        mass, target_accept, max_tree_depth, thin: forwarded to the sampler.
+        rng: seed / RandomState for reproducibility.
+        **backend_kwargs: forwarded to the chosen backend (e.g. ``compile=``, ``device=`` for
+            ``torch``; ``chain_method=`` for ``jax``).
+
+    Returns:
+        :class:`NutsResult` with pooled ``samples`` ``(chains*draws, d)``, per-chain ``chains``
+        ``(chains, draws, d)``, per-dimension ``rhat`` and ``ess``, the total target-evaluation
+        count, the adapted ``step_size``, and ``extra={"backend": name}``.
+    """
+    if dim is None and init is None:
+        raise ValueError("pass dim= or init=.")
+    from .backends import _dispatch_target_kind
+
+    kind_hint = _dispatch_target_kind(target, backend_kwargs.pop("target_kind", None))
+    name = select_backend(backend, target=kind_hint)
+    b = get_inference_backend(name)
+    return b.nuts(
+        target,
+        dim=dim,
+        init=init,
+        num_samples=num_samples,
+        warmup=warmup,
+        chains=chains,
+        mass=mass,
+        target_accept=target_accept,
+        max_tree_depth=max_tree_depth,
+        thin=thin,
+        rng=rng,
+        **backend_kwargs,
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# numpy backend (always available): wraps the existing fused-value_and_grad sampler.
+# --------------------------------------------------------------------------------------------
+def _nuts_numpy(
     value_and_grad: Callable[[np.ndarray], tuple[float, Any]],
     *,
     dim: int | None = None,
@@ -65,34 +163,11 @@ def nuts(
     thin: int = 1,
     rng: np.random.RandomState | int | None = None,
 ) -> NutsResult:
-    """No-U-Turn Sampler over an arbitrary differentiable log-target.
-
-    Args:
-        value_and_grad: fused callable ``theta -> (logp, grad)`` returning the (unnormalized) log
-            target and its gradient in one shot. The fused contract halves forward passes and lets
-            the sampler cache endpoint gradients across the leapfrog/tree.
-        dim: parameter dimension. Required unless ``init`` is given.
-        init: initial state, shape ``(dim,)`` or ``(chains, dim)`` for per-chain starts. Defaults
-            to zeros. A 1-D ``init`` is reused (jittered after the first) across chains.
-        num_samples: retained post-warmup draws per chain.
-        warmup: step-size adaptation / burn-in iterations per chain.
-        chains: number of independent chains (>= 2 to get a meaningful R-hat).
-        mass, target_accept, max_tree_depth, thin: forwarded to the sampler.
-        rng: seed / RandomState for reproducibility.
-
-    Returns:
-        :class:`NutsResult` with pooled ``samples`` ``(chains*draws, d)``, per-chain ``chains``
-        ``(chains, draws, d)``, per-dimension ``rhat`` and ``ess``, the total target-evaluation
-        count and the adapted ``step_size``.
-    """
     from pysp.utils.mcmc import nuts as _nuts
 
-    if dim is None and init is None:
-        raise ValueError("pass dim= or init=.")
     rng = _as_rng(rng)
     inits = _chain_inits(init, dim, chains, rng)
     d = inits.shape[1]
-
     chain_arrays: list[np.ndarray] = []
     total_evals = 0
     last_step = float("nan")
@@ -109,26 +184,59 @@ def nuts(
             thin=thin,
             rng=np.random.RandomState(seed),
         )
-        arr = np.asarray(res.samples, dtype=float).reshape(len(res.samples), d)
-        chain_arrays.append(arr)
+        chain_arrays.append(np.asarray(res.samples, dtype=float).reshape(len(res.samples), d))
         total_evals += int(getattr(res, "num_target_evals", 0))
         last_step = float(getattr(res, "step_size", float("nan")))
-
-    n = min(a.shape[0] for a in chain_arrays)
-    stacked = np.stack([a[:n] for a in chain_arrays], axis=0)  # (chains, n, d)
-    pooled = stacked.reshape(-1, d)
-    rh = rhat(stacked) if chains >= 2 else np.full(d, np.nan)
-    es = ess(stacked)
-    return NutsResult(
-        samples=pooled,
-        chains=stacked,
-        rhat=rh,
-        ess=es,
-        num_target_evals=total_evals,
-        step_size=last_step,
-    )
+    return _pool_chains(chain_arrays, d, chains, total_evals, last_step, backend="numpy")
 
 
+# --------------------------------------------------------------------------------------------
+# numba backend: njit sampler over an @njit value_and_grad (analytic gradient, no autodiff).
+# --------------------------------------------------------------------------------------------
+def _nuts_numba(
+    value_and_grad: Callable[[np.ndarray], tuple[float, Any]],
+    *,
+    dim: int | None = None,
+    init: Any = None,
+    num_samples: int = 1000,
+    warmup: int = 1000,
+    chains: int = 1,
+    mass: Any = 1.0,
+    target_accept: float = 0.8,
+    max_tree_depth: int = 10,
+    thin: int = 1,
+    rng: np.random.RandomState | int | None = None,
+) -> NutsResult:
+    from pysp.utils.mcmc.nuts_numba import nuts_numba as _nuts_numba_core
+
+    rng = _as_rng(rng)
+    inits = _chain_inits(init, dim, chains, rng)
+    d = inits.shape[1]
+    chain_arrays: list[np.ndarray] = []
+    total_evals = 0
+    last_step = float("nan")
+    for c in range(chains):
+        seed = int(rng.randint(1, 2**31 - 1))
+        res = _nuts_numba_core(
+            value_and_grad,
+            initial=inits[c],
+            num_samples=num_samples,
+            warmup=warmup,
+            mass=mass,
+            target_accept=target_accept,
+            max_tree_depth=max_tree_depth,
+            thin=thin,
+            seed=seed,
+        )
+        chain_arrays.append(np.asarray(res.samples, dtype=float).reshape(len(res.samples), d))
+        total_evals += int(getattr(res, "num_target_evals", 0))
+        last_step = float(getattr(res, "step_size", float("nan")))
+    return _pool_chains(chain_arrays, d, chains, total_evals, last_step, backend="numba")
+
+
+# --------------------------------------------------------------------------------------------
+# torch backend: torch-native NUTS over a scalar logp (autodiff; GPU / large targets).
+# --------------------------------------------------------------------------------------------
 def nuts_torch(
     logp: Callable[[Any], Any],
     *,
@@ -148,16 +256,15 @@ def nuts_torch(
 ) -> NutsResult:
     """Torch-native NUTS over a torch scalar ``logp(theta) -> Tensor[()]`` (GPU / large autodiff targets).
 
-    The whole leapfrog/tree runs in torch tensors with a ``torch.compile``d ``value_and_grad`` (jax-free
-    autodiff), so there is no numpy<->torch round-trip or graph re-trace per gradient. Same multi-chain
-    interface and :class:`NutsResult` as :func:`nuts`.
+    The whole leapfrog/tree runs in torch tensors with a ``torch.compile``d ``value_and_grad`` (no
+    numpy round-trip / graph re-trace per gradient). Same multi-chain interface and
+    :class:`NutsResult` as :func:`nuts`. Also registered as the ``"torch"`` backend.
 
-    **Performance note (be deliberate about when to use this):** on CPU this is typically *slower* than
-    the numpy :func:`nuts` (per-op torch dispatch + host syncs in the tree dominate when the target is
-    cheap). Its value is **GPU** (``device=``) and large autodiff targets, where the compiled target and
-    on-device execution pay off. For CPU work prefer the numpy backend, or numba (analytic gradient), or
-    the jax/NumPyro backend (XLA, vectorized multi-chain). Chains run in a Python loop (per-chain
-    latency); batching chains as a leading dim is a future throughput lever.
+    **Performance note (be deliberate about when to use this):** on CPU this is typically *slower*
+    than the numpy :func:`nuts` (per-op torch dispatch + host syncs in the tree dominate when the
+    target is cheap). Its value is **GPU** (``device=``) and large autodiff targets. For CPU work
+    prefer the numpy backend, numba (analytic gradient), or the jax/NumPyro backend (XLA,
+    vectorized multi-chain). Chains run in a Python loop (per-chain latency).
     """
     from pysp.utils.mcmc.nuts_torch import nuts_torch as _nuts_torch
 
@@ -166,7 +273,6 @@ def nuts_torch(
     rng = _as_rng(rng)
     inits = _chain_inits(init, dim, chains, rng)
     d = inits.shape[1]
-
     chain_arrays: list[np.ndarray] = []
     total_evals = 0
     last_step = float("nan")
@@ -187,26 +293,73 @@ def nuts_torch(
             dtype=dtype,
             device=device,
         )
-        arr = np.asarray(res.samples, dtype=float).reshape(len(res.samples), d)
-        chain_arrays.append(arr)
+        chain_arrays.append(np.asarray(res.samples, dtype=float).reshape(len(res.samples), d))
         total_evals += int(getattr(res, "num_target_evals", 0))
         last_step = float(getattr(res, "step_size", float("nan")))
         compiled_any = compiled_any or bool(getattr(res, "compiled", False))
+    return _pool_chains(chain_arrays, d, chains, total_evals, last_step, backend="torch", compiled=compiled_any)
 
-    n = min(a.shape[0] for a in chain_arrays)
-    stacked = np.stack([a[:n] for a in chain_arrays], axis=0)  # (chains, n, d)
-    pooled = stacked.reshape(-1, d)
-    rh = rhat(stacked) if chains >= 2 else np.full(d, np.nan)
-    es = ess(stacked)
-    return NutsResult(
-        samples=pooled,
-        chains=stacked,
-        rhat=rh,
-        ess=es,
-        num_target_evals=total_evals,
-        step_size=last_step,
-        extra={"backend": "torch", "compiled": compiled_any},
+
+# --------------------------------------------------------------------------------------------
+# jax / NumPyro backend: wrap NumPyro's NUTS via potential_fn (autodiff + XLA + vectorized chains).
+# --------------------------------------------------------------------------------------------
+def _nuts_jax(
+    logp: Callable[[Any], Any],
+    *,
+    dim: int | None = None,
+    init: Any = None,
+    num_samples: int = 1000,
+    warmup: int = 1000,
+    chains: int = 1,
+    mass: Any = 1.0,  # noqa: ARG001 — NumPyro adapts a (dense/diagonal) mass matrix in warmup itself
+    target_accept: float = 0.8,
+    max_tree_depth: int = 10,
+    thin: int = 1,  # noqa: ARG001 — thinning handled by num_samples; kept for signature parity
+    rng: np.random.RandomState | int | None = None,
+    chain_method: str = "vectorized",
+) -> NutsResult:
+    """NUTS via NumPyro: autodiff + XLA + vectorized multi-chain; GPU on CUDA (hardware-agnostic).
+
+    The user supplies a jax scalar ``logp(theta)``; we run NumPyro's NUTS over
+    ``potential_fn = -logp`` so the dynamic tree / dense-mass warmup come from NumPyro (we do NOT
+    hand-roll the tree). For ``chains > 1`` the chains are vectorized (init shape ``(chains, d)``).
+    JAX picks the device automatically (GPU if a CUDA build is installed) — no device special-casing.
+    """
+    import jax
+    import jax.numpy as jnp
+    from numpyro.infer import MCMC, NUTS
+
+    if dim is None and init is None:
+        raise ValueError("pass dim= or init=.")
+    rng = _as_rng(rng)
+    inits = _chain_inits(init, dim, chains, rng)
+    d = inits.shape[1]
+
+    def potential_fn(theta):
+        return -logp(theta)
+
+    kernel = NUTS(potential_fn=potential_fn, target_accept_prob=target_accept, max_tree_depth=max_tree_depth)
+    mcmc = MCMC(
+        kernel,
+        num_warmup=warmup,
+        num_samples=num_samples,
+        num_chains=chains,
+        chain_method=chain_method,
+        progress_bar=False,
     )
+    init_params = jnp.asarray(inits if chains > 1 else inits[0])
+    seed = int(rng.randint(1, 2**31 - 1))
+    mcmc.run(jax.random.PRNGKey(seed), init_params=init_params)
+    # group_by_chain=True -> (chains, num_samples, d)
+    samples = np.asarray(mcmc.get_samples(group_by_chain=True), dtype=float).reshape(chains, num_samples, d)
+    step_size = float("nan")
+    try:
+        ss = mcmc.last_state.adapt_state.step_size
+        step_size = float(np.asarray(ss).reshape(-1)[0])
+    except Exception:
+        pass
+    chain_arrays = [samples[c] for c in range(chains)]
+    return _pool_chains(chain_arrays, d, chains, 0, step_size, backend="jax")
 
 
 def advi(
@@ -275,6 +428,8 @@ def _as_rng(rng: np.random.RandomState | int | None) -> np.random.RandomState:
 def _chain_inits(init: Any, dim: int | None, chains: int, rng: np.random.RandomState) -> np.ndarray:
     """Build a ``(chains, d)`` array of initial states from ``init`` / ``dim``."""
     if init is None:
+        if dim is None:
+            raise ValueError("pass dim= or init=.")
         return np.zeros((chains, int(dim)), dtype=float)
     arr = np.asarray(init, dtype=float)
     if arr.ndim == 1:
@@ -288,3 +443,67 @@ def _chain_inits(init: Any, dim: int | None, chains: int, rng: np.random.RandomS
             raise ValueError("init with shape (n, d) must have n == chains.")
         return arr
     raise ValueError("init must be 1-D (d,) or 2-D (chains, d).")
+
+
+def _pool_chains(
+    chain_arrays: list[np.ndarray],
+    d: int,
+    chains: int,
+    total_evals: int,
+    last_step: float,
+    *,
+    backend: str,
+    **extra: Any,
+) -> NutsResult:
+    """Stack per-chain draws into a :class:`NutsResult` with pooled draws + R-hat / ESS."""
+    n = min(a.shape[0] for a in chain_arrays)
+    stacked = np.stack([a[:n] for a in chain_arrays], axis=0)  # (chains, n, d)
+    pooled = stacked.reshape(-1, d)
+    rh = rhat(stacked) if chains >= 2 else np.full(d, np.nan)
+    es = ess(stacked)
+    return NutsResult(
+        samples=pooled,
+        chains=stacked,
+        rhat=rh,
+        ess=es,
+        num_target_evals=total_evals,
+        step_size=last_step,
+        extra={"backend": backend, **extra},
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# Backend registration (`register, don't branch`). Each guarded so a missing optional engine
+# never breaks ``import pysp.infer``.
+# --------------------------------------------------------------------------------------------
+import importlib.util  # noqa: E402
+
+register_inference_backend(
+    InferenceBackend(name="numpy", available=lambda: True, target_kind="numpy_vg", nuts=_nuts_numpy)
+)
+register_inference_backend(
+    InferenceBackend(
+        name="numba",
+        available=lambda: importlib.util.find_spec("numba") is not None,
+        target_kind="njit_vg",
+        nuts=_nuts_numba,
+    )
+)
+register_inference_backend(
+    InferenceBackend(
+        name="torch",
+        available=lambda: importlib.util.find_spec("torch") is not None,
+        target_kind="torch_logp",
+        nuts=nuts_torch,
+    )
+)
+register_inference_backend(
+    InferenceBackend(
+        name="jax",
+        available=lambda: (
+            importlib.util.find_spec("numpyro") is not None and importlib.util.find_spec("jax") is not None
+        ),
+        target_kind="jax_logp",
+        nuts=_nuts_jax,
+    )
+)
