@@ -816,6 +816,14 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
             return ptr
 
+    def to_fisher(self, **kwargs):
+        """Forward-backward Fisher view for the HMM."""
+        if hasattr(self, "topics") and hasattr(self, "transitions"):
+            from pysp.utils.fisher import HiddenMarkovFisherView
+
+            return HiddenMarkovFisherView(self)
+        return super().to_fisher(**kwargs)
+
     def sampler(self, seed: int | None = None) -> "HiddenMarkovSampler":
         """Create a HiddenMarkovSampler object with seed passed.
 

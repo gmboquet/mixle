@@ -2138,47 +2138,6 @@ def to_fisher(dist: Any, **kwargs: Any) -> FisherView:
 
 
 def _legacy_to_fisher(dist: Any, **kwargs: Any) -> FisherView:
-    tname = type(dist).__name__
-
-    if tname == "SequenceDistribution" and hasattr(dist, "dist"):
-        return SequenceFisherView(dist)
-
-    if tname == "MultinomialDistribution" and hasattr(dist, "dist") and hasattr(dist, "len_dist"):
-        return MultinomialFisherView(dist)
-
-    if tname == "OptionalDistribution" and hasattr(dist, "dist"):
-        return OptionalFisherView(dist)
-
-    if tname == "WeightedDistribution" and hasattr(dist, "dist"):
-        return WeightedFisherView(dist)
-
-    if tname == "SelectDistribution" and hasattr(dist, "dists"):
-        return SelectFisherView(dist)
-
-    if (
-        tname in ("HiddenMarkovModelDistribution", "QuantizedHiddenMarkovModelDistribution")
-        and hasattr(dist, "topics")
-        and hasattr(dist, "transitions")
-    ):
-        return HiddenMarkovFisherView(dist)
-
-    if (
-        tname == "HeterogeneousPCFGDistribution"
-        and hasattr(dist, "terminal_rules")
-        and hasattr(dist, "_inside_outside")
-    ):
-        return HeterogeneousPCFGFisherView(dist)
-
-    if tname == "CompositeDistribution" and hasattr(dist, "dists"):
-        return CompositeFisherView(dist)
-
-    if tname == "MixtureDistribution" and hasattr(dist, "components") and hasattr(dist, "w"):
-        return MixtureFisherView(dist)
-
-    if tname == "HierarchicalMixtureDistribution" and hasattr(dist, "to_mixture"):
-        return to_fisher(dist.to_mixture(), **kwargs)
-
-    if tname == "JointMixtureDistribution" and hasattr(dist, "components1") and hasattr(dist, "components2"):
-        return JointMixtureFisherView(dist)
-
+    # All families now own their Fisher view via ProbabilityDistribution.to_fisher; this remains the
+    # generic accumulator-backed fallback for any distribution without a specialized view.
     return FisherView(dist, **kwargs)
