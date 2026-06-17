@@ -98,12 +98,16 @@ class BufferedStream:
         self._done = False
 
     def get(self, i: int) -> tuple[Any, float] | None:
-        while not self._done and len(self._buf) <= i:
+        buf = self._buf
+        # Fast path: already buffered (the common case -- coordinates are re-read every pop).
+        if i < len(buf):
+            return buf[i]
+        while not self._done and len(buf) <= i:
             try:
-                self._buf.append(next(self._it))
+                buf.append(next(self._it))
             except StopIteration:
                 self._done = True
-        return self._buf[i] if i < len(self._buf) else None
+        return buf[i] if i < len(buf) else None
 
 
 class QuantizedEnumerationIndex:
@@ -506,6 +510,14 @@ class ProductEnumerator:
     probs, in non-increasing order. Standard k-best lattice search: a max-heap over
     index tuples, with successors advancing one coordinate; correctness follows from
     each child stream being sorted (coordinate-wise monotonicity).
+
+    Duplicate-free successor rule: each heap entry carries the lowest coordinate it is
+    allowed to advance, and a node only spawns successors for coordinates at or above
+    that index. Every tuple is then reached by exactly one path -- the one that
+    increments coordinates in non-decreasing index order -- so no ``visited`` set (and
+    no O(n) per-successor tuple hashing) is needed. Best-first order is preserved
+    because each successor's score is <= its generating node's (a sorted coordinate
+    only decreases when advanced), so canonical edges are score-monotone.
     """
 
     def __init__(
@@ -515,41 +527,48 @@ class ProductEnumerator:
         self.combine = combine
         self.offset = offset
         self._counter = itertools.count()
-        self._heap: list[tuple[float, int, tuple[int, ...]]] = []
-        self._visited = set()
-        n = len(self.streams)
+        # heap entries: (-score, tie_counter, index_tuple, min_coord_allowed_to_advance)
+        self._heap: list[tuple[float, int, tuple[int, ...], int]] = []
+        self._n = n = len(self.streams)
         if n == 0:
             # Empty product: the single empty tuple with probability one.
-            self._heap.append((-offset, next(self._counter), ()))
-            self._visited.add(())
+            self._heap.append((-offset, next(self._counter), (), 0))
         else:
             heads = [s.get(0) for s in self.streams]
             if all(h is not None for h in heads):
                 root = (0,) * n
                 score = offset + sum(h[1] for h in heads)
-                self._heap.append((-score, next(self._counter), root))
-                self._visited.add(root)
+                self._heap.append((-score, next(self._counter), root, 0))
 
     def __iter__(self) -> "ProductEnumerator":
         return self
 
-    def _score(self, idx: tuple[int, ...]) -> float:
-        return self.offset + sum(self.streams[k].get(i)[1] for k, i in enumerate(idx))
-
     def __next__(self) -> tuple[Any, float]:
         if not self._heap:
             raise StopIteration
-        _, _, idx = heapq.heappop(self._heap)
-        if len(idx) == 0:
+        _, _, idx, min_coord = heapq.heappop(self._heap)
+        n = self._n
+        if n == 0:
             return (self.combine(()), self.offset)
-        # Recompute the score from per-coordinate log probs to avoid float drift.
-        score = self._score(idx)
-        value = self.combine(tuple(self.streams[k].get(i)[0] for k, i in enumerate(idx)))
-        for k in range(len(idx)):
+        # Fetch each coordinate's (value, log_prob) once and reuse it for the combined value, the
+        # exact reported score, and the successor keys -- the previous O(n) re-sum per successor
+        # (and a second O(n) fetch for the value) made __next__ quadratic in the number of fields.
+        streams = self.streams
+        items = [streams[k].get(idx[k]) for k in range(n)]
+        value = self.combine(tuple(it[0] for it in items))
+        score = self.offset + sum(it[1] for it in items)
+        # Only advance coordinates at or above ``min_coord`` (canonical, duplicate-free generation).
+        for k in range(min_coord, n):
+            nxt = streams[k].get(idx[k] + 1)
+            if nxt is None:
+                continue
             succ = idx[:k] + (idx[k] + 1,) + idx[k + 1 :]
-            if succ not in self._visited and self.streams[k].get(idx[k] + 1) is not None:
-                self._visited.add(succ)
-                heapq.heappush(self._heap, (-self._score(succ), next(self._counter), succ))
+            # Advancing one coordinate only changes that coordinate's term, so the successor score
+            # is the (exact, freshly re-summed) parent score plus that single delta. Re-basing on the
+            # exact ``score`` every pop keeps each heap key within one ULP of exact -- no accumulating
+            # drift -- so the pop order matches exact descending order except among true near-ties.
+            succ_key = score + (nxt[1] - items[k][1])
+            heapq.heappush(self._heap, (-succ_key, next(self._counter), succ, k))
         return (value, score)
 
 
@@ -613,6 +632,62 @@ class LengthFrontierMerge:
             heapq.heappush(self._heap, (-head[1], next(self._counter), sid))
 
 
+def frontier_merge(
+    outer_stream: BufferedStream, make_stream: Callable[[Any, float], Iterator[tuple[Any, float]]]
+) -> Iterator[tuple[Any, float]]:
+    """Merge per-outer-key inner streams, instantiating outer keys lazily from a sorted outer stream.
+
+    The general form of :class:`LengthFrontierMerge` for arbitrary (not necessarily integer) outer
+    keys: ``outer_stream`` yields ``(key, lp_key)`` in descending ``lp_key`` order, and
+    ``make_stream(key, lp_key)`` returns a sorted ``(value, log_prob)`` iterator whose log-probs are
+    ``<= lp_key`` (true whenever the inner contribution is ``<= 0`` and ``lp_key`` is folded in as an
+    offset). The next un-instantiated key's ``lp_key`` is then an upper bound on anything its stream
+    could produce, so keys are instantiated only when they can beat the best instantiated head.
+    Supports of distinct keys must be disjoint (no de-duplication). Used for conditional products where
+    the inner distribution depends on the outer value (e.g. hidden-association S2 given S1).
+    """
+    counter = itertools.count()
+    heap: list[tuple[float, int, int]] = []
+    heads: dict[int, tuple[Any, float]] = {}
+    streams: dict[int, Iterator[tuple[Any, float]]] = {}
+    next_rank = 0
+
+    def pop() -> tuple[Any, float]:
+        _, _, sid = heapq.heappop(heap)
+        value, lp = heads.pop(sid)
+        try:
+            nxt = next(streams[sid])
+            heads[sid] = nxt
+            heapq.heappush(heap, (-nxt[1], next(counter), sid))
+        except StopIteration:
+            del streams[sid]
+        return (value, lp)
+
+    while True:
+        frontier = outer_stream.get(next_rank)
+        if frontier is None:
+            if heap:
+                yield pop()
+                continue
+            return
+        if heap and -heap[0][0] >= frontier[1]:
+            yield pop()
+            continue
+        key, lp_key = frontier
+        sid = next_rank
+        next_rank += 1
+        if lp_key == -np.inf:
+            continue
+        stream = iter(make_stream(key, lp_key))
+        try:
+            head = next(stream)
+        except StopIteration:
+            continue
+        streams[sid] = stream
+        heads[sid] = head
+        heapq.heappush(heap, (-head[1], next(counter), sid))
+
+
 def _best_first_union(
     streams: Sequence[BufferedStream],
     log_offsets: Sequence[float],
@@ -623,35 +698,48 @@ def _best_first_union(
     counter = itertools.count()
     # Per-stream head ranks; heads heap holds (-(offset + head_lp), counter, k, rank).
     heads: list[tuple[float, int, int, int]] = []
-    live = {}
+    # Live head scores keyed by stream index, maintained incrementally (only the consumed head
+    # changes per pop). The bound reads these directly instead of re-fetching each head from its
+    # stream, so a recompute is a single bound_fn over the cached scores -- no per-head get() calls.
+    head_scores: dict[int, float] = {}
     for k, s in enumerate(streams):
         if log_offsets[k] == -np.inf:
             continue
         item = s.get(0)
         if item is not None:
-            heapq.heappush(heads, (-(log_offsets[k] + item[1]), next(counter), k, 0))
-            live[k] = 0
+            score = log_offsets[k] + item[1]
+            heapq.heappush(heads, (-score, next(counter), k, 0))
+            head_scores[k] = score
     seen = set()
     buffer: list[tuple[float, int, Any]] = []
 
-    def compute_bound() -> float:
-        if not live:
-            return -np.inf
-        return bound_fn(np.asarray([log_offsets[k] + streams[k].get(r)[1] for k, r in live.items()]))
+    def exact_bound() -> float:
+        return bound_fn(np.fromiter(head_scores.values(), dtype=float, count=len(head_scores)))
 
-    # The bound depends only on the live heads, which change only when a head is consumed;
-    # cache it and recompute after each head pop instead of on every buffer-drain iteration.
-    bound = compute_bound()
+    # A buffered item is releasable once its probability is >= the bound on every unreleased item,
+    # ``bound_fn`` over the live head scores. Both callers' bounds satisfy
+    # ``max(scores) <= bound_fn(scores) <= max(scores) + log(#scores)`` (logsumexp and max), so we
+    # avoid the O(#components) exact ``bound_fn`` on most pops: the heap top is ``max(scores)``, so
+    # ``btop >= max + logK`` certifies release and ``btop < max`` certifies non-release outright --
+    # the exact bound is only needed inside the ``logK``-wide uncertain band.
     while True:
-        if buffer and -buffer[0][0] >= bound - tol:
-            neg_lp, _, v = heapq.heappop(buffer)
-            yield (v, -neg_lp)
-            continue
-        if not heads:
-            if buffer:
+        if buffer:
+            btop = -buffer[0][0]
+            if not heads:
+                release = True
+            else:
+                mh = -heads[0][0]
+                if btop >= mh + math.log(len(head_scores)) - tol:
+                    release = True  # cheap upper bound on the frontier certifies release
+                elif btop < mh - tol:
+                    release = False  # frontier (>= mh) strictly exceeds btop: cannot release yet
+                else:
+                    release = btop >= exact_bound() - tol  # uncertain band: exact frontier needed
+            if release:
                 neg_lp, _, v = heapq.heappop(buffer)
                 yield (v, -neg_lp)
                 continue
+        if not heads:
             return
         _, _, k, rank = heapq.heappop(heads)
         v = streams[k].get(rank)[0]
@@ -663,11 +751,11 @@ def _best_first_union(
                 heapq.heappush(buffer, (-lp, next(counter), v))
         nxt = streams[k].get(rank + 1)
         if nxt is not None:
-            live[k] = rank + 1
-            heapq.heappush(heads, (-(log_offsets[k] + nxt[1]), next(counter), k, rank + 1))
+            score = log_offsets[k] + nxt[1]
+            head_scores[k] = score
+            heapq.heappush(heads, (-score, next(counter), k, rank + 1))
         else:
-            del live[k]
-        bound = compute_bound()
+            del head_scores[k]
 
 
 def best_first_union(

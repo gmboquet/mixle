@@ -24,6 +24,7 @@ Note: To use this distribution, convert your words and authors of the corpus to 
 
 """
 
+import itertools
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
@@ -40,12 +41,17 @@ from pysp.stats.combinator.null_dist import (
 )
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
+    child_enumerator,
 )
+from pysp.stats.leaf.cat_multinomial import MultisetProductEnumerator
+from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, merge_enumerators
 from pysp.utils.optional_deps import numba
 from pysp.utils.optsutil import count_by_value
 
@@ -320,6 +326,20 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
         fast_seq_component_log_density(xv, xc, xd, xi, xm, w_mat, rv)
         return rv
 
+    def enumerator(self) -> DistributionEnumerator:
+        """Enumerate PLSI observations ``(doc_id, bag)`` in descending probability order.
+
+        A PLSI observation factors as ``P(doc) * [prod_w q_d(w)^{c_w}] * P_len(n)`` where ``q_d`` is the
+        per-document word distribution ``prob_mat @ state_mat[d]`` and ``n`` the total word count, so it
+        is a document-labelled mixture of trial-count multinomials: for each document the bags enumerate
+        by a multiset best-first search under a length frontier driven by ``len_dist`` (the real
+        trial-count distribution), and the per-document streams are merged by descending score with the
+        document log-probability as offset. Requires a modelled ``len_dist`` unless every per-document
+        word distribution is sub-stochastic-free; an absent length distribution leaves the bag support
+        infinite and is enumerated by the multinomial term alone.
+        """
+        return IntegerPLSIEnumerator(self)
+
     def sampler(self, seed: int | None = None) -> "IntegerPLSISampler":
         """Return an IntegerPLSISampler object from IntegerPLSIDistribution instance."""
         return IntegerPLSISampler(self, seed)
@@ -357,6 +377,79 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> "IntegerPLSIDataEncoder":
         """Returns IntegerPLSIDataEncoder object."""
         return IntegerPLSIDataEncoder(len_encoder=self.len_dist.dist_to_encoder())
+
+
+def multinomial_bag_stream(log_p_vec, min_val, len_dist, combine):
+    """Enumerate integer count-vector bags in descending ``sum_w c_w*log p_w + log P_len(n)`` order.
+
+    Reuses the per-size multiset best-first search (:class:`MultisetProductEnumerator`) under a length
+    frontier driven by ``len_dist`` (the real trial-count distribution); ``combine`` maps the tuple of
+    ``(value, count)`` pairs to the emitted bag. When ``len_dist`` is Null there is no length term and a
+    synthetic ``n*log p_max`` frontier orders the (countably infinite) support by the multinomial term
+    alone -- matching :class:`IntegerMultinomialEnumerator`. Shared by the coupled bag-of-counts models.
+    """
+    entries = [(int(min_val + k), float(lp)) for k, lp in enumerate(log_p_vec) if lp > -np.inf]
+    entries.sort(key=lambda u: -u[1])
+    return bag_stream(iter(entries), len_dist, combine)
+
+
+def bag_stream(element_stream, len_dist, combine):
+    """Enumerate bags (multisets) drawn from a sorted element stream, in descending bag-score order.
+
+    ``element_stream`` is a descending ``(value, log_prob)`` iterator over the element distribution
+    (any enumerable element distribution -- a fixed categorical, or e.g. a per-document/per-given
+    mixture). A bag scores by the sum of its elements' log-probs plus ``log P_len(n)`` from
+    ``len_dist``; bags enumerate by the per-size multiset best-first search
+    (:class:`MultisetProductEnumerator`) under a length frontier. When ``len_dist`` is Null there is no
+    length term and a synthetic ``n*log p_max`` frontier orders the (countably infinite) support by the
+    element term alone. ``combine`` maps the tuple of ``(value, count)`` pairs to the emitted bag.
+    """
+    elem_buf = BufferedStream(iter(element_stream))
+    head = elem_buf.get(0)
+    if head is None:
+        return iter([(combine(()), 0.0)])
+    if isinstance(len_dist, NullDistribution):
+        lp_max = float(head[1])
+        if lp_max >= 0.0:
+            raise EnumerationError(
+                len_dist, reason="an element has probability one and no length distribution bounds the bag size"
+            )
+        len_stream = BufferedStream((n, n * lp_max) for n in itertools.count())
+        return LengthFrontierMerge(
+            len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=combine, offset=0.0)
+        )
+    len_stream = BufferedStream(child_enumerator(len_dist, "bag_stream.len_dist"))
+    return LengthFrontierMerge(
+        len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=combine, offset=lp_len)
+    )
+
+
+class IntegerPLSIEnumerator(DistributionEnumerator):
+    def __init__(self, dist: IntegerPLSIDistribution) -> None:
+        """Best-first enumeration of ``(doc_id, bag)`` over the document-labelled multinomial mixture.
+
+        Args:
+            dist (IntegerPLSIDistribution): Distribution whose support is enumerated.
+        """
+        super().__init__(dist)
+        streams = []
+        offsets = []
+        with np.errstate(divide="ignore"):
+            for d in range(dist.num_docs):
+                if dist.doc_vec[d] <= 0.0:
+                    continue
+                q_d = dist.prob_mat @ dist.state_mat[d]  # P(word | doc d)
+                log_q = np.log(q_d)
+
+                def combine(pairs, d=d):
+                    return (d, [(int(w), int(c)) for w, c in sorted(pairs)])
+
+                streams.append(multinomial_bag_stream(log_q, 0, dist.len_dist, combine))
+                offsets.append(float(dist.log_doc_vec[d]))
+        self._merge = merge_enumerators(streams, offsets)
+
+    def __next__(self) -> tuple[tuple[int, list[tuple[int, int]]], float]:
+        return next(self._merge)
 
 
 class IntegerPLSISampler(DistributionSampler):

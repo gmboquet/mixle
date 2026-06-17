@@ -24,12 +24,15 @@ from pysp.data.graph_data import (
     _validate_block_probs,
 )
 from pysp.stats.compute.pdist import (
+    DistributionEnumerator,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 
 class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution):
@@ -226,6 +229,27 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
     def sampler(self, seed: int | None = None) -> "StochasticBlockGraphSampler":
         return StochasticBlockGraphSampler(self, seed)
 
+    def enumerator(self) -> DistributionEnumerator:
+        """Enumerate binary graphs in descending probability order, for FIXED block assignments.
+
+        With the node block assignments fixed (``block_assignments`` set on the distribution), each
+        edge ``(i, j)`` is an independent Bernoulli with its own probability ``block_probs[a_i, a_j]``,
+        so the graph distribution is a product of edge factors -- enumerated by best-first over the
+        per-edge supports and assembled into an adjacency matrix (mirrored when undirected). The
+        constant assignment-prior term (when ``include_assignment_prior``) enters as a score offset so
+        each graph carries its exact ``log_density``.
+
+        Marginalizing over UNKNOWN assignments is intentionally not modeled by this family, so
+        enumeration requires fixed assignments; otherwise EnumerationError.
+        """
+        if self.block_assignments is None:
+            raise EnumerationError(
+                self,
+                reason="enumeration requires fixed block_assignments (the family does not marginalize "
+                "over unknown assignments)",
+            )
+        return StochasticBlockGraphEnumerator(self)
+
     def estimator(self, pseudo_count: float | None = None) -> "StochasticBlockGraphEstimator":
         return StochasticBlockGraphEstimator(
             num_blocks=self.num_blocks,
@@ -242,6 +266,43 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
 
     def dist_to_encoder(self) -> GraphDataEncoder:
         return GraphDataEncoder(directed=self.directed, fallback_assignments=self.block_assignments)
+
+
+class StochasticBlockGraphEnumerator(DistributionEnumerator):
+    def __init__(self, dist: StochasticBlockGraphDistribution) -> None:
+        """Best-first enumeration of binary graphs over independent block-dependent edge factors.
+
+        Args:
+            dist (StochasticBlockGraphDistribution): Distribution whose graphs are enumerated (its
+                ``block_assignments`` must be fixed).
+        """
+        super().__init__(dist)
+        assignments = np.asarray(dist.block_assignments)
+        n = len(assignments)
+        edges = list(_edge_indices(n, dist.directed, dist.self_loops))
+        directed = dist.directed
+        with np.errstate(divide="ignore"):
+            offset = float(np.sum(dist.log_block_prior[assignments])) if dist.include_assignment_prior else 0.0
+
+        streams = []
+        for i, j in edges:
+            p = float(dist.block_probs[assignments[i], assignments[j]])
+            lp1, lp0 = math.log(max(p, _EPS)), math.log(max(1.0 - p, _EPS))
+            pair = [(1, lp1), (0, lp0)] if lp1 >= lp0 else [(0, lp0), (1, lp1)]
+            streams.append(BufferedStream(iter(pair)))
+
+        def combine(edge_values: tuple[int, ...]) -> np.ndarray:
+            adj = np.zeros((n, n), dtype=np.int8)
+            for (i, j), v in zip(edges, edge_values):
+                adj[i, j] = v
+                if not directed:
+                    adj[j, i] = v
+            return adj
+
+        self._product = ProductEnumerator(streams, combine=combine, offset=offset)
+
+    def __next__(self) -> tuple[np.ndarray, float]:
+        return next(self._product)
 
 
 class StochasticBlockGraphSampler(DistributionSampler):

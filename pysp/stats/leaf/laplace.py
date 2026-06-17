@@ -118,6 +118,18 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
             rv.append((xx[mask], w_loc[mask]))
         return tuple(rv)
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact). The continuous 'index of' a value."""
+        from scipy.stats import laplace as _sp
+
+        return float(_sp.cdf(x, loc=self.mu, scale=self.b))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from scipy.stats import laplace as _sp
+
+        return float(_sp.ppf(q, loc=self.mu, scale=self.b))
+
     def sampler(self, seed: int | None = None) -> "LaplaceSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LaplaceSampler(self, seed)
