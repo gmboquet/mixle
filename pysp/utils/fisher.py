@@ -538,42 +538,6 @@ class FixedFisherView(FisherView):
         raise ValueError("metric must be 'identity', 'diagonal', or 'full'")
 
 
-class GaussianFisherView(FixedFisherView):
-    def __init__(self, dist: Any) -> None:
-        super().__init__(dist, [("sum",), ("sum2",), ("count",), ("count2",)])
-
-    @staticmethod
-    def _matrix(x: Any) -> np.ndarray:
-        xx = np.asarray(x, dtype=np.float64).reshape(-1)
-        one = np.ones_like(xx, dtype=np.float64)
-        return np.column_stack((xx, xx * xx, one, one))
-
-    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
-        return self._matrix(data)
-
-    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
-        return self._matrix(enc_data)
-
-    def _model_mean(self) -> np.ndarray:
-        mu = float(self.dist.mu)
-        var = float(self.dist.sigma2)
-        return np.asarray([mu, mu * mu + var, 1.0, 1.0], dtype=np.float64)
-
-    def _model_fisher(self) -> np.ndarray:
-        mu = float(self.dist.mu)
-        var = float(self.dist.sigma2)
-        ex1 = mu
-        ex2 = mu * mu + var
-        ex3 = mu * mu * mu + 3.0 * mu * var
-        ex4 = mu**4 + 6.0 * mu * mu * var + 3.0 * var * var
-        info = np.zeros((4, 4), dtype=np.float64)
-        info[0, 0] = ex2 - ex1 * ex1
-        info[0, 1] = ex3 - ex1 * ex2
-        info[1, 0] = info[0, 1]
-        info[1, 1] = ex4 - ex2 * ex2
-        return info
-
-
 class CountFisherView(FixedFisherView):
     def __init__(
         self,
@@ -2531,10 +2495,19 @@ def _identity_encoded(enc_data: Any) -> np.ndarray:
 
 
 def to_fisher(dist: Any, **kwargs: Any) -> FisherView:
-    tname = type(dist).__name__
+    """Return a FisherView for ``dist`` via its own ``to_fisher`` hook.
 
-    if tname == "GaussianDistribution" and hasattr(dist, "mu") and hasattr(dist, "sigma2"):
-        return GaussianFisherView(dist)
+    Fisher views are co-located with each distribution: a distribution owns its view by overriding
+    ``ProbabilityDistribution.to_fisher``. This module keeps only the shared base machinery
+    (FisherView/FixedFisherView/SufficientStatisticVectorizer and the reusable CountFisherView /
+    EmpiricalMetricFixedFisherView helpers) plus :func:`_legacy_to_fisher`, the type-name dispatch for
+    families not yet migrated to a per-file hook (and the generic fallback).
+    """
+    return dist.to_fisher(**kwargs)
+
+
+def _legacy_to_fisher(dist: Any, **kwargs: Any) -> FisherView:
+    tname = type(dist).__name__
 
     if tname == "DiagonalGaussianDistribution" and hasattr(dist, "mu") and hasattr(dist, "covar"):
         return DiagonalGaussianFisherView(dist)

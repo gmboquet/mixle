@@ -128,16 +128,17 @@ class ProbabilityDistribution:
         """Return an estimator for fitting this distribution from data."""
         ...
 
-    def to_fisher(self):
+    def to_fisher(self, **kwargs):
         """Return a Fisher-geometry view of this distribution.
 
-        The default view is accumulator-backed, so distributions inherit a
-        generic sufficient-statistic/Fisher-vector interface.  Individual
-        distributions may override this with faster or more canonical views.
+        The default view is accumulator-backed, so distributions inherit a generic
+        sufficient-statistic/Fisher-vector interface.  Each distribution owns its Fisher view by
+        overriding this method in its own module; families not yet migrated to a per-file hook are
+        resolved by the transitional type-name dispatch in :func:`pysp.utils.fisher._legacy_to_fisher`.
         """
-        from pysp.utils.fisher import to_fisher
+        from pysp.utils.fisher import _legacy_to_fisher
 
-        return to_fisher(self)
+        return _legacy_to_fisher(self, **kwargs)
 
     def get_prior(self) -> Optional["ProbabilityDistribution"]:
         """Return the conjugate/parameter prior carried by this distribution, if any.
