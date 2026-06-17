@@ -51,7 +51,12 @@ class InverseGammaDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_declaration(cls):
-        from pysp.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        from pysp.stats.compute.declarations import (
+            DistributionDeclaration,
+            ExponentialFamilySpec,
+            ParameterSpec,
+            StatisticSpec,
+        )
 
         return DistributionDeclaration(
             name="inverse_gamma",
@@ -63,7 +68,12 @@ class InverseGammaDistribution(SequenceEncodableProbabilityDistribution):
             ),
             statistics=(StatisticSpec("count"), StatisticSpec("sum_inv"), StatisticSpec("sum_neg_log")),
             support="positive_real",
-            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            ),
         )
 
     @staticmethod
@@ -74,6 +84,29 @@ class InverseGammaDistribution(SequenceEncodableProbabilityDistribution):
         log_x = engine.asarray(x[0])
         inv_x = engine.asarray(x[1])
         return inv_x * 0.0 + engine.asarray(1.0), inv_x, -log_x
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: tuple[Any, Any], engine: Any) -> tuple[Any, ...]:
+        """Return inverse-gamma sufficient statistics ``T(x) = (log x, 1/x)``."""
+        return engine.asarray(x[0]), engine.asarray(x[1])
+
+    @staticmethod
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return inverse-gamma natural parameters ``eta = (-(alpha + 1), -beta)``."""
+        return -(params["alpha"] + engine.asarray(1.0)), -params["beta"]
+
+    @staticmethod
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
+        """Return inverse-gamma log partition ``A = lgamma(alpha) - alpha * log(beta)``."""
+        alpha = params["alpha"]
+        return engine.gammaln(alpha) - alpha * engine.log(params["beta"])
+
+    @staticmethod
+    def exp_family_from_natural(eta: Any) -> "InverseGammaDistribution":
+        """Return the inverse-gamma with natural parameters ``eta = (-(alpha + 1), -beta)``."""
+        alpha = -float(eta[0]) - 1.0
+        beta = -float(eta[1])
+        return InverseGammaDistribution(alpha, beta)
 
     @staticmethod
     def backend_log_density_from_params(
