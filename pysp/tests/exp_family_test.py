@@ -31,6 +31,7 @@ from pysp.stats.leaf.half_normal import HalfNormalDistribution
 from pysp.stats.leaf.inverse_gamma import InverseGammaDistribution
 from pysp.stats.leaf.inverse_gaussian import InverseGaussianDistribution
 from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
+from pysp.stats.leaf.logseries import LogSeriesDistribution
 from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution
 from pysp.stats.leaf.poisson import PoissonDistribution
 from pysp.stats.leaf.rayleigh import RayleighDistribution
@@ -55,6 +56,7 @@ def _leaf_cases():
         (VonMisesDistribution(0.7, 2.3), rng.vonmises(0.7, 2.3, 32)),
         (GeometricDistribution(0.35), rng.geometric(0.35, 32).astype(float)),
         (NegativeBinomialDistribution(4.0, 0.6), rng.negative_binomial(4.0, 0.6, 32).astype(float)),
+        (LogSeriesDistribution(0.6), rng.logseries(0.6, 32).astype(float)),
     ]
 
 
@@ -94,6 +96,7 @@ class LeafExponentialFamilyTest(unittest.TestCase):
             InverseGammaDistribution(3.0, 2.0),
             VonMisesDistribution(0.4, 2.5),
             GeometricDistribution(0.3),
+            LogSeriesDistribution(0.5),
         ):
             with self.subTest(dist=type(dist).__name__):
                 form = to_exponential_family(dist)
@@ -108,6 +111,7 @@ class LeafExponentialFamilyTest(unittest.TestCase):
             InverseGammaDistribution(2.5, 1.7),
             VonMisesDistribution(0.7, 2.3),
             GeometricDistribution(0.35),
+            LogSeriesDistribution(0.55),
         ):
             with self.subTest(dist=type(dist).__name__):
                 form = to_exponential_family(dist)
