@@ -232,6 +232,7 @@ def _stats_public_distribution_catalog():
         "NegativeBinomialDistribution": stats.NegativeBinomialDistribution(3.0, 0.45),
         "ParetoDistribution": stats.ParetoDistribution(2.0, 3.0),
         "RayleighDistribution": stats.RayleighDistribution(2.0),
+        "SkellamDistribution": stats.SkellamDistribution(2.0, 1.0),
         "StudentTDistribution": stats.StudentTDistribution(5.0, loc=1.0, scale=2.0),
         "UniformDistribution": stats.UniformDistribution(-1.0, 3.0),
         "WeibullDistribution": stats.WeibullDistribution(1.5, 2.0),
