@@ -68,6 +68,18 @@ class RandomGraphModelsTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(result.history)))
         self.assertTrue(np.all(np.diff(result.history) >= -1.0e-9))
 
+    def test_hard_em_sbm_rejects_decreasing_simultaneous_reassignment(self):
+        rng = np.random.RandomState(133)
+        adj = (rng.rand(6, 6) < rng.uniform(0.05, 0.95)).astype(int)
+        adj = np.triu(adj, 1)
+        adj = adj + adj.T
+
+        result = hard_em_stochastic_block_model(adj, num_blocks=3, max_its=12, restarts=1, seed=100133)
+
+        self.assertGreaterEqual(len(result.history), 1)
+        self.assertTrue(np.all(np.isfinite(result.history)))
+        self.assertTrue(np.all(np.diff(result.history) >= -1.0e-9))
+
 
 if __name__ == "__main__":
     unittest.main()
