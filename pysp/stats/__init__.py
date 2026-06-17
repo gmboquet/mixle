@@ -417,6 +417,7 @@ __all__ = [
     "PlackettLuceSampler",
     "PlackettLuceEstimator",
     "PlackettLuceDataEncoder",
+    "PlackettLuceEnumerator",
     "MallowsDistribution",
     "MallowsSampler",
     "MallowsEstimator",
@@ -715,6 +716,7 @@ from pysp.stats.graph.matching import (
 from pysp.stats.graph.plackett_luce import (
     PlackettLuceDataEncoder,
     PlackettLuceDistribution,
+    PlackettLuceEnumerator,
     PlackettLuceEstimator,
     PlackettLuceSampler,
 )

@@ -55,6 +55,13 @@ class FiniteEnumeratorCoverageTestCase(unittest.TestCase):
         total = np.logaddexp.reduce([lp for _, lp in dist.enumerator()])
         self.assertAlmostEqual(total, 0.0, delta=1e-8)
 
+    def test_plackett_luce_enumerator(self):
+        dist = PlackettLuceDistribution([2.0, 0.5, -1.0])
+        support = [list(p) for p in itertools.permutations(range(3))]
+        assert_matches_brute(self, dist, support, "plackett_luce")
+        total = np.logaddexp.reduce([lp for _, lp in dist.enumerator()])
+        self.assertAlmostEqual(total, 0.0, delta=1e-8)
+
     def test_icltree_enumerator(self):
         dist = ICLTreeDistribution([None, 0], [np.log([0.6, 0.4]), np.log([[0.7, 0.3], [0.2, 0.8]])])
         support = [list(v) for v in itertools.product(range(2), repeat=2)]
@@ -169,6 +176,7 @@ class EnumeratorExportCoverageTestCase(unittest.TestCase):
             "JointMixtureEnumerator",
             "MallowsEnumerator",
             "MultinomialEnumerator",
+            "PlackettLuceEnumerator",
             "SelectEnumerator",
             "SpearmanRankingEnumerator",
         ]
