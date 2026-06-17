@@ -575,8 +575,6 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             band = idx_bands[0]
             alphas_prev = np.multiply(pr_obs[band[0] : band[1], :], w)
             temp = alphas_prev.sum(axis=1, keepdims=True)
-            # temp2 = temp.copy()
-            # temp2[temp2 == 0] = 1.0
             alphas_prev /= temp
 
             np.log(temp, out=temp)
@@ -590,8 +588,6 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 alphas_next = np.dot(alphas_prev[has_next_loc, :], a_mat)
                 alphas_next *= pr_obs[band[0] : band[1], :]
                 pr_max = alphas_next.sum(axis=1, keepdims=True)
-                # pr_max2 = pr_max.copy()
-                # pr_max2[pr_max2 == 0] = 1.0
                 alphas_next /= pr_max
                 alphas_prev = alphas_next
 
