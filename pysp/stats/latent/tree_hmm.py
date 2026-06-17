@@ -773,6 +773,28 @@ class TreeHiddenMarkovSampler(DistributionSampler):
         else:
             self.len_sampler = None
 
+        # Guard against pathological exponential tree growth. sample_tree() branches len_dist-many
+        # children at every level up to terminal_level, so a len_dist whose mean exceeds 1 child
+        # explodes (e.g. len_dist={4:1.0}, terminal_level=10 -> ~4**10 nodes per tree, which looks
+        # like a hang). Estimate the expected per-tree node count from the branching mean and fail
+        # fast with an actionable message. A throwaway sampler is used so the real RNG is untouched.
+        if self.len_sampler is not None:
+            levels = int(self.dist.terminal_level)
+            try:
+                draws = np.asarray(dist.len_dist.sampler(seed=0).sample(size=4096), dtype=float)
+                mean_children = float(np.mean(draws))
+            except (TypeError, ValueError):
+                mean_children = float("nan")  # len_dist yields no numeric child counts -> cannot estimate
+            if np.isfinite(mean_children) and mean_children > 1.0 and levels > 0:
+                expected_nodes = (mean_children ** (levels + 1) - 1.0) / (mean_children - 1.0)
+                if expected_nodes > 1.0e6:
+                    raise ValueError(
+                        "TreeHiddenMarkovSampler would generate ~%.2g nodes per tree: len_dist has mean "
+                        "%.3g children per node (>1) with terminal_level=%d, an exponential blow-up. Use a "
+                        "len_dist with mass on 0 so the mean is <= 1 child (branching terminates), and/or a "
+                        "smaller terminal_level." % (expected_nodes, mean_children, levels)
+                    )
+
     def sample_state(self, given_state: int, size: int | None = None) -> int | np.ndarray:
         """Draw child state(s) from the transition matrix row of a given parent state.
 
