@@ -42,7 +42,12 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_declaration(cls):
-        from pysp.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        from pysp.stats.compute.declarations import (
+            DistributionDeclaration,
+            ExponentialFamilySpec,
+            ParameterSpec,
+            StatisticSpec,
+        )
 
         return DistributionDeclaration(
             name="geometric",
@@ -50,6 +55,14 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
             parameters=(ParameterSpec("p", constraint="unit_interval"),),
             statistics=(StatisticSpec("count"), StatisticSpec("sum")),
             support="positive_integer",
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure=cls.exp_family_base_measure,
+                base_measure_from_params=cls.exp_family_base_measure_from_params,
+                legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            ),
             legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
         )
 
@@ -58,6 +71,88 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         """Return per-row Geometric sufficient statistics in accumulator order."""
         xx = engine.asarray(x)
         return xx * 0.0 + engine.asarray(1.0), xx
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
+        """Return Geometric sufficient statistics ``T(x) = (x,)`` for generated scoring."""
+        return (engine.asarray(x),)
+
+    @staticmethod
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the Geometric natural parameter ``eta = log(1 - p)``.
+
+        At the degenerate boundary ``p == 1`` the natural parameter is ``-inf``
+        (the distribution collapses to a point mass at ``x = 1``). The generic
+        ``base + sum(T * eta) - A`` combiner cannot evaluate ``T * (-inf)``
+        without producing ``NaN``, so ``eta`` is neutralized to ``0`` there and the
+        point-mass support is carried by :meth:`exp_family_base_measure_from_params`.
+        """
+        one = engine.asarray(1.0)
+        p = params["p"]
+        degenerate = p >= one
+        safe = engine.where(degenerate, one, one - p)
+        return (engine.where(degenerate, engine.asarray(0.0), engine.log(safe)),)
+
+    @staticmethod
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
+        """Return the Geometric log partition ``A = log(1 - p) - log(p)``.
+
+        Neutralized to ``0`` at ``p == 1`` to match the neutralized natural
+        parameter; see :meth:`exp_family_natural_parameters`.
+        """
+        one = engine.asarray(1.0)
+        p = params["p"]
+        degenerate = p >= one
+        safe = engine.where(degenerate, one, one - p)
+        return engine.where(degenerate, engine.asarray(0.0), engine.log(safe) - engine.log(p))
+
+    @staticmethod
+    def exp_family_base_measure(x: Any, engine: Any) -> Any:
+        """Return the Geometric base measure: ``0`` on positive integers, ``-inf`` elsewhere."""
+        xx = engine.asarray(x)
+        one = engine.asarray(1.0)
+        good = (xx >= one) & (engine.floor(xx) == xx)
+        return engine.where(good, engine.asarray(0.0), engine.asarray(-np.inf))
+
+    @staticmethod
+    def exp_family_base_measure_from_params(x: Any, params: dict[str, Any], engine: Any) -> Any:
+        """Return the Geometric base measure, exact at the degenerate ``p == 1`` boundary.
+
+        For ``p < 1`` this is the support indicator (``0`` on positive integers,
+        ``-inf`` elsewhere) and the density is recovered from ``T * eta - A``. At
+        ``p == 1`` the natural parameter is neutralized (see
+        :meth:`exp_family_natural_parameters`), so the full point mass at ``x = 1``
+        is encoded here: ``0`` at ``x == 1`` and ``-inf`` otherwise.
+
+        When ``p`` carries a per-component axis (stacked mixtures) with at least one
+        degenerate component the result is the component-dependent ``(n, k)`` base
+        that the stacked scorers consume directly; an all-interior stack keeps the
+        cheaper shared ``(n,)`` base.
+        """
+        xx = engine.asarray(x)
+        one = engine.asarray(1.0)
+        good = (xx >= one) & (engine.floor(xx) == xx)
+        interior = engine.where(good, engine.asarray(0.0), engine.asarray(-np.inf))
+
+        # Detect a component axis (stacked mixtures) without assuming concrete values:
+        # a symbolic or scalar ``p`` is treated as a single (non-stacked) parameter.
+        p = params["p"]
+        try:
+            p_np = np.asarray(engine.to_numpy(p), dtype=np.float64)
+        except Exception:
+            p_np = None
+
+        if p_np is None or p_np.ndim == 0:
+            point_mass = engine.where(good & (xx == one), engine.asarray(0.0), engine.asarray(-np.inf))
+            return engine.where(p >= one, point_mass, interior)
+
+        if not bool((p_np >= 1.0).any()):
+            return interior  # homogeneous non-degenerate stack: keep the (n,) fast path
+
+        point_mass = engine.where(good & (xx == one), engine.asarray(0.0), engine.asarray(-np.inf))
+        inter_np = np.asarray(engine.to_numpy(interior), dtype=np.float64)
+        pm_np = np.asarray(engine.to_numpy(point_mass), dtype=np.float64)
+        return engine.asarray(np.where((p_np >= 1.0)[None, :], pm_np[:, None], inter_np[:, None]))
 
     def __init__(
         self,
