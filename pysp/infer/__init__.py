@@ -23,7 +23,7 @@ import numpy as np
 
 from .diagnostics import ess, rhat
 
-__all__ = ["NutsResult", "AdviResult", "nuts", "advi", "rhat", "ess"]
+__all__ = ["NutsResult", "AdviResult", "nuts", "nuts_torch", "advi", "rhat", "ess"]
 
 
 @dataclass(frozen=True)
@@ -126,6 +126,86 @@ def nuts(
         ess=es,
         num_target_evals=total_evals,
         step_size=last_step,
+    )
+
+
+def nuts_torch(
+    logp: Callable[[Any], Any],
+    *,
+    dim: int | None = None,
+    init: Any = None,
+    num_samples: int = 1000,
+    warmup: int = 1000,
+    chains: int = 1,
+    mass: Any = 1.0,
+    target_accept: float = 0.8,
+    max_tree_depth: int = 10,
+    thin: int = 1,
+    rng: np.random.RandomState | int | None = None,
+    compile: bool = True,
+    dtype: Any = None,
+    device: Any = None,
+) -> NutsResult:
+    """Torch-native NUTS over a torch scalar ``logp(theta) -> Tensor[()]`` (GPU / large autodiff targets).
+
+    The whole leapfrog/tree runs in torch tensors with a ``torch.compile``d ``value_and_grad`` (jax-free
+    autodiff), so there is no numpy<->torch round-trip or graph re-trace per gradient. Same multi-chain
+    interface and :class:`NutsResult` as :func:`nuts`.
+
+    **Performance note (be deliberate about when to use this):** on CPU this is typically *slower* than
+    the numpy :func:`nuts` (per-op torch dispatch + host syncs in the tree dominate when the target is
+    cheap). Its value is **GPU** (``device=``) and large autodiff targets, where the compiled target and
+    on-device execution pay off. For CPU work prefer the numpy backend, or numba (analytic gradient), or
+    the jax/NumPyro backend (XLA, vectorized multi-chain). Chains run in a Python loop (per-chain
+    latency); batching chains as a leading dim is a future throughput lever.
+    """
+    from pysp.utils.mcmc.nuts_torch import nuts_torch as _nuts_torch
+
+    if dim is None and init is None:
+        raise ValueError("pass dim= or init=.")
+    rng = _as_rng(rng)
+    inits = _chain_inits(init, dim, chains, rng)
+    d = inits.shape[1]
+
+    chain_arrays: list[np.ndarray] = []
+    total_evals = 0
+    last_step = float("nan")
+    compiled_any = False
+    for c in range(chains):
+        seed = int(rng.randint(1, 2**31 - 1))
+        res = _nuts_torch(
+            logp,
+            initial=inits[c],
+            num_samples=num_samples,
+            warmup=warmup,
+            mass=mass,
+            target_accept=target_accept,
+            max_tree_depth=max_tree_depth,
+            thin=thin,
+            seed=seed,
+            compile=compile,
+            dtype=dtype,
+            device=device,
+        )
+        arr = np.asarray(res.samples, dtype=float).reshape(len(res.samples), d)
+        chain_arrays.append(arr)
+        total_evals += int(getattr(res, "num_target_evals", 0))
+        last_step = float(getattr(res, "step_size", float("nan")))
+        compiled_any = compiled_any or bool(getattr(res, "compiled", False))
+
+    n = min(a.shape[0] for a in chain_arrays)
+    stacked = np.stack([a[:n] for a in chain_arrays], axis=0)  # (chains, n, d)
+    pooled = stacked.reshape(-1, d)
+    rh = rhat(stacked) if chains >= 2 else np.full(d, np.nan)
+    es = ess(stacked)
+    return NutsResult(
+        samples=pooled,
+        chains=stacked,
+        rhat=rh,
+        ess=es,
+        num_target_evals=total_evals,
+        step_size=last_step,
+        extra={"backend": "torch", "compiled": compiled_any},
     )
 
 
