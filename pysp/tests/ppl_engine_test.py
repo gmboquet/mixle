@@ -1,11 +1,14 @@
 """Execution-stack tests for pysp.ppl: vectorization, torch engine, parallel backends."""
 
+import importlib.util
 import time
 import unittest
 
 import numpy as np
 
 from pysp.ppl import Mix, Normal, free
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 class EngineTestCase(unittest.TestCase):
@@ -21,6 +24,7 @@ class EngineTestCase(unittest.TestCase):
         self.assertAlmostEqual(m.dist.mu, 5.0, delta=0.05)
         self.assertLess(elapsed, 1.0)
 
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_torch_engine_matches_numpy(self):
         from pysp.engines import TorchEngine
 

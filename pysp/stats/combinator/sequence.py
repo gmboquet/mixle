@@ -412,6 +412,26 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             return SequenceFisherView(self)
         return super().to_fisher(**kwargs)
 
+    def to_exponential_family(self, engine: Any = None):
+        """Return the iid exponential-family view, or ``None``.
+
+        An iid sequence of an exponential family is itself an exponential family with
+        the shared element ``eta`` and ``T(x) = sum_t T_0(x_t)``.  This holds only when
+        the length is not separately modeled and not length-normalized (a length term
+        or normalization breaks the single-exp-family form); otherwise returns ``None``,
+        as does a non-exp-family element.
+        """
+        from pysp.engines import NUMPY_ENGINE
+        from pysp.stats.exp_family import IIDExponentialFamilyForm, to_exponential_family
+
+        if not self.null_len_dist or self.len_normalized:
+            return None
+        eng = NUMPY_ENGINE if engine is None else engine
+        element = to_exponential_family(self.dist, engine=eng)
+        if element is None:
+            return None
+        return IIDExponentialFamilyForm(distribution=self, element=element, engine=eng)
+
     def sampler(self, seed: int | None = None) -> "SequenceSampler":
         """Create a SequenceSampler object from instance of SequenceDistribution.
 
@@ -595,7 +615,7 @@ class SequenceSampler(DistributionSampler):
         self.dist_sampler = self.dist.sampler(seed=self.rng.randint(0, maxrandint))
         self.len_sampler = self.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: int | None = None) -> list[Any]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[Any]:
         """Generate iid samples from SequenceSampler object.
 
         If size is None, the length 'n' of the iid sequence is sampled from len_sampler. Then 'n' iid samples are
@@ -603,18 +623,37 @@ class SequenceSampler(DistributionSampler):
 
         If size > 0, above is repeated size times and a List of size List[T] is retured.
 
+        With ``batched=True`` (default) all lengths are drawn at once and all elements across every sequence are
+        drawn in a single vectorized call, then split by length. Because ``len_sampler`` and ``dist_sampler`` own
+        independent ``RandomState`` streams, this yields the same draws as the legacy per-element loop
+        (``batched=False``) but far faster.
+
         Args:
             size (Optional[int]) Number of sequences to be sampled.
+            batched (bool): Vectorize element draws (default); set False for the legacy per-draw loop.
 
         Returns:
             List[T] or List[List[T]] with length(size).
 
         """
         if size is None:
-            n = self.len_sampler.sample()
+            n = int(self.len_sampler.sample())
+            if batched and n > 0:
+                return list(self.dist_sampler.sample(size=n))
             return [self.dist_sampler.sample() for i in range(n)]
-        else:
-            return [self.sample() for i in range(size)]
+        if not batched:
+            return [self.sample(batched=False) for i in range(size)]
+
+        lengths = np.asarray(self.len_sampler.sample(size=size)).astype(int).reshape(-1)
+        total = int(lengths.sum())
+        flat = self.dist_sampler.sample(size=total) if total > 0 else []
+        out: list[Any] = []
+        offset = 0
+        for n in lengths:
+            n = int(n)
+            out.append(list(flat[offset : offset + n]))
+            offset += n
+        return out
 
 
 class SequenceAccumulator(SequenceEncodableStatisticAccumulator):

@@ -300,6 +300,26 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             return CompositeFisherView(self)
         return super().to_fisher(**kwargs)
 
+    def to_exponential_family(self, engine: Any = None):
+        """Return the product exponential-family view, or ``None``.
+
+        A composite is an exponential family iff every child is: the canonical pieces
+        concatenate (``eta``, ``T``) and add (``A``, ``log h``).  Returns ``None`` when
+        any child is not a (single) exponential family.
+        """
+        from pysp.engines import NUMPY_ENGINE
+        from pysp.stats.exp_family import ProductExponentialFamilyForm, to_exponential_family
+
+        eng = NUMPY_ENGINE if engine is None else engine
+        children = [to_exponential_family(d, engine=eng) for d in self.dists]
+        if any(c is None for c in children):
+            return None
+        return ProductExponentialFamilyForm(
+            distribution=self,
+            components=tuple(children),
+            engine=eng,
+        )
+
     def sampler(self, seed: int | None = None) -> "CompositeSampler":
         """Create CompositeSampler for sampling from CompositeDistribution instance.
 

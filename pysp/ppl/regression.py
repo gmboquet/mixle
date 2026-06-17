@@ -93,6 +93,88 @@ class RegressionResult:
     def summary(self):
         return {"coefficients": self.coefficients, "sigma": self.sigma}
 
+    def to_exponential_family(self, engine=None):
+        """Return the conditional exponential-family view ``p(y|x)`` for a canonical link.
+
+        For a canonical link the linear predictor *is* the natural parameter:
+        ``eta(x) = offset + X @ beta`` is the logit (Bernoulli) / log-rate (Poisson)
+        directly, and the mean ``mu(x)/sigma^2`` paired with ``-1/(2 sigma^2)`` for the
+        Normal.  The returned
+        :class:`~pysp.stats.exp_family.ConditionalExponentialFamilyForm` exposes
+        ``natural_parameters(x)``, ``sufficient_statistics(y)``, ``log_partition``,
+        ``log_base_measure(y)``, ``mean(x)`` (the inverse link == :meth:`predict`), and
+        ``log_density(y, x)``.
+        """
+        from pysp.engines import NUMPY_ENGINE
+        from pysp.stats.exp_family import ConditionalExponentialFamilyForm
+
+        eng = NUMPY_ENGINE if engine is None else engine
+        link = self.link
+
+        def _eta_linear(given):
+            X, offset = _design(self._columns, given)
+            return offset + X @ self.beta
+
+        if link == "logit":
+            from pysp.stats.leaf.bernoulli import BernoulliDistribution
+
+            response = BernoulliDistribution(0.5)
+
+            def natural_fn(given):
+                return _eta_linear(given)[:, None]
+
+            def log_partition_fn(eta):
+                e = np.asarray(eta, float).reshape(-1)
+                return np.logaddexp(0.0, e)  # log(1 + e^eta)
+
+            dispersion = None
+        elif link == "log":
+            from pysp.stats.leaf.poisson import PoissonDistribution
+
+            response = PoissonDistribution(1.0)
+
+            def natural_fn(given):
+                return _eta_linear(given)[:, None]
+
+            def log_partition_fn(eta):
+                return np.exp(np.asarray(eta, float).reshape(-1))  # A = lambda = e^eta
+
+            dispersion = None
+        elif link == "identity":
+            from pysp.stats.leaf.gaussian import GaussianDistribution
+
+            sigma2 = self.sigma**2
+            response = GaussianDistribution(0.0, sigma2)
+
+            def natural_fn(given):
+                mu = _eta_linear(given)
+                eta1 = mu / sigma2
+                eta2 = np.full_like(mu, -0.5 / sigma2)
+                return np.column_stack([eta1, eta2])
+
+            def log_partition_fn(eta):
+                e = np.atleast_2d(np.asarray(eta, float))
+                eta1, eta2 = e[:, 0], e[:, 1]
+                # A(eta) = -eta1^2/(4 eta2) - 0.5 log(-eta2/pi)
+                #        = mu^2/(2 sigma^2) + 0.5 log(2 pi sigma^2)
+                return -(eta1 * eta1) / (4.0 * eta2) - 0.5 * np.log(-eta2 / np.pi)
+
+            dispersion = sigma2
+        else:
+            raise NotImplementedError("no canonical exponential-family map for link %r." % link)
+
+        def mean_fn(given):
+            return _link_inv(link, _eta_linear(given))
+
+        return ConditionalExponentialFamilyForm(
+            response_family=response,
+            natural_fn=natural_fn,
+            log_partition_fn=log_partition_fn,
+            mean_fn=mean_fn,
+            dispersion=dispersion,
+            engine=eng,
+        )
+
 
 def _columns_of(linpred: _LinearPredictor):
     """Return (est_columns, fixed_columns): estimated coefs (RV prior / free) vs constants."""
@@ -219,6 +301,167 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
     return RandomVariable._bound(None, name=rv._name, result=result)
 
 
+def _slot_design(slot, given, n):
+    """Design pieces for one parameter slot.
+
+    Returns ``(X, offset, names, spec, m0, p0)`` where ``spec`` lets ``predict`` rebuild the slot:
+    ``("lp", columns)`` for a linear predictor, ``("free",)`` for a free / Normal-prior intercept,
+    or ``("const", c)`` for a fixed value. ``m0``/``p0`` are the Gaussian-prior mean / precision per
+    estimated coefficient (precision 0 == flat / MLE).
+    """
+    if isinstance(slot, _LinearPredictor):
+        if slot.groups:
+            raise NotImplementedError("location-scale regression does not support group effects yet.")
+        columns = _columns_of(slot)
+        est, _ = columns
+        X, offset = _design(columns, given)
+        names, m0, p0 = [], [], []
+        for coef, field in est:
+            names.append(field.name if field is not None else "intercept")
+            if isinstance(coef, RandomVariable) and coef._family.name == "Normal":
+                m0.append(float(coef._args[0]))
+                p0.append(1.0 / float(coef._args[1]) ** 2)
+            else:
+                m0.append(0.0)
+                p0.append(0.0)
+        return X, offset, names, ("lp", columns), np.asarray(m0), np.asarray(p0)
+    if slot is FREE:
+        return np.ones((n, 1)), np.zeros(n), ["intercept"], ("free",), np.zeros(1), np.zeros(1)
+    if isinstance(slot, RandomVariable) and slot._family.name == "Normal":
+        m0 = np.asarray([float(slot._args[0])])
+        p0 = np.asarray([1.0 / float(slot._args[1]) ** 2])
+        return np.ones((n, 1)), np.zeros(n), ["intercept"], ("free",), m0, p0
+    return np.zeros((n, 0)), float(slot) * np.ones(n), [], ("const", float(slot)), np.zeros(0), np.zeros(0)
+
+
+def _build_from_spec(spec, given, n):
+    """Rebuild ``(X, offset)`` for a stored slot spec at prediction time."""
+    kind = spec[0]
+    if kind == "lp":
+        return _design(spec[1], given)
+    if kind == "free":
+        return np.ones((n, 1)), np.zeros(n)
+    return np.zeros((n, 0)), spec[1] * np.ones(n)
+
+
+class LocationScaleResult:
+    """Heteroskedastic (location-scale) regression: separate mean and log-scale coefficients.
+
+    The scale follows a log link, ``scale = exp(eta_scale)``, so the dispersion can vary with
+    covariates (``Normal(mean_pred, free*Field("x") + free)``). ``predict`` returns per-row ``loc``
+    and ``scale``.
+    """
+
+    def __init__(self, family, names_m, names_s, beta, cov, spec_m, spec_s):
+        self.family = family
+        self.names = list(names_m) + list(names_s)
+        self.names_mean = list(names_m)
+        self.names_scale = list(names_s)
+        self.beta = beta
+        self.cov = cov
+        self._pm = len(names_m)
+        self._spec_m = spec_m
+        self._spec_s = spec_s
+        sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        self.coefficients = {names_m[i]: {"mean": float(beta[i]), "sd": float(sd[i])} for i in range(self._pm)}
+        self.scale_coefficients = {
+            names_s[j]: {"mean": float(beta[self._pm + j]), "sd": float(sd[self._pm + j])} for j in range(len(names_s))
+        }
+        self.link = "identity"
+        self.scale_link = "log"
+        self.acceptance_rate = None
+        self.predictive = None
+
+    def predict(self, given, **_):
+        """Return ``{'loc': array, 'scale': array}`` at covariates ``given``."""
+        n = 1
+        for v in (given or {}).values():
+            n = max(n, len(np.asarray(v).reshape(-1)))
+        beta_m, beta_s = self.beta[: self._pm], self.beta[self._pm :]
+        Xm, offm = _build_from_spec(self._spec_m, given or {}, n)
+        Xs, offs = _build_from_spec(self._spec_s, given or {}, n)
+        loc = offm + (Xm @ beta_m if beta_m.size else np.zeros(n))
+        scale = np.exp(np.clip(offs + (Xs @ beta_s if beta_s.size else np.zeros(n)), -20, 20))
+        return {"loc": loc, "scale": scale}
+
+    def summary(self):
+        return {"mean_coefficients": self.coefficients, "scale_coefficients": self.scale_coefficients}
+
+
+def _locscale_fit(rv, data, given, *, max_iter=200, tol=1e-8):
+    """Fit a heteroskedastic Normal/LogNormal: mean (identity) + log-scale linear predictors.
+
+    Maximizes the (optionally ridge-penalized) log-likelihood with analytic gradients; the
+    coefficient covariance is the Laplace approximation (inverse Hessian at the optimum).
+    """
+    from scipy.optimize import minimize
+
+    fam = rv._family.name
+    y = np.asarray(data, dtype=float).reshape(-1)
+    if fam == "LogNormal":
+        if np.any(y <= 0):
+            raise ValueError("LogNormal regression requires positive observations.")
+        w = np.log(y)  # log y ~ Normal(mean, scale); fit on the log scale
+    else:
+        w = y
+    n = w.size
+
+    Xm, offm, names_m, spec_m, m0m, p0m = _slot_design(rv._args[0], given, n)
+    Xs, offs, names_s, spec_s, m0s, p0s = _slot_design(rv._args[1], given, n)
+    pm, ps = Xm.shape[1], Xs.shape[1]
+
+    def unpack(theta):
+        return theta[:pm], theta[pm:]
+
+    def nll(theta):
+        bm, bs = unpack(theta)
+        mu = offm + (Xm @ bm if pm else 0.0)
+        eta = np.clip(offs + (Xs @ bs if ps else 0.0), -20, 20)
+        r = w - mu
+        inv2 = np.exp(-2.0 * eta)
+        val = np.sum(eta + 0.5 * r * r * inv2)
+        val += 0.5 * np.sum(p0m * (bm - m0m) ** 2) + 0.5 * np.sum(p0s * (bs - m0s) ** 2)
+        return val
+
+    def grad(theta):
+        bm, bs = unpack(theta)
+        mu = offm + (Xm @ bm if pm else 0.0)
+        eta = np.clip(offs + (Xs @ bs if ps else 0.0), -20, 20)
+        r = w - mu
+        inv2 = np.exp(-2.0 * eta)
+        gm = (-Xm.T @ (r * inv2) + p0m * (bm - m0m)) if pm else np.zeros(0)
+        gs = (Xs.T @ (1.0 - r * r * inv2) + p0s * (bs - m0s)) if ps else np.zeros(0)
+        return np.concatenate([gm, gs])
+
+    # warm start: OLS mean, unit scale
+    theta0 = np.zeros(pm + ps)
+    if pm:
+        try:
+            theta0[:pm] = np.linalg.lstsq(Xm, w - offm, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            pass
+    res = minimize(nll, theta0, jac=grad, method="L-BFGS-B", options={"maxiter": max_iter, "ftol": tol})
+    theta = res.x
+    bm, bs = unpack(theta)
+
+    # Laplace covariance from the analytic Hessian at the optimum
+    mu = offm + (Xm @ bm if pm else 0.0)
+    eta = np.clip(offs + (Xs @ bs if ps else 0.0), -20, 20)
+    r = w - mu
+    inv2 = np.exp(-2.0 * eta)
+    Hmm = (Xm.T @ (Xm * inv2[:, None]) + np.diag(p0m)) if pm else np.zeros((0, 0))
+    Hss = (Xs.T @ (Xs * (2.0 * r * r * inv2)[:, None]) + np.diag(p0s)) if ps else np.zeros((0, 0))
+    Hms = (2.0 * Xm.T @ (Xs * (r * inv2)[:, None])) if (pm and ps) else np.zeros((pm, ps))
+    H = np.block([[Hmm, Hms], [Hms.T, Hss]])
+    try:
+        cov = np.linalg.inv(H + 1e-8 * np.eye(H.shape[0]))
+    except np.linalg.LinAlgError:
+        cov = np.linalg.pinv(H)
+
+    result = LocationScaleResult(fam, names_m, names_s, theta, cov, spec_m, spec_s)
+    return RandomVariable._bound(None, name=rv._name, result=result)
+
+
 def regression_fit(
     rv: RandomVariable, data, *, given=None, max_iter: int = 100, tol: float = 1e-9, **_
 ) -> RandomVariable:
@@ -228,6 +471,9 @@ def regression_fit(
             raise NotImplementedError("mixed-effects models require a Normal response.")
         return _lmm_fit(rv, np.asarray(data, float).reshape(-1), given or {}, linpred0, max_iter, tol)
     fam = rv._family.name
+    # heteroskedastic location-scale: a linear predictor in the *scale* slot (log link)
+    if fam in ("Normal", "LogNormal") and isinstance(rv._args[1], _LinearPredictor):
+        return _locscale_fit(rv, data, given or {}, max_iter=max(max_iter, 200))
     link = _LINK.get(fam)
     if link is None:
         raise NotImplementedError(f"regression for family {fam} is not supported (have {sorted(_LINK)}).")

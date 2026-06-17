@@ -259,7 +259,9 @@ class QuantizedHmmEstimationTestCase(unittest.TestCase):
             initial_exponents=[0, 1],
             len_dist=CategoricalDistribution({8: 0.5, 9: 0.5}),
         )
-        data = gen.sampler(seed=2).sample(500)
+        # batched=False keeps the legacy per-draw RNG order so this EM-splitting
+        # fixture is unaffected by the vectorized HMM state-path sampling (WS-K).
+        data = gen.sampler(seed=2).sample(500, batched=False)
 
         lls = {}
         for split in (False, True):
