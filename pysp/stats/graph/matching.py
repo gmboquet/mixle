@@ -1,7 +1,7 @@
-"""Create, estimate, and sample from a weighted bipartite perfect-matching distribution.
+"""Create, estimate, sample, and enumerate a weighted bipartite perfect-matching distribution.
 
-Defines the MatchingDistribution, MatchingSampler, MatchingAccumulatorFactory, MatchingAccumulator,
-MatchingEstimator, and the MatchingDataEncoder classes for use with pysparkplug.
+Defines the MatchingDistribution, MatchingEnumerator, MatchingSampler, MatchingAccumulatorFactory,
+MatchingAccumulator, MatchingEstimator, and the MatchingDataEncoder classes for use with pysparkplug.
 
 Data type: a perfect matching of the complete bipartite graph K_{n,n} given as a permutation ``x`` of
 0,...,n-1, where left node i is matched to right node ``x[i]``.
@@ -14,11 +14,14 @@ the matrix permanent. Unlike the Plackett-Luce model (a single worth vector over
 full edge-weight matrix, so it is the natural assignment / matching law. The permanent is computed
 exactly with Ryser's formula, which is exponential in n, so the family targets small-to-moderate n
 (default cap ``max_nodes = 12``). Sampling draws each match in turn from the exact conditional
-distribution (via permanents of the remaining submatrix); estimation matches the empirical assignment
-frequencies to the model edge marginals by projected gradient ascent on the log-weights.
+distribution (via permanents of the remaining submatrix); enumeration scans the finite permutation
+support and sorts by exact fitted probability. Estimation matches the empirical or symmetrically
+smoothed assignment frequencies to the model edge marginals by projected gradient ascent on the
+log-weights.
 """
 
 from collections.abc import Sequence
+import itertools
 from itertools import combinations
 from typing import Any
 
@@ -27,6 +30,7 @@ from numpy.random import RandomState
 
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -153,13 +157,39 @@ class MatchingDistribution(SequenceEncodableProbabilityDistribution):
         """Return a sampler for drawing matchings from this distribution."""
         return MatchingSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "MatchingEstimator":
+    def enumerator(self) -> "MatchingEnumerator":
+        """Return an exact finite enumerator over all matchings in decreasing probability order."""
+        return MatchingEnumerator(self)
+
+    def estimator(self, pseudo_count: float | None = 1.0) -> "MatchingEstimator":
         """Return an estimator that keeps the node count fixed at this distribution's n."""
-        return MatchingEstimator(dim=self.dim, max_nodes=self.max_nodes, name=self.name, keys=self.keys)
+        return MatchingEstimator(
+            dim=self.dim, max_nodes=self.max_nodes, pseudo_count=pseudo_count, name=self.name, keys=self.keys
+        )
 
     def dist_to_encoder(self) -> "MatchingDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return MatchingDataEncoder(dim=self.dim)
+
+
+class MatchingEnumerator(DistributionEnumerator):
+    """Enumerate all finite perfect matchings in descending probability order."""
+
+    def __init__(self, dist: MatchingDistribution) -> None:
+        super().__init__(dist)
+        with np.errstate(divide="ignore"):
+            entries = [(list(p), float(dist.log_density(p))) for p in itertools.permutations(range(dist.dim))]
+        entries = [(v, lp) for v, lp in entries if lp > -np.inf]
+        entries.sort(key=lambda u: -u[1])
+        self._entries = entries
+        self._pos = 0
+
+    def __next__(self) -> tuple[list[int], float]:
+        if self._pos >= len(self._entries):
+            raise StopIteration
+        item = self._entries[self._pos]
+        self._pos += 1
+        return item
 
 
 class MatchingSampler(DistributionSampler):
@@ -264,6 +294,7 @@ class MatchingEstimator(ParameterEstimator):
         self,
         dim: int,
         max_nodes: int = _DEFAULT_MAX_NODES,
+        pseudo_count: float | None = 1.0,
         max_steps: int = 500,
         learning_rate: float = 1.0,
         tol: float = 1.0e-7,
@@ -272,8 +303,11 @@ class MatchingEstimator(ParameterEstimator):
     ) -> None:
         if dim is None or dim < 1:
             raise ValueError("MatchingEstimator requires the number of nodes dim >= 1.")
+        if pseudo_count is not None and pseudo_count < 0.0:
+            raise ValueError("MatchingEstimator requires a non-negative pseudo_count.")
         self.dim = int(dim)
         self.max_nodes = max_nodes
+        self.pseudo_count = pseudo_count
         self.max_steps = max_steps
         self.learning_rate = learning_rate
         self.tol = tol
@@ -289,8 +323,11 @@ class MatchingEstimator(ParameterEstimator):
         if count <= 0.0:
             return MatchingDistribution(np.ones((n, n)), max_nodes=self.max_nodes, name=self.name, keys=self.keys)
 
-        # Laplace-smoothed empirical assignment marginals (rows/cols each sum to 1 in expectation).
-        target = (assign_counts + 1.0) / (count + n)
+        # Symmetric smoothing preserves row and column sums of the assignment-marginal target.
+        if self.pseudo_count is None:
+            target = assign_counts / count
+        else:
+            target = (assign_counts + self.pseudo_count) / (count + n * self.pseudo_count)
         log_w = np.zeros((n, n))
         weights = np.ones((n, n))
         for _ in range(self.max_steps):
