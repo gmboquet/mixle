@@ -412,26 +412,52 @@ def hamiltonian_monte_carlo(
 
 
 def nuts(
-    log_target: LogTarget,
-    grad_log_target: Callable[[Any], Any],
-    initial: Any,
-    num_samples: int,
+    log_target: LogTarget | None = None,
+    grad_log_target: Callable[[Any], Any] | None = None,
+    initial: Any = None,
+    num_samples: int = 0,
     warmup: int = 1000,
     mass: Any = 1.0,
     target_accept: float = 0.8,
     max_tree_depth: int = 10,
     thin: int = 1,
     rng: np.random.RandomState | None = None,
+    *,
+    value_and_grad: Callable[[Any], tuple[float, Any]] | None = None,
 ) -> MCMCResult:
     """No-U-Turn Sampler (Hoffman & Gelman 2014, efficient NUTS with dual-averaging step size).
 
     Auto-tunes the leapfrog trajectory length (recursive tree doubling, U-turn termination) and,
     during ``warmup``, the step size to hit ``target_accept`` — so unlike fixed-step HMC it needs
-    no manual tuning and mixes well on correlated / higher-dimensional posteriors. ``grad_log_target``
-    returns the gradient of the (unnormalized) log target; ``mass`` is a diagonal mass matrix.
+    no manual tuning and mixes well on correlated / higher-dimensional posteriors. ``mass`` is a
+    diagonal mass matrix.
+
+    Two equivalent target interfaces (back-compatible):
+
+    * ``nuts(log_target, grad_log_target, initial, ...)`` — separate value/gradient callables
+      (the historical signature). ``grad_log_target`` returns the gradient of the
+      (unnormalized) log target.
+    * ``nuts(value_and_grad=fn, initial=..., ...)`` — a *fused* callable returning
+      ``(logp, grad)`` in one shot. This halves forward passes (the value NUTS already needs for
+      the slice/Metropolis criterion is shared with the gradient) and lets the sampler cache
+      ``(logp, grad)`` at every trajectory endpoint so shared leapfrog/tree nodes are never
+      re-evaluated — typically ~2-3x fewer target evaluations than the split path.
     """
     if num_samples < 0 or warmup < 0 or thin <= 0:
         raise ValueError("require num_samples>=0, warmup>=0, thin>0.")
+    if value_and_grad is not None:
+        if log_target is not None or grad_log_target is not None:
+            raise ValueError("pass either value_and_grad or (log_target, grad_log_target), not both.")
+        fused = value_and_grad
+    else:
+        if log_target is None or grad_log_target is None:
+            raise ValueError("nuts requires value_and_grad= or both log_target and grad_log_target.")
+
+        def fused(theta_external):  # adapt the split callables to the fused contract
+            return float(log_target(theta_external)), grad_log_target(theta_external)
+
+    if initial is None:
+        raise ValueError("nuts requires an initial state.")
     rng = np.random.RandomState() if rng is None else rng
     theta0 = _numeric_state(initial)
     shape = theta0.shape
@@ -440,30 +466,40 @@ def nuts(
     sqrt_m = np.sqrt(mass_arr)
     delta_max = 1000.0
 
-    def logp(theta):
-        return float(log_target(_restore_numeric_state(theta)))
+    # Fused (logp, grad) at a numeric state; counts every evaluation for diagnostics.
+    eval_count = [0]
 
-    def gradient(theta):
-        return _numeric_gradient(grad_log_target, theta, shape)
+    def value_and_grad_at(theta) -> tuple[float, np.ndarray]:
+        eval_count[0] += 1
+        lp, g = fused(_restore_numeric_state(theta))
+        lp = float(lp)
+        grad = np.asarray(g, dtype=float)
+        if grad.shape != shape:
+            raise ValueError("gradient shape %s does not match state shape %s." % (grad.shape, shape))
+        return lp, grad
 
     def kinetic(r):
         return 0.5 * float(np.sum(r * r * minv))
 
-    def leapfrog(theta, r, eps):
-        r = r + 0.5 * eps * gradient(theta)
+    # A leapfrog step from a node carrying a cached gradient ``grad`` at ``theta``.
+    # Returns the new (theta, r) plus the *fresh* (logp, grad) at the endpoint so the
+    # caller can cache it — no endpoint is ever evaluated twice.
+    def leapfrog(theta, r, grad, eps):
+        r = r + 0.5 * eps * grad
         theta = theta + eps * (minv * r)
-        r = r + 0.5 * eps * gradient(theta)
-        return theta, r
+        lp1, grad1 = value_and_grad_at(theta)
+        r = r + 0.5 * eps * grad1
+        return theta, r, lp1, grad1
 
     def no_uturn(tm, tp, rm, rp):
         d = tp - tm
         return float(np.dot(d, minv * rm)) >= 0 and float(np.dot(d, minv * rp)) >= 0
 
     cur = theta0
-    cur_lp = logp(cur)
+    cur_lp, cur_grad = value_and_grad_at(cur)
     if not np.isfinite(cur_lp):
         raise ValueError("initial state has non-finite log target.")
-    eps = _find_reasonable_eps(cur, cur_lp, logp, leapfrog, kinetic, sqrt_m, shape, rng)
+    eps = _find_reasonable_eps(cur, cur_lp, cur_grad, leapfrog, kinetic, sqrt_m, shape, rng)
     mu = math.log(10.0 * eps)
     log_eps_bar, h_bar, gamma, t0, kappa = 0.0, 0.0, 0.05, 10.0, 0.75
 
@@ -472,28 +508,29 @@ def nuts(
     depths: list[int] = []
     total = warmup + num_samples * thin
 
-    def build_tree(theta, r, logu, v, j, eps, joint0):
+    # Tree nodes carry (theta, r, grad) at both endpoints so doubling re-extends a leaf
+    # from its cached gradient instead of recomputing it.
+    def build_tree(theta, r, grad, logu, v, j, eps, joint0):
         if j == 0:
-            theta1, r1 = leapfrog(theta, r, v * eps)
-            lp1 = logp(theta1)
+            theta1, r1, lp1, grad1 = leapfrog(theta, r, grad, v * eps)
             joint1 = lp1 - kinetic(r1)
             n1 = 1 if logu <= joint1 else 0
             s1 = 1 if (joint1 - logu) > -delta_max and np.isfinite(joint1) else 0
             a = min(1.0, math.exp(min(joint1 - joint0, 0.0))) if np.isfinite(joint1) else 0.0
-            return theta1, r1, theta1, r1, theta1, lp1, n1, s1, a, 1
-        tm, rm, tp, rp, tpr, lpr, n1, s1, a1, na1 = build_tree(theta, r, logu, v, j - 1, eps, joint0)
+            return theta1, r1, grad1, theta1, r1, grad1, theta1, lp1, grad1, n1, s1, a, 1
+        tm, rm, gm, tp, rp, gp, tpr, lpr, gpr, n1, s1, a1, na1 = build_tree(theta, r, grad, logu, v, j - 1, eps, joint0)
         if s1 == 1:
             if v == -1:
-                tm, rm, _, _, t2, lp2, n2, s2, a2, na2 = build_tree(tm, rm, logu, v, j - 1, eps, joint0)
+                tm, rm, gm, _, _, _, t2, lp2, g2, n2, s2, a2, na2 = build_tree(tm, rm, gm, logu, v, j - 1, eps, joint0)
             else:
-                _, _, tp, rp, t2, lp2, n2, s2, a2, na2 = build_tree(tp, rp, logu, v, j - 1, eps, joint0)
+                _, _, _, tp, rp, gp, t2, lp2, g2, n2, s2, a2, na2 = build_tree(tp, rp, gp, logu, v, j - 1, eps, joint0)
             if n2 > 0 and rng.random_sample() < n2 / max(n1 + n2, 1):
-                tpr, lpr = t2, lp2
+                tpr, lpr, gpr = t2, lp2, g2
             a1 += a2
             na1 += na2
             n1 += n2
             s1 = s2 if no_uturn(tm, tp, rm, rp) else 0
-        return tm, rm, tp, rp, tpr, lpr, n1, s1, a1, na1
+        return tm, rm, gm, tp, rp, gp, tpr, lpr, gpr, n1, s1, a1, na1
 
     for it in range(total):
         r0 = sqrt_m * rng.standard_normal(shape)
@@ -501,20 +538,27 @@ def nuts(
         logu = joint0 - rng.exponential()  # log of a slice height u ~ Uniform(0, exp(joint0))
         tm = tp = cur
         rm = rp = r0
-        theta_new, lp_new, n, s, j = cur, cur_lp, 1, 1, 0
+        gm = gp = cur_grad  # cached endpoint gradients shared with the next doubling
+        theta_new, lp_new, grad_new, n, s, j = cur, cur_lp, cur_grad, 1, 1, 0
         alpha, n_alpha = 0.0, 1
         while s == 1 and j < max_tree_depth:
             v = -1 if rng.random_sample() < 0.5 else 1
             if v == -1:
-                tm, rm, _, _, tpr, lpr, n_p, s_p, alpha, n_alpha = build_tree(tm, rm, logu, v, j, eps, joint0)
+                tm, rm, gm, _, _, _, tpr, lpr, gpr, n_p, s_p, alpha, n_alpha = build_tree(
+                    tm, rm, gm, logu, v, j, eps, joint0
+                )
             else:
-                _, _, tp, rp, tpr, lpr, n_p, s_p, alpha, n_alpha = build_tree(tp, rp, logu, v, j, eps, joint0)
+                _, _, _, tp, rp, gp, tpr, lpr, gpr, n_p, s_p, alpha, n_alpha = build_tree(
+                    tp, rp, gp, logu, v, j, eps, joint0
+                )
             if s_p == 1 and rng.random_sample() < min(1.0, n_p / max(n, 1)):
-                theta_new, lp_new = tpr, lpr
+                theta_new, lp_new, grad_new = tpr, lpr, gpr  # carry the proposal's cached gradient
             n += n_p
             s = s_p if no_uturn(tm, tp, rm, rp) else 0
             j += 1
-        cur, cur_lp = theta_new, lp_new
+        # The selected proposal always carries its (logp, grad) from the leapfrog that produced it,
+        # so the new chain state reuses the cached gradient — never a fresh evaluation per iteration.
+        cur, cur_lp, cur_grad = theta_new, lp_new, grad_new
 
         accept_stat = alpha / max(n_alpha, 1)
         if it < warmup:  # dual-averaging adaptation of the step size
@@ -540,19 +584,20 @@ def nuts(
     )
     object.__setattr__(res, "tree_depth", np.asarray(depths, dtype=int))  # frozen dataclass
     object.__setattr__(res, "step_size", float(eps))
+    object.__setattr__(res, "num_target_evals", int(eval_count[0]))
     return res
 
 
-def _find_reasonable_eps(theta, lp0, logp, leapfrog, kinetic, sqrt_m, shape, rng) -> float:
+def _find_reasonable_eps(theta, lp0, grad0, leapfrog, kinetic, sqrt_m, shape, rng) -> float:
     """Heuristic initial step size: double/halve until one leapfrog step moves the acceptance
-    probability across 0.5 (Hoffman & Gelman Algorithm 4)."""
+    probability across 0.5 (Hoffman & Gelman Algorithm 4). ``leapfrog(theta, r, grad, eps)``
+    returns ``(theta1, r1, lp1, grad1)`` and ``grad0`` is the cached gradient at ``theta``."""
     eps = 1.0
     r = sqrt_m * rng.standard_normal(shape)
     joint0 = lp0 - kinetic(r)
 
     def joint_after(step):
-        t1, r1 = leapfrog(theta, r, step)
-        lp1 = logp(t1)
+        _t1, r1, lp1, _g1 = leapfrog(theta, r, grad0, step)
         return (lp1 - kinetic(r1)) if np.isfinite(lp1) else -np.inf
 
     j1 = joint_after(eps)
