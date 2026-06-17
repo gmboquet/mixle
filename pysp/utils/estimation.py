@@ -345,7 +345,12 @@ def _em_loop(
         vll = ll_fn(enc_vdata, nxt)[1] if has_v else ll
         dll = ll - old_ll
 
-        if (dll >= 0) or (delta is None) or (not monotone):
+        # A non-finite step (e.g. a collapsed/singular covariance producing a NaN/-inf
+        # log-likelihood) is never an improvement: never accept it, and do not let it
+        # poison the convergence reference ``old_ll`` (which would stall every later
+        # iteration on NaN comparisons). For finite ``ll`` this is the historical guard.
+        ll_finite = bool(np.isfinite(ll))
+        if ll_finite and ((dll >= 0) or (delta is None) or (not monotone)):
             model = nxt
 
         converged = (delta is not None) and (dll < delta)
@@ -354,7 +359,8 @@ def _em_loop(
         if converged:
             break
 
-        old_ll = ll
+        if ll_finite:
+            old_ll = ll
         if track_best and best_vll < vll:
             best_vll = vll
             best_model = model
@@ -410,7 +416,10 @@ def _fused_em_loop(
         if converged:
             break
 
-        prev_ll = ll_model
+        # Keep the convergence reference on the last finite likelihood; a non-finite
+        # ``ll_model`` (e.g. a collapsed covariance) must not stall the delta test on NaN.
+        if np.isfinite(ll_model):
+            prev_ll = ll_model
         model = nxt
 
     if not converged and nxt is not None:
