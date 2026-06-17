@@ -66,7 +66,12 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_declaration(cls):
-        from pysp.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        from pysp.stats.compute.declarations import (
+            DistributionDeclaration,
+            ExponentialFamilySpec,
+            ParameterSpec,
+            StatisticSpec,
+        )
 
         return DistributionDeclaration(
             name="log_series",
@@ -77,7 +82,13 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
             ),
             statistics=(StatisticSpec("count"), StatisticSpec("sum")),
             support="positive_integer",
-            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure=cls.exp_family_base_measure,
+                legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            ),
         )
 
     @staticmethod
@@ -87,6 +98,33 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
         """Return per-row (count, k) sufficient statistics in accumulator order."""
         k = engine.asarray(x[0])
         return k * 0.0 + engine.asarray(1.0), k
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: tuple[Any, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the log-series sufficient statistic ``T(k) = (k,)``."""
+        return (engine.asarray(x[0]),)
+
+    @staticmethod
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the log-series natural parameter ``eta = log(p)``."""
+        return (params["log_p"],)
+
+    @staticmethod
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
+        """Return the log-series log partition ``A = log(-log(1 - p))``."""
+        return params["log_norm"]
+
+    @staticmethod
+    def exp_family_base_measure(x: tuple[Any, Any], engine: Any) -> Any:
+        """Return the log-series base measure ``log h(k) = -log(k)`` (independent of p, fixed base)."""
+        return -engine.asarray(x[1])
+
+    @staticmethod
+    def exp_family_from_natural(eta: Any) -> "LogSeriesDistribution":
+        """Return the log-series with natural parameter ``eta = log(p)`` (so ``p = exp(eta)``)."""
+        import numpy as _np
+
+        return LogSeriesDistribution(float(_np.exp(float(eta[0]))))
 
     @staticmethod
     def backend_log_density_from_params(k: Any, log_k: Any, log_p: Any, log_norm: Any, engine: Any) -> Any:
