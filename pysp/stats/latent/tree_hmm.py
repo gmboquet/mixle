@@ -39,7 +39,9 @@ from pysp.stats.combinator.null_dist import (
 )
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
@@ -671,6 +673,19 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         if isinstance(self.len_dist, NullDistribution):
             raise Exception("TreeHiddenMarkovSampler requires len_dist with support on non-negative integers")
         return TreeHiddenMarkovSampler(self, seed)
+
+    def enumerator(self) -> DistributionEnumerator:
+        """Not supported: observations are rooted trees, not chains.
+
+        The chain best-first enumerator (:class:`HiddenMarkovModelEnumerator`) does not apply -- the
+        marginal sums over hidden states on a branching tree whose shape is itself governed by the
+        per-node child-count ``len_dist``, so the support is a set of trees rather than sequences.
+        Use :meth:`sampler` or the exact ``log_density`` instead.
+        """
+        raise EnumerationError(
+            self,
+            reason="tree-structured (branching) observations are not supported by the chain enumerator",
+        )
 
     def estimator(self, pseudo_count: float | None = None) -> "TreeHiddenMarkovEstimator":
         """Create a TreeHiddenMarkovEstimator with estimators for the topics and length distribution.

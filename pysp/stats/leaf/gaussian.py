@@ -272,6 +272,18 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
             count,
         )
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact). The continuous 'index of' a value."""
+        from scipy.stats import norm
+
+        return float(norm.cdf(x, loc=self.mu, scale=self.sigma2**0.5))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from scipy.stats import norm
+
+        return float(norm.ppf(q, loc=self.mu, scale=self.sigma2**0.5))
+
     def sampler(self, seed: int | None = None) -> "GaussianSampler":
         """Create an GaussianSampler object from parameters of GaussianDistribution instance.
 

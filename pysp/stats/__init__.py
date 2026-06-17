@@ -395,6 +395,11 @@ __all__ = [
     "TransformEstimator",
     "TransformDataEncoder",
     "TransformEnumerator",
+    "FiniteStochasticTransformDistribution",
+    "FiniteStochasticTransformSampler",
+    "FiniteStochasticTransformEstimator",
+    "FiniteStochasticTransformDataEncoder",
+    "FiniteStochasticTransformEnumerator",
     "IdentityTransform",
     "AffineTransform",
     "ExpTransform",
@@ -460,6 +465,13 @@ from pysp.stats.combinator.conditional import (
     ConditionalDistributionSampler,
     ConditionalEnumerator,
     ConditionalEstimator,
+)
+from pysp.stats.combinator.finite_stochastic_transform import (
+    FiniteStochasticTransformDataEncoder,
+    FiniteStochasticTransformDistribution,
+    FiniteStochasticTransformEnumerator,
+    FiniteStochasticTransformEstimator,
+    FiniteStochasticTransformSampler,
 )
 from pysp.stats.combinator.ignored import IgnoredDataEncoder, IgnoredDistribution, IgnoredEstimator, IgnoredSampler
 from pysp.stats.combinator.null_dist import (
