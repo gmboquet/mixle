@@ -1,8 +1,8 @@
-"""Create, estimate, and sample from a weighted spanning-tree distribution over a labeled graph.
+"""Create, estimate, sample, and enumerate a weighted spanning-tree distribution over a labeled graph.
 
-Defines the SpanningTreeDistribution, SpanningTreeSampler, SpanningTreeAccumulatorFactory,
-SpanningTreeAccumulator, SpanningTreeEstimator, and the SpanningTreeDataEncoder classes for use with
-pysparkplug.
+Defines the SpanningTreeDistribution, SpanningTreeEnumerator, SpanningTreeSampler,
+SpanningTreeAccumulatorFactory, SpanningTreeAccumulator, SpanningTreeEstimator, and the
+SpanningTreeDataEncoder classes for use with pysparkplug.
 
 Data type: a spanning tree of n labeled nodes given as a sequence of n-1 undirected edges, each an
 ``(i, j)`` pair (e.g. ``[(0, 1), (1, 2), (1, 3)]``). Unlike ChowLiuTree (a tree-structured distribution
@@ -17,10 +17,13 @@ L = diag(W 1) - W, i.e. ``det(L[1:, 1:])``. Sampling uses Wilson's loop-erased-r
 which draws exactly from this weighted uniform-spanning-tree law. Estimation matches the empirical edge
 frequencies to the model edge marginals (an exponential family over trees, fit by projected gradient
 ascent on the log-weights); the per-edge marginal ``w[i,j] * R_eff(i,j)`` is read from the Laplacian
-pseudoinverse.
+pseudoinverse. Exact finite enumeration scans all positive-edge subsets of size n-1, keeps the
+spanning trees, and sorts them by fitted probability.
 """
 
 from collections.abc import Sequence
+import itertools
+import math
 from typing import Any
 
 import numpy as np
@@ -28,6 +31,7 @@ from numpy.random import RandomState
 
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -37,6 +41,7 @@ from pysp.stats.compute.pdist import (
 
 _MIN_LOG_WEIGHT = -30.0
 _MAX_LOG_WEIGHT = 30.0
+_DEFAULT_MAX_ENUMERATION_SUBSETS = 200_000
 
 
 def _weighted_laplacian(weights: np.ndarray) -> np.ndarray:
@@ -142,6 +147,13 @@ class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
         """Return a sampler for drawing spanning trees from this distribution."""
         return SpanningTreeSampler(self, seed)
 
+    def enumerator(
+        self,
+        max_edge_subsets: int | None = _DEFAULT_MAX_ENUMERATION_SUBSETS,
+    ) -> "SpanningTreeEnumerator":
+        """Return an exact finite enumerator over all supported spanning trees in probability order."""
+        return SpanningTreeEnumerator(self, max_edge_subsets=max_edge_subsets)
+
     def estimator(self, pseudo_count: float | None = None) -> "SpanningTreeEstimator":
         """Return an estimator that keeps the node count fixed at this distribution's n."""
         return SpanningTreeEstimator(dim=self.dim, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
@@ -149,6 +161,44 @@ class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> "SpanningTreeDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return SpanningTreeDataEncoder(dim=self.dim)
+
+
+class SpanningTreeEnumerator(DistributionEnumerator):
+    """Enumerate supported spanning trees in descending probability order."""
+
+    def __init__(
+        self,
+        dist: SpanningTreeDistribution,
+        max_edge_subsets: int | None = _DEFAULT_MAX_ENUMERATION_SUBSETS,
+    ) -> None:
+        super().__init__(dist)
+        edges = [(i, j) for i in range(dist.dim) for j in range(i + 1, dist.dim) if dist.weights[i, j] > 0.0]
+        num_candidates = math.comb(len(edges), dist.dim - 1)
+        if max_edge_subsets is not None and num_candidates > max_edge_subsets:
+            raise ValueError(
+                "SpanningTreeEnumerator would scan %d edge subsets, exceeding max_edge_subsets=%d."
+                % (num_candidates, max_edge_subsets)
+            )
+        entries: list[tuple[list[tuple[int, int]], float]] = []
+        for candidate in itertools.combinations(edges, dist.dim - 1):
+            try:
+                tree = _canonical_edges(candidate, dist.dim)
+            except ValueError:
+                continue
+            value = [(int(a), int(b)) for a, b in tree]
+            lp = float(dist._edge_log_weight_sum(tree) - dist.log_z)
+            if lp > -np.inf:
+                entries.append((value, lp))
+        entries.sort(key=lambda u: -u[1])
+        self._entries = entries
+        self._pos = 0
+
+    def __next__(self) -> tuple[list[tuple[int, int]], float]:
+        if self._pos >= len(self._entries):
+            raise StopIteration
+        item = self._entries[self._pos]
+        self._pos += 1
+        return item
 
 
 class SpanningTreeSampler(DistributionSampler):
