@@ -45,7 +45,7 @@ torch = ["torch"]
 mpi = ["mpi4py"]
 umap = ["umap-learn"]
 sympy = ["sympy"]
-test = ["pytest>=8"]
+test = ["pytest>=8", "pytest-xdist"]
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
 lint = ["ruff==0.15.17", "mypy"]
 all = ["numba", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn"]
