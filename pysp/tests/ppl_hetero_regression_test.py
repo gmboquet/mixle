@@ -59,6 +59,23 @@ class HeteroskedasticRegressionTestCase(unittest.TestCase):
         self.assertAlmostEqual(fit.result.coefficients["x"]["mean"], -2.0, delta=0.1)
         self.assertAlmostEqual(fit.result.sigma, 0.7, delta=0.05)
 
+    def test_normal_regression_prior_handles_use_ridge_convention(self):
+        x = np.asarray([-2.0, -1.0, 0.0, 1.0, 2.0])
+        y = np.asarray([-4.1, -1.4, 0.2, 2.1, 4.8])
+        slope = Normal(0.5, 2.0, name="slope")
+        intercept = Normal(-0.25, 3.0, name="intercept")
+        fit = Normal(slope * Field("x") + intercept, 2.0).fit(y, given={"x": x})
+
+        X = np.column_stack([x, np.ones_like(x)])
+        m0 = np.asarray([0.5, -0.25])
+        P0 = np.diag([1.0 / 2.0**2, 1.0 / 3.0**2])
+        A = X.T @ X + P0
+        expected_beta = np.linalg.inv(A) @ (X.T @ y + P0 @ m0)
+        expected_cov = 2.0**2 * np.linalg.inv(A)
+
+        np.testing.assert_allclose(fit.result.beta, expected_beta, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(fit.result.cov, expected_cov, rtol=1e-12, atol=1e-12)
+
 
 if __name__ == "__main__":
     unittest.main()
