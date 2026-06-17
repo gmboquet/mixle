@@ -31,6 +31,7 @@ from pysp.stats.leaf.half_normal import HalfNormalDistribution
 from pysp.stats.leaf.inverse_gamma import InverseGammaDistribution
 from pysp.stats.leaf.inverse_gaussian import InverseGaussianDistribution
 from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
+from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution
 from pysp.stats.leaf.poisson import PoissonDistribution
 from pysp.stats.leaf.rayleigh import RayleighDistribution
 from pysp.stats.leaf.von_mises import VonMisesDistribution
@@ -53,6 +54,7 @@ def _leaf_cases():
         (InverseGammaDistribution(2.5, 1.7), 1.0 / rng.gamma(2.5, 1.0 / 1.7, 32)),
         (VonMisesDistribution(0.7, 2.3), rng.vonmises(0.7, 2.3, 32)),
         (GeometricDistribution(0.35), rng.geometric(0.35, 32).astype(float)),
+        (NegativeBinomialDistribution(4.0, 0.6), rng.negative_binomial(4.0, 0.6, 32).astype(float)),
     ]
 
 

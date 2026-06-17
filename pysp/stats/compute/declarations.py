@@ -50,6 +50,15 @@ class ExponentialFamilySpec:
     sufficient_statistics_from_params: Callable[[Any, dict[str, Any], Any], tuple[Any, ...]] | None = None
     base_measure_from_params: Callable[[Any, dict[str, Any], Any], Any] | None = None
     legacy_sufficient_statistics: Callable[[Any, dict[str, Any], Any], tuple[Any, ...]] | None = None
+    fixed_base: bool = True
+    """Whether the base measure ``h(x)`` is independent of the per-component parameters.
+
+    The generated *stacked* exp-family loops broadcast a single per-row base ``(n,)`` across all
+    ``k`` components, so they are only valid when ``h(x)`` does not vary by component. Families
+    whose base depends on a per-component parameter (e.g. NegativeBinomial's ``lgamma(x+r)`` for a
+    varying shape ``r``) set this ``False``: they keep the scalar canonical map / ``to_exponential_family``
+    view but route stacked scoring through their ``backend_*`` hooks instead of the fixed-base loop.
+    """
 
 
 @dataclass(frozen=True)
@@ -189,7 +198,7 @@ def generated_stacked_available(dist_type: type[Any]) -> bool:
     declaration = declaration_for(dist_type)
     if declaration is None:
         return False
-    if declaration.exponential_family is not None:
+    if declaration.exponential_family is not None and declaration.exponential_family.fixed_base:
         return True
     return _generated_backend_hook_supported(dist_type, declaration)
 
@@ -197,7 +206,11 @@ def generated_stacked_available(dist_type: type[Any]) -> bool:
 def generated_stacked_preferred(dist_type: type[Any]) -> bool:
     """Return true when a family explicitly opts into declaration-generated scoring."""
     declaration = declaration_for(dist_type)
-    return declaration is not None and declaration.exponential_family is not None
+    return (
+        declaration is not None
+        and declaration.exponential_family is not None
+        and declaration.exponential_family.fixed_base
+    )
 
 
 def generated_stacked_strategy(dist_type: type[Any]) -> str:
@@ -205,7 +218,7 @@ def generated_stacked_strategy(dist_type: type[Any]) -> str:
     declaration = declaration_for(dist_type)
     if declaration is None:
         return "none"
-    if declaration.exponential_family is not None:
+    if declaration.exponential_family is not None and declaration.exponential_family.fixed_base:
         return "exp_family"
     if _generated_backend_hook_supported(dist_type, declaration):
         return "backend_log_density_from_params"
@@ -314,7 +327,11 @@ def generated_stacked_log_density(enc: Any, params: dict[str, Any], engine: Any)
     """Return an ``(n, k)`` log-density matrix from declaration-stacked params."""
     dist_type = params["__pysp_dist_type__"]
     declaration = declaration_for(dist_type)
-    if declaration is not None and declaration.exponential_family is not None:
+    if (
+        declaration is not None
+        and declaration.exponential_family is not None
+        and declaration.exponential_family.fixed_base
+    ):
         return _generated_exp_family_log_density(enc, params, declaration.exponential_family, engine)
     fn = dist_type.backend_log_density_from_params
     sig_names = tuple(inspect.signature(fn).parameters.keys())
@@ -419,7 +436,11 @@ def generated_numba_log_density_available(x: Any) -> bool:
 def generated_numba_stacked_available(x: Any) -> bool:
     """Return true when declarations can emit a generated stacked numba scorer."""
     declaration = declaration_for(x)
-    return declaration is not None and declaration.exponential_family is not None
+    return (
+        declaration is not None
+        and declaration.exponential_family is not None
+        and declaration.exponential_family.fixed_base
+    )
 
 
 def generated_numba_log_density(dist: Any, enc: Any) -> np.ndarray:
