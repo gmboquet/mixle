@@ -11,7 +11,7 @@ must be compatible with data type T_k.
 
 import math
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Optional, TypeVar
 
 import numpy as np
@@ -321,6 +321,22 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """Creates CompositeEnumerator iterating tuples in descending joint probability order."""
         return CompositeEnumerator(self)
 
+    def conditional_enumerator(self, given: Mapping[int, Any]) -> "CompositeConditionalEnumerator":
+        """Enumerate complete tuples consistent with the fixed positions in ``given``, best-first.
+
+        ``given`` is a mapping ``{position: value}`` pinning a subset of coordinates (most-probable
+        completion / imputation). Because the components are independent, descending order over the
+        *free* coordinates is descending conditional order; each yielded tuple has the fixed positions
+        filled in and carries the full joint ``log_density`` (the fixed positions are a constant
+        offset). Raises ValueError for an out-of-range position.
+        """
+        if not isinstance(given, Mapping):
+            raise TypeError("given must be a mapping of {position: value}.")
+        bad = [k for k in given if not isinstance(k, (int, np.integer)) or k < 0 or k >= self.count]
+        if bad:
+            raise ValueError("given names positions outside [0, %d): %r" % (self.count, bad))
+        return CompositeConditionalEnumerator(self, {int(k): v for k, v in given.items()})
+
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> LazyQuantizedEnumerationIndex:
         """Build a bounded index with a DP over additive quantized child costs.
 
@@ -528,6 +544,40 @@ class CompositeEnumerator(DistributionEnumerator):
             BufferedStream(child_enumerator(d, "CompositeDistribution.dists[%d]" % i)) for i, d in enumerate(dist.dists)
         ]
         self._product = ProductEnumerator(streams, combine=tuple)
+
+    def __next__(self) -> tuple[tuple[Any, ...], float]:
+        return next(self._product)
+
+
+class CompositeConditionalEnumerator(DistributionEnumerator):
+    def __init__(self, dist: "CompositeDistribution", given: dict[int, Any]) -> None:
+        """Enumerate complete tuples consistent with the fixed positions ``given``, best-first.
+
+        Best-first over the product of the *free* coordinates' enumerations, offset by the fixed
+        coordinates' summed log-density so each emitted score is the full joint ``log_density``. An
+        impossible fixed value (``-inf`` under its component) makes the support empty.
+
+        Args:
+            dist (CompositeDistribution): Distribution whose conditional support is enumerated.
+            given (dict): Fixed ``{position: value}`` assignments (already validated by the caller).
+        """
+        super().__init__(dist)
+        free_idx = [i for i in range(dist.count) if i not in given]
+        with np.errstate(divide="ignore"):
+            fixed_lp = sum(dist.dists[i].log_density(v) for i, v in given.items())
+        if fixed_lp == -np.inf:
+            self._product: Any = iter(())
+            return
+
+        def combine(free_values: Sequence[Any], _given=given, _free_idx=free_idx) -> tuple[Any, ...]:
+            slots = dict(_given)
+            slots.update(zip(_free_idx, free_values))
+            return tuple(slots[i] for i in range(len(slots)))
+
+        streams = [
+            BufferedStream(child_enumerator(dist.dists[i], "CompositeDistribution.dists[%d]" % i)) for i in free_idx
+        ]
+        self._product = ProductEnumerator(streams, combine=combine, offset=float(fixed_lp))
 
     def __next__(self) -> tuple[tuple[Any, ...], float]:
         return next(self._product)
