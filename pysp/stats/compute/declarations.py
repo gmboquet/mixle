@@ -661,7 +661,12 @@ def generated_numba_stacked_log_density(enc: Any, params: dict[str, Any]) -> np.
         raise ValueError("generated numba eta/log-partition component counts differ.")
     if eta.shape[1] != row_stats.shape[1]:
         raise ValueError("generated numba statistic/natural-parameter widths differ.")
-    out = np.empty((row_stats.shape[0], eta.shape[0]), dtype=np.float64)
+    k = eta.shape[0]
+    if base.ndim == 1:
+        base = np.ascontiguousarray(np.broadcast_to(base[:, None], (base.shape[0], k)))
+    elif base.shape[1] != k:
+        raise ValueError("generated numba base_measure component count differs from eta.")
+    out = np.empty((row_stats.shape[0], k), dtype=np.float64)
     _numba_stacked_exp_family_log_density(row_stats, base, eta, log_partition, out)
     return out
 
@@ -709,7 +714,10 @@ def _generated_exp_family_log_density(
             if spec.base_measure is not None
             else _generated_exp_family_zero_base(statistics[0], engine)
         )
-    rv = base[:, None]
+    # A component-dependent base measure already carries an ``(n, k)`` component axis
+    # (e.g. a degenerate boundary that the smooth natural parameter cannot represent);
+    # a shared ``(n,)`` base is broadcast across components via the trailing axis.
+    rv = base if len(tuple(getattr(base, "shape", ()))) >= 2 else base[:, None]
     for stat, eta in zip(statistics, natural):
         rv = rv + _generated_exp_family_pair_term(stat, eta, engine, stacked=True)
     return rv - _generated_param_arg(spec.log_partition(params, engine), engine)
@@ -871,7 +879,7 @@ def _numba_stacked_exp_family_log_density(
     k_count = eta.shape[0]
     for i in range(n):
         for k in range(k_count):
-            value = base[i]
+            value = base[i, k]
             for j in range(m):
                 value += row_stats[i, j] * eta[k, j]
             out[i, k] = value - log_partition[k]
@@ -898,7 +906,7 @@ def _generated_numba_row_pieces(
         base_value = spec.base_measure(enc, engine)
     else:
         base_value = np.zeros(row_stats.shape[0], dtype=np.float64)
-    base = _generated_numba_row_vector(base_value, row_stats.shape[0], "base_measure")
+    base = _generated_numba_base(base_value, row_stats.shape[0])
     return row_stats, base
 
 
@@ -926,6 +934,23 @@ def _generated_numba_row_vector(value: Any, row_count: int, name: str) -> np.nda
     if arr.ndim != 1 or arr.shape[0] != row_count:
         raise ValueError("generated numba %s must be scalar or a row vector." % name)
     return np.ascontiguousarray(arr, dtype=np.float64)
+
+
+def _generated_numba_base(value: Any, row_count: int) -> np.ndarray:
+    """Return a base measure as a scalar-filled ``(n,)`` vector or a component ``(n, k)`` matrix.
+
+    A component-dependent base measure (one a single shared natural parameter cannot
+    encode, such as a degenerate exponential-family boundary) keeps its ``(n, k)``
+    component axis so the stacked numba loop can index it per component.
+    """
+    arr = np.asarray(_numpy_engine().to_numpy(value), dtype=np.float64)
+    if arr.ndim == 0:
+        return np.full(row_count, float(arr), dtype=np.float64)
+    if arr.shape[0] != row_count:
+        raise ValueError("generated numba base_measure must have a matching row axis.")
+    if arr.ndim in (1, 2):
+        return np.ascontiguousarray(arr, dtype=np.float64)
+    raise ValueError("generated numba base_measure must be scalar, a row vector, or an (n, k) matrix.")
 
 
 def _generated_numba_eta_vector(params: dict[str, Any], spec: ExponentialFamilySpec) -> np.ndarray:
