@@ -51,7 +51,12 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_declaration(cls):
-        from pysp.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        from pysp.stats.compute.declarations import (
+            DistributionDeclaration,
+            ExponentialFamilySpec,
+            ParameterSpec,
+            StatisticSpec,
+        )
 
         return DistributionDeclaration(
             name="negative_binomial",
@@ -62,7 +67,17 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
             ),
             statistics=(StatisticSpec("count"), StatisticSpec("sum")),
             support="non_negative_integer",
-            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure_from_params=cls.exp_family_base_measure_from_params,
+                legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+                # h(x) = lgamma(x+r) - lgamma(r) - log(x!) depends on the per-component shape r,
+                # so the fixed-base stacked loop does not apply; stacked scoring uses the backend
+                # hooks below while the scalar canonical map still uses the spec above.
+                fixed_base=False,
+            ),
         )
 
     @staticmethod
@@ -72,6 +87,35 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Return per-row negative-binomial sufficient statistics in accumulator order."""
         vals = engine.asarray(x[0])
         return vals * 0.0 + engine.asarray(1.0), vals
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: tuple[Any, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the NegativeBinomial sufficient statistic ``T(x) = (x,)`` (``r`` fixed)."""
+        return (engine.asarray(x[0]),)
+
+    @staticmethod
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the NegativeBinomial natural parameter ``eta = log(1 - p)`` (``r`` fixed)."""
+        return (engine.log(engine.asarray(1.0) - params["p"]),)
+
+    @staticmethod
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
+        """Return the NegativeBinomial log partition ``A = -r * log(p)`` (``r`` fixed)."""
+        return -params["r"] * engine.log(params["p"])
+
+    @staticmethod
+    def exp_family_base_measure_from_params(x: tuple[Any, Any], params: dict[str, Any], engine: Any) -> Any:
+        """Return the NegativeBinomial base measure ``log h(x) = lgamma(x+r) - lgamma(r) - log(x!)``.
+
+        The base measure carries the binomial-coefficient term and depends on the fixed
+        shape ``r``; invalid (non-integer / negative) counts are mapped to ``-inf``.
+        """
+        vals = engine.asarray(x[0])
+        log_fact = engine.asarray(x[1])
+        r = engine.asarray(params["r"])
+        log_h = engine.gammaln(vals + r) - engine.gammaln(r) - log_fact
+        good = (vals >= 0.0) & (engine.floor(vals) == vals)
+        return engine.where(good, log_h, engine.asarray(-np.inf))
 
     def __init__(self, r: float, p: float, name: str | None = None, keys: str | None = None) -> None:
         if r <= 0.0 or not np.isfinite(r):
