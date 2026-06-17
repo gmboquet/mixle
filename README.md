@@ -24,6 +24,14 @@ Torch (GPU).
 - **A PPL surface** — [`pysp.ppl`](#probabilistic-programming-pyspppl): put `free` or another
   distribution in any parameter slot, then `.fit().sample().posterior()`.
 
+## Contents
+
+[Installation](#installation) · [Quickstart](#quickstart) · [Core concepts](#core-concepts) ·
+[Distribution catalog](#distribution-catalog) · [Probabilistic programming](#probabilistic-programming-pyspppl) ·
+[Frequentist & Bayesian](#frequentist--bayesian--one-switch) · [Engines & orchestration](#engines--orchestration) ·
+[Enumeration & ranking](#enumeration--ranking) · [Beyond fitting](#beyond-fitting) ·
+[Examples & notebooks](#examples--notebooks) · [Tests](#tests) · [License](#license)
+
 ## Installation
 
 Python 3.10+ (developed on 3.12). The base install (numpy, scipy, pandas, mpmath) covers every
@@ -72,6 +80,58 @@ est = MixtureEstimator([CompositeEstimator((
 model = optimize(data, est, max_its=100, rng=np.random.RandomState(1))
 print(model.w)   # ≈ [0.6, 0.4]
 ```
+
+For the same model in a more concise dialect, see [`pysp.ppl`](#probabilistic-programming-pyspppl).
+
+## Core concepts
+
+Each model family implements five cooperating pieces:
+
+| Piece             | Role                                                                        |
+| ----------------- | -------------------------------------------------------------------------- |
+| `...Distribution` | Parameters + `log_density(x)` / vectorized `seq_log_density(enc)`          |
+| `...Sampler`      | Draw samples (`dist.sampler(seed).sample(size)`)                           |
+| `...Estimator`    | Specifies the model to fit; closed-form M-step via `estimate()`           |
+| `...Accumulator`  | Collects sufficient statistics (E-step), mergeable across partitions       |
+| `...DataEncoder`  | `seq_encode(data)` flattens raw Python data into NumPy for the fast path   |
+
+`optimize(data, est)` (in `pysp.utils.estimation`) ties these together — EM to convergence locally
+(vectorized NumPy/Numba), scaling out to Spark/Dask/Torch/MPI by swapping one argument (see
+[Engines & orchestration](#engines--orchestration)).
+
+Also available: `best_of` (random restarts), `StreamingEstimator` / `IncrementalEstimator`
+(online EM), `fit_mle` / `fit_map` (autograd fitting with typed priors), `RecordDistribution` /
+`field(...)` (named dict/DataFrame observations), and `pysp.utils.automatic.get_estimator(data)`
+(infer an estimator straight from raw data).
+
+## Distribution catalog
+
+~90 composable families live in `pysp.stats`, grouped into subpackages (`leaf`, `multivariate`,
+`combinator`, `sets`, `latent`, `graph`, `bayes`, `compute`) but all re-exported at the top level —
+`from pysp.stats import GaussianDistribution` works regardless of where the file lives.
+
+- **Scalar / basic:** Gaussian, Student-t / Cauchy, Logistic, LogGaussian, Laplace, Uniform,
+  Exponential, Gamma, Inverse Gamma, Inverse Gaussian, Half-Normal, Gumbel, Beta, Weibull, Rayleigh,
+  Pareto, Poisson, Bernoulli, Geometric, Binomial, Negative Binomial, Log-Series, von Mises, Dirichlet,
+  categorical, plus multivariate / diagonal Gaussian, von Mises–Fisher, and multivariate Student-t.
+- **Combinators:** `CompositeDistribution` (tuples), `RecordDistribution` (named fields),
+  `SequenceDistribution`, `OptionalDistribution` (missing data), `TransformDistribution`,
+  `ConditionalDistribution`, `WeightedDistribution`.
+- **Latent structure:** mixtures (plain, heterogeneous, hierarchical, joint, semi-supervised), LDA,
+  PLSI, probabilistic PCA, HMMs (standard, segmental, lookback, tree, quantized), PCFGs, Markov chains,
+  hidden associations, IBP, Pitman-Yor processes, Bernoulli sets.
+- **Permutations & graphs:** Mallows and Plackett-Luce rankings, matchings, spanning trees, random
+  graphs (Erdős–Rényi, stochastic block, random dot-product), Spearman ranking.
+- **Bayesian:** conjugate priors (NormalGamma, NormalWishart, MvnGamma, Dirichlet, SymmetricDirichlet)
+  and variational Dirichlet-process / hierarchical-DP mixtures.
+
+Estimators accept `pseudo_count` (regularization), `prior` (a conjugate prior — `None` gives MLE),
+and `keys` (tying statistics across model parts). HMM-family models take `use_numba=True` for
+parallel Numba kernels (the first call pays a cached JIT cost).
+
+**API naming.** One stem per family (`<Stem>Distribution` / `Estimator` / `Sampler` /
+`Accumulator`, …) and descriptive argument names. Legacy spellings stay as aliases (prefer `weights`
+over `w`, `covariance` over `covar`, `max_iter` over `max_its`, …); passing both raises `TypeError`.
 
 ## Probabilistic programming (`pysp.ppl`)
 
@@ -144,26 +204,34 @@ For conjugate / exponential-family / mixture models pysp returns the *exact* pos
 sampling; for general posteriors the ensemble sampler leads on ESS/sec. See
 [`pysp/ppl/BENCHMARKS.md`](pysp/ppl/BENCHMARKS.md).
 
-## Core concepts
+## Frequentist & Bayesian — one switch
 
-Each model family implements five cooperating pieces:
+The prior is the single switch — no prior is maximum likelihood, a conjugate `prior=` makes the
+same machinery Bayesian:
 
-| Piece             | Role                                                                        |
-| ----------------- | -------------------------------------------------------------------------- |
-| `...Distribution` | Parameters + `log_density(x)` / vectorized `seq_log_density(enc)`          |
-| `...Sampler`      | Draw samples (`dist.sampler(seed).sample(size)`)                           |
-| `...Estimator`    | Specifies the model to fit; closed-form M-step via `estimate()`           |
-| `...Accumulator`  | Collects sufficient statistics (E-step), mergeable across partitions       |
-| `...DataEncoder`  | `seq_encode(data)` flattens raw Python data into NumPy for the fast path   |
+```python
+from pysp.utils.priors import NormalGammaPrior
 
-`optimize(data, est)` (in `pysp.utils.estimation`) ties these together — EM to convergence locally
-(vectorized NumPy/Numba), scaling out to Spark/Dask/Torch/MPI by swapping one argument (see
-[Engines & orchestration](#engines--orchestration)).
+GaussianEstimator()                          # MLE
+GaussianEstimator(prior=NormalGammaPrior())  # closed-form conjugate posterior — same EM call
+```
 
-Also available: `best_of` (random restarts), `StreamingEstimator` / `IncrementalEstimator`
-(online EM), `fit_mle` / `fit_map` (autograd fitting with typed priors), `RecordDistribution` /
-`field(...)` (named dict/DataFrame observations), and `pysp.utils.automatic.get_estimator(data)`
-(infer an estimator straight from raw data).
+`optimize` / `fit` auto-select the objective from the model (MLE, MAP, or variational ELBO; force it
+with `objective=`); `fit(...)` returns the posterior, `BayesianStreamingEstimator` carries it across
+batches, and `pysp.stats.dpm` / `hdpm` add (hierarchical) Dirichlet-process mixtures. Gradient MAP
+with typed priors is first-class too:
+
+```python
+from pysp.engines import TorchEngine
+from pysp.utils.fit import fit_map
+from pysp.utils.priors import DirichletPrior, MixturePrior, NormalGammaPrior
+
+enc = model.dist_to_encoder().seq_encode(data)
+fitted, objective = fit_map(enc, model, engine=TorchEngine(device="cpu", dtype="float64"),
+                            priors=MixturePrior(
+                                components=[NormalGammaPrior(mu0=-2.0), NormalGammaPrior(mu0=2.0)],
+                                weights=DirichletPrior([2.0, 2.0])))
+```
 
 ## Engines & orchestration
 
@@ -219,35 +287,6 @@ to_latex(GaussianDistribution(0.0, 1.0).backend_seq_log_density(x, SYMBOLIC_ENGI
 # '- 0.5 x^{2} - 0.918938533204673'
 ```
 
-## Frequentist & Bayesian — one switch
-
-The prior is the single switch — no prior is maximum likelihood, a conjugate `prior=` makes the
-same machinery Bayesian:
-
-```python
-from pysp.utils.priors import NormalGammaPrior
-
-GaussianEstimator()                          # MLE
-GaussianEstimator(prior=NormalGammaPrior())  # closed-form conjugate posterior — same EM call
-```
-
-`optimize` / `fit` auto-select the objective from the model (MLE, MAP, or variational ELBO; force it
-with `objective=`); `fit(...)` returns the posterior, `BayesianStreamingEstimator` carries it across
-batches, and `pysp.stats.dpm` / `hdpm` add (hierarchical) Dirichlet-process mixtures. Gradient MAP
-with typed priors is first-class too:
-
-```python
-from pysp.engines import TorchEngine
-from pysp.utils.fit import fit_map
-from pysp.utils.priors import DirichletPrior, MixturePrior, NormalGammaPrior
-
-enc = model.dist_to_encoder().seq_encode(data)
-fitted, objective = fit_map(enc, model, engine=TorchEngine(device="cpu", dtype="float64"),
-                            priors=MixturePrior(
-                                components=[NormalGammaPrior(mu0=-2.0), NormalGammaPrior(mu0=2.0)],
-                                weights=DirichletPrior([2.0, 2.0])))
-```
-
 ## Enumeration & ranking
 
 Discrete and structured models can **enumerate their support in descending-probability order** and
@@ -270,10 +309,11 @@ some fields, best-first:
 record.conditional_enumerator({"country": "US"}).top_k(5)   # 5 likeliest records with country=US
 ```
 
-For decomposable families (`Composite` / `Record` / `Sequence` / `MarkovChain`), rank↔value is an exact count
-dynamic program at any depth (`count_dp_rank`, `count_dp_seek`, `cumulative_probability`,
-`count_dp_top_p` — the nucleus *size* without enumerating it, `mixture_cross_rank`). For very large or infinite supports, **budget-bounded quantized indexes** seek
-and unrank over just the most-probable region without enumerating everything:
+For decomposable families (`Composite` / `Record` / `Sequence` / `MarkovChain`), rank↔value is an
+exact count dynamic program at any depth (`count_dp_rank`, `count_dp_seek`, `cumulative_probability`,
+`count_dp_top_p` — the nucleus *size* without enumerating it, `mixture_cross_rank`). For very large
+or infinite supports, **budget-bounded quantized indexes** seek and unrank over just the
+most-probable region without enumerating everything:
 
 ```python
 index = dist.count_budget_index(budget_bits=20)               # index the top ~2**20 values
@@ -284,52 +324,14 @@ for value, log_prob in dist.count_budget_distinct(budget_bits=20):
 `pysp.utils.enumeration` provides the shared machinery (bounded best-first union, quantization,
 Kronecker-substitution count convolution).
 
-**Continuous families** realize the same four operations through the CDF and its inverse instead of
-discrete enumeration: every univariate continuous leaf (Gaussian, Gamma, Exponential, Beta, Laplace,
-LogGaussian, Logistic, Pareto, Rayleigh, Student-t, Uniform, Weibull) has an exact `cdf(x)` (the
-"index of" `x`) and `quantile(q)` (the value at cumulative-probability index `q` — the continuous
-"arbitrary index"; a quantile grid enumerates the support in order). Multivariate Gaussians expose an
-exact probability-ordered cumulative (the chi-square-of-Mahalanobis highest-density-region mass), and
-von Mises–Fisher exposes one too (the cosine-marginal tail), both surfaced via `density_rank` as method
-`exact-analytic`. Those families also invert it — `density_quantile(q)` returns a representative point at
-cumulative-density index `q` (on the `q`-HDR contour), the multivariate "arbitrary index"; sweeping `q`
-enumerates the support in descending density. For any other samplable family (Dirichlet and the parameter
-priors, MVN mixtures, the coupled topic/association models), `density_rank` returns the cumulative
-probability by Monte Carlo, and every distribution inherits a Monte-Carlo `density_quantile(q)`
-(representative arbitrary index) and `density_enumeration(num_points)` (descending-density representative
-sweep) — so all four operations are reachable for every samplable family, *exactly* where the support is
-countable or has a closed-form density quantile, and as *stochastic representatives* otherwise.
-
-## Distribution catalog
-
-~90 composable families live in `pysp.stats`, grouped into subpackages (`leaf`, `multivariate`,
-`combinator`, `sets`, `latent`, `graph`, `bayes`, `compute`) but all re-exported at the top level —
-`from pysp.stats import GaussianDistribution` works regardless of where the file lives.
-
-- **Scalar / basic:** Gaussian, Student-t / Cauchy, Logistic, LogGaussian, Laplace, Uniform,
-  Exponential, Gamma, Inverse Gamma, Inverse Gaussian, Half-Normal, Gumbel, Beta, Weibull, Rayleigh,
-  Pareto, Poisson, Bernoulli, Geometric, Binomial, Negative Binomial, Log-Series, von Mises, Dirichlet,
-  categorical, plus multivariate / diagonal Gaussian, von Mises–Fisher, and multivariate Student-t.
-- **Combinators:** `CompositeDistribution` (tuples), `RecordDistribution` (named fields),
-  `SequenceDistribution`, `OptionalDistribution` (missing data), `TransformDistribution`,
-  `ConditionalDistribution`, `WeightedDistribution`.
-- **Latent structure:** mixtures (plain, heterogeneous, hierarchical, joint, semi-supervised), LDA,
-  PLSI, probabilistic PCA, HMMs (standard, segmental, lookback, tree, quantized), PCFGs, Markov chains,
-  hidden associations, IBP, Pitman-Yor processes, Bernoulli sets.
-- **Permutations & graphs:** Mallows and Plackett-Luce rankings, matchings, spanning trees, random
-  graphs (Erdős–Rényi, stochastic block, random dot-product), Spearman ranking.
-- **Bayesian:** conjugate priors (NormalGamma, NormalWishart, MvnGamma, Dirichlet, SymmetricDirichlet)
-  and variational Dirichlet-process / hierarchical-DP mixtures.
-
-Estimators accept `pseudo_count` (regularization), `prior` (a conjugate prior — `None` gives MLE),
-and `keys` (tying statistics across model parts). HMM-family models take `use_numba=True` for
-parallel Numba kernels (the first call pays a cached JIT cost).
-
-### API naming
-
-One stem per family (`<Stem>Distribution` / `Estimator` / `Sampler` / `Accumulator`, …) and
-descriptive argument names. Legacy spellings stay as aliases (prefer `weights` over `w`,
-`covariance` over `covar`, `max_iter` over `max_its`, …); passing both raises `TypeError`.
+**Continuous families** realize the same operations through the CDF and its inverse. Every univariate
+continuous leaf has an exact `cdf(x)` (the "index of `x`") and `quantile(q)` (the value at
+cumulative-probability `q`); multivariate Gaussian and von Mises–Fisher expose an exact
+probability-ordered cumulative plus `density_quantile(q)` (a representative point on the `q`-HDR
+contour) — both surfaced via `density_rank` as method `exact-analytic`. Any other samplable family
+falls back to a Monte-Carlo `density_rank` / `density_quantile(q)` / `density_enumeration(n)`, so all
+four operations are reachable everywhere — exact where the support is countable or has a closed-form
+density quantile, stochastic representatives otherwise.
 
 ## Beyond fitting
 
@@ -357,9 +359,7 @@ Every script is self-contained — it samples from a known model, then refits an
 downloads). The `gallery_*_example.py` scripts tour the families in bulk; the rest focus on
 individual models end to end.
 
-### Running on Spark
-
-PySpark 4.x needs a JVM (Java 17/21), and workers must use the driver's Python:
+**Running on Spark.** PySpark 4.x needs a JVM (Java 17/21), and workers must use the driver's Python:
 
 ```sh
 export JAVA_HOME=$(/usr/libexec/java_home -v 17)
@@ -374,8 +374,8 @@ go through identical math.
 ## Tests
 
 ```sh
-python -m pytest -m fast                          # quick correctness gate
-python -m pytest -m "not optional and not benchmark"   # full local suite
+python -m pytest -m fast                                # quick correctness gate
+python -m pytest -m "not optional and not benchmark"    # full local suite
 ```
 
 Tests use `unittest.TestCase` internally with pytest markers / CI tiers (see
