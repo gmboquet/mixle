@@ -107,6 +107,10 @@ class FiniteStochasticTransformDistribution(SequenceEncodableProbabilityDistribu
         rv[valid] = self._log_py[y[valid]]
         return rv
 
+    def support_size(self) -> int:
+        """Number of finite outputs ``{0, ..., n-1}``."""
+        return int(self.num_output)
+
     def sampler(self, seed: int | None = None) -> "FiniteStochasticTransformSampler":
         """Return a sampler drawing ``X ~ dist`` then ``Y ~ Categorical(kernel[X])``."""
         return FiniteStochasticTransformSampler(self, seed)

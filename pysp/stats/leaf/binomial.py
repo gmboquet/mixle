@@ -375,6 +375,10 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         max_bounds = [max_val if hi is None else max(hi, max_val) for hi in init_max]
         return count, obs_sum, engine.asarray(min_bounds), engine.asarray(max_bounds)
 
+    def support_size(self) -> int:
+        """``n + 1`` outcomes ``min_val + {0, ..., n}``."""
+        return int(self.n) + 1
+
     def sampler(self, seed: int | None = None) -> "BinomialSampler":
         """Returns BinomialSampler for generating samples from BinomialDistribution(n,p,min_val).
 
