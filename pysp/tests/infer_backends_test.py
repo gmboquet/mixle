@@ -3,19 +3,19 @@
 The same correlated-Gaussian posterior is expressed once per backend *contract* (a numpy fused
 ``value_and_grad``; an ``@njit`` fused ``value_and_grad``; a jax scalar ``logp``; a torch scalar
 ``logp``) and every *available* backend is asked to recover it. Each backend's test is skipped if
-its engine is absent (mirroring ``pysp/tests/ppl_engine_test.py``); the numpy and numba backends
-must always run.
+its engine is absent (mirroring ``pysp/tests/ppl_engine_test.py``); only the dependency-free numpy
+backend always runs.
 """
 
 import importlib.util
 import unittest
 
 import numpy as np
-from numba import njit
 
 import pysp.infer as infer
 from pysp.infer.backends import available_backends, get_inference_backend, select_backend
 
+HAS_NUMBA = importlib.util.find_spec("numba") is not None
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 HAS_JAX = importlib.util.find_spec("jax") is not None and importlib.util.find_spec("numpyro") is not None
 
@@ -37,6 +37,8 @@ def _numpy_vg():
 
 
 def _njit_vg():
+    from numba import njit
+
     mu = _MU.copy()
     prec = _PREC.copy()
 
@@ -75,7 +77,9 @@ def _jax_logp():
 
 
 # Build per-backend targets only for the engines that are present.
-_TARGETS = {"numpy": _numpy_vg, "numba": _njit_vg}
+_TARGETS = {"numpy": _numpy_vg}
+if HAS_NUMBA:
+    _TARGETS["numba"] = _njit_vg
 if HAS_TORCH:
     _TARGETS["torch"] = _torch_logp
 if HAS_JAX:
@@ -83,18 +87,22 @@ if HAS_JAX:
 
 
 class RegistryTest(unittest.TestCase):
-    def test_numpy_and_numba_always_available(self):
-        avail = available_backends()
-        self.assertIn("numpy", avail)
-        self.assertIn("numba", avail)
+    def test_numpy_always_available(self):
+        self.assertIn("numpy", available_backends())
 
     def test_auto_prefers_numpy(self):
         # No target-kind hint -> the dependency-free numpy path is the default.
         self.assertEqual(select_backend("auto"), "numpy")
 
+    @unittest.skipUnless(HAS_NUMBA, "numba is not installed")
+    def test_numba_available_when_installed(self):
+        self.assertIn("numba", available_backends())
+
+    @unittest.skipUnless(HAS_NUMBA, "numba is not installed")
     def test_explicit_backend_honored(self):
         self.assertEqual(select_backend("numba"), "numba")
 
+    @unittest.skipUnless(HAS_NUMBA, "numba is not installed")
     def test_target_kind_hint_routes(self):
         self.assertEqual(select_backend("auto", target="njit_vg"), "numba")
 
@@ -130,6 +138,7 @@ class BackendParityTest(unittest.TestCase):
     def test_numpy_recovers_posterior(self):
         self._check_recovery("numpy")
 
+    @unittest.skipUnless(HAS_NUMBA, "numba is not installed")
     def test_numba_recovers_posterior(self):
         self._check_recovery("numba")
 
@@ -155,8 +164,8 @@ class MultiChainRhatTest(unittest.TestCase):
     def test_numpy_rhat(self):
         self._check_rhat("numpy")
 
+    @unittest.skipUnless(HAS_NUMBA, "numba is not installed")
     def test_numba_rhat(self):
-        # numba is the always-available "other" backend (it's a core dep).
         self._check_rhat("numba")
 
     @unittest.skipUnless(HAS_JAX, "jax/numpyro not installed")
