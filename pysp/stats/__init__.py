@@ -456,6 +456,16 @@ __all__ = [
     "TruncatedEstimator",
     "TruncatedDataEncoder",
     "TruncatedEnumerator",
+    "CensoredDistribution",
+    "CensoredSampler",
+    "CensoredEstimator",
+    "CensoredAccumulator",
+    "CensoredAccumulatorFactory",
+    "CensoredDataEncoder",
+    "ExponentiallyModifiedGaussianDistribution",
+    "ExponentiallyModifiedGaussianSampler",
+    "ExponentiallyModifiedGaussianEstimator",
+    "ExponentiallyModifiedGaussianDataEncoder",
     "ExponentialTiltedDistribution",
     "ExponentialTiltedSampler",
     "ExponentialTiltedEstimator",
@@ -520,6 +530,14 @@ from pysp.stats.bayes.pitman_yor import (
 from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution, SymmetricDirichletSampler
 
 ### combinators distributions
+from pysp.stats.combinator.censored import (
+    CensoredAccumulator,
+    CensoredAccumulatorFactory,
+    CensoredDataEncoder,
+    CensoredDistribution,
+    CensoredEstimator,
+    CensoredSampler,
+)
 from pysp.stats.combinator.composite import (
     CompositeDataEncoder,
     CompositeDistribution,
@@ -926,6 +944,12 @@ from pysp.stats.leaf.categorical import (
     CategoricalEnumerator,
     CategoricalEstimator,
     CategoricalSampler,
+)
+from pysp.stats.leaf.exgaussian import (
+    ExponentiallyModifiedGaussianDataEncoder,
+    ExponentiallyModifiedGaussianDistribution,
+    ExponentiallyModifiedGaussianEstimator,
+    ExponentiallyModifiedGaussianSampler,
 )
 from pysp.stats.leaf.exponential import (
     ExponentialDataEncoder,
