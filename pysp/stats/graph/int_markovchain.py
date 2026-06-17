@@ -661,20 +661,71 @@ class IntegerMarkovChainSampler(DistributionSampler):
         else:
             return []
 
-    def sample(self, size: int | None = None) -> list[Sequence[int]] | Sequence[int]:
+    def _sample_batched(self, size: int) -> list[Sequence[int]]:
+        """Vectorized batch sample: per-chain init/length draws, then transitions across chains.
+
+        The length and initial-state draws are taken per chain in order (byte-identical to the loop),
+        then the transition step is vectorized: at each time index every live chain's lag-index is
+        computed at once, the conditional rows are gathered, and all next states are drawn together.
+        Because the transition draws are taken across chains rather than per chain, the transition
+        portion is statistically equivalent but NOT byte-identical to ``batched=False``.
+        """
+        if self.init_sampler is None or self.len_sampler is None:
+            raise Exception("IntegerMarkovChainSampler requires init_dist and len_dist for unconditional sampling.")
+        lag = self.dist.lag
+        n_val = self.dist.num_values
+        m_shape = [n_val] * lag
+
+        lengths = np.asarray(self.len_sampler.sample(size=size)).astype(int).reshape(-1)
+        # Per-chain init draws, in order (byte-identical). Chains with length < lag yield [].
+        seqs: list[list[int]] = []
+        for cnt in lengths:
+            if cnt >= lag:
+                seqs.append(list(self.init_sampler.sample()))
+            else:
+                seqs.append([])
+
+        max_len = int(lengths.max()) if size else 0
+        for t in range(lag, max_len):
+            live = np.flatnonzero((lengths >= lag) & (lengths > t))
+            if len(live) == 0:
+                continue
+            # lag-index per live chain from its last `lag` states
+            last = np.asarray([seqs[c][t - lag : t] for c in live], dtype=np.int64)
+            idx = (
+                np.ravel_multi_index([last[:, k] for k in range(lag)], m_shape) if lag > 0 else np.zeros(len(live), int)
+            )
+            rows = self.dist.cond_dist[idx, :]
+            cdf = np.cumsum(rows, axis=1)
+            u = self.trans_sampler.random_sample(len(live)) * cdf[:, -1]
+            nxt = (cdf < u[:, None]).sum(axis=1)
+            for k, c in enumerate(live):
+                seqs[c].append(int(nxt[k]))
+        return seqs
+
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[Sequence[int]] | Sequence[int]:
         """Draw iid samples from an integer Markov chain distribution.
+
+        With ``batched=True`` (default) and ``size`` not None, the lengths and initial states are drawn
+        per chain (byte-identical to the loop) and the lag-conditional transitions are vectorized across
+        all live chains at each time index. The transition draws change RNG consumption order, so the
+        output is statistically equivalent but NOT byte-identical to ``batched=False``. Set
+        ``batched=False`` to reproduce the exact legacy per-sequence output for a given seed.
 
         Args:
             size (Optional[int]): If None, size is taken to be 0.
+            batched (bool): Vectorize transition draws across chains (default); set False for the
+                legacy per-sequence loop.
 
         Returns:
             Sequence[int] if size is None, else List[Sequence[int]] with length equal to size.
 
         """
-        if size is not None:
-            return [self.single_sample() for i in range(size)]
-        else:
+        if size is None:
             return self.single_sample()
+        if not batched:
+            return [self.single_sample() for i in range(size)]
+        return self._sample_batched(size)
 
     def sample_given(self, x: Sequence[int]) -> int:
         """Sample from the Markov chain conditioned on a given value 'x'.
