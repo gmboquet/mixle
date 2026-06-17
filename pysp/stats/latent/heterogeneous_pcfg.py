@@ -439,6 +439,14 @@ class HeterogeneousPCFGDistribution(SequenceEncodableProbabilityDistribution):
                 out.append(self._engine_inside_ll(engine, terminal_ld[offsets[i] : offsets[i + 1]], n))
         return engine.stack(out, axis=0)
 
+    def to_fisher(self, **kwargs):
+        """Inside-outside Fisher view for the PCFG."""
+        if hasattr(self, "terminal_rules") and hasattr(self, "_inside_outside"):
+            from pysp.utils.fisher import HeterogeneousPCFGFisherView
+
+            return HeterogeneousPCFGFisherView(self)
+        return super().to_fisher(**kwargs)
+
     def sampler(self, seed: int | None = None) -> "HeterogeneousPCFGSampler":
         """Return a sampler for drawing observations from this distribution."""
         return HeterogeneousPCFGSampler(self, seed)

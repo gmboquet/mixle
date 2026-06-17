@@ -357,6 +357,14 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         wrapper_counts = engine.stack((missing_counts, observed_counts), axis=1)
         return tuple((wrapper_counts[i], child_values[i]) for i in range(num_components))
 
+    def to_fisher(self, **kwargs):
+        """Fisher view for the optional/missing-gate."""
+        if hasattr(self, "dist"):
+            from pysp.utils.fisher import OptionalFisherView
+
+            return OptionalFisherView(self)
+        return super().to_fisher(**kwargs)
+
     def sampler(self, seed: int | None = None) -> "OptionalSampler":
         """Return a sampler for drawing observations from this distribution."""
         return OptionalSampler(self, seed)

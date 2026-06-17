@@ -408,6 +408,12 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
+    def to_fisher(self, **kwargs):
+        """Reuse the equivalent flat mixture's Fisher view."""
+        if hasattr(self, "to_mixture"):
+            return self.to_mixture().to_fisher(**kwargs)
+        return super().to_fisher(**kwargs)
+
     def sampler(self, seed: int | None = None) -> "HierarchicalMixtureSampler":
         """Return HierarchicalMixtureSampler object created from attribute variables."""
         return HierarchicalMixtureSampler(self, seed)

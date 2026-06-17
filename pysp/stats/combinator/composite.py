@@ -292,6 +292,14 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             total *= s
         return total
 
+    def to_fisher(self, **kwargs):
+        """Structural Fisher view (product of child views)."""
+        if hasattr(self, "dists"):
+            from pysp.utils.fisher import CompositeFisherView
+
+            return CompositeFisherView(self)
+        return super().to_fisher(**kwargs)
+
     def sampler(self, seed: int | None = None) -> "CompositeSampler":
         """Create CompositeSampler for sampling from CompositeDistribution instance.
 

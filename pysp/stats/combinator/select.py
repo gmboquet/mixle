@@ -266,6 +266,14 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
 
         return SelectGradientFitState(self, [recurse(dist, engine, torch, leaves) for dist in self.dists])
 
+    def to_fisher(self, **kwargs):
+        """Fisher view for the select combinator."""
+        if hasattr(self, "dists"):
+            from pysp.utils.fisher import SelectFisherView
+
+            return SelectFisherView(self)
+        return super().to_fisher(**kwargs)
+
     def sampler(self, seed: int | None = None) -> "SelectSampler":
         """Creates a SelectSampler object for sampling from the child distributions.
 

@@ -159,6 +159,14 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         """Returns a WeightedDataEncoder for encoding sequences of (value, weight) observations."""
         return WeightedDataEncoder(encoder=self.dist.dist_to_encoder())
 
+    def to_fisher(self, **kwargs):
+        """Fisher view for the weighted wrapper."""
+        if hasattr(self, "dist"):
+            from pysp.utils.fisher import WeightedFisherView
+
+            return WeightedFisherView(self)
+        return super().to_fisher(**kwargs)
+
     def estimator(self, pseudo_count: float | None = None) -> "WeightedEstimator":
         """Create a WeightedEstimator wrapping the base distribution's estimator.
 
