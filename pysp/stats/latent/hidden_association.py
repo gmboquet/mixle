@@ -62,7 +62,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.stats.latent.int_plsi import bag_stream
 from pysp.stats.latent.mixture import MixtureDistribution
 from pysp.utils.enumeration import BufferedStream, frontier_merge
 from pysp.utils.optsutil import count_by_value
@@ -355,6 +354,10 @@ class HiddenAssociationEnumerator(DistributionEnumerator):
             dist (HiddenAssociationDistribution): Distribution whose support is enumerated.
         """
         super().__init__(dist)
+        # Imported lazily: int_plsi decorates numba kernels at import time, and this
+        # enumerator is rarely constructed -- keep `import pysp.stats` lightweight.
+        from pysp.stats.latent.int_plsi import bag_stream
+
         len_dist = dist.len_dist
 
         def make_inner(s1, lp1):

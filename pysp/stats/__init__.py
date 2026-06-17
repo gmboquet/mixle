@@ -820,18 +820,6 @@ from pysp.stats.latent.hidden_association import (
     HiddenAssociationEstimator,
     HiddenAssociationSampler,
 )
-from pysp.stats.latent.hidden_markov import (
-    HiddenMarkovDataEncoder,
-    HiddenMarkovEstimator,
-    HiddenMarkovModelAccumulator,
-    HiddenMarkovModelAccumulatorFactory,
-    HiddenMarkovModelDataEncoder,
-    HiddenMarkovModelDistribution,
-    HiddenMarkovModelEnumerator,
-    HiddenMarkovModelEstimator,
-    HiddenMarkovModelSampler,
-    HiddenMarkovSampler,
-)
 
 ### Reduced Generic Distributions
 from pysp.stats.latent.hmixture import (
@@ -847,18 +835,6 @@ from pysp.stats.latent.ibp import (
     IndianBuffetProcessEstimator,
     IndianBuffetProcessSampler,
 )
-from pysp.stats.latent.int_hidden_association import (
-    IntegerHiddenAssociationDataEncoder,
-    IntegerHiddenAssociationDistribution,
-    IntegerHiddenAssociationEstimator,
-    IntegerHiddenAssociationSampler,
-)
-from pysp.stats.latent.int_plsi import (
-    IntegerPLSIDataEncoder,
-    IntegerPLSIDistribution,
-    IntegerPLSIEstimator,
-    IntegerPLSISampler,
-)
 from pysp.stats.latent.jmixture import (
     JointMixtureDataEncoder,
     JointMixtureDistribution,
@@ -866,7 +842,6 @@ from pysp.stats.latent.jmixture import (
     JointMixtureEstimator,
     JointMixtureSampler,
 )
-from pysp.stats.latent.lda import LDADataEncoder, LDADistribution, LDAEstimator, LDASampler
 
 ### Generic Distributions
 from pysp.stats.latent.mixture import (
@@ -883,12 +858,6 @@ from pysp.stats.latent.ppca import (
     ProbabilisticPCAEstimator,
     ProbabilisticPCASampler,
 )
-from pysp.stats.latent.quantized_hmm import (
-    QuantizedHiddenMarkovEstimator,
-    QuantizedHiddenMarkovModelDistribution,
-    QuantizedHiddenMarkovModelEnumerator,
-    QuantizedHiddenMarkovModelEstimator,
-)
 from pysp.stats.latent.segmental_hmm import (
     SegmentalHiddenMarkovDataEncoder,
     SegmentalHiddenMarkovDistribution,
@@ -904,13 +873,6 @@ from pysp.stats.latent.ss_mixture import (
     SemiSupervisedMixtureDistribution,
     SemiSupervisedMixtureEstimator,
     SemiSupervisedMixtureSampler,
-)
-from pysp.stats.latent.tree_hmm import (
-    TreeHiddenMarkovEstimator,
-    TreeHiddenMarkovModelDistribution,
-    TreeHiddenMarkovModelEstimator,
-    TreeHiddenMarkovModelSampler,
-    TreeHiddenMarkovSampler,
 )
 
 ### Discrete base distributions
@@ -1162,21 +1124,20 @@ def _register_builtin_compute_metadata() -> None:
         register_capabilities(dist_type, numba_caps)
 
     for dist_type in (
-        HiddenMarkovModelDistribution,
-        QuantizedHiddenMarkovModelDistribution,
         SegmentalHiddenMarkovModelDistribution,
-        TreeHiddenMarkovModelDistribution,
         HeterogeneousMixtureDistribution,
         HierarchicalMixtureDistribution,
         JointMixtureDistribution,
         SemiSupervisedMixtureDistribution,
         DiracLengthMixtureDistribution,
         HiddenAssociationDistribution,
-        IntegerHiddenAssociationDistribution,
-        IntegerPLSIDistribution,
-        LDADistribution,
     ):
         register_capabilities(dist_type, legacy_numpy_caps)
+
+    # The HMM/PLSI/LDA distributions live in heavy numba modules that are imported
+    # lazily (see _LAZY_NAMES / __getattr__ below). Their legacy_numpy capabilities
+    # are registered the first time one of those modules is accessed, which always
+    # precedes first use of the distribution. See _register_lazy_module_capabilities.
 
     numpy_only_reasons = {}
     for dist_type, reason in numpy_only_reasons.items():
@@ -1230,6 +1191,105 @@ def _register_builtin_compute_metadata() -> None:
 
 
 _register_builtin_compute_metadata()
+
+
+# ---------------------------------------------------------------------------
+# Lazy submodule loading (PEP 562).
+#
+# A handful of latent modules pull in numba and decorate cache=True kernels at
+# import time, which costs ~1s even when no HMM/PLSI/LDA model is used. We map
+# their public names here and import the module only on first attribute access.
+# The names still resolve via `from pysp.stats import X` and `import *` (they
+# remain in __all__), and the module's legacy_numpy compute capabilities are
+# registered on that first access -- always before the distribution is used.
+# ---------------------------------------------------------------------------
+_LAZY_NAMES: dict[str, str] = {
+    # hidden_markov
+    "HiddenMarkovDataEncoder": "pysp.stats.latent.hidden_markov",
+    "HiddenMarkovEstimator": "pysp.stats.latent.hidden_markov",
+    "HiddenMarkovModelAccumulator": "pysp.stats.latent.hidden_markov",
+    "HiddenMarkovModelAccumulatorFactory": "pysp.stats.latent.hidden_markov",
+    "HiddenMarkovModelDataEncoder": "pysp.stats.latent.hidden_markov",
+    "HiddenMarkovModelDistribution": "pysp.stats.latent.hidden_markov",
+    "HiddenMarkovModelEnumerator": "pysp.stats.latent.hidden_markov",
+    "HiddenMarkovModelEstimator": "pysp.stats.latent.hidden_markov",
+    "HiddenMarkovModelSampler": "pysp.stats.latent.hidden_markov",
+    "HiddenMarkovSampler": "pysp.stats.latent.hidden_markov",
+    # quantized_hmm (imports hidden_markov at module top)
+    "QuantizedHiddenMarkovEstimator": "pysp.stats.latent.quantized_hmm",
+    "QuantizedHiddenMarkovModelDistribution": "pysp.stats.latent.quantized_hmm",
+    "QuantizedHiddenMarkovModelEnumerator": "pysp.stats.latent.quantized_hmm",
+    "QuantizedHiddenMarkovModelEstimator": "pysp.stats.latent.quantized_hmm",
+    # tree_hmm
+    "TreeHiddenMarkovEstimator": "pysp.stats.latent.tree_hmm",
+    "TreeHiddenMarkovModelDistribution": "pysp.stats.latent.tree_hmm",
+    "TreeHiddenMarkovModelEstimator": "pysp.stats.latent.tree_hmm",
+    "TreeHiddenMarkovModelSampler": "pysp.stats.latent.tree_hmm",
+    "TreeHiddenMarkovSampler": "pysp.stats.latent.tree_hmm",
+    # int_plsi
+    "IntegerPLSIDataEncoder": "pysp.stats.latent.int_plsi",
+    "IntegerPLSIDistribution": "pysp.stats.latent.int_plsi",
+    "IntegerPLSIEstimator": "pysp.stats.latent.int_plsi",
+    "IntegerPLSISampler": "pysp.stats.latent.int_plsi",
+    # int_hidden_association (imports int_plsi + numba)
+    "IntegerHiddenAssociationDataEncoder": "pysp.stats.latent.int_hidden_association",
+    "IntegerHiddenAssociationDistribution": "pysp.stats.latent.int_hidden_association",
+    "IntegerHiddenAssociationEstimator": "pysp.stats.latent.int_hidden_association",
+    "IntegerHiddenAssociationSampler": "pysp.stats.latent.int_hidden_association",
+    # lda
+    "LDADataEncoder": "pysp.stats.latent.lda",
+    "LDADistribution": "pysp.stats.latent.lda",
+    "LDAEstimator": "pysp.stats.latent.lda",
+    "LDASampler": "pysp.stats.latent.lda",
+}
+
+# Distribution classes (by attribute name) whose legacy_numpy capabilities must be
+# registered when their lazy module is first loaded -- previously registered eagerly
+# in _register_builtin_compute_metadata.
+_LAZY_MODULE_CAP_NAMES: dict[str, tuple[str, ...]] = {
+    "pysp.stats.latent.hidden_markov": ("HiddenMarkovModelDistribution",),
+    "pysp.stats.latent.quantized_hmm": ("QuantizedHiddenMarkovModelDistribution",),
+    "pysp.stats.latent.tree_hmm": ("TreeHiddenMarkovModelDistribution",),
+    "pysp.stats.latent.int_hidden_association": ("IntegerHiddenAssociationDistribution",),
+    "pysp.stats.latent.int_plsi": ("IntegerPLSIDistribution",),
+    "pysp.stats.latent.lda": ("LDADistribution",),
+}
+
+_LAZY_CAPS_REGISTERED: set[str] = set()
+
+
+def _register_lazy_module_capabilities(module_path: str, module) -> None:
+    """Register the legacy_numpy capabilities for a heavy module on first load."""
+    if module_path in _LAZY_CAPS_REGISTERED:
+        return
+    _LAZY_CAPS_REGISTERED.add(module_path)
+    caps = DistributionCapabilities(engine_ready=("numpy",), kernel_status="legacy_numpy")
+    for cls_name in _LAZY_MODULE_CAP_NAMES.get(module_path, ()):
+        register_capabilities(getattr(module, cls_name), caps)
+
+
+def __getattr__(name: str):
+    module_path = _LAZY_NAMES.get(name)
+    if module_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    module = importlib.import_module(module_path)
+    _register_lazy_module_capabilities(module_path, module)
+    # Bind every public name this module owns into this namespace so subsequent
+    # accesses skip __getattr__ entirely.
+    value = None
+    for attr, path in _LAZY_NAMES.items():
+        if path == module_path:
+            obj = getattr(module, attr)
+            globals()[attr] = obj
+            if attr == name:
+                value = obj
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY_NAMES))
 
 
 ### imports

@@ -202,6 +202,30 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             self.terminal_level = terminal_level
             self.use_numba = use_numba
 
+        # Cache for the parameter-only per-level marginal state probabilities
+        # (init_prob @ transitions^k). Keyed by the (w, transitions) identities so it
+        # is rebuilt if the parameters are ever replaced. See _get_p_level.
+        self._p_level_cache: tuple[int, int, np.ndarray] | None = None
+
+    def _get_p_level(self, levels: int) -> np.ndarray:
+        """Return per-level marginal state probabilities for the first ``levels`` levels.
+
+        ``level_state_prob`` depends only on the parameters (w, transitions), so the
+        result is memoized across ``seq_log_density`` calls. A larger cached table covers
+        smaller requests (each row k only depends on rows <= k), so we grow the cache
+        monotonically and slice it.
+        """
+        key_w = id(self.w)
+        key_t = id(self.transitions)
+        cache = self._p_level_cache
+        if cache is not None and cache[0] == key_w and cache[1] == key_t and cache[2].shape[0] >= levels:
+            return cache[2][:levels]
+
+        p_level = np.zeros((levels, self.num_states), dtype=np.float64)
+        level_state_prob(levels, self.num_states, self.transitions, self.w, p_level)
+        self._p_level_cache = (key_w, key_t, p_level)
+        return p_level
+
     def __str__(self) -> str:
         """Returns string representation of TreeHiddenMarkovModelDistribution object."""
         s1 = ",".join(map(str, self.topics))
@@ -271,8 +295,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             tot_cnt = tz[-1]
             num_trees = len(tz) - 1
 
-            p_level = np.zeros((max_level + 1, num_states), dtype=np.float64)
-            level_state_prob(max_level + 1, num_states, a_mat, w, p_level)
+            p_level = self._get_p_level(max_level + 1)
 
             pr_obs = np.zeros((tot_cnt, num_states), dtype=np.float64)
             ll_ret = np.zeros(num_trees, dtype=np.float64)
@@ -487,8 +510,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             a_mat = self.transitions
             tot_cnt = tz[-1]
 
-            p_level = np.zeros((max_level + 1, num_states), dtype=np.float64)
-            level_state_prob(max_level + 1, num_states, a_mat, w, p_level)
+            p_level = self._get_p_level(max_level + 1)
 
             pr_obs = np.zeros((tot_cnt, num_states), dtype=np.float64)
 
@@ -1861,7 +1883,6 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
         """
         if self.use_numba:
             xs = []  # flattened values of nodes in order encoded
-            idx = []  # idx corresponding to weight
             tz = [0]  # slice entries for a given observed tree
 
             #  Encodings for the beta pass
@@ -1924,12 +1945,12 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
 
                 tz.append(n)
 
-                #  Length distribution
-                idx.extend([i] * n)
-
                 nc_temp = np.zeros(n, dtype=np.int32)
                 nc_temp[u0] = u1
                 nc.extend(nc_temp)
+
+            #  Length distribution: one weight index per node, grouped by observed tree.
+            idx = np.repeat(np.arange(len(x), dtype=np.int32), tz[1:])
 
             tz = np.cumsum(tz).astype(np.int32)
 
