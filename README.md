@@ -257,10 +257,12 @@ exact probability-ordered cumulative (the chi-square-of-Mahalanobis highest-dens
 von Mises–Fisher exposes one too (the cosine-marginal tail), both surfaced via `density_rank` as method
 `exact-analytic`. Those families also invert it — `density_quantile(q)` returns a representative point at
 cumulative-density index `q` (on the `q`-HDR contour), the multivariate "arbitrary index"; sweeping `q`
-enumerates the support in descending density. For any other samplable family (Dirichlet and the parameter priors, MVN mixtures, the
-coupled topic/association models), `density_rank` returns the cumulative probability by Monte Carlo.
-Enumeration, arbitrary-index, and discrete rank are only defined where the support is countable and
-ordered, so for multivariate / uncountable supports the CDF is the operation that applies.
+enumerates the support in descending density. For any other samplable family (Dirichlet and the parameter
+priors, MVN mixtures, the coupled topic/association models), `density_rank` returns the cumulative
+probability by Monte Carlo, and every distribution inherits a Monte-Carlo `density_quantile(q)`
+(representative arbitrary index) and `density_enumeration(num_points)` (descending-density representative
+sweep) — so all four operations are reachable for every samplable family, *exactly* where the support is
+countable or has a closed-form density quantile, and as *stochastic representatives* otherwise.
 
 ## Distribution catalog
 

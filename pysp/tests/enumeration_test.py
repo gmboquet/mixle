@@ -257,6 +257,32 @@ class CapabilityMatrixTestCase(unittest.TestCase):
             self.assertEqual(r.method, expected_method, "%s: unexpected CDF method" % name)
             self.assertTrue(0.0 <= r.cumulative_probability <= 1.0, "%s: cdf out of range" % name)
 
+    def test_nonenumerable_families_have_arbitrary_index_and_enumeration(self):
+        # The remaining two capabilities -- arbitrary-index and (descending-density) enumeration -- are
+        # reachable for every samplable family through the base-class density_quantile /
+        # density_enumeration (exact where overridden, e.g. MVN; Monte-Carlo representative otherwise).
+        from pysp.stats.bayes.dirichlet import DirichletDistribution
+        from pysp.stats.latent.mvnmixture import GaussianMixtureDistribution
+        from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
+
+        # Monte-Carlo representatives: density falls (or is non-increasing) as q -> 1, enumeration is
+        # descending and the requested size.
+        for dist in (
+            DirichletDistribution(np.array([2.0, 3.0, 1.5])),
+            GaussianDistribution(0.0, 1.0),
+            GaussianMixtureDistribution([np.zeros(2), np.ones(2)], [np.ones(2), np.ones(2)], [0.6, 0.4]),
+        ):
+            lps = [float(dist.log_density(dist.density_quantile(q, n_samples=6000, seed=3))) for q in (0.05, 0.5, 0.95)]
+            self.assertTrue(all(lps[i] >= lps[i + 1] - 0.5 for i in range(len(lps) - 1)))
+            enum = dist.density_enumeration(6, n_samples=6000, seed=3)
+            self.assertEqual(len(enum), 6)
+            self.assertTrue(all(enum[i][1] >= enum[i + 1][1] for i in range(len(enum) - 1)))
+
+        # The exact override (MVN) takes precedence over the sampling default: deterministic + inverts.
+        mvn = MultivariateGaussianDistribution(np.zeros(2), np.eye(2))
+        np.testing.assert_array_equal(mvn.density_quantile(0.5), mvn.density_quantile(0.5))
+        self.assertAlmostEqual(mvn.density_cumulative(mvn.density_quantile(0.4)), 0.4, delta=1e-9)
+
 
 class BruteForceCrossCheckTestCase(unittest.TestCase):
     """Independently constructs small supports, scores them with log_density, and compares."""
