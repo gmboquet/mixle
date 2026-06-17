@@ -13,6 +13,16 @@ def _orderings(n):
     return [list(p) for p in itertools.permutations(range(n))]
 
 
+def _kendall_objective(precede, sigma0):
+    rank = {item: r for r, item in enumerate(sigma0)}
+    total = 0.0
+    for a in range(len(sigma0)):
+        for b in range(len(sigma0)):
+            if rank[a] < rank[b]:
+                total += precede[b, a]
+    return total
+
+
 class MallowsTestCase(unittest.TestCase):
     def test_density_normalizes_over_all_orderings(self):
         dist = MallowsDistribution([2, 0, 1, 3], theta=0.8)
@@ -66,6 +76,21 @@ class MallowsTestCase(unittest.TestCase):
         fitted = fit(data, true.estimator(), max_its=1, rng=np.random.RandomState(0), print_iter=0)
         self.assertEqual(list(fitted.sigma0), list(true.sigma0))
         self.assertAlmostEqual(fitted.theta, 1.0, delta=0.15)
+
+    def test_copeland_estimator_is_not_claimed_as_exact_kemeny(self):
+        data = [[1, 2, 0, 3], [1, 0, 3, 2], [1, 3, 2, 0]]
+        est = MallowsDistribution([0, 1, 2, 3]).estimator()
+        acc = est.accumulator_factory().make()
+        for row in data:
+            acc.update(row, 1.0, None)
+
+        fitted = est.estimate(None, acc.value())
+        count, precede = acc.value()
+        exact = min(_kendall_objective(precede, p) for p in _orderings(4))
+
+        self.assertEqual(count, 3.0)
+        self.assertEqual(list(fitted.sigma0), [1, 0, 2, 3])
+        self.assertGreater(_kendall_objective(precede, fitted.sigma0), exact)
 
     def test_encoder_rejects_non_permutations(self):
         with self.assertRaises(ValueError):
