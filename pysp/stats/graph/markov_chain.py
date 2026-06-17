@@ -1011,36 +1011,161 @@ class MarkovChainSampler(DistributionSampler):
 
         self.len_sampler = dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: int | None = None) -> list[Any] | list[list[Any]]:
+        # --- batched-sampling tables (built lazily) ---
+        self._batch_tables = None
+
+    def _build_batch_tables(self):
+        """Precompute index-space tables for vectorized state-path sampling.
+
+        Returns ``(states, init_idx, init_p, trans_cdf, has_row)`` where ``states`` is the ordered
+        state list, ``init_idx``/``init_p`` give the initial-state categorical over those indices,
+        ``trans_cdf`` is an ``(S, S)`` row-cumsum matrix (row ``i`` = transitions out of state ``i``,
+        zero rows for states absent from ``trans_prob``), and ``has_row`` flags which states have an
+        outgoing distribution. States absent from ``trans_prob`` are absorbing/terminal: the legacy
+        loop breaks the chain there, so batched sampling leaves the remainder unfilled too.
+        """
+        if self._batch_tables is not None:
+            return self._batch_tables
+
+        # Ordered union of every state that can appear (initial keys + all transition keys/targets).
+        states = list(self.init_prob[0])
+        seen = set(states)
+        for k, (keys, _probs) in self.trans_prob.items():
+            if k not in seen:
+                seen.add(k)
+                states.append(k)
+            for w in keys:
+                if w not in seen:
+                    seen.add(w)
+                    states.append(w)
+        state_to_idx = {s: i for i, s in enumerate(states)}
+        n = len(states)
+
+        init_idx = np.asarray([state_to_idx[s] for s in self.init_prob[0]], dtype=np.int64)
+        init_p = np.asarray(self.init_prob[1], dtype=float)
+
+        trans_cdf = np.zeros((n, n), dtype=float)
+        has_row = np.zeros(n, dtype=bool)
+        for k, (keys, probs) in self.trans_prob.items():
+            row = np.zeros(n, dtype=float)
+            for w, p in zip(keys, probs):
+                row[state_to_idx[w]] += p
+            trans_cdf[state_to_idx[k], :] = np.cumsum(row)
+            has_row[state_to_idx[k]] = True
+
+        self._batch_tables = (states, init_idx, init_p, trans_cdf, has_row)
+        return self._batch_tables
+
+    def _sample_state_paths(self, lengths: np.ndarray) -> list[list[Any]]:
+        """Vectorized state-path sampling across a batch of chains.
+
+        Loops over time (``T = max(lengths)``) drawing all live chains' next states at once via the
+        transition CDF, instead of N x T scalar ``rng.choice`` calls. Chains that reach an absorbing
+        state (one with no outgoing transition row) stop early, matching the legacy break.
+
+        Note: this consumes the RNG in a different order than the per-draw legacy loop, so the output
+        is statistically equivalent but NOT byte-identical to ``batched=False``.
+        """
+        states, init_idx, init_p, trans_cdf, has_row = self._build_batch_tables()
+        lengths = np.asarray(lengths, dtype=np.int64).reshape(-1)
+        size = len(lengths)
+        if size == 0:
+            return []
+
+        max_len = int(lengths.max()) if size else 0
+        out: list[list[Any]] = [[None] * int(n) for n in lengths]
+        if max_len == 0:
+            return out
+
+        init_cdf = np.cumsum(init_p)
+        # cur = current integer state per chain; -1 marks a chain that has stopped (absorbed/done).
+        cur = np.full(size, -1, dtype=np.int64)
+        active = lengths >= 1
+        if active.any():
+            act_pos = np.flatnonzero(active)
+            u = self.rng.random_sample(len(act_pos)) * init_cdf[-1]
+            picks = init_idx[np.searchsorted(init_cdf, u, side="right")]
+            cur[act_pos] = picks
+            for k, pos in enumerate(act_pos):
+                out[pos][0] = states[picks[k]]
+
+        for t in range(1, max_len):
+            # A chain advances at step t iff it still needs entries (lengths > t), has not stopped
+            # (cur >= 0), and its current state has an outgoing row (has_row). The first two without
+            # the third = sitting on an absorbing state: leave the remainder None, like the legacy break.
+            needs = (lengths > t) & (cur >= 0)
+            if not needs.any():
+                break
+            live = needs & has_row[np.where(cur >= 0, cur, 0)]
+            live_pos = np.flatnonzero(live)
+            if len(live_pos) == 0:
+                continue
+            rows = trans_cdf[cur[live_pos], :]
+            u = self.rng.random_sample(len(live_pos)) * rows[:, -1]
+            nxt = (rows < u[:, None]).sum(axis=1)
+            cur[live_pos] = nxt
+            for k, pos in enumerate(live_pos):
+                out[pos][t] = states[nxt[k]]
+
+        return out
+
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[Any] | list[list[Any]]:
         """Draw iid samples from Markov chain distribution.
 
         If size is None, sample N from len_sampler() and return a List[T] of length N, where T is the data type of
         the Markov chain. If size > 0, return a list of length size, containing List[T] data types.
 
+        With ``batched=True`` (default) the state paths for the whole batch are drawn by looping over
+        time and advancing all live chains at once through the transition matrix, instead of N x T
+        scalar draws. This consumes the RNG in a different order than the legacy per-draw loop, so the
+        draws are statistically equivalent but NOT byte-identical to ``batched=False``. Set
+        ``batched=False`` to reproduce the exact legacy output for a given seed.
+
         Args:
             size (Optional[int]): Number of samples to draw. Draws 1 sample if None.
+            batched (bool): Vectorize state-path draws across chains (default); set False for the
+                legacy per-draw loop.
 
         Returns:
             List[T] or List[List[T]], depending on size arg.
 
         """
-        if size is not None:
-            return [self.sample() for i in range(size)]
-
-        else:
+        if not batched:
+            if size is not None:
+                return [self.sample(batched=False) for i in range(size)]
             cnt = self.len_sampler.sample()
             rv = [None] * cnt
-
             if cnt >= 1:
                 rv[0] = self.rng.choice(self.init_prob[0], p=self.init_prob[1])
-
             for i in range(1, cnt):
                 curr_k, curr_p = self.trans_prob[rv[i - 1]]
                 rv[i] = self.rng.choice(curr_k, p=curr_p)
-
             return rv
 
-    def sample_seq(self, size: int | None = None, v0: T | None = None) -> T | list[T]:
+        if size is None:
+            cnt = int(self.len_sampler.sample())
+            return self._sample_state_paths(np.asarray([cnt], dtype=np.int64))[0]
+
+        lengths = np.asarray(self.len_sampler.sample(size=size), dtype=np.int64).reshape(-1)
+        return self._sample_state_paths(lengths)
+
+    def sample_paths(self, lengths: Sequence[int]) -> list[list[Any]]:
+        """Vectorized batch of state paths, one per requested length.
+
+        Loops over time and advances all live chains at once through the transition matrix. The RNG
+        consumption order differs from per-sequence ``sample_seq`` calls, so paths are statistically
+        equivalent but not byte-identical. Used by HiddenMarkovSampler for batched state-path draws.
+
+        Args:
+            lengths (Sequence[int]): Length of each chain to sample.
+
+        Returns:
+            List of state-sequences (List[T]), one per entry in ``lengths``.
+
+        """
+        return self._sample_state_paths(np.asarray(list(lengths), dtype=np.int64))
+
+    def sample_seq(self, size: int | None = None, v0: T | None = None, *, batched: bool = False) -> T | list[T]:
         """Sample a Markov chain sequence of length 'size' conditioned on initial state 'v0'.
 
         If size is None, draw a sequence of length 1, returning as type T.
@@ -1049,9 +1174,14 @@ class MarkovChainSampler(DistributionSampler):
 
         If v0 is None, v0 is sampled from member variable 'init_prob'.
 
+        This is the legacy per-step path (one ``rng.choice`` per transition); the ``batched`` flag is
+        accepted for API symmetry but does not change behavior here. For vectorized batches of whole
+        chains use :meth:`sample_paths` or ``sample(..., batched=True)``.
+
         Args:
             size (Optional[int]): Length of Markov chain sequence to sample.
             v0 (Optional[T]): Initial state of Markov chain sequence to sample from.
+            batched (bool): Accepted for API symmetry; sample_seq is always the per-step path.
 
         Returns:
             T or List[T] depending on arg size.
