@@ -505,13 +505,19 @@ def nuts(
         tm = tp = cur
         rm = rp = r0
         theta_new, lp_new, n, s, j = cur, cur_lp, 1, 1, 0
-        alpha, n_alpha = 0.0, 1
+        alpha, n_alpha = 0.0, 0
         while s == 1 and j < max_tree_depth:
             v = -1 if rng.random_sample() < 0.5 else 1
             if v == -1:
-                tm, rm, _, _, tpr, lpr, n_p, s_p, alpha, n_alpha = build_tree(tm, rm, logu, v, j, eps, joint0)
+                tm, rm, _, _, tpr, lpr, n_p, s_p, alpha_p, n_alpha_p = build_tree(
+                    tm, rm, logu, v, j, eps, joint0
+                )
             else:
-                _, _, tp, rp, tpr, lpr, n_p, s_p, alpha, n_alpha = build_tree(tp, rp, logu, v, j, eps, joint0)
+                _, _, tp, rp, tpr, lpr, n_p, s_p, alpha_p, n_alpha_p = build_tree(
+                    tp, rp, logu, v, j, eps, joint0
+                )
+            alpha += alpha_p
+            n_alpha += n_alpha_p
             if s_p == 1 and rng.random_sample() < min(1.0, n_p / max(n, 1)):
                 theta_new, lp_new = tpr, lpr
             n += n_p
