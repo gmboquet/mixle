@@ -195,6 +195,10 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         ww = engine.asarray(weights)
         return engine.sum(ww, axis=0), engine.sum(ww * xx[:, None], axis=0)
 
+    def support_size(self) -> int:
+        """The two outcomes {0, 1}."""
+        return 2
+
     def sampler(self, seed: int | None = None) -> "BernoulliSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BernoulliSampler(self, seed)

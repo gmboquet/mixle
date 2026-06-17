@@ -292,6 +292,10 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         min_vals = engine.asarray(np.full(int(tuple(getattr(ww, "shape", (0, 0)))[1]), int(params["min_val"])))
         return min_vals, count_mat
 
+    def support_size(self) -> int:
+        """Number of integer values in the range."""
+        return int(self.num_vals)
+
     def sampler(self, seed: int | None = None) -> "IntegerCategoricalSampler":
         """IntegerCategoricalSampler object for sampling from IntegerCategoricalDistribution instance.
 

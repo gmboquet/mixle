@@ -176,6 +176,22 @@ class ProbabilityDistribution:
         """
         raise EnumerationError(self)
 
+    def support_size(self) -> int | None:
+        """Return the number of distinct support points, or ``None`` if infinite/unknown.
+
+        This is the cardinality primitive for bounding a truncated descending-probability sum: after
+        enumerating the top ``k`` items (whose smallest probability is ``p_k``), every un-enumerated
+        item has probability ``<= p_k``, so the remaining mass is ``<= (support_size - k) * p_k`` (see
+        :func:`pysp.utils.density_rank.truncated_sum_bound`). Finite discrete leaves return their
+        cardinality; decomposable combinators compose it structurally; an upper bound is acceptable
+        (it only loosens the tail bound). Infinite or continuous supports return ``None``.
+        """
+        return None
+
+    def support_is_finite(self) -> bool:
+        """Return whether the support has a known finite cardinality."""
+        return self.support_size() is not None
+
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0):
         """Build a bounded bit-quantized index over this distribution's support.
 

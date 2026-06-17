@@ -280,6 +280,18 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             child_payloads.append(unstack_component_stats(child_stats, num_components))
         return tuple(tuple(child[i] for child in child_payloads) for i in range(num_components))
 
+    def support_size(self) -> int | None:
+        """Product of child support sizes (``None`` if any child is infinite)."""
+        if self.count == 0:
+            return 1
+        total = 1
+        for d in self.dists:
+            s = d.support_size()
+            if s is None:
+                return None
+            total *= s
+        return total
+
     def sampler(self, seed: int | None = None) -> "CompositeSampler":
         """Create CompositeSampler for sampling from CompositeDistribution instance.
 

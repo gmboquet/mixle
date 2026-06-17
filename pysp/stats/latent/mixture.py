@@ -549,6 +549,16 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         return ll_mat
 
+    def support_size(self) -> int | None:
+        """Upper bound on distinct support points: the sum over components (union <= sum)."""
+        total = 0
+        for c in self.components:
+            s = c.support_size()
+            if s is None:
+                return None
+            total += s
+        return total
+
     def sampler(self, seed: int | None = None) -> "MixtureSampler":
         """Create MixtureSampler for sampling from MixtureDistribution instance.
 
