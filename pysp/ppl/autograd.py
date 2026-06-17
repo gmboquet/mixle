@@ -271,7 +271,7 @@ class GradTarget:
         ``alpha=1`` is the usual KL-ELBO; ``alpha=0`` is the importance-weighted (IWAE) bound — both
         mass-covering directions that widen the often-too-narrow KL fit (the importance weights
         ``w=p/q`` are *tilted* by ``1-alpha``). ``batch_size`` subsamples the data per step (SGVB).
-        Returns ``(value_samples, mean_u, scale_u)``."""
+        Returns ``(value_samples, mean_u, scale_u, final_objective)``."""
         torch = self._torch
         d = len(self.slots)
         n_data = int(self._x.shape[0])
@@ -323,6 +323,16 @@ class GradTarget:
             (-obj).backward()
             opt.step()
 
+        with torch.no_grad():
+            eps = torch.randn((mc, d), dtype=torch.float64, generator=gen)
+            u, log_q, entropy = variational(eps)
+            log_p = self._logtarget_batch(u)
+            if alpha == 1.0:
+                final_obj = log_p.mean() + entropy
+            else:
+                log_w = log_p - log_q
+                final_obj = (torch.logsumexp((1.0 - alpha) * log_w, dim=0) - math.log(mc)) / (1.0 - alpha)
+
         mean_np = mean.detach().numpy()
         z = rng.standard_normal((samples, d))
         if family == "fullrank":
@@ -340,7 +350,7 @@ class GradTarget:
                 vals[:, k] = 1.0 / (1.0 + np.exp(-U[:, k]))
             else:
                 vals[:, k] = U[:, k]
-        return vals, mean_np, scale_np
+        return vals, mean_np, scale_np, float(final_obj)
 
 
 class MixtureGradTarget(GradTarget):
