@@ -93,7 +93,12 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_declaration(cls):
-        from pysp.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        from pysp.stats.compute.declarations import (
+            DistributionDeclaration,
+            ExponentialFamilySpec,
+            ParameterSpec,
+            StatisticSpec,
+        )
 
         return DistributionDeclaration(
             name="von_mises",
@@ -105,7 +110,12 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
             ),
             statistics=(StatisticSpec("count"), StatisticSpec("sum_cos"), StatisticSpec("sum_sin")),
             support="real",
-            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+            ),
         )
 
     @staticmethod
@@ -116,6 +126,30 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
         cos_t = engine.asarray(x[0])
         sin_t = engine.asarray(x[1])
         return cos_t * 0.0 + engine.asarray(1.0), cos_t, sin_t
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: tuple[Any, Any], engine: Any) -> tuple[Any, ...]:
+        """Return von Mises sufficient statistics ``T(x) = (cos x, sin x)``."""
+        return engine.asarray(x[0]), engine.asarray(x[1])
+
+    @staticmethod
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return von Mises natural parameters ``eta = (kappa cos mu, kappa sin mu)``."""
+        return params["eta1"], params["eta2"]
+
+    @staticmethod
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
+        """Return von Mises log partition ``A = log(2 pi I_0(kappa)) = -log_const``."""
+        return -params["log_const"]
+
+    @staticmethod
+    def exp_family_from_natural(eta: Any) -> "VonMisesDistribution":
+        """Return the von Mises with natural parameters ``eta = (kappa cos mu, kappa sin mu)``."""
+        eta1 = float(eta[0])
+        eta2 = float(eta[1])
+        kappa = math.hypot(eta1, eta2)
+        mu = math.atan2(eta2, eta1)
+        return VonMisesDistribution(mu, kappa)
 
     @staticmethod
     def backend_log_density_from_params(
