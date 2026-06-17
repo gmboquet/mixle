@@ -421,6 +421,7 @@ __all__ = [
     "MallowsSampler",
     "MallowsEstimator",
     "MallowsDataEncoder",
+    "MallowsEnumerator",
     "SpanningTreeDistribution",
     "SpanningTreeSampler",
     "SpanningTreeEstimator",
@@ -694,6 +695,7 @@ from pysp.stats.graph.int_markovchain import (
 from pysp.stats.graph.mallows import (
     MallowsDataEncoder,
     MallowsDistribution,
+    MallowsEnumerator,
     MallowsEstimator,
     MallowsSampler,
 )
