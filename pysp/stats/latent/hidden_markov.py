@@ -66,7 +66,7 @@ from pysp.stats.latent._hmm_numba_kernels import (
 from pysp.stats.latent.mixture import MixtureDistribution
 from pysp.utils.aliasing import MISSING, coalesce_alias, require
 from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, best_first_union_max
-from pysp.utils.optional_deps import numba
+from pysp.utils.optional_deps import HAS_NUMBA, numba
 
 T = TypeVar("T")
 T1 = TypeVar("T1")  # Emission suff-stat type
@@ -1723,10 +1723,27 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             nz_idx, nz_idx_group, nz_idx_rep = np.unique(idx, return_index=True, return_inverse=True)
             weights_nz = weights[nz_idx]
 
+            # Emission init parity with the numpy ("bands") branch.
+            #
+            # Both branches draw the SAME values from self._idx_rng (same call, same size); ``states`` here equals
+            # the numpy branch's time-major draw ``idx``. They differ ONLY in how that draw is mapped onto the
+            # emission observations: the numba encoding stores observations sequence-major (``xs``), whereas the
+            # numpy branch builds the per-observation weight mask in TIME-MAJOR ("banded") order via ``idx_vec``
+            # and applies it positionally to its sequence-major ``xs_enc`` (which is identical to ``xs``). To stay
+            # bit-identical with the pinned numpy path we reconstruct that same time-major ``idx_vec`` here and
+            # build the mask the same way, rather than the sequence-major ``weights[idx]`` mask used previously.
+            len_vec = np.asarray(sz, dtype=int)
+            non_zero_len = len_vec != 0
+            nz_len_vec = len_vec[non_zero_len]
+            orig_ids_nz = np.nonzero(non_zero_len)[0]
+            max_len = int(nz_len_vec.max()) if nz_len_vec.size else 0
+            band_seq_i = [j for t in range(max_len) for j in range(len(nz_len_vec)) if t < nz_len_vec[j]]
+            idx_vec = orig_ids_nz[np.asarray(band_seq_i, dtype=int)]
+
             for j in range(self.num_states):
-                w = weights[idx].copy()
-                w[states != j] = 0
-                self.accumulators[j].seq_initialize(xs, w, self._acc_rng[j])
+                w = weights[idx_vec]
+                w[states != j] = 0.0
+                self.accumulators[j].seq_initialize(xs, w.flatten(), self._acc_rng[j])
 
             sz_next = sz.copy()[nz_idx] - 1
             steps = np.zeros(len(sz_next), dtype=int)
@@ -2281,7 +2298,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
         pseudo_count: tuple[float | None, float | None] | None = (None, None),
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
-        use_numba: bool = False,
+        use_numba: bool | None = None,
         prior=None,
     ) -> None:
         """HiddenMarkovEstimator object for estimating HiddenMarkovDistribution for aggregated sufficient statistics.
@@ -2294,7 +2311,9 @@ class HiddenMarkovEstimator(ParameterEstimator):
             name (Optional[str]): Set name to object.
             keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Set keys for initial states,
                 transitions counts, and emission distributions.
-            use_numba (bool): If True, Numba is used for sequence encoding and vectorized functions.
+            use_numba (Optional[bool]): If True, Numba is used for sequence encoding and vectorized functions. If
+                None (default), numba is used automatically when installed (HAS_NUMBA). The numba and numpy paths
+                are bit-identical for this estimator, so this only affects speed.
 
         Attributes:
             estimators (List[ParameterEstimator]): Set ParameterEstimator objects for emission distributions.
@@ -2314,7 +2333,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
         self.keys = keys if keys is not None else (None, None, None)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.name = name
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
         self.set_prior(prior)
 
     def accumulator_factory(self):
