@@ -328,6 +328,8 @@ class ConditionalExponentialFamilyForm:
 
     response_family: ProbabilityDistribution
     natural_fn: Any
+    log_partition_fn: Any = None  # callable eta -> A(eta) row-wise
+    mean_fn: Any = None  # callable x -> E[y|x]
     dispersion: Any = None
     engine: Any = NUMPY_ENGINE
 
@@ -350,13 +352,37 @@ class ConditionalExponentialFamilyForm:
         return self.response_family.to_exponential_family(engine=self.engine).log_base_measure(y)
 
     def log_partition(self, eta: Any) -> np.ndarray:
-        """Return ``A(eta)`` row-wise for a stack of natural parameters."""
-        eta_arr = np.atleast_2d(np.asarray(eta, dtype=np.float64))
-        out = np.empty(eta_arr.shape[0], dtype=np.float64)
+        """Return ``A(eta)`` row-wise for a stack of natural parameters.
+
+        Uses the family-specific ``log_partition_fn`` (supplied by the GLM wiring,
+        which knows the response family) when present; otherwise falls back to the
+        response family's dual map (only available where ``from_natural`` is closed-form).
+        """
+        eta_arr = np.asarray(eta, dtype=np.float64)
+        if self.log_partition_fn is not None:
+            return np.asarray(self.engine.to_numpy(self.log_partition_fn(eta_arr)), dtype=np.float64)
+        eta_2d = np.atleast_2d(eta_arr)
+        out = np.empty(eta_2d.shape[0], dtype=np.float64)
         form = self.response_family.to_exponential_family(engine=self.engine)
-        for i in range(eta_arr.shape[0]):
-            out[i] = float(self.engine.to_numpy(form.log_partition(eta_arr[i])))
+        for i in range(eta_2d.shape[0]):
+            out[i] = float(self.engine.to_numpy(form.log_partition(eta_2d[i])))
         return out
+
+    def mean(self, x: Any) -> np.ndarray:
+        """Return the conditional mean ``E[y|x] = link_inv(eta(x))`` (the inverse link)."""
+        if self.mean_fn is None:
+            raise NotImplementedError("conditional mean(x) requires a mean_fn.")
+        return np.asarray(self.engine.to_numpy(self.mean_fn(x)), dtype=np.float64)
+
+    def log_density(self, y: Any, x: Any) -> np.ndarray:
+        """Return ``log h(y) + <eta(x), T(y)> - A(eta(x))`` row-wise."""
+        eta = self.natural_parameters(x)
+        eta = np.atleast_2d(eta)
+        ty = np.asarray(self.engine.to_numpy(self.sufficient_statistics(y)), dtype=np.float64)
+        h = np.asarray(self.engine.to_numpy(self.log_base_measure(y)), dtype=np.float64)
+        a = self.log_partition(eta)
+        inner = np.einsum("ij,ij->i", ty, eta)
+        return h + inner - a
 
 
 def to_exponential_family(dist: ProbabilityDistribution, engine: Any = NUMPY_ENGINE) -> ExponentialFamilyForm | None:
