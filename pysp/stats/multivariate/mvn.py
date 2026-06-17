@@ -707,6 +707,8 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
+        min_covar: float | None = None,
+        ridge: float | None = None,
     ) -> None:
         """MultivariateGaussianEstimator object for estimating multivariate normal distribution from sufficient stats.
 
@@ -721,6 +723,13 @@ class MultivariateGaussianEstimator(ParameterEstimator):
                 ``estimate`` performs the closed-form conjugate posterior update (returning the joint
                 MAP estimate and carrying the posterior forward as the fitted model's prior) instead
                 of the maximum-likelihood / pseudo-count update.
+            min_covar (Optional[float]): Absolute diagonal ridge floor applied in the MLE M-step.
+                ``None`` (default) uses a tiny ``1e-8``.
+            ridge (Optional[float]): Relative ridge coefficient. ``None`` (default) uses ``1e-6``;
+                the covariance is regularized as ``cov + eps * I`` with
+                ``eps = max(min_covar, ridge * trace(cov) / d)`` so a singular / non-finite
+                covariance (a component holding < d points) cannot break the Cholesky factor.
+                Bias is negligible at the defaults.
 
         Attributes:
             dim (int): Dimension of multivariate normal.
@@ -749,6 +758,8 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         self.key = keys
         self.prior = prior
         self.has_conj_prior = isinstance(prior, NormalWishartDistribution)
+        self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
+        self.ridge = 1.0e-6 if ridge is None else float(ridge)
 
     def accumulator_factory(self) -> "MultivariateGaussianAccumulatorFactory":
         """Returns a MultivariateGaussianAccumulatorFactory built from the estimator's attributes."""
@@ -832,7 +843,25 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         else:
             covar = (suff_stat[1] / nobs) - vec.outer(mu, mu)
 
+        covar = self._regularize_covar(covar)
+
         return MultivariateGaussianDistribution(mu, covar, name=self.name)
+
+    def _regularize_covar(self, covar: np.ndarray) -> np.ndarray:
+        """P1 covariance ridge: cov <- cov + eps*I with eps = max(min_covar, ridge*trace/d).
+
+        Clamps non-finite entries to zero first so a singular / NaN covariance from a
+        component holding fewer than d points cannot break the Cholesky factorization.
+        Symmetrizes to absorb accumulation round-off. Bias is negligible at the defaults.
+        """
+        covar = np.asarray(covar, dtype=float)
+        d = covar.shape[0]
+        if not np.isfinite(covar).all():
+            covar = np.where(np.isfinite(covar), covar, 0.0)
+        covar = 0.5 * (covar + covar.T)
+        trace = float(np.trace(covar))
+        eps = max(self.min_covar, self.ridge * trace / d if trace > 0.0 else 0.0)
+        return covar + eps * np.eye(d)
 
 
 class MultivariateGaussianDataEncoder(DataSequenceEncoder):
