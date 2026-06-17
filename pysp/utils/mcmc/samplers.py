@@ -9,7 +9,7 @@ ordinary ``dist.log_density(x)`` models easy to sample from.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -606,6 +606,104 @@ def posterior_predictive(
         else:
             draws.append(sampler(state, rng, size))
     return draws
+
+
+def _chain_array(chain: Any) -> np.ndarray:
+    """Coerce a chain (MCMCResult or array-like of states) to a ``(n, d)`` float array."""
+    arr = chain.sample_array() if isinstance(chain, MCMCResult) else np.asarray(chain, dtype=float)
+    n = int(arr.shape[0])
+    return arr.reshape((n, -1))
+
+
+def gelman_rubin(chains: Sequence[Any]) -> Any:
+    """Gelman-Rubin potential scale reduction factor (R-hat) across independent chains.
+
+    R-hat compares the variance *between* chains to the variance *within* chains for each
+    parameter. Values near 1.0 indicate the chains have mixed and are sampling a common
+    target; values noticeably above 1.0 (a common threshold is 1.01-1.1) flag
+    non-convergence -- chains stuck in different regions, too short a run, or poor mixing.
+    This is the standard multi-chain convergence check (Gelman & Rubin 1992) and the
+    multi-chain complement to :meth:`MCMCResult.effective_sample_size`.
+
+    Args:
+        chains: Two or more chains, each an :class:`MCMCResult` or an array-like of states.
+            Chains may differ in length; all are truncated to the shortest common length.
+
+    Returns:
+        A float for scalar parameters, otherwise an array of R-hat values shaped like a
+        single sampled state (one R-hat per parameter dimension).
+    """
+    arrs = [_chain_array(c) for c in chains]
+    m = len(arrs)
+    if m < 2:
+        raise ValueError("gelman_rubin requires at least two chains.")
+    d = arrs[0].shape[1]
+    if any(a.shape[1] != d for a in arrs):
+        raise ValueError("all chains must have the same parameter dimension.")
+    n = min(a.shape[0] for a in arrs)
+    if n < 2:
+        raise ValueError("each chain needs at least two samples to estimate R-hat.")
+
+    stacked = np.stack([a[:n] for a in arrs], axis=0)  # (m, n, d)
+    chain_means = stacked.mean(axis=1)  # (m, d)
+    grand_mean = chain_means.mean(axis=0)  # (d,)
+    # Between-chain variance (per parameter).
+    b = n / (m - 1) * np.sum((chain_means - grand_mean) ** 2, axis=0)
+    # Within-chain variance (per parameter): mean of per-chain sample variances.
+    w = np.mean(np.var(stacked, axis=1, ddof=1), axis=0)
+    # Marginal posterior variance estimate and the resulting R-hat.
+    var_hat = (n - 1) / n * w + b / n
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rhat = np.sqrt(np.where(w > 0.0, var_hat / w, 1.0))
+    rhat = np.where(w > 0.0, rhat, 1.0)
+    sample_shape = (
+        chains[0].sample_array().shape[1:] if isinstance(chains[0], MCMCResult) else np.asarray(arrs[0][0]).shape
+    )
+    if sample_shape == () or d == 1:
+        return float(rhat.reshape(-1)[0])
+    return rhat.reshape(sample_shape)
+
+
+def run_chains(
+    sampler: Callable[..., MCMCResult],
+    num_chains: int,
+    initials: Sequence[Any] | Callable[[np.random.RandomState], Any],
+    rng: np.random.RandomState | None = None,
+    **sampler_kwargs: Any,
+) -> tuple[list[MCMCResult], Any]:
+    """Run several independent chains and report their Gelman-Rubin R-hat.
+
+    Each chain is given its own initial state (from ``initials``) and its own RNG seeded
+    deterministically from ``rng`` for reproducibility. The chains are otherwise independent,
+    so this is the multi-chain convergence harness: overdisperse the initials, run, and check
+    the returned R-hat is near 1.0 before trusting the pooled samples.
+
+    Args:
+        sampler: Callable invoked as ``sampler(initial=..., rng=..., **sampler_kwargs)`` and
+            returning an :class:`MCMCResult` (e.g. :func:`metropolis_hastings`, :func:`nuts`).
+        num_chains: Number of independent chains to run (>= 2 for a meaningful R-hat).
+        initials: Either a sequence of per-chain initial states (length ``num_chains``) or a
+            callable ``initials(rng) -> state`` that draws an overdispersed start per chain.
+        rng: Optional RandomState used to seed the per-chain RNGs.
+        **sampler_kwargs: Forwarded to ``sampler`` (e.g. ``proposal``, ``num_samples``).
+
+    Returns:
+        ``(results, rhat)`` -- the list of per-chain results and their R-hat.
+    """
+    if num_chains < 2:
+        raise ValueError("run_chains needs num_chains >= 2 for a meaningful R-hat.")
+    rng = np.random.RandomState() if rng is None else rng
+    if not callable(initials):
+        seq = list(initials)
+        if len(seq) != num_chains:
+            raise ValueError("initials sequence length must equal num_chains.")
+
+    results: list[MCMCResult] = []
+    for c in range(num_chains):
+        chain_rng = np.random.RandomState(rng.randint(0, 2**31 - 1))
+        initial = initials(chain_rng) if callable(initials) else seq[c]
+        results.append(sampler(initial=initial, rng=chain_rng, **sampler_kwargs))
+    return results, gelman_rubin(results)
 
 
 def _copy_state(x: Any) -> Any:
