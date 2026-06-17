@@ -68,6 +68,7 @@ from pysp.stats.compute.pdist import (
 from pysp.stats.latent.hidden_markov import HiddenMarkovAccumulatorFactory, HiddenMarkovModelDistribution
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
+from pysp.utils.optional_deps import HAS_NUMBA
 
 STRUCTURAL_ZERO = -1
 
@@ -745,7 +746,7 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
         len_estimator: ParameterEstimator | None = NullEstimator(),
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
-        use_numba: bool = False,
+        use_numba: bool | None = None,
         max_quant_its: int = 50,
         split_collapsed: bool = True,
         split_nats: float = math.log(2.0),
@@ -778,7 +779,8 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
             name (Optional[str]): Set name to object instance.
             keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Set keys for
                 initial states, transition counts, and emission accumulators.
-            use_numba (bool): If True, Numba is used for sequence encoding and vectorized functions.
+            use_numba (Optional[bool]): If True, Numba is used for sequence encoding and vectorized functions. If
+                None (default), numba is used automatically when installed (HAS_NUMBA); the paths are bit-identical.
             max_quant_its (int): Maximum coordinate-ascent iterations per theta starting point in
                 the M-step.
             split_collapsed (bool): After each M-step, check for state pairs whose quantized
@@ -824,7 +826,7 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.name = name
         self.keys = keys if keys is not None else (None, None, None)
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
         self.max_quant_its = max_quant_its
         self.split_collapsed = split_collapsed
         self.split_nats = split_nats
