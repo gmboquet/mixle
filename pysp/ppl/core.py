@@ -8,39 +8,75 @@ dispatches. See notes/ppl-syntax-spec.md for the design charter and invariants.
 Slice 1-2 of the build order: the wrapper + ``free`` holes + ``fit`` (EM core).
 Algebra, conditioning, latent-arg Compound, and MCMC routing land in later slices.
 """
+
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 
 from pysp.utils.estimation import optimize
 
-__all__ = ["RandomVariable", "free", "lower", "register_family", "Family"]
+__all__ = [
+    "RandomVariable",
+    "free",
+    "ordered",
+    "lower",
+    "register_family",
+    "Family",
+    "Constraint",
+    "Event",
+    "constrain",
+    "eq",
+    "equal",
+    "ne",
+    "increasing",
+    "decreasing",
+    "monotone",
+    "convex",
+    "concave",
+    "lipschitz",
+    "ode_residual",
+]
 
 
 # --------------------------------------------------------------------------- free
 class _Free:
-    """The single ``free`` token: an argument slot to be estimated (MLE).
+    """The ``free`` token: an argument slot to be estimated.
 
-    In IR terms it is ``Var(prior=flat, scope=shared, policy=point)``. It is a
-    singleton; identity (``arg is free``) is the test used during lowering.
+    Bare ``free`` is a scalar slot (identity ``arg is free`` is the test used during lowering).
+    *Called*, it is a **vector/matrix parameter handle** you can both place in a slot and reference
+    in constraints: ``free(dim)`` (a real vector), ``free(dim, name="mu")`` (named, for readout),
+    ``free(dim, kind="ordered"|"simplex"|"cholesky")``, ``free(dim, support="positive")``. This
+    subsumes the old ``param(...)`` helper — one token for "estimate this".
     """
 
     __slots__ = ()
 
-    def __mul__(self, other):       # free * Field -> an OLS regression coefficient
+    def __call__(self, dim: int, *, name=None, kind: str = "vector", support: str = "real"):
+        return _param_handle(int(dim), name=name, kind=kind, support=support)
+
+    def __mul__(self, other):  # free * Field -> an OLS regression coefficient
         if isinstance(other, Field):
             return _LinearPredictor([(self, other)])
         return NotImplemented
+
     __rmul__ = __mul__
+
+    def __reduce__(self):  # preserve singleton identity across pickling
+        return (_free_singleton, ())
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return "free"
 
 
 free = _Free()
+
+
+def _free_singleton():
+    return free
 
 
 def _is_free(x: Any) -> bool:
@@ -56,12 +92,14 @@ class Field:
     def __init__(self, name: str):
         self.name = name
 
-    def __mul__(self, coef):     # Field * coef
+    def __mul__(self, coef):  # Field * coef
         return _LinearPredictor([(coef, self)])
+
     __rmul__ = __mul__
 
     def __add__(self, other):
         return _LinearPredictor([(1.0, self)]).__add__(other)
+
     __radd__ = __add__
 
     def __repr__(self):
@@ -94,6 +132,7 @@ class Group:
 
     def __add__(self, other):
         return _LinearPredictor([], groups=[self._key()]).__add__(other)
+
     __radd__ = __add__
 
     def __repr__(self):
@@ -107,46 +146,421 @@ class _LinearPredictor:
     __slots__ = ("terms", "intercept", "groups")
 
     def __init__(self, terms, intercept=None, groups=None):
-        self.terms = list(terms)         # list of (coef, Field)
-        self.intercept = intercept       # RandomVariable | free | float | None
+        self.terms = list(terms)  # list of (coef, Field)
+        self.intercept = intercept  # RandomVariable | free | float | None
         self.groups = list(groups or [])  # random-intercept group names
 
     def __add__(self, other):
         if isinstance(other, _LinearPredictor):
-            return _LinearPredictor(self.terms + other.terms,
-                                    _combine_intercept(self.intercept, other.intercept),
-                                    self.groups + other.groups)
+            return _LinearPredictor(
+                self.terms + other.terms,
+                _combine_intercept(self.intercept, other.intercept),
+                self.groups + other.groups,
+            )
         if isinstance(other, Field):
             return _LinearPredictor(self.terms + [(1.0, other)], self.intercept, self.groups)
         if isinstance(other, Group):
             return _LinearPredictor(self.terms, self.intercept, self.groups + [other._key()])
         return _LinearPredictor(self.terms, _combine_intercept(self.intercept, other), self.groups)
+
     __radd__ = __add__
 
     def __repr__(self):
-        return (f"_LinearPredictor({self.terms!r}, intercept={self.intercept!r}, "
-                f"groups={self.groups!r})")
+        return f"_LinearPredictor({self.terms!r}, intercept={self.intercept!r}, groups={self.groups!r})"
 
 
-class Event:
-    """A predicate over an RV's value, produced by comparisons (``x > 0``) and consumed by
-    ``rv.given(event)``. Combine with ``&``."""
+class _SimplexSpec:
+    """A structural simplex-valued parameter of a combinator: mixture weights and an HMM
+    initial distribution (``rows=1``, a single K-simplex) or an HMM transition matrix
+    (``rows=K``, K independent simplex rows). ``alpha`` is the per-row Dirichlet concentration
+    (a symmetric ``Dirichlet(1)`` for a ``free`` simplex). Inference expands it via the Gamma
+    representation of the Dirichlet (one positive slot per entry, normalized per row)."""
 
-    __slots__ = ("rv", "pred", "desc")
+    __slots__ = ("alpha", "rows", "name")
 
-    def __init__(self, rv, pred, desc):
-        self.rv = rv
-        self.pred = pred           # value(s) -> bool mask
+    def __init__(self, alpha, rows: int = 1, name: str | None = None):
+        self.alpha = np.asarray(alpha, dtype=float)
+        self.rows = int(rows)
+        self.name = name
+
+
+class _VectorSpec:
+    """A vector-valued parameter of a combinator (e.g. an MVN mean): ``dim`` independent scalar
+    slots of one ``support`` (``real``/``positive``/``unit``), assembled into a vector."""
+
+    __slots__ = ("dim", "support", "name")
+
+    def __init__(self, dim: int, support: str = "real", name: str | None = None):
+        self.dim = int(dim)
+        self.support = support
+        self.name = name
+
+
+class _OrderedSpec:
+    """A strictly-increasing vector parameter (``v[0] < v[1] < ...``): one real base entry plus
+    ``dim-1`` positive increments, assembled as a cumulative sum. Gives ordered means *by
+    construction* (the standard mixture/HMM identifiability device) with no rejection."""
+
+    __slots__ = ("dim", "name")
+
+    def __init__(self, dim: int, name: str | None = None):
+        self.dim = int(dim)
+        self.name = name
+
+
+class _Ordered:
+    """The ``ordered`` token: an estimable vector parameter constrained to be increasing."""
+
+    __slots__ = ()
+
+    def __reduce__(self):
+        return (_ordered_singleton, ())
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return "ordered"
+
+
+ordered = _Ordered()
+
+
+def _ordered_singleton():
+    return ordered
+
+
+class _CholeskySpec:
+    """A covariance-matrix parameter (e.g. an MVN covariance): the ``dim*(dim+1)/2`` lower-
+    triangular Cholesky entries (diagonal in log-space, off-diagonal on the real line). ``rebuild``
+    forms ``L`` and returns ``Sigma = L Lᵀ`` — symmetric positive-definite by construction, so no
+    explicit PSD constraint or Jacobian is needed (the prior, if any, lives on the entries)."""
+
+    __slots__ = ("dim", "name")
+
+    def __init__(self, dim: int, name: str | None = None):
+        self.dim = int(dim)
+        self.name = name
+
+
+class Constraint:
+    """A boolean relation over one or more random variables.
+
+    Produced by comparisons on RVs — ``x > 0`` (RV vs constant), ``a < b`` (RV vs RV), or
+    ``2 * a - b >= 1`` (linear/transformed expressions on either side) — and combined with
+    ``&`` (and), ``|`` (or), ``~`` (not). A constraint over a single RV is consumed by
+    ``rv.given(c)`` (truncation); a constraint over several RVs is consumed by
+    ``constrain(c)`` (joint conditioning) or ``fit(..., constraints=c)`` (feasible region).
+
+    ``leaves`` are the distinct leaf RVs the relation depends on; ``pred(env)`` evaluates the
+    relation given ``env``, a dict mapping each leaf RV to its value(s).
+    """
+
+    __slots__ = ("leaves", "pred", "desc", "residual", "soft")
+
+    def __init__(self, leaves, pred, desc, residual=None, soft=False):
+        self.leaves = tuple(leaves)
+        self.pred = pred  # env: {leaf_rv -> value(s)} -> bool mask
         self.desc = desc
+        # Optional continuous violation r(env): a 1-D array that is 0 where the relation holds
+        # (a hinge for inequalities, the signed gap for equalities). Enables the soft-penalty path
+        # ``fit(..., penalty=w)`` so equality / convex / algebraic constraints can be honored by
+        # gradient inference. ``None`` means penalty-mode is unavailable (e.g. a negated relation).
+        self.residual = residual
+        # ``soft``: a measure-zero relation (equality / ODE residual) that cannot be honored by
+        # rejection, so ``fit`` auto-selects the soft-penalty path for it (no ``penalty=`` needed).
+        self.soft = soft
+
+    @property
+    def rv(self):
+        """The single RV this constraint restricts (back-compat for one-variable events)."""
+        if len(self.leaves) != 1:
+            raise AttributeError("constraint involves multiple RVs; use .leaves.")
+        return self.leaves[0]
+
+    def eval(self, env):
+        return self.pred(env)
 
     def contains(self, x):
-        return self.pred(x)
+        """Evaluate a single-variable constraint directly on that variable's value(s)."""
+        if len(self.leaves) != 1:
+            raise TypeError("contains(x) is only valid for a one-variable constraint; use eval(env).")
+        return self.pred({self.leaves[0]: x})
+
+    def _merge_leaves(self, other):
+        seen, out = set(), []
+        for lv in self.leaves + other.leaves:
+            if id(lv) not in seen:
+                seen.add(id(lv))
+                out.append(lv)
+        return tuple(out)
 
     def __and__(self, other):
-        return Event(self.rv, lambda x: self.pred(x) & other.pred(x), f"({self.desc} & {other.desc})")
+        # AND must satisfy both, so the residual stacks both violations (all must reach 0).
+        residual = _combine_residuals(self.residual, other.residual, "and")
+        return Constraint(
+            self._merge_leaves(other),
+            lambda env: self.pred(env) & other.pred(env),
+            f"({self.desc} & {other.desc})",
+            residual,
+            self.soft or other.soft,
+        )
+
+    def __or__(self, other):
+        # OR is satisfied when either holds, so the residual is the smaller of the two magnitudes.
+        residual = _combine_residuals(self.residual, other.residual, "or")
+        return Constraint(
+            self._merge_leaves(other),
+            lambda env: self.pred(env) | other.pred(env),
+            f"({self.desc} | {other.desc})",
+            residual,
+            self.soft or other.soft,
+        )
+
+    def __invert__(self):
+        # Negation has no smooth penalty surface; only the hard (boolean) mode survives.
+        return Constraint(self.leaves, lambda env: ~np.asarray(self.pred(env)), f"~{self.desc}", None)
+
+    def __bool__(self):
+        raise TypeError(
+            "a Constraint has no truth value — Python chained comparisons (a < b < c) and "
+            "`and`/`or` are not supported; combine with & | ~ instead, e.g. (a < b) & (b < c)."
+        )
 
     def __repr__(self):
-        return f"Event({self.desc})"
+        return f"Constraint({self.desc})"
+
+
+Event = Constraint  # back-compat alias
+
+
+def _expr_leaves(rv) -> list:
+    """The leaf (sample/bound) RVs an expression RV depends on, in left-to-right order."""
+    if not isinstance(rv, RandomVariable):
+        return []
+    if rv._kind in ("apply", "pow", "select"):
+        return _expr_leaves(rv._args[0])
+    if rv._kind in ("sum", "prod"):
+        out = _expr_leaves(rv._args[0])
+        seen = {id(x) for x in out}
+        for lv in _expr_leaves(rv._args[1]):
+            if id(lv) not in seen:
+                out.append(lv)
+                seen.add(id(lv))
+        return out
+    return [rv]  # sample / bound / given: an atomic leaf
+
+
+def _eval_expr(rv, env):
+    """Numerically evaluate an expression RV given ``env`` (leaf RV -> value)."""
+    if not isinstance(rv, RandomVariable):
+        return rv  # a constant
+    if rv._kind == "apply":
+        base, transform = rv._args
+        return transform.forward(_eval_expr(base, env))
+    if rv._kind == "sum":
+        a, b = rv._args
+        return _eval_expr(a, env) + _eval_expr(b, env)
+    if rv._kind == "prod":
+        a, b = rv._args
+        return _eval_expr(a, env) * _eval_expr(b, env)
+    if rv._kind == "pow":
+        base, exponent = rv._args
+        return _eval_expr(base, env) ** exponent
+    if rv._kind == "select":
+        base, index = rv._args
+        return np.asarray(_eval_expr(base, env))[..., index]
+    if rv not in env:
+        raise KeyError(f"no value supplied for {rv!r} when evaluating a constraint.")
+    return env[rv]
+
+
+def _row_mask(mask) -> np.ndarray:
+    """Reduce a constraint's per-sample mask to one boolean per row. A relation between scalars
+    is already ``(n,)``; a whole-vector relation (``v > 0``) yields ``(n, d)`` and means *all
+    entries* hold, so reduce the trailing axes with ``all``."""
+    m = np.asarray(mask)
+    if m.ndim > 1:
+        m = m.all(axis=tuple(range(1, m.ndim)))
+    return m
+
+
+_CMP = {
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    "==": lambda a, b: np.isclose(a, b),
+    "!=": lambda a, b: ~np.isclose(a, b),
+}
+
+# Continuous violation r(a, b) >= 0 (0 where the relation holds): a hinge for inequalities, the
+# signed gap for equality. Used by the soft-penalty inference path (fit(..., penalty=w)).
+_RESIDUAL = {
+    ">": lambda a, b: np.maximum(0.0, b - a),
+    ">=": lambda a, b: np.maximum(0.0, b - a),
+    "<": lambda a, b: np.maximum(0.0, a - b),
+    "<=": lambda a, b: np.maximum(0.0, a - b),
+    "==": lambda a, b: a - b,
+}
+
+
+def _combine_residuals(ra, rb, mode):
+    """Combine two constraint residual closures for ``&`` (stack) / ``|`` (min magnitude)."""
+    if ra is None or rb is None:
+        return None
+    if mode == "and":
+        return lambda env: np.concatenate([np.atleast_1d(ra(env)).ravel(), np.atleast_1d(rb(env)).ravel()])
+
+    def or_residual(env):
+        va = np.atleast_1d(ra(env)).ravel()
+        vb = np.atleast_1d(rb(env)).ravel()
+        mag_a = float(np.sqrt(np.sum(va * va)))
+        mag_b = float(np.sqrt(np.sum(vb * vb)))
+        return va if mag_a <= mag_b else vb
+
+    return or_residual
+
+
+def _make_constraint(lhs, op, rhs) -> Constraint:
+    """Build a Constraint from ``lhs <op> rhs`` where each side is an RV/expression or constant."""
+    leaves, seen = [], set()
+    for side in (lhs, rhs):
+        for lv in _expr_leaves(side):
+            if id(lv) not in seen:
+                seen.add(id(lv))
+                leaves.append(lv)
+    cmp = _CMP[op]
+
+    def pred(env):
+        return cmp(np.asarray(_eval_expr(lhs, env)), np.asarray(_eval_expr(rhs, env)))
+
+    residual = None
+    if op in _RESIDUAL:
+        res_fn = _RESIDUAL[op]
+
+        def residual(env):
+            return np.asarray(res_fn(np.asarray(_eval_expr(lhs, env)), np.asarray(_eval_expr(rhs, env))))
+
+    # equality is measure-zero -> mark soft so fit() auto-uses the penalty path (no rejection)
+    return Constraint(leaves, pred, f"{_expr_desc(lhs)} {op} {_expr_desc(rhs)}", residual, soft=(op == "=="))
+
+
+def eq(lhs, rhs) -> Constraint:
+    """Build an equality relation ``lhs == rhs`` over RVs/expressions/constants.
+
+    ``==`` is not overloaded on ``RandomVariable`` (RVs are used as dict keys by identity), so build
+    equalities with this function or ``rv.eq(...)``. Equalities have measure zero and cannot be honored
+    by rejection, so consume them with the soft-penalty inference path, e.g.
+    ``model.fit(data, constraints=eq(a + b, 1.0), penalty=100.0)``.
+    """
+    return _make_constraint(lhs, "==", rhs)
+
+
+equal = eq  # readable alias
+
+
+def ne(lhs, rhs) -> Constraint:
+    """Build an inequality relation ``lhs != rhs`` (boolean only; no smooth penalty surface)."""
+    return _make_constraint(lhs, "!=", rhs)
+
+
+# ----------------------------------------------------- differential / shape constraints
+# Constraints on the *shape* of a vector-valued RV / expression (a discretized function),
+# expressed through finite differences: the first difference governs monotonicity / smoothness,
+# the second difference governs curvature (convexity). Each carries a continuous residual so it
+# works with the soft-penalty inference path as well as generative ``constrain(...)``.
+def _diff(a, order: int = 1):
+    return np.diff(np.asarray(a, dtype=float), n=order, axis=-1)
+
+
+def _shape_constraint(v, test, violation, desc) -> Constraint:
+    return Constraint(
+        _expr_leaves(v),
+        lambda env: np.all(test(_eval_expr(v, env)), axis=-1),
+        desc,
+        lambda env: np.asarray(violation(_eval_expr(v, env))).ravel(),
+    )
+
+
+def increasing(v, *, strict: bool = False) -> Constraint:
+    """The entries of a vector RV/expression are non-decreasing (``strict`` -> strictly increasing)."""
+    cmp = (lambda d: d > 0) if strict else (lambda d: d >= 0)
+    return _shape_constraint(
+        v, lambda x: cmp(_diff(x)), lambda x: np.maximum(0.0, -_diff(x)), f"increasing({_expr_desc(v)})"
+    )
+
+
+def decreasing(v, *, strict: bool = False) -> Constraint:
+    """The entries of a vector RV/expression are non-increasing (``strict`` -> strictly decreasing)."""
+    cmp = (lambda d: d < 0) if strict else (lambda d: d <= 0)
+    return _shape_constraint(
+        v, lambda x: cmp(_diff(x)), lambda x: np.maximum(0.0, _diff(x)), f"decreasing({_expr_desc(v)})"
+    )
+
+
+def monotone(v) -> Constraint:
+    """The entries are monotone — non-decreasing *or* non-increasing."""
+    return increasing(v) | decreasing(v)
+
+
+def convex(v) -> Constraint:
+    """The entries are convex: the second difference is non-negative everywhere."""
+    return _shape_constraint(
+        v, lambda x: _diff(x, 2) >= 0, lambda x: np.maximum(0.0, -_diff(x, 2)), f"convex({_expr_desc(v)})"
+    )
+
+
+def concave(v) -> Constraint:
+    """The entries are concave: the second difference is non-positive everywhere."""
+    return _shape_constraint(
+        v, lambda x: _diff(x, 2) <= 0, lambda x: np.maximum(0.0, _diff(x, 2)), f"concave({_expr_desc(v)})"
+    )
+
+
+def lipschitz(v, bound: float) -> Constraint:
+    """Bounded first difference: ``|v[i+1] - v[i]| <= bound`` (a discrete smoothness constraint)."""
+    b = float(bound)
+    return _shape_constraint(
+        v,
+        lambda x: np.abs(_diff(x)) <= b,
+        lambda x: np.maximum(0.0, np.abs(_diff(x)) - b),
+        f"lipschitz({_expr_desc(v)}, {b})",
+    )
+
+
+def ode_residual(v, f, dt: float = 1.0, *, tol: float = 1e-2) -> Constraint:
+    """A differential-equation constraint: ``v`` (a function sampled on a uniform grid of spacing
+    ``dt``) satisfies ``dv/dt = f(v)``. The signed residual ``diff(v)/dt - f(v[:-1])`` feeds the
+    soft-penalty inference path — ``fit(..., constraints=ode_residual(y, f), penalty=w)`` fits a
+    physics-informed curve. Like an equality it is measure-zero, so consume it with ``penalty=``
+    rather than by rejection."""
+    step = float(dt)
+
+    def resid(env):
+        y = np.asarray(_eval_expr(v, env), dtype=float)
+        return np.diff(y, axis=-1) / step - np.asarray(f(y[..., :-1]), dtype=float)
+
+    return Constraint(
+        _expr_leaves(v),
+        lambda env: np.all(np.abs(resid(env)) <= tol, axis=-1),
+        f"ode_residual({_expr_desc(v)})",
+        lambda env: np.asarray(resid(env)).ravel(),
+        soft=True,  # an ODE residual is measure-zero -> always the penalty path
+    )
+
+
+def _expr_desc(rv) -> str:
+    if not isinstance(rv, RandomVariable):
+        return repr(rv)
+    if rv._kind == "apply":
+        return f"f({_expr_desc(rv._args[0])})"
+    if rv._kind == "sum":
+        return f"({_expr_desc(rv._args[0])} + {_expr_desc(rv._args[1])})"
+    if rv._kind == "prod":
+        return f"({_expr_desc(rv._args[0])} * {_expr_desc(rv._args[1])})"
+    if rv._kind == "pow":
+        return f"({_expr_desc(rv._args[0])} ** {rv._args[1]})"
+    if rv._kind == "select":
+        return f"{_expr_desc(rv._args[0])}[{rv._args[1]}]"
+    return rv._name or "rv"
 
 
 def _convolve(da, db):
@@ -154,13 +568,16 @@ def _convolve(da, db):
     ta, tb = type(da).__name__, type(db).__name__
     if ta == tb == "GaussianDistribution":
         from pysp.stats.leaf.gaussian import GaussianDistribution
+
         return GaussianDistribution(da.mu + db.mu, da.sigma2 + db.sigma2)
     if ta == tb == "PoissonDistribution":
         from pysp.stats.leaf.poisson import PoissonDistribution
+
         return PoissonDistribution(da.lam + db.lam)
     if ta == tb == "GammaDistribution" and abs(da.theta - db.theta) < 1e-12:
         from pysp.stats.leaf.gamma import GammaDistribution
-        return GammaDistribution(da.k + db.k, da.theta)        # same scale
+
+        return GammaDistribution(da.k + db.k, da.theta)  # same scale
     return None
 
 
@@ -174,11 +591,32 @@ class Family:
     the paired ``*Estimator`` for the all-``free`` case.
     """
 
-    __slots__ = ("name", "dist_cls", "est_cls", "to_dist", "arity", "seed_at", "positive",
-                 "init_fit", "read")
+    __slots__ = (
+        "name",
+        "dist_cls",
+        "est_cls",
+        "to_dist",
+        "arity",
+        "seed_at",
+        "positive",
+        "init_fit",
+        "read",
+        "support",
+    )
 
-    def __init__(self, name, dist_cls, est_cls, to_dist, arity, seed_at=None, positive=None,
-                 init_fit=None, read=None):
+    def __init__(
+        self,
+        name,
+        dist_cls,
+        est_cls,
+        to_dist,
+        arity,
+        seed_at=None,
+        positive=None,
+        init_fit=None,
+        read=None,
+        support=None,
+    ):
         self.name = name
         self.dist_cls = dist_cls
         self.est_cls = est_cls
@@ -189,6 +627,12 @@ class Family:
         self.seed_at = seed_at
         # per-slot positivity (for unconstrained-space MCMC/MAP); default all real.
         self.positive = tuple(positive) if positive is not None else (False,) * arity
+        # per-slot constraint/support for gradient & MCMC reparameterization:
+        # 'real' (identity), 'positive' (log), or 'unit' (logit, for probabilities).
+        # Defaults from `positive`; pass `support=` to mark unit-interval params.
+        self.support = (
+            tuple(support) if support is not None else tuple("positive" if p else "real" for p in self.positive)
+        )
         # init_fit(data) -> a concrete Distribution to warm-start EM for families whose
         # MLE is sensitive to initialization (e.g. negative-binomial dispersion).
         self.init_fit = init_fit
@@ -196,14 +640,14 @@ class Family:
         # fitted params come back in the *same* parameterization the user wrote (sd, not sigma2).
         self.read = read
 
-    def make_dist(self, args: Tuple[Any, ...], name: Optional[str]):
+    def make_dist(self, args: tuple[Any, ...], name: str | None):
         kwargs = self.to_dist(*args)
         if name is not None:
             kwargs.setdefault("name", name)
         return self.dist_cls(**kwargs)
 
-    def make_estimator(self, name: Optional[str], keys: Optional[str]):
-        kwargs: Dict[str, Any] = {}
+    def make_estimator(self, name: str | None, keys: str | None):
+        kwargs: dict[str, Any] = {}
         if name is not None:
             kwargs["name"] = name
         if keys is not None:
@@ -236,15 +680,26 @@ class CompositeFamily:
         self.read = read
 
 
-_FAMILIES: Dict[str, Any] = {}
-_DIST_TO_FAMILY: Dict[type, "Family"] = {}        # reverse map for reading fitted params
-_DIST_TO_COMPOSITE_READ: Dict[type, Any] = {}     # composite dist type -> read(dist, read_params)
+_FAMILIES: dict[str, Any] = {}
+_DIST_TO_FAMILY: dict[type, Family] = {}  # reverse map for reading fitted params
+_DIST_TO_COMPOSITE_READ: dict[type, Any] = {}  # composite dist type -> read(dist, read_params)
 
 
-def register_family(name, dist_cls, est_cls, to_dist, arity, seed_at=None, positive=None,
-                    init_fit=None, read=None) -> Family:
-    fam = Family(name, dist_cls, est_cls, to_dist, arity, seed_at=seed_at, positive=positive,
-                 init_fit=init_fit, read=read)
+def register_family(
+    name, dist_cls, est_cls, to_dist, arity, seed_at=None, positive=None, init_fit=None, read=None, support=None
+) -> Family:
+    fam = Family(
+        name,
+        dist_cls,
+        est_cls,
+        to_dist,
+        arity,
+        seed_at=seed_at,
+        positive=positive,
+        init_fit=init_fit,
+        read=read,
+        support=support,
+    )
     _FAMILIES[name] = fam
     _DIST_TO_FAMILY[dist_cls] = fam
     return fam
@@ -270,14 +725,37 @@ def _count_params(p) -> int:
 
 def compare(models, data, *, by: str = "aic"):
     """Compare fitted models on ``data``. Returns rows sorted best-first by ``by``
-    ('aic' | 'bic' | 'loglik')."""
+    ('aic' | 'bic' | 'loglik' | 'waic' | 'loo').
+
+    ``'waic'`` and ``'loo'`` are the Bayesian predictive criteria (integrating over parameter
+    uncertainty via the posterior draws of a Bayesian fit); ``'aic'``/``'bic'`` use the point estimate.
+    Each row also reports ``elpd`` differences from the best model (``d_elpd``) for waic/loo.
+    """
     rows = []
     for m in models:
         ll = m.log_likelihood(data)
-        rows.append({"model": (m.name or type(m.dist).__name__), "loglik": ll,
-                     "aic": m.aic(data), "bic": m.bic(data)})
-    keys = {"loglik": lambda r: -r["loglik"], "aic": lambda r: r["aic"], "bic": lambda r: r["bic"]}
-    return sorted(rows, key=keys[by])
+        row = {"model": (m.name or type(m.dist).__name__), "loglik": ll, "aic": m.aic(data), "bic": m.bic(data)}
+        if by in ("waic", "loo"):
+            res = m.waic(data) if by == "waic" else m.loo(data)
+            row[by] = res[by]
+            row["elpd"] = res["elpd_waic" if by == "waic" else "elpd_loo"]
+            row["se"] = res["se"]
+            if by == "loo":
+                row["khat_max"] = res["khat_max"]
+        rows.append(row)
+    keys = {
+        "loglik": lambda r: -r["loglik"],
+        "aic": lambda r: r["aic"],
+        "bic": lambda r: r["bic"],
+        "waic": lambda r: r["waic"],
+        "loo": lambda r: r["loo"],
+    }
+    rows = sorted(rows, key=keys[by])
+    if by in ("waic", "loo"):
+        best = rows[0]["elpd"]
+        for r in rows:
+            r["d_elpd"] = r["elpd"] - best
+    return rows
 
 
 def read_params(dist):
@@ -292,7 +770,7 @@ def read_params(dist):
     return dist
 
 
-def seed_child(rv: "RandomVariable", value: Any, scale: float, rng=None):
+def seed_child(rv: RandomVariable, value: Any, scale: float, rng=None):
     """Build a concrete distribution for a child RV to break EM symmetry.
 
     Continuous families with a ``seed_at`` are located at the data ``value``; a Categorical
@@ -308,9 +786,10 @@ def seed_child(rv: "RandomVariable", value: Any, scale: float, rng=None):
             return fam.dist_cls(**fam.seed_at(value, scale))
         if fam.name == "Categorical":
             from pysp.stats.leaf.categorical import CategoricalDistribution
+
             spec = rv._args[0]
             keys = list(spec.keys()) if isinstance(spec, dict) else list(range(len(spec)))
-            w = rng.dirichlet(np.ones(len(keys)))            # random, valid (no zeros->inf)
+            w = rng.dirichlet(np.ones(len(keys)))  # random, valid (no zeros->inf)
             return CategoricalDistribution(pmap=dict(zip(keys, w)))
     return None
 
@@ -325,11 +804,9 @@ class RandomVariable:
     state. Construct via the family functions in :mod:`pysp.ppl` or ``fit``.
     """
 
-    __slots__ = ("_kind", "_family", "_args", "_name", "_keys", "_dist", "_result",
-                 "_cache", "_scope")
+    __slots__ = ("_kind", "_family", "_args", "_name", "_keys", "_dist", "_result", "_cache", "_scope")
 
-    def __init__(self, kind, *, family=None, args=(), name=None, keys=None, dist=None,
-                 result=None, scope="shared"):
+    def __init__(self, kind, *, family=None, args=(), name=None, keys=None, dist=None, result=None, scope="shared"):
         # Private; use the classmethods / family functions. Treated as immutable.
         object.__setattr__(self, "_kind", kind)
         object.__setattr__(self, "_family", family)
@@ -344,100 +821,161 @@ class RandomVariable:
     def __setattr__(self, *a):  # enforce immutability (I2)
         raise AttributeError("RandomVariable is immutable")
 
+    def __reduce__(self):
+        # Picklable so models can cross a process boundary (parallel chains,
+        # distributed fits). Families live in the module-level registry and are
+        # restored by name; transient _result/_cache are dropped.
+        fam_name = self._family.name if self._family is not None else None
+        return (_rv_reconstruct, (self._kind, fam_name, self._args, self._name, self._keys, self._dist, self._scope))
+
     # -- constructors -------------------------------------------------------
     @classmethod
-    def _sample(cls, family_name, args, *, name=None, keys=None, scope="shared") -> "RandomVariable":
+    def _sample(cls, family_name, args, *, name=None, keys=None, scope="shared") -> RandomVariable:
         fam = _FAMILIES[family_name]
         return cls("sample", family=fam, args=args, name=name, keys=keys, scope=scope)
 
-    def each(self) -> "RandomVariable":
+    def each(self) -> RandomVariable:
         """Mark this prior as per-group (a random effect / local latent). Used in a
         parameter slot: ``Normal(Normal(m, t).each(), s)`` is a hierarchical model.
         """
         if self._kind != "sample":
             raise TypeError("each() applies to a distribution used as a prior.")
-        return RandomVariable("sample", family=self._family, args=self._args,
-                              name=self._name, keys=self._keys, scope="grouped")
+        return RandomVariable(
+            "sample", family=self._family, args=self._args, name=self._name, keys=self._keys, scope="grouped"
+        )
 
     @property
     def scope(self) -> str:
         return self._scope
 
     @classmethod
-    def _bound(cls, dist, *, name=None, result=None) -> "RandomVariable":
+    def _bound(cls, dist, *, name=None, result=None) -> RandomVariable:
         return cls("bound", dist=dist, name=name or getattr(dist, "name", None), result=result)
 
     @classmethod
-    def _apply(cls, base, transform) -> "RandomVariable":
+    def _apply(cls, base, transform) -> RandomVariable:
         # Apply node: a deterministic transform of one RV (algebra rung 1).
         return cls("apply", args=(base, transform))
 
     @classmethod
-    def _sum(cls, a, b) -> "RandomVariable":
+    def _sum(cls, a, b) -> RandomVariable:
         # Convolution node: the distribution of a + b for independent a, b.
         return cls("sum", args=(a, b))
 
+    @classmethod
+    def _prod(cls, a, b) -> RandomVariable:
+        # Product expression node (a * b). Valid in constraint / solver expressions and as a
+        # derived RV (sample/mean); not lowerable to a distribution (no tractable density).
+        return cls("prod", args=(a, b))
+
+    @classmethod
+    def _pow(cls, base, exponent) -> RandomVariable:
+        # Power expression node (base ** const). Same status as a product node.
+        return cls("pow", args=(base, float(exponent)))
+
+    @classmethod
+    def _select(cls, base, index) -> RandomVariable:
+        # Entry-selection node base[i]: picks component `index` of a vector-valued RV. Valid in
+        # constraint / solver expressions and as a derived RV (sample/mean).
+        return cls("select", args=(base, int(index)))
+
+    def __getitem__(self, index) -> RandomVariable:
+        if not isinstance(index, int):
+            raise TypeError("RandomVariable indexing selects a single integer entry, e.g. v[0].")
+        return RandomVariable._select(self, index)
+
     # -- algebra (deterministic transforms + convolution) -------------------
-    def _affine(self, loc, scale) -> "RandomVariable":
+    def _affine(self, loc, scale) -> RandomVariable:
         from pysp.stats.combinator.transform import AffineTransform
+
         return RandomVariable._apply(self, AffineTransform(loc=float(loc), scale=float(scale)))
 
     def __mul__(self, c):
-        if isinstance(c, Field):                      # coef * covariate -> regression term
+        if isinstance(c, Field):  # coef * covariate -> regression term
             return _LinearPredictor([(self, c)])
-        if isinstance(c, RandomVariable):
-            raise NotImplementedError("RV * RV (products) is not supported; use sums (+).")
+        if isinstance(c, RandomVariable):  # product expression (constraints/solver; not a dist)
+            return RandomVariable._prod(self, c)
         return self._affine(0.0, c)
+
     __rmul__ = __mul__
 
+    def __pow__(self, p):
+        if isinstance(p, RandomVariable):
+            raise NotImplementedError("RV ** RV is not supported; the exponent must be constant.")
+        return RandomVariable._pow(self, p)
+
     def __add__(self, c):
-        if isinstance(c, _LinearPredictor):           # RV is an intercept
+        if isinstance(c, _LinearPredictor):  # RV is an intercept
             return c.__add__(self)
         if isinstance(c, Field):
             return _LinearPredictor([(1.0, c)], self)
-        if isinstance(c, Group):                      # RV intercept + random group effects
+        if isinstance(c, Group):  # RV intercept + random group effects
             return _LinearPredictor([], self, [c._key()])
-        if isinstance(c, RandomVariable):             # convolution of independent RVs
+        if isinstance(c, RandomVariable):  # convolution of independent RVs
             return RandomVariable._sum(self, c)
         return self._affine(c, 1.0)
+
     __radd__ = __add__
 
     def __sub__(self, c):
         if isinstance(c, RandomVariable):
-            return RandomVariable._sum(self, c._affine(0.0, -1.0))   # a + (-b)
+            return RandomVariable._sum(self, c._affine(0.0, -1.0))  # a + (-b)
         return self._affine(-float(c), 1.0)
 
     def __rsub__(self, c):
         return self._affine(c, -1.0) if not isinstance(c, RandomVariable) else c.__sub__(self)
 
     def __truediv__(self, c):
-        if isinstance(c, RandomVariable):
-            raise NotImplementedError("RV / RV (ratios) is not supported.")
+        if isinstance(c, RandomVariable):  # ratio expression: a / b = a * b**-1
+            return RandomVariable._prod(self, RandomVariable._pow(c, -1.0))
         return self._affine(0.0, 1.0 / float(c))
 
     def __neg__(self):
         return self._affine(0.0, -1.0)
 
-    def exp(self) -> "RandomVariable":
+    def exp(self) -> RandomVariable:
         from pysp.stats.combinator.transform import ExpTransform
+
         return RandomVariable._apply(self, ExpTransform())
 
-    def log(self) -> "RandomVariable":
+    def log(self) -> RandomVariable:
         from pysp.stats.combinator.transform import LogTransform
+
         return RandomVariable._apply(self, LogTransform())
 
-    # -- conditioning: comparisons build Events; .given restricts the RV -----
-    def __gt__(self, v): return Event(self, lambda x: np.asarray(x) > v, f"> {v}")
-    def __ge__(self, v): return Event(self, lambda x: np.asarray(x) >= v, f">= {v}")
-    def __lt__(self, v): return Event(self, lambda x: np.asarray(x) < v, f"< {v}")
-    def __le__(self, v): return Event(self, lambda x: np.asarray(x) <= v, f"<= {v}")
+    # -- relations: comparisons build Constraints (RV vs constant / RV / linear expr) ----
+    def __gt__(self, other):
+        return _make_constraint(self, ">", other)
 
-    def given(self, event) -> "RandomVariable":
-        """Condition this RV on an event (e.g. ``x.given(x > 0)`` -> truncation). The
-        result samples by rejection and scores with the renormalized density."""
-        if not isinstance(event, Event):
-            raise TypeError("given() expects an Event from a comparison, e.g. x > 0.")
-        return RandomVariable("given", args=(self, event))
+    def __ge__(self, other):
+        return _make_constraint(self, ">=", other)
+
+    def __lt__(self, other):
+        return _make_constraint(self, "<", other)
+
+    def __le__(self, other):
+        return _make_constraint(self, "<=", other)
+
+    # ``==`` / ``!=`` stay identity-based (RVs are dict keys), so equalities use explicit methods.
+    def eq(self, other):
+        return _make_constraint(self, "==", other)
+
+    def ne(self, other):
+        return _make_constraint(self, "!=", other)
+
+    def given(self, constraint) -> RandomVariable:
+        """Condition this RV on a constraint over *itself* (e.g. ``x.given(x > 0)`` ->
+        truncation). The result samples by rejection and scores with the renormalized
+        density. For relations among *several* RVs (``a < b``) use ``constrain(...)``."""
+        if not isinstance(constraint, Constraint):
+            raise TypeError("given() expects a Constraint from a comparison, e.g. x > 0.")
+        extra = [lv for lv in constraint.leaves if lv is not self]
+        if extra:
+            raise ValueError(
+                "given() conditions an RV on a relation over itself only; this constraint also "
+                "involves other RVs — use constrain(constraint) for a joint conditioning."
+            )
+        return RandomVariable("given", args=(self, constraint))
 
     # -- introspection ------------------------------------------------------
     @property
@@ -449,8 +987,22 @@ class RandomVariable:
         return self._kind == "sample" and any(_is_free(a) for a in self._args)
 
     @property
-    def name(self) -> Optional[str]:
+    def name(self) -> str | None:
         return self._name
+
+    @property
+    def columns(self) -> list:
+        """For a ``constrain(...)`` joint RV: the variable names, in sample-column order. A
+        vector-valued variable expands to one name per entry (``v[0]``, ``v[1]``, ...)."""
+        if self._kind != "joint":
+            raise TypeError("columns is only defined for a constrain(...) RV.")
+        leaves = self._args[0]
+        names = []
+        for i, lv in enumerate(leaves):
+            base = lv._name or f"rv{i}"
+            w = int(np.asarray(lv.sample(1, seed=0)).reshape(1, -1).shape[1])
+            names.extend([base] if w == 1 else [f"{base}[{j}]" for j in range(w)])
+        return names
 
     @property
     def dist(self):
@@ -468,7 +1020,7 @@ class RandomVariable:
             children = list(d.components)
         elif hasattr(d, "topics"):
             children = list(d.topics)
-        elif hasattr(d, "dist") and not hasattr(d, "mu"):   # SequenceDistribution.dist
+        elif hasattr(d, "dist") and not hasattr(d, "mu"):  # SequenceDistribution.dist
             children = [d.dist]
         else:
             raise TypeError(f"{type(d).__name__} has no sub-models to expose as components.")
@@ -482,7 +1034,7 @@ class RandomVariable:
         """
         d = lower(self, target="dist")
         if d is None and self._result is not None and hasattr(self._result, "coefficients"):
-            return self._result.coefficients          # regression: report coefficients
+            return self._result.coefficients  # regression: report coefficients
         return read_params(d)
 
     @property
@@ -491,8 +1043,28 @@ class RandomVariable:
         return self._result
 
     # -- query verbs (valid once concrete) ----------------------------------
-    def sample(self, n: Optional[int] = None, seed: Optional[int] = None):
-        if self._kind == "sum":                       # convolution: sample operands and add
+    def sample(self, n: int | None = None, seed: int | None = None):
+        if self._kind == "joint":  # joint rejection sampling under a relation
+            leaves, constraint = self._args
+            rng = np.random.RandomState(seed)
+            k = n if n is not None else 1
+            kept = []
+            have = 0
+            while have < k:
+                batch = max(k * 2, 1024)
+                cols = {lv: np.asarray(lv.sample(batch, seed=int(rng.randint(1, 2**31))), dtype=float) for lv in leaves}
+                mask = _row_mask(constraint.eval(cols))  # per-row; vector relations reduce over entries
+                block = np.concatenate([cols[lv][mask].reshape(int(mask.sum()), -1) for lv in leaves], axis=1)
+                kept.append(block)
+                have += len(block)
+            out = np.concatenate(kept, axis=0)[:k]
+            return out if n is not None else out[0]
+        if self._kind == "select":  # entry of a vector RV: sample base, take the component
+            base, index = self._args
+            k = n if n is not None else 1
+            xs = np.asarray(base.sample(k, seed=seed), dtype=float)[..., index]
+            return xs if n is not None else float(xs[0])
+        if self._kind == "sum":  # convolution: sample operands and add
             rng = np.random.RandomState(seed)
             a, b = self._args
             k = n if n is not None else 1
@@ -500,7 +1072,20 @@ class RandomVariable:
             ys = np.asarray(b.sample(k, seed=int(rng.randint(1, 2**31))))
             out = xs + ys
             return out if n is not None else float(out[0])
-        if self._kind == "given":                     # rejection sampling from the region
+        if self._kind == "prod":  # product of independent RVs: sample operands and multiply
+            rng = np.random.RandomState(seed)
+            a, b = self._args
+            k = n if n is not None else 1
+            xs = np.asarray(a.sample(k, seed=int(rng.randint(1, 2**31))))
+            ys = np.asarray(b.sample(k, seed=int(rng.randint(1, 2**31))))
+            out = xs * ys
+            return out if n is not None else float(out[0])
+        if self._kind == "pow":  # power of an RV by a constant exponent
+            base, exponent = self._args
+            k = n if n is not None else 1
+            xs = np.asarray(base.sample(k, seed=seed)) ** exponent
+            return xs if n is not None else float(xs[0])
+        if self._kind == "given":  # rejection sampling from the region
             base, event = self._args
             rng = np.random.RandomState(seed)
             k = n if n is not None else 1
@@ -516,13 +1101,29 @@ class RandomVariable:
         kde = self._cache.get("_kde")
         if kde is None:
             from scipy.stats import gaussian_kde
+
             s = np.asarray(self.sample(40000, seed=12345))
             kde = gaussian_kde(s)
             self._cache["_kde"] = kde
         return kde
 
     def log_prob(self, x):
-        if self._kind == "sum":                       # exact convolution if closed-form, else KDE
+        if self._kind == "joint":  # joint density of independent leaves / Z
+            leaves, constraint = self._args
+            widths = [int(np.asarray(lv.sample(1, seed=0)).reshape(1, -1).shape[1]) for lv in leaves]
+            if any(w > 1 for w in widths):
+                raise NotImplementedError(
+                    "joint log_prob over vector-valued variables is not supported yet; use .sample / .mean / .prob."
+                )
+            xa = np.atleast_2d(np.asarray(x, dtype=float))
+            if xa.shape[1] != len(leaves):
+                raise ValueError(f"expected {len(leaves)} columns, got shape {xa.shape}.")
+            logZ = math.log(self.prob())
+            env = {lv: xa[:, j] for j, lv in enumerate(leaves)}
+            base_lp = sum(np.atleast_1d(lv.log_prob(xa[:, j])) for j, lv in enumerate(leaves))
+            out = np.where(_row_mask(constraint.eval(env)), base_lp - logZ, -np.inf)
+            return float(out[0]) if np.ndim(x) == 1 else out
+        if self._kind == "sum":  # exact convolution if closed-form, else KDE
             a, b = self._args
             cd = None
             try:
@@ -552,26 +1153,86 @@ class RandomVariable:
         """Total log-likelihood of ``data`` under the fitted model (sum of log_prob)."""
         return float(np.sum(self.log_prob(list(data))))
 
-    def aic(self, data, k: Optional[int] = None) -> float:
+    def aic(self, data, k: int | None = None) -> float:
         """Akaike information criterion (lower is better). ``k`` defaults to a heuristic
         parameter count from ``.params``."""
         k = k if k is not None else _count_params(self.params)
         return 2.0 * k - 2.0 * self.log_likelihood(data)
 
-    def bic(self, data, k: Optional[int] = None) -> float:
+    def bic(self, data, k: int | None = None) -> float:
         """Bayesian information criterion (lower is better)."""
         k = k if k is not None else _count_params(self.params)
         n = len(list(data))
         return k * math.log(n) - 2.0 * self.log_likelihood(data)
 
+    def pointwise_log_likelihood(self, data) -> np.ndarray:
+        """Return the ``(n_draws, n_obs)`` log-likelihood matrix used by WAIC / PSIS-LOO.
+
+        For a Bayesian fit (``how='mcmc'|'hmc'|'ensemble'|'vi'``) each row is the log-likelihood of the
+        data under one posterior draw; for a point-estimate fit it is a single row.
+        """
+        r = self._result
+        if r is not None and hasattr(r, "pointwise_log_likelihood") and getattr(r, "build", None) is not None:
+            return r.pointwise_log_likelihood(data)
+        return np.asarray(self.log_prob(list(data)), dtype=float)[None, :]
+
+    def waic(self, data) -> dict:
+        """Widely Applicable Information Criterion from the posterior (lower ``waic`` is better).
+
+        Returns ``{elpd_waic, p_waic, waic, se, n_draws, pointwise}``. Estimates out-of-sample
+        predictive accuracy by integrating over parameter uncertainty -- the Bayesian analogue of
+        ``aic``/``bic`` -- and falls back to a point estimate for non-Bayesian fits.
+        """
+        from pysp.ppl import diagnostics as _diag
+
+        return _diag.waic(self.pointwise_log_likelihood(data))
+
+    def loo(self, data) -> dict:
+        """Pareto-Smoothed Importance-Sampling Leave-One-Out cross-validation (lower ``loo`` better).
+
+        Returns ``{elpd_loo, p_loo, loo, se, khat_max, n_draws, pointwise}``. ``khat_max`` above ~0.7
+        signals an unreliable estimate (refit with more posterior draws or prefer ``waic``).
+        """
+        from pysp.ppl import diagnostics as _diag
+
+        return _diag.psis_loo(self.pointwise_log_likelihood(data))
+
+    def summary(self):
+        """Posterior summary of a Bayesian fit, or the fitted params for a point estimate.
+
+        For ``how='mcmc'|'hmc'|'ensemble'|'vi'`` returns a per-parameter dict of
+        ``{mean, std, q2.5, q97.5}`` (the 95% credible interval) plus ``_acceptance_rate`` and, for
+        multi-chain runs, ``_rhat`` / ``_ess`` / ``_n_chains``. For ``map``/``em`` it returns ``.params``.
+        """
+        r = self._result
+        if r is not None and callable(getattr(r, "summary", None)):
+            return r.summary()
+        return self.params
+
     def mean(self, samples: int = 20000, seed: int = 0):
         """Expected value of the random variable (Monte-Carlo; works for any RV —
-        concrete, transformed, convolved, or conditioned)."""
-        return float(np.mean(np.asarray(self.sample(samples, seed=seed), dtype=float)))
+        concrete, transformed, convolved, or conditioned). For a joint ``constrain(...)``
+        RV this is the per-variable mean vector."""
+        s = np.asarray(self.sample(samples, seed=seed), dtype=float)
+        return s.mean(axis=0) if self._kind == "joint" else float(np.mean(s))
 
     def var(self, samples: int = 20000, seed: int = 0):
-        """Variance of the random variable (Monte-Carlo)."""
-        return float(np.var(np.asarray(self.sample(samples, seed=seed), dtype=float)))
+        """Variance of the random variable (Monte-Carlo); per-variable for a joint RV."""
+        s = np.asarray(self.sample(samples, seed=seed), dtype=float)
+        return s.var(axis=0) if self._kind == "joint" else float(np.var(s))
+
+    def prob(self, samples: int = 40000, seed: int = 999):
+        """Probability that the relation holds (Monte-Carlo), for a ``constrain(...)`` RV."""
+        if self._kind != "joint":
+            raise TypeError("prob() is only defined for a constrain(...) RV.")
+        p = self._cache.get("_pjoint")
+        if p is None:
+            leaves, constraint = self._args
+            rng = np.random.RandomState(seed)
+            cols = {lv: np.asarray(lv.sample(samples, seed=int(rng.randint(1, 2**31))), dtype=float) for lv in leaves}
+            p = max(float(np.mean(_row_mask(constraint.eval(cols)))), 1e-9)
+            self._cache["_pjoint"] = p
+        return p
 
     def prob_of_event(self):
         """P(event) under the base distribution (Monte-Carlo), for a conditioned RV."""
@@ -592,6 +1253,7 @@ class RandomVariable:
         fitted distribution).
         """
         import numpy as _np
+
         rng = rng or _np.random.RandomState()
         r = self._result
         pred = getattr(r, "predictive", None) if r is not None else None
@@ -608,14 +1270,11 @@ class RandomVariable:
           RV was fit with ``how='mcmc'`` (read from ``.result``).
         """
         # Parameter posterior: a handle/name/index against an MCMC result.
-        if isinstance(x, (RandomVariable, str, int)) and self._result is not None \
-                and hasattr(self._result, "samples"):
+        if isinstance(x, (RandomVariable, str, int)) and self._result is not None and hasattr(self._result, "samples"):
             return self._result.samples(x)
         d = lower(self, target="dist")
         if not (hasattr(d, "seq_posterior") or hasattr(d, "posterior")):
-            raise NotImplementedError(
-                f"{type(d).__name__} exposes no posterior (no latent to infer)."
-            )
+            raise NotImplementedError(f"{type(d).__name__} exposes no posterior (no latent to infer).")
         if np.isscalar(x):
             return np.asarray(d.posterior(x))
         enc = d.dist_to_encoder().seq_encode(list(x))
@@ -626,14 +1285,45 @@ class RandomVariable:
     # -- resolve ------------------------------------------------------------
     def _has_priors(self) -> bool:
         # A prior is an RV in a *flat* family slot; composite children are sub-models.
-        return (self._kind == "sample"
-                and not isinstance(self._family, CompositeFamily)
-                and any(isinstance(a, RandomVariable) for a in self._args))
+        return (
+            self._kind == "sample"
+            and not isinstance(self._family, CompositeFamily)
+            and any(isinstance(a, RandomVariable) for a in self._args)
+        )
 
-    def fit(self, data: Sequence[Any], *, how: str = "auto", max_its: int = 100,
-            delta: float = 1e-8, backend: str = "local", num_workers: Optional[int] = None,
-            engine: Any = None, precision: Any = None, print_iter: int = 0,
-            **kw) -> "RandomVariable":
+    def _has_struct_param(self) -> bool:
+        # A structural vector/matrix parameter (a spec or a param(...) handle) anywhere in the tree
+        # -> the model needs inference (map/mcmc/...), not the EM estimator that ignores it.
+        if self._kind != "sample":
+            return False
+        stack = list(self._args)
+        while stack:
+            a = stack.pop()
+            if isinstance(a, (_SimplexSpec, _VectorSpec, _CholeskySpec, _OrderedSpec)):
+                return True
+            if isinstance(a, RandomVariable):
+                if a._kind == "param":
+                    return True
+                if a._kind == "sample":
+                    stack.extend(a._args)
+            elif isinstance(a, (list, tuple)):
+                stack.extend(a)
+        return False
+
+    def fit(
+        self,
+        data: Sequence[Any],
+        *,
+        how: str = "auto",
+        max_its: int = 100,
+        delta: float = 1e-8,
+        backend: str = "local",
+        num_workers: int | None = None,
+        engine: Any = None,
+        precision: Any = None,
+        print_iter: int = 0,
+        **kw,
+    ) -> RandomVariable:
         """Estimate / infer parameters from ``data`` and return a bound RV.
 
         ``how``: ``'em'`` (EM/MLE, default for plain ``free`` models), ``'map'`` (maximize
@@ -641,7 +1331,21 @@ class RandomVariable:
         ``'auto'`` picks ``map`` when the model has priors else ``em``. EM threads pysp's
         parallel/distributed backends (``backend='mp'|'mpi'|'dask'``).
         """
-        valid_how = {"auto", "em", "map", "mcmc", "hmc", "vi", "vmp", "conjugate", "hierarchical"}
+        valid_how = {
+            "auto",
+            "em",
+            "map",
+            "mcmc",
+            "hmc",
+            "nuts",
+            "sample",
+            "ensemble",
+            "vi",
+            "vmp",
+            "conjugate",
+            "conjugate_mixture",
+            "hierarchical",
+        }
         if how not in valid_how:
             raise ValueError(f"unknown how={how!r}; choose from {sorted(valid_how)}.")
         if hasattr(data, "__len__") and len(data) == 0:
@@ -650,34 +1354,87 @@ class RandomVariable:
         # regression / GLM: a linear predictor (covariates) in a parameter slot
         if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
             from pysp.ppl import regression as _reg
+
             return _reg.regression_fit(self, data, **kw)
 
         # state-space time-series models (Kalman/RTS + EM)
-        if self._kind == "sample" and isinstance(self._family, CompositeFamily) \
-                and self._family.name == "StateSpace":
+        if self._kind == "sample" and isinstance(self._family, CompositeFamily) and self._family.name == "StateSpace":
             from pysp.ppl import statespace as _ss
+
             return _ss.statespace_fit(self, data, **kw)
 
         grouped = self._kind == "sample" and any(
-            isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args)
+            isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args
+        )
+        # partial-free: a flat model with some `free` slots and some fixed constants (no priors).
+        # The all-free EM estimator can't hold params fixed, so fit only the free slots by
+        # maximum likelihood (MAP with no prior term), with the fixed args held constant.
+        flat = self._kind == "sample" and not isinstance(self._family, CompositeFamily)
+        partial_free = (
+            flat
+            and not self._has_priors()
+            and any(_is_free(a) for a in self._args)
+            and not all(_is_free(a) for a in self._args)
+        )
+        has_constraints = kw.get("constraints") is not None
+        struct_param = self._has_struct_param()
+        if has_constraints and how in ("em", "conjugate", "conjugate_mixture", "vi", "vmp"):
+            raise ValueError(
+                f"how={how!r} cannot honor inequality constraints; use 'map', 'mcmc', 'hmc', "
+                "or 'ensemble' (or how='auto')."
+            )
         if how == "auto":
             if grouped:
                 how = "hierarchical"
+            elif has_constraints:
+                how = "map"  # constraints truncate the region; the conjugate paths can't
             elif self._has_priors():
                 from pysp.ppl import inference as _inf
-                how = "conjugate" if _inf.conjugate_spec(self) is not None else "map"
+
+                if _inf.conjugate_spec(self) is not None:
+                    how = "conjugate"
+                elif _inf.conjugate_mixture_spec(self) is not None:
+                    how = "conjugate_mixture"
+                else:
+                    how = "map"
+            elif partial_free or struct_param:
+                how = "map"  # a vector/matrix parameter needs inference, not the EM estimator
             else:
                 how = "em"
-        if how in ("map", "mcmc", "hmc", "vi", "vmp", "conjugate", "hierarchical"):
+        elif how == "em" and (partial_free or struct_param):
+            how = "map"  # EM can't hold params fixed / infer a structural vector param
+        if how in (
+            "map",
+            "mcmc",
+            "hmc",
+            "nuts",
+            "sample",
+            "ensemble",
+            "vi",
+            "vmp",
+            "conjugate",
+            "conjugate_mixture",
+            "hierarchical",
+        ):
             from pysp.ppl import inference as _inf
+
+            if how == "conjugate_mixture":
+                return _inf.conjugate_mixture_fit(self, data, **kw)
             if how == "mcmc":
                 return _inf.mcmc_fit(self, data, **kw)
             if how == "hmc":
                 return _inf.hmc_fit(self, data, **kw)
+            if how == "nuts":
+                return _inf.nuts_fit(self, data, **kw)
+            if how == "sample":
+                return _inf.sample_fit(self, data, **kw)
+            if how == "ensemble":
+                return _inf.ensemble_fit(self, data, **kw)
             if how == "vi":
                 return _inf.vi_fit(self, data, **kw)
             if how == "vmp":
                 from pysp.ppl import vmp as _vmp
+
                 if isinstance(self._family, CompositeFamily) and self._family.name == "Mixture":
                     comps = self._args[0]
                     return _vmp.mixture_vmp(data, len(comps), **kw)
@@ -690,29 +1447,45 @@ class RandomVariable:
         # EM / MLE path
         est = lower(self, target="estimator")
         # Warm-start finicky flat-family MLEs (e.g. negative-binomial) from a moment match.
-        if "prev_estimate" not in kw and self._kind == "sample" \
-                and not isinstance(self._family, CompositeFamily) \
-                and getattr(self._family, "init_fit", None) is not None:
+        if (
+            "prev_estimate" not in kw
+            and self._kind == "sample"
+            and not isinstance(self._family, CompositeFamily)
+            and getattr(self._family, "init_fit", None) is not None
+        ):
             seed = self._family.init_fit(data)
             if seed is not None:
                 kw["prev_estimate"] = seed
         # Auto-seed latent composites (mixtures, ...) at distinct data points so EM
         # escapes the symmetric global-mean fixed point — "it just works".
-        if "prev_estimate" not in kw and self._kind == "sample" \
-                and isinstance(self._family, CompositeFamily) and self._family.seed_fn is not None:
+        if (
+            "prev_estimate" not in kw
+            and self._kind == "sample"
+            and isinstance(self._family, CompositeFamily)
+            and self._family.seed_fn is not None
+        ):
             import numpy as _np
+
             rng = kw.get("rng") or _np.random.RandomState()
             seed = self._family.seed_fn(self._args, data, rng, seed_child)
             if seed is not None:
                 kw["prev_estimate"] = seed
         import sys
+
         out = open("/dev/null", "w") if not print_iter else sys.stdout
         try:
             fitted = optimize(
-                data, est, max_its=max_its, delta=delta,
-                backend=backend, num_workers=num_workers,
-                engine=engine, precision=precision,
-                print_iter=max(print_iter, 1), out=out, **kw,
+                data,
+                est,
+                max_its=max_its,
+                delta=delta,
+                backend=backend,
+                num_workers=num_workers,
+                engine=engine,
+                precision=precision,
+                print_iter=max(print_iter, 1),
+                out=out,
+                **kw,
             )
         finally:
             if not print_iter:
@@ -727,8 +1500,68 @@ class RandomVariable:
         return f"RV({self._family.name}({inner}){nm})"
 
 
+def constrain(*constraints) -> RandomVariable:
+    """A joint random variable formed by conditioning several RVs on a relation among them.
+
+    ``constrain(a < b)`` is the pair ``(a, b)`` restricted to ``a < b``; pass several
+    constraints (or combine with ``& | ~``) for richer regions, e.g.
+    ``constrain(a < b, b < c)`` orders three variables. The result samples by joint rejection
+    and answers ``.sample(n)`` (an ``(n, k)`` array, columns in ``.columns`` order),
+    ``.mean()``/``.var()`` (per-variable), ``.prob()`` (probability the relation holds), and
+    ``.log_prob(x)`` (renormalized joint density of the independent variables on the region).
+    """
+    if not constraints:
+        raise ValueError("constrain() needs at least one constraint.")
+    for c in constraints:
+        if not isinstance(c, Constraint):
+            raise TypeError("constrain() expects Constraints from comparisons, e.g. a < b.")
+    combined = constraints[0]
+    for c in constraints[1:]:
+        combined = combined & c
+    leaves = combined.leaves
+    if len(leaves) < 1:
+        raise ValueError("constraint references no random variables.")
+    for lv in leaves:
+        if lv._kind not in ("sample", "bound") or lv.has_free:
+            raise ValueError(
+                "constrain() variables must be concrete RVs (a distribution with fixed "
+                "parameters), not models with `free` holes; fit those first."
+            )
+    return RandomVariable("joint", args=(leaves, combined), name=None)
+
+
+def _param_handle(dim: int, *, name=None, kind: str = "vector", support: str = "real") -> RandomVariable:
+    """Build a referenceable vector/matrix parameter handle (the result of calling ``free(...)``).
+
+    ``kind``: ``vector`` (entries on ``support`` real/positive/unit), ``ordered`` (increasing),
+    ``simplex`` (sums to 1), or ``cholesky`` (an SPD covariance). Placed in a constructor slot and
+    referenced in constraints — ``m = free(3, name="mu"); MVN(3, mean=m).fit(X, constraints=increasing(m))``.
+    The handle behaves like a vector RV in constraint expressions (``m[i]``, ``m[0] < m[1]``, ...).
+    """
+    dim = int(dim)
+    if kind == "vector":
+        spec = _VectorSpec(dim, support, name)
+    elif kind == "ordered":
+        spec = _OrderedSpec(dim, name)
+    elif kind == "simplex":
+        spec = _SimplexSpec(np.ones(dim), rows=1, name=name)
+    elif kind == "cholesky":
+        spec = _CholeskySpec(dim, name)
+    else:
+        raise ValueError(f"unknown free(...) kind {kind!r}; use vector/ordered/simplex/cholesky.")
+    return RandomVariable("param", args=(spec,), name=name)
+
+
+def _rv_reconstruct(kind, fam_name, args, name, keys, dist, scope):
+    """Rebuild a RandomVariable from its picklable structural fields."""
+    if kind == "bound":
+        return RandomVariable._bound(dist, name=name)
+    family = _FAMILIES[fam_name] if fam_name is not None else None
+    return RandomVariable(kind, family=family, args=args, name=name, keys=keys, scope=scope)
+
+
 # -------------------------------------------------------------------- the lowering
-def lower(rv: "RandomVariable", *, target: str = "dist"):
+def lower(rv: RandomVariable, *, target: str = "dist"):
     """The one routing site: symbolic RandomVariable -> existing pysp object.
 
     ``target='dist'`` returns a concrete ``*Distribution`` (needs no ``free`` holes);
@@ -748,6 +1581,7 @@ def lower(rv: "RandomVariable", *, target: str = "dist"):
         if target != "dist":
             raise NotImplementedError("fitting through an RV transform is a later slice.")
         from pysp.stats.combinator.transform import TransformDistribution
+
         base, transform = rv._args
         d = TransformDistribution(lower(base, target="dist"), transform)
         cache[target] = d
@@ -761,8 +1595,7 @@ def lower(rv: "RandomVariable", *, target: str = "dist"):
         if target == "dist":
             result = fam.dist_fn(rv._args, lambda c: lower(c, target="dist"))
         elif target == "estimator":
-            result = fam.est_fn(rv._args, lambda c: lower(c, target="estimator"),
-                                rv._name, rv._keys)
+            result = fam.est_fn(rv._args, lambda c: lower(c, target="estimator"), rv._name, rv._keys)
         else:
             raise ValueError(f"unknown lowering target {target!r}")
         cache[target] = result
@@ -772,8 +1605,7 @@ def lower(rv: "RandomVariable", *, target: str = "dist"):
         if not all(_is_free(a) for a in rv._args):
             if any(_is_free(a) for a in rv._args):
                 raise NotImplementedError(
-                    f"{fam.name}: partial `free` (some args fixed) is a later slice; "
-                    "use all-free or all-fixed for now."
+                    f"{fam.name}: partial `free` (some args fixed) is a later slice; use all-free or all-fixed for now."
                 )
             # No holes: estimator of a fully-specified model is its own estimator.
             est = lower(rv, target="dist").estimator()
@@ -784,13 +1616,9 @@ def lower(rv: "RandomVariable", *, target: str = "dist"):
 
     if target == "dist":
         if any(_is_free(a) for a in rv._args):
-            raise ValueError(
-                f"{fam.name} has unresolved `free` parameters; call .fit(data) first."
-            )
+            raise ValueError(f"{fam.name} has unresolved `free` parameters; call .fit(data) first.")
         if any(isinstance(a, RandomVariable) for a in rv._args):
-            raise NotImplementedError(
-                "latent/random parameters (a distribution in a slot) land in build slice 5."
-            )
+            raise NotImplementedError("latent/random parameters (a distribution in a slot) land in build slice 5.")
         d = fam.make_dist(rv._args, rv._name)
         cache[target] = d
         return d
