@@ -110,6 +110,35 @@ def test_dpm_scoring_self_consistency():
     assert np.isfinite(s_est.model_log_density(sd))
 
 
+def test_dpm_seq_posterior():
+    sd, _ = _matched_dpm()
+    mus = [-5.0, 0.0, 5.0, 10.0]
+    k = len(mus)
+
+    rng = RandomState(0)
+    x = (rng.normal(size=120) * 0.4 + rng.choice(mus, size=120)).tolist()
+    senc = sd.dist_to_encoder().seq_encode(x)
+
+    post = np.asarray(sd.seq_posterior(senc))
+    # Shape, validity, and that each row is a probability simplex.
+    assert post.shape == (len(x), k)
+    assert np.all(post >= 0.0) and np.all(post <= 1.0)
+    np.testing.assert_allclose(post.sum(axis=1), 1.0, atol=1e-9)
+
+    # Vectorized rows match the per-observation scalar posterior(x_i).
+    scalar = np.asarray([sd.posterior(v) for v in x])
+    np.testing.assert_allclose(post, scalar, atol=1e-9)
+
+    # Consistent with the plug-in mixture density: p(z=k|x) = exp(comp_k + log w_k - logsumexp).
+    comp_ld = np.asarray([u.seq_log_density(senc) for u in sd.components]).T + sd.log_w
+    expected = np.exp(comp_ld - np.asarray(sd.seq_log_density(senc))[:, None])
+    np.testing.assert_allclose(post, expected, atol=1e-9)
+
+    # Atom assignment: an observation right at atom j is most probable under component j.
+    atoms = sd.dist_to_encoder().seq_encode([float(m) for m in mus])
+    np.testing.assert_array_equal(np.argmax(np.asarray(sd.seq_posterior(atoms)), axis=1), np.arange(k))
+
+
 def test_dpm_elbo_monotone_and_recovery():
     rng = RandomState(1)
     data = []
