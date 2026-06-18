@@ -136,14 +136,15 @@ def _advi_optimize(
     rng,
     family: str = "meanfield",
     alpha: float = 1.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Reusable ADVI core: fit a Gaussian variational posterior by reparameterized-MC SGVB (Adam).
 
     ``log_p_fn(U: Tensor(mc, d)) -> Tensor(mc,)`` is the (unconstrained) batched joint log-target;
     it owns any data minibatching/rescaling. This is the family/objective machinery shared by
     :meth:`GradTarget.advi` and the public :func:`pysp.infer.advi` facade, with no dependency on
-    ``GradTarget``'s slots or data. Returns ``(mean_u, scale_u, U_draws)`` all in the unconstrained
-    space (``U_draws`` is ``(samples, d)``)."""
+    ``GradTarget``'s slots or data. Returns ``(mean_u, scale_u, U_draws, objective)`` with the
+    unconstrained mean/scale, the draws ``(samples, d)``, and the final variational objective value
+    (the ELBO for ``alpha=1``, otherwise the tilted Renyi bound)."""
     d = int(len(np.asarray(u0, dtype=float)))
     half_d_log2pi = 0.5 * d * math.log(2.0 * math.pi)
     entropy_const = 0.5 * d * (1.0 + math.log(2.0 * math.pi))
@@ -186,6 +187,20 @@ def _advi_optimize(
         (-obj).backward()
         opt.step()
 
+    # final objective at the fitted q, estimated with extra MC samples for a low-variance value
+    with torch.no_grad():
+        n_eval = max(mc, 256)
+        eps = torch.randn((n_eval, d), dtype=torch.float64, generator=gen)
+        u, log_q, entropy = variational(eps)
+        log_p = log_p_fn(u)
+        if alpha == 1.0:
+            final_obj = float((log_p.mean() + entropy).item())
+        else:
+            log_w = log_p - log_q
+            final_obj = float(
+                ((torch.logsumexp((1.0 - alpha) * log_w, dim=0) - math.log(n_eval)) / (1.0 - alpha)).item()
+            )
+
     mean_np = mean.detach().numpy()
     z = rng.standard_normal((samples, d))
     if family == "fullrank":
@@ -195,7 +210,7 @@ def _advi_optimize(
     else:
         scale_np = torch.exp(log_std).detach().numpy()
         U = mean_np + scale_np * z
-    return mean_np, scale_np, U
+    return mean_np, scale_np, U, final_obj
 
 
 class GradTarget:
@@ -337,7 +352,7 @@ class GradTarget:
         batch_size: int | None = None,
         family: str = "meanfield",
         alpha: float = 1.0,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
         """Fit a Gaussian variational posterior by reparameterized-MC stochastic optimization (Adam).
 
         ``family``: ``meanfield`` (diagonal q — independent params) or ``fullrank`` (a full
@@ -346,7 +361,8 @@ class GradTarget:
         ``alpha=1`` is the usual KL-ELBO; ``alpha=0`` is the importance-weighted (IWAE) bound — both
         mass-covering directions that widen the often-too-narrow KL fit (the importance weights
         ``w=p/q`` are *tilted* by ``1-alpha``). ``batch_size`` subsamples the data per step (SGVB).
-        Returns ``(value_samples, mean_u, scale_u)``."""
+        Returns ``(value_samples, mean_u, scale_u, objective)`` where ``objective`` is the final
+        variational objective value (ELBO for ``alpha=1``, otherwise the tilted Renyi bound)."""
         n_data = int(self._x.shape[0])
         use_mb = batch_size is not None and 0 < int(batch_size) < n_data
 
@@ -358,7 +374,7 @@ class GradTarget:
                 )
             return self._logtarget_batch(u)
 
-        mean_np, scale_np, U = _advi_optimize(
+        mean_np, scale_np, U, objective = _advi_optimize(
             self._torch,
             log_p_fn,
             u0,
@@ -379,7 +395,7 @@ class GradTarget:
                 vals[:, k] = 1.0 / (1.0 + np.exp(-U[:, k]))
             else:
                 vals[:, k] = U[:, k]
-        return vals, mean_np, scale_np
+        return vals, mean_np, scale_np, objective
 
 
 class MixtureGradTarget(GradTarget):
