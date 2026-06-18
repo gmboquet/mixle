@@ -470,6 +470,10 @@ __all__ = [
     "SkellamSampler",
     "SkellamEstimator",
     "SkellamDataEncoder",
+    "TweedieDistribution",
+    "TweedieSampler",
+    "TweedieEstimator",
+    "TweedieDataEncoder",
     "ExponentialTiltedDistribution",
     "ExponentialTiltedSampler",
     "ExponentialTiltedEstimator",
@@ -1021,6 +1025,12 @@ from pysp.stats.leaf.skellam import (
     SkellamSampler,
 )
 from pysp.stats.leaf.student_t import StudentTDataEncoder, StudentTDistribution, StudentTEstimator, StudentTSampler
+from pysp.stats.leaf.tweedie import (
+    TweedieDataEncoder,
+    TweedieDistribution,
+    TweedieEstimator,
+    TweedieSampler,
+)
 from pysp.stats.leaf.uniform import UniformDataEncoder, UniformDistribution, UniformEstimator, UniformSampler
 from pysp.stats.leaf.von_mises import (
     VonMisesDataEncoder,
