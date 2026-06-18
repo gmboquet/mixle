@@ -17,6 +17,7 @@ from pysp.stats.latent.mixture import MixtureDistribution
 from pysp.stats.leaf.categorical import CategoricalDistribution
 from pysp.stats.leaf.gaussian import GaussianDistribution
 from pysp.stats.leaf.poisson import PoissonDistribution
+from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
 
 
 class SamplerBatchingParityTestCase(unittest.TestCase):
@@ -59,6 +60,19 @@ class SamplerBatchingParityTestCase(unittest.TestCase):
         fast = m.sampler(3).sample(size=2000, batched=True)
         slow = m.sampler(3).sample(size=2000, batched=False)
         self._assert_same(fast, slow)
+
+    def test_mixture_multivariate_parity(self):
+        # vector-valued (ndarray) leaves exercise the flat-array scatter path, which must
+        # carry the trailing sample dimension rather than assume scalar draws
+        cov = [[1.0, 0.0], [0.0, 1.0]]
+        m = MixtureDistribution(
+            [MultivariateGaussianDistribution([0.0, 0.0], cov), MultivariateGaussianDistribution([5.0, 5.0], cov)],
+            [0.4, 0.6],
+        )
+        fast = m.sampler(17).sample(size=2000, batched=True)
+        slow = m.sampler(17).sample(size=2000, batched=False)
+        self.assertEqual(np.shape(fast[0]), (2,))
+        self.assertTrue(np.array_equal(np.asarray(fast), np.asarray(slow)))
 
     def test_sequence_parity(self):
         s = SequenceDistribution(GaussianDistribution(0.0, 1.0), len_dist=PoissonDistribution(8.0))
