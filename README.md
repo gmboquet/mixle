@@ -35,17 +35,24 @@ Torch (GPU).
 ## Installation
 
 Python 3.10+ (developed on 3.12). The base install (numpy, scipy, pandas, mpmath) covers every
-distribution and local estimation:
+distribution and local estimation. The package is published on PyPI as `pysp-learn` (the import
+name is `pysp`):
 
 ```sh
-pip install git+https://github.com/gmboquet/pysparkplug.git
+pip install pysp-learn
 ```
 
 Back-ends are opt-in extras — `numba` (JIT estimation), `spark` / `dask` (distributed),
 `torch` (GPU/autograd), `umap`, or `all`:
 
 ```sh
-pip install "pysparkplug[all] @ git+https://github.com/gmboquet/pysparkplug.git"
+pip install "pysp-learn[all]"
+```
+
+To install the latest unreleased code straight from source:
+
+```sh
+pip install "pysp-learn[all] @ git+https://github.com/gmboquet/pysparkplug.git"
 ```
 
 Without extras, numba-flagged paths run as pure Python (correct, slower) and Spark/Dask inputs are
