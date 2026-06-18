@@ -17,6 +17,8 @@ standard error, matching the conventions of Stan / ArviZ / the R ``loo`` package
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
 
@@ -141,4 +143,52 @@ def psis_loo(loglik: np.ndarray) -> dict:
         "khat_max": float(np.nanmax(khat)) if np.any(np.isfinite(khat)) else float("nan"),
         "n_draws": s,
         "pointwise": elpd_i,
+    }
+
+
+def loo_stacking_weights(pointwise_lpd: np.ndarray, iters: int = 2000, tol: float = 1.0e-10) -> np.ndarray:
+    """Return LOO stacking weights (Yao, Vehtari, Simpson & Gelman, 2018).
+
+    ``pointwise_lpd`` is an ``(n_obs, K)`` matrix of per-model pointwise LOO log-predictive
+    densities (each column is ``psis_loo(model_k)["pointwise"]``). The returned simplex weights
+    ``w`` maximize the LOO log-score of the weighted predictive distribution,
+    ``sum_i log(sum_k w_k * exp(lpd_ik))``. This is concave in ``w`` and solved here by the standard
+    mixture-weight EM update (no external optimizer), which respects the simplex by construction.
+    """
+    lpd = np.atleast_2d(np.asarray(pointwise_lpd, dtype=float))
+    n, k = lpd.shape
+    if k == 1:
+        return np.ones(1)
+    shift = lpd.max(axis=1, keepdims=True)
+    p = np.exp(lpd - shift)  # per-row rescaled predictive densities (the row constant cancels)
+    w = np.full(k, 1.0 / k)
+    prev = -np.inf
+    for _ in range(int(iters)):
+        num = w[None, :] * p
+        denom = num.sum(axis=1)
+        score = float(np.sum(np.log(denom) + shift[:, 0]))
+        w = (num / denom[:, None]).mean(axis=0)
+        if score - prev < tol * (abs(prev) + 1.0):
+            break
+        prev = score
+    return w
+
+
+def loo_stack(logliks: Sequence[np.ndarray]) -> dict:
+    """Stack K candidate models by LOO predictive performance.
+
+    ``logliks`` is a sequence of ``(n_draws_k, n_obs)`` pointwise log-likelihood matrices over the
+    same, aligned observations. Returns the stacking ``weights``, the ``(n_obs, K)`` per-model
+    pointwise LOO densities, each model's ``elpd_loo``, and the ``stacked_elpd_loo`` of the weighted
+    predictive (which is >= the best single-model elpd_loo, since a one-hot weight is feasible).
+    """
+    pointwise = np.column_stack([psis_loo(np.asarray(ll, dtype=float))["pointwise"] for ll in logliks])
+    weights = loo_stacking_weights(pointwise)
+    shift = pointwise.max(axis=1, keepdims=True)
+    stacked = float(np.sum(np.log((weights[None, :] * np.exp(pointwise - shift)).sum(axis=1)) + shift[:, 0]))
+    return {
+        "weights": weights,
+        "pointwise": pointwise,
+        "model_elpd_loo": [float(pointwise[:, j].sum()) for j in range(pointwise.shape[1])],
+        "stacked_elpd_loo": stacked,
     }
