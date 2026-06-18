@@ -352,6 +352,36 @@ def get_gamma_estimator(
     return _estimator_provider(False).GammaEstimator(suff_stat=(k, theta))
 
 
+def get_student_t_estimator(
+    vdict: dict[np.floating | float, float],
+    pseudo_count: float | None = None,
+    emp_suff_stat: bool = True,
+    use_bstats: bool = False,
+) -> "ParameterEstimator":
+    """Return a fixed-df Student-t estimator; df is set from the excess kurtosis of the data."""
+    df = 5.0
+    ss_0 = 0.0
+    ss_1 = 0.0
+    ss_2 = 0.0
+    ss_4 = 0.0
+    for key, v in vdict.items():
+        if math.isfinite(key):
+            ss_0 += v
+            ss_1 += key * v
+            ss_2 += key * key * v
+    if ss_0 > 0.0:
+        mean = ss_1 / ss_0
+        var = (ss_2 / ss_0) - mean * mean
+        if var > 0.0:
+            for key, v in vdict.items():
+                if math.isfinite(key):
+                    ss_4 += v * (key - mean) ** 4
+            excess_kurtosis = (ss_4 / ss_0) / (var * var) - 3.0
+            if excess_kurtosis > 0.0:
+                df = min(max(4.0 + 6.0 / excess_kurtosis, 2.5), 100.0)
+    return _estimator_provider(False).StudentTEstimator(df=df)
+
+
 def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> "ParameterEstimator":
     if use_bstats:
         return _estimator_provider(True).MultivariateGaussianEstimator(dim=dim, prior=_mvn_default_prior(dim))
