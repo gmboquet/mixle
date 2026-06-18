@@ -232,6 +232,42 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
                 rv[good_rows] = (np.log(np.sum(np.exp(ll_loc), axis=1, keepdims=True)) + ll_max[good_rows]).flatten()
             return rv
 
+    def posterior(self, x: Any) -> np.ndarray:
+        """Return the component posterior ``p(z = k | x)`` at a single observation.
+
+        This is the plug-in mixture posterior consistent with :meth:`log_density`:
+        ``softmax_k( log p(x | theta_k) + log w_k )``. An observation with no support under any
+        component falls back to the mixture weights ``w``. Returns a length-K array summing to 1.
+        """
+        comp_log_density = np.asarray([u.log_density(x) for u in self.components]) + self.log_w
+        max_val = np.max(comp_log_density)
+        if max_val == -np.inf:
+            return self.w.copy()
+        comp_log_density -= max_val
+        np.exp(comp_log_density, out=comp_log_density)
+        comp_log_density /= comp_log_density.sum()
+        return comp_log_density
+
+    def seq_posterior(self, x: Any) -> np.ndarray:
+        """Vectorized component posterior over a sequence-encoded input.
+
+        Returns an ``(sz, K)`` array whose row ``i`` is the plug-in posterior ``p(z = k | x_i)``
+        (see :meth:`posterior`); rows for observations with no support under any component fall back
+        to the mixture weights. A row-wise log-sum-exp keeps the softmax numerically stable.
+        """
+        ll_mat = np.asarray([u.seq_log_density(x) for u in self.components]).T + self.log_w
+        ll_max = ll_mat.max(axis=1, keepdims=True)
+
+        bad_rows = np.isinf(ll_max.flatten())
+        if np.any(bad_rows):
+            ll_mat[bad_rows, :] = self.log_w
+            ll_max[bad_rows] = np.max(self.log_w)
+
+        ll_mat = ll_mat - ll_max
+        np.exp(ll_mat, out=ll_mat)
+        ll_mat /= np.sum(ll_mat, axis=1, keepdims=True)
+        return ll_mat
+
     def seq_local_elbo(self, x: Any) -> np.ndarray:
         """Per-observation local ELBO contributions.
 
