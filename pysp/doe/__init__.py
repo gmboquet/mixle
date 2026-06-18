@@ -25,6 +25,12 @@ from pysp.doe.bayesopt import (
     register_acquisition,
     upper_confidence_bound,
 )
+from pysp.doe.constrained import (
+    ConstrainedBayesOptResult,
+    constrained_minimize,
+    probability_of_feasibility,
+    propose_next_constrained,
+)
 from pysp.doe.designs import (
     Bounds,
     full_factorial,
@@ -68,4 +74,8 @@ __all__ = [
     "i_criterion",
     "register_criterion",
     "available_criteria",
+    "ConstrainedBayesOptResult",
+    "probability_of_feasibility",
+    "propose_next_constrained",
+    "constrained_minimize",
 ]
