@@ -14,7 +14,17 @@ The first surface is space-filling and classical design generators, all returnin
 
 from __future__ import annotations
 
-from pysp.doe.bayesopt import BayesOptResult, expected_improvement, minimize, propose_next
+from pysp.doe.bayesopt import (
+    BayesOptResult,
+    available_acquisitions,
+    expected_improvement,
+    minimize,
+    probability_of_improvement,
+    propose_batch,
+    propose_next,
+    register_acquisition,
+    upper_confidence_bound,
+)
 from pysp.doe.designs import (
     Bounds,
     full_factorial,
@@ -31,6 +41,11 @@ __all__ = [
     "random_design",
     "BayesOptResult",
     "expected_improvement",
+    "probability_of_improvement",
+    "upper_confidence_bound",
+    "register_acquisition",
+    "available_acquisitions",
     "minimize",
     "propose_next",
+    "propose_batch",
 ]
