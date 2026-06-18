@@ -51,6 +51,16 @@ class ExponentialFamilySpec:
     base_measure_from_params: Callable[[Any, dict[str, Any], Any], Any] | None = None
     legacy_sufficient_statistics: Callable[[Any, dict[str, Any], Any], tuple[Any, ...]] | None = None
     fixed_base: bool = True
+    runtime_scoring: bool = True
+    """Whether the generated exp-family form may drive *runtime* scoring (scalar + stacked + numba).
+
+    Set ``False`` when the canonical ``<eta, T(x)>`` dot form is numerically unsafe as a runtime
+    scorer even though the family is a valid exponential family. The motivating case is the
+    categorical: ``eta = log(p)`` has ``-inf`` entries for zero-probability categories, so the
+    generic dot product hits ``0 * -inf = NaN`` for observations of *other* categories (its own
+    ``seq_log_density`` avoids this by indexing). With ``runtime_scoring=False`` the family keeps its
+    ``backend_*`` scoring path while ``to_exponential_family`` still exposes the canonical map (valid
+    where ``p > 0``)."""
     """Whether the base measure ``h(x)`` is independent of the per-component parameters.
 
     The generated *stacked* exp-family loops broadcast a single per-row base ``(n,)`` across all
@@ -193,12 +203,24 @@ def validate_statistic_layout(x: Any, suff_stat: Any) -> DistributionDeclaration
     return declaration
 
 
+def _exp_family_runtime_scoring(declaration: DistributionDeclaration) -> bool:
+    """Whether the exp-family form may drive scalar/numba runtime scoring for this family."""
+    ef = declaration.exponential_family
+    return ef is not None and ef.runtime_scoring
+
+
+def _exp_family_stacked_scoring(declaration: DistributionDeclaration) -> bool:
+    """Whether the exp-family form may drive the fixed-base *stacked* runtime loop."""
+    ef = declaration.exponential_family
+    return ef is not None and ef.fixed_base and ef.runtime_scoring
+
+
 def generated_stacked_available(dist_type: type[Any]) -> bool:
     """Return true when declarations can generate stacked leaf scoring."""
     declaration = declaration_for(dist_type)
     if declaration is None:
         return False
-    if declaration.exponential_family is not None and declaration.exponential_family.fixed_base:
+    if _exp_family_stacked_scoring(declaration):
         return True
     return _generated_backend_hook_supported(dist_type, declaration)
 
@@ -206,11 +228,7 @@ def generated_stacked_available(dist_type: type[Any]) -> bool:
 def generated_stacked_preferred(dist_type: type[Any]) -> bool:
     """Return true when a family explicitly opts into declaration-generated scoring."""
     declaration = declaration_for(dist_type)
-    return (
-        declaration is not None
-        and declaration.exponential_family is not None
-        and declaration.exponential_family.fixed_base
-    )
+    return declaration is not None and _exp_family_stacked_scoring(declaration)
 
 
 def generated_stacked_strategy(dist_type: type[Any]) -> str:
@@ -218,7 +236,7 @@ def generated_stacked_strategy(dist_type: type[Any]) -> str:
     declaration = declaration_for(dist_type)
     if declaration is None:
         return "none"
-    if declaration.exponential_family is not None and declaration.exponential_family.fixed_base:
+    if _exp_family_stacked_scoring(declaration):
         return "exp_family"
     if _generated_backend_hook_supported(dist_type, declaration):
         return "backend_log_density_from_params"
@@ -327,11 +345,7 @@ def generated_stacked_log_density(enc: Any, params: dict[str, Any], engine: Any)
     """Return an ``(n, k)`` log-density matrix from declaration-stacked params."""
     dist_type = params["__pysp_dist_type__"]
     declaration = declaration_for(dist_type)
-    if (
-        declaration is not None
-        and declaration.exponential_family is not None
-        and declaration.exponential_family.fixed_base
-    ):
+    if declaration is not None and _exp_family_stacked_scoring(declaration):
         return _generated_exp_family_log_density(enc, params, declaration.exponential_family, engine)
     fn = dist_type.backend_log_density_from_params
     sig_names = tuple(inspect.signature(fn).parameters.keys())
@@ -369,7 +383,7 @@ def generated_log_density(dist: Any, enc: Any, engine: Any) -> Any:
     if declaration is None:
         raise ValueError("%s has no declaration." % type(dist).__name__)
     params = _generated_scalar_params(dist, declaration, engine)
-    if declaration.exponential_family is not None:
+    if _exp_family_runtime_scoring(declaration):
         return _generated_exp_family_scalar_expression(enc, params, declaration.exponential_family, engine)
     return _generated_backend_log_density(dist, enc, params, declaration, engine)
 
@@ -427,7 +441,7 @@ def generated_numba_log_density_available(x: Any) -> bool:
     declaration = declaration_for(x)
     if declaration is None:
         return False
-    if declaration.exponential_family is not None:
+    if _exp_family_runtime_scoring(declaration):
         return True
     dist_type = x if isinstance(x, type) else type(x)
     return _build_generic_numba_kernel(dist_type, declaration) is not None
@@ -436,11 +450,7 @@ def generated_numba_log_density_available(x: Any) -> bool:
 def generated_numba_stacked_available(x: Any) -> bool:
     """Return true when declarations can emit a generated stacked numba scorer."""
     declaration = declaration_for(x)
-    return (
-        declaration is not None
-        and declaration.exponential_family is not None
-        and declaration.exponential_family.fixed_base
-    )
+    return declaration is not None and _exp_family_stacked_scoring(declaration)
 
 
 def generated_numba_log_density(dist: Any, enc: Any) -> np.ndarray:
@@ -456,7 +466,7 @@ def generated_numba_log_density(dist: Any, enc: Any) -> np.ndarray:
     declaration = declaration_for(dist)
     if declaration is None:
         raise ValueError("%s has no declaration." % type(dist).__name__)
-    if declaration.exponential_family is None:
+    if not _exp_family_runtime_scoring(declaration):
         return _generated_generic_numba_log_density(dist, enc, declaration)
     params = _generated_scalar_params(dist, declaration, NUMPY_ENGINE)
     row_stats, base = _generated_numba_row_pieces(enc, params, declaration.exponential_family)
