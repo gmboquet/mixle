@@ -332,6 +332,86 @@ class IIDExponentialFamilyForm:
 
 
 @dataclass(frozen=True)
+class MultinomialExponentialFamilyForm:
+    """Canonical exponential-family view of a multinomial over an exp-family element.
+
+    A multinomial observation is a bag ``{(v_j, c_j)}`` of values with counts, and the (non
+    length-normalized, no separate trial distribution) log-density is the count-weighted sum of the
+    element log-densities, ``sum_j c_j log p_0(v_j)``.  So the natural parameters are the element's
+    (``eta = eta_0``), the sufficient statistic is the count-weighted sum ``T(x) = sum_j c_j T_0(v_j)``,
+    ``log h(x) = sum_j c_j log h_0(v_j)``, and ``A`` is the element's per-trial partition (the joint
+    scales by the total count ``n = sum_j c_j``).  Built by
+    :meth:`~pysp.stats.leaf.cat_multinomial.MultinomialDistribution.to_exponential_family`.
+    """
+
+    distribution: ProbabilityDistribution
+    element: ExponentialFamilyForm
+    engine: Any = NUMPY_ENGINE
+
+    @property
+    def dim(self) -> int:
+        """Natural-parameter dimension (same as the element family)."""
+        return self.element.dim
+
+    def natural_parameters(self) -> np.ndarray:
+        """Return the shared element natural parameters."""
+        return self.element.natural_parameters()
+
+    @staticmethod
+    def _values_counts(obs: Any) -> tuple[list, np.ndarray]:
+        pairs = list(obs)
+        values = [vc[0] for vc in pairs]
+        counts = np.asarray([float(vc[1]) for vc in pairs], dtype=np.float64)
+        return values, counts
+
+    def sufficient_statistics(self, x: Any) -> np.ndarray:
+        """Return the per-observation count-weighted element statistics ``(n, dim)``."""
+        rows = []
+        for obs in x:
+            values, counts = self._values_counts(obs)
+            if not values:
+                rows.append(np.zeros(self.element.dim, dtype=np.float64))
+                continue
+            t = np.asarray(self.engine.to_numpy(self.element.sufficient_statistics(values)), dtype=np.float64)
+            rows.append((t * counts[:, None]).sum(axis=0))
+        return np.asarray(rows, dtype=np.float64)
+
+    def log_partition(self, eta: Any = None) -> Any:
+        """Return the per-trial ``A`` (the joint scales by the total count)."""
+        if eta is not None:
+            raise NotImplementedError("MultinomialExponentialFamilyForm.log_partition(eta) is unsupported.")
+        return self.element.log_partition()
+
+    def log_base_measure(self, x: Any) -> np.ndarray:
+        """Return ``log h(x) = sum_j c_j log h_0(v_j)`` per observation."""
+        out = []
+        for obs in x:
+            values, counts = self._values_counts(obs)
+            if not values:
+                out.append(0.0)
+                continue
+            h = np.asarray(self.engine.to_numpy(self.element.log_base_measure(values)), dtype=np.float64)
+            out.append(float(np.dot(counts, h)))
+        return np.asarray(out, dtype=np.float64)
+
+    def log_density(self, x: Any) -> np.ndarray:
+        """Return the reconstructed log-density ``sum_j c_j log p_0(v_j)`` per observation."""
+        out = []
+        for obs in x:
+            values, counts = self._values_counts(obs)
+            if not values:
+                out.append(0.0)
+                continue
+            lp = np.asarray(self.engine.to_numpy(self.element.log_density(values)), dtype=np.float64)
+            out.append(float(np.dot(counts, lp)))
+        return np.asarray(out, dtype=np.float64)
+
+    def mean_parameters(self, **kwargs: Any) -> np.ndarray:
+        """Return the element mean parameters (the per-trial expectation of ``T``)."""
+        return self.element.mean_parameters(**kwargs)
+
+
+@dataclass(frozen=True)
 class ConditionalExponentialFamilyForm:
     """Canonical exponential-family view of a conditional model ``p(y | x)``.
 
