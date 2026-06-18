@@ -770,12 +770,19 @@ def _torchrun_backend(data, *, estimator, model, encoder, sub_chunks, comm, root
     )
 
 
+def _lightning_backend(data, *, estimator, model, encoder, sub_chunks, **_):
+    from pysp.utils.parallel.lightning_data import LightningEncodedData
+
+    return LightningEncodedData(data, estimator=estimator, model=model, encoder=encoder, sub_chunks=sub_chunks)
+
+
 register_encoded_data_backend("local", _local_backend)
 register_encoded_data_backend("mp", _mp_backend, aliases=("multiprocessing",))
 register_encoded_data_backend("mpi", _mpi_backend)
 register_encoded_data_backend("spark", _spark_backend)
 register_encoded_data_backend("dask", _dask_backend)
 register_encoded_data_backend("torchrun", _torchrun_backend)
+register_encoded_data_backend("lightning", _lightning_backend, aliases=("pl",))
 
 
 class LocalEncodedData(EncodedDataHandle):
