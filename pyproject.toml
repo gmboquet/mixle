@@ -3,7 +3,8 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pysparkplug"
+# PyPI distribution name; the import package is `pysp` (cf. scikit-learn -> sklearn).
+name = "pysp-learn"
 version = "0.2.0.0"
 description = "A package for estimating heterogeneous probability density functions."
 readme = "README.md"
