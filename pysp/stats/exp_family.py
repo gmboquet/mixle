@@ -186,6 +186,21 @@ class ExponentialFamilyForm:
         stats = np.asarray(self.engine.to_numpy(self.sufficient_statistics(samples)), dtype=np.float64)
         return stats.mean(axis=0)
 
+    def fisher_information(self, n_samples: int = 200000, seed: int | None = 0) -> np.ndarray:
+        """Return the Fisher information in natural coordinates, ``I(eta) = Cov[T(x)] = grad^2 A(eta)``.
+
+        For an exponential family the Fisher information with respect to the natural parameters is
+        exactly the covariance of the sufficient statistic (equivalently the Hessian of the
+        log-partition). This is the second-order companion to :meth:`mean_parameters` (``grad A =
+        E[T]``); it is estimated by the sample covariance of ``T(x)`` over ``n_samples`` draws --
+        approximate, but universal for any samplable family -- and returned as a ``(dim, dim)``
+        symmetric positive-semidefinite matrix.
+        """
+        samples = self.distribution.sampler(seed).sample(int(n_samples))
+        stats = np.asarray(self.engine.to_numpy(self.sufficient_statistics(samples)), dtype=np.float64)
+        cov = np.cov(stats, rowvar=False)
+        return np.asarray(cov, dtype=np.float64).reshape(self.dim, self.dim)
+
     def from_natural(self, eta: Any) -> ProbabilityDistribution | None:
         """Return ``theta(eta)`` as a reconstructed distribution, or ``None``.
 
