@@ -153,5 +153,45 @@ class QuantileRegressionTestCase(unittest.TestCase):
             Normal(free * Field("x") + free, free).fit(list(self.y), given={"x": list(self.x)}, quantile=1.5)
 
 
+class RegularizedRegressionTestCase(unittest.TestCase):
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        n, self.p, self.k = 200, 12, 3
+        self.X = rng.normal(0, 1, (n, self.p))
+        self.beta = np.zeros(self.p)
+        self.beta[: self.k] = np.array([3.0, -2.5, 2.0])
+        self.y = self.X @ self.beta + rng.normal(0, 0.5, n)
+        self.given = {f"x{j}": list(self.X[:, j]) for j in range(self.p)}
+
+    def _build(self, coef):
+        t = coef(0) * Field("x0")
+        for j in range(1, self.p):
+            t = t + coef(j) * Field(f"x{j}")
+        return t + coef("intercept")
+
+    def _coefs(self, m):
+        return np.array([m.result.coefficients[f"x{j}"]["mean"] for j in range(self.p)])
+
+    def test_free_recovers_ols(self):
+        m = Normal(self._build(lambda j: free), free).fit(list(self.y), given=self.given)
+        np.testing.assert_allclose(self._coefs(m)[: self.k], self.beta[: self.k], atol=0.15)
+
+    def test_lasso_selects_sparse_support(self):
+        from pysp.ppl import Laplace
+
+        m = Normal(self._build(lambda j: Laplace(0, 0.3)), free).fit(list(self.y), given=self.given)
+        coefs = self._coefs(m)
+        nonzero = np.flatnonzero(np.abs(coefs) > 1e-6)
+        self.assertTrue(set(range(self.k)).issubset(set(nonzero)))  # keeps the true features
+        self.assertLess(len(nonzero), self.p)  # but zeros some irrelevant ones (sparsity)
+
+    def test_ridge_shrinks_without_zeroing(self):
+        m = Normal(self._build(lambda j: Normal(0, 0.4)), free).fit(list(self.y), given=self.given)
+        coefs = self._coefs(m)
+        self.assertEqual(np.sum(np.abs(coefs) < 1e-6), 0)  # ridge keeps all nonzero
+        ols = Normal(self._build(lambda j: free), free).fit(list(self.y), given=self.given)
+        self.assertLess(np.abs(coefs).max(), np.abs(self._coefs(ols)).max() + 1e-9)  # shrunk
+
+
 if __name__ == "__main__":
     unittest.main()
