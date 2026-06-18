@@ -645,6 +645,8 @@ def encoded_data(
     comm: Any | None = None,
     root: int = 0,
     root_only: bool = False,
+    parallel_chunks: bool = False,
+    chunk_workers: int | None = None,
 ) -> EncodedDataHandle:
     """Return an encoded-data handle, preserving existing compatible handles.
 
@@ -678,6 +680,8 @@ def encoded_data(
         comm=comm,
         root=root,
         root_only=root_only,
+        parallel_chunks=parallel_chunks,
+        chunk_workers=chunk_workers,
     )
 
 
@@ -709,7 +713,20 @@ def available_encoded_data_backends() -> list[str]:
 
 
 def _local_backend(
-    data, *, estimator, model, encoder, placement, resources, engine, precision, num_chunks, sub_chunks, **_
+    data,
+    *,
+    estimator,
+    model,
+    encoder,
+    placement,
+    resources,
+    engine,
+    precision,
+    num_chunks,
+    sub_chunks,
+    parallel_chunks=False,
+    chunk_workers=None,
+    **_,
 ):
     return LocalEncodedData(
         data,
@@ -722,6 +739,8 @@ def _local_backend(
         precision=precision,
         num_chunks=num_chunks,
         sub_chunks=sub_chunks,
+        parallel_chunks=parallel_chunks,
+        chunk_workers=chunk_workers,
     )
 
 
@@ -822,9 +841,13 @@ class LocalEncodedData(EncodedDataHandle):
         precision: Any | None = None,
         num_chunks: int | None = None,
         sub_chunks: int = 1,
+        parallel_chunks: bool = False,
+        chunk_workers: int | None = None,
     ) -> None:
         if len(data) == 0:
             raise ValueError("LocalEncodedData requires non-empty data.")
+        self.parallel_chunks = bool(parallel_chunks)
+        self._chunk_workers = chunk_workers
         if encoder is None:
             if model is not None and callable(getattr(model, "dist_to_encoder", None)):
                 encoder = model.dist_to_encoder()
@@ -868,14 +891,40 @@ class LocalEncodedData(EncodedDataHandle):
             chunks.append((len(raw), ResidentEncodedPayload(host_payload, engine_payload)))
         return _LocalShard(shard.device, shard_engine, tuple(chunks))
 
+    def _chunk_pool_map(self, work: Any, items: list) -> list:
+        """Apply ``work`` to each chunk task, preserving input order.
+
+        When ``parallel_chunks`` is enabled (and there is more than one chunk) the work
+        runs on a thread pool: per-chunk numpy accumulation/scoring releases the GIL inside
+        vectorized ``seq_update``/``seq_log_density`` calls, so threads give real parallel
+        speedup. Results are returned in input order, so the caller's fold stays
+        bit-identical to the serial path regardless of completion order.
+        """
+        if not (self.parallel_chunks and len(items) > 1):
+            return [work(it) for it in items]
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = self._chunk_workers or min(len(items), (os.cpu_count() or 1))
+        with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+            return list(pool.map(work, items))
+
     def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
         """Return total count and summed log density over resident chunks."""
-        count = 0.0
+        plans = [(shard, _kernel_or_none(estimate, shard.engine)) for shard in self.shards]
+        count = float(sum(sz for shard, _ in plans for sz, _ in shard.chunks))
+        if self.parallel_chunks and all(kernel is None for _, kernel in plans):
+            tasks = [(sz, enc) for shard, _ in plans for sz, enc in shard.chunks]
+
+            def _score(task: tuple) -> float:
+                _, enc = task
+                scores = estimate.seq_log_density(getattr(enc, "host_payload", enc))
+                return float(np.asarray(scores, dtype=np.float64).sum())
+
+            total = sum(self._chunk_pool_map(_score, tasks))
+            return count, float(total)
         total = 0.0
-        for shard in self.shards:
-            kernel = _kernel_or_none(estimate, shard.engine)
+        for shard, kernel in plans:
             for sz, enc in shard.chunks:
-                count += sz
                 if kernel is None:
                     scores = estimate.seq_log_density(getattr(enc, "host_payload", enc))
                     total += float(np.asarray(scores, dtype=np.float64).sum())
@@ -890,20 +939,31 @@ class LocalEncodedData(EncodedDataHandle):
 
         validate_estimator_keys(estimator)
         accumulator = estimator.accumulator_factory().make()
-        nobs = 0.0
-        for shard in self.shards:
-            kernel = _kernel_or_none(prev_estimate, shard.engine, estimator=estimator)
-            for sz, enc in shard.chunks:
-                nobs += sz
-                if kernel is None:
-                    local_acc = estimator.accumulator_factory().make()
-                    local_acc.seq_update(
-                        getattr(enc, "host_payload", enc), np.ones(sz, dtype=np.float64), prev_estimate
-                    )
-                    accumulator.combine(local_acc.value())
-                else:
-                    weights = shard.engine.asarray(np.ones(sz, dtype=np.float64))
-                    accumulator.combine(kernel.accumulate(enc, weights))
+        plans = [(shard, _kernel_or_none(prev_estimate, shard.engine, estimator=estimator)) for shard in self.shards]
+        nobs = float(sum(sz for shard, _ in plans for sz, _ in shard.chunks))
+        if self.parallel_chunks and all(kernel is None for _, kernel in plans):
+            tasks = [(sz, enc) for shard, _ in plans for sz, enc in shard.chunks]
+
+            def _accumulate(task: tuple) -> Any:
+                sz, enc = task
+                local_acc = estimator.accumulator_factory().make()
+                local_acc.seq_update(getattr(enc, "host_payload", enc), np.ones(sz, dtype=np.float64), prev_estimate)
+                return local_acc.value()
+
+            for value in self._chunk_pool_map(_accumulate, tasks):
+                accumulator.combine(value)
+        else:
+            for shard, kernel in plans:
+                for sz, enc in shard.chunks:
+                    if kernel is None:
+                        local_acc = estimator.accumulator_factory().make()
+                        local_acc.seq_update(
+                            getattr(enc, "host_payload", enc), np.ones(sz, dtype=np.float64), prev_estimate
+                        )
+                        accumulator.combine(local_acc.value())
+                    else:
+                        weights = shard.engine.asarray(np.ones(sz, dtype=np.float64))
+                        accumulator.combine(kernel.accumulate(enc, weights))
         _global_key_merge(accumulator)
         return estimator.estimate(nobs, accumulator.value())
 
@@ -936,18 +996,29 @@ class LocalEncodedData(EncodedDataHandle):
 
         validate_estimator_keys(estimator)
         accumulator = estimator.accumulator_factory().make()
-        nobs = 0.0
-        for shard in self.shards:
-            kernel = _kernel_or_none(model, shard.engine, estimator=estimator)
-            for sz, enc in shard.chunks:
-                nobs += sz
-                if kernel is None:
-                    local_acc = estimator.accumulator_factory().make()
-                    local_acc.seq_update(getattr(enc, "host_payload", enc), np.ones(sz, dtype=np.float64), model)
-                    accumulator.combine(local_acc.value())
-                else:
-                    weights = shard.engine.asarray(np.ones(sz, dtype=np.float64))
-                    accumulator.combine(kernel.accumulate(enc, weights))
+        plans = [(shard, _kernel_or_none(model, shard.engine, estimator=estimator)) for shard in self.shards]
+        nobs = float(sum(sz for shard, _ in plans for sz, _ in shard.chunks))
+        if self.parallel_chunks and all(kernel is None for _, kernel in plans):
+            tasks = [(sz, enc) for shard, _ in plans for sz, enc in shard.chunks]
+
+            def _accumulate(task: tuple) -> Any:
+                sz, enc = task
+                local_acc = estimator.accumulator_factory().make()
+                local_acc.seq_update(getattr(enc, "host_payload", enc), np.ones(sz, dtype=np.float64), model)
+                return local_acc.value()
+
+            for value in self._chunk_pool_map(_accumulate, tasks):
+                accumulator.combine(value)
+        else:
+            for shard, kernel in plans:
+                for sz, enc in shard.chunks:
+                    if kernel is None:
+                        local_acc = estimator.accumulator_factory().make()
+                        local_acc.seq_update(getattr(enc, "host_payload", enc), np.ones(sz, dtype=np.float64), model)
+                        accumulator.combine(local_acc.value())
+                    else:
+                        weights = shard.engine.asarray(np.ones(sz, dtype=np.float64))
+                        accumulator.combine(kernel.accumulate(enc, weights))
         _global_key_merge(accumulator)
         return nobs, accumulator.value()
 
