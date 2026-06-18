@@ -1607,8 +1607,13 @@ def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None, penalty=Non
 class _VIResult:
     """Lightweight raw-result holder for a variational fit (mirrors MCMCResult's role)."""
 
-    def __init__(self, elbo, mean, std):
+    def __init__(self, elbo, mean, std, objective_kind="kl_elbo", alpha=1.0, family="meanfield", batch_size=None):
         self.elbo = float(elbo)
+        self.objective = float(elbo)  # alias; for alpha != 1 this is the tilted Renyi bound, not the ELBO
+        self.objective_kind = objective_kind
+        self.alpha = float(alpha)
+        self.family = family
+        self.batch_size = None if batch_size is None else int(batch_size)
         self.variational_mean = mean
         self.variational_std = std
         self.acceptance_rate = None
@@ -1647,7 +1652,7 @@ def vi_fit(
         slots, build = ag.slots, ag.build
         u0 = _init_u(slots, ag.dmean, ag.dstd)
         s0 = _init_scale(slots, ag.dstd, len(data))
-        vals, mean, std = ag.advi(
+        vals, mean, std, objective = ag.advi(
             u0,
             s0,
             samples=samples,
@@ -1659,6 +1664,7 @@ def vi_fit(
             family=family,
             alpha=alpha,
         )
+        objective_kind = "kl_elbo" if alpha == 1.0 else "renyi_tilted"
     else:
         from scipy.optimize import minimize
 
@@ -1688,9 +1694,17 @@ def vi_fit(
         vals = np.empty_like(U)
         for k, s in enumerate(slots):
             vals[:, k] = np.exp(U[:, k]) if s.positive else U[:, k]
+        objective = -float(res.fun)  # neg_elbo was minimized; the ELBO is its negation
+        objective_kind = "kl_elbo_common_random"
 
     mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
-    post = Posterior(slots, vals, _VIResult(0.0, mean, std))
+    post = Posterior(
+        slots,
+        vals,
+        _VIResult(
+            objective, mean, std, objective_kind=objective_kind, alpha=alpha, family=family, batch_size=batch_size
+        ),
+    )
 
     def predictive(n, r):
         idx = r.randint(len(vals), size=n)
