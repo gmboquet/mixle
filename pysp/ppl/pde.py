@@ -252,3 +252,90 @@ def fit_diffusivity(
         "obs_sd": float(torch.exp(log_sd).detach()),
         "loglik": float(loglik) if np.isscalar(loglik) or hasattr(loglik, "__float__") else float(loglik[0]),
     }
+
+
+def fit_pde_parameters(
+    observations,
+    transition,
+    init_params: dict[str, float],
+    *,
+    max_its: int = 500,
+    lr: float = 0.05,
+):
+    """Estimate arbitrary (possibly nonlinear) PDE parameters by the autograd adjoint.
+
+    Generalizes :func:`fit_diffusivity` to multiple parameters and nonlinear dynamics. ``transition``
+    is a differentiable one-step solver ``transition(u_prev, params) -> u_pred`` where ``u_prev`` is a
+    ``(B, n)`` torch tensor of fields and ``params`` is a dict of (positive) torch scalars; it may be
+    nonlinear in ``u`` (e.g. reaction terms). The named parameters in ``init_params`` (and the scalar
+    observation noise) are fit by maximizing the one-step predictive Gaussian likelihood
+    ``sum_t log N(y_t; transition(y_{t-1}, params), sigma^2 I)``; gradients flow by reverse-mode
+    autodiff through ``transition`` -- the discrete adjoint of the forward solve -- with no
+    hand-derived adjoint equations.
+
+    Returns a dict of the fitted parameters plus ``obs_sd`` and the maximized ``loglik``.
+    """
+    import torch
+
+    from pysp.utils.objectives import optimize_torch_objective
+
+    y = np.asarray(observations, dtype=float)
+    if y.ndim != 2 or y.shape[0] < 2:
+        raise ValueError("observations must be a (T, n) array with T >= 2 time steps.")
+    yt = torch.tensor(y, dtype=torch.float64)
+    prev, curr = yt[:-1], yt[1:]
+
+    names = list(init_params)
+    raw = {k: torch.tensor(math.log(float(v)), dtype=torch.float64, requires_grad=True) for k, v in init_params.items()}
+    log_sd = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
+
+    def objective():
+        params = {k: torch.exp(raw[k]) for k in names}
+        var = torch.exp(2.0 * log_sd) + 1.0e-12
+        resid = curr - transition(prev, params)
+        return -0.5 * (resid.pow(2).sum() / var + resid.numel() * torch.log(2.0 * math.pi * var))
+
+    loglik = optimize_torch_objective(
+        [raw[k] for k in names] + [log_sd], objective, max_its=max_its, lr=lr, maximize=True, out=None
+    )
+    fitted = {k: float(torch.exp(raw[k]).detach()) for k in names}
+    fitted["obs_sd"] = float(torch.exp(log_sd).detach())
+    fitted["loglik"] = float(loglik) if (np.isscalar(loglik) or hasattr(loglik, "__float__")) else float(loglik[0])
+    return fitted
+
+
+def fit_reaction_diffusion(
+    observations,
+    *,
+    length: float = 1.0,
+    bc: str = "neumann",
+    dt: float = 1.0,
+    init_diffusivity: float = 1.0,
+    init_growth: float = 1.0,
+    max_its: int = 800,
+    lr: float = 0.05,
+):
+    """Infer the (nonlinear) Fisher-KPP parameters ``du/dt = D u_xx + r u (1 - u)`` from snapshots.
+
+    A two-parameter, nonlinear instance of :func:`fit_pde_parameters`: an explicit-Euler step
+    ``u + dt (D L u + r u (1 - u))`` (``L`` the discrete Laplacian) is differentiable in the
+    diffusivity ``D`` and growth rate ``r``, both fit by the autograd adjoint. Returns ``diffusivity``,
+    ``growth``, ``obs_sd``, ``loglik``.
+    """
+    import torch
+
+    from pysp.ppl.dynamics import laplacian_matrix
+
+    y = np.asarray(observations, dtype=float)
+    n = y.shape[1]
+    lap = torch.tensor(laplacian_matrix(n, float(length) / (n - 1), bc), dtype=torch.float64)
+
+    def transition(u_prev, params):
+        diffusion = u_prev @ (params["diffusivity"] * lap).T
+        reaction = params["growth"] * u_prev * (1.0 - u_prev)
+        return u_prev + dt * (diffusion + reaction)
+
+    fitted = fit_pde_parameters(
+        y, transition, {"diffusivity": init_diffusivity, "growth": init_growth}, max_its=max_its, lr=lr
+    )
+    return fitted
