@@ -263,15 +263,20 @@ def stacked_component_params(dists: Sequence[Any], engine: ComputeEngine) -> Sta
     params_fn = getattr(component_type, "backend_stacked_params", None)
     score_fn = getattr(component_type, "backend_stacked_log_density", None)
     has_explicit = callable(params_fn) and callable(score_fn)
-    try:
-        return StackedComponentParams(
-            component_type=component_type,
-            strategy="generated",
-            params=_place_stacked_params(generated_stacked_params(dists, engine), engine, default_axis=0),
-        )
-    except ValueError:
-        if not has_explicit:
-            raise
+    # Only take the generated route when generated stacked *scoring* is actually available:
+    # generated_stacked_params can build a parameter bundle for a family whose generated scorer
+    # then can't run (e.g. a backend hook keyed on a derived parameter, or an exp-family spec with
+    # runtime_scoring=False). In that case prefer the family's explicit backend_stacked_* hooks.
+    if generated_stacked_available(component_type) or not has_explicit:
+        try:
+            return StackedComponentParams(
+                component_type=component_type,
+                strategy="generated",
+                params=_place_stacked_params(generated_stacked_params(dists, engine), engine, default_axis=0),
+            )
+        except ValueError:
+            if not has_explicit:
+                raise
     return StackedComponentParams(
         component_type=component_type,
         strategy="explicit",
