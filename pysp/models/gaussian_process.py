@@ -145,6 +145,49 @@ class GaussianProcessRegressor:
             cov = self.kernel(xs, xs) - v.T.matmul(v)
             return mean.detach().cpu().numpy(), cov.detach().cpu().numpy()
 
+    def predict_monotone(self, x_train: Any, y_train: Any, x_new: Any, increasing: bool = True) -> np.ndarray:
+        """Return the posterior-mean prediction projected to be monotone in scalar ``x_new``.
+
+        Predicts the GP posterior mean at ``x_new`` and projects it onto the monotone cone
+        (non-decreasing if ``increasing`` else non-increasing) by pool-adjacent-violators in
+        ``x_new`` order -- the L2-closest monotone curve to the GP mean. Intended for scalar (1-D)
+        inputs (e.g. monotone age-depth / dose-response fits); reduces to :meth:`predict` when the
+        posterior mean is already monotone.
+        """
+        x_sort_key = np.asarray(x_new, dtype=float).reshape(-1)
+        mean = np.asarray(self.predict(x_train, y_train, x_new), dtype=float).reshape(-1)
+        order = np.argsort(x_sort_key, kind="stable")
+        fitted = _pava(mean[order] if increasing else -mean[order])
+        if not increasing:
+            fitted = -fitted
+        out = np.empty_like(mean)
+        out[order] = fitted
+        return out
+
+
+def _pava(y: np.ndarray) -> np.ndarray:
+    """Pool-adjacent-violators: the L2-closest non-decreasing sequence to ``y`` (equal weights)."""
+    y = np.asarray(y, dtype=float)
+    n = y.size
+    if n <= 1:
+        return y.astype(float).copy()
+    vals: list[float] = []
+    counts: list[int] = []
+    for yi in y:
+        vals.append(float(yi))
+        counts.append(1)
+        while len(vals) >= 2 and vals[-2] > vals[-1]:
+            v2, c2 = vals.pop(), counts.pop()
+            v1, c1 = vals.pop(), counts.pop()
+            vals.append((v1 * c1 + v2 * c2) / (c1 + c2))
+            counts.append(c1 + c2)
+    out = np.empty(n, dtype=float)
+    pos = 0
+    for v, c in zip(vals, counts):
+        out[pos : pos + c] = v
+        pos += c
+    return out
+
 
 def _torch_engine(engine: Any | None, precision: Any | None = None) -> tuple[Any, Any]:
     try:
