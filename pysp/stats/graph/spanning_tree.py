@@ -1,8 +1,8 @@
-"""Create, estimate, and sample from a weighted spanning-tree distribution over a labeled graph.
+"""Create, estimate, sample, and enumerate a weighted spanning-tree distribution over a labeled graph.
 
-Defines the SpanningTreeDistribution, SpanningTreeSampler, SpanningTreeAccumulatorFactory,
-SpanningTreeAccumulator, SpanningTreeEstimator, and the SpanningTreeDataEncoder classes for use with
-pysparkplug.
+Defines the SpanningTreeDistribution, SpanningTreeEnumerator, SpanningTreeSampler,
+SpanningTreeAccumulatorFactory, SpanningTreeAccumulator, SpanningTreeEstimator, and the
+SpanningTreeDataEncoder classes for use with pysparkplug.
 
 Data type: a spanning tree of n labeled nodes given as a sequence of n-1 undirected edges, each an
 ``(i, j)`` pair (e.g. ``[(0, 1), (1, 2), (1, 3)]``). Unlike ChowLiuTree (a tree-structured distribution
@@ -14,13 +14,16 @@ Each undirected edge has a positive weight ``w[i, j]``. A spanning tree T has pr
 
 and by the Matrix-Tree theorem Z equals any first cofactor of the weighted graph Laplacian
 L = diag(W 1) - W, i.e. ``det(L[1:, 1:])``. Sampling uses Wilson's loop-erased-random-walk algorithm,
-which draws exactly from this weighted uniform-spanning-tree law. Estimation matches the empirical edge
-frequencies to the model edge marginals (an exponential family over trees, fit by projected gradient
-ascent on the log-weights); the per-edge marginal ``w[i,j] * R_eff(i,j)`` is read from the Laplacian
-pseudoinverse.
+which draws exactly from this weighted uniform-spanning-tree law. Estimation matches empirical or
+smoothed edge frequencies to the model edge marginals (an exponential family over trees, fit by
+projected gradient ascent on the log-weights); the per-edge marginal ``w[i,j] * R_eff(i,j)`` is read
+from the Laplacian pseudoinverse. Exact finite enumeration scans all positive-edge subsets of size
+n-1, keeps the spanning trees, and sorts them by fitted probability.
 """
 
 from collections.abc import Sequence
+import itertools
+import math
 from typing import Any
 
 import numpy as np
@@ -28,6 +31,7 @@ from numpy.random import RandomState
 
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -37,6 +41,7 @@ from pysp.stats.compute.pdist import (
 
 _MIN_LOG_WEIGHT = -30.0
 _MAX_LOG_WEIGHT = 30.0
+_DEFAULT_MAX_ENUMERATION_SUBSETS = 200_000
 
 
 def _weighted_laplacian(weights: np.ndarray) -> np.ndarray:
@@ -59,6 +64,20 @@ def _edge_marginals(weights: np.ndarray) -> np.ndarray:
     diag = np.diag(lap_pinv)
     r_eff = diag[:, None] + diag[None, :] - 2.0 * lap_pinv
     return weights * r_eff
+
+
+def _smoothed_edge_target(
+    edge_counts: np.ndarray,
+    count: float,
+    candidate: np.ndarray,
+    pseudo_count: float | None,
+) -> np.ndarray:
+    """Return empirical edge marginals, optionally smoothed toward the uniform tree law."""
+    target = edge_counts / count
+    if pseudo_count:
+        prior_marginals = _edge_marginals(np.where(candidate, 1.0, 0.0))
+        target = (count * target + pseudo_count * prior_marginals) / (count + pseudo_count)
+    return target * candidate
 
 
 class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
@@ -142,6 +161,13 @@ class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
         """Return a sampler for drawing spanning trees from this distribution."""
         return SpanningTreeSampler(self, seed)
 
+    def enumerator(
+        self,
+        max_edge_subsets: int | None = _DEFAULT_MAX_ENUMERATION_SUBSETS,
+    ) -> "SpanningTreeEnumerator":
+        """Return an exact finite enumerator over all supported spanning trees in probability order."""
+        return SpanningTreeEnumerator(self, max_edge_subsets=max_edge_subsets)
+
     def estimator(self, pseudo_count: float | None = None) -> "SpanningTreeEstimator":
         """Return an estimator that keeps the node count fixed at this distribution's n."""
         return SpanningTreeEstimator(dim=self.dim, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
@@ -149,6 +175,44 @@ class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> "SpanningTreeDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return SpanningTreeDataEncoder(dim=self.dim)
+
+
+class SpanningTreeEnumerator(DistributionEnumerator):
+    """Enumerate supported spanning trees in descending probability order."""
+
+    def __init__(
+        self,
+        dist: SpanningTreeDistribution,
+        max_edge_subsets: int | None = _DEFAULT_MAX_ENUMERATION_SUBSETS,
+    ) -> None:
+        super().__init__(dist)
+        edges = [(i, j) for i in range(dist.dim) for j in range(i + 1, dist.dim) if dist.weights[i, j] > 0.0]
+        num_candidates = math.comb(len(edges), dist.dim - 1)
+        if max_edge_subsets is not None and num_candidates > max_edge_subsets:
+            raise ValueError(
+                "SpanningTreeEnumerator would scan %d edge subsets, exceeding max_edge_subsets=%d."
+                % (num_candidates, max_edge_subsets)
+            )
+        entries: list[tuple[list[tuple[int, int]], float]] = []
+        for candidate in itertools.combinations(edges, dist.dim - 1):
+            try:
+                tree = _canonical_edges(candidate, dist.dim)
+            except ValueError:
+                continue
+            value = [(int(a), int(b)) for a, b in tree]
+            lp = float(dist._edge_log_weight_sum(tree) - dist.log_z)
+            if lp > -np.inf:
+                entries.append((value, lp))
+        entries.sort(key=lambda u: -u[1])
+        self._entries = entries
+        self._pos = 0
+
+    def __next__(self) -> tuple[list[tuple[int, int]], float]:
+        if self._pos >= len(self._entries):
+            raise StopIteration
+        item = self._entries[self._pos]
+        self._pos += 1
+        return item
 
 
 class SpanningTreeSampler(DistributionSampler):
@@ -256,7 +320,7 @@ class SpanningTreeAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class SpanningTreeEstimator(ParameterEstimator):
-    """Maximum-likelihood estimator for the edge weights (matches empirical and model edge marginals)."""
+    """Estimate edge weights by matching empirical or smoothed tree edge marginals."""
 
     def __init__(
         self,
@@ -270,6 +334,8 @@ class SpanningTreeEstimator(ParameterEstimator):
     ) -> None:
         if dim is None or dim < 2:
             raise ValueError("SpanningTreeEstimator requires the number of nodes dim >= 2.")
+        if pseudo_count is not None and pseudo_count < 0.0:
+            raise ValueError("SpanningTreeEstimator requires a non-negative pseudo_count.")
         self.dim = int(dim)
         self.pseudo_count = pseudo_count
         self.max_steps = max_steps
@@ -289,11 +355,7 @@ class SpanningTreeEstimator(ParameterEstimator):
         if count <= 0.0 or not np.any(candidate):
             return SpanningTreeDistribution(np.ones((n, n)) - np.eye(n), name=self.name, keys=self.keys)
 
-        target = edge_counts / count  # empirical edge frequencies (symmetric)
-        if self.pseudo_count:
-            # Laplace-style smoothing toward a uniform spanning tree over the candidate edges.
-            target = target + self.pseudo_count / max(count, 1.0)
-            target *= candidate
+        target = _smoothed_edge_target(edge_counts, count, candidate, self.pseudo_count)
 
         log_w = np.where(candidate, 0.0, -np.inf)
         weights = np.where(candidate, 1.0, 0.0)

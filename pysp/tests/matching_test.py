@@ -37,6 +37,16 @@ class MatchingTestCase(unittest.TestCase):
         enc = dist.dist_to_encoder().seq_encode(_perms(3))
         np.testing.assert_allclose(dist.seq_log_density(enc), [dist.log_density(p) for p in _perms(3)])
 
+    def test_enumerator_matches_brute_force_order(self):
+        dist = MatchingDistribution(_W)
+        brute = [(p, dist.log_density(p)) for p in _perms(3)]
+        brute.sort(key=lambda u: -u[1])
+        items = list(dist.enumerator())
+
+        self.assertEqual([p for p, _ in items], [p for p, _ in brute])
+        np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in brute], atol=1.0e-12)
+        self.assertAlmostEqual(float(np.logaddexp.reduce([lp for _, lp in items])), 0.0, places=10)
+
     def test_string_round_trip(self):
         dist = MatchingDistribution(_W, name="m", keys="k")
         self.assertEqual(str(eval(str(dist))), str(dist))
@@ -56,6 +66,13 @@ class MatchingTestCase(unittest.TestCase):
         data = true.sampler(seed=1).sample(5000)
         fitted = fit(data, true.estimator(), max_its=1, rng=np.random.RandomState(0), print_iter=0)
         np.testing.assert_allclose(_edge_marginals(fitted.weights), _edge_marginals(true.weights), atol=0.05)
+
+    def test_estimator_pseudo_count_argument_is_respected(self):
+        dist = MatchingDistribution(_W)
+        self.assertEqual(dist.estimator(pseudo_count=0.0).pseudo_count, 0.0)
+        self.assertEqual(dist.estimator(pseudo_count=2.5).pseudo_count, 2.5)
+        with self.assertRaises(ValueError):
+            dist.estimator(pseudo_count=-1.0)
 
     def test_node_cap_and_validation(self):
         with self.assertRaises(ValueError):  # exceeds max_nodes

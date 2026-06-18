@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from pysp.ppl import AR1, LocalLevel
+from pysp.ppl.statespace import _kalman_smooth
 
 
 class StateSpaceTestCase(unittest.TestCase):
@@ -31,7 +32,33 @@ class StateSpaceTestCase(unittest.TestCase):
         m = AR1().fit(list(y))
         self.assertAlmostEqual(m.result.phi, 0.8, delta=0.1)
         self.assertEqual(m.result.forecast(5).shape, (5,))
-        self.assertEqual(set(m.params), {"phi", "level_sd", "obs_sd"})
+        self.assertEqual(
+            set(m.params),
+            {"phi", "level_sd", "obs_sd", "initial_mean", "initial_sd"},
+        )
+
+    def test_returned_moments_match_returned_parameters(self):
+        rng = np.random.RandomState(2)
+        T = 80
+        x = np.zeros(T)
+        for t in range(1, T):
+            x[t] = 0.65 * x[t - 1] + rng.normal(0, 0.5)
+        y = x + rng.normal(0, 0.4, T)
+
+        m = AR1().fit(list(y), max_its=4, tol=0.0)
+        res = m.result
+        xs, ps, _, ll = _kalman_smooth(
+            y,
+            res.phi,
+            res.level_sd**2,
+            res.obs_sd**2,
+            res.initial_mean,
+            res.initial_sd**2,
+        )
+
+        self.assertAlmostEqual(res.loglik, ll, places=10)
+        self.assertTrue(np.allclose(res.smoothed, xs))
+        self.assertTrue(np.allclose(res.smoothed_sd**2, ps))
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """Create, estimate, and sample from a Plackett-Luce ranking distribution.
 
-Defines the PlackettLuceDistribution, PlackettLuceSampler, PlackettLuceAccumulatorFactory,
-PlackettLuceAccumulator, PlackettLuceEstimator, and the PlackettLuceDataEncoder classes for use with
-pysparkplug.
+Defines the PlackettLuceDistribution, PlackettLuceEnumerator, PlackettLuceSampler,
+PlackettLuceAccumulatorFactory, PlackettLuceAccumulator, PlackettLuceEstimator, and the
+PlackettLuceDataEncoder classes for use with pysparkplug.
 
 Data type: List[int] (a full ranking of K items, given as an ordering: ``x[0]`` is the index of the
 top-ranked item, ``x[1]`` the second, ..., ``x[K-1]`` the last). Each datum is a permutation of
@@ -25,6 +25,7 @@ in contention, evaluated at the current worths. Each ``fit`` iteration performs 
 increasing the likelihood.
 """
 
+import itertools
 from collections.abc import Sequence
 from typing import Any
 
@@ -33,6 +34,7 @@ from numpy.random import RandomState
 
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -152,6 +154,10 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
         """Return a sampler for drawing orderings from this distribution."""
         return PlackettLuceSampler(self, seed)
 
+    def enumerator(self) -> "PlackettLuceEnumerator":
+        """Return an exact finite enumerator over all orderings in decreasing probability order."""
+        return PlackettLuceEnumerator(self)
+
     def estimator(self, pseudo_count: float | None = None) -> "PlackettLuceEstimator":
         """Return an MM estimator that keeps the item count fixed at this distribution's K."""
         return PlackettLuceEstimator(dim=self.dim, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
@@ -159,6 +165,26 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> "PlackettLuceDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return PlackettLuceDataEncoder(dim=self.dim)
+
+
+class PlackettLuceEnumerator(DistributionEnumerator):
+    """Enumerate all finite Plackett--Luce orderings in descending probability order."""
+
+    def __init__(self, dist: PlackettLuceDistribution) -> None:
+        super().__init__(dist)
+        with np.errstate(divide="ignore"):
+            entries = [(list(p), float(dist.log_density(p))) for p in itertools.permutations(range(dist.dim))]
+        entries = [(v, lp) for v, lp in entries if lp > -np.inf]
+        entries.sort(key=lambda u: -u[1])
+        self._entries = entries
+        self._pos = 0
+
+    def __next__(self) -> tuple[list[int], float]:
+        if self._pos >= len(self._entries):
+            raise StopIteration
+        item = self._entries[self._pos]
+        self._pos += 1
+        return item
 
 
 class PlackettLuceSampler(DistributionSampler):
