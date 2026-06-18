@@ -14,6 +14,7 @@ The first surface is space-filling and classical design generators, all returnin
 
 from __future__ import annotations
 
+from pysp.doe.bayesopt import BayesOptResult, expected_improvement, minimize, propose_next
 from pysp.doe.designs import (
     Bounds,
     full_factorial,
@@ -28,4 +29,8 @@ __all__ = [
     "latin_hypercube",
     "maximin_latin_hypercube",
     "random_design",
+    "BayesOptResult",
+    "expected_improvement",
+    "minimize",
+    "propose_next",
 ]
