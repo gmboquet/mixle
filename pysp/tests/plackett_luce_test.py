@@ -20,6 +20,17 @@ class PlackettLuceTestCase(unittest.TestCase):
         enc = dist.dist_to_encoder().seq_encode(orders)
         self.assertAlmostEqual(float(np.sum(np.exp(dist.seq_log_density(enc)))), 1.0, places=10)
 
+    def test_enumerator_matches_sorted_finite_support(self):
+        dist = PlackettLuceDistribution([2.0, 0.5, -1.0])
+        brute = [(o, dist.log_density(o)) for o in _orderings(3)]
+        brute.sort(key=lambda u: -u[1])
+
+        items = list(dist.enumerator())
+
+        self.assertEqual([v for v, _ in items], [v for v, _ in brute])
+        np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in brute], rtol=1.0e-12, atol=1.0e-12)
+        self.assertAlmostEqual(float(np.logaddexp.reduce([lp for _, lp in items])), 0.0, places=10)
+
     def test_seq_matches_scalar(self):
         dist = PlackettLuceDistribution([2.0, 0.5, -1.0])
         orders = _orderings(3)

@@ -14,23 +14,30 @@ implements the finite "direct-assignment" truncation of the HDP
 Estimation alternates:
   - E-step at point estimates: responsibilities phi_jik from the group's
     current weights and the atom densities,
-  - MAP M-step for each group's weights (Dirichlet(alpha*beta) prior, clamped
-    at the simplex boundary) and the atoms' conjugate updates,
+  - posterior-mean update for each group's weights under
+    Dirichlet(alpha*beta + expected_counts), deliberately using the mean
+    rather than the boundary-degenerate MAP when alpha*beta_k < 1, together
+    with the atoms' estimator updates,
   - global-weight update via the standard expected-table-count approximation
     m_jk = alpha*beta_k*(psi(alpha*beta_k + n_jk) - psi(alpha*beta_k)), with
-    beta set to the Dirichlet(gamma/K + m_.k) posterior mean.
+    beta set to the Dirichlet(gamma/K + m_.k) posterior mean. Applying this
+    table-count formula to fractional responsibility counts is a deterministic
+    approximation, not an exact collapsed-HDP CAVI step.
 
 ``seq_local_elbo`` scores training groups with their fitted weights (this is
 what the fit driver maximizes); ``seq_log_density`` scores a (possibly new)
 group with the global weights beta, i.e. the expected weights of an unseen
-group.
+group. For multi-observation new groups this is a beta plug-in score, not the
+integrated finite-HDP predictive density obtained by integrating over a new
+group row pi ~ Dirichlet(alpha*beta).
 
 Group sizes are exogenous unless len_dist is supplied (used for sampling and
 added to the per-group score). The length model uses the pysp.stats
 NullDistribution/NullEstimator/NullAccumulator family.
 
-This is a port of ``pysp.bstats.hdpm``; the variational/coordinate-ascent math
-is preserved exactly and only the object protocol is adapted to pysp.stats.
+This is a port of ``pysp.bstats.hdpm`` onto the ``pysp.stats`` protocol. The
+object should be read as the finite direct-assignment approximation described
+above, with posterior-mean rows and an expected-table global-row heuristic.
 """
 
 from collections.abc import Sequence

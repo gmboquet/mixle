@@ -424,17 +424,50 @@ def _kmeanspp(x, k, rng):
 
 
 class MixtureVMPResult:
-    def __init__(self, weights, comps, responsibilities, elbo_trace):
+    def __init__(self, weights, comps, responsibilities, elbo_trace, normalizer_trace):
         self.weights = np.asarray(weights)  # E[pi]
         self.components = comps  # [{'mean','sd'}, ...]
         self.responsibilities = np.asarray(responsibilities)  # (N, K)
-        self.elbo = elbo_trace[-1]
+        self.objective_kind = "finite_mixture_elbo"
+        self.elbo = float(elbo_trace[-1])
         self.elbo_trace = np.asarray(elbo_trace)
+        self.responsibility_normalizer_trace = np.asarray(normalizer_trace)
         self.acceptance_rate = None
         self.predictive = None
 
     def summary(self):
-        return {"weights": self.weights, "components": self.components, "elbo": self.elbo}
+        return {
+            "weights": self.weights,
+            "components": self.components,
+            "elbo": self.elbo,
+            "objective_kind": self.objective_kind,
+        }
+
+
+def _mixture_vmp_elbo(x, r, m, s2, a, b, alpha, *, m0, s0, a0, b0, alpha0):
+    """Full mean-field ELBO for the scalar Gaussian mixture VB helper."""
+    K = alpha.size
+    Etau = a / b
+    Elogtau = digamma(a) - np.log(b)
+    Elogpi = digamma(alpha) - digamma(alpha.sum())
+    diff2 = (x[:, None] - m[None, :]) ** 2 + s2[None, :]
+
+    likelihood = np.sum(r * (0.5 * (Elogtau[None, :] - _LOG2PI) - 0.5 * Etau[None, :] * diff2))
+    allocation = np.sum(r * Elogpi[None, :])
+    positive_r = r > 0.0
+    entropy_z = -np.sum(r[positive_r] * np.log(r[positive_r]))
+
+    prior_pi = gammaln(K * alpha0) - K * gammaln(alpha0) + (alpha0 - 1.0) * np.sum(Elogpi)
+    log_beta_q = np.sum(gammaln(alpha)) - gammaln(alpha.sum())
+    entropy_pi = log_beta_q + (alpha.sum() - K) * digamma(alpha.sum()) - np.sum((alpha - 1.0) * digamma(alpha))
+
+    prior_mu = -0.5 * np.sum(_LOG2PI + math.log(s0 * s0) + ((m - m0) ** 2 + s2) / (s0 * s0))
+    entropy_mu = 0.5 * np.sum(_LOG2PI + 1.0 + np.log(s2))
+
+    prior_tau = np.sum(a0 * math.log(b0) - gammaln(a0) + (a0 - 1.0) * Elogtau - b0 * Etau)
+    entropy_tau = np.sum(a - np.log(b) + gammaln(a) + (1.0 - a) * digamma(a))
+
+    return float(likelihood + allocation + entropy_z + prior_pi + entropy_pi + prior_mu + entropy_mu + prior_tau + entropy_tau)
 
 
 def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None, m0=None, s0=None, a0=1.0, b0=1.0, alpha0=1.0):
@@ -458,6 +491,7 @@ def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None, m0=None, s0=None, a
     alpha = np.full(K, alpha0 + N / K)
 
     trace = []
+    normalizer_trace = []
     for _ in range(max_its):
         Elogpi = digamma(alpha) - digamma(alpha.sum())
         Etau, Elogtau = a / b, digamma(a) - np.log(b)
@@ -476,7 +510,8 @@ def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None, m0=None, s0=None, a
         b = b0 + 0.5 * (r * diff2).sum(0)
         alpha = alpha0 + Nk  # q(pi)
 
-        elbo = float(np.sum(log_norm))  # data evidence proxy
+        normalizer_trace.append(float(np.sum(log_norm)))
+        elbo = _mixture_vmp_elbo(x, r, m, s2, a, b, alpha, m0=m0, s0=s0, a0=a0, b0=b0, alpha0=alpha0)
         trace.append(elbo)
         if len(trace) > 1 and abs(trace[-1] - trace[-2]) < tol:
             break
@@ -486,5 +521,5 @@ def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None, m0=None, s0=None, a
     sds = 1.0 / np.sqrt(Etau)
     comps = [{"mean": float(m[k]), "sd": float(sds[k])} for k in range(K)]
     fitted = MixtureDistribution([GaussianDistribution(float(m[k]), float(sds[k] ** 2)) for k in range(K)], w=weights)
-    result = MixtureVMPResult(weights, comps, r, trace)
+    result = MixtureVMPResult(weights, comps, r, trace, normalizer_trace)
     return RandomVariable._bound(fitted, result=result)

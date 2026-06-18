@@ -16,17 +16,25 @@ from pysp.ppl.core import RandomVariable
 
 
 class StateSpaceResult:
-    def __init__(self, phi, q, r, smoothed, smoothed_var, loglik):
+    def __init__(self, phi, q, r, x0, P0, smoothed, smoothed_var, loglik):
         self.phi = float(phi)
         self.level_sd = float(math.sqrt(q))  # state innovation sd
         self.obs_sd = float(math.sqrt(r))  # observation noise sd
+        self.initial_mean = float(x0)
+        self.initial_sd = float(math.sqrt(P0))
         self.smoothed = np.asarray(smoothed)  # E[x_t | y_{1:T}]
         self.smoothed_sd = np.sqrt(np.asarray(smoothed_var))
         self.loglik = float(loglik)
         self.acceptance_rate = None
         self.predictive = None
         # exposed through RandomVariable.params (no single emission distribution)
-        self.coefficients = {"phi": self.phi, "level_sd": self.level_sd, "obs_sd": self.obs_sd}
+        self.coefficients = {
+            "phi": self.phi,
+            "level_sd": self.level_sd,
+            "obs_sd": self.obs_sd,
+            "initial_mean": self.initial_mean,
+            "initial_sd": self.initial_sd,
+        }
 
     def forecast(self, h: int):
         """Point forecasts h steps ahead from the last smoothed state."""
@@ -38,7 +46,46 @@ class StateSpaceResult:
         return np.asarray(out)
 
     def summary(self):
-        return {"phi": self.phi, "level_sd": self.level_sd, "obs_sd": self.obs_sd, "loglik": self.loglik}
+        return {
+            "phi": self.phi,
+            "level_sd": self.level_sd,
+            "obs_sd": self.obs_sd,
+            "initial_mean": self.initial_mean,
+            "initial_sd": self.initial_sd,
+            "loglik": self.loglik,
+        }
+
+
+def _kalman_smooth(y, phi, q, r, x0, P0):
+    T = y.size
+    xp = np.empty(T)
+    Pp = np.empty(T)
+    xf = np.empty(T)
+    Pf = np.empty(T)
+    xprev, Pprev, ll = x0, P0, 0.0
+    for t in range(T):
+        xpr = phi * xprev
+        Ppr = phi * phi * Pprev + q
+        S = Ppr + r
+        K = Ppr / S
+        innov = y[t] - xpr
+        xf[t] = xpr + K * innov
+        Pf[t] = (1.0 - K) * Ppr
+        xp[t], Pp[t] = xpr, Ppr
+        ll += -0.5 * (math.log(2.0 * math.pi * S) + innov * innov / S)
+        xprev, Pprev = xf[t], Pf[t]
+
+    xs = np.empty(T)
+    Ps = np.empty(T)
+    Pcov = np.zeros(T)
+    xs[-1], Ps[-1] = xf[-1], Pf[-1]
+    for t in range(T - 2, -1, -1):
+        J = phi * Pf[t] / Pp[t + 1]
+        xs[t] = xf[t] + J * (xs[t + 1] - xp[t + 1])
+        Ps[t] = Pf[t] + J * J * (Ps[t + 1] - Pp[t + 1])
+        Pcov[t + 1] = J * Ps[t + 1]  # lag-one smoothed covariance
+
+    return xs, Ps, Pcov, ll
 
 
 def _kalman_em(y, phi_free, max_its, tol):
@@ -50,33 +97,7 @@ def _kalman_em(y, phi_free, max_its, tol):
     x0, P0 = float(y[0]), v0
     prev_ll = None
     for _ in range(max_its):
-        xp = np.empty(T)
-        Pp = np.empty(T)
-        xf = np.empty(T)
-        Pf = np.empty(T)
-        xprev, Pprev, ll = x0, P0, 0.0
-        for t in range(T):
-            xpr = phi * xprev
-            Ppr = phi * phi * Pprev + q
-            S = Ppr + r
-            K = Ppr / S
-            innov = y[t] - xpr
-            xf[t] = xpr + K * innov
-            Pf[t] = (1.0 - K) * Ppr
-            xp[t], Pp[t] = xpr, Ppr
-            ll += -0.5 * (math.log(2.0 * math.pi * S) + innov * innov / S)
-            xprev, Pprev = xf[t], Pf[t]
-
-        xs = np.empty(T)
-        Ps = np.empty(T)
-        Pcov = np.zeros(T)
-        xs[-1], Ps[-1] = xf[-1], Pf[-1]
-        for t in range(T - 2, -1, -1):
-            J = phi * Pf[t] / Pp[t + 1]
-            xs[t] = xf[t] + J * (xs[t + 1] - xp[t + 1])
-            Ps[t] = Pf[t] + J * J * (Ps[t + 1] - Pp[t + 1])
-            Pcov[t + 1] = J * Ps[t + 1]  # lag-one smoothed covariance
-
+        xs, Ps, Pcov, ll = _kalman_smooth(y, phi, q, r, x0, P0)
         Exx = Ps + xs**2
         Exx1 = Pcov[1:] + xs[1:] * xs[:-1]
         if phi_free:
@@ -87,7 +108,8 @@ def _kalman_em(y, phi_free, max_its, tol):
         if prev_ll is not None and abs(ll - prev_ll) < tol:
             break
         prev_ll = ll
-    return StateSpaceResult(phi, q, r, xs, Ps, ll)
+    xs, Ps, _, ll = _kalman_smooth(y, phi, q, r, x0, P0)
+    return StateSpaceResult(phi, q, r, x0, P0, xs, Ps, ll)
 
 
 def statespace_fit(rv: RandomVariable, data, *, max_its: int = 200, tol: float = 1e-6, **_) -> RandomVariable:

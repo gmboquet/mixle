@@ -1,7 +1,7 @@
 """Create, estimate, and sample from a Mallows distribution over permutations (Kendall's tau).
 
-Defines the MallowsDistribution, MallowsSampler, MallowsAccumulatorFactory, MallowsAccumulator,
-MallowsEstimator, and the MallowsDataEncoder classes for use with pysparkplug.
+Defines the MallowsDistribution, MallowsEnumerator, MallowsSampler, MallowsAccumulatorFactory,
+MallowsAccumulator, MallowsEstimator, and the MallowsDataEncoder classes for use with pysparkplug.
 
 Data type: List[int] (a full ranking/ordering of n items, given as a permutation of 0,...,n-1 where
 ``x[r]`` is the item placed at rank r, best first).
@@ -21,6 +21,7 @@ the central permutation by Copeland/Borda aggregation of the pairwise-precedence
 statistic) and fits theta by matching the mean Kendall distance to its closed-form expectation.
 """
 
+import itertools
 import math
 from collections.abc import Sequence
 from typing import Any
@@ -30,6 +31,7 @@ from numpy.random import RandomState
 
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -177,6 +179,10 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
         """Return a sampler for drawing orderings from this distribution."""
         return MallowsSampler(self, seed)
 
+    def enumerator(self) -> "MallowsEnumerator":
+        """Return an exact finite enumerator over all orderings in decreasing probability order."""
+        return MallowsEnumerator(self)
+
     def estimator(self, pseudo_count: float | None = None) -> "MallowsEstimator":
         """Return an estimator that keeps the item count fixed at this distribution's n."""
         return MallowsEstimator(dim=self.dim, name=self.name, keys=self.keys)
@@ -184,6 +190,26 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> "MallowsDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return MallowsDataEncoder(dim=self.dim)
+
+
+class MallowsEnumerator(DistributionEnumerator):
+    """Enumerate all finite Mallows orderings in descending probability order."""
+
+    def __init__(self, dist: MallowsDistribution) -> None:
+        super().__init__(dist)
+        with np.errstate(divide="ignore"):
+            entries = [(list(p), float(dist.log_density(p))) for p in itertools.permutations(range(dist.dim))]
+        entries = [(v, lp) for v, lp in entries if lp > -np.inf]
+        entries.sort(key=lambda u: -u[1])
+        self._entries = entries
+        self._pos = 0
+
+    def __next__(self) -> tuple[list[int], float]:
+        if self._pos >= len(self._entries):
+            raise StopIteration
+        item = self._entries[self._pos]
+        self._pos += 1
+        return item
 
 
 class MallowsSampler(DistributionSampler):
