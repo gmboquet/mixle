@@ -382,6 +382,19 @@ def get_student_t_estimator(
     return _estimator_provider(False).StudentTEstimator(df=df)
 
 
+def get_gaussian_mixture_estimator(
+    vdict: dict[np.floating | float, float],
+    pseudo_count: float | None = None,
+    emp_suff_stat: bool = True,
+    use_bstats: bool = False,
+    n_components: int = 2,
+) -> "ParameterEstimator":
+    """Return a K-component Gaussian mixture estimator (robust init) for multimodal numeric data."""
+    provider = _estimator_provider(False)
+    components = [provider.GaussianEstimator() for _ in range(max(2, int(n_components)))]
+    return provider.MixtureEstimator(components, robust=True)
+
+
 def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> "ParameterEstimator":
     if use_bstats:
         return _estimator_provider(True).MultivariateGaussianEstimator(dim=dim, prior=_mvn_default_prior(dim))

@@ -25,11 +25,13 @@ class GoodnessOfFitGateTest(unittest.TestCase):
         self.assertIsNotNone(field.gof_pvalue)
         self.assertGreater(field.gof_pvalue, 0.01)
 
-    def test_misfit_bimodal_data_is_flagged(self):
-        # Two well-separated modes: no single Gaussian/log-normal/gamma fits -> low PIT p-value.
+    def test_misfit_uniform_data_is_flagged(self):
+        # Uniform data is unimodal (no mixture) but fits no parametric family well, so whichever
+        # unimodal model wins is poorly calibrated -> low PIT p-value + abstain note.
         rng = np.random.RandomState(2)
-        data = list(rng.normal(-8.0, 0.5, size=400)) + list(rng.normal(8.0, 0.5, size=400))
+        data = list(rng.uniform(0.0, 10.0, size=800))
         field = analyze_structure(data, pairwise=False).fields[0]
+        self.assertIn(field.recommendation, ("gaussian", "lognormal", "gamma"))
         self.assertIsNotNone(field.gof_pvalue)
         self.assertLess(field.gof_pvalue, 0.01)
         self.assertTrue(any("poor calibration" in n for n in field.notes))

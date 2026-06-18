@@ -36,6 +36,7 @@ from .factories import (
     get_dict_record_estimator,
     get_gamma_estimator,
     get_gaussian_estimator,
+    get_gaussian_mixture_estimator,
     get_ignored_estimator,
     get_integer_categorical_estimator,
     get_lognormal_estimator,
@@ -461,17 +462,119 @@ def _validation_student_t_bits(train: Sequence[float], validation: Sequence[floa
     return -ll / (float(val.size) * math.log(2.0))
 
 
+_MIXTURE_EM_CAP = 5000
+
+
+def _mixture_log_likelihood(x: np.ndarray, w: np.ndarray, mu: np.ndarray, var: np.ndarray) -> float:
+    logp = np.log(w)[None, :] - 0.5 * np.log(2.0 * np.pi * var)[None, :] - 0.5 * (x[:, None] - mu) ** 2 / var
+    m = logp.max(axis=1, keepdims=True)
+    return float((m[:, 0] + np.log(np.exp(logp - m).sum(axis=1))).sum())
+
+
+def _fit_gaussian_mixture2(arr: np.ndarray, iters: int = 200, tol: float = 1.0e-6):
+    """Fit a 2-component 1-D Gaussian mixture by EM. Returns (total_loglik, (w, mu, var)) or None.
+
+    Large inputs are strided down to ``_MIXTURE_EM_CAP`` points for the fit (BIC is approximate);
+    the returned log-likelihood is rescaled to the full sample size.
+    """
+    if arr.size < 6 or not np.all(np.isfinite(arr)):
+        return None
+    full_n = arr.size
+    if full_n > _MIXTURE_EM_CAP:
+        arr = arr[:: int(np.ceil(full_n / _MIXTURE_EM_CAP))]
+    n = arr.size
+    var0 = float(arr.var())
+    if var0 <= 0.0:
+        return None
+    floor = 1.0e-6 * var0 + 1.0e-300
+    srt = np.sort(arr)
+    half = max(1, n // 2)
+    lo, hi = srt[:half], srt[half:]
+    mu = np.array([float(lo.mean()), float(hi.mean()) if hi.size else float(arr.max())])
+    if mu[0] == mu[1]:
+        mu = np.array([float(arr.min()), float(arr.max())])
+    var = np.array([max(float(lo.var()), floor), max(float(hi.var()) if hi.size else var0, floor)])
+    w = np.array([0.5, 0.5])
+    x = arr
+    prev = -np.inf
+    for _ in range(int(iters)):
+        logp = np.log(w)[None, :] - 0.5 * np.log(2.0 * np.pi * var)[None, :] - 0.5 * (x[:, None] - mu) ** 2 / var
+        m = logp.max(axis=1, keepdims=True)
+        lse = m[:, 0] + np.log(np.exp(logp - m).sum(axis=1))
+        ll = float(lse.sum())
+        resp = np.exp(logp - lse[:, None])
+        nk = resp.sum(axis=0) + 1.0e-300
+        w = nk / n
+        mu = (resp * x[:, None]).sum(axis=0) / nk
+        var = np.maximum((resp * (x[:, None] - mu) ** 2).sum(axis=0) / nk, floor)
+        if ll - prev < tol * (abs(prev) + 1.0):
+            break
+        prev = ll
+    ll_per_obs = _mixture_log_likelihood(x, w, mu, var) / n
+    return ll_per_obs * full_n, (w, mu, var)
+
+
+def _mixture_bic_bits(values: Sequence[float], nobs: int) -> float | None:
+    arr = np.asarray(values, dtype=float)
+    fit = _fit_gaussian_mixture2(arr)
+    if fit is None:
+        return None
+    total_ll, _ = fit
+    # 2-component 1-D Gaussian mixture: 2 means + 2 vars + 1 weight = 5 free parameters.
+    return -total_ll / (arr.size * math.log(2.0)) + _bic_penalty_bits(5, nobs)
+
+
+def _validation_mixture_bits(train: Sequence[float], validation: Sequence[float]) -> float | None:
+    tarr = np.asarray(train, dtype=float)
+    val = np.asarray(validation, dtype=float)
+    if val.size == 0 or not np.all(np.isfinite(val)):
+        return None
+    fit = _fit_gaussian_mixture2(tarr)
+    if fit is None:
+        return None
+    _, (w, mu, var) = fit
+    return -_mixture_log_likelihood(val, w, mu, var) / (val.size * math.log(2.0))
+
+
+def _looks_multimodal(arr: np.ndarray) -> bool:
+    """Heuristic multimodality gate via Sarle's bimodality coefficient (sample-corrected).
+
+    BC = (skew^2 + 1) / (excess_kurtosis + 3(n-1)^2/((n-2)(n-3))). The uniform reference is ~0.555;
+    clearly multimodal (platykurtic) data approaches 1, while a unimodal Gaussian sits near 0.33. A
+    threshold above the uniform value keeps the (overfit-prone) 2-component mixture out of the
+    candidate set for unimodal data.
+    """
+    n = arr.size
+    if n < 8:
+        return False
+    sd = float(arr.std())
+    if sd <= 0.0:
+        return False
+    z = (arr - float(arr.mean())) / sd
+    skew = float(np.mean(z**3))
+    excess_kurtosis = float(np.mean(z**4)) - 3.0
+    denom = excess_kurtosis + 3.0 * (n - 1) ** 2 / ((n - 2) * (n - 3))
+    if denom <= 0.0:
+        return False
+    return (skew * skew + 1.0) / denom > 0.6
+
+
 def _numeric_candidate_bics(arr: np.ndarray, nobs: int) -> dict[str, float]:
     """Return per-candidate BIC code lengths for numeric data (support-typed).
 
-    Gaussian and Student-t apply to any real data; log-normal and gamma are added only for
-    strictly-positive support. Used by both the marginal profiler and ``get_estimator`` so the
-    candidate set and selection stay consistent.
+    Gaussian and Student-t apply to any real data; a 2-component Gaussian mixture is added only when
+    the data looks multimodal (it overfits unimodal samples otherwise); log-normal and gamma are
+    added only for strictly-positive support. Used by both the marginal profiler and
+    ``get_estimator`` so the candidate set and selection stay consistent.
     """
     candidates: dict[str, float | None] = {
         "gaussian": _gaussian_bic_bits(float(arr.var()), nobs),
         "student_t": _student_t_bic_bits(arr, nobs),
     }
+    # The 2-component mixture is added only for plausibly-multimodal data with enough distinct
+    # values that its components cannot collapse onto a few points (which would overfit wildly).
+    if arr.size and np.unique(arr).size >= 12 and _looks_multimodal(arr):
+        candidates["mixture"] = _mixture_bic_bits(arr, nobs)
     if arr.size and np.all(arr > 0.0):
         candidates["lognormal"] = _lognormal_bic_bits(arr, nobs)
         candidates["gamma"] = _gamma_bic_bits(arr, nobs)
@@ -818,6 +921,8 @@ def _validate_marginal_profile(
         scores["gaussian"] = _validation_gaussian_bits(train_f, val_f)
         if "student_t" in profile.model_scores_bits:
             scores["student_t"] = _validation_student_t_bits(train_f, val_f)
+        if "mixture" in profile.model_scores_bits:
+            scores["mixture"] = _validation_mixture_bits(train_f, val_f)
         if "lognormal" in profile.model_scores_bits:
             scores["lognormal"] = _validation_lognormal_bits(train_f, val_f)
         if "gamma" in profile.model_scores_bits:
@@ -1057,8 +1162,8 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
         elif recommendation == "gamma":
             moments = _gamma_moments(arr)
             bits_per_obs = None if moments is None else _gamma_nll_bits(arr, *moments)
-        elif recommendation == "student_t":
-            bits_per_obs = model_scores.get("student_t")
+        elif recommendation in ("student_t", "mixture"):
+            bits_per_obs = model_scores.get(recommendation)
         else:
             bits_per_obs = _gaussian_bits(var)
 
@@ -1619,6 +1724,7 @@ class DatumNode:
             builders = {
                 "gaussian": get_gaussian_estimator,
                 "student_t": get_student_t_estimator,
+                "mixture": get_gaussian_mixture_estimator,
                 "lognormal": get_lognormal_estimator,
                 "gamma": get_gamma_estimator,
             }
