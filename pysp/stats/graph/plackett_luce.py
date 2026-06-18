@@ -112,10 +112,26 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: Sequence[int]) -> float:
-        """Return the log-probability of an ordering x (a permutation of 0,...,K-1)."""
+        """Return the log-probability of an ordering ``x``.
+
+        ``x`` may be a full ranking (a permutation of ``0,...,K-1``) or a **partial / top-m** ranking
+        (an ordered list of ``m <= K`` distinct items, best first, leaving the other ``K-m`` items
+        unranked). For a partial ranking the sequential-choice denominator at each stage still
+        includes the unranked items:
+        ``p(x) = prod_{s=0}^{m-1} w_{x[s]} / (sum_{t>=s} w_{x[t]} + sum_{u unranked} w_u)``,
+        which reduces to the full-ranking density when ``m = K``.
+        """
         idx = np.asarray(x, dtype=int)
+        if idx.ndim != 1 or (
+            idx.size and (np.any(idx < 0) or np.any(idx >= self.dim) or len(set(idx.tolist())) != idx.size)
+        ):
+            raise ValueError("PlackettLuceDistribution ordering must be distinct item indices in 0,...,K-1.")
         g = self.log_w[idx]
         rcl = _reverse_logcumsumexp(g)
+        if 0 < idx.size < self.dim:
+            mask = np.ones(self.dim, dtype=bool)
+            mask[idx] = False
+            rcl = np.logaddexp(rcl, float(np.logaddexp.reduce(self.log_w[mask])))
         return float(np.sum(g - rcl))
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
