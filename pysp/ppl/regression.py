@@ -467,6 +467,42 @@ def _locscale_fit(rv, data, given, *, max_iter=200, tol=1e-8):
     return RandomVariable._bound(None, name=rv._name, result=result)
 
 
+def _coord_descent(X, target, p0, m0, l1, loc1, max_iter, tol: float = 1e-8):
+    """Cyclic coordinate descent for penalized least squares with per-coefficient L1/L2.
+
+    Minimizes ``0.5||target - X beta||^2 + sum_i [0.5 p0_i (beta_i - m0_i)^2 + l1_i |beta_i - loc1_i|]``.
+    Each coordinate has a closed-form soft-threshold update, so a ``free`` coefficient reduces to
+    the OLS update, a Normal prior to ridge, and a Laplace prior to lasso (the families mix freely).
+    """
+    n, p = X.shape
+    beta = np.zeros(p)
+    z = (X * X).sum(axis=0)  # squared column norms
+    resid = target - X @ beta
+    for _ in range(max(int(max_iter), 200)):
+        delta = 0.0
+        for j in range(p):
+            resid = resid + X[:, j] * beta[j]  # partial residual excluding coordinate j
+            a = z[j] + p0[j]
+            c = X[:, j] @ resid + p0[j] * m0[j]
+            if a <= 0.0:
+                bj = 0.0
+            else:
+                d = a * loc1[j] - c  # objective in u = beta_j - loc1[j]: 0.5 a u^2 + d u + l1|u|
+                if d > l1[j]:
+                    u = -(d - l1[j]) / a
+                elif d < -l1[j]:
+                    u = -(d + l1[j]) / a
+                else:
+                    u = 0.0
+                bj = loc1[j] + u
+            delta = max(delta, abs(bj - beta[j]))
+            beta[j] = bj
+            resid = resid - X[:, j] * beta[j]
+        if delta < tol:
+            break
+    return beta
+
+
 def _quantile_fit(rv: RandomVariable, data, given, tau: float) -> RandomVariable:
     """Fit the conditional ``tau``-quantile by minimizing the pinball (check) loss.
 
@@ -532,8 +568,9 @@ def regression_fit(
     X, offset = _design(columns, given)
     N, p = X.shape
 
-    # Gaussian priors per coef (free -> flat, precision 0)
-    m0, p0 = np.zeros(p), np.zeros(p)
+    # coefficient priors per slot: Normal -> L2 (ridge), Laplace -> L1 (lasso), free -> none
+    m0, p0 = np.zeros(p), np.zeros(p)  # L2 mean / precision
+    l1, loc1 = np.zeros(p), np.zeros(p)  # L1 strength / center
     idx_of, names = {}, []
     for i, (coef, field) in enumerate(est):
         names.append(field.name if field is not None else "intercept")
@@ -541,7 +578,20 @@ def regression_fit(
         if isinstance(coef, RandomVariable) and coef._family.name == "Normal":
             m0[i] = float(coef._args[0])
             p0[i] = 1.0 / float(coef._args[1]) ** 2
+        elif isinstance(coef, RandomVariable) and coef._family.name == "Laplace":
+            loc1[i] = float(coef._args[0])
+            l1[i] = 1.0 / float(coef._args[1])  # Laplace scale b -> L1 penalty 1/b
     P0 = np.diag(p0)
+
+    if np.any(l1 > 0.0):  # L1 present (lasso / elastic-net) -> coordinate descent
+        if fam != "Normal":
+            raise NotImplementedError("L1 (Laplace-prior) regression is supported for Normal responses.")
+        beta = _coord_descent(X, y - offset, p0, m0, l1, loc1, max_iter)
+        resid = y - (offset + X @ beta)
+        sigma = float(np.sqrt(max(resid @ resid / N, 1e-8)))
+        # L1 coefficient standard errors need a bootstrap; leave cov at zero (no OLS curvature)
+        result = RegressionResult(names, idx_of, beta, np.zeros((p, p)), sigma, columns, link="identity")
+        return RandomVariable._bound(None, name=rv._name, result=result)
 
     # IRLS / Fisher scoring (one step is OLS for the Gaussian identity link)
     beta = np.zeros(p)
