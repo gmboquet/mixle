@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # PyPI distribution name; the import package is `pysp` (cf. scikit-learn -> sklearn).
 name = "pysp-learn"
-version = "0.2.0.0"
+version = "0.2.0"
 description = "A package for estimating heterogeneous probability density functions."
 readme = "README.md"
 requires-python = ">=3.10"
