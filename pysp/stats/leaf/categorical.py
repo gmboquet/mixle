@@ -79,7 +79,12 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_declaration(cls):
-        from pysp.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        from pysp.stats.compute.declarations import (
+            DistributionDeclaration,
+            ExponentialFamilySpec,
+            ParameterSpec,
+            StatisticSpec,
+        )
 
         return DistributionDeclaration(
             name="categorical",
@@ -87,7 +92,82 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             parameters=(ParameterSpec("pmap", constraint="simplex_map"),),
             statistics=(StatisticSpec("count_map", kind="count_map"),),
             support="finite_or_default_hashable",
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                sufficient_statistics_from_params=cls.exp_family_sufficient_statistics_from_params,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure_from_params=cls.exp_family_base_measure_from_params,
+                # T(x) is the one-hot label indicator (categories in canonical sorted-by-repr key
+                # order) and eta = log(pmap); A = 0, h(x) = 0 on the support (the keys of pmap). The
+                # category set depends on the per-instance pmap, so fixed_base=False. eta has -inf
+                # entries when a label has p = 0, which makes the generic <eta, T> dot form NaN via
+                # 0*-inf for OTHER labels; runtime_scoring is therefore False so scoring keeps the
+                # safe dict-indexing backend path while to_exponential_family still exposes the
+                # canonical map (valid for the plain default_value=0 categorical, where p > 0).
+                fixed_base=False,
+                runtime_scoring=False,
+            ),
         )
+
+    @staticmethod
+    def _ef_pmap(params: dict[str, Any]) -> dict[Any, float]:
+        """Recover the ``pmap`` dict (parameter packing wraps it in a 0-d object array)."""
+        pmap = params["pmap"]
+        return pmap.item() if isinstance(pmap, np.ndarray) else pmap
+
+    @staticmethod
+    def _ef_labels(x: Any) -> np.ndarray:
+        """Recover the observed labels from the exp-family input (encoded ``(idx, value_map)`` or raw)."""
+        if isinstance(x, tuple) and len(x) == 2:
+            idx = np.asarray(x[0]).reshape(-1).astype(np.int64)
+            value_map = np.asarray(x[1], dtype=object).reshape(-1)
+            return value_map[idx]
+        return np.atleast_1d(np.asarray(list(x), dtype=object))
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
+        """Placeholder; the real one-hot needs the category set, so ``..._from_params`` is used."""
+        n = len(CategoricalDistribution._ef_labels(x))
+        return (engine.asarray(np.zeros(n, dtype=np.float64)),)
+
+    @staticmethod
+    def exp_family_sufficient_statistics_from_params(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the one-hot label indicator ``T(x)`` of shape ``(n, K)`` (zeros for off-support labels).
+
+        Categories are ordered canonically by ``sorted(pmap, key=repr)`` so the columns line up with
+        :meth:`exp_family_natural_parameters`.
+        """
+        labels = CategoricalDistribution._ef_labels(x)
+        keys = sorted(CategoricalDistribution._ef_pmap(params).keys(), key=repr)
+        index = {key: i for i, key in enumerate(keys)}
+        onehot = np.zeros((len(labels), len(keys)), dtype=np.float64)
+        for row, label in enumerate(labels):
+            col = index.get(label)
+            if col is not None:
+                onehot[row, col] = 1.0
+        return (engine.asarray(onehot),)
+
+    @staticmethod
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the natural parameter ``eta = log(pmap)`` over categories in canonical key order."""
+        pmap = CategoricalDistribution._ef_pmap(params)
+        keys = sorted(pmap.keys(), key=repr)
+        probs = np.asarray([pmap[key] for key in keys], dtype=np.float64)
+        return (engine.log(engine.asarray(probs)),)
+
+    @staticmethod
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
+        """Return the log partition ``A = 0`` (normalization is carried by ``eta = log p``)."""
+        return engine.asarray(0.0)
+
+    @staticmethod
+    def exp_family_base_measure_from_params(x: Any, params: dict[str, Any], engine: Any) -> Any:
+        """Return ``log h(x) = 0`` on the support (a key of ``pmap``) and ``-inf`` for off-support labels."""
+        labels = CategoricalDistribution._ef_labels(x)
+        keys = set(CategoricalDistribution._ef_pmap(params).keys())
+        h = np.array([0.0 if label in keys else -np.inf for label in labels], dtype=np.float64)
+        return engine.asarray(h)
 
     def __init__(
         self,
