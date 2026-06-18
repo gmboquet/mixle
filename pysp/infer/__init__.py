@@ -73,6 +73,7 @@ class AdviResult:
     samples: np.ndarray
     mean: np.ndarray
     scale: np.ndarray
+    objective: float | None = None
 
 
 def nuts(
@@ -452,7 +453,7 @@ def advi(
     import torch  # noqa: F401
 
     rng = _as_rng(rng)
-    mean_np, scale_np, U = _advi_optimize(
+    mean_np, scale_np, U, objective = _advi_optimize(
         torch,
         target_batch,
         u0,
@@ -465,7 +466,7 @@ def advi(
         family=family,
         alpha=alpha,
     )
-    return AdviResult(samples=U, mean=mean_np, scale=scale_np)
+    return AdviResult(samples=U, mean=mean_np, scale=scale_np, objective=objective)
 
 
 def _as_rng(rng: np.random.RandomState | int | None) -> np.random.RandomState:
