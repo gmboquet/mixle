@@ -74,6 +74,41 @@ class POMDPModelHelpersTestCase(unittest.TestCase):
         np.testing.assert_allclose(result.predictive_observation_probs[0], 0.5125)
         np.testing.assert_allclose(result.beliefs[0], [0.4675 / 0.5125, 0.045 / 0.5125])
 
+    def test_forward_backward_matches_brute_force_controlled_paths(self):
+        model = POMDPModel(
+            transition=[
+                [[0.8, 0.2], [0.3, 0.7]],
+                [[0.55, 0.45], [0.15, 0.85]],
+            ],
+            observation=[
+                [[0.9, 0.1], [0.25, 0.75]],
+                [[0.35, 0.65], [0.8, 0.2]],
+            ],
+            initial_belief=[0.6, 0.4],
+        )
+        actions = [0, 1]
+        observations = [1, 0]
+        gamma, xi, ll = model.forward_backward(actions, observations)
+
+        weights = np.zeros((2, 2, 2))
+        for s0 in range(2):
+            for s1 in range(2):
+                for s2 in range(2):
+                    weights[s0, s1, s2] = (
+                        model.initial_belief[s0]
+                        * model.transition[0, s0, s1]
+                        * model.observation[0, s1, 1]
+                        * model.transition[1, s1, s2]
+                        * model.observation[1, s2, 0]
+                    )
+        z = weights.sum()
+        np.testing.assert_allclose(ll, np.log(z))
+        np.testing.assert_allclose(xi[0], weights.sum(axis=2) / z)
+        np.testing.assert_allclose(xi[1], weights.sum(axis=0) / z)
+        np.testing.assert_allclose(gamma[0], xi[0].sum(axis=0))
+        np.testing.assert_allclose(gamma[1], xi[1].sum(axis=0))
+        np.testing.assert_allclose(xi[0].sum(axis=1), weights.sum(axis=(1, 2)) / z)
+
     def test_baum_welch_pomdp_improves_likelihood(self):
         truth = POMDPModel(
             transition=[[[0.92, 0.08], [0.15, 0.85]]],

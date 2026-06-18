@@ -71,19 +71,22 @@ class MCMCResult:
         flat = arr.reshape((n, -1))
         centered = flat - flat.mean(axis=0, keepdims=True)
         var = np.mean(centered * centered, axis=0)
-        if np.any(var <= 0.0):
-            ess = np.where(var <= 0.0, float(n), 0.0)
+        positive_var = var > 0.0
+        ess = np.full(flat.shape[1], float(n), dtype=float)
+        if not np.any(positive_var):
             return float(ess[0]) if arr.ndim == 1 else ess.reshape(arr.shape[1:])
 
         lag_limit = n - 1 if max_lag is None else min(int(max_lag), n - 1)
-        tau = np.ones(flat.shape[1], dtype=float)
+        tau = np.ones(int(np.sum(positive_var)), dtype=float)
+        centered_pos = centered[:, positive_var]
+        var_pos = var[positive_var]
         for lag in range(1, lag_limit + 1):
-            rho = np.mean(centered[:-lag] * centered[lag:], axis=0) / var
+            rho = np.mean(centered_pos[:-lag] * centered_pos[lag:], axis=0) / var_pos
             positive = rho > 0.0
             if not np.any(positive):
                 break
             tau += 2.0 * np.where(positive, rho, 0.0)
-        ess = np.maximum(1.0, n / tau)
+        ess[positive_var] = np.maximum(1.0, n / tau)
         return float(ess[0]) if arr.ndim == 1 else ess.reshape(arr.shape[1:])
 
     def summary(self, max_lag: int | None = None) -> dict[str, Any]:

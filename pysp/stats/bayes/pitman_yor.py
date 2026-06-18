@@ -343,7 +343,7 @@ class PitmanYorProcessEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, dict, dict, dict]) -> PitmanYorProcessDistribution:
         count, a_hist, b_hist, d_hist = suff_stat
-        if count <= 0.0 or not b_hist:
+        if count <= 0.0:
             return PitmanYorProcessDistribution(1.0, self.discount, name=self.name, keys=self.keys)
 
         d = self.discount

@@ -48,6 +48,34 @@ class FiniteEnumeratorCoverageTestCase(unittest.TestCase):
         total = np.logaddexp.reduce([lp for _, lp in dist.enumerator()])
         self.assertAlmostEqual(total, 0.0, delta=1e-8)
 
+    def test_mallows_enumerator(self):
+        dist = MallowsDistribution([2, 0, 1], theta=0.8)
+        support = [list(p) for p in itertools.permutations(range(3))]
+        assert_matches_brute(self, dist, support, "mallows")
+        total = np.logaddexp.reduce([lp for _, lp in dist.enumerator()])
+        self.assertAlmostEqual(total, 0.0, delta=1e-8)
+
+    def test_plackett_luce_enumerator(self):
+        dist = PlackettLuceDistribution([2.0, 0.5, -1.0])
+        support = [list(p) for p in itertools.permutations(range(3))]
+        assert_matches_brute(self, dist, support, "plackett_luce")
+        total = np.logaddexp.reduce([lp for _, lp in dist.enumerator()])
+        self.assertAlmostEqual(total, 0.0, delta=1e-8)
+
+    def test_matching_enumerator(self):
+        dist = MatchingDistribution([[2.0, 1.0, 3.0], [1.0, 4.0, 1.0], [2.0, 1.0, 5.0]])
+        support = [list(p) for p in itertools.permutations(range(3))]
+        assert_matches_brute(self, dist, support, "matching")
+        total = np.logaddexp.reduce([lp for _, lp in dist.enumerator()])
+        self.assertAlmostEqual(total, 0.0, delta=1e-8)
+
+    def test_spanning_tree_enumerator(self):
+        dist = SpanningTreeDistribution([[0.0, 2.0, 1.0], [2.0, 0.0, 3.0], [1.0, 3.0, 0.0]])
+        support = [[(0, 1), (0, 2)], [(0, 1), (1, 2)], [(0, 2), (1, 2)]]
+        assert_matches_brute(self, dist, support, "spanning_tree")
+        total = np.logaddexp.reduce([lp for _, lp in dist.enumerator()])
+        self.assertAlmostEqual(total, 0.0, delta=1e-8)
+
     def test_icltree_enumerator(self):
         dist = ICLTreeDistribution([None, 0], [np.log([0.6, 0.4]), np.log([[0.7, 0.3], [0.2, 0.8]])])
         support = [list(v) for v in itertools.product(range(2), repeat=2)]
@@ -160,8 +188,12 @@ class EnumeratorExportCoverageTestCase(unittest.TestCase):
             "IntegerStepBernoulliEditEnumerator",
             "IntegerUniformSpikeEnumerator",
             "JointMixtureEnumerator",
+            "MallowsEnumerator",
+            "MatchingEnumerator",
             "MultinomialEnumerator",
+            "PlackettLuceEnumerator",
             "SelectEnumerator",
+            "SpanningTreeEnumerator",
             "SpearmanRankingEnumerator",
         ]
         for name in public_enumerators:

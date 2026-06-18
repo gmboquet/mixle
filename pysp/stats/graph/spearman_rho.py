@@ -600,7 +600,9 @@ class SpearmanRankingEstimator(ParameterEstimator):
             vsum = vsum + float(self.pseudo_count) * np.asarray(psum, dtype=np.float64)
 
         if count > 0:
-            sigma = np.argsort(vsum)
+            # Observations are rank vectors: x[j] is the rank assigned to item j.
+            # argsort(vsum) returns item order, so rank the item order once more.
+            sigma = np.argsort(np.argsort(vsum))
             if self.rho is None:
                 sigma_float = np.asarray(sigma, dtype=np.float64)
                 rank_norm2 = float(np.dot(np.arange(self.dim, dtype=np.float64), np.arange(self.dim, dtype=np.float64)))
