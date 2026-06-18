@@ -6,7 +6,7 @@
 
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
-![tests](https://img.shields.io/badge/tests-1600%2B-brightgreen)
+![tests](https://img.shields.io/badge/tests-1900%2B-brightgreen)
 
 **Composable, distributed density estimation for messy, mixed-type records** — tuples of
 categories, counts, reals, vectors, sets, sequences, and trees. Specify a probabilistic model in a
@@ -122,6 +122,8 @@ Also available: `best_of` (random restarts), `StreamingEstimator` / `Incremental
   hidden associations, IBP, Pitman-Yor processes, Bernoulli sets.
 - **Permutations & graphs:** Mallows and Plackett-Luce rankings, matchings, spanning trees, random
   graphs (Erdős–Rényi, stochastic block, random dot-product), Spearman ranking.
+- **Processes:** a general linear birth-death-sampling process (`BirthDeathSamplingDistribution` —
+  fossilized birth-death is the positive-`sampling_rate` case).
 - **Bayesian:** conjugate priors (NormalGamma, NormalWishart, MvnGamma, Dirichlet, SymmetricDirichlet)
   and variational Dirichlet-process / hierarchical-DP mixtures.
 
@@ -186,6 +188,17 @@ constrain(2*a - b >= 1).sample(100)                              # draw from the
 ```python
 # model constructors: Mix · Seq · Markov · LDA · MVN · DiagGaussian · LocalLevel · AR1 · Graph
 compare([model_a, model_b], data)   # rank fitted models, best first
+```
+
+**PDE-constrained state-space models** (`pysp.ppl.pde`) fit a latent spatial field that evolves by a
+PDE (method-of-lines discretization → linear/nonlinear transition) from noisy spatiotemporal
+snapshots, via multivariate Kalman/RTS + EM or the autograd adjoint:
+
+```python
+from pysp.ppl.pde import fit_diffusivity, fit_reaction_diffusion
+
+fit_diffusivity(snapshots, dx=dx, dt=dt)          # infer a 1-D diffusion coefficient + noise
+fit_reaction_diffusion(snapshots, dx=dx, dt=dt)   # nonlinear Fisher-KPP: du/dt = D u_xx + r u(1-u)
 ```
 
 It's a thin surface — the `pysp.stats` classes underneath are untouched.
@@ -261,7 +274,14 @@ optimize(data, est, backend="mp", num_workers=8)      # multiprocessing
 optimize(rdd,  est, backend="spark")                  # Spark
 optimize(data, est, backend="dask", client=client)    # Dask
 optimize(data, est, backend="mpi", comm=comm)         # MPI / torchrun
+optimize(data, est, backend="ray")                    # Ray
+optimize(data, est, backend="lightning")              # PyTorch Lightning
 ```
+
+New frameworks plug in by registering a factory (`register_encoded_data_backend`) — the same
+"register, don't branch" pattern as the engines, so `ray` and `lightning` were added without
+editing the dispatch. For a purely local speedup, `encoded_data(..., parallel_chunks=True)` folds
+resident chunks across threads (bit-identical to serial).
 
 **The planner** (`pysp.planner`) turns a hardware budget into a memory-aware *placement* — chunking,
 device assignment, and (on Torch) model sharding — that you compute once and reuse:
@@ -338,6 +358,14 @@ density quantile, stochastic representatives otherwise.
 - **Inference & analysis** — `pysp.utils.mcmc` (Metropolis–Hastings / HMC / VMP), `pysp.utils.em`
   (hard, annealed, ECM, Monte-Carlo, variational, online, restart EM), `pysp.utils.fisher`
   (Fisher-geometry views), and `pysp.utils.hvis` (model-based embeddings — t-SNE / UMAP).
+- **Engine-agnostic inference facade** — `pysp.infer` runs NUTS or ADVI on an *arbitrary*
+  differentiable target (bring your own `value_and_grad`) and dispatches to a registered backend
+  (NumPy / Numba / Torch / JAX). Multiple chains run in parallel (`parallel="thread"|"process"`,
+  with R̂ + pooled ESS). The underlying `pysp.utils.mcmc` NUTS does dual-averaging step-size and
+  optional diagonal mass-matrix adaptation (`adapt_mass=True`).
+- **Design of experiments & Bayesian optimization** — `pysp.doe` provides classical designs
+  (`latin_hypercube`, `maximin_latin_hypercube`, `full_factorial`, `random_design`) and sequential
+  GP-EI Bayesian optimization (`minimize`, `propose_next`, `expected_improvement`).
 - **Non-iid models** — `pysp.models` holds GP regression, neural regressors, random graphs,
   grammars, and knowledge graphs.
 
