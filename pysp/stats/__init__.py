@@ -474,6 +474,10 @@ __all__ = [
     "TweedieSampler",
     "TweedieEstimator",
     "TweedieDataEncoder",
+    "BirthDeathSamplingDistribution",
+    "BirthDeathSamplingSampler",
+    "BirthDeathSamplingEstimator",
+    "BirthDeathSamplingDataEncoder",
     "InhomogeneousPoissonProcessDistribution",
     "InhomogeneousPoissonProcessSampler",
     "InhomogeneousPoissonProcessEstimator",
@@ -904,6 +908,12 @@ from pysp.stats.leaf.binomial import (
     BinomialEnumerator,
     BinomialEstimator,
     BinomialSampler,
+)
+from pysp.stats.leaf.birth_death import (
+    BirthDeathSamplingDataEncoder,
+    BirthDeathSamplingDistribution,
+    BirthDeathSamplingEstimator,
+    BirthDeathSamplingSampler,
 )
 from pysp.stats.leaf.cat_multinomial import (
     MultinomialDataEncoder,
