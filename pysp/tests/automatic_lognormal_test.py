@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import GaussianEstimator, LogGaussianEstimator
+from pysp.stats import GammaEstimator, GaussianEstimator, LogGaussianEstimator
 from pysp.utils.automatic import analyze_structure, get_estimator
 
 
@@ -38,6 +38,17 @@ class AutomaticLogNormalTest(unittest.TestCase):
         self.assertEqual(field.recommendation, "gaussian")
         self.assertNotIn("lognormal", field.model_scores_bits)
         self.assertIsInstance(get_estimator(data), GaussianEstimator)
+
+    def test_exponential_data_recommends_and_builds_gamma(self):
+        # Exponential data (monotone-decreasing density from 0) is Gamma(k~1); the log-normal has an
+        # interior mode and cannot fit it, so gamma wins the BIC decisively.
+        rng = np.random.RandomState(4)
+        data = list(rng.exponential(2.0, size=800))
+        field = analyze_structure(data, pairwise=False).fields[0]
+        self.assertEqual(field.recommendation, "gamma")
+        self.assertIn("gamma", field.model_scores_bits)
+        self.assertLess(field.model_scores_bits["gamma"], field.model_scores_bits["lognormal"])
+        self.assertIsInstance(get_estimator(data), GammaEstimator)
 
     def test_symmetric_positive_data_prefers_gaussian(self):
         # Tight, symmetric, strictly-positive data: the Gaussian code length should win.
