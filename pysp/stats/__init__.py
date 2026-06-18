@@ -474,6 +474,10 @@ __all__ = [
     "TweedieSampler",
     "TweedieEstimator",
     "TweedieDataEncoder",
+    "InhomogeneousPoissonProcessDistribution",
+    "InhomogeneousPoissonProcessSampler",
+    "InhomogeneousPoissonProcessEstimator",
+    "InhomogeneousPoissonProcessDataEncoder",
     "ExponentialTiltedDistribution",
     "ExponentialTiltedSampler",
     "ExponentialTiltedEstimator",
@@ -947,6 +951,12 @@ from pysp.stats.leaf.half_normal import (
     HalfNormalDistribution,
     HalfNormalEstimator,
     HalfNormalSampler,
+)
+from pysp.stats.leaf.inhomogeneous_poisson import (
+    InhomogeneousPoissonProcessDataEncoder,
+    InhomogeneousPoissonProcessDistribution,
+    InhomogeneousPoissonProcessEstimator,
+    InhomogeneousPoissonProcessSampler,
 )
 from pysp.stats.leaf.int_multinomial import (
     IntegerMultinomialDataEncoder,
