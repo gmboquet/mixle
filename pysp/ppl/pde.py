@@ -181,3 +181,74 @@ def pde_fit(
         raise TypeError("PDE() requires a DynamicsOperator (see pysp.ppl.dynamics).")
     result = kalman_rts_em(np.asarray(data, dtype=float), operator, dt=dt, H=H, max_its=max_its, tol=tol)
     return RandomVariable._bound(None, name=rv._name, result=result)
+
+
+def fit_diffusivity(
+    observations,
+    *,
+    length: float = 1.0,
+    bc: str = "neumann",
+    scheme: str = "exact",
+    dt: float = 1.0,
+    init_diffusivity: float = 1.0,
+    max_its: int = 500,
+    lr: float = 0.05,
+):
+    """Infer a 1-D diffusion coefficient (and observation noise) from spatiotemporal snapshots.
+
+    Unlike :func:`kalman_rts_em` (which holds the PDE transition fixed and fits only the noise
+    levels), this estimates the **PDE parameter** itself. The latent field evolves by the
+    discretized heat equation ``u_t = A(D) u_{t-1}`` with ``A(D)`` the method-of-lines transition for
+    diffusivity ``D`` (the same ``explicit`` / ``implicit`` / ``exact`` schemes as
+    :class:`~pysp.ppl.dynamics.DiffusionOperator`). ``D`` (and the observation noise) are fit by
+    maximizing the one-step predictive Gaussian likelihood
+    ``sum_t log N(y_t; A(D) y_{t-1}, sigma^2 I)``; gradients flow by reverse-mode autodiff through the
+    differentiable transition (``torch.matrix_exp`` / linear solve) -- i.e. the discrete **adjoint**
+    of the forward solve -- so no hand-derived adjoint equations are needed.
+
+    Args:
+        observations: ``(T, n)`` array of noisy field snapshots on a uniform grid.
+        length, bc, scheme, dt: spatial/temporal discretization (see ``DiffusionOperator``).
+        init_diffusivity, max_its, lr: optimizer seed and budget.
+
+    Returns:
+        dict with the fitted ``diffusivity``, ``obs_sd``, and the maximized ``loglik``.
+    """
+    import torch
+
+    from pysp.ppl.dynamics import laplacian_matrix
+    from pysp.utils.objectives import optimize_torch_objective
+
+    y = np.asarray(observations, dtype=float)
+    if y.ndim != 2 or y.shape[0] < 2:
+        raise ValueError("observations must be a (T, n) array with T >= 2 time steps.")
+    n = y.shape[1]
+    h = float(length) / (n - 1)
+    lap = torch.tensor(laplacian_matrix(n, h, bc), dtype=torch.float64)
+    eye = torch.eye(n, dtype=torch.float64)
+    yt = torch.tensor(y, dtype=torch.float64)
+    prev, curr = yt[:-1], yt[1:]
+
+    raw_d = torch.tensor(math.log(float(init_diffusivity)), dtype=torch.float64, requires_grad=True)
+    log_sd = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
+
+    def transition(diffusivity):
+        g = diffusivity * dt * lap
+        if scheme == "explicit":
+            return eye + g
+        if scheme == "exact":
+            return torch.linalg.matrix_exp(g)
+        return torch.linalg.solve(eye - g, eye)  # implicit Euler
+
+    def objective():
+        diffusivity = torch.exp(raw_d)
+        var = torch.exp(2.0 * log_sd) + 1.0e-12
+        resid = curr - prev @ transition(diffusivity).T  # y_t - A(D) y_{t-1}
+        return -0.5 * (resid.pow(2).sum() / var + resid.numel() * torch.log(2.0 * math.pi * var))
+
+    loglik = optimize_torch_objective([raw_d, log_sd], objective, max_its=max_its, lr=lr, maximize=True, out=None)
+    return {
+        "diffusivity": float(torch.exp(raw_d).detach()),
+        "obs_sd": float(torch.exp(log_sd).detach()),
+        "loglik": float(loglik) if np.isscalar(loglik) or hasattr(loglik, "__float__") else float(loglik[0]),
+    }
