@@ -78,7 +78,19 @@ class MarginalFieldProfile:
     validation_score_gap_bits: float | None = None
     validation_count: int = 0
     validation_notes: list[str] = field(default_factory=list)
+    gof_ks: float | None = None
+    gof_pvalue: float | None = None
     notes: list[str] = field(default_factory=list)
+
+    def model_weights(self) -> dict[str, float]:
+        """Return Schwarz (BIC) model weights over the scored candidates, summing to 1.
+
+        From per-observation code lengths ``L_i`` (``model_scores_bits``) and the observed count
+        ``n``, ``BIC_i = 2 * n * ln2 * L_i`` so the Schwarz weight is
+        ``w_i proportional to exp(-0.5 * (BIC_i - min BIC)) = exp(-n * ln2 * (L_i - min L))`` -- an
+        approximate posterior probability over the candidate models. Empty when nothing was scored.
+        """
+        return _bic_weights(self.model_scores_bits, self.observed_count)
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -103,7 +115,10 @@ class MarginalFieldProfile:
             "integer_max": self.integer_max,
             "integer_density": self.integer_density,
             "model_scores_bits": dict(self.model_scores_bits),
+            "model_weights": self.model_weights(),
             "model_score_gap_bits": self.model_score_gap_bits,
+            "gof_ks": self.gof_ks,
+            "gof_pvalue": self.gof_pvalue,
             "validation_scores_bits": dict(self.validation_scores_bits),
             "validation_recommendation": self.validation_recommendation,
             "validation_score_gap_bits": self.validation_score_gap_bits,
@@ -420,6 +435,60 @@ def _numeric_model_recommendation(scores: dict[str, float], margin: float = _NUM
         return "gaussian"
     best = min(alternatives, key=lambda k: (alternatives[k], k))
     return best if alternatives[best] < scores["gaussian"] - margin else "gaussian"
+
+
+def _bic_weights(scores: dict[str, float], nobs: int) -> dict[str, float]:
+    """Return normalized Schwarz (BIC) weights from per-observation code lengths.
+
+    ``BIC_i = 2 * n * ln2 * L_i`` for code length ``L_i`` (bits/obs), so the Schwarz weight is
+    ``w_i proportional to exp(-0.5 * (BIC_i - min BIC)) = exp(-n * ln2 * (L_i - min L))`` (all
+    exponents <= 0, so no overflow). Returns ``{}`` for empty input.
+    """
+    if not scores:
+        return {}
+    n = max(int(nobs), 1)
+    best = min(scores.values())
+    raw = {k: math.exp(-n * math.log(2.0) * (v - best)) for k, v in scores.items()}
+    total = sum(raw.values()) or 1.0
+    return {k: w / total for k, w in raw.items()}
+
+
+GOF_ABSTAIN_PVALUE = 0.01
+
+
+def _numeric_pit(arr: np.ndarray, recommendation: str, gmean: float, gvar: float):
+    """Return the probability-integral-transform F(x) of the data under the recommended fit, or None."""
+    from scipy import stats
+
+    if recommendation == "gaussian" and gvar > 0.0:
+        return stats.norm.cdf(arr, loc=gmean, scale=math.sqrt(gvar))
+    if recommendation == "lognormal":
+        logs = np.log(arr)
+        lvar = float(logs.var())
+        if lvar > 0.0:
+            return stats.norm.cdf(logs, loc=float(logs.mean()), scale=math.sqrt(lvar))
+        return None
+    if recommendation == "gamma":
+        moments = _gamma_moments(arr)
+        if moments is not None:
+            k, theta = moments
+            return stats.gamma.cdf(arr, a=k, scale=theta)
+    return None
+
+
+def _pit_goodness_of_fit(pit: np.ndarray) -> tuple[float, float] | None:
+    """Return (KS statistic, p-value) of the PIT against Uniform(0,1); None if degenerate.
+
+    Under a correctly-specified model the PIT values are Uniform(0,1); a small p-value indicates
+    miscalibration (the chosen family does not fit), which the profile surfaces as an abstain note.
+    """
+    from scipy import stats
+
+    pit = np.asarray(pit, dtype=float)
+    if pit.size < 2 or not np.all(np.isfinite(pit)):
+        return None
+    result = stats.kstest(np.clip(pit, 0.0, 1.0), "uniform")
+    return float(result.statistic), float(result.pvalue)
 
 
 def _score_gap_bits(scores: dict[str, float], recommendation: str) -> float | None:
@@ -907,6 +976,21 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
             bits_per_obs = None if moments is None else _gamma_nll_bits(arr, *moments)
         else:
             bits_per_obs = _gaussian_bits(var)
+
+        # Goodness-of-fit gate: the PIT of the data under the recommended fit should be Uniform(0,1);
+        # a small KS p-value flags miscalibration (none of the candidate families fit) -> abstain note.
+        gof_ks = None
+        gof_pvalue = None
+        pit = _numeric_pit(arr, recommendation, mean, var)
+        if pit is not None:
+            gof = _pit_goodness_of_fit(pit)
+            if gof is not None:
+                gof_ks, gof_pvalue = gof
+                if gof_pvalue < GOF_ABSTAIN_PVALUE:
+                    notes.append(
+                        "poor calibration: PIT-vs-uniform KS p=%.3g for %s; consider another family"
+                        % (gof_pvalue, recommendation)
+                    )
         return MarginalFieldProfile(
             path,
             role,
@@ -927,6 +1011,8 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
             numeric_var=var,
             model_scores_bits=model_scores,
             model_score_gap_bits=_score_gap_bits(model_scores, recommendation),
+            gof_ks=gof_ks,
+            gof_pvalue=gof_pvalue,
             notes=notes,
         )
 
