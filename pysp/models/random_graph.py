@@ -220,31 +220,37 @@ def hard_em_stochastic_block_model(
     for _ in range(max(1, int(restarts))):
         assignments = _initial_assignments(adj.shape[0], num_blocks, rng)
         history: list[float] = []
-        model = None
+        model = StochasticBlockGraphModel.fit_mle(
+            adj,
+            assignments,
+            num_blocks=num_blocks,
+            directed=directed,
+            self_loops=self_loops,
+            pseudo_count=pseudo_count,
+            prior_p=prior_p,
+        )
+        ll = model.log_likelihood(adj)
+        history.append(ll)
         for _ in range(max(1, int(max_its))):
-            model = StochasticBlockGraphModel.fit_mle(
+            candidate_assignments = _hard_reassign(adj, model)
+            candidate_model = StochasticBlockGraphModel.fit_mle(
                 adj,
-                assignments,
+                candidate_assignments,
                 num_blocks=num_blocks,
                 directed=directed,
                 self_loops=self_loops,
                 pseudo_count=pseudo_count,
                 prior_p=prior_p,
             )
-            assignments = _hard_reassign(adj, model)
-            model = StochasticBlockGraphModel.fit_mle(
-                adj,
-                assignments,
-                num_blocks=num_blocks,
-                directed=directed,
-                self_loops=self_loops,
-                pseudo_count=pseudo_count,
-                prior_p=prior_p,
-            )
-            ll = model.log_likelihood(adj)
-            history.append(ll)
-            if len(history) > 1 and abs(history[-1] - history[-2]) < 1.0e-12:
+            candidate_ll = candidate_model.log_likelihood(adj)
+            if candidate_ll < ll - 1.0e-12:
                 break
+            assignments = candidate_assignments
+            model = candidate_model
+            history.append(candidate_ll)
+            if abs(candidate_ll - ll) < 1.0e-12:
+                break
+            ll = candidate_ll
         if history and history[-1] > best_ll:
             best_ll = history[-1]
             best_model = model

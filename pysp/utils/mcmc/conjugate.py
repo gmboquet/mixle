@@ -23,8 +23,10 @@ def sample_conjugate_posterior(
     alternative to :func:`sample_parameter_posterior`.
 
     Supported leaves: Gaussian (NormalGamma posterior, samples ``(mu, sigma2)``),
-    Poisson (Gamma posterior, samples ``lam``), and Bernoulli (Beta posterior,
-    samples ``p``).
+    Poisson (Gamma posterior, samples ``lam``), Exponential (Gamma posterior over
+    the rate, samples the scale ``beta``), and Bernoulli, Binomial, and
+    Geometric (Beta posterior, samples ``p``).  Binomial draws keep the prototype
+    trial count and support shift fixed.
 
     Args:
         dist: A ``pysp.stats`` distribution; if it carries no conjugate prior a
@@ -42,9 +44,18 @@ def sample_conjugate_posterior(
     rng = np.random.RandomState(seed)
     cls_name = type(dist).__name__
 
-    if cls_name not in ("GaussianDistribution", "PoissonDistribution", "BernoulliDistribution"):
+    supported = (
+        "GaussianDistribution",
+        "PoissonDistribution",
+        "ExponentialDistribution",
+        "BernoulliDistribution",
+        "BinomialDistribution",
+        "GeometricDistribution",
+    )
+    if cls_name not in supported:
         raise NotImplementedError(
-            "sample_conjugate_posterior supports Gaussian, Poisson, and Bernoulli leaves; got %s." % cls_name
+            "sample_conjugate_posterior supports Gaussian, Poisson, Exponential, Bernoulli, "
+            "Binomial, and Geometric leaves; got %s." % cls_name
         )
 
     # the stats leaves default to prior=None; supply a non-informative conjugate
@@ -79,15 +90,30 @@ def sample_conjugate_posterior(
         for _ in range(draws):
             lam = rng.gamma(shape=k, scale=theta)
             samples.append(type(dist)(lam) if return_distributions else float(lam))
-    else:  # BernoulliDistribution
+    elif cls_name == "ExponentialDistribution":
+        from pysp.stats.leaf.gamma import GammaDistribution
+
+        if not isinstance(posterior, GammaDistribution):
+            raise NotImplementedError("sample_conjugate_posterior(Exponential) requires a Gamma posterior.")
+        k, theta = posterior.get_parameters()
+        for _ in range(draws):
+            rate = max(float(rng.gamma(shape=k, scale=theta)), 1.0e-300)
+            beta = 1.0 / rate
+            samples.append(type(dist)(beta) if return_distributions else float(beta))
+    else:
         from pysp.stats.leaf.beta import BetaDistribution
 
         if not isinstance(posterior, BetaDistribution):
-            raise NotImplementedError("sample_conjugate_posterior(Bernoulli) requires a Beta posterior.")
+            raise NotImplementedError("sample_conjugate_posterior(%s) requires a Beta posterior." % cls_name)
         a, b = posterior.get_parameters()
         for _ in range(draws):
             p = rng.beta(a, b)
-            samples.append(type(dist)(p) if return_distributions else float(p))
+            if return_distributions and cls_name == "BinomialDistribution":
+                samples.append(type(dist)(p, dist.n, min_val=dist.min_val, name=dist.name, keys=dist.keys))
+            elif return_distributions:
+                samples.append(type(dist)(p))
+            else:
+                samples.append(float(p))
 
     return MCMCResult(
         samples=samples, log_probs=np.zeros(len(samples), dtype=float), accepted=np.ones(len(samples), dtype=bool)
@@ -109,7 +135,11 @@ def _default_conjugate_prior(cls_name: str) -> Any:
         from pysp.stats.leaf.gamma import GammaDistribution
 
         return GammaDistribution(1.0001, 1.0e6)
-    if cls_name == "BernoulliDistribution":
+    if cls_name == "ExponentialDistribution":
+        from pysp.stats.leaf.gamma import GammaDistribution
+
+        return GammaDistribution(1.0001, 1.0e6)
+    if cls_name in ("BernoulliDistribution", "BinomialDistribution", "GeometricDistribution"):
         from pysp.stats.leaf.beta import BetaDistribution
 
         return BetaDistribution(1.000001, 1.000001)
