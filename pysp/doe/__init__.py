@@ -40,6 +40,11 @@ from pysp.doe.designs import (
     random_design,
     sobol_design,
 )
+from pysp.doe.multiobjective import (
+    MultiObjectiveResult,
+    multi_minimize,
+    pareto_mask,
+)
 from pysp.doe.optimal import (
     a_criterion,
     available_criteria,
@@ -78,4 +83,7 @@ __all__ = [
     "probability_of_feasibility",
     "propose_next_constrained",
     "constrained_minimize",
+    "MultiObjectiveResult",
+    "pareto_mask",
+    "multi_minimize",
 ]
