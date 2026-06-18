@@ -121,5 +121,37 @@ class MixedEffectsTestCase(unittest.TestCase):
         self.assertGreater(np.corrcoef(bslope, u1)[0, 1], 0.95)
 
 
+class QuantileRegressionTestCase(unittest.TestCase):
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.n = 3000
+        self.x = rng.uniform(0, 5, self.n)
+        # heteroskedastic: noise scale grows with x, so the quantiles fan out
+        self.y = 2.0 + 1.5 * self.x + rng.normal(0, 0.4 + 0.6 * self.x, self.n)
+
+    def test_quantiles_fan_out_and_recover_median(self):
+        fits = {
+            tau: Normal(free * Field("x") + free, free).fit(list(self.y), given={"x": list(self.x)}, quantile=tau)
+            for tau in (0.1, 0.5, 0.9)
+        }
+        slopes = {tau: fits[tau].result.coefficients["x"]["mean"] for tau in fits}
+        self.assertAlmostEqual(slopes[0.5], 1.5, delta=0.2)  # median slope ~ the mean slope
+        self.assertLess(slopes[0.1], slopes[0.5])  # spread grows with x -> steeper upper quantile
+        self.assertLess(slopes[0.5], slopes[0.9])
+        self.assertEqual(fits[0.9].result.quantile, 0.9)
+
+    def test_band_coverage(self):
+        lo_fit = Normal(free * Field("x") + free, free).fit(list(self.y), given={"x": list(self.x)}, quantile=0.1)
+        hi_fit = Normal(free * Field("x") + free, free).fit(list(self.y), given={"x": list(self.x)}, quantile=0.9)
+        lo = lo_fit.result.predict({"x": list(self.x)})
+        hi = hi_fit.result.predict({"x": list(self.x)})
+        cov = ((self.y >= lo) & (self.y <= hi)).mean()
+        self.assertAlmostEqual(cov, 0.8, delta=0.04)
+
+    def test_invalid_quantile_raises(self):
+        with self.assertRaises(ValueError):
+            Normal(free * Field("x") + free, free).fit(list(self.y), given={"x": list(self.x)}, quantile=1.5)
+
+
 if __name__ == "__main__":
     unittest.main()
