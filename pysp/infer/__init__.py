@@ -89,6 +89,7 @@ def nuts(
     max_tree_depth: int = 10,
     thin: int = 1,
     rng: np.random.RandomState | int | None = None,
+    parallel: bool | str | None = None,
     **backend_kwargs: Any,
 ) -> NutsResult:
     """No-U-Turn Sampler over an arbitrary log-target, dispatched to a registered engine.
@@ -115,6 +116,13 @@ def nuts(
         chains: number of independent chains (>= 2 to get a meaningful R-hat).
         mass, target_accept, max_tree_depth, thin: forwarded to the sampler.
         rng: seed / RandomState for reproducibility.
+        parallel: run the ``chains`` independent chains concurrently. ``None``/``False`` (default)
+            runs them in the backend's usual single call; ``"thread"`` uses a thread pool (real
+            speedup for the ``numba``/``torch`` backends, whose inner loops release the GIL);
+            ``True`` or ``"process"`` uses a process pool (real speedup for the pure-``numpy``
+            backend; requires a picklable ``target``). Ignored for the ``jax`` backend, which
+            already vectorizes chains internally. Each chain still gets an independent seed, so
+            results are valid multi-chain draws (R-hat / ESS across chains).
         **backend_kwargs: forwarded to the chosen backend (e.g. ``compile=``, ``device=`` for
             ``torch``; ``chain_method=`` for ``jax``).
 
@@ -130,20 +138,63 @@ def nuts(
     kind_hint = _dispatch_target_kind(target, backend_kwargs.pop("target_kind", None))
     name = select_backend(backend, target=kind_hint)
     b = get_inference_backend(name)
-    return b.nuts(
-        target,
-        dim=dim,
-        init=init,
+    common = dict(
         num_samples=num_samples,
         warmup=warmup,
-        chains=chains,
         mass=mass,
         target_accept=target_accept,
         max_tree_depth=max_tree_depth,
         thin=thin,
-        rng=rng,
+    )
+    # jax (NumPyro) already vectorizes chains internally, so facade-level parallelism is wasteful.
+    if parallel and chains > 1 and name != "jax":
+        return _parallel_chains(name, target, dim, init, chains, rng, common, backend_kwargs, parallel)
+    return b.nuts(target, dim=dim, init=init, chains=chains, rng=rng, **common, **backend_kwargs)
+
+
+def _single_chain(name: str, target: Any, init_row: np.ndarray, seed: int, common: dict, backend_kwargs: dict):
+    """Run one chain on backend ``name`` and return (samples (n,d), num_target_evals, step_size).
+
+    Module-level so it is picklable for the process-pool path.
+    """
+    res = get_inference_backend(name).nuts(
+        target,
+        dim=int(init_row.shape[0]),
+        init=init_row,
+        chains=1,
+        rng=np.random.RandomState(int(seed)),
+        **common,
         **backend_kwargs,
     )
+    d = int(np.asarray(res.samples).shape[1]) if np.asarray(res.samples).ndim == 2 else int(init_row.shape[0])
+    samples = np.asarray(res.samples, dtype=float).reshape(-1, d)
+    return samples, int(getattr(res, "num_target_evals", 0)), float(getattr(res, "step_size", float("nan")))
+
+
+def _parallel_chains(name, target, dim, init, chains, rng, common, backend_kwargs, parallel) -> NutsResult:
+    """Run ``chains`` independent single-chain runs concurrently and pool them into a NutsResult."""
+    rng = _as_rng(rng)
+    inits = _chain_inits(init, dim, chains, rng)
+    d = inits.shape[1]
+    seeds = [int(rng.randint(1, 2**31 - 1)) for _ in range(chains)]
+    args = [(name, target, inits[c], seeds[c], common, backend_kwargs) for c in range(chains)]
+    mode = "process" if parallel is True else str(parallel)
+    if mode == "process":
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(max_workers=chains) as ex:
+            results = [f.result() for f in [ex.submit(_single_chain, *a) for a in args]]
+    elif mode == "thread":
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=chains) as ex:
+            results = list(ex.map(lambda a: _single_chain(*a), args))
+    else:
+        raise ValueError("parallel must be None/False, True, 'process', or 'thread'.")
+    chain_arrays = [r[0] for r in results]
+    total_evals = sum(r[1] for r in results)
+    last_step = next((r[2] for r in reversed(results) if np.isfinite(r[2])), float("nan"))
+    return _pool_chains(chain_arrays, d, chains, total_evals, last_step, backend=name)
 
 
 # --------------------------------------------------------------------------------------------
