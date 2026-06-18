@@ -37,6 +37,7 @@ from .factories import (
     get_gaussian_estimator,
     get_ignored_estimator,
     get_integer_categorical_estimator,
+    get_lognormal_estimator,
     get_multivariate_gaussian_estimator,
     get_optional_estimator,
     get_poisson_estimator,
@@ -343,6 +344,30 @@ def _gaussian_bic_bits(var: float, nobs: int) -> float | None:
     return bits + _bic_penalty_bits(2, nobs)
 
 
+def _lognormal_bits(values: Sequence[float]) -> float | None:
+    """Return the per-observation code length (bits) of an MLE log-normal fit, or None.
+
+    For ``X`` log-normal, ``ln X ~ N(mu, sigma^2)`` and the differential entropy is
+    ``E[ln X] + 0.5*ln(2*pi*e*sigma^2)``; the ``E[ln X]`` term is the change-of-variables Jacobian.
+    Defined only for strictly positive data.
+    """
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0 or not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
+        return None
+    logs = np.log(arr)
+    gauss = _gaussian_bits(float(logs.var()))
+    if gauss is None:
+        return None
+    return float(logs.mean()) / math.log(2.0) + gauss
+
+
+def _lognormal_bic_bits(values: Sequence[float], nobs: int) -> float | None:
+    bits = _lognormal_bits(values)
+    if bits is None:
+        return None
+    return bits + _bic_penalty_bits(2, nobs)
+
+
 def _clean_scores(scores: dict[str, float | None]) -> dict[str, float]:
     return {k: float(v) for k, v in scores.items() if v is not None and math.isfinite(float(v))}
 
@@ -486,6 +511,28 @@ def _validation_gaussian_bits(train: Sequence[float], validation: Sequence[float
     return -ll / (float(len(validation)) * math.log(2.0))
 
 
+def _validation_lognormal_bits(train: Sequence[float], validation: Sequence[float]) -> float | None:
+    """Held-out predictive code length (bits/obs) of a log-normal fit; positive data only."""
+    if not train or not validation:
+        return None
+    tarr = np.asarray(train, dtype=float)
+    if not np.all(np.isfinite(tarr)) or not np.all(tarr > 0.0):
+        return None
+    logs = np.log(tarr)
+    mean = float(logs.mean())
+    var = max(float(logs.var()), VALIDATION_VARIANCE_FLOOR)
+    log_norm = 0.5 * math.log(2.0 * math.pi * var)
+    ll = 0.0
+    for value in validation:
+        xx = float(value)
+        if not math.isfinite(xx) or xx <= 0.0:
+            return None
+        lx = math.log(xx)
+        # log p(x) = -ln x - log_norm - (ln x - mu)^2 / (2 var)  (the -ln x is the Jacobian)
+        ll += -lx - log_norm - ((lx - mean) ** 2) / (2.0 * var)
+    return -ll / (float(len(validation)) * math.log(2.0))
+
+
 def _validation_integer_gaussian_bits(train: Sequence[int], validation: Sequence[int]) -> float | None:
     if not train or not validation:
         return None
@@ -544,9 +591,11 @@ def _validate_marginal_profile(
             )
 
     elif profile.kind == "numeric":
-        scores["gaussian"] = _validation_gaussian_bits(
-            [float(value) for value in train], [float(value) for value in validation]
-        )
+        train_f = [float(value) for value in train]
+        val_f = [float(value) for value in validation]
+        scores["gaussian"] = _validation_gaussian_bits(train_f, val_f)
+        if "lognormal" in profile.model_scores_bits:
+            scores["lognormal"] = _validation_lognormal_bits(train_f, val_f)
 
     clean = _clean_scores(scores)
     if not clean:
@@ -773,7 +822,13 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
         arr = np.asarray(observed, dtype=float)
         mean = float(arr.mean())
         var = float(arr.var())
-        model_scores = _clean_scores({"gaussian": _gaussian_bic_bits(var, observed_count)})
+        candidate_bits: dict[str, float | None] = {"gaussian": _gaussian_bic_bits(var, observed_count)}
+        # Support-typed candidate: strictly-positive data may be better explained by a log-normal.
+        if np.all(arr > 0.0):
+            candidate_bits["lognormal"] = _lognormal_bic_bits(arr, observed_count)
+        model_scores = _clean_scores(candidate_bits)
+        recommendation = min(model_scores, key=lambda k: (model_scores[k], k)) if model_scores else "gaussian"
+        bits_per_obs = _lognormal_bits(arr) if recommendation == "lognormal" else _gaussian_bits(var)
         return MarginalFieldProfile(
             path,
             role,
@@ -782,8 +837,8 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
             missing_fraction,
             observed_count,
             "numeric",
-            "gaussian",
-            bits_per_obs=_gaussian_bits(var),
+            recommendation,
+            bits_per_obs=bits_per_obs,
             entropy_bits=entropy,
             cardinality=cardinality,
             unique_fraction=unique_fraction,
@@ -793,6 +848,7 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
             numeric_mean=mean,
             numeric_var=var,
             model_scores_bits=model_scores,
+            model_score_gap_bits=_score_gap_bits(model_scores, recommendation),
             notes=notes,
         )
 
@@ -1308,6 +1364,27 @@ class DatumNode:
             return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
         if self.float_count > 0:
+            # Support-typed selection: for strictly-positive data prefer a log-normal when it gives
+            # a smaller BIC code length than the Gaussian; otherwise keep the Gaussian default.
+            keys = [float(k) for k in self.vdict if math.isfinite(k)]
+            nobs = int(round(sum(self.vdict.values())))
+            if keys and all(k > 0.0 for k in keys):
+                weights = [float(self.vdict[k]) for k in self.vdict if math.isfinite(k)]
+                total = sum(weights) or 1.0
+                gmean = sum(k * w for k, w in zip(keys, weights)) / total
+                gvar = max(sum(w * (k - gmean) ** 2 for k, w in zip(keys, weights)) / total, 0.0)
+                logs = [math.log(k) for k in keys]
+                lmean = sum(lk * w for lk, w in zip(logs, weights)) / total
+                lvar = max(sum(w * (lk - lmean) ** 2 for lk, w in zip(logs, weights)) / total, 0.0)
+                gaussian_bic = _gaussian_bic_bits(gvar, nobs)
+                lognormal_bits = _gaussian_bits(lvar)
+                lognormal_bic = (
+                    None
+                    if lognormal_bits is None
+                    else lmean / math.log(2.0) + lognormal_bits + _bic_penalty_bits(2, nobs)
+                )
+                if lognormal_bic is not None and (gaussian_bic is None or lognormal_bic < gaussian_bic):
+                    return get_lognormal_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
             return get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
         if self.int_count > 0:

@@ -294,6 +294,37 @@ def get_gaussian_estimator(
     )
 
 
+def get_lognormal_estimator(
+    vdict: dict[np.floating | float, float],
+    pseudo_count: float | None = None,
+    emp_suff_stat: bool = True,
+    use_bstats: bool = False,
+) -> "ParameterEstimator":
+    """Return a LogGaussian (log-normal) estimator fit to the log of strictly-positive values."""
+    if emp_suff_stat:
+        ss_0 = 0.0
+        ss_1 = 0.0
+        ss_2 = 0.0
+        for k, v in vdict.items():
+            if math.isfinite(k) and k > 0.0:
+                lk = math.log(k)
+                ss_0 += v
+                ss_1 += lk * v
+                ss_2 += lk * lk * v
+        ss_1 = ss_1 / ss_0
+        ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+    elif pseudo_count is not None:
+        ss_1 = 1.0e-6
+        ss_2 = 1.0e-6
+    else:
+        ss_1 = None
+        ss_2 = None
+
+    return _estimator_provider(False).LogGaussianEstimator(
+        pseudo_count=(pseudo_count, pseudo_count), suff_stat=(ss_1, ss_2)
+    )
+
+
 def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> "ParameterEstimator":
     if use_bstats:
         return _estimator_provider(True).MultivariateGaussianEstimator(dim=dim, prior=_mvn_default_prior(dim))
