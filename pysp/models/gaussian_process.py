@@ -8,9 +8,25 @@ import numpy as np
 
 from pysp.utils.objectives import optimize_torch_objective
 
+_KERNELS = {
+    "rbf": "rbf",
+    "se": "rbf",
+    "squared_exponential": "rbf",
+    "matern32": "matern32",
+    "matern_3_2": "matern32",
+    "matern52": "matern52",
+    "matern_5_2": "matern52",
+    "matern": "matern52",
+}
+
 
 class GaussianProcessRegressor:
-    """Exact GP regression with an RBF kernel and Gaussian observation noise."""
+    """Exact GP regression with a stationary kernel and Gaussian observation noise.
+
+    The kernel is RBF (squared-exponential) by default; ``kernel="matern32"`` or ``"matern52"``
+    selects the Matern-3/2 or Matern-5/2 covariance, whose rougher sample paths often fit physical
+    responses better than the very smooth RBF.
+    """
 
     def __init__(
         self,
@@ -19,9 +35,13 @@ class GaussianProcessRegressor:
         noise: float = 0.1,
         mean: float = 0.0,
         jitter: float = 1.0e-6,
+        kernel: str = "rbf",
         engine: Any | None = None,
         precision: Any | None = None,
     ) -> None:
+        self.kernel_name = _KERNELS.get(str(kernel).lower())
+        if self.kernel_name is None:
+            raise ValueError(f"unknown kernel {kernel!r}; choose from {sorted(set(_KERNELS))}.")
         torch, engine = _torch_engine(engine, precision=precision)
         self.torch = torch
         self.engine = engine
@@ -37,12 +57,12 @@ class GaussianProcessRegressor:
 
     @property
     def lengthscale(self) -> float:
-        """Return the fitted RBF lengthscale."""
+        """Return the fitted kernel lengthscale."""
         return float(self.log_lengthscale.detach().exp().cpu().item())
 
     @property
     def amplitude(self) -> float:
-        """Return the fitted RBF amplitude."""
+        """Return the fitted kernel amplitude."""
         return float(self.log_amplitude.detach().exp().cpu().item())
 
     @property
@@ -60,7 +80,7 @@ class GaussianProcessRegressor:
         return xx, yy
 
     def kernel(self, x1: Any, x2: Any) -> Any:
-        """Return the RBF covariance matrix between two input arrays."""
+        """Return the covariance matrix between two input arrays under the configured kernel."""
         torch = self.torch
         x1 = self.engine.asarray(x1)
         x2 = self.engine.asarray(x2)
@@ -71,7 +91,16 @@ class GaussianProcessRegressor:
         diff = (x1[:, None, :] - x2[None, :, :]) / self.log_lengthscale.exp()
         dist2 = torch.sum(diff * diff, dim=2)
         amp2 = self.log_amplitude.exp() ** 2
-        return amp2 * torch.exp(-0.5 * dist2)
+        if self.kernel_name == "rbf":
+            return amp2 * torch.exp(-0.5 * dist2)
+        # Matern kernels need the (lengthscale-scaled) Euclidean distance; the tiny floor keeps the
+        # sqrt subdifferentiable at zero separation.
+        r = torch.sqrt(torch.clamp(dist2, min=0.0) + 1.0e-12)
+        if self.kernel_name == "matern32":
+            sqrt3 = 3.0**0.5
+            return amp2 * (1.0 + sqrt3 * r) * torch.exp(-sqrt3 * r)
+        sqrt5 = 5.0**0.5  # matern52
+        return amp2 * (1.0 + sqrt5 * r + (5.0 / 3.0) * dist2) * torch.exp(-sqrt5 * r)
 
     def log_marginal_likelihood(self, x: Any, y: Any) -> Any:
         """Return the exact GP log marginal likelihood for training data."""
