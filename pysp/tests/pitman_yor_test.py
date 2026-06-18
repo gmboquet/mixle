@@ -90,6 +90,24 @@ class PitmanYorTestCase(unittest.TestCase):
         self.assertAlmostEqual(fitted.discount, 0.5, delta=0.12)
         self.assertAlmostEqual(fitted.alpha, 1.0, delta=0.6)
 
+    def test_estimator_reports_boundary_for_no_new_blocks(self):
+        data = [[0, 0, 0], [1, 1]]
+        fitted = fit(data, PitmanYorProcessEstimator(discount=0.0), max_its=1, print_iter=0)
+        default = PitmanYorProcessDistribution(1.0, 0.0)
+
+        self.assertLess(fitted.alpha, 1.0e-6)
+        self.assertGreaterEqual(
+            sum(fitted.log_density(x) for x in data),
+            sum(default.log_density(x) for x in data),
+        )
+
+    def test_estimator_returns_default_when_unestimated(self):
+        estimator = PitmanYorProcessEstimator(discount=0.25)
+        fitted = estimator.estimate(None, (0.0, {}, {}, {}))
+
+        self.assertEqual(fitted.alpha, 1.0)
+        self.assertEqual(fitted.discount, 0.25)
+
     def test_invalid_parameters_raise(self):
         with self.assertRaises(ValueError):
             PitmanYorProcessDistribution(1.0, 1.0)  # discount must be < 1

@@ -142,6 +142,10 @@ class MixtureVMPTestCase(unittest.TestCase):
         self.assertTrue(np.allclose(r.responsibilities.sum(1), 1.0))
         self.assertTrue(np.allclose(r.weights.sum(), 1.0))
         self.assertAlmostEqual(r.weights.max(), 1 / 3, delta=0.1)
+        self.assertEqual(r.objective_kind, "finite_mixture_elbo")
+        self.assertTrue(np.all(np.diff(r.elbo_trace) >= -1e-6))
+        self.assertEqual(r.responsibility_normalizer_trace.shape, r.elbo_trace.shape)
+        self.assertFalse(np.allclose(r.elbo_trace, r.responsibility_normalizer_trace))
 
 
 if __name__ == "__main__":

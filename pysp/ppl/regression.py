@@ -7,9 +7,13 @@ link:
     Bernoulli(a*Field("x") + b)       logit link     -> logistic regression
     Poisson(a*Field("x") + b)         log link       -> Poisson regression
 
-Coefficients may be Normal priors (Bayesian / ridge — MAP) or ``free`` (MLE). Fitting is
-IRLS (Fisher scoring) with optional Gaussian-prior penalty and a Laplace coefficient
-covariance. Fit with ``.fit(y, given={"x": xs})``.
+Coefficients may be ``free`` or may carry Normal penalty handles.  Fitting is
+IRLS/Fisher scoring for a likelihood or penalized-likelihood point estimate.
+For Normal responses this module uses the ridge/penalized-least-squares
+convention documented in the book and reports a scale-adjusted
+inverse-curvature diagnostic; it is not a full Gaussian-prior posterior
+unless the likelihood and prior precisions are scaled consistently.  Fit with
+``.fit(y, given={"x": xs})``.
 """
 
 from __future__ import annotations
@@ -44,12 +48,12 @@ def _irls_weight(link, mu):
 
 
 class RegressionResult:
-    """Posterior over regression coefficients + residual scale, with prediction."""
+    """Regression point estimate with coefficient curvature diagnostics."""
 
     def __init__(self, names, idx_of, beta, cov, sigma, columns, link="identity"):
         self.names = names  # column names (covariates + 'intercept')
-        self.beta = beta  # posterior mean coefficients
-        self.cov = cov  # posterior covariance
+        self.beta = beta  # fitted coefficients
+        self.cov = cov  # route-specific covariance / inverse-curvature diagnostic
         self.sigma = float(sigma)
         self.link = link
         self._idx_of = idx_of  # id(coef handle) -> column index
@@ -68,6 +72,7 @@ class RegressionResult:
         return self._idx_of[id(param)]
 
     def samples(self, param=None, n: int = 4000, rng=None):
+        """Draw from the Gaussian coefficient approximation represented by ``beta`` and ``cov``."""
         rng = rng or np.random.RandomState()
         if param is None:
             return rng.multivariate_normal(self.beta, self.cov, n)
@@ -77,8 +82,8 @@ class RegressionResult:
     def predict(self, given, *, n=None, rng=None):
         """Predict the response mean at covariates ``given`` (dict of arrays): the fitted
         value through the link (probabilities for logistic, rates for Poisson, mean for
-        linear). With ``n``, returns ``n`` posterior-predictive draws of the linear-response
-        mean (integrating coefficient uncertainty)."""
+        linear). With ``n``, returns ``n`` draws of the fitted mean under the Gaussian
+        coefficient approximation; observation noise is not added."""
         X, offset = _design(self._columns, given)
         eta = offset + X @ self.beta
         if n is None:
