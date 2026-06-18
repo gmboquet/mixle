@@ -87,6 +87,26 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             differentiable=False,
         )
 
+    def to_exponential_family(self, engine: Any = None):
+        """Return the multinomial exponential-family view, or ``None``.
+
+        A multinomial over an exponential-family element is itself an exponential family with the
+        shared element ``eta`` and the count-weighted sufficient statistic ``T(x) = sum_j c_j T_0(v_j)``.
+        This holds only when the trial count is not separately modeled (``len_dist`` is Null) and the
+        density is not length-normalized (those break the single-exp-family form); it also requires the
+        value element to be an exponential family. Otherwise returns ``None``.
+        """
+        from pysp.engines import NUMPY_ENGINE
+        from pysp.stats.exp_family import MultinomialExponentialFamilyForm, to_exponential_family
+
+        if not isinstance(self.len_dist, NullDistribution) or self.len_normalized:
+            return None
+        eng = NUMPY_ENGINE if engine is None else engine
+        element = to_exponential_family(self.dist, engine=eng)
+        if element is None:
+            return None
+        return MultinomialExponentialFamilyForm(distribution=self, element=element, engine=eng)
+
     def __init__(
         self,
         dist: SequenceEncodableProbabilityDistribution,

@@ -23,6 +23,7 @@ from pysp.stats.exp_family import (
 from pysp.stats.leaf.bernoulli import BernoulliDistribution
 from pysp.stats.leaf.beta import BetaDistribution
 from pysp.stats.leaf.binomial import BinomialDistribution
+from pysp.stats.leaf.cat_multinomial import MultinomialDistribution
 from pysp.stats.leaf.exponential import ExponentialDistribution
 from pysp.stats.leaf.gamma import GammaDistribution
 from pysp.stats.leaf.gaussian import GaussianDistribution
@@ -172,6 +173,45 @@ class SequenceExponentialFamilyTest(unittest.TestCase):
     def test_length_modeled_returns_none(self):
         seq = SequenceDistribution(ExponentialDistribution(1.5), len_dist=PoissonDistribution(2.0))
         self.assertIsNone(to_exponential_family(seq))
+
+
+class MultinomialExponentialFamilyTest(unittest.TestCase):
+    def test_multinomial_reconstruction(self):
+        # A multinomial over a Poisson element: log p(x) = sum_j c_j logPoisson(v_j).
+        mn = MultinomialDistribution(PoissonDistribution(3.0))  # len_dist=Null, len_normalized=False
+        form = to_exponential_family(mn)
+        self.assertIsNotNone(form)
+        xs = [[(0, 2.0), (3, 1.0)], [(2, 4.0)], [(1, 1.0), (5, 2.0), (0, 1.0)]]
+
+        eta = form.natural_parameters()
+        t = np.asarray(form.sufficient_statistics(xs), dtype=np.float64)
+        a = float(form.log_partition())
+        h = np.asarray(form.log_base_measure(xs), dtype=np.float64)
+        ns = np.array([sum(c for _, c in obs) for obs in xs], dtype=np.float64)
+        self.assertEqual(t.shape[1], eta.shape[0])
+        self.assertEqual(form.dim, 1)
+
+        # Count-weighted sufficient statistic: T = sum_j c_j * x_j (Poisson T(x) = x).
+        np.testing.assert_allclose(t[:, 0], [3.0, 8.0, 11.0], atol=1e-9)
+        # Joint reconstruction scales A by the total count n: <eta, T> - n*A + h.
+        recon = h + t @ eta - ns * a
+        ref = np.array([mn.log_density(x) for x in xs])
+        np.testing.assert_allclose(recon, ref, atol=1e-9)
+        np.testing.assert_allclose(np.asarray(form.log_density(xs)), ref, atol=1e-9)
+
+    def test_length_modeled_returns_none(self):
+        mn = MultinomialDistribution(PoissonDistribution(3.0), len_dist=PoissonDistribution(2.0))
+        self.assertIsNone(to_exponential_family(mn))
+
+    def test_length_normalized_returns_none(self):
+        mn = MultinomialDistribution(PoissonDistribution(3.0), len_normalized=True)
+        self.assertIsNone(to_exponential_family(mn))
+
+    def test_non_exp_family_child_returns_none(self):
+        from pysp.stats.leaf.laplace import LaplaceDistribution
+
+        mn = MultinomialDistribution(LaplaceDistribution(0.0, 1.0))
+        self.assertIsNone(to_exponential_family(mn))
 
 
 class ConditionalExponentialFamilyTest(unittest.TestCase):
