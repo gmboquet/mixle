@@ -325,6 +325,33 @@ def get_lognormal_estimator(
     )
 
 
+def get_gamma_estimator(
+    vdict: dict[np.floating | float, float],
+    pseudo_count: float | None = None,
+    emp_suff_stat: bool = True,
+    use_bstats: bool = False,
+) -> "ParameterEstimator":
+    """Return a Gamma estimator initialized from the method-of-moments fit of positive values."""
+    k = 1.0
+    theta = 1.0
+    if emp_suff_stat:
+        ss_0 = 0.0
+        ss_1 = 0.0
+        ss_2 = 0.0
+        for key, v in vdict.items():
+            if math.isfinite(key) and key > 0.0:
+                ss_0 += v
+                ss_1 += key * v
+                ss_2 += key * key * v
+        if ss_0 > 0.0:
+            mean = ss_1 / ss_0
+            var = (ss_2 / ss_0) - mean * mean
+            if mean > 0.0 and var > 0.0:
+                theta = var / mean
+                k = mean / theta
+    return _estimator_provider(False).GammaEstimator(suff_stat=(k, theta))
+
+
 def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> "ParameterEstimator":
     if use_bstats:
         return _estimator_provider(True).MultivariateGaussianEstimator(dim=dim, prior=_mvn_default_prior(dim))

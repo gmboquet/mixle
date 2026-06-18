@@ -34,6 +34,7 @@ from .factories import (
     get_categorical_estimator,
     get_composite_estimator,
     get_dict_record_estimator,
+    get_gamma_estimator,
     get_gaussian_estimator,
     get_ignored_estimator,
     get_integer_categorical_estimator,
@@ -368,8 +369,57 @@ def _lognormal_bic_bits(values: Sequence[float], nobs: int) -> float | None:
     return bits + _bic_penalty_bits(2, nobs)
 
 
+def _gamma_moments(arr: np.ndarray) -> tuple[float, float] | None:
+    """Return the method-of-moments ``(shape k, scale theta)`` for positive data, or None."""
+    if arr.size == 0 or not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
+        return None
+    mean = float(arr.mean())
+    var = float(arr.var())
+    if mean <= 0.0 or var <= 0.0:
+        return None
+    theta = var / mean
+    return mean / theta, theta
+
+
+def _gamma_nll_bits(arr: np.ndarray, k: float, theta: float) -> float:
+    """Per-observation Gamma code length (bits) of data ``arr`` under ``Gamma(k, theta)``."""
+    logs = np.log(arr)
+    nats = -((k - 1.0) * float(logs.mean()) - float(arr.mean()) / theta - math.lgamma(k) - k * math.log(theta))
+    return nats / math.log(2.0)
+
+
+def _gamma_bic_bits(values: Sequence[float], nobs: int) -> float | None:
+    arr = np.asarray(values, dtype=float)
+    moments = _gamma_moments(arr)
+    if moments is None:
+        return None
+    k, theta = moments
+    return _gamma_nll_bits(arr, k, theta) + _bic_penalty_bits(2, nobs)
+
+
 def _clean_scores(scores: dict[str, float | None]) -> dict[str, float]:
     return {k: float(v) for k, v in scores.items() if v is not None and math.isfinite(float(v))}
+
+
+_NUMERIC_MODEL_MARGIN_BITS = 0.02
+
+
+def _numeric_model_recommendation(scores: dict[str, float], margin: float = _NUMERIC_MODEL_MARGIN_BITS) -> str:
+    """Pick the numeric model, defaulting to Gaussian unless an alternative beats it by ``margin``.
+
+    Gamma/log-normal converge to the Gaussian for near-symmetric data, so a bare argmin would flip
+    the default on a numerical tie. Only switch when the best alternative's code length is lower by
+    at least ``margin`` bits/obs; otherwise keep the Gaussian.
+    """
+    if not scores:
+        return "gaussian"
+    if "gaussian" not in scores:
+        return min(scores, key=lambda k: (scores[k], k))
+    alternatives = {k: v for k, v in scores.items() if k != "gaussian"}
+    if not alternatives:
+        return "gaussian"
+    best = min(alternatives, key=lambda k: (alternatives[k], k))
+    return best if alternatives[best] < scores["gaussian"] - margin else "gaussian"
 
 
 def _score_gap_bits(scores: dict[str, float], recommendation: str) -> float | None:
@@ -533,6 +583,24 @@ def _validation_lognormal_bits(train: Sequence[float], validation: Sequence[floa
     return -ll / (float(len(validation)) * math.log(2.0))
 
 
+def _validation_gamma_bits(train: Sequence[float], validation: Sequence[float]) -> float | None:
+    """Held-out predictive code length (bits/obs) of a Gamma fit; positive data only."""
+    if not train or not validation:
+        return None
+    moments = _gamma_moments(np.asarray(train, dtype=float))
+    if moments is None:
+        return None
+    k, theta = moments
+    const = math.lgamma(k) + k * math.log(theta)
+    ll = 0.0
+    for value in validation:
+        xx = float(value)
+        if not math.isfinite(xx) or xx <= 0.0:
+            return None
+        ll += (k - 1.0) * math.log(xx) - xx / theta - const
+    return -ll / (float(len(validation)) * math.log(2.0))
+
+
 def _validation_integer_gaussian_bits(train: Sequence[int], validation: Sequence[int]) -> float | None:
     if not train or not validation:
         return None
@@ -596,6 +664,8 @@ def _validate_marginal_profile(
         scores["gaussian"] = _validation_gaussian_bits(train_f, val_f)
         if "lognormal" in profile.model_scores_bits:
             scores["lognormal"] = _validation_lognormal_bits(train_f, val_f)
+        if "gamma" in profile.model_scores_bits:
+            scores["gamma"] = _validation_gamma_bits(train_f, val_f)
 
     clean = _clean_scores(scores)
     if not clean:
@@ -823,12 +893,20 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
         mean = float(arr.mean())
         var = float(arr.var())
         candidate_bits: dict[str, float | None] = {"gaussian": _gaussian_bic_bits(var, observed_count)}
-        # Support-typed candidate: strictly-positive data may be better explained by a log-normal.
+        # Support-typed candidates: strictly-positive data may be better explained by a log-normal
+        # (interior mode, heavy right tail) or a gamma (e.g. exponential-like, monotone decreasing).
         if np.all(arr > 0.0):
             candidate_bits["lognormal"] = _lognormal_bic_bits(arr, observed_count)
+            candidate_bits["gamma"] = _gamma_bic_bits(arr, observed_count)
         model_scores = _clean_scores(candidate_bits)
-        recommendation = min(model_scores, key=lambda k: (model_scores[k], k)) if model_scores else "gaussian"
-        bits_per_obs = _lognormal_bits(arr) if recommendation == "lognormal" else _gaussian_bits(var)
+        recommendation = _numeric_model_recommendation(model_scores)
+        if recommendation == "lognormal":
+            bits_per_obs = _lognormal_bits(arr)
+        elif recommendation == "gamma":
+            moments = _gamma_moments(arr)
+            bits_per_obs = None if moments is None else _gamma_nll_bits(arr, *moments)
+        else:
+            bits_per_obs = _gaussian_bits(var)
         return MarginalFieldProfile(
             path,
             role,
@@ -1364,10 +1442,15 @@ class DatumNode:
             return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
         if self.float_count > 0:
-            # Support-typed selection: for strictly-positive data prefer a log-normal when it gives
-            # a smaller BIC code length than the Gaussian; otherwise keep the Gaussian default.
+            # Support-typed selection: for strictly-positive data pick the smallest-BIC code length
+            # among Gaussian / log-normal / gamma; signed data keeps the Gaussian default.
             keys = [float(k) for k in self.vdict if math.isfinite(k)]
             nobs = int(round(sum(self.vdict.values())))
+            builders = {
+                "gaussian": get_gaussian_estimator,
+                "lognormal": get_lognormal_estimator,
+                "gamma": get_gamma_estimator,
+            }
             if keys and all(k > 0.0 for k in keys):
                 weights = [float(self.vdict[k]) for k in self.vdict if math.isfinite(k)]
                 total = sum(weights) or 1.0
@@ -1376,15 +1459,22 @@ class DatumNode:
                 logs = [math.log(k) for k in keys]
                 lmean = sum(lk * w for lk, w in zip(logs, weights)) / total
                 lvar = max(sum(w * (lk - lmean) ** 2 for lk, w in zip(logs, weights)) / total, 0.0)
-                gaussian_bic = _gaussian_bic_bits(gvar, nobs)
-                lognormal_bits = _gaussian_bits(lvar)
-                lognormal_bic = (
-                    None
-                    if lognormal_bits is None
-                    else lmean / math.log(2.0) + lognormal_bits + _bic_penalty_bits(2, nobs)
-                )
-                if lognormal_bic is not None and (gaussian_bic is None or lognormal_bic < gaussian_bic):
-                    return get_lognormal_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+                penalty = _bic_penalty_bits(2, nobs)
+                bics: dict[str, float] = {}
+                if (gb := _gaussian_bits(gvar)) is not None:
+                    bics["gaussian"] = gb + penalty
+                if (lb := _gaussian_bits(lvar)) is not None:
+                    bics["lognormal"] = lmean / math.log(2.0) + lb + penalty
+                if gmean > 0.0 and gvar > 0.0:
+                    theta = gvar / gmean
+                    k_shape = gmean / theta
+                    gamma_nats = -(
+                        (k_shape - 1.0) * lmean - gmean / theta - math.lgamma(k_shape) - k_shape * math.log(theta)
+                    )
+                    bics["gamma"] = gamma_nats / math.log(2.0) + penalty
+                if bics:
+                    best = _numeric_model_recommendation(bics)
+                    return builders[best](self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
             return get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
         if self.int_count > 0:
