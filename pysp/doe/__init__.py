@@ -54,6 +54,7 @@ from pysp.doe.optimal import (
     polynomial_features,
     register_criterion,
 )
+from pysp.doe.optimizer import BayesianOptimizer
 
 __all__ = [
     "Bounds",
@@ -86,4 +87,5 @@ __all__ = [
     "MultiObjectiveResult",
     "pareto_mask",
     "multi_minimize",
+    "BayesianOptimizer",
 ]
