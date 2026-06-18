@@ -467,10 +467,51 @@ def _locscale_fit(rv, data, given, *, max_iter=200, tol=1e-8):
     return RandomVariable._bound(None, name=rv._name, result=result)
 
 
+def _quantile_fit(rv: RandomVariable, data, given, tau: float) -> RandomVariable:
+    """Fit the conditional ``tau``-quantile by minimizing the pinball (check) loss.
+
+    Distribution-free: no Gaussian assumption is used. The check-loss minimization is the
+    exact linear program ``min tau*sum(u) + (1-tau)*sum(v)`` subject to
+    ``X beta + u - v = y - offset``, ``u, v >= 0``, solved with HiGHS. The returned
+    :class:`RegressionResult` predicts the fitted quantile through the identity link;
+    coefficient standard errors for quantile regression need a bootstrap, so ``cov`` is
+    left at zero rather than reporting a misleading OLS curvature.
+    """
+    if not 0.0 < tau < 1.0:
+        raise ValueError(f"quantile must be in (0, 1); got {tau}.")
+    if rv._family.name != "Normal":
+        raise NotImplementedError("quantile regression requires a Normal (continuous) response.")
+    from scipy import sparse
+    from scipy.optimize import linprog
+
+    linpred = next(a for a in rv._args if isinstance(a, _LinearPredictor))
+    columns = _columns_of(linpred)
+    est, _fixed = columns
+    X, offset = _design(columns, given)
+    y = np.asarray(data, dtype=float).reshape(-1)
+    n, p = X.shape
+    c = np.concatenate([np.zeros(p), tau * np.ones(n), (1.0 - tau) * np.ones(n)])
+    a_eq = sparse.hstack([sparse.csr_matrix(X), sparse.eye(n), -sparse.eye(n)], format="csr")
+    bounds = [(None, None)] * p + [(0.0, None)] * (2 * n)
+    res = linprog(c, A_eq=a_eq, b_eq=y - offset, bounds=bounds, method="highs")
+    if not res.success:
+        raise RuntimeError(f"quantile regression LP did not converge: {res.message}")
+    beta = np.asarray(res.x[:p], dtype=float)
+    names, idx_of = [], {}
+    for i, (coef, field) in enumerate(est):
+        names.append(field.name if field is not None else "intercept")
+        idx_of[id(coef)] = i
+    result = RegressionResult(names, idx_of, beta, np.zeros((p, p)), float("nan"), columns, link="identity")
+    result.quantile = float(tau)
+    return RandomVariable._bound(None, name=rv._name, result=result)
+
+
 def regression_fit(
-    rv: RandomVariable, data, *, given=None, max_iter: int = 100, tol: float = 1e-9, **_
+    rv: RandomVariable, data, *, given=None, max_iter: int = 100, tol: float = 1e-9, quantile=None, **_
 ) -> RandomVariable:
     linpred0 = next((a for a in rv._args if isinstance(a, _LinearPredictor)), None)
+    if quantile is not None:  # pinball-loss quantile regression (same linear-predictor syntax)
+        return _quantile_fit(rv, data, given or {}, float(quantile))
     if linpred0 is not None and linpred0.groups:  # mixed-effects model
         if rv._family.name != "Normal":
             raise NotImplementedError("mixed-effects models require a Normal response.")
