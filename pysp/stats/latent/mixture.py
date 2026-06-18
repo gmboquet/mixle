@@ -847,9 +847,11 @@ class MixtureSampler(DistributionSampler):
                 drawn = self.comp_samplers[c].sample(size=count)
                 draws_by_comp[c] = drawn
                 all_array = all_array and isinstance(drawn, np.ndarray)
-        if all_array:
-            dtype = next(iter(draws_by_comp.values())).dtype if draws_by_comp else float
-            out_arr = np.empty(size, dtype=dtype)
+        if all_array and draws_by_comp:
+            sample = next(iter(draws_by_comp.values()))
+            # carry any trailing sample shape (e.g. D-vectors from multivariate
+            # leaves) so the scatter is not restricted to scalar draws
+            out_arr = np.empty((size,) + sample.shape[1:], dtype=sample.dtype)
             for c, drawn in draws_by_comp.items():
                 out_arr[comp_state == c] = drawn
             return list(out_arr)
