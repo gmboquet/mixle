@@ -71,7 +71,12 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_declaration(cls):
-        from pysp.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+        from pysp.stats.compute.declarations import (
+            DistributionDeclaration,
+            ExponentialFamilySpec,
+            ParameterSpec,
+            StatisticSpec,
+        )
 
         return DistributionDeclaration(
             name="integer_categorical",
@@ -85,7 +90,60 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 StatisticSpec("count_vec", kind="count_vector"),
             ),
             support="bounded_integer",
+            exponential_family=ExponentialFamilySpec(
+                sufficient_statistics=cls.exp_family_sufficient_statistics,
+                sufficient_statistics_from_params=cls.exp_family_sufficient_statistics_from_params,
+                natural_parameters=cls.exp_family_natural_parameters,
+                log_partition=cls.exp_family_log_partition,
+                base_measure_from_params=cls.exp_family_base_measure_from_params,
+                # T(x) is the one-hot category indicator and eta = log(p_vec); A = 0, h(x) = 1 on
+                # the support [min_val, min_val+K). The base mask depends on the per-component
+                # min_val/K, so fixed_base=False. eta has -inf entries when any p_i = 0, which makes
+                # the generic <eta, T> dot form NaN via 0*-inf for OTHER categories; runtime_scoring
+                # is therefore False so scoring keeps the safe indexing backend path while
+                # to_exponential_family still exposes the canonical map (valid where p > 0).
+                fixed_base=False,
+                runtime_scoring=False,
+            ),
         )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
+        """Placeholder; the real one-hot needs K, so ``sufficient_statistics_from_params`` is used."""
+        return (engine.asarray(x),)
+
+    @staticmethod
+    def exp_family_sufficient_statistics_from_params(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the one-hot category indicator ``T(x)`` of shape ``(n, K)`` (zeros off support)."""
+        vals = np.asarray(engine.to_numpy(engine.asarray(x))).reshape(-1)
+        min_val = int(params["min_val"])
+        k = int(np.asarray(engine.to_numpy(engine.asarray(params["p_vec"]))).reshape(-1).shape[0])
+        idx = np.rint(vals - min_val).astype(np.int64)
+        in_support = (idx >= 0) & (idx < k)
+        onehot = np.zeros((vals.shape[0], k), dtype=np.float64)
+        rows = np.nonzero(in_support)[0]
+        onehot[rows, idx[in_support]] = 1.0
+        return (engine.asarray(onehot),)
+
+    @staticmethod
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the natural parameter ``eta = log(p_vec)`` (one entry per category)."""
+        return (engine.log(engine.asarray(params["p_vec"])),)
+
+    @staticmethod
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
+        """Return the log partition ``A = 0`` (normalization is carried by ``eta = log p``)."""
+        return engine.asarray(0.0)
+
+    @staticmethod
+    def exp_family_base_measure_from_params(x: Any, params: dict[str, Any], engine: Any) -> Any:
+        """Return ``log h(x) = 0`` on the support ``[min_val, min_val+K)`` and ``-inf`` outside it."""
+        vals = engine.asarray(x)
+        min_val = engine.asarray(params["min_val"])
+        k = int(np.asarray(engine.to_numpy(engine.asarray(params["p_vec"]))).reshape(-1).shape[0])
+        v = vals - min_val
+        good = (v >= 0) & (v < k)
+        return engine.where(good, engine.asarray(0.0), engine.asarray(-np.inf))
 
     def __init__(
         self,
