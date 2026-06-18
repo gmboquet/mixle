@@ -235,6 +235,9 @@ def _stats_public_distribution_catalog():
         "SkellamDistribution": stats.SkellamDistribution(2.0, 1.0),
         "StudentTDistribution": stats.StudentTDistribution(5.0, loc=1.0, scale=2.0),
         "TweedieDistribution": stats.TweedieDistribution(2.0, 1.0, 1.5),
+        "BirthDeathSamplingDistribution": stats.BirthDeathSamplingDistribution(
+            0.6, 0.3, 0.2, initial_population=2, horizon=5.0
+        ),
         "InhomogeneousPoissonProcessDistribution": stats.InhomogeneousPoissonProcessDistribution(
             [1.0, 3.0, 0.5], t_max=3.0
         ),
