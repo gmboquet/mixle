@@ -66,6 +66,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
     def compute_declaration(self):
         from pysp.stats.compute.declarations import (
             DistributionDeclaration,
+            ExponentialFamilySpec,
             ParameterSpec,
             StatisticSpec,
             declaration_for,
@@ -73,6 +74,25 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
         children = () if length is None else (length,)
+        # The canonical exp-family map is the multinomial factor alone; only expose it when there is
+        # no separate length (trials) distribution, so it matches seq_log_density exactly.
+        exp_family = None
+        if length is None:
+            exp_family = ExponentialFamilySpec(
+                sufficient_statistics=type(self).exp_family_sufficient_statistics,
+                sufficient_statistics_from_params=type(self).exp_family_sufficient_statistics_from_params,
+                natural_parameters=type(self).exp_family_natural_parameters,
+                log_partition=type(self).exp_family_log_partition,
+                base_measure_from_params=type(self).exp_family_base_measure_from_params,
+                # T(x) is the per-category count vector and eta = log(p_vec); A = 0 and h(x) = 0 on
+                # the support [min_val, min_val+K) (this density omits the multinomial coefficient).
+                # The category set depends on min_val/K so fixed_base=False; eta has -inf entries when
+                # a category has p = 0, which makes the generic <eta, T> dot form NaN via 0*-inf for
+                # zero-count categories, so runtime_scoring=False keeps scoring on the safe indexing
+                # path while to_exponential_family still exposes the canonical map (valid where p > 0).
+                fixed_base=False,
+                runtime_scoring=False,
+            )
         return DistributionDeclaration(
             name="integer_multinomial",
             distribution_type=type(self),
@@ -88,8 +108,54 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
             support="bounded_integer_count_vector",
             children=children,
             child_roles=("length",) if length is not None else (),
+            exponential_family=exp_family,
             differentiable=False,
         )
+
+    @staticmethod
+    def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
+        """Placeholder; the per-category count vector needs K, so ``..._from_params`` is used."""
+        return (engine.asarray(np.zeros(int(x[0]), dtype=np.float64)),)
+
+    @staticmethod
+    def exp_family_sufficient_statistics_from_params(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the per-category count vector ``T(x)`` of shape ``(sz, K)`` (counts of in-support values)."""
+        sz, idx, cnt, val, _tcnt = x
+        min_val = int(params["min_val"])
+        k = int(np.asarray(engine.to_numpy(engine.asarray(params["p_vec"]))).reshape(-1).shape[0])
+        stat = np.zeros((int(sz), k), dtype=np.float64)
+        val = np.asarray(val)
+        if val.shape[0] > 0:
+            v = np.rint(val - min_val).astype(np.int64)
+            keep = (v >= 0) & (v < k)
+            rows = np.asarray(idx)[keep].astype(np.int64)
+            np.add.at(stat, (rows, v[keep]), np.asarray(cnt, dtype=np.float64)[keep])
+        return (engine.asarray(stat),)
+
+    @staticmethod
+    def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Return the natural parameter ``eta = log(p_vec)`` (one entry per category)."""
+        return (engine.log(engine.asarray(params["p_vec"])),)
+
+    @staticmethod
+    def exp_family_log_partition(params: dict[str, Any], engine: Any) -> Any:
+        """Return the log partition ``A = 0`` (normalization is carried by ``eta = log p``)."""
+        return engine.asarray(0.0)
+
+    @staticmethod
+    def exp_family_base_measure_from_params(x: Any, params: dict[str, Any], engine: Any) -> Any:
+        """Return ``log h = 0`` for observations whose values are all in support, ``-inf`` otherwise."""
+        sz, idx, _cnt, val, _tcnt = x
+        min_val = int(params["min_val"])
+        k = int(np.asarray(engine.to_numpy(engine.asarray(params["p_vec"]))).reshape(-1).shape[0])
+        h = np.zeros(int(sz), dtype=np.float64)
+        val = np.asarray(val)
+        if val.shape[0] > 0:
+            v = np.rint(val - min_val).astype(np.int64)
+            out = (v < 0) | (v >= k)
+            if np.any(out):
+                h[np.unique(np.asarray(idx)[out].astype(np.int64))] = -np.inf
+        return engine.asarray(h)
 
     def __init__(
         self,
