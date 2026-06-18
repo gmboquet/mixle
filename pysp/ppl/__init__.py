@@ -51,6 +51,7 @@ from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimat
 from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator, HiddenMarkovModelDistribution
 from pysp.stats.latent.lda import LDADistribution, LDAEstimator
 from pysp.stats.latent.mixture import MixtureDistribution, MixtureEstimator
+from pysp.stats.latent.ss_mixture import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureEstimator
 from pysp.stats.leaf.bernoulli import BernoulliDistribution, BernoulliEstimator
 from pysp.stats.leaf.beta import BetaDistribution, BetaEstimator
 from pysp.stats.leaf.binomial import BinomialDistribution, BinomialEstimator
@@ -103,6 +104,7 @@ __all__ = [
     "NegativeBinomial",
     "Dirichlet",
     "Mix",
+    "SemiMix",
     "Seq",
     "Markov",
     "LDA",
@@ -389,6 +391,30 @@ def _mix_read(d, read_params):
 
 
 register_composite("Mixture", _mix_dist, _mix_est, seed_fn=_mix_seed, dist_cls=MixtureDistribution, read=_mix_read)
+
+
+# --- SemiMix: semi-supervised mixture (observations are (value, prior) pairs) ------
+def _semimix_dist(args, lower_child):
+    comps, weights = args
+    children = [lower_child(c) for c in comps]
+    k = len(children)
+    w = np.ones(k) / k if weights is None else np.asarray(weights, float)
+    return SemiSupervisedMixtureDistribution(children, w=w)
+
+
+def _semimix_est(args, lower_child_est, name, keys):
+    comps, _weights = args
+    estimators = [lower_child_est(c) for c in comps]
+    return SemiSupervisedMixtureEstimator(estimators, name=name)
+
+
+def _semimix_read(d, read_params):
+    return {"components": [read_params(c) for c in d.components], "weights": np.asarray(d.w)}
+
+
+register_composite(
+    "SemiMix", _semimix_dist, _semimix_est, dist_cls=SemiSupervisedMixtureDistribution, read=_semimix_read
+)
 
 
 # --- Sequence: iid elements (+ optional length model) -----------------------------
@@ -690,6 +716,19 @@ def Mix(components, weights=None, *, name: str | None = None) -> RandomVariable:
     """
     comps = tuple(_as_rv(c) for c in components)
     return RandomVariable._sample("Mixture", (comps, weights), name=name)
+
+
+def SemiMix(components, weights=None, *, name: str | None = None) -> RandomVariable:
+    """Semi-supervised finite mixture over component RandomVariables (or concrete distributions).
+
+    Like :func:`Mix`, but each observation is a ``(value, prior)`` pair where ``prior`` is either
+    ``None`` (unlabeled) or a sequence of ``(component_index, probability)`` pairs giving a partial
+    label. Labeled rows restrict/re-weight the responsibilities to the listed components, so a few
+    labels can anchor the components. ``SemiMix([Normal(free, free), Normal(free, free)]).fit(data)``
+    fits a 2-component Gaussian mixture from a mix of labeled and unlabeled rows.
+    """
+    comps = tuple(_as_rv(c) for c in components)
+    return RandomVariable._sample("SemiMix", (comps, weights), name=name)
 
 
 def Seq(element, *, name: str | None = None) -> RandomVariable:
