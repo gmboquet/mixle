@@ -135,8 +135,16 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
         return float(np.sum(g - rcl))
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Return vectorized log-probabilities for an (N, K) array of orderings."""
-        g = self.log_w[x]
+        """Return vectorized log-probabilities for encoded orderings.
+
+        A dense ``(N, K)`` integer array (the full-ranking encoding) is scored by the vectorized
+        path; a ragged sequence of variable-length orderings (the partial / top-m encoding) is scored
+        per-ranking via :meth:`log_density`, which includes the unranked-item denominator term.
+        """
+        arr = x if isinstance(x, np.ndarray) else np.asarray(x, dtype=object)
+        if arr.dtype == object or arr.ndim != 2:
+            return np.array([self.log_density(row) for row in x], dtype=float)
+        g = self.log_w[arr]
         rcl = _reverse_logcumsumexp(g)
         return np.sum(g - rcl, axis=1)
 
@@ -319,3 +327,156 @@ class PlackettLuceDataEncoder(DataSequenceEncoder):
             if not np.array_equal(np.sort(row), expected):
                 raise ValueError("PlackettLuceDistribution orderings must be permutations of 0,...,K-1.")
         return rv
+
+
+class PlackettLucePartialDataEncoder(DataSequenceEncoder):
+    """Encode partial / top-m orderings (variable length) over a fixed item count ``dim``.
+
+    Each datum is an ordered list of ``m <= dim`` distinct item indices (best first); the remaining
+    items are left unranked. Encoded as a ragged list of 1-D int arrays.
+    """
+
+    def __init__(self, dim: int) -> None:
+        self.dim = int(dim)
+
+    def __str__(self) -> str:
+        return "PlackettLucePartialDataEncoder(dim=%r)" % self.dim
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, PlackettLucePartialDataEncoder) and other.dim == self.dim
+
+    def seq_encode(self, x: Sequence[Sequence[int]]) -> list[np.ndarray]:
+        rows = []
+        for row in x:
+            r = np.asarray(list(row), dtype=int)
+            if (
+                r.ndim != 1
+                or r.size > self.dim
+                or (r.size and (r.min() < 0 or r.max() >= self.dim or len(set(r.tolist())) != r.size))
+            ):
+                raise ValueError("partial ordering must be distinct item indices in 0,...,dim-1.")
+            rows.append(r)
+        return rows
+
+
+class PlackettLucePartialAccumulator(SequenceEncodableStatisticAccumulator):
+    """Generalized Hunter (2004) MM statistics for partial / top-m Plackett-Luce rankings.
+
+    For each ranking, at every non-forced stage ``s`` (at least two items still available) the chosen
+    item accrues a numerator count and **all currently-available items** (the unranked tail included)
+    accrue ``weight / sum_{available} w`` to the denominator, evaluated at the previous estimate's
+    worths (uniform when none). On full rankings this reduces exactly to the vectorized full-ranking
+    accumulator.
+    """
+
+    def __init__(self, dim: int, keys: str | None = None) -> None:
+        self.dim = int(dim)
+        self.num = np.zeros(self.dim)
+        self.den = np.zeros(self.dim)
+        self.count = 0.0
+        self.key = keys
+
+    def update(self, x: Sequence[int], weight: float, estimate: PlackettLuceDistribution | None) -> None:
+        self.seq_update([np.asarray(list(x), dtype=int)], np.asarray([weight], dtype=float), estimate)
+
+    def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
+        self.update(x, weight, None)
+
+    def seq_update(
+        self, x: Sequence[np.ndarray], weights: np.ndarray, estimate: PlackettLuceDistribution | None
+    ) -> None:
+        k = self.dim
+        worths = np.ones(k) if estimate is None else np.exp(estimate.log_w)
+        for r, wgt in zip(x, np.asarray(weights, dtype=float)):
+            r = np.asarray(r, dtype=int)
+            avail = np.ones(k, dtype=bool)
+            sum_avail = float(worths.sum())
+            for s in range(r.size):
+                if (k - s) >= 2:  # a genuine choice (the final forced pick of a full ranking is skipped)
+                    self.den[avail] += wgt / sum_avail
+                    self.num[r[s]] += wgt
+                sum_avail -= worths[r[s]]
+                avail[r[s]] = False
+            self.count += float(wgt)
+
+    def seq_initialize(self, x: Sequence[np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        self.seq_update(x, weights, None)
+
+    def combine(self, suff_stat: tuple[float, np.ndarray, np.ndarray]) -> "PlackettLucePartialAccumulator":
+        count, num, den = suff_stat
+        self.count += count
+        self.num += num
+        self.den += den
+        return self
+
+    def value(self) -> tuple[float, np.ndarray, np.ndarray]:
+        return self.count, self.num, self.den
+
+    def from_value(self, x: tuple[float, np.ndarray, np.ndarray]) -> "PlackettLucePartialAccumulator":
+        self.count, self.num, self.den = x[0], np.asarray(x[1]), np.asarray(x[2])
+        self.dim = len(self.num)
+        return self
+
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        if self.key is not None:
+            if self.key in stats_dict:
+                stats_dict[self.key].combine(self.value())
+            else:
+                stats_dict[self.key] = self
+
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        if self.key is not None and self.key in stats_dict:
+            self.from_value(stats_dict[self.key].value())
+
+    def acc_to_encoder(self) -> "PlackettLucePartialDataEncoder":
+        return PlackettLucePartialDataEncoder(dim=self.dim)
+
+
+class PlackettLucePartialAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for PlackettLucePartialAccumulator."""
+
+    def __init__(self, dim: int, keys: str | None = None) -> None:
+        self.dim = int(dim)
+        self.keys = keys
+
+    def make(self) -> PlackettLucePartialAccumulator:
+        return PlackettLucePartialAccumulator(dim=self.dim, keys=self.keys)
+
+
+class PlackettLucePartialEstimator(ParameterEstimator):
+    """MM estimator of Plackett-Luce log-worths from partial / top-m rankings (item count K fixed)."""
+
+    def __init__(
+        self,
+        dim: int,
+        pseudo_count: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        if dim is None or dim < 2:
+            raise ValueError("PlackettLucePartialEstimator requires the number of items dim >= 2.")
+        self.dim = int(dim)
+        self.pseudo_count = pseudo_count
+        self.name = name
+        self.keys = keys
+
+    def accumulator_factory(self) -> PlackettLucePartialAccumulatorFactory:
+        return PlackettLucePartialAccumulatorFactory(dim=self.dim, keys=self.keys)
+
+    def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray, np.ndarray]) -> PlackettLuceDistribution:
+        count, num, den = suff_stat
+        if count <= 0.0:
+            return PlackettLuceDistribution(np.zeros(self.dim), name=self.name, keys=self.keys)
+        num = np.asarray(num, dtype=float)
+        den = np.asarray(den, dtype=float)
+        if self.pseudo_count is not None:
+            num = num + self.pseudo_count
+            den = den + self.pseudo_count * self.dim
+        worths = np.where(den > 0.0, num / np.maximum(den, np.finfo(float).tiny), 0.0)
+        total = float(np.sum(worths))
+        if total <= 0.0 or not np.isfinite(total):
+            return PlackettLuceDistribution(np.zeros(self.dim), name=self.name, keys=self.keys)
+        with np.errstate(divide="ignore"):
+            log_w = np.log(worths) - np.log(total)
+        log_w = np.maximum(log_w, _LOG_WORTH_FLOOR)
+        return PlackettLuceDistribution(log_w, name=self.name, keys=self.keys)
