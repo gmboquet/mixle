@@ -424,6 +424,7 @@ def nuts(
     rng: np.random.RandomState | None = None,
     *,
     value_and_grad: Callable[[Any], tuple[float, Any]] | None = None,
+    adapt_mass: bool = False,
 ) -> MCMCResult:
     """No-U-Turn Sampler (Hoffman & Gelman 2014, efficient NUTS with dual-averaging step size).
 
@@ -508,6 +509,15 @@ def nuts(
     depths: list[int] = []
     total = warmup + num_samples * thin
 
+    # Optional diagonal mass-matrix adaptation: accumulate the position variance over the first half
+    # of warmup (Welford), then set the inverse mass to that variance (rescaling momentum to the
+    # posterior's per-coordinate scale) and restart step-size dual-averaging for the new metric.
+    da_offset = 0
+    adapt_at = (warmup // 2) if (adapt_mass and warmup >= 20) else -1
+    mass_count = 0
+    mass_mean = np.zeros(shape, dtype=float)
+    mass_m2 = np.zeros(shape, dtype=float)
+
     # Tree nodes carry (theta, r, grad) at both endpoints so doubling re-extends a leaf
     # from its cached gradient instead of recomputing it.
     def build_tree(theta, r, grad, logu, v, j, eps, joint0):
@@ -560,9 +570,25 @@ def nuts(
         # so the new chain state reuses the cached gradient — never a fresh evaluation per iteration.
         cur, cur_lp, cur_grad = theta_new, lp_new, grad_new
 
+        # Accumulate position variance over the first warmup window for mass adaptation.
+        if 0 <= adapt_at and it < adapt_at:
+            mass_count += 1
+            delta = cur - mass_mean
+            mass_mean = mass_mean + delta / mass_count
+            mass_m2 = mass_m2 + delta * (cur - mass_mean)
+        elif it == adapt_at and mass_count > 1:
+            var = mass_m2 / (mass_count - 1)
+            minv = np.maximum(var, 1.0e-8)  # inverse mass = posterior variance estimate
+            mass_arr = 1.0 / minv
+            sqrt_m = np.sqrt(mass_arr)
+            eps = _find_reasonable_eps(cur, cur_lp, cur_grad, leapfrog, kinetic, sqrt_m, shape, rng)
+            mu = math.log(10.0 * eps)
+            h_bar, log_eps_bar = 0.0, 0.0  # restart dual-averaging for the new metric
+            da_offset = it  # the new dual-averaging clock starts at m1 = 1 this iteration
+
         accept_stat = alpha / max(n_alpha, 1)
         if it < warmup:  # dual-averaging adaptation of the step size
-            m1 = it + 1
+            m1 = it - da_offset + 1
             h_bar = (1.0 - 1.0 / (m1 + t0)) * h_bar + (target_accept - accept_stat) / (m1 + t0)
             log_eps = mu - math.sqrt(m1) / gamma * h_bar
             eta = m1 ** (-kappa)
@@ -585,6 +611,7 @@ def nuts(
     object.__setattr__(res, "tree_depth", np.asarray(depths, dtype=int))  # frozen dataclass
     object.__setattr__(res, "step_size", float(eps))
     object.__setattr__(res, "num_target_evals", int(eval_count[0]))
+    object.__setattr__(res, "inverse_mass", np.asarray(minv, dtype=float))  # adapted (or fixed) diagonal
     return res
 
 
