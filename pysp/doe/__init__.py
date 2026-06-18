@@ -28,17 +28,30 @@ from pysp.doe.bayesopt import (
 from pysp.doe.designs import (
     Bounds,
     full_factorial,
+    halton_design,
     latin_hypercube,
     maximin_latin_hypercube,
     random_design,
+    sobol_design,
+)
+from pysp.doe.optimal import (
+    a_criterion,
+    available_criteria,
+    d_criterion,
+    i_criterion,
+    optimal_design,
+    polynomial_features,
+    register_criterion,
 )
 
 __all__ = [
     "Bounds",
     "full_factorial",
+    "halton_design",
     "latin_hypercube",
     "maximin_latin_hypercube",
     "random_design",
+    "sobol_design",
     "BayesOptResult",
     "expected_improvement",
     "probability_of_improvement",
@@ -48,4 +61,11 @@ __all__ = [
     "minimize",
     "propose_next",
     "propose_batch",
+    "optimal_design",
+    "polynomial_features",
+    "d_criterion",
+    "a_criterion",
+    "i_criterion",
+    "register_criterion",
+    "available_criteria",
 ]

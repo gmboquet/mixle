@@ -3,8 +3,16 @@
 import unittest
 
 import numpy as np
+from scipy.stats import qmc
 
-from pysp.doe import full_factorial, latin_hypercube, maximin_latin_hypercube, random_design
+from pysp.doe import (
+    full_factorial,
+    halton_design,
+    latin_hypercube,
+    maximin_latin_hypercube,
+    random_design,
+    sobol_design,
+)
 
 
 def _within_bounds(x, bounds):
@@ -88,6 +96,38 @@ class DoeDesignsTest(unittest.TestCase):
             full_factorial(self.bounds, levels=[2, 2])  # wrong length
         with self.assertRaises(ValueError):
             random_design([], 5)  # no dimensions
+
+
+class QuasiRandomDesignsTest(unittest.TestCase):
+    bounds = [(0.0, 1.0), (-2.0, 2.0), (10.0, 20.0)]
+
+    def test_sobol_shape_bounds_and_reproducibility(self):
+        x = sobol_design(self.bounds, 16, seed=0)
+        self.assertEqual(x.shape, (16, 3))
+        self.assertTrue(_within_bounds(x, self.bounds))
+        np.testing.assert_array_equal(x, sobol_design(self.bounds, 16, seed=0))
+        self.assertFalse(np.array_equal(x, sobol_design(self.bounds, 16, seed=1)))
+
+    def test_halton_shape_bounds_and_reproducibility(self):
+        x = halton_design(self.bounds, 13, seed=0)
+        self.assertEqual(x.shape, (13, 3))
+        self.assertTrue(_within_bounds(x, self.bounds))
+        np.testing.assert_array_equal(x, halton_design(self.bounds, 13, seed=0))
+
+    def test_quasi_random_fills_more_evenly_than_uniform(self):
+        # Lower discrepancy == more even space-filling. Sobol' should beat iid uniform.
+        unit_bounds = [(0.0, 1.0)] * 3
+        sob = sobol_design(unit_bounds, 64, seed=0)
+        hal = halton_design(unit_bounds, 64, seed=0)
+        rnd = random_design(unit_bounds, 64, seed=0)
+        self.assertLess(qmc.discrepancy(sob), qmc.discrepancy(rnd))
+        self.assertLess(qmc.discrepancy(hal), qmc.discrepancy(rnd))
+
+    def test_quasi_random_validation(self):
+        with self.assertRaises(ValueError):
+            sobol_design(self.bounds, 0)
+        with self.assertRaises(ValueError):
+            halton_design([(1.0, 0.0)], 8)
 
 
 if __name__ == "__main__":

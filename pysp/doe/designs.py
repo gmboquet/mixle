@@ -8,9 +8,11 @@ returns a ``(n, d)`` numpy array of points scaled into those bounds. Random desi
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.stats import qmc
 
 Bounds = Sequence[tuple[float, float]]
 
@@ -104,6 +106,54 @@ def maximin_latin_hypercube(
             best_design = design
     assert best_design is not None
     return best_design
+
+
+def _qmc_unit(engine_cls: Any, d: int, n: int, scramble: bool, rng: RandomState) -> np.ndarray:
+    """Draw ``n`` points in ``[0, 1]^d`` from a scipy ``qmc`` engine, seeded from ``rng``.
+
+    Uses an integer seed drawn from ``rng`` so the draw is reproducible, and prefers the newer
+    ``rng=`` keyword (falling back to the deprecated ``seed=`` on older scipy).
+    """
+    int_seed = int(rng.randint(2**31))
+    try:
+        engine = engine_cls(d=d, scramble=scramble, rng=int_seed)
+    except TypeError:  # pragma: no cover - older scipy without the rng= alias
+        engine = engine_cls(d=d, scramble=scramble, seed=int_seed)
+    return np.asarray(engine.random(n), dtype=np.float64)
+
+
+def sobol_design(bounds: Bounds, n: int, seed: int | RandomState | None = None, *, scramble: bool = True) -> np.ndarray:
+    """Return an ``n``-point Sobol' low-discrepancy design over ``bounds``.
+
+    Sobol' is a quasi-random sequence whose discrepancy (deviation from perfectly even coverage) is
+    far lower than iid uniform sampling, so it fills the space more evenly for moderate ``n``.
+    ``scramble=True`` applies Owen scrambling, which randomizes the sequence reproducibly from
+    ``seed`` while preserving the low-discrepancy structure; ``scramble=False`` returns the raw
+    deterministic sequence. Balance properties are best when ``n`` is a power of two.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive.")
+    b = _as_bounds(bounds)
+    rng = _as_rng(seed)
+    unit = _qmc_unit(qmc.Sobol, b.shape[0], int(n), scramble, rng)
+    return _scale_unit(unit, b)
+
+
+def halton_design(
+    bounds: Bounds, n: int, seed: int | RandomState | None = None, *, scramble: bool = True
+) -> np.ndarray:
+    """Return an ``n``-point Halton low-discrepancy design over ``bounds``.
+
+    Halton is a quasi-random sequence (coprime van der Corput sequences per axis) that, like Sobol',
+    fills space more evenly than iid uniform sampling and works for any ``n`` (no power-of-two
+    preference). ``scramble=True`` randomizes it reproducibly from ``seed``.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive.")
+    b = _as_bounds(bounds)
+    rng = _as_rng(seed)
+    unit = _qmc_unit(qmc.Halton, b.shape[0], int(n), scramble, rng)
+    return _scale_unit(unit, b)
 
 
 def full_factorial(bounds: Bounds, levels: int | Sequence[int]) -> np.ndarray:
