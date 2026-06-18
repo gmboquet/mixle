@@ -15,6 +15,7 @@ from pysp.utils.mcmc import (
     BlockProposal,
     IndependentProposal,
     LangevinProposal,
+    MCMCResult,
     MixtureProposal,
     RandomWalkProposal,
     build_parameter_bridge,
@@ -56,6 +57,24 @@ class MCMCTestCase(unittest.TestCase):
         self.assertLess(abs(summary["mean"] - 1.0), 0.15)
         self.assertGreater(summary["ess"], 50.0)
         self.assertGreater(summary["mcse"], 0.0)
+
+    def test_effective_sample_size_handles_mixed_constant_vector_coordinates(self):
+        samples = [np.asarray([3.0, float(i)], dtype=float) for i in range(40)]
+        result = MCMCResult(
+            samples=samples,
+            log_probs=np.zeros(len(samples), dtype=float),
+            accepted=np.ones(len(samples), dtype=bool),
+        )
+
+        ess = result.effective_sample_size(max_lag=10)
+        self.assertEqual(ess.shape, (2,))
+        self.assertEqual(float(ess[0]), float(len(samples)))
+        self.assertGreater(float(ess[1]), 0.0)
+        self.assertLessEqual(float(ess[1]), float(len(samples)))
+
+        summary = result.summary(max_lag=10)
+        self.assertEqual(float(np.asarray(summary["mcse"])[0]), 0.0)
+        self.assertGreater(float(np.asarray(summary["mcse"])[1]), 0.0)
 
     def test_mixture_proposal_samples_with_exact_proposal_density(self):
         proposal = MixtureProposal(
@@ -664,6 +683,71 @@ class ConjugatePosteriorTestCase(unittest.TestCase):
         self.assertLess(abs(float(samples.mean()) - analytic_mean), 0.01)
         self.assertLess(abs(float(samples.var()) - analytic_var) / analytic_var, 0.1)
 
+    def test_exponential_gamma_conjugate_matches_analytic(self):
+        stats, _, BGamma = self._stats()
+        rng = np.random.RandomState(14)
+        data = rng.exponential(scale=2.0, size=200).tolist()
+        k0, theta0 = 2.0, 1.0
+        proto = stats.ExponentialDistribution(1.0, prior=BGamma(k0, theta0))
+
+        result = sample_conjugate_posterior(proto, data, draws=40000, seed=24)
+        scales = np.asarray(result.samples, dtype=float)
+        rates = 1.0 / scales
+
+        post_k = k0 + len(data)
+        post_theta = 1.0 / (1.0 / theta0 + float(sum(data)))
+        analytic_mean = post_k * post_theta
+        analytic_var = post_k * post_theta * post_theta
+
+        self.assertTrue(np.all(scales > 0.0))
+        self.assertLess(abs(float(rates.mean()) - analytic_mean), 4.0 * np.sqrt(analytic_var / len(rates)) + 0.01)
+        self.assertLess(abs(float(rates.var()) - analytic_var) / analytic_var, 0.1)
+
+    def test_binomial_beta_conjugate_matches_analytic(self):
+        stats, BBeta, _ = self._stats()
+        rng = np.random.RandomState(15)
+        trials = 5
+        data = rng.binomial(n=trials, p=0.4, size=250).tolist()
+        a0, b0 = 2.0, 3.0
+        proto = stats.BinomialDistribution(0.5, trials, prior=BBeta(a0, b0))
+
+        result = sample_conjugate_posterior(proto, data, draws=40000, seed=25)
+        samples = np.asarray(result.samples, dtype=float)
+
+        successes = float(sum(data))
+        failures = float(len(data) * trials - successes)
+        pa, pb = a0 + successes, b0 + failures
+        analytic_mean = pa / (pa + pb)
+        analytic_var = pa * pb / ((pa + pb) ** 2 * (pa + pb + 1.0))
+
+        self.assertTrue(np.all((samples > 0.0) & (samples < 1.0)))
+        self.assertLess(abs(float(samples.mean()) - analytic_mean), 0.01)
+        self.assertLess(abs(float(samples.var()) - analytic_var) / analytic_var, 0.1)
+
+        rebuilt = sample_conjugate_posterior(proto, data, draws=5, seed=26, return_distributions=True)
+        for dist in rebuilt.samples:
+            self.assertIsInstance(dist, stats.BinomialDistribution)
+            self.assertEqual(dist.n, trials)
+
+    def test_geometric_beta_conjugate_matches_analytic(self):
+        stats, BBeta, _ = self._stats()
+        rng = np.random.RandomState(16)
+        data = rng.geometric(p=0.35, size=250).tolist()
+        a0, b0 = 2.0, 3.0
+        proto = stats.GeometricDistribution(0.5, prior=BBeta(a0, b0))
+
+        result = sample_conjugate_posterior(proto, data, draws=40000, seed=27)
+        samples = np.asarray(result.samples, dtype=float)
+
+        pa = a0 + len(data)
+        pb = b0 + float(sum(data) - len(data))
+        analytic_mean = pa / (pa + pb)
+        analytic_var = pa * pb / ((pa + pb) ** 2 * (pa + pb + 1.0))
+
+        self.assertTrue(np.all((samples > 0.0) & (samples < 1.0)))
+        self.assertLess(abs(float(samples.mean()) - analytic_mean), 0.01)
+        self.assertLess(abs(float(samples.var()) - analytic_var) / analytic_var, 0.1)
+
     def test_gaussian_normalgamma_conjugate_centers_on_data(self):
         stats, _, _ = self._stats()
         rng = np.random.RandomState(13)
@@ -680,8 +764,8 @@ class ConjugatePosteriorTestCase(unittest.TestCase):
 
     def test_conjugate_unsupported_leaf_raises(self):
         stats, _, _ = self._stats()
-        with self.assertRaisesRegex(NotImplementedError, "Gaussian, Poisson, and Bernoulli"):
-            sample_conjugate_posterior(stats.ExponentialDistribution(1.0), [0.5, 1.0], draws=5)
+        with self.assertRaisesRegex(NotImplementedError, "Gaussian, Poisson, Exponential, Bernoulli"):
+            sample_conjugate_posterior(stats.CategoricalDistribution({"a": 0.5, "b": 0.5}), ["a", "b"], draws=5)
 
 
 if __name__ == "__main__":

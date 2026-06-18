@@ -717,6 +717,10 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
 
         """
         self.num_vals = coalesce_alias("num_vals", num_vals, "num_values", num_values, default=MISSING)
+        if pseudo_count is not None and pseudo_count < 0.0:
+            raise ValueError("IntegerStepBernoulliEditEstimator requires a non-negative pseudo_count.")
+        if min_prob is not None and (min_prob < 0.0 or min_prob > 0.5):
+            raise ValueError("IntegerStepBernoulliEditEstimator requires 0 <= min_prob <= 0.5.")
         self.keys = keys
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
@@ -728,6 +732,40 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
         """Returns an IntegerStepBernoulliEditAccumulatorFactory for creating accumulator objects."""
         init_factory = self.init_est.accumulator_factory()
         return IntegerStepBernoulliEditAccumulatorFactory(self.num_vals, init_factory, self.keys)
+
+    def __clip_prob(self, value: float) -> float:
+        if self.min_prob is None or self.min_prob <= 0.0:
+            return float(value)
+        return float(np.clip(value, self.min_prob, 1.0 - self.min_prob))
+
+    def __effective_step_counts(
+        self,
+        count_mat: np.ndarray,
+        tot_sum: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        s1 = count_mat[:, 0] + count_mat[:, 2]
+        s0 = tot_sum - s1
+
+        rem_success = count_mat[:, 0].astype(np.float64).copy()
+        rem_trials = s1.astype(np.float64).copy()
+        add_success = count_mat[:, 1].astype(np.float64).copy()
+        add_trials = s0.astype(np.float64).copy()
+
+        if self.pseudo_count is not None and self.pseudo_count > 0.0:
+            p = self.pseudo_count
+            if self.suff_stat is not None:
+                s = np.asarray(self.suff_stat, dtype=np.float64)
+                rem_success += p * s[:, 1]
+                rem_trials += p * (s[:, 1] + s[:, 3])
+                add_success += p * s[:, 2]
+                add_trials += p * (s[:, 0] + s[:, 2])
+            else:
+                rem_success += p / 4.0
+                rem_trials += p / 2.0
+                add_success += p / 4.0
+                add_trials += p / 2.0
+
+        return rem_success, rem_trials, add_success, add_trials
 
     def __get_pqk(self, successes: np.ndarray, trials: np.ndarray) -> np.ndarray:
         """Fit a two-level (p, q) step function to per-element binomial counts.
@@ -743,7 +781,8 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
             trials (np.ndarray): Per-element trial counts.
 
         Returns:
-            Numpy array of per-element probabilities taking at most two distinct values.
+            Numpy array of per-element probabilities taking at most two distinct values, clipped to
+            the estimator's probability floor when one is declared.
 
         """
         N = len(successes)
@@ -763,11 +802,11 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
         max_params = None
         for i in range(M):
             sh, th = cs[i], ct[i]
-            p = sh / th
+            p = self.__clip_prob(sh / th)
             v1 = (sh * np.log(p) if sh > 0 else 0.0) + ((th - sh) * np.log1p(-p) if th > sh else 0.0)
             if i + 1 < M:
                 sl, tl = tot_s - sh, tot_t - th
-                q = sl / tl
+                q = self.__clip_prob(sl / tl)
                 v2 = (sl * np.log(q) if sl > 0 else 0.0) + ((tl - sl) * np.log1p(-q) if tl > sl else 0.0)
             else:
                 q = 0.0
@@ -779,7 +818,7 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
 
         p, q, k = max_params
 
-        arr = np.full(N, tot_s / tot_t)
+        arr = np.full(N, self.__clip_prob(tot_s / tot_t))
         arr[sidx[: k + 1]] = p
         arr[sidx[k + 1 :]] = q
         return arr
@@ -802,105 +841,11 @@ class IntegerStepBernoulliEditEstimator(ParameterEstimator):
         """
         init_dist = self.init_est.estimate(None, suff_stat[2])
         count_mat, tot_sum, _ = suff_stat
+        rem_success, rem_trials, add_success, add_trials = self.__effective_step_counts(count_mat, tot_sum)
+        arr1 = self.__get_pqk(rem_success, rem_trials)
+        arr2 = self.__get_pqk(add_success, add_trials)
 
-        if self.pseudo_count is not None and self.suff_stat is not None:
-            p = self.pseudo_count
-            s = self.suff_stat
-
-            s1 = count_mat[:, 0] + count_mat[:, 2]
-            s0 = tot_sum - s1
-
-            log_s1 = np.log(s1 + p * (s[:, 1] + s[:, 3]))
-            log_s0 = np.log(s0 + p * (s[:, 0] + s[:, 2]))
-
-            log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-
-            # print('hello')
-            log_pmat[:, 0] = np.log((s0 - count_mat[:, 1]) + p * s[:, 0]) - log_s0
-            log_pmat[:, 1] = np.log(count_mat[:, 0] + p * s[:, 1]) - log_s1
-            log_pmat[:, 2] = np.log(count_mat[:, 1] + p * s[:, 2]) - log_s0
-            log_pmat[:, 3] = np.log(count_mat[:, 2] + p * s[:, 3]) - log_s1
-
-        elif self.pseudo_count is not None and self.suff_stat is None:
-            p = self.pseudo_count
-
-            s1 = count_mat[:, 0] + count_mat[:, 2]
-            s0 = tot_sum - s1
-
-            log_s1 = np.log(s1 + p / 2.0)
-            log_s0 = np.log(s0 + p / 2.0)
-
-            log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-
-            log_pmat[:, 2] = np.log(count_mat[:, 1] + (p / 4.0)) - log_s0
-            log_pmat[:, 3] = np.log(count_mat[:, 2] + (p / 4.0)) - log_s1
-            log_pmat[:, 0] = np.log((s0 - count_mat[:, 1]) + (p / 4.0)) - log_s0
-            log_pmat[:, 1] = np.log(count_mat[:, 0] + (p / 4.0)) - log_s1
-
-        else:
-            if suff_stat[1] == 0:
-                log_pmat = np.zeros((self.num_vals, 4), dtype=np.float64) + np.log(0.5)
-
-            elif (self.min_prob is not None) and (self.min_prob > 0):
-                s1 = count_mat[:, 0] + count_mat[:, 2]
-                s0 = tot_sum - s1
-
-                nz0 = s0 != 0
-                nz1 = s1 != 0
-
-                p0 = np.ones(self.num_vals, dtype=np.float64)
-                p2 = np.zeros(self.num_vals, dtype=np.float64)
-                p0[nz0] = np.maximum((s0[nz0] - count_mat[nz0, 1]) / s0[nz0], self.min_prob)
-                p2[nz0] = np.maximum(count_mat[nz0, 1] / s0[nz0], self.min_prob)
-                z0 = p0[nz0] + p2[nz0]
-                p0[nz0] /= z0
-                p2[nz0] /= z0
-
-                p1 = np.zeros(self.num_vals, dtype=np.float64)
-                p3 = np.ones(self.num_vals, dtype=np.float64)
-                p1[nz1] = np.maximum(count_mat[nz1, 0] / s1[nz1], self.min_prob)
-                p3[nz1] = np.maximum(count_mat[nz1, 2] / s1[nz1], self.min_prob)
-                z1 = p1[nz1] + p3[nz1]
-                p1[nz1] /= z1
-                p3[nz1] /= z1
-
-                log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-                with np.errstate(divide="ignore"):
-                    log_pmat[:, 0] = np.log(p0)
-                    log_pmat[:, 1] = np.log(p1)
-                    log_pmat[:, 2] = np.log(p2)
-                    log_pmat[:, 3] = np.log(p3)
-
-            else:
-                s1 = count_mat[:, 0] + count_mat[:, 2]
-                s0 = tot_sum - s1
-
-                nz0 = s0 != 0
-                nz1 = s1 != 0
-
-                p0 = np.ones(self.num_vals, dtype=np.float64)
-                p2 = np.zeros(self.num_vals, dtype=np.float64)
-                p0[nz0] = (s0[nz0] - count_mat[nz0, 1]) / s0[nz0]
-                p2[nz0] = count_mat[nz0, 1] / s0[nz0]
-
-                p1 = np.zeros(self.num_vals, dtype=np.float64)
-                p3 = np.ones(self.num_vals, dtype=np.float64)
-                p1[nz1] = count_mat[nz1, 0] / s1[nz1]
-                p3[nz1] = count_mat[nz1, 2] / s1[nz1]
-
-                log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
-                with np.errstate(divide="ignore"):
-                    log_pmat[:, 0] = np.log(p0)
-                    log_pmat[:, 1] = np.log(p1)
-                    log_pmat[:, 2] = np.log(p2)
-                    log_pmat[:, 3] = np.log(p3)
-
-        s1 = count_mat[:, 0] + count_mat[:, 2]
-        s0 = tot_sum - s1
-
-        arr1 = self.__get_pqk(count_mat[:, 0], s1)
-        arr2 = self.__get_pqk(count_mat[:, 1], s0)
-
+        log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
         with np.errstate(divide="ignore"):
             log_pmat[:, 2] = np.log(arr2)
             log_pmat[:, 0] = np.log(1 - arr2)

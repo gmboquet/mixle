@@ -417,18 +417,22 @@ __all__ = [
     "PlackettLuceSampler",
     "PlackettLuceEstimator",
     "PlackettLuceDataEncoder",
+    "PlackettLuceEnumerator",
     "MallowsDistribution",
     "MallowsSampler",
     "MallowsEstimator",
     "MallowsDataEncoder",
+    "MallowsEnumerator",
     "SpanningTreeDistribution",
     "SpanningTreeSampler",
     "SpanningTreeEstimator",
     "SpanningTreeDataEncoder",
+    "SpanningTreeEnumerator",
     "MatchingDistribution",
     "MatchingSampler",
     "MatchingEstimator",
     "MatchingDataEncoder",
+    "MatchingEnumerator",
     "RandomDotProductGraphDistribution",
     "RandomDotProductGraphSampler",
     "RandomDotProductGraphEstimator",
@@ -756,6 +760,7 @@ from pysp.stats.graph.int_markovchain import (
 from pysp.stats.graph.mallows import (
     MallowsDataEncoder,
     MallowsDistribution,
+    MallowsEnumerator,
     MallowsEstimator,
     MallowsSampler,
 )
@@ -769,12 +774,14 @@ from pysp.stats.graph.markov_chain import (
 from pysp.stats.graph.matching import (
     MatchingDataEncoder,
     MatchingDistribution,
+    MatchingEnumerator,
     MatchingEstimator,
     MatchingSampler,
 )
 from pysp.stats.graph.plackett_luce import (
     PlackettLuceDataEncoder,
     PlackettLuceDistribution,
+    PlackettLuceEnumerator,
     PlackettLuceEstimator,
     PlackettLuceSampler,
 )
@@ -786,6 +793,7 @@ from pysp.stats.graph.rdpg import (
 from pysp.stats.graph.spanning_tree import (
     SpanningTreeDataEncoder,
     SpanningTreeDistribution,
+    SpanningTreeEnumerator,
     SpanningTreeEstimator,
     SpanningTreeSampler,
 )
