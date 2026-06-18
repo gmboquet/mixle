@@ -203,7 +203,9 @@ class AutomaticScientificProfilingTestCase(unittest.TestCase):
         self.assertEqual(field.missing_count, 80)
         self.assertEqual(field.missing_fraction, 0.5)
         self.assertEqual(field.observed_count, 80)
-        self.assertEqual(field.recommendation, "gaussian")
+        # Positive-only data ({1.0, 2.5}) now also considers a log-normal: it wins the BIC prefilter
+        # but held-out predictive validation still prefers the Gaussian here (the two can disagree).
+        self.assertEqual(field.recommendation, "lognormal")
         self.assertAlmostEqual(field.unique_fraction, 2.0 / 80.0)
         self.assertGreater(field.effective_cardinality, 1.0)
         self.assertEqual(field.validation_count, 20)
