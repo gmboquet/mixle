@@ -57,7 +57,8 @@ class _DifferentialProxy(Proxy):
     """Internal proxy: solve a forward model from the drivers/field and score the observed output."""
 
     def __init__(self, y, *, forward, observe, drivers, over_name, scale, family, prefix="diff"):
-        self.y = np.asarray(y, dtype=float)
+        self.complex = np.iscomplexobj(np.asarray(y))
+        self.y = np.asarray(y) if self.complex else np.asarray(y, dtype=float)
         self.forward = forward
         self.observe = observe
         self.drivers = drivers  # list of (name, support, dim)
@@ -96,6 +97,9 @@ class _DifferentialProxy(Proxy):
         scale = params[self._scale_name] if self._scale_name is not None else self._scale_fixed
         resid = (y - pred) / scale
         log_scale = torch.log(scale) if torch.is_tensor(scale) else float(np.log(scale))
+        if self.complex:  # complex Gaussian (radar/sonar): misfit on |residual|^2
+            sq = resid.real**2 + resid.imag**2
+            return -0.5 * torch.sum(sq) - y.numel() * (2.0 * log_scale + np.log(np.pi))
         return -0.5 * torch.sum(resid * resid) - y.numel() * (log_scale + 0.5 * np.log(2 * np.pi))
 
     def residual(self, field_t, params, torch):
@@ -109,7 +113,10 @@ class _DifferentialProxy(Proxy):
         solution = self.forward(p, ops)
         pred = self.observe(solution, p, ops) if self.observe is not None else solution
         scale = params[self._scale_name] if self._scale_name is not None else self._scale_fixed
-        return (torch.as_tensor(self.y) - pred) / scale
+        resid = (torch.as_tensor(self.y) - pred) / scale
+        if self.complex:  # stack real/imag so the Gauss-Newton Jacobian stays real
+            return torch.cat([resid.real, resid.imag])
+        return resid
 
 
 def Differential(
