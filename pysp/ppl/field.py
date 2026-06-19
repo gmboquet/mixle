@@ -50,6 +50,7 @@ __all__ = [
     "Cox",
     "joint",
     "FieldModel",
+    "multistart",
 ]
 
 
@@ -729,3 +730,21 @@ def joint(observations: Sequence[tuple]) -> FieldModel:
         raise ValueError(f"joint() targets one shared field; saw {sorted(fields)}. Use fit_field for several.")
     field = next(iter(fields.values())) if fields else None
     return FieldModel(field, [proxy for _, proxy in observations])
+
+
+def multistart(model: FieldModel, inits: Sequence[dict], *, how: str = "map", **kw) -> FieldPosterior:
+    """Fit ``model`` from several initializations and keep the best (lowest-objective) fit.
+
+    For the multimodal posteriors of nonlinear inverse problems (e.g. scattering / FWI cycle-skipping), a
+    single optimization can land in a poor local mode; ``inits`` is a list of ``{node: value}`` dicts and
+    the fit with the smallest ``objective`` is returned. (Frequency continuation -- fit a coarse/low-
+    frequency model, then seed a finer one via ``fit(init=...)`` -- is the complementary strategy.)
+    """
+    best = None
+    for init in inits:
+        post = model.fit(how=how, init=init, **kw)
+        if best is None or post.objective < best.objective:
+            best = post
+    if best is None:
+        raise ValueError("multistart needs at least one initialization.")
+    return best
