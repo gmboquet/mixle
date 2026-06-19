@@ -98,6 +98,19 @@ class _DifferentialProxy(Proxy):
         log_scale = torch.log(scale) if torch.is_tensor(scale) else float(np.log(scale))
         return -0.5 * torch.sum(resid * resid) - y.numel() * (log_scale + 0.5 * np.log(2 * np.pi))
 
+    def residual(self, field_t, params, torch):
+        if self.family != "gaussian":
+            return None
+        ops = make_ops()
+        values = {name: params[name] for name, _, _ in self.drivers}
+        if self.over_name is not None:
+            values["field"] = field_t
+        p = _Params(values)
+        solution = self.forward(p, ops)
+        pred = self.observe(solution, p, ops) if self.observe is not None else solution
+        scale = params[self._scale_name] if self._scale_name is not None else self._scale_fixed
+        return (torch.as_tensor(self.y) - pred) / scale
+
 
 def Differential(
     y: np.ndarray,
