@@ -47,6 +47,33 @@ class ConformalRegressorTestCase(unittest.TestCase):
         self.assertGreater(cp.covers(self.te[0], self.te[1]).mean(), 0.86)
 
 
+class ConformalQuantileRegressorTestCase(unittest.TestCase):
+    def setUp(self):
+        rng = np.random.RandomState(1)
+        n = 6000
+        self.x = rng.uniform(0, 5, n)
+        self.y = 2.0 + 1.5 * self.x + rng.normal(0, 0.3 + 0.7 * self.x, n)  # heteroskedastic
+        self.tr, self.cal, self.te = np.split(rng.permutation(n), [3000, 4500])
+
+    def _qfit(self, tau):
+        return Normal(free * Field("x") + free, free).fit(
+            list(self.y[self.tr]), given={"x": list(self.x[self.tr])}, quantile=tau
+        )
+
+    def test_marginal_coverage_and_adaptive_width(self):
+        from pysp.ppl import ConformalQuantileRegressor
+
+        lo, hi = self._qfit(0.05), self._qfit(0.95)
+        cqr = ConformalQuantileRegressor(lo.result, hi.result, {"x": list(self.x[self.cal])}, self.y[self.cal], alpha=0.1)
+        cov = cqr.covers({"x": list(self.x[self.te])}, self.y[self.te]).mean()
+        self.assertGreater(cov, 0.86)
+        self.assertLess(cov, 0.95)
+        a, b = cqr.interval({"x": list(self.x[self.te])})
+        width = b - a
+        xt = np.asarray(self.x[self.te])
+        self.assertGreater(width[xt > 4].mean(), width[xt < 1].mean())  # band widens with the noise
+
+
 class ConformalQuantileTestCase(unittest.TestCase):
     def test_finite_sample_correction(self):
         scores = np.arange(1.0, 101.0)  # 1..100

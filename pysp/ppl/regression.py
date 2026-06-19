@@ -543,7 +543,7 @@ def _quantile_fit(rv: RandomVariable, data, given, tau: float) -> RandomVariable
 
 
 def regression_fit(
-    rv: RandomVariable, data, *, given=None, max_iter: int = 100, tol: float = 1e-9, quantile=None, **_
+    rv: RandomVariable, data, *, given=None, max_iter: int = 100, tol: float = 1e-9, quantile=None, l2=0.0, **_
 ) -> RandomVariable:
     linpred0 = next((a for a in rv._args if isinstance(a, _LinearPredictor)), None)
     if quantile is not None:  # pinball-loss quantile regression (same linear-predictor syntax)
@@ -581,11 +581,14 @@ def regression_fit(
         elif isinstance(coef, RandomVariable) and coef._family.name == "Laplace":
             loc1[i] = float(coef._args[0])
             l1[i] = 1.0 / float(coef._args[1])  # Laplace scale b -> L1 penalty 1/b
+    if l2 > 0.0:  # global ridge added to every non-intercept coefficient (elastic net with Laplace priors)
+        not_intercept = np.array([field is not None for (_coef, field) in est], dtype=float)
+        p0 = p0 + float(l2) * not_intercept
     P0 = np.diag(p0)
 
-    if np.any(l1 > 0.0):  # L1 present (lasso / elastic-net) -> coordinate descent
+    if np.any(l1 > 0.0) or l2 > 0.0:  # L1 and/or global L2 -> coordinate descent (lasso / ridge / elastic net)
         if fam != "Normal":
-            raise NotImplementedError("L1 (Laplace-prior) regression is supported for Normal responses.")
+            raise NotImplementedError("penalized (L1 / elastic-net) regression is supported for Normal responses.")
         beta = _coord_descent(X, y - offset, p0, m0, l1, loc1, max_iter)
         resid = y - (offset + X @ beta)
         sigma = float(np.sqrt(max(resid @ resid / N, 1e-8)))
