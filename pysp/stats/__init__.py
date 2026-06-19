@@ -413,6 +413,10 @@ __all__ = [
     "SpearmanRankingEstimator",
     "SpearmanRankingDataEncoder",
     "SpearmanRankingEnumerator",
+    "KnowledgeGraphDistribution",
+    "KnowledgeGraphEstimator",
+    "KnowledgeGraphSampler",
+    "KnowledgeGraphDataEncoder",
     "PlackettLuceDistribution",
     "PlackettLuceSampler",
     "PlackettLuceEstimator",
@@ -756,6 +760,12 @@ from pysp.stats.graph.int_markovchain import (
     IntegerMarkovChainEnumerator,
     IntegerMarkovChainEstimator,
     IntegerMarkovChainSampler,
+)
+from pysp.stats.graph.knowledge_graph import (
+    KnowledgeGraphDataEncoder,
+    KnowledgeGraphDistribution,
+    KnowledgeGraphEstimator,
+    KnowledgeGraphSampler,
 )
 from pysp.stats.graph.mallows import (
     MallowsDataEncoder,
