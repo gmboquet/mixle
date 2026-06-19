@@ -112,6 +112,44 @@ class ConformalClassifier:
         return self.predict_set(proba).sum(axis=1)
 
 
+class ConformalQuantileRegressor:
+    """Conformalized quantile regression (Romano, Patterson, Candes 2019).
+
+    Combines two fitted quantile regressions (a lower and an upper conditional quantile) with a
+    split-conformal calibration so the band has exact marginal coverage *and* the adaptive,
+    heteroscedastic width of quantile regression — wide where the data is noisy, narrow where it is
+    tight, unlike the constant-width absolute-residual band of :class:`ConformalRegressor`.
+
+    The nonconformity score is the signed distance outside the predicted band,
+    ``E_i = max(qlo(x_i) - y_i, y_i - qhi(x_i))`` (negative when ``y_i`` is comfortably inside), and
+    the calibrated band is ``[qlo(x) - qhat, qhi(x) + qhat]`` with ``qhat`` the conformal quantile of
+    the calibration scores. ``lo`` and ``hi`` are fitted quantile-regression results (from
+    ``...fit(..., quantile=tau)``), typically at ``tau = alpha/2`` and ``1 - alpha/2``.
+    """
+
+    def __init__(self, lo: Any, hi: Any, given: dict, y_cal: Any, *, alpha: float = 0.1) -> None:
+        self.lo = lo
+        self.hi = hi
+        self.alpha = float(alpha)
+        y = np.asarray(y_cal, dtype=float).reshape(-1)
+        qlo = np.asarray(lo.predict(given), dtype=float).reshape(-1)
+        qhi = np.asarray(hi.predict(given), dtype=float).reshape(-1)
+        self.scores = np.maximum(qlo - y, y - qhi)  # CQR nonconformity (negative when inside the band)
+        self.qhat = conformal_quantile(self.scores, self.alpha)
+
+    def interval(self, given: dict) -> tuple[np.ndarray, np.ndarray]:
+        """Return ``(lower, upper)`` arrays of the calibrated adaptive band at covariates ``given``."""
+        qlo = np.asarray(self.lo.predict(given), dtype=float).reshape(-1)
+        qhi = np.asarray(self.hi.predict(given), dtype=float).reshape(-1)
+        return qlo - self.qhat, qhi + self.qhat
+
+    def covers(self, given: dict, y: Any) -> np.ndarray:
+        """Boolean array: does the adaptive band at ``given`` contain each observed ``y``."""
+        lo, hi = self.interval(given)
+        y = np.asarray(y, dtype=float).reshape(-1)
+        return (y >= lo) & (y <= hi)
+
+
 def conformal(result: Any, given: dict, y_cal: Any, *, alpha: float = 0.1) -> ConformalRegressor:
     """Split-conformal calibration of a fitted regression ``result`` into prediction intervals.
 
