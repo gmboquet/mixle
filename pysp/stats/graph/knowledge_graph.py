@@ -326,6 +326,7 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         init_scale: float = 0.3,
         max_norm: float = 1.0,
         directions: tuple = ("tail", "head", "relation"),
+        negatives: int | None = None,
         seed: int = 1,
         pseudo_count: float | None = None,
         name: str | None = None,
@@ -343,6 +344,7 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         self.init_scale = float(init_scale)
         self.max_norm = float(max_norm)
         self.directions = tuple(directions)
+        self.negatives = None if negatives is None else int(negatives)  # sampled-softmax negatives (scales to large KGs)
         self.seed = int(seed)
         self.pseudo_count = pseudo_count
         self.name = name
@@ -354,6 +356,31 @@ class KnowledgeGraphEstimator(ParameterEstimator):
     def _project(self, entity: np.ndarray) -> np.ndarray:
         norms = np.linalg.norm(entity, axis=1, keepdims=True)
         return entity * np.minimum(1.0, self.max_norm / np.maximum(norms, 1e-12))
+
+    def _entity_direction_grad(self, E, R, q, target, other, r, w, ge, gr, rng):
+        """Accumulate the gradient of ``log p(target_entity | q)`` (q = R[r] * E[other]) into ge, gr.
+
+        Full softmax over all entities by default, or sampled softmax against ``self.negatives`` uniform
+        negatives per row (so the per-row cost is O(K d) instead of O(num_entities d), the key to scaling
+        to large graphs). The context-role gradient flows to E[other] and R[r] identically either way.
+        """
+        if self.negatives is None:
+            p = _softmax_rows(q @ E.T)
+            ebar = p @ E
+            resid = ((np.arange(E.shape[0])[None, :] == target[:, None]) - p) * w
+            ge += resid.T @ q
+        else:
+            k = int(self.negatives)
+            cand = np.concatenate([target[:, None], rng.randint(E.shape[0], size=(q.shape[0], k))], axis=1)
+            cand_emb = E[cand]  # (m, 1+k, d); column 0 is the positive
+            p = _softmax_rows(np.einsum("bkd,bd->bk", cand_emb, q))
+            ebar = np.einsum("bk,bkd->bd", p, cand_emb)
+            onehot = np.zeros_like(p)
+            onehot[:, 0] = 1.0
+            resid = (onehot - p) * w
+            np.add.at(ge, cand.reshape(-1), (resid[:, :, None] * q[:, None, :]).reshape(-1, q.shape[1]))
+        np.add.at(ge, other, w * R[r] * (E[target] - ebar))
+        np.add.at(gr, r, w * E[other] * (E[target] - ebar))
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> KnowledgeGraphDistribution:
         _count, triples, weights = suff_stat
@@ -367,7 +394,6 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         weights = np.asarray(weights, dtype=float)
         n = triples.shape[0]
         bs = min(self.batch_size, n)
-        ent_index = np.arange(nE)
         rel_index = np.arange(nR)
         for _ in range(self.epochs):
             order = rng.permutation(n)
@@ -379,22 +405,10 @@ class KnowledgeGraphEstimator(ParameterEstimator):
                 ge = np.zeros_like(E)
                 gr = np.zeros_like(R)
                 if "tail" in self.directions:  # maximize log p(t | h, r)
-                    v = E[h] * R[r]
-                    p = _softmax_rows(v @ E.T)
-                    ebar = p @ E
-                    resid = ((ent_index[None, :] == t[:, None]) - p) * w
-                    ge += resid.T @ v
-                    np.add.at(ge, h, w * R[r] * (E[t] - ebar))
-                    np.add.at(gr, r, w * E[h] * (E[t] - ebar))
+                    self._entity_direction_grad(E, R, E[h] * R[r], t, h, r, w, ge, gr, rng)
                 if "head" in self.directions:  # maximize log p(h | r, t)
-                    u = R[r] * E[t]
-                    p = _softmax_rows(u @ E.T)
-                    ebar = p @ E
-                    resid = ((ent_index[None, :] == h[:, None]) - p) * w
-                    ge += resid.T @ u
-                    np.add.at(ge, t, w * R[r] * (E[h] - ebar))
-                    np.add.at(gr, r, w * E[t] * (E[h] - ebar))
-                if "relation" in self.directions:  # maximize log p(r | h, t)
+                    self._entity_direction_grad(E, R, R[r] * E[t], h, t, r, w, ge, gr, rng)
+                if "relation" in self.directions:  # maximize log p(r | h, t)  (relations are few; full softmax)
                     q = E[h] * E[t]
                     pr = _softmax_rows(q @ R.T)
                     rbar = pr @ R

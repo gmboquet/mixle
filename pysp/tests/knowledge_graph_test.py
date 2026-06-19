@@ -155,5 +155,22 @@ class KnowledgeGraphPatternTestCase(unittest.TestCase):
         self.assertGreater(cs.covers(inst[600:1200]).mean(), 0.86)
 
 
+class KnowledgeGraphNegativeSamplingTestCase(unittest.TestCase):
+    def test_sampled_softmax_learns(self):
+        ent, rel = _kg_truth()
+        nE, nR, d = ent.shape[0], rel.shape[0], ent.shape[1]
+        train = _sample(ent, rel, 4000, seed=1)
+        test = _sample(ent, rel, 1500, seed=2)
+        m = optimize(
+            train,
+            KnowledgeGraphEstimator(nE, nR, dim=d, epochs=150, lr=1.0, negatives=20, seed=1),
+            max_its=1,
+            rng=np.random.RandomState(0),
+            print_iter=10**9,
+        )
+        acc = np.mean([m.tail_log_posterior(h, r).argmax() == t for h, r, t in test])
+        self.assertGreater(acc, 0.3)  # sampled softmax still recovers tails well above the 1/60 chance rate
+
+
 if __name__ == "__main__":
     unittest.main()
