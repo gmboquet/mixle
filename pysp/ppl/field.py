@@ -49,6 +49,7 @@ __all__ = [
     "Niche",
     "Cox",
     "joint",
+    "FieldModel",
 ]
 
 
@@ -511,12 +512,24 @@ def fit_field(
             vals[field_name] = fv
             return -_px.loglik(fv, vals, torch)
 
-        Hk = torch.autograd.functional.hessian(negll, f_star).detach().numpy()
+        try:
+            Hk = torch.autograd.functional.hessian(negll, f_star).detach().numpy()
+        except RuntimeError as e:
+            raise ValueError(
+                "how='laplace' needs a twice-differentiable forward model; the adjoint sparse solve does "
+                "not qualify. Use how='map' for sparse forward models."
+            ) from e
         proxy_info[label] = 0.5 * (Hk + Hk.T)
 
     # ----- joint Laplace covariance: invert the full negative-log-posterior Hessian at the MAP -----
     u_star = u.detach().clone().requires_grad_(True)
-    H = torch.autograd.functional.hessian(neg_log_post, u_star).detach().numpy()
+    try:
+        H = torch.autograd.functional.hessian(neg_log_post, u_star).detach().numpy()
+    except RuntimeError as e:  # e.g. a forward using the adjoint sparse solve is not twice-differentiable
+        raise ValueError(
+            "how='laplace' needs a twice-differentiable forward model (dense solves and ODE integration "
+            "qualify); the adjoint sparse solve does not. Use how='map' for sparse forward models."
+        ) from e
     H = 0.5 * (H + H.T)
     cov = np.linalg.inv(H + 1e-10 * np.eye(H.shape[0]))
     return FieldPosterior(
@@ -623,17 +636,37 @@ def Cox(counts, *, log_intensity, offset=0.0) -> tuple:
     return aff.gp, PoissonProxy(counts, offset=offset, prefix=aff.gp.name + "_cox")
 
 
-def joint(observations: Sequence[tuple], *, how: str = "laplace", **kw) -> FieldPosterior:
-    """Fit a shared latent field jointly to equation-style observations.
+@dataclass
+class FieldModel:
+    """A latent-field model built from equation-style observations; fit with ``.fit(how=...)``.
 
-    Each item is the ``(field, proxy)`` pair returned by :func:`Gaussian`, :func:`Niche` or :func:`Cox`.
-    All observations must reference the same GP field (this surface targets one shared field); the fit and
-    the posterior-over-any-node readout are delegated to :func:`fit_field`.
+    The one fit verb, matching the rest of ``pysp.ppl``: ``joint([...]).fit(how='map'|'laplace')`` returns
+    a :class:`FieldPosterior` with a posterior over any node. Delegates to :func:`fit_field`.
+    """
+
+    field: GaussianField | None
+    proxies: list
+
+    def fit(self, *, how: str = "laplace", **kw) -> FieldPosterior:
+        return fit_field(self.field, self.proxies, how=how, **kw)
+
+
+def joint(observations: Sequence[tuple]) -> FieldModel:
+    """Assemble a latent-field model from equation-style observations; call ``.fit(how=...)`` to fit.
+
+    Each item is the ``(field, proxy)`` pair returned by :func:`Gaussian`, :func:`Niche`, :func:`Cox` or
+    :func:`pysp.ppl.Differential`. Observations sharing a field must name the same one (this surface targets
+    one shared field); field-free observations (a pure-parameter ODE inverse problem) are allowed.
     """
     if not observations:
         raise ValueError("joint() needs at least one observation.")
-    fields = {obs[0].field.name: obs[0].field for obs in observations}
-    if len(fields) != 1:
+    fields = {}
+    for f, _ in observations:
+        if f is None:
+            continue
+        gf = f.field if hasattr(f, "field") else f  # accept a GP (has .field) or a GaussianField directly
+        fields[gf.name] = gf
+    if len(fields) > 1:
         raise ValueError(f"joint() targets one shared field; saw {sorted(fields)}. Use fit_field for several.")
-    field = next(iter(fields.values()))
-    return fit_field(field, [obs[1] for obs in observations], how=how, **kw)
+    field = next(iter(fields.values())) if fields else None
+    return FieldModel(field, [proxy for _, proxy in observations])
