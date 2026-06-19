@@ -71,6 +71,12 @@ class FieldKernel:
     def precision(self, index: np.ndarray) -> np.ndarray:
         raise NotImplementedError
 
+    def covariance(self, index: np.ndarray) -> np.ndarray | None:
+        """The prior covariance matrix, when available cheaply (a kernel defined by its covariance). Used by
+        the low-rank Gauss-Newton posterior to get field marginals without a dense precision inverse;
+        ``None`` (the default) falls back to the dense path."""
+        return None
+
 
 @dataclass
 class RandomWalk(FieldKernel):
@@ -108,14 +114,16 @@ class RBF(FieldKernel):
     amplitude: float = 1.0
     jitter: float = 1e-6
 
-    def precision(self, index: np.ndarray) -> np.ndarray:
+    def covariance(self, index: np.ndarray) -> np.ndarray:
         x = np.asarray(index, dtype=float)
         if x.ndim == 1:
             x = x[:, None]
         d2 = np.sum((x[:, None, :] - x[None, :, :]) ** 2, axis=-1)
         k = float(self.amplitude) ** 2 * np.exp(-0.5 * d2 / float(self.lengthscale) ** 2)
-        k = k + self.jitter * np.eye(len(x))
-        return np.linalg.inv(k)
+        return k + self.jitter * np.eye(len(x))
+
+    def precision(self, index: np.ndarray) -> np.ndarray:
+        return np.linalg.inv(self.covariance(index))
 
 
 @dataclass
@@ -132,6 +140,8 @@ class GaussianField:
         self.precision = np.asarray(self.kernel.precision(self.index), dtype=float)
         if self.precision.shape != (self.dim, self.dim):
             raise ValueError(f"kernel precision is {self.precision.shape}, expected {(self.dim, self.dim)}.")
+        cov = self.kernel.covariance(self.index)  # prior covariance, when the kernel provides it cheaply
+        self.covariance = None if cov is None else np.asarray(cov, dtype=float)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -321,6 +331,7 @@ class FieldPosterior:
     _field_prior: np.ndarray = _dc_field(default_factory=lambda: np.zeros((0, 0)))
     _proxy_info: dict = _dc_field(default_factory=dict)  # proxy label -> field Fisher-information block
     _supports: dict = _dc_field(default_factory=dict)  # node -> 'real' | 'positive'
+    _marg_var: dict = _dc_field(default_factory=dict)  # node -> marginal variance (low-rank path, no full cov)
 
     def mean(self, node: str) -> np.ndarray:
         return self.map_values[node]
@@ -340,11 +351,16 @@ class FieldPosterior:
 
     def cov(self, node: str) -> np.ndarray:
         """Posterior covariance of ``node`` in its natural space (delta method applied for positive nodes)."""
+        if node in self._marg_var:
+            raise ValueError(f"node {node!r} has only marginal variances (low-rank fit); use sd()/posterior().")
         s = self._slice(node)
         j = self._jacobian(node)
         return (j[:, None] * self._cov[s, s]) * j[None, :]
 
     def sd(self, node: str) -> np.ndarray:
+        if node in self._marg_var:  # low-rank (Woodbury) path: only marginal variances were formed
+            j = self._jacobian(node)
+            return np.sqrt(np.clip(self._marg_var[node], 1e-12, None)) * j
         return np.sqrt(np.clip(np.diag(np.atleast_2d(self.cov(node))), 1e-12, None))
 
     def posterior(self, node: str, *, coupling: bool = True) -> tuple[np.ndarray, np.ndarray]:
@@ -531,6 +547,28 @@ def fit_field(
 
         u_star = u.detach().clone().requires_grad_(True)
         jac = torch.autograd.functional.jacobian(residual_vec, u_star).detach().numpy()
+
+        # Low-rank (Woodbury) fast path for the field marginals: when the field is the only latent and its
+        # prior covariance K is available (e.g. an RBF kernel), the posterior covariance
+        # (K^-1 + J^T J)^-1 = K - K J^T (I + J K J^T)^-1 J K is formed without any dense n_field inverse --
+        # only an n_obs x n_obs solve -- so the marginal sds scale to large fields. n_resid is the sensor count.
+        field_only = field.dim > 0 and pos == field.dim  # layout holds the field and nothing else
+        if field_only and field.covariance is not None:
+            K = field.covariance
+            M = K @ jac.T  # n_field x n_resid  (= K J^T)
+            C = np.linalg.inv(np.eye(jac.shape[0]) + jac @ M)  # n_resid x n_resid
+            marg_var = np.diag(K) - np.einsum("ij,jk,ik->i", M, C, M)
+            return FieldPosterior(
+                map_values,
+                np.zeros((0, 0)),
+                layout,
+                field_name,
+                np.zeros((0, 0)),
+                obj,
+                _supports=node_support,
+                _marg_var={field_name: marg_var},
+            )
+
         H = jac.T @ jac
         if field.dim > 0:
             lo, hi = layout[field_name]
