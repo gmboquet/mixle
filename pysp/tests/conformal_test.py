@@ -4,7 +4,16 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import ConformalClassifier, ConformalRegressor, Field, Normal, conformal, free
+from pysp.ppl import (
+    ConformalClassifier,
+    ConformalLinkPredictor,
+    ConformalRegressor,
+    ConformalStructure,
+    Field,
+    Normal,
+    conformal,
+    free,
+)
 from pysp.ppl.conformal import conformal_quantile
 
 
@@ -64,7 +73,9 @@ class ConformalQuantileRegressorTestCase(unittest.TestCase):
         from pysp.ppl import ConformalQuantileRegressor
 
         lo, hi = self._qfit(0.05), self._qfit(0.95)
-        cqr = ConformalQuantileRegressor(lo.result, hi.result, self.y[self.cal], given={"x": list(self.x[self.cal])}, alpha=0.1)
+        cqr = ConformalQuantileRegressor(
+            lo.result, hi.result, self.y[self.cal], given={"x": list(self.x[self.cal])}, alpha=0.1
+        )
         cov = cqr.covers(self.y[self.te], given={"x": list(self.x[self.te])}).mean()
         self.assertGreater(cov, 0.86)
         self.assertLess(cov, 0.95)
@@ -107,6 +118,76 @@ class ConformalClassifierTestCase(unittest.TestCase):
         sizes = cc.set_sizes(self.P[self.te])
         self.assertGreaterEqual(sizes.min(), 1)  # never empty in practice for a decent model
         self.assertLessEqual(sizes.max(), 4)
+
+
+class ConformalStructureTestCase(unittest.TestCase):
+    def _pl(self):
+        from pysp.stats import PlackettLuceDistribution
+
+        return PlackettLuceDistribution(np.log([5.0, 4.0, 3.0, 2.0, 1.0]))
+
+    def test_ranking_set_coverage_and_membership(self):
+        pl = self._pl()
+        cal = pl.sampler(seed=1).sample(2000)
+        te = pl.sampler(seed=2).sample(4000)
+        cs = ConformalStructure(pl, cal, alpha=0.1)
+        cov = cs.covers(te).mean()
+        self.assertGreater(cov, 0.88)  # finite-sample valid (conservative for discrete scores)
+        self.assertLess(cov, 0.97)
+        self.assertTrue(cs.contains([0, 1, 2, 3, 4]))  # the modal ranking is in the set
+        self.assertTrue(0 < cs.size() < 120)  # a strict subset of the 5! permutations
+
+    def test_set_grows_as_alpha_shrinks(self):
+        pl = self._pl()
+        cal = pl.sampler(seed=1).sample(2000)
+        sizes = [ConformalStructure(pl, cal, alpha=a).size() for a in (0.2, 0.1, 0.05)]
+        self.assertLessEqual(sizes[0], sizes[1])
+        self.assertLessEqual(sizes[1], sizes[2])
+
+    def test_members_respect_threshold(self):
+        pl = self._pl()
+        cs = ConformalStructure(pl, pl.sampler(seed=3).sample(1500), alpha=0.1)
+        for s in cs.members():
+            self.assertGreaterEqual(pl.log_density(s), cs.log_prob_threshold - 1e-9)
+            self.assertTrue(cs.contains(s))
+
+    def test_mallows_structures(self):
+        from pysp.stats import MallowsDistribution
+
+        m = MallowsDistribution(list(range(5)), 0.8)
+        cs = ConformalStructure(m, m.sampler(seed=1).sample(2000), alpha=0.1)
+        self.assertGreater(cs.covers(m.sampler(seed=2).sample(4000)).mean(), 0.88)
+
+
+class ConformalLinkPredictorTestCase(unittest.TestCase):
+    def _graph(self):
+        rng = np.random.RandomState(0)
+        n, d = 300, 2
+        X = np.abs(rng.normal(0, 1, (n, d)))
+        X /= np.linalg.norm(X, axis=1, keepdims=True) * 1.5
+        P = np.clip(X @ X.T, 0, 1)
+        np.fill_diagonal(P, 0.0)
+        A = (rng.random((n, n)) < P).astype(int)
+        A = np.triu(A, 1)
+        A = A + A.T
+        edges = np.argwhere(np.triu(A, 1) == 1)
+        rng.shuffle(edges)
+        return P, edges
+
+    def test_edge_coverage(self):
+        P, edges = self._graph()
+        cut = len(edges) // 2
+        clp = ConformalLinkPredictor(P, edges[:cut], alpha=0.1)
+        cov = clp.covers(edges[cut:]).mean()
+        self.assertGreater(cov, 0.86)
+        self.assertLess(cov, 0.95)
+        sizes = clp.set_sizes()
+        self.assertEqual(sizes.size, P.shape[0])
+        self.assertGreaterEqual(sizes.min(), 0)
+
+    def test_non_square_raises(self):
+        with self.assertRaises(ValueError):
+            ConformalLinkPredictor(np.zeros((3, 4)), [(0, 1)], alpha=0.1)
 
 
 if __name__ == "__main__":
