@@ -73,6 +73,7 @@ from pysp.ppl.field import (
     fit_field,
     joint,
 )
+from pysp.ppl.inverse import DifferentialProxy, integrate_ode
 from pysp.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
 from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
 from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator, HiddenMarkovModelDistribution
@@ -179,6 +180,8 @@ __all__ = [
     "Niche",
     "Cox",
     "joint",
+    "DifferentialProxy",
+    "integrate_ode",
     "conformal",
     "ConformalRegressor",
     "ConformalClassifier",
