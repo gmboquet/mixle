@@ -306,6 +306,7 @@ class FieldPosterior:
     objective: float
     _field_prior: np.ndarray = _dc_field(default_factory=lambda: np.zeros((0, 0)))
     _proxy_info: dict = _dc_field(default_factory=dict)  # proxy label -> field Fisher-information block
+    _supports: dict = _dc_field(default_factory=dict)  # node -> 'real' | 'positive'
 
     def mean(self, node: str) -> np.ndarray:
         return self.map_values[node]
@@ -316,23 +317,37 @@ class FieldPosterior:
         lo, hi = self._layout[node]
         return slice(lo, hi)
 
+    def _jacobian(self, node: str) -> np.ndarray:
+        """d(natural value)/d(unconstrained) for the delta method: the value itself for a log link, else 1."""
+        if self._supports.get(node, "real") == "positive":
+            return np.atleast_1d(np.asarray(self.map_values[node], dtype=float))
+        lo, hi = self._layout[node]
+        return np.ones(hi - lo)
+
     def cov(self, node: str) -> np.ndarray:
+        """Posterior covariance of ``node`` in its natural space (delta method applied for positive nodes)."""
         s = self._slice(node)
-        return self._cov[s, s]
+        j = self._jacobian(node)
+        return (j[:, None] * self._cov[s, s]) * j[None, :]
 
     def sd(self, node: str) -> np.ndarray:
         return np.sqrt(np.clip(np.diag(np.atleast_2d(self.cov(node))), 1e-12, None))
 
     def posterior(self, node: str, *, coupling: bool = True) -> tuple[np.ndarray, np.ndarray]:
-        """``(mean, sd)`` for ``node``. ``coupling=True`` (default) marginalizes the other nodes
-        (the honest marginal); ``coupling=False`` fixes them at the MAP (additive-information picture)."""
+        """``(mean, sd)`` for ``node`` in its natural space. ``coupling=True`` (default) marginalizes the
+        other nodes (the honest marginal); ``coupling=False`` fixes them at the MAP (additive information)."""
         m = self.map_values[node]
         if coupling:
             sd = self.sd(node)
         else:
             s = self._slice(node)
             block = self._hessian[s, s]
-            sd = np.sqrt(np.clip(np.diag(np.linalg.inv(np.atleast_2d(block))), 1e-12, None))
+            j = self._jacobian(node)
+            sd_u = np.sqrt(np.clip(np.diag(np.linalg.inv(np.atleast_2d(block))), 1e-12, None))
+            sd = j * sd_u
+        lo, hi = self._layout[node]
+        if hi - lo == 1:  # a scalar node returns scalars, matching its scalar MAP value
+            return m, float(sd[0])
         return m, sd
 
     def field_posterior(self, include: Sequence[str] | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -357,6 +372,8 @@ class FieldPosterior:
         out = {}
         for node in self._layout:
             m = np.atleast_1d(self.map_values[node])
+            if m.size == 0:  # the degenerate no-field node in pure-parameter inference
+                continue
             sd = self.sd(node)
             out[node] = {"mean": m if m.size > 1 else float(m[0]), "sd": sd if sd.size > 1 else float(sd[0])}
         return out
@@ -368,8 +385,16 @@ def _support_transforms(support: str):
     return (lambda u, t: u, lambda v: v)
 
 
+class _NoField:
+    """A degenerate field (no shared latent) so fit_field also serves pure-parameter inference."""
+
+    name = "_field"
+    dim = 0
+    precision = np.zeros((0, 0))
+
+
 def fit_field(
-    field: GaussianField,
+    field: GaussianField | None,
     proxies: Sequence[Proxy],
     *,
     how: str = "laplace",
@@ -379,13 +404,16 @@ def fit_field(
 ) -> FieldPosterior:
     """Fit a latent field jointly to a list of proxy likelihoods.
 
-    ``how='map'`` returns the joint MAP (no covariance); ``how='laplace'`` adds the Gaussian posterior
-    (the inverse-Hessian covariance, exact when every factor is Gaussian). Posteriors over any node are
-    then read off the returned :class:`FieldPosterior`.
+    ``field=None`` runs pure-parameter inference (the proxies carry all the latents, e.g. ODE/PDE
+    coefficients) with no shared field. ``how='map'`` returns the joint MAP (no covariance);
+    ``how='laplace'`` adds the Gaussian posterior (the inverse-Hessian covariance, exact when every
+    factor is Gaussian). Posteriors over any node are read off the returned :class:`FieldPosterior`.
     """
     if how not in ("map", "laplace"):
         raise ValueError("how must be 'map' or 'laplace' (the dedicated field builder; PPL how='vi' comes later).")
     torch = _torch()
+    if field is None:
+        field = _NoField()
 
     # ----- assemble the flat parameter layout: the field first, then each proxy's params -----
     layout: dict[str, tuple[int, int]] = {}
@@ -393,10 +421,13 @@ def fit_field(
     init_vals: list[np.ndarray] = []
     pos = 0
 
+    node_support: dict[str, str] = {}
+
     def add(name, size, support, value):
         nonlocal pos
         layout[name] = (pos, pos + size)
         supports.extend([support] * size)
+        node_support[name] = support
         init_vals.append(np.atleast_1d(np.asarray(value, dtype=float)).ravel())
         pos += size
 
@@ -416,15 +447,15 @@ def fit_field(
         out = {}
         for name, (lo, hi) in layout.items():
             seg = u_t[lo:hi]
-            if supports_arr[lo] == "positive":
+            if hi > lo and supports_arr[lo] == "positive":
                 seg = torch.exp(seg)
-            out[name] = seg if (hi - lo) > 1 else seg[0]
+            out[name] = seg if (hi - lo) != 1 else seg[0]  # vector/empty -> array, scalar -> 0-d
         return out
 
     def neg_log_post(u_t):
         vals = unpack(u_t)
         f = vals[field_name]
-        nlp = 0.5 * f @ (Lambda @ f)  # Gaussian field prior: -log p(field) up to a constant
+        nlp = 0.0 if field.dim == 0 else 0.5 * f @ (Lambda @ f)  # Gaussian field prior, up to a constant
         for px in proxies:
             nlp = nlp - px.loglik(f, vals, torch)
         return nlp
@@ -447,12 +478,14 @@ def fit_field(
     map_values: dict[str, np.ndarray] = {}
     for name, (lo, hi) in layout.items():
         seg = u_np[lo:hi]
-        if supports_arr[lo] == "positive":
+        if hi > lo and supports_arr[lo] == "positive":
             seg = np.exp(seg)
-        map_values[name] = seg if (hi - lo) > 1 else float(seg[0])
+        map_values[name] = seg if (hi - lo) != 1 else float(seg[0])
 
     if how == "map":
-        return FieldPosterior(map_values, np.zeros((0, 0)), layout, field_name, np.zeros((0, 0)), obj)
+        return FieldPosterior(
+            map_values, np.zeros((0, 0)), layout, field_name, np.zeros((0, 0)), obj, _supports=node_support
+        )
 
     # ----- per-proxy field Fisher information at the MAP (information is additive across proxies) -----
     map_t = {
@@ -470,6 +503,8 @@ def fit_field(
 
     for px in proxies:
         label = _proxy_label(px)
+        if field.dim == 0:  # no shared field -> no per-proxy field information to attribute
+            continue
 
         def negll(fv, _px=px):
             vals = dict(map_t)
@@ -485,7 +520,8 @@ def fit_field(
     H = 0.5 * (H + H.T)
     cov = np.linalg.inv(H + 1e-10 * np.eye(H.shape[0]))
     return FieldPosterior(
-        map_values, cov, layout, field_name, H, obj, _field_prior=field.precision, _proxy_info=proxy_info
+        map_values, cov, layout, field_name, H, obj,
+        _field_prior=field.precision, _proxy_info=proxy_info, _supports=node_support,
     )
 
 
