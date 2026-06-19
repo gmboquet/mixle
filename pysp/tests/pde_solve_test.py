@@ -51,6 +51,25 @@ class SparseSolveTestCase(unittest.TestCase):
         self.assertLess(float((vals.grad - av.grad).abs().max()), 1e-8)
         self.assertLess(float((b1.grad - b2.grad).abs().max()), 1e-8)
 
+    def test_complex_adjoint_gradient_matches_dense(self):
+        # the adjoint must use the conjugate transpose for complex systems (Helmholtz / EM scattering)
+        torch.manual_seed(2)
+        n = 10
+        m = torch.randn(n, n) + 1j * torch.randn(n, n)
+        A = m @ m.conj().T + n * torch.eye(n)
+        b = torch.randn(n, dtype=torch.complex128)
+        r, c = torch.meshgrid(torch.arange(n), torch.arange(n), indexing="ij")
+        r, c = r.reshape(-1), c.reshape(-1)
+
+        vals = A.reshape(-1).clone().requires_grad_(True)
+        u = sparse_solve(vals, r, c, n, b)
+        (u.real**2 + u.imag**2).sum().backward()
+
+        av = A.reshape(-1).clone().requires_grad_(True)
+        u2 = torch.linalg.solve(av.reshape(n, n), b)
+        (u2.real**2 + u2.imag**2).sum().backward()
+        self.assertLess(float((vals.grad - av.grad).abs().max()), 1e-9)
+
 
 @unittest.skipUnless(HAS_TORCH, "requires PyTorch")
 class AssemblyTestCase(unittest.TestCase):
