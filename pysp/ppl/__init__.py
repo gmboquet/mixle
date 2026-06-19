@@ -75,6 +75,7 @@ from pysp.ppl.field import (
     joint,
 )
 from pysp.ppl.inverse import Differential
+from pysp.ppl.shape import level_set_material, shape_optimize
 
 # Low-level numeric primitives (sparse_solve, grid assembly, the ODE integrator) live in
 # pysp.ppl.pde_solve and are reached through the `ops` namespace handed to forward callbacks; they are
@@ -187,6 +188,8 @@ __all__ = [
     "joint",
     "FieldModel",
     "Differential",
+    "shape_optimize",
+    "level_set_material",
     "conformal",
     "ConformalRegressor",
     "ConformalClassifier",
