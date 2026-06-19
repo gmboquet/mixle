@@ -189,7 +189,7 @@ class PPLNativeSurfaceTestCase(unittest.TestCase):
         pres = (rng.rand(S, n) < 1 / (1 + np.exp(-logit))).astype(float)
 
         T = GP("T", index=np.arange(n), kernel=RandomWalk(scale=0.3, ridge=3.0))
-        post = joint([Gaussian(d18, mean=c0 - c1 * T, sd=sig), Niche(pres, over=T)], how="laplace", max_iter=400)
+        post = joint([Gaussian(d18, mean=c0 - c1 * T, sd=sig), Niche(pres, over=T)]).fit(how="laplace", max_iter=400)
         _, sd_native = post.field_posterior()
 
         field = GaussianField(np.arange(n), RandomWalk(scale=0.3, ridge=3.0), name="T")
@@ -209,7 +209,7 @@ class PPLNativeSurfaceTestCase(unittest.TestCase):
         kchol = np.linalg.cholesky(np.linalg.inv(field_gp.field.precision))
         log_intensity = kchol @ rng.randn(n)
         counts = rng.poisson(np.exp(2.0 + log_intensity))
-        post = joint([Cox(counts, log_intensity=field_gp, offset=2.0)], how="laplace", max_iter=400)
+        post = joint([Cox(counts, log_intensity=field_gp, offset=2.0)]).fit(how="laplace", max_iter=400)
         f_map, sd = post.posterior("logmu")
         self.assertGreater(np.corrcoef(f_map, log_intensity)[0, 1], 0.8)
 
