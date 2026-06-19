@@ -192,6 +192,30 @@ class RegularizedRegressionTestCase(unittest.TestCase):
         ols = Normal(self._build(lambda j: free), free).fit(list(self.y), given=self.given)
         self.assertLess(np.abs(coefs).max(), np.abs(self._coefs(ols)).max() + 1e-9)  # shrunk
 
+    def test_elastic_net_groups_correlated_features(self):
+        from pysp.ppl import Laplace
+
+        rng = np.random.RandomState(0)
+        nn, p = 200, 8
+        z = rng.normal(0, 1, (nn, 1))
+        Xc = np.concatenate([z + 0.05 * rng.normal(0, 1, (nn, 3)), rng.normal(0, 1, (nn, p - 3))], axis=1)
+        y = Xc @ np.r_[np.full(3, 2.0), np.zeros(p - 3)] + rng.normal(0, 0.5, nn)
+        given = {f"x{j}": list(Xc[:, j]) for j in range(p)}
+
+        def build(coef):
+            t = coef(0) * Field("x0")
+            for j in range(1, p):
+                t = t + coef(j) * Field(f"x{j}")
+            return t + coef("intercept")
+
+        def coefs(m):
+            return np.array([m.result.coefficients[f"x{j}"]["mean"] for j in range(p)])
+
+        lasso = Normal(build(lambda j: Laplace(0, 0.1)), free).fit(list(y), given=given)
+        enet = Normal(build(lambda j: Laplace(0, 0.1)), free).fit(list(y), given=given, l2=2.0)
+        # the global L2 spreads weight across the correlated group instead of concentrating on one
+        self.assertGreater(np.abs(coefs(enet)[:3]).min(), np.abs(coefs(lasso)[:3]).min())
+
 
 if __name__ == "__main__":
     unittest.main()
