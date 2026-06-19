@@ -55,6 +55,19 @@ from pysp.ppl.core import (
     register_composite,
     register_family,
 )
+from pysp.ppl.field import (
+    RBF,
+    CustomProxy,
+    FieldKernel,
+    FieldPosterior,
+    GaussianField,
+    GaussianProxy,
+    LogisticNicheProxy,
+    PoissonProxy,
+    Proxy,
+    RandomWalk,
+    fit_field,
+)
 from pysp.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
 from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
 from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator, HiddenMarkovModelDistribution
@@ -145,6 +158,17 @@ __all__ = [
     "concave",
     "lipschitz",
     "ode_residual",
+    "GaussianField",
+    "FieldKernel",
+    "RandomWalk",
+    "RBF",
+    "Proxy",
+    "GaussianProxy",
+    "LogisticNicheProxy",
+    "PoissonProxy",
+    "CustomProxy",
+    "fit_field",
+    "FieldPosterior",
     "conformal",
     "ConformalRegressor",
     "ConformalClassifier",
