@@ -75,6 +75,7 @@ from pysp.ppl.field import (
     joint,
     multistart,
 )
+from pysp.ppl.flow import NavierStokes2D
 from pysp.ppl.inverse import Differential
 from pysp.ppl.priors import Potts, TotalVariation
 from pysp.ppl.shape import level_set_material, shape_optimize
@@ -195,6 +196,7 @@ __all__ = [
     "TotalVariation",
     "Potts",
     "multistart",
+    "NavierStokes2D",
     "conformal",
     "ConformalRegressor",
     "ConformalClassifier",
