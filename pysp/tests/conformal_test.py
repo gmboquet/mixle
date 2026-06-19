@@ -190,5 +190,37 @@ class ConformalLinkPredictorTestCase(unittest.TestCase):
             ConformalLinkPredictor(np.zeros((3, 4)), [(0, 1)], alpha=0.1)
 
 
+class ConformalKnowledgeGraphTestCase(unittest.TestCase):
+    def setUp(self):
+        from pysp.stats import KnowledgeGraphEstimator
+        from pysp.utils.estimation import optimize
+
+        rng = np.random.RandomState(0)
+        nE, nR, d = 50, 4, 12
+        ent, rel = rng.normal(0, 1, (nE, d)), rng.normal(0, 1, (nR, d))
+        tri = [
+            (int(h), int(r), int(np.argmax(ent @ (ent[h] * rel[r]))))
+            for h, r in zip(rng.randint(nE, size=6000), rng.randint(nR, size=6000))
+        ]
+        self.m = optimize(tri, KnowledgeGraphEstimator(nE, nR, dim=d, seed=1), max_its=1, rng=rng, print_iter=10**9)
+        self.cal, self.te = tri[:2000], tri[2000:4000]
+
+    def test_completion_set_coverage_all_slots(self):
+        from pysp.ppl import ConformalKnowledgeGraph
+
+        for slot in ("tail", "head", "relation"):
+            ck = ConformalKnowledgeGraph(self.m, self.cal, slot=slot, alpha=0.1)
+            cov = ck.covers(self.te).mean()
+            self.assertGreater(cov, 0.86, slot)
+            self.assertLess(cov, 0.96, slot)
+            self.assertGreaterEqual(ck.set_sizes(self.te).min(), 0)
+
+    def test_bad_slot_raises(self):
+        from pysp.ppl import ConformalKnowledgeGraph
+
+        with self.assertRaises(ValueError):
+            ConformalKnowledgeGraph(self.m, self.cal, slot="entity", alpha=0.1)
+
+
 if __name__ == "__main__":
     unittest.main()

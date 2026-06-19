@@ -239,6 +239,58 @@ class ConformalLinkPredictor:
         return np.array([self.neighbor_set(i).size for i in nodes], dtype=int)
 
 
+class ConformalKnowledgeGraph:
+    """Split-conformal completion sets for a knowledge-graph model (any-slot UQ).
+
+    Calibrating on held-out true triples turns the model's completion posterior into a *set* of
+    candidate fillers that contains the true one with probability at least ``1 - alpha`` over
+    exchangeable held-out triples.  ``slot`` selects which slot is predicted -- ``'tail'`` for
+    ``(h, r, ?)``, ``'head'`` for ``(?, r, t)``, ``'relation'`` for ``(h, ?, t)`` -- using the model's
+    ``tail_log_posterior`` / ``head_log_posterior`` / ``relation_log_posterior``.  The nonconformity of
+    a triple is ``1 - p(true filler)``, so a confident model gives small completion sets and a recommended
+    completion carries a coverage guarantee.
+    """
+
+    def __init__(self, kg: Any, calibration: Any, *, slot: str = "tail", alpha: float = 0.1) -> None:
+        if slot not in ("tail", "head", "relation"):
+            raise ValueError("slot must be 'tail', 'head', or 'relation'.")
+        self.kg = kg
+        self.slot = slot
+        self.alpha = float(alpha)
+        scores = [1.0 - float(np.exp(self._posterior(h, r, t)[self._truth(h, r, t)])) for h, r, t in calibration]
+        self.tau = conformal_quantile(scores, self.alpha)
+
+    def _posterior(self, h: int, r: int, t: int) -> np.ndarray:
+        if self.slot == "tail":
+            return self.kg.tail_log_posterior(int(h), int(r))
+        if self.slot == "head":
+            return self.kg.head_log_posterior(int(r), int(t))
+        return self.kg.relation_log_posterior(int(h), int(t))
+
+    def _truth(self, h: int, r: int, t: int) -> int:
+        return int({"tail": t, "head": h, "relation": r}[self.slot])
+
+    def completion_set(self, h: int | None = None, r: int | None = None, t: int | None = None) -> np.ndarray:
+        """Candidate fillers in the conformal set for the missing slot of a query."""
+        p = np.exp(self.kg.complete(h=h, r=r, t=t))
+        return np.flatnonzero((1.0 - p) <= self.tau)
+
+    def covers(self, triples: Any) -> np.ndarray:
+        """Boolean array: is each held-out true triple's filler in the completion set."""
+        return np.array(
+            [(1.0 - np.exp(self._posterior(h, r, t)[self._truth(h, r, t)])) <= self.tau for h, r, t in triples],
+            dtype=bool,
+        )
+
+    def set_sizes(self, triples: Any) -> np.ndarray:
+        """Completion-set size for each query (the slot of each triple is treated as missing)."""
+        out = []
+        for h, r, t in triples:
+            q = {"tail": (h, r, None), "head": (None, r, t), "relation": (h, None, t)}[self.slot]
+            out.append(self.completion_set(*q).size)
+        return np.array(out, dtype=int)
+
+
 def conformal(result: Any, y_cal: Any, *, given: dict, alpha: float = 0.1) -> ConformalRegressor:
     """Split-conformal calibration of a fitted regression ``result`` into prediction intervals.
 
