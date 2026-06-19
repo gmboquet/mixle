@@ -73,8 +73,10 @@ from pysp.ppl.field import (
     RandomWalk,
     fit_field,
     joint,
+    multistart,
 )
 from pysp.ppl.inverse import Differential
+from pysp.ppl.priors import Potts, TotalVariation
 from pysp.ppl.shape import level_set_material, shape_optimize
 
 # Low-level numeric primitives (sparse_solve, grid assembly, the ODE integrator) live in
@@ -190,6 +192,9 @@ __all__ = [
     "Differential",
     "shape_optimize",
     "level_set_material",
+    "TotalVariation",
+    "Potts",
+    "multistart",
     "conformal",
     "ConformalRegressor",
     "ConformalClassifier",
