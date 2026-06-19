@@ -157,6 +157,11 @@ class Proxy:
     def loglik(self, field_t: Any, params: dict, torch) -> Any:
         raise NotImplementedError
 
+    def residual(self, field_t: Any, params: dict, torch) -> Any:
+        """The standardized Gaussian residual ``(y - prediction) / scale`` (1-D), or ``None`` if this
+        proxy is not a Gaussian-misfit observation. Used by the Gauss-Newton posterior (``how='gauss_newton'``)."""
+        return None
+
 
 def _resolve(value, default_init, prefix, name, support):
     """A proxy coefficient is either a fixed float or the ``free`` token -> a scalar param to estimate."""
@@ -204,6 +209,13 @@ class GaussianProxy(Proxy):
         resid = (y - (intercept + slope * f)) / scale
         log_scale = torch.log(scale) if torch.is_tensor(scale) else float(np.log(scale))
         return -0.5 * torch.sum(resid * resid) - len(self.y) * (log_scale + 0.5 * np.log(2 * np.pi))
+
+    def residual(self, field_t, params, torch):
+        f = field_t if self.idx is None else field_t[torch.as_tensor(self.idx)]
+        slope = params[self._slope_p.name] if self._slope_p else self._slope_v
+        intercept = params[self._int_p.name] if self._int_p else self._int_v
+        scale = params[self._scale_p.name] if self._scale_p else self._scale_v
+        return (torch.as_tensor(self.y) - (intercept + slope * f)) / scale
 
 
 @dataclass
@@ -408,10 +420,13 @@ def fit_field(
     ``field=None`` runs pure-parameter inference (the proxies carry all the latents, e.g. ODE/PDE
     coefficients) with no shared field. ``how='map'`` returns the joint MAP (no covariance);
     ``how='laplace'`` adds the Gaussian posterior (the inverse-Hessian covariance, exact when every
-    factor is Gaussian). Posteriors over any node are read off the returned :class:`FieldPosterior`.
+    factor is Gaussian; needs a twice-differentiable forward); ``how='gauss_newton'`` builds the posterior
+    from ``J^T J + prior`` with ``J`` the Jacobian of the standardized residual -- first-order only, so it
+    is the posterior for the sparse adjoint solve (where ``how='laplace'`` cannot run) and is exact for a
+    linear forward. Posteriors over any node are read off the returned :class:`FieldPosterior`.
     """
-    if how not in ("map", "laplace"):
-        raise ValueError("how must be 'map' or 'laplace' (the dedicated field builder; PPL how='vi' comes later).")
+    if how not in ("map", "laplace", "gauss_newton"):
+        raise ValueError("how must be 'map', 'laplace', or 'gauss_newton'.")
     torch = _torch()
     if field is None:
         field = _NoField()
@@ -472,7 +487,15 @@ def fit_field(
         return loss
 
     opt.step(closure)
-    obj = float(neg_log_post(u).detach())
+    from pysp.ppl.pde_solve import sparse_used_since
+
+    sparse_used_since(reset=True)
+    obj = float(neg_log_post(u).detach())  # one eval to detect whether the forward uses the sparse solve
+    if how == "laplace" and sparse_used_since():
+        raise ValueError(
+            "how='laplace' builds a dense Hessian by double-backward, which the adjoint sparse solve does "
+            "not support (the Hessian would be silently wrong). Use how='gauss_newton' for sparse forwards."
+        )
 
     # ----- read constrained MAP values per node -----
     u_np = u.detach().numpy()
@@ -486,6 +509,35 @@ def fit_field(
     if how == "map":
         return FieldPosterior(
             map_values, np.zeros((0, 0)), layout, field_name, np.zeros((0, 0)), obj, _supports=node_support
+        )
+
+    if how == "gauss_newton":
+        # Gauss-Newton posterior: H = J^T J + prior precision, J the Jacobian of the standardized residual.
+        # Uses only first-order gradients (one adjoint solve per residual), so it works with the sparse
+        # adjoint solve where the dense Hessian (how='laplace') cannot, and is exact for a linear forward.
+        def residual_vec(u_t):
+            vals = unpack(u_t)
+            f = vals[field_name]
+            parts = []
+            for px in proxies:
+                r = px.residual(f, vals, torch)
+                if r is None:
+                    raise ValueError(
+                        f"how='gauss_newton' needs Gaussian-misfit observations; {type(px).__name__} has no residual()."
+                    )
+                parts.append(torch.atleast_1d(r))
+            return torch.cat(parts)
+
+        u_star = u.detach().clone().requires_grad_(True)
+        jac = torch.autograd.functional.jacobian(residual_vec, u_star).detach().numpy()
+        H = jac.T @ jac
+        if field.dim > 0:
+            lo, hi = layout[field_name]
+            H[lo:hi, lo:hi] += field.precision  # the field prior precision (Gauss-Newton adds it to J^T J)
+        H = 0.5 * (H + H.T) + 1e-10 * np.eye(H.shape[0])
+        cov = np.linalg.inv(H)
+        return FieldPosterior(
+            map_values, cov, layout, field_name, H, obj, _field_prior=field.precision, _supports=node_support
         )
 
     # ----- per-proxy field Fisher information at the MAP (information is additive across proxies) -----
@@ -533,8 +585,15 @@ def fit_field(
     H = 0.5 * (H + H.T)
     cov = np.linalg.inv(H + 1e-10 * np.eye(H.shape[0]))
     return FieldPosterior(
-        map_values, cov, layout, field_name, H, obj,
-        _field_prior=field.precision, _proxy_info=proxy_info, _supports=node_support,
+        map_values,
+        cov,
+        layout,
+        field_name,
+        H,
+        obj,
+        _field_prior=field.precision,
+        _proxy_info=proxy_info,
+        _supports=node_support,
     )
 
 
