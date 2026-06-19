@@ -20,6 +20,7 @@ import numpy as np
 
 from pysp.ppl.conformal import (
     ConformalClassifier,
+    ConformalKnowledgeGraph,
     ConformalLinkPredictor,
     ConformalQuantileRegressor,
     ConformalRegressor,
@@ -150,6 +151,7 @@ __all__ = [
     "ConformalQuantileRegressor",
     "ConformalStructure",
     "ConformalLinkPredictor",
+    "ConformalKnowledgeGraph",
 ]
 
 
