@@ -431,6 +431,9 @@ def fit_field(
     max_iter: int = 500,
     lr: float = 0.4,
     init: dict | None = None,
+    vi_steps: int = 400,
+    vi_lr: float = 0.05,
+    vi_samples: int = 4,
 ) -> FieldPosterior:
     """Fit a latent field jointly to a list of proxy likelihoods.
 
@@ -440,10 +443,13 @@ def fit_field(
     factor is Gaussian; needs a twice-differentiable forward); ``how='gauss_newton'`` builds the posterior
     from ``J^T J + prior`` with ``J`` the Jacobian of the standardized residual -- first-order only, so it
     is the posterior for the sparse adjoint solve (where ``how='laplace'`` cannot run) and is exact for a
-    linear forward. Posteriors over any node are read off the returned :class:`FieldPosterior`.
+    linear forward; ``how='vi'`` fits a mean-field Gaussian variational posterior (reparameterized ADVI on
+    the unconstrained vector), the calibrated approximation for genuinely non-Gaussian posteriors (e.g. with
+    total-variation / Potts priors), and it too is first-order so it works through the sparse solve.
+    Posteriors over any node are read off the returned :class:`FieldPosterior`.
     """
-    if how not in ("map", "laplace", "gauss_newton"):
-        raise ValueError("how must be 'map', 'laplace', or 'gauss_newton'.")
+    if how not in ("map", "laplace", "gauss_newton", "vi"):
+        raise ValueError("how must be 'map', 'laplace', 'gauss_newton', or 'vi'.")
     torch = _torch()
     if field is None:
         field = _NoField()
@@ -577,6 +583,45 @@ def fit_field(
         cov = np.linalg.inv(H)
         return FieldPosterior(
             map_values, cov, layout, field_name, H, obj, _field_prior=field.precision, _supports=node_support
+        )
+
+    if how == "vi":
+        # Mean-field Gaussian variational posterior over the unconstrained vector, by reparameterized ADVI
+        # (initialized at the MAP). First-order only, so it works through the sparse solve, and -- unlike
+        # Laplace -- it is a genuine variational fit for non-Gaussian posteriors (e.g. TV / Potts priors).
+        n_u = u0.shape[0]
+        mu = u.detach().clone().requires_grad_(True)
+        log_sigma = torch.full((n_u,), -2.0, dtype=torch.double, requires_grad=True)
+        opt2 = torch.optim.Adam([mu, log_sigma], lr=vi_lr)
+        for _ in range(vi_steps):
+            opt2.zero_grad()
+            sigma = torch.exp(log_sigma)
+            neg = 0.0
+            for _ in range(vi_samples):
+                neg = neg + neg_log_post(mu + sigma * torch.randn(n_u, dtype=torch.double))
+            loss = neg / vi_samples - log_sigma.sum()  # -ELBO = E_q[neg_log_post] - entropy(q)
+            loss.backward()
+            opt2.step()
+        mu_np = mu.detach().numpy()
+        var_np = np.exp(2.0 * log_sigma.detach().numpy())
+        vi_values: dict[str, np.ndarray] = {}
+        vi_marg: dict[str, np.ndarray] = {}
+        for name, (lo, hi) in layout.items():
+            seg = mu_np[lo:hi]
+            if hi > lo and supports_arr[lo] == "positive":
+                seg = np.exp(seg)
+            vi_values[name] = seg if (hi - lo) != 1 else float(seg[0])
+            if hi > lo:
+                vi_marg[name] = var_np[lo:hi]
+        return FieldPosterior(
+            vi_values,
+            np.zeros((0, 0)),
+            layout,
+            field_name,
+            np.zeros((0, 0)),
+            float(neg_log_post(mu).detach()),
+            _supports=node_support,
+            _marg_var=vi_marg,
         )
 
     # ----- per-proxy field Fisher information at the MAP (information is additive across proxies) -----
