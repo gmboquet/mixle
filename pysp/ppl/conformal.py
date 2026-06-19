@@ -150,6 +150,60 @@ class ConformalQuantileRegressor:
         return (y >= lo) & (y <= hi)
 
 
+class ConformalStructure:
+    """Split-conformal credible sets over combinatorial structures (rankings, matchings, spanning
+    trees, permutations, ...) from a fitted pysparkplug distribution's exact log-density.
+
+    The nonconformity of a structure ``s`` is ``-log p(s)``: the lower its model probability, the
+    more surprising it is.  Calibrating on held-out true structures yields a log-probability
+    threshold, and the conformal set is ``{s : log p(s) >= threshold}`` — it contains the true
+    structure with probability at least ``1 - alpha`` whenever the calibration and test structures
+    are exchangeable (for example iid draws), with no assumption on the model being correct.
+
+    ``dist`` is any structure distribution exposing ``log_density`` (``PlackettLuceDistribution``,
+    ``MallowsDistribution``, ``MatchingDistribution``, ``SpanningTreeDistribution``, ...);
+    ``calibration`` is a sequence of observed structures.  Membership is always available; listing or
+    counting the set additionally needs the distribution's exact ``enumerator()``.
+    """
+
+    def __init__(self, dist: Any, calibration: Any, *, alpha: float = 0.1) -> None:
+        self.dist = dist
+        self.alpha = float(alpha)
+        self.scores = np.array([-float(dist.log_density(s)) for s in calibration], dtype=float)
+        self.qhat = conformal_quantile(self.scores, self.alpha)  # largest admitted nonconformity
+
+    @property
+    def log_prob_threshold(self) -> float:
+        """Structures with ``log p(s)`` at or above this value are in the conformal set."""
+        return -self.qhat
+
+    def contains(self, structure: Any) -> bool:
+        """Is ``structure`` in the conformal set (its log-probability above the threshold)."""
+        return bool(-float(self.dist.log_density(structure)) <= self.qhat)
+
+    def covers(self, structures: Any) -> np.ndarray:
+        """Boolean array: membership of each structure (use on held-out truths to check coverage)."""
+        return np.array([self.contains(s) for s in structures], dtype=bool)
+
+    def members(self) -> list:
+        """List the structures in the conformal set, highest-probability first.
+
+        Requires the distribution's exact ``enumerator()`` (raises ``EnumerationError`` otherwise).
+        The enumerator yields structures in descending log-probability, so the scan stops at the
+        threshold.
+        """
+        out = []
+        for structure, log_p in self.dist.enumerator():
+            if log_p < self.log_prob_threshold:
+                break
+            out.append(structure)
+        return out
+
+    def size(self) -> int:
+        """Number of structures in the conformal set (needs the exact ``enumerator()``)."""
+        return len(self.members())
+
+
 def conformal(result: Any, y_cal: Any, *, given: dict, alpha: float = 0.1) -> ConformalRegressor:
     """Split-conformal calibration of a fitted regression ``result`` into prediction intervals.
 
