@@ -18,7 +18,13 @@ from typing import Any
 
 import numpy as np
 
-from pysp.ppl.conformal import ConformalClassifier, ConformalQuantileRegressor, ConformalRegressor, conformal
+from pysp.ppl.conformal import (
+    ConformalClassifier,
+    ConformalQuantileRegressor,
+    ConformalRegressor,
+    ConformalStructure,
+    conformal,
+)
 from pysp.ppl.core import (
     Constraint,
     Event,
@@ -141,6 +147,7 @@ __all__ = [
     "ConformalRegressor",
     "ConformalClassifier",
     "ConformalQuantileRegressor",
+    "ConformalStructure",
 ]
 
 
