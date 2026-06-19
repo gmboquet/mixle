@@ -117,6 +117,22 @@ class _Ops:
 
         return _matvec(rows, cols, vals, n, x, self._t)
 
+    def grad(self, field, shape, axis, *, spacing=1.0):
+        """Central finite-difference partial derivative of a flat field on a structured ``shape`` grid along
+        ``axis`` (interior; zero at the edges). Differentiable -- for assembling advection / velocities."""
+        t = self._t
+        a = field.reshape(tuple(int(s) for s in shape))
+        out = t.zeros_like(a)
+        sl = [slice(None)] * a.dim()
+        lo = list(sl)
+        hi = list(sl)
+        lo[axis] = slice(0, a.shape[axis] - 2)
+        hi[axis] = slice(2, a.shape[axis])
+        mid = list(sl)
+        mid[axis] = slice(1, a.shape[axis] - 1)
+        out[tuple(mid)] = (a[tuple(hi)] - a[tuple(lo)]) / (2.0 * spacing)
+        return out.reshape(-1)
+
     # differentiable grid assembly + adjoint sparse solve (the PDE forward operators)
     def divergence_form(self, kappa, shape, *, spacing=1.0):
         from pysp.ppl.pde_solve import divergence_form
