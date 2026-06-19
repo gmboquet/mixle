@@ -34,7 +34,15 @@ class NavierStokes2D:
     or initial vorticity, an inlet strength, a viscosity) flows through to the recorded velocities.
     """
 
-    def __init__(self, n: int, *, viscosity: float, dt: float, spacing: float | None = None):
+    def __init__(
+        self,
+        n: int,
+        *,
+        viscosity: float,
+        dt: float,
+        spacing: float | None = None,
+        implicit_diffusion: bool = False,
+    ):
         self.n = int(n)
         self.nu = float(viscosity)
         self.dt = float(dt)
@@ -43,6 +51,25 @@ class NavierStokes2D:
         mask = np.ones((n, n))
         mask[0] = mask[-1] = mask[:, 0] = mask[:, -1] = 0.0
         self._mask = mask.ravel()
+        self.implicit_diffusion = bool(implicit_diffusion)
+        self._implicit = self._build_implicit() if implicit_diffusion else None
+
+    def _build_implicit(self):
+        """Assemble ``I + dt*nu*(-laplacian)`` (interior; identity on the walls) for an implicit diffusion
+        step: ``(I + dt*nu*(-lap)) omega_{n+1} = omega_n - dt*advection``. Removes the diffusion CFL limit
+        (stable for any dt), so the explicit advection step alone bounds dt -- robust at higher viscosity."""
+        import scipy.sparse as sp
+
+        n2 = self.n * self.n
+        rows, cols, vals, _ = self._poisson
+        L = sp.csc_matrix((vals.numpy(), (rows.numpy(), cols.numpy())), shape=(n2, n2)).tolil()
+        for b in np.where(self._mask == 0.0)[0]:  # zero the boundary rows of L (kept identity by the +I below)
+            L.rows[b] = []
+            L.data[b] = []
+        M = (sp.identity(n2, format="csc") + self.dt * self.nu * L.tocsc()).tocoo()
+        import torch
+
+        return (torch.as_tensor(M.row), torch.as_tensor(M.col), torch.as_tensor(M.data, dtype=torch.float64), n2)
 
     def _interior_mask(self, ops):
         return ops.tensor(self._mask)
@@ -65,10 +92,15 @@ class NavierStokes2D:
         return ops.grad(psi, shape, 1, spacing=self.h), -ops.grad(psi, shape, 0, spacing=self.h)
 
     def step(self, omega, ops):
-        """Advance the vorticity one explicit time step."""
+        """Advance the vorticity one time step (explicit, or implicit-diffusion if requested)."""
         shape = (self.n, self.n)
+        mask = self._interior_mask(ops)
         psi = self.streamfunction(omega, ops)
         u, v = self.velocity(psi, ops)
         advection = u * ops.grad(omega, shape, 0, spacing=self.h) + v * ops.grad(omega, shape, 1, spacing=self.h)
+        if self.implicit_diffusion:
+            rhs = (omega - self.dt * advection) * mask  # diffusion handled by the implicit solve
+            r, c, vv, nn = self._implicit
+            return ops.sparse_solve(r, c, vv, nn, rhs) * mask
         omega_next = omega + self.dt * (-advection + self.nu * self._lap(omega, ops))
-        return omega_next * self._interior_mask(ops)
+        return omega_next * mask
