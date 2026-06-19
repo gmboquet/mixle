@@ -170,6 +170,21 @@ class KnowledgeGraphDistribution(SequenceEncodableProbabilityDistribution):
         cand.sort(key=lambda u: -u[3])
         return cand[:top_n]
 
+    def pattern(
+        self, pattern: Any, candidates: Any = None, known: Any = None, beam: int = 64
+    ) -> "KnowledgeGraphPattern":
+        """A subgraph-pattern query over this model for flexible enumeration of missing parts.
+
+        ``pattern`` is a list of triples whose slots are either fixed integer ids or named variables
+        (strings starting with ``'?'``), variables shared across edges (e.g.
+        ``[(alice, friend, '?x'), ('?x', lives_in, '?c')]``).  The returned
+        :class:`KnowledgeGraphPattern` enumerates the variable bindings (completed subgraphs) in
+        descending joint plausibility, restricts variables to ``candidates`` if given, drops groundings
+        that add nothing new when ``known`` is given, and plugs into
+        :class:`~pysp.ppl.ConformalStructure` for a calibrated set of completed subgraphs.
+        """
+        return KnowledgeGraphPattern(self, pattern, candidates=candidates, known=known, beam=beam)
+
     def log_density(self, x: Sequence[int]) -> float:
         h, r, t = int(x[0]), int(x[1]), int(x[2])
         return float(self.tail_log_posterior(h, r)[t])
@@ -311,6 +326,7 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         init_scale: float = 0.3,
         max_norm: float = 1.0,
         directions: tuple = ("tail", "head", "relation"),
+        negatives: int | None = None,
         seed: int = 1,
         pseudo_count: float | None = None,
         name: str | None = None,
@@ -328,6 +344,7 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         self.init_scale = float(init_scale)
         self.max_norm = float(max_norm)
         self.directions = tuple(directions)
+        self.negatives = None if negatives is None else int(negatives)  # sampled-softmax negatives (scales to large KGs)
         self.seed = int(seed)
         self.pseudo_count = pseudo_count
         self.name = name
@@ -339,6 +356,31 @@ class KnowledgeGraphEstimator(ParameterEstimator):
     def _project(self, entity: np.ndarray) -> np.ndarray:
         norms = np.linalg.norm(entity, axis=1, keepdims=True)
         return entity * np.minimum(1.0, self.max_norm / np.maximum(norms, 1e-12))
+
+    def _entity_direction_grad(self, E, R, q, target, other, r, w, ge, gr, rng):
+        """Accumulate the gradient of ``log p(target_entity | q)`` (q = R[r] * E[other]) into ge, gr.
+
+        Full softmax over all entities by default, or sampled softmax against ``self.negatives`` uniform
+        negatives per row (so the per-row cost is O(K d) instead of O(num_entities d), the key to scaling
+        to large graphs). The context-role gradient flows to E[other] and R[r] identically either way.
+        """
+        if self.negatives is None:
+            p = _softmax_rows(q @ E.T)
+            ebar = p @ E
+            resid = ((np.arange(E.shape[0])[None, :] == target[:, None]) - p) * w
+            ge += resid.T @ q
+        else:
+            k = int(self.negatives)
+            cand = np.concatenate([target[:, None], rng.randint(E.shape[0], size=(q.shape[0], k))], axis=1)
+            cand_emb = E[cand]  # (m, 1+k, d); column 0 is the positive
+            p = _softmax_rows(np.einsum("bkd,bd->bk", cand_emb, q))
+            ebar = np.einsum("bk,bkd->bd", p, cand_emb)
+            onehot = np.zeros_like(p)
+            onehot[:, 0] = 1.0
+            resid = (onehot - p) * w
+            np.add.at(ge, cand.reshape(-1), (resid[:, :, None] * q[:, None, :]).reshape(-1, q.shape[1]))
+        np.add.at(ge, other, w * R[r] * (E[target] - ebar))
+        np.add.at(gr, r, w * E[other] * (E[target] - ebar))
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> KnowledgeGraphDistribution:
         _count, triples, weights = suff_stat
@@ -352,7 +394,6 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         weights = np.asarray(weights, dtype=float)
         n = triples.shape[0]
         bs = min(self.batch_size, n)
-        ent_index = np.arange(nE)
         rel_index = np.arange(nR)
         for _ in range(self.epochs):
             order = rng.permutation(n)
@@ -364,22 +405,10 @@ class KnowledgeGraphEstimator(ParameterEstimator):
                 ge = np.zeros_like(E)
                 gr = np.zeros_like(R)
                 if "tail" in self.directions:  # maximize log p(t | h, r)
-                    v = E[h] * R[r]
-                    p = _softmax_rows(v @ E.T)
-                    ebar = p @ E
-                    resid = ((ent_index[None, :] == t[:, None]) - p) * w
-                    ge += resid.T @ v
-                    np.add.at(ge, h, w * R[r] * (E[t] - ebar))
-                    np.add.at(gr, r, w * E[h] * (E[t] - ebar))
+                    self._entity_direction_grad(E, R, E[h] * R[r], t, h, r, w, ge, gr, rng)
                 if "head" in self.directions:  # maximize log p(h | r, t)
-                    u = R[r] * E[t]
-                    p = _softmax_rows(u @ E.T)
-                    ebar = p @ E
-                    resid = ((ent_index[None, :] == h[:, None]) - p) * w
-                    ge += resid.T @ u
-                    np.add.at(ge, t, w * R[r] * (E[h] - ebar))
-                    np.add.at(gr, r, w * E[t] * (E[h] - ebar))
-                if "relation" in self.directions:  # maximize log p(r | h, t)
+                    self._entity_direction_grad(E, R, R[r] * E[t], h, t, r, w, ge, gr, rng)
+                if "relation" in self.directions:  # maximize log p(r | h, t)  (relations are few; full softmax)
                     q = E[h] * E[t]
                     pr = _softmax_rows(q @ R.T)
                     rbar = pr @ R
@@ -470,3 +499,104 @@ def fit_knowledge_graph_ensemble(
         est = KnowledgeGraphEstimator(num_entities, num_relations, dim=dim, seed=1 + k, **estimator_kwargs)
         mods.append(optimize(data, est, max_its=1, rng=RandomState(base.randint(2**31)), print_iter=10**9))
     return KnowledgeGraphEnsemble(mods)
+
+
+class KnowledgeGraphPattern:
+    """A subgraph-pattern query over a fitted :class:`KnowledgeGraphDistribution`.
+
+    A pattern is a list of triples whose slots are fixed integer ids or named variables (strings
+    starting with ``'?'``); a variable may recur across edges (shared join), and a variable in the
+    relation slot ranges over relations, otherwise over entities.  A *binding* assigns every variable a
+    value; its joint score is the sum over edges of ``log p(tail | head, relation)``.
+
+    ``enumerate`` returns the most plausible completed subgraphs, and ``enumerator`` yields them lazily
+    in descending score (a best-first beam of width ``beam``), so the object also satisfies the
+    structure-distribution interface (``log_density`` + ``enumerator``) and can be handed to
+    :class:`~pysp.ppl.ConformalStructure` for a calibrated set of completed subgraphs.  A binding is
+    represented as a tuple of values in the canonical (sorted) variable order; :meth:`binding` builds one
+    from a dict and :meth:`triples` grounds it to edges.
+    """
+
+    def __init__(
+        self, kg: "KnowledgeGraphDistribution", pattern: Any, candidates: Any = None, known: Any = None, beam: int = 64
+    ) -> None:
+        self.kg = kg
+        self.edges = [tuple(e) for e in pattern]
+        kind: dict[str, str] = {}
+        for edge in self.edges:
+            for slot, val in enumerate(edge):
+                if isinstance(val, str) and val.startswith("?"):
+                    k = "relation" if slot == 1 else "entity"
+                    if kind.get(val, k) != k:
+                        raise ValueError(f"variable {val!r} is used as both an entity and a relation.")
+                    kind[val] = k
+        self.variables = sorted(kind)
+        self.kind = kind
+        cand = dict(candidates or {})
+        self.domain = {
+            v: list(cand[v])
+            if v in cand
+            else list(range(kg.num_relations if kind[v] == "relation" else kg.num_entities))
+            for v in self.variables
+        }
+        self.known = None if known is None else {tuple(int(x) for x in e) for e in known}
+        self.beam = int(beam)
+
+    @staticmethod
+    def _edge_vars(edge: tuple) -> set:
+        return {s for s in edge if isinstance(s, str) and s.startswith("?")}
+
+    def _ground_edge(self, edge: tuple, b: dict) -> tuple:
+        return tuple(int(b[s]) if isinstance(s, str) and s.startswith("?") else int(s) for s in edge)
+
+    def binding(self, assignment: dict) -> tuple:
+        """Canonical binding tuple (sorted-variable order) from a ``{variable: value}`` dict."""
+        return tuple(int(assignment[v]) for v in self.variables)
+
+    def triples(self, binding: tuple) -> list[tuple]:
+        """Ground a binding tuple to the list of completed ``(h, r, t)`` edges."""
+        b = dict(zip(self.variables, binding))
+        return [self._ground_edge(e, b) for e in self.edges]
+
+    def _edge_logprob(self, h: int, r: int, t: int) -> float:
+        return float(self.kg.tail_log_posterior(h, r)[t])
+
+    def log_density(self, binding: tuple) -> float:
+        """Joint log-probability of a complete binding (sum of edge tail-conditional log-probs)."""
+        return float(sum(self._edge_logprob(*e) for e in self.triples(binding)))
+
+    def enumerator(self):
+        """Yield ``(binding, joint_log_prob)`` over completed subgraphs in descending score (beam-limited)."""
+        beam: list[tuple[dict, float]] = [({}, 0.0)]
+        bound: set = set()
+        for v in self.variables:
+            bound.add(v)
+            ready = [e for e in self.edges if self._edge_vars(e) <= bound and v in self._edge_vars(e)]
+            nxt: list[tuple[dict, float]] = []
+            for b, sc in beam:
+                for val in self.domain[v]:
+                    nb = dict(b)
+                    nb[v] = val
+                    inc = sum(self._edge_logprob(*self._ground_edge(e, nb)) for e in ready)
+                    nxt.append((nb, sc + inc))
+            nxt.sort(key=lambda u: -u[1])
+            beam = nxt[: self.beam]
+        fixed = sum(self._edge_logprob(*self._ground_edge(e, {})) for e in self.edges if not self._edge_vars(e))
+        results = [(tuple(b[v] for v in self.variables), sc + fixed) for b, sc in beam]
+        if self.known is not None:  # keep only groundings that add at least one new edge
+            results = [
+                (bt, sc)
+                for bt, sc in results
+                if any(self._ground_edge(e, dict(zip(self.variables, bt))) not in self.known for e in self.edges)
+            ]
+        results.sort(key=lambda u: -u[1])
+        yield from results
+
+    def enumerate(self, top_n: int | None = 10) -> list[tuple[dict, list[tuple], float]]:
+        """Top completed subgraphs as ``[({variable: value}, [edges], joint_log_prob), ...]``."""
+        out = []
+        for binding, score in self.enumerator():
+            out.append((dict(zip(self.variables, binding)), self.triples(binding), score))
+            if top_n is not None and len(out) >= top_n:
+                break
+        return out

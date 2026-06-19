@@ -106,5 +106,71 @@ class KnowledgeGraphRecommendTestCase(unittest.TestCase):
         self.assertEqual(len(ens.mean_tail_posterior(0, 0)), self.nE)
 
 
+class KnowledgeGraphPatternTestCase(unittest.TestCase):
+    def setUp(self):
+        self.ent, self.rel = _kg_truth()
+        self.nE, self.nR, self.d = self.ent.shape[0], self.rel.shape[0], self.ent.shape[1]
+        tr = _sample(self.ent, self.rel, 4000, seed=1)
+        self.m = optimize(
+            tr,
+            KnowledgeGraphEstimator(self.nE, self.nR, dim=self.d, seed=1),
+            max_its=1,
+            rng=np.random.RandomState(0),
+            print_iter=10**9,
+        )
+
+    def test_single_edge_pattern_matches_rank(self):
+        pat = self.m.pattern([(3, 0, "?t")])
+        enum = [g["?t"] for g, _, _ in pat.enumerate(top_n=5)]
+        rank = [c for c, _ in self.m.rank(h=3, r=0, top_n=5)]
+        self.assertEqual(enum, rank)
+
+    def test_chain_enumeration_descending_and_grounded(self):
+        pat = self.m.pattern([(3, 0, "?x"), ("?x", 1, "?c")], beam=200)
+        top = pat.enumerate(top_n=5)
+        scores = [s for _, _, s in top]
+        self.assertEqual(scores, sorted(scores, reverse=True))  # best-first
+        g, edges, _ = top[0]
+        self.assertEqual(edges, [(3, 0, g["?x"]), (g["?x"], 1, g["?c"])])  # shared variable joins the edges
+
+    def test_candidate_restriction_and_known_exclusion(self):
+        pat = self.m.pattern([(0, 1, "?x")], candidates={"?x": [2, 5, 9]})
+        self.assertEqual(sorted(g["?x"] for g, _, _ in pat.enumerate(top_n=None)), [2, 5, 9])
+        pat2 = self.m.pattern(
+            [(0, 1, "?x"), ("?x", 1, "?c")], candidates={"?x": [2], "?c": [5, 7]}, known=[(0, 1, 2), (2, 1, 5)], beam=50
+        )
+        gs = [(g["?x"], g["?c"]) for g, _, _ in pat2.enumerate(top_n=None)]
+        self.assertIn((2, 7), gs)  # has a new edge -> kept
+        self.assertNotIn((2, 5), gs)  # entirely known -> dropped
+
+    def test_conformal_set_of_subgraphs(self):
+        from pysp.ppl import ConformalStructure
+
+        tmpl = self.m.pattern([("?a", "?r", "?x")])
+        facts = _sample(self.ent, self.rel, 6000, seed=4)
+        inst = [tmpl.binding({"?a": h, "?r": r, "?x": t}) for h, r, t in facts]
+        rng = np.random.RandomState(0)
+        rng.shuffle(inst)
+        cs = ConformalStructure(tmpl, inst[:600], alpha=0.1)
+        self.assertGreater(cs.covers(inst[600:1200]).mean(), 0.86)
+
+
+class KnowledgeGraphNegativeSamplingTestCase(unittest.TestCase):
+    def test_sampled_softmax_learns(self):
+        ent, rel = _kg_truth()
+        nE, nR, d = ent.shape[0], rel.shape[0], ent.shape[1]
+        train = _sample(ent, rel, 4000, seed=1)
+        test = _sample(ent, rel, 1500, seed=2)
+        m = optimize(
+            train,
+            KnowledgeGraphEstimator(nE, nR, dim=d, epochs=150, lr=1.0, negatives=20, seed=1),
+            max_its=1,
+            rng=np.random.RandomState(0),
+            print_iter=10**9,
+        )
+        acc = np.mean([m.tail_log_posterior(h, r).argmax() == t for h, r, t in test])
+        self.assertGreater(acc, 0.3)  # sampled softmax still recovers tails well above the 1/60 chance rate
+
+
 if __name__ == "__main__":
     unittest.main()
