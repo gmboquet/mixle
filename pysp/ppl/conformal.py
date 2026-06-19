@@ -204,6 +204,41 @@ class ConformalStructure:
         return len(self.members())
 
 
+class ConformalLinkPredictor:
+    """Split-conformal candidate-neighbor sets for a random-graph model from its edge-probability
+    matrix ``P`` (``P[i, j] = p(edge i--j)``, e.g. ``X @ X.T`` from a fitted RDPG, or an
+    Erdos-Renyi / stochastic-block-model edge probability).
+
+    The nonconformity of a present edge ``(i, j)`` is ``1 - P[i, j]``.  Calibrating on held-out true
+    edges gives a threshold; the predicted neighbor set of a node keeps every candidate ``j`` with
+    ``1 - P[i, j] <= tau``, so it contains a true neighbor with probability at least ``1 - alpha``
+    over exchangeable held-out edges (a random split of the observed edges).
+    """
+
+    def __init__(self, edge_prob: Any, cal_edges: Any, *, alpha: float = 0.1) -> None:
+        self.P = np.asarray(edge_prob, dtype=float)
+        if self.P.ndim != 2 or self.P.shape[0] != self.P.shape[1]:
+            raise ValueError("edge_prob must be a square (n_nodes, n_nodes) probability matrix.")
+        self.alpha = float(alpha)
+        scores = np.array([1.0 - self.P[int(i), int(j)] for i, j in cal_edges], dtype=float)
+        self.tau = conformal_quantile(scores, self.alpha)
+
+    def neighbor_set(self, i: int, candidates: Any = None) -> np.ndarray:
+        """Candidate nodes ``j`` in node ``i``'s conformal neighbor set."""
+        row = self.P[int(i)]
+        cand = np.arange(row.size) if candidates is None else np.asarray(candidates, dtype=int)
+        return cand[(1.0 - row[cand]) <= self.tau]
+
+    def covers(self, edges: Any) -> np.ndarray:
+        """Boolean array: is each held-out true edge's endpoint in the predicted neighbor set."""
+        return np.array([(1.0 - self.P[int(i), int(j)]) <= self.tau for i, j in edges], dtype=bool)
+
+    def set_sizes(self, nodes: Any = None) -> np.ndarray:
+        """Neighbor-set size per node (defaults to all nodes)."""
+        nodes = range(self.P.shape[0]) if nodes is None else nodes
+        return np.array([self.neighbor_set(i).size for i in nodes], dtype=int)
+
+
 def conformal(result: Any, y_cal: Any, *, given: dict, alpha: float = 0.1) -> ConformalRegressor:
     """Split-conformal calibration of a fitted regression ``result`` into prediction intervals.
 
