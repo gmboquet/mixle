@@ -60,6 +60,16 @@ class _Ops:
     def abs(self, x):
         return self._t.abs(x)
 
+    def heaviside(self, phi, eps: float = 0.1):
+        """A smoothed Heaviside ``0.5 (1 + tanh(phi / eps))`` -- the soft indicator of a level set's interior
+        (``phi > 0``). Differentiable; ``eps`` sets the boundary width."""
+        return 0.5 * (1.0 + self._t.tanh(phi / eps))
+
+    def level_set(self, phi, inside, outside, *, eps: float = 0.1):
+        """A material field from a level-set function: ``outside + (inside - outside) * heaviside(phi)``.
+        The shape boundary is ``{phi = 0}``; inferring ``phi`` (with a smoothness prior) infers the shape."""
+        return outside + (inside - outside) * self.heaviside(phi, eps)
+
     def clamp(self, x, lo=None, hi=None):
         return self._t.clamp(x, min=lo, max=hi)
 
