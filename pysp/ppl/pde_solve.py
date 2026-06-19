@@ -50,6 +50,58 @@ def _integrate_ops(rhs, y0, t_grid, torch, method="rk4"):
     return torch.stack(states)
 
 
+def _matvec(rows, cols, vals, n, x, torch):
+    """Differentiable sparse matrix-vector product ``A x`` for ``A = sparse(rows, cols, vals)`` (n x n).
+
+    Lets a time-dependent PDE apply an assembled operator (e.g. the Laplacian) explicitly without a solve,
+    with gradients flowing to both ``vals`` (the coefficient field) and ``x``.
+    """
+    rows = torch.as_tensor(rows, dtype=torch.long)
+    cols = torch.as_tensor(cols, dtype=torch.long)
+    out = torch.zeros(int(n), dtype=vals.dtype)
+    return out.index_add(0, rows, vals * x[cols])
+
+
+def _integrate_record(step, y0, n_steps, record, torch, checkpoint=None):
+    """Step a time-dependent system and record an observation at each step, with optional checkpointing.
+
+    ``step(y, i) -> y_next`` advances one step; ``record(y, i) -> obs`` extracts the observed quantity at
+    step ``i`` (e.g. the field at receiver nodes). Returns the stacked records for steps ``0..n_steps``.
+
+    With ``checkpoint=K``, segments of ``K`` steps are wrapped in gradient checkpointing: the full
+    intermediate states are *not* retained for the backward pass but recomputed segment by segment, so the
+    memory is O(n_steps/K) boundary states + O(K) recomputed -- the adjoint-state pattern that makes
+    full-waveform inversion (many steps over a large field) feasible. Records (usually small, e.g. a few
+    receivers) are kept. Gradients are identical to the non-checkpointed integration.
+    """
+
+    def run_segment(y_start, i0, length):
+        y = y_start
+        seg = []
+        for j in range(int(length)):
+            seg.append(record(y, int(i0) + j))  # state before step i0+j
+            y = step(y, int(i0) + j)
+        return y, torch.stack(seg)
+
+    if not checkpoint or checkpoint <= 0:
+        y, recs = run_segment(y0, 0, n_steps)
+        return torch.cat([recs, record(y, n_steps).unsqueeze(0)])
+
+    from torch.utils.checkpoint import checkpoint as ckpt
+
+    k = int(checkpoint)
+    y = y0
+    chunks = []
+    i = 0
+    while i < n_steps:
+        length = min(k, n_steps - i)
+        y, seg = ckpt(run_segment, y, i, length, use_reentrant=False)
+        chunks.append(seg)
+        i += length
+    chunks.append(record(y, n_steps).unsqueeze(0))
+    return torch.cat(chunks)
+
+
 def _sparse_solve_function(torch):
     """Build (once) the autograd Function bound to this torch import."""
     import scipy.sparse as sp
