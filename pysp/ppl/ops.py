@@ -94,6 +94,19 @@ class _Ops:
 
         return _integrate_ops(rhs, y0, self.tensor(t_grid), self._t, method)
 
+    def integrate_record(self, step, y0, n_steps, record, *, checkpoint=None):
+        """Step a time-dependent system, recording ``record(y, i)`` each step; ``checkpoint=K`` runs the
+        adjoint-state scheme (recompute K-step segments in the backward pass) for O(sqrt(steps)) memory."""
+        from pysp.ppl.pde_solve import _integrate_record
+
+        return _integrate_record(step, y0, int(n_steps), record, self._t, checkpoint=checkpoint)
+
+    def matvec(self, rows, cols, vals, n, x):
+        """Differentiable sparse matrix-vector product ``A x`` (apply an assembled operator without a solve)."""
+        from pysp.ppl.pde_solve import _matvec
+
+        return _matvec(rows, cols, vals, n, x, self._t)
+
     # differentiable grid assembly + adjoint sparse solve (the PDE forward operators)
     def divergence_form(self, kappa, shape, *, spacing=1.0):
         from pysp.ppl.pde_solve import divergence_form
