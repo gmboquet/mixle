@@ -79,6 +79,7 @@ from pysp.ppl.flow import NavierStokes2D
 from pysp.ppl.inverse import Differential
 from pysp.ppl.priors import Potts, TotalVariation
 from pysp.ppl.shape import level_set_material, shape_optimize
+from pysp.ppl.wave import WaveEquation2D
 
 # Low-level numeric primitives (sparse_solve, grid assembly, the ODE integrator) live in
 # pysp.ppl.pde_solve and are reached through the `ops` namespace handed to forward callbacks; they are
@@ -197,6 +198,7 @@ __all__ = [
     "Potts",
     "multistart",
     "NavierStokes2D",
+    "WaveEquation2D",
     "conformal",
     "ConformalRegressor",
     "ConformalClassifier",
