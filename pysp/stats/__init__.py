@@ -416,6 +416,8 @@ __all__ = [
     "KnowledgeGraphDistribution",
     "KnowledgeGraphEstimator",
     "KnowledgeGraphSampler",
+    "KnowledgeGraphEnsemble",
+    "fit_knowledge_graph_ensemble",
     "KnowledgeGraphDataEncoder",
     "PlackettLuceDistribution",
     "PlackettLuceSampler",
@@ -764,8 +766,10 @@ from pysp.stats.graph.int_markovchain import (
 from pysp.stats.graph.knowledge_graph import (
     KnowledgeGraphDataEncoder,
     KnowledgeGraphDistribution,
+    KnowledgeGraphEnsemble,
     KnowledgeGraphEstimator,
     KnowledgeGraphSampler,
+    fit_knowledge_graph_ensemble,
 )
 from pysp.stats.graph.mallows import (
     MallowsDataEncoder,

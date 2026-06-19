@@ -43,6 +43,13 @@ def _tail_log_posterior(entity: np.ndarray, v: np.ndarray) -> np.ndarray:
     return scores - (scores.max() + np.log(np.sum(np.exp(scores - scores.max()))))
 
 
+def _softmax_rows(scores: np.ndarray) -> np.ndarray:
+    """Row-wise softmax of a ``(B, K)`` score matrix."""
+    scores = scores - scores.max(axis=1, keepdims=True)
+    e = np.exp(scores)
+    return e / e.sum(axis=1, keepdims=True)
+
+
 class KnowledgeGraphDistribution(SequenceEncodableProbabilityDistribution):
     """DistMult knowledge-graph embedding distribution over triples ``(h, r, t)``.
 
@@ -84,6 +91,84 @@ class KnowledgeGraphDistribution(SequenceEncodableProbabilityDistribution):
     def tail_log_posterior(self, h: int, r: int) -> np.ndarray:
         """Length-``num_entities`` vector of ``log p(t | h, r)`` over all tail candidates."""
         return _tail_log_posterior(self.entity, self.entity[h] * self.relation[r])
+
+    def head_log_posterior(self, r: int, t: int) -> np.ndarray:
+        """Length-``num_entities`` vector of ``log p(h | r, t)`` over all head candidates."""
+        return _tail_log_posterior(self.entity, self.relation[r] * self.entity[t])
+
+    def relation_log_posterior(self, h: int, t: int) -> np.ndarray:
+        """Length-``num_relations`` vector of ``log p(r | h, t)`` over all relation candidates."""
+        return _tail_log_posterior(self.relation, self.entity[h] * self.entity[t])
+
+    def complete(self, h: int | None = None, r: int | None = None, t: int | None = None) -> np.ndarray:
+        """Log-posterior over candidates for the single missing slot of a query.
+
+        Exactly one of ``h``, ``r``, ``t`` must be ``None``; the returned vector is over entities (for a
+        missing head or tail) or relations (for a missing relation).
+        """
+        missing = [name for name, v in (("h", h), ("r", r), ("t", t)) if v is None]
+        if len(missing) != 1:
+            raise ValueError("complete() needs exactly one of h, r, t to be None (the slot to fill).")
+        if t is None:
+            return self.tail_log_posterior(int(h), int(r))
+        if h is None:
+            return self.head_log_posterior(int(r), int(t))
+        return self.relation_log_posterior(int(h), int(t))
+
+    def rank(
+        self,
+        h: int | None = None,
+        r: int | None = None,
+        t: int | None = None,
+        exclude: Any = (),
+        top_n: int | None = None,
+    ) -> list[tuple[int, float]]:
+        """Rank candidates for the missing slot by log-probability, dropping ``exclude`` candidates.
+
+        Returns ``[(candidate, log_prob), ...]`` highest first (the most plausible completions).
+        """
+        logp = self.complete(h=h, r=r, t=t)
+        order = np.argsort(-logp)
+        excl = set(int(e) for e in np.atleast_1d(np.asarray(list(exclude), dtype=int))) if len(exclude) else set()
+        ranked = [(int(c), float(logp[c])) for c in order if int(c) not in excl]
+        return ranked if top_n is None else ranked[:top_n]
+
+    def recommend(self, known: Any, top_n: int = 10) -> list[tuple[int, int, int, float]]:
+        """Recommend the most plausible missing tail facts for the ``(h, r)`` contexts in ``known``.
+
+        ``known`` is a sequence of observed ``(h, r, t)`` triples; for each distinct ``(h, r)`` the
+        already-present tails are excluded, the remaining tails are ranked by ``log p(t | h, r)``, and
+        the global top ``top_n`` new facts are returned as ``[(h, r, t, log_prob), ...]``.
+        """
+        known = np.asarray(list(known), dtype=int).reshape(-1, 3)
+        seen: dict[tuple[int, int], set] = {}
+        for h, r, t in known:
+            seen.setdefault((int(h), int(r)), set()).add(int(t))
+        out: list[tuple[int, int, int, float]] = []
+        for (h, r), tails in seen.items():
+            for t, lp in self.rank(h=h, r=r, exclude=tails):
+                out.append((h, r, t, lp))
+        out.sort(key=lambda u: -u[3])
+        return out[:top_n]
+
+    def recommend_subgraph(self, node: int, known: Any, top_n: int = 5) -> list[tuple[int, int, int, float]]:
+        """Recommend plausible new edges incident to ``node`` (both ``(node, r, ?)`` and ``(?, r, node)``).
+
+        Excludes edges already in ``known`` and returns the top ``top_n`` by log-probability as
+        ``[(h, r, t, log_prob), ...]``, the suggested missing subgraph around the node.
+        """
+        node = int(node)
+        known_set = {(int(h), int(r), int(t)) for h, r, t in np.asarray(list(known), dtype=int).reshape(-1, 3)}
+        cand: list[tuple[int, int, int, float]] = []
+        for r in range(self.num_relations):
+            for t, lp in self.rank(h=node, r=r):
+                if (node, r, t) not in known_set:
+                    cand.append((node, r, t, lp))
+            for h, lp in self.rank(r=r, t=node):
+                if (h, r, node) not in known_set:
+                    cand.append((h, r, node, lp))
+        cand.sort(key=lambda u: -u[3])
+        return cand[:top_n]
 
     def log_density(self, x: Sequence[int]) -> float:
         h, r, t = int(x[0]), int(x[1]), int(x[2])
@@ -225,6 +310,7 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         weight_decay: float = 1.0e-4,
         init_scale: float = 0.3,
         max_norm: float = 1.0,
+        directions: tuple = ("tail", "head", "relation"),
         seed: int = 1,
         pseudo_count: float | None = None,
         name: str | None = None,
@@ -241,6 +327,7 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         self.weight_decay = float(weight_decay)
         self.init_scale = float(init_scale)
         self.max_norm = float(max_norm)
+        self.directions = tuple(directions)
         self.seed = int(seed)
         self.pseudo_count = pseudo_count
         self.name = name
@@ -266,27 +353,40 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         n = triples.shape[0]
         bs = min(self.batch_size, n)
         ent_index = np.arange(nE)
+        rel_index = np.arange(nR)
         for _ in range(self.epochs):
             order = rng.permutation(n)
             for start in range(0, n, bs):
                 idx = order[start : start + bs]
                 h, r, t = triples[idx, 0], triples[idx, 1], triples[idx, 2]
                 w = weights[idx][:, None]
-                v = E[h] * R[r]  # (B, d) DistMult query vectors
-                scores = v @ E.T  # (B, nE)
-                scores -= scores.max(axis=1, keepdims=True)
-                p = np.exp(scores)
-                p /= p.sum(axis=1, keepdims=True)
-                onehot = (ent_index[None, :] == t[:, None]).astype(float)
-                resid = (onehot - p) * w  # (B, nE)
-                ebar = p @ E  # (B, d) expected tail embedding
-                ge = resid.T @ v  # tail-role gradient over all entities, (nE, d)
-                gr = np.zeros_like(R)
-                head_grad = w * R[r] * (E[t] - ebar)
-                rel_grad = w * E[h] * (E[t] - ebar)
-                np.add.at(ge, h, head_grad)
-                np.add.at(gr, r, rel_grad)
                 m = len(idx)
+                ge = np.zeros_like(E)
+                gr = np.zeros_like(R)
+                if "tail" in self.directions:  # maximize log p(t | h, r)
+                    v = E[h] * R[r]
+                    p = _softmax_rows(v @ E.T)
+                    ebar = p @ E
+                    resid = ((ent_index[None, :] == t[:, None]) - p) * w
+                    ge += resid.T @ v
+                    np.add.at(ge, h, w * R[r] * (E[t] - ebar))
+                    np.add.at(gr, r, w * E[h] * (E[t] - ebar))
+                if "head" in self.directions:  # maximize log p(h | r, t)
+                    u = R[r] * E[t]
+                    p = _softmax_rows(u @ E.T)
+                    ebar = p @ E
+                    resid = ((ent_index[None, :] == h[:, None]) - p) * w
+                    ge += resid.T @ u
+                    np.add.at(ge, t, w * R[r] * (E[h] - ebar))
+                    np.add.at(gr, r, w * E[t] * (E[h] - ebar))
+                if "relation" in self.directions:  # maximize log p(r | h, t)
+                    q = E[h] * E[t]
+                    pr = _softmax_rows(q @ R.T)
+                    rbar = pr @ R
+                    resid = ((rel_index[None, :] == r[:, None]) - pr) * w
+                    gr += resid.T @ q
+                    np.add.at(ge, h, w * E[t] * (R[r] - rbar))
+                    np.add.at(ge, t, w * E[h] * (R[r] - rbar))
                 E = E + self.lr * (ge / m - self.weight_decay * E)
                 R = R + self.lr * (gr / m - self.weight_decay * R)
             E = self._project(E)
@@ -307,3 +407,66 @@ class KnowledgeGraphDataEncoder(DataSequenceEncoder):
         if rv.ndim != 2 or rv.shape[1] != 3 or rv.shape[0] == 0:
             raise ValueError("KnowledgeGraphDistribution requires a non-empty sequence of (h, r, t) triples.")
         return rv
+
+
+class KnowledgeGraphEnsemble:
+    """An ensemble of independently fit :class:`KnowledgeGraphDistribution` models, for epistemic
+    (model) uncertainty over completions.
+
+    The members share the entity and relation index spaces but are fit from different random seeds, so
+    where the data pins the answer down they agree and where it does not they disagree.  The mean tail
+    posterior averages ``p(t | h, r)`` across members; the epistemic uncertainty is the mutual
+    information (BALD) ``H(mean) - mean_m H(member_m)`` -- the part of the predictive entropy that comes
+    from disagreement among members rather than from genuine ambiguity.
+    """
+
+    def __init__(self, members: list[KnowledgeGraphDistribution]) -> None:
+        if len(members) < 2:
+            raise ValueError("a KnowledgeGraphEnsemble needs at least two members.")
+        self.members = list(members)
+
+    def _tail_probs(self, h: int, r: int) -> np.ndarray:
+        return np.array([np.exp(m.tail_log_posterior(int(h), int(r))) for m in self.members])
+
+    def mean_tail_posterior(self, h: int, r: int) -> np.ndarray:
+        """The ensemble-averaged ``p(t | h, r)`` over all tail candidates."""
+        return self._tail_probs(h, r).mean(axis=0)
+
+    def epistemic_tail_uncertainty(self, h: int, r: int) -> float:
+        """Mutual-information (BALD) epistemic uncertainty of the tail completion (nats); 0 if members agree."""
+        ps = self._tail_probs(h, r)
+        mean = ps.mean(axis=0)
+        h_mean = float(-np.sum(mean * np.log(mean + 1e-12)))
+        h_each = float(np.mean(-np.sum(ps * np.log(ps + 1e-12), axis=1)))
+        return h_mean - h_each
+
+
+def fit_knowledge_graph_ensemble(
+    triples: Sequence[Sequence[int]],
+    num_entities: int,
+    num_relations: int,
+    dim: int = 16,
+    members: int = 5,
+    bootstrap: bool = False,
+    rng: Any = None,
+    **estimator_kwargs: Any,
+) -> KnowledgeGraphEnsemble:
+    """Fit ``members`` knowledge-graph models and wrap them in an ensemble.
+
+    Members differ by their random seed; with ``bootstrap=True`` each is also fit on a bootstrap
+    resample of the triples (bagging), which spreads the members further apart where the data is thin
+    and so sharpens the epistemic-uncertainty estimate.
+    """
+    from pysp.utils.estimation import optimize
+
+    base = RandomState() if rng is None else rng
+    triples = list(triples)
+    mods = []
+    for k in range(int(members)):
+        data = triples
+        if bootstrap:
+            idx = base.randint(len(triples), size=len(triples))
+            data = [triples[i] for i in idx]
+        est = KnowledgeGraphEstimator(num_entities, num_relations, dim=dim, seed=1 + k, **estimator_kwargs)
+        mods.append(optimize(data, est, max_its=1, rng=RandomState(base.randint(2**31)), print_iter=10**9))
+    return KnowledgeGraphEnsemble(mods)
