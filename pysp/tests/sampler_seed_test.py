@@ -289,6 +289,9 @@ def _stats_public_distribution_catalog():
             [[1.0, 0.2], [0.3, 0.8], [0.5, 0.1], [-0.2, 0.6]], [0.0, 1.0, -1.0, 0.5], 0.5
         ),
         "PlackettLuceDistribution": stats.PlackettLuceDistribution([1.5, 0.5, -0.5, -1.5]),
+        "KnowledgeGraphDistribution": stats.KnowledgeGraphDistribution(
+            np.linspace(-1, 1, 18).reshape(6, 3), np.linspace(-0.5, 0.5, 6).reshape(2, 3)
+        ),
         "MallowsDistribution": stats.MallowsDistribution([0, 2, 1, 3], theta=1.0),
         "SpanningTreeDistribution": stats.SpanningTreeDistribution(
             [[0.0, 2.0, 1.0, 3.0], [2.0, 0.0, 4.0, 1.0], [1.0, 4.0, 0.0, 2.0], [3.0, 1.0, 2.0, 0.0]]
