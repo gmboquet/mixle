@@ -4,7 +4,16 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import ConformalClassifier, ConformalRegressor, ConformalStructure, Field, Normal, conformal, free
+from pysp.ppl import (
+    ConformalClassifier,
+    ConformalLinkPredictor,
+    ConformalRegressor,
+    ConformalStructure,
+    Field,
+    Normal,
+    conformal,
+    free,
+)
 from pysp.ppl.conformal import conformal_quantile
 
 
@@ -148,6 +157,37 @@ class ConformalStructureTestCase(unittest.TestCase):
         m = MallowsDistribution(list(range(5)), 0.8)
         cs = ConformalStructure(m, m.sampler(seed=1).sample(2000), alpha=0.1)
         self.assertGreater(cs.covers(m.sampler(seed=2).sample(4000)).mean(), 0.88)
+
+
+class ConformalLinkPredictorTestCase(unittest.TestCase):
+    def _graph(self):
+        rng = np.random.RandomState(0)
+        n, d = 300, 2
+        X = np.abs(rng.normal(0, 1, (n, d)))
+        X /= np.linalg.norm(X, axis=1, keepdims=True) * 1.5
+        P = np.clip(X @ X.T, 0, 1)
+        np.fill_diagonal(P, 0.0)
+        A = (rng.random((n, n)) < P).astype(int)
+        A = np.triu(A, 1)
+        A = A + A.T
+        edges = np.argwhere(np.triu(A, 1) == 1)
+        rng.shuffle(edges)
+        return P, edges
+
+    def test_edge_coverage(self):
+        P, edges = self._graph()
+        cut = len(edges) // 2
+        clp = ConformalLinkPredictor(P, edges[:cut], alpha=0.1)
+        cov = clp.covers(edges[cut:]).mean()
+        self.assertGreater(cov, 0.86)
+        self.assertLess(cov, 0.95)
+        sizes = clp.set_sizes()
+        self.assertEqual(sizes.size, P.shape[0])
+        self.assertGreaterEqual(sizes.min(), 0)
+
+    def test_non_square_raises(self):
+        with self.assertRaises(ValueError):
+            ConformalLinkPredictor(np.zeros((3, 4)), [(0, 1)], alpha=0.1)
 
 
 if __name__ == "__main__":
