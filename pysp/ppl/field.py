@@ -44,6 +44,11 @@ __all__ = [
     "CustomProxy",
     "fit_field",
     "FieldPosterior",
+    "GP",
+    "Gaussian",
+    "Niche",
+    "Cox",
+    "joint",
 ]
 
 
@@ -482,3 +487,117 @@ def fit_field(
     return FieldPosterior(
         map_values, cov, layout, field_name, H, obj, _field_prior=field.precision, _proxy_info=proxy_info
     )
+
+
+# --------------------------------------------------------------------------------------------------
+# PPL-native surface: write the forward model as an equation in a GP node and let joint() discover the
+# field and lower each likelihood to a proxy. A thin, ergonomic layer over fit_field for the common
+# shapes (affine-Gaussian, logistic niche, log-Gaussian Cox); the dedicated builder remains the escape
+# hatch for arbitrary forward models.
+# --------------------------------------------------------------------------------------------------
+class GP:
+    """A latent field node for the equation-style surface: ``T = GP("T", index=grid, kernel=...)``.
+
+    Supports affine algebra (``c0 - c1*T``, ``T + b``) so a linear forward model reads as math; the
+    result carries the field, the gain and the offset to :func:`joint`.
+    """
+
+    def __init__(self, name: str, index: np.ndarray, kernel: FieldKernel):
+        self.field = GaussianField(index, kernel, name)
+        self.name = name
+
+    def _affine(self) -> _GPAffine:
+        return _GPAffine(self, 1.0, 0.0)
+
+    def __mul__(self, a):
+        return self._affine() * a
+
+    __rmul__ = __mul__
+
+    def __add__(self, b):
+        return self._affine() + b
+
+    __radd__ = __add__
+
+    def __sub__(self, b):
+        return self._affine() - b
+
+    def __rsub__(self, b):
+        return b - self._affine()
+
+    def __neg__(self):
+        return -self._affine()
+
+
+@dataclass
+class _GPAffine:
+    """``gain * field + offset`` for one GP field -- the linear forward model carried into joint()."""
+
+    gp: GP
+    gain: float
+    offset: float
+
+    def __mul__(self, a):
+        return _GPAffine(self.gp, self.gain * float(a), self.offset * float(a))
+
+    __rmul__ = __mul__
+
+    def __add__(self, b):
+        return _GPAffine(self.gp, self.gain, self.offset + float(b))
+
+    __radd__ = __add__
+
+    def __sub__(self, b):
+        return _GPAffine(self.gp, self.gain, self.offset - float(b))
+
+    def __rsub__(self, b):
+        return _GPAffine(self.gp, -self.gain, float(b) - self.offset)
+
+    def __neg__(self):
+        return _GPAffine(self.gp, -self.gain, -self.offset)
+
+
+def _as_affine(x) -> _GPAffine:
+    if isinstance(x, _GPAffine):
+        return x
+    if isinstance(x, GP):
+        return x._affine()
+    raise TypeError(f"expected a GP field (or an affine in one), got {type(x).__name__}.")
+
+
+def Gaussian(y, *, mean, sd) -> tuple:
+    """A linear-Gaussian observation ``y ~ N(gain*field + offset, sd)``; ``mean`` is an affine in a GP."""
+    aff = _as_affine(mean)
+    return aff.gp, GaussianProxy(y, slope=aff.gain, intercept=aff.offset, scale=sd, prefix=aff.gp.name + "_gauss")
+
+
+def Niche(presence, *, over: GP, mu_scale: float = 2.0) -> tuple:
+    """Logistic thermal-niche occupancy of ``presence`` over the field ``over`` (a community thermometer)."""
+    if not isinstance(over, GP):
+        raise TypeError("Niche(over=...) takes a GP field.")
+    return over, LogisticNicheProxy(presence, mu_scale=mu_scale, prefix=over.name + "_niche")
+
+
+def Cox(counts, *, log_intensity, offset=0.0) -> tuple:
+    """A log-Gaussian Cox process ``counts ~ Poisson(exp(offset + field))``; ``log_intensity`` is a GP."""
+    aff = _as_affine(log_intensity)
+    if aff.gain != 1.0 or aff.offset != 0.0:
+        # fold an affine log-intensity into the per-observation offset; the field stays the latent log-rate
+        raise ValueError("Cox(log_intensity=...) takes the field directly; put any gain/offset in `offset`.")
+    return aff.gp, PoissonProxy(counts, offset=offset, prefix=aff.gp.name + "_cox")
+
+
+def joint(observations: Sequence[tuple], *, how: str = "laplace", **kw) -> FieldPosterior:
+    """Fit a shared latent field jointly to equation-style observations.
+
+    Each item is the ``(field, proxy)`` pair returned by :func:`Gaussian`, :func:`Niche` or :func:`Cox`.
+    All observations must reference the same GP field (this surface targets one shared field); the fit and
+    the posterior-over-any-node readout are delegated to :func:`fit_field`.
+    """
+    if not observations:
+        raise ValueError("joint() needs at least one observation.")
+    fields = {obs[0].field.name: obs[0].field for obs in observations}
+    if len(fields) != 1:
+        raise ValueError(f"joint() targets one shared field; saw {sorted(fields)}. Use fit_field for several.")
+    field = next(iter(fields.values()))
+    return fit_field(field, [obs[1] for obs in observations], how=how, **kw)

@@ -12,15 +12,20 @@ except ImportError:
     HAS_TORCH = False
 
 from pysp.ppl import (
+    GP,
     RBF,
+    Cox,
     CustomProxy,
+    Gaussian,
     GaussianField,
     GaussianProxy,
     LogisticNicheProxy,
+    Niche,
     PoissonProxy,
     RandomWalk,
     fit_field,
     free,
+    joint,
 )
 
 
@@ -164,6 +169,56 @@ class KernelAndCustomTestCase(unittest.TestCase):
         post = fit_field(field, [CustomProxy(gaussian_ll, prefix="obs")], how="laplace", max_iter=300)
         t_map, sd = post.posterior("T")
         self.assertGreater(np.corrcoef(t_map, t_true)[0, 1], 0.9)
+
+
+@unittest.skipUnless(HAS_TORCH, "fit_field requires PyTorch")
+class PPLNativeSurfaceTestCase(unittest.TestCase):
+    """The equation-style GP/joint surface delegates to fit_field and gives identical results."""
+
+    def test_joint_matches_builder(self):
+        rng = np.random.RandomState(1)
+        n = 50
+        t = np.linspace(0, 1, n)
+        t_true = 1.5 * np.cos(2.4 * t) + 0.4 * np.sin(7 * t)
+        c0, c1, sig = 3.0, 1.2, 0.5
+        d18 = c0 - c1 * t_true + sig * rng.randn(n)
+        S = 50
+        mu = rng.uniform(t_true.min(), t_true.max(), S)
+        kap = np.exp(rng.uniform(-0.5, 1.5, S))
+        logit = 1.0 - 0.5 * kap[:, None] * (t_true[None, :] - mu[:, None]) ** 2
+        pres = (rng.rand(S, n) < 1 / (1 + np.exp(-logit))).astype(float)
+
+        T = GP("T", index=np.arange(n), kernel=RandomWalk(scale=0.3, ridge=3.0))
+        post = joint([Gaussian(d18, mean=c0 - c1 * T, sd=sig), Niche(pres, over=T)], how="laplace", max_iter=400)
+        _, sd_native = post.field_posterior()
+
+        field = GaussianField(np.arange(n), RandomWalk(scale=0.3, ridge=3.0), name="T")
+        ref = fit_field(
+            field,
+            [GaussianProxy(d18, slope=-c1, intercept=c0, scale=sig), LogisticNicheProxy(pres)],
+            how="laplace",
+            max_iter=400,
+        )
+        _, sd_ref = ref.field_posterior()
+        self.assertTrue(np.allclose(sd_native, sd_ref, atol=1e-8))
+
+    def test_cox_surface(self):
+        rng = np.random.RandomState(2)
+        n = 50
+        field_gp = GP("logmu", index=np.arange(n), kernel=RandomWalk(scale=0.4, ridge=3.0))
+        kchol = np.linalg.cholesky(np.linalg.inv(field_gp.field.precision))
+        log_intensity = kchol @ rng.randn(n)
+        counts = rng.poisson(np.exp(2.0 + log_intensity))
+        post = joint([Cox(counts, log_intensity=field_gp, offset=2.0)], how="laplace", max_iter=400)
+        f_map, sd = post.posterior("logmu")
+        self.assertGreater(np.corrcoef(f_map, log_intensity)[0, 1], 0.8)
+
+    def test_single_field_required(self):
+        A = GP("A", index=np.arange(10), kernel=RandomWalk(scale=0.5, ridge=3.0))
+        B = GP("B", index=np.arange(10), kernel=RandomWalk(scale=0.5, ridge=3.0))
+        y = np.zeros(10)
+        with self.assertRaises(ValueError):
+            joint([Gaussian(y, mean=A, sd=1.0), Gaussian(y, mean=B, sd=1.0)])
 
 
 if __name__ == "__main__":

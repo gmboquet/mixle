@@ -56,17 +56,22 @@ from pysp.ppl.core import (
     register_family,
 )
 from pysp.ppl.field import (
+    GP,
     RBF,
+    Cox,
     CustomProxy,
     FieldKernel,
     FieldPosterior,
+    Gaussian,
     GaussianField,
     GaussianProxy,
     LogisticNicheProxy,
+    Niche,
     PoissonProxy,
     Proxy,
     RandomWalk,
     fit_field,
+    joint,
 )
 from pysp.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
 from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
@@ -169,6 +174,11 @@ __all__ = [
     "CustomProxy",
     "fit_field",
     "FieldPosterior",
+    "GP",
+    "Gaussian",
+    "Niche",
+    "Cox",
+    "joint",
     "conformal",
     "ConformalRegressor",
     "ConformalClassifier",
