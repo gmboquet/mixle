@@ -61,6 +61,7 @@ from pysp.ppl.field import (
     Cox,
     CustomProxy,
     FieldKernel,
+    FieldModel,
     FieldPosterior,
     Gaussian,
     GaussianField,
@@ -73,7 +74,11 @@ from pysp.ppl.field import (
     fit_field,
     joint,
 )
-from pysp.ppl.inverse import DifferentialProxy, integrate_ode
+from pysp.ppl.inverse import Differential
+
+# Low-level numeric primitives (sparse_solve, grid assembly, the ODE integrator) live in
+# pysp.ppl.pde_solve and are reached through the `ops` namespace handed to forward callbacks; they are
+# deliberately not exported at the top level, which is reserved for the modeling surface.
 from pysp.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
 from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
 from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator, HiddenMarkovModelDistribution
@@ -180,8 +185,8 @@ __all__ = [
     "Niche",
     "Cox",
     "joint",
-    "DifferentialProxy",
-    "integrate_ode",
+    "FieldModel",
+    "Differential",
     "conformal",
     "ConformalRegressor",
     "ConformalClassifier",
