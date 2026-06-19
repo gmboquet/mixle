@@ -55,7 +55,7 @@ class ConformalRegressor:
     or a GP regressor).
     """
 
-    def __init__(self, result: Any, given: dict, y_cal: Any, *, alpha: float = 0.1) -> None:
+    def __init__(self, result: Any, y_cal: Any, *, given: dict, alpha: float = 0.1) -> None:
         self.result = result
         self.alpha = float(alpha)
         yhat = np.asarray(result.predict(given), dtype=float).reshape(-1)
@@ -70,7 +70,7 @@ class ConformalRegressor:
         center = np.asarray(self.result.predict(given), dtype=float).reshape(-1)
         return center - self.qhat, center + self.qhat
 
-    def covers(self, given: dict, y: Any) -> np.ndarray:
+    def covers(self, y: Any, *, given: dict) -> np.ndarray:
         """Boolean array: does the interval at ``given`` contain each observed ``y``."""
         lo, hi = self.interval(given)
         y = np.asarray(y, dtype=float).reshape(-1)
@@ -127,7 +127,7 @@ class ConformalQuantileRegressor:
     ``...fit(..., quantile=tau)``), typically at ``tau = alpha/2`` and ``1 - alpha/2``.
     """
 
-    def __init__(self, lo: Any, hi: Any, given: dict, y_cal: Any, *, alpha: float = 0.1) -> None:
+    def __init__(self, lo: Any, hi: Any, y_cal: Any, *, given: dict, alpha: float = 0.1) -> None:
         self.lo = lo
         self.hi = hi
         self.alpha = float(alpha)
@@ -143,21 +143,22 @@ class ConformalQuantileRegressor:
         qhi = np.asarray(self.hi.predict(given), dtype=float).reshape(-1)
         return qlo - self.qhat, qhi + self.qhat
 
-    def covers(self, given: dict, y: Any) -> np.ndarray:
+    def covers(self, y: Any, *, given: dict) -> np.ndarray:
         """Boolean array: does the adaptive band at ``given`` contain each observed ``y``."""
         lo, hi = self.interval(given)
         y = np.asarray(y, dtype=float).reshape(-1)
         return (y >= lo) & (y <= hi)
 
 
-def conformal(result: Any, given: dict, y_cal: Any, *, alpha: float = 0.1) -> ConformalRegressor:
+def conformal(result: Any, y_cal: Any, *, given: dict, alpha: float = 0.1) -> ConformalRegressor:
     """Split-conformal calibration of a fitted regression ``result`` into prediction intervals.
 
-    One-liner over :class:`ConformalRegressor`::
+    Mirrors ``fit``'s convention (labels positional, ``given=`` keyword), a one-liner over
+    :class:`ConformalRegressor`::
 
         m = Normal(free * Field("x") + free, free).fit(y_tr, given={"x": x_tr})
-        cp = conformal(m.result, {"x": x_cal}, y_cal, alpha=0.1)
+        cp = conformal(m.result, y_cal, given={"x": x_cal}, alpha=0.1)
         lo, hi = cp.interval({"x": x_te})
-        cp.covers({"x": x_te}, y_te).mean()   # ~ 0.9
+        cp.covers(y_te, given={"x": x_te}).mean()   # ~ 0.9
     """
-    return ConformalRegressor(result, given, y_cal, alpha=alpha)
+    return ConformalRegressor(result, y_cal, given=given, alpha=alpha)

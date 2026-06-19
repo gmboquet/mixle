@@ -20,14 +20,14 @@ class ConformalRegressorTestCase(unittest.TestCase):
         self.te = ({"x": list(x[te])}, y[te])
 
     def test_marginal_coverage_holds(self):
-        cp = conformal(self.m.result, self.cal[0], self.cal[1], alpha=0.1)
-        cov = cp.covers(self.te[0], self.te[1]).mean()
+        cp = conformal(self.m.result, self.cal[1], given=self.cal[0], alpha=0.1)
+        cov = cp.covers(self.te[1], given=self.te[0]).mean()
         self.assertGreater(cov, 0.86)  # finite-sample valid: at least ~0.90 up to sampling noise
         self.assertLess(cov, 0.94)
         self.assertGreater(cp.qhat, 0.0)
 
     def test_interval_is_symmetric_about_prediction(self):
-        cp = ConformalRegressor(self.m.result, self.cal[0], self.cal[1], alpha=0.2)
+        cp = ConformalRegressor(self.m.result, self.cal[1], given=self.cal[0], alpha=0.2)
         lo, hi = cp.interval(self.te[0])
         center = np.asarray(self.m.result.predict(self.te[0]))
         np.testing.assert_allclose((lo + hi) / 2.0, center, atol=1e-9)
@@ -43,8 +43,8 @@ class ConformalRegressorTestCase(unittest.TestCase):
                 return np.full(len(next(iter(given.values()))), self.c)
 
         const = _ConstMean(np.mean(self.cal[1]))
-        cp = conformal(const, self.cal[0], self.cal[1], alpha=0.1)
-        self.assertGreater(cp.covers(self.te[0], self.te[1]).mean(), 0.86)
+        cp = conformal(const, self.cal[1], given=self.cal[0], alpha=0.1)
+        self.assertGreater(cp.covers(self.te[1], given=self.te[0]).mean(), 0.86)
 
 
 class ConformalQuantileRegressorTestCase(unittest.TestCase):
@@ -64,8 +64,8 @@ class ConformalQuantileRegressorTestCase(unittest.TestCase):
         from pysp.ppl import ConformalQuantileRegressor
 
         lo, hi = self._qfit(0.05), self._qfit(0.95)
-        cqr = ConformalQuantileRegressor(lo.result, hi.result, {"x": list(self.x[self.cal])}, self.y[self.cal], alpha=0.1)
-        cov = cqr.covers({"x": list(self.x[self.te])}, self.y[self.te]).mean()
+        cqr = ConformalQuantileRegressor(lo.result, hi.result, self.y[self.cal], given={"x": list(self.x[self.cal])}, alpha=0.1)
+        cov = cqr.covers(self.y[self.te], given={"x": list(self.x[self.te])}).mean()
         self.assertGreater(cov, 0.86)
         self.assertLess(cov, 0.95)
         a, b = cqr.interval({"x": list(self.x[self.te])})
