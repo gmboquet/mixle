@@ -123,13 +123,15 @@ def _sparse_solve_function(torch):
         @staticmethod
         def backward(ctx, grad_u):
             vals, rows, cols, u = ctx.saved_tensors
-            # adjoint system A^T lambda = dL/du -- a single extra solve
-            lam = ctx.lu.solve(grad_u.detach().cpu().numpy(), trans="T")
+            # adjoint system A^H lambda = dL/du -- a single extra solve. The conjugate transpose (and the
+            # conjugate on u below) is what makes the gradient correct for COMPLEX systems (e.g. the
+            # Helmholtz operator in radar / acoustic scattering); for real A it is identical to A^T.
+            lam = ctx.lu.solve(grad_u.detach().cpu().numpy(), trans="H")
             lam_t = torch.as_tensor(lam, dtype=vals.dtype)
             r = rows.long()
             c = cols.long()
-            # dL/dA = -lambda u^T, read only at the (row, col) pattern: grad_vals[k] = -lambda[r_k] u[c_k]
-            grad_vals = -lam_t[r] * u[c]
+            # dL/dA = -lambda u^H, read only at the (row, col) pattern: grad_vals[k] = -lambda[r_k] conj(u[c_k])
+            grad_vals = -lam_t[r] * u[c].conj()
             grad_b = lam_t
             return grad_vals, None, None, None, grad_b
 
