@@ -85,6 +85,15 @@ def _sparse_solve_function(torch):
 
 
 _CACHE: dict = {}
+_USED = [False]  # set when sparse_solve runs, so fit_field can block the (silently wrong) dense Hessian
+
+
+def sparse_used_since(reset: bool = False) -> bool:
+    """Whether sparse_solve has run since the last reset (guards the second-order Laplace path)."""
+    was = _USED[0]
+    if reset:
+        _USED[0] = False
+    return was
 
 
 def sparse_solve(vals, rows, cols, n, b):
@@ -92,11 +101,16 @@ def sparse_solve(vals, rows, cols, n, b):
 
     ``vals`` (nnz,) and ``b`` (n,) are torch tensors (gradients flow to both); ``rows``/``cols`` are fixed
     long tensors giving the sparsity pattern; duplicate ``(row, col)`` entries are summed. Returns ``u`` (n,).
+
+    The adjoint backward uses a factorization (not autograd), so it is first-order only: it powers MAP and
+    Gauss-Newton (``how='gauss_newton'``), but a forward using it must not be fit with the second-order
+    ``how='laplace'`` (the dense Hessian would be silently wrong); fit_field detects this and raises.
     """
     torch = _torch()
     fn = _CACHE.get("fn")
     if fn is None:
         fn = _CACHE["fn"] = _sparse_solve_function(torch)
+    _USED[0] = True
     rows = torch.as_tensor(rows, dtype=torch.long)
     cols = torch.as_tensor(cols, dtype=torch.long)
     return fn.apply(vals, rows, cols, int(n), b)
