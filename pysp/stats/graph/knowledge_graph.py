@@ -170,6 +170,21 @@ class KnowledgeGraphDistribution(SequenceEncodableProbabilityDistribution):
         cand.sort(key=lambda u: -u[3])
         return cand[:top_n]
 
+    def pattern(
+        self, pattern: Any, candidates: Any = None, known: Any = None, beam: int = 64
+    ) -> "KnowledgeGraphPattern":
+        """A subgraph-pattern query over this model for flexible enumeration of missing parts.
+
+        ``pattern`` is a list of triples whose slots are either fixed integer ids or named variables
+        (strings starting with ``'?'``), variables shared across edges (e.g.
+        ``[(alice, friend, '?x'), ('?x', lives_in, '?c')]``).  The returned
+        :class:`KnowledgeGraphPattern` enumerates the variable bindings (completed subgraphs) in
+        descending joint plausibility, restricts variables to ``candidates`` if given, drops groundings
+        that add nothing new when ``known`` is given, and plugs into
+        :class:`~pysp.ppl.ConformalStructure` for a calibrated set of completed subgraphs.
+        """
+        return KnowledgeGraphPattern(self, pattern, candidates=candidates, known=known, beam=beam)
+
     def log_density(self, x: Sequence[int]) -> float:
         h, r, t = int(x[0]), int(x[1]), int(x[2])
         return float(self.tail_log_posterior(h, r)[t])
@@ -470,3 +485,104 @@ def fit_knowledge_graph_ensemble(
         est = KnowledgeGraphEstimator(num_entities, num_relations, dim=dim, seed=1 + k, **estimator_kwargs)
         mods.append(optimize(data, est, max_its=1, rng=RandomState(base.randint(2**31)), print_iter=10**9))
     return KnowledgeGraphEnsemble(mods)
+
+
+class KnowledgeGraphPattern:
+    """A subgraph-pattern query over a fitted :class:`KnowledgeGraphDistribution`.
+
+    A pattern is a list of triples whose slots are fixed integer ids or named variables (strings
+    starting with ``'?'``); a variable may recur across edges (shared join), and a variable in the
+    relation slot ranges over relations, otherwise over entities.  A *binding* assigns every variable a
+    value; its joint score is the sum over edges of ``log p(tail | head, relation)``.
+
+    ``enumerate`` returns the most plausible completed subgraphs, and ``enumerator`` yields them lazily
+    in descending score (a best-first beam of width ``beam``), so the object also satisfies the
+    structure-distribution interface (``log_density`` + ``enumerator``) and can be handed to
+    :class:`~pysp.ppl.ConformalStructure` for a calibrated set of completed subgraphs.  A binding is
+    represented as a tuple of values in the canonical (sorted) variable order; :meth:`binding` builds one
+    from a dict and :meth:`triples` grounds it to edges.
+    """
+
+    def __init__(
+        self, kg: "KnowledgeGraphDistribution", pattern: Any, candidates: Any = None, known: Any = None, beam: int = 64
+    ) -> None:
+        self.kg = kg
+        self.edges = [tuple(e) for e in pattern]
+        kind: dict[str, str] = {}
+        for edge in self.edges:
+            for slot, val in enumerate(edge):
+                if isinstance(val, str) and val.startswith("?"):
+                    k = "relation" if slot == 1 else "entity"
+                    if kind.get(val, k) != k:
+                        raise ValueError(f"variable {val!r} is used as both an entity and a relation.")
+                    kind[val] = k
+        self.variables = sorted(kind)
+        self.kind = kind
+        cand = dict(candidates or {})
+        self.domain = {
+            v: list(cand[v])
+            if v in cand
+            else list(range(kg.num_relations if kind[v] == "relation" else kg.num_entities))
+            for v in self.variables
+        }
+        self.known = None if known is None else {tuple(int(x) for x in e) for e in known}
+        self.beam = int(beam)
+
+    @staticmethod
+    def _edge_vars(edge: tuple) -> set:
+        return {s for s in edge if isinstance(s, str) and s.startswith("?")}
+
+    def _ground_edge(self, edge: tuple, b: dict) -> tuple:
+        return tuple(int(b[s]) if isinstance(s, str) and s.startswith("?") else int(s) for s in edge)
+
+    def binding(self, assignment: dict) -> tuple:
+        """Canonical binding tuple (sorted-variable order) from a ``{variable: value}`` dict."""
+        return tuple(int(assignment[v]) for v in self.variables)
+
+    def triples(self, binding: tuple) -> list[tuple]:
+        """Ground a binding tuple to the list of completed ``(h, r, t)`` edges."""
+        b = dict(zip(self.variables, binding))
+        return [self._ground_edge(e, b) for e in self.edges]
+
+    def _edge_logprob(self, h: int, r: int, t: int) -> float:
+        return float(self.kg.tail_log_posterior(h, r)[t])
+
+    def log_density(self, binding: tuple) -> float:
+        """Joint log-probability of a complete binding (sum of edge tail-conditional log-probs)."""
+        return float(sum(self._edge_logprob(*e) for e in self.triples(binding)))
+
+    def enumerator(self):
+        """Yield ``(binding, joint_log_prob)`` over completed subgraphs in descending score (beam-limited)."""
+        beam: list[tuple[dict, float]] = [({}, 0.0)]
+        bound: set = set()
+        for v in self.variables:
+            bound.add(v)
+            ready = [e for e in self.edges if self._edge_vars(e) <= bound and v in self._edge_vars(e)]
+            nxt: list[tuple[dict, float]] = []
+            for b, sc in beam:
+                for val in self.domain[v]:
+                    nb = dict(b)
+                    nb[v] = val
+                    inc = sum(self._edge_logprob(*self._ground_edge(e, nb)) for e in ready)
+                    nxt.append((nb, sc + inc))
+            nxt.sort(key=lambda u: -u[1])
+            beam = nxt[: self.beam]
+        fixed = sum(self._edge_logprob(*self._ground_edge(e, {})) for e in self.edges if not self._edge_vars(e))
+        results = [(tuple(b[v] for v in self.variables), sc + fixed) for b, sc in beam]
+        if self.known is not None:  # keep only groundings that add at least one new edge
+            results = [
+                (bt, sc)
+                for bt, sc in results
+                if any(self._ground_edge(e, dict(zip(self.variables, bt))) not in self.known for e in self.edges)
+            ]
+        results.sort(key=lambda u: -u[1])
+        yield from results
+
+    def enumerate(self, top_n: int | None = 10) -> list[tuple[dict, list[tuple], float]]:
+        """Top completed subgraphs as ``[({variable: value}, [edges], joint_log_prob), ...]``."""
+        out = []
+        for binding, score in self.enumerator():
+            out.append((dict(zip(self.variables, binding)), self.triples(binding), score))
+            if top_n is not None and len(out) >= top_n:
+                break
+        return out
