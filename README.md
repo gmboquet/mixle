@@ -373,7 +373,8 @@ density quantile, stochastic representatives otherwise.
 - **Design of experiments & Bayesian optimization** — `pysp.doe` provides classical designs
   (`latin_hypercube`, `maximin_latin_hypercube`, `full_factorial`, `random_design`) and sequential
   GP-EI Bayesian optimization (`minimize`, `propose_next`, `expected_improvement`).
-- **Non-iid models** — `pysp.models` holds GP regression, neural regressors, random graphs,
+- **Non-iid & supervised models** — `pysp.models` holds GP regression, neural regressors, random
+  forests (a conditional `p(y | x)` leaf that fits the estimation framework), random graphs,
   grammars, and knowledge graphs.
 
 ## Examples & notebooks
