@@ -11,14 +11,18 @@ from pysp.models.dependence import (
     orient_v_structures,
 )
 from pysp.models.dpm import (
-    TruncatedDPMFitResult,
-    TruncatedDPMModel,
+    TruncatedDirichletProcessMixtureFitResult,
+    TruncatedDirichletProcessMixtureModel,
     expected_log_stick_weights,
     fit_truncated_dpm,
     mean_stick_weights,
     sample_crp_assignments,
     stick_breaking_weights,
 )
+
+# Backward-compatible DPM / POMDP aliases (redundant import alias marks an intentional re-export).
+from pysp.models.dpm import TruncatedDPMFitResult as TruncatedDPMFitResult  # noqa: F401
+from pysp.models.dpm import TruncatedDPMModel as TruncatedDPMModel  # noqa: F401
 from pysp.models.gaussian_process import GaussianProcessRegressor
 from pysp.models.grammar import (
     GrammarLearningResult,
@@ -40,7 +44,15 @@ from pysp.models.neural import (
 from pysp.models.neural import CategoricalClassificationNN as CategoricalClassificationNN  # noqa: F401
 from pysp.models.neural import GaussianRegressionNN as GaussianRegressionNN  # noqa: F401
 from pysp.models.neural import PoissonRegressionNN as PoissonRegressionNN  # noqa: F401
-from pysp.models.pomdp import POMDPFilterResult, POMDPFitResult, POMDPModel, baum_welch_pomdp
+from pysp.models.pomdp import (
+    PartiallyObservableMarkovDecisionProcessFilterResult,
+    PartiallyObservableMarkovDecisionProcessFitResult,
+    PartiallyObservableMarkovDecisionProcessModel,
+    baum_welch_pomdp,
+)
+from pysp.models.pomdp import POMDPFilterResult as POMDPFilterResult  # noqa: F401
+from pysp.models.pomdp import POMDPFitResult as POMDPFitResult  # noqa: F401
+from pysp.models.pomdp import POMDPModel as POMDPModel  # noqa: F401
 from pysp.models.random_forest import (
     RandomForestConditional,
     RandomForestEstimator,
@@ -62,9 +74,9 @@ __all__ = [
     "GrammarLearningResult",
     "HardEMResult",
     "KnowledgeGraphFitResult",
-    "POMDPFilterResult",
-    "POMDPFitResult",
-    "POMDPModel",
+    "PartiallyObservableMarkovDecisionProcessFilterResult",
+    "PartiallyObservableMarkovDecisionProcessFitResult",
+    "PartiallyObservableMarkovDecisionProcessModel",
     "PartiallyDirectedGraph",
     "PCFGParseNode",
     "PoissonRegressionNeuralNetwork",
@@ -72,8 +84,8 @@ __all__ = [
     "RandomForestEstimator",
     "StochasticBlockGraphModel",
     "TransEKnowledgeGraphModel",
-    "TruncatedDPMFitResult",
-    "TruncatedDPMModel",
+    "TruncatedDirichletProcessMixtureFitResult",
+    "TruncatedDirichletProcessMixtureModel",
     "baum_welch_pomdp",
     "discrete_conditional_mutual_information",
     "expected_log_stick_weights",
