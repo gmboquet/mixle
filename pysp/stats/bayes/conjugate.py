@@ -6,17 +6,20 @@ posterior is simply
 
     chi' = chi + sum_i T(x_i),    nu' = nu + n.
 
-That update is *generic* -- it needs only the sufficient statistics ``T(x)`` and the pseudo-counts,
-both of which :mod:`pysp.stats.exp_family` already exposes for ~22 families. This module turns that
-into usable Bayesian inference:
+This module realises that posterior in *closed form, full-Bayesian* terms for every exponential-family
+leaf that has a tractable conjugate -- exact parameter samples, marginal likelihood (evidence),
+posterior mean / point estimate, and a posterior predictive:
 
-* for the *regular* conjugate families (Gaussian, multivariate Gaussian, Poisson, Exponential,
-  Bernoulli/Binomial/Geometric, Categorical, Gamma-rate) it realises the posterior in its familiar
-  closed form -- exact parameter samples, marginal likelihood (evidence), and posterior predictive;
-* for every other exponential-family leaf it falls back to the generic natural-parameter posterior,
-  giving the posterior mean of the mean-parameters and a moment-matched point estimate.
+* fully (all parameters): Gaussian, multivariate & diagonal Gaussian, LogGaussian, Poisson,
+  Exponential, Bernoulli/Binomial/Geometric, Categorical, Rayleigh, half-normal;
+* conditional on the distribution's known nuisance parameter (shape / location / scale /
+  number-of-trials / concentration, taken from the instance exactly as a Binomial's ``n`` is):
+  Gamma, InverseGamma, InverseGaussian, Pareto, NegativeBinomial, von Mises.
 
-The public entry point is :func:`conjugate_posterior`.
+Likelihoods with no tractable closed-form conjugate (full Beta, full Gamma, LogSeries, …) and
+structured distributions (mixtures, HMMs, …) raise rather than return a partial answer.
+:func:`mixture_conjugate_posterior` extends this to priors that are themselves mixtures of
+conjugates (Diaconis-Ylvisaker). The public entry point is :func:`conjugate_posterior`.
 """
 
 from __future__ import annotations
@@ -356,11 +359,12 @@ def _build_integer_categorical(dist, data, weights, prior) -> DirichletPosterior
 class NormalInverseGammaPosterior(ConjugatePosterior):
     family = "NormalInverseGamma"
 
-    def __init__(self, m: float, kappa: float, a: float, b: float):
+    def __init__(self, m: float, kappa: float, a: float, b: float, kind: str = "gaussian"):
         self.m = float(m)  # posterior mean location
         self.kappa = float(kappa)  # mean pseudo-count
         self.a = float(a)  # inverse-gamma shape
         self.b = float(b)  # inverse-gamma scale
+        self.kind = kind  # "gaussian" or "log_gaussian" (the latter models log x)
         self._prior = None
 
     def mean(self) -> dict[str, Any]:
@@ -373,13 +377,21 @@ class NormalInverseGammaPosterior(ConjugatePosterior):
         return {"mu": mu, "sigma2": sigma2}
 
     def point_estimate(self):
+        sigma2 = self.b / (self.a - 1.0) if self.a > 1.0 else self.b / self.a
+        if self.kind == "log_gaussian":
+            from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
+
+            return LogGaussianDistribution(self.m, sigma2)
         from pysp.stats.leaf.gaussian import GaussianDistribution
 
-        sigma2 = self.b / (self.a - 1.0) if self.a > 1.0 else self.b / self.a
         return GaussianDistribution(self.m, sigma2)
 
     def posterior_predictive(self):
         # Marginalising (mu, sigma2) gives a Student-t: df=2a, loc=m, scale^2=b(kappa+1)/(a*kappa).
+        # For log_gaussian the predictive is that Student-t in log-space (a log-Student-t in x); the
+        # plug-in LogGaussian is returned as a usable pysp distribution.
+        if self.kind == "log_gaussian":
+            return self.point_estimate()
         from pysp.stats.leaf.student_t import StudentTDistribution
 
         scale = math.sqrt(self.b * (self.kappa + 1.0) / (self.a * self.kappa))
@@ -396,7 +408,8 @@ class NormalInverseGammaPosterior(ConjugatePosterior):
             raise ValueError("prior hyperparameters were not recorded")
         m0, k0, a0, b0, n = self._prior
         return float(
-            gammaln(self.a)
+            self.log_base  # Jacobian sum_i -log x_i for log_gaussian; 0 for gaussian
+            + gammaln(self.a)
             - gammaln(a0)
             + a0 * math.log(b0)
             - self.a * math.log(self.b)
@@ -533,76 +546,344 @@ def _build_mvn(dist, data, weights, prior) -> NormalInverseWishartPosterior:
     return post
 
 
-# ---------------------------------------------------------------------------
-# Generic exponential-family fallback (any family with a to_exponential_family map)
-# ---------------------------------------------------------------------------
-class GenericExpFamilyPosterior(ConjugatePosterior):
-    family = "ExponentialFamily(generic)"
+def _build_log_gaussian(dist, data, weights, prior) -> NormalInverseGammaPosterior:
+    # LogGaussian models log x ~ Normal(mu, sigma2): apply the Normal-Inverse-Gamma update to log(data),
+    # then add the change-of-variables Jacobian sum_i -log x_i to the evidence.
+    x, w = _as_weighted_array(data, weights)
+    logx = np.log(x)
+    post = _build_gaussian(dist, list(logx), w, prior)
+    post.kind = "log_gaussian"
+    post.log_base = float(-np.dot(w, logx))
+    return post
 
-    def __init__(self, dist, chi: np.ndarray, nu: float):
-        self.dist = dist
-        self.chi = np.asarray(chi, dtype=np.float64)
-        self.nu = float(nu)
 
-    def mean_parameters(self) -> np.ndarray:
-        """Posterior mean of the mean-parameters E[T(x)] = chi / nu."""
-        return self.chi / self.nu
+# ---------------------------------------------------------------------------
+# Inverse-Gamma-on-variance posterior (Rayleigh, HalfNormal -- unknown scale sigma)
+# ---------------------------------------------------------------------------
+class InverseGammaVariancePosterior(ConjugatePosterior):
+    """Posterior over the squared-scale ``sigma2`` of a zero-location scale family.
+
+    Rayleigh and half-normal both have a single scale ``sigma`` with ``x^2`` as the sufficient
+    statistic, so ``sigma2`` has an Inverse-Gamma conjugate posterior.
+    """
+
+    family = "InverseGamma(variance)"
+
+    def __init__(self, a: float, b: float, kind: str):
+        self.a = float(a)  # inverse-gamma shape
+        self.b = float(b)  # inverse-gamma scale
+        self.kind = kind  # "rayleigh" or "half_normal"
+        self._prior = None
+
+    def _sigma2_mean(self) -> float:
+        return self.b / (self.a - 1.0) if self.a > 1.0 else self.b / self.a
 
     def mean(self) -> dict[str, Any]:
-        return {"mean_parameters": self.mean_parameters()}
+        s2 = self.b / (self.a - 1.0) if self.a > 1.0 else float("inf")
+        return {"sigma2": s2, "sigma": math.sqrt(s2) if math.isfinite(s2) else float("inf")}
+
+    def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        rng = rng or np.random.RandomState()
+        s2 = 1.0 / rng.gamma(self.a, 1.0 / self.b, size=n)
+        return {"sigma2": s2, "sigma": np.sqrt(s2)}
 
     def point_estimate(self):
-        """Distribution whose mean-parameters match the posterior mean (moment matching)."""
-        from pysp.stats.exp_family import to_exponential_family
+        sigma = math.sqrt(self._sigma2_mean())
+        if self.kind == "half_normal":
+            from pysp.stats.leaf.half_normal import HalfNormalDistribution
 
-        form = to_exponential_family(self.dist)
-        target = self.mean_parameters()
-        # Where a closed-form dual map exists, invert grad A; else fall back to the source MLE shape.
-        recon = getattr(form, "from_mean_parameters", None)
-        if callable(recon):
-            d = recon(target)
-            if d is not None:
-                return d
-        return self.dist  # best-effort: caller still has the natural posterior hyperparameters
+            return HalfNormalDistribution(sigma)
+        from pysp.stats.leaf.rayleigh import RayleighDistribution
+
+        return RayleighDistribution(sigma)
+
+    def posterior_predictive(self):
+        # the exact predictive is a compound (non-standard) density; the plug-in is returned.
+        return self.point_estimate()
 
     def hyper(self) -> dict[str, Any]:
-        return {"chi": self.chi, "nu": self.nu}
+        return {"a": self.a, "b": self.b}
 
-    def sample(self, n: int = 1, rng: np.random.RandomState | None = None):
-        raise NotImplementedError(
-            "generic posterior sampling requires the family's dual map A(eta); not available for "
-            "%s. Its closed-form conjugate (if any) is not yet registered." % type(self.dist).__name__
-        )
+    def _set_prior(self, a0, b0):
+        self._prior = (a0, b0)
 
     def log_marginal_likelihood(self) -> float:
-        raise NotImplementedError("generic marginal likelihood requires the family's prior normaliser")
+        a0, b0 = self._prior
+        return float(self.log_base + a0 * math.log(b0) - gammaln(a0) + gammaln(self.a) - self.a * math.log(self.b))
+
+
+def _build_rayleigh(dist, data, weights, prior) -> InverseGammaVariancePosterior:
+    x, w = _as_weighted_array(data, weights)
+    n, sx2 = float(w.sum()), float(np.dot(w, x * x))
+    a0, b0 = (prior or {}).get("a", 1e-3), (prior or {}).get("b", 1e-3)
+    post = InverseGammaVariancePosterior(a0 + n, b0 + 0.5 * sx2, kind="rayleigh")
+    post.log_base = float(np.dot(w, np.log(x)))  # h(x) = x
+    post._set_prior(a0, b0)
+    return post
+
+
+def _build_half_normal(dist, data, weights, prior) -> InverseGammaVariancePosterior:
+    x, w = _as_weighted_array(data, weights)
+    n, sx2 = float(w.sum()), float(np.dot(w, x * x))
+    a0, b0 = (prior or {}).get("a", 1e-3), (prior or {}).get("b", 1e-3)
+    post = InverseGammaVariancePosterior(a0 + 0.5 * n, b0 + 0.5 * sx2, kind="half_normal")
+    post.log_base = float(0.5 * n * math.log(2.0 / math.pi))  # h(x) = sqrt(2/pi)
+    post._set_prior(a0, b0)
+    return post
+
+
+# ---------------------------------------------------------------------------
+# Gamma-on-positive-parameter posterior (Gamma/InverseGamma/InverseGaussian/Pareto,
+# each conditional on its known shape/location/scale parameter, taken from the distribution)
+# ---------------------------------------------------------------------------
+class GammaParameterPosterior(ConjugatePosterior):
+    """Gamma posterior over a positive parameter ``psi`` of a one-parameter exponential family.
+
+    Each supported likelihood factorises (given its other, known parameter) as
+    ``propto psi^P exp(-psi * C)``, so a ``Gamma(A0, B0)`` prior on ``psi`` gives ``Gamma(A0+P, B0+C)``.
+    ``kind`` selects which parameter ``psi`` is and how to rebuild a distribution at its posterior
+    mean (using the known parameter ``fixed``).
+    """
+
+    family = "Gamma(parameter)"
+
+    def __init__(self, shape: float, rate: float, kind: str, fixed: float, param: str):
+        self.shape = float(shape)  # posterior Gamma shape A
+        self.rate = float(rate)  # posterior Gamma rate B
+        self.kind = kind
+        self.fixed = fixed  # the known parameter (shape / mean / scale)
+        self.param = param  # the name of psi for reporting
+        self._prior = None
+
+    def mean(self) -> dict[str, Any]:
+        return {self.param: self.shape / self.rate}
+
+    def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        rng = rng or np.random.RandomState()
+        return {self.param: rng.gamma(self.shape, 1.0 / self.rate, size=n)}
+
+    def point_estimate(self):
+        psi = self.shape / self.rate
+        if self.kind == "gamma":
+            from pysp.stats.leaf.gamma import GammaDistribution
+
+            return GammaDistribution(self.fixed, 1.0 / psi)  # known shape k, theta = 1/rate
+        if self.kind == "inverse_gamma":
+            from pysp.stats.leaf.inverse_gamma import InverseGammaDistribution
+
+            return InverseGammaDistribution(self.fixed, psi)  # known alpha, beta = psi
+        if self.kind == "inverse_gaussian":
+            from pysp.stats.leaf.inverse_gaussian import InverseGaussianDistribution
+
+            return InverseGaussianDistribution(self.fixed, psi)  # known mu, lam = psi
+        from pysp.stats.leaf.pareto import ParetoDistribution
+
+        return ParetoDistribution(self.fixed, psi)  # known xm, alpha = psi
+
+    def posterior_predictive(self):
+        return self.point_estimate()  # compound predictive is non-standard; plug-in returned
+
+    def hyper(self) -> dict[str, Any]:
+        return {"shape": self.shape, "rate": self.rate, self.param: self.shape / self.rate}
+
+    def _set_prior(self, a0, b0):
+        self._prior = (a0, b0)
+
+    def log_marginal_likelihood(self) -> float:
+        a0, b0 = self._prior
+        return float(
+            self.log_base + gammaln(self.shape) - gammaln(a0) + a0 * math.log(b0) - self.shape * math.log(self.rate)
+        )
+
+
+def _gamma_prior(prior):
+    p = prior or {}
+    return float(p.get("shape", 1e-3)), float(p.get("rate", 1e-3))
+
+
+def _build_gamma(dist, data, weights, prior) -> GammaParameterPosterior:
+    # Gamma(k, theta): known shape k -> rate=1/theta has a Gamma posterior.
+    k = float(dist.k)
+    x, w = _as_weighted_array(data, weights)
+    n, sx = float(w.sum()), float(np.dot(w, x))
+    a0, b0 = _gamma_prior(prior)
+    post = GammaParameterPosterior(a0 + n * k, b0 + sx, kind="gamma", fixed=k, param="rate")
+    post.log_base = float(np.dot(w, (k - 1.0) * np.log(x)) - n * gammaln(k))  # x^{k-1}/Gamma(k)
+    post._set_prior(a0, b0)
+    return post
+
+
+def _build_inverse_gamma(dist, data, weights, prior) -> GammaParameterPosterior:
+    # InverseGamma(alpha, beta): known alpha -> beta has a Gamma posterior (suff stat 1/x).
+    alpha = float(dist.alpha)
+    x, w = _as_weighted_array(data, weights)
+    n, s_inv = float(w.sum()), float(np.dot(w, 1.0 / x))
+    a0, b0 = _gamma_prior(prior)
+    post = GammaParameterPosterior(a0 + n * alpha, b0 + s_inv, kind="inverse_gamma", fixed=alpha, param="beta")
+    post.log_base = float(np.dot(w, -(alpha + 1.0) * np.log(x)) - n * gammaln(alpha))  # x^{-alpha-1}/Gamma(alpha)
+    post._set_prior(a0, b0)
+    return post
+
+
+def _build_inverse_gaussian(dist, data, weights, prior) -> GammaParameterPosterior:
+    # InverseGaussian(mu, lam): known mu -> lam has a Gamma posterior.
+    mu = float(dist.mu)
+    x, w = _as_weighted_array(data, weights)
+    n = float(w.sum())
+    c = float(np.dot(w, (x - mu) ** 2 / (2.0 * mu * mu * x)))
+    a0, b0 = _gamma_prior(prior)
+    post = GammaParameterPosterior(a0 + 0.5 * n, b0 + c, kind="inverse_gaussian", fixed=mu, param="lam")
+    post.log_base = float(np.dot(w, -0.5 * np.log(2.0 * math.pi * x**3)))  # sqrt(1/(2 pi x^3))
+    post._set_prior(a0, b0)
+    return post
+
+
+def _build_pareto(dist, data, weights, prior) -> GammaParameterPosterior:
+    # Pareto(xm, alpha): known scale xm -> tail index alpha has a Gamma posterior.
+    xm = float(dist.xm)
+    x, w = _as_weighted_array(data, weights)
+    n = float(w.sum())
+    c = float(np.dot(w, np.log(x / xm)))
+    a0, b0 = _gamma_prior(prior)
+    post = GammaParameterPosterior(a0 + n, b0 + c, kind="pareto", fixed=xm, param="alpha")
+    post.log_base = float(np.dot(w, -np.log(x)))  # density carries a 1/x factor
+    post._set_prior(a0, b0)
+    return post
+
+
+def _build_negative_binomial(dist, data, weights, prior) -> BetaPosterior:
+    # NegativeBinomial(r, p): known r -> success prob p has a Beta posterior (likelihood p^{nr}(1-p)^{sum x}).
+    r = float(dist.r)
+    x, w = _as_weighted_array(data, weights)
+    n, sx = float(w.sum()), float(np.dot(w, x))
+    a0, b0 = (prior or {}).get("a", 1.0), (prior or {}).get("b", 1.0)
+    post = BetaPosterior(a0 + n * r, b0 + sx, kind="negative_binomial", n_trials=int(r))
+    post.kind = "negative_binomial"
+    post._nb_r = r
+    post.log_base = float(np.dot(w, gammaln(x + r) - gammaln(r) - gammaln(x + 1.0)))  # binomial coefficient
+    post._set_prior(a0, b0, n, sx, sx)
+    return post
+
+
+# ---------------------------------------------------------------------------
+# Diagonal Gaussian: independent Normal-Inverse-Gamma per dimension
+# ---------------------------------------------------------------------------
+class DiagonalNIGPosterior(ConjugatePosterior):
+    """Independent Normal-Inverse-Gamma posteriors, one per coordinate of a diagonal Gaussian."""
+
+    family = "DiagonalNormalInverseGamma"
+
+    def __init__(self, per_dim: list[NormalInverseGammaPosterior]):
+        self.per_dim = per_dim
+        self.d = len(per_dim)
+
+    def mean(self) -> dict[str, Any]:
+        return {
+            "mu": np.array([p.mean()["mu"] for p in self.per_dim]),
+            "sigma2": np.array([p.mean()["sigma2"] for p in self.per_dim]),
+        }
+
+    def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        rng = rng or np.random.RandomState()
+        mus = np.empty((n, self.d))
+        s2 = np.empty((n, self.d))
+        for j, p in enumerate(self.per_dim):
+            s = p.sample(n, rng)
+            mus[:, j] = s["mu"]
+            s2[:, j] = s["sigma2"]
+        return {"mu": mus, "sigma2": s2}
+
+    def point_estimate(self):
+        from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
+
+        mu = np.array([p.mean()["mu"] for p in self.per_dim])
+        s2 = np.array([p.b / (p.a - 1.0) if p.a > 1.0 else p.b / p.a for p in self.per_dim])
+        return DiagonalGaussianDistribution(mu, s2)
+
+    def posterior_predictive(self):
+        return self.point_estimate()  # product of per-dim Student-t; plug-in returned
+
+    def hyper(self) -> dict[str, Any]:
+        return {"per_dim": [p.hyper() for p in self.per_dim]}
+
+    def log_marginal_likelihood(self) -> float:
+        return float(sum(p.log_marginal_likelihood() for p in self.per_dim))
+
+
+def _build_diagonal_gaussian(dist, data, weights, prior) -> DiagonalNIGPosterior:
+    x = np.asarray(list(data), dtype=np.float64)
+    if x.ndim == 1:
+        x = x[:, None]
+    d = x.shape[1]
+    per_dim = [_build_gaussian(None, list(x[:, j]), weights, prior) for j in range(d)]
+    return DiagonalNIGPosterior(per_dim)
+
+
+# ---------------------------------------------------------------------------
+# von Mises: conjugate posterior on the mean direction (concentration kappa known)
+# ---------------------------------------------------------------------------
+class VonMisesMeanPosterior(ConjugatePosterior):
+    """von Mises posterior over the mean direction ``mu`` (concentration ``kappa`` taken as known).
+
+    The conjugate prior for ``mu`` is itself a von Mises ``vM(m0, R0)``; combining with the
+    likelihood gives a von Mises ``vM(m_n, R_n)`` whose resultant vector adds the data's.
+    """
+
+    family = "vonMises(mean)"
+
+    def __init__(self, m: float, r: float, kappa: float):
+        self.m = float(m)  # posterior mean direction
+        self.r = float(r)  # posterior concentration
+        self.kappa = float(kappa)  # known likelihood concentration
+        self._prior = None
+
+    def mean(self) -> dict[str, Any]:
+        return {"mu": self.m, "concentration": self.r}
+
+    def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        rng = rng or np.random.RandomState()
+        return {"mu": rng.vonmises(self.m, self.r, size=n)}
+
+    def point_estimate(self):
+        from pysp.stats.leaf.von_mises import VonMisesDistribution
+
+        return VonMisesDistribution(self.m, self.kappa)
 
     def posterior_predictive(self):
         return self.point_estimate()
 
+    def hyper(self) -> dict[str, Any]:
+        return {"m": self.m, "R": self.r, "kappa": self.kappa}
 
-def _build_generic(dist, data, weights, prior) -> GenericExpFamilyPosterior:
-    from pysp.stats.exp_family import to_exponential_family
+    def _set_prior(self, r0):
+        self._prior = r0
 
-    form = to_exponential_family(dist)
-    if form is None:
-        raise TypeError(
-            "%s is not an exponential family with a registered map; no conjugate posterior available."
-            % type(dist).__name__
-        )
-    x = list(data)
-    stats = np.asarray(form.engine.to_numpy(form.sufficient_statistics(x)), dtype=np.float64)
-    if weights is None:
-        sum_t = stats.sum(axis=0)
-        n = float(len(x))
-    else:
-        w = np.asarray(weights, dtype=np.float64)
-        sum_t = (w[:, None] * stats).sum(axis=0)
-        n = float(w.sum())
+    def log_marginal_likelihood(self) -> float:
+        from scipy.special import ive
+
+        r0 = self._prior
+        n = self.log_base  # carries -n (number of obs) via the (2 pi I0(kappa))^{-n} term handled below
+        # evidence = I0(R_n) / [ (2 pi I0(kappa))^n * I0(R0) ]; use ive for stability: I0(x)=ive(0,x)e^{x}
+        log_i0 = lambda z: math.log(ive(0, z)) + z
+        return float(log_i0(self.r) - log_i0(r0) - n * (math.log(2.0 * math.pi) + log_i0(self.kappa)))
+
+
+def _build_von_mises(dist, data, weights, prior) -> VonMisesMeanPosterior:
+    kappa = float(dist.kappa)
+    x, w = _as_weighted_array(data, weights)
     p = prior or {}
-    chi0 = np.asarray(p.get("chi", np.zeros(stats.shape[1])), dtype=np.float64)
-    nu0 = float(p.get("nu", 0.0))
-    return GenericExpFamilyPosterior(dist, chi0 + sum_t, nu0 + n)
+    m0 = float(p.get("m", 0.0))
+    r0 = float(p.get("R", 1e-6))  # near-uniform prior direction
+    cx = float(np.dot(w, np.cos(x)))
+    sx = float(np.dot(w, np.sin(x)))
+    rc = kappa * cx + r0 * math.cos(m0)
+    rs = kappa * sx + r0 * math.sin(m0)
+    r_n = math.hypot(rc, rs)
+    m_n = math.atan2(rs, rc)
+    post = VonMisesMeanPosterior(m_n, r_n, kappa)
+    post.log_base = float(w.sum())  # n, used inside the evidence
+    post._set_prior(r0)
+    return post
 
 
 # ---------------------------------------------------------------------------
@@ -613,10 +894,20 @@ def _registry():
     from pysp.stats.leaf.binomial import BinomialDistribution
     from pysp.stats.leaf.categorical import CategoricalDistribution
     from pysp.stats.leaf.exponential import ExponentialDistribution
+    from pysp.stats.leaf.gamma import GammaDistribution
     from pysp.stats.leaf.gaussian import GaussianDistribution
     from pysp.stats.leaf.geometric import GeometricDistribution
+    from pysp.stats.leaf.half_normal import HalfNormalDistribution
     from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
+    from pysp.stats.leaf.inverse_gamma import InverseGammaDistribution
+    from pysp.stats.leaf.inverse_gaussian import InverseGaussianDistribution
+    from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
+    from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution
+    from pysp.stats.leaf.pareto import ParetoDistribution
     from pysp.stats.leaf.poisson import PoissonDistribution
+    from pysp.stats.leaf.rayleigh import RayleighDistribution
+    from pysp.stats.leaf.von_mises import VonMisesDistribution
+    from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
     from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
 
     return {
@@ -629,21 +920,47 @@ def _registry():
         IntegerCategoricalDistribution: _build_integer_categorical,
         GaussianDistribution: _build_gaussian,
         MultivariateGaussianDistribution: _build_mvn,
+        # full closed-form (all parameters)
+        RayleighDistribution: _build_rayleigh,
+        HalfNormalDistribution: _build_half_normal,
+        LogGaussianDistribution: _build_log_gaussian,
+        DiagonalGaussianDistribution: _build_diagonal_gaussian,
+        # closed-form conditional on the distribution's known shape/location/scale parameter
+        GammaDistribution: _build_gamma,
+        InverseGammaDistribution: _build_inverse_gamma,
+        InverseGaussianDistribution: _build_inverse_gaussian,
+        ParetoDistribution: _build_pareto,
+        NegativeBinomialDistribution: _build_negative_binomial,
+        VonMisesDistribution: _build_von_mises,
     }
+
+
+# Exponential-family likelihoods whose conjugate prior has no closed form (intractable normaliser),
+# so there is no closed-form full-Bayesian posterior; we raise rather than return a partial answer.
+_NO_CLOSED_FORM = {
+    "BetaDistribution": "both shape parameters unknown (the conjugate prior normaliser is intractable)",
+    "GammaDistribution_full": "both shape and scale unknown -- only known-shape is conjugate",
+    "LogSeriesDistribution": "no tractable conjugate prior",
+    "IntegerMultinomialDistribution": "compositional (length distribution + count vectors); use a Dirichlet on the component directly",
+}
 
 
 def conjugate_posterior(dist, data, prior: dict | None = None, weights: np.ndarray | None = None) -> ConjugatePosterior:
     """Closed-form conjugate posterior over the parameters of ``dist`` given ``data``.
 
+    Every supported family returns a *closed-form, full-Bayesian* posterior: exact parameter
+    samples, marginal likelihood, posterior mean / point estimate, and a posterior predictive. For
+    families with a multi-parameter likelihood whose conjugate is conditional (Gamma, InverseGamma,
+    InverseGaussian, Pareto, NegativeBinomial, vonMises), the *non-target* parameter (shape /
+    location / scale / number-of-trials / concentration) is taken as known from ``dist`` -- exactly
+    as a Binomial's number of trials is. Families with no closed-form conjugate (full Beta, full
+    Gamma, LogSeries, …) raise a clear error rather than returning a partial answer.
+
     Args:
-        dist: A pysp likelihood distribution instance whose *type* selects the conjugate family
-            (its parameter values are ignored except for fixed structure such as a Binomial's
-            number of trials or a Categorical's support). Any exponential-family leaf is accepted;
-            the regular conjugates get a closed-form realiser, the rest the generic fallback.
+        dist: A pysp likelihood distribution instance whose *type* selects the conjugate family.
         data: A sequence of observations of the kind ``dist`` scores.
-        prior: Optional dict of conjugate-prior hyperparameters (family specific, e.g.
-            ``{"a": 1.0, "b": 1.0}`` for Beta, ``{"m":0,"kappa":1e-3,"a":1e-3,"b":1e-3}`` for
-            Gaussian). ``None`` uses a weak proper prior.
+        prior: Optional dict of conjugate-prior hyperparameters (family specific). ``None`` uses a
+            weak proper prior.
         weights: Optional per-observation weights (e.g. EM responsibilities).
 
     Returns:
@@ -653,7 +970,14 @@ def conjugate_posterior(dist, data, prior: dict | None = None, weights: np.ndarr
     builder = _registry().get(type(dist))
     if builder is not None:
         return builder(dist, data, weights, prior)
-    return _build_generic(dist, data, weights, prior)
+    name = type(dist).__name__
+    reason = _NO_CLOSED_FORM.get(name)
+    if reason is not None:
+        raise TypeError("%s has no closed-form conjugate posterior: %s." % (name, reason))
+    raise TypeError(
+        "%s has no registered conjugate posterior (not a conjugate exponential family, or a "
+        "structured distribution such as a mixture/HMM -- use the variational machinery instead)." % name
+    )
 
 
 # ---------------------------------------------------------------------------
