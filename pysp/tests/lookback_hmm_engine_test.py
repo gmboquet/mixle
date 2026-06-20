@@ -30,7 +30,7 @@ def _make_dist(mod, len_dist):
         for p in EMISSION_PROBS
     ]
     init_dist = None
-    return mod.LookbackHiddenMarkovDistribution(
+    return mod.LookbackHiddenMarkovModelDistribution(
         topics, w=W, transitions=TRANSITIONS, lag=0, init_dist=init_dist, len_dist=len_dist
     )
 
@@ -40,7 +40,7 @@ def _make_estimator(mod):
         IntegerCategoricalEstimator(min_val=0, max_val=2, pseudo_count=0.1),
         len_estimator=CategoricalEstimator(pseudo_count=0.1),
     )
-    return mod.LookbackHiddenMarkovEstimator(
+    return mod.LookbackHiddenMarkovModelEstimator(
         [topic_est] * 2,
         lag=0,
         init_estimators=[NullEstimator()] * 2,
