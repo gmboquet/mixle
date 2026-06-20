@@ -463,6 +463,9 @@ def weighted_log_posterior(x: np.ndarray, w: np.ndarray) -> list[float]:
             max_val = r
         rv[i] = r
 
+    if isinf(max_val) or isnan(max_val):  # every component impossible -> uniform posterior (matches log_posterior)
+        return [-log(len(x))] * len(x)
+
     e_sum = 0.0
     for i in range(len(x)):
         e_sum += exp(rv[i] - max_val)
@@ -509,6 +512,9 @@ def weighted_log_posterior_sum(x: np.ndarray, w: np.ndarray) -> tuple[list[float
             max_val = r
         rv[i] = r
 
+    if isinf(max_val) or isnan(max_val):  # every component impossible -> uniform posterior, zero evidence
+        return [-log(len(x))] * len(x), -inf
+
     e_sum = 0.0
     for i in range(len(x)):
         e_sum += exp(rv[i] - max_val)
@@ -544,6 +550,10 @@ def matrix_log_posteriors(x: np.ndarray, u_mat: np.ndarray, u: np.ndarray) -> tu
         for j in range(z):
             temp = u_mat[i, :] + x[:, j]
             inner_max = temp.max()
+            if isinf(inner_max) or isnan(inner_max):  # this slice impossible -> uniform, no evidence
+                row_posteriors[i, :, j] = 1.0 / w
+                row_sum += -inf
+                continue
             temp = exp(temp - inner_max)
             inner_sum = temp.sum()
 
@@ -554,6 +564,9 @@ def matrix_log_posteriors(x: np.ndarray, u_mat: np.ndarray, u: np.ndarray) -> tu
         if row_sum > outer_max:
             outer_max = row_sum
         outer_posterior[i] = row_sum
+
+    if isinf(outer_max) or isnan(outer_max):  # every row impossible -> uniform outer posterior, zero evidence
+        return row_posteriors, zeros(h) + 1.0 / h, -inf
 
     outer_posterior = exp(outer_posterior - outer_max)
     outer_sum = outer_posterior.sum()

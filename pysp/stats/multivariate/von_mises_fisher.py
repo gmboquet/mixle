@@ -534,10 +534,11 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
         good_w = np.bitwise_and(np.isfinite(weights), weights >= 0)
         if np.all(good_w):
             x_weight = np.multiply(x.T, weights)
+            self.count += weights.sum()
         else:
             x_weight = np.multiply(x[good_w, :].T, weights[good_w])
+            self.count += weights[good_w].sum()  # count only the kept rows, matching ssum (a NaN weight -> NaN count)
 
-        self.count += weights.sum()
         self.ssum += x_weight.sum(axis=1)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState) -> None:
