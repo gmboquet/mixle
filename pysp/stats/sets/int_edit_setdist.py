@@ -477,7 +477,8 @@ class IntegerBernoulliEditSampler(DistributionSampler):
             temp = self.rng.rand(self.dist.num_vals)
             temp = np.log(temp)
             rv = np.zeros(self.dist.num_vals, dtype=bool)
-            prev_ob = np.asarray(self.init_rng.sample(), dtype=int)
+            prev_raw = self.init_rng.sample()  # a Null init_dist yields None -> empty previous set
+            prev_ob = np.asarray([] if prev_raw is None else prev_raw, dtype=int)
 
             rv[temp <= self.dist.log_edit_pmat[:, 2]] = True
             rv[prev_ob] = temp[prev_ob] <= self.dist.log_edit_pmat[prev_ob, 3]
