@@ -11,12 +11,12 @@ from numpy.random import RandomState
 
 from pysp.stats import seq_estimate, seq_initialize
 from pysp.stats.latent.hidden_markov_ind_pi import (
-    IndPiHiddenMarkovDataEncoder,
-    IndPiHiddenMarkovEstimator,
-    IndPiHiddenMarkovEstimatorAccumulator,
-    IndPiHiddenMarkovEstimatorAccumulatorFactory,
-    IndPiHiddenMarkovModelDistribution,
-    IndPiHiddenMarkovSampler,
+    SemiSupervisedHiddenMarkovDataEncoder,
+    SemiSupervisedHiddenMarkovEstimator,
+    SemiSupervisedHiddenMarkovEstimatorAccumulator,
+    SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory,
+    SemiSupervisedHiddenMarkovModelDistribution,
+    SemiSupervisedHiddenMarkovSampler,
 )
 from pysp.stats.latent.llda import (
     LLDADataEncoder,
@@ -39,23 +39,23 @@ def make_ind_pi_dist(use_numba=True, n_rows=2):
         w = [[0.55, 0.45]] * n_rows
     transitions = [[0.9, 0.1], [0.2, 0.8]]
     len_dist = CategoricalDistribution({3: 0.5, 4: 0.5})
-    return IndPiHiddenMarkovModelDistribution(topics, w, transitions, None, len_dist=len_dist, use_numba=use_numba)
+    return SemiSupervisedHiddenMarkovModelDistribution(topics, w, transitions, None, len_dist=len_dist, use_numba=use_numba)
 
 
 def make_ind_pi_estimator():
-    return IndPiHiddenMarkovEstimator(
+    return SemiSupervisedHiddenMarkovEstimator(
         [CategoricalEstimator(), CategoricalEstimator()], len_estimator=CategoricalEstimator(), pseudo_count=(1.0, 1.0)
     )
 
 
-class IndPiHiddenMarkovTestCase(unittest.TestCase):
+class SemiSupervisedHiddenMarkovTestCase(unittest.TestCase):
     def setUp(self):
         self.dist = make_ind_pi_dist()
         self.data = self.dist.sampler(seed=1).sample(30)
 
     def test_sampler_output(self):
         sampler = self.dist.sampler(seed=1)
-        self.assertIsInstance(sampler, IndPiHiddenMarkovSampler)
+        self.assertIsInstance(sampler, SemiSupervisedHiddenMarkovSampler)
         self.assertEqual(len(self.data), 30)
         for seq in self.data:
             self.assertIn(len(seq), (3, 4))
@@ -65,13 +65,13 @@ class IndPiHiddenMarkovTestCase(unittest.TestCase):
     def test_encoder_equality_and_str(self):
         enc1 = self.dist.dist_to_encoder()
         enc2 = self.dist.dist_to_encoder()
-        self.assertIsInstance(enc1, IndPiHiddenMarkovDataEncoder)
+        self.assertIsInstance(enc1, SemiSupervisedHiddenMarkovDataEncoder)
         self.assertEqual(enc1, enc2)
-        self.assertIn("IndPiHiddenMarkovDataEncoder", str(enc1))
+        self.assertIn("SemiSupervisedHiddenMarkovDataEncoder", str(enc1))
 
         est = make_ind_pi_estimator()
         acc = est.accumulator_factory().make()
-        self.assertIsInstance(acc, IndPiHiddenMarkovEstimatorAccumulator)
+        self.assertIsInstance(acc, SemiSupervisedHiddenMarkovEstimatorAccumulator)
         self.assertEqual(acc.acc_to_encoder(), enc1)
 
     def test_numba_encoding_round_trip(self):
@@ -118,13 +118,13 @@ class IndPiHiddenMarkovTestCase(unittest.TestCase):
         enc_data = [(len(self.data), encoder.seq_encode(self.data))]
 
         model = seq_initialize(enc_data, est, RandomState(7), p=1.0)
-        self.assertIsInstance(model, IndPiHiddenMarkovModelDistribution)
+        self.assertIsInstance(model, SemiSupervisedHiddenMarkovModelDistribution)
         self.assertEqual(np.shape(model.w), (len(self.data), 2))
 
         for _ in range(3):
             model = seq_estimate(enc_data, est, model)
 
-        self.assertIsInstance(model, IndPiHiddenMarkovModelDistribution)
+        self.assertIsInstance(model, SemiSupervisedHiddenMarkovModelDistribution)
         self.assertEqual(model.nStates, 2)
         self.assertEqual(np.shape(model.w), (len(self.data), 2))
         self.assertTrue(np.allclose(model.w.sum(axis=1), 1.0))
@@ -138,8 +138,8 @@ class IndPiHiddenMarkovTestCase(unittest.TestCase):
         est = make_ind_pi_estimator()
         f1 = est.accumulator_factory()
         f2 = est.accumulatorFactory()
-        self.assertIsInstance(f1, IndPiHiddenMarkovEstimatorAccumulatorFactory)
-        self.assertIsInstance(f2, IndPiHiddenMarkovEstimatorAccumulatorFactory)
+        self.assertIsInstance(f1, SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory)
+        self.assertIsInstance(f2, SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory)
 
 
 def make_llda_model():

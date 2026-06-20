@@ -1,7 +1,7 @@
 """Create, estimate, and sample from a hidden Markov model with independent (per-sequence) initial state vectors.
 
-Defines the IndPiHiddenMarkovModelDistribution, IndPiHiddenMarkovSampler, IndPiHiddenMarkovEstimatorAccumulator,
-IndPiHiddenMarkovEstimatorAccumulatorFactory, IndPiHiddenMarkovEstimator, and the IndPiHiddenMarkovDataEncoder
+Defines the SemiSupervisedHiddenMarkovModelDistribution, SemiSupervisedHiddenMarkovSampler, SemiSupervisedHiddenMarkovEstimatorAccumulator,
+SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory, SemiSupervisedHiddenMarkovEstimator, and the SemiSupervisedHiddenMarkovDataEncoder
 classes for use with pysparkplug.
 
 Data type: List[T] / Sequence[T] (determined by the emission distributions).
@@ -44,7 +44,7 @@ from pysp.utils.aliasing import MISSING, coalesce_alias, require
 from pysp.utils.optional_deps import numba
 
 
-class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
+class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     """HMM with shared emissions/transitions and an independent initial state vector per observed sequence.
 
     Compatible with data type List[T], where T is the data type of the emission distributions.
@@ -110,7 +110,7 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
         use_numba=True,
         weights=MISSING,
     ):
-        """IndPiHiddenMarkovModelDistribution object defining an HMM with per-sequence initial state vectors.
+        """SemiSupervisedHiddenMarkovModelDistribution object defining an HMM with per-sequence initial state vectors.
 
         Args:
                 topics (Sequence[SequenceEncodableProbabilityDistribution]): Emission distributions all having type T.
@@ -170,7 +170,7 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
             self.has_topics = False
 
     def __str__(self):
-        """Returns string representation of IndPiHiddenMarkovModelDistribution instance."""
+        """Returns string representation of SemiSupervisedHiddenMarkovModelDistribution instance."""
         s1 = ",".join(map(str, self.topics))
         s2 = repr(list(self.w))
         s3 = repr([list(u) for u in self.transitions])
@@ -181,12 +181,12 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
         s5 = str(self.len_dist)
         s6 = repr(self.name)
 
-        return "IndPiHiddenMarkovModelDistribution([%s], %s, %s, %s, len_dist=%s, name=%s)" % (s1, s2, s3, s4, s5, s6)
+        return "SemiSupervisedHiddenMarkovModelDistribution([%s], %s, %s, %s, len_dist=%s, name=%s)" % (s1, s2, s3, s4, s5, s6)
 
     def density(self, x):
         """Returns the density of the HMM for an observed sequence x.
 
-        See 'IndPiHiddenMarkovModelDistribution.log_density()' for details.
+        See 'SemiSupervisedHiddenMarkovModelDistribution.log_density()' for details.
 
         Args:
                 x (List[T]): Observed sequence of HMM emissions.
@@ -293,12 +293,12 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
     def seq_log_density(self, x):
         """Vectorized log-density evaluation for an encoded sequence of iid HMM observations.
 
-        Arg 'x' is the output of 'IndPiHiddenMarkovDataEncoder.seq_encode()'; either Tuple[enc, None] for
+        Arg 'x' is the output of 'SemiSupervisedHiddenMarkovDataEncoder.seq_encode()'; either Tuple[enc, None] for
         the numpy encoding, or Tuple[None, enc_numba] for the numba encoding. The numba path averages
         the per-sequence initial state vectors of 'w' before the forward pass.
 
         Args:
-                x: Encoded sequence of iid HMM observations (see IndPiHiddenMarkovDataEncoder.seq_encode()).
+                x: Encoded sequence of iid HMM observations (see SemiSupervisedHiddenMarkovDataEncoder.seq_encode()).
 
         Returns:
                 Numpy array of log-density values, one per encoded sequence.
@@ -411,17 +411,17 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
         if self.has_topics:
             if getattr(engine, "name", None) == "numpy":
                 return self.seq_log_density(x)
-            raise BackendScoringError("IndPi HMM backend scoring does not support topic-mixture emissions.")
+            raise BackendScoringError("SemiSupervised HMM backend scoring does not support topic-mixture emissions.")
         if self.terminal_values is not None:
             if getattr(engine, "name", None) == "numpy":
                 return self.seq_log_density(x)
-            raise BackendScoringError("IndPi HMM backend scoring does not support terminal-value semantics.")
+            raise BackendScoringError("SemiSupervised HMM backend scoring does not support terminal-value semantics.")
         if x1 is not None:
             if getattr(engine, "name", None) == "numpy":
                 return self.seq_log_density(x)
-            raise BackendScoringError("IndPi HMM backend scoring requires the non-numba encoding.")
+            raise BackendScoringError("SemiSupervised HMM backend scoring requires the non-numba encoding.")
         if x0 is None:
-            raise BackendScoringError("IndPi HMM backend scoring received an empty encoded layout.")
+            raise BackendScoringError("SemiSupervised HMM backend scoring received an empty encoded layout.")
 
         (tot_cnt, idx_bands, has_next, len_vec, idx_mat, idx_vec, enc_data), len_enc = x0
         num_states = self.nStates
@@ -467,13 +467,13 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
     def _seq_encode(self, x):
         """Deprecated: encode x with the numpy (non-numba) encoding.
 
-        Use 'dist_to_encoder()' and 'IndPiHiddenMarkovDataEncoder.seq_encode()' instead.
+        Use 'dist_to_encoder()' and 'SemiSupervisedHiddenMarkovDataEncoder.seq_encode()' instead.
 
         Args:
                 x (List[List[T]]): A sequence of iid observations from the HMM.
 
         Returns:
-                Encoded sequence (see IndPiHiddenMarkovDataEncoder._seq_encode()).
+                Encoded sequence (see SemiSupervisedHiddenMarkovDataEncoder._seq_encode()).
 
         """
         encoder = self.dist_to_encoder()
@@ -483,28 +483,28 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
     def seq_encode(self, x):
         """Deprecated: encode a sequence of iid HMM observations for vectorized 'seq_' calls.
 
-        Use 'dist_to_encoder()' and 'IndPiHiddenMarkovDataEncoder.seq_encode()' instead.
+        Use 'dist_to_encoder()' and 'SemiSupervisedHiddenMarkovDataEncoder.seq_encode()' instead.
 
         Args:
                 x (List[List[T]]): A sequence of iid observations from the HMM.
 
         Returns:
-                Encoded sequence (see IndPiHiddenMarkovDataEncoder.seq_encode()).
+                Encoded sequence (see SemiSupervisedHiddenMarkovDataEncoder.seq_encode()).
 
         """
         return self.dist_to_encoder().seq_encode(x)
 
     def sampler(self, seed=None):
-        """Create an IndPiHiddenMarkovSampler object with seed passed.
+        """Create an SemiSupervisedHiddenMarkovSampler object with seed passed.
 
         Args:
                 seed (Optional[int]): Set seed for random sampling.
 
         Returns:
-                IndPiHiddenMarkovSampler object.
+                SemiSupervisedHiddenMarkovSampler object.
 
         """
-        return IndPiHiddenMarkovSampler(self, seed)
+        return SemiSupervisedHiddenMarkovSampler(self, seed)
 
     def enumerator(self):
         """Returns an enumerator over observation sequences in descending marginal probability order.
@@ -520,49 +520,49 @@ class IndPiHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistributio
             log_w=self.logW,
             log_transitions=self.logTransitions,
             len_dist=self.len_dist,
-            path_root="IndPiHiddenMarkovModelDistribution",
+            path_root="SemiSupervisedHiddenMarkovModelDistribution",
         )
 
     def estimator(self, pseudo_count=None):
-        """Create an IndPiHiddenMarkovEstimator for estimating models like this object instance.
+        """Create an SemiSupervisedHiddenMarkovEstimator for estimating models like this object instance.
 
         Args:
                 pseudo_count (Optional[float]): Used to re-weight sufficient statistics in estimation.
 
         Returns:
-                IndPiHiddenMarkovEstimator object.
+                SemiSupervisedHiddenMarkovEstimator object.
 
         """
         len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
         comp_ests = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
-        return IndPiHiddenMarkovEstimator(comp_ests, pseudo_count=(pseudo_count, pseudo_count), len_estimator=len_est)
+        return SemiSupervisedHiddenMarkovEstimator(comp_ests, pseudo_count=(pseudo_count, pseudo_count), len_estimator=len_est)
 
     def dist_to_encoder(self):
-        """Returns IndPiHiddenMarkovDataEncoder object for encoding sequences of iid HMM observations."""
+        """Returns SemiSupervisedHiddenMarkovDataEncoder object for encoding sequences of iid HMM observations."""
         emission_encoder = self.topics[0].dist_to_encoder()
         len_encoder = self.len_dist.dist_to_encoder() if self.len_dist is not None else NullDataEncoder()
-        return IndPiHiddenMarkovDataEncoder(
+        return SemiSupervisedHiddenMarkovDataEncoder(
             emission_encoder=emission_encoder, len_encoder=len_encoder, use_numba=self.use_numba
         )
 
 
-class IndPiHiddenMarkovSampler(DistributionSampler):
-    """IndPiHiddenMarkovSampler object for sampling iid sequences from an IndPiHiddenMarkovModelDistribution.
+class SemiSupervisedHiddenMarkovSampler(DistributionSampler):
+    """SemiSupervisedHiddenMarkovSampler object for sampling iid sequences from an SemiSupervisedHiddenMarkovModelDistribution.
 
     Cycles through one Markov chain state sampler per row of 'dist.w' so consecutive samples are drawn with
     the per-sequence initial state vectors of the model.
     """
 
     def __init__(self, dist, seed):
-        """IndPiHiddenMarkovSampler object.
+        """SemiSupervisedHiddenMarkovSampler object.
 
         Args:
-                dist (IndPiHiddenMarkovModelDistribution): Distribution instance to sample from.
+                dist (SemiSupervisedHiddenMarkovModelDistribution): Distribution instance to sample from.
                 seed (Optional[int]): Set seed on random number generator for sampling.
 
         Attributes:
                 num_states (int): Number of hidden states in 'dist' object.
-                dist (IndPiHiddenMarkovModelDistribution): Distribution instance to sample from.
+                dist (SemiSupervisedHiddenMarkovModelDistribution): Distribution instance to sample from.
                 rng (RandomState): RandomState object with seed set for sampling.
                 iter (int): Index of the next per-sequence state sampler to use (cycles through 'stateSamplers').
                 obsSamplers (List[DistributionSampler]): Samplers for the emission distributions. Taken to be
@@ -717,18 +717,18 @@ class IndPiHiddenMarkovSampler(DistributionSampler):
                 return [self.sample_terminal(self.terminal_set) for i in range(size)]
 
         else:
-            raise RuntimeError("IndPiHiddenMarkovSampler requires either a length distribution or terminal value set.")
+            raise RuntimeError("SemiSupervisedHiddenMarkovSampler requires either a length distribution or terminal value set.")
 
 
-class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
-    """IndPiHiddenMarkovEstimatorAccumulator object for aggregating sufficient statistics from HMM observations.
+class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
+    """SemiSupervisedHiddenMarkovEstimatorAccumulator object for aggregating sufficient statistics from HMM observations.
 
     The initial state counts ('init_counts') are tracked per sequence (a 2-d array with one row per observed
     sequence), unlike pysp.stats.latent.hidden_markov where they are pooled.
     """
 
     def __init__(self, accumulators, len_accumulator=None, keys=(None, None, None), init_counts=None, use_numba=True):
-        """IndPiHiddenMarkovEstimatorAccumulator object.
+        """SemiSupervisedHiddenMarkovEstimatorAccumulator object.
 
         Args:
                 accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Accumulator objects for the
@@ -799,7 +799,7 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
         Args:
                 x (List[T]): HMM observation sequence.
                 weight (float): Weight for observation.
-                estimate (IndPiHiddenMarkovModelDistribution): Previous estimate of the HMM.
+                estimate (SemiSupervisedHiddenMarkovModelDistribution): Previous estimate of the HMM.
 
         Returns:
                 None.
@@ -895,7 +895,7 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
         emission accumulators accordingly.
 
         Args:
-                x: Encoded sequence of iid HMM observations (see IndPiHiddenMarkovDataEncoder.seq_encode()).
+                x: Encoded sequence of iid HMM observations (see SemiSupervisedHiddenMarkovDataEncoder.seq_encode()).
                 weights (np.ndarray): Numpy array of weights for the observations.
                 rng (RandomState): Used to seed member RandomState objects on first call.
 
@@ -988,9 +988,9 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
         posterior initial state probabilities (one row per sequence in the batch).
 
         Args:
-                x: Encoded sequence of iid HMM observations (see IndPiHiddenMarkovDataEncoder.seq_encode()).
+                x: Encoded sequence of iid HMM observations (see SemiSupervisedHiddenMarkovDataEncoder.seq_encode()).
                 weights (np.ndarray): Numpy array of weights for the observations.
-                estimate (IndPiHiddenMarkovModelDistribution): Previous EM estimate of the HMM model.
+                estimate (SemiSupervisedHiddenMarkovModelDistribution): Previous EM estimate of the HMM model.
 
         Returns:
                 None.
@@ -1205,7 +1205,7 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
     def seq_update_engine(self, x, weights, estimate, engine):
         """Engine-resident Baum-Welch E-step for the blocked encoding (numpy or torch).
 
-        Uses hmm_engine_forward_backward with a per-sequence initial vector (IndPi's defining
+        Uses hmm_engine_forward_backward with a per-sequence initial vector (SemiSupervised's defining
         feature) and produces the same per-sequence initial-state counts, transition counts, state
         counts, and emission statistics as the host blocked seq_update. Falls back to the host path
         for the numba encoding.
@@ -1269,7 +1269,7 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
                 suff_stat: See above for details.
 
         Returns:
-                IndPiHiddenMarkovEstimatorAccumulator object.
+                SemiSupervisedHiddenMarkovEstimatorAccumulator object.
 
         """
         num_states, init_counts, state_counts, trans_counts, accumulators, len_acc = suff_stat
@@ -1331,7 +1331,7 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
                 x: See above for details.
 
         Returns:
-                IndPiHiddenMarkovEstimatorAccumulator object.
+                SemiSupervisedHiddenMarkovEstimatorAccumulator object.
 
         """
         num_states, init_counts, state_counts, trans_counts, accumulators, len_acc = x
@@ -1425,19 +1425,19 @@ class IndPiHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticAccumulato
             self.len_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self):
-        """Returns IndPiHiddenMarkovDataEncoder object for encoding sequences of iid HMM observations."""
+        """Returns SemiSupervisedHiddenMarkovDataEncoder object for encoding sequences of iid HMM observations."""
         emission_encoder = self.accumulators[0].acc_to_encoder()
         len_encoder = self.len_accumulator.acc_to_encoder() if self.len_accumulator is not None else NullDataEncoder()
-        return IndPiHiddenMarkovDataEncoder(
+        return SemiSupervisedHiddenMarkovDataEncoder(
             emission_encoder=emission_encoder, len_encoder=len_encoder, use_numba=self.use_numba
         )
 
 
-class IndPiHiddenMarkovEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
-    """IndPiHiddenMarkovEstimatorAccumulatorFactory object for creating IndPiHiddenMarkovEstimatorAccumulator objects."""
+class SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
+    """SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory object for creating SemiSupervisedHiddenMarkovEstimatorAccumulator objects."""
 
     def __init__(self, factories, len_factory, keys, use_numba=True):
-        """IndPiHiddenMarkovEstimatorAccumulatorFactory object.
+        """SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory object.
 
         Args:
                 factories (Sequence[StatisticAccumulatorFactory]): StatisticAccumulatorFactory objects for the
@@ -1455,9 +1455,9 @@ class IndPiHiddenMarkovEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         self.use_numba = use_numba
 
     def make(self):
-        """Returns an IndPiHiddenMarkovEstimatorAccumulator object."""
+        """Returns an SemiSupervisedHiddenMarkovEstimatorAccumulator object."""
         len_acc = self.len_factory.make() if self.len_factory is not None else None
-        return IndPiHiddenMarkovEstimatorAccumulator(
+        return SemiSupervisedHiddenMarkovEstimatorAccumulator(
             [self.factories[i].make() for i in range(len(self.factories))],
             len_accumulator=len_acc,
             keys=self.keys,
@@ -1465,8 +1465,8 @@ class IndPiHiddenMarkovEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         )
 
 
-class IndPiHiddenMarkovEstimator(ParameterEstimator):
-    """IndPiHiddenMarkovEstimator object for estimating IndPiHiddenMarkovModelDistribution objects from
+class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
+    """SemiSupervisedHiddenMarkovEstimator object for estimating SemiSupervisedHiddenMarkovModelDistribution objects from
     aggregated sufficient statistics.
     """
 
@@ -1480,7 +1480,7 @@ class IndPiHiddenMarkovEstimator(ParameterEstimator):
         keys=(None, None, None),
         use_numba=True,
     ):
-        """IndPiHiddenMarkovEstimator object.
+        """SemiSupervisedHiddenMarkovEstimator object.
 
         Args:
                 estimators (List[ParameterEstimator]): ParameterEstimator objects for the emission distributions.
@@ -1520,10 +1520,10 @@ class IndPiHiddenMarkovEstimator(ParameterEstimator):
         self.use_numba = use_numba
 
     def accumulator_factory(self):
-        """Returns an IndPiHiddenMarkovEstimatorAccumulatorFactory object."""
+        """Returns an SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory object."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         len_factory = self.len_estimator.accumulator_factory() if self.len_estimator is not None else None
-        return IndPiHiddenMarkovEstimatorAccumulatorFactory(
+        return SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory(
             est_factories, len_factory, self.keys, use_numba=self.use_numba
         )
 
@@ -1532,7 +1532,7 @@ class IndPiHiddenMarkovEstimator(ParameterEstimator):
         return self.accumulator_factory()
 
     def estimate(self, nobs, suff_stat):
-        """Estimate an IndPiHiddenMarkovModelDistribution from aggregated sufficient statistics 'suff_stat'.
+        """Estimate an SemiSupervisedHiddenMarkovModelDistribution from aggregated sufficient statistics 'suff_stat'.
 
         Sufficient statistics in arg 'suff_stat' are a Tuple containing:
                 suff_stat[0] (int): Number of hidden states.
@@ -1550,7 +1550,7 @@ class IndPiHiddenMarkovEstimator(ParameterEstimator):
                 suff_stat: See above for details.
 
         Returns:
-                IndPiHiddenMarkovModelDistribution object.
+                SemiSupervisedHiddenMarkovModelDistribution object.
 
         """
 
@@ -1587,16 +1587,16 @@ class IndPiHiddenMarkovEstimator(ParameterEstimator):
         else:
             transitions = trans_counts / trans_counts.sum(axis=1, keepdims=True)
 
-        return IndPiHiddenMarkovModelDistribution(
+        return SemiSupervisedHiddenMarkovModelDistribution(
             topics, w, transitions, None, len_dist=len_dist, name=self.name, use_numba=self.use_numba
         )
 
 
-class IndPiHiddenMarkovDataEncoder(DataSequenceEncoder):
-    """IndPiHiddenMarkovDataEncoder object for encoding sequences of iid HMM observations (List[List[T]])."""
+class SemiSupervisedHiddenMarkovDataEncoder(DataSequenceEncoder):
+    """SemiSupervisedHiddenMarkovDataEncoder object for encoding sequences of iid HMM observations (List[List[T]])."""
 
     def __init__(self, emission_encoder, len_encoder=None, use_numba=True):
-        """IndPiHiddenMarkovDataEncoder object.
+        """SemiSupervisedHiddenMarkovDataEncoder object.
 
         Args:
                 emission_encoder (DataSequenceEncoder): DataSequenceEncoder of type T for the observed emission
@@ -1617,23 +1617,23 @@ class IndPiHiddenMarkovDataEncoder(DataSequenceEncoder):
         self.use_numba = use_numba
 
     def __str__(self):
-        """Returns string representation of IndPiHiddenMarkovDataEncoder object instance."""
-        s = "IndPiHiddenMarkovDataEncoder(emission_encoder=" + str(self.emission_encoder) + ","
+        """Returns string representation of SemiSupervisedHiddenMarkovDataEncoder object instance."""
+        s = "SemiSupervisedHiddenMarkovDataEncoder(emission_encoder=" + str(self.emission_encoder) + ","
         s += "len_encoder=" + str(self.len_encoder) + ","
         s += "use_numba=" + str(self.use_numba) + ")"
         return s
 
     def __eq__(self, other):
-        """Check if other is equivalent to IndPiHiddenMarkovDataEncoder object instance.
+        """Check if other is equivalent to SemiSupervisedHiddenMarkovDataEncoder object instance.
 
         Args:
-                other (object): Object to compare to IndPiHiddenMarkovDataEncoder object instance.
+                other (object): Object to compare to SemiSupervisedHiddenMarkovDataEncoder object instance.
 
         Returns:
-                True if other is an IndPiHiddenMarkovDataEncoder with equivalent member encoders and 'use_numba'.
+                True if other is an SemiSupervisedHiddenMarkovDataEncoder with equivalent member encoders and 'use_numba'.
 
         """
-        if isinstance(other, IndPiHiddenMarkovDataEncoder):
+        if isinstance(other, SemiSupervisedHiddenMarkovDataEncoder):
             return (
                 self.emission_encoder == other.emission_encoder
                 and self.len_encoder == other.len_encoder
@@ -1840,25 +1840,25 @@ def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, al
 
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
-IndPiHiddenMarkovAccumulator = IndPiHiddenMarkovEstimatorAccumulator
-IndPiHiddenMarkovAccumulatorFactory = IndPiHiddenMarkovEstimatorAccumulatorFactory
-IndPiHiddenMarkovModelAccumulator = IndPiHiddenMarkovEstimatorAccumulator
-IndPiHiddenMarkovModelAccumulatorFactory = IndPiHiddenMarkovEstimatorAccumulatorFactory
-IndPiHiddenMarkovModelDataEncoder = IndPiHiddenMarkovDataEncoder
-IndPiHiddenMarkovModelEstimator = IndPiHiddenMarkovEstimator
-IndPiHiddenMarkovModelSampler = IndPiHiddenMarkovSampler
+SemiSupervisedHiddenMarkovAccumulator = SemiSupervisedHiddenMarkovEstimatorAccumulator
+SemiSupervisedHiddenMarkovAccumulatorFactory = SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory
+SemiSupervisedHiddenMarkovModelAccumulator = SemiSupervisedHiddenMarkovEstimatorAccumulator
+SemiSupervisedHiddenMarkovModelAccumulatorFactory = SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory
+SemiSupervisedHiddenMarkovModelDataEncoder = SemiSupervisedHiddenMarkovDataEncoder
+SemiSupervisedHiddenMarkovModelEstimator = SemiSupervisedHiddenMarkovEstimator
+SemiSupervisedHiddenMarkovModelSampler = SemiSupervisedHiddenMarkovSampler
 
 
-def _register_ind_pi_engine_kernel():
-    """Register the engine-resident IndPi HMM kernel (idempotent; called at import)."""
+def _register_semi_supervised_engine_kernel():
+    """Register the engine-resident SemiSupervised HMM kernel (idempotent; called at import)."""
     from pysp.stats.compute.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
-    class IndPiHiddenMarkovModelKernel(GenericKernel):
-        """IndPi HMM kernel whose E-step runs the per-sequence-init forward-backward on the engine."""
+    class SemiSupervisedHiddenMarkovModelKernel(GenericKernel):
+        """SemiSupervised HMM kernel whose E-step runs the per-sequence-init forward-backward on the engine."""
 
         def accumulate(self, enc, weights):
             if self.estimator is None:
-                raise ValueError("IndPiHiddenMarkovModelKernel.accumulate requires an estimator.")
+                raise ValueError("SemiSupervisedHiddenMarkovModelKernel.accumulate requires an estimator.")
             if not getattr(self.engine, "resident_estep", True):
                 return super().accumulate(enc, weights)
             host_enc = getattr(enc, "host_payload", enc)
@@ -1866,13 +1866,30 @@ def _register_ind_pi_engine_kernel():
             accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
             return accumulator.value()
 
-    class IndPiHiddenMarkovModelKernelFactory(KernelFactory):
+    class SemiSupervisedHiddenMarkovModelKernelFactory(KernelFactory):
         def build(self, dist, engine, estimator=None):
             if not dist.supports_engine(engine):
                 return GenericKernelFactory().build(dist, engine, estimator=estimator)
-            return IndPiHiddenMarkovModelKernel(dist, engine=engine, estimator=estimator)
+            return SemiSupervisedHiddenMarkovModelKernel(dist, engine=engine, estimator=estimator)
 
-    register_kernel_factory(IndPiHiddenMarkovModelDistribution, IndPiHiddenMarkovModelKernelFactory())
+    register_kernel_factory(SemiSupervisedHiddenMarkovModelDistribution, SemiSupervisedHiddenMarkovModelKernelFactory())
 
 
-_register_ind_pi_engine_kernel()
+_register_semi_supervised_engine_kernel()
+
+
+# Backward-compatible aliases for the former IndPi* names (the family was renamed
+# SemiSupervisedHiddenMarkovModel*).
+IndPiHiddenMarkovModelDistribution = SemiSupervisedHiddenMarkovModelDistribution
+IndPiHiddenMarkovSampler = SemiSupervisedHiddenMarkovSampler
+IndPiHiddenMarkovModelSampler = SemiSupervisedHiddenMarkovSampler
+IndPiHiddenMarkovEstimator = SemiSupervisedHiddenMarkovEstimator
+IndPiHiddenMarkovModelEstimator = SemiSupervisedHiddenMarkovEstimator
+IndPiHiddenMarkovDataEncoder = SemiSupervisedHiddenMarkovDataEncoder
+IndPiHiddenMarkovModelDataEncoder = SemiSupervisedHiddenMarkovDataEncoder
+IndPiHiddenMarkovEstimatorAccumulator = SemiSupervisedHiddenMarkovEstimatorAccumulator
+IndPiHiddenMarkovEstimatorAccumulatorFactory = SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory
+IndPiHiddenMarkovAccumulator = SemiSupervisedHiddenMarkovEstimatorAccumulator
+IndPiHiddenMarkovAccumulatorFactory = SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory
+IndPiHiddenMarkovModelAccumulator = SemiSupervisedHiddenMarkovEstimatorAccumulator
+IndPiHiddenMarkovModelAccumulatorFactory = SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory
