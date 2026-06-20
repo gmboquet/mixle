@@ -161,8 +161,12 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
             log_const (float): Log of above.
 
         """
+        if isnan(mu) or isinf(mu):
+            raise ValueError("LogGaussianDistribution requires finite mu.")
+        if sigma2 <= 0.0 or isnan(sigma2) or isinf(sigma2):
+            raise ValueError("LogGaussianDistribution requires finite sigma2 > 0.")
         self.mu = mu
-        self.sigma2 = 1.0 if (sigma2 <= 0 or isnan(sigma2) or isinf(sigma2)) else sigma2
+        self.sigma2 = sigma2
         self.log_const = -0.5 * log(2.0 * pi * self.sigma2)
         self.const = 1.0 / sqrt(2.0 * pi * self.sigma2)
         self.name = name
@@ -619,6 +623,7 @@ class LogGaussianEstimator(ParameterEstimator):
         self,
         pseudo_count: tuple[float | None, float | None] = (None, None),
         suff_stat: tuple[float | None, float | None] = (None, None),
+        min_covar: float | None = None,
         name: str | None = None,
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
@@ -644,6 +649,7 @@ class LogGaussianEstimator(ParameterEstimator):
         """
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
+        self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
         self.keys = keys
         self.name = name
         self.prior = prior
@@ -718,14 +724,17 @@ class LogGaussianEstimator(ParameterEstimator):
             mu = suff_stat[0] / nobs_loc1
 
         if nobs_loc2 == 0.0:
-            sigma2 = 0.0
+            sigma2 = self.min_covar
         elif self.pseudo_count[1] is not None and self.suff_stat[1] is not None:
             sigma2 = (suff_stat[1] - mu * mu * nobs_loc2 + self.pseudo_count[1] * self.suff_stat[1]) / (
                 nobs_loc2 + self.pseudo_count[1]
             )
         else:
-            sigma2 = np.sum(log_x2 - np.sum(log_x) ** 2 / nobs_loc1) / nobs_loc2
+            # E[y^2] - E[y]^2 on the log scale (matches GaussianEstimator; the previous form was only
+            # correct when the two observation counts were equal)
+            sigma2 = log_x2 / nobs_loc2 - mu * mu
 
+        sigma2 = max(sigma2, self.min_covar, 1.0e-6 * sigma2)
         return LogGaussianDistribution(mu, sigma2, name=self.name)
 
 
