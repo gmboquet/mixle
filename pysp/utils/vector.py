@@ -310,7 +310,8 @@ def weighted_log_sum(x: np.ndarray, w: np.ndarray) -> float:
         w (ndarray): Numpy array on of weights for y_i = exp(x_i) on the log-scale. E.g. w_i = log(weight_i).
 
     Returns:
-        Float value log(sum(exp(x)*exp(w)), or -np.inf if any x or w are -np.inf.
+        Float value log(sum(exp(x)*exp(w))), or -np.inf if any x or w are -np.inf. Inputs are log-densities
+        and log-weights (<= 0); +inf terms are not supported (this is a hot EM path).
 
     """
     y = x + w

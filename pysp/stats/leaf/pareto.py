@@ -234,7 +234,7 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
         mask = weights > 0.0
         if np.any(mask):
             self.count += np.sum(weights[mask], dtype=np.float64)
-            self.sum_of_logs += np.dot(lx, weights)
+            self.sum_of_logs += np.dot(lx[mask], weights[mask])  # mask consistently with count/min_val
             self.min_val = min(self.min_val, float(np.min(xx[mask])))
 
     def seq_update_engine(
