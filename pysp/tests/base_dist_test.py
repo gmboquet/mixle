@@ -66,7 +66,7 @@ def _build_dists():
 
     # dependency_list = [(0, None), (1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (6, 5), (7, 6)]
     # conditional_log_densities = np.ones(len(dependency_list))/len(dependency_list)
-    # dists.append(ICLTreeDistribution(dependency_list=dependency_list, conditional_log_densities=conditional_log_densities))
+    # dists.append(IntegerChowLiuTreeDistribution(dependency_list=dependency_list, conditional_log_densities=conditional_log_densities))
 
     # dists.append(IgnoredDistribution(GeometricDistribution(0.8)))
     # dists.append(

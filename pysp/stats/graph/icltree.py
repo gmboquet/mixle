@@ -1,9 +1,9 @@
 """Create, estimate, and sample from an integer Chow Liu Tree distribution.
 
-Defines the ICLTreeDistribution, ICLTreeSampler, ICLTreeAccumulatorFactory, ICLTreeAccumulator, ICLTreeEstimator, and
-the ICLTreeDataEncoder classes for use with pysparkplug.
+Defines the IntegerChowLiuTreeDistribution, IntegerChowLiuTreeSampler, IntegerChowLiuTreeAccumulatorFactory, IntegerChowLiuTreeAccumulator, IntegerChowLiuTreeEstimator, and
+the IntegerChowLiuTreeDataEncoder classes for use with pysparkplug.
 
-PySparkPlug supports Chow & Liu trees [1] through the ICLTree (Integer Chow Liu Tree) class of objects. ICLTrees model
+PySparkPlug supports Chow & Liu trees [1] through the IntegerChowLiuTree (Integer Chow Liu Tree) class of objects. IntegerChowLiuTrees model
 non-Markov conditional dependence for fixed-length sequences of integers with the likelihood functions of the form
 
     P(x_1, x_2,..,x_n) = P(x_i1) P(x_{i_2}|x_{j_2})*...*P(x_{i_n}|x_{j_n}),
@@ -34,7 +34,7 @@ from pysp.stats.compute.pdist import (
 )
 
 
-class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
+class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
     """Integer Chow-Liu tree distribution factorizing a joint over fixed-length integer vectors along a tree.
 
     Data type: Union[Sequence[int], np.ndarray] (fixed-length vector of non-negative integers).
@@ -73,7 +73,7 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
         feature_order: Sequence[int] | None = None,
         name: str | None = None,
     ) -> None:
-        """ICLTreeDistribution object for integer Chow Liu tree distribution.
+        """IntegerChowLiuTreeDistribution object for integer Chow Liu tree distribution.
 
         Args:
             dependency_list (List[Tuple[int, Optional[int]]]): List of Tuples containing node id and parent dependence
@@ -102,12 +102,12 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
 
     def __str__(self) -> str:
-        """Returns string representation of ICLTreeDistribution object."""
+        """Returns string representation of IntegerChowLiuTreeDistribution object."""
         f1 = ",".join([str(u[1]) for u in self.dependency_list])
         f3 = ",".join([str(u[0]) for u in self.dependency_list])
         f2 = ["[" + ",".join(map(str, u.flatten())) + "]" for u in self.conditional_log_densities]
         f4 = repr(self.name)
-        return "ICLTreeDistribution([%s], [%s], feature_order=[%s], name=%s)" % (f1, f2, f3, f4)
+        return "IntegerChowLiuTreeDistribution([%s], [%s], feature_order=[%s], name=%s)" % (f1, f2, f3, f4)
 
     def density(self, x: Sequence[int] | np.ndarray) -> float:
         """Density of integer Chow-Liu tree distribution at observation x.
@@ -176,53 +176,53 @@ class ICLTreeDistribution(SequenceEncodableProbabilityDistribution):
                 rv = rv + table[xx[:, k], xx[:, j]]
         return rv
 
-    def sampler(self, seed: int | None = None) -> "ICLTreeSampler":
-        """Create an ICLTreeSampler object from parameters of ICLTreeDistribution instance.
+    def sampler(self, seed: int | None = None) -> "IntegerChowLiuTreeSampler":
+        """Create an IntegerChowLiuTreeSampler object from parameters of IntegerChowLiuTreeDistribution instance.
 
         Args:
             seed (Optional[int]): Used to set seed in random sampler.
 
         Returns:
-            ICLTreeSampler object.
+            IntegerChowLiuTreeSampler object.
 
         """
-        return ICLTreeSampler(self, seed)
+        return IntegerChowLiuTreeSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "ICLTreeEstimator":
-        """Create an ICLTreeEstimator object.
+    def estimator(self, pseudo_count: float | None = None) -> "IntegerChowLiuTreeEstimator":
+        """Create an IntegerChowLiuTreeEstimator object.
 
         Args:
             pseudo_count (Optional[float]): Used to inflate sufficient statistics.
 
         Returns:
-            ICLTreeEstimator object.
+            IntegerChowLiuTreeEstimator object.
 
         """
         num_states = len(self.conditional_densities[0])
-        return ICLTreeEstimator(
+        return IntegerChowLiuTreeEstimator(
             num_features=self.num_features, num_states=num_states, pseudo_count=pseudo_count, name=self.name
         )
 
-    def dist_to_encoder(self) -> "ICLTreeDataEncoder":
-        """Returns an ICLTreeDataEncoder object for encoding sequences of data."""
-        return ICLTreeDataEncoder()
+    def dist_to_encoder(self) -> "IntegerChowLiuTreeDataEncoder":
+        """Returns an IntegerChowLiuTreeDataEncoder object for encoding sequences of data."""
+        return IntegerChowLiuTreeDataEncoder()
 
-    def enumerator(self) -> "ICLTreeEnumerator":
-        """Returns ICLTreeEnumerator iterating fixed-length integer vectors in descending probability order."""
-        return ICLTreeEnumerator(self)
+    def enumerator(self) -> "IntegerChowLiuTreeEnumerator":
+        """Returns IntegerChowLiuTreeEnumerator iterating fixed-length integer vectors in descending probability order."""
+        return IntegerChowLiuTreeEnumerator(self)
 
 
-class ICLTreeEnumerator(DistributionEnumerator):
+class IntegerChowLiuTreeEnumerator(DistributionEnumerator):
     """Enumerates the finite support of an integer Chow-Liu tree."""
 
-    def __init__(self, dist: ICLTreeDistribution) -> None:
-        """ICLTreeEnumerator object.
+    def __init__(self, dist: IntegerChowLiuTreeDistribution) -> None:
+        """IntegerChowLiuTreeEnumerator object.
 
         The support is the Cartesian product of each feature's finite state range, inferred
         from the root marginal and conditional probability tables.
 
         Args:
-            dist (ICLTreeDistribution): Distribution whose support is enumerated.
+            dist (IntegerChowLiuTreeDistribution): Distribution whose support is enumerated.
 
         """
         super().__init__(dist)
@@ -257,7 +257,7 @@ class ICLTreeEnumerator(DistributionEnumerator):
         self._pos = 0
 
     @staticmethod
-    def _set_domain_size(domain_sizes: list[int | None], idx: int, size: int, dist: ICLTreeDistribution) -> None:
+    def _set_domain_size(domain_sizes: list[int | None], idx: int, size: int, dist: IntegerChowLiuTreeDistribution) -> None:
         if idx < 0 or idx >= len(domain_sizes):
             raise EnumerationError(dist, reason="feature index out of range")
         if domain_sizes[idx] is not None and domain_sizes[idx] != size:
@@ -272,14 +272,14 @@ class ICLTreeEnumerator(DistributionEnumerator):
         return item
 
 
-class ICLTreeSampler(DistributionSampler):
-    """Sampler for the ICLTreeDistribution. Samples each feature given its sampled parent value."""
+class IntegerChowLiuTreeSampler(DistributionSampler):
+    """Sampler for the IntegerChowLiuTreeDistribution. Samples each feature given its sampled parent value."""
 
-    def __init__(self, dist: ICLTreeDistribution, seed: int | None = None) -> None:
-        """ICLTreeSampler object.
+    def __init__(self, dist: IntegerChowLiuTreeDistribution, seed: int | None = None) -> None:
+        """IntegerChowLiuTreeSampler object.
 
         Args:
-            dist (ICLTreeDistribution): Distribution to sample from.
+            dist (IntegerChowLiuTreeDistribution): Distribution to sample from.
             seed (Optional[int]): Seed for random number generator.
 
         """
@@ -316,11 +316,11 @@ class ICLTreeSampler(DistributionSampler):
             return [self.sample() for i in range(size)]
 
 
-class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulator for the ICLTreeDistribution. Tracks pairwise joint and marginal feature-state counts."""
+class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulator for the IntegerChowLiuTreeDistribution. Tracks pairwise joint and marginal feature-state counts."""
 
     def __init__(self, num_features: int, num_states: int, keys: str | None = None, name: str | None = None):
-        """ICLTreeAccumulator object.
+        """IntegerChowLiuTreeAccumulator object.
 
         Args:
             num_features (int): Number of features (length of observed integer vectors).
@@ -376,13 +376,13 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
             self.counts = new_counts
             self.marginal_counts = new_marginal
 
-    def update(self, x: Sequence[int] | np.ndarray, weight: float, estimate: ICLTreeDistribution | None) -> None:
+    def update(self, x: Sequence[int] | np.ndarray, weight: float, estimate: IntegerChowLiuTreeDistribution | None) -> None:
         """Update pairwise joint and marginal counts with a weighted observation.
 
         Args:
             x (Union[Sequence[int], np.ndarray]): Fixed-length vector of non-negative integers.
             weight (float): Weight for observation.
-            estimate (Optional[ICLTreeDistribution]): Previous estimate (unused).
+            estimate (Optional[IntegerChowLiuTreeDistribution]): Previous estimate (unused).
 
         """
         if (self.counts is None) or (self.num_states <= np.max(x)):
@@ -395,13 +395,13 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         for i in range(self.num_features):
             self.counts[i, ff, xx[i], xx] += weight
 
-    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: ICLTreeDistribution | None) -> None:
+    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: IntegerChowLiuTreeDistribution | None) -> None:
         """Vectorized update of pairwise joint and marginal counts from sequence encoded data.
 
         Args:
             x (np.ndarray): 2-d numpy array of N integer vectors with num_features columns.
             weights (np.ndarray): Weights for each of the N observations.
-            estimate (Optional[ICLTreeDistribution]): Previous estimate (unused).
+            estimate (Optional[IntegerChowLiuTreeDistribution]): Previous estimate (unused).
 
         """
         max_x = np.max(x)
@@ -443,7 +443,7 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: tuple[int, int, np.ndarray, np.ndarray]) -> "ICLTreeAccumulator":
+    def combine(self, suff_stat: tuple[int, int, np.ndarray, np.ndarray]) -> "IntegerChowLiuTreeAccumulator":
         """Combine sufficient statistics from another accumulator into this one.
 
         Count arrays are expanded if the incoming statistics track more states.
@@ -491,7 +491,7 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         joint counts, and marginal counts."""
         return self.num_features, self.num_states, self.counts, self.marginal_counts
 
-    def from_value(self, x: tuple[int, int, np.ndarray, np.ndarray]) -> "ICLTreeAccumulator":
+    def from_value(self, x: tuple[int, int, np.ndarray, np.ndarray]) -> "IntegerChowLiuTreeAccumulator":
         """Set sufficient statistics of accumulator from value x.
 
         Args:
@@ -509,7 +509,7 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> "ICLTreeAccumulator":
+    def scale(self, c: float) -> "IntegerChowLiuTreeAccumulator":
         if self.counts is not None:
             self.counts *= c
         if self.marginal_counts is not None:
@@ -517,7 +517,7 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """No-op kept for interface consistency (keyed merging is not supported for ICLTreeAccumulator).
+        """No-op kept for interface consistency (keyed merging is not supported for IntegerChowLiuTreeAccumulator).
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to shared sufficient statistics (ignored).
@@ -529,7 +529,7 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         pass
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """No-op kept for interface consistency (keyed merging is not supported for ICLTreeAccumulator).
+        """No-op kept for interface consistency (keyed merging is not supported for IntegerChowLiuTreeAccumulator).
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to shared sufficient statistics (ignored).
@@ -540,13 +540,13 @@ class ICLTreeAccumulator(SequenceEncodableStatisticAccumulator):
         """
         pass
 
-    def acc_to_encoder(self) -> "ICLTreeDataEncoder":
-        """Returns an ICLTreeDataEncoder object for encoding sequences of data."""
-        return ICLTreeDataEncoder()
+    def acc_to_encoder(self) -> "IntegerChowLiuTreeDataEncoder":
+        """Returns an IntegerChowLiuTreeDataEncoder object for encoding sequences of data."""
+        return IntegerChowLiuTreeDataEncoder()
 
 
-class ICLTreeAccumulatorFactory(StatisticAccumulatorFactory):
-    """Factory for creating ICLTreeAccumulator objects."""
+class IntegerChowLiuTreeAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for creating IntegerChowLiuTreeAccumulator objects."""
 
     def __init__(
         self,
@@ -555,7 +555,7 @@ class ICLTreeAccumulatorFactory(StatisticAccumulatorFactory):
         keys: str | None = None,
         name: str | None = None,
     ) -> None:
-        """ICLTreeAccumulatorFactory object.
+        """IntegerChowLiuTreeAccumulatorFactory object.
 
         Args:
             num_features (Optional[int]): Number of features. If None, set from data on first update.
@@ -569,13 +569,13 @@ class ICLTreeAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
         self.name = name
 
-    def make(self) -> "ICLTreeAccumulator":
-        """Returns a new ICLTreeAccumulator object."""
-        return ICLTreeAccumulator(self.num_features, self.num_states, self.keys)
+    def make(self) -> "IntegerChowLiuTreeAccumulator":
+        """Returns a new IntegerChowLiuTreeAccumulator object."""
+        return IntegerChowLiuTreeAccumulator(self.num_features, self.num_states, self.keys)
 
 
-class ICLTreeEstimator(ParameterEstimator):
-    """Estimator for the ICLTreeDistribution. Learns the dependency tree with the Chow-Liu algorithm."""
+class IntegerChowLiuTreeEstimator(ParameterEstimator):
+    """Estimator for the IntegerChowLiuTreeDistribution. Learns the dependency tree with the Chow-Liu algorithm."""
 
     def __init__(
         self,
@@ -586,7 +586,7 @@ class ICLTreeEstimator(ParameterEstimator):
         keys: str | None = None,
         name: str | None = None,
     ):
-        """ICLTreeEstimator object.
+        """IntegerChowLiuTreeEstimator object.
 
         Args:
             num_features (Optional[int]): Number of features. If None, set from data.
@@ -605,11 +605,11 @@ class ICLTreeEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self):
-        """Returns an ICLTreeAccumulatorFactory for creating ICLTreeAccumulator objects."""
-        return ICLTreeAccumulatorFactory(self.num_features, self.num_states, self.keys)
+        """Returns an IntegerChowLiuTreeAccumulatorFactory for creating IntegerChowLiuTreeAccumulator objects."""
+        return IntegerChowLiuTreeAccumulatorFactory(self.num_features, self.num_states, self.keys)
 
     def estimate(self, nobs, suff_stat):
-        """Estimate an ICLTreeDistribution from sufficient statistics via the Chow-Liu algorithm.
+        """Estimate an IntegerChowLiuTreeDistribution from sufficient statistics via the Chow-Liu algorithm.
 
         Pairwise mutual information is computed from the (optionally smoothed) joint and marginal
         counts, a maximum mutual information spanning tree is extracted, and conditional densities
@@ -621,7 +621,7 @@ class ICLTreeEstimator(ParameterEstimator):
                 states, pairwise joint counts, and marginal counts.
 
         Returns:
-            ICLTreeDistribution object.
+            IntegerChowLiuTreeDistribution object.
 
         """
         num_features, num_states, counts, marginal_counts = suff_stat
@@ -694,27 +694,27 @@ class ICLTreeEstimator(ParameterEstimator):
 
                 tmats[i] = np.log(tmat)
 
-        return ICLTreeDistribution(deps, tmats, feature_order=feature_order)
+        return IntegerChowLiuTreeDistribution(deps, tmats, feature_order=feature_order)
 
 
-class ICLTreeDataEncoder(DataSequenceEncoder):
+class IntegerChowLiuTreeDataEncoder(DataSequenceEncoder):
     """Data encoder for sequences of fixed-length integer vector observations."""
 
     def __str__(self) -> str:
-        """Returns string representation of ICLTreeDataEncoder object."""
-        return "ICLTreeDataEncoder"
+        """Returns string representation of IntegerChowLiuTreeDataEncoder object."""
+        return "IntegerChowLiuTreeDataEncoder"
 
     def __eq__(self, other: object) -> bool:
-        """Checks if other object is an instance of an ICLTreeDataEncoder.
+        """Checks if other object is an instance of an IntegerChowLiuTreeDataEncoder.
 
         Args:
             other (object): Object to compare against.
 
         Returns:
-            True if other is an ICLTreeDataEncoder instance, else False.
+            True if other is an IntegerChowLiuTreeDataEncoder instance, else False.
 
         """
-        return isinstance(other, ICLTreeDataEncoder)
+        return isinstance(other, IntegerChowLiuTreeDataEncoder)
 
     def seq_encode(self, x: list[int] | np.ndarray) -> np.ndarray:
         """Encode a sequence of N integer vectors for vectorized functions.
@@ -727,3 +727,14 @@ class ICLTreeDataEncoder(DataSequenceEncoder):
 
         """
         return np.asarray(x, dtype=int)
+
+
+# Backward-compatible aliases for the former ICLTree* names (the family was renamed
+# IntegerChowLiuTree to spell out the Integer Chow-Liu Tree acronym).
+ICLTreeDistribution = IntegerChowLiuTreeDistribution
+ICLTreeEnumerator = IntegerChowLiuTreeEnumerator
+ICLTreeSampler = IntegerChowLiuTreeSampler
+ICLTreeAccumulator = IntegerChowLiuTreeAccumulator
+ICLTreeAccumulatorFactory = IntegerChowLiuTreeAccumulatorFactory
+ICLTreeEstimator = IntegerChowLiuTreeEstimator
+ICLTreeDataEncoder = IntegerChowLiuTreeDataEncoder
