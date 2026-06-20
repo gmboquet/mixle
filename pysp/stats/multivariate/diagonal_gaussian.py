@@ -21,7 +21,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
-from pysp.stats.bayes.mvngamma import MultivariateNormalGammaDistribution
+from pysp.stats.bayes.multivariate_normal_gamma import MultivariateNormalGammaDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -157,7 +157,7 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
             name (Optional[str]): Set name for object instance.
             keys (Optional[str]): Set keys for object isntance.
             prior (Optional): Conjugate parameter prior over (mu, tau=1/covar). A
-                :class:`~pysp.stats.bayes.mvngamma.MultivariateNormalGammaDistribution` enables the
+                :class:`~pysp.stats.bayes.multivariate_normal_gamma.MultivariateNormalGammaDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the conjugate
                 posterior update); ``None`` (default) is a plain point model.
 

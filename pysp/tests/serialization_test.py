@@ -6,8 +6,11 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 import pysp.stats as stats
-from pysp.stats.bayes.dpm import DirichletProcessMixtureDistribution, DirichletProcessMixtureEstimator
-from pysp.stats.bayes.normgamma import NormalGammaDistribution
+from pysp.stats.bayes.dirichlet_process_mixture import (
+    DirichletProcessMixtureDistribution,
+    DirichletProcessMixtureEstimator,
+)
+from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 from pysp.stats.combinator.select import SelectDistribution
 from pysp.utils.serialization import (
     SerializationError,

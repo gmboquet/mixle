@@ -23,12 +23,12 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.stats import seq_encode, seq_estimate, seq_initialize
-from pysp.stats.bayes.dpm import (
+from pysp.stats.bayes.dirichlet_process_mixture import (
     DirichletProcessMixtureDistribution,
     DirichletProcessMixtureEstimator,
 )
-from pysp.stats.bayes.hdpm import HierarchicalDirichletProcessMixtureEstimator
-from pysp.stats.bayes.normgamma import NormalGammaDistribution
+from pysp.stats.bayes.hierarchical_dirichlet_process_mixture import HierarchicalDirichletProcessMixtureEstimator
+from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 from pysp.stats.leaf.gamma import GammaDistribution
 from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
 from pysp.utils.estimation import fit
@@ -64,7 +64,9 @@ def _matched_dpm():
 
 def _matched_hdpm():
     """Build a stats HDPM with fixed components/priors/state."""
-    from pysp.stats.bayes.hdpm import HierarchicalDirichletProcessMixtureDistribution as SHD
+    from pysp.stats.bayes.hierarchical_dirichlet_process_mixture import (
+        HierarchicalDirichletProcessMixtureDistribution as SHD,
+    )
 
     rng = RandomState(5)
     mus = [-6.0, 0.0, 6.0]

@@ -9,7 +9,7 @@ Covers:
     and the ELBO must increase monotonically for DPM variational inference.
 
 Conventions exercised here:
-  * conjugate priors live in pysp.stats.bayes.normgamma / normwishart / mvngamma /
+  * conjugate priors live in pysp.stats.bayes.normal_gamma / normal_wishart / multivariate_normal_gamma /
     catdirichlet / gamma / beta / dirichlet;
   * the estimator API is the 2-arg ``estimate(nobs, suff_stat)``, so calls become
     ``estimate(None, suff_stat)``;
@@ -38,16 +38,16 @@ from pysp.stats import (
     seq_encode,
     seq_estimate,
 )
-from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
+from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 from pysp.stats.bayes.dirichlet import DirichletDistribution
-from pysp.stats.bayes.dpm import DirichletProcessMixtureEstimator
-from pysp.stats.bayes.hdpm import (
+from pysp.stats.bayes.dirichlet_process_mixture import DirichletProcessMixtureEstimator
+from pysp.stats.bayes.hierarchical_dirichlet_process_mixture import (
     HierarchicalDirichletProcessMixtureDistribution,
     HierarchicalDirichletProcessMixtureEstimator,
 )
-from pysp.stats.bayes.mvngamma import MultivariateNormalGammaDistribution
-from pysp.stats.bayes.normgamma import NormalGammaDistribution
-from pysp.stats.bayes.normwishart import NormalWishartDistribution
+from pysp.stats.bayes.multivariate_normal_gamma import MultivariateNormalGammaDistribution
+from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
+from pysp.stats.bayes.normal_wishart import NormalWishartDistribution
 from pysp.stats.combinator.conditional import ConditionalDistribution
 from pysp.stats.combinator.optional import OptionalDistribution
 from pysp.stats.graph.markov_chain import MarkovChainDistribution, MarkovChainEstimator

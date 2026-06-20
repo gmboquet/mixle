@@ -17,8 +17,8 @@ from scipy.special import logsumexp
 
 from pysp.stats import seq_encode, seq_estimate, seq_initialize
 from pysp.stats.bayes.dirichlet import DirichletDistribution
-from pysp.stats.bayes.normgamma import NormalGammaDistribution
-from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
+from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from pysp.stats.latent.mixture import (
     MixtureDistribution,
     MixtureEstimator,

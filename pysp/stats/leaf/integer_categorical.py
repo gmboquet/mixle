@@ -162,7 +162,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             name (Optional[str]): Assign name to IntegerCategoricalDistribution object.
             prior (Optional): Conjugate parameter prior over the probability vector. A
                 :class:`~pysp.stats.bayes.dirichlet.DirichletDistribution` or
-                :class:`~pysp.stats.bayes.symdirichlet.SymmetricDirichletDistribution` enables the Bayesian /
+                :class:`~pysp.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution` enables the Bayesian /
                 variational machinery (``expected_log_density`` and the conjugate posterior update);
                 ``None`` (default) is a plain point model.
 
@@ -210,7 +210,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         (including ``None``) leaves the distribution a plain point model.
         """
         from pysp.stats.bayes.dirichlet import DirichletDistribution
-        from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+        from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 
         self.prior = prior
 
@@ -880,7 +880,7 @@ class IntegerCategoricalEstimator(ParameterEstimator):
 
     def _set_has_conj_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
         from pysp.stats.bayes.dirichlet import DirichletDistribution
-        from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+        from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 
         self.has_conj_prior = isinstance(prior, (DirichletDistribution, SymmetricDirichletDistribution))
 

@@ -20,7 +20,7 @@ import pysp.stats.graph.markov_chain as smc
 import pysp.stats.latent.hidden_markov as shmm
 import pysp.stats.leaf.gaussian as sgauss
 from pysp.stats.bayes.dirichlet import DirichletDistribution as Dir
-from pysp.stats.bayes.normgamma import NormalGammaDistribution as sNG
+from pysp.stats.bayes.normal_gamma import NormalGammaDistribution as sNG
 
 TOL = 1e-9
 S = 3

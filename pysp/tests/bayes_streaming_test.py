@@ -31,8 +31,8 @@ from pysp.stats import (
     SequenceDistribution,
     SequenceEstimator,
 )
-from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
-from pysp.stats.bayes.normgamma import NormalGammaDistribution
+from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
+from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 from pysp.stats.latent.mixture import mixture_prior
 from pysp.utils.estimation import BayesianStreamingEstimator, forgetting
 
