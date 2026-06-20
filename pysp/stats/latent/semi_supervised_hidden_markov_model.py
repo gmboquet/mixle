@@ -104,9 +104,12 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
     def _emission_potential(self, emissions, prior) -> tuple[np.ndarray, np.ndarray]:
         """Return the (T, S) emission likelihood times the state prior (probability space)."""
         n = len(emissions)
+        if n == 0:
+            return np.zeros((0, self.nStates)), np.zeros(0)
+        enc = self.topics[0].dist_to_encoder().seq_encode(list(emissions))  # score emissions vectorized over T
         b = np.empty((n, self.nStates))
         for s in range(self.nStates):
-            b[:, s] = np.asarray([self.topics[s].log_density(o) for o in emissions], dtype=float)
+            b[:, s] = np.asarray(self.topics[s].seq_log_density(enc), dtype=float)
         mx = b.max(axis=1, keepdims=True)
         mx[~np.isfinite(mx)] = 0.0
         phi = np.exp(b - mx)  # scaled emission likelihood; the per-row offset mx is added back via the loglik
@@ -256,9 +259,12 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
         if n > 0:
             gamma, xi = self._posteriors(dist, emissions, prior)
             self.trans_counts += weight * xi
-            for t in range(n):
-                for s in range(self.num_states):
-                    self.accumulators[s].update(emissions[t], weight * gamma[t, s], None if dist is None else dist.topics[s])
+            # accumulate emissions vectorized over T: one weighted seq_update per state instead of T*S calls
+            enc = self.accumulators[0].acc_to_encoder().seq_encode(list(emissions))
+            for s in range(self.num_states):
+                self.accumulators[s].seq_update(
+                    enc, weight * gamma[:, s], None if dist is None else dist.topics[s]
+                )
         if not isinstance(self.len_accumulator, NullAccumulator):
             self.len_accumulator.update(n, weight, None if dist is None else dist.len_dist)
 
