@@ -441,7 +441,7 @@ def optimize(
     delta: float | None = 1.0e-9,
     init_estimator: ParameterEstimator | None = None,
     init_p: float = 0.1,
-    rng: RandomState = RandomState(),
+    rng: RandomState | None = None,
     prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
     vdata: Sequence[T] | None = None,
     enc_data: list[tuple[int, E0]] | None = None,
@@ -541,6 +541,7 @@ def optimize(
             is met.
 
     """
+    rng = RandomState() if rng is None else rng
     if precision == "auto":
         from pysp.engines import auto_precision
 
@@ -727,7 +728,7 @@ def fit(
     delta: float | None = 1.0e-6,
     init_estimator: ParameterEstimator | None = None,
     init_p: float = 0.1,
-    rng: RandomState = RandomState(),
+    rng: RandomState | None = None,
     prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
     vdata: Sequence[T] | None = None,
     enc_data: list[tuple[int, E0]] | None = None,
@@ -761,6 +762,7 @@ def fit(
     if data is None and enc_data is None:
         raise Exception("fit called with empty data or enc_data.")
 
+    rng = RandomState() if rng is None else rng
     est = estimator if init_estimator is None else init_estimator
     div_error = np.seterr(divide="ignore")
     try:
@@ -917,7 +919,7 @@ class BayesianStreamingEstimator:
         model: SequenceEncodableProbabilityDistribution | None = None,
         init_estimator: ParameterEstimator | None = None,
         init_p: float = 0.1,
-        rng: RandomState = RandomState(),
+        rng: RandomState | None = None,
         num_chunks: int = 1,
     ) -> None:
         self.estimator = estimator
@@ -930,7 +932,7 @@ class BayesianStreamingEstimator:
             raise ValueError("mode must be 'posterior_carry' or 'forgetting'.")
         self.model = model
         self.init_p = init_p
-        self.rng = rng
+        self.rng = RandomState() if rng is None else rng
         self.num_chunks = num_chunks
         self.step = 0
         self.nobs = 0.0
@@ -1003,7 +1005,7 @@ def iterate(
     max_its: int,
     prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
     init_p: float = 0.1,
-    rng: RandomState | None = RandomState(),
+    rng: RandomState | None = None,
     out: IO = sys.stdout,
     enc_data: list[tuple[int, E0]] | None = None,
     init_estimator: ParameterEstimator | None = None,
@@ -1035,10 +1037,14 @@ def iterate(
     if data is None and enc_data is None:
         raise Exception("Optimization called with empty data or enc_data.")
 
+    rng = RandomState() if rng is None else rng
     i_est = estimator if init_estimator is None else init_estimator
+    # the EM step uses estimator when provided, otherwise the init estimator (estimator may be None
+    # when only init_estimator is given); the encoder is structural so either estimator resolves it
+    step_est = estimator if estimator is not None else i_est
 
     if enc_data is None:
-        enc_data = seq_encode(data, _resolve_encoder(estimator))
+        enc_data = seq_encode(data, _resolve_encoder(i_est))
 
     if prev_estimate is None:
         mm = seq_initialize(enc_data, i_est, rng, init_p)
@@ -1052,7 +1058,7 @@ def iterate(
     # lightweight path for callers that just want N EM steps
     t0 = time.time()
     for i in range(max_its):
-        mm = seq_estimate(enc_data, estimator, mm)
+        mm = seq_estimate(enc_data, step_est, mm)
         if out is not None and print_iter and (i + 1) % print_iter == 0:
             out.write("Iteration %d\t E[dT]=%f.\n" % (i + 1, (time.time() - t0) / float(i + 1)))
 
