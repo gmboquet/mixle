@@ -498,6 +498,10 @@ __all__ = [
     "InhomogeneousPoissonProcessSampler",
     "InhomogeneousPoissonProcessEstimator",
     "InhomogeneousPoissonProcessDataEncoder",
+    "HawkesProcessDistribution",
+    "HawkesProcessSampler",
+    "HawkesProcessEstimator",
+    "HawkesProcessDataEncoder",
     "ExponentialTiltedDistribution",
     "ExponentialTiltedSampler",
     "ExponentialTiltedEstimator",
@@ -1005,6 +1009,12 @@ from pysp.stats.leaf.half_normal import (
     HalfNormalDistribution,
     HalfNormalEstimator,
     HalfNormalSampler,
+)
+from pysp.stats.leaf.hawkes_process import (
+    HawkesProcessDataEncoder,
+    HawkesProcessDistribution,
+    HawkesProcessEstimator,
+    HawkesProcessSampler,
 )
 from pysp.stats.leaf.inhomogeneous_poisson import (
     InhomogeneousPoissonProcessDataEncoder,
