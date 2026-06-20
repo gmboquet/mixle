@@ -77,21 +77,21 @@ class FiniteEnumeratorCoverageTestCase(unittest.TestCase):
         self.assertAlmostEqual(total, 0.0, delta=1e-8)
 
     def test_icltree_enumerator(self):
-        dist = ICLTreeDistribution([None, 0], [np.log([0.6, 0.4]), np.log([[0.7, 0.3], [0.2, 0.8]])])
+        dist = IntegerChowLiuTreeDistribution([None, 0], [np.log([0.6, 0.4]), np.log([[0.7, 0.3], [0.2, 0.8]])])
         support = [list(v) for v in itertools.product(range(2), repeat=2)]
         assert_matches_brute(self, dist, support, "icltree")
         total = np.logaddexp.reduce([lp for _, lp in dist.enumerator()])
         self.assertAlmostEqual(total, 0.0, delta=1e-8)
 
     def test_icltree_string_representation_keeps_name_intact(self):
-        dist = ICLTreeDistribution([None, 0], [np.log([0.6, 0.4]), np.log([[0.7, 0.3], [0.2, 0.8]])], name="tree")
+        dist = IntegerChowLiuTreeDistribution([None, 0], [np.log([0.6, 0.4]), np.log([[0.7, 0.3], [0.2, 0.8]])], name="tree")
         dist_str = str(dist)
 
         self.assertIn("name='tree'", dist_str)
         self.assertNotIn("name=',t,r,e,e,'", dist_str)
 
     def test_icltree_backend_metadata_and_scale(self):
-        dist = ICLTreeDistribution([None, 0], [np.log([0.6, 0.4]), np.log([[0.7, 0.3], [0.2, 0.8]])])
+        dist = IntegerChowLiuTreeDistribution([None, 0], [np.log([0.6, 0.4]), np.log([[0.7, 0.3], [0.2, 0.8]])])
         data = np.asarray([[0, 0], [0, 1], [1, 1], [1, 0], [1, 1]])
         enc = dist.dist_to_encoder().seq_encode(data)
         expected_scores = dist.seq_log_density(enc)
@@ -114,7 +114,7 @@ class FiniteEnumeratorCoverageTestCase(unittest.TestCase):
 
         weights = np.linspace(0.5, 1.5, len(data))
         c = 0.37
-        estimator = ICLTreeEstimator()
+        estimator = IntegerChowLiuTreeEstimator()
         acc = estimator.accumulator_factory().make()
         acc.seq_update(enc, weights, None)
         self.assertIs(acc.scale(c), acc)
@@ -181,7 +181,7 @@ class EnumeratorExportCoverageTestCase(unittest.TestCase):
             "ConditionalDistributionEnumerator",
             "DiracLengthMixtureEnumerator",
             "HierarchicalMixtureEnumerator",
-            "ICLTreeEnumerator",
+            "IntegerChowLiuTreeEnumerator",
             "IntegerBernoulliEditEnumerator",
             "IntegerMarkovChainEnumerator",
             "IntegerMultinomialEnumerator",

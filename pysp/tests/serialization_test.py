@@ -94,7 +94,7 @@ class DistributionSerializationTestCase(unittest.TestCase):
         self.assertEqual(markov_loaded.all_vals, {"a", "b"})
         self.assertEqual(markov_loaded.trans_log_pvec.getformat(), markov.trans_log_pvec.getformat())
 
-        tree = stats.ICLTreeDistribution(
+        tree = stats.IntegerChowLiuTreeDistribution(
             [None, 0],
             [np.log(np.asarray([0.4, 0.6])), np.log(np.asarray([[0.7, 0.3], [0.2, 0.8]]))],
         )
