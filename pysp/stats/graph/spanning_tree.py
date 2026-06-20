@@ -22,8 +22,6 @@ n-1, keeps the spanning trees, and sorts them by fitted probability.
 """
 
 from collections.abc import Sequence
-import itertools
-import math
 from typing import Any
 
 import numpy as np
@@ -38,6 +36,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.spanning import k_best_spanning_trees
 
 _MIN_LOG_WEIGHT = -30.0
 _MAX_LOG_WEIGHT = 30.0
@@ -178,41 +177,31 @@ class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class SpanningTreeEnumerator(DistributionEnumerator):
-    """Enumerate supported spanning trees in descending probability order."""
+    """Enumerate supported spanning trees in descending probability order, lazily.
+
+    A tree's probability is the product of its edge weights, so descending probability is increasing total edge
+    cost under ``cost = -log(weights)`` (zero-weight edges become +inf, i.e. absent). Gabow's k-best spanning-tree
+    algorithm streams the trees in that order from one constrained-MST oracle per node, without scanning the
+    exponential set of edge subsets.
+    """
 
     def __init__(
         self,
         dist: SpanningTreeDistribution,
         max_edge_subsets: int | None = _DEFAULT_MAX_ENUMERATION_SUBSETS,
     ) -> None:
+        # max_edge_subsets is accepted for backward compatibility but no longer constrains the lazy enumeration.
         super().__init__(dist)
-        edges = [(i, j) for i in range(dist.dim) for j in range(i + 1, dist.dim) if dist.weights[i, j] > 0.0]
-        num_candidates = math.comb(len(edges), dist.dim - 1)
-        if max_edge_subsets is not None and num_candidates > max_edge_subsets:
-            raise ValueError(
-                "SpanningTreeEnumerator would scan %d edge subsets, exceeding max_edge_subsets=%d."
-                % (num_candidates, max_edge_subsets)
-            )
-        entries: list[tuple[list[tuple[int, int]], float]] = []
-        for candidate in itertools.combinations(edges, dist.dim - 1):
-            try:
-                tree = _canonical_edges(candidate, dist.dim)
-            except ValueError:
-                continue
-            value = [(int(a), int(b)) for a, b in tree]
-            lp = float(dist._edge_log_weight_sum(tree) - dist.log_z)
-            if lp > -np.inf:
-                entries.append((value, lp))
-        entries.sort(key=lambda u: -u[1])
-        self._entries = entries
-        self._pos = 0
+        with np.errstate(divide="ignore"):
+            cost = -dist.log_weights  # +inf where the edge weight is 0 (absent edge)
+        self._gen = k_best_spanning_trees(cost)
+        self._log_z = dist.log_z
 
     def __next__(self) -> tuple[list[tuple[int, int]], float]:
-        if self._pos >= len(self._entries):
-            raise StopIteration
-        item = self._entries[self._pos]
-        self._pos += 1
-        return item
+        total, tree = next(self._gen)  # StopIteration propagates at the end of the support
+        canon = _canonical_edges(tree, self.dist.dim)  # same canonical edge representation as log_density
+        value = [(int(a), int(b)) for a, b in canon]
+        return value, float(-total - self._log_z)
 
 
 class SpanningTreeSampler(DistributionSampler):
