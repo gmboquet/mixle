@@ -753,19 +753,19 @@ from pysp.stats.graph.erdos_renyi_graph import (
 )
 
 # Backward-compatible ICLTree* aliases (redundant import alias marks an intentional re-export).
-from pysp.stats.graph.icltree import ICLTreeDataEncoder as ICLTreeDataEncoder  # noqa: F401
-from pysp.stats.graph.icltree import ICLTreeDistribution as ICLTreeDistribution  # noqa: F401
-from pysp.stats.graph.icltree import ICLTreeEnumerator as ICLTreeEnumerator  # noqa: F401
-from pysp.stats.graph.icltree import ICLTreeEstimator as ICLTreeEstimator  # noqa: F401
-from pysp.stats.graph.icltree import ICLTreeSampler as ICLTreeSampler  # noqa: F401
-from pysp.stats.graph.icltree import (
+from pysp.stats.graph.integer_chow_liu_tree import ICLTreeDataEncoder as ICLTreeDataEncoder  # noqa: F401
+from pysp.stats.graph.integer_chow_liu_tree import ICLTreeDistribution as ICLTreeDistribution  # noqa: F401
+from pysp.stats.graph.integer_chow_liu_tree import ICLTreeEnumerator as ICLTreeEnumerator  # noqa: F401
+from pysp.stats.graph.integer_chow_liu_tree import ICLTreeEstimator as ICLTreeEstimator  # noqa: F401
+from pysp.stats.graph.integer_chow_liu_tree import ICLTreeSampler as ICLTreeSampler  # noqa: F401
+from pysp.stats.graph.integer_chow_liu_tree import (
     IntegerChowLiuTreeDataEncoder,
     IntegerChowLiuTreeDistribution,
     IntegerChowLiuTreeEnumerator,
     IntegerChowLiuTreeEstimator,
     IntegerChowLiuTreeSampler,
 )
-from pysp.stats.graph.int_markovchain import (
+from pysp.stats.graph.integer_markov_chain import (
     IntegerMarkovChainDataEncoder,
     IntegerMarkovChainDistribution,
     IntegerMarkovChainEnumerator,
@@ -808,7 +808,7 @@ from pysp.stats.graph.plackett_luce import (
     PlackettLuceEstimator,
     PlackettLuceSampler,
 )
-from pysp.stats.graph.rdpg import (
+from pysp.stats.graph.random_dot_product_graph import (
     RandomDotProductGraphDistribution,
     RandomDotProductGraphEstimator,
     RandomDotProductGraphSampler,
@@ -869,20 +869,20 @@ from pysp.stats.latent.hidden_association import (
 )
 
 ### Reduced Generic Distributions
-from pysp.stats.latent.hmixture import (
+from pysp.stats.latent.hierarchical_mixture import (
     HierarchicalMixtureDataEncoder,
     HierarchicalMixtureDistribution,
     HierarchicalMixtureEnumerator,
     HierarchicalMixtureEstimator,
     HierarchicalMixtureSampler,
 )
-from pysp.stats.latent.ibp import (
+from pysp.stats.latent.indian_buffet_process import (
     IndianBuffetProcessDataEncoder,
     IndianBuffetProcessDistribution,
     IndianBuffetProcessEstimator,
     IndianBuffetProcessSampler,
 )
-from pysp.stats.latent.jmixture import (
+from pysp.stats.latent.joint_mixture import (
     JointMixtureDataEncoder,
     JointMixtureDistribution,
     JointMixtureEnumerator,
@@ -899,13 +899,13 @@ from pysp.stats.latent.mixture import (
     MixtureSampler,
     mixture_prior,
 )
-from pysp.stats.latent.ppca import (
+from pysp.stats.latent.probabilistic_pca import (
     ProbabilisticPCADataEncoder,
     ProbabilisticPCADistribution,
     ProbabilisticPCAEstimator,
     ProbabilisticPCASampler,
 )
-from pysp.stats.latent.segmental_hmm import (
+from pysp.stats.latent.segmental_hidden_markov_model import (
     SegmentalHiddenMarkovDataEncoder,
     SegmentalHiddenMarkovDistribution,
     SegmentalHiddenMarkovEstimator,
@@ -915,7 +915,7 @@ from pysp.stats.latent.segmental_hmm import (
     SegmentalHiddenMarkovModelSampler,
     SegmentalHiddenMarkovSampler,
 )
-from pysp.stats.latent.ss_mixture import (
+from pysp.stats.latent.semi_supervised_mixture import (
     SemiSupervisedMixtureDataEncoder,
     SemiSupervisedMixtureDistribution,
     SemiSupervisedMixtureEstimator,
@@ -946,19 +946,19 @@ from pysp.stats.leaf.birth_death import (
     BirthDeathSamplingEstimator,
     BirthDeathSamplingSampler,
 )
-from pysp.stats.leaf.cat_multinomial import (
-    MultinomialDataEncoder,
-    MultinomialDistribution,
-    MultinomialEnumerator,
-    MultinomialEstimator,
-    MultinomialSampler,
-)
 from pysp.stats.leaf.categorical import (
     CategoricalDataEncoder,
     CategoricalDistribution,
     CategoricalEnumerator,
     CategoricalEstimator,
     CategoricalSampler,
+)
+from pysp.stats.leaf.categorical_multinomial import (
+    MultinomialDataEncoder,
+    MultinomialDistribution,
+    MultinomialEnumerator,
+    MultinomialEstimator,
+    MultinomialSampler,
 )
 from pysp.stats.leaf.exgaussian import (
     ExponentiallyModifiedGaussianDataEncoder,
@@ -999,21 +999,21 @@ from pysp.stats.leaf.inhomogeneous_poisson import (
     InhomogeneousPoissonProcessEstimator,
     InhomogeneousPoissonProcessSampler,
 )
-from pysp.stats.leaf.int_multinomial import (
-    IntegerMultinomialDataEncoder,
-    IntegerMultinomialDistribution,
-    IntegerMultinomialEnumerator,
-    IntegerMultinomialEstimator,
-    IntegerMultinomialSampler,
-)
-from pysp.stats.leaf.int_range import (
+from pysp.stats.leaf.integer_categorical import (
     IntegerCategoricalDataEncoder,
     IntegerCategoricalDistribution,
     IntegerCategoricalEnumerator,
     IntegerCategoricalEstimator,
     IntegerCategoricalSampler,
 )
-from pysp.stats.leaf.int_spike import (
+from pysp.stats.leaf.integer_multinomial import (
+    IntegerMultinomialDataEncoder,
+    IntegerMultinomialDistribution,
+    IntegerMultinomialEnumerator,
+    IntegerMultinomialEstimator,
+    IntegerMultinomialSampler,
+)
+from pysp.stats.leaf.integer_uniform_spike import (
     IntegerUniformSpikeDataEncoder,
     IntegerUniformSpikeDistribution,
     IntegerUniformSpikeEnumerator,
@@ -1090,57 +1090,57 @@ from pysp.stats.leaf.von_mises import (
     VonMisesSampler,
 )
 from pysp.stats.leaf.weibull import WeibullDataEncoder, WeibullDistribution, WeibullEstimator, WeibullSampler
-from pysp.stats.multivariate.dmvn import (
+from pysp.stats.multivariate.diagonal_gaussian import (
     DiagonalGaussianDataEncoder,
     DiagonalGaussianDistribution,
     DiagonalGaussianEstimator,
     DiagonalGaussianSampler,
 )
-from pysp.stats.multivariate.mvn import (
+from pysp.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDataEncoder,
     MultivariateGaussianDistribution,
     MultivariateGaussianEstimator,
     MultivariateGaussianSampler,
 )
-from pysp.stats.multivariate.mvt import (
+from pysp.stats.multivariate.multivariate_student_t import (
     MultivariateStudentTDataEncoder,
     MultivariateStudentTDistribution,
     MultivariateStudentTEstimator,
     MultivariateStudentTSampler,
 )
-from pysp.stats.multivariate.vmf import (
+from pysp.stats.multivariate.von_mises_fisher import (
     VonMisesFisherDataEncoder,
     VonMisesFisherDistribution,
     VonMisesFisherEstimator,
     VonMisesFisherSampler,
 )
-from pysp.stats.sets.int_edit_setdist import (
+from pysp.stats.sets.bernoulli_set import (
+    BernoulliSetDataEncoder,
+    BernoulliSetDistribution,
+    BernoulliSetEnumerator,
+    BernoulliSetEstimator,
+    BernoulliSetSampler,
+)
+from pysp.stats.sets.integer_bernoulli_edit import (
     IntegerBernoulliEditDataEncoder,
     IntegerBernoulliEditDistribution,
     IntegerBernoulliEditEnumerator,
     IntegerBernoulliEditEstimator,
     IntegerBernoulliEditSampler,
 )
-from pysp.stats.sets.int_edit_stepsetdist import (
-    IntegerStepBernoulliEditDataEncoder,
-    IntegerStepBernoulliEditDistribution,
-    IntegerStepBernoulliEditEnumerator,
-    IntegerStepBernoulliEditEstimator,
-    IntegerStepBernoulliEditSampler,
-)
-from pysp.stats.sets.int_setdist import (
+from pysp.stats.sets.integer_bernoulli_set import (
     IntegerBernoulliSetDataEncoder,
     IntegerBernoulliSetDistribution,
     IntegerBernoulliSetEnumerator,
     IntegerBernoulliSetEstimator,
     IntegerBernoulliSetSampler,
 )
-from pysp.stats.sets.setdist import (
-    BernoulliSetDataEncoder,
-    BernoulliSetDistribution,
-    BernoulliSetEnumerator,
-    BernoulliSetEstimator,
-    BernoulliSetSampler,
+from pysp.stats.sets.integer_step_bernoulli_edit import (
+    IntegerStepBernoulliEditDataEncoder,
+    IntegerStepBernoulliEditDistribution,
+    IntegerStepBernoulliEditEnumerator,
+    IntegerStepBernoulliEditEstimator,
+    IntegerStepBernoulliEditSampler,
 )
 from pysp.utils.optional_deps import RDD_TYPES, pyspark
 
@@ -1287,31 +1287,31 @@ _LAZY_NAMES: dict[str, str] = {
     "HiddenMarkovModelSampler": "pysp.stats.latent.hidden_markov",
     "HiddenMarkovSampler": "pysp.stats.latent.hidden_markov",
     # quantized_hmm (imports hidden_markov at module top)
-    "QuantizedHiddenMarkovEstimator": "pysp.stats.latent.quantized_hmm",
-    "QuantizedHiddenMarkovModelDistribution": "pysp.stats.latent.quantized_hmm",
-    "QuantizedHiddenMarkovModelEnumerator": "pysp.stats.latent.quantized_hmm",
-    "QuantizedHiddenMarkovModelEstimator": "pysp.stats.latent.quantized_hmm",
+    "QuantizedHiddenMarkovEstimator": "pysp.stats.latent.quantized_hidden_markov_model",
+    "QuantizedHiddenMarkovModelDistribution": "pysp.stats.latent.quantized_hidden_markov_model",
+    "QuantizedHiddenMarkovModelEnumerator": "pysp.stats.latent.quantized_hidden_markov_model",
+    "QuantizedHiddenMarkovModelEstimator": "pysp.stats.latent.quantized_hidden_markov_model",
     # tree_hmm
-    "TreeHiddenMarkovEstimator": "pysp.stats.latent.tree_hmm",
-    "TreeHiddenMarkovModelDistribution": "pysp.stats.latent.tree_hmm",
-    "TreeHiddenMarkovModelEstimator": "pysp.stats.latent.tree_hmm",
-    "TreeHiddenMarkovModelSampler": "pysp.stats.latent.tree_hmm",
-    "TreeHiddenMarkovSampler": "pysp.stats.latent.tree_hmm",
+    "TreeHiddenMarkovEstimator": "pysp.stats.latent.tree_hidden_markov_model",
+    "TreeHiddenMarkovModelDistribution": "pysp.stats.latent.tree_hidden_markov_model",
+    "TreeHiddenMarkovModelEstimator": "pysp.stats.latent.tree_hidden_markov_model",
+    "TreeHiddenMarkovModelSampler": "pysp.stats.latent.tree_hidden_markov_model",
+    "TreeHiddenMarkovSampler": "pysp.stats.latent.tree_hidden_markov_model",
     # int_plsi
-    "IntegerProbabilisticLatentSemanticIndexingDataEncoder": "pysp.stats.latent.int_plsi",
-    "IntegerProbabilisticLatentSemanticIndexingDistribution": "pysp.stats.latent.int_plsi",
-    "IntegerProbabilisticLatentSemanticIndexingEstimator": "pysp.stats.latent.int_plsi",
-    "IntegerProbabilisticLatentSemanticIndexingSampler": "pysp.stats.latent.int_plsi",
+    "IntegerProbabilisticLatentSemanticIndexingDataEncoder": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
+    "IntegerProbabilisticLatentSemanticIndexingDistribution": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
+    "IntegerProbabilisticLatentSemanticIndexingEstimator": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
+    "IntegerProbabilisticLatentSemanticIndexingSampler": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
     # int_plsi backward-compatible aliases (former IntegerPLSI* names)
-    "IntegerPLSIDataEncoder": "pysp.stats.latent.int_plsi",
-    "IntegerPLSIDistribution": "pysp.stats.latent.int_plsi",
-    "IntegerPLSIEstimator": "pysp.stats.latent.int_plsi",
-    "IntegerPLSISampler": "pysp.stats.latent.int_plsi",
+    "IntegerPLSIDataEncoder": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
+    "IntegerPLSIDistribution": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
+    "IntegerPLSIEstimator": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
+    "IntegerPLSISampler": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
     # int_hidden_association (imports int_plsi + numba)
-    "IntegerHiddenAssociationDataEncoder": "pysp.stats.latent.int_hidden_association",
-    "IntegerHiddenAssociationDistribution": "pysp.stats.latent.int_hidden_association",
-    "IntegerHiddenAssociationEstimator": "pysp.stats.latent.int_hidden_association",
-    "IntegerHiddenAssociationSampler": "pysp.stats.latent.int_hidden_association",
+    "IntegerHiddenAssociationDataEncoder": "pysp.stats.latent.integer_hidden_association",
+    "IntegerHiddenAssociationDistribution": "pysp.stats.latent.integer_hidden_association",
+    "IntegerHiddenAssociationEstimator": "pysp.stats.latent.integer_hidden_association",
+    "IntegerHiddenAssociationSampler": "pysp.stats.latent.integer_hidden_association",
     # lda
     "LDADataEncoder": "pysp.stats.latent.lda",
     "LDADistribution": "pysp.stats.latent.lda",
@@ -1324,10 +1324,10 @@ _LAZY_NAMES: dict[str, str] = {
 # in _register_builtin_compute_metadata.
 _LAZY_MODULE_CAP_NAMES: dict[str, tuple[str, ...]] = {
     "pysp.stats.latent.hidden_markov": ("HiddenMarkovModelDistribution",),
-    "pysp.stats.latent.quantized_hmm": ("QuantizedHiddenMarkovModelDistribution",),
-    "pysp.stats.latent.tree_hmm": ("TreeHiddenMarkovModelDistribution",),
-    "pysp.stats.latent.int_hidden_association": ("IntegerHiddenAssociationDistribution",),
-    "pysp.stats.latent.int_plsi": ("IntegerProbabilisticLatentSemanticIndexingDistribution",),
+    "pysp.stats.latent.quantized_hidden_markov_model": ("QuantizedHiddenMarkovModelDistribution",),
+    "pysp.stats.latent.tree_hidden_markov_model": ("TreeHiddenMarkovModelDistribution",),
+    "pysp.stats.latent.integer_hidden_association": ("IntegerHiddenAssociationDistribution",),
+    "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing": ("IntegerProbabilisticLatentSemanticIndexingDistribution",),
     "pysp.stats.latent.lda": ("LDADistribution",),
 }
 

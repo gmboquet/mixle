@@ -1,4 +1,4 @@
-"""Tests for pysp.stats.latent.mvnmixture (GaussianMixtureDistribution and friends).
+"""Tests for pysp.stats.latent.gaussian_mixture (GaussianMixtureDistribution and friends).
 
 Covers: sample -> estimate round-trip on a small 2-component 2-d problem, agreement between
 scalar and vectorized (seq_) updates, and sampler output shapes. Also smoke-tests the
@@ -11,13 +11,16 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.stats.bayes.dirichlet import DirichletDistribution
-from pysp.stats.latent.mvnmixture import (
+from pysp.stats.latent.gaussian_mixture import (
     GaussianMixtureDataEncoder,
     GaussianMixtureDistribution,
     GaussianMixtureEstimator,
 )
-from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution
-from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
+from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
+from pysp.stats.multivariate.multivariate_gaussian import (
+    MultivariateGaussianDistribution,
+    MultivariateGaussianEstimator,
+)
 
 
 def make_dist():

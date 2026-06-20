@@ -29,8 +29,8 @@ from pysp.stats import (
     seq_encode,
     seq_log_density_sum,
 )
+from pysp.stats.latent.labeled_lda import LabeledLDADistribution, LabeledLDAEstimator
 from pysp.stats.latent.lda import LDAEstimator
-from pysp.stats.latent.llda import LabeledLDADistribution, LabeledLDAEstimator
 from pysp.utils.estimation import optimize
 from pysp.utils.optsutil import count_by_value
 

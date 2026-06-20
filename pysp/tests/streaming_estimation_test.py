@@ -135,19 +135,19 @@ class StreamingEstimatorTestCase(unittest.TestCase):
 
     def test_hmm_family_scaling_preserves_metadata(self):
         from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
-        from pysp.stats.graph.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-        from pysp.stats.latent.hidden_markov_ind_pi import (
-            SemiSupervisedHiddenMarkovEstimator,
-            SemiSupervisedHiddenMarkovModelDistribution,
-        )
-        from pysp.stats.latent.look_back_hmm import (
+        from pysp.stats.graph.integer_markov_chain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
+        from pysp.stats.latent.lookback_hidden_markov_model import (
             LookbackHiddenMarkovModelDistribution,
             LookbackHiddenMarkovModelEstimator,
         )
-        from pysp.stats.latent.tree_hmm import TreeHiddenMarkovModelDistribution
+        from pysp.stats.latent.semi_supervised_hidden_markov_model import (
+            SemiSupervisedHiddenMarkovEstimator,
+            SemiSupervisedHiddenMarkovModelDistribution,
+        )
+        from pysp.stats.latent.tree_hidden_markov_model import TreeHiddenMarkovModelDistribution
         from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
         from pysp.stats.leaf.gaussian import GaussianDistribution
-        from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
+        from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
 
         init_dist = SequenceDistribution(
             IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]), CategoricalDistribution({1: 1.0})

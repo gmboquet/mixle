@@ -71,7 +71,7 @@ from pysp.stats.leaf.exponential import ExponentialDistribution
 from pysp.stats.leaf.gamma import GammaDistribution
 from pysp.stats.leaf.gaussian import GaussianDistribution
 from pysp.stats.leaf.geometric import GeometricDistribution
-from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
+from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
 from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
 from pysp.stats.leaf.logistic import LogisticDistribution
 from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution
@@ -81,7 +81,7 @@ from pysp.stats.leaf.rayleigh import RayleighDistribution
 from pysp.stats.leaf.student_t import StudentTDistribution
 from pysp.stats.leaf.uniform import UniformDistribution
 from pysp.stats.leaf.weibull import WeibullDistribution
-from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution
+from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
 from pysp.utils.optional_deps import numba
 
 __all__ = ["CompiledMixture", "build_kernel"]

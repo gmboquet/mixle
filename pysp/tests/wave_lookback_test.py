@@ -1,6 +1,6 @@
 """Smoke tests for the lookback hidden Markov module.
 
-Covers pysp.stats.latent.look_back_hmm (the typed lookback HMM). Checks that it imports, that a tiny
+Covers pysp.stats.latent.lookback_hidden_markov_model (the typed lookback HMM). Checks that it imports, that a tiny
 fixed-seed sample -> seq_initialize -> seq_estimate loop runs, and that the data encoders
 round-trip (dist_to_encoder == acc_to_encoder, vectorized log-densities match per-item
 log_density).
@@ -11,12 +11,12 @@ import unittest
 import numpy as np
 from numpy.random import RandomState
 
-import pysp.stats.latent.look_back_hmm as new_mod
+import pysp.stats.latent.lookback_hidden_markov_model as new_mod
 from pysp.stats import seq_encode, seq_estimate, seq_initialize, seq_log_density_sum
 from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
-from pysp.stats.graph.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
+from pysp.stats.graph.integer_markov_chain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.leaf.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 
 MODULES = [new_mod]
 

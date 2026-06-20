@@ -4,13 +4,13 @@ import unittest
 
 import numpy as np
 
-import pysp.stats.latent.look_back_hmm as new_mod
+import pysp.stats.latent.lookback_hidden_markov_model as new_mod
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats.combinator.null_dist import NullEstimator
 from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
 from pysp.stats.compute.backend import backend_seq_log_density
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.leaf.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 
 try:
     from pysp.engines import TorchEngine

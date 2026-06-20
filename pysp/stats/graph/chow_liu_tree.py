@@ -1,6 +1,6 @@
 """Generic Chow-Liu tree distribution for fixed-length tuple observations.
 
-The integer-only :mod:`pysp.stats.graph.icltree` implementation uses dense integer
+The integer-only :mod:`pysp.stats.graph.integer_chow_liu_tree` implementation uses dense integer
 count tables.  This module keeps the Chow-Liu structure learning step generic:
 parent variables are represented by their observed/enumerable values, while
 each child conditional distribution is estimated with the user-supplied

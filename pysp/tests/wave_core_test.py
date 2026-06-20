@@ -12,8 +12,8 @@ from pysp.stats.combinator.weighted import WeightedDistribution, WeightedSampler
 from pysp.stats.compute.pdist import DataSequenceEncoder, EnumerationError
 from pysp.stats.latent.dirac_length import DiracLengthMixtureDistribution
 from pysp.stats.leaf.gaussian import GaussianDistribution
-from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
-from pysp.stats.leaf.int_spike import IntegerUniformSpikeDistribution
+from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
+from pysp.stats.leaf.integer_uniform_spike import IntegerUniformSpikeDistribution
 from pysp.stats.leaf.poisson import PoissonDistribution
 from pysp.utils.enumeration import freeze
 
@@ -198,7 +198,7 @@ class DiracLengthMixtureEnumeratorTestCase(unittest.TestCase):
 
 class ExportsTestCase(unittest.TestCase):
     def test_diagonal_gaussian_sampler_export(self):
-        from pysp.stats.multivariate.dmvn import DiagonalGaussianSampler as DmvnSampler
+        from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianSampler as DmvnSampler
 
         self.assertIs(DiagonalGaussianSampler, DmvnSampler)
 

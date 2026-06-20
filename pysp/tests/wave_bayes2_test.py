@@ -35,7 +35,7 @@ from pysp.stats.leaf.bernoulli import (
 )
 from pysp.stats.leaf.beta import BetaDistribution, BetaSampler
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.leaf.int_range import (
+from pysp.stats.leaf.integer_categorical import (
     IntegerCategoricalAccumulator,
     IntegerCategoricalAccumulatorFactory,
     IntegerCategoricalDistribution,

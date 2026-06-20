@@ -89,7 +89,7 @@ from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimat
 from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator, HiddenMarkovModelDistribution
 from pysp.stats.latent.lda import LDADistribution, LDAEstimator
 from pysp.stats.latent.mixture import MixtureDistribution, MixtureEstimator
-from pysp.stats.latent.ss_mixture import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureEstimator
+from pysp.stats.latent.semi_supervised_mixture import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureEstimator
 from pysp.stats.leaf.bernoulli import BernoulliDistribution, BernoulliEstimator
 from pysp.stats.leaf.beta import BetaDistribution, BetaEstimator
 from pysp.stats.leaf.binomial import BinomialDistribution, BinomialEstimator
@@ -102,7 +102,7 @@ from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEsti
 from pysp.stats.leaf.gamma import GammaDistribution, GammaEstimator
 from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
 from pysp.stats.leaf.geometric import GeometricDistribution, GeometricEstimator
-from pysp.stats.leaf.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 from pysp.stats.leaf.laplace import LaplaceDistribution, LaplaceEstimator
 from pysp.stats.leaf.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
 from pysp.stats.leaf.logistic import LogisticDistribution, LogisticEstimator
@@ -113,8 +113,11 @@ from pysp.stats.leaf.rayleigh import RayleighDistribution, RayleighEstimator
 from pysp.stats.leaf.student_t import StudentTDistribution, StudentTEstimator
 from pysp.stats.leaf.uniform import UniformDistribution, UniformEstimator
 from pysp.stats.leaf.weibull import WeibullDistribution, WeibullEstimator
-from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution, DiagonalGaussianEstimator
-from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
+from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution, DiagonalGaussianEstimator
+from pysp.stats.multivariate.multivariate_gaussian import (
+    MultivariateGaussianDistribution,
+    MultivariateGaussianEstimator,
+)
 
 __all__ = [
     "RandomVariable",

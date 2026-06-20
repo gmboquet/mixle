@@ -208,9 +208,9 @@ class CapabilityMatrixTestCase(unittest.TestCase):
         from pysp.stats.bayes.dirichlet import DirichletDistribution
         from pysp.stats.bayes.normgamma import NormalGammaDistribution
         from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
-        from pysp.stats.latent.mvnmixture import GaussianMixtureDistribution
-        from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
-        from pysp.stats.multivariate.vmf import VonMisesFisherDistribution
+        from pysp.stats.latent.gaussian_mixture import GaussianMixtureDistribution
+        from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
+        from pysp.stats.multivariate.von_mises_fisher import VonMisesFisherDistribution
         from pysp.utils.density_rank import density_rank
 
         # (name, dist, value, expected density_rank method): families with no enumerator still expose a
@@ -252,8 +252,8 @@ class CapabilityMatrixTestCase(unittest.TestCase):
         # reachable for every samplable family through the base-class density_quantile /
         # density_enumeration (exact where overridden, e.g. MVN; Monte-Carlo representative otherwise).
         from pysp.stats.bayes.dirichlet import DirichletDistribution
-        from pysp.stats.latent.mvnmixture import GaussianMixtureDistribution
-        from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
+        from pysp.stats.latent.gaussian_mixture import GaussianMixtureDistribution
+        from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
 
         # Monte-Carlo representatives: density falls (or is non-increasing) as q -> 1, enumeration is
         # descending and the requested size.

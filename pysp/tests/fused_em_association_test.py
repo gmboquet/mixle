@@ -27,13 +27,13 @@ from pysp.stats.graph.sparse_markov_transform import (
     SparseMarkovAssociationEstimator,
 )
 from pysp.stats.latent.hidden_association import HiddenAssociationDistribution, HiddenAssociationEstimator
-from pysp.stats.latent.ibp import IndianBuffetProcessDistribution, IndianBuffetProcessEstimator
-from pysp.stats.latent.int_hidden_association import (
+from pysp.stats.latent.indian_buffet_process import IndianBuffetProcessDistribution, IndianBuffetProcessEstimator
+from pysp.stats.latent.integer_hidden_association import (
     IntegerHiddenAssociationDistribution,
     IntegerHiddenAssociationEstimator,
 )
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.leaf.int_multinomial import IntegerMultinomialDistribution, IntegerMultinomialEstimator
+from pysp.stats.leaf.integer_multinomial import IntegerMultinomialDistribution, IntegerMultinomialEstimator
 from pysp.utils.estimation import optimize
 
 

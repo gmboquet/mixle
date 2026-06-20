@@ -1,4 +1,4 @@
-"""Tests for the coupled multi-label alpha update in pysp.stats.latent.llda.
+"""Tests for the coupled multi-label alpha update in pysp.stats.latent.labeled_lda.
 
 Covers the single-label fast path (agreement with the per-row fixed-point update recomputed from the
 same per-label statistics), the coupled multi-label update (objective increase, stationarity in beta
@@ -12,7 +12,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma
 
-from pysp.stats.latent.llda import (
+from pysp.stats.latent.labeled_lda import (
     LabeledLDADistribution,
     LabeledLDAEstimator,
     LabeledLDALabelSetStats,

@@ -8,7 +8,7 @@ Observations are length-n sequences/arrays of non-negative reals summing to one 
 where n = len(x) is inferred from each observation.
 
 This is a parameter prior (the conjugate Dirichlet prior used by
-:class:`~pysp.stats.leaf.int_range.IntegerCategoricalDistribution` when a symmetric prior is desired). It
+:class:`~pysp.stats.leaf.integer_categorical.IntegerCategoricalDistribution` when a symmetric prior is desired). It
 is scored on probability vectors, not fit from data by EM. Ported from pysp.bstats.symdirichlet.
 """
 

@@ -5,7 +5,7 @@ with unknown mean and precision matrix.
 
 with scale matrix W (d x d positive definite) and degrees of freedom nu > d - 1.
 This is the conjugate prior for the multivariate
-:class:`~pysp.stats.multivariate.mvn.MultivariateGaussianDistribution` (see its ``prior=``
+:class:`~pysp.stats.multivariate.multivariate_gaussian.MultivariateGaussianDistribution` (see its ``prior=``
 argument) and the d-dimensional generalization of NormalGamma (d=1: nu = 2a,
 W = 1/(2b)). It is a parameter prior: it is scored on ``(mu, Lambda)`` parameter
 pairs, not fit from data by EM.

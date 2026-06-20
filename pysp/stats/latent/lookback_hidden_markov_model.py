@@ -59,7 +59,7 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.stats.graph.markov_chain import MarkovChainDistribution
-from pysp.stats.latent._hmm_numba_kernels import (
+from pysp.stats.latent._hidden_markov_numba_kernels import (
     numba_baum_welch2,
     numba_baum_welch_alphas,
     numba_seq_log_density,

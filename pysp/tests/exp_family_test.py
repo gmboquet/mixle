@@ -23,7 +23,7 @@ from pysp.stats.exp_family import (
 from pysp.stats.leaf.bernoulli import BernoulliDistribution
 from pysp.stats.leaf.beta import BetaDistribution
 from pysp.stats.leaf.binomial import BinomialDistribution
-from pysp.stats.leaf.cat_multinomial import MultinomialDistribution
+from pysp.stats.leaf.categorical_multinomial import MultinomialDistribution
 from pysp.stats.leaf.exponential import ExponentialDistribution
 from pysp.stats.leaf.gamma import GammaDistribution
 from pysp.stats.leaf.gaussian import GaussianDistribution

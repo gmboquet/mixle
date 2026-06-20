@@ -9,7 +9,7 @@ Data type: Tuple[Sequence[int], Sequence[int]]: An observation x = (x1, x2) is a
 (prev set, next set), each a subset of S = {0,1,2,...N-1}.
 
 The density has the same form as the integer Bernoulli edit set distribution (see
-pysp.stats.sets.int_edit_setdist): each integer k independently transitions in or out of the set with
+pysp.stats.sets.integer_bernoulli_edit): each integer k independently transitions in or out of the set with
 probabilities p(k in x2 | k in x1), p(k in x2 | k not in x1), etc., and the previous set x1 follows an
 init distribution,
 
@@ -44,7 +44,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.sets.int_edit_setdist import IntegerBernoulliEditEnumerator
+from pysp.stats.sets.integer_bernoulli_edit import IntegerBernoulliEditEnumerator
 from pysp.utils.aliasing import MISSING, coalesce_alias
 
 T = tuple[Sequence[int] | np.ndarray, Sequence[int] | np.ndarray]
