@@ -11,7 +11,13 @@ import unittest
 
 import numpy as np
 
-from pysp.utils.model_enumeration import beam_search, best_first, best_first_decode, top_k_scored
+from pysp.utils.model_enumeration import (
+    beam_search,
+    best_first,
+    best_first_decode,
+    quantized_best_first_decode,
+    top_k_scored,
+)
 
 # a tiny autoregressive model over vocab {0,1,2} with EOS=2: next-token log-probs depend on the last token.
 _EOS = 2
@@ -104,6 +110,91 @@ class ModelEnumerationTestCase(unittest.TestCase):
         self.assertTrue(results)
         sc = [v for _, v in results]
         self.assertTrue(all(sc[i] >= sc[i + 1] for i in range(len(sc) - 1)))
+
+
+class _PeakedModel:
+    """A peaked autoregressive model over vocab 0..V-1 (EOS=V-1): most mass on a few tokens per step.
+
+    Counts forward calls so the tests can show the nucleus-pruning / batching speedup.
+    """
+
+    def __init__(self, vocab=10, seed=0):
+        self.vocab = vocab
+        self.eos = vocab - 1
+        rng = np.random.RandomState(seed)
+        # sharp logits per last-token context (peaked), normalized to log-probs
+        self.logp = {}
+        for ctx in [None] + list(range(vocab - 1)):
+            z = rng.randn(vocab) * 4.0
+            self.logp[ctx] = z - np.log(np.exp(z).sum())
+        self.calls = 0
+        self.batch_calls = 0
+
+    def next_logprobs(self, prefix):
+        self.calls += 1
+        return list(enumerate(self.logp[prefix[-1] if prefix else None]))
+
+    def batch_next_logprobs(self, prefixes):
+        self.batch_calls += 1
+        self.calls += len(prefixes)
+        return [list(enumerate(self.logp[p[-1] if p else None])) for p in prefixes]
+
+
+class QuantizedDecodeTestCase(unittest.TestCase):
+    def test_matches_exact_without_pruning(self):
+        m = _PeakedModel(vocab=4, seed=1)
+        exact = list(best_first_decode(m.next_logprobs, eos=m.eos, max_len=5))
+        # no pruning + fine buckets -> same descending log-probs (tie-robust)
+        quant = list(
+            quantized_best_first_decode(m.next_logprobs, eos=m.eos, max_len=5, bucket_bits=20, batch_size=1)
+        )
+        self.assertEqual(len(quant), len(exact))
+        np.testing.assert_allclose([lp for _, lp in quant], [lp for _, lp in exact], atol=1e-9)
+
+    def test_nucleus_pruning_covers_mass_and_cuts_work(self):
+        m = _PeakedModel(vocab=12, seed=2)
+        full = _PeakedModel(vocab=12, seed=2)
+        # exact top-20
+        exact_top = list(best_first_decode(full.next_logprobs, eos=full.eos, max_len=8, max_results=20))
+        # top_p nucleus pruning
+        pruned = list(quantized_best_first_decode(m.next_logprobs, eos=m.eos, max_len=8, top_p=0.95, max_results=20))
+        self.assertEqual(len(pruned), 20)
+        # the pruned top sequence equals the exact best; pruning used far fewer model calls
+        self.assertEqual(pruned[0][0], exact_top[0][0])
+        self.assertLess(m.calls, full.calls)
+        # pruned results are valid descending probabilities
+        lps = [lp for _, lp in pruned]
+        self.assertTrue(all(lps[i] >= lps[i + 1] - 1e-9 for i in range(len(lps) - 1)))
+
+    def test_batched_scoring_matches_and_batches(self):
+        per = _PeakedModel(vocab=10, seed=3)
+        bat = _PeakedModel(vocab=10, seed=3)
+        # coarse buckets group near-equal-score prefixes so the batched path expands several per forward call
+        a = list(
+            quantized_best_first_decode(per.next_logprobs, eos=per.eos, max_len=6, top_k=4, bucket_bits=2, max_results=10)
+        )
+        b = list(
+            quantized_best_first_decode(
+                batch_next_logprobs=bat.batch_next_logprobs,
+                eos=bat.eos,
+                max_len=6,
+                top_k=4,
+                bucket_bits=2,
+                batch_size=32,
+                max_results=10,
+            )
+        )
+        # same set of results (within a bucket the yield order may differ by batch size, so compare sorted)
+        np.testing.assert_allclose(sorted(lp for _, lp in a), sorted(lp for _, lp in b), atol=1e-9)
+        # the batched path scored more prefixes than it made forward calls -> it really batched
+        self.assertGreater(bat.calls, bat.batch_calls)
+
+    def test_min_mass_early_stop(self):
+        m = _PeakedModel(vocab=8, seed=4)
+        got = list(quantized_best_first_decode(m.next_logprobs, eos=m.eos, max_len=6, top_p=0.99, min_mass=0.5))
+        self.assertGreaterEqual(sum(math.exp(lp) for _, lp in got), 0.5)
+        # stopped early: covered ~0.5, not the whole (near-1) support
+        self.assertLess(sum(math.exp(lp) for _, lp in got), 0.95)
 
 
 if __name__ == "__main__":

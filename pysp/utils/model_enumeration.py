@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import heapq
 import itertools
+import math
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
@@ -198,3 +199,129 @@ def top_k_scored(
     if k is None:
         return sorted(scored, key=lambda u: -u[1])
     return heapq.nlargest(k, scored, key=lambda u: u[1])
+
+
+def _prune_step(items: Iterable[tuple[Any, float]], top_k: int | None, top_p: float | None) -> list[tuple[Any, float]]:
+    """Restrict a step's (token, log_prob) continuations to the top-k / top-p (nucleus) -- the structural
+    pruning that makes peaked neural distributions cheap to enumerate."""
+    ranked = sorted(items, key=lambda u: -u[1])
+    if top_k is not None:
+        ranked = ranked[:top_k]
+    if top_p is not None and ranked:
+        kept: list[tuple[Any, float]] = []
+        cum = 0.0
+        for token, lp in ranked:
+            kept.append((token, lp))
+            cum += math.exp(lp)
+            if cum >= top_p:
+                break
+        ranked = kept
+    return ranked
+
+
+def quantized_best_first_decode(
+    next_logprobs: Callable[[tuple], Iterable[tuple[Any, float]]] | None = None,
+    eos: Any = None,
+    max_len: int | None = None,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    bucket_bits: int = 12,
+    batch_next_logprobs: Callable[[list[tuple]], list[Iterable[tuple[Any, float]]]] | None = None,
+    batch_size: int = 64,
+    start: tuple = (),
+    max_results: int | None = None,
+    min_mass: float | None = None,
+) -> Iterator[tuple[tuple, float]]:
+    """Fast descending-probability sequence enumeration specialized for neural / transformer decoders.
+
+    Three structure-aware accelerations over :func:`best_first_decode`:
+
+    1. **Nucleus / top-k pruning.** Neural next-token distributions are sharply peaked, so each step is
+       restricted to its ``top_k`` tokens or its ``top_p`` nucleus -- dropping the long low-probability tail
+       collapses the branching factor (a ~50k vocab down to a handful) at negligible mass loss.
+    2. **Quantized bucket priority queue.** Cumulative log-probs only decrease, so instead of an O(log n)
+       comparison heap the frontier is bucketed by quantized score (``bucket = floor(score * 2**bucket_bits)``)
+       and drained highest-bucket first -- O(1) pushes/pops, and prefixes of near-equal score are grouped.
+       Buckets are disjoint score ranges, so order is exact across buckets and within ~2**-bucket_bits inside one.
+    3. **Batched scoring.** The cost is dominated by model forward passes. Pass ``batch_next_logprobs`` to
+       score up to ``batch_size`` frontier prefixes in one call (one padded GPU forward) instead of one at a time.
+
+    With ``top_k=top_p=None`` and a large ``bucket_bits`` this reduces to the exact enumeration; pruning is the
+    only approximation (report ``min_mass`` to stop once enough probability is covered).
+
+    Args:
+        next_logprobs: ``next_logprobs(prefix) -> [(token, log_prob), ...]`` (used when ``batch_next_logprobs``
+            is not given). Log-probs must be <= 0.
+        eos: end-of-sequence token (a prefix ending in ``eos`` is complete).
+        max_len: maximum sequence length. Give ``eos`` and/or ``max_len``.
+        top_k: keep only the ``top_k`` highest-probability tokens per step.
+        top_p: keep the smallest set of tokens per step whose probability sums to >= ``top_p`` (nucleus).
+        bucket_bits: score-quantization resolution; larger = finer ordering, slower bookkeeping.
+        batch_next_logprobs: optional ``batch_next_logprobs([prefix, ...]) -> [[(token, log_prob), ...], ...]``
+            scoring a batch of prefixes in one forward pass.
+        batch_size: number of frontier prefixes expanded per (batched) scoring call.
+        start: initial prefix.
+        max_results: stop after this many complete sequences.
+        min_mass: stop once the yielded sequences cover at least this much probability mass.
+
+    Yields:
+        ``(sequence_tuple, total_log_prob)``, highest probability first (exact across score buckets).
+    """
+    if next_logprobs is None and batch_next_logprobs is None:
+        raise ValueError("provide next_logprobs or batch_next_logprobs.")
+    if eos is None and max_len is None:
+        raise ValueError("quantized_best_first_decode needs eos and/or max_len to know when a sequence is complete.")
+
+    scale = float(2**bucket_bits)
+
+    def _is_complete(prefix: tuple) -> bool:
+        if eos is not None and len(prefix) > 0 and prefix[-1] == eos:
+            return True
+        return max_len is not None and len(prefix) >= max_len
+
+    buckets: dict[int, list[tuple[float, tuple]]] = {}
+    bucket_heap: list[int] = []  # min-heap of -bucket so the highest bucket pops first
+
+    def push(prefix: tuple, score: float) -> None:
+        b = math.floor(score * scale)
+        lst = buckets.get(b)
+        if lst is None:
+            buckets[b] = [(score, prefix)]
+            heapq.heappush(bucket_heap, -b)
+        else:
+            lst.append((score, prefix))
+
+    push(start, 0.0)
+    emitted = 0
+    covered = 0.0
+    while bucket_heap:
+        b = -bucket_heap[0]
+        lst = buckets.get(b)
+        if not lst:
+            heapq.heappop(bucket_heap)
+            buckets.pop(b, None)
+            continue
+        # take a batch from the current (highest) bucket
+        if len(lst) > batch_size:
+            take = lst[-batch_size:]
+            del lst[-batch_size:]
+        else:
+            take = lst
+            buckets[b] = []
+        # yield completed sequences in this batch, exact order within the bucket
+        for sc, pf in sorted((u for u in take if _is_complete(u[1])), key=lambda u: -u[0]):
+            yield pf, sc
+            emitted += 1
+            covered += math.exp(sc)
+            if (max_results is not None and emitted >= max_results) or (min_mass is not None and covered >= min_mass):
+                return
+        to_expand = [u for u in take if not _is_complete(u[1])]
+        if to_expand:
+            prefixes = [pf for _, pf in to_expand]
+            if batch_next_logprobs is not None:
+                steps = batch_next_logprobs(prefixes)
+            else:
+                steps = [next_logprobs(pf) for pf in prefixes]
+            for (sc, pf), step in zip(to_expand, steps):
+                for token, token_lp in _prune_step(step, top_k, top_p):
+                    push(pf + (token,), sc + token_lp)
