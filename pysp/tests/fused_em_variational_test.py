@@ -11,7 +11,7 @@ log-likelihood). For each family this verifies:
   * FUSED: EM run with reuse_estep_ll=True reaches the same optimum as the standard loop
     (same init/seed/iterations).
 
-Families covered: LDA, LLDA, IntegerPLSI.
+Families covered: LDA, LabeledLDA, IntegerPLSI.
 """
 
 import io
@@ -30,7 +30,7 @@ from pysp.stats import (
     seq_log_density_sum,
 )
 from pysp.stats.latent.lda import LDAEstimator
-from pysp.stats.latent.llda import LLDADistribution, LLDAEstimator
+from pysp.stats.latent.llda import LabeledLDADistribution, LabeledLDAEstimator
 from pysp.utils.estimation import optimize
 from pysp.utils.optsutil import count_by_value
 
@@ -96,7 +96,7 @@ class FusedEMVariationalTestCase(unittest.TestCase):
         _, mk, data = self._lda()
         self._fused(mk, data)
 
-    # ----------------------------------------------------------------- LLDA
+    # ----------------------------------------------------------------- LabeledLDA
     def _llda(self):
         VOCAB = ["w0", "w1", "w2", "w3"]
         PMATS = [[0.4, 0.4, 0.1, 0.1], [0.1, 0.1, 0.4, 0.4]]
@@ -111,7 +111,7 @@ class FusedEMVariationalTestCase(unittest.TestCase):
             for wd in words:
                 cnts[VOCAB[wd]] = cnts.get(VOCAB[wd], 0) + 1
             data.append((sorted(cnts.items()), labels))
-        dist = LLDADistribution(
+        dist = LabeledLDADistribution(
             [
                 CategoricalDistribution({"w0": 0.4, "w1": 0.4, "w2": 0.1, "w3": 0.1}),
                 CategoricalDistribution({"w0": 0.1, "w1": 0.1, "w2": 0.4, "w3": 0.4}),
@@ -119,7 +119,7 @@ class FusedEMVariationalTestCase(unittest.TestCase):
             np.asarray([[1.0, 1.0], [1.5, 0.5], [0.5, 1.5]], dtype=float),
             gamma_threshold=1e-10,
         )
-        mk = lambda: LLDAEstimator(
+        mk = lambda: LabeledLDAEstimator(
             [CategoricalEstimator(), CategoricalEstimator()], num_alphas=3, gamma_threshold=1e-10
         )
         return dist, mk, data
