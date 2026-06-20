@@ -510,6 +510,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
                 # p_mat(x_mat(t) | x_mat(0), ..., x_mat(t-1))  [prevent underflow]
                 max_ll = obs_log_likelihood.max()
+                if max_ll == -np.inf:
+                    # x[k] is outside every state's emission support: the sequence has zero probability.
+                    # Without this guard, obs_log_likelihood -= -inf would produce nan (the vectorized
+                    # seq_log_density path returns -inf here, so this keeps scalar/seq consistent).
+                    return -np.inf
                 obs_log_likelihood -= max_ll
                 np.exp(obs_log_likelihood, out=obs_log_likelihood)
                 sum_ll = np.sum(obs_log_likelihood)
@@ -567,9 +572,10 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             for i in range(num_states):
                 pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
 
-            pr_max0 = pr_obs.max(axis=1, keepdims=True)
-            pr_obs -= pr_max0
-            np.exp(pr_obs, out=pr_obs)
+            with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> ll_ret sanitized below
+                pr_max0 = pr_obs.max(axis=1, keepdims=True)
+                pr_obs -= pr_max0
+                np.exp(pr_obs, out=pr_obs)
 
             # Vectorized alpha pass
             band = idx_bands[0]
@@ -622,14 +628,18 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             for i in range(num_states):
                 pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
 
-            pr_max0 = pr_obs.max(axis=1)
-            pr_obs -= pr_max0[:, None]
-            np.exp(pr_obs, out=pr_obs)
+            with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> sanitized after the kernel
+                pr_max0 = pr_obs.max(axis=1)
+                pr_obs -= pr_max0[:, None]
+                np.exp(pr_obs, out=pr_obs)
 
             alpha_buff = np.zeros((num_seq, num_states), dtype=np.float64)
             next_alpha = np.zeros((num_seq, num_states), dtype=np.float64)
 
             numba_seq_log_density(num_states, tz, pr_obs, w, a_mat, pr_max0, next_alpha, alpha_buff, ll_ret)
+            # a sequence with an out-of-support emission yields nan from the kernel; it has zero
+            # probability (the numpy path above sanitizes the same way -- keep the two paths consistent)
+            ll_ret[np.isnan(ll_ret)] = -np.inf
 
             if self.len_dist is not None:
                 ll_ret += self.len_dist.seq_log_density(len_enc)
