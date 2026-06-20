@@ -130,20 +130,41 @@ class SpanningTreeTest(unittest.TestCase):
         self.assertAlmostEqual(total, sum(w[i, j] for i, j in edges))
 
 
-class EditDistanceTest(unittest.TestCase):
-    def test_best_equals_levenshtein(self):
-        for a, b in [("kitten", "sitting"), ("flaw", "lawn"), ("", "abc")]:
-            self.assertAlmostEqual(EditDistance(list(a), list(b)).solve()[1], _levenshtein(a, b), places=9)
+class EditDistanceBallTest(unittest.TestCase):
+    def test_center_first_increasing_and_distances_exact(self):
+        # a ball around one center -- no endpoint; strings come out nearest-first
+        prob = EditDistance("cat", alphabet="cato", max_distance=2)
+        items = list(prob)
+        self.assertEqual(items[0], Solution("cat", 0.0))  # the center is at distance 0
+        dists = [s.objective for s in items]
+        self.assertTrue(all(dists[i] <= dists[i + 1] for i in range(len(dists) - 1)))
+        # every enumerated string's reported distance equals its true edit distance from the center
+        for s in items:
+            self.assertAlmostEqual(s.objective, _levenshtein("cat", s.value), places=9)
+        self.assertTrue(all(s.objective <= 2 for s in items))
+        values = [s.value for s in items]
+        self.assertIn("cot", values)  # substitute a->o
+        self.assertIn("at", values)  # delete c
+        self.assertIn("ocat", values)  # insert o
+        self.assertEqual(values.count("cat"), 1)  # de-duplicated: the center appears exactly once
 
-    def test_non_uniform_costs_and_ops_rebuild(self):
-        # expensive substitution -> prefer delete + insert
-        ops, cost = EditDistance(list("a"), list("b"), sub_cost=lambda x, y: 0.0 if x == y else 5.0).solve()
-        self.assertAlmostEqual(cost, 2.0)
-        self.assertNotIn("sub", [o[0] for o in ops])
-        # applying the optimal script to the source rebuilds the target
-        a, b = list("abc"), list("axc")
-        ops = EditDistance(a, b).solve()[0]
-        self.assertEqual([t for kind, _s, t in ops if kind in ("match", "sub", "ins")], b)
+    def test_top_k_nearest_without_bound(self):
+        top = EditDistance("ab", alphabet="ab").top(3)  # infinite ball, bounded by k
+        self.assertEqual(top[0].value, "ab")
+        self.assertEqual(top[0].objective, 0.0)
+        self.assertTrue(all(top[i].objective <= top[i + 1].objective for i in range(len(top) - 1)))
+
+    def test_non_uniform_costs_change_the_ball(self):
+        # under uniform costs, 'cb' is one substitution from 'ab' -> distance 1
+        uniform = {s.value: s.objective for s in EditDistance("ab", alphabet="abc", max_distance=2)}
+        self.assertEqual(uniform["cb"], 1.0)
+        # make substitution very expensive: 'cb' is now reached via delete 'a' + insert 'c' -> distance 2
+        pricey = {
+            s.value: s.objective
+            for s in EditDistance("ab", alphabet="abc", sub_cost=lambda a, b: 0.0 if a == b else 9.0, max_distance=2)
+        }
+        self.assertEqual(pricey["cb"], 2.0)  # cheapest path avoids the cost-9 substitution
+        self.assertEqual(pricey["b"], 1.0)  # delete-reachable strings unaffected
 
 
 class ViterbiPathTest(unittest.TestCase):
