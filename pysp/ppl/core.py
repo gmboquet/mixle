@@ -1447,6 +1447,10 @@ class RandomVariable:
 
                 if isinstance(self._family, CompositeFamily) and self._family.name == "Mixture":
                     comps = self._args[0]
+                    # NOTE: mixture_vmp fits a Gaussian mixture under its own default NIG/Dirichlet
+                    # hyperpriors -- only the component COUNT is threaded through, so component-level
+                    # priors, fixed parameters, and constraints on this Mix(...) are NOT applied here.
+                    # Use how='vi' or how='mcmc' to honor custom priors/constraints on a mixture.
                     return _vmp.mixture_vmp(data, len(comps), **kw)
                 return _vmp.vmp_fit(self, data, **kw)
             if how == "conjugate":
