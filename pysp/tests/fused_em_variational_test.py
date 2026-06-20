@@ -1,7 +1,7 @@
 """Fused-EM (optimize(reuse_estep_ll=True)) support for the variational topic-model families.
 
 These families' seq_log_density returns a per-document variational lower bound (ELBO) rather than a
-plain logsumexp marginal (IntegerPLSI's is an exact marginal -- still a per-document data
+plain logsumexp marginal (IntegerProbabilisticLatentSemanticIndexing's is an exact marginal -- still a per-document data
 log-likelihood). For each family this verifies:
 
   * PARITY: with _track_ll enabled the accumulator's reported batch log-likelihood (_seq_ll) equals
@@ -11,7 +11,7 @@ log-likelihood). For each family this verifies:
   * FUSED: EM run with reuse_estep_ll=True reaches the same optimum as the standard loop
     (same init/seed/iterations).
 
-Families covered: LDA, LabeledLDA, IntegerPLSI.
+Families covered: LDA, LabeledLDA, IntegerProbabilisticLatentSemanticIndexing.
 """
 
 import io
@@ -23,8 +23,8 @@ from numpy.random import RandomState
 from pysp.stats import (
     CategoricalDistribution,
     CategoricalEstimator,
-    IntegerPLSIDistribution,
-    IntegerPLSIEstimator,
+    IntegerProbabilisticLatentSemanticIndexingDistribution,
+    IntegerProbabilisticLatentSemanticIndexingEstimator,
     LDADistribution,
     seq_encode,
     seq_log_density_sum,
@@ -132,7 +132,7 @@ class FusedEMVariationalTestCase(unittest.TestCase):
         _, mk, data = self._llda()
         self._fused(mk, data)
 
-    # ------------------------------------------------------------- IntegerPLSI
+    # ------------------------------------------------------------- IntegerProbabilisticLatentSemanticIndexing
     def _int_plsi(self):
         # Dense, low-cardinality config + init_p=0.5: PLSI's numba E-step (fast_seq_update) has a
         # pre-existing division-by-zero instability for sparse/degenerate inits, unrelated to
@@ -142,11 +142,11 @@ class FusedEMVariationalTestCase(unittest.TestCase):
         sw = rng.dirichlet(np.ones(num_words), size=num_states).T
         ds = rng.dirichlet(np.ones(num_states), size=num_authors)
         dv = rng.dirichlet(np.ones(num_authors))
-        dist = IntegerPLSIDistribution(
+        dist = IntegerProbabilisticLatentSemanticIndexingDistribution(
             state_word_mat=sw, doc_state_mat=ds, doc_vec=dv, len_dist=CategoricalDistribution({8: 1.0})
         )
         data = dist.sampler(seed=10).sample(400)
-        mk = lambda: IntegerPLSIEstimator(
+        mk = lambda: IntegerProbabilisticLatentSemanticIndexingEstimator(
             num_vals=num_words, num_states=num_states, num_docs=num_authors, len_estimator=CategoricalEstimator()
         )
         return dist, mk, data

@@ -33,7 +33,7 @@ from pysp.stats import (
     IntegerHiddenAssociationDistribution,
     IntegerMarkovChainDistribution,
     IntegerMultinomialDistribution,
-    IntegerPLSIDistribution,
+    IntegerProbabilisticLatentSemanticIndexingDistribution,
     IntegerStepBernoulliEditDistribution,
     IntegerUniformSpikeDistribution,
     JointMixtureDistribution,
@@ -314,7 +314,7 @@ class BackendScoringTestCase(unittest.TestCase):
                 [[], [(1, 2.0), (2, 1.0)], [(3, 3.0)], [(1, 1.0), (2, 2.0), (3, 1.0)]],
             ),
             (
-                IntegerPLSIDistribution(
+                IntegerProbabilisticLatentSemanticIndexingDistribution(
                     [[0.70, 0.10], [0.20, 0.30], [0.10, 0.60]],
                     [[0.80, 0.20], [0.25, 0.75]],
                     [0.55, 0.45],

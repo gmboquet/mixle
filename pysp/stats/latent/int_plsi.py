@@ -1,7 +1,7 @@
 """Create, estimate, and sample from an integer PLSI model.
 
-Defines the IntegerPLSIDistribution, IntegerPLSISampler, IntegerPLSIAccumulatorFactory, IntegerPLSIAccumulator,
-IntegerPLSIEstimator, and the IntegerPLSIDataEncoder classes for use with pysparkplug.
+Defines the IntegerProbabilisticLatentSemanticIndexingDistribution, IntegerProbabilisticLatentSemanticIndexingSampler, IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory, IntegerProbabilisticLatentSemanticIndexingAccumulator,
+IntegerProbabilisticLatentSemanticIndexingEstimator, and the IntegerProbabilisticLatentSemanticIndexingDataEncoder classes for use with pysparkplug.
 
 Consider an Integer PLSI model for a corpus of documents with S states, V word values, and D authors (doc_ids).
 
@@ -59,7 +59,7 @@ T1 = TypeVar("T1")  ## type for encoded sequence of lengths.
 SS1 = TypeVar("SS1")  ### type for value of length dist sufficient statistics.
 
 
-class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
+class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodableProbabilityDistribution):
     """Integer-valued probabilistic latent semantic indexing distribution."""
 
     def __init__(
@@ -70,7 +70,7 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         name: str | None = None,
     ) -> None:
-        """IntegerPLSIDistribution object defining an Integer PLSI distribution.
+        """IntegerProbabilisticLatentSemanticIndexingDistribution object defining an Integer PLSI distribution.
 
         Args:
             state_word_mat (Union[List[List[float]], np.ndarray]): Array-like of floats that contains a
@@ -155,7 +155,7 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
         s3 = ",".join(map(str, self.doc_vec))
         s4 = repr(self.name)
         s5 = str(self.len_dist)
-        return "IntegerPLSIDistribution([%s], [%s], [%s], name=%s, len_dist=%s)" % (s1, s2, s3, s4, s5)
+        return "IntegerProbabilisticLatentSemanticIndexingDistribution([%s], [%s], [%s], name=%s, len_dist=%s)" % (s1, s2, s3, s4, s5)
 
     def density(self, x: tuple[int, Sequence[tuple[int, float]]]) -> float:
         """Evaluate the density of PLSI model for an observation x.
@@ -338,24 +338,24 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
         word distribution is sub-stochastic-free; an absent length distribution leaves the bag support
         infinite and is enumerated by the multinomial term alone.
         """
-        return IntegerPLSIEnumerator(self)
+        return IntegerProbabilisticLatentSemanticIndexingEnumerator(self)
 
-    def sampler(self, seed: int | None = None) -> "IntegerPLSISampler":
-        """Return an IntegerPLSISampler object from IntegerPLSIDistribution instance."""
-        return IntegerPLSISampler(self, seed)
+    def sampler(self, seed: int | None = None) -> "IntegerProbabilisticLatentSemanticIndexingSampler":
+        """Return an IntegerProbabilisticLatentSemanticIndexingSampler object from IntegerProbabilisticLatentSemanticIndexingDistribution instance."""
+        return IntegerProbabilisticLatentSemanticIndexingSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "IntegerPLSIEstimator":
-        """Create an IntegerPLSIEstimator object from IntegerPLSIDistribution instance.
+    def estimator(self, pseudo_count: float | None = None) -> "IntegerProbabilisticLatentSemanticIndexingEstimator":
+        """Create an IntegerProbabilisticLatentSemanticIndexingEstimator object from IntegerProbabilisticLatentSemanticIndexingDistribution instance.
 
         Args:
             pseudo_count (Optional[float]): Re-weight object instance sufficient statistics when passed to estimator.
 
         Returns:
-            IntegerPLSIEstimator object.
+            IntegerProbabilisticLatentSemanticIndexingEstimator object.
 
         """
         if pseudo_count is None:
-            return IntegerPLSIEstimator(
+            return IntegerProbabilisticLatentSemanticIndexingEstimator(
                 num_vals=self.num_vals,
                 num_states=self.num_states,
                 num_docs=self.num_docs,
@@ -364,7 +364,7 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
             )
         else:
             pseudo_count = (pseudo_count, pseudo_count, pseudo_count)
-            return IntegerPLSIEstimator(
+            return IntegerProbabilisticLatentSemanticIndexingEstimator(
                 num_vals=self.num_vals,
                 num_states=self.num_states,
                 num_docs=self.num_docs,
@@ -374,9 +374,9 @@ class IntegerPLSIDistribution(SequenceEncodableProbabilityDistribution):
                 name=self.name,
             )
 
-    def dist_to_encoder(self) -> "IntegerPLSIDataEncoder":
-        """Returns IntegerPLSIDataEncoder object."""
-        return IntegerPLSIDataEncoder(len_encoder=self.len_dist.dist_to_encoder())
+    def dist_to_encoder(self) -> "IntegerProbabilisticLatentSemanticIndexingDataEncoder":
+        """Returns IntegerProbabilisticLatentSemanticIndexingDataEncoder object."""
+        return IntegerProbabilisticLatentSemanticIndexingDataEncoder(len_encoder=self.len_dist.dist_to_encoder())
 
 
 def multinomial_bag_stream(log_p_vec, min_val, len_dist, combine):
@@ -424,12 +424,12 @@ def bag_stream(element_stream, len_dist, combine):
     )
 
 
-class IntegerPLSIEnumerator(DistributionEnumerator):
-    def __init__(self, dist: IntegerPLSIDistribution) -> None:
+class IntegerProbabilisticLatentSemanticIndexingEnumerator(DistributionEnumerator):
+    def __init__(self, dist: IntegerProbabilisticLatentSemanticIndexingDistribution) -> None:
         """Best-first enumeration of ``(doc_id, bag)`` over the document-labelled multinomial mixture.
 
         Args:
-            dist (IntegerPLSIDistribution): Distribution whose support is enumerated.
+            dist (IntegerProbabilisticLatentSemanticIndexingDistribution): Distribution whose support is enumerated.
         """
         super().__init__(dist)
         streams = []
@@ -452,17 +452,17 @@ class IntegerPLSIEnumerator(DistributionEnumerator):
         return next(self._merge)
 
 
-class IntegerPLSISampler(DistributionSampler):
-    def __init__(self, dist: IntegerPLSIDistribution, seed: int | None = None) -> None:
-        """IntegerPLSISampler object for sampling from IntegerPLSIDistribution.
+class IntegerProbabilisticLatentSemanticIndexingSampler(DistributionSampler):
+    def __init__(self, dist: IntegerProbabilisticLatentSemanticIndexingDistribution, seed: int | None = None) -> None:
+        """IntegerProbabilisticLatentSemanticIndexingSampler object for sampling from IntegerProbabilisticLatentSemanticIndexingDistribution.
 
         Args:
-            dist (IntegerPLSIDistribution): IntegerPLSIDistribution instance to sampler from.
+            dist (IntegerProbabilisticLatentSemanticIndexingDistribution): IntegerProbabilisticLatentSemanticIndexingDistribution instance to sampler from.
             seed (Optional[int]): Set seed for random number generator used in sampling.
 
         Attributes:
             rng (RandomState): RandomState object with seed set if passed.
-            dist (IntegerPLSIDistribution): IntegerPLSIDistribution instance to sampler from.
+            dist (IntegerProbabilisticLatentSemanticIndexingDistribution): IntegerProbabilisticLatentSemanticIndexingDistribution instance to sampler from.
             size_rng (RandomState): RandomState object for sampling the length of documents.
 
         """
@@ -497,7 +497,7 @@ class IntegerPLSISampler(DistributionSampler):
             return [self.sample() for i in range(size)]
 
 
-class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
+class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableStatisticAccumulator):
     def __init__(
         self,
         num_vals: int,
@@ -507,7 +507,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
     ) -> None:
-        """IntegerPLSIAccumulator object for aggregating sufficient statistics from observed data.
+        """IntegerProbabilisticLatentSemanticIndexingAccumulator object for aggregating sufficient statistics from observed data.
 
         Note: Keys in order, words/values, states, documents.
 
@@ -563,14 +563,14 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         self._len_rng: RandomState | None = None
 
     def update(
-        self, x: tuple[int, Sequence[tuple[int, float]]], weight: float, estimate: IntegerPLSIDistribution
+        self, x: tuple[int, Sequence[tuple[int, float]]], weight: float, estimate: IntegerProbabilisticLatentSemanticIndexingDistribution
     ) -> None:
         """Update the sufficient statistics of object instance for a single observation x.
 
         Args:
             x (Tuple[int, Sequence[Tuple[int, float]]]): An observation from integer PLSI model.
             weight (float): Observation weight.
-            estimate (IntegerPLSIDistribution): Prior estimate of IntegerPLSIDistribution object.
+            estimate (IntegerProbabilisticLatentSemanticIndexingDistribution): Prior estimate of IntegerProbabilisticLatentSemanticIndexingDistribution object.
 
         Returns:
             None.
@@ -675,7 +675,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         self,
         x: tuple[T1 | None, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
         weights: np.ndarray,
-        estimate: IntegerPLSIDistribution,
+        estimate: IntegerProbabilisticLatentSemanticIndexingDistribution,
     ) -> None:
         """Vectorized update of sufficient statistics for encoded sequence of iid observations in x.
 
@@ -691,7 +691,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         Args:
             x: Encoded sequence of iid observations of PLSI model. See above for details.
             weights (np.ndarray): Numpy array of observation weights.
-            estimate (IntegerPLSIDistribution): Prior estimate of IntegerPLSIDistribution object.
+            estimate (IntegerProbabilisticLatentSemanticIndexingDistribution): Prior estimate of IntegerProbabilisticLatentSemanticIndexingDistribution object.
 
         Returns:
             None.
@@ -774,7 +774,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         self.doc_count += np.bincount(np.asarray(xm, dtype=np.int64), weights=weights_np, minlength=self.num_docs)
         self.len_acc.seq_update(nn, weights_np, estimate.len_dist)
 
-    def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]) -> "IntegerPLSIAccumulator":
+    def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
         """Combine the sufficient statistics in arg 'suff_stat' with object instance.
 
         Arg 'suff_stat' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
@@ -787,7 +787,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
             suff_stat: See above for details.
 
         Returns:
-            IntegerPLSIAccumulator object.
+            IntegerProbabilisticLatentSemanticIndexingAccumulator object.
 
         """
         self.word_count += suff_stat[0]
@@ -799,7 +799,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, Any | None]:
-        """Returns sufficient statistics of IntegerPLSIAccumulator object instance.
+        """Returns sufficient statistics of IntegerProbabilisticLatentSemanticIndexingAccumulator object instance.
 
         Returned value 'suff_stat' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
             suff_stat[0] (np.ndarray): State/word counts with matching dimension of num_states by num_vals.
@@ -810,7 +810,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
         """
         return self.word_count, self.comp_count, self.doc_count, self.len_acc.value()
 
-    def from_value(self, x: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]) -> "IntegerPLSIAccumulator":
+    def from_value(self, x: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
         """Set the sufficient statistics of object instance to arg 'x' values.
 
         Arg 'x' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
@@ -823,7 +823,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
             x: Aggregated sufficient statistics. See above for details.
 
         Returns:
-            IntegerPLSIAccumulator object.
+            IntegerProbabilisticLatentSemanticIndexingAccumulator object.
 
         """
         self.word_count = x[0]
@@ -833,7 +833,7 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> "IntegerPLSIAccumulator":
+    def scale(self, c: float) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
         """Scale linear latent counts and delegate document-length statistics."""
         self.word_count *= c
         self.comp_count *= c
@@ -906,13 +906,13 @@ class IntegerPLSIAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.len_acc.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> "IntegerPLSIDataEncoder":
-        """Return an IntegerPLSIDataEncoder object."""
+    def acc_to_encoder(self) -> "IntegerProbabilisticLatentSemanticIndexingDataEncoder":
+        """Return an IntegerProbabilisticLatentSemanticIndexingDataEncoder object."""
         len_encoder = self.len_acc.acc_to_encoder()
-        return IntegerPLSIDataEncoder(len_encoder=len_encoder)
+        return IntegerProbabilisticLatentSemanticIndexingDataEncoder(len_encoder=len_encoder)
 
 
-class IntegerPLSIAccumulatorFactory(StatisticAccumulatorFactory):
+class IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(StatisticAccumulatorFactory):
     def __init__(
         self,
         num_vals: int,
@@ -922,7 +922,7 @@ class IntegerPLSIAccumulatorFactory(StatisticAccumulatorFactory):
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         name: str | None = None,
     ) -> None:
-        """IntegerPLSIAccumulatorFactory object for creating IntegerPLSIAccumulator objects.
+        """IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory object for creating IntegerProbabilisticLatentSemanticIndexingAccumulator objects.
 
         Args:
             num_vals (int): Number of words/values in PLSI.
@@ -951,9 +951,9 @@ class IntegerPLSIAccumulatorFactory(StatisticAccumulatorFactory):
         self.num_docs = num_docs
         self.name = name
 
-    def make(self) -> "IntegerPLSIAccumulator":
-        """Returns IntegerPLSIAccumulator object."""
-        return IntegerPLSIAccumulator(
+    def make(self) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
+        """Returns IntegerProbabilisticLatentSemanticIndexingAccumulator object."""
+        return IntegerProbabilisticLatentSemanticIndexingAccumulator(
             self.num_vals,
             self.num_states,
             self.num_docs,
@@ -963,7 +963,7 @@ class IntegerPLSIAccumulatorFactory(StatisticAccumulatorFactory):
         )
 
 
-class IntegerPLSIEstimator(ParameterEstimator):
+class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
     def __init__(
         self,
         num_vals: int,
@@ -979,7 +979,7 @@ class IntegerPLSIEstimator(ParameterEstimator):
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
     ) -> None:
-        """IntegerPLSIEstimator for estimating integer PLSI distributions from aggregated sufficient statistics.
+        """IntegerProbabilisticLatentSemanticIndexingEstimator for estimating integer PLSI distributions from aggregated sufficient statistics.
 
         Args:
             num_vals (int): Number of words/values in PLSI.
@@ -1020,22 +1020,22 @@ class IntegerPLSIEstimator(ParameterEstimator):
         self.keys = keys if keys is not None else (None, None, None)
         self.name = name
 
-    def accumulator_factory(self) -> "IntegerPLSIAccumulatorFactory":
-        """Returns IntegerPLSIAccumulatorFactory object."""
+    def accumulator_factory(self) -> "IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory":
+        """Returns IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory object."""
         len_est = self.len_estimator.accumulator_factory()
-        return IntegerPLSIAccumulatorFactory(self.num_vals, self.num_states, self.num_docs, len_est, self.keys)
+        return IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(self.num_vals, self.num_states, self.num_docs, len_est, self.keys)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]
-    ) -> "IntegerPLSIDistribution":
-        """Estimate IntegerPLSIDistribution from aggregated sufficient statistics in arg 'suff_stat'.
+    ) -> "IntegerProbabilisticLatentSemanticIndexingDistribution":
+        """Estimate IntegerProbabilisticLatentSemanticIndexingDistribution from aggregated sufficient statistics in arg 'suff_stat'.
 
         Args:
             nobs (Optional[float]): Optional number of observations used to accumulate 'suff_stat'.
             suff_stat: See above for details.
 
         Returns:
-            IntegerPLSIDistribution object.
+            IntegerProbabilisticLatentSemanticIndexingDistribution object.
 
         """
         word_count, comp_count, doc_count, len_suff_stats = suff_stat
@@ -1091,12 +1091,12 @@ class IntegerPLSIEstimator(ParameterEstimator):
 
         len_dist = self.len_estimator.estimate(None, len_suff_stats)
 
-        return IntegerPLSIDistribution(word_prob_mat, state_prob_mat, doc_prob_vec, name=self.name, len_dist=len_dist)
+        return IntegerProbabilisticLatentSemanticIndexingDistribution(word_prob_mat, state_prob_mat, doc_prob_vec, name=self.name, len_dist=len_dist)
 
 
-class IntegerPLSIDataEncoder(DataSequenceEncoder):
+class IntegerProbabilisticLatentSemanticIndexingDataEncoder(DataSequenceEncoder):
     def __init__(self, len_encoder: DataSequenceEncoder | None = NullDataEncoder()) -> None:
-        """IntegerPLSIDataEncoder object for encoding sequences of iid observations from a PLSI model.
+        """IntegerProbabilisticLatentSemanticIndexingDataEncoder object for encoding sequences of iid observations from a PLSI model.
 
         Args:
             len_encoder (Optional[DataSequenceEncoder]): Optional DataSequenceEncoder for the total number of words
@@ -1111,19 +1111,19 @@ class IntegerPLSIDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Returns a string representation of object instance."""
-        return "IntegerPLSIDataEncoder(len_dist=" + str(self.len_encoder) + ")"
+        return "IntegerProbabilisticLatentSemanticIndexingDataEncoder(len_dist=" + str(self.len_encoder) + ")"
 
     def __eq__(self, other: object) -> bool:
-        """Check if object is equivalent to instance of IntegerPLSIDataEncoder.
+        """Check if object is equivalent to instance of IntegerProbabilisticLatentSemanticIndexingDataEncoder.
 
         Args:
             other (object): Other object to compare to instance.
 
         Returns:
-            True if object is an instance of IntegerPLSIDataEncoder with matching 'len_encoder' attribute.
+            True if object is an instance of IntegerProbabilisticLatentSemanticIndexingDataEncoder with matching 'len_encoder' attribute.
 
         """
-        if isinstance(other, IntegerPLSIDataEncoder):
+        if isinstance(other, IntegerProbabilisticLatentSemanticIndexingDataEncoder):
             return other.len_encoder == self.len_encoder
         else:
             return False
@@ -1331,10 +1331,10 @@ def _register_int_plsi_engine_kernel():
     """Register the engine-resident integer-PLSI kernel (idempotent; called at import)."""
     from pysp.stats.compute.kernel import GenericKernel, GenericKernelFactory, KernelFactory, register_kernel_factory
 
-    class IntegerPLSIKernel(GenericKernel):
+    class IntegerProbabilisticLatentSemanticIndexingKernel(GenericKernel):
         def accumulate(self, enc, weights):
             if self.estimator is None:
-                raise ValueError("IntegerPLSIKernel.accumulate requires an estimator.")
+                raise ValueError("IntegerProbabilisticLatentSemanticIndexingKernel.accumulate requires an estimator.")
             if not getattr(self.engine, "resident_estep", True):
                 return super().accumulate(enc, weights)
             host_enc = getattr(enc, "host_payload", enc)
@@ -1342,13 +1342,23 @@ def _register_int_plsi_engine_kernel():
             accumulator.seq_update_engine(host_enc, weights, self.dist, self.engine)
             return accumulator.value()
 
-    class IntegerPLSIKernelFactory(KernelFactory):
+    class IntegerProbabilisticLatentSemanticIndexingKernelFactory(KernelFactory):
         def build(self, dist, engine, estimator=None):
             if not dist.supports_engine(engine):
                 return GenericKernelFactory().build(dist, engine, estimator=estimator)
-            return IntegerPLSIKernel(dist, engine=engine, estimator=estimator)
+            return IntegerProbabilisticLatentSemanticIndexingKernel(dist, engine=engine, estimator=estimator)
 
-    register_kernel_factory(IntegerPLSIDistribution, IntegerPLSIKernelFactory())
+    register_kernel_factory(IntegerProbabilisticLatentSemanticIndexingDistribution, IntegerProbabilisticLatentSemanticIndexingKernelFactory())
 
 
 _register_int_plsi_engine_kernel()
+
+
+# Backward-compatible aliases for the former IntegerPLSI (probabilistic latent semantic indexing) names.
+IntegerPLSIDistribution = IntegerProbabilisticLatentSemanticIndexingDistribution
+IntegerPLSISampler = IntegerProbabilisticLatentSemanticIndexingSampler
+IntegerPLSIEstimator = IntegerProbabilisticLatentSemanticIndexingEstimator
+IntegerPLSIAccumulator = IntegerProbabilisticLatentSemanticIndexingAccumulator
+IntegerPLSIAccumulatorFactory = IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory
+IntegerPLSIDataEncoder = IntegerProbabilisticLatentSemanticIndexingDataEncoder
+IntegerPLSIEnumerator = IntegerProbabilisticLatentSemanticIndexingEnumerator

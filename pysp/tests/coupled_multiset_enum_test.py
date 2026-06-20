@@ -30,15 +30,15 @@ def _bags_over(num_vals, n):
             yield head + [(w + 1, c) for w, c in rest]
 
 
-class IntegerPLSIEnumerationTestCase(unittest.TestCase):
+class IntegerProbabilisticLatentSemanticIndexingEnumerationTestCase(unittest.TestCase):
     def _dist(self):
-        from pysp.stats.latent.int_plsi import IntegerPLSIDistribution
+        from pysp.stats.latent.int_plsi import IntegerProbabilisticLatentSemanticIndexingDistribution
         from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
 
         prob = np.array([[0.5, 0.1], [0.3, 0.2], [0.2, 0.7]])
         state = np.array([[0.6, 0.4], [0.2, 0.8]])
         doc_vec = np.array([0.7, 0.3])
-        return IntegerPLSIDistribution(
+        return IntegerProbabilisticLatentSemanticIndexingDistribution(
             prob, state, doc_vec, len_dist=IntegerCategoricalDistribution(0, [0.2, 0.5, 0.3])
         )
 
@@ -61,11 +61,11 @@ class IntegerPLSIEnumerationTestCase(unittest.TestCase):
 
     def test_null_length_support_is_descending_and_exact(self):
         from pysp.stats.combinator.null_dist import NullDistribution
-        from pysp.stats.latent.int_plsi import IntegerPLSIDistribution
+        from pysp.stats.latent.int_plsi import IntegerProbabilisticLatentSemanticIndexingDistribution
 
         prob = np.array([[0.5, 0.1], [0.3, 0.2], [0.2, 0.7]])
         state = np.array([[0.6, 0.4], [0.2, 0.8]])
-        dist = IntegerPLSIDistribution(prob, state, np.array([0.7, 0.3]), len_dist=NullDistribution())
+        dist = IntegerProbabilisticLatentSemanticIndexingDistribution(prob, state, np.array([0.7, 0.3]), len_dist=NullDistribution())
         items = list(itertools.islice(dist.enumerator(), 30))
         lps = [lp for _, lp in items]
         for i in range(len(lps) - 1):
