@@ -107,7 +107,8 @@ def best_of(
             objective=objective,
         )
         _, vll = seq_log_density_sum(score_data, mm)
-        out.write("Trial %d. VLL=%f\n" % (kk + 1, vll))
+        if out is not None:
+            out.write("Trial %d. VLL=%f\n" % (kk + 1, vll))
         if vll > rv_ll:
             rv_ll, rv_mm = vll, mm
 
@@ -354,7 +355,7 @@ def _em_loop(
             model = nxt
 
         converged = (delta is not None) and (dll < delta)
-        if converged or ((i + 1) % print_iter == 0):
+        if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
             _write_em_iter(out, i + 1, ll, dll, vll, has_v, obj_label)
         if converged:
             break
@@ -411,7 +412,7 @@ def _fused_em_loop(
 
         dll = (ll_model - prev_ll) if prev_ll is not None else float("inf")
         converged = (delta is not None) and (prev_ll is not None) and (dll < delta)
-        if converged or ((i + 1) % print_iter == 0):
+        if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
             _write_em_iter(out, i + 1, ll_model, dll, score, has_v, obj_label)
         if converged:
             break
@@ -486,8 +487,10 @@ def optimize(
         enc_data (Optional[List[Tuple[int, E]]]): Optional encoded data of form
             List[Tuple[int, E]]. Formed from data if None.
         enc_vdata (Optional[List[Tuple[int, E0]]]): Optional sequence encoded validation set.
-        out (IO): IO stream to write out iterations of EM algorithm.
-        print_iter (int): Print iterations (i.e. log-likelihood difference) every print_iter-iterations.
+        out (IO): IO stream to write out iterations of EM algorithm. Pass out=None to silence all output.
+        print_iter (int): Print the log-likelihood difference every print_iter iterations; the final converged
+            iteration is always reported. Pass print_iter=0 to suppress the periodic lines (keeping only the
+            converged line), or out=None to silence entirely.
         num_chunks (int): Number of chunks for encoded data.
         engine (Optional[Any]): Optional ComputeEngine for local kernel scoring/accumulation. Distributed engine
             placement is intentionally deferred to the orchestrator/planner layer.
@@ -1050,7 +1053,7 @@ def iterate(
     t0 = time.time()
     for i in range(max_its):
         mm = seq_estimate(enc_data, estimator, mm)
-        if (i + 1) % print_iter == 0:
+        if out is not None and print_iter and (i + 1) % print_iter == 0:
             out.write("Iteration %d\t E[dT]=%f.\n" % (i + 1, (time.time() - t0) / float(i + 1)))
 
     return mm
