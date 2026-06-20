@@ -395,12 +395,12 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(np.mean((pred - y) ** 2), 0.20)
 
     def test_neural_regression_objective_improves_fit(self):
-        from pysp.models import GaussianRegressionNN, make_mlp
+        from pysp.models import GaussianRegressionNeuralNetwork, make_mlp
 
         torch.manual_seed(4)
         x = np.linspace(-1.0, 1.0, 50)[:, None]
         y = 2.0 * x - 0.5
-        model = GaussianRegressionNN(make_mlp(1, [8], 1, activation="tanh"), noise=0.8, engine=self.engine)
+        model = GaussianRegressionNeuralNetwork(make_mlp(1, [8], 1, activation="tanh"), noise=0.8, engine=self.engine)
         before = np.mean((model.predict(x) - y) ** 2)
         value, _ = model.fit(x, y, max_its=300, lr=0.03, tol=0.0)
         after = np.mean((model.predict(x) - y) ** 2)
@@ -410,12 +410,12 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(after, 0.05)
 
     def test_neural_regression_fit_reports_diagnostics(self):
-        from pysp.models import GaussianRegressionNN, make_mlp
+        from pysp.models import GaussianRegressionNeuralNetwork, make_mlp
 
         torch.manual_seed(8)
         x = np.linspace(-1.0, 1.0, 36)[:, None]
         y = -1.25 * x + 0.3
-        model = GaussianRegressionNN(make_mlp(1, [], 1), noise=0.9, engine=self.engine)
+        model = GaussianRegressionNeuralNetwork(make_mlp(1, [], 1), noise=0.9, engine=self.engine)
         before = np.mean((model.predict(x) - y) ** 2)
 
         result = model.fit(x, y, max_its=180, lr=0.04, tol=0.0, return_result=True)
@@ -428,10 +428,10 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(after, 0.05)
 
     def test_neural_classification_objective_improves_accuracy(self):
-        from pysp.models import CategoricalClassificationNN, make_mlp
+        from pysp.models import CategoricalClassificationNeuralNetwork, make_mlp
 
         x, y = self.three_class_classification_fixture()
-        model = CategoricalClassificationNN(make_mlp(2, [], 3), engine=self.engine)
+        model = CategoricalClassificationNeuralNetwork(make_mlp(2, [], 3), engine=self.engine)
         self.zero_module_parameters(model)
         before = np.mean(model.predict(x) == y)
 
@@ -445,10 +445,10 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         np.testing.assert_allclose(np.sum(proba, axis=1), np.ones(len(x)), rtol=1.0e-10, atol=1.0e-10)
 
     def test_neural_classification_fit_reports_diagnostics(self):
-        from pysp.models import CategoricalClassificationNN, make_mlp
+        from pysp.models import CategoricalClassificationNeuralNetwork, make_mlp
 
         x, y = self.three_class_classification_fixture()
-        model = CategoricalClassificationNN(make_mlp(2, [], 3), engine=self.engine)
+        model = CategoricalClassificationNeuralNetwork(make_mlp(2, [], 3), engine=self.engine)
         self.zero_module_parameters(model)
 
         result = model.fit(x, y, max_its=220, lr=0.06, tol=0.0, return_result=True)
@@ -460,11 +460,11 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertGreaterEqual(after, 0.95)
 
     def test_neural_poisson_objective_improves_count_rate_fit(self):
-        from pysp.models import PoissonRegressionNN, make_mlp
+        from pysp.models import PoissonRegressionNeuralNetwork, make_mlp
 
         x = np.linspace(-1.0, 1.0, 48)[:, None]
         y = np.asarray(np.round(np.exp(0.35 + 1.1 * x[:, 0])), dtype=np.float64)
-        model = PoissonRegressionNN(make_mlp(1, [], 1), engine=self.engine)
+        model = PoissonRegressionNeuralNetwork(make_mlp(1, [], 1), engine=self.engine)
         self.zero_module_parameters(model)
         before = np.mean((model.predict_rate(x)[:, 0] - y) ** 2)
 
@@ -476,11 +476,11 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(after, 0.35)
 
     def test_neural_poisson_fit_reports_diagnostics(self):
-        from pysp.models import PoissonRegressionNN, make_mlp
+        from pysp.models import PoissonRegressionNeuralNetwork, make_mlp
 
         x = np.linspace(-1.0, 1.0, 40)[:, None]
         y = np.asarray(np.round(np.exp(-0.15 + 0.9 * x[:, 0])), dtype=np.float64)
-        model = PoissonRegressionNN(make_mlp(1, [], 1), engine=self.engine)
+        model = PoissonRegressionNeuralNetwork(make_mlp(1, [], 1), engine=self.engine)
         self.zero_module_parameters(model)
         before = float(model.log_likelihood(x, y).detach().cpu().item())
 

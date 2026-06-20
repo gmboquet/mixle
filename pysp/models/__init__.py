@@ -29,7 +29,17 @@ from pysp.models.grammar import (
     viterbi_parse,
 )
 from pysp.models.knowledge_graph import KnowledgeGraphFitResult, TransEKnowledgeGraphModel
-from pysp.models.neural import CategoricalClassificationNN, GaussianRegressionNN, PoissonRegressionNN, make_mlp
+from pysp.models.neural import (
+    CategoricalClassificationNeuralNetwork,
+    GaussianRegressionNeuralNetwork,
+    PoissonRegressionNeuralNetwork,
+    make_mlp,
+)
+
+# Backward-compatible NN aliases (redundant import alias marks an intentional re-export).
+from pysp.models.neural import CategoricalClassificationNN as CategoricalClassificationNN  # noqa: F401
+from pysp.models.neural import GaussianRegressionNN as GaussianRegressionNN  # noqa: F401
+from pysp.models.neural import PoissonRegressionNN as PoissonRegressionNN  # noqa: F401
 from pysp.models.pomdp import POMDPFilterResult, POMDPFitResult, POMDPModel, baum_welch_pomdp
 from pysp.models.random_forest import (
     RandomForestConditional,
@@ -44,11 +54,11 @@ from pysp.models.random_graph import (
 
 __all__ = [
     "CausalSkeleton",
-    "CategoricalClassificationNN",
+    "CategoricalClassificationNeuralNetwork",
     "ConditionalIndependenceResult",
     "ErdosRenyiGraphModel",
     "GaussianProcessRegressor",
-    "GaussianRegressionNN",
+    "GaussianRegressionNeuralNetwork",
     "GrammarLearningResult",
     "HardEMResult",
     "KnowledgeGraphFitResult",
@@ -57,7 +67,7 @@ __all__ = [
     "POMDPModel",
     "PartiallyDirectedGraph",
     "PCFGParseNode",
-    "PoissonRegressionNN",
+    "PoissonRegressionNeuralNetwork",
     "RandomForestConditional",
     "RandomForestEstimator",
     "StochasticBlockGraphModel",
