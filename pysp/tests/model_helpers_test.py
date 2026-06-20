@@ -3,9 +3,9 @@ import unittest
 import numpy as np
 
 from pysp.models import (
-    POMDPModel,
+    PartiallyObservableMarkovDecisionProcessModel,
     TransEKnowledgeGraphModel,
-    TruncatedDPMModel,
+    TruncatedDirichletProcessMixtureModel,
     baum_welch_pomdp,
     discrete_conditional_mutual_information,
     fit_induced_pcfg,
@@ -47,7 +47,7 @@ class DPMModelHelpersTestCase(unittest.TestCase):
             GaussianDistribution(0.0, 1.0),
             GaussianDistribution(3.0, 1.0),
         ]
-        initial_ll = sum(TruncatedDPMModel(initial, alpha=0.5).log_density(x) for x in data)
+        initial_ll = sum(TruncatedDirichletProcessMixtureModel(initial, alpha=0.5).log_density(x) for x in data)
 
         result = fit_truncated_dpm(data, initial, GaussianEstimator(), alpha=0.5, max_its=20)
         final_ll = sum(result.model.log_density(x) for x in data)
@@ -60,9 +60,9 @@ class DPMModelHelpersTestCase(unittest.TestCase):
         self.assertGreater(means[-1], 1.5)
 
 
-class POMDPModelHelpersTestCase(unittest.TestCase):
+class PartiallyObservableMarkovDecisionProcessModelHelpersTestCase(unittest.TestCase):
     def test_filtering_matches_first_step_by_hand(self):
-        model = POMDPModel(
+        model = PartiallyObservableMarkovDecisionProcessModel(
             transition=[[[0.9, 0.1], [0.2, 0.8]]],
             observation=[[[0.85, 0.15], [0.1, 0.9]]],
             initial_belief=[0.5, 0.5],
@@ -75,7 +75,7 @@ class POMDPModelHelpersTestCase(unittest.TestCase):
         np.testing.assert_allclose(result.beliefs[0], [0.4675 / 0.5125, 0.045 / 0.5125])
 
     def test_forward_backward_matches_brute_force_controlled_paths(self):
-        model = POMDPModel(
+        model = PartiallyObservableMarkovDecisionProcessModel(
             transition=[
                 [[0.8, 0.2], [0.3, 0.7]],
                 [[0.55, 0.45], [0.15, 0.85]],
@@ -110,14 +110,14 @@ class POMDPModelHelpersTestCase(unittest.TestCase):
         np.testing.assert_allclose(xi[0].sum(axis=1), weights.sum(axis=(1, 2)) / z)
 
     def test_baum_welch_pomdp_improves_likelihood(self):
-        truth = POMDPModel(
+        truth = PartiallyObservableMarkovDecisionProcessModel(
             transition=[[[0.92, 0.08], [0.15, 0.85]]],
             observation=[[[0.9, 0.1], [0.2, 0.8]]],
             initial_belief=[0.6, 0.4],
         )
         actions = [0] * 40
         sequences = [(actions, truth.sample(actions, seed=i)[1]) for i in range(6)]
-        initial = POMDPModel(
+        initial = PartiallyObservableMarkovDecisionProcessModel(
             transition=[[[0.55, 0.45], [0.45, 0.55]]],
             observation=[[[0.55, 0.45], [0.45, 0.55]]],
             initial_belief=[0.5, 0.5],
