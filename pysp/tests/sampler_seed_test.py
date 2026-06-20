@@ -254,7 +254,7 @@ def _stats_public_distribution_catalog():
         "IndianBuffetProcessDistribution": stats.IndianBuffetProcessDistribution(
             5, alpha=2.0, feature_probs=[0.9, 0.1, 0.5, 0.2, 0.8], data_format="sparse"
         ),
-        "ICLTreeDistribution": stats.ICLTreeDistribution(
+        "IntegerChowLiuTreeDistribution": stats.IntegerChowLiuTreeDistribution(
             [None, 0], [np.log([0.6, 0.4]), np.log([[0.8, 0.2], [0.1, 0.9]])]
         ),
         "IgnoredDistribution": stats.IgnoredDistribution(stats.GaussianDistribution(0.0, 1.0)),
