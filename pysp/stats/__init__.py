@@ -1938,7 +1938,7 @@ def seq_initialize(
         for sz, enc_x in enc_data:
             w = rng_w.binomial(n=1, p=p, size=sz).astype(dtype=np.float64)
             accumulator.seq_initialize(enc_x, w, rng)
-            nobs += sz
+            nobs += float(w.sum())  # count the kept (weight-1) observations, matching the RDD/non-seq paths
 
         stats_dict = dict()
         accumulator.key_merge(stats_dict)
