@@ -14,14 +14,13 @@ the matrix permanent. Unlike the Plackett-Luce model (a single worth vector over
 full edge-weight matrix, so it is the natural assignment / matching law. The permanent is computed
 exactly with Ryser's formula, which is exponential in n, so the family targets small-to-moderate n
 (default cap ``max_nodes = 12``). Sampling draws each match in turn from the exact conditional
-distribution (via permanents of the remaining submatrix); enumeration scans the finite permutation
-support and sorts by exact fitted probability. Estimation matches the empirical or symmetrically
+distribution (via permanents of the remaining submatrix); enumeration is lazy and streams matchings in
+decreasing probability via Murty's k-best assignment (no n! materialization). Estimation matches the empirical or symmetrically
 smoothed assignment frequencies to the model edge marginals by projected gradient ascent on the
 log-weights.
 """
 
 from collections.abc import Sequence
-import itertools
 from itertools import combinations
 from typing import Any
 
@@ -37,6 +36,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.assignment import k_best_assignments
 
 _MIN_LOG_WEIGHT = -30.0
 _MAX_LOG_WEIGHT = 30.0
@@ -173,23 +173,25 @@ class MatchingDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class MatchingEnumerator(DistributionEnumerator):
-    """Enumerate all finite perfect matchings in descending probability order."""
+    """Enumerate finite-probability perfect matchings in descending probability order.
+
+    Lazily, via Murty's k-best assignment on the edge-cost matrix ``-log(weights)``: decreasing probability is
+    increasing assignment cost, and zero-weight edges become +inf costs (forbidden), so only positive-probability
+    matchings are yielded. This streams the top matchings without materializing the n! permutation support.
+    """
 
     def __init__(self, dist: MatchingDistribution) -> None:
         super().__init__(dist)
         with np.errstate(divide="ignore"):
-            entries = [(list(p), float(dist.log_density(p))) for p in itertools.permutations(range(dist.dim))]
-        entries = [(v, lp) for v, lp in entries if lp > -np.inf]
-        entries.sort(key=lambda u: -u[1])
-        self._entries = entries
-        self._pos = 0
+            cost = -np.log(dist.weights)  # +inf where weight == 0 -> forbidden edge
+        self._gen = k_best_assignments(cost)
 
     def __next__(self) -> tuple[list[int], float]:
-        if self._pos >= len(self._entries):
-            raise StopIteration
-        item = self._entries[self._pos]
-        self._pos += 1
-        return item
+        total_cost, rows, cols = next(self._gen)  # StopIteration propagates at the end of the support
+        sigma = [0] * self.dist.dim
+        for r, c in zip(rows, cols):
+            sigma[int(r)] = int(c)
+        return sigma, float(-total_cost - self.dist.log_z)
 
 
 class MatchingSampler(DistributionSampler):
