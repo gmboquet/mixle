@@ -1,4 +1,4 @@
-"""Tests for the modernized legacy modules pysp.stats.latent.hidden_markov_ind_pi and pysp.stats.latent.llda.
+"""Tests for the modernized legacy modules pysp.stats.latent.llda.
 
 Covers import, DataSequenceEncoder round-trips, scalar vs vectorized agreement, and short
 seq_estimate smoke runs on tiny synthetic data with fixed seeds.
@@ -10,14 +10,6 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.stats import seq_estimate, seq_initialize
-from pysp.stats.latent.hidden_markov_ind_pi import (
-    SemiSupervisedHiddenMarkovDataEncoder,
-    SemiSupervisedHiddenMarkovEstimator,
-    SemiSupervisedHiddenMarkovEstimatorAccumulator,
-    SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory,
-    SemiSupervisedHiddenMarkovModelDistribution,
-    SemiSupervisedHiddenMarkovSampler,
-)
 from pysp.stats.latent.llda import (
     LLDADataEncoder,
     LLDADistribution,
@@ -26,120 +18,6 @@ from pysp.stats.latent.llda import (
     LLDAEstimatorAccumulatorFactory,
 )
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-
-
-def make_ind_pi_dist(use_numba=True, n_rows=2):
-    topics = [
-        CategoricalDistribution({"a": 0.7, "b": 0.2, "c": 0.1}),
-        CategoricalDistribution({"a": 0.1, "b": 0.2, "c": 0.7}),
-    ]
-    if n_rows == 2:
-        w = [[0.8, 0.2], [0.3, 0.7]]
-    else:
-        w = [[0.55, 0.45]] * n_rows
-    transitions = [[0.9, 0.1], [0.2, 0.8]]
-    len_dist = CategoricalDistribution({3: 0.5, 4: 0.5})
-    return SemiSupervisedHiddenMarkovModelDistribution(topics, w, transitions, None, len_dist=len_dist, use_numba=use_numba)
-
-
-def make_ind_pi_estimator():
-    return SemiSupervisedHiddenMarkovEstimator(
-        [CategoricalEstimator(), CategoricalEstimator()], len_estimator=CategoricalEstimator(), pseudo_count=(1.0, 1.0)
-    )
-
-
-class SemiSupervisedHiddenMarkovTestCase(unittest.TestCase):
-    def setUp(self):
-        self.dist = make_ind_pi_dist()
-        self.data = self.dist.sampler(seed=1).sample(30)
-
-    def test_sampler_output(self):
-        sampler = self.dist.sampler(seed=1)
-        self.assertIsInstance(sampler, SemiSupervisedHiddenMarkovSampler)
-        self.assertEqual(len(self.data), 30)
-        for seq in self.data:
-            self.assertIn(len(seq), (3, 4))
-            for v in seq:
-                self.assertIn(v, ("a", "b", "c"))
-
-    def test_encoder_equality_and_str(self):
-        enc1 = self.dist.dist_to_encoder()
-        enc2 = self.dist.dist_to_encoder()
-        self.assertIsInstance(enc1, SemiSupervisedHiddenMarkovDataEncoder)
-        self.assertEqual(enc1, enc2)
-        self.assertIn("SemiSupervisedHiddenMarkovDataEncoder", str(enc1))
-
-        est = make_ind_pi_estimator()
-        acc = est.accumulator_factory().make()
-        self.assertIsInstance(acc, SemiSupervisedHiddenMarkovEstimatorAccumulator)
-        self.assertEqual(acc.acc_to_encoder(), enc1)
-
-    def test_numba_encoding_round_trip(self):
-        enc = self.dist.dist_to_encoder().seq_encode(self.data)
-        x0, x1 = enc
-        self.assertIsNone(x0)
-        (idx, sz, xs), len_enc = x1
-
-        np.testing.assert_array_equal(sz, np.asarray([len(u) for u in self.data], dtype=np.int32))
-        self.assertEqual(len(idx), sum(len(u) for u in self.data))
-        np.testing.assert_array_equal(np.bincount(idx), sz)
-        self.assertIsNotNone(len_enc)
-
-        # legacy seq_encode on the distribution delegates to the encoder
-        legacy_enc = self.dist.seq_encode(self.data)
-        np.testing.assert_array_equal(legacy_enc[1][0][0], idx)
-        np.testing.assert_array_equal(legacy_enc[1][0][1], sz)
-
-    def test_seq_log_density_matches_scalar(self):
-        # numba path with per-sequence rows averaged to logW
-        enc = self.dist.dist_to_encoder().seq_encode(self.data)
-        seq_ll = self.dist.seq_log_density(enc)
-        scalar_ll = np.asarray([self.dist.log_density(u) for u in self.data])
-        self.assertTrue(np.all(np.isfinite(seq_ll)))
-        self.assertTrue(np.allclose(seq_ll, scalar_ll, rtol=1.0e-8, atol=1.0e-8))
-
-        # non-numba (numpy) path requires one w row per sequence; use identical rows equal to the mean
-        dist_np = make_ind_pi_dist(use_numba=False, n_rows=len(self.data))
-        enc_np = dist_np.dist_to_encoder().seq_encode(self.data)
-        self.assertIsNone(enc_np[1])
-        seq_ll_np = dist_np.seq_log_density(enc_np)
-        self.assertTrue(np.allclose(seq_ll_np, scalar_ll, rtol=1.0e-8, atol=1.0e-8))
-
-    def test_scalar_update_runs(self):
-        est = make_ind_pi_estimator()
-        acc = est.accumulator_factory().make()
-        acc.update(self.data[0], 1.0, self.dist)
-        self.assertAlmostEqual(np.sum(acc.state_counts), float(len(self.data[0])), places=8)
-        self.assertEqual(np.shape(acc.init_counts), (1, 2))
-
-    def test_seq_estimate_smoke(self):
-        est = make_ind_pi_estimator()
-        encoder = est.accumulator_factory().make().acc_to_encoder()
-        enc_data = [(len(self.data), encoder.seq_encode(self.data))]
-
-        model = seq_initialize(enc_data, est, RandomState(7), p=1.0)
-        self.assertIsInstance(model, SemiSupervisedHiddenMarkovModelDistribution)
-        self.assertEqual(np.shape(model.w), (len(self.data), 2))
-
-        for _ in range(3):
-            model = seq_estimate(enc_data, est, model)
-
-        self.assertIsInstance(model, SemiSupervisedHiddenMarkovModelDistribution)
-        self.assertEqual(model.nStates, 2)
-        self.assertEqual(np.shape(model.w), (len(self.data), 2))
-        self.assertTrue(np.allclose(model.w.sum(axis=1), 1.0))
-        self.assertEqual(np.shape(model.transitions), (2, 2))
-        self.assertTrue(np.allclose(model.transitions.sum(axis=1), 1.0))
-
-        ll = model.seq_log_density(encoder.seq_encode(self.data))
-        self.assertTrue(np.all(np.isfinite(ll)))
-
-    def test_accumulator_factory_alias(self):
-        est = make_ind_pi_estimator()
-        f1 = est.accumulator_factory()
-        f2 = est.accumulatorFactory()
-        self.assertIsInstance(f1, SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory)
-        self.assertIsInstance(f2, SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory)
 
 
 def make_llda_model():
