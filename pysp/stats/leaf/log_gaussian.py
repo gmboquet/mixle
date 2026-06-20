@@ -15,7 +15,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
-from pysp.stats.bayes.normgamma import NormalGammaDistribution
+from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -149,7 +149,7 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
             sigma2 (float): Positive real-valued number.
             name (Optional[str]): String for name of object.
             prior (Optional): Conjugate parameter prior over (mu, tau=1/sigma2) of log(X). A
-                :class:`~pysp.stats.bayes.normgamma.NormalGammaDistribution` enables the
+                :class:`~pysp.stats.bayes.normal_gamma.NormalGammaDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the conjugate
                 posterior update); ``None`` (default) is a plain point model.
 

@@ -23,7 +23,7 @@ from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.arithmetic import maxrandint
 from pysp.stats.bayes.dirichlet import DirichletDistribution
-from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -60,7 +60,7 @@ def mixture_prior(
     Args:
         weight_prior: Prior on the mixture weights (a
             :class:`~pysp.stats.bayes.dirichlet.DirichletDistribution` or
-            :class:`~pysp.stats.bayes.symdirichlet.SymmetricDirichletDistribution`).
+            :class:`~pysp.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution`).
         component_priors: Sequence of one conjugate prior per component.
 
     Returns:

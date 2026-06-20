@@ -24,9 +24,9 @@ import numpy as np
 import scipy.integrate
 import scipy.stats
 
-from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
+from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 from pysp.stats.bayes.dirichlet import DirichletDistribution
-from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from pysp.stats.compute.pdist import ProbabilityDistribution
 from pysp.stats.leaf.bernoulli import (
     BernoulliAccumulatorFactory,

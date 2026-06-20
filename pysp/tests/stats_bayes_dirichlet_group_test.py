@@ -11,9 +11,9 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
+from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 from pysp.stats.bayes.dirichlet import DirichletDistribution
-from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.leaf.integer_categorical import (
     IntegerCategoricalDataEncoder,

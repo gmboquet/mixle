@@ -14,8 +14,8 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.bayes.catdirichlet import DictDirichletDistribution as SDir
-from pysp.stats.bayes.normgamma import NormalGammaDistribution as SNG
+from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution as SDir
+from pysp.stats.bayes.normal_gamma import NormalGammaDistribution as SNG
 from pysp.stats.combinator.composite import CompositeDistribution as SComp
 from pysp.stats.combinator.composite import CompositeEstimator as SCompEst
 from pysp.stats.combinator.conditional import ConditionalDistribution as SCond
