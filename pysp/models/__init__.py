@@ -31,6 +31,10 @@ from pysp.models.grammar import (
 from pysp.models.knowledge_graph import KnowledgeGraphFitResult, TransEKnowledgeGraphModel
 from pysp.models.neural import CategoricalClassificationNN, GaussianRegressionNN, PoissonRegressionNN, make_mlp
 from pysp.models.pomdp import POMDPFilterResult, POMDPFitResult, POMDPModel, baum_welch_pomdp
+from pysp.models.random_forest import (
+    RandomForestConditional,
+    RandomForestEstimator,
+)
 from pysp.models.random_graph import (
     ErdosRenyiGraphModel,
     HardEMResult,
@@ -54,6 +58,8 @@ __all__ = [
     "PartiallyDirectedGraph",
     "PCFGParseNode",
     "PoissonRegressionNN",
+    "RandomForestConditional",
+    "RandomForestEstimator",
     "StochasticBlockGraphModel",
     "TransEKnowledgeGraphModel",
     "TruncatedDPMFitResult",
