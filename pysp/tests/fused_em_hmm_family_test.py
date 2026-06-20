@@ -10,7 +10,7 @@ For each family this verifies two things:
     fixed iteration count.
 
 Families covered: SegmentalHiddenMarkov, TreeHiddenMarkov (numpy + numba encodings),
-IndPiHiddenMarkov (numpy + numba encodings), LookbackHiddenMarkov.
+IndPiHiddenMarkov (numpy + numba encodings), LookbackHiddenMarkovModel.
 """
 
 import io
@@ -193,7 +193,7 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
         len_dist = CategoricalDistribution({7: 0.5, 8: 0.25, 9: 0.25})
         transition = [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]
         w = [0.4, 0.3, 0.3]
-        return mod.LookbackHiddenMarkovDistribution(
+        return mod.LookbackHiddenMarkovModelDistribution(
             states, w=w, transitions=transition, lag=1, init_dist=init_dists, len_dist=len_dist
         )
 
@@ -202,7 +202,7 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
             IntegerCategoricalEstimator(pseudo_count=0.1), len_estimator=CategoricalEstimator(pseudo_count=0.1)
         )
         est1 = IntegerMarkovChainEstimator(3, pseudo_count=0.1)
-        return mod.LookbackHiddenMarkovEstimator(
+        return mod.LookbackHiddenMarkovModelEstimator(
             [est1] * 3,
             lag=1,
             init_estimators=[est0] * 3,
