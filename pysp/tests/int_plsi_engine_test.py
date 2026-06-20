@@ -20,7 +20,9 @@ class IntegerProbabilisticLatentSemanticIndexingEngineTestCase(unittest.TestCase
         sw = np.random.RandomState(0).dirichlet(np.ones(5), size=3).T  # (5 words, 3 states)
         ds = np.random.RandomState(1).dirichlet(np.ones(3), size=4)  # (4 docs, 3 states)
         dv = np.ones(4) / 4.0
-        self.dist = IntegerProbabilisticLatentSemanticIndexingDistribution(sw, ds, dv, len_dist=CategoricalDistribution({3: 1.0}))
+        self.dist = IntegerProbabilisticLatentSemanticIndexingDistribution(
+            sw, ds, dv, len_dist=CategoricalDistribution({3: 1.0})
+        )
         self.data = self.dist.sampler(seed=2).sample(15)
         self.weights = np.linspace(0.5, 1.5, len(self.data))
         self.est = self.dist.estimator()

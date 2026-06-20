@@ -48,9 +48,7 @@ def _as_prior(prior, length: int, num_states: int) -> np.ndarray | None:
     elif p.shape == (1, num_states) and length > 0:
         p = np.repeat(p, length, axis=0)  # a single shared prior row broadcast over the sequence
     else:
-        raise ValueError(
-            "state_prior must be shape (T=%d, S=%d) or (1, S); got %s" % (length, num_states, p.shape)
-        )
+        raise ValueError("state_prior must be shape (T=%d, S=%d) or (1, S); got %s" % (length, num_states, p.shape))
     if np.any(p < 0.0):
         raise ValueError("state_prior must be non-negative.")
     return p
@@ -160,13 +158,17 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         return SemiSupervisedHiddenMarkovSampler(self, seed)
 
     def estimator(self, pseudo_count=None):
-        len_est = None if isinstance(self.len_dist, NullDistribution) else self.len_dist.estimator(pseudo_count=pseudo_count)
+        len_est = (
+            None if isinstance(self.len_dist, NullDistribution) else self.len_dist.estimator(pseudo_count=pseudo_count)
+        )
         comp_ests = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
         return SemiSupervisedHiddenMarkovEstimator(comp_ests, len_estimator=len_est, pseudo_count=pseudo_count)
 
     def dist_to_encoder(self):
         emission_encoder = self.topics[0].dist_to_encoder()
-        len_encoder = self.len_dist.dist_to_encoder() if not isinstance(self.len_dist, NullDistribution) else NullDataEncoder()
+        len_encoder = (
+            self.len_dist.dist_to_encoder() if not isinstance(self.len_dist, NullDistribution) else NullDataEncoder()
+        )
         return SemiSupervisedHiddenMarkovDataEncoder(emission_encoder=emission_encoder, len_encoder=len_encoder)
 
 
@@ -262,9 +264,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
             # accumulate emissions vectorized over T: one weighted seq_update per state instead of T*S calls
             enc = self.accumulators[0].acc_to_encoder().seq_encode(list(emissions))
             for s in range(self.num_states):
-                self.accumulators[s].seq_update(
-                    enc, weight * gamma[:, s], None if dist is None else dist.topics[s]
-                )
+                self.accumulators[s].seq_update(enc, weight * gamma[:, s], None if dist is None else dist.topics[s])
         if not isinstance(self.len_accumulator, NullAccumulator):
             self.len_accumulator.update(n, weight, None if dist is None else dist.len_dist)
 
@@ -380,7 +380,9 @@ class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self):
-        len_factory = None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.accumulator_factory()
+        len_factory = (
+            None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.accumulator_factory()
+        )
         return SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory(
             [e.accumulator_factory() for e in self.estimators], len_factory=len_factory, keys=self.keys
         )
@@ -393,8 +395,12 @@ class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
         denom[denom == 0] = 1.0
         transitions = row / denom
         topics = [self.estimators[s].estimate(None, emission_stats[s]) for s in range(self.num_states)]
-        len_dist = None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.estimate(None, length_stat)
-        return SemiSupervisedHiddenMarkovModelDistribution(topics, transitions, len_dist=len_dist, name=self.name, keys=self.keys)
+        len_dist = (
+            None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.estimate(None, length_stat)
+        )
+        return SemiSupervisedHiddenMarkovModelDistribution(
+            topics, transitions, len_dist=len_dist, name=self.name, keys=self.keys
+        )
 
 
 class SemiSupervisedHiddenMarkovDataEncoder(DataSequenceEncoder):
@@ -418,7 +424,9 @@ class SemiSupervisedHiddenMarkovDataEncoder(DataSequenceEncoder):
         emissions_list = [list(obs[0]) for obs in x]
         priors = [obs[1] for obs in x]
         lengths = np.asarray([len(e) for e in emissions_list], dtype=int)
-        len_enc = self.len_encoder.seq_encode(lengths.tolist()) if not isinstance(self.len_encoder, NullDataEncoder) else None
+        len_enc = (
+            self.len_encoder.seq_encode(lengths.tolist()) if not isinstance(self.len_encoder, NullDataEncoder) else None
+        )
         # emissions are scored per-sequence in the forward; keep the raw lists (the emission encoder is used
         # by the per-state emission distributions through their own log_density)
         return (emissions_list, priors, len_enc, lengths)

@@ -43,10 +43,18 @@ class ClassNameAliasTestCase(unittest.TestCase):
 
         self.assertIs(lda.LDAAccumulator, lda.LDAEstimatorAccumulator)
         self.assertIs(lda.LDAAccumulatorFactory, lda.LDAEstimatorAccumulatorFactory)
-        self.assertIs(hierarchical_mixture.HierarchicalMixtureAccumulator, hierarchical_mixture.HierarchicalMixtureEstimatorAccumulator)
-        self.assertIs(joint_mixture.JointMixtureAccumulatorFactory, joint_mixture.JointMixtureEstimatorAccumulatorFactory)
+        self.assertIs(
+            hierarchical_mixture.HierarchicalMixtureAccumulator,
+            hierarchical_mixture.HierarchicalMixtureEstimatorAccumulator,
+        )
+        self.assertIs(
+            joint_mixture.JointMixtureAccumulatorFactory, joint_mixture.JointMixtureEstimatorAccumulatorFactory
+        )
         self.assertIs(select.SelectAccumulator, select.SelectEstimatorAccumulator)
-        self.assertIs(semi_supervised_mixture.SemiSupervisedMixtureAccumulator, semi_supervised_mixture.SemiSupervisedMixtureEstimatorAccumulator)
+        self.assertIs(
+            semi_supervised_mixture.SemiSupervisedMixtureAccumulator,
+            semi_supervised_mixture.SemiSupervisedMixtureEstimatorAccumulator,
+        )
         self.assertIs(optional.OptionalAccumulatorFactory, optional.OptionalEstimatorAccumulatorFactory)
 
     def test_family_stem_aliases(self):
@@ -66,7 +74,8 @@ class ClassNameAliasTestCase(unittest.TestCase):
         self.assertIs(grammar.GrammarAccumulator, grammar.GrammarEstimatorAccumulator)
         self.assertIs(qhmm.QuantizedHiddenMarkovModelEstimator, qhmm.QuantizedHiddenMarkovEstimator)
         self.assertIs(
-            gaussian_mixture.GaussianMixtureAccumulatorFactory, gaussian_mixture.GaussianMixtureEstimatorAccumulatorFactory
+            gaussian_mixture.GaussianMixtureAccumulatorFactory,
+            gaussian_mixture.GaussianMixtureEstimatorAccumulatorFactory,
         )
         self.assertIs(seg.SegmentalHiddenMarkovModelEstimator, seg.SegmentalHiddenMarkovEstimator)
         self.assertIs(tree.TreeHiddenMarkovModelEstimator, tree.TreeHiddenMarkovEstimator)

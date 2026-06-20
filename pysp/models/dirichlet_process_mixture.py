@@ -64,7 +64,11 @@ class TruncatedDirichletProcessMixtureModel:
         self.log_weights = np.log(np.clip(self.weights, _EPS, 1.0))
 
     def __str__(self) -> str:
-        return "TruncatedDirichletProcessMixtureModel(num_components=%d, alpha=%r, name=%r)" % (self.num_components, self.alpha, self.name)
+        return "TruncatedDirichletProcessMixtureModel(num_components=%d, alpha=%r, name=%r)" % (
+            self.num_components,
+            self.alpha,
+            self.name,
+        )
 
     @property
     def expected_log_weights(self) -> np.ndarray:
