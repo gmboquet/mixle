@@ -74,7 +74,8 @@ class _DecisionTree:
         pure = (self.task == "classification" and len(np.unique(y)) <= 1) or (
             self.task == "regression" and np.ptp(y) == 0.0
         )
-        if depth >= self.max_depth or n < self.min_samples_split or n < 2 * self.min_samples_leaf or pure:
+        # an all-zero-weight node (e.g. EM responsibilities -> 0) gives 0/0 NaN gains in _best_split; stop here
+        if depth >= self.max_depth or n < self.min_samples_split or n < 2 * self.min_samples_leaf or pure or w.sum() <= 0.0:
             return self._leaf(y, w)
 
         feat, thr = self._best_split(X, y, w)
