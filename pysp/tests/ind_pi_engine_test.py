@@ -1,6 +1,6 @@
-"""Engine-resident E-step parity for the per-sequence-init HMM (IndPi).
+"""Engine-resident E-step parity for the per-sequence-init HMM (SemiSupervised).
 
-IndPi reuses the generalized forward-backward with a per-sequence initial vector. This also exercises
+SemiSupervised reuses the generalized forward-backward with a per-sequence initial vector. This also exercises
 the fix to the blocked (use_numba=False) host seq_update, whose per-sequence initial-state counts
 were previously broken.
 """
@@ -11,7 +11,7 @@ import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.latent.hidden_markov_ind_pi import IndPiHiddenMarkovEstimator, IndPiHiddenMarkovModelDistribution
+from pysp.stats.latent.hidden_markov_ind_pi import SemiSupervisedHiddenMarkovEstimator, SemiSupervisedHiddenMarkovModelDistribution
 
 try:
     from pysp.engines import TorchEngine
@@ -23,7 +23,7 @@ except Exception:
 
 def _model():
     topics = [CategoricalDistribution({"a": 0.7, "b": 0.3}), CategoricalDistribution({"a": 0.2, "b": 0.8})]
-    return IndPiHiddenMarkovModelDistribution(
+    return SemiSupervisedHiddenMarkovModelDistribution(
         topics,
         [[0.6, 0.4], [0.3, 0.7]],
         [[0.7, 0.3], [0.4, 0.6]],
@@ -33,12 +33,12 @@ def _model():
     )
 
 
-class IndPiEngineEStepTestCase(unittest.TestCase):
+class SemiSupervisedEngineEStepTestCase(unittest.TestCase):
     def setUp(self):
         self.dist = _model()
         self.data = self.dist.sampler(seed=1).sample(25)
         self.weights = np.linspace(0.5, 1.5, len(self.data))
-        self.est = IndPiHiddenMarkovEstimator(
+        self.est = SemiSupervisedHiddenMarkovEstimator(
             [CategoricalEstimator(), CategoricalEstimator()],
             len_estimator=CategoricalEstimator(),
             pseudo_count=(1.0, 1.0),
@@ -76,7 +76,7 @@ class IndPiEngineEStepTestCase(unittest.TestCase):
         for name, engine in self.engines:
             with self.subTest(engine=name):
                 kernel = self.dist.kernel(engine=engine, estimator=self.est)
-                self.assertEqual(type(kernel).__name__, "IndPiHiddenMarkovModelKernel")
+                self.assertEqual(type(kernel).__name__, "SemiSupervisedHiddenMarkovModelKernel")
                 value = kernel.accumulate(enc, self.weights)
                 self.assertEqual(np.asarray(value[1]).shape, (len(self.data), 2))
 

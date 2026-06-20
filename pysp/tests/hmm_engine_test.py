@@ -100,7 +100,7 @@ class HmmEngineForwardBackwardTestCase(unittest.TestCase):
 
 
 class HmmEngineForwardBackwardInitTestCase(unittest.TestCase):
-    """hmm_engine_forward_backward accepts a per-sequence (N, S) initial vector (IndPi HMM)."""
+    """hmm_engine_forward_backward accepts a per-sequence (N, S) initial vector (SemiSupervised HMM)."""
 
     def test_per_sequence_initial_vector(self):
         rng = np.random.RandomState(0)
