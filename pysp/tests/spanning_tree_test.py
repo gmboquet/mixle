@@ -59,8 +59,12 @@ class SpanningTreeTestCase(unittest.TestCase):
         brute.sort(key=lambda u: -u[1])
         items = list(dist.enumerator())
 
-        self.assertEqual([t for t, _ in items], [t for t, _ in brute])
+        # densities match in descending order (the lazy enumerator may break exact ties differently)
         np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in brute], atol=1.0e-12)
+        # and the enumerated trees are exactly the support (compared as a set, tie-order-independent)
+        self.assertEqual(
+            {frozenset(t) for t, _ in items}, {frozenset(t) for t, _ in brute}
+        )
         self.assertAlmostEqual(float(np.logaddexp.reduce([lp for _, lp in items])), 0.0, places=10)
 
     def test_enumerator_respects_sparse_support(self):
@@ -85,11 +89,16 @@ class SpanningTreeTestCase(unittest.TestCase):
         self.assertEqual([t for t, _ in items], [t for t, _ in brute])
         self.assertAlmostEqual(float(np.logaddexp.reduce([lp for _, lp in items])), 0.0, places=10)
 
-    def test_enumerator_candidate_cap_is_explicit(self):
+    def test_enumerator_is_lazy_and_complete(self):
+        # the enumerator now streams trees in increasing cost (Gabow k-best), so max_edge_subsets no longer
+        # caps it -- both the legacy argument and the default yield the full Cayley count of n^(n-2) trees.
         dist = SpanningTreeDistribution(_W)
-        with self.assertRaises(ValueError):
-            dist.enumerator(max_edge_subsets=1)
+        self.assertEqual(len(list(dist.enumerator(max_edge_subsets=1))), 4 ** (4 - 2))
         self.assertEqual(len(list(dist.enumerator(max_edge_subsets=None))), 4 ** (4 - 2))
+        # lazily taking only the top few does not enumerate everything
+        top = list(itertools.islice(dist.enumerator(), 3))
+        self.assertEqual(len(top), 3)
+        self.assertTrue(all(top[i][1] >= top[i + 1][1] for i in range(2)))
 
     def test_edge_marginals_sum_to_n_minus_1(self):
         dist = SpanningTreeDistribution(_W)
