@@ -65,6 +65,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         alpha: Sequence[float] | np.ndarray,
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         gamma_threshold: float = 1.0e-8,
+        max_gamma_iter: int = 100,
     ) -> None:
         """LDADistribution object for defining a Latent Dirichlet allocation model.
 
@@ -73,14 +74,18 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
             alpha (Union[Sequence[float], np.ndarray]): Parameter to the prior Dirichlet for which topics are drawn.
             len_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for length of documents.
                 Must be set to non-negative support distribution for sampling.
-            gamma_threshold (float): For numerical stability in estimation.
+            gamma_threshold (float): Convergence threshold for the per-document variational gamma fixed point.
+            max_gamma_iter (int): Hard cap on per-document variational iterations. The fixed point converges
+                geometrically, so a few straggler documents would otherwise chase ``gamma_threshold`` for
+                thousands of iterations at negligible gain; capping bounds the worst case (default 100).
 
         Attributes:
             topics (Sequence[SequenceEncodableProbabilityDistribution]): Topic distributions for the LDA.
             alpha (np.ndarray): Parameter to the prior Dirichlet for which topics are drawn.
             len_dist (SequenceEncodableProbabilityDistribution): Distribution for length of documents.
                 Must be set to non-negative support distribution for sampling. Default to NullDistribution.
-            gamma_threshold (float): For numerical stability in estimation.
+            gamma_threshold (float): Convergence threshold for the per-document variational gamma fixed point.
+            max_gamma_iter (int): Hard cap on per-document variational iterations.
 
         """
         self.topics = topics
@@ -88,6 +93,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         self.alpha = np.asarray(alpha)
         self.len_dist = len_dist
         self.gamma_threshold = gamma_threshold
+        self.max_gamma_iter = int(max_gamma_iter)
 
     def compute_capabilities(self):
         """Return backend capability metadata for this concrete LDA instance."""
@@ -262,7 +268,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         else:
             document_gammas = engine.asarray(gammas)
 
-        for _ in range(10000):
+        for _ in range(self.max_gamma_iter):
             digamma_gammas = engine.digamma(document_gammas)
             centered_gammas = digamma_gammas - engine.max(digamma_gammas, axis=1).reshape((-1, 1))
             gamma_weights = engine.exp(centered_gammas)
@@ -430,12 +436,17 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
 
         if pseudo_count is None:
-            return LDAEstimator(estimators=[d.estimator() for d in self.topics], len_estimator=len_est)
+            return LDAEstimator(
+                estimators=[d.estimator() for d in self.topics],
+                len_estimator=len_est,
+                max_gamma_iter=self.max_gamma_iter,
+            )
         else:
             return LDAEstimator(
                 estimators=[d.estimator() for d in self.topics],
                 len_estimator=len_est,
                 pseudo_count=(pseudo_count, pseudo_count),
+                max_gamma_iter=self.max_gamma_iter,
             )
 
     def dist_to_encoder(self) -> "LDADataEncoder":
@@ -1070,6 +1081,7 @@ class LDAEstimator(ParameterEstimator):
         fixed_alpha: np.ndarray | None = None,
         gamma_threshold: float = 1.0e-8,
         alpha_threshold: float = 1.0e-8,
+        max_gamma_iter: int = 100,
     ) -> None:
         """LDAEstimator object.
 
@@ -1110,6 +1122,7 @@ class LDAEstimator(ParameterEstimator):
         self.gamma_threshold = gamma_threshold
         self.alpha_threshold = alpha_threshold
         self.fixed_alpha = fixed_alpha
+        self.max_gamma_iter = int(max_gamma_iter)
 
     def accumulator_factory(self) -> "LDAEstimatorAccumulatorFactory":
         """Returns an LDAEstimatorAccumulatorFactory object from attribute variables."""
@@ -1144,7 +1157,13 @@ class LDAEstimator(ParameterEstimator):
 
         if doc_counts == 0:
             sys.stderr.write("Warning: LDA Estimation performed with zero documents.\n")
-            return LDADistribution(topics, prev_alpha, len_dist=len_dist, gamma_threshold=self.gamma_threshold)
+            return LDADistribution(
+                topics,
+                prev_alpha,
+                len_dist=len_dist,
+                gamma_threshold=self.gamma_threshold,
+                max_gamma_iter=self.max_gamma_iter,
+            )
 
         if self.fixed_alpha is None:
             if self.pseudo_count is not None:
@@ -1157,7 +1176,13 @@ class LDAEstimator(ParameterEstimator):
         else:
             new_alpha = np.asarray(self.fixed_alpha).copy()
 
-        return LDADistribution(topics, new_alpha, len_dist=len_dist, gamma_threshold=self.gamma_threshold)
+        return LDADistribution(
+            topics,
+            new_alpha,
+            len_dist=len_dist,
+            gamma_threshold=self.gamma_threshold,
+            max_gamma_iter=self.max_gamma_iter,
+        )
 
 
 class LDADataEncoder(DataSequenceEncoder):
@@ -1461,8 +1486,9 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
     log_density_gamma_loc /= posterior_sum_ll_loc
 
     old_stuff = None
+    max_gamma_iter = getattr(estimate, "max_gamma_iter", 100)
 
-    while ndoc > 0:
+    while ndoc > 0 and itr_cnt < max_gamma_iter:
         itr_cnt += 1
 
         digamma(document_gammas, out=document_gammas2)
@@ -1526,6 +1552,14 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
             document_gammas = document_gammas[is_rem_idx, :]
             document_gammas2 = document_gammas2[:ndoc, :]
             document_gammas3 = document_gammas3[:ndoc, :]
+
+    # Cap reached while some documents were still iterating: their gammas are already converged to
+    # far below what EM needs (geometric convergence), so flush the current values as the result.
+    if ndoc > 0:
+        final_gammas[finished_count : finished_count + ndoc, :] = document_gammas
+        final_gammas_idx[finished_count : finished_count + ndoc] = rem_gammas_idx
+        gamma_itr_cnt[finished_count : finished_count + ndoc] = itr_cnt
+        finished_count += ndoc
 
     #
     # Accumulate per-bag-sample
