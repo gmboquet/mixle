@@ -39,24 +39,24 @@ class CoalesceAliasHelperTestCase(unittest.TestCase):
 class ClassNameAliasTestCase(unittest.TestCase):
     def test_estimator_accumulator_aliases(self):
         from pysp.stats.combinator import optional, select
-        from pysp.stats.latent import hmixture, jmixture, lda, ss_mixture
+        from pysp.stats.latent import hierarchical_mixture, joint_mixture, lda, semi_supervised_mixture
 
         self.assertIs(lda.LDAAccumulator, lda.LDAEstimatorAccumulator)
         self.assertIs(lda.LDAAccumulatorFactory, lda.LDAEstimatorAccumulatorFactory)
-        self.assertIs(hmixture.HierarchicalMixtureAccumulator, hmixture.HierarchicalMixtureEstimatorAccumulator)
-        self.assertIs(jmixture.JointMixtureAccumulatorFactory, jmixture.JointMixtureEstimatorAccumulatorFactory)
+        self.assertIs(hierarchical_mixture.HierarchicalMixtureAccumulator, hierarchical_mixture.HierarchicalMixtureEstimatorAccumulator)
+        self.assertIs(joint_mixture.JointMixtureAccumulatorFactory, joint_mixture.JointMixtureEstimatorAccumulatorFactory)
         self.assertIs(select.SelectAccumulator, select.SelectEstimatorAccumulator)
-        self.assertIs(ss_mixture.SemiSupervisedMixtureAccumulator, ss_mixture.SemiSupervisedMixtureEstimatorAccumulator)
+        self.assertIs(semi_supervised_mixture.SemiSupervisedMixtureAccumulator, semi_supervised_mixture.SemiSupervisedMixtureEstimatorAccumulator)
         self.assertIs(optional.OptionalAccumulatorFactory, optional.OptionalEstimatorAccumulatorFactory)
 
     def test_family_stem_aliases(self):
         from pysp.stats.combinator import conditional as cond
         from pysp.stats.graph import grammar
         from pysp.stats.latent import hidden_markov as hm
-        from pysp.stats.latent import mvnmixture
-        from pysp.stats.latent import quantized_hmm as qhmm
-        from pysp.stats.latent import segmental_hmm as seg
-        from pysp.stats.latent import tree_hmm as tree
+        from pysp.stats.latent import gaussian_mixture
+        from pysp.stats.latent import quantized_hidden_markov_model as qhmm
+        from pysp.stats.latent import segmental_hidden_markov_model as seg
+        from pysp.stats.latent import tree_hidden_markov_model as tree
 
         self.assertIs(hm.HiddenMarkovModelEstimator, hm.HiddenMarkovEstimator)
         self.assertIs(hm.HiddenMarkovModelSampler, hm.HiddenMarkovSampler)
@@ -66,7 +66,7 @@ class ClassNameAliasTestCase(unittest.TestCase):
         self.assertIs(grammar.GrammarAccumulator, grammar.GrammarEstimatorAccumulator)
         self.assertIs(qhmm.QuantizedHiddenMarkovModelEstimator, qhmm.QuantizedHiddenMarkovEstimator)
         self.assertIs(
-            mvnmixture.GaussianMixtureAccumulatorFactory, mvnmixture.GaussianMixtureEstimatorAccumulatorFactory
+            gaussian_mixture.GaussianMixtureAccumulatorFactory, gaussian_mixture.GaussianMixtureEstimatorAccumulatorFactory
         )
         self.assertIs(seg.SegmentalHiddenMarkovModelEstimator, seg.SegmentalHiddenMarkovEstimator)
         self.assertIs(tree.TreeHiddenMarkovModelEstimator, tree.TreeHiddenMarkovEstimator)
