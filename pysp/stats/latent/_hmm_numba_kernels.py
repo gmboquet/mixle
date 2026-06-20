@@ -1,16 +1,9 @@
 """Shared numba Baum-Welch / forward kernels for the HMM family.
 
 These forward-backward kernels are byte-for-byte identical across the HMM
-variants (``hidden_markov``, ``look_back_hmm`` and, for the ``2``-suffixed and
-density kernels, ``hidden_markov_ind_pi``). They are consolidated here so the
-numba JIT compiles and caches them once and the variants share the same
+variants (``hidden_markov`` and ``look_back_hmm``). They are consolidated here so
+the numba JIT compiles and caches them once and the variants share the same
 ``cache=True`` object code.
-
-NOTE: ``hidden_markov_ind_pi`` carries its own ``numba_baum_welch2`` because it
-takes a per-sequence (2D) ``init_pvec`` and guards a zero ``alpha_sum``; that
-kernel is genuinely different and stays in that module. The shared
-``numba_baum_welch2`` here is the scalar-``init_pvec`` version used by
-``hidden_markov`` and ``look_back_hmm``.
 """
 
 import math

@@ -140,7 +140,10 @@ class StreamingEstimatorTestCase(unittest.TestCase):
             SemiSupervisedHiddenMarkovEstimator,
             SemiSupervisedHiddenMarkovModelDistribution,
         )
-        from pysp.stats.latent.look_back_hmm import LookbackHiddenMarkovModelDistribution, LookbackHiddenMarkovModelEstimator
+        from pysp.stats.latent.look_back_hmm import (
+            LookbackHiddenMarkovModelDistribution,
+            LookbackHiddenMarkovModelEstimator,
+        )
         from pysp.stats.latent.tree_hmm import TreeHiddenMarkovModelDistribution
         from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
         from pysp.stats.leaf.gaussian import GaussianDistribution
@@ -181,24 +184,22 @@ class StreamingEstimatorTestCase(unittest.TestCase):
                 )
                 _assert_scaled_accumulator_matches(self, estimator, dist, lookback_data)
 
-        ind_pi = SemiSupervisedHiddenMarkovModelDistribution(
+        semi_sup = SemiSupervisedHiddenMarkovModelDistribution(
             [
                 CategoricalDistribution({"a": 0.7, "b": 0.2, "c": 0.1}),
                 CategoricalDistribution({"a": 0.1, "b": 0.2, "c": 0.7}),
             ],
             [[0.8, 0.2], [0.3, 0.7]],
-            [[0.9, 0.1], [0.2, 0.8]],
-            None,
             len_dist=CategoricalDistribution({3: 0.5, 4: 0.5}),
         )
-        ind_pi_est = SemiSupervisedHiddenMarkovEstimator(
+        semi_sup_est = SemiSupervisedHiddenMarkovEstimator(
             [CategoricalEstimator(), CategoricalEstimator()],
             len_estimator=CategoricalEstimator(),
-            pseudo_count=(1.0, 1.0),
+            pseudo_count=1.0,
         )
-        _assert_scaled_accumulator_matches(
-            self, ind_pi_est, ind_pi, [["a", "b", "a"], ["c", "b", "c", "a"], ["a", "a", "b"]]
-        )
+        # observations are (emission_seq, per-position state prior); None prior leaves the states free
+        semi_sup_data = [(["a", "b", "a"], None), (["c", "b", "c", "a"], None), (["a", "a", "b"], None)]
+        _assert_scaled_accumulator_matches(self, semi_sup_est, semi_sup, semi_sup_data)
 
         tree = TreeHiddenMarkovModelDistribution(
             topics=[GaussianDistribution(0.0, 1.0), GaussianDistribution(10.0, 1.0)],

@@ -10,7 +10,7 @@ For each family this verifies two things:
     fixed iteration count.
 
 Families covered: SegmentalHiddenMarkov, TreeHiddenMarkov (numpy + numba encodings),
-SemiSupervisedHiddenMarkov (numpy + numba encodings), LookbackHiddenMarkovModel.
+LookbackHiddenMarkovModel.
 """
 
 import io
@@ -30,7 +30,6 @@ from pysp.stats import (
     seq_log_density_sum,
 )
 from pysp.stats.graph.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-from pysp.stats.latent.hidden_markov_ind_pi import SemiSupervisedHiddenMarkovEstimator, SemiSupervisedHiddenMarkovModelDistribution
 from pysp.stats.latent.segmental_hmm import SegmentalHiddenMarkovModelDistribution
 from pysp.stats.latent.tree_hmm import TreeHiddenMarkovEstimator, TreeHiddenMarkovModelDistribution
 from pysp.stats.leaf.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
@@ -86,37 +85,7 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
         self._fused(est, data)
         self._default_off(est)
 
-    # ------------------------------------------------------------------- ind_pi
-
-    def _ind_pi(self, use_numba):
-        topics = [CategoricalDistribution({"a": 0.7, "b": 0.3}), CategoricalDistribution({"a": 0.2, "b": 0.8})]
-        dist = SemiSupervisedHiddenMarkovModelDistribution(
-            topics,
-            [[0.6, 0.4], [0.3, 0.7]],
-            [[0.7, 0.3], [0.4, 0.6]],
-            None,
-            len_dist=CategoricalDistribution({3: 0.5, 4: 0.5}),
-            use_numba=use_numba,
-        )
-        est = SemiSupervisedHiddenMarkovEstimator(
-            [CategoricalEstimator(), CategoricalEstimator()],
-            len_estimator=CategoricalEstimator(),
-            pseudo_count=(1.0, 1.0),
-            use_numba=use_numba,
-        )
-        return dist, est, dist.sampler(seed=1).sample(25)
-
-    def test_ind_pi_numba(self):
-        dist, est, data = self._ind_pi(True)
-        self._parity(dist, est, data)
-        self._fused(est, data)
-        self._default_off(est)
-
-    def test_ind_pi_numpy(self):
-        dist, est, data = self._ind_pi(False)
-        self._parity(dist, est, data)
-        self._fused(est, data)
-        self._default_off(est)
+    # (the semi-supervised HMM is numpy-only and has no fused-EM fast path; see semi_supervised_hmm_test.py)
 
     # ------------------------------------------------------------------ tree_hmm
 
