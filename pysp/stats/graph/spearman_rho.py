@@ -614,7 +614,7 @@ class SpearmanRankingEstimator(ParameterEstimator):
             else:
                 rho = self.rho
         else:
-            sigma = vsum
+            sigma = np.arange(self.dim)  # no data: the identity permutation (rho=0 is uniform regardless)
             rho = 0.0
 
         return SpearmanRankingDistribution(sigma, rho, name=self.name, keys=self.keys)
@@ -649,5 +649,7 @@ class SpearmanRankingDataEncoder(DataSequenceEncoder):
             2-d numpy array with N rows and K columns.
 
         """
-        rv = np.asarray(x)
+        rv = np.asarray(x, dtype=int)  # rank vectors are integer permutations
+        if rv.ndim != 2:
+            raise ValueError("SpearmanRankingDataEncoder expects a 2-d array of equal-length rank vectors.")
         return rv

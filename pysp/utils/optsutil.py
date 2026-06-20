@@ -34,17 +34,10 @@ def get_inv_map(val_map: dict[T, T1]) -> dict[T1, T]:
         val_map (Dict[T1, T]): Dictionary mapping keys to values.
 
     Returns:
-        Inverse mapping of val_map.
+        Inverse mapping of val_map (value -> key).
 
     """
-    max_val = max(val_map.values())
-
-    rv = [None] * (max_val + 1)
-
-    for k, v in val_map.items():
-        rv[v] = k
-
-    return rv
+    return {v: k for k, v in val_map.items()}
 
 
 def text_file(f) -> list[str]:
@@ -188,12 +181,11 @@ def least_occurring(x: Sequence[T], count: int | None = None, percent: float | N
     elif percent is not None:
         n = max(int(len(s_idx) * percent), 1)
     else:
-        return x
+        return list(x)
 
     vals = [cnt_map[i][0] for i in s_idx[:n]]
 
     if keep_freq:
-        vals = set(vals)
-        return filter(lambda u: u in vals, x)
-    else:
-        return vals
+        vset = set(vals)
+        return [u for u in x if u in vset]  # always return a list (was a lazy filter object)
+    return vals
