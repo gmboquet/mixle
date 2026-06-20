@@ -1,4 +1,4 @@
-"""Tests for pysp.stats.latent.quantized_hmm.
+"""Tests for pysp.stats.latent.quantized_hidden_markov_model.
 
 Covers the theta^k parameterization (row normalization, log-prob structure, structural zeros,
 stationary init mode), agreement with the dense HiddenMarkovModelDistribution, sampling, and EM
@@ -24,7 +24,7 @@ try:
     _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
-from pysp.stats.latent.quantized_hmm import (
+from pysp.stats.latent.quantized_hidden_markov_model import (
     QuantizedHiddenMarkovEstimator,
     QuantizedHiddenMarkovModelDistribution,
     QuantizedHiddenMarkovModelEnumerator,

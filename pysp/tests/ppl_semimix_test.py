@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 
 from pysp.ppl import Normal, SemiMix, free
-from pysp.stats.latent.ss_mixture import SemiSupervisedMixtureDistribution
+from pysp.stats.latent.semi_supervised_mixture import SemiSupervisedMixtureDistribution
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 

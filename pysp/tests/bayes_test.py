@@ -67,15 +67,18 @@ from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEsti
 from pysp.stats.leaf.gamma import GammaDistribution
 from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
 from pysp.stats.leaf.geometric import GeometricDistribution
-from pysp.stats.leaf.int_range import (
+from pysp.stats.leaf.integer_categorical import (
     IntegerCategoricalDistribution,
     IntegerCategoricalEstimator,
 )
 from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
 from pysp.stats.leaf.point_mass import PointMassDistribution
 from pysp.stats.leaf.poisson import PoissonDistribution, PoissonEstimator
-from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
-from pysp.stats.sets.setdist import BernoulliSetDistribution
+from pysp.stats.multivariate.multivariate_gaussian import (
+    MultivariateGaussianDistribution,
+    MultivariateGaussianEstimator,
+)
+from pysp.stats.sets.bernoulli_set import BernoulliSetDistribution
 from pysp.utils.estimation import fit as fit_driver
 from pysp.utils.evaluation import k_fold_split_index
 from pysp.utils.special import stirling2

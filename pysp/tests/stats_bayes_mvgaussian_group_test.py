@@ -15,8 +15,11 @@ from pysp.stats.bayes.mvngamma import MultivariateNormalGammaDistribution
 from pysp.stats.bayes.normgamma import NormalGammaDistribution
 from pysp.stats.bayes.normwishart import NormalWishartDistribution
 from pysp.stats.leaf.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
-from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution, DiagonalGaussianEstimator
-from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution, MultivariateGaussianEstimator
+from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution, DiagonalGaussianEstimator
+from pysp.stats.multivariate.multivariate_gaussian import (
+    MultivariateGaussianDistribution,
+    MultivariateGaussianEstimator,
+)
 from pysp.utils.special import digamma
 
 

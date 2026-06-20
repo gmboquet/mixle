@@ -12,8 +12,8 @@ import numpy as np
 
 from pysp.stats import *
 from pysp.stats.compute.pdist import EnumerationError
-from pysp.stats.latent.hmixture import HierarchicalMixtureDistribution
-from pysp.stats.latent.jmixture import JointMixtureDistribution
+from pysp.stats.latent.hierarchical_mixture import HierarchicalMixtureDistribution
+from pysp.stats.latent.joint_mixture import JointMixtureDistribution
 from pysp.stats.latent.lda import LDADistribution
 from pysp.utils.enumeration import freeze
 

@@ -9,7 +9,7 @@ import unittest
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats.leaf.int_spike import IntegerUniformSpikeDistribution
+from pysp.stats.leaf.integer_uniform_spike import IntegerUniformSpikeDistribution
 from pysp.stats.leaf.laplace import LaplaceDistribution
 from pysp.stats.leaf.pareto import ParetoDistribution
 from pysp.stats.leaf.point_mass import PointMassDistribution

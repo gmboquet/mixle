@@ -1,4 +1,4 @@
-"""Tests for the modernized legacy modules pysp.stats.latent.llda.
+"""Tests for the modernized legacy modules pysp.stats.latent.labeled_lda.
 
 Covers import, DataSequenceEncoder round-trips, scalar vs vectorized agreement, and short
 seq_estimate smoke runs on tiny synthetic data with fixed seeds.
@@ -10,7 +10,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.stats import seq_estimate, seq_initialize
-from pysp.stats.latent.llda import (
+from pysp.stats.latent.labeled_lda import (
     LabeledLDADataEncoder,
     LabeledLDADistribution,
     LabeledLDAEstimator,

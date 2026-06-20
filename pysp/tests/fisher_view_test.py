@@ -310,10 +310,14 @@ class FisherViewTestCase(unittest.TestCase):
         from pysp.stats.leaf.exponential import ExponentialDistribution as BayesianExponentialDistribution
         from pysp.stats.leaf.gamma import GammaDistribution as BayesianGammaDistribution
         from pysp.stats.leaf.gaussian import GaussianDistribution as BayesianGaussianDistribution
-        from pysp.stats.leaf.int_range import IntegerCategoricalDistribution as BayesianIntegerCategoricalDistribution
+        from pysp.stats.leaf.integer_categorical import (
+            IntegerCategoricalDistribution as BayesianIntegerCategoricalDistribution,
+        )
         from pysp.stats.leaf.log_gaussian import LogGaussianDistribution as BayesianLogGaussianDistribution
-        from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution as BayesianDiagonalGaussianDistribution
-        from pysp.stats.multivariate.mvn import (
+        from pysp.stats.multivariate.diagonal_gaussian import (
+            DiagonalGaussianDistribution as BayesianDiagonalGaussianDistribution,
+        )
+        from pysp.stats.multivariate.multivariate_gaussian import (
             MultivariateGaussianDistribution as BayesianMultivariateGaussianDistribution,
         )
 

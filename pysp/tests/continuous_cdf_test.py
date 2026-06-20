@@ -74,8 +74,8 @@ class MultivariateCumulativeTestCase(unittest.TestCase):
     def test_mvn_exact_cumulative_matches_sampling(self):
         import numpy as np
 
-        from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution
-        from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
+        from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
+        from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
         from pysp.utils.density_rank import density_rank
 
         mvn = MultivariateGaussianDistribution(np.array([0.5, -1.0]), np.array([[2.0, 0.3], [0.3, 1.0]]))
@@ -95,7 +95,7 @@ class MultivariateCumulativeTestCase(unittest.TestCase):
     def test_vmf_exact_cumulative(self):
         import numpy as np
 
-        from pysp.stats.multivariate.vmf import VonMisesFisherDistribution
+        from pysp.stats.multivariate.von_mises_fisher import VonMisesFisherDistribution
         from pysp.utils.density_rank import density_rank
 
         # d=3: closed form G = (e^k - e^{k t}) / (e^k - e^{-k}), t = mu . x
@@ -125,9 +125,9 @@ class MultivariateCumulativeTestCase(unittest.TestCase):
         # (sweeping q enumerates the support in descending density).
         import numpy as np
 
-        from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution
-        from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
-        from pysp.stats.multivariate.vmf import VonMisesFisherDistribution
+        from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
+        from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
+        from pysp.stats.multivariate.von_mises_fisher import VonMisesFisherDistribution
 
         dists = [
             MultivariateGaussianDistribution(np.array([0.5, -1.0]), np.array([[2.0, 0.3], [0.3, 1.0]])),

@@ -50,7 +50,7 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.stats.latent.int_plsi import multinomial_bag_stream
+from pysp.stats.latent.integer_probabilistic_latent_semantic_indexing import multinomial_bag_stream
 from pysp.utils.enumeration import BufferedStream, frontier_merge
 from pysp.utils.optional_deps import HAS_NUMBA, numba
 from pysp.utils.optsutil import count_by_value

@@ -941,7 +941,7 @@ def _structured_values_matrix(view: FisherView, values: Sequence[Any]) -> np.nda
     if not values:
         return np.zeros((0, len(view.vectorizer.labels)), dtype=np.float64)
     if isinstance(view, FixedFisherView):
-        # IntegerCategorical views (now defined in pysp.stats.leaf.int_range) self-identify with a
+        # IntegerCategorical views (now defined in pysp.stats.leaf.integer_categorical) self-identify with a
         # class marker so this shared builder stays decoupled from that module (no import cycle).
         if getattr(view, "_fisher_integer_categorical", False):
             mat = np.zeros((len(values), len(view.vectorizer.labels)), dtype=np.float64)
