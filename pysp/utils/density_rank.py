@@ -113,10 +113,12 @@ def density_rank(
 
     # Sampling fallback: estimate G(value) = P(log p(Y) >= t).
     samples = dist.sampler(seed).sample(n_samples)
-    hits = 0
-    for y in samples:
-        if float(dist.log_density(y)) >= t - tol:
-            hits += 1
+    try:
+        # vectorized: one seq_log_density pass instead of n_samples per-sample log_density calls
+        lp = np.asarray(dist.seq_log_density(dist.dist_to_encoder().seq_encode(samples)), dtype=float)
+        hits = int(np.count_nonzero(lp >= t - tol))
+    except Exception:
+        hits = sum(1 for y in samples if float(dist.log_density(y)) >= t - tol)
     g = hits / n_samples
     stderr = math.sqrt(max(g * (1.0 - g), 0.0) / n_samples)
     return DensityRankResult(g, None, False, stderr, t, "sampling")
