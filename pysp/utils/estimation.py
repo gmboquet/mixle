@@ -362,9 +362,11 @@ def _em_loop(
 
         if ll_finite:
             old_ll = ll
-        if track_best and best_vll < vll:
-            best_vll = vll
-            best_model = model
+            # best-model selection is by validation score; record nxt (the model that achieved vll),
+            # not model (which is unchanged on a rejected step) -- and never select a non-finite step
+            if track_best and best_vll < vll:
+                best_vll = vll
+                best_model = nxt
 
     return (best_model if track_best else model), best_vll
 
