@@ -54,7 +54,7 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
     the topic distributions.
     """
 
-    def __init__(self, topics, alphas, set_dist=None, len_dist=None, gamma_threshold=1.0e-8):
+    def __init__(self, topics, alphas, set_dist=None, len_dist=None, gamma_threshold=1.0e-8, max_gamma_iter=100):
         """LabeledLDADistribution object.
 
         Args:
@@ -85,6 +85,7 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         self.len_dist = len_dist
         self.set_dist = set_dist
         self.gamma_threshold = gamma_threshold
+        self.max_gamma_iter = int(max_gamma_iter)
 
     def __str__(self):
         """Returns string representation of LabeledLDADistribution instance."""
@@ -268,7 +269,7 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         else:
             document_gammas = engine.asarray(gammas)
 
-        for _ in range(10000):
+        for _ in range(self.max_gamma_iter):
             dg = engine.digamma(document_gammas)
             gw = engine.exp(dg - engine.max(dg, axis=1).reshape((-1, 1)))
             row_weights = per_topic_weights * gw[idx_e, :]
@@ -371,7 +372,12 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
 
         """
         estimators = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
-        return LabeledLDAEstimator(estimators, num_alphas=self.num_alpha, gamma_threshold=self.gamma_threshold)
+        return LabeledLDAEstimator(
+            estimators,
+            num_alphas=self.num_alpha,
+            gamma_threshold=self.gamma_threshold,
+            max_gamma_iter=self.max_gamma_iter,
+        )
 
     def dist_to_encoder(self):
         """Returns LabeledLDADataEncoder object for encoding sequences of iid LabeledLDA observations."""
@@ -1076,6 +1082,7 @@ class LabeledLDAEstimator(ParameterEstimator):
         fixed_alpha=None,
         gamma_threshold=1.0e-8,
         alpha_threshold=1.0e-8,
+        max_gamma_iter=100,
     ):
         """LabeledLDAEstimator object.
 
@@ -1111,6 +1118,7 @@ class LabeledLDAEstimator(ParameterEstimator):
         self.gamma_threshold = gamma_threshold
         self.alpha_threshold = alpha_threshold
         self.fixed_alpha = fixed_alpha
+        self.max_gamma_iter = int(max_gamma_iter)
 
     def accumulator_factory(self):
         """Returns an LabeledLDAEstimatorAccumulatorFactory object."""
@@ -1185,7 +1193,9 @@ class LabeledLDAEstimator(ParameterEstimator):
         else:
             new_alpha = np.asarray(self.fixed_alpha).copy()
 
-        return LabeledLDADistribution(topics, new_alpha, gamma_threshold=self.gamma_threshold)
+        return LabeledLDADistribution(
+            topics, new_alpha, gamma_threshold=self.gamma_threshold, max_gamma_iter=self.max_gamma_iter
+        )
 
 
 class LabeledLDADataEncoder(DataSequenceEncoder):
@@ -1664,8 +1674,9 @@ def seq_posterior(estimate, x):
     log_density_gamma_loc /= posterior_sum_ll_loc
 
     old_stuff = None
+    max_gamma_iter = getattr(estimate, "max_gamma_iter", 100)
 
-    while ndoc > 0:
+    while ndoc > 0 and itr_cnt < max_gamma_iter:
         itr_cnt += 1
 
         digamma(document_gammas, out=document_gammas2)
@@ -1730,6 +1741,13 @@ def seq_posterior(estimate, x):
             document_gammas2 = document_gammas2[:ndoc, :]
             document_gammas3 = document_gammas3[:ndoc, :]
             alphas_loc2 = alphas_loc2[is_rem_idx, :]
+
+    # Cap reached while some documents were still iterating: flush their (already well-converged) gammas.
+    if ndoc > 0:
+        final_gammas[finished_count : finished_count + ndoc, :] = document_gammas
+        final_gammas_idx[finished_count : finished_count + ndoc] = rem_gammas_idx
+        gamma_itr_cnt[finished_count : finished_count + ndoc] = itr_cnt
+        finished_count += ndoc
 
     #
     # Accumulate per-bag-sample
