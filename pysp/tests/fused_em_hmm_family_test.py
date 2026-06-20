@@ -10,7 +10,7 @@ For each family this verifies two things:
     fixed iteration count.
 
 Families covered: SegmentalHiddenMarkov, TreeHiddenMarkov (numpy + numba encodings),
-IndPiHiddenMarkov (numpy + numba encodings), LookbackHiddenMarkovModel.
+SemiSupervisedHiddenMarkov (numpy + numba encodings), LookbackHiddenMarkovModel.
 """
 
 import io
@@ -30,7 +30,7 @@ from pysp.stats import (
     seq_log_density_sum,
 )
 from pysp.stats.graph.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-from pysp.stats.latent.hidden_markov_ind_pi import IndPiHiddenMarkovEstimator, IndPiHiddenMarkovModelDistribution
+from pysp.stats.latent.hidden_markov_ind_pi import SemiSupervisedHiddenMarkovEstimator, SemiSupervisedHiddenMarkovModelDistribution
 from pysp.stats.latent.segmental_hmm import SegmentalHiddenMarkovModelDistribution
 from pysp.stats.latent.tree_hmm import TreeHiddenMarkovEstimator, TreeHiddenMarkovModelDistribution
 from pysp.stats.leaf.int_range import IntegerCategoricalDistribution, IntegerCategoricalEstimator
@@ -90,7 +90,7 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
 
     def _ind_pi(self, use_numba):
         topics = [CategoricalDistribution({"a": 0.7, "b": 0.3}), CategoricalDistribution({"a": 0.2, "b": 0.8})]
-        dist = IndPiHiddenMarkovModelDistribution(
+        dist = SemiSupervisedHiddenMarkovModelDistribution(
             topics,
             [[0.6, 0.4], [0.3, 0.7]],
             [[0.7, 0.3], [0.4, 0.6]],
@@ -98,7 +98,7 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
             len_dist=CategoricalDistribution({3: 0.5, 4: 0.5}),
             use_numba=use_numba,
         )
-        est = IndPiHiddenMarkovEstimator(
+        est = SemiSupervisedHiddenMarkovEstimator(
             [CategoricalEstimator(), CategoricalEstimator()],
             len_estimator=CategoricalEstimator(),
             pseudo_count=(1.0, 1.0),

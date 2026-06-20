@@ -137,8 +137,8 @@ class StreamingEstimatorTestCase(unittest.TestCase):
         from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
         from pysp.stats.graph.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
         from pysp.stats.latent.hidden_markov_ind_pi import (
-            IndPiHiddenMarkovEstimator,
-            IndPiHiddenMarkovModelDistribution,
+            SemiSupervisedHiddenMarkovEstimator,
+            SemiSupervisedHiddenMarkovModelDistribution,
         )
         from pysp.stats.latent.look_back_hmm import LookbackHiddenMarkovModelDistribution, LookbackHiddenMarkovModelEstimator
         from pysp.stats.latent.tree_hmm import TreeHiddenMarkovModelDistribution
@@ -181,7 +181,7 @@ class StreamingEstimatorTestCase(unittest.TestCase):
                 )
                 _assert_scaled_accumulator_matches(self, estimator, dist, lookback_data)
 
-        ind_pi = IndPiHiddenMarkovModelDistribution(
+        ind_pi = SemiSupervisedHiddenMarkovModelDistribution(
             [
                 CategoricalDistribution({"a": 0.7, "b": 0.2, "c": 0.1}),
                 CategoricalDistribution({"a": 0.1, "b": 0.2, "c": 0.7}),
@@ -191,7 +191,7 @@ class StreamingEstimatorTestCase(unittest.TestCase):
             None,
             len_dist=CategoricalDistribution({3: 0.5, 4: 0.5}),
         )
-        ind_pi_est = IndPiHiddenMarkovEstimator(
+        ind_pi_est = SemiSupervisedHiddenMarkovEstimator(
             [CategoricalEstimator(), CategoricalEstimator()],
             len_estimator=CategoricalEstimator(),
             pseudo_count=(1.0, 1.0),

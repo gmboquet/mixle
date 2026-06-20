@@ -117,7 +117,7 @@ from pysp.stats import (
     validate_declaration,
     validate_statistic_layout,
 )
-from pysp.stats.latent.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
+from pysp.stats.latent.hidden_markov_ind_pi import SemiSupervisedHiddenMarkovModelDistribution
 
 
 def _assert_suff_close(test_case, actual, expected):
@@ -321,7 +321,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
         self.assertEqual(capabilities_for(tree_hmm).engine_ready, ("numpy", "torch"))
         self.assertEqual(capabilities_for(tree_hmm).kernel_status, "generic_latent")
 
-        ind_pi_hmm = IndPiHiddenMarkovModelDistribution(
+        ind_pi_hmm = SemiSupervisedHiddenMarkovModelDistribution(
             [GaussianDistribution(-1.0, 0.8), GaussianDistribution(2.0, 1.5)],
             [[0.6, 0.4], [0.5, 0.5], [0.3, 0.7], [0.8, 0.2]],
             [[0.75, 0.25], [0.20, 0.80]],
@@ -1124,7 +1124,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
         tree_params = tree_decl.parameter_values(tree_hmm)
         np.testing.assert_allclose(tree_params["transitions"], np.asarray([[0.75, 0.25], [0.20, 0.80]]))
 
-        ind_pi_hmm = IndPiHiddenMarkovModelDistribution(
+        ind_pi_hmm = SemiSupervisedHiddenMarkovModelDistribution(
             [GaussianDistribution(-1.0, 0.8), GaussianDistribution(2.0, 1.5)],
             [[0.6, 0.4], [0.5, 0.5], [0.3, 0.7], [0.8, 0.2]],
             [[0.75, 0.25], [0.20, 0.80]],

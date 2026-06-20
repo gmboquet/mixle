@@ -1172,7 +1172,7 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
         """Enumerates observation sequences in descending marginal probability order.
 
         The optional keyword arguments override the corresponding attributes of dist so HMM
-        variants with the same forward semantics (e.g. IndPiHiddenMarkovModelDistribution)
+        variants with the same forward semantics (e.g. SemiSupervisedHiddenMarkovModelDistribution)
         can reuse this enumerator.
 
         The marginal probability of an observation sequence sums over all hidden state paths
@@ -2763,7 +2763,7 @@ def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=No
     log_w = engine.asarray(log_w)
     log_a = engine.asarray(log_a)
     m = engine.asarray(mask)
-    # log_w is either a shared (S,) initial vector or a per-sequence (N, S) vector (IndPi HMM).
+    # log_w is either a shared (S,) initial vector or a per-sequence (N, S) vector (SemiSupervised HMM).
     log_w_2d = np.asarray(log_w).ndim == 2
     num_states = int(np.asarray(log_w).shape[-1])
 

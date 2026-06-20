@@ -75,7 +75,7 @@ from pysp.stats import (
     generated_stacked_params,
     generated_stacked_sufficient_statistics,
 )
-from pysp.stats.latent.hidden_markov_ind_pi import IndPiHiddenMarkovModelDistribution
+from pysp.stats.latent.hidden_markov_ind_pi import SemiSupervisedHiddenMarkovModelDistribution
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 if HAS_TORCH:
@@ -254,7 +254,7 @@ class BackendScoringTestCase(unittest.TestCase):
                 [[((0, -1), -1.2)], [((0, -1), -0.5), ((1, 0), 1.5)], [((0, -1), 2.0), ((1, 0), 2.5), ((2, 0), -0.2)]],
             ),
             (
-                IndPiHiddenMarkovModelDistribution(
+                SemiSupervisedHiddenMarkovModelDistribution(
                     [GaussianDistribution(-1.0, 0.8), GaussianDistribution(2.0, 1.5)],
                     [[0.6, 0.4], [0.5, 0.5], [0.3, 0.7], [0.8, 0.2]],
                     [[0.75, 0.25], [0.20, 0.80]],
