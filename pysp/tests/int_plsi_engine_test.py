@@ -1,11 +1,11 @@
-"""Engine-resident E-step parity for IntegerPLSI (numpy + torch)."""
+"""Engine-resident E-step parity for IntegerProbabilisticLatentSemanticIndexing (numpy + torch)."""
 
 import unittest
 
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats import CategoricalDistribution, IntegerPLSIDistribution
+from pysp.stats import CategoricalDistribution, IntegerProbabilisticLatentSemanticIndexingDistribution
 
 try:
     from pysp.engines import TorchEngine
@@ -15,12 +15,12 @@ except Exception:
     _TORCH = None
 
 
-class IntegerPLSIEngineTestCase(unittest.TestCase):
+class IntegerProbabilisticLatentSemanticIndexingEngineTestCase(unittest.TestCase):
     def setUp(self):
         sw = np.random.RandomState(0).dirichlet(np.ones(5), size=3).T  # (5 words, 3 states)
         ds = np.random.RandomState(1).dirichlet(np.ones(3), size=4)  # (4 docs, 3 states)
         dv = np.ones(4) / 4.0
-        self.dist = IntegerPLSIDistribution(sw, ds, dv, len_dist=CategoricalDistribution({3: 1.0}))
+        self.dist = IntegerProbabilisticLatentSemanticIndexingDistribution(sw, ds, dv, len_dist=CategoricalDistribution({3: 1.0}))
         self.data = self.dist.sampler(seed=2).sample(15)
         self.weights = np.linspace(0.5, 1.5, len(self.data))
         self.est = self.dist.estimator()
@@ -34,7 +34,7 @@ class IntegerPLSIEngineTestCase(unittest.TestCase):
         for name, engine in self.engines:
             with self.subTest(engine=name):
                 kernel = self.dist.kernel(engine=engine, estimator=self.est)
-                self.assertEqual(type(kernel).__name__, "IntegerPLSIKernel")
+                self.assertEqual(type(kernel).__name__, "IntegerProbabilisticLatentSemanticIndexingKernel")
                 value = kernel.accumulate(enc, self.weights)
                 for j in range(3):
                     self.assertTrue(
