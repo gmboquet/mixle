@@ -1,4 +1,4 @@
-"""Engine scoring + E-step parity for LLDA (numpy + torch)."""
+"""Engine scoring + E-step parity for LabeledLDA (numpy + torch)."""
 
 import unittest
 
@@ -7,7 +7,7 @@ from numpy.random import RandomState
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats.compute.backend import backend_seq_log_density
-from pysp.stats.latent.llda import LLDADistribution, LLDAEstimator
+from pysp.stats.latent.llda import LabeledLDADistribution, LabeledLDAEstimator
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 
 try:
@@ -35,9 +35,9 @@ def _data(label_sets, n, seed):
     return out
 
 
-class LLDAEngineTestCase(unittest.TestCase):
+class LabeledLDAEngineTestCase(unittest.TestCase):
     def setUp(self):
-        self.dist = LLDADistribution(
+        self.dist = LabeledLDADistribution(
             [
                 CategoricalDistribution({"w0": 0.4, "w1": 0.4, "w2": 0.1, "w3": 0.1}),
                 CategoricalDistribution({"w0": 0.1, "w1": 0.1, "w2": 0.4, "w3": 0.4}),
@@ -47,7 +47,7 @@ class LLDAEngineTestCase(unittest.TestCase):
         )
         self.data = _data([[0], [1], [0, 2], [1, 2]], 24, seed=7)
         self.weights = np.linspace(0.5, 1.5, len(self.data))
-        self.est = LLDAEstimator(
+        self.est = LabeledLDAEstimator(
             [CategoricalEstimator(), CategoricalEstimator()], num_alphas=3, gamma_threshold=1.0e-10
         )
         self.engines = [("numpy", NUMPY_ENGINE)] + ([("torch", _TORCH)] if _TORCH is not None else [])

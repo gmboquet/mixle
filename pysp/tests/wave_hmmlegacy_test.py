@@ -11,11 +11,11 @@ from numpy.random import RandomState
 
 from pysp.stats import seq_estimate, seq_initialize
 from pysp.stats.latent.llda import (
-    LLDADataEncoder,
-    LLDADistribution,
-    LLDAEstimator,
-    LLDAEstimatorAccumulator,
-    LLDAEstimatorAccumulatorFactory,
+    LabeledLDADataEncoder,
+    LabeledLDADistribution,
+    LabeledLDAEstimator,
+    LabeledLDAEstimatorAccumulator,
+    LabeledLDAEstimatorAccumulatorFactory,
 )
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 
@@ -26,7 +26,7 @@ def make_llda_model():
         CategoricalDistribution({"w0": 0.1, "w1": 0.1, "w2": 0.4, "w3": 0.4}),
     ]
     alphas = np.asarray([[2.0, 0.5], [0.5, 2.0]])
-    return LLDADistribution(topics, alphas)
+    return LabeledLDADistribution(topics, alphas)
 
 
 def make_llda_data(n=30, seed=5):
@@ -46,10 +46,10 @@ def make_llda_data(n=30, seed=5):
 
 
 def make_llda_estimator():
-    return LLDAEstimator([CategoricalEstimator(), CategoricalEstimator()], num_alphas=2)
+    return LabeledLDAEstimator([CategoricalEstimator(), CategoricalEstimator()], num_alphas=2)
 
 
-class LLDATestCase(unittest.TestCase):
+class LabeledLDATestCase(unittest.TestCase):
     def setUp(self):
         self.model = make_llda_model()
         self.data = make_llda_data(n=30, seed=5)
@@ -57,13 +57,13 @@ class LLDATestCase(unittest.TestCase):
     def test_encoder_equality_and_str(self):
         enc1 = self.model.dist_to_encoder()
         enc2 = self.model.dist_to_encoder()
-        self.assertIsInstance(enc1, LLDADataEncoder)
+        self.assertIsInstance(enc1, LabeledLDADataEncoder)
         self.assertEqual(enc1, enc2)
-        self.assertIn("LLDADataEncoder", str(enc1))
+        self.assertIn("LabeledLDADataEncoder", str(enc1))
 
         est = make_llda_estimator()
         acc = est.accumulator_factory().make()
-        self.assertIsInstance(acc, LLDAEstimatorAccumulator)
+        self.assertIsInstance(acc, LabeledLDAEstimatorAccumulator)
         self.assertEqual(acc.acc_to_encoder(), enc1)
 
     def test_encoding_round_trip(self):
@@ -123,12 +123,12 @@ class LLDATestCase(unittest.TestCase):
         enc_data = [(len(self.data), encoder.seq_encode(self.data))]
 
         model = seq_initialize(enc_data, est, RandomState(11), p=1.0)
-        self.assertIsInstance(model, LLDADistribution)
+        self.assertIsInstance(model, LabeledLDADistribution)
 
         for _ in range(3):
             model = seq_estimate(enc_data, est, model)
 
-        self.assertIsInstance(model, LLDADistribution)
+        self.assertIsInstance(model, LabeledLDADistribution)
         self.assertEqual(np.shape(model.alphas), (2, 2))
         self.assertTrue(np.all(np.isfinite(model.alphas)))
         self.assertTrue(np.all(model.alphas > 0))
@@ -140,8 +140,8 @@ class LLDATestCase(unittest.TestCase):
         est = make_llda_estimator()
         f1 = est.accumulator_factory()
         f2 = est.accumulatorFactory()
-        self.assertIsInstance(f1, LLDAEstimatorAccumulatorFactory)
-        self.assertIsInstance(f2, LLDAEstimatorAccumulatorFactory)
+        self.assertIsInstance(f1, LabeledLDAEstimatorAccumulatorFactory)
+        self.assertIsInstance(f2, LabeledLDAEstimatorAccumulatorFactory)
 
 
 if __name__ == "__main__":
