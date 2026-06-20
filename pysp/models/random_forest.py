@@ -12,8 +12,8 @@ composite/record model or act as a mixture-of-experts component. Because estimat
 through optimize(..., max_its=1) (there is no likelihood for EM to iterate); for classification log-density is the
 forest's predict_log_proba, for regression it is a Gaussian residual model with a globally estimated noise scale.
 
-sklearn provides the forest and is imported lazily inside estimate(), so importing this module -- or pysp.models --
-does not require scikit-learn unless a forest is actually fit.
+The forest itself is a native numpy CART + bagging ensemble (pysp.models._forest), so pysparkplug carries no
+scikit-learn dependency.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 
+from pysp.models._forest import NativeRandomForest
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -206,27 +207,37 @@ class RandomForestAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class RandomForestEstimator(ParameterEstimator):
-    """Estimator that fits a scikit-learn random forest as a conditional leaf.
+    """Estimator that fits a native (numpy) random forest as a conditional leaf.
 
-    task is 'classification', 'regression', or 'auto' (inferred from the dtype of y). Extra keyword arguments are
-    forwarded to the sklearn forest constructor (n_estimators, max_depth, random_state, ...). estimate() trains in
-    one pass on the accumulated weighted data; there is no EM iteration, so drive it with optimize(max_its=1) or
-    call the seq_encode / accumulate / estimate path directly.
+    task is 'classification', 'regression', or 'auto' (inferred from the dtype of y). The forest hyperparameters
+    (n_estimators, max_depth, min_samples_split, min_samples_leaf, max_features, random_state) are passed straight
+    to the native ensemble. estimate() trains in one pass on the accumulated weighted data; there is no EM
+    iteration, so drive it with optimize(max_its=1) or call the seq_encode / accumulate / estimate path directly.
     """
 
     def __init__(
         self,
         task: str = "auto",
+        n_estimators: int = 100,
+        max_depth: int | None = None,
+        min_samples_split: int = 2,
+        min_samples_leaf: int = 1,
+        max_features: Any = "auto",
+        random_state: int | None = None,
         min_sigma: float = 1.0e-3,
         name: str | None = None,
         keys: str | None = None,
-        **forest_kwargs: Any,
     ) -> None:
         self.task = task
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
+        self.max_features = max_features
+        self.random_state = random_state
         self.min_sigma = float(min_sigma)
         self.name = name
         self.keys = keys
-        self.forest_kwargs = forest_kwargs
 
     def accumulator_factory(self) -> RandomForestAccumulatorFactory:
         return RandomForestAccumulatorFactory(self.name, self.keys)
@@ -235,6 +246,17 @@ class RandomForestEstimator(ParameterEstimator):
         if self.task != "auto":
             return self.task
         return "regression" if np.asarray(y).dtype.kind == "f" else "classification"
+
+    def _make_forest(self, task: str) -> NativeRandomForest:
+        return NativeRandomForest(
+            task=task,
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            min_samples_split=self.min_samples_split,
+            min_samples_leaf=self.min_samples_leaf,
+            max_features=self.max_features,
+            random_state=self.random_state,
+        )
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray] | None
@@ -246,19 +268,13 @@ class RandomForestEstimator(ParameterEstimator):
         task = self._resolve_task(y)
 
         if task == "classification":
-            from sklearn.ensemble import RandomForestClassifier
-
-            forest = RandomForestClassifier(**self.forest_kwargs)
-            forest.fit(X, y, sample_weight=w)
+            forest = self._make_forest("classification").fit(X, y, sample_weight=w)
             return RandomForestConditional(
                 forest, "classification", n_features=X.shape[1], name=self.name, keys=self.keys
             )
 
-        from sklearn.ensemble import RandomForestRegressor
-
         y = np.asarray(y, dtype=float)
-        forest = RandomForestRegressor(**self.forest_kwargs)
-        forest.fit(X, y, sample_weight=w)
+        forest = self._make_forest("regression").fit(X, y, sample_weight=w)
         resid = y - forest.predict(X)
         wsum = float(np.sum(w))
         var = float(np.sum(w * resid * resid) / wsum) if wsum > 0 else float(np.mean(resid * resid))
