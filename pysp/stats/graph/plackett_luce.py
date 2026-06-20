@@ -258,7 +258,7 @@ class PlackettLuceAccumulator(SequenceEncodableStatisticAccumulator):
         worths = np.ones(k) if estimate is None else np.exp(estimate.log_w)
         go = worths[x]  # (N, K) worths in ranked order
         suffix = _reverse_cumsum(go)  # suffix[n, s] = sum_{t>=s} w_{x[n,t]}
-        inv_suffix = 1.0 / suffix
+        inv_suffix = 1.0 / np.maximum(suffix, np.finfo(np.float64).tiny)  # guard underflowed worth sums
         prefix = np.cumsum(inv_suffix, axis=1)  # prefix[n, m] = sum_{s<=m} 1/suffix[n, s]
         # Item ranked at position t is in contention at stages 0..min(t, K-2).
         m_cols = np.minimum(np.arange(k), k - 2)
