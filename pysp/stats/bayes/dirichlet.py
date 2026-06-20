@@ -351,11 +351,11 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         """Cross entropy -E_self[log dist(x)] for a Dirichlet argument.
 
         Accepts another :class:`DirichletDistribution` (full concentration vector) or a
-        :class:`~pysp.stats.bayes.symdirichlet.SymmetricDirichletDistribution` (scalar concentration
+        :class:`~pysp.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution` (scalar concentration
         broadcast to this distribution's dimension). Both arise as the conjugate prior/posterior
         over the same simplex during variational Bayes (e.g. the ELBO global term in DPM).
         """
-        from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+        from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 
         a = self.alpha
         if isinstance(dist, DirichletDistribution):

@@ -191,7 +191,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             default_value float: Value for prob of observation outside support of CategorialDistribution.
             name (str): Assigns a name to the CategoricalDistribution object.
             prior (Optional): Conjugate parameter prior over the category-probability simplex. A
-                :class:`~pysp.stats.bayes.catdirichlet.DictDirichletDistribution` enables the Bayesian /
+                :class:`~pysp.stats.bayes.dict_dirichlet.DictDirichletDistribution` enables the Bayesian /
                 variational machinery (``expected_log_density`` and the conjugate posterior update);
                 ``None`` (default) is a plain point model.
 
@@ -241,7 +241,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         alpha is treated as a symmetric Dirichlet of dimension ``len(pmap)``. Any other prior
         (including ``None``) leaves the distribution a plain point model.
         """
-        from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
+        from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 
         self.prior = prior
         if isinstance(prior, DictDirichletDistribution):
@@ -827,7 +827,7 @@ class CategoricalEstimator(ParameterEstimator):
         self.name = name
         self.keys = keys
         self.prior = prior
-        from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
+        from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 
         self.has_conj_prior = isinstance(prior, DictDirichletDistribution)
 
@@ -837,7 +837,7 @@ class CategoricalEstimator(ParameterEstimator):
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
         """Set the conjugate parameter prior over the category-probability simplex."""
-        from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
+        from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 
         self.prior = prior
         self.has_conj_prior = isinstance(prior, DictDirichletDistribution)
@@ -860,7 +860,7 @@ class CategoricalEstimator(ParameterEstimator):
     def _estimate_conjugate(self, suff_stat: dict[Any, float]) -> "CategoricalDistribution":
         """Dirichlet MAP estimate (counts + alpha - 1, clamped at the simplex boundary, posterior
         mean when degenerate) carrying the posterior DictDirichlet forward as the new prior."""
-        from pysp.stats.bayes.catdirichlet import DictDirichletDistribution
+        from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 
         count_map = suff_stat
         conj_prior_params = self.prior.get_parameters()

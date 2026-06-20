@@ -206,8 +206,8 @@ class CapabilityMatrixTestCase(unittest.TestCase):
         # enumeration + unranking + exact rank are N/A -- but CDF ("probability-ordered cumulative")
         # is still available for any samplable family via density_rank's Monte-Carlo fallback.
         from pysp.stats.bayes.dirichlet import DirichletDistribution
-        from pysp.stats.bayes.normgamma import NormalGammaDistribution
-        from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution
+        from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
+        from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
         from pysp.stats.latent.gaussian_mixture import GaussianMixtureDistribution
         from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
         from pysp.stats.multivariate.von_mises_fisher import VonMisesFisherDistribution

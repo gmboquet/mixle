@@ -24,7 +24,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
-from pysp.stats.bayes.normwishart import NormalWishartDistribution
+from pysp.stats.bayes.normal_wishart import NormalWishartDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -186,7 +186,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             name (Optional[str]): Set name to object.
             keys (Optional[str]): Set keys for distribution.
             prior (Optional): Conjugate parameter prior over (mu, Lambda=covar^-1). A
-                :class:`~pysp.stats.bayes.normwishart.NormalWishartDistribution` enables the
+                :class:`~pysp.stats.bayes.normal_wishart.NormalWishartDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the conjugate
                 posterior update); ``None`` (default) is a plain point model.
 

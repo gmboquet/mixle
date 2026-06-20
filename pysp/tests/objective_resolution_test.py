@@ -11,8 +11,8 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.bayes.dpm import DirichletProcessMixtureEstimator
-from pysp.stats.bayes.normgamma import NormalGammaDistribution
+from pysp.stats.bayes.dirichlet_process_mixture import DirichletProcessMixtureEstimator
+from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
 from pysp.utils.estimation import _resolve_objective, fit, optimize
 

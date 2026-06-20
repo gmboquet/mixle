@@ -195,7 +195,7 @@ class AutomaticDetectionTestCase(unittest.TestCase):
 
     def test_bayesian_integral_float_record_fields_are_fittable(self):
         from pysp.stats import initialize
-        from pysp.stats.bayes.normgamma import NormalGammaDistribution
+        from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
         from pysp.utils.estimation import fit
 
         data = [(0.0, float(i % 4) + 0.25) for i in range(80)]

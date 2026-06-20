@@ -534,28 +534,31 @@ __all__ = [
 ]
 
 ### Abstract Classes
-from pysp.stats.bayes.catdirichlet import DictDirichletDistribution, DictDirichletSampler
+from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution, DictDirichletSampler
 from pysp.stats.bayes.dirichlet import DirichletDataEncoder, DirichletDistribution, DirichletEstimator, DirichletSampler
-from pysp.stats.bayes.dpm import (
+from pysp.stats.bayes.dirichlet_process_mixture import (
     DirichletProcessMixtureDistribution,
     DirichletProcessMixtureEstimator,
     DirichletProcessMixtureSampler,
 )
-from pysp.stats.bayes.hdpm import (
+from pysp.stats.bayes.hierarchical_dirichlet_process_mixture import (
     HierarchicalDirichletProcessMixtureDistribution,
     HierarchicalDirichletProcessMixtureEstimator,
     HierarchicalDirichletProcessMixtureSampler,
 )
-from pysp.stats.bayes.mvngamma import MultivariateNormalGammaDistribution, MultivariateNormalGammaSampler
-from pysp.stats.bayes.normgamma import NormalGammaDistribution, NormalGammaSampler
-from pysp.stats.bayes.normwishart import NormalWishartDistribution, NormalWishartSampler
+from pysp.stats.bayes.multivariate_normal_gamma import (
+    MultivariateNormalGammaDistribution,
+    MultivariateNormalGammaSampler,
+)
+from pysp.stats.bayes.normal_gamma import NormalGammaDistribution, NormalGammaSampler
+from pysp.stats.bayes.normal_wishart import NormalWishartDistribution, NormalWishartSampler
 from pysp.stats.bayes.pitman_yor import (
     PitmanYorProcessDataEncoder,
     PitmanYorProcessDistribution,
     PitmanYorProcessEstimator,
     PitmanYorProcessSampler,
 )
-from pysp.stats.bayes.symdirichlet import SymmetricDirichletDistribution, SymmetricDirichletSampler
+from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution, SymmetricDirichletSampler
 
 ### combinators distributions
 from pysp.stats.combinator.censored import (

@@ -72,7 +72,7 @@ def sample_conjugate_posterior(
 
     samples: list[Any] = []
     if cls_name == "GaussianDistribution":
-        from pysp.stats.bayes.normgamma import NormalGammaDistribution
+        from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 
         if not isinstance(posterior, NormalGammaDistribution):
             raise NotImplementedError("sample_conjugate_posterior(Gaussian) requires a NormalGamma posterior.")
@@ -128,7 +128,7 @@ def _default_conjugate_prior(cls_name: str) -> Any:
     the conjugate family.
     """
     if cls_name == "GaussianDistribution":
-        from pysp.stats.bayes.normgamma import NormalGammaDistribution
+        from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 
         return NormalGammaDistribution(0.0, 1.0e-8, 0.500001, 1.0)
     if cls_name == "PoissonDistribution":
