@@ -479,8 +479,9 @@ class IntegerBernoulliSetEstimator(ParameterEstimator):
 
         else:
             if suff_stat[1] == 0:
-                log_pvec = np.zeros(self.num_vals, dtype=np.float64) + 0.5
-                log_nvec = np.zeros(self.num_vals, dtype=np.float64) + 0.5
+                # no observations: fall back to p = 0.5 per element (these are log-probabilities)
+                log_pvec = np.zeros(self.num_vals, dtype=np.float64) + np.log(0.5)
+                log_nvec = np.zeros(self.num_vals, dtype=np.float64) + np.log(0.5)
 
             elif self.min_prob > 0:
                 log_pvec = np.log(np.maximum(suff_stat[0] / suff_stat[1], self.min_prob))
@@ -511,7 +512,7 @@ class IntegerBernoulliSetDataEncoder(DataSequenceEncoder):
         return "IntegerBernoulliSetDataEncoder"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(object, IntegerBernoulliSetDataEncoder)
+        return isinstance(other, IntegerBernoulliSetDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> tuple[int, np.ndarray, np.ndarray]:
         """Encode sequences of iid observations for vectorized calculations.
