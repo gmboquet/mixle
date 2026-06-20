@@ -356,7 +356,7 @@ class HiddenAssociationEnumerator(DistributionEnumerator):
         super().__init__(dist)
         # Imported lazily: int_plsi decorates numba kernels at import time, and this
         # enumerator is rarely constructed -- keep `import pysp.stats` lightweight.
-        from pysp.stats.latent.int_plsi import bag_stream
+        from pysp.stats.latent.integer_probabilistic_latent_semantic_indexing import bag_stream
 
         len_dist = dist.len_dist
 

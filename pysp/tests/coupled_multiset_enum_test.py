@@ -32,8 +32,10 @@ def _bags_over(num_vals, n):
 
 class IntegerProbabilisticLatentSemanticIndexingEnumerationTestCase(unittest.TestCase):
     def _dist(self):
-        from pysp.stats.latent.int_plsi import IntegerProbabilisticLatentSemanticIndexingDistribution
-        from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
+        from pysp.stats.latent.integer_probabilistic_latent_semantic_indexing import (
+            IntegerProbabilisticLatentSemanticIndexingDistribution,
+        )
+        from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
 
         prob = np.array([[0.5, 0.1], [0.3, 0.2], [0.2, 0.7]])
         state = np.array([[0.6, 0.4], [0.2, 0.8]])
@@ -61,7 +63,9 @@ class IntegerProbabilisticLatentSemanticIndexingEnumerationTestCase(unittest.Tes
 
     def test_null_length_support_is_descending_and_exact(self):
         from pysp.stats.combinator.null_dist import NullDistribution
-        from pysp.stats.latent.int_plsi import IntegerProbabilisticLatentSemanticIndexingDistribution
+        from pysp.stats.latent.integer_probabilistic_latent_semantic_indexing import (
+            IntegerProbabilisticLatentSemanticIndexingDistribution,
+        )
 
         prob = np.array([[0.5, 0.1], [0.3, 0.2], [0.2, 0.7]])
         state = np.array([[0.6, 0.4], [0.2, 0.8]])
@@ -77,7 +81,7 @@ class IntegerProbabilisticLatentSemanticIndexingEnumerationTestCase(unittest.Tes
 
 class IBPEnumerationTestCase(unittest.TestCase):
     def test_matches_brute_force_both_formats(self):
-        from pysp.stats.latent.ibp import IndianBuffetProcessDistribution
+        from pysp.stats.latent.indian_buffet_process import IndianBuffetProcessDistribution
 
         for fmt in ("dense", "sparse"):
             dist = IndianBuffetProcessDistribution(num_features=4, feature_probs=[0.6, 0.3, 0.2, 0.45], data_format=fmt)
@@ -97,9 +101,9 @@ class IBPEnumerationTestCase(unittest.TestCase):
 
 class IntegerHiddenAssociationEnumerationTestCase(unittest.TestCase):
     def _dist(self):
-        from pysp.stats.latent.int_hidden_association import IntegerHiddenAssociationDistribution
-        from pysp.stats.leaf.int_multinomial import IntegerMultinomialDistribution
-        from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
+        from pysp.stats.latent.integer_hidden_association import IntegerHiddenAssociationDistribution
+        from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
+        from pysp.stats.leaf.integer_multinomial import IntegerMultinomialDistribution
 
         state_prob = np.array([[0.5, 0.3, 0.2], [0.1, 0.4, 0.5]])  # (states, S2 words)
         cond_w = np.array([[0.7, 0.3], [0.2, 0.8]])  # (S1 words, states)
@@ -130,7 +134,7 @@ class IntegerHiddenAssociationEnumerationTestCase(unittest.TestCase):
 
     def test_requires_prev_dist(self):
         from pysp.stats.compute.pdist import EnumerationError
-        from pysp.stats.latent.int_hidden_association import IntegerHiddenAssociationDistribution
+        from pysp.stats.latent.integer_hidden_association import IntegerHiddenAssociationDistribution
 
         dist = IntegerHiddenAssociationDistribution(
             np.array([[0.5, 0.5], [0.5, 0.5]]), np.array([[0.5, 0.5], [0.5, 0.5]]), alpha=0.1
@@ -144,8 +148,8 @@ class HiddenAssociationEnumerationTestCase(unittest.TestCase):
         from pysp.stats.combinator.conditional import ConditionalDistribution
         from pysp.stats.latent.hidden_association import HiddenAssociationDistribution
         from pysp.stats.leaf.categorical import CategoricalDistribution
-        from pysp.stats.leaf.int_multinomial import IntegerMultinomialDistribution
-        from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
+        from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
+        from pysp.stats.leaf.integer_multinomial import IntegerMultinomialDistribution
 
         cond = ConditionalDistribution(
             {
@@ -210,7 +214,7 @@ class LabeledLDANonEnumerableTestCase(unittest.TestCase):
         from pysp.stats.compute.pdist import EnumerationError
 
         # LabeledLDA's log_density is a variational ELBO, so it is intentionally not enumerable.
-        from pysp.stats.latent.llda import LabeledLDADistribution
+        from pysp.stats.latent.labeled_lda import LabeledLDADistribution
         from pysp.utils.enumeration import supports_enumeration
 
         topics = [np.log([0.6, 0.3, 0.1]), np.log([0.1, 0.4, 0.5])]

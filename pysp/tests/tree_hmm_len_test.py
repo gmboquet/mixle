@@ -14,9 +14,9 @@ import unittest
 import numpy as np
 
 from pysp.stats.combinator.null_dist import NullDistribution
-from pysp.stats.latent.tree_hmm import TreeHiddenMarkovModelDistribution
+from pysp.stats.latent.tree_hidden_markov_model import TreeHiddenMarkovModelDistribution
 from pysp.stats.leaf.gaussian import GaussianDistribution
-from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
+from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
 
 
 def _child_counts(tree):

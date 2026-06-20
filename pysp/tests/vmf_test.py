@@ -1,4 +1,4 @@
-"""Tests for the von Mises-Fisher distribution (pysp.stats.multivariate.vmf).
+"""Tests for the von Mises-Fisher distribution (pysp.stats.multivariate.von_mises_fisher).
 
 Normalization is checked against exact references: arbitrary-precision Bessel
 functions (mpmath) for log I_v, the d=3 closed form c = k/(4 pi sinh k), and
@@ -12,7 +12,7 @@ import mpmath
 import numpy as np
 
 from pysp.stats import VonMisesFisherDistribution, VonMisesFisherEstimator
-from pysp.stats.multivariate.vmf import lniv
+from pysp.stats.multivariate.von_mises_fisher import lniv
 
 
 class BesselTestCase(unittest.TestCase):

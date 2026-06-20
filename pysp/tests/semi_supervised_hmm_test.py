@@ -11,7 +11,7 @@ import unittest
 import numpy as np
 
 from pysp.stats import GaussianDistribution as G
-from pysp.stats.latent.hidden_markov_ind_pi import (
+from pysp.stats.latent.semi_supervised_hidden_markov_model import (
     IndPiHiddenMarkovModelDistribution,
     SemiSupervisedHiddenMarkovModelDistribution,
 )

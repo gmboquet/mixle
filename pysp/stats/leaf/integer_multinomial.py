@@ -42,7 +42,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.leaf.cat_multinomial import MultisetProductEnumerator
+from pysp.stats.leaf.categorical_multinomial import MultisetProductEnumerator
 from pysp.utils.aliasing import coalesce_alias
 from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
 

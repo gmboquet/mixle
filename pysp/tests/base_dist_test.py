@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from pysp.stats import *
-from pysp.stats.leaf.int_spike import *
+from pysp.stats.leaf.integer_uniform_spike import *
 from pysp.utils.evaluation import empirical_kl_divergence
 
 

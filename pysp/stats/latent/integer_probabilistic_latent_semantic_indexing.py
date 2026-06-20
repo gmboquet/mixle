@@ -50,7 +50,7 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.stats.leaf.cat_multinomial import MultisetProductEnumerator
+from pysp.stats.leaf.categorical_multinomial import MultisetProductEnumerator
 from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, merge_enumerators
 from pysp.utils.optional_deps import numba
 from pysp.utils.optsutil import count_by_value

@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.latent.int_hidden_association import IntegerHiddenAssociationDistribution
+from pysp.stats.latent.integer_hidden_association import IntegerHiddenAssociationDistribution
 
 COND_WEIGHTS = np.asarray(
     [

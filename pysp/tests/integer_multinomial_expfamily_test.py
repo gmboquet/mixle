@@ -16,7 +16,7 @@ import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.stats.exp_family import ExponentialFamilyForm, is_exponential_family, to_exponential_family
-from pysp.stats.leaf.int_multinomial import IntegerMultinomialDistribution
+from pysp.stats.leaf.integer_multinomial import IntegerMultinomialDistribution
 
 
 class IntegerMultinomialExponentialFamilyTest(unittest.TestCase):

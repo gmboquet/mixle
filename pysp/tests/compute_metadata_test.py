@@ -117,7 +117,7 @@ from pysp.stats import (
     validate_declaration,
     validate_statistic_layout,
 )
-from pysp.stats.latent.hidden_markov_ind_pi import SemiSupervisedHiddenMarkovModelDistribution
+from pysp.stats.latent.semi_supervised_hidden_markov_model import SemiSupervisedHiddenMarkovModelDistribution
 
 
 def _assert_suff_close(test_case, actual, expected):

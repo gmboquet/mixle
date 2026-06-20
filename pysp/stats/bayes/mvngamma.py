@@ -10,7 +10,7 @@ Data type: (Tuple[np.ndarray, np.ndarray]): A pair (mu, tau) of length-d
     log-densities.
 
 This is the conjugate prior used by the diagonal
-:class:`~pysp.stats.multivariate.dmvn.DiagonalGaussianDistribution` (see its ``prior=``
+:class:`~pysp.stats.multivariate.diagonal_gaussian.DiagonalGaussianDistribution` (see its ``prior=``
 argument) and the vectorized counterpart of NormalGamma. It is a parameter
 prior: it is scored on ``(mu, tau)`` parameter pairs, not fit from data by EM.
 """

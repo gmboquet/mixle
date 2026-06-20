@@ -15,8 +15,8 @@ import unittest
 import numpy as np
 
 from pysp.stats.compute.pdist import EnumerationError
-from pysp.stats.sets.setdist import BernoulliSetDistribution, BernoulliSetEnumerator
-from pysp.stats.sets.int_edit_stepsetdist import IntegerStepBernoulliEditEstimator
+from pysp.stats.sets.bernoulli_set import BernoulliSetDistribution, BernoulliSetEnumerator
+from pysp.stats.sets.integer_step_bernoulli_edit import IntegerStepBernoulliEditEstimator
 
 TOL = 1e-9
 
@@ -258,7 +258,7 @@ class SetDistImportSmokeTestCase(unittest.TestCase):
     """Import smoke test for the five set/association modules and their five-part protocol classes."""
 
     MODULES = {
-        "pysp.stats.sets.setdist": [
+        "pysp.stats.sets.bernoulli_set": [
             "BernoulliSetDistribution",
             "BernoulliSetSampler",
             "BernoulliSetEstimator",
@@ -267,7 +267,7 @@ class SetDistImportSmokeTestCase(unittest.TestCase):
             "BernoulliSetDataEncoder",
             "BernoulliSetEnumerator",
         ],
-        "pysp.stats.sets.int_edit_setdist": [
+        "pysp.stats.sets.integer_bernoulli_edit": [
             "IntegerBernoulliEditDistribution",
             "IntegerBernoulliEditSampler",
             "IntegerBernoulliEditEstimator",
@@ -275,7 +275,7 @@ class SetDistImportSmokeTestCase(unittest.TestCase):
             "IntegerBernoulliEditAccumulatorFactory",
             "IntegerBernoulliEditDataEncoder",
         ],
-        "pysp.stats.sets.int_edit_stepsetdist": [
+        "pysp.stats.sets.integer_step_bernoulli_edit": [
             "IntegerStepBernoulliEditDistribution",
             "IntegerStepBernoulliEditSampler",
             "IntegerStepBernoulliEditEstimator",
@@ -291,7 +291,7 @@ class SetDistImportSmokeTestCase(unittest.TestCase):
             "HiddenAssociationAccumulatorFactory",
             "HiddenAssociationDataEncoder",
         ],
-        "pysp.stats.latent.int_hidden_association": [
+        "pysp.stats.latent.integer_hidden_association": [
             "IntegerHiddenAssociationDistribution",
             "IntegerHiddenAssociationSampler",
             "IntegerHiddenAssociationEstimator",

@@ -107,7 +107,7 @@ class WeightsAliasTestCase(unittest.TestCase):
     def test_mixture_family_weights(self):
         from pysp.stats.latent.heterogeneous_mixture import HeterogeneousMixtureDistribution
         from pysp.stats.latent.mixture import MixtureDistribution
-        from pysp.stats.latent.ss_mixture import SemiSupervisedMixtureDistribution
+        from pysp.stats.latent.semi_supervised_mixture import SemiSupervisedMixtureDistribution
 
         for cls in (MixtureDistribution, HeterogeneousMixtureDistribution, SemiSupervisedMixtureDistribution):
             comps = self._components()
@@ -120,7 +120,7 @@ class WeightsAliasTestCase(unittest.TestCase):
                 cls(comps)
 
     def test_gaussian_mixture_weights(self):
-        from pysp.stats.latent.mvnmixture import GaussianMixtureDistribution
+        from pysp.stats.latent.gaussian_mixture import GaussianMixtureDistribution
 
         mu = [[0.0, 0.0], [3.0, 3.0]]
         sig2 = [[1.0, 1.0], [1.0, 1.0]]
@@ -146,7 +146,7 @@ class WeightsAliasTestCase(unittest.TestCase):
 class ProbMapVecCovarAliasTestCase(unittest.TestCase):
     def test_prob_map(self):
         from pysp.stats.leaf.categorical import CategoricalDistribution
-        from pysp.stats.sets.setdist import BernoulliSetDistribution
+        from pysp.stats.sets.bernoulli_set import BernoulliSetDistribution
 
         self.assertEqual(
             CategoricalDistribution(prob_map={"a": 0.6, "b": 0.4}).pmap,
@@ -157,8 +157,8 @@ class ProbMapVecCovarAliasTestCase(unittest.TestCase):
             CategoricalDistribution({"a": 1.0}, prob_map={"a": 1.0})
 
     def test_prob_vec(self):
-        from pysp.stats.leaf.int_multinomial import IntegerMultinomialDistribution
-        from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
+        from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
+        from pysp.stats.leaf.integer_multinomial import IntegerMultinomialDistribution
 
         self.assertTrue(
             np.allclose(
@@ -174,8 +174,8 @@ class ProbMapVecCovarAliasTestCase(unittest.TestCase):
         )
 
     def test_covariance(self):
-        from pysp.stats.multivariate.dmvn import DiagonalGaussianDistribution
-        from pysp.stats.multivariate.mvn import MultivariateGaussianDistribution
+        from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
+        from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
 
         cov = [[2.0, 0.0], [0.0, 3.0]]
         self.assertTrue(
@@ -198,9 +198,9 @@ class NumValuesMaxIterAliasTestCase(unittest.TestCase):
     def test_num_values(self):
         from pysp.stats.graph.markov_transform import MarkovTransformEstimator
         from pysp.stats.graph.sparse_markov_transform import SparseMarkovAssociationEstimator
-        from pysp.stats.sets.int_edit_setdist import IntegerBernoulliEditEstimator
-        from pysp.stats.sets.int_edit_stepsetdist import IntegerStepBernoulliEditEstimator
-        from pysp.stats.sets.int_setdist import IntegerBernoulliSetEstimator
+        from pysp.stats.sets.integer_bernoulli_edit import IntegerBernoulliEditEstimator
+        from pysp.stats.sets.integer_bernoulli_set import IntegerBernoulliSetEstimator
+        from pysp.stats.sets.integer_step_bernoulli_edit import IntegerStepBernoulliEditEstimator
 
         for cls in (
             MarkovTransformEstimator,

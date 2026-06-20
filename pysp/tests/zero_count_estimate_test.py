@@ -11,7 +11,7 @@ import numpy as np
 
 from pysp.stats.leaf.gamma import GammaEstimator
 from pysp.stats.leaf.geometric import GeometricEstimator
-from pysp.stats.leaf.int_multinomial import IntegerMultinomialEstimator
+from pysp.stats.leaf.integer_multinomial import IntegerMultinomialEstimator
 from pysp.stats.leaf.poisson import PoissonEstimator
 
 

@@ -14,7 +14,7 @@ from pysp.stats.latent.mixture import MixtureDistribution
 from pysp.stats.leaf.bernoulli import BernoulliDistribution
 from pysp.stats.leaf.binomial import BinomialDistribution
 from pysp.stats.leaf.categorical import CategoricalDistribution
-from pysp.stats.leaf.int_range import IntegerCategoricalDistribution
+from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
 from pysp.stats.leaf.point_mass import PointMassDistribution
 from pysp.stats.leaf.poisson import PoissonDistribution
 from pysp.utils.density_rank import truncated_sum_bound

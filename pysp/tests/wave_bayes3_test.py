@@ -38,7 +38,7 @@ from pysp.stats.leaf.poisson import (
     PoissonDistribution,
     PoissonEstimator,
 )
-from pysp.stats.sets.setdist import (
+from pysp.stats.sets.bernoulli_set import (
     BernoulliSetAccumulator,
     BernoulliSetAccumulatorFactory,
     BernoulliSetEstimator,

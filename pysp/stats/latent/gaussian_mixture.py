@@ -33,7 +33,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.multivariate.mvn import (
+from pysp.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDataEncoder,
     MultivariateGaussianDistribution,
 )
