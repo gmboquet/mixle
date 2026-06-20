@@ -57,7 +57,7 @@ class GrammarRule:
         )
 
 
-class VRG:
+class VertexReplacementGrammar:
     """Small in-tree node-replacement grammar container."""
 
     __pysp_serializable__ = True
@@ -102,7 +102,7 @@ class VRG:
         self.num_rules = state.get("num_rules", self.num_rules)
 
     def __str__(self) -> str:
-        return "VRG(name=%s, num_rules=%s)" % (repr(self.name), self.num_rules)
+        return "VertexReplacementGrammar(name=%s, num_rules=%s)" % (repr(self.name), self.num_rules)
 
 
 def _copy_rule(rule):
@@ -203,13 +203,13 @@ def get_degree_dist(rule_list):
 
 
 class GrammarDistribution(SequenceEncodableProbabilityDistribution):
-    """GrammarDistribution object for evaluating the likelihood of node-replacement grammars (VRG objects)."""
+    """GrammarDistribution object for evaluating the likelihood of node-replacement grammars (VertexReplacementGrammar objects)."""
 
     def __init__(self, grammar, mix_p, decomp_level=0, lhs_delta=0, name=None, orig_n=100):
         """GrammarDistribution object defined by a model grammar and mixing parameters.
 
         Args:
-            grammar: VRG object serving as the model grammar.
+            grammar: VertexReplacementGrammar object serving as the model grammar.
             mix_p (float): Weight in [0, 1] on the degree-distribution background model.
             decomp_level (int): Maximum recursion depth for decomposing unmatched rules.
             lhs_delta (int): Allowed slack when matching rule left-hand sides.
@@ -217,7 +217,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
             orig_n (int): Target number of nodes used when sampling graphs.
 
         Attributes:
-            grammar: VRG object serving as the model grammar.
+            grammar: VertexReplacementGrammar object serving as the model grammar.
             mix_p (float): Weight in [0, 1] on the degree-distribution background model.
             decomp_level (int): Maximum recursion depth for decomposing unmatched rules.
             lhs_delta (int): Allowed slack when matching rule left-hand sides.
@@ -254,7 +254,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         See log_density() for details.
 
         Args:
-            x: Observed VRG object.
+            x: Observed VertexReplacementGrammar object.
 
         Returns:
             Density at observation x.
@@ -271,7 +271,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         to decomp_level times. The per-rule probabilities are averaged and logged.
 
         Args:
-            x: Observed VRG object.
+            x: Observed VertexReplacementGrammar object.
 
         Returns:
             Log-density at observation x.
@@ -346,7 +346,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         """Encode a sequence of grammar observations for vectorized calls (identity encoding).
 
         Args:
-            x: Sequence of VRG objects.
+            x: Sequence of VertexReplacementGrammar objects.
 
         Returns:
             The input sequence unchanged.
@@ -358,7 +358,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         """Evaluate log_density() at each encoded observation.
 
         Args:
-            x: Sequence of VRG objects (from seq_encode).
+            x: Sequence of VertexReplacementGrammar objects (from seq_encode).
 
         Returns:
             Numpy array of log-densities, one per observation.
@@ -402,12 +402,12 @@ class GrammarSampler(DistributionSampler):
         """GrammarSampler object.
 
         Args:
-            grammar: VRG object to generate graphs from.
+            grammar: VertexReplacementGrammar object to generate graphs from.
             orig_n (int): Default target number of nodes for generated graphs.
             seed (Optional[int]): Seed for the local random generator.
 
         Attributes:
-            grammar: VRG object to generate graphs from.
+            grammar: VertexReplacementGrammar object to generate graphs from.
             orig_n (int): Default target number of nodes for generated graphs.
 
         """
@@ -450,12 +450,12 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """GrammarEstimatorAccumulator object.
 
         Attributes:
-            grammar: VRG object accumulating frequency-weighted rules from observations.
+            grammar: VertexReplacementGrammar object accumulating frequency-weighted rules from observations.
 
         """
         #             self.rule_list = []
         #             self.rule_dict = {}
-        self.grammar = VRG("mu_level_dl", "leiden", "", 4)
+        self.grammar = VertexReplacementGrammar("mu_level_dl", "leiden", "", 4)
 
     def update(self, grammar, weight, estimate):
         """Merge an observed grammar into the accumulated grammar with the given weight.
@@ -470,7 +470,7 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (Optional[GrammarDistribution]): Previous estimate (unused).
 
         Returns:
-            The accumulated VRG object.
+            The accumulated VertexReplacementGrammar object.
 
         """
         #   change to check for node color as well
@@ -510,7 +510,7 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize the accumulator with a single weighted observation.
 
         Args:
-            x: Observed VRG object.
+            x: Observed VertexReplacementGrammar object.
             weight (float): Weight of the observation.
             rng: RandomState (unused).
 
@@ -524,7 +524,7 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize the accumulator with a sequence of weighted observations.
 
         Args:
-            x: Sequence of VRG objects (from seq_encode).
+            x: Sequence of VertexReplacementGrammar objects (from seq_encode).
             weights: Sequence of observation weights.
             rng: RandomState (unused).
 
@@ -539,7 +539,7 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """Merge a sequence of weighted observed grammars into the accumulated grammar.
 
         Args:
-            x: Sequence of VRG objects (from seq_encode).
+            x: Sequence of VertexReplacementGrammar objects (from seq_encode).
             weights: Sequence of observation weights.
             estimate (Optional[GrammarDistribution]): Previous estimate (unused).
 
@@ -554,10 +554,10 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.update(grammar, weight, estimate)
 
     def combine(self, suff_stat):
-        """Merge the sufficient statistic of another accumulator (a VRG object) into this one.
+        """Merge the sufficient statistic of another accumulator (a VertexReplacementGrammar object) into this one.
 
         Args:
-            suff_stat: VRG object from another accumulator's value().
+            suff_stat: VertexReplacementGrammar object from another accumulator's value().
 
         Returns:
             This GrammarEstimatorAccumulator object.
@@ -567,14 +567,14 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self):
-        """Returns the accumulated VRG object sufficient statistic."""
+        """Returns the accumulated VertexReplacementGrammar object sufficient statistic."""
         return self.grammar
 
     def from_value(self, x):
-        """Set the accumulated sufficient statistic from a VRG object.
+        """Set the accumulated sufficient statistic from a VertexReplacementGrammar object.
 
         Args:
-            x: VRG object.
+            x: VertexReplacementGrammar object.
 
         Returns:
             This GrammarEstimatorAccumulator object.
@@ -616,7 +616,7 @@ class GrammarEstimator(ParameterEstimator):
 
     #       self.levels = levels
 
-    #                self.grammar = VRG('mu_level_dl','leiden','',4)
+    #                self.grammar = VertexReplacementGrammar('mu_level_dl','leiden','',4)
 
     def accumulator_factory(self):
         """Returns a GrammarAccumulatorFactory object."""
@@ -669,7 +669,7 @@ class GrammarDataEncoder(DataSequenceEncoder):
         """Encode a sequence of grammar observations for vectorized calls (identity encoding).
 
         Args:
-            x: Sequence of VRG objects.
+            x: Sequence of VertexReplacementGrammar objects.
 
         Returns:
             The input sequence unchanged.
@@ -680,3 +680,7 @@ class GrammarDataEncoder(DataSequenceEncoder):
 
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 GrammarAccumulator = GrammarEstimatorAccumulator
+
+
+# Backward-compatible alias for the former VRG (vertex replacement grammar) name.
+VRG = VertexReplacementGrammar

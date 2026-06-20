@@ -110,19 +110,19 @@ class DistributionSerializationTestCase(unittest.TestCase):
         self.assertEqual(sparse_loaded.cond_prob_mat.getformat(), "csr")
 
     def test_grammar_distribution_json_round_trip(self):
-        from pysp.stats.graph.grammar import VRG, GrammarDistribution, GrammarRule
+        from pysp.stats.graph.grammar import GrammarDistribution, GrammarRule, VertexReplacementGrammar
 
         graph = nx.Graph()
         graph.add_node(0, label="A", node_color="")
         graph.add_node(1, label="B", node_color="")
         graph.add_edge(0, 1, weight=1.0, edge_color="")
-        grammar = VRG(name="json")
+        grammar = VertexReplacementGrammar(name="json")
         grammar.add_rule(GrammarRule(2, graph, frequency=3.0))
 
         dist = GrammarDistribution(grammar, 0.01, orig_n=4)
         loaded = GrammarDistribution.from_json(dist.to_json())
 
-        self.assertIsInstance(loaded.grammar, VRG)
+        self.assertIsInstance(loaded.grammar, VertexReplacementGrammar)
         self.assertEqual(loaded.grammar.name, "json")
         self.assertEqual(len(loaded.grammar.rule_list), 1)
         self.assertAlmostEqual(loaded.log_density(grammar), dist.log_density(grammar), places=12)
