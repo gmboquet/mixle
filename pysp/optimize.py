@@ -11,14 +11,15 @@ The pysp idiom for enumeration: you *specify* a problem (its data + objective), 
 
 Each item is a :class:`Solution` namedtuple ``(value, objective)`` -- it reads as ``sol.value`` /
 ``sol.objective`` and still unpacks as ``value, objective = sol``. ``value`` is the solution itself
-(an assignment, an edit script, a state sequence, a feature subset, ...) and ``objective`` is its
+(an assignment, a nearby string, a state sequence, a feature subset, ...) and ``objective`` is its
 cost (minimized) or score (maximized); ``sense`` records which.
 
-Assignment, spanning tree, weighted edit distance, k-best Viterbi, shortest path, and best-subset
+Assignment, spanning tree, the edit-distance ball, k-best Viterbi, shortest path, and best-subset
 regression are all specified and consumed the same way, each delegating to whatever engine fits
-(Murty for assignment, Gabow for spanning trees, A* / :func:`best_first_paths` for paths/edit/Viterbi,
-exhaustive ranking for best-subset). :func:`best_first_paths` is the shared low-level engine and
-:class:`ShortestPath` is its problem-object wrapper.
+(Murty for assignment, Gabow for spanning trees, A* / :func:`best_first_paths` for paths and Viterbi,
+Dijkstra / :func:`nearest_first` for the edit-distance ball, exhaustive ranking for best-subset).
+The two shared low-level engines are :func:`best_first_paths` (k-best *paths to a goal*) and
+:func:`nearest_first` (distinct *states outward* from a center -- an expanding metric ball).
 
     >>> from pysp.optimize import Assignment
     >>> sol = Assignment([[1, 9], [9, 1]]).solve()
@@ -49,6 +50,7 @@ __all__ = [
     "SpanningTree",
     "ViterbiPath",
     "best_first_paths",
+    "nearest_first",
 ]
 
 
@@ -125,6 +127,48 @@ def best_first_paths(
         for nxt, step in succ:
             g2 = g + step
             heapq.heappush(heap, (priority(g2, nxt), next(cnt), g2, nxt, path + (nxt,)))
+
+
+def nearest_first(
+    start: Any,
+    neighbors: Callable[[Any], Iterable[tuple[Any, float]]],
+    *,
+    key: Callable[[Any], Any] | None = None,
+    max_distance: float | None = None,
+    max_results: int | None = None,
+) -> Iterator[tuple[Any, float]]:
+    """Enumerate distinct states outward from ``start`` in increasing distance (Dijkstra).
+
+    The dual of :func:`best_first_paths`: instead of enumerating *paths to goal states*, this
+    enumerates the reachable *states themselves*, each once, nearest first -- an expanding metric
+    "ball" around ``start``. ``neighbors(state) -> iterable of (next_state, step_cost)`` with
+    non-negative steps; ``key(state)`` gives a hashable identity for de-duplication (default: the
+    state itself). The space may be infinite, so bound it with ``max_distance`` and/or ``max_results``
+    (or just consume the lazy iterator finitely).
+
+    Yields:
+        ``(state, distance)`` where ``distance`` is the shortest total cost from ``start``, in
+        nondecreasing order.
+    """
+    key = key or (lambda s: s)
+    cnt = itertools.count()
+    heap: list[tuple[float, int, Any]] = [(0.0, next(cnt), start)]
+    seen: set = set()
+    emitted = 0
+    while heap:
+        dist, _, state = heapq.heappop(heap)
+        sk = key(state)
+        if sk in seen:
+            continue
+        seen.add(sk)
+        yield state, dist
+        emitted += 1
+        if max_results is not None and emitted >= max_results:
+            return
+        for nxt, step in neighbors(state):
+            nd = dist + step
+            if (max_distance is None or nd <= max_distance) and key(nxt) not in seen:
+                heapq.heappush(heap, (nd, next(cnt), nxt))
 
 
 # ---------------------------------------------------------------------------
@@ -236,62 +280,66 @@ class SpanningTree(OptimizationProblem):
 # Non-uniform (weighted) edit distance / alignment
 # ---------------------------------------------------------------------------
 class EditDistance(OptimizationProblem):
-    """Non-uniform (weighted) edit distance: enumerate edit scripts in increasing total cost.
+    """Enumerate strings outward from a center by (non-uniform) edit distance -- an edit-distance ball.
 
-    Each operation carries its own (possibly symbol/position-dependent) cost, so this is the general
-    weighted edit distance / alignment. It reduces to a shortest path in the edit DAG over cursor
-    states ``(i, j)``: a diagonal step matches/substitutes, a vertical step deletes from ``source``,
-    a horizontal step inserts from ``target``. The solution value is a list of ``(kind, a, b)``
-    operations with ``kind`` in ``{"match", "sub", "del", "ins"}``; the best objective is the edit
-    distance.
+    You give a single center string and an alphabet, *not* two endpoints (the distance between two
+    fixed strings is just one number). The enumerator yields strings in increasing edit distance from
+    the center: the center itself at distance 0, then its 1-edit neighbours, then 2-edit, and so on --
+    a Dijkstra expansion over string space with per-operation costs (:func:`nearest_first`). The ball
+    is infinite (insertions grow strings without bound), so bound it with ``max_distance`` or by
+    taking ``top(k)`` / ``enumerator(k)``. Solution values are strings (or symbol tuples, matching the
+    center's type); the objective is the edit distance from the center.
+
+    Args:
+        center: The center string (or sequence of symbols).
+        alphabet: The symbols available for substitution and insertion.
+        sub_cost: ``(a, b) -> cost`` of substituting ``a`` with ``b`` (default unit; 0 if equal).
+        ins_cost: ``c -> cost`` of inserting symbol ``c`` (default 1).
+        del_cost: ``a -> cost`` of deleting symbol ``a`` (default 1).
+        max_distance: Only enumerate strings within this edit distance (``None`` = unbounded/lazy).
     """
 
     sense = "min"
 
     def __init__(
         self,
-        source: Iterable[Any],
-        target: Iterable[Any],
+        center: Iterable[Any],
+        alphabet: Iterable[Any],
         *,
         sub_cost: Callable[[Any, Any], float] | None = None,
         ins_cost: Callable[[Any], float] | None = None,
         del_cost: Callable[[Any], float] | None = None,
+        max_distance: float | None = None,
     ) -> None:
-        self.source = list(source)
-        self.target = list(target)
+        self._as_str = isinstance(center, str)
+        self.center = tuple(center)
+        self.alphabet = tuple(alphabet)
         self.sub_cost = sub_cost or (lambda a, b: 0.0 if a == b else 1.0)
         self.ins_cost = ins_cost or (lambda b: 1.0)
         self.del_cost = del_cost or (lambda a: 1.0)
+        self.max_distance = max_distance
+
+    def _neighbors(self, s: tuple) -> list[tuple[tuple, float]]:
+        out = []
+        n = len(s)
+        for i in range(n):  # substitutions
+            si = s[i]
+            for c in self.alphabet:
+                if c != si:
+                    out.append((s[:i] + (c,) + s[i + 1 :], self.sub_cost(si, c)))
+        for i in range(n):  # deletions
+            out.append((s[:i] + s[i + 1 :], self.del_cost(s[i])))
+        for i in range(n + 1):  # insertions
+            for c in self.alphabet:
+                out.append((s[:i] + (c,) + s[i:], self.ins_cost(c)))
+        return out
+
+    def _format(self, state: tuple):
+        return "".join(state) if self._as_str else state
 
     def enumerator(self, k: int | None = None) -> Iterator[Solution]:
-        ns, nt = len(self.source), len(self.target)
-
-        def successors(node):
-            i, j = node
-            out = []
-            if i < ns and j < nt:
-                out.append(((i + 1, j + 1), self.sub_cost(self.source[i], self.target[j])))
-            if i < ns:
-                out.append(((i + 1, j), self.del_cost(self.source[i])))
-            if j < nt:
-                out.append(((i, j + 1), self.ins_cost(self.target[j])))
-            return out
-
-        # the goal (ns, nt) is the unique sink, so the default sink-is-goal rule applies
-        for path, cost in best_first_paths((0, 0), successors, sense="min", max_results=k):
-            yield Solution(self._path_to_ops(path), float(cost))
-
-    def _path_to_ops(self, path):
-        ops = []
-        for (i0, j0), (i1, j1) in zip(path, path[1:]):
-            if i1 == i0 + 1 and j1 == j0 + 1:
-                a, b = self.source[i0], self.target[j0]
-                ops.append(("match" if a == b else "sub", a, b))
-            elif i1 == i0 + 1:
-                ops.append(("del", self.source[i0], None))
-            else:
-                ops.append(("ins", None, self.target[j0]))
-        return ops
+        for state, dist in nearest_first(self.center, self._neighbors, max_distance=self.max_distance, max_results=k):
+            yield Solution(self._format(state), float(dist))
 
 
 # ---------------------------------------------------------------------------
