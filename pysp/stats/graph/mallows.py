@@ -21,7 +21,6 @@ the central permutation by Copeland/Borda aggregation of the pairwise-precedence
 statistic) and fits theta by matching the mean Kendall distance to its closed-form expectation.
 """
 
-import itertools
 import math
 from collections.abc import Sequence
 from typing import Any
@@ -38,6 +37,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 _MAX_THETA = 700.0
 
@@ -193,23 +193,32 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class MallowsEnumerator(DistributionEnumerator):
-    """Enumerate all finite Mallows orderings in descending probability order."""
+    """Enumerate Mallows orderings in descending probability order, lazily.
+
+    Kendall distance is separable in the Lehmer code: an ordering's distance is the sum of digits
+    ``L_i in {0,...,n-1-i}`` (inversions contributed at each rank), each weighted ``-theta*L_i``. So the support
+    is a product over the digits and ``ProductEnumerator`` streams it in increasing distance (descending
+    probability) without materializing the n! permutations; each digit tuple decodes (factorial number system)
+    to a permutation of the identity, relabeled through the central permutation sigma0.
+    """
 
     def __init__(self, dist: MallowsDistribution) -> None:
         super().__init__(dist)
-        with np.errstate(divide="ignore"):
-            entries = [(list(p), float(dist.log_density(p))) for p in itertools.permutations(range(dist.dim))]
-        entries = [(v, lp) for v, lp in entries if lp > -np.inf]
-        entries.sort(key=lambda u: -u[1])
-        self._entries = entries
-        self._pos = 0
+        n = dist.dim
+        theta = dist.theta
+        sigma0 = dist.sigma0
+
+        def combine(digits: tuple[int, ...]) -> list[int]:
+            unused = list(range(n))
+            perm = [unused.pop(d) for d in digits]  # factorial-number-system decode -> permutation of identity
+            return [int(sigma0[v]) for v in perm]  # relabel through the central permutation
+
+        # digit i ranges over 0..n-1-i with log-weight -theta*L (descending weight == ascending L for theta>=0)
+        streams = [BufferedStream((d, -theta * d) for d in range(n - i)) for i in range(n)]
+        self._prod = ProductEnumerator(streams, combine=combine, offset=-dist.log_z)
 
     def __next__(self) -> tuple[list[int], float]:
-        if self._pos >= len(self._entries):
-            raise StopIteration
-        item = self._entries[self._pos]
-        self._pos += 1
-        return item
+        return self._prod.__next__()  # (permutation, log_density); StopIteration propagates
 
 
 class MallowsSampler(DistributionSampler):

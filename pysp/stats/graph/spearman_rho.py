@@ -32,6 +32,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.assignment import k_best_assignments
 
 
 @cache
@@ -299,29 +300,29 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class SpearmanRankingEnumerator(DistributionEnumerator):
-    """Enumerates all permutations in descending Spearman probability order."""
+    """Enumerate permutations in descending Spearman probability order, lazily.
+
+    The Spearman distance ``sum_i (x_i - sigma_i)^2`` is a linear assignment cost (assigning value j to
+    position i costs ``(j - sigma_i)^2``), so descending probability is increasing assignment cost: Murty's
+    k-best assignment streams the permutations in order without materializing the K! support.
+    """
 
     def __init__(self, dist: SpearmanRankingDistribution) -> None:
-        """SpearmanRankingEnumerator object.
-
-        Args:
-            dist (SpearmanRankingDistribution): Distribution whose finite permutation support is enumerated.
-
-        """
         super().__init__(dist)
-        with np.errstate(divide="ignore"):
-            entries = [(list(p), float(dist.log_density(p))) for p in itertools.permutations(range(dist.dim))]
-        entries = [(v, lp) for v, lp in entries if lp > -np.inf]
-        entries.sort(key=lambda u: -u[1])
-        self._entries = entries
-        self._pos = 0
+        n = dist.dim
+        sigma = np.asarray(dist.sigma, dtype=float)
+        # cost[i, j] = (j - sigma_i)^2; scaling by rho makes increasing cost == descending log-density for any
+        # sign of rho (log p = -rho * distance - log_const)
+        cost = dist.rho * (np.arange(n, dtype=float)[None, :] - sigma[:, None]) ** 2
+        self._gen = k_best_assignments(cost)
+        self._log_const = dist.log_const
 
     def __next__(self) -> tuple[list[int], float]:
-        if self._pos >= len(self._entries):
-            raise StopIteration
-        item = self._entries[self._pos]
-        self._pos += 1
-        return item
+        total, rows, cols = next(self._gen)  # StopIteration propagates at the end of the support
+        x = [0] * self.dist.dim
+        for r, c in zip(rows, cols):
+            x[int(r)] = int(c)
+        return x, float(-total - self._log_const)
 
 
 class SpearmanRankingSampler(DistributionSampler):
