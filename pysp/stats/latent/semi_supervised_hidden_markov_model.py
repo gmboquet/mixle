@@ -101,7 +101,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
     def density(self, x) -> float:
         return float(np.exp(self.log_density(x)))
 
-    def _emission_potential(self, emissions, prior) -> np.ndarray:
+    def _emission_potential(self, emissions, prior) -> tuple[np.ndarray, np.ndarray]:
         """Return the (T, S) emission likelihood times the state prior (probability space)."""
         n = len(emissions)
         b = np.empty((n, self.nStates))
