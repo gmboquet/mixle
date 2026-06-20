@@ -10,7 +10,7 @@ import numpy as np
 from pysp.utils.objectives import optimize_torch_objective
 
 
-class GaussianRegressionNN:
+class GaussianRegressionNeuralNetwork:
     """A Torch module trained with a Gaussian regression log likelihood.
 
     The wrapped module predicts the response mean and this helper learns a
@@ -21,7 +21,7 @@ class GaussianRegressionNN:
     def __init__(
         self, module: Any, noise: float = 1.0, engine: Any | None = None, precision: Any | None = None
     ) -> None:
-        torch, engine = _torch_engine(engine, precision=precision, owner="GaussianRegressionNN")
+        torch, engine = _torch_engine(engine, precision=precision, owner="GaussianRegressionNeuralNetwork")
         self.torch = torch
         self.engine = engine
         self.module = module.to(device=engine.device, dtype=engine.dtype)
@@ -100,7 +100,7 @@ class GaussianRegressionNN:
             return self.predict_tensor(x).detach().cpu().numpy()
 
 
-class CategoricalClassificationNN:
+class CategoricalClassificationNeuralNetwork:
     """A Torch classifier wrapper optimized by summed categorical log likelihood.
 
     The wrapped module must return one logits row per observation.  Fitting is
@@ -110,7 +110,7 @@ class CategoricalClassificationNN:
     """
 
     def __init__(self, module: Any, engine: Any | None = None, precision: Any | None = None) -> None:
-        torch, engine = _torch_engine(engine, precision=precision, owner="CategoricalClassificationNN")
+        torch, engine = _torch_engine(engine, precision=precision, owner="CategoricalClassificationNeuralNetwork")
         self.torch = torch
         self.engine = engine
         self.module = module.to(device=engine.device, dtype=engine.dtype)
@@ -191,7 +191,7 @@ class CategoricalClassificationNN:
         return np.argmax(self.predict_proba(x), axis=1)
 
 
-class PoissonRegressionNN:
+class PoissonRegressionNeuralNetwork:
     """A Torch count-regression wrapper optimized by Poisson log likelihood.
 
     The wrapped module predicts log rates.  Observed counts must be
@@ -200,7 +200,7 @@ class PoissonRegressionNN:
     """
 
     def __init__(self, module: Any, engine: Any | None = None, precision: Any | None = None) -> None:
-        torch, engine = _torch_engine(engine, precision=precision, owner="PoissonRegressionNN")
+        torch, engine = _torch_engine(engine, precision=precision, owner="PoissonRegressionNeuralNetwork")
         self.torch = torch
         self.engine = engine
         self.module = module.to(device=engine.device, dtype=engine.dtype)
@@ -303,7 +303,7 @@ def make_mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int = 1, ac
 
 
 def _torch_engine(
-    engine: Any | None, precision: Any | None = None, owner: str = "GaussianRegressionNN"
+    engine: Any | None, precision: Any | None = None, owner: str = "GaussianRegressionNeuralNetwork"
 ) -> tuple[Any, Any]:
     try:
         import torch
@@ -318,3 +318,9 @@ def _torch_engine(
 
         engine = engine_with_precision(engine, precision)
     return torch, engine
+
+
+# Backward-compatible aliases for the former NN (neural network) spellings.
+CategoricalClassificationNN = CategoricalClassificationNeuralNetwork
+GaussianRegressionNN = GaussianRegressionNeuralNetwork
+PoissonRegressionNN = PoissonRegressionNeuralNetwork
