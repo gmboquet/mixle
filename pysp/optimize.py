@@ -2,22 +2,28 @@
 
 The pysp idiom for enumeration: you *specify* a problem (its data + objective), then ask it for an
 ``enumerator()`` of solutions in best-first order -- the same shape as a distribution yielding a
-``sampler()`` / ``estimator()`` / ``enumerator()``. Every problem shares one surface:
+``sampler()`` / ``estimator()`` / ``enumerator()``. Every problem shares one surface::
 
-    problem.best()        -> the single optimal ``(solution, objective)`` (or ``None`` if infeasible)
-    problem.top(k)        -> the ``k`` best solutions as a list
-    problem.enumerator()  -> a lazy iterator over ``(solution, objective)``, best-first
-    for solution, objective in problem: ...
+    problem.solve()       -> the single optimal Solution (or None if infeasible)
+    problem.top(k)        -> the k best solutions as a list
+    problem.enumerator()  -> a lazy best-first iterator over solutions
+    for solution in problem: ...
 
-So assignment, spanning tree, weighted edit distance, k-best Viterbi, shortest path, and best-subset
-regression are all *specified and consumed the same way*, each delegating to whatever engine fits
+Each item is a :class:`Solution` namedtuple ``(value, objective)`` -- it reads as ``sol.value`` /
+``sol.objective`` and still unpacks as ``value, objective = sol``. ``value`` is the solution itself
+(an assignment, an edit script, a state sequence, a feature subset, ...) and ``objective`` is its
+cost (minimized) or score (maximized); ``sense`` records which.
+
+Assignment, spanning tree, weighted edit distance, k-best Viterbi, shortest path, and best-subset
+regression are all specified and consumed the same way, each delegating to whatever engine fits
 (Murty for assignment, Gabow for spanning trees, A* / :func:`best_first_paths` for paths/edit/Viterbi,
-exhaustive ranking for best-subset). ``sense`` records whether the objective is minimized
-(increasing cost out) or maximized (decreasing score out).
+exhaustive ranking for best-subset). :func:`best_first_paths` is the shared low-level engine and
+:class:`ShortestPath` is its problem-object wrapper.
 
-:func:`best_first_paths` is the shared low-level engine: lazy best-first / A* over an arbitrary state
-graph. :class:`ShortestPath` is its problem-object wrapper; the other problems reduce onto it or onto
-the dedicated k-best engines.
+    >>> from pysp.optimize import Assignment
+    >>> sol = Assignment([[1, 9], [9, 1]]).solve()
+    >>> sol.value, sol.objective          # the column assignment and its total cost
+    (array([0, 1]), 2.0)
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ import heapq
 import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -39,10 +45,18 @@ __all__ = [
     "EditDistance",
     "OptimizationProblem",
     "ShortestPath",
+    "Solution",
     "SpanningTree",
     "ViterbiPath",
     "best_first_paths",
 ]
+
+
+class Solution(NamedTuple):
+    """One enumerated solution: ``value`` (the solution itself) and ``objective`` (its cost/score)."""
+
+    value: Any
+    objective: float
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +65,7 @@ __all__ = [
 def best_first_paths(
     start: Any,
     successors: Callable[[Any], Iterable[tuple[Any, float]]],
-    is_goal: Callable[[Any], bool],
+    is_goal: Callable[[Any], bool] | None = None,
     *,
     sense: str = "min",
     heuristic: Callable[[Any], float] | None = None,
@@ -64,7 +78,9 @@ def best_first_paths(
         start: The initial state.
         successors: ``state -> iterable of (next_state, step)`` where ``step`` is the edge cost
             (``sense="min"``) or edge score (``sense="max"``).
-        is_goal: Predicate; when true for a popped state it is emitted (and not expanded further).
+        is_goal: Predicate; when true for a popped state it is emitted (and not expanded). ``None``
+            (the default) treats any *sink* -- a state with no successors -- as a goal, which covers
+            DAG/trellis/edit-graph searches without a separate goal test.
         sense: ``"min"`` to minimise total cost (increasing order out) or ``"max"`` to maximise total
             score (decreasing order out).
         heuristic: Optional admissible estimate of the *remaining* cost (a lower bound, ``min``) or
@@ -90,13 +106,23 @@ def best_first_paths(
     emitted = 0
     while heap:
         _, _, g, state, path = heapq.heappop(heap)
-        if is_goal(state):
-            yield (list(path) if return_paths else state, g)
-            emitted += 1
-            if max_results is not None and emitted >= max_results:
-                return
-            continue
-        for nxt, step in successors(state):
+        if is_goal is not None:
+            if is_goal(state):
+                yield (list(path) if return_paths else state, g)
+                emitted += 1
+                if max_results is not None and emitted >= max_results:
+                    return
+                continue
+            succ = successors(state)
+        else:  # sink == goal
+            succ = list(successors(state))
+            if not succ:
+                yield (list(path) if return_paths else state, g)
+                emitted += 1
+                if max_results is not None and emitted >= max_results:
+                    return
+                continue
+        for nxt, step in succ:
             g2 = g + step
             heapq.heappush(heap, (priority(g2, nxt), next(cnt), g2, nxt, path + (nxt,)))
 
@@ -107,26 +133,26 @@ def best_first_paths(
 class OptimizationProblem(ABC):
     """A combinatorial optimization problem whose solutions can be enumerated best-first.
 
-    Subclasses implement :meth:`enumerator`; :meth:`best`, :meth:`top` and iteration come for free.
-    ``sense`` is ``"min"`` (objective minimized, solutions out in increasing cost) or ``"max"``
-    (objective maximized, solutions out in decreasing score).
+    Subclasses implement :meth:`enumerator` (yielding :class:`Solution` items); :meth:`solve`,
+    :meth:`top` and iteration come for free. ``sense`` is ``"min"`` (objective minimized, solutions
+    out in increasing cost) or ``"max"`` (objective maximized, solutions out in decreasing score).
     """
 
     sense: str = "min"
 
     @abstractmethod
-    def enumerator(self, k: int | None = None) -> Iterator[tuple[Any, float]]:
-        """Lazily yield ``(solution, objective)`` best-first; at most ``k`` if given (``None`` = all)."""
+    def enumerator(self, k: int | None = None) -> Iterator[Solution]:
+        """Lazily yield :class:`Solution` items best-first; at most ``k`` if given (``None`` = all)."""
 
-    def best(self) -> tuple[Any, float] | None:
-        """The single optimal ``(solution, objective)``, or ``None`` if the problem is infeasible."""
+    def solve(self) -> Solution | None:
+        """The single optimal :class:`Solution`, or ``None`` if the problem is infeasible."""
         return next(self.enumerator(k=1), None)
 
-    def top(self, k: int) -> list[tuple[Any, float]]:
-        """The ``k`` best ``(solution, objective)`` pairs as a list."""
+    def top(self, k: int) -> list[Solution]:
+        """The ``k`` best solutions as a list."""
         return list(self.enumerator(k=k))
 
-    def __iter__(self) -> Iterator[tuple[Any, float]]:
+    def __iter__(self) -> Iterator[Solution]:
         return self.enumerator()
 
 
@@ -136,14 +162,17 @@ class OptimizationProblem(ABC):
 class ShortestPath(OptimizationProblem):
     """k-shortest-path / best-first search over an arbitrary state graph.
 
-    Specify the graph by callables; the solution is the list of states from ``start`` to a goal.
+    Specify the graph by ``start`` and ``successors``; the solution value is the list of states from
+    ``start`` to a goal. By default a *sink* (a state with no successors) is a goal, so a finite
+    DAG search needs no goal test; pass ``is_goal`` for infinite graphs or early goals. Use
+    ``sense="max"`` for highest-score paths and an admissible ``heuristic`` for A*.
     """
 
     def __init__(
         self,
         start: Any,
         successors: Callable[[Any], Iterable[tuple[Any, float]]],
-        is_goal: Callable[[Any], bool],
+        is_goal: Callable[[Any], bool] | None = None,
         *,
         sense: str = "min",
         heuristic: Callable[[Any], float] | None = None,
@@ -154,10 +183,11 @@ class ShortestPath(OptimizationProblem):
         self.sense = sense
         self.heuristic = heuristic
 
-    def enumerator(self, k: int | None = None) -> Iterator[tuple[Any, float]]:
-        return best_first_paths(
+    def enumerator(self, k: int | None = None) -> Iterator[Solution]:
+        for path, cost in best_first_paths(
             self.start, self.successors, self.is_goal, sense=self.sense, heuristic=self.heuristic, max_results=k
-        )
+        ):
+            yield Solution(path, float(cost))
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +196,7 @@ class ShortestPath(OptimizationProblem):
 class Assignment(OptimizationProblem):
     """Linear assignment / bipartite matching: match rows to columns at extremal total cost.
 
-    The solution is ``col_ind`` -- ``col_ind[i]`` is the column assigned to row ``i``.
+    The solution value is ``col_ind`` -- ``col_ind[i]`` is the column assigned to row ``i``.
     """
 
     def __init__(self, cost: np.ndarray, maximize: bool = False) -> None:
@@ -176,9 +206,9 @@ class Assignment(OptimizationProblem):
         self.maximize = bool(maximize)
         self.sense = "max" if maximize else "min"
 
-    def enumerator(self, k: int | None = None) -> Iterator[tuple[np.ndarray, float]]:
+    def enumerator(self, k: int | None = None) -> Iterator[Solution]:
         for total, _rows, cols in k_best_assignments(self.cost, k=k, maximize=self.maximize):
-            yield cols, float(total)
+            yield Solution(cols, float(total))
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +217,7 @@ class Assignment(OptimizationProblem):
 class SpanningTree(OptimizationProblem):
     """Spanning trees of a weighted undirected graph, enumerated in increasing total edge weight.
 
-    The solution is the list of ``(i, j)`` edges. Non-finite weights are forbidden edges.
+    The solution value is the list of ``(i, j)`` edges. Non-finite weights are forbidden edges.
     """
 
     sense = "min"
@@ -197,9 +227,9 @@ class SpanningTree(OptimizationProblem):
         if self.weights.ndim != 2 or self.weights.shape[0] != self.weights.shape[1]:
             raise ValueError("weights must be a square matrix")
 
-    def enumerator(self, k: int | None = None) -> Iterator[tuple[list[tuple[int, int]], float]]:
+    def enumerator(self, k: int | None = None) -> Iterator[Solution]:
         for total, edges in k_best_spanning_trees(self.weights, k=k):
-            yield edges, float(total)
+            yield Solution(edges, float(total))
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +241,9 @@ class EditDistance(OptimizationProblem):
     Each operation carries its own (possibly symbol/position-dependent) cost, so this is the general
     weighted edit distance / alignment. It reduces to a shortest path in the edit DAG over cursor
     states ``(i, j)``: a diagonal step matches/substitutes, a vertical step deletes from ``source``,
-    a horizontal step inserts from ``target``. The solution is a list of ``(kind, a, b)`` operations
-    with ``kind`` in ``{"match", "sub", "del", "ins"}``; the best objective is the edit distance.
+    a horizontal step inserts from ``target``. The solution value is a list of ``(kind, a, b)``
+    operations with ``kind`` in ``{"match", "sub", "del", "ins"}``; the best objective is the edit
+    distance.
     """
 
     sense = "min"
@@ -232,9 +263,8 @@ class EditDistance(OptimizationProblem):
         self.ins_cost = ins_cost or (lambda b: 1.0)
         self.del_cost = del_cost or (lambda a: 1.0)
 
-    def enumerator(self, k: int | None = None) -> Iterator[tuple[list[tuple[str, Any, Any]], float]]:
+    def enumerator(self, k: int | None = None) -> Iterator[Solution]:
         ns, nt = len(self.source), len(self.target)
-        goal = (ns, nt)
 
         def successors(node):
             i, j = node
@@ -247,8 +277,9 @@ class EditDistance(OptimizationProblem):
                 out.append(((i, j + 1), self.ins_cost(self.target[j])))
             return out
 
-        for path, cost in best_first_paths((0, 0), successors, lambda n: n == goal, sense="min", max_results=k):
-            yield self._path_to_ops(path), cost
+        # the goal (ns, nt) is the unique sink, so the default sink-is-goal rule applies
+        for path, cost in best_first_paths((0, 0), successors, sense="min", max_results=k):
+            yield Solution(self._path_to_ops(path), float(cost))
 
     def _path_to_ops(self, path):
         ops = []
@@ -270,8 +301,8 @@ class ViterbiPath(OptimizationProblem):
     """k most-likely hidden-state sequences of an HMM, enumerated in decreasing joint log-probability.
 
     Standard Viterbi returns only the single best path; this reduces the trellis (nodes ``(t, s)``)
-    to a longest-log-prob path and yields the top ``k``. The solution is a length-``T`` list of state
-    indices.
+    to a longest-log-prob path and yields the top ``k``. The solution value is a length-``T`` list of
+    state indices.
 
     Args:
         log_init: ``log p(state s at t=0)``, length ``S``.
@@ -288,7 +319,7 @@ class ViterbiPath(OptimizationProblem):
         self.n_states = self.log_init.shape[0]
         self.n_steps = len(self.log_obs)
 
-    def enumerator(self, k: int | None = None) -> Iterator[tuple[list[int], float]]:
+    def enumerator(self, k: int | None = None) -> Iterator[Solution]:
         if self.n_steps == 0:
             return
         t_last, s = self.n_steps - 1, self.n_states
@@ -299,11 +330,11 @@ class ViterbiPath(OptimizationProblem):
             if t == -1:
                 return [((0, sp), float(log_init[sp]) + float(log_obs[0][sp])) for sp in range(s)]
             if t >= t_last:
-                return []
+                return []  # states at the final step are sinks -> goals
             return [((t + 1, sp), float(log_trans[state][sp]) + float(log_obs[t + 1][sp])) for sp in range(s)]
 
-        for path, score in best_first_paths((-1, -1), successors, lambda n: n[0] == t_last, sense="max", max_results=k):
-            yield [st for (_t, st) in path[1:]], score
+        for path, score in best_first_paths((-1, -1), successors, sense="max", max_results=k):
+            yield Solution([st for (_t, st) in path[1:]], float(score))
 
 
 # ---------------------------------------------------------------------------
@@ -312,10 +343,10 @@ class ViterbiPath(OptimizationProblem):
 class BestSubsetRegression(OptimizationProblem):
     """Best-subset feature selection for least squares, enumerated in increasing selection criterion.
 
-    Solutions are feature-index tuples ranked by ``criterion``: residual sum of squares (``"rss"``),
-    Akaike (``"aic"``) or Bayesian (``"bic"``) information criterion (Gaussian form). Best-subset
-    selection is inherently exponential, so this scores subsets exhaustively up to ``max_size``
-    features -- cap ``max_size`` (and/or the number of features) for large ``p``.
+    Solution values are feature-index tuples ranked by ``criterion``: residual sum of squares
+    (``"rss"``), Akaike (``"aic"``) or Bayesian (``"bic"``) information criterion (Gaussian form).
+    Best-subset selection is inherently exponential, so this scores subsets exhaustively up to
+    ``max_size`` features -- cap ``max_size`` (and/or the number of features) for large ``p``.
 
     Args:
         X: Design matrix, shape ``(n, p)``.
@@ -365,11 +396,11 @@ class BestSubsetRegression(OptimizationProblem):
         penalty = 2.0 * k if self.criterion == "aic" else np.log(self.n) * k
         return float(ll_term + penalty)
 
-    def enumerator(self, k: int | None = None) -> Iterator[tuple[tuple[int, ...], float]]:
+    def enumerator(self, k: int | None = None) -> Iterator[Solution]:
         scored = []
         for size in range(0, self.max_size + 1):
             for subset in itertools.combinations(range(self.p), size):
                 scored.append((self._score(subset), subset))
         scored.sort(key=lambda t: t[0])
         for score, subset in scored if k is None else scored[:k]:
-            yield subset, score
+            yield Solution(subset, float(score))
