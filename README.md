@@ -1,5 +1,5 @@
 <p align="left">
-  <img src="pysparkplug_logo.png" alt="pysparkplug" width="120"/>
+  <img src="https://raw.githubusercontent.com/gmboquet/pysparkplug/main/pysparkplug_logo.png" alt="pysparkplug" width="120"/>
 </p>
 
 # pysparkplug
@@ -222,7 +222,7 @@ competing PPLs):
 
 For conjugate / exponential-family / mixture models pysp returns the *exact* posterior with no
 sampling; for general posteriors the ensemble sampler leads on ESS/sec. See
-[`pysp/ppl/BENCHMARKS.md`](pysp/ppl/BENCHMARKS.md).
+[`pysp/ppl/BENCHMARKS.md`](https://github.com/gmboquet/pysparkplug/blob/main/pysp/ppl/BENCHMARKS.md).
 
 ## Frequentist & Bayesian — one switch
 
@@ -382,7 +382,7 @@ density quantile, stochastic representatives otherwise.
 Worked tutorials live in the companion
 [**pysparkplug-notebooks**](https://github.com/gmboquet/pysparkplug-notebooks) repo.
 
-Runnable scripts ship in [examples/](examples/) — `examples_pysp/` (core), `examples_bayes/`
+Runnable scripts ship in [examples/](https://github.com/gmboquet/pysparkplug/tree/main/examples) — `examples_pysp/` (core), `examples_bayes/`
 (Bayesian), `examples_spark/`, `examples_mp/`, and `examples_mpi/`:
 
 ```sh
@@ -415,11 +415,11 @@ python -m pytest -m "not optional and not benchmark"    # full local suite
 ```
 
 Tests use `unittest.TestCase` internally with pytest markers / CI tiers (see
-[`pysp/tests/README.md`](pysp/tests/README.md)). `base_dist_test.py` checks each distribution
+[`pysp/tests/README.md`](https://github.com/gmboquet/pysparkplug/blob/main/pysp/tests/README.md)). `base_dist_test.py` checks each distribution
 end-to-end: sampler repeatability, `str`/`eval` round-trips, vectorized-vs-scalar densities, and
 EM convergence.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Originally developed at Lawrence Livermore
+MIT — see [LICENSE](https://github.com/gmboquet/pysparkplug/blob/main/LICENSE) and [NOTICE](https://github.com/gmboquet/pysparkplug/blob/main/NOTICE). Originally developed at Lawrence Livermore
 National Laboratory (LLNL-CODE-844837).
