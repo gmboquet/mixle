@@ -49,7 +49,7 @@ from pysp.stats import (
     IntegerHiddenAssociationDistribution,
     IntegerMarkovChainDistribution,
     IntegerMultinomialDistribution,
-    IntegerPLSIDistribution,
+    IntegerProbabilisticLatentSemanticIndexingDistribution,
     IntegerStepBernoulliEditDistribution,
     IntegerStepBernoulliEditEstimator,
     IntegerUniformSpikeDistribution,
@@ -367,7 +367,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
         self.assertEqual(capabilities_for(int_markov).engine_ready, ("numpy", "torch"))
         self.assertEqual(capabilities_for(int_markov).kernel_status, "generic_table")
 
-        plsi = IntegerPLSIDistribution(
+        plsi = IntegerProbabilisticLatentSemanticIndexingDistribution(
             [[0.70, 0.10], [0.20, 0.30], [0.10, 0.60]],
             [[0.80, 0.20], [0.25, 0.75]],
             [0.55, 0.45],
@@ -972,7 +972,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
         self.assertFalse(dirac_decl.differentiable)
 
     def test_document_association_declarations_describe_payloads_and_children(self):
-        plsi = IntegerPLSIDistribution(
+        plsi = IntegerProbabilisticLatentSemanticIndexingDistribution(
             [[0.70, 0.20], [0.20, 0.50], [0.10, 0.30]],
             [[0.65, 0.35], [0.25, 0.75]],
             [0.40, 0.60],
@@ -1382,7 +1382,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
                 [[], [0], [0, 1, 2], [2, 2, 1]],
             ),
             (
-                IntegerPLSIDistribution(
+                IntegerProbabilisticLatentSemanticIndexingDistribution(
                     [[0.70, 0.10], [0.20, 0.30], [0.10, 0.60]],
                     [[0.80, 0.20], [0.25, 0.75]],
                     [0.55, 0.45],
@@ -1683,7 +1683,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
                 [([0], [0, 1]), ([1, 2], [2]), ([], [0, 2]), ([0, 2], [])],
             ),
             (
-                IntegerPLSIDistribution(
+                IntegerProbabilisticLatentSemanticIndexingDistribution(
                     [[0.70, 0.10], [0.20, 0.30], [0.10, 0.60]],
                     [[0.80, 0.20], [0.25, 0.75]],
                     [0.55, 0.45],

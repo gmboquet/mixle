@@ -314,10 +314,10 @@ __all__ = [
     "IntegerMarkovChainEstimator",
     "IntegerMarkovChainDataEncoder",
     "IntegerMarkovChainEnumerator",
-    "IntegerPLSIDistribution",
-    "IntegerPLSISampler",
-    "IntegerPLSIEstimator",
-    "IntegerPLSIDataEncoder",
+    "IntegerProbabilisticLatentSemanticIndexingDistribution",
+    "IntegerProbabilisticLatentSemanticIndexingSampler",
+    "IntegerProbabilisticLatentSemanticIndexingEstimator",
+    "IntegerProbabilisticLatentSemanticIndexingDataEncoder",
     "IntegerUniformSpikeDistribution",
     "IntegerUniformSpikeEstimator",
     "IntegerUniformSpikeSampler",
@@ -751,12 +751,14 @@ from pysp.stats.graph.erdos_renyi_graph import (
     ErdosRenyiGraphEstimator,
     ErdosRenyiGraphSampler,
 )
+
+# Backward-compatible ICLTree* aliases (redundant import alias marks an intentional re-export).
+from pysp.stats.graph.icltree import ICLTreeDataEncoder as ICLTreeDataEncoder  # noqa: F401
+from pysp.stats.graph.icltree import ICLTreeDistribution as ICLTreeDistribution  # noqa: F401
+from pysp.stats.graph.icltree import ICLTreeEnumerator as ICLTreeEnumerator  # noqa: F401
+from pysp.stats.graph.icltree import ICLTreeEstimator as ICLTreeEstimator  # noqa: F401
+from pysp.stats.graph.icltree import ICLTreeSampler as ICLTreeSampler  # noqa: F401
 from pysp.stats.graph.icltree import (
-    ICLTreeDataEncoder,
-    ICLTreeDistribution,
-    ICLTreeEnumerator,
-    ICLTreeEstimator,
-    ICLTreeSampler,
     IntegerChowLiuTreeDataEncoder,
     IntegerChowLiuTreeDistribution,
     IntegerChowLiuTreeEnumerator,
@@ -1296,6 +1298,11 @@ _LAZY_NAMES: dict[str, str] = {
     "TreeHiddenMarkovModelSampler": "pysp.stats.latent.tree_hmm",
     "TreeHiddenMarkovSampler": "pysp.stats.latent.tree_hmm",
     # int_plsi
+    "IntegerProbabilisticLatentSemanticIndexingDataEncoder": "pysp.stats.latent.int_plsi",
+    "IntegerProbabilisticLatentSemanticIndexingDistribution": "pysp.stats.latent.int_plsi",
+    "IntegerProbabilisticLatentSemanticIndexingEstimator": "pysp.stats.latent.int_plsi",
+    "IntegerProbabilisticLatentSemanticIndexingSampler": "pysp.stats.latent.int_plsi",
+    # int_plsi backward-compatible aliases (former IntegerPLSI* names)
     "IntegerPLSIDataEncoder": "pysp.stats.latent.int_plsi",
     "IntegerPLSIDistribution": "pysp.stats.latent.int_plsi",
     "IntegerPLSIEstimator": "pysp.stats.latent.int_plsi",
@@ -1320,7 +1327,7 @@ _LAZY_MODULE_CAP_NAMES: dict[str, tuple[str, ...]] = {
     "pysp.stats.latent.quantized_hmm": ("QuantizedHiddenMarkovModelDistribution",),
     "pysp.stats.latent.tree_hmm": ("TreeHiddenMarkovModelDistribution",),
     "pysp.stats.latent.int_hidden_association": ("IntegerHiddenAssociationDistribution",),
-    "pysp.stats.latent.int_plsi": ("IntegerPLSIDistribution",),
+    "pysp.stats.latent.int_plsi": ("IntegerProbabilisticLatentSemanticIndexingDistribution",),
     "pysp.stats.latent.lda": ("LDADistribution",),
 }
 

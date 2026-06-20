@@ -93,7 +93,7 @@ def _build_dists():
     # doc_vec = rng.dirichlet(alpha=np.ones(authors), size=1)[0]
     # len_dist = CategoricalDistribution({8: 0.1, 9: 0.2, 10: 0.7})
     # dists.append(
-    #     IntegerPLSIDistribution(state_word_mat=state_word_mat, doc_state_mat=doc_state_mat, doc_vec=doc_vec,
+    #     IntegerProbabilisticLatentSemanticIndexingDistribution(state_word_mat=state_word_mat, doc_state_mat=doc_state_mat, doc_vec=doc_vec,
     #                             len_dist=len_dist, name='a'))
     # dists.append(IntegerMultinomialDistribution(0, [0.1, 0.4, 0.3, 0.2], len_dist=CategoricalDistribution({4: 1.0}),
     #                                             name='a'))

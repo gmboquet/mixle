@@ -111,7 +111,7 @@ def _stats_public_distribution_catalog():
         len_dist=stats.CategoricalDistribution({5: 1.0}),
     )
 
-    int_plsi = stats.IntegerPLSIDistribution(
+    int_plsi = stats.IntegerProbabilisticLatentSemanticIndexingDistribution(
         state_word_mat=[[0.7, 0.2], [0.2, 0.5], [0.1, 0.3]],
         doc_state_mat=[[0.8, 0.2], [0.3, 0.7]],
         doc_vec=[0.55, 0.45],
@@ -262,7 +262,7 @@ def _stats_public_distribution_catalog():
         "IntegerStepBernoulliEditDistribution": stats.IntegerStepBernoulliEditDistribution(log_edit, init_dist=int_set),
         "IntegerHiddenAssociationDistribution": int_hidden_assoc,
         "IntegerMarkovChainDistribution": int_markov,
-        "IntegerPLSIDistribution": int_plsi,
+        "IntegerProbabilisticLatentSemanticIndexingDistribution": int_plsi,
         "IntegerUniformSpikeDistribution": stats.IntegerUniformSpikeDistribution(k=2, num_vals=5, p=0.5, min_val=0),
         "IntegerMultinomialDistribution": stats.IntegerMultinomialDistribution(
             0, [0.2, 0.5, 0.3], len_dist=stats.CategoricalDistribution({4: 1.0})
