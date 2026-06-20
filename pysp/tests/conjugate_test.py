@@ -147,17 +147,94 @@ class MvnConjugateTest(unittest.TestCase):
         self.assertIsInstance(post.posterior_predictive(), MultivariateStudentTDistribution)
 
 
-class GenericFallbackTest(unittest.TestCase):
-    def test_generic_mean_parameters_equal_empirical_suffstat(self):
-        from pysp.stats.exp_family import to_exponential_family
+class NewClosedFormFamiliesTest(unittest.TestCase):
+    """Each newly-added family returns a closed-form full-Bayesian posterior (no generic formula)."""
 
-        rng = np.random.RandomState(0)
-        x = np.abs(rng.normal(0.0, 3.0, 1000)) + 0.1
-        post = conjugate_posterior(RayleighDistribution(1.0), x, prior={"nu": 0.0})
-        form = to_exponential_family(RayleighDistribution(1.0))
-        emp = np.asarray(form.engine.to_numpy(form.sufficient_statistics(list(x)))).mean(axis=0)
-        self.assertTrue(np.allclose(post.mean_parameters(), emp))
-        self.assertIsInstance(post.point_estimate(), RayleighDistribution)
+    def _recovers(self, dist, key, truth, delta, transform=lambda v: v, n=8000):
+        x = dist.sampler(seed=1).sample(n)
+        post = conjugate_posterior(dist, list(x) if np.ndim(x[0]) else x)
+        self.assertAlmostEqual(transform(post.mean()[key]), truth, delta=delta)
+        # full-Bayesian surface is present and runs
+        post.sample(50, np.random.RandomState(0))
+        self.assertTrue(np.isfinite(post.log_marginal_likelihood()))
+        post.posterior_predictive()
+        return post
+
+    def test_rayleigh(self):
+        self._recovers(RayleighDistribution(2.0), "sigma2", 4.0, 0.4)  # E[sigma2]=4
+
+    def test_half_normal(self):
+        from pysp.stats import HalfNormalDistribution
+
+        self._recovers(HalfNormalDistribution(1.5), "sigma2", 2.25, 0.3)
+
+    def test_log_gaussian(self):
+        from pysp.stats import LogGaussianDistribution
+
+        self._recovers(LogGaussianDistribution(0.5, 0.4), "mu", 0.5, 0.05)
+
+    def test_gamma_known_shape(self):
+        from pysp.stats import GammaDistribution
+
+        self._recovers(GammaDistribution(3.0, 2.0), "rate", 0.5, 0.05)  # rate = 1/theta
+
+    def test_inverse_gamma_known_shape(self):
+        from pysp.stats import InverseGammaDistribution
+
+        self._recovers(InverseGammaDistribution(4.0, 3.0), "beta", 3.0, 0.3)
+
+    def test_inverse_gaussian_known_mean(self):
+        from pysp.stats import InverseGaussianDistribution
+
+        self._recovers(InverseGaussianDistribution(1.5, 2.0), "lam", 2.0, 0.3)
+
+    def test_pareto_known_scale(self):
+        from pysp.stats import ParetoDistribution
+
+        self._recovers(ParetoDistribution(1.0, 3.0), "alpha", 3.0, 0.2)
+
+    def test_negative_binomial_known_r(self):
+        from pysp.stats import NegativeBinomialDistribution
+
+        self._recovers(NegativeBinomialDistribution(5.0, 0.4), "p", 0.4, 0.03)
+
+    def test_von_mises_known_concentration(self):
+        from pysp.stats import VonMisesDistribution
+
+        self._recovers(VonMisesDistribution(0.7, 3.0), "mu", 0.7, 0.05)
+
+    def test_diagonal_gaussian(self):
+        from pysp.stats import DiagonalGaussianDistribution
+
+        d = DiagonalGaussianDistribution([1.0, -2.0], [2.0, 0.5])
+        post = conjugate_posterior(d, list(d.sampler(seed=1).sample(8000)))
+        self.assertTrue(np.allclose(post.mean()["mu"], [1.0, -2.0], atol=0.1))
+        self.assertTrue(np.allclose(post.mean()["sigma2"], [2.0, 0.5], atol=0.15))
+        self.assertTrue(np.isfinite(post.log_marginal_likelihood()))
+
+    def test_rayleigh_evidence_matches_numerical(self):
+        from math import lgamma
+
+        x = RayleighDistribution(2.0).sampler(seed=3).sample(6)
+        a0, b0 = 2.0, 2.0
+        post = conjugate_posterior(RayleighDistribution(1.0), x, prior={"a": a0, "b": b0})
+        g = np.linspace(1e-3, 80, 400000)
+        ig = (b0**a0 / np.exp(lgamma(a0))) * g ** (-a0 - 1) * np.exp(-b0 / g)
+        lik = np.prod([xi / g * np.exp(-(xi**2) / (2 * g)) for xi in x], axis=0)
+        num = np.log(np.trapezoid(lik * ig, g))
+        self.assertAlmostEqual(post.log_marginal_likelihood(), num, places=3)
+
+
+class UnsupportedFamiliesTest(unittest.TestCase):
+    def test_no_closed_form_conjugate_raises(self):
+        from pysp.stats import BetaDistribution, MixtureDistribution
+
+        with self.assertRaises(TypeError):  # full Beta: no closed-form conjugate
+            conjugate_posterior(BetaDistribution(2.0, 2.0), [0.3, 0.5, 0.7])
+        with self.assertRaises(TypeError):  # structured: not conjugate at all
+            conjugate_posterior(
+                MixtureDistribution([GaussianDistribution(0, 1), GaussianDistribution(5, 1)], [0.5, 0.5]), [0.1, 5.2]
+            )
 
 
 class WeightedTest(unittest.TestCase):
@@ -213,11 +290,11 @@ class MixtureOfConjugatesTest(unittest.TestCase):
         self.assertAlmostEqual(s.mean(), post.mean()["p"], delta=0.01)
 
     def test_requires_closed_form_family(self):
-        # Gamma has only the generic posterior (no evidence) -> cannot form a mixture-of-conjugates
+        # full Beta has no closed-form conjugate (no evidence) -> cannot form a mixture-of-conjugates
         with self.assertRaises(TypeError):
-            from pysp.stats import GammaDistribution
+            from pysp.stats import BetaDistribution
 
-            mixture_conjugate_posterior(GammaDistribution(2.0, 1.0), [1.0, 2.0, 3.0], [{"nu": 0.0}, {"nu": 1.0}])
+            mixture_conjugate_posterior(BetaDistribution(2.0, 2.0), [0.2, 0.4, 0.6], [{"a": 1.0}, {"a": 2.0}])
 
 
 if __name__ == "__main__":
