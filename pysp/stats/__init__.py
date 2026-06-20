@@ -9,6 +9,8 @@ __all__ = [
     # Bayesian (conjugate/variational) families folded in from the former pysp.bstats
     "conjugate_posterior",
     "ConjugatePosterior",
+    "mixture_conjugate_posterior",
+    "MixtureConjugatePosterior",
     "mixture_prior",
     "DictDirichletDistribution",
     "DictDirichletSampler",
@@ -536,7 +538,12 @@ __all__ = [
 ]
 
 ### Abstract Classes
-from pysp.stats.bayes.conjugate import ConjugatePosterior, conjugate_posterior
+from pysp.stats.bayes.conjugate import (
+    ConjugatePosterior,
+    MixtureConjugatePosterior,
+    conjugate_posterior,
+    mixture_conjugate_posterior,
+)
 from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution, DictDirichletSampler
 from pysp.stats.bayes.dirichlet import DirichletDataEncoder, DirichletDistribution, DirichletEstimator, DirichletSampler
 from pysp.stats.bayes.dirichlet_process_mixture import (
