@@ -26,11 +26,13 @@ from collections import Counter
 from typing import Any
 
 import numpy as np
-from scipy.special import betaln, gammaln, multigammaln
+from scipy.special import betaln, gammaln, logsumexp, multigammaln
 
 __all__ = [
     "ConjugatePosterior",
+    "MixtureConjugatePosterior",
     "conjugate_posterior",
+    "mixture_conjugate_posterior",
 ]
 
 
@@ -652,3 +654,110 @@ def conjugate_posterior(dist, data, prior: dict | None = None, weights: np.ndarr
     if builder is not None:
         return builder(dist, data, weights, prior)
     return _build_generic(dist, data, weights, prior)
+
+
+# ---------------------------------------------------------------------------
+# Mixtures of conjugate priors (Diaconis-Ylvisaker: a mixture of conjugates is conjugate)
+# ---------------------------------------------------------------------------
+class MixtureConjugatePosterior(ConjugatePosterior):
+    """Posterior under a prior that is itself a mixture of conjugate priors.
+
+    Diaconis-Ylvisaker (1979): if the prior is ``sum_m w_m * pi_m(theta)`` with each ``pi_m``
+    conjugate to the likelihood, the posterior is again a mixture of the component conjugate
+    posteriors, ``sum_m w'_m * pi_m^post(theta)``, with the mixing weights reweighted by each
+    component's marginal likelihood ``Z_m``:
+
+        w'_m  proportional to  w_m * Z_m.
+
+    Everything stays closed-form, so a prior can be multimodal (e.g. "the rate is near 1 OR near
+    10") or robust (a heavy-tailed prior as a mixture of conjugates) without losing exact inference.
+    """
+
+    family = "MixtureOfConjugates"
+
+    def __init__(self, components, post_weights, prior_weights, comp_log_evidence):
+        self.components: list[ConjugatePosterior] = list(components)
+        self.weights = np.asarray(post_weights, dtype=np.float64)  # posterior mixing weights (normalised)
+        self.prior_weights = np.asarray(prior_weights, dtype=np.float64)
+        self.comp_log_evidence = np.asarray(comp_log_evidence, dtype=np.float64)
+
+    def mean(self) -> dict[str, Any]:
+        # posterior mean of theta = sum_m w'_m E_m[theta]; per-key weighted average of the components.
+        out: dict[str, Any] = {}
+        keys = self.components[0].mean().keys()
+        for k in keys:
+            vals = [c.mean()[k] for c in self.components]
+            try:
+                out[k] = sum(w * np.asarray(v, dtype=np.float64) for w, v in zip(self.weights, vals))
+            except (TypeError, ValueError):
+                out[k] = vals[int(np.argmax(self.weights))]  # non-numeric (e.g. dicts): take the MAP component
+        return out
+
+    def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        rng = rng or np.random.RandomState()
+        counts = rng.multinomial(n, self.weights)  # how many draws come from each component
+        gathered: dict[str, list] = {}
+        for m, cm in enumerate(counts):
+            if cm == 0:
+                continue
+            s = self.components[m].sample(int(cm), rng)
+            for key, arr in s.items():
+                gathered.setdefault(key, []).append(np.asarray(arr))
+        return {key: np.concatenate(parts) for key, parts in gathered.items()}
+
+    def point_estimate(self):
+        """The maximum-a-posteriori *component*'s point estimate (the dominant conjugate mode)."""
+        return self.components[int(np.argmax(self.weights))].point_estimate()
+
+    def posterior_predictive(self):
+        """A pysp MixtureDistribution of the component predictives, weighted by the posterior weights."""
+        from pysp.stats.latent.mixture import MixtureDistribution
+
+        return MixtureDistribution([c.posterior_predictive() for c in self.components], list(self.weights))
+
+    def log_marginal_likelihood(self) -> float:
+        # evidence of the whole data under the mixture prior: sum_m w_m Z_m
+        return float(logsumexp(np.log(self.prior_weights) + self.comp_log_evidence))
+
+    def hyper(self) -> dict[str, Any]:
+        return {"weights": self.weights, "components": [c.hyper() for c in self.components]}
+
+
+def mixture_conjugate_posterior(
+    dist,
+    data,
+    priors: list[dict],
+    prior_weights: np.ndarray | None = None,
+    weights: np.ndarray | None = None,
+) -> MixtureConjugatePosterior:
+    """Posterior under a prior that is a mixture of conjugate priors (Diaconis-Ylvisaker).
+
+    Args:
+        dist: The likelihood distribution (must map to a *closed-form* conjugate realiser, since the
+            reweighting needs each component's marginal likelihood).
+        data: The observations.
+        priors: One hyperparameter dict per mixture component (same keys :func:`conjugate_posterior`
+            accepts for this family).
+        prior_weights: Prior mixing weights ``w_m`` (default uniform); normalised internally.
+        weights: Optional per-observation weights.
+
+    Returns:
+        A :class:`MixtureConjugatePosterior`: the exact posterior, again a mixture of conjugate
+        posteriors with weights ``w'_m proportional to w_m * Z_m``.
+    """
+    m = len(priors)
+    if m == 0:
+        raise ValueError("need at least one prior component")
+    pw = np.ones(m) / m if prior_weights is None else np.asarray(prior_weights, dtype=np.float64)
+    pw = pw / pw.sum()
+    components = [conjugate_posterior(dist, data, prior=pr, weights=weights) for pr in priors]
+    try:
+        log_evidence = np.array([c.log_marginal_likelihood() for c in components])
+    except NotImplementedError as exc:
+        raise TypeError(
+            "mixture_conjugate_posterior needs a closed-form family (it reweights by each "
+            "component's marginal likelihood); %s has only the generic posterior." % type(dist).__name__
+        ) from exc
+    log_post = np.log(pw) + log_evidence
+    post_weights = np.exp(log_post - logsumexp(log_post))
+    return MixtureConjugatePosterior(components, post_weights, pw, log_evidence)

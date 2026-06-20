@@ -18,6 +18,7 @@ from pysp.stats import (
     PoissonDistribution,
     RayleighDistribution,
     conjugate_posterior,
+    mixture_conjugate_posterior,
 )
 
 
@@ -169,6 +170,54 @@ class WeightedTest(unittest.TestCase):
         pr = conjugate_posterior(GaussianDistribution(0.0, 1.0), rep)
         self.assertAlmostEqual(pw.mean()["mu"], pr.mean()["mu"], places=9)
         self.assertAlmostEqual(pw.mean()["sigma2"], pr.mean()["sigma2"], places=9)
+
+
+class MixtureOfConjugatesTest(unittest.TestCase):
+    def test_matches_numerical_posterior_exactly(self):
+        # bimodal Beta prior; the closed-form mixture-of-conjugates posterior must equal the
+        # grid-integrated posterior (mean, log-evidence, and the whole density).
+        from scipy.stats import beta as B
+
+        rng = np.random.RandomState(0)
+        priors = [{"a": 12.0, "b": 3.0}, {"a": 3.0, "b": 12.0}]
+        x = (rng.rand(15) < 0.75).astype(int)
+        post = mixture_conjugate_posterior(BernoulliDistribution(0.5), x, priors, prior_weights=[0.5, 0.5])
+
+        grid = np.linspace(1e-6, 1 - 1e-6, 400001)
+        prior_pdf = 0.5 * B.pdf(grid, 12, 3) + 0.5 * B.pdf(grid, 3, 12)
+        loglik = x.sum() * np.log(grid) + (len(x) - x.sum()) * np.log(1 - grid)
+        un = np.exp(loglik - loglik.max()) * prior_pdf
+        z = np.trapezoid(un, grid)
+        num_mean = np.trapezoid(grid * un, grid) / z
+        self.assertAlmostEqual(post.mean()["p"], num_mean, places=5)
+
+        ml = np.trapezoid(np.exp(loglik) * prior_pdf, grid)
+        self.assertAlmostEqual(post.log_marginal_likelihood(), np.log(ml), places=4)
+
+        mix_pdf = sum(w * B.pdf(grid, c.a, c.b) for w, c in zip(post.weights, post.components))
+        self.assertLess(np.max(np.abs(mix_pdf - un / z)), 1e-9)
+
+    def test_weights_reweighted_by_evidence(self):
+        # data strongly favouring high p must upweight the high-p prior component
+        rng = np.random.RandomState(1)
+        x = (rng.rand(40) < 0.8).astype(int)
+        post = mixture_conjugate_posterior(
+            BernoulliDistribution(0.5), x, [{"a": 20.0, "b": 2.0}, {"a": 2.0, "b": 20.0}], prior_weights=[0.5, 0.5]
+        )
+        self.assertGreater(post.weights[0], 0.95)
+        # the predictive is a proper mixture, and sampling reproduces the posterior mean
+        from pysp.stats import MixtureDistribution
+
+        self.assertIsInstance(post.posterior_predictive(), MixtureDistribution)
+        s = post.sample(50000, np.random.RandomState(2))["p"]
+        self.assertAlmostEqual(s.mean(), post.mean()["p"], delta=0.01)
+
+    def test_requires_closed_form_family(self):
+        # Gamma has only the generic posterior (no evidence) -> cannot form a mixture-of-conjugates
+        with self.assertRaises(TypeError):
+            from pysp.stats import GammaDistribution
+
+            mixture_conjugate_posterior(GammaDistribution(2.0, 1.0), [1.0, 2.0, 3.0], [{"nu": 0.0}, {"nu": 1.0}])
 
 
 if __name__ == "__main__":
