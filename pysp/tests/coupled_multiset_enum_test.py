@@ -69,7 +69,9 @@ class IntegerProbabilisticLatentSemanticIndexingEnumerationTestCase(unittest.Tes
 
         prob = np.array([[0.5, 0.1], [0.3, 0.2], [0.2, 0.7]])
         state = np.array([[0.6, 0.4], [0.2, 0.8]])
-        dist = IntegerProbabilisticLatentSemanticIndexingDistribution(prob, state, np.array([0.7, 0.3]), len_dist=NullDistribution())
+        dist = IntegerProbabilisticLatentSemanticIndexingDistribution(
+            prob, state, np.array([0.7, 0.3]), len_dist=NullDistribution()
+        )
         items = list(itertools.islice(dist.enumerator(), 30))
         lps = [lp for _, lp in items]
         for i in range(len(lps) - 1):

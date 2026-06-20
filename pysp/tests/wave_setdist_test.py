@@ -211,9 +211,7 @@ class StepBernoulliEditEstimatorTestCase(unittest.TestCase):
         )
         tot_sum = 10.0
         alpha = 6.0
-        est = IntegerStepBernoulliEditEstimator(
-            num_vals=3, pseudo_count=alpha, suff_stat=reference, min_prob=0.0
-        )
+        est = IntegerStepBernoulliEditEstimator(num_vals=3, pseudo_count=alpha, suff_stat=reference, min_prob=0.0)
         dist = est.estimate(None, (count_mat, tot_sum, None))
 
         s1 = count_mat[:, 0] + count_mat[:, 2]

@@ -62,9 +62,7 @@ class SpanningTreeTestCase(unittest.TestCase):
         # densities match in descending order (the lazy enumerator may break exact ties differently)
         np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in brute], atol=1.0e-12)
         # and the enumerated trees are exactly the support (compared as a set, tie-order-independent)
-        self.assertEqual(
-            {frozenset(t) for t, _ in items}, {frozenset(t) for t, _ in brute}
-        )
+        self.assertEqual({frozenset(t) for t, _ in items}, {frozenset(t) for t, _ in brute})
         self.assertAlmostEqual(float(np.logaddexp.reduce([lp for _, lp in items])), 0.0, places=10)
 
     def test_enumerator_respects_sparse_support(self):
@@ -77,11 +75,7 @@ class SpanningTreeTestCase(unittest.TestCase):
             ]
         )
         dist = SpanningTreeDistribution(weights)
-        support = [
-            list(t)
-            for t in _all_trees(4)
-            if all(weights[i, j] > 0.0 for i, j in t)
-        ]
+        support = [list(t) for t in _all_trees(4) if all(weights[i, j] > 0.0 for i, j in t)]
         brute = [(t, dist.log_density(t)) for t in support]
         brute.sort(key=lambda u: -u[1])
 

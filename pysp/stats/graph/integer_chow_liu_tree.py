@@ -257,7 +257,9 @@ class IntegerChowLiuTreeEnumerator(DistributionEnumerator):
         self._pos = 0
 
     @staticmethod
-    def _set_domain_size(domain_sizes: list[int | None], idx: int, size: int, dist: IntegerChowLiuTreeDistribution) -> None:
+    def _set_domain_size(
+        domain_sizes: list[int | None], idx: int, size: int, dist: IntegerChowLiuTreeDistribution
+    ) -> None:
         if idx < 0 or idx >= len(domain_sizes):
             raise EnumerationError(dist, reason="feature index out of range")
         if domain_sizes[idx] is not None and domain_sizes[idx] != size:
@@ -376,7 +378,9 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
             self.counts = new_counts
             self.marginal_counts = new_marginal
 
-    def update(self, x: Sequence[int] | np.ndarray, weight: float, estimate: IntegerChowLiuTreeDistribution | None) -> None:
+    def update(
+        self, x: Sequence[int] | np.ndarray, weight: float, estimate: IntegerChowLiuTreeDistribution | None
+    ) -> None:
         """Update pairwise joint and marginal counts with a weighted observation.
 
         Args:

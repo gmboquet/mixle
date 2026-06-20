@@ -145,9 +145,7 @@ class QuantizedDecodeTestCase(unittest.TestCase):
         m = _PeakedModel(vocab=4, seed=1)
         exact = list(best_first_decode(m.next_logprobs, eos=m.eos, max_len=5))
         # no pruning + fine buckets -> same descending log-probs (tie-robust)
-        quant = list(
-            quantized_best_first_decode(m.next_logprobs, eos=m.eos, max_len=5, bucket_bits=20, batch_size=1)
-        )
+        quant = list(quantized_best_first_decode(m.next_logprobs, eos=m.eos, max_len=5, bucket_bits=20, batch_size=1))
         self.assertEqual(len(quant), len(exact))
         np.testing.assert_allclose([lp for _, lp in quant], [lp for _, lp in exact], atol=1e-9)
 
@@ -171,7 +169,9 @@ class QuantizedDecodeTestCase(unittest.TestCase):
         bat = _PeakedModel(vocab=10, seed=3)
         # coarse buckets group near-equal-score prefixes so the batched path expands several per forward call
         a = list(
-            quantized_best_first_decode(per.next_logprobs, eos=per.eos, max_len=6, top_k=4, bucket_bits=2, max_results=10)
+            quantized_best_first_decode(
+                per.next_logprobs, eos=per.eos, max_len=6, top_k=4, bucket_bits=2, max_results=10
+            )
         )
         b = list(
             quantized_best_first_decode(

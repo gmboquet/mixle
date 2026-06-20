@@ -1330,7 +1330,9 @@ _LAZY_MODULE_CAP_NAMES: dict[str, tuple[str, ...]] = {
     "pysp.stats.latent.quantized_hidden_markov_model": ("QuantizedHiddenMarkovModelDistribution",),
     "pysp.stats.latent.tree_hidden_markov_model": ("TreeHiddenMarkovModelDistribution",),
     "pysp.stats.latent.integer_hidden_association": ("IntegerHiddenAssociationDistribution",),
-    "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing": ("IntegerProbabilisticLatentSemanticIndexingDistribution",),
+    "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing": (
+        "IntegerProbabilisticLatentSemanticIndexingDistribution",
+    ),
     "pysp.stats.latent.lda": ("LDADistribution",),
 }
 

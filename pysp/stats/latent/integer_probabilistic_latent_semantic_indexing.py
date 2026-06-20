@@ -155,7 +155,13 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
         s3 = ",".join(map(str, self.doc_vec))
         s4 = repr(self.name)
         s5 = str(self.len_dist)
-        return "IntegerProbabilisticLatentSemanticIndexingDistribution([%s], [%s], [%s], name=%s, len_dist=%s)" % (s1, s2, s3, s4, s5)
+        return "IntegerProbabilisticLatentSemanticIndexingDistribution([%s], [%s], [%s], name=%s, len_dist=%s)" % (
+            s1,
+            s2,
+            s3,
+            s4,
+            s5,
+        )
 
     def density(self, x: tuple[int, Sequence[tuple[int, float]]]) -> float:
         """Evaluate the density of PLSI model for an observation x.
@@ -563,7 +569,10 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         self._len_rng: RandomState | None = None
 
     def update(
-        self, x: tuple[int, Sequence[tuple[int, float]]], weight: float, estimate: IntegerProbabilisticLatentSemanticIndexingDistribution
+        self,
+        x: tuple[int, Sequence[tuple[int, float]]],
+        weight: float,
+        estimate: IntegerProbabilisticLatentSemanticIndexingDistribution,
     ) -> None:
         """Update the sufficient statistics of object instance for a single observation x.
 
@@ -774,7 +783,9 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         self.doc_count += np.bincount(np.asarray(xm, dtype=np.int64), weights=weights_np, minlength=self.num_docs)
         self.len_acc.seq_update(nn, weights_np, estimate.len_dist)
 
-    def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
+    def combine(
+        self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]
+    ) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
         """Combine the sufficient statistics in arg 'suff_stat' with object instance.
 
         Arg 'suff_stat' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
@@ -810,7 +821,9 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         """
         return self.word_count, self.comp_count, self.doc_count, self.len_acc.value()
 
-    def from_value(self, x: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
+    def from_value(
+        self, x: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]
+    ) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
         """Set the sufficient statistics of object instance to arg 'x' values.
 
         Arg 'x' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
@@ -1023,7 +1036,9 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
     def accumulator_factory(self) -> "IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory":
         """Returns IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory object."""
         len_est = self.len_estimator.accumulator_factory()
-        return IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(self.num_vals, self.num_states, self.num_docs, len_est, self.keys)
+        return IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(
+            self.num_vals, self.num_states, self.num_docs, len_est, self.keys
+        )
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]
@@ -1091,7 +1106,9 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
 
         len_dist = self.len_estimator.estimate(None, len_suff_stats)
 
-        return IntegerProbabilisticLatentSemanticIndexingDistribution(word_prob_mat, state_prob_mat, doc_prob_vec, name=self.name, len_dist=len_dist)
+        return IntegerProbabilisticLatentSemanticIndexingDistribution(
+            word_prob_mat, state_prob_mat, doc_prob_vec, name=self.name, len_dist=len_dist
+        )
 
 
 class IntegerProbabilisticLatentSemanticIndexingDataEncoder(DataSequenceEncoder):
@@ -1348,7 +1365,10 @@ def _register_int_plsi_engine_kernel():
                 return GenericKernelFactory().build(dist, engine, estimator=estimator)
             return IntegerProbabilisticLatentSemanticIndexingKernel(dist, engine=engine, estimator=estimator)
 
-    register_kernel_factory(IntegerProbabilisticLatentSemanticIndexingDistribution, IntegerProbabilisticLatentSemanticIndexingKernelFactory())
+    register_kernel_factory(
+        IntegerProbabilisticLatentSemanticIndexingDistribution,
+        IntegerProbabilisticLatentSemanticIndexingKernelFactory(),
+    )
 
 
 _register_int_plsi_engine_kernel()

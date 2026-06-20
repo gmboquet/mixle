@@ -118,6 +118,7 @@ class PPLVariationalFamilyTestCase(unittest.TestCase):
         self.assertGreater(corr(fr), 0.8)  # full-rank recovers the strong correlation
         self.assertAlmostEqual(fr.params["shape"], 3.0, delta=0.6)
 
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_tilted_alpha_widens_posterior(self):
         rng = np.random.RandomState(1)
         data = list(rng.normal(5.0, 2.0, 400))
@@ -183,6 +184,7 @@ class PPLVITestCase(unittest.TestCase):
         rng = np.random.RandomState(0)
         self.data = list(rng.normal(5.0, 2.0, size=3000))
 
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_vi_recovers_params(self):
         mu = Normal(0, 10, name="mu")
         m = Normal(mu, free).fit(self.data, how="vi", rng=np.random.RandomState(1))

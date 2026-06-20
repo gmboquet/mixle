@@ -467,7 +467,9 @@ def _mixture_vmp_elbo(x, r, m, s2, a, b, alpha, *, m0, s0, a0, b0, alpha0):
     prior_tau = np.sum(a0 * math.log(b0) - gammaln(a0) + (a0 - 1.0) * Elogtau - b0 * Etau)
     entropy_tau = np.sum(a - np.log(b) + gammaln(a) + (1.0 - a) * digamma(a))
 
-    return float(likelihood + allocation + entropy_z + prior_pi + entropy_pi + prior_mu + entropy_mu + prior_tau + entropy_tau)
+    return float(
+        likelihood + allocation + entropy_z + prior_pi + entropy_pi + prior_mu + entropy_mu + prior_tau + entropy_tau
+    )
 
 
 def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None, m0=None, s0=None, a0=1.0, b0=1.0, alpha0=1.0):
