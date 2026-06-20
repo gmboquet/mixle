@@ -1691,9 +1691,9 @@ def vi_fit(
         mean, std = res.x[:d], np.exp(res.x[d:])
         Z = rng.standard_normal((samples, d))
         U = mean + std * Z
-        vals = np.empty_like(U)
-        for k, s in enumerate(slots):
-            vals[:, k] = np.exp(U[:, k]) if s.positive else U[:, k]
+        # map unconstrained samples back per slot support (exp/sigmoid/identity); the old hand-rolled
+        # branch only handled positive support, passing unit-support (Beta/Bernoulli) values through unbounded
+        vals = _u_to_vals(slots, U)
         objective = -float(res.fun)  # neg_elbo was minimized; the ELBO is its negation
         objective_kind = "kl_elbo_common_random"
 
