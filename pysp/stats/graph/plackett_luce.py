@@ -25,6 +25,7 @@ in contention, evaluated at the current worths. Each ``fit`` iteration performs 
 increasing the likelihood.
 """
 
+import heapq
 import itertools
 from collections.abc import Sequence
 from typing import Any
@@ -168,23 +169,44 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class PlackettLuceEnumerator(DistributionEnumerator):
-    """Enumerate all finite Plackett--Luce orderings in descending probability order."""
+    """Enumerate Plackett--Luce orderings in descending probability order, lazily (A* best-first).
+
+    A ranking's log-density is ``sum_k [theta_{x_k} - logsumexp(theta over the items not yet ranked at step k)]``.
+    The state is a chosen prefix with exact partial score g; the best possible completion ranks the remaining
+    items by descending worth (which minimizes the remaining logsumexp denominators), giving an exact admissible
+    bound h. A* on g + h streams the rankings in exact descending order without touching the n! support.
+    """
 
     def __init__(self, dist: PlackettLuceDistribution) -> None:
         super().__init__(dist)
-        with np.errstate(divide="ignore"):
-            entries = [(list(p), float(dist.log_density(p))) for p in itertools.permutations(range(dist.dim))]
-        entries = [(v, lp) for v, lp in entries if lp > -np.inf]
-        entries.sort(key=lambda u: -u[1])
-        self._entries = entries
-        self._pos = 0
+        self._lw = np.asarray(dist.log_w, dtype=float)
+        self._n = dist.dim
+        self._counter = itertools.count()
+        # heap entries: (-(g + h), tiebreak, prefix_tuple, remaining_frozenset, g)
+        root_remaining = frozenset(range(self._n))
+        self._heap: list = [(-self._bound(root_remaining), next(self._counter), (), root_remaining, 0.0)]
+
+    def _bound(self, remaining: frozenset[int]) -> float:
+        """Exact best-completion log-probability over ``remaining`` (rank by descending worth)."""
+        if not remaining:
+            return 0.0
+        lw = np.sort(self._lw[list(remaining)])[::-1]  # descending worth
+        # term at step k = lw[k] - logsumexp(lw[k:]); sum_k lw[k] - sum_k logsumexp(suffix_k)
+        suffix = np.logaddexp.accumulate(lw[::-1])[::-1]  # logsumexp of each descending suffix
+        return float(lw.sum() - suffix.sum())
 
     def __next__(self) -> tuple[list[int], float]:
-        if self._pos >= len(self._entries):
-            raise StopIteration
-        item = self._entries[self._pos]
-        self._pos += 1
-        return item
+        while self._heap:
+            _, _, prefix, remaining, g = heapq.heappop(self._heap)
+            if not remaining:
+                return list(prefix), g  # complete ranking; g is the exact log-density
+            lse_rem = float(np.logaddexp.reduce(self._lw[list(remaining)]))
+            for j in remaining:
+                new_g = g + (self._lw[j] - lse_rem)
+                new_remaining = remaining - {j}
+                f = new_g + self._bound(new_remaining)
+                heapq.heappush(self._heap, (-f, next(self._counter), (*prefix, j), new_remaining, new_g))
+        raise StopIteration
 
 
 class PlackettLuceSampler(DistributionSampler):
