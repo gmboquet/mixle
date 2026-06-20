@@ -6,12 +6,13 @@ import unittest
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from pysp.utils.optimization import (
+from pysp.optimize import (
     Assignment,
     BestSubsetRegression,
     EditDistance,
     OptimizationProblem,
     ShortestPath,
+    Solution,
     SpanningTree,
     ViterbiPath,
     best_first_paths,
@@ -48,24 +49,28 @@ def _viterbi_best(log_init, log_trans, log_obs):
 
 
 class SharedSurfaceTest(unittest.TestCase):
-    def test_best_top_iter_consistent(self):
+    def test_solve_top_iter_consistent(self):
         prob = Assignment(np.array([[1.0, 9.0], [9.0, 1.0]]))
         self.assertIsInstance(prob, OptimizationProblem)
-        best = prob.best()
+        sol = prob.solve()
+        # Solution is a named tuple: attribute access AND unpacking both work
+        self.assertIsInstance(sol, Solution)
+        value, objective = sol
+        self.assertTrue(np.array_equal(sol.value, value))
+        self.assertEqual(sol.objective, objective)
         top2 = prob.top(2)
-        self.assertTrue(np.array_equal(best[0], top2[0][0]))
-        self.assertEqual(best[1], top2[0][1])
+        self.assertTrue(np.array_equal(sol.value, top2[0].value))
+        self.assertEqual(sol.objective, top2[0].objective)
         # iterating the problem yields the same as enumerator()
-        self.assertEqual([c.tolist() for c, _ in itertools.islice(iter(prob), 2)], [c.tolist() for c, _ in top2])
-        self.assertAlmostEqual(best[1], 2.0)  # the 1+1 diagonal
+        self.assertEqual([s.value.tolist() for s in itertools.islice(iter(prob), 2)], [s.value.tolist() for s in top2])
+        self.assertAlmostEqual(sol.objective, 2.0)  # the 1+1 diagonal
 
-    def test_shortest_path_problem(self):
-        # a tiny weighted DAG; ShortestPath is the direct problem-object wrapper of the engine
+    def test_shortest_path_sink_goal_default(self):
+        # a tiny weighted DAG; ShortestPath needs no is_goal -- the sink "t" is the goal by default
         edges = {"s": [("a", 1.0), ("b", 4.0)], "a": [("t", 5.0), ("b", 1.0)], "b": [("t", 1.0)], "t": []}
-        prob = ShortestPath("s", lambda n: edges[n], lambda n: n == "t", sense="min")
-        path, cost = prob.best()
-        self.assertEqual(path, ["s", "a", "b", "t"])
-        self.assertAlmostEqual(cost, 3.0)
+        sol = ShortestPath("s", lambda n: edges[n]).solve()
+        self.assertEqual(sol.value, ["s", "a", "b", "t"])
+        self.assertAlmostEqual(sol.objective, 3.0)
 
 
 class EngineTest(unittest.TestCase):
@@ -101,7 +106,7 @@ class AssignmentTest(unittest.TestCase):
     def test_best_matches_scipy(self):
         rng = np.random.RandomState(1)
         cost = rng.rand(5, 5)
-        cols, total = Assignment(cost).best()
+        cols, total = Assignment(cost).solve()
         r, c = linear_sum_assignment(cost)
         self.assertAlmostEqual(total, cost[r, c].sum())
         self.assertEqual(list(cols), list(c))
@@ -128,16 +133,16 @@ class SpanningTreeTest(unittest.TestCase):
 class EditDistanceTest(unittest.TestCase):
     def test_best_equals_levenshtein(self):
         for a, b in [("kitten", "sitting"), ("flaw", "lawn"), ("", "abc")]:
-            self.assertAlmostEqual(EditDistance(list(a), list(b)).best()[1], _levenshtein(a, b), places=9)
+            self.assertAlmostEqual(EditDistance(list(a), list(b)).solve()[1], _levenshtein(a, b), places=9)
 
     def test_non_uniform_costs_and_ops_rebuild(self):
         # expensive substitution -> prefer delete + insert
-        ops, cost = EditDistance(list("a"), list("b"), sub_cost=lambda x, y: 0.0 if x == y else 5.0).best()
+        ops, cost = EditDistance(list("a"), list("b"), sub_cost=lambda x, y: 0.0 if x == y else 5.0).solve()
         self.assertAlmostEqual(cost, 2.0)
         self.assertNotIn("sub", [o[0] for o in ops])
         # applying the optimal script to the source rebuilds the target
         a, b = list("abc"), list("axc")
-        ops = EditDistance(a, b).best()[0]
+        ops = EditDistance(a, b).solve()[0]
         self.assertEqual([t for kind, _s, t in ops if kind in ("match", "sub", "ins")], b)
 
 
@@ -150,7 +155,7 @@ class ViterbiPathTest(unittest.TestCase):
         self.lo = np.log([rng.dirichlet(np.ones(self.s)) for _ in range(self.t)])
 
     def test_best_matches_viterbi_dp(self):
-        path, score = ViterbiPath(self.li, self.lt, self.lo).best()
+        path, score = ViterbiPath(self.li, self.lt, self.lo).solve()
         ref_path, ref_score = _viterbi_best(self.li, self.lt, self.lo)
         self.assertEqual(path, ref_path)
         self.assertAlmostEqual(score, ref_score, places=9)
@@ -177,7 +182,7 @@ class BestSubsetRegressionTest(unittest.TestCase):
         n, p = 200, 6
         X = rng.randn(n, p)
         y = 3.0 * X[:, 1] - 2.0 * X[:, 4] + 0.1 * rng.randn(n)  # only features 1 and 4 matter
-        best_subset, _crit = BestSubsetRegression(X, y, criterion="bic").best()
+        best_subset, _crit = BestSubsetRegression(X, y, criterion="bic").solve()
         self.assertEqual(set(best_subset), {1, 4})
 
     def test_criterion_ordering_and_rss_monotone(self):
