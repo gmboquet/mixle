@@ -49,7 +49,13 @@ class LogDensityConvenienceTestCase(unittest.TestCase):
     def test_compound_mixture_model(self):
         rng = np.random.RandomState(0)
         X = np.vstack([rng.randn(30, 2), rng.randn(30, 2) + 5]).tolist()
-        mix = optimize(X, MixtureEstimator([MultivariateGaussianEstimator(dim=2) for _ in range(2)]), max_its=20)
+        # explicit rng: optimize()'s default rng is a shared mutable default, so seed locally for reproducibility
+        mix = optimize(
+            X,
+            MixtureEstimator([MultivariateGaussianEstimator(dim=2) for _ in range(2)]),
+            max_its=20,
+            rng=np.random.RandomState(0),
+        )
         ld = log_density(X, mix)
         old = np.concatenate([mix.seq_log_density(e) for _, e in seq_encode(X, model=mix)])
         self.assertEqual(ld.shape, (len(X),))
