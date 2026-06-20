@@ -21,15 +21,15 @@ _EPS = 1.0e-300
 
 
 @dataclass
-class TruncatedDPMFitResult:
+class TruncatedDirichletProcessMixtureFitResult:
     """Fitted truncated DPM plus variational responsibilities and history."""
 
-    model: TruncatedDPMModel
+    model: TruncatedDirichletProcessMixtureModel
     responsibilities: np.ndarray
     history: list[float]
 
 
-class TruncatedDPMModel:
+class TruncatedDirichletProcessMixtureModel:
     """Truncated stick-breaking mixture over existing pysp component models."""
 
     def __init__(
@@ -41,7 +41,7 @@ class TruncatedDPMModel:
         name: str | None = None,
     ) -> None:
         if len(components) == 0:
-            raise ValueError("TruncatedDPMModel requires at least one component.")
+            raise ValueError("TruncatedDirichletProcessMixtureModel requires at least one component.")
         if alpha <= 0.0 or not np.isfinite(alpha):
             raise ValueError("alpha must be finite and positive.")
         self.components = list(components)
@@ -64,7 +64,7 @@ class TruncatedDPMModel:
         self.log_weights = np.log(np.clip(self.weights, _EPS, 1.0))
 
     def __str__(self) -> str:
-        return "TruncatedDPMModel(num_components=%d, alpha=%r, name=%r)" % (self.num_components, self.alpha, self.name)
+        return "TruncatedDirichletProcessMixtureModel(num_components=%d, alpha=%r, name=%r)" % (self.num_components, self.alpha, self.name)
 
     @property
     def expected_log_weights(self) -> np.ndarray:
@@ -188,7 +188,7 @@ def fit_truncated_dpm(
     tol: float | None = 1.0e-8,
     sort_components: bool = True,
     name: str | None = None,
-) -> TruncatedDPMFitResult:
+) -> TruncatedDirichletProcessMixtureFitResult:
     """Fit a truncated DP mixture by coordinate-ascent variational updates.
 
     The component M-steps are delegated to ordinary ``pysp.stats`` estimators.
@@ -226,14 +226,14 @@ def fit_truncated_dpm(
             counts = counts[order]
 
         gamma = _posterior_stick_gamma(counts, float(alpha))
-        model = TruncatedDPMModel(components, alpha=alpha, gamma=gamma, name=name)
+        model = TruncatedDirichletProcessMixtureModel(components, alpha=alpha, gamma=gamma, name=name)
         objective = _variational_predictive_objective(model, data)
         history.append(objective)
         if len(history) > 1 and tol is not None and abs(history[-1] - history[-2]) < tol:
             break
 
     responsibilities = model.responsibilities(data, expected=True)
-    return TruncatedDPMFitResult(model, responsibilities, history)
+    return TruncatedDirichletProcessMixtureFitResult(model, responsibilities, history)
 
 
 def _as_gamma(gamma: Any, expected_rows: int | None = None) -> np.ndarray:
@@ -320,7 +320,12 @@ def _posterior_stick_gamma(counts: np.ndarray, alpha: float) -> np.ndarray:
     return gam
 
 
-def _variational_predictive_objective(model: TruncatedDPMModel, data: Sequence[Any]) -> float:
+def _variational_predictive_objective(model: TruncatedDirichletProcessMixtureModel, data: Sequence[Any]) -> float:
     log_scores = _component_log_density_matrix(model.components, data)
     weighted = log_scores + model.expected_log_weights[None, :]
     return float(np.sum([vec.log_sum(row) for row in weighted]))
+
+
+# Backward-compatible aliases for the former DPM (Dirichlet process mixture) names.
+TruncatedDPMModel = TruncatedDirichletProcessMixtureModel
+TruncatedDPMFitResult = TruncatedDirichletProcessMixtureFitResult

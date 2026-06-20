@@ -10,7 +10,7 @@ import numpy as np
 
 
 @dataclass
-class POMDPFilterResult:
+class PartiallyObservableMarkovDecisionProcessFilterResult:
     """Belief trajectories, log likelihood, and predictive observation terms."""
 
     beliefs: np.ndarray
@@ -19,15 +19,15 @@ class POMDPFilterResult:
 
 
 @dataclass
-class POMDPFitResult:
-    """Baum-Welch style fit result for known-action POMDP sequences."""
+class PartiallyObservableMarkovDecisionProcessFitResult:
+    """Baum-Welch style fit result for known-action PartiallyObservableMarkovDecisionProcess sequences."""
 
-    model: POMDPModel
+    model: PartiallyObservableMarkovDecisionProcessModel
     history: list[float]
 
 
-class POMDPModel:
-    """Finite-state POMDP with action-conditioned transitions and observations.
+class PartiallyObservableMarkovDecisionProcessModel:
+    """Finite-state PartiallyObservableMarkovDecisionProcess with action-conditioned transitions and observations.
 
     ``transition[a, i, j]`` is P(S_t=j | S_{t-1}=i, A_t=a).
     ``observation[a, j, o]`` is P(O_t=o | S_t=j, A_t=a).
@@ -56,7 +56,7 @@ class POMDPModel:
         self.name = name
 
     def __str__(self) -> str:
-        return "POMDPModel(num_states=%d, num_actions=%d, num_observations=%d, name=%r)" % (
+        return "PartiallyObservableMarkovDecisionProcessModel(num_states=%d, num_actions=%d, num_observations=%d, name=%r)" % (
             self.num_states,
             self.num_actions,
             self.num_observations,
@@ -77,7 +77,7 @@ class POMDPModel:
 
     def filter(
         self, actions: Sequence[int], observations: Sequence[int], initial_belief: Any | None = None
-    ) -> POMDPFilterResult:
+    ) -> PartiallyObservableMarkovDecisionProcessFilterResult:
         """Run the forward filter and return posterior beliefs and log likelihood."""
         actions = np.asarray(actions, dtype=np.int64)
         observations = np.asarray(observations, dtype=np.int64)
@@ -96,7 +96,7 @@ class POMDPModel:
             beliefs[t] = belief
             pred_probs[t] = evidence
             log_likelihood += np.log(max(evidence, 1.0e-300))
-        return POMDPFilterResult(beliefs, float(log_likelihood), pred_probs)
+        return PartiallyObservableMarkovDecisionProcessFilterResult(beliefs, float(log_likelihood), pred_probs)
 
     def sequence_log_likelihood(
         self, actions: Sequence[int], observations: Sequence[int], initial_belief: Any | None = None
@@ -218,13 +218,13 @@ def baum_welch_pomdp(
     num_states: int,
     num_actions: int,
     num_observations: int,
-    initial_model: POMDPModel | None = None,
+    initial_model: PartiallyObservableMarkovDecisionProcessModel | None = None,
     max_its: int = 50,
     tol: float | None = 1.0e-8,
     pseudo_count: float = 1.0e-3,
     seed: int | None = None,
-) -> POMDPFitResult:
-    """Fit a known-action finite POMDP by Baum-Welch/EM."""
+) -> PartiallyObservableMarkovDecisionProcessFitResult:
+    """Fit a known-action finite PartiallyObservableMarkovDecisionProcess by Baum-Welch/EM."""
     if num_states <= 0 or num_actions <= 0 or num_observations <= 0:
         raise ValueError("state, action, and observation counts must be positive.")
     if len(sequences) == 0:
@@ -256,18 +256,18 @@ def baum_welch_pomdp(
         transition = _normalize_last_axis(trans_counts)
         observation = _normalize_last_axis(obs_counts)
         initial = init_counts / init_counts.sum()
-        model = POMDPModel(transition, observation, initial_belief=initial, name=model.name)
+        model = PartiallyObservableMarkovDecisionProcessModel(transition, observation, initial_belief=initial, name=model.name)
         history.append(float(ll))
         if len(history) > 1 and tol is not None and abs(history[-1] - history[-2]) < tol:
             break
-    return POMDPFitResult(model, history)
+    return PartiallyObservableMarkovDecisionProcessFitResult(model, history)
 
 
-def _random_pomdp(num_states: int, num_actions: int, num_observations: int, rng: np.random.RandomState) -> POMDPModel:
+def _random_pomdp(num_states: int, num_actions: int, num_observations: int, rng: np.random.RandomState) -> PartiallyObservableMarkovDecisionProcessModel:
     transition = rng.dirichlet(np.ones(num_states), size=(num_actions, num_states))
     observation = rng.dirichlet(np.ones(num_observations), size=(num_actions, num_states))
     initial = rng.dirichlet(np.ones(num_states))
-    return POMDPModel(transition, observation, initial_belief=initial)
+    return PartiallyObservableMarkovDecisionProcessModel(transition, observation, initial_belief=initial)
 
 
 def _as_stochastic_3d(x: Any, name: str) -> np.ndarray:
@@ -316,3 +316,9 @@ def _as_simplex(x: Any, size: int, name: str) -> np.ndarray:
 def _normalize_last_axis(x: np.ndarray) -> np.ndarray:
     totals = x.sum(axis=-1, keepdims=True)
     return np.divide(x, totals, out=np.zeros_like(x), where=totals > 0.0)
+
+
+# Backward-compatible aliases for the former POMDP names.
+POMDPModel = PartiallyObservableMarkovDecisionProcessModel
+POMDPFilterResult = PartiallyObservableMarkovDecisionProcessFilterResult
+POMDPFitResult = PartiallyObservableMarkovDecisionProcessFitResult
