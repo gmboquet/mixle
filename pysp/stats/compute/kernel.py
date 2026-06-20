@@ -283,9 +283,18 @@ class GeneratedNumbaKernel(Kernel):
         """Return normalized mixture posterior weights for generated mixtures."""
         if self.components is None:
             ll = self.score(enc).reshape(-1, 1)
+            logw = np.zeros((1, 1))
         else:
-            ll = self.component_scores(enc) + np.asarray(self.dist.log_w, dtype=np.float64).reshape(1, -1)
-        ll = ll - ll.max(axis=1, keepdims=True)
+            logw = np.asarray(self.dist.log_w, dtype=np.float64).reshape(1, -1)
+            ll = self.component_scores(enc) + logw
+        mx = ll.max(axis=1, keepdims=True)
+        # a row with no supporting component has max=-inf, so -inf-(-inf)=nan; fall back to the prior
+        # weights for those rows (matches StackedMixtureKernel.posteriors) instead of emitting NaN
+        bad = ~np.isfinite(mx[:, 0])
+        if bad.any():
+            ll[bad] = logw
+            mx[bad, 0] = ll[bad].max(axis=1)
+        ll = ll - mx
         np.exp(ll, out=ll)
         ll /= ll.sum(axis=1, keepdims=True)
         return ll
