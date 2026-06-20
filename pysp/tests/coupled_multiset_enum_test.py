@@ -205,16 +205,16 @@ class HiddenAssociationEnumerationTestCase(unittest.TestCase):
         self.assertEqual(e_above, b_above)
 
 
-class LLDANonEnumerableTestCase(unittest.TestCase):
+class LabeledLDANonEnumerableTestCase(unittest.TestCase):
     def test_llda_raises_enumeration_error(self):
         from pysp.stats.compute.pdist import EnumerationError
 
-        # LLDA's log_density is a variational ELBO, so it is intentionally not enumerable.
-        from pysp.stats.latent.llda import LLDADistribution
+        # LabeledLDA's log_density is a variational ELBO, so it is intentionally not enumerable.
+        from pysp.stats.latent.llda import LabeledLDADistribution
         from pysp.utils.enumeration import supports_enumeration
 
         topics = [np.log([0.6, 0.3, 0.1]), np.log([0.1, 0.4, 0.5])]
-        dist = LLDADistribution(topics, [1.0, 1.0])
+        dist = LabeledLDADistribution(topics, [1.0, 1.0])
         with self.assertRaises(EnumerationError):
             dist.enumerator()
         self.assertFalse(supports_enumeration(dist))

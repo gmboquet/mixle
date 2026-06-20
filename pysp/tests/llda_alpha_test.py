@@ -13,9 +13,9 @@ from numpy.random import RandomState
 from scipy.special import digamma
 
 from pysp.stats.latent.llda import (
-    LLDADistribution,
-    LLDAEstimator,
-    LLDALabelSetStats,
+    LabeledLDADistribution,
+    LabeledLDAEstimator,
+    LabeledLDALabelSetStats,
     coupled_alpha_objective,
     seq_posterior,
     update_alpha,
@@ -32,7 +32,7 @@ def make_model(alphas):
         CategoricalDistribution({"w0": 0.4, "w1": 0.4, "w2": 0.1, "w3": 0.1}),
         CategoricalDistribution({"w0": 0.1, "w1": 0.1, "w2": 0.4, "w3": 0.4}),
     ]
-    return LLDADistribution(topics, np.asarray(alphas, dtype=float))
+    return LabeledLDADistribution(topics, np.asarray(alphas, dtype=float))
 
 
 def make_data(label_sets, n, seed):
@@ -50,7 +50,7 @@ def make_data(label_sets, n, seed):
 
 
 def make_estimator(num_alphas, pseudo_count=None):
-    return LLDAEstimator(
+    return LabeledLDAEstimator(
         [CategoricalEstimator(), CategoricalEstimator()], num_alphas=num_alphas, pseudo_count=pseudo_count
     )
 
@@ -62,7 +62,7 @@ def accumulate(model, est, data):
     return enc, acc.value()
 
 
-class LLDASingleLabelAlphaTestCase(unittest.TestCase):
+class LabeledLDASingleLabelAlphaTestCase(unittest.TestCase):
     def setUp(self):
         self.model = make_model([[2.0, 0.5], [0.5, 2.0]])
         self.data = make_data([(0,), (1,)], n=30, seed=5)
@@ -103,7 +103,7 @@ class LLDASingleLabelAlphaTestCase(unittest.TestCase):
         self.assertTrue(np.allclose(a_gd[rows, :], a_fp, rtol=1.0e-6, atol=1.0e-6))
 
 
-class LLDAMultiLabelAlphaTestCase(unittest.TestCase):
+class LabeledLDAMultiLabelAlphaTestCase(unittest.TestCase):
     def setUp(self):
         self.model = make_model([[2.0, 0.5], [0.5, 2.0], [1.0, 1.0]])
         self.data = make_data([(0,), (0, 1), (1, 2), (2,), (0, 2), (1,)], n=48, seed=7)
@@ -193,7 +193,7 @@ class LLDAMultiLabelAlphaTestCase(unittest.TestCase):
         self.assertTrue(np.allclose(ss_split[3], self.ss[3], rtol=1.0e-8, atol=1.0e-10))
 
         acc_rt = self.est.accumulator_factory().make().from_value(ss_split)
-        self.assertIsInstance(acc_rt.set_stats, LLDALabelSetStats)
+        self.assertIsInstance(acc_rt.set_stats, LabeledLDALabelSetStats)
         self.assertTrue(np.allclose(acc_rt.value()[1], self.ss[1], rtol=1.0e-8, atol=1.0e-10))
 
         fitted_split = self.est.estimate(None, ss_split)
