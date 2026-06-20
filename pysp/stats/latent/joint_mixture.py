@@ -251,18 +251,22 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
         for i in range(self.num_components2):
             ll_mat2[:, i] = self.components2[i].seq_log_density(enc_data2)
 
-        ll_max1 = ll_mat1.max(axis=1, keepdims=True)
-        ll_mat1 -= ll_max1
-        np.exp(ll_mat1, out=ll_mat1)
+        with np.errstate(divide="ignore", invalid="ignore"):  # -inf max on impossible rows -> handled below
+            ll_max1 = ll_mat1.max(axis=1, keepdims=True)
+            ll_mat1 -= ll_max1
+            np.exp(ll_mat1, out=ll_mat1)
 
-        ll_max2 = ll_mat2.max(axis=1, keepdims=True)
-        ll_mat2 -= ll_max2
-        np.exp(ll_mat2, out=ll_mat2)
+            ll_max2 = ll_mat2.max(axis=1, keepdims=True)
+            ll_mat2 -= ll_max2
+            np.exp(ll_mat2, out=ll_mat2)
 
-        ll_mat12 = np.dot(ll_mat1, self.taus12)
-        ll_mat2 *= ll_mat12
+            ll_mat12 = np.dot(ll_mat1, self.taus12)
+            ll_mat2 *= ll_mat12
 
-        rv = np.log(ll_mat2.sum(axis=1)) + ll_max1[:, 0] + ll_max2[:, 0]
+            rv = np.log(ll_mat2.sum(axis=1)) + ll_max1[:, 0] + ll_max2[:, 0]
+        # an observation outside the support of either component set has max log-density -inf, which
+        # produces nan above; such observations have zero probability
+        rv[~(np.isfinite(ll_max1[:, 0]) & np.isfinite(ll_max2[:, 0]))] = -np.inf
 
         return rv
 
@@ -643,22 +647,30 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             ll_mat1[:, i, 0] = estimate.components1[i].seq_log_density(enc_data1)
             ll_mat1[:, i, 0] += log_w[i]
 
-        ll_max1 = ll_mat1.max(axis=1, keepdims=True)
-        ll_mat1 -= ll_max1
-        np.exp(ll_mat1, out=ll_mat1)
-
         for i in range(estimate.num_components2):
             ll_mat2[:, 0, i] = estimate.components2[i].seq_log_density(enc_data2)
 
-        ll_max2 = ll_mat2.max(axis=2, keepdims=True)
-        ll_mat2 -= ll_max2
-        np.exp(ll_mat2, out=ll_mat2)
+        with np.errstate(invalid="ignore"):  # -inf max on impossible rows -> rows zeroed below
+            ll_max1 = ll_mat1.max(axis=1, keepdims=True)
+            ll_mat1 -= ll_max1
+            np.exp(ll_mat1, out=ll_mat1)
+
+            ll_max2 = ll_mat2.max(axis=2, keepdims=True)
+            ll_mat2 -= ll_max2
+            np.exp(ll_mat2, out=ll_mat2)
+
+        # an observation outside the support of either component set has max log-density -inf, which makes
+        # the exponentiated matrices nan; zero those rows so impossible observations contribute no
+        # responsibility (rather than poisoning the whole batch's counts with nan)
+        ll_mat1[~np.isfinite(np.broadcast_to(ll_max1, ll_mat1.shape))] = 0.0
+        ll_mat2[~np.isfinite(np.broadcast_to(ll_max2, ll_mat2.shape))] = 0.0
 
         ll_joint = ll_mat1 * ll_mat2
         ll_joint *= estimate.taus12
 
         gamma_2 = np.sum(ll_joint, axis=1, keepdims=True)
         sf = np.sum(gamma_2, axis=2, keepdims=True)
+        sf_safe = np.where(sf > 0.0, sf, 1.0)  # impossible rows have sf==0; their gammas are already 0
         ww = np.reshape(weights, [-1, 1, 1])
 
         # Capture per-row data log-likelihood (== seq_log_density) by reusing the joint posterior
@@ -670,10 +682,10 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self._seq_ll += float(np.dot(weights, row_ll))
 
         gamma_1 = np.sum(ll_joint, axis=2, keepdims=True)
-        gamma_1 *= ww / sf
-        gamma_2 *= ww / sf
+        gamma_1 *= ww / sf_safe
+        gamma_2 *= ww / sf_safe
 
-        ll_joint *= ww / sf
+        ll_joint *= ww / sf_safe
 
         self.comp_counts1 += np.sum(gamma_1, axis=0).flatten()
         self.comp_counts2 += np.sum(gamma_2, axis=0).flatten()
