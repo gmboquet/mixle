@@ -321,16 +321,14 @@ class ComputeMetadataTestCase(unittest.TestCase):
         self.assertEqual(capabilities_for(tree_hmm).engine_ready, ("numpy", "torch"))
         self.assertEqual(capabilities_for(tree_hmm).kernel_status, "generic_latent")
 
-        ind_pi_hmm = SemiSupervisedHiddenMarkovModelDistribution(
+        semi_sup_hmm = SemiSupervisedHiddenMarkovModelDistribution(
             [GaussianDistribution(-1.0, 0.8), GaussianDistribution(2.0, 1.5)],
-            [[0.6, 0.4], [0.5, 0.5], [0.3, 0.7], [0.8, 0.2]],
             [[0.75, 0.25], [0.20, 0.80]],
-            None,
             len_dist=IntegerCategoricalDistribution(0, [0.1, 0.2, 0.4, 0.3]),
-            use_numba=False,
         )
-        self.assertEqual(capabilities_for(ind_pi_hmm).engine_ready, ("numpy", "torch"))
-        self.assertEqual(capabilities_for(ind_pi_hmm).kernel_status, "generic_latent")
+        # the semi-supervised HMM (per-observation state priors) is numpy-only
+        self.assertEqual(capabilities_for(semi_sup_hmm).engine_ready, ("numpy",))
+        self.assertEqual(capabilities_for(semi_sup_hmm).kernel_status, "legacy_numpy")
 
         quantized_hmm = QuantizedHiddenMarkovModelDistribution(
             theta=0.5,
@@ -1124,23 +1122,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
         tree_params = tree_decl.parameter_values(tree_hmm)
         np.testing.assert_allclose(tree_params["transitions"], np.asarray([[0.75, 0.25], [0.20, 0.80]]))
 
-        ind_pi_hmm = SemiSupervisedHiddenMarkovModelDistribution(
-            [GaussianDistribution(-1.0, 0.8), GaussianDistribution(2.0, 1.5)],
-            [[0.6, 0.4], [0.5, 0.5], [0.3, 0.7], [0.8, 0.2]],
-            [[0.75, 0.25], [0.20, 0.80]],
-            None,
-            len_dist=IntegerCategoricalDistribution(0, [0.1, 0.2, 0.4, 0.3]),
-            use_numba=False,
-        )
-        ind_pi_decl = declaration_for(ind_pi_hmm)
-        self.assertEqual(ind_pi_decl.name, "ind_pi_hidden_markov")
-        self.assertEqual(ind_pi_decl.parameter_names, ("w", "transitions", "taus"))
-        self.assertEqual(ind_pi_decl.statistic_names, hmm_decl.statistic_names)
-        self.assertEqual(ind_pi_decl.child_roles, ("state_0_emission", "state_1_emission", "length"))
-        self.assertFalse(ind_pi_decl.differentiable)
-        ind_pi_params = ind_pi_decl.parameter_values(ind_pi_hmm)
-        np.testing.assert_allclose(ind_pi_params["w"], np.asarray([[0.6, 0.4], [0.5, 0.5], [0.3, 0.7], [0.8, 0.2]]))
-        self.assertIsNone(ind_pi_params["taus"])
+        # (the semi-supervised HMM is numpy-only and exposes no compute declaration)
 
     def test_declared_leaf_statistics_match_accumulator_layouts(self):
         cases = [

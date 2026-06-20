@@ -14,7 +14,6 @@ import numpy as np
 
 from pysp.stats import *
 from pysp.stats.compute.pdist import EnumerationError
-from pysp.stats.latent.hidden_markov_ind_pi import SemiSupervisedHiddenMarkovModelDistribution
 from pysp.utils.enumeration import freeze, sound_top_k, supports_enumeration
 
 TOL = 1e-9
@@ -32,14 +31,6 @@ def make_cases():
         topics=[CategoricalDistribution({"a": 0.8, "b": 0.2}), CategoricalDistribution({"b": 0.6, "c": 0.4})],
         w=[0.7, 0.3],
         transitions=[[0.9, 0.1], [0.4, 0.6]],
-        len_dist=IntegerCategoricalDistribution(0, [0.1, 0.3, 0.4, 0.2]),
-    )
-
-    ind_pi_hmm = SemiSupervisedHiddenMarkovModelDistribution(
-        topics=[CategoricalDistribution({"a": 0.8, "b": 0.2}), CategoricalDistribution({"b": 0.6, "c": 0.4})],
-        w=[[0.7, 0.3], [0.5, 0.5]],
-        transitions=[[0.9, 0.1], [0.4, 0.6]],
-        taus=None,
         len_dist=IntegerCategoricalDistribution(0, [0.1, 0.3, 0.4, 0.2]),
     )
 
@@ -110,7 +101,6 @@ def make_cases():
         ("intsetdist", IntegerBernoulliSetDistribution(np.log([0.8, 0.4, 0.01])), 10, 8),
         ("markov_chain", mc, 30, 15),
         ("hmm", hmm, 60, 40),
-        ("ind_pi_hmm", ind_pi_hmm, 60, 40),
         ("segmental_hmm", seg_hmm, 60, 40),
     ]
 
