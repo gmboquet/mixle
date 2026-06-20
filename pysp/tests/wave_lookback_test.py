@@ -29,7 +29,7 @@ def make_dist(mod):
     init_dists = [SequenceDistribution(d0, CategoricalDistribution({1: 1.0}))] * 2
     len_dist = CategoricalDistribution({5: 0.5, 6: 0.5})
 
-    return mod.LookbackHiddenMarkovDistribution(
+    return mod.LookbackHiddenMarkovModelDistribution(
         [t1, t2], w=[0.6, 0.4], transitions=[[0.8, 0.2], [0.3, 0.7]], lag=1, init_dist=init_dists, len_dist=len_dist
     )
 
@@ -48,7 +48,7 @@ def make_estimator(mod, with_len=True):
     topic_est = IntegerMarkovChainEstimator(3, lag=1, pseudo_count=0.1)
     len_est = CategoricalEstimator(pseudo_count=0.1) if with_len else None
 
-    return mod.LookbackHiddenMarkovEstimator(
+    return mod.LookbackHiddenMarkovModelEstimator(
         [topic_est] * 2, lag=1, init_estimators=[init_est] * 2, len_estimator=len_est, pseudo_count=(1.0, 1.0)
     )
 
@@ -58,12 +58,12 @@ class LookbackHmmImportTestCase(unittest.TestCase):
         for mod in MODULES:
             with self.subTest(module=mod.__name__):
                 for cls_name in (
-                    "LookbackHiddenMarkovDistribution",
-                    "LookbackHiddenMarkovSampler",
-                    "LookbackHiddenMarkovEstimatorAccumulator",
-                    "LookbackHiddenMarkovEstimatorAccumulatorFactory",
-                    "LookbackHiddenMarkovEstimator",
-                    "LookbackHiddenMarkovDataEncoder",
+                    "LookbackHiddenMarkovModelDistribution",
+                    "LookbackHiddenMarkovModelSampler",
+                    "LookbackHiddenMarkovModelEstimatorAccumulator",
+                    "LookbackHiddenMarkovModelEstimatorAccumulatorFactory",
+                    "LookbackHiddenMarkovModelEstimator",
+                    "LookbackHiddenMarkovModelDataEncoder",
                 ):
                     self.assertTrue(hasattr(mod, cls_name), "%s missing %s" % (mod.__name__, cls_name))
 
@@ -99,7 +99,7 @@ class LookbackHmmEncoderTestCase(unittest.TestCase):
 
                 self.assertEqual(enc_d, dist.dist_to_encoder())
                 self.assertEqual(enc_d, enc_a)
-                self.assertTrue(str(enc_d).startswith("LookbackHiddenMarkovDataEncoder"))
+                self.assertTrue(str(enc_d).startswith("LookbackHiddenMarkovModelDataEncoder"))
 
                 ld_enc_d = dist.seq_log_density(enc_d.seq_encode(data))
                 ld_enc_a = dist.seq_log_density(enc_a.seq_encode(data))
@@ -121,11 +121,11 @@ class LookbackHmmEstimationTestCase(unittest.TestCase):
                 enc_data = seq_encode(data, model=dist)
 
                 init_model = seq_initialize(enc_data, est, RandomState(1), p=1.0)
-                self.assertIsInstance(init_model, mod.LookbackHiddenMarkovDistribution)
+                self.assertIsInstance(init_model, mod.LookbackHiddenMarkovModelDistribution)
 
                 model1 = seq_estimate(enc_data, est, init_model)
                 model2 = seq_estimate(enc_data, est, model1)
-                self.assertIsInstance(model2, mod.LookbackHiddenMarkovDistribution)
+                self.assertIsInstance(model2, mod.LookbackHiddenMarkovModelDistribution)
 
                 _, ll0 = seq_log_density_sum(enc_data, init_model)
                 _, ll1 = seq_log_density_sum(enc_data, model1)

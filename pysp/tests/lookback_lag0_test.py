@@ -62,7 +62,7 @@ def make_lag0_dist(mod, len_dist):
     ]
     init_dist = None
 
-    return mod.LookbackHiddenMarkovDistribution(
+    return mod.LookbackHiddenMarkovModelDistribution(
         topics, w=W, transitions=TRANSITIONS, lag=0, init_dist=init_dist, len_dist=len_dist
     )
 
@@ -78,7 +78,7 @@ def make_lag0_estimator(mod, with_len=True):
     else:
         len_est = NullEstimator()
 
-    return mod.LookbackHiddenMarkovEstimator(
+    return mod.LookbackHiddenMarkovModelEstimator(
         [topic_est] * 2, lag=0, init_estimators=[NullEstimator()] * 2, len_estimator=len_est, pseudo_count=(1.0, 1.0)
     )
 
@@ -153,7 +153,7 @@ class Lag0SamplerTestCase(unittest.TestCase):
     def make_sampler_dist(self, mod, len_dist):
         topics = [_MarginalWindowDistribution(IntegerCategoricalDistribution(0, p)) for p in EMISSION_PROBS]
         init_dist = [NullDistribution()] * 2
-        return mod.LookbackHiddenMarkovDistribution(
+        return mod.LookbackHiddenMarkovModelDistribution(
             topics, w=W, transitions=TRANSITIONS, lag=0, init_dist=init_dist, len_dist=len_dist
         )
 
@@ -208,7 +208,7 @@ class Lag0EstimationTestCase(unittest.TestCase):
                 enc_data = seq_encode(data, model=dist)
 
                 init_model = seq_initialize(enc_data, est, RandomState(1), p=1.0)
-                self.assertIsInstance(init_model, mod.LookbackHiddenMarkovDistribution)
+                self.assertIsInstance(init_model, mod.LookbackHiddenMarkovModelDistribution)
 
                 model1 = seq_estimate(enc_data, est, init_model)
                 model2 = seq_estimate(enc_data, est, model1)

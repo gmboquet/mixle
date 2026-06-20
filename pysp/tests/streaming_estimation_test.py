@@ -140,7 +140,7 @@ class StreamingEstimatorTestCase(unittest.TestCase):
             IndPiHiddenMarkovEstimator,
             IndPiHiddenMarkovModelDistribution,
         )
-        from pysp.stats.latent.look_back_hmm import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
+        from pysp.stats.latent.look_back_hmm import LookbackHiddenMarkovModelDistribution, LookbackHiddenMarkovModelEstimator
         from pysp.stats.latent.tree_hmm import TreeHiddenMarkovModelDistribution
         from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
         from pysp.stats.leaf.gaussian import GaussianDistribution
@@ -162,7 +162,7 @@ class StreamingEstimatorTestCase(unittest.TestCase):
             len_estimator=CategoricalEstimator(pseudo_count=0.1),
         )
         lookback_data = [[0, 1, 1, 2, 2, 0], [2, 2, 1, 1, 0], [0, 0, 1, 2, 1, 0]]
-        for dist_cls, est_cls in ((LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator),):
+        for dist_cls, est_cls in ((LookbackHiddenMarkovModelDistribution, LookbackHiddenMarkovModelEstimator),):
             with self.subTest(dist=dist_cls.__module__):
                 dist = dist_cls(
                     lookback_topics,
