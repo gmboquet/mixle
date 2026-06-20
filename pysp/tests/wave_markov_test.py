@@ -100,13 +100,13 @@ class ImportTestCase(unittest.TestCase):
 class GrammarTestCase(unittest.TestCase):
     @staticmethod
     def _grammar():
-        from pysp.stats.graph.grammar import VRG, GrammarRule
+        from pysp.stats.graph.grammar import GrammarRule, VertexReplacementGrammar
 
         graph = nx.Graph()
         graph.add_node(0, label="A", node_color="")
         graph.add_node(1, label="B", node_color="")
         graph.add_edge(0, 1, weight=1.0, edge_color="")
-        grammar = VRG(name="tiny")
+        grammar = VertexReplacementGrammar(name="tiny")
         grammar.add_rule(GrammarRule(2, graph, frequency=3.0))
         return grammar
 
