@@ -33,6 +33,8 @@ __all__ = [
     "seq_encode",
     "seq_log_density",
     "seq_log_density_sum",
+    "log_density",
+    "density",
     "seq_estimate",
     "seq_initialize",
     "load_models",
@@ -1695,6 +1697,50 @@ def seq_log_density(
             return [np.asarray([ee.seq_log_density(u[1]) for ee in estimate]) for u in enc_data]
         else:
             return [estimate.seq_log_density(u[1]) for u in enc_data]
+
+
+def log_density(
+    data: Sequence[T] | pyspark.rdd.RDD,
+    model: SequenceEncodableProbabilityDistribution,
+) -> np.ndarray:
+    """Per-observation log-density of 'model' over raw (unencoded) 'data'.
+
+    Convenience wrapper that encodes 'data' with the model's own encoder, evaluates the vectorized
+    seq_log_density, and returns a single flat numpy array aligned to the input order -- the common need that
+    otherwise requires the seq_encode / seq_log_density / np.concatenate boilerplate. For a distributed RDD the
+    densities are collected to the driver in partition order.
+
+    Args:
+        data (Union[Sequence[T], pyspark.rdd.RDD]): Raw iid observations of data type consistent with 'model'.
+        model (SequenceEncodableProbabilityDistribution): Distribution to score the observations under.
+
+    Returns:
+        np.ndarray of per-observation log-densities.
+
+    """
+    # num_chunks=1 keeps the result aligned to the input order (multi-chunk encoding interleaves observations)
+    enc_data = seq_encode(data, model=model, num_chunks=1)
+    parts = seq_log_density(enc_data, model)
+    return np.concatenate([np.atleast_1d(np.asarray(p, dtype=float)) for p in parts])
+
+
+def density(
+    data: Sequence[T] | pyspark.rdd.RDD,
+    model: SequenceEncodableProbabilityDistribution,
+) -> np.ndarray:
+    """Per-observation density of 'model' over raw (unencoded) 'data'.
+
+    Exponentiated companion to log_density(); returns a flat numpy array of densities aligned to the input order.
+
+    Args:
+        data (Union[Sequence[T], pyspark.rdd.RDD]): Raw iid observations of data type consistent with 'model'.
+        model (SequenceEncodableProbabilityDistribution): Distribution to score the observations under.
+
+    Returns:
+        np.ndarray of per-observation densities.
+
+    """
+    return np.exp(log_density(data, model))
 
 
 def seq_estimate(
