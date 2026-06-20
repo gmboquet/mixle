@@ -56,11 +56,14 @@ class PartiallyObservableMarkovDecisionProcessModel:
         self.name = name
 
     def __str__(self) -> str:
-        return "PartiallyObservableMarkovDecisionProcessModel(num_states=%d, num_actions=%d, num_observations=%d, name=%r)" % (
-            self.num_states,
-            self.num_actions,
-            self.num_observations,
-            self.name,
+        return (
+            "PartiallyObservableMarkovDecisionProcessModel(num_states=%d, num_actions=%d, num_observations=%d, name=%r)"
+            % (
+                self.num_states,
+                self.num_actions,
+                self.num_observations,
+                self.name,
+            )
         )
 
     def belief_update(self, belief: Any, action: int, observation: int) -> tuple[np.ndarray, float]:
@@ -256,14 +259,18 @@ def baum_welch_pomdp(
         transition = _normalize_last_axis(trans_counts)
         observation = _normalize_last_axis(obs_counts)
         initial = init_counts / init_counts.sum()
-        model = PartiallyObservableMarkovDecisionProcessModel(transition, observation, initial_belief=initial, name=model.name)
+        model = PartiallyObservableMarkovDecisionProcessModel(
+            transition, observation, initial_belief=initial, name=model.name
+        )
         history.append(float(ll))
         if len(history) > 1 and tol is not None and abs(history[-1] - history[-2]) < tol:
             break
     return PartiallyObservableMarkovDecisionProcessFitResult(model, history)
 
 
-def _random_pomdp(num_states: int, num_actions: int, num_observations: int, rng: np.random.RandomState) -> PartiallyObservableMarkovDecisionProcessModel:
+def _random_pomdp(
+    num_states: int, num_actions: int, num_observations: int, rng: np.random.RandomState
+) -> PartiallyObservableMarkovDecisionProcessModel:
     transition = rng.dirichlet(np.ones(num_states), size=(num_actions, num_states))
     observation = rng.dirichlet(np.ones(num_observations), size=(num_actions, num_states))
     initial = rng.dirichlet(np.ones(num_states))

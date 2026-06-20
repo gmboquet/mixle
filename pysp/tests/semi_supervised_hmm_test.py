@@ -95,7 +95,9 @@ class SemiSupervisedHMMTestCase(unittest.TestCase):
         np.testing.assert_allclose(m.transitions, A, atol=0.1)
 
     def test_unsupervised_em_runs(self):
-        truth = SemiSupervisedHiddenMarkovModelDistribution([G(-3.0, 1.0), G(3.0, 1.0)], np.array([[0.85, 0.15], [0.2, 0.8]]))
+        truth = SemiSupervisedHiddenMarkovModelDistribution(
+            [G(-3.0, 1.0), G(3.0, 1.0)], np.array([[0.85, 0.15], [0.2, 0.8]])
+        )
         data = [(truth.sampler(seed=i).sample()[0], None) for i in range(1, 120)]
         est = SemiSupervisedHiddenMarkovModelDistribution([G(0.0, 1.0), G(0.0, 1.0)], np.full((2, 2), 0.5)).estimator()
         m = optimize(data, est, max_its=40, rng=np.random.RandomState(3), out=None)

@@ -344,7 +344,9 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         self.init_scale = float(init_scale)
         self.max_norm = float(max_norm)
         self.directions = tuple(directions)
-        self.negatives = None if negatives is None else int(negatives)  # sampled-softmax negatives (scales to large KGs)
+        self.negatives = (
+            None if negatives is None else int(negatives)
+        )  # sampled-softmax negatives (scales to large KGs)
         self.seed = int(seed)
         self.pseudo_count = pseudo_count
         self.name = name
