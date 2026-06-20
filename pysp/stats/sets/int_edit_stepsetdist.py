@@ -437,9 +437,6 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
         self.init_acc = init_acc if init_acc is not None else NullAccumulator()
         self.tot_sum = 0.0
 
-        self._acc_rng = None
-        self._init_rng = False
-
     def update(self, x: T, weight: float, estimate: IntegerStepBernoulliEditDistribution | None) -> None:
         """Add weight to the removed/added/kept counts for the observed (prev set, next set) pair.
 
@@ -468,11 +465,6 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
             else:
                 self.init_acc.update(x[0], weight, None)
 
-    def _rng_initialize(self, rng: RandomState) -> None:
-        if not self._init_rng:
-            self._acc_rng = RandomState(seed=rng.randint(maxrandint))
-            self._init_rng = True
-
     def initialize(self, x: T, weight: float, rng: RandomState) -> None:
         """Initialize the accumulator with a weighted observation.
 
@@ -482,9 +474,6 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
             rng (RandomState): Random number generator passed to the init accumulator.
 
         """
-        if not self._init_rng:
-            self._rng_initialize(rng)
-
         xx0 = np.asarray(x[0], dtype=int)
         xx1 = np.asarray(x[1], dtype=int)
 
@@ -568,9 +557,6 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
 
         """
         sz, idx, xs, ys, ym, init_enc = x
-
-        if not self._init_rng:
-            self._rng_initialize(rng)
 
         agg_cnt0 = np.bincount(xs[ym[0]], weights=weights[idx[ym[0]]])
         agg_cnt1 = np.bincount(xs[ym[1]], weights=weights[idx[ym[1]]])

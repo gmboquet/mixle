@@ -683,7 +683,8 @@ def run_em(
             return last_good
         model = candidate
         last_good = model
-        if delta is not None and abs(value - old_value) < delta:
+        # converge on a small *improvement* only; abs() would also stop on a decrease (the wrong model)
+        if delta is not None and 0.0 <= value - old_value < delta:
             break
         old_value = value
     return model
