@@ -1423,7 +1423,7 @@ def initialize(
             rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
 
             for x in itr:
-                w = rng.binomial(n=1, p=p)
+                w = rng_w.binomial(n=1, p=p)  # partition-local rng; the driver's rng is identical on every split
                 counts_for_split += w
                 accumulator_for_split.initialize(x, w, rng_loc)
 
