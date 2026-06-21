@@ -94,6 +94,11 @@ def _sympy_ops(sympy) -> dict[str, Callable[..., Any]]:
         "max": lambda *xs: sympy.Max(*xs),
         "where": lambda cond, a, b: sympy.Piecewise((a, cond), (b, True)),
         "clip": lambda x, a_min, a_max: _sympy_clip(sympy, x, a_min, a_max),
+        # nullary named math constants -- stay exact (pi, not 3.14159...)
+        "pi": lambda: sympy.pi,
+        "e": lambda: sympy.E,
+        "euler_gamma": lambda: sympy.EulerGamma,
+        "inf": lambda: sympy.oo,
     }
 
 
@@ -192,6 +197,10 @@ def _sage_ops(sage) -> dict[str, Callable[..., Any]]:
         "max": lambda *xs: sage.max_symbolic(*xs),
         "where": lambda cond, a, b: _sage_where(sage, cond, a, b),
         "clip": lambda x, a_min, a_max: _sage_clip(sage, x, a_min, a_max),
+        "pi": lambda: sage.pi,
+        "e": lambda: sage.e,
+        "euler_gamma": lambda: sage.euler_gamma,
+        "inf": lambda: sage.oo,
     }
 
 
