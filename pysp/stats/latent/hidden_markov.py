@@ -969,6 +969,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             len_estimator=len_est,
             name=self.name,
             prior=self.get_prior(),
+            terminal_states=self.terminal_states,
         )
 
     def dist_to_encoder(self) -> "HiddenMarkovDataEncoder":
@@ -1886,6 +1887,57 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             self.state_counts += np.bincount(states, weights[idx], minlength=self.num_states)
             self.init_counts += np.bincount(states[nz_idx_group], weights[nz_idx], minlength=self.num_states)
 
+    def _terminal_seq_update(self, x, weights: np.ndarray, estimate: HiddenMarkovModelDistribution) -> None:
+        """Baum-Welch E-step for a terminal-state HMM (per-sequence terminal forward-backward).
+
+        The backward pass mirrors the forward: a state ends the sequence only at the final position and
+        only if it is terminal, and only non-terminal states have a future. Responsibilities (gamma) and
+        transition responsibilities (xi) are accumulated into the same init/state/transition/emission
+        sufficient statistics as the standard path, so the M-step is unchanged.
+        """
+        from scipy.special import logsumexp
+
+        x0, _ = x
+        (tot_cnt, _ib, _hn, len_vec, idx_mat, _iv, enc_data), _, _le = x0
+        k = self.num_states
+        log_b_all = np.empty((tot_cnt, k))
+        for j in range(k):
+            log_b_all[:, j] = estimate.topics[j].seq_log_density(enc_data)
+        log_w, log_a = estimate.log_w, estimate.log_transitions
+        term, nonterm = estimate._terminal_mask, ~estimate._terminal_mask
+        weights = np.asarray(weights, dtype=np.float64)
+        gamma_flat = np.zeros((tot_cnt, k))
+        for s in range(idx_mat.shape[0]):
+            length = int(len_vec[s])
+            if length == 0:
+                continue
+            ws = float(weights[s])
+            rows = idx_mat[s, :length]
+            log_b = log_b_all[rows, :]
+            la = np.empty((length, k))
+            la[0] = log_w + log_b[0]
+            for t in range(1, length):
+                prev = np.where(nonterm, la[t - 1], -np.inf)
+                la[t] = log_b[t] + logsumexp(prev[:, None] + log_a, axis=0)
+            log_p = float(logsumexp(la[length - 1][term])) if term.any() else -np.inf
+            if not np.isfinite(log_p):
+                continue
+            lb = np.full((length, k), -np.inf)
+            lb[length - 1] = np.where(term, 0.0, -np.inf)
+            for t in range(length - 2, -1, -1):
+                future = log_b[t + 1] + lb[t + 1]
+                lb[t] = np.where(nonterm, logsumexp(log_a + future[None, :], axis=1), -np.inf)
+            gamma = np.exp(la + lb - log_p)  # (length, k)
+            self.init_counts += ws * gamma[0]
+            for t in range(length):
+                gamma_flat[rows[t]] += ws * gamma[t]
+            for t in range(length - 1):
+                log_xi = la[t][:, None] + log_a + (log_b[t + 1] + lb[t + 1])[None, :] - log_p
+                self.trans_counts += ws * np.where(nonterm[:, None], np.exp(log_xi), 0.0)
+        self.state_counts += gamma_flat.sum(axis=0)
+        for j in range(k):
+            self.accumulators[j].seq_update(enc_data, gamma_flat[:, j], estimate.topics[j])
+
     def seq_update(self, x, weights: np.ndarray, estimate: HiddenMarkovModelDistribution) -> None:
         """Vectorized update for HiddenMarkovAccumulator object from encoded sequence of observations.
 
@@ -1927,6 +1979,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        if estimate.terminal_states is not None:
+            self._terminal_seq_update(x, weights, estimate)
+            return
+
         x0, x1 = x
 
         if x1 is None:
@@ -2424,6 +2480,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
         use_numba: bool | None = None,
         prior=None,
         steady_state_init: bool = False,
+        terminal_states: set[int] | Sequence[int] | None = None,
     ) -> None:
         """HiddenMarkovEstimator object for estimating HiddenMarkovDistribution for aggregated sufficient statistics.
 
@@ -2459,6 +2516,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
         self.name = name
         self.use_numba = HAS_NUMBA if use_numba is None else use_numba
         self.steady_state_init = bool(steady_state_init)
+        self.terminal_states = terminal_states
         self.set_prior(prior)
 
     def accumulator_factory(self):
@@ -2586,6 +2644,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
                 len_dist=len_dist,
                 name=self.name,
                 terminal_values=None,
+                terminal_states=self.terminal_states,
                 use_numba=self.use_numba,
                 prior=(init_posterior, row_posteriors),
             )
@@ -2625,6 +2684,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
             len_dist=len_dist,
             name=self.name,
             terminal_values=None,
+            terminal_states=self.terminal_states,
             use_numba=self.use_numba,
         )
 
