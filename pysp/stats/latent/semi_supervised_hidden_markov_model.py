@@ -62,7 +62,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
 
         return DistributionCapabilities(engine_ready=("numpy",), kernel_status="legacy_numpy")
 
-    def __init__(self, topics, transitions, len_dist=None, name=None, keys=None, use_numba=False):
+    def __init__(self, topics, transitions, len_dist=None, name=None, keys=None, use_numba=False, terminal_states=None):
         """SemiSupervisedHiddenMarkovModelDistribution.
 
         Args:
@@ -84,6 +84,32 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
             keys = (None, None)
         self.keys = keys
         self.use_numba = False
+        self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+        if self.terminal_states is not None:
+            self._terminal_mask = np.zeros(self.nStates, dtype=bool)
+            self._terminal_mask[list(self.terminal_states)] = True
+
+    def _terminal_log_b(self, emissions, prior) -> np.ndarray:
+        """Per-position log emission+prior potentials ``(T, S)`` for the terminal forward."""
+        enc = self.topics[0].dist_to_encoder().seq_encode(list(emissions))
+        log_b = np.empty((len(emissions), self.nStates))
+        for s in range(self.nStates):
+            log_b[:, s] = np.asarray(self.topics[s].seq_log_density(enc), dtype=float)
+        p = _as_prior(prior, len(emissions), self.nStates)
+        if p is not None:
+            with np.errstate(divide="ignore"):
+                log_b = log_b + np.log(p)
+        return log_b
+
+    def _terminal_forward_loglik(self, emissions, prior) -> float:
+        """Stopping-time likelihood (uniform initial weight; shared terminal forward over phi=emission*prior)."""
+        from pysp.stats.latent.hidden_markov import terminal_forward_loglik
+
+        if len(emissions) == 0:
+            return _LOG_ZERO
+        return terminal_forward_loglik(
+            np.zeros(self.nStates), self.logTransitions, self._terminal_log_b(emissions, prior), self._terminal_mask
+        )
 
     def __str__(self) -> str:
         s1 = ",".join(map(str, self.topics))
@@ -118,6 +144,8 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
 
     def _forward_loglik(self, emissions, prior) -> float:
         """Scaled forward; returns the log joint evidence log sum_paths prod phi * prod A."""
+        if self.terminal_states is not None:
+            return self._terminal_forward_loglik(emissions, prior)
         n = len(emissions)
         if n == 0:
             return 0.0
@@ -162,7 +190,9 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
             None if isinstance(self.len_dist, NullDistribution) else self.len_dist.estimator(pseudo_count=pseudo_count)
         )
         comp_ests = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
-        return SemiSupervisedHiddenMarkovEstimator(comp_ests, len_estimator=len_est, pseudo_count=pseudo_count)
+        return SemiSupervisedHiddenMarkovEstimator(
+            comp_ests, len_estimator=len_est, pseudo_count=pseudo_count, terminal_states=self.terminal_states
+        )
 
     def dist_to_encoder(self):
         emission_encoder = self.topics[0].dist_to_encoder()
@@ -199,7 +229,19 @@ class SemiSupervisedHiddenMarkovSampler(DistributionSampler):
             emissions.append(self.state_samplers[z].sample())
         return (emissions, None)
 
+    def _sample_terminal(self, cap=1_000_000):
+        """Run the chain (uniform initial) until the first terminal state; emit one observation per state."""
+        s = self.dist.nStates
+        z = int(self.rng.choice(s))
+        states = [z]
+        while z not in self.dist.terminal_states and len(states) < cap:
+            z = int(self.rng.choice(s, p=self.dist.transitions[z]))
+            states.append(z)
+        return ([self.state_samplers[st].sample() for st in states], None)
+
     def sample(self, size=None):
+        if self.dist.terminal_states is not None:
+            return self._sample_terminal() if size is None else [self._sample_terminal() for _ in range(size)]
         if size is None:
             return self._sample_one()
         return [self._sample_one() for _ in range(size)]
@@ -256,10 +298,25 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
         gamma[n - 1] = gamma[n - 1] / (g if g > 0 else 1.0)
         return gamma, xi
 
+    def _terminal_posteriors(self, dist, emissions, prior):
+        """Terminal-state forward-backward responsibilities (uniform initial; phi=emission*prior)."""
+        from pysp.stats.latent.hidden_markov import terminal_forward_backward
+
+        log_b = dist._terminal_log_b(emissions, prior)
+        _, gamma, xi = terminal_forward_backward(
+            np.zeros(dist.nStates), dist.logTransitions, log_b, dist._terminal_mask
+        )
+        return (None, None) if gamma is None else (gamma, xi.sum(axis=0))
+
     def _accumulate(self, dist, emissions, prior, weight):
         n = len(emissions)
         if n > 0:
-            gamma, xi = self._posteriors(dist, emissions, prior)
+            if dist is not None and getattr(dist, "terminal_states", None) is not None:
+                gamma, xi = self._terminal_posteriors(dist, emissions, prior)
+                if gamma is None:
+                    return  # zero-probability sequence under the terminal model
+            else:
+                gamma, xi = self._posteriors(dist, emissions, prior)
             self.trans_counts += weight * xi
             # accumulate emissions vectorized over T: one weighted seq_update per state instead of T*S calls
             enc = self.accumulators[0].acc_to_encoder().seq_encode(list(emissions))
@@ -369,7 +426,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory(StatisticAccumulator
 
 
 class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
-    def __init__(self, estimators, len_estimator=None, pseudo_count=None, name=None, keys=(None, None)):
+    def __init__(self, estimators, len_estimator=None, pseudo_count=None, name=None, keys=(None, None), terminal_states=None):
         self.estimators = list(estimators)
         self.num_states = len(self.estimators)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
@@ -378,6 +435,7 @@ class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
         if keys is None:
             keys = (None, None)
         self.keys = keys
+        self.terminal_states = terminal_states
 
     def accumulator_factory(self):
         len_factory = (
@@ -399,7 +457,7 @@ class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
             None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.estimate(None, length_stat)
         )
         return SemiSupervisedHiddenMarkovModelDistribution(
-            topics, transitions, len_dist=len_dist, name=self.name, keys=self.keys
+            topics, transitions, len_dist=len_dist, name=self.name, keys=self.keys, terminal_states=self.terminal_states
         )
 
 
