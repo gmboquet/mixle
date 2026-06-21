@@ -324,6 +324,33 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         """
         return vec.log_sum(np.asarray([u.log_density(x) for u in self.components]) + self.log_w)
 
+    def conditional(self, observed: dict[int, float]) -> "MixtureDistribution":
+        """Return the conditional mixture over the unobserved coordinates given ``observed``.
+
+        The conditional of a mixture is *itself a mixture*: for ``sum_k w_k f_k`` observing ``x_o``,
+
+            P(x_u | x_o) = sum_k w'_k f_k(x_u | x_o),  w'_k proportional to w_k f_k.marginal(x_o)(x_o),
+
+        i.e. the component responsibilities are updated by how well each component explains the observed
+        coordinates and each component is replaced by its own conditional. Because the result is a full
+        ``MixtureDistribution`` you can both score it and ``.sampler(seed).sample()`` from it -- the latter
+        is ``given=``-style conditional sampling that first draws a component from the posterior
+        responsibilities, then draws the unobserved coordinates from that component's conditional.
+
+        Requires each component to support ``marginal(indices)`` and ``condition(observed)`` (e.g. the
+        multivariate Gaussian / Student-t). ``observed`` maps coordinate index to its fixed value.
+        """
+        obs_idx = sorted(observed)
+        if not obs_idx:
+            return MixtureDistribution([c.condition({}) for c in self.components], self.w.copy())
+        x_o = np.array([observed[i] for i in obs_idx], dtype=float)
+        log_post = np.array(
+            [self.log_w[k] + self.components[k].marginal(obs_idx).log_density(x_o) for k in range(self.num_components)]
+        )
+        log_post -= vec.log_sum(log_post)
+        new_components = [c.condition(observed) for c in self.components]
+        return MixtureDistribution(new_components, np.exp(log_post))
+
     def component_log_density(self, x: T) -> np.ndarray:
         """Evaluate component-wise log-density of Mixture distribution at observation x.
 
