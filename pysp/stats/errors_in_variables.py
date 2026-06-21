@@ -26,7 +26,7 @@ class DemingFit:
         x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
         self.x_latent = x + (self.slope / (variance_ratio + self.slope**2)) * (y - self.intercept - self.slope * x)
 
-    def predict_mean(self, x_star: np.ndarray) -> np.ndarray:
+    def conditional_mean(self, x_star: np.ndarray) -> np.ndarray:
         """The conditional mean ``E[y | x*] = a + b x*`` at *true* predictor values ``x*``."""
         return self.intercept + self.slope * np.asarray(x_star, dtype=float)
 
