@@ -71,6 +71,39 @@ class HmmTerminalStatesTest(unittest.TestCase):
         np.testing.assert_allclose(g.seq_log_density(enc), [g.log_density(seq) for seq in s], atol=1e-10)
 
 
+class QuantizedHmmTerminalStatesTest(unittest.TestCase):
+    """The Quantized HMM subclasses the base and inherits terminal-state scoring/sampling/EM."""
+
+    def setUp(self):
+        from pysp.stats import QuantizedHiddenMarkovModelDistribution
+
+        self.d = QuantizedHiddenMarkovModelDistribution(
+            0.5, ["a", "b"], [[0, 1], [2, 0]], [[0, 1], [2, 0]], initial_exponents=[0, 1], terminal_states={1}
+        )
+
+    def _brute(self, x):
+        log_w, log_a, topics = self.d.log_w, self.d.log_transitions, self.d.topics
+        total = -np.inf
+        for path in itertools.product([0, 1], repeat=len(x)):
+            if path[-1] != 1 or any(z == 1 for z in path[:-1]):
+                continue
+            lp = (
+                log_w[path[0]]
+                + sum(log_a[path[t], path[t + 1]] for t in range(len(x) - 1))
+                + sum(topics[path[t]].log_density(x[t]) for t in range(len(x)))
+            )
+            total = np.logaddexp(total, lp)
+        return total
+
+    def test_inherits_terminal_scoring(self):
+        self.assertEqual(self.d.terminal_states, {1})
+        for x in [["b"], ["a", "b"], ["a", "a", "b"]]:
+            self.assertAlmostEqual(self.d.log_density(x), self._brute(x), places=10)
+        s = self.d.sampler(seed=0).sample(10)
+        enc = self.d.dist_to_encoder().seq_encode(s)
+        np.testing.assert_allclose(self.d.seq_log_density(enc), [self.d.log_density(seq) for seq in s], atol=1e-12)
+
+
 class HmmTerminalStatesEMTest(unittest.TestCase):
     def test_baum_welch_recovers_parameters(self):
         true = HiddenMarkovModelDistribution(
