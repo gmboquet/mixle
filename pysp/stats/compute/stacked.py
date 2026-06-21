@@ -293,6 +293,15 @@ def stacked_component_log_density(enc: Any, route: StackedComponentParams, engin
     raise ValueError("Unknown stacked component strategy %s." % route.strategy)
 
 
+def _estimator_resident_supported(estimator: Any) -> bool:
+    """Return whether ``estimator`` (or every component of a mixture estimator) accepts resident stats."""
+    component_estimators = getattr(estimator, "estimators", None)
+    if component_estimators is not None:
+        return all(_estimator_resident_supported(e) for e in component_estimators)
+    supported = getattr(estimator, "resident_accumulation_supported", None)
+    return bool(supported()) if callable(supported) else True
+
+
 def stacked_component_sufficient_statistics(
     enc: Any,
     weights: Any,
@@ -368,6 +377,8 @@ class StackedMixtureKernel(Kernel):
     @property
     def has_resident_accumulate(self) -> bool:
         """Return true when the leaf family can accumulate sufficient stats on the engine."""
+        if self.estimator is not None and not _estimator_resident_supported(self.estimator):
+            return False
         if callable(getattr(self.component_type, "backend_stacked_sufficient_statistics", None)):
             return True
         if self.estimator is not None and callable(
