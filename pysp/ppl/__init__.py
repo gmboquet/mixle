@@ -80,8 +80,8 @@ from pysp.ppl.field import (
     multistart,
 )
 from pysp.ppl.flow import NavierStokes2D
-from pysp.ppl.multiphysics import CoupledPDESystem, solve_poisson
 from pysp.ppl.inverse import Differential
+from pysp.ppl.multiphysics import CoupledPDESystem, solve_poisson
 from pysp.ppl.priors import Potts, TotalVariation
 from pysp.ppl.shape import level_set_material, shape_optimize
 from pysp.ppl.wave import WaveEquation2D

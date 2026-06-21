@@ -35,7 +35,12 @@ class MatrixNormalDistribution(SequenceEncodableProbabilityDistribution):
     """Matrix normal distribution over ``(n, p)`` matrices with row covariance ``U`` and column covariance ``V``."""
 
     def __init__(
-        self, mean: np.ndarray, row_covar: np.ndarray, col_covar: np.ndarray, name: str | None = None, keys: str | None = None
+        self,
+        mean: np.ndarray,
+        row_covar: np.ndarray,
+        col_covar: np.ndarray,
+        name: str | None = None,
+        keys: str | None = None,
     ) -> None:
         m = np.asarray(mean, dtype=np.float64)
         u = np.asarray(row_covar, dtype=np.float64)

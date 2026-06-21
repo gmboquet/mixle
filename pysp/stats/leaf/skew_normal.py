@@ -36,7 +36,9 @@ _MAX_SKEW = ((4.0 - math.pi) / 2.0) * _B**3 / (1.0 - _B * _B) ** 1.5
 class SkewNormalDistribution(SequenceEncodableProbabilityDistribution):
     """Skew-normal distribution with location ``loc``, scale ``> 0`` and shape ``alpha``."""
 
-    def __init__(self, loc: float, scale: float, shape: float, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self, loc: float, scale: float, shape: float, name: str | None = None, keys: str | None = None
+    ) -> None:
         if scale <= 0.0 or not (np.isfinite(loc) and np.isfinite(scale) and np.isfinite(shape)):
             raise ValueError("SkewNormalDistribution requires finite parameters and scale > 0.")
         self.loc = float(loc)  # xi
@@ -190,9 +192,7 @@ class SkewNormalEstimator(ParameterEstimator):
     def accumulator_factory(self) -> SkewNormalAccumulatorFactory:
         return SkewNormalAccumulatorFactory(name=self.name, keys=self.keys)
 
-    def estimate(
-        self, nobs: float | None, suff_stat: tuple[float, float, float, float]
-    ) -> SkewNormalDistribution:
+    def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> SkewNormalDistribution:
         sum_x, sum_x2, sum_x3, count = suff_stat
         if count <= 0.0:
             return SkewNormalDistribution(0.0, 1.0, 0.0, name=self.name, keys=self.keys)

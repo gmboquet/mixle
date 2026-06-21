@@ -179,7 +179,12 @@ class ChineseRestaurantProcessEstimator(ParameterEstimator):
     """Maximum-likelihood estimator for the CRP concentration via the monotone expected-blocks equation."""
 
     def __init__(
-        self, n: int, alpha_min: float = 1.0e-6, alpha_max: float = 1.0e6, name: str | None = None, keys: str | None = None
+        self,
+        n: int,
+        alpha_min: float = 1.0e-6,
+        alpha_max: float = 1.0e6,
+        name: str | None = None,
+        keys: str | None = None,
     ) -> None:
         self.n = int(n)
         self.alpha_min = alpha_min

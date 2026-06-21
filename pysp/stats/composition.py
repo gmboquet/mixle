@@ -40,7 +40,7 @@ def ilr_basis(d: int) -> np.ndarray:
     v = np.zeros((d, d - 1))
     for i in range(d - 1):
         n = i + 1
-        v[: n, i] = 1.0 / n
+        v[:n, i] = 1.0 / n
         v[n, i] = -1.0
         v[:, i] *= np.sqrt(n / (n + 1.0))
     return v

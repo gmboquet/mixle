@@ -428,7 +428,9 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         log_phi -= logsumexp(log_phi, axis=1, keepdims=True)
         return MeanFieldLDAPosterior(gamma, np.exp(log_phi), counts)
 
-    def posterior_predictive(self, doc: Sequence[tuple[int, float]], n_words: int, seed: int | None = None) -> list[Any]:
+    def posterior_predictive(
+        self, doc: Sequence[tuple[int, float]], n_words: int, seed: int | None = None
+    ) -> list[Any]:
         """Draw ``n_words`` new words conditioned on the document ``doc``.
 
         Sample the document-topic mix ``theta ~ q(theta) = Dir(gamma)`` from the variational posterior,

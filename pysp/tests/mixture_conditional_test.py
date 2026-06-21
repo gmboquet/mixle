@@ -63,7 +63,10 @@ class MixtureConditionalTest(unittest.TestCase):
         self.assertAlmostEqual(float(cond.w.sum()), 1.0, places=10)
 
     def test_diagonal_gaussian_mixture_conditional_equals_joint_over_marginal(self):
-        comps = [DG(np.array([0.0, 1.0, 2.0]), np.array([1.0, 1.0, 1.0])), DG(np.array([3.0, -1.0, 0.0]), np.array([0.5, 2.0, 1.0]))]
+        comps = [
+            DG(np.array([0.0, 1.0, 2.0]), np.array([1.0, 1.0, 1.0])),
+            DG(np.array([3.0, -1.0, 0.0]), np.array([0.5, 2.0, 1.0])),
+        ]
         mix = MixtureDistribution(comps, [0.4, 0.6])
         cond = self._check_joint_over_marginal(mix, comps, {0: 1.5})
         self.assertFalse(np.allclose(cond.w, mix.w))  # responsibilities still update from the observed coord
@@ -76,7 +79,10 @@ class MixtureConditionalTest(unittest.TestCase):
 
     def test_studentt_mixture_conditional_equals_joint_over_marginal(self):
         rng = np.random.RandomState(2)
-        comps = [MVT(8.0, np.array([0.0, 1.0, 2.0]), _rcov(rng, 3)), MVT(8.0, np.array([2.0, 0.0, -1.0]), _rcov(rng, 3))]
+        comps = [
+            MVT(8.0, np.array([0.0, 1.0, 2.0]), _rcov(rng, 3)),
+            MVT(8.0, np.array([2.0, 0.0, -1.0]), _rcov(rng, 3)),
+        ]
         mix = MixtureDistribution(comps, [0.5, 0.5])
         self._check_joint_over_marginal(mix, comps, {2: -0.5})
 
