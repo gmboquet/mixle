@@ -113,6 +113,30 @@ def _map_probs(counts: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     return cpp / cpp.sum()
 
 
+def stationary_distribution(transitions: np.ndarray) -> np.ndarray:
+    """Stationary distribution ``pi`` of a row-stochastic matrix (``pi A = pi``, ``sum pi = 1``).
+
+    Solved as the constrained least-squares system ``[(I - A^T); 1^T] pi = [0; 1]`` so it is robust for
+    reducible/near-singular chains (it returns one valid stationary distribution). The result is
+    clipped to non-negative and renormalized.
+
+    Args:
+        transitions (np.ndarray): a square row-stochastic transition matrix.
+
+    Returns:
+        1-d numpy array of stationary probabilities (length = number of states).
+    """
+    a = np.asarray(transitions, dtype=np.float64)
+    n = a.shape[0]
+    lhs = np.vstack([np.eye(n) - a.T, np.ones((1, n))])
+    rhs = np.zeros(n + 1)
+    rhs[-1] = 1.0
+    pi, _, _, _ = np.linalg.lstsq(lhs, rhs, rcond=None)
+    pi = np.clip(pi, 0.0, None)
+    total = pi.sum()
+    return pi / total if total > 0.0 else np.full(n, 1.0 / n)
+
+
 class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
     """Markov-chain distribution over finite-state sequences."""
 

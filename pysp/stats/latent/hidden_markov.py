@@ -57,7 +57,7 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.stats.graph.markov_chain import MarkovChainDistribution
+from pysp.stats.graph.markov_chain import MarkovChainDistribution, stationary_distribution
 from pysp.stats.latent._hidden_markov_numba_kernels import (
     numba_baum_welch2,
     numba_baum_welch_alphas,
@@ -2336,6 +2336,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         use_numba: bool | None = None,
         prior=None,
+        steady_state_init: bool = False,
     ) -> None:
         """HiddenMarkovEstimator object for estimating HiddenMarkovDistribution for aggregated sufficient statistics.
 
@@ -2370,6 +2371,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.name = name
         self.use_numba = HAS_NUMBA if use_numba is None else use_numba
+        self.steady_state_init = bool(steady_state_init)
         self.set_prior(prior)
 
     def accumulator_factory(self):
@@ -2486,6 +2488,9 @@ class HiddenMarkovEstimator(ParameterEstimator):
                 transitions[i, :] = _hmm_map_probs(trans_counts[i, :], ai)
                 row_posteriors.append(DirichletDistribution(trans_counts[i, :] + ai))
 
+            if self.steady_state_init:  # tie the initial distribution to the transition matrix's equilibrium
+                w = stationary_distribution(transitions)
+
             return HiddenMarkovModelDistribution(
                 topics=topics,
                 w=w,
@@ -2521,6 +2526,9 @@ class HiddenMarkovEstimator(ParameterEstimator):
                 transitions[good_rows, :] += trans_counts[good_rows, :] / row_sum[good_rows]
             else:
                 transitions = trans_counts / row_sum
+
+        if self.steady_state_init:  # tie the initial distribution to the transition matrix's equilibrium
+            w = stationary_distribution(transitions)
 
         return HiddenMarkovModelDistribution(
             topics=topics,
