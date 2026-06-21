@@ -522,6 +522,10 @@ __all__ = [
     "SkellamSampler",
     "SkellamEstimator",
     "SkellamDataEncoder",
+    "SkewNormalDistribution",
+    "SkewNormalSampler",
+    "SkewNormalEstimator",
+    "SkewNormalDataEncoder",
     "TweedieDistribution",
     "TweedieSampler",
     "TweedieEstimator",
@@ -1197,6 +1201,12 @@ from pysp.stats.leaf.skellam import (
     SkellamDistribution,
     SkellamEstimator,
     SkellamSampler,
+)
+from pysp.stats.leaf.skew_normal import (
+    SkewNormalDataEncoder,
+    SkewNormalDistribution,
+    SkewNormalEstimator,
+    SkewNormalSampler,
 )
 from pysp.stats.leaf.student_t import StudentTDataEncoder, StudentTDistribution, StudentTEstimator, StudentTSampler
 from pysp.stats.leaf.tweedie import (
