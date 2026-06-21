@@ -462,6 +462,19 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         cov_cond = 0.5 * (cov_cond + cov_cond.T)
         return MultivariateGaussianDistribution(mu_cond, cov_cond)
 
+    def marginal(self, keep: Sequence[int]) -> "MultivariateGaussianDistribution":
+        """Return the marginal Gaussian over the dimensions ``keep`` (Gaussian marginals just drop rows).
+
+        ``N(mu, Sigma)`` marginalized to index set ``keep`` is ``N(mu[keep], Sigma[keep, keep])``. The
+        order of ``keep`` is preserved, so the result's dimensions follow the given order.
+        """
+        idx = np.asarray(list(keep), dtype=int)
+        if idx.size == 0:
+            raise ValueError("keep at least one dimension")
+        if idx.min() < 0 or idx.max() >= self.dim:
+            raise ValueError("kept indices must be in [0, dim)")
+        return MultivariateGaussianDistribution(self.mu[idx], np.asarray(self.covar)[np.ix_(idx, idx)])
+
     def estimator(self, pseudo_count: float | None = None):
         """Create a MultivariateGaussianEstimator for estimating this distribution.
 

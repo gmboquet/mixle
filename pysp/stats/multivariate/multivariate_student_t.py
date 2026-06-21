@@ -198,6 +198,21 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         scale_cond = 0.5 * (scale_cond + scale_cond.T)
         return MultivariateStudentTDistribution(self.dof + p_o, mu_cond, scale_cond)
 
+    def marginal(self, keep: Sequence[int]) -> "MultivariateStudentTDistribution":
+        """Return the marginal over the dimensions ``keep``: ``MVT(dof, mu[keep], shape[keep, keep])``.
+
+        A multivariate Student-t marginal keeps the same degrees of freedom and simply restricts the
+        location and shape to the kept coordinates (order preserved).
+        """
+        idx = np.asarray(list(keep), dtype=int)
+        if idx.size == 0:
+            raise ValueError("keep at least one dimension")
+        if idx.min() < 0 or idx.max() >= self.dim:
+            raise ValueError("kept indices must be in [0, dim)")
+        mu = np.asarray(self.mu, dtype=np.float64)
+        shape = np.asarray(self.shape, dtype=np.float64)
+        return MultivariateStudentTDistribution(self.dof, mu[idx], shape[np.ix_(idx, idx)])
+
     def density(self, x: Sequence[float] | np.ndarray) -> float:
         """Return the probability density at a single observation."""
         return float(np.exp(self.log_density(x)))
