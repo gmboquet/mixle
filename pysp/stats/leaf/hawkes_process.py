@@ -246,10 +246,38 @@ class HawkesProcessAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray, float], weights: np.ndarray, estimate: HawkesProcessDistribution
     ) -> None:
+        # Vectorized across sequences: one loop over event index (<= max_len), each step updating the
+        # R_i / S_i recursion and the (s0, g, w) responsibility sums for all sequences at once -- the
+        # same scheme as seq_log_density. Bit-identical to summing _accumulate_seq per sequence.
         times, lengths, _ = x
-        for k in range(len(lengths)):
-            n = int(lengths[k])
-            self._accumulate_seq(times[k, :n], n, float(weights[k]), estimate)
+        times = np.asarray(times, dtype=np.float64)
+        lengths = np.asarray(lengths, dtype=np.int64)
+        n_seq = lengths.shape[0]
+        if n_seq == 0:
+            return
+        w = np.asarray(weights, dtype=np.float64)
+        mu, alpha, beta = estimate.mu, estimate.alpha, estimate.beta
+        max_len = times.shape[1]
+        r = np.zeros(n_seq, dtype=np.float64)  # R_i per sequence
+        s = np.zeros(n_seq, dtype=np.float64)  # S_i per sequence
+        for i in range(max_len):
+            active = i < lengths
+            if i == 0:
+                ri = np.zeros(n_seq, dtype=np.float64)
+                si = np.zeros(n_seq, dtype=np.float64)
+            else:
+                dt = times[:, i] - times[:, i - 1]
+                e = np.exp(-beta * dt)
+                si = e * (dt * (r + 1.0) + s)
+                ri = e * (r + 1.0)
+            lam = mu + alpha * ri
+            base = np.where(active, w / lam, 0.0)
+            self.s0 += float(np.sum(base * mu))
+            self.g += float(np.sum(base * alpha * ri))
+            self.w += float(np.sum(base * alpha * si))
+            r, s = ri, si
+        self.n_events += float(np.dot(w, lengths))
+        self.total_window += float(np.sum(w) * self.window)
 
     def seq_initialize(
         self, x: tuple[np.ndarray, np.ndarray, float], weights: np.ndarray, rng: RandomState | None
