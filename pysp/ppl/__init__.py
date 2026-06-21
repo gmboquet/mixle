@@ -58,6 +58,7 @@ from pysp.ppl.core import (
 from pysp.ppl.field import (
     GP,
     RBF,
+    AnisotropicRBF,
     Cox,
     CustomProxy,
     FieldKernel,
@@ -190,6 +191,7 @@ __all__ = [
     "great_circle_distance",
     "RandomWalk",
     "RBF",
+    "AnisotropicRBF",
     "Proxy",
     "GaussianProxy",
     "LogisticNicheProxy",
