@@ -5,6 +5,7 @@ calibration -- the classical UQ loop layered on top of pysp's Bayesian inference
 earth-science/multiphysics/UQ plan (Phase 4).
 """
 
+from pysp.uq.propagate import propagate, unscented_transform
 from pysp.uq.sensitivity import morris_screening, sobol_indices
 
-__all__ = ["sobol_indices", "morris_screening"]
+__all__ = ["sobol_indices", "morris_screening", "propagate", "unscented_transform"]
