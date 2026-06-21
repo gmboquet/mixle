@@ -153,6 +153,57 @@ def _hmm_forward_ll(log_b: np.ndarray, log_init: np.ndarray, log_trans: np.ndarr
     return float(ll + b_max.sum())
 
 
+def terminal_forward_loglik(log_w: np.ndarray, log_a: np.ndarray, log_b: np.ndarray, term_mask: np.ndarray) -> float:
+    """Log-likelihood of a terminal-state HMM sequence (length is a stopping time at the first terminal state).
+
+    ``log_b`` is the per-position, per-state emission log-density ``(L, K)``. The forward only transitions
+    *from* non-terminal states and the likelihood sums the final position over terminal states. Shared by
+    every HMM variant whose forward is a linear state trellis (base, lookback, ...).
+    """
+    from scipy.special import logsumexp
+
+    nonterm = ~term_mask
+    la = log_w + log_b[0]
+    for t in range(1, log_b.shape[0]):
+        prev = np.where(nonterm, la, -np.inf)
+        la = log_b[t] + logsumexp(prev[:, None] + log_a, axis=0)
+    tf = la[term_mask]
+    return float(logsumexp(tf)) if tf.size else -np.inf
+
+
+def terminal_forward_backward(
+    log_w: np.ndarray, log_a: np.ndarray, log_b: np.ndarray, term_mask: np.ndarray
+) -> tuple[float, "np.ndarray | None", "np.ndarray | None"]:
+    """Terminal-state forward-backward; returns ``(loglik, gamma (L,K), xi (L-1,K,K))`` (gamma/xi None if 0-prob).
+
+    The backward pass mirrors the forward: only the final position may be terminal, and only non-terminal
+    states have a future. Responsibilities are normalized by the sequence likelihood.
+    """
+    from scipy.special import logsumexp
+
+    length, k = log_b.shape
+    nonterm = ~term_mask
+    la = np.empty((length, k))
+    la[0] = log_w + log_b[0]
+    for t in range(1, length):
+        prev = np.where(nonterm, la[t - 1], -np.inf)
+        la[t] = log_b[t] + logsumexp(prev[:, None] + log_a, axis=0)
+    log_p = float(logsumexp(la[length - 1][term_mask])) if term_mask.any() else -np.inf
+    if not np.isfinite(log_p):
+        return log_p, None, None
+    lb = np.full((length, k), -np.inf)
+    lb[length - 1] = np.where(term_mask, 0.0, -np.inf)
+    for t in range(length - 2, -1, -1):
+        future = log_b[t + 1] + lb[t + 1]
+        lb[t] = np.where(nonterm, logsumexp(log_a + future[None, :], axis=1), -np.inf)
+    gamma = np.exp(la + lb - log_p)
+    xi = np.zeros((max(length - 1, 0), k, k))
+    for t in range(length - 1):
+        log_xi = la[t][:, None] + log_a + (log_b[t + 1] + lb[t + 1])[None, :] - log_p
+        xi[t] = np.where(nonterm[:, None], np.exp(log_xi), 0.0)
+    return log_p, gamma, xi
+
+
 class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     """Hidden Markov model distribution for variable-length observation sequences."""
 
@@ -469,19 +520,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         n = len(x)
         if n == 0:
             return -np.inf  # a terminal-states HMM always emits at least the terminal state
-        from scipy.special import logsumexp
-
         k = self.n_states
         log_b = np.empty((n, k))
         for j in range(k):
             log_b[:, j] = [self.topics[j].log_density(x[t]) for t in range(n)]
-        log_alpha = self.log_w + log_b[0]  # position 1 (terminal mass here only matters if n == 1)
-        nonterminal = ~self._terminal_mask
-        for t in range(1, n):
-            prev = np.where(nonterminal, log_alpha, -np.inf)  # only non-terminal states may be parents
-            log_alpha = log_b[t] + logsumexp(prev[:, None] + self.log_transitions, axis=0)
-        terminal_final = log_alpha[self._terminal_mask]
-        return float(logsumexp(terminal_final)) if terminal_final.size else -np.inf
+        return terminal_forward_loglik(self.log_w, self.log_transitions, log_b, self._terminal_mask)
 
     def log_density(self, x: list[T]) -> float:
         """Returns the log-density of HMM for observed sequence x.
@@ -592,15 +635,12 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
     def _terminal_states_seq_log_density(self, x: E1 | E2) -> "np.ndarray":
         """Vectorized terminal-state forward: per-sequence stopping-time likelihood from encoded emissions."""
-        from scipy.special import logsumexp
-
         x0, _ = x
         (tot_cnt, _idx_bands, _has_next, len_vec, idx_mat, _idx_vec, enc_data), _, _len_enc = x0
         k = self.n_states
         log_b_all = np.empty((tot_cnt, k))
         for j in range(k):
             log_b_all[:, j] = self.topics[j].seq_log_density(enc_data)
-        nonterminal = ~self._terminal_mask
         out = np.empty(idx_mat.shape[0], dtype=np.float64)
         for s in range(idx_mat.shape[0]):
             length = int(len_vec[s])
@@ -608,12 +648,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 out[s] = -np.inf
                 continue
             log_b = log_b_all[idx_mat[s, :length], :]
-            log_alpha = self.log_w + log_b[0]
-            for t in range(1, length):
-                prev = np.where(nonterminal, log_alpha, -np.inf)
-                log_alpha = log_b[t] + logsumexp(prev[:, None] + self.log_transitions, axis=0)
-            tf = log_alpha[self._terminal_mask]
-            out[s] = float(logsumexp(tf)) if tf.size else -np.inf
+            out[s] = terminal_forward_loglik(self.log_w, self.log_transitions, log_b, self._terminal_mask)
         return out
 
     def seq_log_density(self, x: E1 | E2) -> "np.ndarray":
@@ -1895,7 +1930,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         transition responsibilities (xi) are accumulated into the same init/state/transition/emission
         sufficient statistics as the standard path, so the M-step is unchanged.
         """
-        from scipy.special import logsumexp
+        from pysp.stats.latent.hidden_markov import terminal_forward_backward
 
         x0, _ = x
         (tot_cnt, _ib, _hn, len_vec, idx_mat, _iv, enc_data), _, _le = x0
@@ -1903,37 +1938,21 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         log_b_all = np.empty((tot_cnt, k))
         for j in range(k):
             log_b_all[:, j] = estimate.topics[j].seq_log_density(enc_data)
-        log_w, log_a = estimate.log_w, estimate.log_transitions
-        term, nonterm = estimate._terminal_mask, ~estimate._terminal_mask
+        log_w, log_a, term = estimate.log_w, estimate.log_transitions, estimate._terminal_mask
         weights = np.asarray(weights, dtype=np.float64)
         gamma_flat = np.zeros((tot_cnt, k))
         for s in range(idx_mat.shape[0]):
             length = int(len_vec[s])
             if length == 0:
                 continue
-            ws = float(weights[s])
             rows = idx_mat[s, :length]
-            log_b = log_b_all[rows, :]
-            la = np.empty((length, k))
-            la[0] = log_w + log_b[0]
-            for t in range(1, length):
-                prev = np.where(nonterm, la[t - 1], -np.inf)
-                la[t] = log_b[t] + logsumexp(prev[:, None] + log_a, axis=0)
-            log_p = float(logsumexp(la[length - 1][term])) if term.any() else -np.inf
-            if not np.isfinite(log_p):
+            log_p, gamma, xi = terminal_forward_backward(log_w, log_a, log_b_all[rows, :], term)
+            if gamma is None:
                 continue
-            lb = np.full((length, k), -np.inf)
-            lb[length - 1] = np.where(term, 0.0, -np.inf)
-            for t in range(length - 2, -1, -1):
-                future = log_b[t + 1] + lb[t + 1]
-                lb[t] = np.where(nonterm, logsumexp(log_a + future[None, :], axis=1), -np.inf)
-            gamma = np.exp(la + lb - log_p)  # (length, k)
+            ws = float(weights[s])
             self.init_counts += ws * gamma[0]
-            for t in range(length):
-                gamma_flat[rows[t]] += ws * gamma[t]
-            for t in range(length - 1):
-                log_xi = la[t][:, None] + log_a + (log_b[t + 1] + lb[t + 1])[None, :] - log_p
-                self.trans_counts += ws * np.where(nonterm[:, None], np.exp(log_xi), 0.0)
+            gamma_flat[rows] += ws * gamma
+            self.trans_counts += ws * xi.sum(axis=0)
         self.state_counts += gamma_flat.sum(axis=0)
         for j in range(k):
             self.accumulators[j].seq_update(enc_data, gamma_flat[:, j], estimate.topics[j])
