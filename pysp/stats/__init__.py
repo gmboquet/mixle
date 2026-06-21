@@ -575,6 +575,10 @@ __all__ = [
     "WishartSampler",
     "WishartEstimator",
     "WishartDataEncoder",
+    "InverseWishartDistribution",
+    "InverseWishartSampler",
+    "InverseWishartEstimator",
+    "InverseWishartDataEncoder",
     "VonMisesFisherSampler",
     "VonMisesFisherEstimator",
     "VonMisesFisherDataEncoder",
@@ -1240,6 +1244,12 @@ from pysp.stats.multivariate.gaussian_copula import (
     GaussianCopulaDistribution,
     GaussianCopulaEstimator,
     GaussianCopulaSampler,
+)
+from pysp.stats.multivariate.inverse_wishart import (
+    InverseWishartDataEncoder,
+    InverseWishartDistribution,
+    InverseWishartEstimator,
+    InverseWishartSampler,
 )
 from pysp.stats.multivariate.matrix_normal import (
     MatrixNormalDataEncoder,

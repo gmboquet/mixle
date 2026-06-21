@@ -256,6 +256,7 @@ def _stats_public_distribution_catalog():
         "WatsonDistribution": stats.WatsonDistribution([0.0, 0.0, 1.0], 5.0),
         "WishartDistribution": stats.WishartDistribution(6, [[2.0, 0.3], [0.3, 1.0]]),
         "SkewNormalDistribution": stats.SkewNormalDistribution(0.5, 2.0, 4.0),
+        "InverseWishartDistribution": stats.InverseWishartDistribution(8, [[2.0, 0.3], [0.3, 1.0]]),
         "SurvivalDistribution": stats.SurvivalDistribution(stats.WeibullDistribution(1.5, 2.0)),
         "UniformDistribution": stats.UniformDistribution(-1.0, 3.0),
         "WeibullDistribution": stats.WeibullDistribution(1.5, 2.0),
