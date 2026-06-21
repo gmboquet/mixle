@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 from scipy.special import logsumexp
 
+from pysp.stats import DiagonalGaussianDistribution as DG
 from pysp.stats import MixtureDistribution
 from pysp.stats import MultivariateGaussianDistribution as MVN
 from pysp.stats import MultivariateStudentTDistribution as MVT
@@ -60,6 +61,18 @@ class MixtureConditionalTest(unittest.TestCase):
         # responsibilities are reweighted by the observed-coordinate fit
         self.assertFalse(np.allclose(cond.w, mix.w))
         self.assertAlmostEqual(float(cond.w.sum()), 1.0, places=10)
+
+    def test_diagonal_gaussian_mixture_conditional_equals_joint_over_marginal(self):
+        comps = [DG(np.array([0.0, 1.0, 2.0]), np.array([1.0, 1.0, 1.0])), DG(np.array([3.0, -1.0, 0.0]), np.array([0.5, 2.0, 1.0]))]
+        mix = MixtureDistribution(comps, [0.4, 0.6])
+        cond = self._check_joint_over_marginal(mix, comps, {0: 1.5})
+        self.assertFalse(np.allclose(cond.w, mix.w))  # responsibilities still update from the observed coord
+
+    def test_diagonal_gaussian_condition_leaves_unobserved_unchanged(self):
+        d = DG(np.array([0.0, 1.0, 2.0]), np.array([1.0, 2.0, 0.5]))
+        c = d.condition({0: 5.0})  # independence: observing dim 0 must not move dims 1,2
+        np.testing.assert_allclose(c.mu, [1.0, 2.0])
+        np.testing.assert_allclose(c.covar, [2.0, 0.5])
 
     def test_studentt_mixture_conditional_equals_joint_over_marginal(self):
         rng = np.random.RandomState(2)
