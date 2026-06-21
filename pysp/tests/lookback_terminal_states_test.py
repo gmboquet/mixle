@@ -21,8 +21,10 @@ def _brute(log_b, log_w, log_a, term):
     for path in itertools.product(range(k), repeat=length):
         if not term[path[-1]] or any(term[z] for z in path[:-1]):
             continue
-        lp = log_w[path[0]] + log_b[0, path[0]] + sum(
-            log_a[path[t], path[t + 1]] + log_b[t + 1, path[t + 1]] for t in range(length - 1)
+        lp = (
+            log_w[path[0]]
+            + log_b[0, path[0]]
+            + sum(log_a[path[t], path[t + 1]] + log_b[t + 1, path[t + 1]] for t in range(length - 1))
         )
         total = np.logaddexp(total, lp)
     return total
@@ -42,8 +44,12 @@ class LookbackTerminalStatesTest(unittest.TestCase):
     def test_scoring_matches_brute_force_lag1(self):
         init = [_mk([0.5, 0.5]), _mk([0.4, 0.6])]
         win = [
-            SequenceDistribution(IntegerCategoricalDistribution(0, [0.6, 0.4]), len_dist=CategoricalDistribution({2: 1.0})),
-            SequenceDistribution(IntegerCategoricalDistribution(0, [0.3, 0.7]), len_dist=CategoricalDistribution({2: 1.0})),
+            SequenceDistribution(
+                IntegerCategoricalDistribution(0, [0.6, 0.4]), len_dist=CategoricalDistribution({2: 1.0})
+            ),
+            SequenceDistribution(
+                IntegerCategoricalDistribution(0, [0.3, 0.7]), len_dist=CategoricalDistribution({2: 1.0})
+            ),
         ]
         d1 = LB(win, self.w, self.a, lag=1, init_dist=init, terminal_states={1})
         for x in [[0, 1], [0, 0, 1], [1, 0, 1]]:
@@ -70,7 +76,9 @@ class LookbackTerminalStatesTest(unittest.TestCase):
 
     def test_baum_welch_recovers_parameters(self):
         data = self._manual_data(1)
-        init = LB([_mk([0.6, 0.4]), _mk([0.45, 0.55])], [0.5, 0.5], [[0.5, 0.5], [0.5, 0.5]], lag=0, terminal_states={1})
+        init = LB(
+            [_mk([0.6, 0.4]), _mk([0.45, 0.55])], [0.5, 0.5], [[0.5, 0.5], [0.5, 0.5]], lag=0, terminal_states={1}
+        )
         m = init
         for _ in range(30):
             m = estimate(data, init.estimator(), m)

@@ -35,7 +35,9 @@ class HmmTerminalStatesTest(unittest.TestCase):
 
     def test_normalizes_over_sequences(self):
         total = sum(
-            np.exp(self.d.log_density(list(x))) for length in range(1, 13) for x in itertools.product("ab", repeat=length)
+            np.exp(self.d.log_density(list(x)))
+            for length in range(1, 13)
+            for x in itertools.product("ab", repeat=length)
         )
         self.assertAlmostEqual(total, 1.0, delta=0.01)  # remaining mass is in sequences longer than 12
 

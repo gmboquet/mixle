@@ -605,7 +605,9 @@ class FieldPosterior:
         z = rng.standard_normal((size, dim))
         if given:
             if not has_full:
-                raise ValueError("conditioning on given= needs the full joint covariance (how='laplace'/'gauss_newton').")
+                raise ValueError(
+                    "conditioning on given= needs the full joint covariance (how='laplace'/'gauss_newton')."
+                )
             obs_pos: list[int] = []
             x_o: list[float] = []
             for node, value in given.items():

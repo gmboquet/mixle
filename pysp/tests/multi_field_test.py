@@ -98,7 +98,9 @@ class MultiFieldTest(unittest.TestCase):
     def test_negative_coregion_flips_the_induced_field(self):
         sys_indep, proxies, a_true, _ = _two_field_setup()
         fa, fb = sys_indep.fields
-        coreg = fit_field(FieldSystem([fa, fb], coregion=np.array([[1.0, -0.9], [-0.9, 1.0]])), [proxies[0]], how="laplace")
+        coreg = fit_field(
+            FieldSystem([fa, fb], coregion=np.array([[1.0, -0.9], [-0.9, 1.0]])), [proxies[0]], how="laplace"
+        )
         self.assertLess(np.corrcoef(coreg.mean("B"), a_true)[0, 1], -0.8)
 
     def test_icm_recovers_the_exact_conditional_scaling(self):
@@ -106,7 +108,10 @@ class MultiFieldTest(unittest.TestCase):
         sys_indep, proxies, _, _ = _two_field_setup()
         fa, fb = sys_indep.fields
         coreg = fit_field(
-            FieldSystem([fa, fb], coregion=np.array([[1.0, 0.7], [0.7, 1.0]])), [proxies[0]], how="laplace", max_iter=3000
+            FieldSystem([fa, fb], coregion=np.array([[1.0, 0.7], [0.7, 1.0]])),
+            [proxies[0]],
+            how="laplace",
+            max_iter=3000,
         )
         np.testing.assert_allclose(np.median(coreg.mean("B") / coreg.mean("A")), 0.7, atol=0.02)
 

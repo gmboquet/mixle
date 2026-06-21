@@ -61,7 +61,13 @@ def propagate(
 
 
 def unscented_transform(
-    func: Callable[[np.ndarray], np.ndarray], mean: np.ndarray, cov: np.ndarray, *, alpha: float = 1e-3, beta: float = 2.0, kappa: float = 0.0
+    func: Callable[[np.ndarray], np.ndarray],
+    mean: np.ndarray,
+    cov: np.ndarray,
+    *,
+    alpha: float = 1e-3,
+    beta: float = 2.0,
+    kappa: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Propagate ``(mean, cov)`` through ``func`` with the unscented (sigma-point) transform.
 

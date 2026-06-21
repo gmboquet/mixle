@@ -181,7 +181,13 @@ class DirichletMultinomialEstimator(ParameterEstimator):
     """Minka fixed-point maximum-likelihood estimator for the Dirichlet-multinomial concentration."""
 
     def __init__(
-        self, dim: int, n: int, max_iter: int = 500, tol: float = 1.0e-9, name: str | None = None, keys: str | None = None
+        self,
+        dim: int,
+        n: int,
+        max_iter: int = 500,
+        tol: float = 1.0e-9,
+        name: str | None = None,
+        keys: str | None = None,
     ) -> None:
         self.dim = dim
         self.n = n

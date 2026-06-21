@@ -150,9 +150,7 @@ class GeneralizedParetoAccumulator(SequenceEncodableStatisticAccumulator):
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         self.update(x, weight, None)
 
-    def seq_update(
-        self, x: np.ndarray, weights: np.ndarray, estimate: GeneralizedParetoDistribution | None
-    ) -> None:
+    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: GeneralizedParetoDistribution | None) -> None:
         xx = np.asarray(x, dtype=np.float64)
         self.sum += np.dot(xx, weights)
         self.sum2 += np.dot(xx * xx, weights)
@@ -232,7 +230,9 @@ class GeneralizedParetoEstimator(ParameterEstimator):
         var = sum_x2 / count - mean_x * mean_x
         m = mean_x - self.loc  # exceedance mean
         if m <= 0.0 or var <= 0.0:
-            return GeneralizedParetoDistribution(max(m, self.min_scale), 0.0, loc=self.loc, name=self.name, keys=self.keys)
+            return GeneralizedParetoDistribution(
+                max(m, self.min_scale), 0.0, loc=self.loc, name=self.name, keys=self.keys
+            )
         xi = 0.5 * (1.0 - m * m / var)
         xi = min(max(xi, self.xi_min), self.xi_max)
         scale = max(m * (1.0 - xi), self.min_scale)

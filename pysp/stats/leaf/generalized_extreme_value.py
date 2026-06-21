@@ -264,9 +264,7 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
             g1, g2 = _gamma(1.0 - xi), _gamma(1.0 - 2.0 * xi)
             scale = math.sqrt(var) * abs(xi) / math.sqrt(g2 - g1 * g1)
             loc = mean - scale * (g1 - 1.0) / xi
-        return GeneralizedExtremeValueDistribution(
-            loc, max(scale, self.min_scale), xi, name=self.name, keys=self.keys
-        )
+        return GeneralizedExtremeValueDistribution(loc, max(scale, self.min_scale), xi, name=self.name, keys=self.keys)
 
 
 class GeneralizedExtremeValueDataEncoder(DataSequenceEncoder):
