@@ -245,6 +245,10 @@ __all__ = [
     "UniformEstimator",
     "UniformDataEncoder",
     "VonMisesDistribution",
+    "WrappedCauchyDistribution",
+    "WrappedCauchySampler",
+    "WrappedCauchyEstimator",
+    "WrappedCauchyDataEncoder",
     "VonMisesSampler",
     "VonMisesEstimator",
     "VonMisesDataEncoder",
@@ -1181,6 +1185,12 @@ from pysp.stats.leaf.von_mises import (
     VonMisesSampler,
 )
 from pysp.stats.leaf.weibull import WeibullDataEncoder, WeibullDistribution, WeibullEstimator, WeibullSampler
+from pysp.stats.leaf.wrapped_cauchy import (
+    WrappedCauchyDataEncoder,
+    WrappedCauchyDistribution,
+    WrappedCauchyEstimator,
+    WrappedCauchySampler,
+)
 from pysp.stats.multivariate.diagonal_gaussian import (
     DiagonalGaussianDataEncoder,
     DiagonalGaussianDistribution,
