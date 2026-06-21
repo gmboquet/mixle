@@ -92,9 +92,15 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
     def backend_legacy_sufficient_statistics(
         x: tuple[Any, Any], params: dict[str, Any], engine: Any
     ) -> tuple[Any, ...]:
-        """Return per-row negative-binomial sufficient statistics in accumulator order."""
+        """Return per-row negative-binomial sufficient statistics in accumulator order.
+
+        The accumulator's :meth:`NegativeBinomialAccumulator.value` returns
+        ``(count, sum, histogram)``; the third row stat carries the per-row counts so the
+        declaration's ``kind="histogram"`` reducer can fold them into the weighted count
+        histogram the dispersion (``r``) solve needs.
+        """
         vals = engine.asarray(x[0])
-        return vals * 0.0 + engine.asarray(1.0), vals
+        return vals * 0.0 + engine.asarray(1.0), vals, vals
 
     @staticmethod
     def exp_family_sufficient_statistics(x: tuple[Any, Any], engine: Any) -> tuple[Any, ...]:

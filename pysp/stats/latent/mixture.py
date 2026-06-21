@@ -549,6 +549,19 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         return ll_mat
 
+    def latent_posterior(self, x: Sequence[T]) -> "CategoricalLatentPosterior":
+        """Return the latent posterior ``q(z | x)`` over component labels for raw observations ``x``.
+
+        ``q(z)`` is the exact independent-categorical posterior whose marginals are the EM
+        responsibilities. The returned :class:`~pysp.stats.latent_posterior.CategoricalLatentPosterior`
+        can ``.marginals()`` (the responsibilities), ``.sample(rng)`` component labels, ``.mode()``
+        (the MAP labels), or ``.entropy()``.
+        """
+        from pysp.stats.latent_posterior import CategoricalLatentPosterior
+
+        enc = self.dist_to_encoder().seq_encode(list(x))
+        return CategoricalLatentPosterior(self.seq_posterior(enc))
+
     def support_size(self) -> int | None:
         """Upper bound on distinct support points: the sum over components (union <= sum)."""
         total = 0
