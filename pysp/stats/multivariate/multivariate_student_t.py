@@ -162,6 +162,42 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
             repr(self.keys),
         )
 
+    def condition(self, observed: dict[int, float]) -> "MultivariateStudentTDistribution":
+        """Return the conditional distribution over the unobserved dimensions given ``observed``.
+
+        The conditional of a multivariate Student-t is again a multivariate Student-t. With observed
+        dimensions ``o`` (Mahalanobis ``d_o``) and unobserved ``u``:
+
+            dof'   = dof + |o|,
+            mu'    = mu_u + S_uo S_oo^{-1} (x_o - mu_o),
+            shape' = (dof + d_o)/(dof + |o|) * (S_uu - S_uo S_oo^{-1} S_ou),
+
+        i.e. the location shifts like the Gaussian conditional but the scale is inflated by how far the
+        observed coordinates fall in the tails (``given=``-style conditional sampling). Raises if no
+        dimension is left unobserved.
+        """
+        mu = np.asarray(self.mu, dtype=np.float64)
+        shape = np.asarray(self.shape, dtype=np.float64)
+        obs_idx = np.array(sorted(observed), dtype=int)
+        if obs_idx.size and (obs_idx.min() < 0 or obs_idx.max() >= self.dim):
+            raise ValueError("observed indices must be in [0, dim)")
+        unobs_idx = np.array([i for i in range(self.dim) if i not in observed], dtype=int)
+        if unobs_idx.size == 0:
+            raise ValueError("at least one dimension must be left unobserved")
+        if obs_idx.size == 0:
+            return MultivariateStudentTDistribution(self.dof, mu.copy(), shape.copy())
+        x_o = np.array([observed[i] for i in obs_idx], dtype=np.float64) - mu[obs_idx]
+        s_oo = shape[np.ix_(obs_idx, obs_idx)]
+        s_uo = shape[np.ix_(unobs_idx, obs_idx)]
+        s_uu = shape[np.ix_(unobs_idx, unobs_idx)]
+        solve = np.linalg.solve(s_oo, np.concatenate([x_o[:, None], s_uo.T], axis=1))
+        mu_cond = mu[unobs_idx] + s_uo @ solve[:, 0]
+        d_o = float(x_o @ solve[:, 0])  # observed Mahalanobis distance
+        p_o = obs_idx.size
+        scale_cond = ((self.dof + d_o) / (self.dof + p_o)) * (s_uu - s_uo @ solve[:, 1:])
+        scale_cond = 0.5 * (scale_cond + scale_cond.T)
+        return MultivariateStudentTDistribution(self.dof + p_o, mu_cond, scale_cond)
+
     def density(self, x: Sequence[float] | np.ndarray) -> float:
         """Return the probability density at a single observation."""
         return float(np.exp(self.log_density(x)))
