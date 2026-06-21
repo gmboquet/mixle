@@ -34,7 +34,7 @@ LookbackHiddenMarkovModelDataEncoder constructor signatures also differ (here: e
 """
 
 from collections.abc import Sequence
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
@@ -84,6 +84,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         name: str | None = None,
         weights: np.ndarray = MISSING,
+        terminal_states: set[int] | Sequence[int] | None = None,
     ) -> None:
         """LookbackHiddenMarkovModelDistribution object for sequences with lagged emission dependence.
 
@@ -128,6 +129,31 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             self.transitions = np.reshape(transitions, (self.num_states, self.num_states))
             self.len_dist = len_dist if len_dist is not None else NullDistribution()
             self.name = name
+            self.log_transitions = log(self.transitions)
+            self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+            if self.terminal_states is not None:
+                self._terminal_mask = np.zeros(self.num_states, dtype=bool)
+                self._terminal_mask[list(self.terminal_states)] = True
+
+    def _windowed_log_b(self, x: Sequence[Any]) -> np.ndarray:
+        """Per-position, per-state emission log-densities ``(obs_cnt, num_states)`` for the lookback windows."""
+        lag, ns = self.lag, self.num_states
+        obs_cnt = len(x) - lag + 1 if lag > 0 else len(x)
+        log_b = np.empty((obs_cnt, ns))
+        for i in range(ns):
+            log_b[0, i] = self.init_dist[i].log_density(x[:lag]) if lag > 0 else self.topics[i].log_density(x[0:1])
+        for idx, k in enumerate(range(max(lag, 1), len(x))):
+            for i in range(ns):
+                log_b[idx + 1, i] = self.topics[i].log_density(x[(k - lag) : (k + 1)])
+        return log_b
+
+    def _terminal_states_log_density(self, x: Sequence[Any]) -> float:
+        """Stopping-time likelihood for the lookback HMM (shared terminal forward over windowed emissions)."""
+        from pysp.stats.latent.hidden_markov import terminal_forward_loglik
+
+        if len(x) < max(self.lag, 1):
+            return -np.inf
+        return terminal_forward_loglik(self.log_w, self.log_transitions, self._windowed_log_b(x), self._terminal_mask)
 
     def __str__(self) -> str:
         """Returns string representation of LookbackHiddenMarkovModelDistribution object."""
@@ -176,6 +202,9 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             float: Log-density at x.
 
         """
+        if self.terminal_states is not None:
+            return self._terminal_states_log_density(x)
+
         if x is None or len(x) == 0:
             if self.len_dist is not None:
                 return self.len_dist.log_density(0)
@@ -287,6 +316,10 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             np.ndarray: Log-density value for each encoded sequence.
 
         """
+        if self.terminal_states is not None:
+            # terminal-state lookback HMMs encode raw sequences (passthrough); score per sequence
+            return np.array([self._terminal_states_log_density(s) for s in x], dtype=np.float64)
+
         num_states = self.num_states
 
         (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
@@ -444,6 +477,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             len_estimator=len_est,
             pseudo_count=(pseudo_count, pseudo_count),
             name=self.name,
+            terminal_states=self.terminal_states,
         )
 
     def seq_encode(self, x: Sequence[Sequence[T]]):
@@ -466,6 +500,9 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
                 distributions of this instance.
 
         """
+        if self.terminal_states is not None:
+            return LookbackTerminalDataEncoder()
+
         encoder = self.topics[0].dist_to_encoder()
         len_encoder = self.len_dist.dist_to_encoder()
         init_encoder = self.init_dist[0].dist_to_encoder()
@@ -473,6 +510,19 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         return LookbackHiddenMarkovModelDataEncoder(
             encoder=encoder, len_encoder=len_encoder, init_encoder=init_encoder, lag=self.lag
         )
+
+
+class LookbackTerminalDataEncoder(DataSequenceEncoder):
+    """Passthrough encoder for terminal-state lookback HMMs: keeps raw sequences (scored per sequence)."""
+
+    def __str__(self) -> str:
+        return "LookbackTerminalDataEncoder"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, LookbackTerminalDataEncoder)
+
+    def seq_encode(self, x):
+        return [list(s) for s in x]
 
 
 class LookbackHiddenMarkovModelSampler(DistributionSampler):
@@ -515,6 +565,11 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
                 ``size`` sampled sequences.
 
         """
+        if self.dist.terminal_states is not None:
+            if size is None:
+                return self._sample_terminal()
+            return [self._sample_terminal() for _ in range(size)]
+
         if size is None:
             lag = self.dist.lag
             n = self.len_sampler.sample()
@@ -531,11 +586,34 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
         else:
             return [self.sample() for i in range(size)]
 
+    def _sample_terminal(self, cap: int = 1_000_000):
+        """Run the chain until the first terminal (absorbing) state, emitting the lookback windows."""
+        lag = self.dist.lag
+        z = int(self.state_sampler.sample_seq())
+        states = [z]
+        while z not in self.dist.terminal_states and len(states) < cap:
+            z = int(self.state_sampler.sample_seq(v0=z))
+            states.append(z)
+        if lag == 0:
+            return [self.obs_samplers[s].sample_given([]) for s in states]
+        rv = list(self.init_samplers[states[0]].sample())
+        for s in states[1:]:
+            rv.append(self.obs_samplers[s].sample_given(rv[-lag:]))
+        return rv
+
 
 class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for sufficient statistics of a lookback hidden Markov model."""
 
-    def __init__(self, seq_accumulators, init_accumulators=None, lag=0, len_accumulator=None, keys=(None, None, None)):
+    def __init__(
+        self,
+        seq_accumulators,
+        init_accumulators=None,
+        lag=0,
+        len_accumulator=None,
+        keys=(None, None, None),
+        terminal_states=None,
+    ):
         """LookbackHiddenMarkovModelEstimatorAccumulator object.
 
         Args:
@@ -558,6 +636,7 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
         self.state_counts = vec.zeros(self.num_states)
         self.len_accumulator = len_accumulator
         self.lag = lag
+        self.terminal_states = terminal_states
 
         self.init_key = keys[0]
         self.trans_key = keys[1]
@@ -569,6 +648,32 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
         self._track_ll = False
         self._seq_ll = 0.0
 
+    def _terminal_update(self, x, weight, estimate):
+        """Terminal-state Baum-Welch E-step for one raw lookback sequence (windowed forward-backward)."""
+        from pysp.stats.latent.hidden_markov import terminal_forward_backward
+
+        if len(x) < max(self.lag, 1):
+            return
+        log_b = estimate._windowed_log_b(x)
+        _, gamma, xi = terminal_forward_backward(estimate.log_w, estimate.log_transitions, log_b, estimate._terminal_mask)
+        if gamma is None:
+            return
+        lag = self.lag
+        w = weight * gamma  # per-position state responsibilities (obs_cnt, num_states)
+        self.init_counts += w[0]
+        self.state_counts += w.sum(axis=0)
+        self.trans_counts += weight * xi.sum(axis=0)
+        if lag > 0:
+            for j in range(self.num_states):
+                self.init_accumulators[j].update(x[:lag], w[0, j], estimate.init_dist[j])
+            for k, i in enumerate(range(lag, len(x))):
+                for j in range(self.num_states):
+                    self.seq_accumulators[j].update(x[(i - lag) : (i + 1)], w[k + 1, j], estimate.topics[j])
+        else:
+            for k in range(len(x)):
+                for j in range(self.num_states):
+                    self.seq_accumulators[j].update(x[k : (k + 1)], w[k, j], estimate.topics[j])
+
     def update(self, x, weight, estimate):
         """Update sufficient statistics with one observed sequence and weight.
 
@@ -578,6 +683,9 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             estimate (LookbackHiddenMarkovModelDistribution): Current estimate used for the E-step.
 
         """
+        if estimate.terminal_states is not None:
+            self._terminal_update(x, weight, estimate)
+            return
         self.seq_update(estimate.seq_encode([x]), np.asarray([weight]), estimate)
 
     def initialize(self, x, weight, rng):
@@ -627,6 +735,11 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             rng (np.random.RandomState): Random number generator for the random state assignment.
 
         """
+        if self.terminal_states is not None:
+            for s, wt in zip(x, np.asarray(weights, dtype=np.float64)):
+                self.initialize(s, float(wt), rng)
+            return
+
         (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
 
         num_states = self.num_states
@@ -673,6 +786,9 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             LookbackHiddenMarkovModelDataEncoder: Encoder built from the member accumulators.
 
         """
+        if self.terminal_states is not None:
+            return LookbackTerminalDataEncoder()
+
         encoder = self.seq_accumulators[0].acc_to_encoder()
         init_encoder = self.init_accumulators[0].acc_to_encoder() if self.init_accumulators else NullDataEncoder()
         len_encoder = self.len_accumulator.acc_to_encoder() if self.len_accumulator is not None else NullDataEncoder()
@@ -690,6 +806,11 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             estimate (LookbackHiddenMarkovModelDistribution): Current estimate used for the E-step.
 
         """
+        if estimate.terminal_states is not None:
+            for s, wt in zip(x, np.asarray(weights, dtype=np.float64)):
+                self._terminal_update(s, float(wt), estimate)
+            return
+
         (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
 
         tot_cnt = len(ids) + len(idi)
@@ -963,6 +1084,7 @@ class LookbackHiddenMarkovModelEstimatorAccumulatorFactory(StatisticAccumulatorF
         init_factories: Sequence[StatisticAccumulatorFactory] | None = None,
         len_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
+        terminal_states=None,
     ):
         """LookbackHiddenMarkovModelEstimatorAccumulatorFactory object.
 
@@ -982,6 +1104,7 @@ class LookbackHiddenMarkovModelEstimatorAccumulatorFactory(StatisticAccumulatorF
         self.keys = keys if keys is not None else (None, None, None)
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
         self.lag = lag
+        self.terminal_states = terminal_states
 
         if init_factories is None:
             self.init_factories = [NullAccumulatorFactory() for j in range(len(seq_factories))]
@@ -999,7 +1122,12 @@ class LookbackHiddenMarkovModelEstimatorAccumulatorFactory(StatisticAccumulatorF
         seq_acc = [self.seq_factories[i].make() for i in range(len(self.seq_factories))]
         init_acc = [self.init_factories[i].make() for i in range(len(self.init_factories))]
         return LookbackHiddenMarkovModelEstimatorAccumulator(
-            seq_acc, lag=self.lag, init_accumulators=init_acc, len_accumulator=len_acc, keys=self.keys
+            seq_acc,
+            lag=self.lag,
+            init_accumulators=init_acc,
+            len_accumulator=len_acc,
+            keys=self.keys,
+            terminal_states=self.terminal_states,
         )
 
 
@@ -1016,6 +1144,7 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
         pseudo_count: tuple[float | None, float | None] | None = (None, None),
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
+        terminal_states=None,
     ):
         """LookbackHiddenMarkovModelEstimator object.
 
@@ -1044,6 +1173,7 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.name = name
         self.lag = lag
+        self.terminal_states = terminal_states
 
         if init_estimators is None:
             self.init_estimators = [NullEstimator() for xx in range(self.num_states)]
@@ -1063,7 +1193,7 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
 
         len_factory = self.len_estimator.accumulator_factory()
         return LookbackHiddenMarkovModelEstimatorAccumulatorFactory(
-            self.lag, est_factories, iest_factories, len_factory, self.keys
+            self.lag, est_factories, iest_factories, len_factory, self.keys, terminal_states=self.terminal_states
         )
 
     def estimate(self, nobs: float | None, suff_stat):
@@ -1109,7 +1239,14 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
                 transitions = trans_counts / row_sum
 
         return LookbackHiddenMarkovModelDistribution(
-            topics, w, transitions, lag=lag, init_dist=init_dist, len_dist=len_dist, name=self.name
+            topics,
+            w,
+            transitions,
+            lag=lag,
+            init_dist=init_dist,
+            len_dist=len_dist,
+            name=self.name,
+            terminal_states=self.terminal_states,
         )
 
 
