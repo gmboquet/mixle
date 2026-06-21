@@ -6,11 +6,11 @@ import unittest
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from pysp.optimize import (
+from pysp.relations import (
     Assignment,
     BestSubsetRegression,
     EditDistance,
-    OptimizationProblem,
+    Relation,
     ShortestPath,
     Solution,
     SpanningTree,
@@ -51,7 +51,7 @@ def _viterbi_best(log_init, log_trans, log_obs):
 class SharedSurfaceTest(unittest.TestCase):
     def test_solve_top_iter_consistent(self):
         prob = Assignment(np.array([[1.0, 9.0], [9.0, 1.0]]))
-        self.assertIsInstance(prob, OptimizationProblem)
+        self.assertIsInstance(prob, Relation)
         sol = prob.solve()
         # Solution is a named tuple: attribute access AND unpacking both work
         self.assertIsInstance(sol, Solution)
