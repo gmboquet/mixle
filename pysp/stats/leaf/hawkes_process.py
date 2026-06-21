@@ -31,6 +31,7 @@ edge-effect-free branching estimator; exact as ``window -> inf``).
 """
 
 import math
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -157,6 +158,13 @@ class HawkesProcessSampler(DistributionSampler):
     def __init__(self, dist: HawkesProcessDistribution, seed: int | None = None) -> None:
         self.rng = RandomState(seed)
         self.dist = dist
+        if dist.branching_ratio >= 1.0:
+            warnings.warn(
+                "super-critical Hawkes process (branching_ratio = alpha/beta = %g >= 1): the process is "
+                "non-stationary and self-perpetuating, so realizations may explode and hit the event cap."
+                % dist.branching_ratio,
+                stacklevel=2,
+            )
 
     def _sample_one(self) -> np.ndarray:
         # Ogata thinning: between events the intensity only decays, so lam(t+) = mu + alpha*excitation
@@ -180,6 +188,12 @@ class HawkesProcessSampler(DistributionSampler):
             if self.rng.uniform() <= lam_t / lam_bar:
                 events.append(t)
                 excitation += 1.0  # the new event contributes exp(0) = 1 to future excitation
+        if len(events) >= cap:
+            warnings.warn(
+                "Hawkes realization hit the %d-event cap and was truncated before the window end; the "
+                "process is likely near- or super-critical." % cap,
+                stacklevel=2,
+            )
         return np.asarray(events, dtype=np.float64)
 
     def sample(self, size: int | None = None) -> np.ndarray | list[np.ndarray]:
