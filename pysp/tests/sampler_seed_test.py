@@ -246,6 +246,7 @@ def _stats_public_distribution_catalog():
         "HurdleDistribution": stats.HurdleDistribution(stats.PoissonDistribution(2.0), 0.3),
         "GeneralizedParetoDistribution": stats.GeneralizedParetoDistribution(2.0, 0.3),
         "GeneralizedExtremeValueDistribution": stats.GeneralizedExtremeValueDistribution(0.0, 2.0, 0.2),
+        "GaussianCopulaDistribution": stats.GaussianCopulaDistribution([[1.0, 0.5], [0.5, 1.0]]),
         "UniformDistribution": stats.UniformDistribution(-1.0, 3.0),
         "WeibullDistribution": stats.WeibullDistribution(1.5, 2.0),
         "HeterogeneousMixtureDistribution": stats.HeterogeneousMixtureDistribution(
