@@ -247,6 +247,9 @@ def _stats_public_distribution_catalog():
         "GeneralizedParetoDistribution": stats.GeneralizedParetoDistribution(2.0, 0.3),
         "GeneralizedExtremeValueDistribution": stats.GeneralizedExtremeValueDistribution(0.0, 2.0, 0.2),
         "GaussianCopulaDistribution": stats.GaussianCopulaDistribution([[1.0, 0.5], [0.5, 1.0]]),
+        "MatrixNormalDistribution": stats.MatrixNormalDistribution(
+            [[0.0, 0.0], [1.0, -1.0], [2.0, 0.5]], [[2.0, 0.3, 0.1], [0.3, 1.0, 0.2], [0.1, 0.2, 1.5]], [[1.4, 0.4], [0.4, 0.9]]
+        ),
         "SurvivalDistribution": stats.SurvivalDistribution(stats.WeibullDistribution(1.5, 2.0)),
         "UniformDistribution": stats.UniformDistribution(-1.0, 3.0),
         "WeibullDistribution": stats.WeibullDistribution(1.5, 2.0),
