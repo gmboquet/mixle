@@ -539,6 +539,10 @@ __all__ = [
     "InhomogeneousPoissonProcessEstimator",
     "InhomogeneousPoissonProcessDataEncoder",
     "HawkesProcessDistribution",
+    "MultivariateHawkesProcessDistribution",
+    "MultivariateHawkesProcessSampler",
+    "MultivariateHawkesProcessEstimator",
+    "MultivariateHawkesProcessDataEncoder",
     "HawkesProcessSampler",
     "HawkesProcessEstimator",
     "HawkesProcessDataEncoder",
@@ -1176,6 +1180,12 @@ from pysp.stats.leaf.logseries import (
     LogSeriesDistribution,
     LogSeriesEstimator,
     LogSeriesSampler,
+)
+from pysp.stats.leaf.multivariate_hawkes import (
+    MultivariateHawkesProcessDataEncoder,
+    MultivariateHawkesProcessDistribution,
+    MultivariateHawkesProcessEstimator,
+    MultivariateHawkesProcessSampler,
 )
 from pysp.stats.leaf.negative_binomial import (
     NegativeBinomialDataEncoder,
