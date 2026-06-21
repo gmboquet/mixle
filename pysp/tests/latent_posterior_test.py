@@ -106,6 +106,19 @@ class HmmChainLatentPosteriorTest(unittest.TestCase):
         self.assertTrue(np.array_equal(self.q.mode(), self.m.viterbi(self.x)))
         self.assertAlmostEqual(self.q.entropy(), entropy, places=9)
 
+    def test_posterior_predictive_follows_inferred_states(self):
+        m = HiddenMarkovModelDistribution(
+            [GaussianDistribution(-5.0, 0.5), GaussianDistribution(5.0, 0.5)],
+            [0.5, 0.5],
+            [[0.9, 0.1], [0.1, 0.9]],
+            len_dist=CategoricalDistribution({6: 1.0}),
+        )
+        x = [-5.0, -5.0, 5.0, 5.0, -5.0, 5.0]
+        pp = np.array(m.posterior_predictive(x, seed=0))
+        self.assertEqual(len(pp), 6)
+        self.assertTrue(np.array_equal(np.sign(pp), np.sign(x)))  # well-separated: pattern is recovered
+        self.assertTrue(np.array_equal(pp, np.array(m.posterior_predictive(x, seed=0))))  # repeatable
+
     def test_ffbs_sample_average_matches_marginals(self):
         s = np.array([self.q.sample(rng=i) for i in range(4000)])
         emp = np.array([[np.mean(s[:, t] == k) for k in range(3)] for t in range(len(self.x))])
