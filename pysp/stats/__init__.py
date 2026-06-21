@@ -364,6 +364,7 @@ __all__ = [
     "LatentPosterior",
     "CategoricalLatentPosterior",
     "MarkovChainLatentPosterior",
+    "MeanFieldLDAPosterior",
     "MixtureSampler",
     "MixtureEstimator",
     "MixtureDataEncoder",
@@ -955,6 +956,7 @@ from pysp.stats.latent_posterior import (
     CategoricalLatentPosterior,
     LatentPosterior,
     MarkovChainLatentPosterior,
+    MeanFieldLDAPosterior,
 )
 
 ### Discrete base distributions
