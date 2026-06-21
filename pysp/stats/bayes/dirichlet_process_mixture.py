@@ -38,6 +38,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import maxrandint
+from pysp.stats._sampling import scatter_component_draws
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -339,14 +340,17 @@ class DirichletProcessMixtureSampler(DistributionSampler):
         self.dist = dist
         self.comp_samplers = [d.sampler(seed=rng_loc.randint(0, maxrandint)) for d in self.dist.components]
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw size samples (a single observation when size is None).
 
-        A component is chosen with probability w_k and an observation is drawn
-        from that component.
+        A component is chosen with probability w_k and an observation is drawn from that component.
+        With ``batched=True`` (default) component draws are grouped and scattered -- bit-identical to
+        the per-draw loop (``batched=False``) but far faster, since each component sampler owns an
+        independent RNG.
 
         Args:
             size (Optional[int]): Number of samples to draw.
+            batched (bool): Vectorize component draws (default); set False for the per-draw loop.
 
         Returns:
             A single observation if size is None, else a list of size observations.
@@ -356,8 +360,9 @@ class DirichletProcessMixtureSampler(DistributionSampler):
 
         if size is None:
             return self.comp_samplers[comp_state].sample()
-        else:
+        if not batched:
             return [self.comp_samplers[i].sample() for i in comp_state]
+        return scatter_component_draws(comp_state, self.comp_samplers, int(size))
 
 
 class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
