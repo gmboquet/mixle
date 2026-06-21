@@ -1,18 +1,21 @@
-"""Combinatorial optimization problems with best-first solution enumeration.
+"""Relations over structured spaces, enumerated in order of a residual.
 
-The pysp idiom for enumeration: you *specify* a problem (its data + objective), then ask it for an
-``enumerator()`` of solutions in best-first order -- the same shape as a distribution yielding a
-``sampler()`` / ``estimator()`` / ``enumerator()``. Every problem shares one surface::
+A :class:`Relation` is not an optimization problem -- it is a constraint imposed on a structured
+space (matchings, spanning trees, strings near a center, hidden-state sequences, feature subsets),
+whose members are enumerated ranked by a residual/cost. Finding the single best member is incidental;
+the value is the *whole ranked set*. You specify the relation, then ask it for an ``enumerator()`` --
+the same shape as a distribution yielding a ``sampler()`` / ``estimator()`` / ``enumerator()``. Every
+relation shares one surface::
 
-    problem.solve()       -> the single optimal Solution (or None if infeasible)
-    problem.top(k)        -> the k best solutions as a list
-    problem.enumerator()  -> a lazy best-first iterator over solutions
-    for solution in problem: ...
+    relation.solve()       -> the minimal-residual Solution (or None if the relation is empty)
+    relation.top(k)        -> the k smallest-residual members as a list
+    relation.enumerator()  -> a lazy iterator over members, smallest residual first
+    for solution in relation: ...
 
 Each item is a :class:`Solution` namedtuple ``(value, objective)`` -- it reads as ``sol.value`` /
-``sol.objective`` and still unpacks as ``value, objective = sol``. ``value`` is the solution itself
+``sol.objective`` and still unpacks as ``value, objective = sol``. ``value`` is the member itself
 (an assignment, a nearby string, a state sequence, a feature subset, ...) and ``objective`` is its
-cost (minimized) or score (maximized); ``sense`` records which.
+residual: a cost (minimized) or score (maximized); ``sense`` records which.
 
 Assignment, spanning tree, the edit-distance ball, k-best Viterbi, shortest path, and best-subset
 regression are all specified and consumed the same way, each delegating to whatever engine fits
@@ -21,7 +24,7 @@ Dijkstra / :func:`nearest_first` for the edit-distance ball, exhaustive ranking 
 The two shared low-level engines are :func:`best_first_paths` (k-best *paths to a goal*) and
 :func:`nearest_first` (distinct *states outward* from a center -- an expanding metric ball).
 
-    >>> from pysp.optimize import Assignment
+    >>> from pysp.relations import Assignment
     >>> sol = Assignment([[1, 9], [9, 1]]).solve()
     >>> sol.value, sol.objective          # the column assignment and its total cost
     (array([0, 1]), 2.0)
@@ -44,7 +47,7 @@ __all__ = [
     "Assignment",
     "BestSubsetRegression",
     "EditDistance",
-    "OptimizationProblem",
+    "Relation",
     "ShortestPath",
     "Solution",
     "SpanningTree",
@@ -174,12 +177,12 @@ def nearest_first(
 # ---------------------------------------------------------------------------
 # The shared problem interface
 # ---------------------------------------------------------------------------
-class OptimizationProblem(ABC):
-    """A combinatorial optimization problem whose solutions can be enumerated best-first.
+class Relation(ABC):
+    """A constraint over a structured space whose members are enumerated ranked by a residual.
 
     Subclasses implement :meth:`enumerator` (yielding :class:`Solution` items); :meth:`solve`,
-    :meth:`top` and iteration come for free. ``sense`` is ``"min"`` (objective minimized, solutions
-    out in increasing cost) or ``"max"`` (objective maximized, solutions out in decreasing score).
+    :meth:`top` and iteration come for free. ``sense`` is ``"min"`` (residual minimized, members out
+    in increasing cost) or ``"max"`` (residual maximized, members out in decreasing score).
     """
 
     sense: str = "min"
@@ -203,7 +206,7 @@ class OptimizationProblem(ABC):
 # ---------------------------------------------------------------------------
 # General graph problem (direct wrapper of the engine)
 # ---------------------------------------------------------------------------
-class ShortestPath(OptimizationProblem):
+class ShortestPath(Relation):
     """k-shortest-path / best-first search over an arbitrary state graph.
 
     Specify the graph by ``start`` and ``successors``; the solution value is the list of states from
@@ -237,7 +240,7 @@ class ShortestPath(OptimizationProblem):
 # ---------------------------------------------------------------------------
 # Linear assignment (Murty)
 # ---------------------------------------------------------------------------
-class Assignment(OptimizationProblem):
+class Assignment(Relation):
     """Linear assignment / bipartite matching: match rows to columns at extremal total cost.
 
     The solution value is ``col_ind`` -- ``col_ind[i]`` is the column assigned to row ``i``.
@@ -258,7 +261,7 @@ class Assignment(OptimizationProblem):
 # ---------------------------------------------------------------------------
 # Minimum spanning tree (Gabow)
 # ---------------------------------------------------------------------------
-class SpanningTree(OptimizationProblem):
+class SpanningTree(Relation):
     """Spanning trees of a weighted undirected graph, enumerated in increasing total edge weight.
 
     The solution value is the list of ``(i, j)`` edges. Non-finite weights are forbidden edges.
@@ -279,7 +282,7 @@ class SpanningTree(OptimizationProblem):
 # ---------------------------------------------------------------------------
 # Non-uniform (weighted) edit distance / alignment
 # ---------------------------------------------------------------------------
-class EditDistance(OptimizationProblem):
+class EditDistance(Relation):
     """Enumerate strings outward from a center by (non-uniform) edit distance -- an edit-distance ball.
 
     You give a single center string and an alphabet, *not* two endpoints (the distance between two
@@ -345,7 +348,7 @@ class EditDistance(OptimizationProblem):
 # ---------------------------------------------------------------------------
 # k-best Viterbi (most-likely hidden-state sequences of an HMM)
 # ---------------------------------------------------------------------------
-class ViterbiPath(OptimizationProblem):
+class ViterbiPath(Relation):
     """k most-likely hidden-state sequences of an HMM, enumerated in decreasing joint log-probability.
 
     Standard Viterbi returns only the single best path; this reduces the trellis (nodes ``(t, s)``)
@@ -388,7 +391,7 @@ class ViterbiPath(OptimizationProblem):
 # ---------------------------------------------------------------------------
 # Best-subset regression (least squares)
 # ---------------------------------------------------------------------------
-class BestSubsetRegression(OptimizationProblem):
+class BestSubsetRegression(Relation):
     """Best-subset feature selection for least squares, enumerated in increasing selection criterion.
 
     Solution values are feature-index tuples ranked by ``criterion``: residual sum of squares
