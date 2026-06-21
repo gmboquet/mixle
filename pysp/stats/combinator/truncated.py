@@ -28,6 +28,8 @@ from pysp.stats.compute.pdist import (
 )
 from pysp.utils.enumeration import freeze
 
+_REJECTION_BUDGET = 1_000_000  # max base draws before a rejection sampler gives up
+
 
 class TruncatedDistribution(SequenceEncodableProbabilityDistribution):
     """A base distribution restricted to an allowed support and renormalized."""
@@ -171,15 +173,58 @@ class TruncatedSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.base_sampler = dist.base.sampler(seed=self.rng.randint(0, 2**31 - 1))
 
-    def sample(self, size: int | None = None):
-        """Draw one allowed value (or a list of ``size``) by rejection."""
+    def sample(self, size: int | None = None, *, batched: bool = True):
+        """Draw one allowed value (or a list of ``size``) by rejection.
+
+        With ``batched=True`` (default) base draws are taken in blocks sized from the running accept
+        rate, instead of one per draw -- far faster when the retained mass is small, with a clear
+        diagnostic (accept rate, attempts) if the budget is exhausted. Set ``batched=False`` for the
+        per-draw reference path. Batched draws differ in RNG-call order from the per-draw loop.
+        """
         if size is None:
-            for _ in range(1_000_000):
+            for _ in range(_REJECTION_BUDGET):
                 v = self.base_sampler.sample()
                 if self.dist._allowed(v):
                     return v
             raise RuntimeError("TruncatedSampler exceeded the rejection budget; retained mass may be tiny.")
-        return [self.sample() for _ in range(size)]
+        if not batched:
+            return [self.sample() for _ in range(size)]
+        # Precompute a numeric allowed/forbidden array so the accept test can vectorize via np.isin
+        # (the per-element membership test, not base sampling, is the bottleneck for low retained mass).
+        allowed_arr = forbidden_arr = None
+        if self.dist._allowed_values is not None:
+            a = np.asarray(self.dist._allowed_values)
+            allowed_arr = a if a.dtype.kind in "iuf" else None
+        elif self.dist._forbidden_values is not None:
+            f = np.asarray(self.dist._forbidden_values)
+            forbidden_arr = f if f.dtype.kind in "iuf" else None
+        out: list[Any] = []
+        attempts = 0
+        budget = max(_REJECTION_BUDGET, int(size) * 1000)
+        block = max(int(size), 256)
+        while len(out) < size and attempts < budget:
+            draws = self.base_sampler.sample(size=block)
+            arr = np.asarray(draws)
+            if (allowed_arr is not None or forbidden_arr is not None) and arr.dtype.kind in "iuf":
+                mask = np.isin(arr, allowed_arr) if allowed_arr is not None else ~np.isin(arr, forbidden_arr)
+                out.extend(arr[mask][: size - len(out)].tolist())
+                attempts += arr.shape[0]
+            else:
+                for v in draws:
+                    attempts += 1
+                    if self.dist._allowed(v):
+                        out.append(v)
+                        if len(out) >= size:
+                            break
+            rate = len(out) / attempts if attempts else 0.0
+            block = max(int((size - len(out)) / rate) + 16, 64) if rate > 0.0 else block * 2
+        if len(out) < size:
+            rate = len(out) / attempts if attempts else 0.0
+            raise RuntimeError(
+                "TruncatedSampler exceeded the rejection budget over %d attempts (accept rate %.2g); "
+                "retained mass may be tiny." % (attempts, rate)
+            )
+        return out[:size]
 
 
 class TruncatedAccumulator(SequenceEncodableStatisticAccumulator):
