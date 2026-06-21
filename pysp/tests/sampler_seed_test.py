@@ -245,6 +245,7 @@ def _stats_public_distribution_catalog():
         "ZeroInflatedDistribution": stats.ZeroInflatedDistribution(stats.PoissonDistribution(2.0), 0.3),
         "HurdleDistribution": stats.HurdleDistribution(stats.PoissonDistribution(2.0), 0.3),
         "GeneralizedParetoDistribution": stats.GeneralizedParetoDistribution(2.0, 0.3),
+        "GeneralizedExtremeValueDistribution": stats.GeneralizedExtremeValueDistribution(0.0, 2.0, 0.2),
         "UniformDistribution": stats.UniformDistribution(-1.0, 3.0),
         "WeibullDistribution": stats.WeibullDistribution(1.5, 2.0),
         "HeterogeneousMixtureDistribution": stats.HeterogeneousMixtureDistribution(
