@@ -561,6 +561,22 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         enc = self.dist_to_encoder().seq_encode(list(x))
         return CategoricalLatentPosterior(self.seq_posterior(enc))
 
+    def posterior_predictive(self, x: Sequence[T], seed: int | None = None) -> list[Any]:
+        """Draw posterior-predictive observations conditioned on ``x``.
+
+        For each observed ``x_i`` the component is sampled from the latent posterior ``q(z_i | x_i)``
+        and a *fresh* observation is emitted from that component -- i.e. "given I saw ``x_i``, draw a
+        new point from the same mixture component it likely came from". Returns a list the length of
+        ``x``. Draws are grouped by component and scattered (vectorized) via the shared sampling
+        helper.
+        """
+        from pysp.stats._sampling import scatter_component_draws
+
+        rng = RandomState(seed)
+        z = self.latent_posterior(x).sample(rng)
+        comp_samplers = [c.sampler(seed=rng.randint(maxrandint)) for c in self.components]
+        return scatter_component_draws(z, comp_samplers, len(z))
+
     def support_size(self) -> int | None:
         """Upper bound on distinct support points: the sum over components (union <= sum)."""
         total = 0

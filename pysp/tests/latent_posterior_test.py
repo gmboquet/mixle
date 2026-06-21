@@ -47,6 +47,16 @@ class MixtureLatentPosteriorTest(unittest.TestCase):
         ambiguous = self.m.latent_posterior([0.0]).entropy()  # equidistant from both means
         self.assertGreater(ambiguous[0], 0.6)  # near log(2) for a 50/50 split
 
+    def test_posterior_predictive_conditions_on_observation(self):
+        x = [-5.0] * 100 + [5.0] * 100
+        pp = np.array(self.m.posterior_predictive(x, seed=0))
+        self.assertEqual(len(pp), 200)
+        self.assertLess(pp[:100].mean(), -3.0)  # points near component 0 predict near -5
+        self.assertGreater(pp[100:].mean(), 3.0)  # points near component 1 predict near +5
+        self.assertTrue(np.array_equal(pp, np.array(self.m.posterior_predictive(x, seed=0))))  # repeatable
+        amb = np.array(self.m.posterior_predictive([0.0] * 2000, seed=1))  # ambiguous -> ~50/50
+        self.assertAlmostEqual(np.mean(amb < 0), 0.5, delta=0.07)
+
     def test_categorical_posterior_direct(self):
         r = np.array([[0.7, 0.3], [0.1, 0.9]])
         q = CategoricalLatentPosterior(r, support=["a", "b"])
