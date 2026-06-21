@@ -796,6 +796,18 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             log_b[:, k] = self.topics[k].seq_log_density(enc)
         return MarkovChainLatentPosterior(self.log_w, self.log_transitions, log_b)
 
+    def posterior_predictive(self, x: list[T], seed: int | None = None) -> list[Any]:
+        """Draw a new observation sequence conditioned on ``x``.
+
+        Sample a full hidden-state path from the posterior ``q(z | x)`` by FFBS, then emit a fresh
+        observation from each state's emission distribution -- "given the sequence I saw, draw a new
+        sequence from the states it most likely passed through". Returns a list the length of ``x``.
+        """
+        rng = RandomState(seed)
+        z = self.latent_posterior(x).sample(rng)
+        topic_samplers = [t.sampler(seed=rng.randint(maxrandint)) for t in self.topics]
+        return [topic_samplers[k].sample() for k in z]
+
     def seq_viterbi(self, x: E2):
         """Return Viterbi paths for sequence-encoded observation sequences."""
         x0, x1 = x
