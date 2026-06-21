@@ -150,6 +150,7 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         name: str | None = None,
         weights: Sequence[float] | np.ndarray = MISSING,
+        terminal_states: set[int] | Sequence[int] | None = None,
     ) -> None:
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
         transitions = require("transitions", transitions, default=MISSING)
@@ -172,6 +173,10 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         self.null_len_dist = isinstance(self.len_dist, NullDistribution)
         self.name = name
+        self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+        if self.terminal_states is not None:
+            self._terminal_mask = np.zeros(self.n_states, dtype=bool)
+            self._terminal_mask[list(self.terminal_states)] = True
 
     def __str__(self) -> str:
         s1 = ",".join(str(u) for u in self.emissions)
@@ -202,6 +207,10 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         log_emit = np.empty((n, self.n_states), dtype=np.float64)
         for k, dist in enumerate(self.emissions):
             log_emit[:, k] = np.asarray([dist.log_density(xx) for xx in x], dtype=np.float64)
+        if self.terminal_states is not None:
+            from pysp.stats.latent.hidden_markov import terminal_forward_loglik
+
+            return terminal_forward_loglik(self.log_w, self.log_transitions, log_emit, self._terminal_mask)
         rv = _forward_log(self.log_w, self.log_transitions, log_emit)
         if not self.null_len_dist:
             rv += self.len_dist.log_density(n)
@@ -218,6 +227,14 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
             log_emit[:, k] = dist.seq_log_density(enc_by_state[k])
 
         offsets = np.concatenate([[0], np.cumsum(sz)]).astype(int)
+        if self.terminal_states is not None:
+            from pysp.stats.latent.hidden_markov import terminal_forward_loglik
+
+            for i in range(nseq):
+                rv[i] = terminal_forward_loglik(
+                    self.log_w, self.log_transitions, log_emit[offsets[i] : offsets[i + 1]], self._terminal_mask
+                )
+            return rv
         for i in range(nseq):
             rv[i] = _forward_log(self.log_w, self.log_transitions, log_emit[offsets[i] : offsets[i + 1]])
 
@@ -260,8 +277,8 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
 
     def sampler(self, seed: int | None = None) -> "SegmentalHiddenMarkovSampler":
         """Return a sampler for drawing observations from this distribution."""
-        if self.null_len_dist:
-            raise ValueError("SegmentalHiddenMarkovSampler requires a non-null len_dist.")
+        if self.null_len_dist and self.terminal_states is None:
+            raise ValueError("SegmentalHiddenMarkovSampler requires a non-null len_dist or terminal_states.")
         return SegmentalHiddenMarkovSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "SegmentalHiddenMarkovEstimator":
@@ -269,7 +286,11 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         len_est = self.len_dist.estimator(pseudo_count=pseudo_count)
         ests = [u.estimator(pseudo_count=pseudo_count) for u in self.emissions]
         return SegmentalHiddenMarkovEstimator(
-            ests, len_estimator=len_est, pseudo_count=(pseudo_count, pseudo_count), name=self.name
+            ests,
+            len_estimator=len_est,
+            pseudo_count=(pseudo_count, pseudo_count),
+            name=self.name,
+            terminal_states=self.terminal_states,
         )
 
     def dist_to_encoder(self) -> "SegmentalHiddenMarkovDataEncoder":
@@ -315,6 +336,13 @@ class SegmentalHiddenMarkovSampler(DistributionSampler):
     def sample(self, size: int | None = None) -> list[Any] | list[list[Any]]:
         if size is not None:
             return [self.sample() for _ in range(size)]
+        if self.dist.terminal_states is not None:
+            z = int(self.state_sampler.sample_seq())
+            states = [z]
+            while z not in self.dist.terminal_states and len(states) < 1_000_000:
+                z = int(self.state_sampler.sample_seq(v0=z))
+                states.append(z)
+            return [self.obs_samplers[s].sample() for s in states]
         n = self.len_sampler.sample()
         states = self.state_sampler.sample_seq(n)
         return [self.obs_samplers[s].sample() for s in states]
@@ -412,13 +440,25 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         track_ll = self._track_ll
         ll_ret = np.zeros(len(sz), dtype=np.float64) if track_ll else None
 
+        terminal = estimate.terminal_states is not None
+        if terminal:
+            from pysp.stats.latent.hidden_markov import terminal_forward_backward
+
         offsets = np.concatenate([[0], np.cumsum(sz)]).astype(int)
         gamma_all = np.zeros((total, self.num_states), dtype=np.float64)
         for i, n in enumerate(sz):
             if n == 0:
                 continue
             start, stop = offsets[i], offsets[i + 1]
-            ll_i, gamma, xi_sum = _forward_backward(estimate.log_w, estimate.log_transitions, log_emit[start:stop])
+            if terminal:
+                ll_i, gamma, xi = terminal_forward_backward(
+                    estimate.log_w, estimate.log_transitions, log_emit[start:stop], estimate._terminal_mask
+                )
+                if gamma is None:
+                    continue
+                xi_sum = xi.sum(axis=0)
+            else:
+                ll_i, gamma, xi_sum = _forward_backward(estimate.log_w, estimate.log_transitions, log_emit[start:stop])
             if track_ll:
                 ll_ret[i] = ll_i
             w = weights[i]
@@ -587,6 +627,7 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
         pseudo_count: tuple[float | None, float | None] | None = (None, None),
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
+        terminal_states: set[int] | Sequence[int] | None = None,
     ) -> None:
         self.estimators = list(estimators)
         self.num_states = len(self.estimators)
@@ -594,6 +635,7 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
         self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None)
         self.keys = keys
         self.name = name
+        self.terminal_states = terminal_states
 
     def accumulator_factory(self) -> SegmentalHiddenMarkovAccumulatorFactory:
         return SegmentalHiddenMarkovAccumulatorFactory(
@@ -629,7 +671,9 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
             row_sum = transitions.sum(axis=1, keepdims=True)
         transitions = transitions / row_sum
 
-        return SegmentalHiddenMarkovModelDistribution(emissions, w, transitions, len_dist=len_dist, name=self.name)
+        return SegmentalHiddenMarkovModelDistribution(
+            emissions, w, transitions, len_dist=len_dist, name=self.name, terminal_states=self.terminal_states
+        )
 
 
 class SegmentalHiddenMarkovDataEncoder(DataSequenceEncoder):
