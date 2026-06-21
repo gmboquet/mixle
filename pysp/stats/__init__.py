@@ -487,6 +487,10 @@ __all__ = [
     "HurdleSampler",
     "HurdleEstimator",
     "HurdleDataEncoder",
+    "SurvivalDistribution",
+    "SurvivalSampler",
+    "SurvivalEstimator",
+    "SurvivalDataEncoder",
     "TruncatedDistribution",
     "TruncatedSampler",
     "TruncatedEstimator",
@@ -683,6 +687,12 @@ from pysp.stats.combinator.sequence import (
     SequenceEnumerator,
     SequenceEstimator,
     SequenceSampler,
+)
+from pysp.stats.combinator.survival import (
+    SurvivalDataEncoder,
+    SurvivalDistribution,
+    SurvivalEstimator,
+    SurvivalSampler,
 )
 from pysp.stats.combinator.transform import (
     AffineTransform,
