@@ -775,6 +775,17 @@ class ParameterEstimator(Generic[SS]):
     @abstractmethod
     def accumulator_factory(self) -> "StatisticAccumulatorFactory": ...
 
+    def resident_accumulation_supported(self) -> bool:
+        """Return whether engine-resident (fixed-width) sufficient statistics suffice for ``estimate``.
+
+        Most exponential-family M-steps consume only the resident sufficient statistics,
+        so the default is ``True``. Estimators whose M-step needs more than that (e.g. a
+        full count histogram for the negative-binomial dispersion solve) override this to
+        ``False`` so stacked/generated kernels fall back to the host accumulator, keeping
+        every backend's fixed point identical.
+        """
+        return True
+
     def get_prior(self) -> Optional["ProbabilityDistribution"]:
         """Return the parameter prior configured on this estimator, if any.
 

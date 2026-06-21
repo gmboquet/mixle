@@ -22,6 +22,21 @@ class EngineNotSupportedError(ValueError):
     pass
 
 
+def _estimator_resident_supported(estimator: Any) -> bool:
+    """Return whether ``estimator`` (or every component of a mixture estimator) accepts resident stats.
+
+    Estimators whose M-step needs more than fixed-width resident sufficient statistics
+    (e.g. the negative-binomial dispersion solve, which needs the full count histogram)
+    override ``resident_accumulation_supported`` to ``False`` so generated kernels fall
+    back to the host accumulator and stay identical to the numpy/seq path.
+    """
+    component_estimators = getattr(estimator, "estimators", None)
+    if component_estimators is not None:
+        return all(_estimator_resident_supported(e) for e in component_estimators)
+    supported = getattr(estimator, "resident_accumulation_supported", None)
+    return bool(supported()) if callable(supported) else True
+
+
 class Kernel(ABC):
     """Evaluation kernel for a fitted distribution."""
 
@@ -254,9 +269,12 @@ class GeneratedNumbaKernel(Kernel):
         )
 
         enc = getattr(enc, "engine_payload", enc)  # unwrap resident payloads
+        resident_ok = _estimator_resident_supported(self.estimator)
         if self.components is not None:
             row_weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
             try:
+                if not resident_ok:
+                    raise ValueError("estimator requires host-side sufficient statistics")
                 gamma = self.posteriors(enc)
                 gamma *= row_weights.reshape(-1, 1)
                 component_stats = _generated_numba_component_stats(enc, gamma, self.components, self.engine)
@@ -264,12 +282,12 @@ class GeneratedNumbaKernel(Kernel):
                 return component_counts, _unstack_numba_component_stats(component_stats, len(component_counts))
             except ValueError:
                 # A component family has no generated stacked scorer / sufficient-statistic hook (or
-                # a width mismatch): fall back to the host mixture accumulator, which handles any
-                # component family.
+                # a width mismatch), or its M-step needs more than resident statistics: fall back to the
+                # host mixture accumulator, which handles any component family.
                 accumulator = self.estimator.accumulator_factory().make()
                 accumulator.seq_update(getattr(enc, "host_payload", enc), row_weights, self.dist)
                 return accumulator.value()
-        if generated_sufficient_statistics_available(self.dist):
+        if resident_ok and generated_sufficient_statistics_available(self.dist):
             return generated_sufficient_statistics(self.dist, enc, weights, self.engine)
         # Scorer-only leaf (numba scorer but no generated suff-stat hook): accumulate via the host
         # accumulator so the M-step still receives its expected statistics.

@@ -190,12 +190,14 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
             acc.update(x, 1.0, None)
         self.assertAlmostEqual(BernoulliEstimator().estimate(None, acc.value()).p, 3.0 / 5.0)
 
-        acc = NegativeBinomialEstimator(r=3.0).accumulator_factory().make()
+        acc = NegativeBinomialEstimator(r=3.0, estimate_r=False).accumulator_factory().make()
         data = [0, 1, 2, 5]
         for x in data:
             acc.update(x, 1.0, None)
         expected = 3.0 * len(data) / (3.0 * len(data) + sum(data))
-        self.assertAlmostEqual(NegativeBinomialEstimator(r=3.0).estimate(None, acc.value()).p, expected)
+        self.assertAlmostEqual(
+            NegativeBinomialEstimator(r=3.0, estimate_r=False).estimate(None, acc.value()).p, expected
+        )
 
         data = np.asarray([0.0, 1.0, 100.0])
         acc = LaplaceEstimator().accumulator_factory().make()
