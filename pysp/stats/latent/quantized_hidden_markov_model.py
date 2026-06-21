@@ -433,6 +433,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         name: str | None = None,
         terminal_values: set | None = None,
         use_numba: bool = False,
+        terminal_states: set[int] | Sequence[int] | None = None,
     ) -> None:
         """QuantizedHiddenMarkovModelDistribution: an HMM whose probabilities are powers of theta.
 
@@ -530,6 +531,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             name=name,
             terminal_values=terminal_values,
             use_numba=use_numba,
+            terminal_states=terminal_states,
         )
 
     def __str__(self) -> str:
