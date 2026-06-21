@@ -168,6 +168,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         use_numba: bool = False,
         weights: Sequence[float] | np.ndarray = MISSING,
         prior=None,
+        terminal_states: set[int] | Sequence[int] | None = None,
     ) -> None:
         """HiddenMarkovModelDistribution object defining HMM compatible with data type T.
 
@@ -224,6 +225,14 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             self.terminal_values = terminal_values
             self.name = name
             self.len_dist = len_dist if len_dist is not None else NullDistribution()
+
+            # Absorbing hidden states: the sequence ends exactly when one is first entered, so the
+            # length is a stopping time (not governed by len_dist). Stored as a boolean state mask.
+            self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+            if self.terminal_states is not None:
+                self._terminal_mask = np.zeros(self.n_states, dtype=bool)
+                self._terminal_mask[list(self.terminal_states)] = True
+                self.use_numba = False  # the terminal-state forward uses the non-numba per-sequence layout
 
         if taus is not None:
             self.taus = vec.make(taus)
@@ -448,6 +457,32 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         """
         return exp(self.log_density(x))
 
+    def _terminal_states_log_density(self, x: list[T]) -> float:
+        """Forward likelihood when the sequence ends exactly at the first absorbing (terminal) state.
+
+        ``P(x) = sum over paths z_1..z_L`` with ``z_1..z_{L-1}`` non-terminal and ``z_L`` terminal, of
+        ``pi(z_1) prod A(z_t,z_{t+1}) prod b_{z_t}(x_t)``. The forward recursion only transitions *from*
+        non-terminal states (entering a terminal state stops the chain) and the likelihood sums the
+        final position over terminal states. ``len_dist`` is bypassed -- the length is the stopping
+        time. Computed in log space (stable, no rescaling).
+        """
+        n = len(x)
+        if n == 0:
+            return -np.inf  # a terminal-states HMM always emits at least the terminal state
+        from scipy.special import logsumexp
+
+        k = self.n_states
+        log_b = np.empty((n, k))
+        for j in range(k):
+            log_b[:, j] = [self.topics[j].log_density(x[t]) for t in range(n)]
+        log_alpha = self.log_w + log_b[0]  # position 1 (terminal mass here only matters if n == 1)
+        nonterminal = ~self._terminal_mask
+        for t in range(1, n):
+            prev = np.where(nonterminal, log_alpha, -np.inf)  # only non-terminal states may be parents
+            log_alpha = log_b[t] + logsumexp(prev[:, None] + self.log_transitions, axis=0)
+        terminal_final = log_alpha[self._terminal_mask]
+        return float(logsumexp(terminal_final)) if terminal_final.size else -np.inf
+
     def log_density(self, x: list[T]) -> float:
         """Returns the log-density of HMM for observed sequence x.
 
@@ -475,6 +510,9 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             Log-density of observed HMM sequence x.
 
         """
+        if self.terminal_states is not None:
+            return self._terminal_states_log_density(x)
+
         if x is None or len(x) == 0:
             return self.len_dist.log_density(0)  # this will return 0.0 if NullDistribution()
 
@@ -552,8 +590,36 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
             return rv
 
+    def _terminal_states_seq_log_density(self, x: E1 | E2) -> "np.ndarray":
+        """Vectorized terminal-state forward: per-sequence stopping-time likelihood from encoded emissions."""
+        from scipy.special import logsumexp
+
+        x0, _ = x
+        (tot_cnt, _idx_bands, _has_next, len_vec, idx_mat, _idx_vec, enc_data), _, _len_enc = x0
+        k = self.n_states
+        log_b_all = np.empty((tot_cnt, k))
+        for j in range(k):
+            log_b_all[:, j] = self.topics[j].seq_log_density(enc_data)
+        nonterminal = ~self._terminal_mask
+        out = np.empty(idx_mat.shape[0], dtype=np.float64)
+        for s in range(idx_mat.shape[0]):
+            length = int(len_vec[s])
+            if length == 0:
+                out[s] = -np.inf
+                continue
+            log_b = log_b_all[idx_mat[s, :length], :]
+            log_alpha = self.log_w + log_b[0]
+            for t in range(1, length):
+                prev = np.where(nonterminal, log_alpha, -np.inf)
+                log_alpha = log_b[t] + logsumexp(prev[:, None] + self.log_transitions, axis=0)
+            tf = log_alpha[self._terminal_mask]
+            out[s] = float(logsumexp(tf)) if tf.size else -np.inf
+        return out
+
     def seq_log_density(self, x: E1 | E2) -> "np.ndarray":
         """Return vectorized log-density values for sequence-encoded observations."""
+        if self.terminal_states is not None:
+            return self._terminal_states_seq_log_density(x)
         x0, x1 = x
         if x1 is None:
             num_states = self.n_states
@@ -875,10 +941,10 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             HiddenMarkovSampler object.
 
         """
-        if isinstance(self.len_dist, NullDistribution) and self.terminal_values is None:
+        if isinstance(self.len_dist, NullDistribution) and self.terminal_values is None and self.terminal_states is None:
             raise Exception(
                 "HiddenMarkovSampler requires len_dist with support on non-negative integers, or terminal_"
-                "values to be set."
+                "values / terminal_states to be set."
             )
 
         return HiddenMarkovSampler(self, seed)
@@ -1386,6 +1452,8 @@ class HiddenMarkovSampler(DistributionSampler):
         else:
             self.terminal_set = set(dist.terminal_values)
 
+        self.terminal_states = dist.terminal_states  # absorbing hidden states (a set of indices) or None
+
         t_map = {i: {k: dist.transitions[i, k] for k in range(dist.n_states)} for i in range(dist.n_states)}
         p_map = {i: dist.w[i] for i in range(dist.n_states)}
 
@@ -1485,6 +1553,20 @@ class HiddenMarkovSampler(DistributionSampler):
 
         return rv
 
+    def sample_terminal_states(self, cap: int = 1_000_000) -> list[T]:
+        """Sample an HMM sequence run until the hidden chain first enters an absorbing (terminal) state.
+
+        The path ``z_1, z_2, ...`` is drawn from the chain and stops the moment ``z_L`` is terminal; the
+        returned sequence emits one observation per state, so its last state is terminal and all earlier
+        states are not. ``cap`` guards against a terminal state that is unreachable.
+        """
+        z = int(self.state_sampler.sample_seq())
+        states = [z]
+        while z not in self.terminal_states and len(states) < cap:
+            z = int(self.state_sampler.sample_seq(v0=z))
+            states.append(z)
+        return [self.obs_samplers[s].sample() for s in states]
+
     def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw iid samples from HMM.
 
@@ -1506,6 +1588,11 @@ class HiddenMarkovSampler(DistributionSampler):
             List[T] or List[List[T]] depending on arg size.
 
         """
+        if self.terminal_states is not None:
+            if size is None:
+                return self.sample_terminal_states()
+            return [self.sample_terminal_states() for _ in range(size)]
+
         if self.len_sampler is not None:
             return self.sample_seq(size=size, batched=batched)
 
