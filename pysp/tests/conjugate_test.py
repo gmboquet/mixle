@@ -297,5 +297,28 @@ class MixtureOfConjugatesTest(unittest.TestCase):
             mixture_conjugate_posterior(BetaDistribution(2.0, 2.0), [0.2, 0.4, 0.6], [{"a": 1.0}, {"a": 2.0}])
 
 
+class ConjugateSamplerApiTest(unittest.TestCase):
+    """The posterior follows the standard obj.sampler(seed).sample(size) convention."""
+
+    def test_sampler_single_and_batch(self):
+        post = conjugate_posterior(BernoulliDistribution(0.5), [1, 0, 1, 1, 0, 1, 1])
+        single = post.sampler(seed=0).sample()
+        self.assertTrue(np.isscalar(single["p"]) or np.ndim(single["p"]) == 0)  # one parameter set
+        batch = post.sampler(seed=0).sample(5)
+        self.assertEqual(batch["p"].shape, (5,))
+
+    def test_sampler_is_seed_repeatable(self):
+        post = conjugate_posterior(BernoulliDistribution(0.5), [1, 0, 1, 1, 0])
+        a = post.sampler(seed=3).sample(10)["p"]
+        b = post.sampler(seed=3).sample(10)["p"]
+        self.assertTrue(np.array_equal(a, b))
+
+    def test_legacy_sample_n_rng_still_works(self):
+        post = conjugate_posterior(GaussianDistribution(0, 1), list(np.random.RandomState(0).randn(50)))
+        draws = post.sample(3, rng=np.random.RandomState(1))
+        self.assertIn("mu", draws)
+        self.assertEqual(np.asarray(draws["mu"]).shape[0], 3)
+
+
 if __name__ == "__main__":
     unittest.main()
