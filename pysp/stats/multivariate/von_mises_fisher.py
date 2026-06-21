@@ -429,32 +429,43 @@ class VonMisesFisherSampler(DistributionSampler):
         c = k * x0 + (d - 1.0) * np.log(1 - x0 * x0)
 
         sz = 1 if size is None else size
-        rv = np.zeros((sz, d))
 
         QQ = np.zeros((d, d), dtype=float)
         QQ[0, :] = mu
         _, s, vh = scipy.linalg.svd(QQ)
-        QQ = vh[np.abs(s) < 0.1, :].T
+        QQ = vh[np.abs(s) < 0.1, :].T  # (d, d-1) orthonormal complement of mu
 
-        for i in range(sz):
-            t = c - 1
-            u = 1
+        # Wood's tangent coordinate w, drawn by *batched* rejection: draw blocks of (z, u), accept
+        # where t - c >= log u, and accumulate sz accepted values. Wood's scheme accepts in O(1)
+        # expected draws, so the budget below is only a guard against a pathological non-terminating
+        # loop (the per-draw `while True` it replaces had no such guard).
+        w = np.empty(sz)
+        filled = 0
+        for _ in range(10_000):
+            if filled >= sz:
+                break
+            block = max(sz - filled, 64)
+            z = rng1.beta(m, m, size=block)
+            u = rng2.rand(block)
+            ww = (1.0 - (1.0 + b) * z) / (1.0 - (1.0 - b) * z)
+            t = k * ww + (d - 1) * np.log(1.0 - x0 * ww)
+            acc = (t - c) >= np.log(u)
+            take = min(int(acc.sum()), sz - filled)
+            if take:
+                w[filled : filled + take] = ww[acc][:take]
+                filled += take
+        if filled < sz:
+            raise RuntimeError(
+                "VonMisesFisherSampler exceeded the rejection budget (dim=%d, kappa=%g); acceptance was "
+                "near zero." % (d, k)
+            )
 
-            while (t - c) < np.log(u):
-                z = rng1.beta(m, m)
-                u = rng2.rand()
-                w = (1.0 - (1.0 + b) * z) / (1.0 - (1 - b) * z)
-                t = k * w + (d - 1) * np.log(1.0 - x0 * w)
+        # tangential directions: sz unit vectors in the complement of mu, then combine with w
+        v = rng3.randn(sz, d - 1) @ QQ.T  # (sz, d)
+        v /= np.sqrt(np.einsum("ij,ij->i", v, v))[:, None]
+        rv = np.sqrt(1.0 - w * w)[:, None] * v + w[:, None] * mu[None, :]
 
-            v = rng3.randn(d - 1)
-            v = np.dot(QQ, v)
-            v /= np.sqrt(np.dot(v, v))
-            rv[i, :] = np.sqrt(1 - w * w) * v + w * mu
-
-        if size is None:
-            return rv[0, :]
-        else:
-            return rv
+        return rv[0, :] if size is None else rv
 
 
 class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
