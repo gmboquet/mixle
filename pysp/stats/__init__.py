@@ -152,6 +152,10 @@ __all__ = [
     "BinomialDataEncoder",
     "BinomialEnumerator",
     "CategoricalDistribution",
+    "ChineseRestaurantProcessDistribution",
+    "ChineseRestaurantProcessSampler",
+    "ChineseRestaurantProcessEstimator",
+    "ChineseRestaurantProcessDataEncoder",
     "CategoricalSampler",
     "CategoricalEstimator",
     "CategoricalDataEncoder",
@@ -1070,6 +1074,12 @@ from pysp.stats.leaf.categorical_multinomial import (
     MultinomialEnumerator,
     MultinomialEstimator,
     MultinomialSampler,
+)
+from pysp.stats.leaf.chinese_restaurant_process import (
+    ChineseRestaurantProcessDataEncoder,
+    ChineseRestaurantProcessDistribution,
+    ChineseRestaurantProcessEstimator,
+    ChineseRestaurantProcessSampler,
 )
 from pysp.stats.leaf.dirichlet_multinomial import (
     DirichletMultinomialDataEncoder,
