@@ -9,7 +9,13 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.temporal import PeriodicTime, SeasonalTimeSeries, cyclic_phase, to_unix_seconds
+from pysp.stats import estimate
+from pysp.stats.temporal import PeriodicTimeDistribution, SeasonalTimeSeries, cyclic_phase, to_unix_seconds
+
+
+def _fit_periodic(times, period="day"):
+    """Fit a PeriodicTimeDistribution through the pysp estimator contract."""
+    return estimate(list(times), PeriodicTimeDistribution(period).estimator())
 
 
 class DatetimeParsingTest(unittest.TestCase):
@@ -33,18 +39,19 @@ class PeriodicTimeTest(unittest.TestCase):
         self.times = np.arange(4000) * 86400.0 + hours * 3600.0
 
     def test_fit_recovers_peak_and_concentration(self):
-        pt = PeriodicTime.fit(self.times, period="day")
+        pt = _fit_periodic(self.times, "day")
         self.assertAlmostEqual(pt.peak_phase_fraction() * 24, 9.0, delta=0.3)
         self.assertGreater(pt.conc, 1.0)  # clearly peaked, not uniform
 
     def test_density_integrates_to_one_over_the_cycle(self):
-        pt = PeriodicTime.fit(self.times, period="day")
+        pt = _fit_periodic(self.times, "day")
         grid = np.linspace(0, 86400, 20000, endpoint=False)
-        integral = np.trapezoid(np.exp(pt.log_density(grid)), grid)
+        enc = pt.dist_to_encoder().seq_encode(grid)
+        integral = np.trapezoid(np.exp(pt.seq_log_density(enc)), grid)
         self.assertAlmostEqual(integral, 1.0, places=2)
 
     def test_sampler_clusters_at_the_peak(self):
-        pt = PeriodicTime.fit(self.times, period="day")
+        pt = _fit_periodic(self.times, "day")
         s = pt.sampler(seed=1).sample(8000) / 3600.0  # hours into the day
         self.assertAlmostEqual(np.mean(s), 9.0, delta=0.3)
 
@@ -52,12 +59,12 @@ class PeriodicTimeTest(unittest.TestCase):
         rng = np.random.RandomState(1)
         dow = 2.0 + rng.randn(4000) * 0.4  # epoch is a Thursday, so +2 days = Saturday
         wtimes = np.arange(4000) * 7 * 86400.0 + dow * 86400.0
-        pw = PeriodicTime.fit(wtimes, period="week")
+        pw = _fit_periodic(wtimes, "week")
         self.assertAlmostEqual(pw.peak_phase_fraction() * 7, 2.0, delta=0.3)
 
     def test_uniform_when_no_pattern(self):
         rng = np.random.RandomState(2)
-        pt = PeriodicTime.fit(rng.uniform(0, 365 * 86400, 5000), period="day")
+        pt = _fit_periodic(rng.uniform(0, 365 * 86400, 5000), "day")
         self.assertLess(pt.conc, 0.3)  # no time-of-day structure -> near-uniform
 
 
