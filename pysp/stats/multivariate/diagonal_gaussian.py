@@ -271,6 +271,35 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         rv += self.cc
         return rv
 
+    def condition(self, observed: dict[int, float]) -> "DiagonalGaussianDistribution":
+        """Return the conditional over the unobserved dimensions given ``observed``.
+
+        A diagonal Gaussian has independent coordinates, so conditioning on some of them leaves the rest
+        unchanged: the result is just ``DiagonalGaussian(mu[unobserved], covar[unobserved])`` (the
+        observed values do not shift the unobserved mean or variance). Provided so diagonal-covariance
+        Gaussian mixtures support :meth:`MixtureDistribution.conditional` -- there the *responsibilities*
+        still update from how well each component explains the observed coordinates, even though the
+        within-component coordinates are independent. Raises if no dimension is left unobserved.
+        """
+        if observed and (min(observed) < 0 or max(observed) >= self.dim):
+            raise ValueError("observed indices must be in [0, dim)")
+        unobs = np.array([i for i in range(self.dim) if i not in observed], dtype=int)
+        if unobs.size == 0:
+            raise ValueError("at least one dimension must be left unobserved")
+        return DiagonalGaussianDistribution(self.mu[unobs], self.covar[unobs])
+
+    def marginal(self, keep: Sequence[int]) -> "DiagonalGaussianDistribution":
+        """Return the marginal over the dimensions ``keep``: ``DiagonalGaussian(mu[keep], covar[keep])``.
+
+        Marginalizing a diagonal Gaussian simply drops the other independent coordinates (order kept).
+        """
+        idx = np.asarray(list(keep), dtype=int)
+        if idx.size == 0:
+            raise ValueError("keep at least one dimension")
+        if idx.min() < 0 or idx.max() >= self.dim:
+            raise ValueError("kept indices must be in [0, dim)")
+        return DiagonalGaussianDistribution(self.mu[idx], self.covar[idx])
+
     def density_cumulative(self, x: Sequence[float] | np.ndarray) -> float:
         """Exact probability-ordered cumulative ``G(x) = P(p(Y) >= p(x))`` -- the highest-density-region
         mass through ``x`` (multivariate analogue of a CDF). For a diagonal Gaussian the squared
