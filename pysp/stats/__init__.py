@@ -467,6 +467,10 @@ __all__ = [
     "FiniteStochasticTransformEstimator",
     "FiniteStochasticTransformDataEncoder",
     "FiniteStochasticTransformEnumerator",
+    "ZeroInflatedDistribution",
+    "ZeroInflatedSampler",
+    "ZeroInflatedEstimator",
+    "ZeroInflatedDataEncoder",
     "TruncatedDistribution",
     "TruncatedSampler",
     "TruncatedEstimator",
@@ -674,6 +678,12 @@ from pysp.stats.combinator.truncated import (
     TruncatedSampler,
 )
 from pysp.stats.combinator.weighted import WeightedDataEncoder, WeightedDistribution, WeightedEstimator
+from pysp.stats.combinator.zero_inflated import (
+    ZeroInflatedDataEncoder,
+    ZeroInflatedDistribution,
+    ZeroInflatedEstimator,
+    ZeroInflatedSampler,
+)
 from pysp.stats.compute.backend import (
     BackendScoringError,
     backend_log_density_sum,
