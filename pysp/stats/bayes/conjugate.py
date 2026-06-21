@@ -109,7 +109,9 @@ class ConjugatePosteriorSampler:
     def sample(self, size: int | None = None) -> dict[str, Any]:
         draws = self.posterior.sample(n=1 if size is None else int(size), rng=self.rng)
         if size is None:
-            return {k: (v[0] if isinstance(v, np.ndarray) and v.shape and v.shape[0] == 1 else v) for k, v in draws.items()}
+            return {
+                k: (v[0] if isinstance(v, np.ndarray) and v.shape and v.shape[0] == 1 else v) for k, v in draws.items()
+            }
         return draws
 
 

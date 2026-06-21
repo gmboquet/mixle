@@ -175,9 +175,7 @@ class GaussianCopulaAccumulatorFactory(StatisticAccumulatorFactory):
 class GaussianCopulaEstimator(ParameterEstimator):
     """Inversion estimator: the correlation of the normal scores ``z = Phi^{-1}(u)``."""
 
-    def __init__(
-        self, dim: int, min_eig: float = 1.0e-8, name: str | None = None, keys: str | None = None
-    ) -> None:
+    def __init__(self, dim: int, min_eig: float = 1.0e-8, name: str | None = None, keys: str | None = None) -> None:
         self.dim = dim
         self.min_eig = min_eig
         self.name = name

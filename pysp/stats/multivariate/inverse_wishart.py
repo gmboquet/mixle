@@ -99,7 +99,9 @@ class InverseWishartSampler(DistributionSampler):
     def __init__(self, dist: InverseWishartDistribution, seed: int | None = None) -> None:
         self.rng = RandomState(seed)
         self.dist = dist
-        self._wishart = WishartDistribution(dist.df, np.linalg.inv(dist.scale)).sampler(seed=self.rng.randint(0, 2**31 - 1))
+        self._wishart = WishartDistribution(dist.df, np.linalg.inv(dist.scale)).sampler(
+            seed=self.rng.randint(0, 2**31 - 1)
+        )
 
     def sample(self, size: int | None = None) -> np.ndarray:
         w = self._wishart.sample(size=size)

@@ -49,7 +49,9 @@ class WishartDistribution(SequenceEncodableProbabilityDistribution):
         self._scale_inv = np.linalg.inv(v)
         self._chol = np.linalg.cholesky(v)
         p = self.dim
-        self._log_norm = -(self.df * p / 2.0) * math.log(2.0) - (self.df / 2.0) * logdet - multigammaln(self.df / 2.0, p)
+        self._log_norm = (
+            -(self.df * p / 2.0) * math.log(2.0) - (self.df / 2.0) * logdet - multigammaln(self.df / 2.0, p)
+        )
 
     def __str__(self) -> str:
         return "WishartDistribution(%s, %s, name=%s, keys=%s)" % (

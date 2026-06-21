@@ -192,7 +192,11 @@ class SurvivalAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for :class:`SurvivalAccumulator`."""
 
     def __init__(
-        self, base_factory: StatisticAccumulatorFactory, base_encoder: DataSequenceEncoder, n_impute: int, keys: str | None
+        self,
+        base_factory: StatisticAccumulatorFactory,
+        base_encoder: DataSequenceEncoder,
+        n_impute: int,
+        keys: str | None,
     ) -> None:
         self.base_factory = base_factory
         self.base_encoder = base_encoder

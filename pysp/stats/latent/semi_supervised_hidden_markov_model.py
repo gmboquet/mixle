@@ -426,7 +426,9 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory(StatisticAccumulator
 
 
 class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
-    def __init__(self, estimators, len_estimator=None, pseudo_count=None, name=None, keys=(None, None), terminal_states=None):
+    def __init__(
+        self, estimators, len_estimator=None, pseudo_count=None, name=None, keys=(None, None), terminal_states=None
+    ):
         self.estimators = list(estimators)
         self.num_states = len(self.estimators)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()

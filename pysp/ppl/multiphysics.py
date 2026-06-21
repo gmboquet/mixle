@@ -111,6 +111,8 @@ class CoupledPDESystem:
                     b_rows.append(i * n + interior)
                     b_cols.append(j * n + interior)
                     b_vals.append(np.full(len(interior), self.coupling[i, j]))
-        big = sp.csc_matrix((np.concatenate(b_vals), (np.concatenate(b_rows), np.concatenate(b_cols))), shape=(self.k * n,) * 2)
+        big = sp.csc_matrix(
+            (np.concatenate(b_vals), (np.concatenate(b_rows), np.concatenate(b_cols))), shape=(self.k * n,) * 2
+        )
         u = spla.spsolve(big, rhs)
         return [u[i * n : (i + 1) * n].reshape(self.shape) for i in range(self.k)]

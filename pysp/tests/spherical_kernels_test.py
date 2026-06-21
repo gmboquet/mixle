@@ -81,7 +81,9 @@ class SphericalFieldFitTest(unittest.TestCase):
         idx = np.column_stack([lat, lon])
         truth = -30 * np.cos(np.radians(lat)) + 10  # warm equator, cold poles
         y = truth + rng.randn(n) * 1.5
-        field = GaussianField(idx, GreatCircleMatern(lengthscale=4000.0, amplitude=20.0, nu=1.5, radius=EARTH_KM), name="T")
+        field = GaussianField(
+            idx, GreatCircleMatern(lengthscale=4000.0, amplitude=20.0, nu=1.5, radius=EARTH_KM), name="T"
+        )
         post = fit_field(field, [GaussianProxy(y, slope=1.0, intercept=0.0, scale=1.5)], how="laplace")
         m = post.mean("T")
         self.assertGreater(np.corrcoef(m, truth)[0, 1], 0.9)

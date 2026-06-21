@@ -84,5 +84,7 @@ def sample(
         draw_seed = int(rng.randint(0, maxrandint)) if rng is not None else seed
         return model.sampler(seed=draw_seed).sample(size, **kwargs)
 
-    raise TypeError(f"don't know how to sample from a {type(model).__name__}; expected a distribution, "
-                    "conjugate posterior, Relation, FieldPosterior, or LatentPosterior.")
+    raise TypeError(
+        f"don't know how to sample from a {type(model).__name__}; expected a distribution, "
+        "conjugate posterior, Relation, FieldPosterior, or LatentPosterior."
+    )

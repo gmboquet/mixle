@@ -173,9 +173,7 @@ class WrappedCauchyAccumulatorFactory(StatisticAccumulatorFactory):
 class WrappedCauchyEstimator(ParameterEstimator):
     """Estimate ``mu`` and ``rho`` from the mean resultant (the first trigonometric moment)."""
 
-    def __init__(
-        self, rho_max: float = 1.0 - 1.0e-8, name: str | None = None, keys: str | None = None
-    ) -> None:
+    def __init__(self, rho_max: float = 1.0 - 1.0e-8, name: str | None = None, keys: str | None = None) -> None:
         self.rho_max = rho_max
         self.name = name
         self.keys = keys

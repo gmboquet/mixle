@@ -655,7 +655,9 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
         if len(x) < max(self.lag, 1):
             return
         log_b = estimate._windowed_log_b(x)
-        _, gamma, xi = terminal_forward_backward(estimate.log_w, estimate.log_transitions, log_b, estimate._terminal_mask)
+        _, gamma, xi = terminal_forward_backward(
+            estimate.log_w, estimate.log_transitions, log_b, estimate._terminal_mask
+        )
         if gamma is None:
             return
         lag = self.lag

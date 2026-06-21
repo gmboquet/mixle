@@ -976,7 +976,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             HiddenMarkovSampler object.
 
         """
-        if isinstance(self.len_dist, NullDistribution) and self.terminal_values is None and self.terminal_states is None:
+        if (
+            isinstance(self.len_dist, NullDistribution)
+            and self.terminal_values is None
+            and self.terminal_states is None
+        ):
             raise Exception(
                 "HiddenMarkovSampler requires len_dist with support on non-negative integers, or terminal_"
                 "values / terminal_states to be set."
