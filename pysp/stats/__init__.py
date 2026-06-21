@@ -567,6 +567,10 @@ __all__ = [
     "WatsonSampler",
     "WatsonEstimator",
     "WatsonDataEncoder",
+    "WishartDistribution",
+    "WishartSampler",
+    "WishartEstimator",
+    "WishartDataEncoder",
     "VonMisesFisherSampler",
     "VonMisesFisherEstimator",
     "VonMisesFisherDataEncoder",
@@ -1256,6 +1260,12 @@ from pysp.stats.multivariate.watson import (
     WatsonDistribution,
     WatsonEstimator,
     WatsonSampler,
+)
+from pysp.stats.multivariate.wishart import (
+    WishartDataEncoder,
+    WishartDistribution,
+    WishartEstimator,
+    WishartSampler,
 )
 from pysp.stats.sets.bernoulli_set import (
     BernoulliSetDataEncoder,
