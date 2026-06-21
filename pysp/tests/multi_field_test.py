@@ -85,6 +85,41 @@ class MultiFieldTest(unittest.TestCase):
         np.testing.assert_allclose(gn.mean("A"), lap.mean("A"), atol=1e-4)
         np.testing.assert_allclose(gn.mean("B"), lap.mean("B"), atol=1e-4)
 
+    def test_coregionalization_pulls_an_unobserved_field_through_the_prior(self):
+        """With data ONLY on A, a strong a-priori cross-correlation should inform B; block-diag leaves it flat."""
+        sys_indep, proxies, a_true, _ = _two_field_setup()
+        pa = proxies[0]  # the proxy attached to A; B has no data
+        fa, fb = sys_indep.fields
+        indep = fit_field(FieldSystem([fa, fb]), [pa], how="laplace")
+        coreg = fit_field(FieldSystem([fa, fb], coregion=np.array([[1.0, 0.9], [0.9, 1.0]])), [pa], how="laplace")
+        self.assertLess(np.max(np.abs(indep.mean("B"))), 1e-3)  # block-diagonal: B uninformed, flat at 0
+        self.assertGreater(np.corrcoef(coreg.mean("B"), a_true)[0, 1], 0.8)  # coregion: B tracks A
+
+    def test_negative_coregion_flips_the_induced_field(self):
+        sys_indep, proxies, a_true, _ = _two_field_setup()
+        fa, fb = sys_indep.fields
+        coreg = fit_field(FieldSystem([fa, fb], coregion=np.array([[1.0, -0.9], [-0.9, 1.0]])), [proxies[0]], how="laplace")
+        self.assertLess(np.corrcoef(coreg.mean("B"), a_true)[0, 1], -0.8)
+
+    def test_icm_recovers_the_exact_conditional_scaling(self):
+        """At convergence the data-less field equals (B01/B00)*A pointwise -- the intrinsic-coregion prior."""
+        sys_indep, proxies, _, _ = _two_field_setup()
+        fa, fb = sys_indep.fields
+        coreg = fit_field(
+            FieldSystem([fa, fb], coregion=np.array([[1.0, 0.7], [0.7, 1.0]])), [proxies[0]], how="laplace", max_iter=3000
+        )
+        np.testing.assert_allclose(np.median(coreg.mean("B") / coreg.mean("A")), 0.7, atol=0.02)
+
+    def test_coregion_validation(self):
+        f = GaussianField(np.arange(6.0), RBF(), name="A")
+        g = GaussianField(np.arange(6.0), RBF(), name="B")
+        with self.assertRaises(ValueError):  # not positive-definite
+            FieldSystem([f, g], coregion=np.array([[1.0, 1.2], [1.2, 1.0]]))
+        with self.assertRaises(ValueError):  # wrong shape for 2 fields
+            FieldSystem([f, g], coregion=np.eye(3))
+        with self.assertRaises(ValueError):  # fields must share a dim/index
+            FieldSystem([f, GaussianField(np.arange(5.0), RBF(), name="B")], coregion=np.eye(2))
+
     def test_single_field_system_matches_plain_field(self):
         n = 20
         x = np.linspace(0, 1, n)

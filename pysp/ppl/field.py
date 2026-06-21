@@ -258,15 +258,21 @@ class FieldSystem:
     earth-science models (e.g. an ore-grade field constrained by several geophysical surveys, or coupled
     paleo-environment fields like temperature + salinity + pCO2 read through many proxies).
 
-    The prior is block-diagonal over the fields (each keeps its own kernel precision). Cross-field
-    dependence is expressed in the proxy likelihoods: a proxy ``loglik(field_t, params, torch)`` receives
-    the full ``params`` dict, so it can read *any* field by name and couple them (a coupling PDE residual,
-    a grade that depends on density + susceptibility, ...). Attach a proxy to a particular field with
-    ``proxy.on('name')``; an unattached proxy defaults to the first field. (Prior-level coregionalization
-    -- a cross-field Gaussian coupling in the precision itself -- is the next step on top of this.)
+    By default the prior is block-diagonal over the fields (each keeps its own kernel precision) and
+    cross-field dependence is expressed in the proxy likelihoods: a proxy ``loglik(field_t, params,
+    torch)`` receives the full ``params`` dict, so it can read *any* field by name and couple them (a
+    coupling PDE residual, a grade that depends on density + susceptibility, ...). Attach a proxy to a
+    particular field with ``proxy.on('name')``; an unattached proxy defaults to the first field.
+
+    Pass ``coregion=B`` (a ``K x K`` between-field covariance for the ``K`` fields) for *prior-level*
+    coregionalization -- the intrinsic coregionalization model, joint prior precision ``B^-1 (x) Lambda``,
+    where the fields share one spatial structure ``Lambda`` (the first field's kernel) and are correlated
+    a priori through ``B`` (e.g. temperature and salinity covary before any data). Requires all fields to
+    share one index/dim. ``B`` must be symmetric positive-definite.
     """
 
     fields: Sequence[GaussianField]
+    coregion: np.ndarray | None = None
 
     def __post_init__(self):
         self.fields = list(self.fields)
@@ -276,6 +282,18 @@ class FieldSystem:
         if len(set(names)) != len(names):
             raise ValueError(f"field names must be unique; got {names}.")
         self.names = names
+        if self.coregion is not None:
+            b = np.asarray(self.coregion, dtype=float)
+            k = len(self.fields)
+            if b.shape != (k, k):
+                raise ValueError(f"coregion must be {k}x{k} for {k} fields; got {b.shape}.")
+            if not np.allclose(b, b.T):
+                raise ValueError("coregion must be symmetric.")
+            if np.linalg.eigvalsh(b).min() <= 0:
+                raise ValueError("coregion must be positive-definite.")
+            if any(f.dim != self.fields[0].dim for f in self.fields):
+                raise ValueError("coregionalization (coregion=) requires all fields to share one index/dim.")
+            self.coregion = b
 
 
 # --------------------------------------------------------------------------------------------------
@@ -718,8 +736,25 @@ def fit_field(
 
     u0 = np.concatenate(init_vals) if init_vals else np.zeros(0)
     supports_arr = supports
-    field_prec = {fld.name: torch.as_tensor(fld.precision) for fld in field_list}
     field_dim = {fld.name: fld.dim for fld in field_list}
+
+    # ----- joint field prior precision over the contiguous field block (fields are added first) -----
+    n_field = sum(fld.dim for fld in field_list)
+    coregion = field.coregion if isinstance(field, FieldSystem) else None
+    if coregion is not None:
+        # intrinsic coregionalization: Lambda_joint = B^-1 (x) Lambda_shared (the first field's precision)
+        field_prec_joint = np.kron(np.linalg.inv(coregion), field_list[0].precision)
+    else:
+        blocks = [fld.precision for fld in field_list if fld.dim]
+        field_prec_joint = np.zeros((0, 0))
+        if blocks:
+            field_prec_joint = np.zeros((n_field, n_field))
+            o = 0
+            for m in blocks:  # block-diagonal: independent fields
+                d = m.shape[0]
+                field_prec_joint[o : o + d, o : o + d] = m
+                o += d
+    Lambda_joint = torch.as_tensor(field_prec_joint)
 
     def unpack(u_t):
         """Map the unconstrained vector to {node: constrained tensor}."""
@@ -733,11 +768,10 @@ def fit_field(
 
     def neg_log_post(u_t):
         vals = unpack(u_t)
-        nlp = 0.0
-        for fld in field_list:  # block-diagonal Gaussian field prior(s), up to a constant
-            if fld.dim:
-                f = vals[fld.name]
-                nlp = nlp + 0.5 * f @ (field_prec[fld.name] @ f)
+        # Gaussian field prior over the contiguous, real-support field block (up to a constant). The joint
+        # precision is block-diagonal (independent fields) or B^-1 (x) Lambda (coregionalized).
+        ff = u_t[:n_field]
+        nlp = 0.5 * ff @ (Lambda_joint @ ff) if n_field else 0.0
         for px in proxies:
             nlp = nlp - px.loglik(vals[_proxy_field(px)], vals, torch)
         return nlp
@@ -800,7 +834,7 @@ def fit_field(
         # its prior covariance K is available (e.g. an RBF kernel), the posterior covariance
         # (K^-1 + J^T J)^-1 = K - K J^T (I + J K J^T)^-1 J K is formed without any dense n_field inverse --
         # only an n_obs x n_obs solve -- so the marginal sds scale to large fields. n_resid is the sensor count.
-        field_only = len(field_list) == 1 and primary.dim > 0 and pos == primary.dim
+        field_only = len(field_list) == 1 and primary.dim > 0 and pos == primary.dim and coregion is None
         if field_only and primary.covariance is not None:
             K = primary.covariance
             M = K @ jac.T  # n_field x n_resid  (= K J^T)
@@ -818,10 +852,8 @@ def fit_field(
             )
 
         H = jac.T @ jac
-        for fld in field_list:  # add each field's prior precision into its own block (Gauss-Newton: J^T J + prior)
-            if fld.dim > 0:
-                lo, hi = layout[fld.name]
-                H[lo:hi, lo:hi] += fld.precision
+        if n_field:  # add the joint field prior precision (block-diagonal or coregionalized) to J^T J
+            H[:n_field, :n_field] += field_prec_joint
         H = 0.5 * (H + H.T) + 1e-10 * np.eye(H.shape[0])
         cov = np.linalg.inv(H)
         return FieldPosterior(
