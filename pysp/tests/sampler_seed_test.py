@@ -251,6 +251,7 @@ def _stats_public_distribution_catalog():
             [[0.0, 0.0], [1.0, -1.0], [2.0, 0.5]], [[2.0, 0.3, 0.1], [0.3, 1.0, 0.2], [0.1, 0.2, 1.5]], [[1.4, 0.4], [0.4, 0.9]]
         ),
         "WrappedCauchyDistribution": stats.WrappedCauchyDistribution(0.7, 0.6),
+        "BetaBinomialDistribution": stats.BetaBinomialDistribution(10, 2.0, 3.0),
         "SurvivalDistribution": stats.SurvivalDistribution(stats.WeibullDistribution(1.5, 2.0)),
         "UniformDistribution": stats.UniformDistribution(-1.0, 3.0),
         "WeibullDistribution": stats.WeibullDistribution(1.5, 2.0),

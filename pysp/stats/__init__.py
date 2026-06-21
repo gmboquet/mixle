@@ -143,6 +143,10 @@ __all__ = [
     "LogSeriesEstimator",
     "LogSeriesDataEncoder",
     "BinomialDistribution",
+    "BetaBinomialDistribution",
+    "BetaBinomialSampler",
+    "BetaBinomialEstimator",
+    "BetaBinomialDataEncoder",
     "BinomialSampler",
     "BinomialEstimator",
     "BinomialDataEncoder",
@@ -1010,6 +1014,12 @@ from pysp.stats.leaf.bernoulli import (
 
 ### Continuous base distributions
 from pysp.stats.leaf.beta import BetaDataEncoder, BetaDistribution, BetaEstimator, BetaSampler
+from pysp.stats.leaf.beta_binomial import (
+    BetaBinomialDataEncoder,
+    BetaBinomialDistribution,
+    BetaBinomialEstimator,
+    BetaBinomialSampler,
+)
 from pysp.stats.leaf.binomial import (
     BinomialDataEncoder,
     BinomialDistribution,
