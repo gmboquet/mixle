@@ -398,7 +398,7 @@ class FieldPosterior:
         sd = np.sqrt(np.clip(np.diag(np.linalg.inv(prec)), 1e-12, None))
         return self.map_values[self._field_name], sd
 
-    def sample(self, size: int = 1, rng=None, *, nodes: Sequence[str] | None = None) -> dict:
+    def sample(self, size: int = 1, rng=None, *, nodes: Sequence[str] | None = None, given: dict | None = None) -> dict:
         """Draw joint samples from the Gaussian posterior, returned in each node's natural space.
 
         The Laplace / Gauss-Newton posterior is the Gaussian ``N(map, _cov)`` in the *unconstrained*
@@ -409,10 +409,17 @@ class FieldPosterior:
         A mean-field ``how='vi'`` (or low-rank Woodbury) fit exposes only per-node marginal variances, so
         there the draws are independent across nodes (which is exactly the mean-field assumption).
 
+        ``given`` (a ``{node: value}`` dict) conditions the draw on fixed node values -- the closed-form
+        Gaussian conditional of the remaining coordinates given the observed ones (e.g. draw the field
+        consistent with a pinned measurement or a fixed proxy parameter). Conditioning couples nodes
+        through the joint covariance, so it requires the full-covariance fit
+        (``how='laplace'``/``'gauss_newton'``); the fixed nodes come back at their given values.
+
         Args:
             size: number of joint draws.
             rng: a ``numpy.random.RandomState``, an integer seed, or ``None``.
             nodes: which nodes to return (default: all). The draw is always joint over the full vector.
+            given: optional ``{node: value}`` to condition on (values in each node's natural space).
 
         Returns:
             ``{node: ndarray}`` with shape ``(size,)`` for scalar nodes and ``(size, dim)`` otherwise.
@@ -426,14 +433,44 @@ class FieldPosterior:
                 "'gauss_newton', or 'vi' to sample."
             )
         dim = max((hi for _, hi in self._layout.values()), default=0)
+
+        def _to_unconstrained(node, value):
+            v = np.atleast_1d(np.asarray(value, dtype=float))
+            return np.log(np.clip(v, 1e-12, None)) if self._supports.get(node) == "positive" else v
+
         mu = np.zeros(dim)
         for node, (lo, hi) in self._layout.items():
             val = np.atleast_1d(np.asarray(self.map_values[node], dtype=float))
             if val.size == 0:
                 continue
-            mu[lo:hi] = np.log(np.clip(val, 1e-12, None)) if self._supports.get(node) == "positive" else val
+            mu[lo:hi] = _to_unconstrained(node, val)
         z = rng.standard_normal((size, dim))
-        if has_full:
+        if given:
+            if not has_full:
+                raise ValueError("conditioning on given= needs the full joint covariance (how='laplace'/'gauss_newton').")
+            obs_pos: list[int] = []
+            x_o: list[float] = []
+            for node, value in given.items():
+                lo, hi = self._slice(node).start, self._slice(node).stop
+                uval = _to_unconstrained(node, value)
+                if uval.size != hi - lo:
+                    raise ValueError(f"given[{node!r}] has {uval.size} value(s), expected {hi - lo}.")
+                obs_pos.extend(range(lo, hi))
+                x_o.extend(uval.tolist())
+            obs = np.array(obs_pos, dtype=int)
+            unobs = np.array([i for i in range(dim) if i not in set(obs_pos)], dtype=int)
+            if unobs.size == 0:
+                raise ValueError("given= fixes every coordinate; leave at least one node free.")
+            cov = np.atleast_2d(np.asarray(self._cov, dtype=float))
+            s_oo, s_uo, s_uu = cov[np.ix_(obs, obs)], cov[np.ix_(unobs, obs)], cov[np.ix_(unobs, unobs)]
+            solve = np.linalg.solve(s_oo, np.concatenate([(np.array(x_o) - mu[obs])[:, None], s_uo.T], axis=1))
+            mu_u = mu[unobs] + s_uo @ solve[:, 0]
+            cov_u = s_uu - s_uo @ solve[:, 1:]
+            chol = np.linalg.cholesky(0.5 * (cov_u + cov_u.T) + 1e-12 * np.eye(unobs.size))
+            draws = np.empty((size, dim))
+            draws[:, obs] = np.array(x_o)[None, :]
+            draws[:, unobs] = mu_u[None, :] + z[:, : unobs.size] @ chol.T
+        elif has_full:
             cov = np.atleast_2d(np.asarray(self._cov, dtype=float))
             chol = np.linalg.cholesky(cov + 1e-12 * np.eye(dim))
             draws = mu[None, :] + z @ chol.T
