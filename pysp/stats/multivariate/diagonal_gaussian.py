@@ -425,8 +425,10 @@ class DiagonalGaussianSampler(DistributionSampler):
             rv *= np.sqrt(self.dist.covar)
             rv += self.dist.mu
             return rv
-        else:
-            return [self.sample() for i in range(size)]
+        # Vectorized: randn(size, dim) fills row-major, so row i equals the i-th per-draw randn(dim);
+        # bit-identical to the loop, far faster.
+        rv = self.rng.randn(int(size), self.dist.dim) * np.sqrt(self.dist.covar) + self.dist.mu
+        return list(rv)
 
 
 class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):

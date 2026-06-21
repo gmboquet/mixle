@@ -29,6 +29,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import maxrandint
+from pysp.stats._sampling import scatter_component_draws
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -509,16 +510,19 @@ class HeterogeneousMixtureSampler(DistributionSampler):
         self.dist = dist
         self.comp_samplers = [d.sampler(seed=rng_loc.randint(0, maxrandint)) for d in self.dist.components]
 
-    def sample(self, size: int | None = None) -> Any | list[Any]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any | list[Any]:
         """Draw iid samples from a heterogeneous mixture distribution.
 
         The data type drawn from 'comp_samplers' is type T, corresponding to the data type of the mixture components.
 
         If size is None, a single sample (of data type T) is drawn and returned. If size is not None, 'size'-iid
-        heterogeneous mixture samples are drawn and returned as a List with data type List[T].
+        heterogeneous mixture samples are drawn and returned as a List with data type List[T]. With ``batched=True``
+        (default) component draws are grouped and scattered -- bit-identical to the per-draw loop (``batched=False``)
+        but far faster, since each component sampler owns an independent RNG.
 
         Args:
             size (Optional[int]): Number of iid samples to draw.
+            batched (bool): Vectorize component draws (default); set False for the per-draw loop.
 
         Returns:
             Data type T or List[T].
@@ -528,8 +532,9 @@ class HeterogeneousMixtureSampler(DistributionSampler):
 
         if size is None:
             return self.comp_samplers[comp_state].sample()
-        else:
+        if not batched:
             return [self.comp_samplers[i].sample() for i in comp_state]
+        return scatter_component_draws(comp_state, self.comp_samplers, int(size))
 
 
 class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
