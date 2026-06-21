@@ -16,7 +16,7 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-__all__ = ["solve_poisson", "CoupledPDESystem"]
+__all__ = ["solve_poisson", "CoupledPDESystem", "solve_elasticity"]
 
 
 def _diffusion_blocks(shape, kappa, spacing):
@@ -116,3 +116,75 @@ class CoupledPDESystem:
         )
         u = spla.spsolve(big, rhs)
         return [u[i * n : (i + 1) * n].reshape(self.shape) for i in range(self.k)]
+
+
+def solve_elasticity(shape, body_force, *, lame_lambda=1.0, lame_mu=1.0, spacing=1.0, dirichlet=0.0):
+    """Solve 2-D static linear elasticity (the Navier-Cauchy displacement equations) on a structured grid.
+
+    ``mu lap(u) + (lambda + mu) grad(div u) + f = 0`` for the displacement field ``u = (ux, uy)``, with
+    isotropic Lame parameters ``lame_lambda`` / ``lame_mu`` (stiffness) and Dirichlet (clamped) boundaries.
+    The structural / geomechanics forward map behind seismic and stress modelling: given a stiffness model
+    and loads, it returns the displacement, from which strain and stress follow.
+
+    Args:
+        shape: ``(nx, ny)`` grid.
+        body_force: ``(nx, ny, 2)`` or ``(2,)`` body force ``(fx, fy)`` per node (scalar broadcasts).
+        lame_lambda, lame_mu: isotropic Lame parameters (may be scalars; constant-coefficient form).
+        spacing: grid spacing (scalar or ``(hx, hy)``).
+        dirichlet: boundary displacement, ``(nx, ny, 2)``, ``(2,)`` or scalar.
+
+    Returns:
+        ``u`` of shape ``(nx, ny, 2)`` -- the displacement field.
+    """
+    nx, ny = (int(s) for s in shape)
+    n = nx * ny
+    hx, hy = np.broadcast_to(np.asarray(spacing, dtype=float), (2,))
+    lam, mu = float(lame_lambda), float(lame_mu)
+    idx = np.arange(n).reshape(nx, ny)
+    on_bnd = np.zeros((nx, ny), dtype=bool)
+    on_bnd[[0, -1], :] = True
+    on_bnd[:, [0, -1]] = True
+    rows, cols, vals = [], [], []
+
+    def add(r, c, v):
+        rows.append(r)
+        cols.append(c)
+        vals.append(v)
+
+    cxx, cyy = (lam + 2 * mu) / hx**2, mu / hy**2  # x-equation diagonal stencils (uy: swap)
+    cmix = (lam + mu) / (4 * hx * hy)  # mixed-derivative coupling
+    for i in range(nx):
+        for j in range(ny):
+            r = idx[i, j]
+            if on_bnd[i, j]:  # clamped boundary: identity rows for both components
+                add(r, r, 1.0)
+                add(n + r, n + r, 1.0)
+                continue
+            # x-equation: (lam+2mu) uxx + mu uyy + (lam+mu) d2uy/dxdy = -fx
+            add(r, idx[i + 1, j], cxx)
+            add(r, idx[i - 1, j], cxx)
+            add(r, idx[i, j + 1], cyy)
+            add(r, idx[i, j - 1], cyy)
+            add(r, r, -2 * cxx - 2 * cyy)
+            for (di, dj), s in (((1, 1), cmix), ((1, -1), -cmix), ((-1, 1), -cmix), ((-1, -1), cmix)):
+                add(r, n + idx[i + di, j + dj], s)
+            # y-equation: mu uxx + (lam+2mu) uyy + (lam+mu) d2ux/dxdy = -fy
+            add(n + r, n + idx[i + 1, j], mu / hx**2)
+            add(n + r, n + idx[i - 1, j], mu / hx**2)
+            add(n + r, n + idx[i, j + 1], (lam + 2 * mu) / hy**2)
+            add(n + r, n + idx[i, j - 1], (lam + 2 * mu) / hy**2)
+            add(n + r, n + r, -2 * mu / hx**2 - 2 * (lam + 2 * mu) / hy**2)
+            for (di, dj), s in (((1, 1), cmix), ((1, -1), -cmix), ((-1, 1), -cmix), ((-1, -1), cmix)):
+                add(n + r, idx[i + di, j + dj], s)
+
+    a = sp.csc_matrix((vals, (rows, cols)), shape=(2 * n, 2 * n))
+    f = np.broadcast_to(np.asarray(body_force, dtype=float), (nx, ny, 2)).reshape(n, 2)
+    dv = np.broadcast_to(np.asarray(dirichlet, dtype=float), (nx, ny, 2)).reshape(n, 2)
+    b = np.zeros(2 * n)
+    interior = ~on_bnd.ravel()
+    b[:n][interior] = -f[interior, 0]
+    b[n:][interior] = -f[interior, 1]
+    b[:n][~interior] = dv[~interior, 0]  # boundary identity rows set the clamped displacement
+    b[n:][~interior] = dv[~interior, 1]
+    u = spla.spsolve(a, b)
+    return np.stack([u[:n], u[n:]], axis=1).reshape(nx, ny, 2)
