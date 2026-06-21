@@ -33,6 +33,7 @@ from scipy.special import betaln, gammaln, logsumexp, multigammaln
 
 __all__ = [
     "ConjugatePosterior",
+    "ConjugatePosteriorSampler",
     "MixtureConjugatePosterior",
     "conjugate_posterior",
     "mixture_conjugate_posterior",
@@ -69,6 +70,16 @@ class ConjugatePosterior:
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         raise NotImplementedError
 
+    def sampler(self, seed: int | None = None) -> ConjugatePosteriorSampler:
+        """Return a sampler exposing the standard ``obj.sampler(seed).sample(size)`` API.
+
+        Mirrors the distribution sampling convention so conjugate posteriors read the same way as every
+        other pysp object; here each draw is a *parameter set* from the posterior. ``size=None`` returns
+        one parameter set (scalars), ``size=n`` a dict of length-``n`` arrays. The explicit-rng form
+        ``sample(n, rng)`` remains available.
+        """
+        return ConjugatePosteriorSampler(self, seed)
+
     def point_estimate(self):
         raise NotImplementedError
 
@@ -86,6 +97,20 @@ class ConjugatePosterior:
 
     def __repr__(self) -> str:
         return "%s(%s)" % (type(self).__name__, self.hyper())
+
+
+class ConjugatePosteriorSampler:
+    """Standard ``.sample(size)`` adapter over a :class:`ConjugatePosterior` (draws parameter sets)."""
+
+    def __init__(self, posterior: ConjugatePosterior, seed: int | None = None) -> None:
+        self.posterior = posterior
+        self.rng = np.random.RandomState(seed)
+
+    def sample(self, size: int | None = None) -> dict[str, Any]:
+        draws = self.posterior.sample(n=1 if size is None else int(size), rng=self.rng)
+        if size is None:
+            return {k: (v[0] if isinstance(v, np.ndarray) and v.shape and v.shape[0] == 1 else v) for k, v in draws.items()}
+        return draws
 
 
 # ---------------------------------------------------------------------------
