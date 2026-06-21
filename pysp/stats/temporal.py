@@ -6,9 +6,11 @@ strings, or POSIX seconds. This module consumes any of those directly. Two capab
 * :class:`PeriodicTime` -- a distribution over *where in a recurring cycle* events fall (time-of-day,
   day-of-week, season), via a von Mises on the cycle phase. Captures recurring timing: "events cluster
   around 9am", "activity peaks on weekends", "blooms in spring".
-* :class:`SeasonalTimeSeries` -- a regression time-series model on ``(timestamp, value)`` data: a linear
-  trend plus Fourier seasonal harmonics at one or more periods, fit by least squares, with forecasting and
-  trend/seasonal decomposition. The straightforward "model a time series from raw data" tool.
+* :class:`SeasonalTimeSeries` -- a *conditional distribution* ``value | time`` on ``(timestamp, value)``
+  data: a Gaussian whose mean is a linear trend plus Fourier seasonal harmonics at one or more periods.
+  Like any distribution it has ``conditional`` (returns the predictive distribution at a time), ``mean``,
+  ``log_density`` and a ``sampler`` -- not a ``predict``. ``decompose`` splits the mean into trend +
+  seasonal parts.
 
 Part of the earth-science/multiphysics/UQ work and generally useful (paleo records are time series;
 event catalogues -- earthquakes, blooms, drilling -- have strong calendar/seasonal structure).
@@ -145,13 +147,17 @@ class PeriodicTimeSampler:
 
 
 class SeasonalTimeSeries:
-    """Time-series model on raw ``(timestamp, value)`` data: linear trend + Fourier seasonal harmonics.
+    """A conditional distribution ``value | time`` for raw ``(timestamp, value)`` series: a Gaussian whose
+    mean is a linear trend plus Fourier seasonal harmonics.
 
-    Fits ``value ~ b0 + b1 * t + sum over periods, harmonics of [a sin(2pi k t / P) + b cos(...)]`` by least
-    squares (``t`` in days from the first timestamp). Captures multiple seasonalities at once (e.g. daily +
-    yearly), forecasts at arbitrary future timestamps with predictive uncertainty, and decomposes the fit
-    into trend and per-period seasonal parts. ``periods`` are named or in seconds; ``harmonics`` sets how
-    many Fourier terms per period (higher = more flexible season shape).
+    Models ``value | time ~ N(mu(time), s^2)`` with ``mu(t) = b0 + b1 t + sum over periods/harmonics of
+    [a sin(2pi k t / P) + b cos(...)]``, fit by least squares (``t`` in days from the first timestamp).
+    Being a distribution, it has no ``predict`` -- you ask for the conditional distribution at a time and
+    read its mean, sample it, or score data: ``conditional(t)`` returns a
+    :class:`~pysp.stats.GaussianDistribution` (the posterior-predictive at ``t``, parameter uncertainty +
+    noise), ``mean(times)`` is ``E[value | time]``, ``log_density(times, values)`` scores observations,
+    and ``sampler(seed).sample(times)`` draws values. Captures several seasonalities at once (daily +
+    weekly + yearly); ``decompose`` splits the mean into trend + per-period parts.
     """
 
     def __init__(self, periods: Sequence[float | str] = ("year",), harmonics: int = 3, trend: bool = True):
@@ -187,14 +193,35 @@ class SeasonalTimeSeries:
         self._xtx_inv = np.linalg.pinv(x.T @ x)
         return self
 
-    def predict(self, times: Any, *, return_std: bool = False):
-        """Predict the value at ``times`` (the fitted trend + seasonality), optionally with predictive std."""
+    def mean(self, times: Any) -> np.ndarray:
+        """The conditional expectation ``E[value | time]`` -- the fitted trend + seasonality."""
+        return self._design(to_unix_seconds(times)) @ self.beta
+
+    def _predictive_var(self, times: Any) -> np.ndarray:
+        """Posterior-predictive variance at ``times`` (observation noise + parameter uncertainty)."""
         x = self._design(to_unix_seconds(times))
-        mean = x @ self.beta
-        if not return_std:
-            return mean
-        var = self.sigma**2 * (1.0 + np.einsum("ij,jk,ik->i", x, self._xtx_inv, x))
-        return mean, np.sqrt(var)
+        return self.sigma**2 * (1.0 + np.einsum("ij,jk,ik->i", x, self._xtx_inv, x))
+
+    def conditional(self, time: Any):
+        """The conditional distribution ``p(value | time)`` -- a :class:`GaussianDistribution` (or a list,
+        for an array of times). This is how you 'predict' the pysp way: you get a distribution to sample,
+        score, or read ``.mu`` / ``.sigma2`` from, not a bare point estimate."""
+        from pysp.stats import GaussianDistribution
+
+        m, v = self.mean(time), self._predictive_var(time)
+        if np.ndim(time) == 0:
+            return GaussianDistribution(float(m[0]), float(v[0]))
+        return [GaussianDistribution(float(mi), float(vi)) for mi, vi in zip(m, v)]
+
+    def log_density(self, times: Any, values: Any) -> np.ndarray | float:
+        """Conditional log-density of ``(time, value)`` observations under the model."""
+        m, v = self.mean(times), self._predictive_var(times)
+        y = np.asarray(values, dtype=float).ravel()
+        ld = -0.5 * ((y - m) ** 2 / v + np.log(2.0 * np.pi * v))
+        return float(ld[0]) if np.ndim(values) == 0 else ld
+
+    def sampler(self, seed: int | None = None) -> SeasonalTimeSeriesSampler:
+        return SeasonalTimeSeriesSampler(self, seed)
 
     def decompose(self, times: Any) -> dict[str, np.ndarray]:
         """Split the prediction into ``trend`` and one component per period (the seasonal contributions)."""
@@ -210,3 +237,17 @@ class SeasonalTimeSeries:
                 j += 2
             out[str(name)] = part
         return out
+
+
+class SeasonalTimeSeriesSampler:
+    """Draws values from the conditional ``p(value | time)`` of a fitted :class:`SeasonalTimeSeries`."""
+
+    def __init__(self, dist: SeasonalTimeSeries, seed: int | None = None):
+        self.dist = dist
+        self.rng = np.random.RandomState(seed)
+
+    def sample(self, times: Any) -> np.ndarray:
+        """Sample one value at each timestamp in ``times`` from its conditional distribution."""
+        m = self.dist.mean(times)
+        sd = np.sqrt(self.dist._predictive_var(times))
+        return m + sd * self.rng.standard_normal(len(m))

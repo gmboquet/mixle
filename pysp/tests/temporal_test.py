@@ -72,17 +72,34 @@ class SeasonalTimeSeriesTest(unittest.TestCase):
 
     def test_fit_quality(self):
         m = SeasonalTimeSeries(periods=["year"], harmonics=2).fit(self.ts, self.y)
-        rmse = np.sqrt(np.mean((m.predict(self.ts) - self.y) ** 2))
+        rmse = np.sqrt(np.mean((m.mean(self.ts) - self.y) ** 2))
         self.assertLess(rmse, 0.6)  # ~ the 0.5 noise level
 
-    def test_forecast_is_accurate_with_uncertainty(self):
+    def test_conditional_returns_a_distribution(self):
+        from pysp.stats import GaussianDistribution
+
+        m = SeasonalTimeSeries(periods=["year"], harmonics=2).fit(self.ts, self.y)
+        d = m.conditional(self.ts[100])  # the predictive distribution at one timestamp
+        self.assertIsInstance(d, GaussianDistribution)
+        self.assertAlmostEqual(d.mu, m.mean(self.ts[100])[0], places=8)
+        self.assertGreater(d.sigma2, 0.0)
+        self.assertIsInstance(m.conditional(self.ts[:5]), list)  # array of times -> list of distributions
+
+    def test_forecast_is_accurate(self):
         m = SeasonalTimeSeries(periods=["year"], harmonics=2).fit(self.ts, self.y)
         future_d = 365 * 3 + np.arange(60)
         future = np.array([datetime.datetime(2018, 1, 1) + datetime.timedelta(days=int(d)) for d in future_d])
-        fc, std = m.predict(future, return_std=True)
         truth = 10 + self.trend * future_d + self.amp * np.sin(2 * np.pi * future_d / 365.25 - 1.0)
-        self.assertLess(np.sqrt(np.mean((fc - truth) ** 2)), 0.3)
-        self.assertTrue(np.all(std > 0))
+        self.assertLess(np.sqrt(np.mean((m.mean(future) - truth) ** 2)), 0.3)
+        self.assertTrue(all(d.sigma2 > 0 for d in m.conditional(future)))
+
+    def test_log_density_and_sampler(self):
+        m = SeasonalTimeSeries(periods=["year"], harmonics=2).fit(self.ts, self.y)
+        ld = m.log_density(self.ts, self.y)
+        self.assertEqual(ld.shape, (len(self.y),))
+        s = m.sampler(seed=0).sample(self.ts)  # draws values from the conditional p(value|time)
+        self.assertEqual(s.shape, (len(self.y),))
+        self.assertLess(abs(np.std(s - m.mean(self.ts)) - m.sigma), 0.3)  # residual spread ~ sigma
 
     def test_decompose_recovers_trend_and_seasonal_amplitude(self):
         m = SeasonalTimeSeries(periods=["year"], harmonics=2).fit(self.ts, self.y)
@@ -98,7 +115,7 @@ class SeasonalTimeSeriesTest(unittest.TestCase):
         weekly = 2 * np.cos(2 * np.pi * secs / 604800.0)
         y = 20 + daily + weekly + rng.randn(len(secs)) * 0.3
         m = SeasonalTimeSeries(periods=["day", "week"], harmonics=1).fit(secs, y)
-        self.assertLess(np.sqrt(np.mean((m.predict(secs) - y) ** 2)), 0.4)
+        self.assertLess(np.sqrt(np.mean((m.mean(secs) - y) ** 2)), 0.4)
 
 
 if __name__ == "__main__":
