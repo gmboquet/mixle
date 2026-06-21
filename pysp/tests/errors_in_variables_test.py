@@ -35,7 +35,9 @@ class DemingRegressionTest(unittest.TestCase):
 
     def test_conditional_mean_on_true_values(self):
         fit = deming_regression(self.x, self.y, variance_ratio=1.0)
-        np.testing.assert_allclose(fit.conditional_mean(np.array([0.0, 1.0])), [fit.intercept, fit.intercept + fit.slope])
+        np.testing.assert_allclose(
+            fit.conditional_mean(np.array([0.0, 1.0])), [fit.intercept, fit.intercept + fit.slope]
+        )
 
 
 if __name__ == "__main__":
