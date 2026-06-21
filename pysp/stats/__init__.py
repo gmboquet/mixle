@@ -249,6 +249,10 @@ __all__ = [
     "VonMisesEstimator",
     "VonMisesDataEncoder",
     "WeibullDistribution",
+    "GeneralizedParetoDistribution",
+    "GeneralizedParetoSampler",
+    "GeneralizedParetoEstimator",
+    "GeneralizedParetoDataEncoder",
     "WeibullSampler",
     "WeibullEstimator",
     "WeibullDataEncoder",
@@ -1021,6 +1025,12 @@ from pysp.stats.leaf.exponential import (
 )
 from pysp.stats.leaf.gamma import GammaDataEncoder, GammaDistribution, GammaEstimator, GammaSampler
 from pysp.stats.leaf.gaussian import GaussianDataEncoder, GaussianDistribution, GaussianEstimator, GaussianSampler
+from pysp.stats.leaf.generalized_pareto import (
+    GeneralizedParetoDataEncoder,
+    GeneralizedParetoDistribution,
+    GeneralizedParetoEstimator,
+    GeneralizedParetoSampler,
+)
 from pysp.stats.leaf.geometric import (
     GeometricDataEncoder,
     GeometricDistribution,

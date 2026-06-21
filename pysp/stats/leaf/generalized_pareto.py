@@ -1,0 +1,252 @@
+"""Generalized Pareto distribution (GPD): the peaks-over-threshold law of extreme exceedances.
+
+By the Pickands-Balkema-de Haan theorem the distribution of exceedances over a high threshold of
+almost any distribution converges to a GPD, which makes it the workhorse for modelling tail risk
+(hydrology, finance, reliability). With threshold ``loc = mu``, scale ``sigma > 0`` and shape ``xi``,
+for ``y = x - mu >= 0``:
+
+    f(x) = (1/sigma) (1 + xi * y / sigma) ** (-1/xi - 1)   (xi != 0),
+    f(x) = (1/sigma) exp(-y / sigma)                       (xi == 0, the exponential tail).
+
+``xi > 0`` is a heavy (Pareto) tail, ``xi = 0`` exponential, ``xi < 0`` a tail with a finite upper
+endpoint at ``mu - sigma/xi``. The threshold ``mu`` is treated as a *fixed, known* level (chosen, not
+fit -- the standard peaks-over-threshold setup); ``sigma`` and ``xi`` are fit by method of moments,
+which is closed-form: ``xi = (1 - m^2/v)/2`` and ``sigma = m (1 - xi)`` from the exceedance mean ``m``
+and variance ``v`` (valid for ``xi < 1/2``, where the variance is finite).
+"""
+
+import math
+from collections.abc import Sequence
+from typing import Any
+
+import numpy as np
+from numpy.random import RandomState
+
+from pysp.stats.compute.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
+
+_XI_TOL = 1.0e-8  # |xi| below this is treated as the exponential limit
+
+
+class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
+    """Generalized Pareto distribution with threshold ``loc``, scale ``> 0`` and shape ``xi``."""
+
+    def __init__(
+        self, scale: float, shape: float, loc: float = 0.0, name: str | None = None, keys: str | None = None
+    ) -> None:
+        if scale <= 0.0 or not np.isfinite(scale) or not np.isfinite(shape) or not np.isfinite(loc):
+            raise ValueError("GeneralizedParetoDistribution requires finite parameters and scale > 0.")
+        self.scale = float(scale)
+        self.shape = float(shape)  # xi
+        self.loc = float(loc)  # mu (threshold)
+        self.log_scale = math.log(self.scale)
+        self.name = name
+        self.keys = keys
+
+    def __str__(self) -> str:
+        return "GeneralizedParetoDistribution(%s, %s, loc=%s, name=%s, keys=%s)" % (
+            repr(self.scale),
+            repr(self.shape),
+            repr(self.loc),
+            repr(self.name),
+            repr(self.keys),
+        )
+
+    def _upper(self) -> float:
+        """Upper endpoint of the support (``inf`` unless ``xi < 0``)."""
+        return self.loc - self.scale / self.shape if self.shape < -_XI_TOL else math.inf
+
+    def density(self, x: float) -> float:
+        """Return the probability density at a single observation."""
+        return math.exp(self.log_density(x))
+
+    def log_density(self, x: float) -> float:
+        """Return the log-density at a single observation (``-inf`` outside the support)."""
+        y = x - self.loc
+        if y < 0.0 or x > self._upper():
+            return -np.inf
+        if abs(self.shape) < _XI_TOL:
+            return -self.log_scale - y / self.scale
+        t = 1.0 + self.shape * y / self.scale
+        if t <= 0.0:
+            return -np.inf
+        return -self.log_scale - (1.0 / self.shape + 1.0) * math.log(t)
+
+    def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized log-density values for sequence-encoded observations."""
+        y = np.asarray(x, dtype=np.float64) - self.loc
+        if abs(self.shape) < _XI_TOL:
+            rv = -self.log_scale - y / self.scale
+        else:
+            t = 1.0 + self.shape * y / self.scale
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rv = -self.log_scale - (1.0 / self.shape + 1.0) * np.log(t)
+            rv = np.where(t <= 0.0, -np.inf, rv)
+        return np.where(y < 0.0, -np.inf, rv)
+
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)`` (exact)."""
+        from scipy.stats import genpareto as _sp
+
+        return float(_sp.cdf(x, self.shape, loc=self.loc, scale=self.scale))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF ``F^{-1}(q)``."""
+        from scipy.stats import genpareto as _sp
+
+        return float(_sp.ppf(q, self.shape, loc=self.loc, scale=self.scale))
+
+    def sampler(self, seed: int | None = None) -> "GeneralizedParetoSampler":
+        """Return a sampler for drawing observations from this distribution."""
+        return GeneralizedParetoSampler(self, seed)
+
+    def estimator(self, pseudo_count: float | None = None) -> "GeneralizedParetoEstimator":
+        """Return a method-of-moments estimator for ``scale`` and ``shape`` at the fixed threshold ``loc``."""
+        return GeneralizedParetoEstimator(loc=self.loc, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
+
+    def dist_to_encoder(self) -> "GeneralizedParetoDataEncoder":
+        """Return the data encoder used by this distribution for vectorized methods."""
+        return GeneralizedParetoDataEncoder()
+
+
+class GeneralizedParetoSampler(DistributionSampler):
+    """Draw iid GPD observations by inverse-CDF transform."""
+
+    def __init__(self, dist: GeneralizedParetoDistribution, seed: int | None = None) -> None:
+        self.rng = RandomState(seed)
+        self.dist = dist
+
+    def sample(self, size: int | None = None) -> float | np.ndarray:
+        d = self.dist
+        u = self.rng.uniform(size=size)  # uniform; 1-U is also uniform, so use U directly below
+        if abs(d.shape) < _XI_TOL:
+            y = -d.scale * np.log(u)
+        else:
+            y = (d.scale / d.shape) * (np.power(u, -d.shape) - 1.0)
+        return d.loc + y
+
+
+class GeneralizedParetoAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulate weighted first and second moments for GPD estimation."""
+
+    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+        self.sum = 0.0
+        self.sum2 = 0.0
+        self.count = 0.0
+        self.name = name
+        self.key = keys
+
+    def update(self, x: float, weight: float, estimate: GeneralizedParetoDistribution | None) -> None:
+        self.sum += x * weight
+        self.sum2 += x * x * weight
+        self.count += weight
+
+    def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        self.update(x, weight, None)
+
+    def seq_update(
+        self, x: np.ndarray, weights: np.ndarray, estimate: GeneralizedParetoDistribution | None
+    ) -> None:
+        xx = np.asarray(x, dtype=np.float64)
+        self.sum += np.dot(xx, weights)
+        self.sum2 += np.dot(xx * xx, weights)
+        self.count += np.sum(weights, dtype=np.float64)
+
+    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        self.seq_update(x, weights, None)
+
+    def combine(self, suff_stat: tuple[float, float, float]) -> "GeneralizedParetoAccumulator":
+        self.sum += suff_stat[0]
+        self.sum2 += suff_stat[1]
+        self.count += suff_stat[2]
+        return self
+
+    def value(self) -> tuple[float, float, float]:
+        return self.sum, self.sum2, self.count
+
+    def from_value(self, x: tuple[float, float, float]) -> "GeneralizedParetoAccumulator":
+        self.sum, self.sum2, self.count = float(x[0]), float(x[1]), float(x[2])
+        return self
+
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        if self.key is not None:
+            if self.key in stats_dict:
+                stats_dict[self.key].combine(self.value())
+            else:
+                stats_dict[self.key] = self
+
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        if self.key is not None and self.key in stats_dict:
+            self.from_value(stats_dict[self.key].value())
+
+    def acc_to_encoder(self) -> "GeneralizedParetoDataEncoder":
+        return GeneralizedParetoDataEncoder()
+
+
+class GeneralizedParetoAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for GeneralizedParetoAccumulator."""
+
+    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+        self.name = name
+        self.keys = keys
+
+    def make(self) -> GeneralizedParetoAccumulator:
+        return GeneralizedParetoAccumulator(name=self.name, keys=self.keys)
+
+
+class GeneralizedParetoEstimator(ParameterEstimator):
+    """Method-of-moments estimator for GPD scale and shape at a fixed threshold ``loc``."""
+
+    def __init__(
+        self,
+        loc: float = 0.0,
+        pseudo_count: float | None = None,
+        min_scale: float = 1.0e-12,
+        xi_max: float = 0.5 - 1.0e-6,
+        xi_min: float = -10.0,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.loc = float(loc)
+        self.pseudo_count = pseudo_count
+        self.min_scale = min_scale
+        self.xi_max = xi_max  # method of moments needs a finite variance (xi < 1/2)
+        self.xi_min = xi_min
+        self.name = name
+        self.keys = keys
+
+    def accumulator_factory(self) -> GeneralizedParetoAccumulatorFactory:
+        return GeneralizedParetoAccumulatorFactory(name=self.name, keys=self.keys)
+
+    def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> GeneralizedParetoDistribution:
+        sum_x, sum_x2, count = suff_stat
+        if count <= 0.0:
+            return GeneralizedParetoDistribution(1.0, 0.0, loc=self.loc, name=self.name, keys=self.keys)
+        mean_x = sum_x / count
+        var = sum_x2 / count - mean_x * mean_x
+        m = mean_x - self.loc  # exceedance mean
+        if m <= 0.0 or var <= 0.0:
+            return GeneralizedParetoDistribution(max(m, self.min_scale), 0.0, loc=self.loc, name=self.name, keys=self.keys)
+        xi = 0.5 * (1.0 - m * m / var)
+        xi = min(max(xi, self.xi_min), self.xi_max)
+        scale = max(m * (1.0 - xi), self.min_scale)
+        return GeneralizedParetoDistribution(scale, xi, loc=self.loc, name=self.name, keys=self.keys)
+
+
+class GeneralizedParetoDataEncoder(DataSequenceEncoder):
+    """Encode GPD observations as a float array."""
+
+    def __str__(self) -> str:
+        return "GeneralizedParetoDataEncoder"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, GeneralizedParetoDataEncoder)
+
+    def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        return np.asarray(x, dtype=np.float64)
