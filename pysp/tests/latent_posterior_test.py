@@ -1,13 +1,17 @@
 """LatentPosterior: q(z|x) as a first-class object -- the mixture (exact categorical) realization."""
 
+import itertools
 import unittest
 
 import numpy as np
 
 from pysp.stats import (
+    CategoricalDistribution,
     CategoricalLatentPosterior,
     GaussianDistribution,
+    HiddenMarkovModelDistribution,
     LatentPosterior,
+    MarkovChainLatentPosterior,
     MixtureDistribution,
 )
 
@@ -46,6 +50,54 @@ class MixtureLatentPosteriorTest(unittest.TestCase):
         self.assertEqual(list(q.mode()), ["a", "b"])
         draws = np.array([q.sample(rng=i)[0] for i in range(400)])
         self.assertAlmostEqual(np.mean(draws == "a"), 0.7, delta=0.06)  # row 0 ~ 70% 'a'
+
+
+class HmmChainLatentPosteriorTest(unittest.TestCase):
+    def setUp(self):
+        self.m = HiddenMarkovModelDistribution(
+            [GaussianDistribution(-2.0, 1.0), GaussianDistribution(2.0, 1.0), GaussianDistribution(6.0, 1.0)],
+            [0.5, 0.3, 0.2],
+            [[0.7, 0.2, 0.1], [0.1, 0.8, 0.1], [0.2, 0.2, 0.6]],
+            len_dist=CategoricalDistribution({5: 1.0}),
+        )
+        self.x = [-1.8, 2.1, 2.3, 5.9, -2.0]
+        self.q = self.m.latent_posterior(self.x)
+
+    def _brute_force(self):
+        t, k = len(self.x), 3
+        logpi, log_a = self.m.log_w, self.m.log_transitions
+        logb = np.array([[self.m.topics[j].log_density(xt) for j in range(k)] for xt in self.x])
+        paths = list(itertools.product(range(k), repeat=t))
+        logw = np.array(
+            [
+                logpi[p[0]] + logb[0, p[0]] + sum(log_a[p[i], p[i + 1]] + logb[i + 1, p[i + 1]] for i in range(t - 1))
+                for p in paths
+            ]
+        )
+        w = np.exp(logw - logw.max())
+        w /= w.sum()
+        gamma = np.zeros((t, k))
+        for p, wp in zip(paths, w):
+            for i in range(t):
+                gamma[i, p[i]] += wp
+        return gamma, paths[int(np.argmax(w))], float(-np.sum(w * np.log(w)))
+
+    def test_chain_posterior_is_latent_posterior(self):
+        self.assertIsInstance(self.q, MarkovChainLatentPosterior)
+        self.assertIsInstance(self.q, LatentPosterior)
+
+    def test_marginals_mode_entropy_match_brute_force(self):
+        gamma, mode, entropy = self._brute_force()
+        np.testing.assert_allclose(self.q.marginals(), gamma, atol=1e-9)
+        self.assertEqual(tuple(self.q.mode()), mode)
+        self.assertTrue(np.array_equal(self.q.mode(), self.m.viterbi(self.x)))
+        self.assertAlmostEqual(self.q.entropy(), entropy, places=9)
+
+    def test_ffbs_sample_average_matches_marginals(self):
+        s = np.array([self.q.sample(rng=i) for i in range(4000)])
+        emp = np.array([[np.mean(s[:, t] == k) for k in range(3)] for t in range(len(self.x))])
+        np.testing.assert_allclose(emp, self.q.marginals(), atol=0.03)
+        self.assertTrue(np.array_equal(self.q.sample(rng=3), self.q.sample(rng=3)))  # repeatable
 
 
 if __name__ == "__main__":
