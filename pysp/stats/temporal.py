@@ -3,9 +3,9 @@
 Real temporal data arrives as raw timestamps -- Python ``datetime``/``date``, ``numpy.datetime64``, ISO
 strings, or POSIX seconds. This module consumes any of those directly. Two capabilities:
 
-* :class:`PeriodicTime` -- a distribution over *where in a recurring cycle* events fall (time-of-day,
-  day-of-week, season), via a von Mises on the cycle phase. Captures recurring timing: "events cluster
-  around 9am", "activity peaks on weekends", "blooms in spring".
+* :class:`PeriodicTimeDistribution` -- a distribution over *where in a recurring cycle* events fall
+  (time-of-day, day-of-week, season), a von Mises on the cycle phase. Captures recurring timing: "events
+  cluster around 9am", "activity peaks on weekends", "blooms in spring".
 * :class:`SeasonalTimeSeries` -- a *conditional distribution* ``value | time`` on ``(timestamp, value)``
   data: a Gaussian whose mean is a linear trend plus Fourier seasonal harmonics at one or more periods.
   Like any distribution it has ``conditional`` (returns the predictive distribution at a time), ``mean``,
@@ -23,7 +23,22 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["to_unix_seconds", "cyclic_phase", "PERIODS", "PeriodicTime", "SeasonalTimeSeries"]
+from pysp.stats.compute.pdist import (
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    StatisticAccumulatorFactory,
+)
+from pysp.stats.leaf.von_mises import VonMisesDistribution, VonMisesEstimator
+
+__all__ = [
+    "to_unix_seconds",
+    "cyclic_phase",
+    "PERIODS",
+    "PeriodicTimeDistribution",
+    "PeriodicTimeEstimator",
+    "SeasonalTimeSeries",
+]
 
 # Named cycle lengths in seconds (year = mean Gregorian year).
 PERIODS: dict[str, float] = {
@@ -63,87 +78,143 @@ def cyclic_phase(times: Any, period: float | str) -> np.ndarray:
     return 2.0 * np.pi * np.mod(to_unix_seconds(times), p) / p
 
 
-def _solve_kappa(rbar: float) -> float:
-    """Invert the von Mises mean-resultant length to a concentration (Fisher's approximation)."""
-    rbar = float(np.clip(rbar, 0.0, 1.0 - 1e-10))
-    if rbar < 0.53:
-        return 2.0 * rbar + rbar**3 + 5.0 * rbar**5 / 6.0
-    if rbar < 0.85:
-        return -0.4 + 1.39 * rbar + 0.43 / (1.0 - rbar)
-    return 1.0 / (rbar**3 - 4.0 * rbar**2 + 3.0 * rbar)
+class PeriodicTimeDistribution(SequenceEncodableProbabilityDistribution):
+    """A distribution over raw timestamps whose recurring-cycle *phase* is von Mises.
 
+    The cycle phase ``phi = 2*pi*(t mod P)/P`` is distributed von Mises around a peak; this is a proper
+    density over *time* within one period (a constant Jacobian ``log(2*pi/P)`` makes it integrate to 1).
+    It follows the pysp Distribution / Sampler / Estimator / Accumulator / DataEncoder contract by
+    delegating the circular density to :class:`~pysp.stats.leaf.von_mises.VonMisesDistribution`, so
+    recurring time-of-day / day-of-week / seasonal patterns compose with the rest of the library.
 
-class PeriodicTime:
-    """A von Mises distribution over the phase of a recurring cycle -- recurring-timing on raw timestamps.
-
-    ``period`` is the cycle (``'day'``, ``'week'``, ``'year'``, ... or seconds). ``loc`` is the peak phase
+    ``period`` is the cycle (``'day'``, ``'week'``, ``'year'``, ... or seconds); ``loc`` is the peak phase
     (radians) and ``conc`` the concentration (0 = uniform over the cycle, large = sharply peaked).
     """
 
-    def __init__(self, period: float | str = "day", loc: float = 0.0, conc: float = 0.0):
+    def __init__(self, period: float | str = "day", loc: float = 0.0, conc: float = 0.0, name=None, keys=None):
         self.period = period
         self.period_s = _period_seconds(period)
-        self.loc = float(loc)
-        self.conc = float(conc)
+        self.von_mises = VonMisesDistribution(float(loc), float(conc))
+        self._jac = float(np.log(2.0 * np.pi / self.period_s))  # d(phase)/d(time), so it integrates to 1 over a period
+        self.name = name
+        self.keys = keys
 
-    def log_density(self, t: Any) -> np.ndarray | float:
-        """Log-density at timestamp(s), as a proper density over time within one period."""
-        from scipy.special import i0e
+    @property
+    def loc(self) -> float:
+        return float(self.von_mises.mu)
 
-        phi = cyclic_phase(t, self.period)
-        jac = np.log(2.0 * np.pi / self.period_s)  # d(phase)/d(time), so the density integrates to 1 over a period
-        vm = self.conc * (np.cos(phi - self.loc) - 1.0) - np.log(2.0 * np.pi) - np.log(i0e(self.conc))
-        ld = vm + jac
-        return float(ld[0]) if np.ndim(t) == 0 else ld
+    @property
+    def conc(self) -> float:
+        return float(self.von_mises.kappa)
+
+    def __str__(self) -> str:
+        return "PeriodicTimeDistribution(%r, loc=%r, conc=%r)" % (self.period, self.loc, self.conc)
+
+    def density(self, t: Any) -> float:
+        return float(np.exp(self.log_density(t)))
+
+    def log_density(self, t: Any) -> float:
+        """Log-density at one timestamp (the von Mises phase density plus the time Jacobian)."""
+        return float(self.von_mises.log_density(float(cyclic_phase(t, self.period)[0])) + self._jac)
+
+    def seq_log_density(self, x) -> np.ndarray:
+        return self.von_mises.seq_log_density(x) + self._jac  # x is phase-encoded by the PeriodicTime encoder
 
     def peak_phase_fraction(self) -> float:
         """The peak location as a fraction of the cycle (e.g. 0.375 of a day = 09:00)."""
         return float(np.mod(self.loc, 2.0 * np.pi) / (2.0 * np.pi))
 
-    @classmethod
-    def fit(cls, times: Any, period: float | str = "day") -> PeriodicTime:
-        """Maximum-likelihood von Mises fit of the cycle phase of ``times``."""
-        phi = cyclic_phase(times, period)
-        c, s = np.cos(phi).mean(), np.sin(phi).mean()
-        rbar = np.hypot(c, s)
-        loc = np.arctan2(s, c)
-        return cls(period, loc=loc, conc=_solve_kappa(rbar))
-
     def sampler(self, seed: int | None = None) -> PeriodicTimeSampler:
         return PeriodicTimeSampler(self, seed)
 
+    def estimator(self, pseudo_count: float | None = None) -> PeriodicTimeEstimator:
+        return PeriodicTimeEstimator(self.period, name=self.name, keys=self.keys)
 
-class PeriodicTimeSampler:
-    def __init__(self, dist: PeriodicTime, seed: int | None = None):
+    def dist_to_encoder(self) -> PeriodicTimeDataEncoder:
+        return PeriodicTimeDataEncoder(self.period, self.von_mises.dist_to_encoder())
+
+
+class PeriodicTimeSampler(DistributionSampler):
+    def __init__(self, dist: PeriodicTimeDistribution, seed: int | None = None):
         self.dist = dist
-        self.rng = np.random.RandomState(seed)
+        self.von_mises_sampler = dist.von_mises.sampler(seed)
 
     def sample(self, size: int | None = None) -> np.ndarray | float:
-        """Draw phase fraction(s) of the cycle in ``[0, period_seconds)`` (von Mises rejection sampler)."""
-        n = 1 if size is None else size
-        phi = self._vonmises(n)
-        secs = np.mod(phi, 2.0 * np.pi) / (2.0 * np.pi) * self.dist.period_s
-        return float(secs[0]) if size is None else secs
+        """Draw cycle position(s) in seconds, ``[0, period_seconds)`` (the phase mapped back to time)."""
+        phi = self.von_mises_sampler.sample(size)
+        secs = np.mod(np.asarray(phi), 2.0 * np.pi) / (2.0 * np.pi) * self.dist.period_s
+        return float(secs) if size is None else secs
 
-    def _vonmises(self, n: int) -> np.ndarray:
-        # Best-Fisher rejection sampler for von Mises(loc, conc).
-        kappa = self.dist.conc
-        if kappa < 1e-8:
-            return self.rng.uniform(0, 2 * np.pi, n)
-        tau = 1.0 + np.sqrt(1.0 + 4.0 * kappa**2)
-        rho = (tau - np.sqrt(2.0 * tau)) / (2.0 * kappa)
-        r = (1.0 + rho**2) / (2.0 * rho)
-        out = np.empty(n)
-        i = 0
-        while i < n:
-            u1, u2, u3 = self.rng.uniform(size=3)
-            z = np.cos(np.pi * u1)
-            f = (1.0 + r * z) / (r + z)
-            c = kappa * (r - f)
-            if c * (2.0 - c) - u2 > 0 or np.log(c / u2) + 1.0 - c >= 0:
-                out[i] = np.mod(self.dist.loc + np.sign(u3 - 0.5) * np.arccos(f), 2.0 * np.pi)
-                i += 1
-        return out
+
+class PeriodicTimeDataEncoder:
+    """Encode timestamps by the cycle phase, then defer to the von Mises encoder over the angles."""
+
+    def __init__(self, period, von_mises_encoder):
+        self.period = period
+        self.von_mises_encoder = von_mises_encoder
+
+    def seq_encode(self, x):
+        return self.von_mises_encoder.seq_encode(cyclic_phase(x, self.period))
+
+
+class PeriodicTimeEstimator(ParameterEstimator):
+    """Maximum-likelihood estimator: the von Mises MLE of the cycle phase (delegated to VonMises)."""
+
+    def __init__(self, period: float | str = "day", name=None, keys=None):
+        self.period = period
+        self.von_mises_estimator = VonMisesEstimator()
+        self.name = name
+        self.keys = keys
+
+    def accumulator_factory(self) -> StatisticAccumulatorFactory:
+        period = self.period
+        von_mises_factory = self.von_mises_estimator.accumulator_factory()
+
+        class _Factory(StatisticAccumulatorFactory):
+            def make(self):
+                return PeriodicTimeAccumulator(period, von_mises_factory.make())
+
+        return _Factory()
+
+    def estimate(self, nobs, suff_stat) -> PeriodicTimeDistribution:
+        vm = self.von_mises_estimator.estimate(nobs, suff_stat)
+        return PeriodicTimeDistribution(self.period, vm.mu, vm.kappa, name=self.name, keys=self.keys)
+
+
+class PeriodicTimeAccumulator:
+    """Wrap a von Mises accumulator; timestamps are mapped to cycle phases, then the stats are delegated."""
+
+    def __init__(self, period, von_mises_acc):
+        self.period = period
+        self.von_mises_acc = von_mises_acc
+
+    def update(self, t, weight, estimate):
+        self.von_mises_acc.update(
+            float(cyclic_phase(t, self.period)[0]), weight, None if estimate is None else estimate.von_mises
+        )
+
+    def initialize(self, t, weight, rng):
+        self.von_mises_acc.initialize(float(cyclic_phase(t, self.period)[0]), weight, rng)
+
+    def seq_update(self, x, weights, estimate):
+        self.von_mises_acc.seq_update(x, weights, None if estimate is None else estimate.von_mises)
+
+    def seq_initialize(self, x, weights, rng):
+        self.von_mises_acc.seq_initialize(x, weights, rng)
+
+    def combine(self, suff_stat):
+        self.von_mises_acc.combine(suff_stat)
+        return self
+
+    def value(self):
+        return self.von_mises_acc.value()
+
+    def from_value(self, x):
+        self.von_mises_acc.from_value(x)
+        return self
+
+    def acc_to_encoder(self):
+        return PeriodicTimeDataEncoder(self.period, self.von_mises_acc.acc_to_encoder())
 
 
 class SeasonalTimeSeries:
