@@ -65,6 +65,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableProbabilityDistribution,
     child_enumerator,
 )
+from pysp.stats.graph.markov_chain import stationary_distribution
 from pysp.stats.latent.hidden_markov import HiddenMarkovAccumulatorFactory, HiddenMarkovModelDistribution
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
@@ -380,30 +381,6 @@ def _split_collapsed_states(
     return num_split
 
 
-def _stationary_distribution(transitions: np.ndarray) -> np.ndarray:
-    """Stationary distribution pi of a row-stochastic matrix (pi A = pi, sum pi = 1).
-
-    Solved as a least-squares problem; for reducible chains this returns one valid stationary
-    distribution.
-
-    Args:
-        transitions (np.ndarray): 2-d row-stochastic transition matrix.
-
-    Returns:
-        1-d numpy array of stationary probabilities.
-
-    """
-    num_states = transitions.shape[0]
-    a_mat = np.vstack([np.eye(num_states) - transitions.T, np.ones((1, num_states))])
-    b_vec = np.zeros(num_states + 1)
-    b_vec[-1] = 1.0
-
-    pi, _, _, _ = np.linalg.lstsq(a_mat, b_vec, rcond=None)
-    pi = np.clip(pi, 0.0, None)
-
-    return pi / pi.sum()
-
-
 class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
     """Hidden Markov model distribution with quantized observation summaries."""
 
@@ -538,7 +515,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             w = np.exp(_exponent_log_probs(self.initial_exponents[None, :], self.log_theta))[0]
         else:
             self.initial_exponents = None
-            w = _stationary_distribution(transitions)
+            w = stationary_distribution(transitions)
 
         topics = [
             CategoricalDistribution(dict(zip(self.levels, emission_probs[i, :].tolist()))) for i in range(num_states)
