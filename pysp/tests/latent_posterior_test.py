@@ -4,6 +4,7 @@ import itertools
 import unittest
 
 import numpy as np
+from scipy.stats import dirichlet
 
 from pysp.stats import (
     CategoricalDistribution,
@@ -11,7 +12,9 @@ from pysp.stats import (
     GaussianDistribution,
     HiddenMarkovModelDistribution,
     LatentPosterior,
+    LDADistribution,
     MarkovChainLatentPosterior,
+    MeanFieldLDAPosterior,
     MixtureDistribution,
 )
 
@@ -98,6 +101,44 @@ class HmmChainLatentPosteriorTest(unittest.TestCase):
         emp = np.array([[np.mean(s[:, t] == k) for k in range(3)] for t in range(len(self.x))])
         np.testing.assert_allclose(emp, self.q.marginals(), atol=0.03)
         self.assertTrue(np.array_equal(self.q.sample(rng=3), self.q.sample(rng=3)))  # repeatable
+
+
+class LDAMeanFieldPosteriorTest(unittest.TestCase):
+    def setUp(self):
+        topics = [
+            CategoricalDistribution({0: 0.45, 1: 0.45, 2: 0.05, 3: 0.05}),
+            CategoricalDistribution({0: 0.05, 1: 0.05, 2: 0.45, 3: 0.45}),
+        ]
+        self.m = LDADistribution(topics, [0.1, 0.1])
+        self.doc = [(0, 5), (1, 4), (2, 1)]  # mostly topic-0 words
+        self.q = self.m.latent_posterior(self.doc)
+
+    def test_is_latent_posterior(self):
+        self.assertIsInstance(self.q, MeanFieldLDAPosterior)
+        self.assertIsInstance(self.q, LatentPosterior)
+
+    def test_topic_proportions_match_model_seq_posterior(self):
+        enc = self.m.dist_to_encoder().seq_encode([self.doc])
+        np.testing.assert_allclose(self.q.topic_proportions(), self.m.seq_posterior(enc)[0], atol=1e-9)
+        self.assertGreater(self.q.topic_proportions()[0], 0.9)  # topic-0-dominated document
+
+    def test_phi_rows_normalized(self):
+        phi = self.q.marginals()
+        self.assertEqual(phi.shape, (3, 2))
+        np.testing.assert_allclose(phi.sum(axis=1), 1.0)
+
+    def test_entropy_decomposes_into_dirichlet_plus_categorical(self):
+        phi = self.q.marginals()
+        h_z = -float(np.sum(self.q.counts[:, None] * np.where(phi > 0, phi * np.log(phi), 0.0)))
+        expected = dirichlet(self.q.gamma).entropy() + h_z  # differential H[q(theta)] may be negative
+        self.assertAlmostEqual(self.q.entropy(), expected, places=9)
+
+    def test_sample_returns_theta_and_per_token_topics(self):
+        theta, z = self.q.sample(rng=0)
+        self.assertAlmostEqual(float(theta.sum()), 1.0)
+        self.assertEqual(len(z), 10)  # total token count 5+4+1
+        self.assertTrue(set(z.tolist()) <= {0, 1})
+        self.assertTrue(np.array_equal(self.q.sample(rng=1)[1], self.q.sample(rng=1)[1]))  # repeatable
 
 
 if __name__ == "__main__":
