@@ -36,6 +36,9 @@ __all__ = [
     "FieldKernel",
     "RandomWalk",
     "RBF",
+    "GreatCircleRBF",
+    "GreatCircleMatern",
+    "great_circle_distance",
     "GaussianField",
     "Proxy",
     "GaussianProxy",
@@ -121,6 +124,110 @@ class RBF(FieldKernel):
         d2 = np.sum((x[:, None, :] - x[None, :, :]) ** 2, axis=-1)
         k = float(self.amplitude) ** 2 * np.exp(-0.5 * d2 / float(self.lengthscale) ** 2)
         return k + self.jitter * np.eye(len(x))
+
+    def precision(self, index: np.ndarray) -> np.ndarray:
+        return np.linalg.inv(self.covariance(index))
+
+
+def _unit_vectors(latlon_deg: np.ndarray) -> np.ndarray:
+    """Map ``(lat, lon)`` rows in degrees to unit vectors on the sphere (n, 3)."""
+    a = np.atleast_2d(np.asarray(latlon_deg, dtype=float))
+    if a.shape[1] != 2:
+        raise ValueError("a spherical index needs two columns: latitude and longitude (degrees).")
+    lat, lon = np.radians(a[:, 0]), np.radians(a[:, 1])
+    cl = np.cos(lat)
+    return np.stack([cl * np.cos(lon), cl * np.sin(lon), np.sin(lat)], axis=1)
+
+
+def great_circle_distance(latlon_a: np.ndarray, latlon_b: np.ndarray | None = None, *, radius: float = 1.0):
+    """Great-circle (geodesic) distance between ``(lat, lon)`` points in degrees.
+
+    Returns ``radius * theta`` where ``theta`` is the central angle (radians). With ``radius=1`` the
+    result is the angle itself; ``radius=6371.0088`` gives kilometres on Earth. ``latlon_b=None`` returns
+    the full pairwise ``(n, n)`` matrix for ``latlon_a``; otherwise the ``(na, nb)`` cross matrix (a float
+    when both are single points). Uses the haversine formula for accuracy at small angles.
+    """
+    a = np.atleast_2d(np.asarray(latlon_a, dtype=float))
+    b = a if latlon_b is None else np.atleast_2d(np.asarray(latlon_b, dtype=float))
+    lat_a, lon_a = np.radians(a[:, 0])[:, None], np.radians(a[:, 1])[:, None]
+    lat_b, lon_b = np.radians(b[:, 0])[None, :], np.radians(b[:, 1])[None, :]
+    dlat, dlon = lat_b - lat_a, lon_b - lon_a
+    h = np.sin(dlat / 2) ** 2 + np.cos(lat_a) * np.cos(lat_b) * np.sin(dlon / 2) ** 2
+    theta = 2.0 * np.arcsin(np.sqrt(np.clip(h, 0.0, 1.0)))
+    d = float(radius) * theta
+    return float(d[0, 0]) if d.shape == (1, 1) else d
+
+
+def _chordal_sq(index: np.ndarray, radius: float) -> np.ndarray:
+    """Pairwise squared chord length between sphere points (physical units of ``radius``).
+
+    ``chord^2 = 2 radius^2 (1 - cos theta)`` -- the Euclidean distance in the R^3 embedding. Kernels of
+    the chord are positive-definite on the sphere for every lengthscale (they are ordinary R^3 kernels of
+    the embedded points), unlike a kernel of the raw geodesic distance, which is PD only for some scales.
+    """
+    u = _unit_vectors(index)
+    g = np.clip(u @ u.T, -1.0, 1.0)
+    d2 = 2.0 * float(radius) ** 2 * (1.0 - g)
+    np.fill_diagonal(d2, 0.0)
+    return np.maximum(d2, 0.0)
+
+
+@dataclass
+class GreatCircleRBF(FieldKernel):
+    """Squared-exponential GP prior on the sphere for a ``(lat, lon)`` index (degrees).
+
+    ``K[i,j] = amplitude^2 exp(-0.5 chord_ij^2 / lengthscale^2)`` where ``chord`` is the straight-line
+    distance through the R^3 embedding -- so the kernel is positive-definite on the sphere at every
+    lengthscale (a geodesic-distance RBF is not). For nearby points the chord matches the great-circle
+    distance, so ``lengthscale`` reads as a spatial correlation length in the same units as ``radius``
+    (``radius=6371.0088`` -> kilometres on Earth; default unit sphere -> radians of arc).
+    """
+
+    lengthscale: float = 1.0
+    amplitude: float = 1.0
+    jitter: float = 1e-6
+    radius: float = 1.0
+
+    def covariance(self, index: np.ndarray) -> np.ndarray:
+        d2 = _chordal_sq(index, self.radius)
+        k = float(self.amplitude) ** 2 * np.exp(-0.5 * d2 / float(self.lengthscale) ** 2)
+        return k + self.jitter * np.eye(len(d2))
+
+    def precision(self, index: np.ndarray) -> np.ndarray:
+        return np.linalg.inv(self.covariance(index))
+
+
+@dataclass
+class GreatCircleMatern(FieldKernel):
+    """Matern GP prior on the sphere for a ``(lat, lon)`` index (degrees) -- the geostatistics default.
+
+    A Matern covariance of the R^3 chordal distance (so PD on the sphere at every lengthscale), giving
+    rougher, more realistic spatial fields than the infinitely-smooth RBF. ``nu`` in {0.5, 1.5, 2.5}
+    (0.5 = exponential / Ornstein-Uhlenbeck, 1.5 and 2.5 are the common once/twice-differentiable
+    choices). ``lengthscale`` and ``radius`` carry the same spatial-units meaning as in
+    :class:`GreatCircleRBF`.
+    """
+
+    lengthscale: float = 1.0
+    amplitude: float = 1.0
+    nu: float = 1.5
+    jitter: float = 1e-6
+    radius: float = 1.0
+
+    def covariance(self, index: np.ndarray) -> np.ndarray:
+        r = np.sqrt(_chordal_sq(index, self.radius))
+        ls, a2 = float(self.lengthscale), float(self.amplitude) ** 2
+        if self.nu == 0.5:
+            k = a2 * np.exp(-r / ls)
+        elif self.nu == 1.5:
+            s = np.sqrt(3.0) * r / ls
+            k = a2 * (1.0 + s) * np.exp(-s)
+        elif self.nu == 2.5:
+            s = np.sqrt(5.0) * r / ls
+            k = a2 * (1.0 + s + s * s / 3.0) * np.exp(-s)
+        else:
+            raise ValueError("nu must be 0.5, 1.5, or 2.5")
+        return k + self.jitter * np.eye(len(r))
 
     def precision(self, index: np.ndarray) -> np.ndarray:
         return np.linalg.inv(self.covariance(index))
