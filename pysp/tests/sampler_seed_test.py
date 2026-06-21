@@ -242,6 +242,9 @@ def _stats_public_distribution_catalog():
             [1.0, 3.0, 0.5], t_max=3.0
         ),
         "HawkesProcessDistribution": stats.HawkesProcessDistribution(0.5, 0.6, 1.2, 50.0),
+        "MultivariateHawkesProcessDistribution": stats.MultivariateHawkesProcessDistribution(
+            [0.5, 0.3], [[0.4, 0.1], [0.2, 0.5]], 1.5, 50.0
+        ),
         "ZeroInflatedDistribution": stats.ZeroInflatedDistribution(stats.PoissonDistribution(2.0), 0.3),
         "HurdleDistribution": stats.HurdleDistribution(stats.PoissonDistribution(2.0), 0.3),
         "GeneralizedParetoDistribution": stats.GeneralizedParetoDistribution(2.0, 0.3),
