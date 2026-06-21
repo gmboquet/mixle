@@ -1,0 +1,68 @@
+"""Segmental HMM terminal (absorbing) hidden states: scoring, sampling, and Baum-Welch EM."""
+
+import itertools
+import unittest
+
+import numpy as np
+
+from pysp.stats import GaussianDistribution, estimate
+from pysp.stats.latent.segmental_hidden_markov_model import SegmentalHiddenMarkovModelDistribution as SHMM
+
+
+class SegmentalTerminalStatesTest(unittest.TestCase):
+    def setUp(self):
+        self.topics = [GaussianDistribution(-2.0, 1.0), GaussianDistribution(2.0, 1.0)]
+        self.w = [0.7, 0.3]
+        self.a = np.array([[0.6, 0.4], [0.5, 0.5]])
+        self.d = SHMM(self.topics, self.w, self.a, terminal_states={1})
+
+    def _brute(self, x):
+        log_w, log_a = np.log(self.w), np.log(self.a)
+        total = -np.inf
+        for path in itertools.product([0, 1], repeat=len(x)):
+            if path[-1] != 1 or any(z == 1 for z in path[:-1]):
+                continue
+            lp = (
+                log_w[path[0]]
+                + sum(self.topics[path[t]].log_density(x[t]) for t in range(len(x)))
+                + sum(log_a[path[t], path[t + 1]] for t in range(len(x) - 1))
+            )
+            total = np.logaddexp(total, lp)
+        return total
+
+    def test_forward_matches_brute_force(self):
+        for x in [[2.0], [-2.0, 2.0], [-2.0, -2.0, 2.0]]:
+            self.assertAlmostEqual(self.d.log_density(x), self._brute(x), places=9)
+
+    def test_seq_matches_scalar(self):
+        data = [[2.0], [-2.0, 2.0], [-2.0, -2.0, 2.0]]
+        enc = self.d.dist_to_encoder().seq_encode(data)
+        np.testing.assert_allclose(self.d.seq_log_density(enc), [self.d.log_density(x) for x in data], atol=1e-12)
+
+    def test_sampler_ends_in_terminal_state(self):
+        self.assertGreater(np.mean([s[-1] for s in self.d.sampler(seed=0).sample(2000)]), 1.0)
+
+    def test_baum_welch_recovers_parameters(self):
+        true = SHMM(
+            [GaussianDistribution(-5, 1.0), GaussianDistribution(0, 1.0), GaussianDistribution(5, 1.0)],
+            [0.5, 0.5, 0.0],
+            [[0.45, 0.45, 0.1], [0.45, 0.45, 0.1], [0.0, 0.0, 1.0]],
+            terminal_states={2},
+        )
+        data = true.sampler(seed=0).sample(400)
+        init = SHMM(
+            [GaussianDistribution(-3, 2.0), GaussianDistribution(1, 2.0), GaussianDistribution(4, 2.0)],
+            [0.4, 0.4, 0.2],
+            [[0.4, 0.4, 0.2], [0.4, 0.4, 0.2], [0.3, 0.3, 0.4]],
+            terminal_states={2},
+        )
+        m = init
+        for _ in range(30):
+            m = estimate(data, init.estimator(), m)
+        self.assertEqual(m.terminal_states, {2})
+        np.testing.assert_allclose(sorted(t.mu for t in m.emissions), [-5.0, 0.0, 5.0], atol=0.2)
+        np.testing.assert_allclose(m.transitions[:2], [[0.45, 0.45, 0.1], [0.45, 0.45, 0.1]], atol=0.08)
+
+
+if __name__ == "__main__":
+    unittest.main()
