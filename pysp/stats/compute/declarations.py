@@ -425,7 +425,9 @@ def generated_sufficient_statistics(dist: Any, enc: Any, weights: Any, engine: A
         )
     ww = engine.asarray(weights)
     return tuple(
-        _host_legacy_value(_weighted_row_sum(stat, spec, ww, engine), engine)
+        _weighted_histogram(stat, ww, engine)
+        if spec.kind == "histogram"
+        else _host_legacy_value(_weighted_row_sum(stat, spec, ww, engine), engine)
         for spec, stat in zip(declaration.statistics, row_stats)
     )
 
@@ -1443,6 +1445,27 @@ def _weighted_row_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any)
         return engine.sum(weights * arr, axis=0, dtype=acc)
     extra_axes = (None,) * (len(shape) - 1)
     return engine.sum(weights[(slice(None),) + extra_axes] * arr, axis=0, dtype=acc)
+
+
+def _weighted_histogram(stat: Any, weights: Any, engine: Any) -> dict[int, float]:
+    """Fold per-row integer counts into a weighted ``{value: weight}`` histogram.
+
+    This mirrors :meth:`NegativeBinomialAccumulator.seq_update` so the generated
+    (torch/stacked) accumulate path produces the exact dict the numpy host
+    accumulator returns for histogram-kind statistics.
+    """
+    vals = np.asarray(engine.to_numpy(stat))
+    wts = np.asarray(engine.to_numpy(weights), dtype=np.float64)
+    hist: dict[int, float] = {}
+    if vals.size == 0:
+        return hist
+    ints = np.rint(vals.reshape(-1)).astype(np.int64)
+    uniq, inv = np.unique(ints, return_inverse=True)
+    wsum = np.zeros(uniq.shape[0], dtype=np.float64)
+    np.add.at(wsum, inv, wts.reshape(-1))
+    for k, w in zip(uniq.tolist(), wsum.tolist()):
+        hist[int(k)] = w
+    return hist
 
 
 def _host_legacy_value(value: Any, engine: Any) -> Any:
