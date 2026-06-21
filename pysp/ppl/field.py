@@ -40,6 +40,7 @@ __all__ = [
     "GreatCircleMatern",
     "great_circle_distance",
     "GaussianField",
+    "FieldSystem",
     "Proxy",
     "GaussianProxy",
     "LogisticNicheProxy",
@@ -251,6 +252,32 @@ class GaussianField:
         self.covariance = None if cov is None else np.asarray(cov, dtype=float)
 
 
+@dataclass
+class FieldSystem:
+    """Several named latent fields fit *jointly* -- the spine for coupled multiphysics / multivariate
+    earth-science models (e.g. an ore-grade field constrained by several geophysical surveys, or coupled
+    paleo-environment fields like temperature + salinity + pCO2 read through many proxies).
+
+    The prior is block-diagonal over the fields (each keeps its own kernel precision). Cross-field
+    dependence is expressed in the proxy likelihoods: a proxy ``loglik(field_t, params, torch)`` receives
+    the full ``params`` dict, so it can read *any* field by name and couple them (a coupling PDE residual,
+    a grade that depends on density + susceptibility, ...). Attach a proxy to a particular field with
+    ``proxy.on('name')``; an unattached proxy defaults to the first field. (Prior-level coregionalization
+    -- a cross-field Gaussian coupling in the precision itself -- is the next step on top of this.)
+    """
+
+    fields: Sequence[GaussianField]
+
+    def __post_init__(self):
+        self.fields = list(self.fields)
+        if not self.fields:
+            raise ValueError("a FieldSystem needs at least one field.")
+        names = [f.name for f in self.fields]
+        if len(set(names)) != len(names):
+            raise ValueError(f"field names must be unique; got {names}.")
+        self.names = names
+
+
 # --------------------------------------------------------------------------------------------------
 # Proxies: each contributes a torch log-likelihood given the field tensor and its own latent params.
 # A proxy declares its parameters as (name, shape, support, init); fit_field assembles them into the
@@ -268,6 +295,12 @@ class Proxy:
     """A likelihood hung off the shared field. Subclasses declare params and score the data in torch."""
 
     prefix: str = "proxy"
+    field: str | None = None  # which field in a FieldSystem this proxy observes (None -> the first field)
+
+    def on(self, field_name: str) -> Proxy:
+        """Attach this proxy to a named field of a :class:`FieldSystem`; returns ``self`` for chaining."""
+        self.field = field_name
+        return self
 
     def params(self) -> list[_ParamSpec]:
         return []
@@ -651,7 +684,16 @@ def fit_field(
     if field is None:
         field = _NoField()
 
-    # ----- assemble the flat parameter layout: the field first, then each proxy's params -----
+    # ----- normalize to a list of fields (one shared field, or a FieldSystem of several) -----
+    field_list = list(field.fields) if isinstance(field, FieldSystem) else [field]
+    field_name = field_list[0].name  # the primary field (single-field models reference this throughout)
+    field_names = [fld.name for fld in field_list]
+    primary = field_list[0]
+
+    def _proxy_field(px):
+        return getattr(px, "field", None) or field_name
+
+    # ----- assemble the flat parameter layout: the field(s) first, then each proxy's params -----
     layout: dict[str, tuple[int, int]] = {}
     supports: list[str] = []
     init_vals: list[np.ndarray] = []
@@ -667,8 +709,8 @@ def fit_field(
         init_vals.append(np.atleast_1d(np.asarray(value, dtype=float)).ravel())
         pos += size
 
-    field_name = field.name
-    add(field_name, field.dim, "real", np.zeros(field.dim))
+    for fld in field_list:
+        add(fld.name, fld.dim, "real", np.zeros(fld.dim))
     for px in proxies:
         for spec in px.params():
             v = init[spec.name] if (init and spec.name in init) else spec.init
@@ -676,7 +718,8 @@ def fit_field(
 
     u0 = np.concatenate(init_vals) if init_vals else np.zeros(0)
     supports_arr = supports
-    Lambda = torch.as_tensor(field.precision)
+    field_prec = {fld.name: torch.as_tensor(fld.precision) for fld in field_list}
+    field_dim = {fld.name: fld.dim for fld in field_list}
 
     def unpack(u_t):
         """Map the unconstrained vector to {node: constrained tensor}."""
@@ -690,10 +733,13 @@ def fit_field(
 
     def neg_log_post(u_t):
         vals = unpack(u_t)
-        f = vals[field_name]
-        nlp = 0.0 if field.dim == 0 else 0.5 * f @ (Lambda @ f)  # Gaussian field prior, up to a constant
+        nlp = 0.0
+        for fld in field_list:  # block-diagonal Gaussian field prior(s), up to a constant
+            if fld.dim:
+                f = vals[fld.name]
+                nlp = nlp + 0.5 * f @ (field_prec[fld.name] @ f)
         for px in proxies:
-            nlp = nlp - px.loglik(f, vals, torch)
+            nlp = nlp - px.loglik(vals[_proxy_field(px)], vals, torch)
         return nlp
 
     # ----- joint MAP via L-BFGS (strong-Wolfe), as in the earth-field engine -----
@@ -737,10 +783,9 @@ def fit_field(
         # adjoint solve where the dense Hessian (how='laplace') cannot, and is exact for a linear forward.
         def residual_vec(u_t):
             vals = unpack(u_t)
-            f = vals[field_name]
             parts = []
             for px in proxies:
-                r = px.residual(f, vals, torch)
+                r = px.residual(vals[_proxy_field(px)], vals, torch)
                 if r is None:
                     raise ValueError(
                         f"how='gauss_newton' needs Gaussian-misfit observations; {type(px).__name__} has no residual()."
@@ -751,13 +796,13 @@ def fit_field(
         u_star = u.detach().clone().requires_grad_(True)
         jac = torch.autograd.functional.jacobian(residual_vec, u_star).detach().numpy()
 
-        # Low-rank (Woodbury) fast path for the field marginals: when the field is the only latent and its
-        # prior covariance K is available (e.g. an RBF kernel), the posterior covariance
+        # Low-rank (Woodbury) fast path for the field marginals: when a single field is the only latent and
+        # its prior covariance K is available (e.g. an RBF kernel), the posterior covariance
         # (K^-1 + J^T J)^-1 = K - K J^T (I + J K J^T)^-1 J K is formed without any dense n_field inverse --
         # only an n_obs x n_obs solve -- so the marginal sds scale to large fields. n_resid is the sensor count.
-        field_only = field.dim > 0 and pos == field.dim  # layout holds the field and nothing else
-        if field_only and field.covariance is not None:
-            K = field.covariance
+        field_only = len(field_list) == 1 and primary.dim > 0 and pos == primary.dim
+        if field_only and primary.covariance is not None:
+            K = primary.covariance
             M = K @ jac.T  # n_field x n_resid  (= K J^T)
             C = np.linalg.inv(np.eye(jac.shape[0]) + jac @ M)  # n_resid x n_resid
             marg_var = np.diag(K) - np.einsum("ij,jk,ik->i", M, C, M)
@@ -773,13 +818,14 @@ def fit_field(
             )
 
         H = jac.T @ jac
-        if field.dim > 0:
-            lo, hi = layout[field_name]
-            H[lo:hi, lo:hi] += field.precision  # the field prior precision (Gauss-Newton adds it to J^T J)
+        for fld in field_list:  # add each field's prior precision into its own block (Gauss-Newton: J^T J + prior)
+            if fld.dim > 0:
+                lo, hi = layout[fld.name]
+                H[lo:hi, lo:hi] += fld.precision
         H = 0.5 * (H + H.T) + 1e-10 * np.eye(H.shape[0])
         cov = np.linalg.inv(H)
         return FieldPosterior(
-            map_values, cov, layout, field_name, H, obj, _field_prior=field.precision, _supports=node_support
+            map_values, cov, layout, field_name, H, obj, _field_prior=primary.precision, _supports=node_support
         )
 
     if how == "vi":
@@ -837,7 +883,9 @@ def fit_field(
 
     for px in proxies:
         label = _proxy_label(px)
-        if field.dim == 0:  # no shared field -> no per-proxy field information to attribute
+        # Attribute information only for proxies on the primary field (the field_posterior(include=)
+        # ablation decomposes that field's precision). Proxies on other fields don't sharpen it.
+        if field_dim.get(field_name, 0) == 0 or _proxy_field(px) != field_name:
             continue
 
         def negll(fv, _px=px):
@@ -872,7 +920,7 @@ def fit_field(
         field_name,
         H,
         obj,
-        _field_prior=field.precision,
+        _field_prior=primary.precision,
         _proxy_info=proxy_info,
         _supports=node_support,
     )
