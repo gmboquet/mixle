@@ -35,6 +35,7 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from pysp.stats.latent_posterior import CategoricalLatentPosterior
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.enumeration import (
     BufferedStream,
@@ -557,8 +558,6 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         can ``.marginals()`` (the responsibilities), ``.sample(rng)`` component labels, ``.mode()``
         (the MAP labels), or ``.entropy()``.
         """
-        from pysp.stats.latent_posterior import CategoricalLatentPosterior
-
         enc = self.dist_to_encoder().seq_encode(list(x))
         return CategoricalLatentPosterior(self.seq_posterior(enc))
 
