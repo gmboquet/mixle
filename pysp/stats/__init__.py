@@ -547,6 +547,10 @@ __all__ = [
     "GaussianCopulaSampler",
     "GaussianCopulaEstimator",
     "GaussianCopulaDataEncoder",
+    "MatrixNormalDistribution",
+    "MatrixNormalSampler",
+    "MatrixNormalEstimator",
+    "MatrixNormalDataEncoder",
     "VonMisesFisherSampler",
     "VonMisesFisherEstimator",
     "VonMisesFisherDataEncoder",
@@ -1188,6 +1192,12 @@ from pysp.stats.multivariate.gaussian_copula import (
     GaussianCopulaDistribution,
     GaussianCopulaEstimator,
     GaussianCopulaSampler,
+)
+from pysp.stats.multivariate.matrix_normal import (
+    MatrixNormalDataEncoder,
+    MatrixNormalDistribution,
+    MatrixNormalEstimator,
+    MatrixNormalSampler,
 )
 from pysp.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDataEncoder,
