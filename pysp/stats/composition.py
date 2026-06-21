@@ -2,17 +2,44 @@
 
 Geochemistry (and many earth-science) measurements are *compositions* -- vectors of non-negative parts
 that sum to a constant (element abundances, mineral fractions, isotope splits). Ordinary statistics on
-them is wrong: they live on the simplex, not in real space. Aitchison's logratio transforms (clr/ilr)
-map the simplex isometrically to real coordinates where standard multivariate-Gaussian modelling applies;
-the isometric logratio (ilr) uses an orthonormal basis so distances/covariances are preserved. Part of
-the earth-science/multiphysics/UQ plan (Phase 6, modality breadth).
+them is wrong: they live on the simplex, not in real space. Aitchison's logratio transforms (clr/ilr) map
+the simplex isometrically to real coordinates where standard multivariate-Gaussian modelling applies; the
+isometric logratio (ilr) uses an orthonormal basis so distances/covariances are preserved.
+
+``AitchisonNormalDistribution`` is the logratio-normal -- ``ilr(x) ~ N(mean, cov)`` -- as a first-class
+pysp distribution: it follows the ``Distribution`` / ``Sampler`` / ``Estimator`` / ``Accumulator`` /
+``DataEncoder`` contract by *delegating* the Gaussian to :class:`MultivariateGaussianDistribution` after
+the ilr transform, so it composes with the rest of the library (mixtures, the unified ``estimate``/
+``sample`` entry points, ...) like any other leaf.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
-__all__ = ["closure", "clr", "clr_inv", "ilr", "ilr_inv", "ilr_basis", "AitchisonNormal"]
+from pysp.stats.compute.pdist import (
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    StatisticAccumulatorFactory,
+)
+from pysp.stats.multivariate.multivariate_gaussian import (
+    MultivariateGaussianDistribution,
+    MultivariateGaussianEstimator,
+)
+
+__all__ = [
+    "closure",
+    "clr",
+    "clr_inv",
+    "ilr",
+    "ilr_inv",
+    "ilr_basis",
+    "AitchisonNormalDistribution",
+    "AitchisonNormalEstimator",
+]
 
 
 def closure(x: np.ndarray, total: float = 1.0) -> np.ndarray:
@@ -61,55 +88,125 @@ def ilr_inv(y: np.ndarray, basis: np.ndarray | None = None) -> np.ndarray:
     return clr_inv(y @ v.T)
 
 
-class AitchisonNormal:
+class AitchisonNormalDistribution(SequenceEncodableProbabilityDistribution):
     """A logratio-normal distribution on the simplex: ``ilr(x) ~ N(mean, cov)``.
 
-    The natural Gaussian for compositions -- model in the orthonormal ilr coordinates, interpret on the
-    simplex. ``log_density`` is the Gaussian density in ilr space (the compositional density w.r.t. the
-    Aitchison measure); fitting is the Gaussian MLE on the ilr-transformed data; sampling draws in ilr
-    space and maps back. ``mean`` (length ``D-1``) and ``cov`` (``(D-1, D-1)``) are the ilr parameters of
-    a ``D``-part composition.
+    The natural Gaussian for compositions -- modelled in the orthonormal ilr coordinates, interpreted on
+    the simplex. ``mean`` (length ``D-1``) and ``cov`` (``(D-1, D-1)``) are the ilr-space parameters of a
+    ``D``-part composition; everything Gaussian is delegated to a :class:`MultivariateGaussianDistribution`.
     """
 
-    def __init__(self, mean: np.ndarray, cov: np.ndarray):
-        self.mean = np.asarray(mean, dtype=float)
-        self.cov = np.atleast_2d(np.asarray(cov, dtype=float))
-        self.n_parts = len(self.mean) + 1
-        self._chol = np.linalg.cholesky(self.cov)
-        self._logdet = 2.0 * np.sum(np.log(np.diag(self._chol)))
-        self._inv = np.linalg.inv(self.cov)
+    def __init__(self, mean: np.ndarray, cov: np.ndarray, name: str | None = None, keys: str | None = None):
+        self.gaussian = MultivariateGaussianDistribution(np.asarray(mean, dtype=float), np.asarray(cov, dtype=float))
+        self.n_parts = self.gaussian.dim + 1
+        self.name = name
+        self.keys = keys
 
-    def log_density(self, x: np.ndarray) -> np.ndarray | float:
-        """Log-density at composition(s) ``x`` (the ilr-space Gaussian log-density)."""
-        y = ilr(x)
-        diff = y - self.mean
-        maha = np.einsum("ij,jk,ik->i", diff, self._inv, diff)
-        k = len(self.mean)
-        ld = -0.5 * (maha + self._logdet + k * np.log(2.0 * np.pi))
-        return float(ld[0]) if np.ndim(x) == 1 else ld
+    @property
+    def mean(self) -> np.ndarray:
+        return self.gaussian.mu
+
+    @property
+    def cov(self) -> np.ndarray:
+        return np.asarray(self.gaussian.covar)
+
+    def __str__(self) -> str:
+        return "AitchisonNormalDistribution(%r, %r)" % (list(self.gaussian.mu), [list(r) for r in self.cov])
+
+    def density(self, x: np.ndarray) -> float:
+        return float(np.exp(self.log_density(x)))
+
+    def log_density(self, x: np.ndarray) -> float:
+        """Log-density at a single composition (the ilr-space Gaussian log-density)."""
+        return float(self.gaussian.log_density(ilr(x)[0]))
+
+    def seq_log_density(self, x) -> np.ndarray:
+        return self.gaussian.seq_log_density(x)  # x is already ilr-encoded by the AitchisonNormal encoder
+
+    def mean_composition(self) -> np.ndarray:
+        """The center of the distribution as a composition (the ilr-mean mapped back to the simplex)."""
+        return ilr_inv(self.gaussian.mu)[0]
 
     def sampler(self, seed: int | None = None) -> AitchisonNormalSampler:
         return AitchisonNormalSampler(self, seed)
 
-    @classmethod
-    def fit(cls, x: np.ndarray) -> AitchisonNormal:
-        """Maximum-likelihood fit: the Gaussian MLE in ilr coordinates."""
-        y = ilr(np.atleast_2d(np.asarray(x, dtype=float)))
-        return cls(y.mean(axis=0), np.cov(y.T, bias=True) if y.shape[1] > 1 else np.array([[np.var(y)]]))
+    def estimator(self, pseudo_count: float | None = None) -> AitchisonNormalEstimator:
+        return AitchisonNormalEstimator(name=self.name, keys=self.keys)
 
-    def mean_composition(self) -> np.ndarray:
-        """The center of the distribution as a composition (the ilr-mean mapped back to the simplex)."""
-        return ilr_inv(self.mean)[0]
+    def dist_to_encoder(self) -> AitchisonNormalDataEncoder:
+        return AitchisonNormalDataEncoder(self.gaussian.dist_to_encoder())
 
 
-class AitchisonNormalSampler:
-    def __init__(self, dist: AitchisonNormal, seed: int | None = None):
+class AitchisonNormalSampler(DistributionSampler):
+    def __init__(self, dist: AitchisonNormalDistribution, seed: int | None = None):
         self.dist = dist
-        self.rng = np.random.RandomState(seed)
+        self.gaussian_sampler = dist.gaussian.sampler(seed)
 
     def sample(self, size: int | None = None) -> np.ndarray:
-        n = 1 if size is None else size
-        z = self.rng.standard_normal((n, len(self.dist.mean)))
-        y = self.dist.mean[None, :] + z @ self.dist._chol.T
-        comp = ilr_inv(y)
-        return comp[0] if size is None else comp
+        y = self.gaussian_sampler.sample(size)
+        return ilr_inv(np.atleast_2d(y))[0] if size is None else ilr_inv(np.asarray(y))
+
+
+class AitchisonNormalDataEncoder:
+    """Encode compositions by the ilr transform, then defer to the Gaussian encoder over ilr coordinates."""
+
+    def __init__(self, gaussian_encoder):
+        self.gaussian_encoder = gaussian_encoder
+
+    def seq_encode(self, x):
+        return self.gaussian_encoder.seq_encode(ilr(np.asarray(x, dtype=float)))
+
+
+class AitchisonNormalEstimator(ParameterEstimator):
+    """Maximum-likelihood estimator: the Gaussian MLE in ilr coordinates (delegated to MVN)."""
+
+    def __init__(self, name: str | None = None, keys: str | None = None):
+        self.gaussian_estimator = MultivariateGaussianEstimator()
+        self.name = name
+        self.keys = keys
+
+    def accumulator_factory(self) -> StatisticAccumulatorFactory:
+        gaussian_factory = self.gaussian_estimator.accumulator_factory()
+
+        class _Factory(StatisticAccumulatorFactory):
+            def make(self):
+                return AitchisonNormalAccumulator(gaussian_factory.make())
+
+        return _Factory()
+
+    def estimate(self, nobs, suff_stat) -> AitchisonNormalDistribution:
+        g = self.gaussian_estimator.estimate(nobs, suff_stat)
+        return AitchisonNormalDistribution(g.mu, g.covar, name=self.name, keys=self.keys)
+
+
+class AitchisonNormalAccumulator:
+    """Wrap a Gaussian accumulator; the data arrives already ilr-encoded, so the stats are delegated."""
+
+    def __init__(self, gaussian_acc):
+        self.gaussian_acc = gaussian_acc
+
+    def update(self, x: np.ndarray, weight: float, estimate: AitchisonNormalDistribution | None) -> None:
+        self.gaussian_acc.update(ilr(x)[0], weight, None if estimate is None else estimate.gaussian)
+
+    def initialize(self, x: np.ndarray, weight: float, rng) -> None:
+        self.gaussian_acc.initialize(ilr(x)[0], weight, rng)
+
+    def seq_update(self, x, weights, estimate) -> None:
+        self.gaussian_acc.seq_update(x, weights, None if estimate is None else estimate.gaussian)
+
+    def seq_initialize(self, x, weights, rng) -> None:
+        self.gaussian_acc.seq_initialize(x, weights, rng)
+
+    def combine(self, suff_stat) -> AitchisonNormalAccumulator:
+        self.gaussian_acc.combine(suff_stat)
+        return self
+
+    def value(self) -> Any:
+        return self.gaussian_acc.value()
+
+    def from_value(self, x) -> AitchisonNormalAccumulator:
+        self.gaussian_acc.from_value(x)
+        return self
+
+    def acc_to_encoder(self) -> AitchisonNormalDataEncoder:
+        return AitchisonNormalDataEncoder(self.gaussian_acc.acc_to_encoder())
