@@ -170,6 +170,17 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             name (Optional[str]): Assign a name to object instance.
             use_numba (bool): If true Numba is used for vectorized calculations.
 
+        Note on terminal *states*: the absorbing-hidden-state ``terminal_states`` supported by the
+        sequence HMM variants (base/quantized/lookback/semi-supervised/segmental) does not apply here.
+        That concept makes the *sequence length* a stopping time via an absorbing-state forward
+        algorithm -- but a tree has no single length or linear forward (inference is an upward-downward
+        recursion over many branches/leaves). The tree's native termination is structural:
+        ``terminal_level`` bounds the depth and ``len_dist`` governs per-node branching (a node with 0
+        children is a leaf). A tree analogue of absorbing states ("a terminal state forces 0 children")
+        would be a *different* model -- a state-coupled child-count distribution requiring a rewrite of
+        the numba upward-downward kernels -- and is intentionally not conflated with the sequence
+        variants' ``terminal_states``.
+
         Attributes:
             topics (Sequence[SequenceEncodableProbabilityDistribution]): Emission distributions having type T.
             num_states (int): Number of states in HMM.
