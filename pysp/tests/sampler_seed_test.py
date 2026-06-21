@@ -245,6 +245,7 @@ def _stats_public_distribution_catalog():
         "MultivariateHawkesProcessDistribution": stats.MultivariateHawkesProcessDistribution(
             [0.5, 0.3], [[0.4, 0.1], [0.2, 0.5]], 1.5, 50.0
         ),
+        "ChineseRestaurantProcessDistribution": stats.ChineseRestaurantProcessDistribution(1.7, 6),
         "ZeroInflatedDistribution": stats.ZeroInflatedDistribution(stats.PoissonDistribution(2.0), 0.3),
         "HurdleDistribution": stats.HurdleDistribution(stats.PoissonDistribution(2.0), 0.3),
         "GeneralizedParetoDistribution": stats.GeneralizedParetoDistribution(2.0, 0.3),
