@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import CategoricalDistribution, GaussianDistribution, HiddenMarkovModelDistribution
+from pysp.stats import CategoricalDistribution, GaussianDistribution, HiddenMarkovModelDistribution, estimate
 
 
 class HmmTerminalStatesTest(unittest.TestCase):
@@ -69,6 +69,32 @@ class HmmTerminalStatesTest(unittest.TestCase):
         s = g.sampler(seed=1).sample(25)
         enc = g.dist_to_encoder().seq_encode(s)
         np.testing.assert_allclose(g.seq_log_density(enc), [g.log_density(seq) for seq in s], atol=1e-10)
+
+
+class HmmTerminalStatesEMTest(unittest.TestCase):
+    def test_baum_welch_recovers_parameters(self):
+        true = HiddenMarkovModelDistribution(
+            [GaussianDistribution(-5, 1.0), GaussianDistribution(0, 1.0), GaussianDistribution(5, 1.0)],
+            [0.5, 0.5, 0.0],
+            [[0.5, 0.4, 0.1], [0.4, 0.5, 0.1], [0.0, 0.0, 1.0]],
+            terminal_states={2},  # state 2 absorbing
+        )
+        data = true.sampler(seed=0).sample(400)
+        init = HiddenMarkovModelDistribution(
+            [GaussianDistribution(-3, 2.0), GaussianDistribution(1, 2.0), GaussianDistribution(4, 2.0)],
+            [0.4, 0.4, 0.2],
+            [[0.4, 0.4, 0.2], [0.4, 0.4, 0.2], [0.3, 0.3, 0.4]],
+            terminal_states={2},
+        )
+        m = init
+        for _ in range(30):  # terminal-aware Baum-Welch, iterated by the standard estimate() driver
+            m = estimate(data, init.estimator(), m)
+        self.assertEqual(m.terminal_states, {2})  # stays a terminal-states model
+        np.testing.assert_allclose(sorted(t.mu for t in m.topics), [-5.0, 0.0, 5.0], atol=0.2)
+        np.testing.assert_allclose(np.sort(m.w), [0.0, 0.46, 0.54], atol=0.05)
+        # the non-terminal transition rows recover (the terminal row is never sourced)
+        np.testing.assert_allclose(m.transitions[:2, :], [[0.5, 0.4, 0.1], [0.4, 0.5, 0.1]], atol=0.07)
+        self.assertGreater(sum(m.log_density(s) for s in data), sum(init.log_density(s) for s in data))
 
 
 if __name__ == "__main__":
