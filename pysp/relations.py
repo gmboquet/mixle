@@ -199,6 +199,64 @@ class Relation(ABC):
         """The ``k`` best solutions as a list."""
         return list(self.enumerator(k=k))
 
+    def sample(
+        self,
+        size: int | None = None,
+        *,
+        rng=None,
+        temperature: float = 1.0,
+        k: int | None = None,
+        uniform: bool = False,
+    ) -> Any:
+        """Draw member value(s) of the relation by a Gibbs weight over the objective.
+
+        Each enumerated member is weighted ``exp(-objective / temperature)`` when ``sense == "min"``
+        (low cost favoured) or ``exp(objective / temperature)`` when ``sense == "max"`` (high score
+        favoured). ``temperature -> 0`` concentrates on the optimum; ``-> inf`` (or ``uniform=True``)
+        is uniform over the enumerated members.
+
+        Exactness: the weights are normalized over the members actually enumerated, so this is an
+        *exact* draw from the Gibbs distribution only when the relation is finite and fully enumerated
+        (``k=None``). For an infinite or very large relation pass ``k`` to truncate to the ``k`` best --
+        the dropped tail is the lowest-weight mass (for ``sense="min"`` the ``k`` best are the highest
+        weight), so it is a good approximation at low temperature and degrades as ``temperature`` grows.
+        ``k`` is required for an infinite relation (otherwise enumeration does not terminate).
+
+        Args:
+            size: ``None`` returns a single member value; an int returns a list of that many draws.
+            rng: a ``numpy.random.RandomState``, an integer seed, or ``None``.
+            temperature: Gibbs temperature (default 1.0).
+            k: enumerate at most this many members before sampling (``None`` = all; required if infinite).
+            uniform: ignore objectives and sample uniformly over the enumerated members.
+
+        Returns:
+            A member ``value`` (``size=None``) or a list of member values (``size=int``).
+
+        Raises:
+            ValueError: if the relation enumerates no members (infeasible).
+        """
+        if rng is None or isinstance(rng, (int, np.integer)):
+            rng = np.random.RandomState(None if rng is None else int(rng))
+        sols = list(self.enumerator(k=k))
+        if not sols:
+            raise ValueError("relation is infeasible: no members to sample.")
+        obj = np.array([s.objective for s in sols], dtype=float)
+        if uniform or not np.isfinite(temperature):  # infinite temperature -> uniform
+            log_w = np.zeros(len(sols))
+        elif temperature <= 0.0:  # zero temperature -> point mass on the best enumerated member
+            best = int(np.argmin(obj) if self.sense == "min" else np.argmax(obj))
+            return sols[best].value if size is None else [sols[best].value] * size
+        else:
+            sign = -1.0 if self.sense == "min" else 1.0
+            log_w = sign * obj / float(temperature)
+        log_w = log_w - log_w.max()
+        p = np.exp(log_w)
+        p /= p.sum()
+        idx = rng.choice(len(sols), size=size, p=p)
+        if size is None:
+            return sols[int(idx)].value
+        return [sols[int(i)].value for i in idx]
+
     def __iter__(self) -> Iterator[Solution]:
         return self.enumerator()
 
