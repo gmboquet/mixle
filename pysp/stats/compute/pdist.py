@@ -531,9 +531,17 @@ class DistributionSampler:
     sample(size=n) returns a length-n collection of observations.
     """
 
-    def __init__(self, dist: SequenceEncodableProbabilityDistribution, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        dist: SequenceEncodableProbabilityDistribution,
+        seed: int | None = None,
+        *,
+        rng: np.random.RandomState | None = None,
+    ) -> None:
         self.dist = dist
-        self.rng = np.random.RandomState(seed)
+        # ``rng`` (keyword-only) lets callers share one RandomState across samplers for composable,
+        # reproducible streams; ``seed`` remains the default scalar-seed path when no rng is supplied.
+        self.rng = rng if rng is not None else np.random.RandomState(seed)
 
     def new_seed(self) -> int:
         """Return a fresh random seed drawn from this sampler's RandomState."""
