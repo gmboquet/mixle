@@ -10,6 +10,7 @@ from pysp.stats import (
     GaussianDistribution,
     HeterogeneousMixtureDistribution,
     PoissonDistribution,
+    TruncatedDistribution,
 )
 from pysp.stats.latent.gaussian_mixture import GaussianMixtureDistribution
 
@@ -47,6 +48,20 @@ class SamplerVectorizationTest(unittest.TestCase):
         a = hm.sampler(seed=5).sample(100, batched=True)
         b = hm.sampler(seed=5).sample(100, batched=False)
         self.assertTrue(_identical(a, b))
+
+
+class TruncatedSamplerTest(unittest.TestCase):
+    def test_batched_rejection_only_yields_allowed(self):
+        # low acceptance + numeric support exercises the np.isin fast path
+        d = TruncatedDistribution(PoissonDistribution(2.0), allowed=[8, 9, 10])
+        x = d.sampler(seed=1).sample(500)
+        self.assertEqual(len(x), 500)
+        self.assertTrue(all(v in (8, 9, 10) for v in x))
+
+    def test_zero_truncated_and_reference_path(self):
+        d = TruncatedDistribution(PoissonDistribution(2.0), forbidden=[0])
+        self.assertTrue(all(v != 0 for v in d.sampler(seed=2).sample(2000)))  # batched
+        self.assertTrue(all(v != 0 for v in d.sampler(seed=2).sample(200, batched=False)))  # per-draw
 
 
 if __name__ == "__main__":
