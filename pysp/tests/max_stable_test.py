@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from scipy.stats import norm, spearmanr
 
-from pysp.stats.max_stable import SmithMaxStable
+from pysp.stats.max_stable import SmithMaxStable, fit_smith_maxstable
 
 
 class SmithMaxStableTest(unittest.TestCase):
@@ -40,7 +40,7 @@ class SmithMaxStableTest(unittest.TestCase):
         true = SmithMaxStable(2.0**2 * np.eye(2))
         locs = np.random.RandomState(1).uniform(0, 12, (10, 2))
         fields = true.sampler(locs, seed=2).sample(500, n_storms=120)
-        fit = SmithMaxStable.fit_isotropic(locs, fields)
+        fit = fit_smith_maxstable(locs, fields)
         self.assertAlmostEqual(np.sqrt(fit.sigma[0, 0]), 2.0, delta=0.6)
 
 
