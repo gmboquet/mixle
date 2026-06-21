@@ -253,6 +253,10 @@ __all__ = [
     "GeneralizedParetoSampler",
     "GeneralizedParetoEstimator",
     "GeneralizedParetoDataEncoder",
+    "GeneralizedExtremeValueDistribution",
+    "GeneralizedExtremeValueSampler",
+    "GeneralizedExtremeValueEstimator",
+    "GeneralizedExtremeValueDataEncoder",
     "WeibullSampler",
     "WeibullEstimator",
     "WeibullDataEncoder",
@@ -1025,6 +1029,12 @@ from pysp.stats.leaf.exponential import (
 )
 from pysp.stats.leaf.gamma import GammaDataEncoder, GammaDistribution, GammaEstimator, GammaSampler
 from pysp.stats.leaf.gaussian import GaussianDataEncoder, GaussianDistribution, GaussianEstimator, GaussianSampler
+from pysp.stats.leaf.generalized_extreme_value import (
+    GeneralizedExtremeValueDataEncoder,
+    GeneralizedExtremeValueDistribution,
+    GeneralizedExtremeValueEstimator,
+    GeneralizedExtremeValueSampler,
+)
 from pysp.stats.leaf.generalized_pareto import (
     GeneralizedParetoDataEncoder,
     GeneralizedParetoDistribution,
