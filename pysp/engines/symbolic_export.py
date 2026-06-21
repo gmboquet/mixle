@@ -37,13 +37,20 @@ def _import_sympy():
 
 
 def _import_sage():
-    try:
-        import sage.all as sage  # noqa: F401
-    except ImportError as exc:  # pragma: no cover - sage is not installed here
-        raise ImportError(
-            "sagemath is required for to_sage; install Sage and run under its Python interpreter."
-        ) from exc
-    return sage
+    # Full SageMath exposes the unified ``sage.all``; the pip-installable modular distribution
+    # (``pip install passagemath-symbolics``) exposes the same symbolic surface under
+    # ``sage.all__sagemath_symbolics`` instead, so accept either.
+    import importlib
+
+    for module_name in ("sage.all", "sage.all__sagemath_symbolics"):
+        try:
+            return importlib.import_module(module_name)
+        except ImportError:
+            continue
+    raise ImportError(  # pragma: no cover - exercised only without any sage
+        "sagemath is required for to_sage; install full SageMath, or `pip install "
+        "passagemath-symbolics` for the symbolic subset."
+    )
 
 
 def _is_array(x: Any) -> bool:

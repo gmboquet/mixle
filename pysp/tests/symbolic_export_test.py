@@ -13,7 +13,21 @@ from pysp.engines import (
 )
 
 HAS_SYMPY = importlib.util.find_spec("sympy") is not None
-HAS_SAGE = importlib.util.find_spec("sage") is not None
+
+
+def _sage_module_name():
+    # full SageMath -> "sage.all"; pip-installable passagemath -> "sage.all__sagemath_symbolics".
+    for name in ("sage.all", "sage.all__sagemath_symbolics"):
+        try:
+            if importlib.util.find_spec(name) is not None:
+                return name
+        except (ImportError, ValueError):
+            continue
+    return None
+
+
+_SAGE_MODULE = _sage_module_name()
+HAS_SAGE = _SAGE_MODULE is not None
 
 
 def _gaussian_log_density_expr(mu=0.0, sigma2=1.0):
@@ -125,7 +139,7 @@ class SymbolicSympyExportTestCase(unittest.TestCase):
 @unittest.skipUnless(HAS_SAGE, "sagemath is not installed")
 class SymbolicSageExportTestCase(unittest.TestCase):
     def test_gaussian_density_roundtrip(self):
-        import sage.all as sage
+        sage = importlib.import_module(_SAGE_MODULE)
 
         expr, _ = _gaussian_log_density_expr(mu=1.5, sigma2=2.0)
         sym = to_sage(expr)
@@ -134,6 +148,16 @@ class SymbolicSageExportTestCase(unittest.TestCase):
             native = float(expr.evaluate({"x": xv}))
             via_sage = float(sym.subs({x: xv}))
             self.assertAlmostEqual(native, via_sage, places=10)
+
+    def test_engine_constants_lower_to_exact_sage(self):
+        sage = importlib.import_module(_SAGE_MODULE)
+        with ar.using_engine("symbolic"):
+            self.assertTrue(bool(to_sage(ar.pi) == sage.pi))  # exact symbolic pi, not a float
+            self.assertTrue(bool(to_sage(ar.e) == sage.e))
+            self.assertTrue(bool(to_sage(ar.euler_gamma) == sage.euler_gamma))
+            self.assertTrue(bool(to_sage(ar.half) == sage.SR(1) / sage.SR(2)))  # exact 1/2
+            expr = ar.two * ar.pi
+            self.assertTrue(bool(to_sage(expr) == 2 * sage.pi))
 
 
 if __name__ == "__main__":
