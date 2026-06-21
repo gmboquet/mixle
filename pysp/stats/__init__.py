@@ -344,6 +344,10 @@ __all__ = [
     "IntegerUniformSpikeDataEncoder",
     "IntegerUniformSpikeEnumerator",
     "IntegerMultinomialDistribution",
+    "DirichletMultinomialDistribution",
+    "DirichletMultinomialSampler",
+    "DirichletMultinomialEstimator",
+    "DirichletMultinomialDataEncoder",
     "IntegerMultinomialSampler",
     "IntegerMultinomialEstimator",
     "IntegerMultinomialDataEncoder",
@@ -1046,6 +1050,12 @@ from pysp.stats.leaf.categorical_multinomial import (
     MultinomialEnumerator,
     MultinomialEstimator,
     MultinomialSampler,
+)
+from pysp.stats.leaf.dirichlet_multinomial import (
+    DirichletMultinomialDataEncoder,
+    DirichletMultinomialDistribution,
+    DirichletMultinomialEstimator,
+    DirichletMultinomialSampler,
 )
 from pysp.stats.leaf.exgaussian import (
     ExponentiallyModifiedGaussianDataEncoder,
