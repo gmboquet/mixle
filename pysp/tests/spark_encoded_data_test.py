@@ -11,6 +11,36 @@ from pysp.utils.estimation import constant, optimize
 from pysp.utils.streaming import StreamingEstimator, streaming_accumulate
 
 
+def _ensure_java_home() -> None:
+    """Point JAVA_HOME at an installed JDK if it is not already set.
+
+    pyspark needs a JVM; on many dev machines a JDK is installed (e.g. Homebrew ``openjdk@17``) but
+    ``JAVA_HOME`` is not exported, so Spark would otherwise be skipped. Auto-detect a usable JDK so the
+    Spark tests run wherever Java is present; if none is found, leave the environment untouched (the
+    SparkSession build fails cleanly and the suite skips as before).
+    """
+    current = os.environ.get("JAVA_HOME")
+    if current and os.path.exists(os.path.join(current, "bin", "java")):
+        return
+    candidates: list[str] = []
+    try:
+        import subprocess
+
+        out = subprocess.run(["/usr/libexec/java_home"], capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            candidates.append(out.stdout.strip())
+    except Exception:
+        pass
+    for prefix in ("/opt/homebrew/opt", "/usr/local/opt"):  # Homebrew (Apple silicon / Intel)
+        for jdk in ("openjdk@17", "openjdk@21", "openjdk@11", "openjdk"):
+            candidates.append(os.path.join(prefix, jdk, "libexec/openjdk.jdk/Contents/Home"))
+            candidates.append(os.path.join(prefix, jdk))
+    for cand in candidates:
+        if cand and os.path.exists(os.path.join(cand, "bin", "java")):
+            os.environ["JAVA_HOME"] = cand
+            return
+
+
 def _spark_context():
     try:
         from pyspark.sql import SparkSession
@@ -18,6 +48,7 @@ def _spark_context():
         return None
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
+    _ensure_java_home()
     try:
         spark = (
             SparkSession.builder.master("local[2]")
