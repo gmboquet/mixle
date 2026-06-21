@@ -4,7 +4,9 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.composition import AitchisonNormal, closure, clr, clr_inv, ilr, ilr_basis, ilr_inv
+from pysp.stats import estimate
+from pysp.stats.composition import AitchisonNormalDistribution as AitchisonNormal
+from pysp.stats.composition import closure, clr, clr_inv, ilr, ilr_basis, ilr_inv
 
 
 class LogratioTransformTest(unittest.TestCase):
@@ -42,9 +44,10 @@ class AitchisonNormalTest(unittest.TestCase):
         self.assertTrue((s > 0).all())
         self.assertEqual(s.shape[1], 4)  # D-1=3 ilr coords -> D=4 parts
 
-    def test_fit_recovers_parameters(self):
+    def test_estimate_recovers_parameters(self):
         s = self.true.sampler(seed=2).sample(20000)
-        fit = AitchisonNormal.fit(s)
+        fit = estimate([row for row in s], self.true.estimator())  # the pysp estimator/accumulator contract
+        self.assertIsInstance(fit, AitchisonNormal)
         np.testing.assert_allclose(fit.mean, self.true.mean, atol=0.04)
         np.testing.assert_allclose(fit.cov, self.true.cov, atol=0.06)
 
@@ -56,9 +59,10 @@ class AitchisonNormalTest(unittest.TestCase):
     def test_mean_composition_is_on_the_simplex(self):
         self.assertAlmostEqual(self.true.mean_composition().sum(), 1.0, places=10)
 
-    def test_log_density_scalar_vs_batch(self):
+    def test_seq_log_density_matches_scalar(self):
         s = self.true.sampler(seed=3).sample(4)
-        batch = self.true.log_density(s)
+        enc = self.true.dist_to_encoder().seq_encode([s[i] for i in range(4)])
+        batch = self.true.seq_log_density(enc)
         self.assertEqual(batch.shape, (4,))
         self.assertAlmostEqual(self.true.log_density(s[0]), batch[0], places=10)
 
