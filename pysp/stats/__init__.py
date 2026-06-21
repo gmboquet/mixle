@@ -475,6 +475,10 @@ __all__ = [
     "ZeroInflatedSampler",
     "ZeroInflatedEstimator",
     "ZeroInflatedDataEncoder",
+    "HurdleDistribution",
+    "HurdleSampler",
+    "HurdleEstimator",
+    "HurdleDataEncoder",
     "TruncatedDistribution",
     "TruncatedSampler",
     "TruncatedEstimator",
@@ -625,6 +629,12 @@ from pysp.stats.combinator.finite_stochastic_transform import (
     FiniteStochasticTransformEnumerator,
     FiniteStochasticTransformEstimator,
     FiniteStochasticTransformSampler,
+)
+from pysp.stats.combinator.hurdle import (
+    HurdleDataEncoder,
+    HurdleDistribution,
+    HurdleEstimator,
+    HurdleSampler,
 )
 from pysp.stats.combinator.ignored import IgnoredDataEncoder, IgnoredDistribution, IgnoredEstimator, IgnoredSampler
 from pysp.stats.combinator.null_dist import (
