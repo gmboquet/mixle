@@ -21,10 +21,25 @@ from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.special import logsumexp
 
 
 def _as_rng(rng: Any) -> RandomState:
     return rng if isinstance(rng, RandomState) else RandomState(rng)
+
+
+def _softmax(logp: np.ndarray) -> np.ndarray:
+    e = np.exp(logp - logp.max())
+    return e / e.sum()
+
+
+def _cat(rng: RandomState, p: np.ndarray) -> int:
+    return int(np.searchsorted(np.cumsum(p), rng.random_sample() * p.sum()))
+
+
+def _entropy(p: np.ndarray) -> float:
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return float(-np.sum(np.where(p > 0.0, p * np.log(p), 0.0)))
 
 
 class LatentPosterior(ABC):
@@ -85,3 +100,84 @@ class CategoricalLatentPosterior(LatentPosterior):
         with np.errstate(divide="ignore", invalid="ignore"):
             terms = np.where(r > 0.0, r * np.log(r), 0.0)
         return -terms.sum(axis=1)
+
+
+class MarkovChainLatentPosterior(LatentPosterior):
+    """Chain-structured latents ``q(z_1..z_T | x)`` for an HMM -- exact, via forward-backward.
+
+    Built from the log initial distribution ``log_pi`` ``(K,)``, the log transition matrix ``log_A``
+    ``(K, K)`` (row ``j`` -> column ``k``), and the per-position emission log-likelihoods ``log_b``
+    ``(T, K)``. The latents are *coupled* (a Markov chain), so:
+
+      marginals() -> the ``(T, K)`` forward-backward smoothing probabilities ``q(z_t = k | x)``
+      sample(rng) -> a full state path ``(T,)`` by forward-filter / backward-sample (FFBS)
+      mode()      -> the Viterbi (max-product) path ``(T,)``
+      entropy()   -> the exact *scalar* chain entropy ``H[q(z_1..z_T | x)]``
+    """
+
+    def __init__(self, log_pi: np.ndarray, log_A: np.ndarray, log_b: np.ndarray) -> None:
+        self.log_pi = np.asarray(log_pi, dtype=np.float64)
+        self.log_A = np.asarray(log_A, dtype=np.float64)
+        self.log_b = np.asarray(log_b, dtype=np.float64)
+        self.t, self.k = self.log_b.shape
+        self._log_alpha = self._forward()  # alpha_t(k) = log p(z_t=k, x_{1:t}), the FFBS filter
+
+    def _forward(self) -> np.ndarray:
+        la = np.empty((self.t, self.k))
+        la[0] = self.log_pi + self.log_b[0]
+        for t in range(1, self.t):
+            la[t] = self.log_b[t] + logsumexp(la[t - 1][:, None] + self.log_A, axis=0)
+        return la
+
+    def log_likelihood(self) -> float:
+        """The sequence log-likelihood ``log p(x)`` (the forward normalizer)."""
+        return float(logsumexp(self._log_alpha[-1]))
+
+    def _backward(self) -> np.ndarray:
+        lb = np.zeros((self.t, self.k))
+        for t in range(self.t - 2, -1, -1):
+            lb[t] = logsumexp(self.log_A + (self.log_b[t + 1] + lb[t + 1])[None, :], axis=1)
+        return lb
+
+    def marginals(self) -> np.ndarray:
+        """The ``(T, K)`` smoothing probabilities ``q(z_t = k | x)``."""
+        log_gamma = self._log_alpha + self._backward()
+        log_gamma -= logsumexp(log_gamma, axis=1, keepdims=True)
+        return np.exp(log_gamma)
+
+    def sample(self, rng: Any = None) -> np.ndarray:
+        """Draw a state path ``z ~ q(z | x)`` via FFBS; returns ``(T,)`` state indices."""
+        rng = _as_rng(rng)
+        z = np.empty(self.t, dtype=int)
+        z[-1] = _cat(rng, _softmax(self._log_alpha[-1]))  # z_T ~ filter at the last step (= smoother)
+        for t in range(self.t - 2, -1, -1):
+            # z_t ~ q(z_t | z_{t+1}, x_{1:t}) prop. alpha_t(.) * A(., z_{t+1})
+            z[t] = _cat(rng, _softmax(self._log_alpha[t] + self.log_A[:, z[t + 1]]))
+        return z
+
+    def mode(self) -> np.ndarray:
+        """The Viterbi (max-product) MAP path ``(T,)``."""
+        v = np.empty((self.t, self.k))
+        bp = np.zeros((self.t, self.k), dtype=int)
+        v[0] = self.log_pi + self.log_b[0]
+        for t in range(1, self.t):
+            m = v[t - 1][:, None] + self.log_A
+            bp[t] = np.argmax(m, axis=0)
+            v[t] = self.log_b[t] + m.max(axis=0)
+        z = np.empty(self.t, dtype=int)
+        z[-1] = int(np.argmax(v[-1]))
+        for t in range(self.t - 2, -1, -1):
+            z[t] = bp[t + 1][z[t + 1]]
+        return z
+
+    def entropy(self) -> float:
+        """Exact scalar chain entropy via the FFBS factorization ``q = q(z_T) prod_t q(z_t|z_{t+1})``."""
+        gamma = self.marginals()
+        h = _entropy(_softmax(self._log_alpha[-1]))
+        for t in range(self.t - 1):
+            logp = self._log_alpha[t][:, None] + self.log_A  # (j, k): unnormalized q(z_t=j, z_{t+1}=k)
+            cond = np.exp(logp - logsumexp(logp, axis=0, keepdims=True))  # q(z_t=j | z_{t+1}=k)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                h_k = -np.sum(np.where(cond > 0.0, cond * np.log(cond), 0.0), axis=0)  # (k,)
+            h += float(np.sum(gamma[t + 1] * h_k))
+        return h

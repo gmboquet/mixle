@@ -363,6 +363,7 @@ __all__ = [
     "MixtureDistribution",
     "LatentPosterior",
     "CategoricalLatentPosterior",
+    "MarkovChainLatentPosterior",
     "MixtureSampler",
     "MixtureEstimator",
     "MixtureDataEncoder",
@@ -950,7 +951,11 @@ from pysp.stats.latent.semi_supervised_mixture import (
 )
 
 ### Generic Distributions
-from pysp.stats.latent_posterior import CategoricalLatentPosterior, LatentPosterior
+from pysp.stats.latent_posterior import (
+    CategoricalLatentPosterior,
+    LatentPosterior,
+    MarkovChainLatentPosterior,
+)
 
 ### Discrete base distributions
 from pysp.stats.leaf.bernoulli import (

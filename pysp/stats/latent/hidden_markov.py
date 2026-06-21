@@ -64,6 +64,7 @@ from pysp.stats.latent._hidden_markov_numba_kernels import (
     numba_seq_log_density,
 )
 from pysp.stats.latent.mixture import MixtureDistribution
+from pysp.stats.latent_posterior import MarkovChainLatentPosterior
 from pysp.utils.aliasing import MISSING, coalesce_alias, require
 from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, best_first_union_max
 from pysp.utils.optional_deps import HAS_NUMBA, numba
@@ -781,6 +782,19 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             ptr[t] = np.argmax(v[t, :])
 
         return ptr
+
+    def latent_posterior(self, x: list[T]) -> "MarkovChainLatentPosterior":
+        """Return the exact chain posterior ``q(z | x)`` over hidden states for one observation sequence.
+
+        The returned :class:`~pysp.stats.latent_posterior.MarkovChainLatentPosterior` can
+        ``.marginals()`` (forward-backward smoothing probabilities), ``.sample(rng)`` a full state path
+        by FFBS, ``.mode()`` (the Viterbi path), or ``.entropy()`` (the exact chain entropy).
+        """
+        enc = self.topics[0].dist_to_encoder().seq_encode(list(x))
+        log_b = np.empty((len(x), self.n_states))
+        for k in range(self.n_states):
+            log_b[:, k] = self.topics[k].seq_log_density(enc)
+        return MarkovChainLatentPosterior(self.log_w, self.log_transitions, log_b)
 
     def seq_viterbi(self, x: E2):
         """Return Viterbi paths for sequence-encoded observation sequences."""
