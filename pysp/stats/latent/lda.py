@@ -23,7 +23,7 @@ from typing import Any, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
-from scipy.special import digamma, gammaln
+from scipy.special import digamma, gammaln, logsumexp
 
 from pysp.arithmetic import maxrandint
 from pysp.stats.bayes.dirichlet import DirichletDistribution
@@ -42,6 +42,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.stats.latent_posterior import MeanFieldLDAPosterior
 from pysp.utils.special import digammainv
 from pysp.utils.vector import row_choice
 
@@ -409,6 +410,23 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         document_gammas /= document_gammas.sum(axis=1, keepdims=True)
 
         return document_gammas
+
+    def latent_posterior(self, doc: Sequence[tuple[int, float]]) -> "MeanFieldLDAPosterior":
+        """Return the mean-field variational posterior ``q(theta, z)`` for a single document.
+
+        Runs the per-document Blei-Ng-Jordan variational fixed point and returns a
+        :class:`~pysp.stats.latent_posterior.MeanFieldLDAPosterior`: ``.topic_proportions()`` (the
+        document-topic mix ``E[theta]``), ``.marginals()`` (per-word topic responsibilities ``phi``),
+        ``.sample(rng)`` ``(theta, z)``, ``.mode()`` (MAP topic per word), or ``.entropy()``.
+        """
+        enc = self.dist_to_encoder().seq_encode([list(doc)])
+        _, gammas, per_topic_log_densities = seq_posterior(self, enc)
+        _, _, counts, _, _ = enc
+        gamma = gammas[0]
+        # phi at the variational fixed point: phi_wk prop. exp(E_q[log theta_k]) * p(word_w | topic_k)
+        log_phi = (digamma(gamma) - digamma(gamma.sum()))[None, :] + per_topic_log_densities
+        log_phi -= logsumexp(log_phi, axis=1, keepdims=True)
+        return MeanFieldLDAPosterior(gamma, np.exp(log_phi), counts)
 
     def sampler(self, seed: int | None = None) -> "LDASampler":
         """Create an LDASampler object for sampling documents from this distribution.

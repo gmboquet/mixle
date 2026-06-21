@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
-from scipy.special import logsumexp
+from scipy.special import digamma, gammaln, logsumexp
 
 
 def _as_rng(rng: Any) -> RandomState:
@@ -181,3 +181,53 @@ class MarkovChainLatentPosterior(LatentPosterior):
                 h_k = -np.sum(np.where(cond > 0.0, cond * np.log(cond), 0.0), axis=0)  # (k,)
             h += float(np.sum(gamma[t + 1] * h_k))
         return h
+
+
+class MeanFieldLDAPosterior(LatentPosterior):
+    """Mean-field variational posterior for one LDA document: ``q(theta, z) = Dir(theta; gamma) prod_n Cat(z_n; phi_n)``.
+
+    The Blei-Ng-Jordan variational factorization made into an object instead of loose ``gamma``/``phi``
+    arrays. ``gamma`` ``(K,)`` is the document's variational Dirichlet parameter (``q(theta)``);
+    ``phi`` ``(W, K)`` the per-*distinct*-word topic responsibilities (``q(z_n)``, rows sum to 1);
+    ``counts`` ``(W,)`` the word counts. Note the latents are heterogeneous (continuous ``theta`` +
+    discrete ``z``), so ``sample`` returns the pair ``(theta, z)`` and ``entropy`` is a scalar.
+    """
+
+    def __init__(self, gamma: np.ndarray, phi: np.ndarray, counts: np.ndarray) -> None:
+        self.gamma = np.asarray(gamma, dtype=np.float64).ravel()
+        self.phi = np.asarray(phi, dtype=np.float64)
+        self.counts = np.asarray(counts)
+        self.k = self.gamma.shape[0]
+
+    def topic_proportions(self) -> np.ndarray:
+        """The mean document-topic distribution ``E_q[theta] = gamma / sum(gamma)`` ``(K,)``."""
+        return self.gamma / self.gamma.sum()
+
+    def marginals(self) -> np.ndarray:
+        """The ``(W, K)`` per-distinct-word topic responsibilities ``q(z_n)``."""
+        return self.phi
+
+    def sample(self, rng: Any = None) -> tuple[np.ndarray, np.ndarray]:
+        """Draw the full latent ``(theta, z)``: ``theta ~ Dir(gamma)`` and per-*token* topics ``z`` from ``phi``."""
+        rng = _as_rng(rng)
+        theta = rng.dirichlet(self.gamma)
+        cdf = np.cumsum(self.phi, axis=1)
+        cdf[:, -1] = 1.0
+        z = []
+        for w, c in enumerate(self.counts):
+            u = rng.random_sample(int(c))[:, None]
+            z.extend((u < cdf[w]).argmax(axis=1).tolist())
+        return theta, np.asarray(z, dtype=int)
+
+    def mode(self) -> np.ndarray:
+        """The MAP topic per distinct word, ``argmax_k phi_wk`` ``(W,)``."""
+        return np.argmax(self.phi, axis=1)
+
+    def entropy(self) -> float:
+        """Mean-field entropy ``H[q(theta)] + sum_w count_w H[Cat(phi_w)]`` (scalar)."""
+        g = self.gamma
+        g0 = g.sum()
+        h_theta = float(gammaln(g).sum() - gammaln(g0) + (g0 - self.k) * digamma(g0) - np.sum((g - 1.0) * digamma(g)))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            h_z = -float(np.sum(self.counts[:, None] * np.where(self.phi > 0.0, self.phi * np.log(self.phi), 0.0)))
+        return h_theta + h_z
