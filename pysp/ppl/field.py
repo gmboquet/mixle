@@ -36,6 +36,7 @@ __all__ = [
     "FieldKernel",
     "RandomWalk",
     "RBF",
+    "AnisotropicRBF",
     "GreatCircleRBF",
     "GreatCircleMatern",
     "great_circle_distance",
@@ -124,6 +125,50 @@ class RBF(FieldKernel):
             x = x[:, None]
         d2 = np.sum((x[:, None, :] - x[None, :, :]) ** 2, axis=-1)
         k = float(self.amplitude) ** 2 * np.exp(-0.5 * d2 / float(self.lengthscale) ** 2)
+        return k + self.jitter * np.eye(len(x))
+
+    def precision(self, index: np.ndarray) -> np.ndarray:
+        return np.linalg.inv(self.covariance(index))
+
+
+@dataclass
+class AnisotropicRBF(FieldKernel):
+    """A geometrically-anisotropic squared-exponential GP prior -- correlation that is longer along one
+    direction than another (geological layering / bedding, faulted fabric, flow channels).
+
+    The squared distance is the Mahalanobis form ``(x-y)^T M (x-y)`` with ``M`` built from per-axis
+    correlation ``ranges`` after rotating the coordinates: in 2-D, ``angle`` (radians, counter-clockwise
+    from the x-axis) sets the principal direction and ``ranges=(major, minor)`` the correlation length
+    along/across it. For >2-D, supply ``ranges`` per axis (axis-aligned) or a full ``metric`` matrix
+    ``M`` directly. Provably positive-definite -- it is an ordinary RBF on linearly-transformed
+    coordinates.
+    """
+
+    ranges: Sequence[float] = (1.0, 1.0)
+    angle: float = 0.0
+    amplitude: float = 1.0
+    jitter: float = 1e-6
+    metric: np.ndarray | None = None
+
+    def _transform(self, x: np.ndarray) -> np.ndarray:
+        """Whiten the coordinates so Euclidean distance becomes the anisotropic distance."""
+        if self.metric is not None:
+            chol = np.linalg.cholesky(np.asarray(self.metric, dtype=float))  # M = L L^T ; u = L^T x
+            return x @ chol
+        r = np.asarray(self.ranges, dtype=float)
+        if x.shape[1] == 2 and self.angle:
+            c, s = np.cos(self.angle), np.sin(self.angle)
+            rot = np.array([[c, s], [-s, c]])  # rotate into the principal frame
+            x = x @ rot.T
+        return x / r[: x.shape[1]]
+
+    def covariance(self, index: np.ndarray) -> np.ndarray:
+        x = np.asarray(index, dtype=float)
+        if x.ndim == 1:
+            x = x[:, None]
+        u = self._transform(x)
+        d2 = np.sum((u[:, None, :] - u[None, :, :]) ** 2, axis=-1)
+        k = float(self.amplitude) ** 2 * np.exp(-0.5 * d2)
         return k + self.jitter * np.eye(len(x))
 
     def precision(self, index: np.ndarray) -> np.ndarray:
