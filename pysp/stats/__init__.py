@@ -34,6 +34,7 @@ __all__ = [
     "PitmanYorProcessDataEncoder",
     "initialize",
     "estimate",
+    "sample",
     "seq_encode",
     "seq_log_density",
     "seq_log_density_sum",
@@ -1307,6 +1308,7 @@ from pysp.stats.multivariate.wishart import (
     WishartEstimator,
     WishartSampler,
 )
+from pysp.stats.sampling_api import sample
 from pysp.stats.sets.bernoulli_set import (
     BernoulliSetDataEncoder,
     BernoulliSetDistribution,
