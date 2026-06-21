@@ -563,6 +563,10 @@ __all__ = [
     "MatrixNormalSampler",
     "MatrixNormalEstimator",
     "MatrixNormalDataEncoder",
+    "WatsonDistribution",
+    "WatsonSampler",
+    "WatsonEstimator",
+    "WatsonDataEncoder",
     "VonMisesFisherSampler",
     "VonMisesFisherEstimator",
     "VonMisesFisherDataEncoder",
@@ -1246,6 +1250,12 @@ from pysp.stats.multivariate.von_mises_fisher import (
     VonMisesFisherDistribution,
     VonMisesFisherEstimator,
     VonMisesFisherSampler,
+)
+from pysp.stats.multivariate.watson import (
+    WatsonDataEncoder,
+    WatsonDistribution,
+    WatsonEstimator,
+    WatsonSampler,
 )
 from pysp.stats.sets.bernoulli_set import (
     BernoulliSetDataEncoder,
