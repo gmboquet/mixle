@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
@@ -19,6 +20,23 @@ class ComputeEngine(ABC):
     supports_autograd = False
     dtype = None
     device = "cpu"
+
+    # Mathematical constants are part of the engine's arithmetic policy: a numeric engine returns
+    # plain floats, but an exact/symbolic engine overrides these so that e.g. ``pi`` stays a symbolic
+    # ``pi`` (and ``half`` an exact 1/2) instead of collapsing to a float.  ``pysp.arithmetic`` reads
+    # them from the active engine so call sites can be backend-neutral.
+    pi = math.pi
+    e = math.e
+    euler_gamma = 0.5772156649015328606
+    inf = math.inf
+    zero = 0.0
+    one = 1.0
+    two = 2.0
+    half = 0.5
+
+    def constant(self, value: Any) -> Any:
+        """Return ``value`` in this engine's scalar representation (identity for numeric engines)."""
+        return value
 
     # Capability flags for kernel/E-step dispatch -- routed on these instead of the engine name so
     # new backends opt in by setting flags rather than by editing core dispatch ("register, don't

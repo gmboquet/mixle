@@ -76,6 +76,8 @@ class SymbolicExpression:
             return self.args[0]
         if self.op == "const":
             return repr(self.args[0])
+        if not self.args:  # nullary named constant (pi, e, euler_gamma, inf)
+            return self.op
         if self.op in _INFIX and len(self.args) == 2:
             return "(%s %s %s)" % (self.args[0], _INFIX[self.op], self.args[1])
         if self.op == "neg":
@@ -159,6 +161,22 @@ class SymbolicEngine(ComputeEngine):
 
     name = "symbolic"
     supports_autograd = False
+
+    # Exact/symbolic constants: pi, e and euler_gamma are named nodes (they lower to sympy.pi etc.
+    # and never collapse to a float); the small numbers are symbolic constants, with half kept as an
+    # exact 1/2 rather than the float 0.5.
+    pi = SymbolicExpression("pi", ())
+    e = SymbolicExpression("e", ())
+    euler_gamma = SymbolicExpression("euler_gamma", ())
+    inf = SymbolicExpression("inf", ())
+    zero = SymbolicExpression.constant(0)
+    one = SymbolicExpression.constant(1)
+    two = SymbolicExpression.constant(2)
+    half = SymbolicExpression("div", (SymbolicExpression.constant(1), SymbolicExpression.constant(2)))
+
+    def constant(self, value: Any) -> SymbolicExpression:
+        """Return ``value`` as a symbolic constant node."""
+        return SymbolicExpression.constant(value)
 
     def symbol(self, name: str) -> SymbolicExpression:
         """Return a named symbolic expression variable."""
@@ -510,6 +528,11 @@ _EVAL_OPS: dict[str, Callable[..., Any]] = {
     "isnan": math.isnan,
     "isinf": math.isinf,
     "betaln": lambda x, y: math.lgamma(x) + math.lgamma(y) - math.lgamma(x + y),
+    # nullary named constants
+    "pi": lambda: math.pi,
+    "e": lambda: math.e,
+    "euler_gamma": lambda: 0.5772156649015328606,
+    "inf": lambda: math.inf,
 }
 
 
