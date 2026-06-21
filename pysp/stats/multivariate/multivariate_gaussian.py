@@ -431,6 +431,37 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         """
         return MultivariateGaussianSampler(self, seed)
 
+    def condition(self, observed: dict[int, float]) -> "MultivariateGaussianDistribution":
+        """Return the conditional distribution over the unobserved dimensions given ``observed``.
+
+        ``observed`` maps dimension index to its fixed value; the result is the closed-form Gaussian
+        conditional over the remaining dimensions (in increasing index order):
+
+            mu_{u|o} = mu_u + Sigma_uo Sigma_oo^{-1} (x_o - mu_o),
+            Sigma_{u|o} = Sigma_uu - Sigma_uo Sigma_oo^{-1} Sigma_ou.
+
+        Sampling the result is ``given=``-style conditional sampling (draw the unobserved coordinates
+        consistent with the observed ones). Raises if no dimension is left unobserved.
+        """
+        obs_idx = np.array(sorted(observed), dtype=int)
+        if obs_idx.size and (obs_idx.min() < 0 or obs_idx.max() >= self.dim):
+            raise ValueError("observed indices must be in [0, dim)")
+        unobs_idx = np.array([i for i in range(self.dim) if i not in observed], dtype=int)
+        if unobs_idx.size == 0:
+            raise ValueError("at least one dimension must be left unobserved")
+        if obs_idx.size == 0:
+            return MultivariateGaussianDistribution(self.mu.copy(), self.covar.copy())
+        x_o = np.array([observed[i] for i in obs_idx], dtype=np.float64)
+        cov = np.asarray(self.covar, dtype=np.float64)
+        s_oo = cov[np.ix_(obs_idx, obs_idx)]
+        s_uo = cov[np.ix_(unobs_idx, obs_idx)]
+        s_uu = cov[np.ix_(unobs_idx, unobs_idx)]
+        solve = np.linalg.solve(s_oo, np.concatenate([(x_o - self.mu[obs_idx])[:, None], s_uo.T], axis=1))
+        mu_cond = self.mu[unobs_idx] + s_uo @ solve[:, 0]
+        cov_cond = s_uu - s_uo @ solve[:, 1:]
+        cov_cond = 0.5 * (cov_cond + cov_cond.T)
+        return MultivariateGaussianDistribution(mu_cond, cov_cond)
+
     def estimator(self, pseudo_count: float | None = None):
         """Create a MultivariateGaussianEstimator for estimating this distribution.
 
