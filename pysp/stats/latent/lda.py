@@ -428,6 +428,19 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         log_phi -= logsumexp(log_phi, axis=1, keepdims=True)
         return MeanFieldLDAPosterior(gamma, np.exp(log_phi), counts)
 
+    def posterior_predictive(self, doc: Sequence[tuple[int, float]], n_words: int, seed: int | None = None) -> list[Any]:
+        """Draw ``n_words`` new words conditioned on the document ``doc``.
+
+        Sample the document-topic mix ``theta ~ q(theta) = Dir(gamma)`` from the variational posterior,
+        then generate each new word by drawing a topic ``~ theta`` and a word from that topic -- "given
+        this document, generate more words from its inferred topic mixture".
+        """
+        rng = RandomState(seed)
+        theta = rng.dirichlet(self.latent_posterior(doc).gamma)
+        topic_samplers = [t.sampler(seed=rng.randint(maxrandint)) for t in self.topics]
+        topics = rng.choice(self.n_topics, size=int(n_words), p=theta)
+        return [topic_samplers[k].sample() for k in topics]
+
     def sampler(self, seed: int | None = None) -> "LDASampler":
         """Create an LDASampler object for sampling documents from this distribution.
 

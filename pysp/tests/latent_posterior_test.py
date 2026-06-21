@@ -156,6 +156,14 @@ class LDAMeanFieldPosteriorTest(unittest.TestCase):
         expected = dirichlet(self.q.gamma).entropy() + h_z  # differential H[q(theta)] may be negative
         self.assertAlmostEqual(self.q.entropy(), expected, places=9)
 
+    def test_posterior_predictive_generates_from_inferred_topics(self):
+        w = np.array(self.m.posterior_predictive(self.doc, n_words=3000, seed=0))  # topic-0 doc
+        self.assertEqual(len(w), 3000)
+        self.assertGreater(np.mean(np.isin(w, [0, 1])), 0.8)  # words come from topic-0 vocab
+        w1 = np.array(self.m.posterior_predictive([(2, 8), (3, 7)], n_words=3000, seed=1))  # topic-1 doc
+        self.assertGreater(np.mean(np.isin(w1, [2, 3])), 0.8)
+        self.assertTrue(np.array_equal(w, np.array(self.m.posterior_predictive(self.doc, 3000, seed=0))))
+
     def test_sample_returns_theta_and_per_token_topics(self):
         theta, z = self.q.sample(rng=0)
         self.assertAlmostEqual(float(theta.sum()), 1.0)
