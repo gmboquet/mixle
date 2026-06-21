@@ -398,6 +398,59 @@ class FieldPosterior:
         sd = np.sqrt(np.clip(np.diag(np.linalg.inv(prec)), 1e-12, None))
         return self.map_values[self._field_name], sd
 
+    def sample(self, size: int = 1, rng=None, *, nodes: Sequence[str] | None = None) -> dict:
+        """Draw joint samples from the Gaussian posterior, returned in each node's natural space.
+
+        The Laplace / Gauss-Newton posterior is the Gaussian ``N(map, _cov)`` in the *unconstrained*
+        parameter space; this draws via a Cholesky factor of that joint covariance (so cross-node and
+        within-field correlations are preserved) and maps each draw back through the node's support
+        transform (``exp`` for positive nodes). That back-transform is *exact* -- unlike :meth:`cov`,
+        which linearizes it with the delta method -- so a positive node's draws are properly lognormal.
+        A mean-field ``how='vi'`` (or low-rank Woodbury) fit exposes only per-node marginal variances, so
+        there the draws are independent across nodes (which is exactly the mean-field assumption).
+
+        Args:
+            size: number of joint draws.
+            rng: a ``numpy.random.RandomState``, an integer seed, or ``None``.
+            nodes: which nodes to return (default: all). The draw is always joint over the full vector.
+
+        Returns:
+            ``{node: ndarray}`` with shape ``(size,)`` for scalar nodes and ``(size, dim)`` otherwise.
+        """
+        if rng is None or isinstance(rng, (int, np.integer)):
+            rng = np.random.RandomState(None if rng is None else int(rng))
+        has_full = self._cov is not None and np.asarray(self._cov).size > 0
+        if not has_full and not self._marg_var:
+            raise ValueError(
+                "this posterior carries no covariance (how='map'); refit with how='laplace', "
+                "'gauss_newton', or 'vi' to sample."
+            )
+        dim = max((hi for _, hi in self._layout.values()), default=0)
+        mu = np.zeros(dim)
+        for node, (lo, hi) in self._layout.items():
+            val = np.atleast_1d(np.asarray(self.map_values[node], dtype=float))
+            if val.size == 0:
+                continue
+            mu[lo:hi] = np.log(np.clip(val, 1e-12, None)) if self._supports.get(node) == "positive" else val
+        z = rng.standard_normal((size, dim))
+        if has_full:
+            cov = np.atleast_2d(np.asarray(self._cov, dtype=float))
+            chol = np.linalg.cholesky(cov + 1e-12 * np.eye(dim))
+            draws = mu[None, :] + z @ chol.T
+        else:  # mean-field: independent per-node marginal draws
+            sdv = np.zeros(dim)
+            for node, (lo, hi) in self._layout.items():
+                if node in self._marg_var:
+                    sdv[lo:hi] = np.sqrt(np.clip(np.atleast_1d(self._marg_var[node]), 1e-12, None))
+            draws = mu[None, :] + z * sdv[None, :]
+        out = {}
+        for node in self._layout if nodes is None else nodes:
+            lo, hi = self._slice(node).start, self._slice(node).stop
+            u = draws[:, lo:hi]
+            v = np.exp(u) if self._supports.get(node) == "positive" else u
+            out[node] = v[:, 0] if hi - lo == 1 else v
+        return out
+
     def summary(self) -> dict:
         out = {}
         for node in self._layout:
