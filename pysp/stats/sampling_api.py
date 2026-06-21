@@ -58,11 +58,11 @@ def sample(
     Raises:
         TypeError: if ``model`` is not a recognized samplable object.
     """
-    # Relation -- Gibbs-weighted member draws.
+    # Relation -- a sampler under a Gibbs measure over its members (temperature/k/uniform are sampler args).
     from pysp.relations import Relation
 
     if isinstance(model, Relation):
-        return model.sample(size, rng=_resolve_rng(seed, rng), **kwargs)
+        return model.sampler(seed=seed, rng=rng, **kwargs).sample(size)
 
     # FieldPosterior -- joint field/parameter draws (importing lazily; field.py needs torch).
     try:
