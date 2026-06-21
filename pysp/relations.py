@@ -48,6 +48,7 @@ __all__ = [
     "BestSubsetRegression",
     "EditDistance",
     "Relation",
+    "RelationSampler",
     "ShortestPath",
     "Solution",
     "SpanningTree",
@@ -199,66 +200,97 @@ class Relation(ABC):
         """The ``k`` best solutions as a list."""
         return list(self.enumerator(k=k))
 
-    def sample(
+    def sampler(
         self,
-        size: int | None = None,
+        seed: int | None = None,
         *,
-        rng=None,
         temperature: float = 1.0,
         k: int | None = None,
         uniform: bool = False,
-    ) -> Any:
-        """Draw member value(s) of the relation by a Gibbs weight over the objective.
+        rng=None,
+    ) -> RelationSampler:
+        """Return a :class:`RelationSampler` that draws members under a Gibbs measure over the objective.
+
+        A relation is a *specification* of a structured space, not itself a random object; sampling it
+        means imposing a distribution over its members, which needs an RNG and a temperature. So -- like
+        every other pysp object -- it hands back a sampler (``relation.sampler(seed).sample(size)``) that
+        owns the stream and the Gibbs measure, rather than being sampled directly.
 
         Each enumerated member is weighted ``exp(-objective / temperature)`` when ``sense == "min"``
-        (low cost favoured) or ``exp(objective / temperature)`` when ``sense == "max"`` (high score
-        favoured). ``temperature -> 0`` concentrates on the optimum; ``-> inf`` (or ``uniform=True``)
-        is uniform over the enumerated members.
-
-        Exactness: the weights are normalized over the members actually enumerated, so this is an
-        *exact* draw from the Gibbs distribution only when the relation is finite and fully enumerated
-        (``k=None``). For an infinite or very large relation pass ``k`` to truncate to the ``k`` best --
-        the dropped tail is the lowest-weight mass (for ``sense="min"`` the ``k`` best are the highest
-        weight), so it is a good approximation at low temperature and degrades as ``temperature`` grows.
-        ``k`` is required for an infinite relation (otherwise enumeration does not terminate).
+        (low cost favoured) or ``exp(objective / temperature)`` when ``sense == "max"``. ``temperature
+        -> 0`` concentrates on the optimum; ``-> inf`` (or ``uniform=True``) is uniform. The draw is an
+        *exact* Gibbs sample only when the relation is finite and fully enumerated (``k=None``); pass
+        ``k`` to truncate an infinite/large relation to its ``k`` best (the dropped tail is the
+        lowest-weight mass -- a good low-temperature approximation, and ``k`` is required if infinite).
 
         Args:
-            size: ``None`` returns a single member value; an int returns a list of that many draws.
-            rng: a ``numpy.random.RandomState``, an integer seed, or ``None``.
+            seed: scalar seed for the sampler's RandomState (ignored if ``rng`` is given).
             temperature: Gibbs temperature (default 1.0).
-            k: enumerate at most this many members before sampling (``None`` = all; required if infinite).
+            k: enumerate at most this many members (``None`` = all; required if infinite).
             uniform: ignore objectives and sample uniformly over the enumerated members.
-
-        Returns:
-            A member ``value`` (``size=None``) or a list of member values (``size=int``).
-
-        Raises:
-            ValueError: if the relation enumerates no members (infeasible).
+            rng: a shared ``numpy.random.RandomState`` (takes precedence over ``seed``).
         """
-        if rng is None or isinstance(rng, (int, np.integer)):
-            rng = np.random.RandomState(None if rng is None else int(rng))
-        sols = list(self.enumerator(k=k))
-        if not sols:
-            raise ValueError("relation is infeasible: no members to sample.")
-        obj = np.array([s.objective for s in sols], dtype=float)
-        if uniform or not np.isfinite(temperature):  # infinite temperature -> uniform
-            log_w = np.zeros(len(sols))
-        elif temperature <= 0.0:  # zero temperature -> point mass on the best enumerated member
-            best = int(np.argmin(obj) if self.sense == "min" else np.argmax(obj))
-            return sols[best].value if size is None else [sols[best].value] * size
-        else:
-            sign = -1.0 if self.sense == "min" else 1.0
-            log_w = sign * obj / float(temperature)
-        log_w = log_w - log_w.max()
-        p = np.exp(log_w)
-        p /= p.sum()
-        idx = rng.choice(len(sols), size=size, p=p)
-        if size is None:
-            return sols[int(idx)].value
-        return [sols[int(i)].value for i in idx]
+        return RelationSampler(self, seed, temperature=temperature, k=k, uniform=uniform, rng=rng)
 
     def __iter__(self) -> Iterator[Solution]:
         return self.enumerator()
+
+
+class RelationSampler:
+    """Draws members of a :class:`Relation` under a Gibbs measure ``exp(-objective / temperature)``.
+
+    Constructed via :meth:`Relation.sampler`. It enumerates the relation's members once (lazily, on the
+    first draw) and caches the resulting categorical, so repeated ``sample`` calls are cheap. ``size=None``
+    returns one member value; ``size=int`` returns a list of that many draws.
+    """
+
+    def __init__(
+        self,
+        relation: Relation,
+        seed: int | None = None,
+        *,
+        temperature: float = 1.0,
+        k: int | None = None,
+        uniform: bool = False,
+        rng=None,
+    ) -> None:
+        self.relation = relation
+        self.rng = rng if rng is not None else np.random.RandomState(seed)
+        self.temperature = temperature
+        self.k = k
+        self.uniform = uniform
+        self._values: list[Any] | None = None
+        self._p: np.ndarray | None = None  # categorical over members; None at zero temperature
+        self._point: int | None = None  # index of the optimum when temperature == 0
+
+    def _prepare(self) -> None:
+        if self._values is not None:
+            return
+        sols = list(self.relation.enumerator(k=self.k))
+        if not sols:
+            raise ValueError("relation is infeasible: no members to sample.")
+        self._values = [s.value for s in sols]
+        obj = np.array([s.objective for s in sols], dtype=float)
+        if self.uniform or not np.isfinite(self.temperature):  # infinite temperature -> uniform
+            self._p = np.full(len(sols), 1.0 / len(sols))
+        elif self.temperature <= 0.0:  # zero temperature -> point mass on the best enumerated member
+            self._point = int(np.argmin(obj) if self.relation.sense == "min" else np.argmax(obj))
+        else:
+            sign = -1.0 if self.relation.sense == "min" else 1.0
+            log_w = sign * obj / float(self.temperature)
+            log_w -= log_w.max()
+            p = np.exp(log_w)
+            self._p = p / p.sum()
+
+    def sample(self, size: int | None = None) -> Any:
+        """Draw a member value (``size=None``) or a list of ``size`` member values."""
+        self._prepare()
+        if self._p is None:  # zero temperature: the optimum, deterministically
+            return self._values[self._point] if size is None else [self._values[self._point]] * size
+        idx = self.rng.choice(len(self._values), size=size, p=self._p)
+        if size is None:
+            return self._values[int(idx)]
+        return [self._values[int(i)] for i in idx]
 
 
 # ---------------------------------------------------------------------------
