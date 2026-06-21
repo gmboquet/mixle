@@ -25,6 +25,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import maxrandint
+from pysp.stats._sampling import scatter_component_draws
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -348,14 +349,17 @@ class GaussianMixtureSampler(DistributionSampler):
         self.dist = dist
         self.compSamplers = [d.sampler(seed=rng_loc.randint(0, maxrandint)) for d in self.dist.components]
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw iid samples from the Gaussian mixture.
 
         If size is None, a single length-d numpy array is returned. Otherwise a numpy array
-        with shape (size, d) containing 'size' iid samples is returned.
+        with shape (size, d) containing 'size' iid samples is returned. With ``batched=True``
+        (default) component draws are grouped and scattered -- bit-identical to the per-draw loop
+        (``batched=False``) but far faster, since each component sampler owns an independent RNG.
 
         Args:
             size (Optional[int]): Number of iid samples to draw.
+            batched (bool): Vectorize component draws (default); set False for the per-draw loop.
 
         Returns:
             Numpy array with shape (d,) if size is None, else with shape (size, d).
@@ -365,8 +369,9 @@ class GaussianMixtureSampler(DistributionSampler):
 
         if size is None:
             return self.compSamplers[comp_state].sample()
-        else:
+        if not batched:
             return np.asarray([self.compSamplers[i].sample() for i in comp_state])
+        return np.asarray(scatter_component_draws(comp_state, self.compSamplers, int(size)))
 
 
 class GaussianMixtureAccumulator(SequenceEncodableStatisticAccumulator):
