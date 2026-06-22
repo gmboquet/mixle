@@ -229,6 +229,14 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         """Return this distribution's own Fisher view."""
         return BetaFisherView(self)
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(self.a / (self.a + self.b))
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float(self.a * self.b / ((self.a + self.b) ** 2 * (self.a + self.b + 1.0)))
+
     def sampler(self, seed: int | None = None) -> "BetaSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BetaSampler(self, seed)

@@ -271,6 +271,14 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
 
         return CountFisherView(self, _fisher_mean_var, _count_data, _identity_encoded)
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(self.beta)
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float(self.beta * self.beta)
+
     def sampler(self, seed: int | None = None) -> "ExponentialSampler":
         """Create an ExponentialSampler object with scale beta.
 

@@ -283,6 +283,14 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
 
         return CountFisherView(self, _fisher_mean_var, _count_data, _fisher_encoded)
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(self.lam)
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float(self.lam)
+
     def sampler(self, seed: int | None = None) -> "PoissonSampler":
         """Create PoissonSampler object with PoissonDistribution instance and seed (Optional[int]) passed.
 

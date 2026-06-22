@@ -400,6 +400,14 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         return CountFisherView(self, _fisher_mean_var, _count_data, _fisher_encoded)
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(float(getattr(self, 'min_val', 0) or 0) + self.n * self.p)
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float(self.n * self.p * (1.0 - self.p))
+
     def sampler(self, seed: int | None = None) -> "BinomialSampler":
         """Returns BinomialSampler for generating samples from BinomialDistribution(n,p,min_val).
 
