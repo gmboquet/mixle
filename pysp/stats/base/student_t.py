@@ -139,6 +139,14 @@ class StudentTDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(_sp.ppf(q, self.df, loc=self.loc, scale=self.scale))
 
+    def mean(self) -> float:
+        """Mean (loc) for df > 1, else inf (undefined)."""
+        return float(self.loc) if self.df > 1.0 else float("inf")
+
+    def variance(self) -> float:
+        """Variance scale^2 * df/(df-2) for df > 2, else inf."""
+        return float(self.scale * self.scale * self.df / (self.df - 2.0)) if self.df > 2.0 else float("inf")
+
     def sampler(self, seed: int | None = None) -> "StudentTSampler":
         """Return a sampler for drawing observations from this distribution."""
         return StudentTSampler(self, seed)

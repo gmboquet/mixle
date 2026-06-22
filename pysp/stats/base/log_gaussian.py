@@ -346,6 +346,18 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
         """Return this distribution's own Fisher view."""
         return LogGaussianFisherView(self)
 
+    def mean(self) -> float:
+        """Mean exp(mu + sigma2/2)."""
+        import math
+
+        return float(math.exp(self.mu + 0.5 * self.sigma2))
+
+    def variance(self) -> float:
+        """Variance (exp(sigma2) - 1) * exp(2 mu + sigma2)."""
+        import math
+
+        return float((math.exp(self.sigma2) - 1.0) * math.exp(2.0 * self.mu + self.sigma2))
+
     def sampler(self, seed: int | None = None) -> "LogGaussianSampler":
         """Create an LogGaussianSampler object from parameters of LogGaussianDistribution instance.
 
