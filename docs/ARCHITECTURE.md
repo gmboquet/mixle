@@ -134,9 +134,9 @@ thin re-export shims left at the old paths); only the object namespaces remain r
 
 | Module | Role | Physical state | Backed by |
 |---|---|---|---|
-| `pysp.enumeration` | concern | **package — machinery moved in** | `algorithms` (was utils.enumeration) + `quantization/` (was utils.quantization) + `model_enumeration` + `density_rank` (descending-probability rank/CDF, was utils.density_rank) + DistributionEnumerator (pdist) + Enumerable |
-| `pysp.sampling` | concern | **package — machinery moved in** | `sampling_api` + `latent_posterior` + `_sampling` (were under stats) + pdist samplers + PosteriorPredictive |
-| `pysp.inference` | concern | **package — machinery moved in** | `estimation` / `em` / `fit` / `objectives` / `fisher` / `priors` (were utils) + `mcmc/` (were utils.mcmc) + `target` / `backends` / `diagnostics` (the NUTS/ADVI facade, were `pysp.infer`) + bayes.conjugate (re-exported) |
+| `pysp.enumeration` | concern | **package — machinery moved in** | `algorithms` (was utils.enumeration) + `quantization/` + `model_enumeration` + `density_rank` (descending-probability rank/CDF) + `assignment` (k-best Murty) + `spanning` (k-best spanning trees) + DistributionEnumerator (pdist) + Enumerable |
+| `pysp.sampling` | concern | **package — machinery moved in (stats shims removed)** | `sampling_api` + `latent_posterior` + `_sampling` (were under stats; old stats shims now deleted) + pdist samplers + PosteriorPredictive |
+| `pysp.inference` | concern | **package — machinery moved in** | `estimation` / `em` / `fit` / `objectives` / `fisher` / `priors` / `streaming` (were utils) + `mcmc/` (were utils.mcmc) + `target` / `backends` / `diagnostics` (the NUTS/ADVI facade, were `pysp.infer`) + bayes.conjugate (re-exported) |
 | `pysp.ops` | operations | self-contained module | new (quantize) + the combinators, capability-gated |
 | `pysp.contracts` | kernel | re-export shim | every ABC/Protocol in one import (capabilities eager, subsystem roles lazy) |
 | `pysp.dist` / `pysp.process` / `pysp.models` | objects | re-export shims (by design) | aliases of stats / the point-process families / the generic-model package |

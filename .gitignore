@@ -46,3 +46,7 @@ pip-delete-this-directory.txt
 
 # Downloaded example datasets
 /data/
+
+# local-only design docs + audit ledgers (not for GitHub)
+docs/
+audit/
