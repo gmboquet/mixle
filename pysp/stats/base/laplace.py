@@ -130,6 +130,14 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(_sp.ppf(q, loc=self.mu, scale=self.b))
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(self.mu)
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float(2.0 * self.b * self.b)
+
     def sampler(self, seed: int | None = None) -> "LaplaceSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LaplaceSampler(self, seed)

@@ -327,6 +327,14 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         """Return the Gaussian's own Fisher view."""
         return GaussianFisherView(self)
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(self.mu)
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float(self.sigma2)
+
     def sampler(self, seed: int | None = None) -> "GaussianSampler":
         """Create an GaussianSampler object from parameters of GaussianDistribution instance.
 

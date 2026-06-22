@@ -119,6 +119,14 @@ class LogisticDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(_sp.ppf(q, loc=self.loc, scale=self.scale))
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(self.loc)
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float((np.pi ** 2 / 3.0) * self.scale * self.scale)
+
     def sampler(self, seed: int | None = None) -> "LogisticSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LogisticSampler(self, seed)

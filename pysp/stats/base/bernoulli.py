@@ -210,6 +210,14 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
 
         return CountFisherView(self, _fisher_mean_var, _count_data, _identity_encoded)
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(self.p)
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float(self.p * (1.0 - self.p))
+
     def sampler(self, seed: int | None = None) -> "BernoulliSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BernoulliSampler(self, seed)

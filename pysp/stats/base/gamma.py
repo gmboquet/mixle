@@ -320,6 +320,14 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         """Return this distribution's own Fisher view."""
         return GammaFisherView(self)
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(self.k * self.theta)
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float(self.k * self.theta * self.theta)
+
     def sampler(self, seed: int | None = None) -> "GammaSampler":
         """Create a GammaSampler object from GammaDistribution.
 
