@@ -214,11 +214,12 @@ def _em_step_fn(engine: Any | None, strategy: Any | None = None):
     import. Otherwise the standard exact E/M step is used (engine-aware).
     """
     if strategy is not None:
-        step_method = getattr(strategy, "step", None)
-        if callable(step_method):
+        from pysp.utils.em import EMStrategy
+
+        if isinstance(strategy, EMStrategy):
 
             def step(enc, estimator, model):
-                result = step_method(enc, estimator, model, engine=engine)
+                result = strategy.step(enc, estimator, model, engine=engine)
                 return getattr(result, "model", result)
 
             return step
