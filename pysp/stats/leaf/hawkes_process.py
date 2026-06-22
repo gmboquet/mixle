@@ -93,6 +93,27 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.keys),
         )
 
+    def intensity(self, t: float, times: Any, marks: Any = None) -> float:
+        """Conditional rate ``lambda(t) = mu + alpha sum_{t_i < t} exp(-beta (t - t_i))`` given the history.
+
+        ``times`` is the event history; ``marks`` is accepted for ``TemporalPointProcess`` signature
+        parity (the univariate Hawkes process is unmarked) and is ignored.
+        """
+        ti = np.asarray(times, dtype=np.float64).reshape(-1)
+        past = ti[ti < t]
+        return float(self.mu + self.alpha * np.sum(np.exp(-self.beta * (t - past))))
+
+    def expected_count(self, t_start: float, t_end: float, times: Any, marks: Any = None) -> float:
+        """Compensator ``integral_{t_start}^{t_end} lambda(s) ds`` of the intensity given the history.
+
+        ``marks`` is accepted for signature parity and ignored (the univariate process is unmarked).
+        """
+        ti = np.asarray(times, dtype=np.float64).reshape(-1)
+        tp = ti[ti < t_end]
+        lo = np.maximum(t_start, tp)
+        kernel = np.exp(-self.beta * (lo - tp)) - np.exp(-self.beta * (t_end - tp))
+        return float(self.mu * (t_end - t_start) + (self.alpha / self.beta) * np.sum(kernel))
+
     def density(self, x: Any) -> float:
         """Probability density of one realization ``x`` (a sequence of event times)."""
         return math.exp(self.log_density(x))

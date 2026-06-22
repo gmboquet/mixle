@@ -112,6 +112,19 @@ def test_conjugate_updatable_is_the_closed_form_tier():
         assert d.has_conjugate_prior() == cap.supports(d, cap.ConjugateUpdatable) == is_conjugate_family(d)
 
 
+def test_temporal_point_process_facet():
+    from pysp.stats.leaf.hawkes_process import HawkesProcessDistribution
+
+    h = HawkesProcessDistribution(0.5, 0.3, 1.5, window=10.0)
+    assert cap.supports(h, cap.TemporalPointProcess)
+    assert not cap.supports(GaussianDistribution(0, 1), cap.TemporalPointProcess)
+    # the unified surface is real: intensity + compensator reconstruct the log-density
+    t = np.array([0.4, 1.1, 2.0, 3.7])
+    loglam = sum(np.log(h.intensity(float(ti), t[:i])) for i, ti in enumerate(t))
+    recon = loglam - h.expected_count(0.0, 10.0, t)
+    assert recon == pytest.approx(h.log_density(t), abs=1e-9)
+
+
 def test_core_contracts_are_enforced_abcs():
     # The pdist contracts are real ABCs now: isinstance works, and an incomplete subclass can't
     # be instantiated.

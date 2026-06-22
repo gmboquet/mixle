@@ -35,6 +35,7 @@ __all__ = [
     "SupportsBackendScoring",
     "SupportsBackendComponentScoring",
     "SupportsStackedBackend",
+    "TemporalPointProcess",
     "PredicateCapability",
     "Enumerable",
     "FiniteSupport",
@@ -124,6 +125,21 @@ class SupportsStackedBackend(Protocol):
 
     def backend_stacked_params(self, dists: Any, engine: Any) -> Any: ...
     def backend_stacked_log_density(self, x: Any, params: Any, engine: Any) -> Any: ...
+
+
+@runtime_checkable
+class TemporalPointProcess(Protocol):
+    """An event-time point process exposing its conditional intensity and compensator.
+
+    ``intensity(t, times, marks=None)`` is the conditional rate lambda(t) given the history; the
+    univariate Hawkes / inhomogeneous-Poisson leaves return a float, the multivariate variant a
+    per-mark vector. ``expected_count(t_start, t_end, times, marks=None)`` is the integrated intensity
+    (compensator) over the window. (Birth-death is a population process, not an intensity-based point
+    process, and is intentionally excluded.)
+    """
+
+    def intensity(self, t: float, times: Any, marks: Any = None) -> Any: ...
+    def expected_count(self, t_start: float, t_end: float, times: Any, marks: Any = None) -> Any: ...
 
 
 # ---------------------------------------------------------------------------
@@ -230,14 +246,10 @@ class SetValued(PredicateCapability):
         return hasattr(obj, "num_required") and hasattr(obj, "required")
 
 
-# Deferred capability — named in docs/ABSTRACTIONS.md but NOT yet reliably detectable, because the
-# underlying families do not share a method surface. Formalising it is a family-surface unification
-# (a refactor), not just adding a Protocol here:
-#   * TemporalPointProcess — the point-process leaves (hawkes/inhomogeneous_poisson/birth_death) expose
-#     no common intensity()/compensator() method; give them one first.
-# (ConjugateUpdatable was deferred for the same reason and is now formalised above, backed by the
-# single conjugate_posterior registry. The PDE forward operator is free functions in ppl/pde_solve.py;
-# ppl/dynamics.DynamicsOperator is already a formal ABC.)
+# All capability facets named in docs/ABSTRACTIONS.md are now formalised. ConjugateUpdatable and
+# TemporalPointProcess (which previously needed a family-surface unification) are detectable above;
+# the PDE forward-operator contract lives in ppl/_operator.py (ForwardOperator) and ppl/dynamics
+# (DynamicsOperator ABC); the DOE Surrogate/Acquisition contracts live in doe/_contracts.py.
 
 
 # Capabilities that apply to distributions (iterated by ``capabilities(dist)``). EngineResidentEStep,
@@ -256,6 +268,7 @@ ALL_CAPABILITIES: tuple[type, ...] = (
     SetValued,
     SupportsBackendScoring,
     SupportsBackendComponentScoring,
+    TemporalPointProcess,
     Neutral,
 )
 
