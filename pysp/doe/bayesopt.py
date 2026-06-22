@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
-from scipy.special import ndtr
+from scipy.special import erfcx, ndtr
 
 from pysp.doe._contracts import Acquisition, Surrogate
 from pysp.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
@@ -47,6 +47,35 @@ def expected_improvement(
     pdf = np.exp(-0.5 * z * z) / np.sqrt(2.0 * np.pi)
     ei[pos] = improve[pos] * ndtr(z[pos]) + std[pos] * pdf[pos]
     return np.maximum(ei, 0.0)
+
+
+def log_expected_improvement(
+    mean: Any, std: Any, best: float, xi: float = 0.0, *, maximize: bool = False, **_: Any
+) -> np.ndarray:
+    """Return the log expected-improvement acquisition -- a numerically stable EI (Ament et al. 2023).
+
+    Mathematically ``log(EI)``, but computed so it stays finite and informative deep in the
+    no-improvement tail where ``EI`` itself underflows to 0 (and ``log EI`` to ``-inf``), keeping the
+    optimizer's ordering and gradients usable. Same argmax as :func:`expected_improvement`; points with
+    zero predictive ``std`` get ``-inf``. Higher is better. The ``z >= 0`` branch is the direct
+    well-conditioned form; the ``z < 0`` tail uses the scaled complementary error function ``erfcx``
+    (``Phi(z)/phi(z) = sqrt(pi/2) erfcx(-z/sqrt2)``), which is bounded there and so never under/overflows.
+    """
+    mean = np.asarray(mean, dtype=np.float64)
+    std = np.asarray(std, dtype=np.float64)
+    improve = (mean - best - xi) if maximize else (best - mean - xi)
+    out = np.full(std.shape, -np.inf, dtype=np.float64)
+    pos = std > 1.0e-300
+    z = improve[pos] / std[pos]
+    log_h = np.empty_like(z)
+    neg = z < 0.0
+    zp = z[~neg]
+    log_h[~neg] = np.log(zp * ndtr(zp) + np.exp(-0.5 * zp * zp) / np.sqrt(2.0 * np.pi))
+    zn = z[neg]
+    mills = np.sqrt(np.pi / 2.0) * erfcx(-zn / np.sqrt(2.0))
+    log_h[neg] = -0.5 * zn * zn - 0.5 * np.log(2.0 * np.pi) + np.log1p(zn * mills)
+    out[pos] = np.log(std[pos]) + log_h
+    return out
 
 
 def probability_of_improvement(
@@ -137,6 +166,7 @@ def _get_acquisition(acq: str | Acquisition) -> Acquisition:
 
 
 register_acquisition("expected_improvement", expected_improvement, aliases=("ei",))
+register_acquisition("log_expected_improvement", log_expected_improvement, aliases=("logei", "log_ei"))
 register_acquisition("probability_of_improvement", probability_of_improvement, aliases=("pi",))
 register_acquisition("upper_confidence_bound", upper_confidence_bound, aliases=("ucb", "lcb", "confidence_bound", "cb"))
 register_acquisition("thompson_sampling", thompson_sampling, aliases=("thompson", "ts"))
@@ -355,6 +385,7 @@ __all__: Sequence[str] = [
     "Acquisition",
     "Surrogate",
     "expected_improvement",
+    "log_expected_improvement",
     "probability_of_improvement",
     "upper_confidence_bound",
     "thompson_sampling",
