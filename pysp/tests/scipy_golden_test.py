@@ -15,8 +15,14 @@ from pysp.stats.base.exponential import ExponentialDistribution
 from pysp.stats.base.gamma import GammaDistribution
 from pysp.stats.base.gaussian import GaussianDistribution
 from pysp.stats.base.geometric import GeometricDistribution
+from pysp.stats.base.gumbel import GumbelDistribution
+from pysp.stats.base.half_normal import HalfNormalDistribution
+from pysp.stats.base.inverse_gamma import InverseGammaDistribution
+from pysp.stats.base.inverse_gaussian import InverseGaussianDistribution
 from pysp.stats.base.laplace import LaplaceDistribution
+from pysp.stats.base.log_gaussian import LogGaussianDistribution
 from pysp.stats.base.logistic import LogisticDistribution
+from pysp.stats.base.negative_binomial import NegativeBinomialDistribution
 from pysp.stats.base.pareto import ParetoDistribution
 from pysp.stats.base.poisson import PoissonDistribution
 from pysp.stats.base.rayleigh import RayleighDistribution
@@ -37,12 +43,18 @@ CONTINUOUS = [
     (StudentTDistribution(4.0, 0.0, 1.0), ss.t(df=4.0, loc=0.0, scale=1.0), [-3.0, -0.5, 0.7, 2.5]),
     (WeibullDistribution(1.5, 2.0), ss.weibull_min(c=1.5, scale=2.0), [0.2, 1.0, 2.0, 4.0]),
     (ParetoDistribution(1.0, 2.5), ss.pareto(b=2.5, scale=1.0), [1.2, 1.5, 3.0, 6.0]),
+    (GumbelDistribution(1.0, 2.0), ss.gumbel_r(loc=1.0, scale=2.0), [-1.0, 1.0, 3.0, 6.0]),
+    (HalfNormalDistribution(1.5), ss.halfnorm(scale=1.5), [0.2, 1.0, 2.5, 5.0]),
+    (InverseGammaDistribution(3.0, 2.0), ss.invgamma(a=3.0, scale=2.0), [0.3, 0.7, 1.5, 3.0]),
+    (InverseGaussianDistribution(1.5, 3.0), ss.invgauss(mu=1.5 / 3.0, scale=3.0), [0.3, 1.0, 2.0, 4.0]),
+    (LogGaussianDistribution(0.0, 0.25), ss.lognorm(s=0.5, scale=1.0), [0.3, 1.0, 2.0, 4.0]),
 ]
 DISCRETE = [
     (PoissonDistribution(4.0), ss.poisson(mu=4.0), [0, 2, 4, 8]),
     (BinomialDistribution(0.3, 10), ss.binom(10, 0.3), [0, 3, 6, 10]),
     (GeometricDistribution(0.4), ss.geom(0.4), [1, 2, 5, 10]),
     (BernoulliDistribution(0.3), ss.bernoulli(0.3), [0, 1]),
+    (NegativeBinomialDistribution(5.0, 0.4), ss.nbinom(5, 0.4), [0, 3, 7, 15]),
 ]
 
 
