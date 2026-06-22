@@ -56,6 +56,7 @@ __all__ = [
     "max_independent_set",
     "is_stable_matching",
     "max_flow",
+    "min_arborescence",
     "min_cut",
     "stable_matching",
     "tsp_held_karp",
@@ -464,6 +465,95 @@ def max_independent_set(adjacency: Any) -> list[int]:
     if n:
         np.fill_diagonal(complement, 0)
     return max_clique(complement)
+
+
+# ---------------------------------------------------------------------------
+# Minimum spanning arborescence (Chu-Liu / Edmonds)
+# ---------------------------------------------------------------------------
+def _edmonds(nodes: set[int], edges: list[tuple[int, int, float]], root: int) -> list[tuple[int, int, float]] | None:
+    """Recursive Chu-Liu/Edmonds: return the chosen original edges, or ``None`` if no arborescence."""
+    min_in: dict[int, tuple[int, int, float]] = {}
+    for v in nodes:
+        if v == root:
+            continue
+        cands = [e for e in edges if e[1] == v]
+        if not cands:
+            return None  # node v is unreachable -> no spanning arborescence
+        min_in[v] = min(cands, key=lambda e: e[2])
+    cycle = None
+    for start in nodes:
+        if start == root:
+            continue
+        seen: list[int] = []
+        v = start
+        while v != root and v not in seen:
+            seen.append(v)
+            v = min_in[v][0]
+        if v != root and v in seen:
+            cycle = seen[seen.index(v) :]
+            break
+    if cycle is None:
+        return list(min_in.values())
+    cyc = set(cycle)
+    super_node = max(nodes) + 1
+    new_nodes = {x for x in nodes if x not in cyc} | {super_node}
+    new_edges: list[tuple[int, int, float]] = []
+    origin: dict[tuple[int, int], list[tuple[tuple[int, int, float], float]]] = {}
+    for u, v, w in edges:
+        if u in cyc and v in cyc:
+            continue
+        if v in cyc:  # edge into the cycle: discount by the in-edge it would replace
+            key = (super_node if u in cyc else u, super_node)
+            adj = w - min_in[v][2]
+        elif u in cyc:  # edge leaving the cycle
+            key = (super_node, v)
+            adj = w
+        else:
+            key = (u, v)
+            adj = w
+        new_edges.append((key[0], key[1], adj))
+        origin.setdefault(key, []).append(((u, v, w), adj))
+    sub = _edmonds(new_nodes, new_edges, root)
+    if sub is None:
+        return None
+    result: list[tuple[int, int, float]] = []
+    entered = None
+    for u, v, _w in sub:
+        orig_edge, _adj = min(origin[(u, v)], key=lambda oa: oa[1])
+        result.append(orig_edge)
+        if v == super_node:
+            entered = orig_edge[1]  # the cycle vertex actually entered from outside
+    for v in cyc:
+        if v != entered:
+            result.append(min_in[v])
+    return result
+
+
+def min_arborescence(weight: Any, root: int = 0) -> tuple[float, list[int]] | None:
+    """Minimum-weight spanning arborescence rooted at ``root`` (directed MST; Chu-Liu/Edmonds).
+
+    ``weight`` is an ``n x n`` matrix of directed arc costs with ``inf`` for absent arcs. Returns
+    ``(total, parent)`` where ``parent[v]`` is the chosen in-arc tail for each non-root ``v`` (and
+    ``parent[root] = -1``), forming the cheapest arborescence in which every node is reachable from
+    ``root``; returns ``None`` if no such arborescence exists.
+    """
+    w = np.asarray(weight, dtype=np.float64)
+    n = w.shape[0]
+    edges = [
+        (u, v, float(w[u, v]))
+        for u in range(n)
+        for v in range(n)
+        if u != v and v != root and np.isfinite(w[u, v])
+    ]
+    chosen = _edmonds(set(range(n)), edges, root)
+    if chosen is None:
+        return None
+    parent = [-1] * n
+    total = 0.0
+    for u, v, ew in chosen:
+        parent[v] = u
+        total += ew
+    return total, parent
 
 
 # ---------------------------------------------------------------------------
