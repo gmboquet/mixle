@@ -97,6 +97,36 @@ class InhomogeneousPoissonProcessDistribution(SequenceEncodableProbabilityDistri
             repr(self.keys),
         )
 
+    def intensity(self, t: float, times: Any = None, marks: Any = None) -> float:
+        """Conditional rate ``lambda(t) = rates[bin containing t]``.
+
+        The inhomogeneous Poisson process is **not** self-exciting, so the rate depends only on ``t``.
+        ``times``/``marks`` are accepted for ``TemporalPointProcess`` signature parity and ignored.
+        Raises ``ValueError`` for ``t`` outside the support ``[edges[0], edges[-1]]``.
+        """
+        t = float(t)
+        if not (self.t_min <= t <= self.t_max):
+            raise ValueError("intensity queried outside the process window [edges[0], edges[-1]].")
+        # bin b is [edges[b], edges[b+1]); clamp the right endpoint into the last bin
+        b = int(np.searchsorted(self.edges, t, side="right") - 1)
+        b = min(max(b, 0), self.num_bins - 1)
+        return float(self.rates[b])
+
+    def expected_count(self, t_start: float, t_end: float, times: Any = None, marks: Any = None) -> float:
+        """Compensator ``integral_{t_start}^{t_end} lambda(s) ds`` -- the piecewise-rate integral.
+
+        Computed as ``sum_b rate_b * width(overlap([t_start, t_end], bin_b))``. ``times``/``marks`` are
+        accepted for signature parity and ignored. With ``t_start=edges[0], t_end=edges[-1]`` this returns
+        the full integral ``sum_b rate_b width_b`` used by ``log_density``.
+        """
+        a, b = float(t_start), float(t_end)
+        if b <= a:
+            return 0.0
+        lo = np.maximum(self.edges[:-1], a)
+        hi = np.minimum(self.edges[1:], b)
+        overlap = np.clip(hi - lo, 0.0, None)
+        return float(np.sum(self.rates * overlap))
+
     def _bin_counts(self, events: Any) -> np.ndarray | None:
         ev = np.asarray(events, dtype=np.float64).reshape(-1)
         if ev.size and (np.any(~np.isfinite(ev)) or np.any(ev < self.t_min) or np.any(ev > self.t_max)):
