@@ -61,6 +61,9 @@ class TorchMixture:
                 scores = model.kernel(engine=self.engine).component_scores(payload)
                 return np.asarray(self.engine.to_numpy(scores), dtype=np.float64)
             except Exception:
+                # Fall back to the legacy numpy path if the model has no modular kernel for this
+                # engine (or the kernel raises). This intentionally swallows kernel errors; set a
+                # breakpoint here when debugging a silently-degraded engine path.
                 return np.asarray(model.seq_component_log_density(payload), dtype=np.float64)
         scores = self._score(model, payload)
         return scores.reshape((-1, 1))
@@ -87,6 +90,8 @@ class TorchMixture:
             denom = self.engine.logsumexp(comp, axis=1)
             return self.engine.exp(comp - denom[:, None])
         except Exception:
+            # Fall back to the legacy numpy posterior if no modular kernel is available (or it
+            # raises). Intentionally swallows kernel errors to keep the engine path optional.
             return self.engine.asarray(model.seq_posterior(payload))
 
     def weighted_suff_stats(self, enc: tuple[int, Any], gamma: Any, model: Any | None = None) -> Any:
@@ -129,6 +134,8 @@ class TorchMixture:
                 payload, self.engine.asarray(row_weights)
             )
         except Exception:
+            # Fall back to the legacy accumulator M-step if no modular kernel exists for this
+            # (model, estimator, engine) combination (or it raises). Swallows kernel errors by design.
             acc = estimator.accumulator_factory().make()
             acc.seq_update(payload, row_weights, model)
             stats = acc.value()
@@ -234,6 +241,8 @@ class TorchMixture:
             scores = model.kernel(engine=self.engine).score(payload)
             return np.asarray(self.engine.to_numpy(scores), dtype=np.float64)
         except Exception:
+            # Fall back to the legacy numpy scorer when no modular kernel is available (or it
+            # raises). Intentionally swallows kernel errors to keep the engine path optional.
             return np.asarray(model.seq_log_density(payload), dtype=np.float64)
 
     def _validate_ignored_structure(self, model: Any) -> None:

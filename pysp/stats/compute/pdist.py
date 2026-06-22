@@ -108,9 +108,12 @@ class ProbabilityDistribution:
             raise TypeError("decoded object is %s, not %s" % (type(rv).__name__, cls.__name__))
         return rv
 
-    @abstractmethod
     def density(self, x: Any) -> float:
-        """Return the probability density or mass at a single observation."""
+        """Return the probability density or mass at a single observation.
+
+        Concrete default: exponentiate ``log_density`` (the abstract method subclasses must
+        provide). Leaves with a cheaper closed form may override this.
+        """
         return math.exp(self.log_density(x))
 
     @abstractmethod

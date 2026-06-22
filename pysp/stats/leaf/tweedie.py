@@ -53,20 +53,36 @@ def _tweedie_positive_logpdf(y: np.ndarray, mu: float, phi: float, p: float) -> 
     log_theta = math.log(theta)
     log_y = np.log(y)
 
-    # The series terms in n are unimodal with peak near n* ~ y / (a*theta); cover every observation's
-    # peak with a shared upper bound plus a generous window, then sum the negligible tails harmlessly.
-    n_peak_max = float(np.max(y)) / (a * theta) if y.size else 1.0
-    n_max = int(min(max(50.0, 2.0 * n_peak_max + 10.0 * math.sqrt(n_peak_max + 1.0) + 50.0), 20000.0))
-    n = np.arange(1, n_max + 1, dtype=np.float64)
+    # The series terms in n are unimodal. The summand's log is
+    #   A_n + (a*log y_i)*n, with A_n = n*log lam - lgamma(n+1) - lgamma(n*a) - n*a*log theta,
+    # whose Stirling-approximate stationary point grows like n* ~ y_i**(2-p) / (phi*(2-p)) (i.e. ~sqrt(y)
+    # in the dispersion-units that matter), NOT linearly in y. A fixed cap (the old n_max=20000) truncates
+    # the peak for large lambda (large mu / small phi); instead center a window on the actual peak and
+    # widen it until the boundary log-terms fall ``tol`` below the peak.
+    def _log_terms(n: np.ndarray) -> np.ndarray:
+        # log term[i, n] = c_i + A_n + (a*log y_i)*n
+        a_n = n * log_lam - gammaln(n + 1.0) - gammaln(n * a) - n * a * log_theta
+        c_i = -lam - log_y - y / theta
+        return c_i[:, None] + a_n[None, :] + (a * log_y)[:, None] * n[None, :]
 
-    # log term[i, n] = c_i + A_n + (a*log y_i)*n, with
-    #   A_n = n*log lam - lgamma(n+1) - lgamma(n*a) - n*a*log theta
-    #   c_i = -lam - log y_i - y_i/theta
-    a_n = n * log_lam - gammaln(n + 1.0) - gammaln(n * a) - n * a * log_theta
-    c_i = -lam - log_y - y / theta
-    terms = c_i[:, None] + a_n[None, :] + (a * log_y)[:, None] * n[None, :]
-    m = np.max(terms, axis=1, keepdims=True)
-    return m[:, 0] + np.log(np.sum(np.exp(terms - m), axis=1))
+    # Peak location of the saddlepoint series (Dunn & Smyth): n*_i ~ y_i**(2-p) / (phi*(2-p)).
+    n_peak = np.power(np.maximum(y, _MIN_TWEEDIE), 2.0 - p) / (phi * (2.0 - p))
+    n_peak_max = float(np.max(n_peak)) if y.size else 1.0
+    # Initial window: [1, n_hi]. Widen geometrically until both the lower boundary (n=1) and the upper
+    # boundary (n=n_hi) are ``tol`` below the per-row peak across every observation.
+    tol = 50.0  # in log-units; exp(-50) ~ 2e-22 relative contribution, far below float64 round-off
+    n_hi = max(50.0, 2.0 * n_peak_max + 10.0 * math.sqrt(n_peak_max + 1.0) + 50.0)
+    for _ in range(64):
+        n = np.arange(1, int(math.ceil(n_hi)) + 1, dtype=np.float64)
+        terms = _log_terms(n)
+        m = np.max(terms, axis=1)
+        # Boundary log-terms relative to the per-row peak; if the upper edge is still within ``tol`` of
+        # the peak for any row the window is too narrow, so widen and retry.
+        upper_gap = m - terms[:, -1]
+        if not y.size or np.all(upper_gap >= tol):
+            break
+        n_hi = n_hi * 2.0
+    return m + np.log(np.sum(np.exp(terms - m[:, None]), axis=1))
 
 
 class TweedieDistribution(SequenceEncodableProbabilityDistribution):
