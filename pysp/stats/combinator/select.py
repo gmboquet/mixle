@@ -38,10 +38,7 @@ T = TypeVar("T")
 
 
 def _child_accumulator_factory(estimator: ParameterEstimator) -> StatisticAccumulatorFactory:
-    """Return estimator.accumulator_factory(), falling back to the legacy camelCase name.
-
-    Modern estimators define accumulator_factory(); a few legacy estimators only define
-    accumulatorFactory(). This helper supports both so SelectEstimator works with either.
+    """Return estimator.accumulator_factory().
 
     Args:
         estimator (ParameterEstimator): Child estimator to obtain a factory from.
@@ -50,10 +47,7 @@ def _child_accumulator_factory(estimator: ParameterEstimator) -> StatisticAccumu
         StatisticAccumulatorFactory created by the child estimator.
 
     """
-    factory_fn = getattr(estimator, "accumulator_factory", None)
-    if factory_fn is None:
-        factory_fn = estimator.accumulatorFactory
-    return factory_fn()
+    return estimator.accumulator_factory()
 
 
 class SelectDistribution(SequenceEncodableProbabilityDistribution):

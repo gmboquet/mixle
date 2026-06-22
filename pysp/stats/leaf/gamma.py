@@ -395,13 +395,13 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
             keys (Optional[str]): GammaAccumulator objects with same key merge sufficient statistics.
 
         Attributes:
-            nobs (float): Number of observations accumulated.
+            count (float): Number of observations accumulated.
             sum (float): Weighted-sum of observations accumulated.
             sum_of_logs (float): log weighted sum of weighted log(observations).
             key (Optional[str]): GammaAccumulator objects with same key merge sufficient statistics.
 
         """
-        self.nobs = zero
+        self.count = zero
         self.sum = zero
         self.sum_of_logs = zero
         self.key = keys
@@ -452,7 +452,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
         """
         if x <= 0.0 or not np.isfinite(x):
             raise ValueError("GammaDistribution has support x > 0.")
-        self.nobs += weight
+        self.count += weight
         self.sum += x * weight
         self.sum_of_logs += log(x) * weight
 
@@ -472,19 +472,19 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.sum += np.dot(x[0], weights)
         self.sum_of_logs += np.dot(x[1], weights)
-        self.nobs += np.sum(weights)
+        self.count += np.sum(weights)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "GammaAccumulator":
         """Aggregates sufficient statistics with GammaAccumulator member sufficient statistics.
 
         Args:
-            suff_stat (Tuple[float, float, float]): Aggregated sum, sum_of_logs, nobs.
+            suff_stat (Tuple[float, float, float]): Aggregated count, sum, sum_of_logs.
 
         Returns:
             ExponentialAccumulator
 
         """
-        self.nobs += suff_stat[0]
+        self.count += suff_stat[0]
         self.sum += suff_stat[1]
         self.sum_of_logs += suff_stat[2]
 
@@ -492,7 +492,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self) -> tuple[float, float, float]:
         """Returns Tuple[float, float, float] containing sufficient statistics of GammaAccumulator."""
-        return self.nobs, self.sum, self.sum_of_logs
+        return self.count, self.sum, self.sum_of_logs
 
     def from_value(self, x: tuple[float, float, float]) -> "GammaAccumulator":
         """Sets sufficient statistics GammaAccumulator to x.
@@ -504,7 +504,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
             ExponentialAccumulator
 
         """
-        self.nobs = x[0]
+        self.count = x[0]
         self.sum = x[1]
         self.sum_of_logs = x[2]
 
@@ -523,12 +523,12 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
         if self.key is not None:
             if self.key in stats_dict:
                 x0, x1, x2 = stats_dict[self.key]
-                self.nobs += x0
+                self.count += x0
                 self.sum += x1
                 self.sum_of_logs += x2
 
             else:
-                stats_dict[self.key] = (self.nobs, self.sum, self.sum_of_logs)
+                stats_dict[self.key] = (self.count, self.sum, self.sum_of_logs)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set sufficient statistics of object instance to suff_stats with matching keys.
@@ -543,7 +543,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
         if self.key is not None:
             if self.key in stats_dict:
                 x0, x1, x2 = stats_dict[self.key]
-                self.nobs = x0
+                self.count = x0
                 self.sum = x1
                 self.sum_of_logs = x2
 
