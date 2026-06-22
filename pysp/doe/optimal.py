@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.doe._contracts import Criterion
 from pysp.doe.designs import Bounds, _as_bounds, _as_rng, sobol_design
 
 ModelMatrix = Callable[[np.ndarray], np.ndarray]
@@ -93,10 +94,10 @@ def i_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
 
 # --- criterion registry ("register, don't branch") ----------------------------------------------
 # A criterion is ``fn(info, *, ref) -> merit`` where ``merit`` is maximized over candidate designs.
-_CRITERIA: dict[str, Callable[..., float]] = {}
+_CRITERIA: dict[str, Criterion] = {}
 
 
-def register_criterion(name: str, fn: Callable[..., float], aliases: tuple[str, ...] = ()) -> None:
+def register_criterion(name: str, fn: Criterion, aliases: tuple[str, ...] = ()) -> None:
     """Register an optimality criterion ``fn`` under ``name`` (and any ``aliases``).
 
     ``fn`` is called as ``fn(info, *, ref)`` with the information matrix ``M = F.T @ F`` and must
@@ -115,7 +116,7 @@ def available_criteria() -> list[str]:
     return sorted(_CRITERIA)
 
 
-def _get_criterion(criterion: str | Callable[..., float]) -> Callable[..., float]:
+def _get_criterion(criterion: str | Criterion) -> Criterion:
     if callable(criterion):
         return criterion
     fn = _CRITERIA.get(str(criterion).lower())
@@ -132,7 +133,7 @@ register_criterion("i", i_criterion, aliases=("i_optimal", "i-optimal", "iv"))
 def _exchange(
     fmat: np.ndarray,
     n: int,
-    crit: Callable[..., float],
+    crit: Criterion,
     ref: np.ndarray | None,
     rng: RandomState,
     max_iter: int,
@@ -173,7 +174,7 @@ def optimal_design(
     *,
     candidates: np.ndarray | None = None,
     model: ModelMatrix | None = None,
-    criterion: str | Callable[..., float] = "D",
+    criterion: str | Criterion = "D",
     n_candidates: int = 256,
     n_restarts: int = 5,
     max_iter: int = 100,
@@ -229,6 +230,7 @@ def optimal_design(
 
 
 __all__: Sequence[str] = [
+    "Criterion",
     "polynomial_features",
     "d_criterion",
     "a_criterion",

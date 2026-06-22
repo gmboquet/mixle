@@ -24,6 +24,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import ndtr
 
+from pysp.doe._contracts import Acquisition, Surrogate
 from pysp.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 
 
@@ -86,10 +87,10 @@ def upper_confidence_bound(
 # --- acquisition registry ("register, don't branch") --------------------------------------------
 # An acquisition is ``fn(mean, std, best, *, maximize, **params) -> merit`` where ``merit`` is
 # maximized over the candidate set. Built-ins are registered below; third parties register their own.
-_ACQUISITIONS: dict[str, Callable[..., np.ndarray]] = {}
+_ACQUISITIONS: dict[str, Acquisition] = {}
 
 
-def register_acquisition(name: str, fn: Callable[..., np.ndarray], aliases: tuple[str, ...] = ()) -> None:
+def register_acquisition(name: str, fn: Acquisition, aliases: tuple[str, ...] = ()) -> None:
     """Register an acquisition ``fn`` under ``name`` (and any ``aliases``).
 
     ``fn`` is called as ``fn(mean, std, best, *, maximize, **params)`` and must return a merit array
@@ -108,7 +109,7 @@ def available_acquisitions() -> list[str]:
     return sorted(_ACQUISITIONS)
 
 
-def _get_acquisition(acq: str | Callable[..., np.ndarray]) -> Callable[..., np.ndarray]:
+def _get_acquisition(acq: str | Acquisition) -> Acquisition:
     if callable(acq):
         return acq
     fn = _ACQUISITIONS.get(str(acq).lower())
@@ -143,7 +144,7 @@ class BayesOptResult(OptimizationResult):
     best_y: float
 
 
-def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Any | None, fit_kwargs: dict[str, Any] | None) -> Any:
+def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Surrogate | None, fit_kwargs: dict[str, Any] | None) -> Surrogate:
     if gp is None:
         from pysp.models.gaussian_process import GaussianProcessRegressor
 
@@ -161,12 +162,12 @@ def _propose_one(
     rng: RandomState,
     *,
     maximize: bool,
-    acq_fn: Callable[..., np.ndarray],
+    acq_fn: Acquisition,
     acq_kwargs: dict[str, Any],
     n_candidates: int,
-    gp: Any | None,
+    gp: Surrogate | None,
     fit_kwargs: dict[str, Any] | None,
-) -> tuple[np.ndarray, float, Any]:
+) -> tuple[np.ndarray, float, Surrogate]:
     """Fit the surrogate, score Latin-hypercube candidates, return (best point, its merit, fitted gp)."""
     gp = _fit_surrogate(x, y, gp, fit_kwargs)
     candidates = latin_hypercube(b, n_candidates, rng)
@@ -197,9 +198,9 @@ def propose_next(
     *,
     maximize: bool = False,
     xi: float = 0.0,
-    acq: str | Callable[..., np.ndarray] = "ei",
+    acq: str | Acquisition = "ei",
     acq_kwargs: dict[str, Any] | None = None,
-    gp: Any | None = None,
+    gp: Surrogate | None = None,
     fit_kwargs: dict[str, Any] | None = None,
     return_acquisition: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, float]:
@@ -242,7 +243,7 @@ def propose_batch(
     *,
     maximize: bool = False,
     xi: float = 0.0,
-    acq: str | Callable[..., np.ndarray] = "ei",
+    acq: str | Acquisition = "ei",
     acq_kwargs: dict[str, Any] | None = None,
     fit_kwargs: dict[str, Any] | None = None,
 ) -> np.ndarray:
@@ -290,7 +291,7 @@ def minimize(
     *,
     maximize: bool = False,
     xi: float = 0.0,
-    acq: str | Callable[..., np.ndarray] = "ei",
+    acq: str | Acquisition = "ei",
     acq_kwargs: dict[str, Any] | None = None,
     n_candidates: int = 512,
     fit_kwargs: dict[str, Any] | None = None,
@@ -332,6 +333,8 @@ def minimize(
 
 
 __all__: Sequence[str] = [
+    "Acquisition",
+    "Surrogate",
     "expected_improvement",
     "probability_of_improvement",
     "upper_confidence_bound",
