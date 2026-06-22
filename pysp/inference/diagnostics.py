@@ -221,3 +221,30 @@ def mcmc_summary(chains: Any) -> list[dict[str, float]]:
             }
         )
     return out
+
+
+def geweke_z(chain: Any, first: float = 0.1, last: float = 0.5) -> np.ndarray:
+    """Geweke convergence z-score comparing the start and end of a single chain (per parameter).
+
+    Tests stationarity within one chain (Geweke 1992): if the chain has converged, the mean of its first
+    ``first`` fraction and its last ``last`` fraction agree, so the z-statistic ``(mean_a - mean_b) /
+    sqrt(se_a^2 + se_b^2)`` -- with autocorrelation-adjusted standard errors (the segment variance divided
+    by its effective sample size) -- is approximately standard normal. ``|z| < 2`` indicates convergence;
+    a large ``|z|`` flags a chain still drifting. Returns one z per parameter. Complements the
+    multi-chain :func:`split_rhat`.
+    """
+    series = np.asarray(chain, dtype=float)
+    if series.ndim == 1:
+        series = series[:, None]  # (n,) single chain, single parameter -> (n, 1)
+    n, d = series.shape
+    na = max(2, int(first * n))
+    nb = max(2, int(last * n))
+    a = series[:na]
+    b = series[n - nb :]
+    z = np.empty(d, dtype=float)
+    for k in range(d):
+        var_a = a[:, k].var(ddof=1) / max(float(ess(a[:, k][None, :, None])[0]), 1.0)
+        var_b = b[:, k].var(ddof=1) / max(float(ess(b[:, k][None, :, None])[0]), 1.0)
+        denom = np.sqrt(var_a + var_b)
+        z[k] = (a[:, k].mean() - b[:, k].mean()) / denom if denom > 0 else 0.0
+    return z
