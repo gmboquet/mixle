@@ -209,6 +209,14 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
         g2 = math.gamma(1.0 + 2.0 / self.shape)
         return float(self.scale * self.scale * (g2 - g1 * g1))
 
+    def entropy(self) -> float:
+        """Differential entropy gamma*(1 - 1/shape) + log(scale/shape) + 1."""
+        import math
+
+        import numpy as np
+
+        return float(np.euler_gamma * (1.0 - 1.0 / self.shape) + math.log(self.scale / self.shape) + 1.0)
+
     def sampler(self, seed: int | None = None) -> "WeibullSampler":
         """Return a sampler for drawing observations from this distribution."""
         return WeibullSampler(self, seed)

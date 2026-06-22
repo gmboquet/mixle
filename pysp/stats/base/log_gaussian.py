@@ -358,6 +358,12 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
         return float((math.exp(self.sigma2) - 1.0) * math.exp(2.0 * self.mu + self.sigma2))
 
+    def entropy(self) -> float:
+        """Differential entropy mu + 0.5*log(2*pi*e*sigma2)."""
+        import math
+
+        return float(self.mu + 0.5 * (math.log(2.0 * math.pi * self.sigma2) + 1.0))
+
     def sampler(self, seed: int | None = None) -> "LogGaussianSampler":
         """Create an LogGaussianSampler object from parameters of LogGaussianDistribution instance.
 

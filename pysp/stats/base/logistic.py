@@ -127,6 +127,12 @@ class LogisticDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float((np.pi ** 2 / 3.0) * self.scale * self.scale)
 
+    def entropy(self) -> float:
+        """Differential entropy log(scale) + 2."""
+        import math
+
+        return float(math.log(self.scale) + 2.0)
+
     def sampler(self, seed: int | None = None) -> "LogisticSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LogisticSampler(self, seed)

@@ -335,6 +335,12 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float(self.sigma2)
 
+    def entropy(self) -> float:
+        """Differential entropy 0.5*log(2*pi*e*sigma2)."""
+        import math
+
+        return float(0.5 * (math.log(2.0 * math.pi * self.sigma2) + 1.0))
+
     def sampler(self, seed: int | None = None) -> "GaussianSampler":
         """Create an GaussianSampler object from parameters of GaussianDistribution instance.
 
