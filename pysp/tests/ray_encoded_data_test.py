@@ -9,8 +9,8 @@ import unittest
 
 from numpy.random import RandomState
 
-from pysp.planner import available_encoded_data_backends, encoded_data
 from pysp.stats import GaussianDistribution, GaussianEstimator
+from pysp.utils.parallel.planner import available_encoded_data_backends, encoded_data
 
 HAS_RAY = importlib.util.find_spec("ray") is not None
 

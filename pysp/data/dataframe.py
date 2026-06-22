@@ -66,7 +66,7 @@ def seq_encode_dataframe(
     def _record_fields_sources(obj: Any) -> tuple[Any, Any] | None:
         """Recover ``(fields, sources)`` from any record-like object via a capability probe.
 
-        Mirrors the duck/``getattr`` probes used in ``pysp.planner`` -- a record-like model or
+        Mirrors the duck/``getattr`` probes used in ``pysp.utils.parallel.planner`` -- a record-like model or
         estimator exposes both a ``fields`` and a ``sources`` attribute; anything else is not
         record-shaped and yields ``None``.
         """

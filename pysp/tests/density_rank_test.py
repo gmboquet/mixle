@@ -1,4 +1,4 @@
-"""Tests for pysp.utils.density_rank: rank + cumulative probability of an observation.
+"""Tests for pysp.enumeration.density_rank: rank + cumulative probability of an observation.
 
 Covers the exact head (cross-checked against brute force over a finite support), the sampling
 fallback (forced via a tiny max_exact, checked within a few standard errors of the exact value),
@@ -11,13 +11,13 @@ import unittest
 
 import numpy as np
 
+from pysp.enumeration.density_rank import count_dp_rank, count_dp_seek, density_rank
 from pysp.stats.combinator.composite import CompositeDistribution
 from pysp.stats.combinator.sequence import SequenceDistribution
 from pysp.stats.latent.hidden_markov import HiddenMarkovModelDistribution
 from pysp.stats.latent.mixture import MixtureDistribution
 from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
 from pysp.stats.leaf.poisson import PoissonDistribution
-from pysp.utils.density_rank import count_dp_rank, count_dp_seek, density_rank
 
 
 class DensityRankTestCase(unittest.TestCase):
@@ -158,7 +158,7 @@ class MixtureCrossRankTestCase(unittest.TestCase):
     """mixture_cross_rank gives the TRUE marginal rank (not the tropical/dominant-component rank)."""
 
     def test_composite_mixture_true_rank_beats_tropical(self):
-        from pysp.utils.density_rank import count_dp_rank, mixture_cross_rank
+        from pysp.enumeration.density_rank import count_dp_rank, mixture_cross_rank
 
         rng = np.random.RandomState(0)
         fields = (4, 3, 5)
@@ -185,7 +185,7 @@ class MixtureCrossRankTestCase(unittest.TestCase):
         self.assertLessEqual(abs(mixture_cross_rank(mix, worst, oversample=128) - brute(worst)), 6)
 
     def test_leaf_mixture_true_rank(self):
-        from pysp.utils.density_rank import mixture_cross_rank
+        from pysp.enumeration.density_rank import mixture_cross_rank
 
         rng = np.random.RandomState(1)
         mix = MixtureDistribution(
@@ -204,7 +204,7 @@ class CumulativeProbabilityTestCase(unittest.TestCase):
     """The unbiased mass-histogram DP gives EXACT cumulative probability for decomposable families."""
 
     def test_composite_exact(self):
-        from pysp.utils.density_rank import cumulative_probability
+        from pysp.enumeration.density_rank import cumulative_probability
 
         rng = np.random.RandomState(0)
         comp = CompositeDistribution(
@@ -221,7 +221,7 @@ class CumulativeProbabilityTestCase(unittest.TestCase):
             self.assertAlmostEqual(cumulative_probability(comp, list(x), oversample=16), brute(x), places=10)
 
     def test_sequence_exact(self):
-        from pysp.utils.density_rank import cumulative_probability
+        from pysp.enumeration.density_rank import cumulative_probability
 
         rng = np.random.RandomState(0)
         seq = SequenceDistribution(
@@ -246,8 +246,8 @@ class CountDPTopPTestCase(unittest.TestCase):
         return len(dist.enumerator().top_p(p, max_items=200000))
 
     def test_bracket_contains_true_nucleus_size(self):
+        from pysp.enumeration.density_rank import count_dp_top_p
         from pysp.stats.leaf.categorical import CategoricalDistribution
-        from pysp.utils.density_rank import count_dp_top_p
 
         cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
         intc = IntegerCategoricalDistribution(0, [0.6, 0.3, 0.1])
@@ -262,8 +262,8 @@ class CountDPTopPTestCase(unittest.TestCase):
 
     def test_leaf_bracket_is_exact(self):
         # A leaf has no convolution smear, so the bracket collapses to the exact nucleus size.
+        from pysp.enumeration.density_rank import count_dp_top_p
         from pysp.stats.leaf.categorical import CategoricalDistribution
-        from pysp.utils.density_rank import count_dp_top_p
 
         leaf = CategoricalDistribution({i: w for i, w in enumerate([0.3, 0.25, 0.15, 0.1, 0.08, 0.06, 0.04, 0.02])})
         for p in (0.3, 0.55, 0.8, 0.95, 1.0):
@@ -273,8 +273,8 @@ class CountDPTopPTestCase(unittest.TestCase):
 
     def test_huge_support_without_enumeration(self):
         # A support too large to enumerate (6**12) still returns a bracket quickly.
+        from pysp.enumeration.density_rank import count_dp_top_p
         from pysp.stats.leaf.categorical import CategoricalDistribution
-        from pysp.utils.density_rank import count_dp_top_p
 
         rng = np.random.RandomState(0)
         big = CompositeDistribution(
@@ -289,8 +289,8 @@ class CountDPTopPTestCase(unittest.TestCase):
         self.assertGreaterEqual(r.covered_mass, 0.9 - 1e-9)
 
     def test_edge_cases(self):
+        from pysp.enumeration.density_rank import count_dp_top_p
         from pysp.stats.leaf.categorical import CategoricalDistribution
-        from pysp.utils.density_rank import count_dp_top_p
 
         leaf = CategoricalDistribution({"a": 0.6, "b": 0.4})
         self.assertEqual((count_dp_top_p(leaf, 0.0).size_lower, count_dp_top_p(leaf, 0.0).size_upper), (0, 0))

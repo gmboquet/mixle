@@ -487,7 +487,7 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "fold the E-step over distributed/streaming data",
         "object contract",
         "pysp_seq_* methods",
-        "pysp.planner",
+        "pysp.utils.parallel.planner",
     ),
     CapabilitySpec("EMStrategy", "an EM-step strategy", "object contract", "step() -> EMStepResult", "pysp.inference.em"),
     CapabilitySpec(

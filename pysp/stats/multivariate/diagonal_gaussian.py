@@ -304,7 +304,7 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         """Exact probability-ordered cumulative ``G(x) = P(p(Y) >= p(x))`` -- the highest-density-region
         mass through ``x`` (multivariate analogue of a CDF). For a diagonal Gaussian the squared
         Mahalanobis distance ``sum_i (x_i-mu_i)^2/var_i`` is chi-square(dim), so ``G = chi2.cdf(maha2, dim)``.
-        Used by :func:`pysp.utils.density_rank.density_rank` to return an EXACT cumulative.
+        Used by :func:`pysp.enumeration.density_rank.density_rank` to return an EXACT cumulative.
         """
         from scipy.stats import chi2
 

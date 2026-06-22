@@ -58,11 +58,11 @@ if TYPE_CHECKING:  # let static tools / __all__ see the lazily-resolved subsyste
     from pysp.engines.base import ComputeEngine
     from pysp.enumeration.quantization.semiring import DecomposableSemiring
     from pysp.inference.em import EMStrategy
-    from pysp.planner import EncodedFold
     from pysp.ppl._operator import ForwardOperator
     from pysp.ppl.dynamics import DynamicsOperator
     from pysp.relations import Relation
     from pysp.stats.compute.kernel import Kernel, KernelFactory
+    from pysp.utils.parallel.planner import EncodedFold
 
 # Heavier subsystem-role contracts — imported on first access to keep this module a light leaf.
 _LAZY: dict[str, tuple[str, str]] = {
@@ -72,7 +72,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "KernelFactory": ("pysp.stats.compute.kernel", "KernelFactory"),
     "DecomposableSemiring": ("pysp.enumeration.quantization.semiring", "DecomposableSemiring"),
     "EMStrategy": ("pysp.inference.em", "EMStrategy"),
-    "EncodedFold": ("pysp.planner", "EncodedFold"),
+    "EncodedFold": ("pysp.utils.parallel.planner", "EncodedFold"),
     "DynamicsOperator": ("pysp.ppl.dynamics", "DynamicsOperator"),
     "ForwardOperator": ("pysp.ppl._operator", "ForwardOperator"),
     "Surrogate": ("pysp.doe._contracts", "Surrogate"),

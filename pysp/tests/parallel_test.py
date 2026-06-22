@@ -11,7 +11,6 @@ import unittest
 import numpy as np
 
 from pysp.inference.estimation import constant, optimize
-from pysp.planner import EncodedDataHandle, encoded_data, is_encoded_data_handle
 from pysp.stats import (
     CategoricalDistribution,
     CategoricalEstimator,
@@ -27,6 +26,7 @@ from pysp.stats import (
     seq_log_density_sum,
 )
 from pysp.utils.parallel.multiprocessing import MPEncodedData
+from pysp.utils.parallel.planner import EncodedDataHandle, encoded_data, is_encoded_data_handle
 from pysp.utils.streaming import StreamingEstimator
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

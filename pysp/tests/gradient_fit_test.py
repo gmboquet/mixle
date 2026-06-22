@@ -5,6 +5,17 @@ import numpy as np
 import pytest
 
 from pysp.inference.fit import fit_map, fit_mle
+from pysp.inference.priors import (
+    BetaPrior,
+    ConditionalPrior,
+    DirichletPrior,
+    GammaPrior,
+    MarkovChainPrior,
+    MixturePrior,
+    NormalGammaPrior,
+    OptionalPrior,
+    RecordPrior,
+)
 from pysp.stats import (
     AffineTransform,
     BernoulliDistribution,
@@ -35,17 +46,6 @@ from pysp.stats import (
     UniformDistribution,
     WeibullDistribution,
     field,
-)
-from pysp.utils.priors import (
-    BetaPrior,
-    ConditionalPrior,
-    DirichletPrior,
-    GammaPrior,
-    MarkovChainPrior,
-    MixturePrior,
-    NormalGammaPrior,
-    OptionalPrior,
-    RecordPrior,
 )
 
 pytestmark = [pytest.mark.torch, pytest.mark.optional]

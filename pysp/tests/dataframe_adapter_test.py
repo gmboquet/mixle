@@ -140,7 +140,7 @@ class DataFrameAdapterTestCase(unittest.TestCase):
         self.assertAlmostEqual(from_df.sigma2, from_list.sigma2, places=12)
 
     def test_optimize_accepts_dataframe_fields_with_resources(self):
-        from pysp.planner import Resources
+        from pysp.utils.parallel.planner import Resources
 
         df = pd.DataFrame({"x": np.linspace(-2.0, 2.0, 20), "unused": np.arange(20)})
         data = dataframe_records(df, fields="x")
