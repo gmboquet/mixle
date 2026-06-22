@@ -3,6 +3,8 @@
 import math
 import unittest
 
+import numpy as np
+
 import pysp.arithmetic as arith
 from pysp.engines import NUMPY_ENGINE, SYMBOLIC_ENGINE, SymbolicExpression, to_sympy
 
@@ -28,6 +30,14 @@ class ArithmeticConstantsTest(unittest.TestCase):
         with arith.using_engine("symbolic"):
             self.assertEqual(arith.maxrandint, 2**31 - 1)  # implementation limits, not math constants
             self.assertEqual(arith.eps, 1.0e-8)
+
+    def test_max_keeps_python_scalar_semantics(self):
+        self.assertEqual(arith.max(1.0, 2.5, -1.0), 2.5)
+        self.assertEqual(arith.max(np.float64(0.4), 0.0, np.float64(0.6)), np.float64(0.6))
+
+    def test_max_still_dispatches_array_reductions(self):
+        values = np.asarray([[1.0, 3.0], [4.0, 2.0]])
+        np.testing.assert_allclose(arith.max(values, axis=1), np.asarray([3.0, 4.0]))
 
     def test_symbolic_constants_are_symbolic(self):
         with arith.using_engine(SYMBOLIC_ENGINE):
