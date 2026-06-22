@@ -760,8 +760,11 @@ class _BinomialB(_LeafBuilder):
 
     def stats_to_ss(self, stats, k):
         # legacy BinomialAccumulator.value(): (count, sum, min_val, max_val);
-        # min/max are the data-wide values the legacy encoder reports, recovered
-        # exactly from the w-weighted constants accumulated in stats[2:4].
+        # min/max are recovered from the w-weighted constants in stats[2:4].
+        # NOTE: value()[2] (min_val) can differ from the legacy accumulator here:
+        # this fused path recovers the true observed data minimum, whereas the
+        # legacy accumulator reports its factory-seeded 0. Benign with the default
+        # BinomialEstimator (min_val is not used in the M-step).
         c = stats[0][k]
         if c > 0:
             return c, stats[1][k], int(round(stats[2][k] / c)), int(round(stats[3][k] / c))
@@ -1269,9 +1272,24 @@ class CompiledMixture:
         ll = self.seq_component_log_density(enc, model)
         if self.is_mixture:
             ll = ll + np.asarray(model.log_w).reshape(1, -1)
-        ll -= ll.max(axis=1, keepdims=True)
+        mx = ll.max(axis=1, keepdims=True)
+        # Rows whose component log-densities are all -inf (out-of-support
+        # observations) have a non-finite max; the softmax would produce NaN
+        # responsibilities. Match the legacy seq_posterior convention and assign
+        # those rows a uniform 1/K instead (mirrors the seq_log_density guard).
+        bad = ~np.isfinite(mx[:, 0])
+        if bad.any():
+            # zero the shift so the exp/sum below stays finite; the row is
+            # overwritten with a uniform 1/K afterward.
+            mx[bad] = 0.0
+        ll -= mx
         np.exp(ll, out=ll)
-        ll /= ll.sum(axis=1, keepdims=True)
+        denom = ll.sum(axis=1, keepdims=True)
+        if bad.any():
+            denom[bad] = 1.0
+        ll /= denom
+        if bad.any():
+            ll[bad] = 1.0 / ll.shape[1]
         return ll
 
     # -- estimation ----------------------------------------------------------

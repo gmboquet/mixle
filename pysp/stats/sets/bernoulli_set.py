@@ -887,11 +887,9 @@ def _beta_posterior_mode(beta_a: float, beta_b: float, obs_cnt: float, tot_cnt: 
     a = (beta_a - 1) + obs_cnt
     b = (beta_b - 1) - obs_cnt + tot_cnt
 
-    if a > 0 and b > 0 and a > b:
-        # bstats returns -b / (a + b); plain p = 1 + (-b / (a + b)) = a / (a + b).
+    if a > 0 and b > 0:
+        # Beta posterior mode for a>0, b>0 is a / (a + b).
         return a / (a + b)
-    elif a > 0 and b > 0 and b > a:
-        return (a - 1) / (a + b - 2)
     elif a == 0 and b == 0:
         return 0.5
     elif b > a:
