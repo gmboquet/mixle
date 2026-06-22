@@ -86,6 +86,35 @@ def ks_test(data: Sequence[float], dist: Any) -> tuple[float, float]:
     return d, float(kstwo.sf(d, n))
 
 
+def chi_square_test(data: Sequence[int], dist: Any, *, lo: int | None = None, hi: int | None = None) -> tuple[float, int, float]:
+    """Pearson chi-square goodness-of-fit test for a discrete ``dist`` against integer ``data``.
+
+    Bins the observations over each value in ``[lo, hi]`` plus a single combined tail bin for everything
+    outside that window (so the expected cell probabilities sum to 1, using ``dist.cdf`` for the tail).
+    Returns ``(chi2, dof, p_value)`` with ``dof = #cells - 1`` and the upper-tail chi-square p-value;
+    ``lo``/``hi`` default to the data's min/max. A small p-value is evidence of misfit.
+    """
+    import math
+
+    from scipy.stats import chi2 as _chi2
+
+    x = np.asarray(data)
+    n = x.size
+    if n == 0:
+        raise ValueError("chi_square_test requires at least one observation.")
+    lo = int(np.min(x)) if lo is None else int(lo)
+    hi = int(np.max(x)) if hi is None else int(hi)
+    ks = list(range(lo, hi + 1))
+    observed = np.array([np.sum(x == k) for k in ks] + [np.sum((x < lo) | (x > hi))], dtype=np.float64)
+    tail_p = max(0.0, 1.0 - (float(dist.cdf(hi)) - float(dist.cdf(lo - 1))))
+    probs = np.array([math.exp(dist.log_density(k)) for k in ks] + [tail_p], dtype=np.float64)
+    expected = n * probs
+    mask = expected > 0.0
+    chi2 = float(np.sum((observed[mask] - expected[mask]) ** 2 / expected[mask]))
+    dof = int(mask.sum()) - 1
+    return chi2, dof, float(_chi2.sf(chi2, dof))
+
+
 def k_fold_split_index(sz: int, k: int, rng: RandomState) -> np.ndarray:
     """Returns integer numpy index vector for k-fold split. Entry j is the fold-id for the j^{th} data point.
 
