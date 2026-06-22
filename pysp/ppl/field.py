@@ -32,6 +32,13 @@ from typing import Any
 
 import numpy as np
 
+from pysp.models._kernels import (
+    exponential_from_scaled_dist,
+    matern32_from_scaled_dist,
+    matern52_from_scaled_dist,
+    rbf_from_scaled_sqdist,
+)
+
 __all__ = [
     "FieldKernel",
     "RandomWalk",
@@ -124,7 +131,7 @@ class RBF(FieldKernel):
         if x.ndim == 1:
             x = x[:, None]
         d2 = np.sum((x[:, None, :] - x[None, :, :]) ** 2, axis=-1)
-        k = float(self.amplitude) ** 2 * np.exp(-0.5 * d2 / float(self.lengthscale) ** 2)
+        k = rbf_from_scaled_sqdist(d2 / float(self.lengthscale) ** 2, float(self.amplitude))
         return k + self.jitter * np.eye(len(x))
 
     def precision(self, index: np.ndarray) -> np.ndarray:
@@ -168,7 +175,7 @@ class AnisotropicRBF(FieldKernel):
             x = x[:, None]
         u = self._transform(x)
         d2 = np.sum((u[:, None, :] - u[None, :, :]) ** 2, axis=-1)
-        k = float(self.amplitude) ** 2 * np.exp(-0.5 * d2)
+        k = rbf_from_scaled_sqdist(d2, float(self.amplitude))
         return k + self.jitter * np.eye(len(x))
 
     def precision(self, index: np.ndarray) -> np.ndarray:
@@ -236,7 +243,7 @@ class GreatCircleRBF(FieldKernel):
 
     def covariance(self, index: np.ndarray) -> np.ndarray:
         d2 = _chordal_sq(index, self.radius)
-        k = float(self.amplitude) ** 2 * np.exp(-0.5 * d2 / float(self.lengthscale) ** 2)
+        k = rbf_from_scaled_sqdist(d2 / float(self.lengthscale) ** 2, float(self.amplitude))
         return k + self.jitter * np.eye(len(d2))
 
     def precision(self, index: np.ndarray) -> np.ndarray:
@@ -262,15 +269,14 @@ class GreatCircleMatern(FieldKernel):
 
     def covariance(self, index: np.ndarray) -> np.ndarray:
         r = np.sqrt(_chordal_sq(index, self.radius))
-        ls, a2 = float(self.lengthscale), float(self.amplitude) ** 2
+        ls, amp = float(self.lengthscale), float(self.amplitude)
+        r_scaled = r / ls  # lengthscale-scaled chordal distance, shared by all three Matern smoothnesses
         if self.nu == 0.5:
-            k = a2 * np.exp(-r / ls)
+            k = exponential_from_scaled_dist(r_scaled, amp)
         elif self.nu == 1.5:
-            s = np.sqrt(3.0) * r / ls
-            k = a2 * (1.0 + s) * np.exp(-s)
+            k = matern32_from_scaled_dist(r_scaled, amp)
         elif self.nu == 2.5:
-            s = np.sqrt(5.0) * r / ls
-            k = a2 * (1.0 + s + s * s / 3.0) * np.exp(-s)
+            k = matern52_from_scaled_dist(r_scaled, amp)
         else:
             raise ValueError("nu must be 0.5, 1.5, or 2.5")
         return k + self.jitter * np.eye(len(r))
