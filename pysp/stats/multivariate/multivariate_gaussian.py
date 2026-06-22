@@ -11,7 +11,7 @@ x = (x_1,x_2,..,x_n) ~ MVN(mu, covar), where mu is a length n numpy array, anc c
 covariance matrix.
 
 The log-density is given by
-    log(p(x)) = -0.5*k*log(2*pi) - 0.5*det(covar) - 0.5*(x-mu)' covar^{-1} (x-mu).
+    log(p(x)) = -0.5*k*log(2*pi) - 0.5*log|covar| - 0.5*(x-mu)' covar^{-1} (x-mu).
 
 """
 
@@ -283,7 +283,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         """Evaluate the log-density at x.
 
         The log-density is given by
-            log(p(x)) = -0.5*k*log(2*pi) - 0.5*det(covar) - 0.5*(x-mu)' covar^{-1} (x-mu).
+            log(p(x)) = -0.5*k*log(2*pi) - 0.5*log|covar| - 0.5*(x-mu)' covar^{-1} (x-mu).
         Args:
             x (np.ndarray): Observation from multivariate Gaussian distribution.
 
@@ -876,6 +876,15 @@ class MultivariateGaussianEstimator(ParameterEstimator):
 
         nobs = suff_stat[2]
         pc1, pc2 = self.pseudo_count
+
+        if nobs <= 0:
+            # zero-responsibility component: fall back to the prior mean (or zeros)
+            # rather than dividing by zero and emitting a NaN mean.
+            d = self.dim if self.dim is not None else len(suff_stat[0])
+            mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
+            covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.eye(d)
+            covar = self._regularize_covar(covar)
+            return MultivariateGaussianDistribution(mu, covar, name=self.name)
 
         if pc1 is not None and self.prior_mu is not None:
             mu = (suff_stat[0] + pc1 * self.prior_mu) / (nobs + pc1)

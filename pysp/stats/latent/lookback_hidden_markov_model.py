@@ -1222,7 +1222,8 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
             w = init_counts + p1
             w /= w.sum()
         else:
-            w = init_counts / init_counts.sum()
+            init_sum = init_counts.sum()
+            w = np.full(num_states, 1.0 / num_states) if init_sum <= 0.0 else init_counts / init_sum
 
         if self.pseudo_count[1] is not None:
             p2 = self.pseudo_count[1] / float(num_states * num_states)

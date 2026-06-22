@@ -246,16 +246,21 @@ class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution)
 
         """
         tag_list, enc_data = x
-        ll_mat_init = False
+
+        comp_to_tag = {}
+        for tag, tag_idxs in enumerate(tag_list):
+            for i in tag_idxs:
+                comp_to_tag[int(i)] = tag
+
+        base_tag = comp_to_tag.get(0, 0)
+        sz = len(self.components[0].seq_log_density(enc_data[base_tag]))
+        ll_mat = np.zeros((sz, self.num_components))
+        ll_mat.fill(-np.inf)
 
         for tag, tag_idxs in enumerate(tag_list):
             for i in tag_idxs:
                 if not self.zw[i]:
                     temp = self.components[i].seq_log_density(enc_data[tag])
-                    if not ll_mat_init:
-                        ll_mat = np.zeros((len(temp), self.num_components))
-                        ll_mat.fill(-np.inf)
-                        ll_mat_init = True
                     ll_mat[:, i] = temp
                     ll_mat[:, i] += self.log_w[i]
 
