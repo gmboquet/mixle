@@ -38,6 +38,7 @@ from .proposals import (
 from .samplers import (
     MCMCResult,
     affine_invariant_ensemble,
+    dense_mass_hmc,
     distribution_log_target,
     gelman_rubin,
     hamiltonian_monte_carlo,
@@ -67,6 +68,7 @@ __all__ = [
     "distribution_log_target",
     "gelman_rubin",
     "hamiltonian_monte_carlo",
+    "dense_mass_hmc",
     "particle_filter",
     "reflective_hmc",
     "metropolis_hastings",
