@@ -291,6 +291,15 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float(self.lam)
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x) = Q(floor(x)+1, lam)."""
+        import math
+
+        from scipy.special import gammaincc
+
+        k = math.floor(float(x))
+        return float(gammaincc(k + 1, self.lam)) if k >= 0 else 0.0
+
     def sampler(self, seed: int | None = None) -> "PoissonSampler":
         """Create PoissonSampler object with PoissonDistribution instance and seed (Optional[int]) passed.
 

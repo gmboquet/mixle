@@ -218,6 +218,13 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float(self.p * (1.0 - self.p))
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x) over {0, 1}."""
+        xv = float(x)
+        if xv < 0.0:
+            return 0.0
+        return float(1.0 - self.p) if xv < 1.0 else 1.0
+
     def sampler(self, seed: int | None = None) -> "BernoulliSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BernoulliSampler(self, seed)

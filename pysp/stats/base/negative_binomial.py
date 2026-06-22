@@ -226,6 +226,15 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X]: r(1-p)/p^2."""
         return float(self.r * (1.0 - self.p) / (self.p * self.p))
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x) = I_p(r, floor(x)+1)."""
+        import math
+
+        from scipy.special import betainc
+
+        k = math.floor(float(x))
+        return float(betainc(self.r, k + 1, self.p)) if k >= 0 else 0.0
+
     def sampler(self, seed: int | None = None) -> "NegativeBinomialSampler":
         """Return a sampler for drawing observations from this distribution."""
         return NegativeBinomialSampler(self, seed)
