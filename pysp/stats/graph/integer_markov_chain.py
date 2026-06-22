@@ -30,6 +30,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -74,8 +75,8 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             declaration_for,
         )
 
-        init = None if isinstance(self.init_dist, NullDistribution) else declaration_for(self.init_dist)
-        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        init = None if supports(self.init_dist, Neutral) else declaration_for(self.init_dist)
+        length = None if supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = tuple(d for d in (init, length) if d is not None)
         roles = []
         if init is not None:
@@ -298,13 +299,13 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
         num_values = int(dists[0].num_values)
         lag = int(dists[0].lag)
-        null_init_dist = isinstance(dists[0].init_dist, NullDistribution)
-        null_len_dist = isinstance(dists[0].len_dist, NullDistribution)
+        null_init_dist = supports(dists[0].init_dist, Neutral)
+        null_len_dist = supports(dists[0].len_dist, Neutral)
         if any(
             int(dist.num_values) != num_values
             or int(dist.lag) != lag
-            or isinstance(dist.init_dist, NullDistribution) != null_init_dist
-            or isinstance(dist.len_dist, NullDistribution) != null_len_dist
+            or supports(dist.init_dist, Neutral) != null_init_dist
+            or supports(dist.len_dist, Neutral) != null_len_dist
             for dist in dists
         ):
             raise ValueError(
@@ -495,7 +496,7 @@ class IntegerMarkovChainEnumerator(DistributionEnumerator):
         super().__init__(dist)
         if dist.lag <= 0:
             raise EnumerationError(dist, reason="lag must be positive for enumeration")
-        if isinstance(dist.len_dist, NullDistribution):
+        if supports(dist.len_dist, Neutral):
             raise EnumerationError(dist, reason="no length distribution is modeled (len_dist is Null)")
 
         with np.errstate(divide="ignore"):
@@ -524,7 +525,7 @@ class IntegerMarkovChainEnumerator(DistributionEnumerator):
         self._merge = LengthFrontierMerge(len_stream, self._kbest_paths)
 
     def _init_iterator(self) -> Iterator[tuple[Any, float]]:
-        if isinstance(self.dist.init_dist, NullDistribution):
+        if supports(self.dist.init_dist, Neutral):
             streams = [BufferedStream(iter(self._choices)) for _ in range(self.dist.lag)]
             return iter(ProductEnumerator(streams, combine=list))
         return iter(child_enumerator(self.dist.init_dist, "IntegerMarkovChainDistribution.init_dist"))
@@ -640,8 +641,8 @@ class IntegerMarkovChainSampler(DistributionSampler):
         self.trans_sampler = np.random.RandomState(seeds[0])
 
         # init/len samplers are only needed for unconditional sampling; sample_given works without them
-        self.init_sampler = None if isinstance(dist.init_dist, NullDistribution) else dist.init_dist.sampler(seeds[1])
-        self.len_sampler = None if isinstance(dist.len_dist, NullDistribution) else dist.len_dist.sampler(seeds[2])
+        self.init_sampler = None if supports(dist.init_dist, Neutral) else dist.init_dist.sampler(seeds[1])
+        self.len_sampler = None if supports(dist.len_dist, Neutral) else dist.len_dist.sampler(seeds[2])
 
     def single_sample(self) -> Sequence[int]:
         """Returns a single sample from the integer Markov chain distribution."""

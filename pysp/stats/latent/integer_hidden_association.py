@@ -33,6 +33,7 @@ import numpy as np
 
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -118,7 +119,7 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         self.state_prob_mat = np.asarray(state_prob_mat, dtype=np.float64)
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         self.prev_dist = prev_dist if prev_dist is not None else NullDistribution()
-        self.has_prev_dist = not isinstance(self.prev_dist, NullDistribution)
+        self.has_prev_dist = not supports(self.prev_dist, Neutral)
         self.num_vals2 = self.state_prob_mat.shape[1]
         self.num_vals1 = self.cond_weights.shape[0]
         self.num_states = self.state_prob_mat.shape[0]
@@ -146,8 +147,8 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
             declaration_for,
         )
 
-        previous = None if isinstance(self.prev_dist, NullDistribution) else declaration_for(self.prev_dist)
-        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        previous = None if supports(self.prev_dist, Neutral) else declaration_for(self.prev_dist)
+        length = None if supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = tuple(child for child in (previous, length) if child is not None)
         roles = ()
         if previous is not None:
@@ -378,9 +379,9 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
             IntegerHiddenAssociationSampler object.
 
         """
-        if isinstance(self.prev_dist, NullDistribution):
+        if supports(self.prev_dist, Neutral):
             raise Exception("HiddenAssociationSampler requires attribute dist.prev_dist.")
-        if isinstance(self.len_dist, NullDistribution):
+        if supports(self.len_dist, Neutral):
             raise Exception("HiddenAssociationSampler requires attribute dist.size_dist.")
         return IntegerHiddenAssociationSampler(self, seed)
 
@@ -465,12 +466,12 @@ class IntegerHiddenAssociationSampler(DistributionSampler):
         self.rng = np.random.RandomState(seed)
         self.dist = dist
 
-        if isinstance(self.dist.prev_dist, NullDistribution):
+        if supports(self.dist.prev_dist, Neutral):
             raise Exception("HiddenAssociationSampler requires attribute dist.prev_dist.")
         else:
             self.prev_sampler = self.dist.prev_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-        if isinstance(self.dist.len_dist, NullDistribution):
+        if supports(self.dist.len_dist, Neutral):
             raise Exception("HiddenAssociationSampler requires attribute dist.size_dist.")
         else:
             self.size_sampler = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))

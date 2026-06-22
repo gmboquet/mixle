@@ -20,6 +20,7 @@ from numpy.random import RandomState
 from scipy.special import logsumexp
 
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -171,7 +172,7 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
             self.log_w = np.log(self.w)
             self.log_transitions = np.log(self.transitions)
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
-        self.null_len_dist = isinstance(self.len_dist, NullDistribution)
+        self.null_len_dist = supports(self.len_dist, Neutral)
         self.name = name
         self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
         if self.terminal_states is not None:
@@ -707,7 +708,7 @@ class SegmentalHiddenMarkovDataEncoder(DataSequenceEncoder):
         for seq in x:
             flat.extend(seq)
         enc_by_state = tuple(enc.seq_encode(flat) for enc in self.emission_encoders)
-        len_enc = None if isinstance(self.len_encoder, NullDataEncoder) else self.len_encoder.seq_encode(lengths)
+        len_enc = None if supports(self.len_encoder, Neutral) else self.len_encoder.seq_encode(lengths)
         return idx, lengths, enc_by_state, len_enc
 
 

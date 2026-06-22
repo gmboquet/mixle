@@ -26,6 +26,7 @@ from numpy.random import RandomState
 from scipy.special import digamma, gammaln, logsumexp
 
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
@@ -101,7 +102,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         from pysp.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         children = tuple(self.topics)
-        if self.len_dist is not None and not isinstance(self.len_dist, NullDistribution):
+        if self.len_dist is not None and not supports(self.len_dist, Neutral):
             children = children + (self.len_dist,)
         return DistributionCapabilities(engine_ready=intersect_engine_ready(children), kernel_status="generic_latent")
 
@@ -114,11 +115,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         )
 
         topic_children = tuple(declaration_for(topic) for topic in self.topics)
-        length = (
-            None
-            if self.len_dist is None or isinstance(self.len_dist, NullDistribution)
-            else declaration_for(self.len_dist)
-        )
+        length = None if self.len_dist is None or supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = tuple(
             child for child in topic_children + ((length,) if length is not None else ()) if child is not None
         )
@@ -212,7 +209,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
             alpha, idx, counts, num_topics, log_density_gamma, document_gammas, per_topic_log_densities
         )
 
-        if self.len_dist is not None and not isinstance(self.len_dist, NullDistribution):
+        if self.len_dist is not None and not supports(self.len_dist, Neutral):
             doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
             len_enc = self.len_dist.dist_to_encoder().seq_encode(doc_lens)
             elob += self.len_dist.seq_log_density(len_enc)
@@ -321,7 +318,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
 
         elob = elob3 + elob5 + elob6 + elob7
 
-        if self.len_dist is not None and not isinstance(self.len_dist, NullDistribution):
+        if self.len_dist is not None and not supports(self.len_dist, Neutral):
             doc_lens = engine.bincount(idx_backend, weights=counts_backend, minlength=num_documents)
             len_enc = self.len_dist.dist_to_encoder().seq_encode(engine.to_numpy(doc_lens))
             elob = elob + backend_seq_log_density(self.len_dist, len_enc, engine)
@@ -666,7 +663,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self._rng_idx = RandomState(seed=seeds[1])
             self._rng_w = RandomState(seed=seeds[2])
             self._rng_topics = [RandomState(seed=seeds[3 + j]) for j in range(self.num_topics)]
-            if not isinstance(self.len_accumulator, NullAccumulator):
+            if not supports(self.len_accumulator, Neutral):
                 self._rng_len = RandomState(seed=rng.randint(maxrandint))
             self._init_rng = True
 
@@ -719,7 +716,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.topic_counts[j] += np.sum(w)
             self.accumulators[j].seq_initialize(enc_data, w, self._rng_topics[j])
 
-        if not isinstance(self.len_accumulator, NullAccumulator):
+        if not supports(self.len_accumulator, Neutral):
             doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
             len_enc = self.len_accumulator.acc_to_encoder().seq_encode(doc_lens)
             self.len_accumulator.seq_initialize(len_enc, weights, self._rng_len)
@@ -763,7 +760,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                 self.accumulators[j].initialize(x[i][0], w[i], self._rng_topics[j])
                 self.topic_counts[j] += w[i]
 
-        if not isinstance(self.len_accumulator, NullAccumulator):
+        if not supports(self.len_accumulator, Neutral):
             self.len_accumulator.initialize(np.sum(counts), weight, self._rng_len)
 
     def seq_update(
@@ -817,14 +814,14 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                 per_topic_log_densities,
             )
 
-            if estimate.len_dist is not None and not isinstance(estimate.len_dist, NullDistribution):
+            if estimate.len_dist is not None and not supports(estimate.len_dist, Neutral):
                 doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
                 len_enc = estimate.len_dist.dist_to_encoder().seq_encode(doc_lens)
                 elob = elob + estimate.len_dist.seq_log_density(len_enc)
 
             self._seq_ll += float(np.dot(weights, elob))
 
-        if not isinstance(self.len_accumulator, NullAccumulator):
+        if not supports(self.len_accumulator, Neutral):
             doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
             len_enc = self.len_accumulator.acc_to_encoder().seq_encode(doc_lens)
             self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
@@ -867,7 +864,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         for i in range(self.num_topics):
             self.accumulators[i].seq_update(enc_data, wtc_np[:, i], estimate.topics[i])
 
-        if not isinstance(self.len_accumulator, NullAccumulator):
+        if not supports(self.len_accumulator, Neutral):
             doc_lens = np.bincount(idx_np, weights=counts, minlength=num_documents)
             len_enc = self.len_accumulator.acc_to_encoder().seq_encode(doc_lens)
             self.len_accumulator.seq_update(len_enc, weights_np, estimate.len_dist)

@@ -30,6 +30,7 @@ from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -118,7 +119,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         )
 
         topic_children = tuple(declaration_for(topic) for topic in self.topics)
-        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        length = None if supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = tuple(
             child for child in topic_children + ((length,) if length is not None else ()) if child is not None
         )
@@ -703,7 +704,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
                 non-negative integers is required for sampling).
 
         """
-        if isinstance(self.len_dist, NullDistribution):
+        if supports(self.len_dist, Neutral):
             raise Exception("TreeHiddenMarkovSampler requires len_dist with support on non-negative integers")
         return TreeHiddenMarkovSampler(self, seed)
 

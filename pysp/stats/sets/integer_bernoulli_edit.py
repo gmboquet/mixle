@@ -32,6 +32,7 @@ from numpy.random import RandomState
 
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -216,11 +217,8 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         from pysp.stats.compute.stacked import stacked_component_params
 
         num_vals = int(dists[0].num_vals)
-        null_init_dist = isinstance(dists[0].init_dist, NullDistribution)
-        if any(
-            int(dist.num_vals) != num_vals or isinstance(dist.init_dist, NullDistribution) != null_init_dist
-            for dist in dists
-        ):
+        null_init_dist = supports(dists[0].init_dist, Neutral)
+        if any(int(dist.num_vals) != num_vals or supports(dist.init_dist, Neutral) != null_init_dist for dist in dists):
             raise ValueError(
                 "Stacked IntegerBernoulliEditDistribution components require shared support and init policy."
             )
@@ -363,7 +361,7 @@ class IntegerBernoulliEditEnumerator(DistributionEnumerator):
         self._counter = itertools.count()
 
     def _prev_iterator(self) -> Iterator[tuple[list[int], float]]:
-        if isinstance(self.dist.init_dist, NullDistribution):
+        if supports(self.dist.init_dist, Neutral):
             choices = [(False, 0.0), (True, 0.0)]
             streams = [BufferedStream(iter(choices)) for _ in range(self.dist.num_vals)]
 
