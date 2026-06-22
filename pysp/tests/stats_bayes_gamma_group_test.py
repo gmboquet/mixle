@@ -17,9 +17,9 @@ from scipy.special import gammaln
 from pysp.inference import seq_estimate, seq_initialize
 from pysp.inference.estimation import _data_objective_sum, _model_objective, fit, optimize
 from pysp.stats import seq_encode
-from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEstimator
-from pysp.stats.leaf.gamma import GammaDistribution, GammaEstimator
-from pysp.stats.leaf.poisson import PoissonDistribution, PoissonEstimator
+from pysp.stats.base.exponential import ExponentialDistribution, ExponentialEstimator
+from pysp.stats.base.gamma import GammaDistribution, GammaEstimator
+from pysp.stats.base.poisson import PoissonDistribution, PoissonEstimator
 from pysp.utils.special import digamma
 
 

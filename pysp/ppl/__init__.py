@@ -86,6 +86,29 @@ from pysp.ppl.multiphysics import CoupledPDESystem, solve_poisson
 from pysp.ppl.priors import Potts, TotalVariation
 from pysp.ppl.shape import level_set_material, shape_optimize
 from pysp.ppl.wave import WaveEquation2D
+from pysp.stats.base.bernoulli import BernoulliDistribution, BernoulliEstimator
+from pysp.stats.base.beta import BetaDistribution, BetaEstimator
+from pysp.stats.base.binomial import BinomialDistribution, BinomialEstimator
+from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.base.exgaussian import (
+    ExponentiallyModifiedGaussianDistribution,
+    ExponentiallyModifiedGaussianEstimator,
+)
+from pysp.stats.base.exponential import ExponentialDistribution, ExponentialEstimator
+from pysp.stats.base.gamma import GammaDistribution, GammaEstimator
+from pysp.stats.base.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.base.geometric import GeometricDistribution, GeometricEstimator
+from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution, IntegerCategoricalEstimator
+from pysp.stats.base.laplace import LaplaceDistribution, LaplaceEstimator
+from pysp.stats.base.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
+from pysp.stats.base.logistic import LogisticDistribution, LogisticEstimator
+from pysp.stats.base.negative_binomial import NegativeBinomialDistribution, NegativeBinomialEstimator
+from pysp.stats.base.pareto import ParetoDistribution, ParetoEstimator
+from pysp.stats.base.poisson import PoissonDistribution, PoissonEstimator
+from pysp.stats.base.rayleigh import RayleighDistribution, RayleighEstimator
+from pysp.stats.base.student_t import StudentTDistribution, StudentTEstimator
+from pysp.stats.base.uniform import UniformDistribution, UniformEstimator
+from pysp.stats.base.weibull import WeibullDistribution, WeibullEstimator
 
 # Low-level numeric primitives (sparse_solve, grid assembly, the ODE integrator) live in
 # pysp.ppl.pde_solve and are reached through the `ops` namespace handed to forward callbacks; they are
@@ -96,29 +119,6 @@ from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator, HiddenMarkovM
 from pysp.stats.latent.lda import LDADistribution, LDAEstimator
 from pysp.stats.latent.mixture import MixtureDistribution, MixtureEstimator
 from pysp.stats.latent.semi_supervised_mixture import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureEstimator
-from pysp.stats.leaf.bernoulli import BernoulliDistribution, BernoulliEstimator
-from pysp.stats.leaf.beta import BetaDistribution, BetaEstimator
-from pysp.stats.leaf.binomial import BinomialDistribution, BinomialEstimator
-from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.leaf.exgaussian import (
-    ExponentiallyModifiedGaussianDistribution,
-    ExponentiallyModifiedGaussianEstimator,
-)
-from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEstimator
-from pysp.stats.leaf.gamma import GammaDistribution, GammaEstimator
-from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.stats.leaf.geometric import GeometricDistribution, GeometricEstimator
-from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution, IntegerCategoricalEstimator
-from pysp.stats.leaf.laplace import LaplaceDistribution, LaplaceEstimator
-from pysp.stats.leaf.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
-from pysp.stats.leaf.logistic import LogisticDistribution, LogisticEstimator
-from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution, NegativeBinomialEstimator
-from pysp.stats.leaf.pareto import ParetoDistribution, ParetoEstimator
-from pysp.stats.leaf.poisson import PoissonDistribution, PoissonEstimator
-from pysp.stats.leaf.rayleigh import RayleighDistribution, RayleighEstimator
-from pysp.stats.leaf.student_t import StudentTDistribution, StudentTEstimator
-from pysp.stats.leaf.uniform import UniformDistribution, UniformEstimator
-from pysp.stats.leaf.weibull import WeibullDistribution, WeibullEstimator
 from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution, DiagonalGaussianEstimator
 from pysp.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDistribution,

@@ -10,12 +10,12 @@ import unittest
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.stats.base.categorical import CategoricalDistribution
+from pysp.stats.base.gaussian import GaussianDistribution, GaussianEstimator
 from pysp.stats.combinator.conditional import ConditionalDistribution
 from pysp.stats.combinator.select import SelectDistribution, SelectEstimator
 from pysp.stats.compute.pdist import EnumerationError
 from pysp.stats.latent.semi_supervised_mixture import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureEstimator
-from pysp.stats.leaf.categorical import CategoricalDistribution
-from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
 
 TOL = 1e-9
 

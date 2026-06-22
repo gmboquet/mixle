@@ -21,7 +21,7 @@ from pysp.models import (
     viterbi_parse,
 )
 from pysp.stats import CategoricalDistribution, HeterogeneousPCFGDistribution
-from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.base.gaussian import GaussianDistribution, GaussianEstimator
 
 
 class DPMModelHelpersTestCase(unittest.TestCase):

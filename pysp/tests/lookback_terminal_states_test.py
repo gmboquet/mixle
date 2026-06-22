@@ -7,9 +7,9 @@ import numpy as np
 
 from pysp.inference import estimate
 from pysp.stats import CategoricalDistribution
+from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
 from pysp.stats.combinator.sequence import SequenceDistribution
 from pysp.stats.latent.lookback_hidden_markov_model import LookbackHiddenMarkovModelDistribution as LB
-from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
 
 
 def _mk(p):

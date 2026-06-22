@@ -363,7 +363,7 @@ def vmp_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8, 
     ``Normal(Normal(Normal(0,100), 5), 1)`` (mean with a hyperprior). For multi-factor
     models or shared variables across datasets, use :class:`Graph` directly.
     """
-    from pysp.stats.leaf.gaussian import GaussianDistribution
+    from pysp.stats.base.gaussian import GaussianDistribution
 
     if rv._kind != "sample" or rv._family.name != "Normal" or len(rv._args) != 2:
         raise NotImplementedError("vmp supports Normal(mean, scale) Gaussian models.")
@@ -474,8 +474,8 @@ def _mixture_vmp_elbo(x, r, m, s2, a, b, alpha, *, m0, s0, a0, b0, alpha0):
 
 def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None, m0=None, s0=None, a0=1.0, b0=1.0, alpha0=1.0):
     """Bayesian Gaussian mixture by variational message passing (VBEM)."""
+    from pysp.stats.base.gaussian import GaussianDistribution
     from pysp.stats.latent.mixture import MixtureDistribution
-    from pysp.stats.leaf.gaussian import GaussianDistribution
 
     x = np.asarray(data, dtype=float).reshape(-1)
     N = x.size

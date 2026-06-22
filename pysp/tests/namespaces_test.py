@@ -6,7 +6,7 @@ import importlib
 def test_object_namespaces_alias_the_families():
     import pysp
 
-    gauss = importlib.import_module("pysp.stats.leaf.gaussian").GaussianDistribution
+    gauss = importlib.import_module("pysp.stats.base.gaussian").GaussianDistribution
     assert pysp.dist.GaussianDistribution is gauss  # pysp.dist aliases pysp.stats
     assert pysp.process.HawkesProcessDistribution.__name__ == "HawkesProcessDistribution"
     # a Markov chain is a distribution, not a graph — it lives in the pysp.dist umbrella

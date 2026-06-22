@@ -675,15 +675,15 @@ def _convolve(da, db):
     """Closed-form distribution of da + db for independent operands, or None."""
     ta, tb = type(da).__name__, type(db).__name__
     if ta == tb == "GaussianDistribution":
-        from pysp.stats.leaf.gaussian import GaussianDistribution
+        from pysp.stats.base.gaussian import GaussianDistribution
 
         return GaussianDistribution(da.mu + db.mu, da.sigma2 + db.sigma2)
     if ta == tb == "PoissonDistribution":
-        from pysp.stats.leaf.poisson import PoissonDistribution
+        from pysp.stats.base.poisson import PoissonDistribution
 
         return PoissonDistribution(da.lam + db.lam)
     if ta == tb == "GammaDistribution" and abs(da.theta - db.theta) < 1e-12:
-        from pysp.stats.leaf.gamma import GammaDistribution
+        from pysp.stats.base.gamma import GammaDistribution
 
         return GammaDistribution(da.k + db.k, da.theta)  # same scale
     return None
@@ -893,7 +893,7 @@ def seed_child(rv: RandomVariable, value: Any, scale: float, rng=None):
         if fam.seed_at is not None:
             return fam.dist_cls(**fam.seed_at(value, scale))
         if fam.name == "Categorical":
-            from pysp.stats.leaf.categorical import CategoricalDistribution
+            from pysp.stats.base.categorical import CategoricalDistribution
 
             spec = rv._args[0]
             keys = list(spec.keys()) if isinstance(spec, dict) else list(range(len(spec)))

@@ -121,7 +121,7 @@ class RegressionResult:
             return offset + X @ self.beta
 
         if link == "logit":
-            from pysp.stats.leaf.bernoulli import BernoulliDistribution
+            from pysp.stats.base.bernoulli import BernoulliDistribution
 
             response = BernoulliDistribution(0.5)
 
@@ -134,7 +134,7 @@ class RegressionResult:
 
             dispersion = None
         elif link == "log":
-            from pysp.stats.leaf.poisson import PoissonDistribution
+            from pysp.stats.base.poisson import PoissonDistribution
 
             response = PoissonDistribution(1.0)
 
@@ -146,7 +146,7 @@ class RegressionResult:
 
             dispersion = None
         elif link == "identity":
-            from pysp.stats.leaf.gaussian import GaussianDistribution
+            from pysp.stats.base.gaussian import GaussianDistribution
 
             sigma2 = self.sigma**2
             response = GaussianDistribution(0.0, sigma2)

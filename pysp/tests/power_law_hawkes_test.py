@@ -6,7 +6,7 @@ import warnings
 import numpy as np
 
 from pysp.stats import ExponentialDistribution
-from pysp.stats.leaf.power_law_hawkes import PowerLawHawkesDistribution as PLH
+from pysp.stats.base.power_law_hawkes import PowerLawHawkesDistribution as PLH
 
 
 class PowerLawHawkesTest(unittest.TestCase):

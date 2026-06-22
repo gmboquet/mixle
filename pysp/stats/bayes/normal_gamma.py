@@ -6,7 +6,7 @@ Data type: (Tuple[float, float]): A pair (mu, tau) with tau > 0; the log-density
     log(f(mu, tau)) = a*log(b) + 0.5*log(lam/(2*pi)) - gammaln(a)
     + (a - 0.5)*log(tau) - b*tau - 0.5*lam*tau*(mu - mu0)^2.
 
-This is the conjugate prior for the univariate :class:`~pysp.stats.leaf.gaussian.GaussianDistribution`
+This is the conjugate prior for the univariate :class:`~pysp.stats.base.gaussian.GaussianDistribution`
 (see its ``prior=`` argument) and the d=1 special case of NormalWishart (nu = 2a, W = 1/(2b)).
 It is a parameter prior: it is scored on ``(mu, tau)`` parameter pairs, not fit from data by EM.
 """

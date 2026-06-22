@@ -37,7 +37,7 @@ def quantize(
     """
     import numpy as np
 
-    from pysp.stats.leaf.categorical import CategoricalDistribution
+    from pysp.stats.base.categorical import CategoricalDistribution
 
     n = 1 << int(bits)
     # bracket the bulk of the mass

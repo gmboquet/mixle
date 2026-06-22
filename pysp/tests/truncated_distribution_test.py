@@ -5,9 +5,9 @@ import unittest
 
 import numpy as np
 
+from pysp.stats.base.categorical import CategoricalDistribution
+from pysp.stats.base.poisson import PoissonDistribution
 from pysp.stats.combinator.truncated import TruncatedDistribution
-from pysp.stats.leaf.categorical import CategoricalDistribution
-from pysp.stats.leaf.poisson import PoissonDistribution
 
 TOL = 1e-12
 

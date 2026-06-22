@@ -15,8 +15,8 @@ import unittest
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
+from pysp.stats.base.integer_multinomial import IntegerMultinomialDistribution
 from pysp.stats.exp_family import ExponentialFamilyForm, is_exponential_family, to_exponential_family
-from pysp.stats.leaf.integer_multinomial import IntegerMultinomialDistribution
 
 
 class IntegerMultinomialExponentialFamilyTest(unittest.TestCase):
@@ -62,7 +62,7 @@ class IntegerMultinomialExponentialFamilyTest(unittest.TestCase):
 
     def test_not_exp_family_with_a_length_distribution(self):
         # A separate trials distribution means the canonical multinomial map is not the full density.
-        from pysp.stats.leaf.poisson import PoissonDistribution
+        from pysp.stats.base.poisson import PoissonDistribution
 
         d = IntegerMultinomialDistribution(min_val=0, p_vec=[0.5, 0.5], len_dist=PoissonDistribution(3.0))
         self.assertFalse(is_exponential_family(d))

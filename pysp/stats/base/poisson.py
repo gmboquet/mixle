@@ -24,6 +24,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.stats.base.gamma import GammaDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -33,7 +34,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.leaf.gamma import GammaDistribution
 from pysp.utils.special import digamma
 from pysp.utils.vector import gammaln
 
@@ -123,7 +123,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
             lam (float): Positive real-valued number.
             name (Optional[str]): String name for object instance.
             prior (Optional): Conjugate parameter prior over the rate ``lam``. A
-                :class:`~pysp.stats.leaf.gamma.GammaDistribution` enables the
+                :class:`~pysp.stats.base.gamma.GammaDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the
                 conjugate posterior update); ``None`` (default) is a plain point model.
 

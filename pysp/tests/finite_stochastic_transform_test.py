@@ -11,9 +11,9 @@ import unittest
 import numpy as np
 
 from pysp.enumeration.algorithms import freeze
+from pysp.stats.base.binomial import BinomialDistribution
+from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution as IC
 from pysp.stats.combinator.finite_stochastic_transform import FiniteStochasticTransformDistribution as FST
-from pysp.stats.leaf.binomial import BinomialDistribution
-from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution as IC
 
 TOL = 1e-12
 

@@ -157,14 +157,14 @@ class BetaPosterior(ConjugatePosterior):
     def point_estimate(self):
         p = self.a / (self.a + self.b)
         if self.kind == "geometric":
-            from pysp.stats.leaf.geometric import GeometricDistribution
+            from pysp.stats.base.geometric import GeometricDistribution
 
             return GeometricDistribution(p)
         if self.kind == "binomial":
-            from pysp.stats.leaf.binomial import BinomialDistribution
+            from pysp.stats.base.binomial import BinomialDistribution
 
             return BinomialDistribution(p, self.n_trials)
-        from pysp.stats.leaf.bernoulli import BernoulliDistribution
+        from pysp.stats.base.bernoulli import BernoulliDistribution
 
         return BernoulliDistribution(p)
 
@@ -244,21 +244,21 @@ class GammaRatePosterior(ConjugatePosterior):
     def point_estimate(self):
         lam = self.shape / self.rate
         if self.kind == "poisson":
-            from pysp.stats.leaf.poisson import PoissonDistribution
+            from pysp.stats.base.poisson import PoissonDistribution
 
             return PoissonDistribution(lam)
         if self.kind == "exponential":
-            from pysp.stats.leaf.exponential import ExponentialDistribution
+            from pysp.stats.base.exponential import ExponentialDistribution
 
             return ExponentialDistribution(1.0 / lam)  # ExponentialDistribution is mean-parameterised
-        from pysp.stats.leaf.gamma import GammaDistribution
+        from pysp.stats.base.gamma import GammaDistribution
 
         return GammaDistribution(self.known_shape, 1.0 / lam)  # k=shape, theta=scale=1/rate
 
     def posterior_predictive(self):
         if self.kind == "poisson":
             # Poisson-Gamma predictive is Negative-Binomial(r=A, p=B/(B+1)).
-            from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution
+            from pysp.stats.base.negative_binomial import NegativeBinomialDistribution
 
             return NegativeBinomialDistribution(self.shape, self.rate / (self.rate + 1.0))
         return self.point_estimate()
@@ -328,10 +328,10 @@ class DirichletPosterior(ConjugatePosterior):
     def point_estimate(self):
         p = self.alpha / self.alpha.sum()
         if self.kind == "integer_categorical":
-            from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
+            from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
 
             return IntegerCategoricalDistribution(self.min_val, p)
-        from pysp.stats.leaf.categorical import CategoricalDistribution
+        from pysp.stats.base.categorical import CategoricalDistribution
 
         return CategoricalDistribution(dict(zip(self.support, p)))
 
@@ -420,10 +420,10 @@ class NormalInverseGammaPosterior(ConjugatePosterior):
     def point_estimate(self):
         sigma2 = self.b / (self.a - 1.0) if self.a > 1.0 else self.b / self.a
         if self.kind == "log_gaussian":
-            from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
+            from pysp.stats.base.log_gaussian import LogGaussianDistribution
 
             return LogGaussianDistribution(self.m, sigma2)
-        from pysp.stats.leaf.gaussian import GaussianDistribution
+        from pysp.stats.base.gaussian import GaussianDistribution
 
         return GaussianDistribution(self.m, sigma2)
 
@@ -433,7 +433,7 @@ class NormalInverseGammaPosterior(ConjugatePosterior):
         # plug-in LogGaussian is returned as a usable pysp distribution.
         if self.kind == "log_gaussian":
             return self.point_estimate()
-        from pysp.stats.leaf.student_t import StudentTDistribution
+        from pysp.stats.base.student_t import StudentTDistribution
 
         scale = math.sqrt(self.b * (self.kappa + 1.0) / (self.a * self.kappa))
         return StudentTDistribution(2.0 * self.a, self.m, scale)
@@ -632,10 +632,10 @@ class InverseGammaVariancePosterior(ConjugatePosterior):
     def point_estimate(self):
         sigma = math.sqrt(self._sigma2_mean())
         if self.kind == "half_normal":
-            from pysp.stats.leaf.half_normal import HalfNormalDistribution
+            from pysp.stats.base.half_normal import HalfNormalDistribution
 
             return HalfNormalDistribution(sigma)
-        from pysp.stats.leaf.rayleigh import RayleighDistribution
+        from pysp.stats.base.rayleigh import RayleighDistribution
 
         return RayleighDistribution(sigma)
 
@@ -707,18 +707,18 @@ class GammaParameterPosterior(ConjugatePosterior):
     def point_estimate(self):
         psi = self.shape / self.rate
         if self.kind == "gamma":
-            from pysp.stats.leaf.gamma import GammaDistribution
+            from pysp.stats.base.gamma import GammaDistribution
 
             return GammaDistribution(self.fixed, 1.0 / psi)  # known shape k, theta = 1/rate
         if self.kind == "inverse_gamma":
-            from pysp.stats.leaf.inverse_gamma import InverseGammaDistribution
+            from pysp.stats.base.inverse_gamma import InverseGammaDistribution
 
             return InverseGammaDistribution(self.fixed, psi)  # known alpha, beta = psi
         if self.kind == "inverse_gaussian":
-            from pysp.stats.leaf.inverse_gaussian import InverseGaussianDistribution
+            from pysp.stats.base.inverse_gaussian import InverseGaussianDistribution
 
             return InverseGaussianDistribution(self.fixed, psi)  # known mu, lam = psi
-        from pysp.stats.leaf.pareto import ParetoDistribution
+        from pysp.stats.base.pareto import ParetoDistribution
 
         return ParetoDistribution(self.fixed, psi)  # known xm, alpha = psi
 
@@ -887,7 +887,7 @@ class VonMisesMeanPosterior(ConjugatePosterior):
         return {"mu": rng.vonmises(self.m, self.r, size=n)}
 
     def point_estimate(self):
-        from pysp.stats.leaf.von_mises import VonMisesDistribution
+        from pysp.stats.base.von_mises import VonMisesDistribution
 
         return VonMisesDistribution(self.m, self.kappa)
 
@@ -932,23 +932,23 @@ def _build_von_mises(dist, data, weights, prior) -> VonMisesMeanPosterior:
 # Registry + dispatch
 # ---------------------------------------------------------------------------
 def _registry():
-    from pysp.stats.leaf.bernoulli import BernoulliDistribution
-    from pysp.stats.leaf.binomial import BinomialDistribution
-    from pysp.stats.leaf.categorical import CategoricalDistribution
-    from pysp.stats.leaf.exponential import ExponentialDistribution
-    from pysp.stats.leaf.gamma import GammaDistribution
-    from pysp.stats.leaf.gaussian import GaussianDistribution
-    from pysp.stats.leaf.geometric import GeometricDistribution
-    from pysp.stats.leaf.half_normal import HalfNormalDistribution
-    from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
-    from pysp.stats.leaf.inverse_gamma import InverseGammaDistribution
-    from pysp.stats.leaf.inverse_gaussian import InverseGaussianDistribution
-    from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
-    from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution
-    from pysp.stats.leaf.pareto import ParetoDistribution
-    from pysp.stats.leaf.poisson import PoissonDistribution
-    from pysp.stats.leaf.rayleigh import RayleighDistribution
-    from pysp.stats.leaf.von_mises import VonMisesDistribution
+    from pysp.stats.base.bernoulli import BernoulliDistribution
+    from pysp.stats.base.binomial import BinomialDistribution
+    from pysp.stats.base.categorical import CategoricalDistribution
+    from pysp.stats.base.exponential import ExponentialDistribution
+    from pysp.stats.base.gamma import GammaDistribution
+    from pysp.stats.base.gaussian import GaussianDistribution
+    from pysp.stats.base.geometric import GeometricDistribution
+    from pysp.stats.base.half_normal import HalfNormalDistribution
+    from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
+    from pysp.stats.base.inverse_gamma import InverseGammaDistribution
+    from pysp.stats.base.inverse_gaussian import InverseGaussianDistribution
+    from pysp.stats.base.log_gaussian import LogGaussianDistribution
+    from pysp.stats.base.negative_binomial import NegativeBinomialDistribution
+    from pysp.stats.base.pareto import ParetoDistribution
+    from pysp.stats.base.poisson import PoissonDistribution
+    from pysp.stats.base.rayleigh import RayleighDistribution
+    from pysp.stats.base.von_mises import VonMisesDistribution
     from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
     from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
 

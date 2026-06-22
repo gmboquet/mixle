@@ -32,10 +32,10 @@ def _bags_over(num_vals, n):
 
 class IntegerProbabilisticLatentSemanticIndexingEnumerationTestCase(unittest.TestCase):
     def _dist(self):
+        from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
         from pysp.stats.latent.integer_probabilistic_latent_semantic_indexing import (
             IntegerProbabilisticLatentSemanticIndexingDistribution,
         )
-        from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
 
         prob = np.array([[0.5, 0.1], [0.3, 0.2], [0.2, 0.7]])
         state = np.array([[0.6, 0.4], [0.2, 0.8]])
@@ -103,9 +103,9 @@ class IBPEnumerationTestCase(unittest.TestCase):
 
 class IntegerHiddenAssociationEnumerationTestCase(unittest.TestCase):
     def _dist(self):
+        from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
+        from pysp.stats.base.integer_multinomial import IntegerMultinomialDistribution
         from pysp.stats.latent.integer_hidden_association import IntegerHiddenAssociationDistribution
-        from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
-        from pysp.stats.leaf.integer_multinomial import IntegerMultinomialDistribution
 
         state_prob = np.array([[0.5, 0.3, 0.2], [0.1, 0.4, 0.5]])  # (states, S2 words)
         cond_w = np.array([[0.7, 0.3], [0.2, 0.8]])  # (S1 words, states)
@@ -147,11 +147,11 @@ class IntegerHiddenAssociationEnumerationTestCase(unittest.TestCase):
 
 class HiddenAssociationEnumerationTestCase(unittest.TestCase):
     def _dist(self):
+        from pysp.stats.base.categorical import CategoricalDistribution
+        from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
+        from pysp.stats.base.integer_multinomial import IntegerMultinomialDistribution
         from pysp.stats.combinator.conditional import ConditionalDistribution
         from pysp.stats.latent.hidden_association import HiddenAssociationDistribution
-        from pysp.stats.leaf.categorical import CategoricalDistribution
-        from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
-        from pysp.stats.leaf.integer_multinomial import IntegerMultinomialDistribution
 
         cond = ConditionalDistribution(
             {

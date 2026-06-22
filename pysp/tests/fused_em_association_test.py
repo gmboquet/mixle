@@ -20,6 +20,8 @@ import numpy as np
 
 from pysp.inference.estimation import optimize
 from pysp.stats import seq_encode, seq_log_density_sum
+from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.base.integer_multinomial import IntegerMultinomialDistribution, IntegerMultinomialEstimator
 from pysp.stats.combinator.composite import CompositeDistribution, CompositeEstimator
 from pysp.stats.combinator.conditional import ConditionalDistribution, ConditionalDistributionEstimator
 from pysp.stats.graph.markov_transform import MarkovTransformDistribution, MarkovTransformEstimator
@@ -33,8 +35,6 @@ from pysp.stats.latent.integer_hidden_association import (
     IntegerHiddenAssociationDistribution,
     IntegerHiddenAssociationEstimator,
 )
-from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.leaf.integer_multinomial import IntegerMultinomialDistribution, IntegerMultinomialEstimator
 
 
 def _devnull():
