@@ -21,8 +21,8 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.stats.combinator._base import MaskedBaseEncoder
 from pysp.stats.compute.pdist import (
-    DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -259,18 +259,8 @@ class ZeroInflatedEstimator(ParameterEstimator):
         return ZeroInflatedDistribution(base, pi, name=self.name, keys=self.keys)
 
 
-class ZeroInflatedDataEncoder(DataSequenceEncoder):
+class ZeroInflatedDataEncoder(MaskedBaseEncoder):
     """Encode observations via the base encoder, plus a boolean ``x == 0`` mask."""
 
-    def __init__(self, base_encoder: DataSequenceEncoder) -> None:
-        self.base_encoder = base_encoder
-
-    def __str__(self) -> str:
-        return "ZeroInflatedDataEncoder(%s)" % str(self.base_encoder)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, ZeroInflatedDataEncoder) and other.base_encoder == self.base_encoder
-
-    def seq_encode(self, x: Sequence[Any]) -> tuple[Any, np.ndarray]:
-        zero_mask = np.asarray([v == 0 for v in x], dtype=bool)
-        return self.base_encoder.seq_encode(list(x)), zero_mask
+    def _extra_columns(self, x: Sequence[Any]) -> tuple[np.ndarray]:
+        return (np.asarray([v == 0 for v in x], dtype=bool),)
