@@ -42,8 +42,8 @@ def _njit_vg():
     mu = _MU.copy()
     prec = _PREC.copy()
 
-    @njit(cache=True)
-    def vg(x):
+    @njit  # NB: not cache=True -- caching this closure to disk goes stale across pytest reimports
+    def vg(x):  # ("underlying object has vanished"), an intermittent flake; recompiling is cheap here
         d = x - mu
         return -0.5 * (d @ (prec @ d)), -(prec @ d)
 
