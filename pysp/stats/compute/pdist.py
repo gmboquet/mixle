@@ -7,7 +7,7 @@ ConditionalSampler, and DistributionSampler for classes of the pysp.stats.
 import itertools
 import math
 import sys
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from typing import Any, Generic, Optional, TypeVar
 
 import numpy as np
@@ -61,7 +61,7 @@ def child_enumerator(child: "ProbabilityDistribution", path: str) -> "Distributi
         raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
 
 
-class ProbabilityDistribution:
+class ProbabilityDistribution(ABC):
     """Base class for all probability distributions in pysp.stats.
 
     A distribution evaluates the (log-)density of a single observation of its data
@@ -69,9 +69,6 @@ class ProbabilityDistribution:
     ParameterEstimator for re-estimating itself from data. Discrete distributions
     may additionally provide a DistributionEnumerator over their support.
     """
-
-    def __init__(self) -> None:
-        pass
 
     def __repr__(self) -> str:
         return self.__str__()
@@ -538,7 +535,7 @@ class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
         ...
 
 
-class DistributionSampler:
+class DistributionSampler(ABC):
     """Draws iid observations from a distribution using a seeded RandomState.
 
     sample(size=None) returns a single observation of the distribution's data type;
@@ -576,7 +573,7 @@ class DistributionSampler:
         ...
 
 
-class DistributionEnumerator:
+class DistributionEnumerator(ABC):
     """Lazy iterator over the support of dist in non-increasing probability order.
 
     Yields (value, log_prob) pairs, possibly infinitely many. Contract:
@@ -652,14 +649,14 @@ class DistributionEnumerator:
         return QuantizedEnumerationIndex.from_enumerator(self, max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
-class ConditionalSampler:
+class ConditionalSampler(ABC):
     """Sampler mixin for conditional draws: sample_given(x) draws from P(. | x)."""
 
     @abstractmethod
     def sample_given(self, x): ...
 
 
-class StatisticAccumulator(Generic[SS]):
+class StatisticAccumulator(ABC, Generic[SS]):
     """Accumulates weighted sufficient statistics of type SS from observations.
 
     update(x, weight, estimate) adds one observation (estimate is the previous model,
@@ -759,14 +756,14 @@ def scale_suff_stat(x: Any, c: float) -> Any:
     return x
 
 
-class StatisticAccumulatorFactory:
+class StatisticAccumulatorFactory(ABC):
     """Factory whose make() returns a fresh, zeroed accumulator for one estimator."""
 
     @abstractmethod
     def make(self) -> "SequenceEncodableStatisticAccumulator": ...
 
 
-class ParameterEstimator(Generic[SS]):
+class ParameterEstimator(ABC, Generic[SS]):
     """Estimates a distribution from accumulated sufficient statistics.
 
     accumulator_factory() supplies accumulators that gather sufficient statistics of
@@ -843,7 +840,7 @@ class ParameterEstimator(Generic[SS]):
         return 0.0
 
 
-class DataSequenceEncoder:
+class DataSequenceEncoder(ABC):
     """Encodes an iid data sequence into the vectorized form used by seq_* methods.
 
     seq_encode(x) transforms a sequence of observations into the encoding consumed
