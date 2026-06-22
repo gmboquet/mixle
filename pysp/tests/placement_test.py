@@ -6,7 +6,17 @@ import unittest
 import numpy as np
 
 from pysp.inference.estimation import optimize
-from pysp.planner import (
+from pysp.stats import (
+    GaussianDistribution,
+    GaussianEstimator,
+    MixtureDistribution,
+    MixtureEstimator,
+    seq_encode,
+    seq_estimate,
+    seq_initialize,
+    seq_log_density_sum,
+)
+from pysp.utils.parallel.planner import (
     CalibrationCatalog,
     DeviceSpec,
     EncodedDataHandle,
@@ -18,16 +28,6 @@ from pysp.planner import (
     is_encoded_data_handle,
     model_sharding_plan,
     plan,
-)
-from pysp.stats import (
-    GaussianDistribution,
-    GaussianEstimator,
-    MixtureDistribution,
-    MixtureEstimator,
-    seq_encode,
-    seq_estimate,
-    seq_initialize,
-    seq_log_density_sum,
 )
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None

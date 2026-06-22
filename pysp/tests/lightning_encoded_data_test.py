@@ -10,8 +10,8 @@ import unittest
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.planner import available_encoded_data_backends, encoded_data
 from pysp.stats import GaussianDistribution, GaussianEstimator
+from pysp.utils.parallel.planner import available_encoded_data_backends, encoded_data
 
 HAS_LIGHTNING = importlib.util.find_spec("lightning") is not None and importlib.util.find_spec("torch") is not None
 

@@ -2,13 +2,13 @@
 
 import unittest
 
-from pysp.planner import (
+from pysp.stats.leaf.gaussian import GaussianDistribution
+from pysp.utils.parallel.planner import (
     LocalEncodedData,
     available_encoded_data_backends,
     encoded_data,
     register_encoded_data_backend,
 )
-from pysp.stats.leaf.gaussian import GaussianDistribution
 
 
 class EncodedDataBackendRegistryTestCase(unittest.TestCase):
@@ -48,7 +48,7 @@ class EncodedDataBackendRegistryTestCase(unittest.TestCase):
             self.assertEqual(seen["data_len"], 50)
             self.assertIs(seen["encoder"], self.encoder)
         finally:
-            from pysp.planner import _ENCODED_DATA_BACKENDS
+            from pysp.utils.parallel.planner import _ENCODED_DATA_BACKENDS
 
             _ENCODED_DATA_BACKENDS.pop("fake-test-backend", None)
             _ENCODED_DATA_BACKENDS.pop("ftb", None)

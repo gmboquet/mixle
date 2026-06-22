@@ -11,9 +11,9 @@ from typing import IO, Any, TypeVar
 
 import numpy as np
 
+from pysp.inference.priors import as_prior_dict
 from pysp.stats.compute.gradient import GradientFitError
 from pysp.stats.compute.pdist import SequenceEncodableProbabilityDistribution
-from pysp.utils.priors import as_prior_dict
 
 T = TypeVar("T")
 E0 = TypeVar("E0")
@@ -410,7 +410,7 @@ def fit_map(
 
     ``prior_strength=0`` is exactly the same objective as ``fit_mle`` when no
     explicit ``priors`` are supplied.  ``priors`` may be a legacy prior dict or
-    one of the helpers from ``pysp.utils.priors``.
+    one of the helpers from ``pysp.inference.priors``.
     """
     return _fit_gradient(
         enc,

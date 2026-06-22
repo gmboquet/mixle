@@ -231,7 +231,7 @@ class ProbabilityDistribution(ABC):
         This is the cardinality primitive for bounding a truncated descending-probability sum: after
         enumerating the top ``k`` items (whose smallest probability is ``p_k``), every un-enumerated
         item has probability ``<= p_k``, so the remaining mass is ``<= (support_size - k) * p_k`` (see
-        :func:`pysp.utils.density_rank.truncated_sum_bound`). Finite discrete leaves return their
+        :func:`pysp.enumeration.density_rank.truncated_sum_bound`). Finite discrete leaves return their
         cardinality; decomposable combinators compose it structurally; an upper bound is acceptable
         (it only loosens the tail bound). Infinite or continuous supports return ``None``.
         """
@@ -261,7 +261,7 @@ class ProbabilityDistribution(ABC):
         """Return a representative value at cumulative-density index ``q`` (descending-density order).
 
         The arbitrary-index / inverse of the probability-ordered cumulative that
-        :func:`pysp.utils.density_rank.density_rank` computes (``G(x) = P(p(Y) >= p(x))``): ``q = 0``
+        :func:`pysp.enumeration.density_rank.density_rank` computes (``G(x) = P(p(Y) >= p(x))``): ``q = 0``
         is the mode, ``q -> 1`` walks into the tail.  Families with a closed form override this
         (univariate continuous leaves expose the spatial ``quantile``; multivariate Gaussians and von
         Mises-Fisher override ``density_quantile`` exactly); the default here is the universal

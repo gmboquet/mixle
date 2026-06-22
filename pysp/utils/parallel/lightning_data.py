@@ -2,7 +2,7 @@
 
 ``LightningEncodedData`` plugs PyTorch Lightning's data tooling into pysp's encoded-data backend
 registry (``planner.encoded_data(..., backend="lightning")``). Full-data EM operations delegate to a
-resident :class:`~pysp.planner.LocalEncodedData` (identical results to ``backend="local"``); the
+resident :class:`~pysp.utils.parallel.planner.LocalEncodedData` (identical results to ``backend="local"``); the
 Lightning-specific value is **mini-batch iteration** via a :class:`lightning.pytorch.LightningDataModule`
 + ``DataLoader`` (shuffling, batching, multi-worker collation), which drives stochastic / mini-batch EM
 through :class:`~pysp.utils.streaming.StreamingEstimator`.
@@ -18,8 +18,8 @@ from typing import Any
 
 from numpy.random import RandomState
 
-from pysp.planner import EncodedDataHandle, LocalEncodedData
 from pysp.stats.compute.pdist import DataSequenceEncoder
+from pysp.utils.parallel.planner import EncodedDataHandle, LocalEncodedData
 
 
 def _resolve_encoder(estimator: Any, model: Any, encoder: DataSequenceEncoder | None) -> DataSequenceEncoder:

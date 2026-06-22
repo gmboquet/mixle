@@ -3,7 +3,6 @@ import unittest
 import numpy as np
 
 from pysp.inference.estimation import constant, harmonic
-from pysp.planner import LocalEncodedData, Resources
 from pysp.stats import (
     BinomialDistribution,
     BinomialEstimator,
@@ -14,6 +13,7 @@ from pysp.stats import (
     UniformDistribution,
     UniformEstimator,
 )
+from pysp.utils.parallel.planner import LocalEncodedData, Resources
 from pysp.utils.streaming import IncrementalEstimator, StreamingEstimator
 
 

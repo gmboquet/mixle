@@ -37,7 +37,7 @@ from typing import Any, Optional
 import numpy as np
 from mpi4py import MPI
 
-from pysp.planner import EncodedDataHandle
+from pysp.utils.parallel.planner import EncodedDataHandle
 
 __all__ = ["MPIEncodedData", "mpi_out"]
 

@@ -177,7 +177,7 @@ class CapabilityMatrixTestCase(unittest.TestCase):
     enumerates, Monte-Carlo CDF otherwise). This pins that contract across the family matrix."""
 
     def test_every_enumerable_family_supports_all_four(self):
-        from pysp.utils.density_rank import density_rank
+        from pysp.enumeration.density_rank import density_rank
 
         cases = make_cases()
         cases.append(("erdos_renyi", ErdosRenyiGraphDistribution(0.3, num_nodes=4), 10, None))
@@ -205,13 +205,13 @@ class CapabilityMatrixTestCase(unittest.TestCase):
         # Continuous / coupled families cannot enumerate (uncountable or non-decomposable support), so
         # enumeration + unranking + exact rank are N/A -- but CDF ("probability-ordered cumulative")
         # is still available for any samplable family via density_rank's Monte-Carlo fallback.
+        from pysp.enumeration.density_rank import density_rank
         from pysp.stats.bayes.dirichlet import DirichletDistribution
         from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
         from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
         from pysp.stats.latent.gaussian_mixture import GaussianMixtureDistribution
         from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
         from pysp.stats.multivariate.von_mises_fisher import VonMisesFisherDistribution
-        from pysp.utils.density_rank import density_rank
 
         # (name, dist, value, expected density_rank method): families with no enumerator still expose a
         # CDF -- exact-analytic where a closed-form probability-ordered cumulative exists (the
@@ -373,7 +373,7 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
     def test_record_nested_matches_composite_ranks(self):
         # A Record over the same children as a Composite scores identically (sum of field
         # log-densities), so count_dp_rank must agree row-for-row through the dict relabelling.
-        from pysp.utils.density_rank import count_dp_rank
+        from pysp.enumeration.density_rank import count_dp_rank
 
         cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
         intcat = IntegerCategoricalDistribution(0, [0.7, 0.2, 0.1])
