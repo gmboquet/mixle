@@ -50,6 +50,7 @@ __all__ = [
     "branch_and_bound_milp",
     "EditDistance",
     "graph_coloring",
+    "irreducible_infeasible_subset",
     "Relation",
     "RelationSampler",
     "ShortestPath",
@@ -621,6 +622,44 @@ def branch_and_bound_milp(
         return None
     value = -incumbent[0] if sense == "max" else incumbent[0]
     return value, incumbent[1]
+
+
+# ---------------------------------------------------------------------------
+# Infeasibility diagnostics (irreducible infeasible subset of linear constraints)
+# ---------------------------------------------------------------------------
+def _lp_feasible(a_ub: np.ndarray, b_ub: np.ndarray, bounds: Sequence[tuple[float, float]]) -> bool:
+    """True iff ``{x in bounds : a_ub @ x <= b_ub}`` is non-empty (a zero-objective LP feasibility check)."""
+    from scipy.optimize import linprog
+
+    if len(b_ub) == 0:
+        return True
+    res = linprog(np.zeros(a_ub.shape[1]), A_ub=a_ub, b_ub=b_ub, bounds=list(bounds), method="highs")
+    return bool(res.success)
+
+
+def irreducible_infeasible_subset(
+    a_ub: Any, b_ub: Any, bounds: Sequence[tuple[float, float]] | None = None
+) -> list[int] | None:
+    """Find an irreducible infeasible subset (IIS) of the linear constraints ``a_ub @ x <= b_ub``.
+
+    Returns the row indices of a minimal infeasible subset: the subsystem is itself infeasible, yet
+    dropping any single one of its rows makes it feasible (within the variable ``bounds``, default
+    unbounded). Returns ``None`` if the full system is already feasible. Uses the deletion filter --
+    tentatively remove each constraint and keep it removed whenever the remainder stays infeasible --
+    so the result certifies *which* constraints conflict, the standard infeasibility diagnostic.
+    """
+    a = np.asarray(a_ub, dtype=np.float64)
+    b = np.asarray(b_ub, dtype=np.float64)
+    n = a.shape[1]
+    bnds = [(-np.inf, np.inf)] * n if bounds is None else list(bounds)
+    if _lp_feasible(a, b, bnds):
+        return None  # feasible system has no infeasible subset
+    rows = list(range(len(b)))
+    for i in list(rows):
+        trial = [r for r in rows if r != i]
+        if not _lp_feasible(a[trial], b[trial], bnds):
+            rows = trial  # constraint i is not needed for infeasibility -> drop it
+    return rows
 
 
 # ---------------------------------------------------------------------------
