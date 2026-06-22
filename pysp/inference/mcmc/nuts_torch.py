@@ -1,6 +1,6 @@
 """Torch-native No-U-Turn Sampler.
 
-A device-resident port of the numpy NUTS in :mod:`pysp.utils.mcmc.samplers`: identical
+A device-resident port of the numpy NUTS in :mod:`pysp.inference.mcmc.samplers`: identical
 algorithm (recursive tree doubling, U-turn termination, multinomial proposal, dual-averaging
 step-size adaptation), but the leapfrog trajectory and the target evaluation stay in torch
 tensors on the target's device. The (unnormalised) log-target is supplied as a torch scalar
@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 
-from pysp.utils.mcmc.samplers import MCMCResult
+from pysp.inference.mcmc.samplers import MCMCResult
 
 
 def _make_value_and_grad(logp: Callable[[Any], Any], theta0: Any, use_compile: bool):
@@ -88,7 +88,7 @@ def nuts_torch(
             initial tensor's device, else CPU).
 
     Returns:
-        :class:`~pysp.utils.mcmc.samplers.MCMCResult` with ``samples`` (numpy), plus
+        :class:`~pysp.inference.mcmc.samplers.MCMCResult` with ``samples`` (numpy), plus
         ``step_size`` and ``num_target_evals`` attributes.
     """
     import torch

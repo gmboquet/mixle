@@ -9,7 +9,7 @@ from pysp.stats import (
     GaussianDistribution,
     PoissonDistribution,
 )
-from pysp.utils.mcmc import (
+from pysp.inference.mcmc import (
     AdaptiveCovarianceProposal,
     AdaptiveRandomWalkProposal,
     BlockProposal,
