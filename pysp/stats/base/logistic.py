@@ -141,6 +141,10 @@ class LogisticDistribution(SequenceEncodableProbabilityDistribution):
         """Excess kurtosis (6/5)."""
         return 1.2
 
+    def mode(self) -> float:
+        """Mode (= the location loc)."""
+        return float(self.loc)
+
     def sampler(self, seed: int | None = None) -> "LogisticSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LogisticSampler(self, seed)

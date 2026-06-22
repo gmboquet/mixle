@@ -316,6 +316,12 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(poisson.ppf(float(q), self.lam))
 
+    def mode(self) -> float:
+        """Mode floor(lambda)."""
+        import math
+
+        return float(math.floor(self.lam))
+
     def sampler(self, seed: int | None = None) -> "PoissonSampler":
         """Create PoissonSampler object with PoissonDistribution instance and seed (Optional[int]) passed.
 

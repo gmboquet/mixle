@@ -245,6 +245,17 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         return float(betaln(a, b) - (a - 1.0) * digamma(a) - (b - 1.0) * digamma(b)
                      + (a + b - 2.0) * digamma(a + b))
 
+    def mode(self) -> float:
+        """Mode (a-1)/(a+b-2) for a,b>1; boundary otherwise."""
+        a, b = self.a, self.b
+        if a > 1.0 and b > 1.0:
+            return float((a - 1.0) / (a + b - 2.0))
+        if a <= 1.0 < b:
+            return 0.0
+        if b <= 1.0 < a:
+            return 1.0
+        return 0.0
+
     def sampler(self, seed: int | None = None) -> "BetaSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BetaSampler(self, seed)

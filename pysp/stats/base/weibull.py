@@ -217,6 +217,11 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(np.euler_gamma * (1.0 - 1.0 / self.shape) + math.log(self.scale / self.shape) + 1.0)
 
+    def mode(self) -> float:
+        """Mode scale*((k-1)/k)^(1/k) for shape k>1, else 0."""
+
+        return float(self.scale * ((self.shape - 1.0) / self.shape) ** (1.0 / self.shape)) if self.shape > 1.0 else 0.0
+
     def sampler(self, seed: int | None = None) -> "WeibullSampler":
         """Return a sampler for drawing observations from this distribution."""
         return WeibullSampler(self, seed)

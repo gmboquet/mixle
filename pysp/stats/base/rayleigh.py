@@ -180,6 +180,10 @@ class RayleighDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(-(6.0 * math.pi ** 2 - 24.0 * math.pi + 16.0) / (4.0 - math.pi) ** 2)
 
+    def mode(self) -> float:
+        """Mode (sigma)."""
+        return float(self.sigma)
+
     def sampler(self, seed: int | None = None) -> "RayleighSampler":
         """Return a sampler for drawing observations from this distribution."""
         return RayleighSampler(self, seed)
