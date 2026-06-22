@@ -35,7 +35,8 @@ from __future__ import annotations
 import heapq
 import itertools
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -50,6 +51,8 @@ __all__ = [
     "Relation",
     "RelationSampler",
     "ShortestPath",
+    "is_stable_matching",
+    "stable_matching",
     "Solution",
     "SpanningTree",
     "ViterbiPath",
@@ -173,6 +176,76 @@ def nearest_first(
             nd = dist + step
             if (max_distance is None or nd <= max_distance) and key(nxt) not in seen:
                 heapq.heappush(heap, (nd, next(cnt), nxt))
+
+
+# ---------------------------------------------------------------------------
+# Stable matching (Gale-Shapley)
+# ---------------------------------------------------------------------------
+def stable_matching(
+    proposer_prefs: Sequence[Sequence[int]], receiver_prefs: Sequence[Sequence[int]]
+) -> list[int]:
+    """Proposer-optimal stable matching via Gale-Shapley.
+
+    ``proposer_prefs[i]`` is proposer ``i``'s receivers in descending preference; ``receiver_prefs[j]``
+    likewise for receiver ``j``. Preference lists may be partial (an unlisted partner is unacceptable)
+    and the two sides may differ in size. Returns ``match`` with ``match[i]`` the receiver assigned to
+    proposer ``i`` (or ``-1`` if unmatched). The result is the proposer-optimal stable matching: it is
+    stable (no blocking pair) and every proposer gets the best partner achievable in any stable matching.
+
+    Reference: Gale & Shapley, "College admissions and the stability of marriage", *Amer. Math. Monthly*
+    (1962).
+    """
+    n, m = len(proposer_prefs), len(receiver_prefs)
+    rank = [{p: r for r, p in enumerate(receiver_prefs[j])} for j in range(m)]
+    next_choice = [0] * n
+    match_p = [-1] * n
+    match_r = [-1] * m
+    free = deque(range(n))
+    while free:
+        i = free.popleft()
+        while next_choice[i] < len(proposer_prefs[i]):
+            j = proposer_prefs[i][next_choice[i]]
+            next_choice[i] += 1
+            if i not in rank[j]:
+                continue  # receiver j finds proposer i unacceptable
+            cur = match_r[j]
+            if cur == -1:
+                match_r[j], match_p[i] = i, j
+                break
+            if rank[j][i] < rank[j][cur]:  # j prefers i to its current partner
+                match_p[cur] = -1
+                free.append(cur)
+                match_r[j], match_p[i] = i, j
+                break
+            # else j rejects i; i keeps proposing down its list
+        # if i exhausts its list it stays unmatched (not re-queued)
+    return match_p
+
+
+def is_stable_matching(
+    match: Sequence[int], proposer_prefs: Sequence[Sequence[int]], receiver_prefs: Sequence[Sequence[int]]
+) -> bool:
+    """Return ``True`` iff ``match`` has no blocking pair (a mutually-preferred unmatched proposer/receiver)."""
+    m = len(receiver_prefs)
+    p_rank = [{r: k for k, r in enumerate(proposer_prefs[i])} for i in range(len(proposer_prefs))]
+    r_rank = [{p: k for k, p in enumerate(receiver_prefs[j])} for j in range(m)]
+    receiver_of = match
+    proposer_of = [-1] * m
+    for i, j in enumerate(match):
+        if j != -1:
+            proposer_of[j] = i
+    for i, prefs in enumerate(proposer_prefs):
+        for j in prefs:  # receivers i prefers, best-first
+            if receiver_of[i] == j:
+                break  # i is matched to j or someone it prefers more; no blocking pair beyond here
+            if i not in r_rank[j]:
+                continue  # j won't accept i anyway
+            cur = proposer_of[j]
+            # blocking iff j is unmatched, or j prefers i to its current partner
+            if cur == -1 or r_rank[j][i] < r_rank[j][cur]:
+                if receiver_of[i] == -1 or p_rank[i][j] < p_rank[i][receiver_of[i]]:
+                    return False
+    return True
 
 
 # ---------------------------------------------------------------------------
