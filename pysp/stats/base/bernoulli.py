@@ -225,6 +225,18 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
             return 0.0
         return float(1.0 - self.p) if xv < 1.0 else 1.0
 
+    def skewness(self) -> float:
+        """Skewness (1-2p)/sqrt(p(1-p))."""
+        import math
+
+        p = self.p
+        return float((1.0 - 2.0 * p) / math.sqrt(p * (1.0 - p)))
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis (1-6p(1-p))/(p(1-p))."""
+        p = self.p
+        return float((1.0 - 6.0 * p * (1.0 - p)) / (p * (1.0 - p)))
+
     def sampler(self, seed: int | None = None) -> "BernoulliSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BernoulliSampler(self, seed)

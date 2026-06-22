@@ -285,6 +285,14 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(1.0 + math.log(self.beta))
 
+    def skewness(self) -> float:
+        """Skewness (2)."""
+        return 2.0
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis (6)."""
+        return 6.0
+
     def sampler(self, seed: int | None = None) -> "ExponentialSampler":
         """Create an ExponentialSampler object with scale beta.
 
