@@ -17,7 +17,9 @@ tolerances (not mathematical constants), so they stay engine-independent.
 
 from __future__ import annotations
 
+import builtins
 from contextlib import contextmanager
+from numbers import Number
 from typing import Any
 
 from pysp.engines import NUMPY_ENGINE, SYMBOLIC_ENGINE, ComputeEngine, engine_of
@@ -38,6 +40,12 @@ __all__ = [
     "floor",
     "isnan",
     "isinf",
+    # NOTE: ``sum`` and ``max`` are dispatched and importable by explicit name
+    # (``from pysp.arithmetic import sum``) but are deliberately kept OUT of
+    # ``__all__``: many leaf/latent modules do ``from pysp.arithmetic import *``
+    # and call the *builtins* ``max``/``sum`` inside numba ``nopython`` kernels.
+    # Exporting the dispatch wrappers would shadow those builtins in the module
+    # namespace and break numba type inference (Untyped global name 'max').
     "dot",
     "matmul",
     "cumsum",
@@ -142,7 +150,16 @@ isnan = _dispatch("isnan")
 isinf = _dispatch("isinf")
 
 sum = _dispatch("sum")
-max = _dispatch("max")
+
+
+def max(*args, **kwargs):
+    """Return Python scalar ``max`` or dispatch array reductions to the active engine."""
+    if len(args) > 1 and not kwargs and all(isinstance(arg, Number) for arg in args):
+        return builtins.max(*args)
+    engine = engine_of(args, default=_default_engine)
+    return engine.max(*args, **kwargs)
+
+
 dot = _dispatch("dot")
 matmul = _dispatch("matmul")
 cumsum = _dispatch("cumsum")
