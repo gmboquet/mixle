@@ -22,11 +22,11 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.composite import _distribute_child_prior
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
-    NullDataEncoder,
     NullDistribution,
     NullEstimator,
 )
@@ -95,7 +95,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         self.len_normalized = len_normalized
         self.name = name
 
-        self.null_len_dist = isinstance(self.len_dist, NullDistribution)
+        self.null_len_dist = supports(self.len_dist, Neutral)
         self.set_prior(prior)
 
     def get_prior(self) -> tuple[Any, Any]:
@@ -694,7 +694,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
         self.len_normalized = len_normalized
 
-        self.null_len_accumulator = isinstance(self.len_accumulator, NullAccumulator)
+        self.null_len_accumulator = supports(self.len_accumulator, Neutral)
 
         ### Seeds for initialize/seq_initialize consistency
         self._init_rng = False
@@ -1108,7 +1108,7 @@ class SequenceDataEncoder(DataSequenceEncoder):
         self.encoder = encoders[0]
         self.len_encoder = encoders[1]
 
-        self.null_len_enc = isinstance(self.len_encoder, NullDataEncoder)
+        self.null_len_enc = supports(self.len_encoder, Neutral)
 
     def __str__(self) -> str:
         """Returns string representation of SequenceDataEncoder object."""

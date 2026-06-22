@@ -39,6 +39,7 @@ from scipy.special import logsumexp
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -450,7 +451,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     def compute_capabilities(self):
         from pysp.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
-        children = tuple(self.topics) + (() if isinstance(self.len_dist, NullDistribution) else (self.len_dist,))
+        children = tuple(self.topics) + (() if supports(self.len_dist, Neutral) else (self.len_dist,))
         if self.has_topics or self.terminal_values is not None or self.use_numba:
             return DistributionCapabilities(engine_ready=("numpy",), kernel_status="legacy_numpy")
         ready = intersect_engine_ready(children)
@@ -465,7 +466,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         )
 
         topic_children = tuple(declaration_for(topic) for topic in self.topics)
-        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        length = None if supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = tuple(
             child for child in topic_children + ((length,) if length is not None else ()) if child is not None
         )
@@ -976,11 +977,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             HiddenMarkovSampler object.
 
         """
-        if (
-            isinstance(self.len_dist, NullDistribution)
-            and self.terminal_values is None
-            and self.terminal_states is None
-        ):
+        if supports(self.len_dist, Neutral) and self.terminal_values is None and self.terminal_states is None:
             raise Exception(
                 "HiddenMarkovSampler requires len_dist with support on non-negative integers, or terminal_"
                 "values / terminal_states to be set."
@@ -1046,7 +1043,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.stats.compute.pdist import EnumerationError
         from pysp.utils.quantization.core import CountHistogram, CountIndex, child_count_index, leaf_count_index
 
-        if isinstance(self.len_dist, NullDistribution):
+        if supports(self.len_dist, Neutral):
             raise EnumerationError(self, reason="no length distribution is modeled (len_dist is Null)")
 
         def _fallback():
@@ -1350,7 +1347,7 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
         if getattr(dist, "terminal_values", None) is not None:
             raise EnumerationError(dist, reason="terminal_values semantics are not supported")
         len_dist = dist.len_dist if len_dist is None else len_dist
-        if len_dist is None or isinstance(len_dist, NullDistribution):
+        if len_dist is None or supports(len_dist, Neutral):
             raise EnumerationError(dist, reason="no length distribution is modeled (len_dist is Null)")
         path_root = path_root if path_root is not None else type(dist).__name__
 

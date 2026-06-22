@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import NullDataEncoder, NullDistribution, NullSampler
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -121,7 +122,7 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.stats.compute.stacked import stacked_component_params
 
         child_dists = [dist.dist for dist in dists]
-        if all(isinstance(dist, NullDistribution) for dist in child_dists):
+        if all(supports(dist, Neutral) for dist in child_dists):
             return {"child_route": None, "num_components": len(dists)}
         try:
             child_route = stacked_component_params(child_dists, engine)
@@ -271,7 +272,7 @@ class IgnoredEstimator(ParameterEstimator):
 class IgnoredDataEncoder(DataSequenceEncoder):
     def __init__(self, encoder: DataSequenceEncoder | None = NullDataEncoder()) -> None:
         self.encoder = encoder if encoder is not None else NullDataEncoder()
-        self.null = isinstance(self.encoder, NullDataEncoder)
+        self.null = supports(self.encoder, Neutral)
 
     def __str__(self) -> str:
         return "IgnoredDataEncoder(dist=" + str(self.encoder) + ")"

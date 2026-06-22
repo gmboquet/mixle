@@ -48,6 +48,7 @@ from numpy.random import RandomState
 from scipy.special import digamma
 
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
@@ -137,7 +138,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
             c.set_parameters(p)
 
     def _len_term(self, x: Any) -> float:
-        if isinstance(self.len_dist, NullDistribution) or self.len_dist is None:
+        if supports(self.len_dist, Neutral) or self.len_dist is None:
             return 0.0
         return self.len_dist.log_density(len(x))
 
@@ -184,7 +185,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
             flat.extend(u)
         flat_enc = self.components[0].dist_to_encoder().seq_encode(flat)
 
-        if isinstance(self.len_dist, NullDistribution) or self.len_dist is None:
+        if supports(self.len_dist, Neutral) or self.len_dist is None:
             len_enc = None
         else:
             len_enc = self.len_dist.dist_to_encoder().seq_encode(lengths)
@@ -268,7 +269,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
     def estimator(self, pseudo_count: float | None = None) -> "HierarchicalDirichletProcessMixtureEstimator":
         """Create a HierarchicalDirichletProcessMixtureEstimator from this
         distribution's components, concentrations, and length estimator."""
-        len_est = NullEstimator() if isinstance(self.len_dist, NullDistribution) else self.len_dist.estimator()
+        len_est = NullEstimator() if supports(self.len_dist, Neutral) else self.len_dist.estimator()
         return HierarchicalDirichletProcessMixtureEstimator(
             [u.estimator() for u in self.components],
             gamma=self.gamma,
@@ -280,7 +281,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
     def dist_to_encoder(self) -> "HierarchicalDirichletProcessMixtureDataEncoder":
         """Returns a HierarchicalDirichletProcessMixtureDataEncoder for this distribution."""
         comp_encoder = self.components[0].dist_to_encoder()
-        len_encoder = None if isinstance(self.len_dist, NullDistribution) else self.len_dist.dist_to_encoder()
+        len_encoder = None if supports(self.len_dist, Neutral) else self.len_dist.dist_to_encoder()
         return HierarchicalDirichletProcessMixtureDataEncoder(comp_encoder, len_encoder)
 
 
@@ -294,7 +295,7 @@ class HierarchicalDirichletProcessMixtureSampler(DistributionSampler):
         self.rng = RandomState(rng.randint(0, maxrandint))
         self.dist = dist
         self.comp_samplers = [u.sampler(seed=rng.randint(0, maxrandint)) for u in dist.components]
-        if isinstance(dist.len_dist, NullDistribution) or dist.len_dist is None:
+        if supports(dist.len_dist, Neutral) or dist.len_dist is None:
             self.len_sampler = None
         else:
             self.len_sampler = dist.len_dist.sampler(seed=rng.randint(0, maxrandint))
@@ -352,7 +353,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
                 self.accumulators[k].initialize(u, p[k] * weight, rng)
         self.group_counts.append(counts)
 
-        if not isinstance(self.len_accumulator, NullAccumulator):
+        if not supports(self.len_accumulator, Neutral):
             self.len_accumulator.update(len(x), weight, None)
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState) -> None:
@@ -374,7 +375,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
         for k in range(self.num_components):
             self.accumulators[k].seq_initialize(flat_enc, phi[:, k] * seq_w, rng)
 
-        if len_enc is not None and not isinstance(self.len_accumulator, NullAccumulator):
+        if len_enc is not None and not supports(self.len_accumulator, Neutral):
             self.len_accumulator.seq_initialize(len_enc, weights, rng)
 
     def update(self, x: Any, weight: float, estimate: HierarchicalDirichletProcessMixtureDistribution) -> None:
@@ -425,7 +426,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
         for k in range(self.num_components):
             self.accumulators[k].seq_update(flat_enc, phi_all[:, k], estimate.components[k])
 
-        if len_enc is not None and not isinstance(self.len_accumulator, NullAccumulator):
+        if len_enc is not None and not supports(self.len_accumulator, Neutral):
             self.len_accumulator.seq_update(len_enc, weights, None)
 
     def combine(self, suff_stat: tuple) -> "HierarchicalDirichletProcessMixtureAccumulator":
@@ -436,7 +437,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
             self.prev_alpha = suff_stat[2]
         for k in range(self.num_components):
             self.accumulators[k].combine(suff_stat[3][k])
-        if suff_stat[4] is not None and not isinstance(self.len_accumulator, NullAccumulator):
+        if suff_stat[4] is not None and not supports(self.len_accumulator, Neutral):
             self.len_accumulator.combine(suff_stat[4])
         return self
 
@@ -447,13 +448,13 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
         self.group_counts = [gc * c for gc in self.group_counts]
         for u in self.accumulators:
             u.scale(c)
-        if not isinstance(self.len_accumulator, NullAccumulator):
+        if not supports(self.len_accumulator, Neutral):
             self.len_accumulator.scale(c)
         return self
 
     def value(self) -> tuple:
         """Returns (group_counts, prev_beta, prev_alpha, atom values, len_value)."""
-        len_val = None if isinstance(self.len_accumulator, NullAccumulator) else self.len_accumulator.value()
+        len_val = None if supports(self.len_accumulator, Neutral) else self.len_accumulator.value()
         return (
             list(self.group_counts),
             self.prev_beta,
@@ -469,7 +470,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
         self.prev_alpha = x[2]
         for k in range(self.num_components):
             self.accumulators[k].from_value(x[3][k])
-        if x[4] is not None and not isinstance(self.len_accumulator, NullAccumulator):
+        if x[4] is not None and not supports(self.len_accumulator, Neutral):
             self.len_accumulator.from_value(x[4])
         return self
 
@@ -494,9 +495,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
     def acc_to_encoder(self) -> "HierarchicalDirichletProcessMixtureDataEncoder":
         """Returns a HierarchicalDirichletProcessMixtureDataEncoder for this accumulator."""
         comp_encoder = self.accumulators[0].acc_to_encoder()
-        len_encoder = (
-            None if isinstance(self.len_accumulator, NullAccumulator) else self.len_accumulator.acc_to_encoder()
-        )
+        len_encoder = None if supports(self.len_accumulator, Neutral) else self.len_accumulator.acc_to_encoder()
         return HierarchicalDirichletProcessMixtureDataEncoder(comp_encoder, len_encoder)
 
 

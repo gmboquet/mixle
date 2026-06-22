@@ -33,6 +33,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import NullAccumulator, NullAccumulatorFactory, NullDistribution, NullEstimator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -60,14 +61,14 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
     def compute_capabilities(self):
         from pysp.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
-        children = (self.dist,) if isinstance(self.len_dist, NullDistribution) else (self.dist, self.len_dist)
+        children = (self.dist,) if supports(self.len_dist, Neutral) else (self.dist, self.len_dist)
         return DistributionCapabilities(engine_ready=intersect_engine_ready(children), kernel_status="generic_table")
 
     def compute_declaration(self):
         from pysp.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         value = declaration_for(self.dist)
-        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        length = None if supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = tuple(d for d in (value, length) if d is not None)
         roles = []
         if value is not None:
@@ -100,7 +101,7 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.engines import NUMPY_ENGINE
         from pysp.stats.exp_family import MultinomialExponentialFamilyForm, to_exponential_family
 
-        if not isinstance(self.len_dist, NullDistribution) or self.len_normalized:
+        if not supports(self.len_dist, Neutral) or self.len_normalized:
             return None
         eng = NUMPY_ENGINE if engine is None else engine
         element = to_exponential_family(self.dist, engine=eng)
@@ -262,9 +263,9 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.stats.compute.stacked import stacked_component_params
 
         len_normalized = bool(dists[0].len_normalized)
-        null_len_dist = isinstance(dists[0].len_dist, NullDistribution)
+        null_len_dist = supports(dists[0].len_dist, Neutral)
         if any(
-            bool(dist.len_normalized) != len_normalized or isinstance(dist.len_dist, NullDistribution) != null_len_dist
+            bool(dist.len_normalized) != len_normalized or supports(dist.len_dist, Neutral) != null_len_dist
             for dist in dists
         ):
             raise ValueError("Stacked MultinomialDistribution components require matching length policy.")
@@ -375,7 +376,7 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             MultinomialSampler object.
 
         """
-        if isinstance(self.len_dist, NullDistribution):
+        if supports(self.len_dist, Neutral):
             raise Exception(
                 "len_dist must not be a SequenceEncodableProbabilityDistribution with support of non-negative integers."
             )
@@ -511,7 +512,7 @@ class MultinomialEnumerator(DistributionEnumerator):
 
         """
         super().__init__(dist)
-        if isinstance(dist.len_dist, NullDistribution):
+        if supports(dist.len_dist, Neutral):
             raise EnumerationError(dist, reason="no trial-count distribution is modeled (len_dist is Null)")
         if dist.len_normalized:
             raise EnumerationError(dist, reason="len_normalized densities are not enumerable")

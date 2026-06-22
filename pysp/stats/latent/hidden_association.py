@@ -39,6 +39,7 @@ import numpy as np
 
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.conditional import (
     ConditionalDistribution,
     ConditionalDistributionAccumulator,
@@ -124,8 +125,8 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         conditional = declaration_for(self.cond_dist)
-        given = None if isinstance(self.given_dist, NullDistribution) else declaration_for(self.given_dist)
-        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        given = None if supports(self.given_dist, Neutral) else declaration_for(self.given_dist)
+        length = None if supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = tuple(child for child in (conditional, given, length) if child is not None)
         roles = ()
         if conditional is not None:
@@ -289,7 +290,7 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         under ``len_dist``, merged by descending total score with ``given_dist(S1)`` as the frontier
         bound. Requires an enumerable non-null ``given_dist`` and a ConditionalDistribution ``cond_dist``.
         """
-        if isinstance(self.given_dist, NullDistribution):
+        if supports(self.given_dist, Neutral):
             raise EnumerationError(self, reason="enumeration requires a non-null given_dist over the S1 bags")
         if not isinstance(self.cond_dist, ConditionalDistribution):
             raise EnumerationError(self, reason="enumeration requires cond_dist to be a ConditionalDistribution")
@@ -383,9 +384,9 @@ class HiddenAssociationSampler(DistributionSampler):
             given_sampler (DistributionSampler): Sampler for the given set.
 
         """
-        if isinstance(dist.given_dist, NullDistribution):
+        if supports(dist.given_dist, Neutral):
             raise Exception("HiddenAssociationSampler requires attribute dist.given_dist.")
-        if isinstance(dist.len_dist, NullDistribution):
+        if supports(dist.len_dist, Neutral):
             raise Exception("HiddenAssociationSampler requires attribute dist.len_dist.")
 
         self.rng = np.random.RandomState(seed)
@@ -676,11 +677,11 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             pair_w_np = np.asarray(engine.to_numpy(pair_w), dtype=np.float64)
             self.cond_accumulator.seq_update(cond_enc, pair_w_np, estimate.cond_dist)
 
-        if not isinstance(self.given_accumulator, NullAccumulator):
+        if not supports(self.given_accumulator, Neutral):
             given_enc = self.given_accumulator.acc_to_encoder().seq_encode([xx[0] for xx in x])
             self.given_accumulator.seq_update(given_enc, weights_np, estimate.given_dist)
 
-        if not isinstance(self.size_accumulator, NullAccumulator):
+        if not supports(self.size_accumulator, Neutral):
             size_enc = self.size_accumulator.acc_to_encoder().seq_encode(emit_lengths)
             self.size_accumulator.seq_update(size_enc, weights_np, estimate.len_dist)
 
