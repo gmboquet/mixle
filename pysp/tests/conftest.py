@@ -126,3 +126,28 @@ def pytest_collection_modifyitems(items) -> None:
 
         if not {"slow", "optional", "benchmark"} & assigned:
             _add_markers(item, ("fast",), assigned)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_process_state():
+    """Snapshot and restore process-global state around every test.
+
+    Some tests set the default compute engine, consume the global numpy RNG, or change the numpy error
+    mode. Without isolation those leaks make *other* tests order-dependent under the parallel runner --
+    e.g. a ``fit()``-based parameter-recovery test that is deterministic in isolation but flakes only in
+    the full suite because an earlier test left a non-numpy default engine in place. Restoring the
+    default engine, the numpy RNG state, and the numpy error mode after each test closes that hole.
+    """
+    import numpy as np
+
+    from pysp.arithmetic import get_default_engine, set_default_engine
+
+    engine = get_default_engine()
+    rng_state = np.random.get_state()
+    err_mode = np.geterr()
+    try:
+        yield
+    finally:
+        set_default_engine(engine)
+        np.random.set_state(rng_state)
+        np.seterr(**err_mode)
