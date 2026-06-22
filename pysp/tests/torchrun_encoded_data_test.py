@@ -9,9 +9,9 @@ import unittest
 import numpy as np
 
 from pysp.inference.estimation import optimize
+from pysp.inference.streaming import streaming_accumulate
 from pysp.stats import GaussianDistribution, GaussianEstimator, seq_encode, seq_estimate, seq_log_density_sum
 from pysp.utils.parallel.planner import Resources, encoded_data, is_encoded_data_handle
-from pysp.utils.streaming import streaming_accumulate
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -91,7 +91,7 @@ from pysp.engines import TorchEngine
 from pysp.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator, \
     estimate_component_shard_value, seq_encode, seq_estimate, seq_log_density_sum, tie_component_shard_values
 from pysp.inference.estimation import constant, optimize
-from pysp.utils.streaming import StreamingEstimator, streaming_accumulate
+from pysp.inference.streaming import StreamingEstimator, streaming_accumulate
 from pysp.utils.parallel.torchrun import TorchRunEncodedData, torchrun_out
 
 import torch

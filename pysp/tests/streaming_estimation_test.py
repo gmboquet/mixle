@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from pysp.inference.estimation import constant, harmonic
+from pysp.inference.streaming import IncrementalEstimator, StreamingEstimator
 from pysp.stats import (
     BinomialDistribution,
     BinomialEstimator,
@@ -14,7 +15,6 @@ from pysp.stats import (
     UniformEstimator,
 )
 from pysp.utils.parallel.planner import LocalEncodedData, Resources
-from pysp.utils.streaming import IncrementalEstimator, StreamingEstimator
 
 
 def _assert_suff_close(test_case, actual, expected):

@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.enumeration.spanning import k_best_spanning_trees
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -36,7 +37,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.spanning import k_best_spanning_trees
 
 _MIN_LOG_WEIGHT = -30.0
 _MAX_LOG_WEIGHT = 30.0

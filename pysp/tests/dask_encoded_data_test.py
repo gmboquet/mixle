@@ -4,9 +4,9 @@ import unittest
 import numpy as np
 
 from pysp.inference.estimation import constant, optimize
+from pysp.inference.streaming import StreamingEstimator, streaming_accumulate
 from pysp.stats import GaussianDistribution, GaussianEstimator, seq_encode, seq_estimate, seq_log_density_sum
 from pysp.utils.parallel.planner import DaskEncodedData, encoded_data, is_encoded_data_handle
-from pysp.utils.streaming import StreamingEstimator, streaming_accumulate
 
 
 class _Future:

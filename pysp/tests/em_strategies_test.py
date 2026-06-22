@@ -19,6 +19,7 @@ from pysp.inference.em import (
     run_em,
 )
 from pysp.inference.estimation import constant
+from pysp.inference.streaming import IncrementalEstimator, StreamingEstimator
 from pysp.stats import (
     GaussianDistribution,
     GaussianEstimator,
@@ -27,7 +28,6 @@ from pysp.stats import (
     seq_encode,
     seq_estimate,
 )
-from pysp.utils.streaming import IncrementalEstimator, StreamingEstimator
 
 
 def _assert_mixture_close(test_case, actual, expected):

@@ -27,6 +27,7 @@ from scipy.special import digamma, gammaln, logsumexp
 
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.sampling.latent_posterior import MeanFieldLDAPosterior
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
@@ -43,7 +44,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.latent_posterior import MeanFieldLDAPosterior
 from pysp.utils.special import digammainv
 from pysp.utils.vector import row_choice
 
@@ -394,7 +394,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         """Return the mean-field variational posterior ``q(theta, z)`` for a single document.
 
         Runs the per-document Blei-Ng-Jordan variational fixed point and returns a
-        :class:`~pysp.stats.latent_posterior.MeanFieldLDAPosterior`: ``.topic_proportions()`` (the
+        :class:`~pysp.sampling.latent_posterior.MeanFieldLDAPosterior`: ``.topic_proportions()`` (the
         document-topic mix ``E[theta]``), ``.marginals()`` (per-word topic responsibilities ``phi``),
         ``.sample(rng)`` ``(theta, z)``, ``.mode()`` (MAP topic per word), or ``.entropy()``.
         """
