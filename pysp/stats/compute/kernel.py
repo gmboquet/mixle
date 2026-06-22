@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from pysp.capability import EngineResidentEStep, supports
+from pysp.capability import EngineResidentEStep, SupportsBackendComponentScoring, supports
 from pysp.engines import NUMPY_ENGINE, ComputeEngine
 from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
@@ -109,7 +109,7 @@ class GenericKernel(Kernel):
     def component_scores(self, enc: Any) -> Any:
         """Return per-row component log densities for mixture-like models."""
         enc = getattr(enc, "engine_payload", enc)
-        if callable(getattr(self.dist, "backend_seq_component_log_density", None)):
+        if supports(self.dist, SupportsBackendComponentScoring):
             from pysp.stats.compute.backend import backend_seq_component_log_density
 
             return backend_seq_component_log_density(self.dist, enc, self.engine)
