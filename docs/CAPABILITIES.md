@@ -60,6 +60,8 @@ pysp.catalog()               # the full capability vocabulary, as data
 - **Latent-state models** (`pysp.stats.latent`): finite latent (Mixture/LDA/PCA), sequential latent (HMM family — the hidden finite-state automaton), Markov chains (observed FSM), PCFG (grammar).
 - **Bayesian / nonparametric** (`pysp.stats.bayes`): conjugate posteriors, Dirichlet/Pitman-Yor process mixtures.
 
+**Generic / applied models** (`pysp.models`) — objects that aren't full Distribution-contract families but still participate in some concerns: Gaussian processes, neural networks (Gaussian/Poisson/categorical regression + MLPs), random forests, TransE knowledge graphs, POMDPs, causal-structure learners.
+
 **Subsystems** built on the same contract:
 - **Enumeration** (`pysp.utils.enumeration`, `quantization`) — descending-probability iteration + count-budget unranking by index.
 - **Relations** (`pysp.relations`) — optimisation-as-distribution over constrained combinatorial spaces.

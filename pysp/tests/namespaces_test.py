@@ -13,6 +13,9 @@ def test_object_namespaces_alias_the_families():
     assert pysp.dist.MarkovChainDistribution.__name__ == "MarkovChainDistribution"
     assert not hasattr(pysp, "graph")  # pysp.graph was dropped (minimal namespaces)
     assert "GaussianDistribution" in pysp.dist.__all__
+    # generic / applied models (GPs, neural nets, forests) are their own object namespace
+    assert pysp.models.GaussianProcessRegressor.__name__ == "GaussianProcessRegressor"
+    assert pysp.models.RandomForestEstimator.__name__ == "RandomForestEstimator"
 
 
 def test_concern_namespaces_gather_each_concern():
@@ -45,5 +48,5 @@ def test_contracts_gathers_every_contract_in_one_import():
 def test_pysp_dir_advertises_the_namespaces():
     import pysp
 
-    for ns in ("dist", "process", "enumeration", "sampling", "inference", "ops", "contracts"):
+    for ns in ("dist", "process", "models", "enumeration", "sampling", "inference", "ops", "contracts"):
         assert ns in dir(pysp)

@@ -3,8 +3,10 @@
 The structure (see ``docs/ARCHITECTURE.md`` and ``docs/CAPABILITIES.md``):
 
 * **Objects** — the families: :mod:`pysp.dist` (the umbrella over every distribution, including the
-  graph / ranking / set / Markov families), :mod:`pysp.process` (stochastic processes), and
-  :mod:`pysp.relations`.
+  graph / ranking / set / Markov families), :mod:`pysp.process` (stochastic processes),
+  :mod:`pysp.models` (generic / applied models — GPs, neural nets, random forests, knowledge graphs,
+  POMDPs — which aren't full Distribution-contract families but still participate in some concerns),
+  and :mod:`pysp.relations`.
 * **Concerns** — what you can do, each its own module: :mod:`pysp.enumeration`,
   :mod:`pysp.sampling`, :mod:`pysp.inference`, :mod:`pysp.ops`.
 * **Kernel** — :mod:`pysp.contracts` (every ABC/Protocol in one import) and the capability meta-layer
@@ -21,6 +23,7 @@ from pysp.capability import capabilities, catalog, describe, require, supports, 
 _NAMESPACES = (
     "dist",
     "process",
+    "models",
     "enumeration",
     "sampling",
     "inference",
@@ -54,7 +57,6 @@ __all__ = [
     *_NAMESPACES,
     "stats",
     "utils",
-    "models",
     "parallel",
     "src",
 ]
