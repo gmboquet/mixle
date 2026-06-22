@@ -29,11 +29,14 @@ _NAMESPACES = (
 )
 
 
-def __getattr__(name: str):  # PEP 562 — lazy submodule namespaces
-    if name in _NAMESPACES:
+def __getattr__(name: str):  # PEP 562 — resolve any pysp submodule (incl. the namespaces) lazily
+    if not name.startswith("_"):
         import importlib
 
-        return importlib.import_module("pysp." + name)
+        try:
+            return importlib.import_module("pysp." + name)
+        except ModuleNotFoundError:
+            pass
     raise AttributeError("module 'pysp' has no attribute %r" % name)
 
 
