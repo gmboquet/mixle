@@ -11,14 +11,14 @@ can draw posterior-predictive data. This module gathers the contract (:class:`Di
 from __future__ import annotations
 
 from pysp.capability import PosteriorPredictive
-from pysp.stats.compute.pdist import ConditionalSampler, DistributionSampler
-from pysp.stats.latent_posterior import (
+from pysp.sampling.latent_posterior import (
     CategoricalLatentPosterior,
     LatentPosterior,
     MarkovChainLatentPosterior,
     MeanFieldLDAPosterior,
 )
-from pysp.stats.sampling_api import sample
+from pysp.sampling.sampling_api import sample
+from pysp.stats.compute.pdist import ConditionalSampler, DistributionSampler
 
 __all__ = [
     "sample",

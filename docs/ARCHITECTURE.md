@@ -125,24 +125,31 @@ operations become an axis — and concretely answer both questions, with shims s
 
 ---
 
-## Status — realized as namespaces (re-export shims)
+## Status — namespaces live; self-contained concern machinery physically relocated
 
-The structure above is **live now**, as cycle-free re-export shims (nothing moved, every existing
-import still works):
+The structure above is **live**. Every namespace is reachable as `pysp.<ns>` (lazy `__getattr__`, so
+`import pysp` stays cheap) or `from pysp.<ns> import …`, and **every existing import still works**.
+Two of the concern packages now physically *own* their machinery (the files were `git mv`d in, with
+thin re-export shims left at the old paths); the rest remain cycle-free re-export shims.
 
-| Module | Role | Backed by |
-|---|---|---|
-| `pysp.enumeration` | concern | utils.enumeration + utils.quantization + DistributionEnumerator + Enumerable |
-| `pysp.sampling` | concern | pdist samplers + stats.sampling_api + latent_posterior |
-| `pysp.inference` | concern | utils.{estimation,em,fit,fisher} + bayes.conjugate + infer.nuts |
-| `pysp.ops` | operations | new (quantize) + the combinators, capability-gated |
-| `pysp.contracts` | kernel | every ABC/Protocol in one import (capabilities eager, subsystem roles lazy) |
-| `pysp.dist` / `pysp.process` / `pysp.graph` | objects | aliases of stats / the point-process & graph families |
+| Module | Role | Physical state | Backed by |
+|---|---|---|---|
+| `pysp.enumeration` | concern | **package — machinery moved in** | `_algorithms` (was utils.enumeration) + `quantization/` (was utils.quantization) + `model_enumeration` + DistributionEnumerator (pdist) + Enumerable |
+| `pysp.sampling` | concern | **package — machinery moved in** | `sampling_api` + `latent_posterior` + `_sampling` (were under stats) + pdist samplers + PosteriorPredictive |
+| `pysp.inference` | concern | re-export shim (by design) | utils.{estimation,em,fit,fisher} + bayes.conjugate + infer.nuts |
+| `pysp.ops` | operations | self-contained module | new (quantize) + the combinators, capability-gated |
+| `pysp.contracts` | kernel | re-export shim | every ABC/Protocol in one import (capabilities eager, subsystem roles lazy) |
+| `pysp.dist` / `pysp.process` / `pysp.models` | objects | re-export shims (by design) | aliases of stats / the point-process families / the generic-model package |
 
-All reachable as `pysp.<ns>` (lazy `__getattr__`, so `import pysp` stays cheap) or `from pysp.<ns>
-import …`. The remaining work is purely cosmetic: physically relocating implementations into the
-concern/object packages and flipping the shims to deprecated re-exports — done later, since the
-namespaces already deliver the coherence.
+**Why `inference` and the object namespaces stay as re-export shims (not a TODO — a decision).**
+The distribution families (`pysp.dist`, `pysp.process`) keep their canonical home in `pysp.stats`
+because **serialization type-ids are the fully-qualified module path** (`_type_id(cls) =
+"{cls.__module__}.{cls.__name__}"`); physically moving a distribution would change its type-id and
+break loading of previously-saved models. The inference machinery (`em`, `estimation`) is in a
+pre-existing tight import cycle with `pysp.stats` — estimation must iterate over distributions — so it
+stays adjacent to `stats`, with `pysp.inference` re-exporting it. The *self-contained* concern
+machinery (enumeration, sampling) has no such coupling, so it was relocated; that is the dividing
+line.
 
 ---
 
