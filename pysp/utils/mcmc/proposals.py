@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from pysp.utils.special import logsumexp as _logsumexp
+
 
 class Proposal:
     """Base proposal protocol for Metropolis-Hastings kernels."""
@@ -368,13 +370,3 @@ def _normalize_transition_proposals(proposals: Any) -> tuple[tuple[str, Proposal
         if not isinstance(proposal, Proposal):
             raise TypeError("proposal %r is not a Proposal instance." % (label,))
     return items
-
-
-def _logsumexp(values: Sequence[float]) -> float:
-    arr = np.asarray(values, dtype=float)
-    if arr.size == 0:
-        return -np.inf
-    m = float(np.max(arr))
-    if not np.isfinite(m):
-        return m
-    return float(m + np.log(np.sum(np.exp(arr - m))))

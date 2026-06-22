@@ -23,14 +23,13 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma, gammaln, logsumexp
 
+# Canonical guarded softmax (all-(-inf) slices -> uniform). For the finite 1-D inputs used here this
+# matches the previous local `_softmax`; the guard only changes the degenerate all-(-inf) case.
+from pysp.utils.special import softmax as _softmax
+
 
 def _as_rng(rng: Any) -> RandomState:
     return rng if isinstance(rng, RandomState) else RandomState(rng)
-
-
-def _softmax(logp: np.ndarray) -> np.ndarray:
-    e = np.exp(logp - logp.max())
-    return e / e.sum()
 
 
 def _cat(rng: RandomState, p: np.ndarray) -> int:
