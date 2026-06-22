@@ -8,15 +8,14 @@ from typing import Any
 
 import numpy as np
 
+from pysp.models._result import FitResult
+
 Triple = tuple[Any, Any, Any]
 
 
 @dataclass
-class KnowledgeGraphFitResult:
+class KnowledgeGraphFitResult(FitResult["TransEKnowledgeGraphModel"]):
     """Result from TransE margin fitting."""
-
-    model: TransEKnowledgeGraphModel
-    history: list[float]
 
 
 class TransEKnowledgeGraphModel:

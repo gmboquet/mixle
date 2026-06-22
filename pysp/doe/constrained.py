@@ -22,12 +22,12 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import ndtr
 
-from pysp.doe.bayesopt import _fit_surrogate, _get_acquisition, _validate_xy
+from pysp.doe.bayesopt import BayesOptResult, _fit_surrogate, _get_acquisition, _validate_xy
 from pysp.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 
 
 @dataclass(frozen=True)
-class ConstrainedBayesOptResult:
+class ConstrainedBayesOptResult(BayesOptResult):
     """Outcome of a constrained Bayesian-optimization run.
 
     ``c`` holds the ``(N, K)`` observed constraint values (feasible rows have all entries ``<= 0``)
@@ -35,10 +35,6 @@ class ConstrainedBayesOptResult:
     point; if no feasible point was found they fall back to the least-infeasible observation.
     """
 
-    best_x: np.ndarray
-    best_y: float
-    x: np.ndarray
-    y: np.ndarray
     c: np.ndarray
     feasible: np.ndarray
 

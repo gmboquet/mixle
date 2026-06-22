@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from pysp.models._result import FitResult
 from pysp.stats import (
     HeterogeneousPCFGDistribution,
     InducedHeterogeneousPCFGEstimator,
@@ -19,12 +20,8 @@ from pysp.stats.compute.pdist import ParameterEstimator
 
 
 @dataclass
-class GrammarLearningResult:
+class GrammarLearningResult(FitResult["HeterogeneousPCFGDistribution"]):
     """Fitted PCFG plus training and optional validation log-likelihood history."""
-
-    model: HeterogeneousPCFGDistribution
-    history: list[float]
-    validation_history: list[float] | None = None
 
 
 @dataclass

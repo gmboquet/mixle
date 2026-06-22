@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from pysp.doe.bayesopt import (
     BayesOptResult,
+    OptimizationResult,
     available_acquisitions,
     expected_improvement,
     minimize,
@@ -64,6 +65,7 @@ __all__ = [
     "maximin_latin_hypercube",
     "random_design",
     "sobol_design",
+    "OptimizationResult",
     "BayesOptResult",
     "expected_improvement",
     "probability_of_improvement",

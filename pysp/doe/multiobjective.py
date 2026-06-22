@@ -21,20 +21,18 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.doe.bayesopt import propose_next
+from pysp.doe.bayesopt import OptimizationResult, propose_next
 from pysp.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 
 
 @dataclass(frozen=True)
-class MultiObjectiveResult:
+class MultiObjectiveResult(OptimizationResult):
     """Outcome of a multi-objective Bayesian-optimization run.
 
     ``y`` is the ``(N, M)`` matrix of observed objective vectors (all minimized); ``pareto_mask`` flags
     the non-dominated rows, and ``pareto_x`` / ``pareto_y`` are those points and their objective vectors.
     """
 
-    x: np.ndarray
-    y: np.ndarray
     pareto_mask: np.ndarray
     pareto_x: np.ndarray
     pareto_y: np.ndarray
