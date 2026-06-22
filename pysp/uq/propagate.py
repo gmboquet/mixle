@@ -78,6 +78,11 @@ def unscented_transform(
     cov = np.atleast_2d(np.asarray(cov, dtype=float))
     d = len(mean)
     lam = alpha**2 * (d + kappa) - d
+    if d + lam <= 0:
+        raise ValueError(
+            f"unscented_transform requires d + lambda > 0, got {d + lam:.6g}; "
+            f"choose kappa > -d (here d={d}) so the sigma-point spread is positive."
+        )
     chol = np.linalg.cholesky((d + lam) * cov)
     sigma = np.vstack([mean, mean + chol.T, mean - chol.T])  # 2d+1 sigma points
     wm = np.full(2 * d + 1, 1.0 / (2.0 * (d + lam)))
