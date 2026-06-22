@@ -318,12 +318,13 @@ answer exact **rank / cumulative-probability** queries — even when the support
 unbounded.
 
 ```python
-from pysp.enumeration.density_rank import density_rank, count_dp_seek
-
-dist.enumerator().top_k(5)          # the 5 most probable (value, log_prob), in order
-dist.enumerator().top_p(0.95)       # smallest set covering 95% of the mass (discrete nucleus)
-density_rank(dist, value)           # exact-head + sampling rank & CDF of an observation
-count_dp_seek(dist, index=10_000)   # the ~10,000th most probable value, by structural count-DP
+e = dist.enumerator()               # the weighted-structure enumerator
+e.top_k(5)                          # the 5 most probable (value, log_prob), in order
+e.top_p(0.95)                       # smallest set covering 95% of the mass (discrete nucleus)
+e.rank(value)                       # exact-head + sampling rank & CDF of an observation
+e.seek(10_000)                      # the ~10,000th most probable value, by structural count-DP
+e.from_index(10_000)                # iterate (value, log_prob) descending from a structural index
+e.nucleus_size(0.95)                # size of the 95% nucleus without materializing it
 ```
 
 `Composite` / `Record` also support **conditional enumeration** — most-probable completions given
