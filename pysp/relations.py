@@ -55,6 +55,7 @@ __all__ = [
     "max_flow",
     "min_cut",
     "stable_matching",
+    "tsp_held_karp",
     "Solution",
     "SpanningTree",
     "ViterbiPath",
@@ -315,6 +316,65 @@ def min_cut(capacity: Any, source: int, sink: int) -> tuple[float, list[int], li
     cut_edges = [(u, v) for u in reachable for v in range(n) if v not in reachable and cap[u, v] > 0.0]
     cut_capacity = float(sum(cap[u, v] for u, v in cut_edges))
     return cut_capacity, sorted(reachable), cut_edges
+
+
+# ---------------------------------------------------------------------------
+# Travelling salesman (exact, Held-Karp dynamic program)
+# ---------------------------------------------------------------------------
+def tsp_held_karp(distance: Any) -> tuple[float, list[int]]:
+    """Exact minimum-cost Hamiltonian cycle through all nodes (Held-Karp).
+
+    ``distance`` is an ``n x n`` matrix of arc costs (may be asymmetric). Returns ``(cost, tour)`` where
+    ``tour`` starts at node 0, visits every node once, and the cost includes the closing arc back to 0.
+    The Held-Karp bitmask DP is exact in ``O(2^n n^2)`` time / ``O(2^n n)`` memory, so it is intended for
+    small ``n`` (roughly <= 15-18); beyond that use a heuristic.
+    """
+    d = np.asarray(distance, dtype=np.float64)
+    n = d.shape[0]
+    if n <= 1:
+        return 0.0, list(range(n))
+    if n == 2:
+        return float(d[0, 1] + d[1, 0]), [0, 1]
+    full = (1 << (n - 1)) - 1
+    # C[(mask, j)] = (min cost of a path 0 -> ... -> j visiting exactly the nodes in mask, predecessor k)
+    # where mask is a bitmask over nodes 1..n-1.
+    cost_to: dict[tuple[int, int], tuple[float, int]] = {(1 << (j - 1), j): (float(d[0, j]), 0) for j in range(1, n)}
+    for mask in range(1, full + 1):
+        for j in range(1, n):
+            bj = 1 << (j - 1)
+            if not (mask & bj) or mask == bj:
+                continue  # j not in mask, or the singleton already seeded above
+            prev_mask = mask ^ bj
+            best: tuple[float, int] | None = None
+            for k in range(1, n):
+                if k == j or not (prev_mask & (1 << (k - 1))):
+                    continue
+                pc = cost_to.get((prev_mask, k))
+                if pc is None:
+                    continue
+                cand = pc[0] + float(d[k, j])
+                if best is None or cand < best[0]:
+                    best = (cand, k)
+            if best is not None:
+                cost_to[(mask, j)] = best
+    # close each full path back to node 0 and take the best
+    end: tuple[float, int] | None = None
+    for j in range(1, n):
+        c = cost_to.get((full, j))
+        if c is None:
+            continue
+        cand = c[0] + float(d[j, 0])
+        if end is None or cand < end[0]:
+            end = (cand, j)
+    cost, last = end  # type: ignore[misc]
+    rev = []
+    mask, j = full, last
+    while j != 0:
+        rev.append(j)
+        _, k = cost_to[(mask, j)]
+        mask ^= 1 << (j - 1)
+        j = k
+    return float(cost), [0, *rev[::-1]]
 
 
 # ---------------------------------------------------------------------------
