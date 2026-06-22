@@ -21,6 +21,68 @@ class ComputeEngine(ABC):
     dtype = None
     device = "cpu"
 
+    # Canonical array-op surface that backend-neutral kernels duck-type on the engine.  Historically
+    # only the handful of allocation ops below were ``@abstractmethod``, while kernels reached for
+    # ~25 more (``log``, ``where``, ``logsumexp``, ``gammaln``, ``index_add`` ...) that each engine
+    # provided informally -- the root cause of the "present on numpy, missing/divergent on torch or
+    # symbolic" bug class.  Declaring the contract here and checking it in ``__init_subclass__`` makes
+    # a missing op fail loudly at engine *class definition* rather than deep inside a kernel.
+    #
+    # These are the elementwise/reduction/special-function ops every numeric engine must supply.
+    # Optional capabilities (autograd, device placement, precision adjustment, symbolic comparison
+    # masks) are deliberately NOT listed -- they are not part of the universal kernel surface.
+    REQUIRED_OPS: tuple[str, ...] = (
+        # allocation / conversion
+        "asarray",
+        "zeros",
+        "empty",
+        "arange",
+        "to_numpy",
+        "stack",
+        # elementwise math
+        "log",
+        "exp",
+        "sqrt",
+        "abs",
+        "where",
+        "maximum",
+        "clip",
+        "floor",
+        "isnan",
+        "isinf",
+        # reductions / linear algebra
+        "sum",
+        "max",
+        "dot",
+        "matmul",
+        "cumsum",
+        "logsumexp",
+        # indexing / set ops
+        "bincount",
+        "unique",
+        "searchsorted",
+        "index_add",
+        # special functions
+        "gammaln",
+        "digamma",
+        "betaln",
+        "erf",
+    )
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Enforce the :attr:`REQUIRED_OPS` contract on every concrete engine subclass.
+
+        Abstract subclasses (those still carrying ``@abstractmethod`` placeholders) are exempt, so
+        intermediate bases can be declared incrementally.  A concrete engine missing any required op
+        raises here -- at import/class-definition time -- instead of failing inside a kernel.
+        """
+        super().__init_subclass__(**kwargs)
+        if getattr(cls, "__abstractmethods__", None):
+            return
+        missing = tuple(op for op in cls.REQUIRED_OPS if getattr(cls, op, None) is None)
+        if missing:
+            raise TypeError("%s does not provide required compute ops: %s" % (cls.__name__, ", ".join(missing)))
+
     # Mathematical constants are part of the engine's arithmetic policy: a numeric engine returns
     # plain floats, but an exact/symbolic engine overrides these so that e.g. ``pi`` stays a symbolic
     # ``pi`` (and ``half`` an exact 1/2) instead of collapsing to a float.  ``pysp.arithmetic`` reads
@@ -46,6 +108,18 @@ class ComputeEngine(ABC):
     # E-step through host numpy (every non-host engine, e.g. torch/jax, wants this -- the default).
     supports_numba = False
     resident_estep = True
+
+    @property
+    def accumulator_dtype(self) -> Any:
+        """High-precision dtype for sufficient-statistic reductions, or ``None`` when not applicable.
+
+        Numeric engines override this with their float64 accumulator so a reduced-precision fit does
+        not drift on large N (see ``NumpyEngine``/``TorchEngine``).  The base returns ``None`` --
+        meaning "no separate accumulator dtype", which is the correct policy for engines that never
+        drive the numeric accumulate path (e.g. the symbolic engine, where reductions are exact
+        expression trees).  ``None`` is also a valid ``dtype=`` argument to ``sum`` (NumPy's default).
+        """
+        return None
 
     @property
     def precision(self) -> str:
