@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.stats.combinator._base import MaskedBaseEncoder, SingleChildAccumulator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -30,6 +31,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
+    scale_suff_stat,
 )
 from pysp.utils.special import log1mexp
 
@@ -122,7 +124,7 @@ class SurvivalSampler(DistributionSampler):
         return [(t, 1) for t in self.base_sampler.sample(size=int(size))]
 
 
-class SurvivalAccumulator(SequenceEncodableStatisticAccumulator):
+class SurvivalAccumulator(SingleChildAccumulator):
     """Feed observed events and conditional-quantile imputations of censored times to the base accumulator."""
 
     def __init__(
@@ -191,22 +193,11 @@ class SurvivalAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(self, x, weights: np.ndarray, rng: RandomState | None) -> None:
         self._accumulate(x, weights, None, initialize=True, rng=rng)
 
-    def combine(self, suff_stat: Any) -> "SurvivalAccumulator":
-        self.base_accumulator.combine(suff_stat)
+    def scale(self, c: float) -> "SurvivalAccumulator":
+        # Structural default over the bare child value (this accumulator carries no scalable
+        # statistics of its own; n_impute / _qgrid are configuration, not sufficient statistics).
+        self.from_value(scale_suff_stat(self.value(), c))
         return self
-
-    def value(self) -> Any:
-        return self.base_accumulator.value()
-
-    def from_value(self, x: Any) -> "SurvivalAccumulator":
-        self.base_accumulator.from_value(x)
-        return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        self.base_accumulator.key_merge(stats_dict)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        self.base_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "SurvivalDataEncoder":
         return SurvivalDataEncoder(self.base_accumulator.acc_to_encoder())
@@ -257,17 +248,8 @@ class SurvivalEstimator(ParameterEstimator):
         return SurvivalDistribution(self.base_estimator.estimate(nobs, suff_stat), name=self.name, keys=self.keys)
 
 
-class SurvivalDataEncoder(DataSequenceEncoder):
+class SurvivalDataEncoder(MaskedBaseEncoder):
     """Encode ``(t, event)`` data as the base encoding of the times plus the boolean event mask."""
-
-    def __init__(self, base_encoder: DataSequenceEncoder) -> None:
-        self.base_encoder = base_encoder
-
-    def __str__(self) -> str:
-        return "SurvivalDataEncoder(%s)" % str(self.base_encoder)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, SurvivalDataEncoder) and other.base_encoder == self.base_encoder
 
     def seq_encode(self, x: Sequence[tuple[float, int]]) -> tuple[Any, np.ndarray, np.ndarray]:
         times = np.asarray([t for t, _ in x], dtype=np.float64)

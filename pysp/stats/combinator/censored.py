@@ -31,6 +31,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.stats.combinator._base import MaskedBaseEncoder, SingleChildAccumulator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -171,7 +172,7 @@ class CensoredSampler(DistributionSampler):
         return self.base_sampler.sample(size=size)
 
 
-class CensoredAccumulator(SequenceEncodableStatisticAccumulator):
+class CensoredAccumulator(SingleChildAccumulator):
     """Accumulate base sufficient statistics over the exact (uncensored) observations only."""
 
     def __init__(self, base_accumulator: SequenceEncodableStatisticAccumulator, keys: str | None = None) -> None:
@@ -207,27 +208,6 @@ class CensoredAccumulator(SequenceEncodableStatisticAccumulator):
         if len(exact_idx) > 0:
             w = np.asarray(weights, dtype=np.float64)[exact_idx]
             self.base_accumulator.seq_initialize(exact_enc, w, rng)
-
-    def combine(self, suff_stat: Any) -> "CensoredAccumulator":
-        self.base_accumulator.combine(suff_stat)
-        return self
-
-    def value(self) -> Any:
-        return self.base_accumulator.value()
-
-    def from_value(self, x: Any) -> "CensoredAccumulator":
-        self.base_accumulator.from_value(x)
-        return self
-
-    def scale(self, c: float) -> "CensoredAccumulator":
-        self.base_accumulator.scale(c)
-        return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        self.base_accumulator.key_merge(stats_dict)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        self.base_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "DataSequenceEncoder":
         return CensoredDataEncoder.from_base_encoder(self.base_accumulator.acc_to_encoder())
@@ -265,7 +245,7 @@ class CensoredEstimator(ParameterEstimator):
         return CensoredDistribution(base, name=self.name, keys=self.keys)
 
 
-class CensoredDataEncoder(DataSequenceEncoder):
+class CensoredDataEncoder(MaskedBaseEncoder):
     """Split a batch into exact observations (base-encoded) and censoring intervals.
 
     Encoded form is ``(exact_enc, exact_idx, lows, highs, cens_idx)`` where ``exact_idx`` /
@@ -286,12 +266,6 @@ class CensoredDataEncoder(DataSequenceEncoder):
     @classmethod
     def from_base_encoder(cls, base_encoder: DataSequenceEncoder) -> "CensoredDataEncoder":
         return cls(base_encoder=base_encoder)
-
-    def __str__(self) -> str:
-        return "CensoredDataEncoder(%s)" % str(self.base_encoder)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, CensoredDataEncoder) and other.base_encoder == self.base_encoder
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[Any, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         exact_vals: list[Any] = []
