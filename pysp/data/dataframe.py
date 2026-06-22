@@ -62,13 +62,28 @@ def seq_encode_dataframe(
 ):
     """Sequence-encode selected DataFrame columns with the ordinary stats API."""
     from pysp.stats import seq_encode
-    from pysp.stats.combinator.record import RecordDistribution, RecordEstimator
 
-    if fields is None and model is not None and isinstance(model, RecordDistribution):
-        fields = tuple(zip(model.fields, model.sources))
-    elif fields is None and estimator is not None and isinstance(estimator, RecordEstimator):
-        fields = tuple(zip(estimator.fields, estimator.sources))
-    as_dict = isinstance(model, RecordDistribution) or isinstance(estimator, RecordEstimator)
+    def _record_fields_sources(obj: Any) -> tuple[Any, Any] | None:
+        """Recover ``(fields, sources)`` from any record-like object via a capability probe.
+
+        Mirrors the duck/``getattr`` probes used in ``pysp.planner`` -- a record-like model or
+        estimator exposes both a ``fields`` and a ``sources`` attribute; anything else is not
+        record-shaped and yields ``None``.
+        """
+        fields_attr = getattr(obj, "fields", None)
+        sources_attr = getattr(obj, "sources", None)
+        if fields_attr is None or sources_attr is None:
+            return None
+        return fields_attr, sources_attr
+
+    model_rs = None if model is None else _record_fields_sources(model)
+    estimator_rs = None if estimator is None else _record_fields_sources(estimator)
+
+    if fields is None and model_rs is not None:
+        fields = tuple(zip(model_rs[0], model_rs[1]))
+    elif fields is None and estimator_rs is not None:
+        fields = tuple(zip(estimator_rs[0], estimator_rs[1]))
+    as_dict = model_rs is not None or estimator_rs is not None
     records = dataframe_records(df, fields=fields, as_dict=as_dict)
     return seq_encode(
         records, encoder=encoder, estimator=estimator, model=model, num_chunks=num_chunks, chunk_size=chunk_size

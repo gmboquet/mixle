@@ -13,7 +13,26 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["propagate", "unscented_transform"]
+__all__ = ["propagate", "register_propagator", "unscented_transform"]
+
+#: Registry of forward-propagation methods, keyed by ``method`` name. Each entry is a callable
+#: ``f(func, mean, cov, *, n, quantiles, seed) -> dict`` -- the "register, don't branch" pattern
+#: shared with the doe acquisition/criterion registries.
+_PROPAGATORS: dict[str, Callable[..., dict[str, Any]]] = {}
+
+
+def register_propagator(name: str) -> Callable[[Callable[..., dict[str, Any]]], Callable[..., dict[str, Any]]]:
+    """Decorator registering a propagation method under ``name`` for :func:`propagate`.
+
+    The decorated callable receives ``(func, mean, cov, *, n, quantiles, seed)`` (``mean``/``cov``
+    already coerced to float arrays) and returns the output-statistics dict.
+    """
+
+    def decorator(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+        _PROPAGATORS[name] = fn
+        return fn
+
+    return decorator
 
 
 def propagate(
@@ -34,7 +53,7 @@ def propagate(
         mean: length-``d`` input mean. ``cov``: ``(d, d)`` input covariance (defaults to identity).
         n: Monte Carlo sample size (ignored by the unscented method).
         method: ``'montecarlo'`` (sample + summarize, gives quantiles) or ``'unscented'`` (sigma-point
-            moment propagation, mean + std only).
+            moment propagation, mean + std only). Looked up through the propagator registry.
         quantiles: output quantiles to report (Monte Carlo only).
 
     Returns:
@@ -43,12 +62,41 @@ def propagate(
     mean = np.atleast_1d(np.asarray(mean, dtype=float))
     d = len(mean)
     cov = np.eye(d) if cov is None else np.atleast_2d(np.asarray(cov, dtype=float))
-    if method == "unscented":
-        m, c = unscented_transform(func, mean, cov)
-        std = np.sqrt(np.clip(np.diag(np.atleast_2d(c)), 0.0, None))
-        return {"mean": m, "std": float(std[0]) if np.ndim(m) == 0 else std}
-    if method != "montecarlo":
-        raise ValueError("method must be 'montecarlo' or 'unscented'.")
+    try:
+        propagator = _PROPAGATORS[method]
+    except KeyError:
+        raise ValueError(
+            "unknown propagation method %r; registered methods are %s."
+            % (method, ", ".join(repr(name) for name in sorted(_PROPAGATORS)))
+        ) from None
+    return propagator(func, mean, cov, n=n, quantiles=quantiles, seed=seed)
+
+
+@register_propagator("unscented")
+def _propagate_unscented(
+    func: Callable[[np.ndarray], np.ndarray],
+    mean: np.ndarray,
+    cov: np.ndarray,
+    *,
+    n: int,
+    quantiles: tuple[float, ...],
+    seed: int,
+) -> dict[str, Any]:
+    m, c = unscented_transform(func, mean, cov)
+    std = np.sqrt(np.clip(np.diag(np.atleast_2d(c)), 0.0, None))
+    return {"mean": m, "std": float(std[0]) if np.ndim(m) == 0 else std}
+
+
+@register_propagator("montecarlo")
+def _propagate_montecarlo(
+    func: Callable[[np.ndarray], np.ndarray],
+    mean: np.ndarray,
+    cov: np.ndarray,
+    *,
+    n: int,
+    quantiles: tuple[float, ...],
+    seed: int,
+) -> dict[str, Any]:
     rng = np.random.RandomState(seed)
     x = rng.multivariate_normal(mean, cov, size=n)
     y = np.asarray(func(x), dtype=float)
