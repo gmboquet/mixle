@@ -702,6 +702,12 @@ def _resolve_objective(
         return obj
     if hasattr(model, "seq_local_elbo"):
         return "vb"
+    # Prefer the explicit prior signal: get_prior() is None exactly when the estimator carries no
+    # parameter prior. This is robust even when the log-prior happens to evaluate to 0.0 at init
+    # (which the model_log_density != 0.0 heuristic below would misclassify as MLE).
+    get_prior = getattr(estimator, "get_prior", None)
+    if callable(get_prior):
+        return "map" if get_prior() is not None else "mle"
     if _model_objective(estimator, model) != 0.0:
         return "map"
     return "mle"

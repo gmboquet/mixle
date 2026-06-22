@@ -34,7 +34,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.special import digamma, gammaln
+from pysp.utils.special import digamma, gammaln, trigamma
 
 _MIN_PARAM = 1.0e-12
 _MAX_SHAPE = 1.0e12
@@ -364,7 +364,7 @@ class InverseGammaEstimator(ParameterEstimator):
             if k <= 0.0:
                 return _MIN_PARAM
             g = math.log(k) - digamma(k) - s
-            gp = 1.0 / k - _trigamma(k)
+            gp = 1.0 / k - float(trigamma(k))
             step = g / gp
             k_new = k - step
             if k_new <= 0.0:
@@ -390,12 +390,6 @@ class InverseGammaEstimator(ParameterEstimator):
         alpha = self._estimate_shape(mean_y, mean_log_y, self.threshold)
         beta = max(alpha / mean_y, _MIN_PARAM)  # theta_gamma = mean_y / alpha; beta = 1/theta
         return InverseGammaDistribution(alpha, beta, name=self.name, keys=self.keys)
-
-
-def _trigamma(x: float) -> float:
-    """Trigamma psi'(x) via a finite difference of digamma (adequate for the shape Newton step)."""
-    h = 1.0e-5
-    return (digamma(x + h) - digamma(x - h)) / (2.0 * h)
 
 
 class InverseGammaDataEncoder(DataSequenceEncoder):
