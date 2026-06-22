@@ -7,11 +7,13 @@ pysparkplug.
 Data type: Sequence[Tuple[int, float]]: Consider an observation of a multinomial consisting of integer-category
 counts of the form x = (x_0,..,x_K), where K is the number of integers in the range [min_val, max_val]. The
 IntegerMultinomialDistribution with support [min_val, max_value], number of trials 'N', and probability of success for
-the integer-categories given by p = (p_0, ..., p_k), is given by
+the integer-categories given by p = (p_0, ..., p_k), scores the un-normalized log-density
 
-    log(P(x,N|p)) = -log(n!) - sum_{k=1}^{K} (x_k * log(p_k) + log(x_k!)) + log(P_len(N))
+    log(P(x,N|p)) = sum_{k=0}^{K} x_k * log(p_k) + log(P_len(N))
 
-where P_len(N) is a distribution for the number of trials in the multinomial.
+where P_len(N) is a distribution for the number of trials in the multinomial. The multinomial coefficient
+(log(N!) - sum_k log(x_k!)) is intentionally omitted, so this is a per-category scoring form rather than a
+normalized probability mass over count vectors.
 
 """
 
@@ -226,12 +228,13 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: Sequence[tuple[int, float]]) -> float:
         """Evaluate the log-density of IntegerMultinomialDistribution at observed value x.
 
-        Log-density given by
+        Un-normalized log-density given by
 
-        log(p_mat(x)) = log(n!) - sum_k x_k*log(p_k) - log(x_k!), for x having k integer categories.
+        log(p_mat(x)) = sum_k x_k*log(p_k), for x having k integer categories.
 
-        Note: n is the total number of trials in observation x and x has k integer values. p_k denotes the probability
-        of success for integer-category x_k.
+        Note: x has k integer values and p_k denotes the probability of success for integer-category x_k. The
+        multinomial coefficient is intentionally omitted (see the module docstring), so this is a per-category
+        scoring form, not a normalized mass over count vectors.
 
         Args:
             x (Sequence[Tuple[int, float]]): Sequence of Tuple(s) containing the integer category value and number of
@@ -243,6 +246,10 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
         """
         rv = 0.0
         for xx, cnt in x:
+            if cnt == 0:
+                # A zero-count term contributes nothing, even for an out-of-support value
+                # (avoids (-inf) * 0 = NaN). Matches the seq path's base-measure masking.
+                continue
             rv += (-inf if (xx < self.min_val or xx > self.max_val) else self.log_p_vec[xx - self.min_val]) * cnt
         return rv
 

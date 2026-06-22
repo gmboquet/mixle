@@ -65,7 +65,8 @@ def d_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
 def a_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
     """A-optimality merit: ``-trace(M^{-1})`` (``-inf`` if singular). Higher is better."""
     try:
-        inv = np.linalg.inv(info)
+        # trace(M^{-1}) via solving M X = I, avoiding an explicit inverse.
+        inv = np.linalg.solve(info, np.eye(info.shape[0]))
     except np.linalg.LinAlgError:
         return -np.inf
     return float(-np.trace(inv))
@@ -79,12 +80,14 @@ def i_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
     no reference set is supplied.
     """
     try:
-        inv = np.linalg.inv(info)
+        if ref is None:
+            # Fall back to A-optimality: trace(M^{-1}) via solving M X = I.
+            return float(-np.trace(np.linalg.solve(info, np.eye(info.shape[0]))))
+        # Prediction variance g M^{-1} g per reference row via solving M Y = ref.T.
+        sol = np.linalg.solve(info, ref.T)
     except np.linalg.LinAlgError:
         return -np.inf
-    if ref is None:
-        return float(-np.trace(inv))
-    pred_var = np.einsum("ij,jk,ik->i", ref, inv, ref)
+    pred_var = np.einsum("ij,ji->i", ref, sol)
     return float(-np.mean(pred_var))
 
 

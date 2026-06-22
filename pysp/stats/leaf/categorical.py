@@ -936,10 +936,7 @@ class CategoricalEstimator(ParameterEstimator):
             pseudo_count_per_level = self.pseudo_count / len(suff_stat)
             adjusted_nobs = nobs_loc + self.pseudo_count
 
-            for k, v in suff_stat.items():
-                suff_stat[k] = (v + pseudo_count_per_level) / adjusted_nobs
-
-            p_map = suff_stat
+            p_map = {k: (v + pseudo_count_per_level) / adjusted_nobs for k, v in suff_stat.items()}
 
         else:
             suff_stat_sum = sum(self.suff_stat.values())

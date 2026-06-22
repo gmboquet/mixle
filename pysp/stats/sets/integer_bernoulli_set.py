@@ -26,7 +26,6 @@ from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
     DistributionSampler,
-    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
@@ -98,15 +97,25 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         self.log_pvec = np.asarray(log_pvec, dtype=np.float64).copy()
         self.key = keys
 
-        if log_nvec is None:
-            log_nvec = np.log1p(-np.exp(self.log_pvec))
-            self.log_nvec = None
-            self.log_dvec = self.log_pvec - log_nvec
-            self.log_nsum = np.sum(log_nvec[np.isfinite(log_nvec)])
-        else:
-            self.log_nvec = np.asarray(log_nvec, dtype=np.float64)
-            self.log_dvec = self.log_pvec - self.log_nvec
-            self.log_nsum = np.sum(self.log_nvec[np.isfinite(self.log_nvec)])
+        with np.errstate(divide="ignore"):
+            if log_nvec is None:
+                log_nvec = np.log1p(-np.exp(self.log_pvec))
+                self.log_nvec = None
+                self.log_dvec = self.log_pvec - log_nvec
+                self.log_nsum = np.sum(log_nvec[np.isfinite(log_nvec)])
+            else:
+                self.log_nvec = np.asarray(log_nvec, dtype=np.float64)
+                self.log_dvec = self.log_pvec - self.log_nvec
+                self.log_nsum = np.sum(self.log_nvec[np.isfinite(self.log_nvec)])
+
+        # An element with p_k = 1 is *required*: its log_dvec entry is +inf (log_nvec = -inf,
+        # excluded from log_nsum). Treat it as forced membership (mirrors BernoulliSetDistribution):
+        # zero contribution when present, -inf when an observation omits it -- never +inf.
+        self.required = np.where(~np.isfinite(self.log_dvec) & (self.log_dvec > 0))[0]
+        self.num_required = int(self.required.shape[0])
+        if self.num_required:
+            self.log_dvec = self.log_dvec.copy()
+            self.log_dvec[self.required] = 0.0
 
     def __str__(self) -> str:
         s1 = repr(list(self.log_pvec))
@@ -121,6 +130,8 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: Sequence[int] | np.ndarray) -> float:
         """Return the log-density or log-mass at a single observation."""
         xx = np.asarray(x, dtype=int)
+        if self.num_required and not np.all(np.isin(self.required, xx)):
+            return -np.inf
         return np.sum(self.log_dvec[xx]) + self.log_nsum
 
     def seq_log_density(self, x: tuple[int, np.ndarray, np.ndarray]) -> np.ndarray:
@@ -129,6 +140,10 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         rv = np.zeros(sz, dtype=np.float64)
         rv += np.bincount(idx, weights=self.log_dvec[xs], minlength=sz)
         rv += self.log_nsum
+        if self.num_required:
+            req_loc = np.isin(xs, self.required)
+            req_cnt = np.bincount(idx[req_loc], minlength=sz)
+            rv[req_cnt != self.num_required] = -np.inf
         return rv
 
     def backend_seq_log_density(self, x: tuple[int, np.ndarray, np.ndarray], engine: Any) -> Any:
@@ -138,6 +153,12 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         if len(xs):
             log_dvec = engine.asarray(self.log_dvec)
             rv = rv + engine.bincount(engine.asarray(idx), weights=log_dvec[engine.asarray(xs)], minlength=sz)
+        if self.num_required:
+            req_cnt = engine.zeros(sz)
+            if len(xs):
+                required_loc = np.isin(np.asarray(xs), self.required).astype(np.float64)
+                req_cnt = engine.bincount(engine.asarray(idx), weights=engine.asarray(required_loc), minlength=sz)
+            rv = engine.where(req_cnt != float(self.num_required), engine.asarray(np.full(sz, -np.inf)), rv)
         return rv
 
     @classmethod
@@ -146,11 +167,14 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         num_vals = int(dists[0].num_vals)
         if any(int(dist.num_vals) != num_vals for dist in dists):
             raise ValueError("Stacked IntegerBernoulliSetDistribution components require shared support size.")
+        required = np.stack([np.isin(np.arange(num_vals), dist.required).astype(np.float64) for dist in dists], axis=1)
         return {
-            "__pysp_component_axis__": {"log_dvec": 1, "log_nsum": 0},
+            "__pysp_component_axis__": {"log_dvec": 1, "log_nsum": 0, "required": 1, "num_required": 0},
             "num_vals": num_vals,
             "log_dvec": engine.asarray(np.stack([dist.log_dvec for dist in dists], axis=1)),
             "log_nsum": engine.asarray(np.asarray([dist.log_nsum for dist in dists], dtype=np.float64)),
+            "required": engine.asarray(required),
+            "num_required": engine.asarray(np.asarray([dist.num_required for dist in dists], dtype=np.float64)),
             "num_components": len(dists),
         }
 
@@ -164,6 +188,12 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         if len(xs):
             contrib = params["log_dvec"][engine.asarray(xs), :]
             rv = engine.index_add(rv, engine.asarray(idx), contrib)
+        if "num_required" in params and np.any(np.asarray(engine.to_numpy(params["num_required"])) != 0):
+            req_cnt = engine.zeros((sz, int(params["num_components"])))
+            if len(xs):
+                req_loc = params["required"][engine.asarray(xs), :]
+                req_cnt = engine.index_add(req_cnt, engine.asarray(idx), req_loc)
+            rv = engine.where(req_cnt != params["num_required"][None, :], engine.asarray(-np.inf), rv)
         return rv
 
     @classmethod
@@ -211,22 +241,21 @@ class IntegerBernoulliSetEnumerator(DistributionEnumerator):
         Membership is independent per integer: including k contributes log_dvec[k] to the
         log-density and excluding it contributes 0 (relative to the log_nsum offset). Each
         integer therefore yields a sorted two-choice stream, and subsets are enumerated with
-        a best-first product search. Integers with p_k = 0 are exclude-only; p_k = 1 makes
-        the distribution's own log-density degenerate (infinite) and raises EnumerationError.
+        a best-first product search. Integers with p_k = 0 are exclude-only; required integers
+        (p_k = 1) are include-only and contribute 0 to the log-density.
 
         Args:
             dist (IntegerBernoulliSetDistribution): Distribution whose support is enumerated.
 
         """
         super().__init__(dist)
-        if np.any(np.isposinf(dist.log_dvec)):
-            raise EnumerationError(
-                dist, reason="some membership probability equals one, making the log-density degenerate"
-            )
+        required = {int(k) for k in dist.required}
         streams = []
         for k in range(dist.num_vals):
             d = dist.log_dvec[k]
-            if d == -np.inf:
+            if k in required:
+                choices = [(True, 0.0)]
+            elif d == -np.inf:
                 choices = [(False, 0.0)]
             elif d > 0.0:
                 choices = [(True, float(d)), (False, 0.0)]
