@@ -39,6 +39,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.special import logsubexp
 
 # Tiny finite log-mass floor for an interval that underflowed to 0 in probability space when the base
 # exposes only a linear ``cdf`` (~log of the smallest positive normal double); avoids silently zeroing.
@@ -48,22 +49,6 @@ _LOG_MASS_FLOOR = math.log(np.finfo(np.float64).tiny)
 def _is_interval(x: Any) -> bool:
     """An observation is a censoring interval if it is a length-2 sequence of bounds."""
     return isinstance(x, (tuple, list)) and len(x) == 2
-
-
-def _logsubexp(log_hi: float, log_lo: float) -> float:
-    """Stable ``log(exp(log_hi) - exp(log_lo))`` for ``log_hi >= log_lo``.
-
-    Evaluates ``log_hi + log1p(-exp(log_lo - log_hi))`` so a far-tail interval whose two CDFs
-    are individually indistinguishable from 0 (or 1) in probability space still returns a finite
-    large-negative log-mass instead of ``log(0) = -inf``.
-    """
-    if log_hi == -math.inf:
-        return -math.inf
-    if log_lo == -math.inf:
-        return log_hi
-    if log_hi <= log_lo:
-        return -math.inf
-    return log_hi + math.log1p(-math.exp(log_lo - log_hi))
 
 
 class CensoredDistribution(SequenceEncodableProbabilityDistribution):
@@ -96,7 +81,7 @@ class CensoredDistribution(SequenceEncodableProbabilityDistribution):
         Tail censoring is the normal use case, so ``F(b) - F(a)`` routinely underflows to ``0`` in
         probability space (``log(0) = -inf``) even when the true interval log-mass is a perfectly
         finite large-negative number. When the base distribution exposes ``logcdf``/``logsf`` the mass
-        is formed by a stable :func:`_logsubexp`; otherwise the linear ``F(b) - F(a)`` is used but the
+        is formed by a stable :func:`pysp.utils.special.logsubexp`; otherwise the linear ``F(b) - F(a)`` is used but the
         underflow is guarded so a real far-tail interval is not silently zeroed.
         """
         if b < a:
@@ -113,10 +98,10 @@ class CensoredDistribution(SequenceEncodableProbabilityDistribution):
             if has_logsf:
                 log_sa = 0.0 if a == -math.inf else float(self.base.logsf(a))
                 log_sb = -math.inf if b == math.inf else float(self.base.logsf(b))
-                return _logsubexp(log_sa, log_sb)
+                return logsubexp(log_sa, log_sb)
             log_fa = -math.inf if a == -math.inf else float(self.base.logcdf(a))
             log_fb = 0.0 if b == math.inf else float(self.base.logcdf(b))
-            return _logsubexp(log_fb, log_fa)
+            return logsubexp(log_fb, log_fa)
         fa = 0.0 if a == -math.inf else float(self.base.cdf(a))
         fb = 1.0 if b == math.inf else float(self.base.cdf(b))
         mass = fb - fa

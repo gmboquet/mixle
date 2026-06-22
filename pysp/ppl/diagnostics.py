@@ -21,14 +21,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-
-def _logsumexp(a: np.ndarray, axis=None) -> np.ndarray:
-    a = np.asarray(a, dtype=float)
-    m = np.max(a, axis=axis, keepdims=True)
-    out = np.log(np.sum(np.exp(a - m), axis=axis, keepdims=True)) + m
-    if axis is None:
-        return float(np.squeeze(out))
-    return np.squeeze(out, axis=axis)
+from pysp.utils.special import logsumexp as _logsumexp
 
 
 def _lppd_pointwise(loglik: np.ndarray) -> np.ndarray:

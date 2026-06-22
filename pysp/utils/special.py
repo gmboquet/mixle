@@ -1,7 +1,14 @@
-"""Defines the log-pseudo-determinant, polgamma, trigamma, and digamma inverse functions."""
+"""Defines the log-pseudo-determinant, polgamma, trigamma, and digamma inverse functions.
+
+This module is the canonical home for pysp's hand-rolled stable-math helpers (``log_erfcx``,
+``trigamma``, ``digammainv``, ``log1mexp``, ``logsubexp``, ``logsumexp``, ``softmax``,
+``softmax_rows``, ``valid_integer``). Import from here rather than re-implementing privately so
+the numerically-careful versions stay in one place.
+"""
 
 import math
 from collections.abc import Iterable
+from typing import Any
 
 import numpy as np
 
@@ -19,6 +26,7 @@ from scipy.special import (  # noqa: F401  -- re-exported
     psi,
     zeta,
 )
+from scipy.special import logsumexp as _scipy_logsumexp
 
 from pysp.arithmetic import *
 
@@ -201,3 +209,141 @@ def digammainv(y: np.ndarray | float) -> np.ndarray | float:
         x -= (digamma(x) - y) / trigamma(x)
 
     return x
+
+
+def log1mexp(x: float) -> float:
+    """Return ``log(1 - exp(x))`` for ``x <= 0``, stable across the whole range.
+
+    Uses the two-regime split (Mächler, "Accurately Computing log(1 - exp(-|a|))"):
+    ``log(-expm1(x))`` when ``exp(x)`` is small and ``log1p(-exp(x))`` when it is close to 1,
+    so ``1 - exp(x)`` is never formed by a catastrophically cancelling subtraction. Returns
+    ``-inf`` for ``x >= 0`` (where ``1 - exp(x) <= 0``).
+
+    Args:
+        x: A non-positive log-probability ``log p`` with ``p in [0, 1]``.
+
+    Returns:
+        ``log(1 - exp(x))``; ``-inf`` when ``x >= 0``.
+
+    """
+    if x >= 0.0:
+        return -math.inf
+    if x > -math.log(2.0):
+        return math.log(-math.expm1(x))
+    return math.log1p(-math.exp(x))
+
+
+def logsubexp(log_hi: float, log_lo: float) -> float:
+    """Return ``log(exp(log_hi) - exp(log_lo))`` for ``log_hi >= log_lo``, computed stably.
+
+    Evaluates ``log_hi + log1mexp(log_lo - log_hi)`` so a far-tail difference whose two operands
+    are individually indistinguishable from 0 (or 1) in probability space still returns a finite
+    large-negative log-mass instead of ``log(0) = -inf``. Returns ``-inf`` when the difference is
+    non-positive (``log_hi <= log_lo``).
+
+    Args:
+        log_hi: Log of the larger operand.
+        log_lo: Log of the smaller operand.
+
+    Returns:
+        ``log(exp(log_hi) - exp(log_lo))``; ``-inf`` if ``log_hi <= log_lo``.
+
+    """
+    if log_hi == -math.inf:
+        return -math.inf
+    if log_lo == -math.inf:
+        return log_hi
+    if log_hi <= log_lo:
+        return -math.inf
+    return log_hi + log1mexp(log_lo - log_hi)
+
+
+def logsumexp(a: Any, axis: int | None = None) -> Any:
+    """Stable ``log(sum(exp(a)))`` via the max-shift trick.
+
+    Thin wrapper over :func:`scipy.special.logsumexp` providing pysp's canonical scalar/array
+    fallback. The ``axis=None`` (full reduction) result is returned as a Python ``float`` to match
+    the private re-implementations this replaces; a reduced array is returned otherwise. Empty input
+    reduces to ``-inf`` and a non-finite running max propagates (``+inf`` stays ``+inf``).
+
+    Args:
+        a: Array-like of log-values.
+        axis: Axis to reduce over, or ``None`` for a full reduction.
+
+    Returns:
+        ``float`` when ``axis is None``; a numpy array otherwise.
+
+    """
+    rv = _scipy_logsumexp(a, axis=axis)
+    if axis is None:
+        return float(rv)
+    return rv
+
+
+def softmax(log_scores: np.ndarray, axis: int = -1) -> np.ndarray:
+    """Numerically stable softmax of ``log_scores`` along ``axis``, with an all-``-inf`` guard.
+
+    Subtracts the per-slice maximum before exponentiating. A slice that is entirely ``-inf`` (no
+    finite log-score) has no defined softmax and would otherwise yield ``nan``; it is filled with a
+    uniform distribution ``1 / n`` over that axis instead.
+
+    Args:
+        log_scores: Array of log-scores.
+        axis: Axis along which to normalize (default the last axis).
+
+    Returns:
+        An array the same shape as ``log_scores`` whose ``axis`` slices each sum to 1.
+
+    """
+    log_scores = np.asarray(log_scores, dtype=np.float64)
+    mx = np.max(log_scores, axis=axis, keepdims=True)
+    good = np.isfinite(mx)
+    shifted = np.where(good, log_scores - np.where(good, mx, 0.0), -np.inf)
+    e = np.exp(shifted)
+    denom = e.sum(axis=axis, keepdims=True)
+    rv = np.divide(e, denom, out=np.zeros_like(e), where=denom > 0.0)
+    # Slices whose max was non-finite (all -inf) get a uniform distribution.
+    n = log_scores.shape[axis]
+    bad_slice = ~good
+    if np.any(bad_slice):
+        rv = np.where(np.broadcast_to(bad_slice, rv.shape), 1.0 / n, rv)
+    return rv
+
+
+def softmax_rows(log_scores: np.ndarray) -> np.ndarray:
+    """Row-wise (``axis=1``) softmax of a ``(B, K)`` log-score matrix, with an all-``-inf`` guard.
+
+    Convenience wrapper for :func:`softmax` with ``axis=1``: a row that is entirely ``-inf`` is
+    replaced by the uniform distribution ``1 / K`` instead of yielding ``nan``.
+
+    Args:
+        log_scores: A ``(B, K)`` matrix of log-scores.
+
+    Returns:
+        A ``(B, K)`` matrix whose rows each sum to 1.
+
+    """
+    return softmax(np.asarray(log_scores, dtype=np.float64), axis=1)
+
+
+def valid_integer(x: Any, *, nonneg: bool = False) -> bool:
+    """Return whether ``x`` is a finite (optionally non-negative) integer value.
+
+    Coerces ``x`` to ``float`` and checks it is finite and integer-valued (``floor(x) == x``). Any
+    coercion failure returns ``False``. With ``nonneg=True`` the value must additionally be ``>= 0``.
+
+    Args:
+        x: Candidate value.
+        nonneg: If ``True``, require ``x >= 0`` (e.g. a count); if ``False``, allow negatives.
+
+    Returns:
+        ``True`` if ``x`` is a valid (non-negative, if requested) integer; ``False`` otherwise.
+
+    """
+    try:
+        xx = float(x)
+    except Exception:
+        return False
+    if not (np.isfinite(xx) and math.floor(xx) == xx):
+        return False
+    return xx >= 0.0 if nonneg else True

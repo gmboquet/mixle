@@ -16,6 +16,7 @@ import numpy as np
 import pysp.utils.vector as vec
 from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 from pysp.utils.special import digamma
+from pysp.utils.special import softmax_rows as _softmax_rows
 
 _EPS = 1.0e-300
 
@@ -279,20 +280,6 @@ def _component_log_density_matrix(
     rv = np.empty((len(data), len(components)), dtype=np.float64)
     for j, comp in enumerate(components):
         rv[:, j] = [comp.log_density(x) for x in data]
-    return rv
-
-
-def _softmax_rows(log_scores: np.ndarray) -> np.ndarray:
-    mx = np.max(log_scores, axis=1, keepdims=True)
-    good = np.isfinite(mx[:, 0])
-    rv = np.zeros_like(log_scores, dtype=np.float64)
-    if np.any(good):
-        shifted = log_scores[good] - mx[good]
-        np.exp(shifted, out=shifted)
-        denom = shifted.sum(axis=1, keepdims=True)
-        rv[good] = np.divide(shifted, denom, out=np.zeros_like(shifted), where=denom > 0.0)
-    if np.any(~good):
-        rv[~good] = 1.0 / log_scores.shape[1]
     return rv
 
 

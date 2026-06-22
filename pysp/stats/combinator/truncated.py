@@ -29,22 +29,9 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.utils.enumeration import freeze
+from pysp.utils.special import log1mexp
 
 _REJECTION_BUDGET = 1_000_000  # max base draws before a rejection sampler gives up
-
-
-def _log1mexp(log_p: float) -> float:
-    """Return ``log(1 - exp(log_p))`` for ``log_p <= 0``, stable across the whole range.
-
-    Uses the two-regime split (Mächler): ``log(-expm1(log_p))`` when the forbidden mass is small and
-    ``log1p(-exp(log_p))`` when it is close to 1, so the retained mass ``1 - p_forbidden`` is never
-    formed by a catastrophically cancelling subtraction in probability space.
-    """
-    if log_p >= 0.0:
-        return -math.inf
-    if log_p > -math.log(2.0):
-        return math.log(-math.expm1(log_p))
-    return math.log1p(-math.exp(log_p))
 
 
 class TruncatedDistribution(SequenceEncodableProbabilityDistribution):
@@ -87,7 +74,7 @@ class TruncatedDistribution(SequenceEncodableProbabilityDistribution):
             log_forbidden = [float(base.log_density(v)) for v in self._forbidden_values]
             finite = [lp for lp in log_forbidden if lp > -math.inf]
             log_p_forbidden = float(logsumexp(finite)) if finite else -math.inf
-            log_z = _log1mexp(log_p_forbidden)
+            log_z = log1mexp(log_p_forbidden)
         if not (log_z > -math.inf):
             raise ValueError("Truncation retains no probability mass.")
         self.log_z = log_z
