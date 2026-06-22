@@ -230,6 +230,86 @@ def _propose_one(
     return candidates[idx], float(merit[idx]), gp
 
 
+def _kg_inner(a: np.ndarray, b: np.ndarray) -> float:
+    """``E[max_i (a_i + b_i Z)] - max_i a_i`` for ``Z ~ N(0, 1)`` (Frazier 2009, Algorithm 1)."""
+    order = np.lexsort((a, b))  # sort by slope b ascending, ties broken by intercept a
+    a = a[order]
+    b = b[order]
+    keep = np.append(np.diff(b) > 0.0, True)  # equal-slope lines: keep only the highest intercept
+    a = a[keep]
+    b = b[keep]
+    idx = [0]
+    cross = [-np.inf]
+    for i in range(1, len(b)):
+        while True:
+            j = idx[-1]
+            c = (a[j] - a[i]) / (b[i] - b[j])
+            if len(idx) > 1 and c <= cross[-1]:
+                idx.pop()
+                cross.pop()
+            else:
+                break
+        idx.append(i)
+        cross.append(c)
+    a = a[idx]
+    b = b[idx]
+    c = np.array([*cross, np.inf])
+    cl, cr = c[:-1], c[1:]
+    pdf = np.exp(-0.5 * c * c) / np.sqrt(2.0 * np.pi)
+    return float(np.sum(a * (ndtr(cr) - ndtr(cl)) + b * (pdf[:-1] - pdf[1:])) - a.max())
+
+
+def knowledge_gradient(mean: Any, cov: Any, noise: float = 1.0e-6) -> np.ndarray:
+    """Knowledge-gradient acquisition value of one observation at each candidate (Frazier et al. 2009).
+
+    Given the Gaussian-process posterior ``mean`` and joint ``cov`` over a candidate set, returns, for
+    each candidate ``x``, the expected increase in the best posterior mean after fantasizing one
+    (noisy) observation there: ``KG(x) = E_y[max_x' mu_{n+1}(x')] - max_x' mu_n(x')``. Maximizing KG is
+    the one-step Bayes-optimal, look-ahead choice (it values *information*, not just immediate
+    improvement), so it explores where an observation would most change the believed optimum. Assumes a
+    *maximization* objective; negate ``mean`` for minimization. Computed exactly via the piecewise-linear
+    epigraph of the fantasized posterior means, and ``>= 0`` by construction.
+    """
+    mean = np.asarray(mean, dtype=np.float64)
+    cov = np.asarray(cov, dtype=np.float64)
+    out = np.empty(mean.size)
+    for x in range(mean.size):
+        sigma_x = np.sqrt(max(cov[x, x] + noise, 1.0e-12))
+        out[x] = _kg_inner(mean.copy(), cov[:, x] / sigma_x)
+    return out
+
+
+def propose_knowledge_gradient(
+    x: Any,
+    y: Any,
+    bounds: Any,
+    *,
+    maximize: bool = False,
+    n_candidates: int = 512,
+    seed: int | None = None,
+    gp: Surrogate | None = None,
+    fit_kwargs: dict[str, Any] | None = None,
+    noise: float = 1.0e-6,
+) -> np.ndarray:
+    """Propose the next evaluation point by maximizing the knowledge gradient over a candidate set.
+
+    Fits the GP surrogate to ``(x, y)``, draws ``n_candidates`` Latin-hypercube points, evaluates the
+    joint posterior, and returns the candidate with the largest :func:`knowledge_gradient` -- the
+    look-ahead Bayesian-optimization proposal. ``maximize`` selects the objective sense (the mean is
+    negated for minimization).
+    """
+    x, y = _validate_xy(x, y)
+    b = _as_bounds(bounds)
+    rng = _as_rng(seed)
+    gp = _fit_surrogate(x, y, gp, fit_kwargs)
+    candidates = latin_hypercube(b, n_candidates, rng)
+    mean, cov = gp.predict(x, y, candidates, return_cov=True)
+    mean = np.asarray(mean, dtype=np.float64)
+    signed_mean = mean if maximize else -mean  # KG is defined for maximization
+    kg = knowledge_gradient(signed_mean, np.asarray(cov, dtype=np.float64), noise)
+    return candidates[int(np.argmax(kg))]
+
+
 def _validate_xy(x: Any, y: Any) -> tuple[np.ndarray, np.ndarray]:
     x = np.atleast_2d(np.asarray(x, dtype=np.float64))
     y = np.asarray(y, dtype=np.float64).reshape(-1)
@@ -389,6 +469,8 @@ __all__: Sequence[str] = [
     "probability_of_improvement",
     "upper_confidence_bound",
     "thompson_sampling",
+    "knowledge_gradient",
+    "propose_knowledge_gradient",
     "register_acquisition",
     "available_acquisitions",
     "propose_next",
