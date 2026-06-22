@@ -22,6 +22,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import ndtr
 
+from pysp.doe._contracts import Acquisition, Surrogate
 from pysp.doe.bayesopt import BayesOptResult, _fit_surrogate, _get_acquisition, _validate_xy
 from pysp.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 
@@ -59,7 +60,7 @@ def probability_of_feasibility(mean: Any, std: Any) -> np.ndarray:
     return pf
 
 
-def _predict_std(gp: Any, x: np.ndarray, y: np.ndarray, candidates: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _predict_std(gp: Surrogate, x: np.ndarray, y: np.ndarray, candidates: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return posterior mean and standard deviation of ``gp`` at ``candidates``."""
     mean, cov = gp.predict(x, y, candidates, return_cov=True)
     std = np.sqrt(np.clip(np.diag(np.asarray(cov, dtype=np.float64)), 0.0, None))
@@ -88,7 +89,7 @@ def propose_next_constrained(
     *,
     maximize: bool = False,
     xi: float = 0.0,
-    acq: str | Callable[..., np.ndarray] = "ei",
+    acq: str | Acquisition = "ei",
     acq_kwargs: dict[str, Any] | None = None,
     fit_kwargs: dict[str, Any] | None = None,
     return_acquisition: bool = False,
@@ -147,7 +148,7 @@ def constrained_minimize(
     *,
     maximize: bool = False,
     xi: float = 0.0,
-    acq: str | Callable[..., np.ndarray] = "ei",
+    acq: str | Acquisition = "ei",
     acq_kwargs: dict[str, Any] | None = None,
     n_candidates: int = 512,
     fit_kwargs: dict[str, Any] | None = None,

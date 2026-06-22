@@ -19,12 +19,13 @@ functional drivers (``constrained_minimize`` / ``multi_minimize``).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.doe._contracts import Acquisition
 from pysp.doe.bayesopt import BayesOptResult, propose_batch, propose_next
 from pysp.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 
@@ -42,7 +43,7 @@ class BayesianOptimizer:
         self,
         bounds: Bounds,
         *,
-        acq: str | Callable[..., np.ndarray] = "ei",
+        acq: str | Acquisition = "ei",
         acq_kwargs: dict[str, Any] | None = None,
         maximize: bool = False,
         n_init: int | None = None,
