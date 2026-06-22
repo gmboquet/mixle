@@ -106,7 +106,11 @@ def test_combine_and_value_roundtrip():
     a.seq_update(np.array([1.0, 2.0, 3.0]), np.ones(3), None)
     b.seq_update(np.array([4.0, 5.0]), np.ones(2), None)
     a.combine(b.value())
-    s1, s2, s3, n = a.value()
-    assert n == 5.0
-    assert s1 == pytest.approx(15.0)
-    assert s2 == pytest.approx(1 + 4 + 9 + 16 + 25)
+    # The accumulator stores weighted central moments (count, mean, M2, M3); combining the two
+    # batches must reproduce the moments of the pooled data [1, 2, 3, 4, 5].
+    count, mean, m2, m3 = a.value()
+    data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    assert count == 5.0
+    assert mean == pytest.approx(data.mean())
+    assert m2 == pytest.approx(np.sum((data - data.mean()) ** 2))
+    assert m3 == pytest.approx(np.sum((data - data.mean()) ** 3))
