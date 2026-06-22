@@ -125,9 +125,7 @@ def project(source: Any, target: Any, *, n_samples: int = 20_000, seed: int = 0,
     """
     import numpy as np
 
-    from pysp.inference.estimation import fit  # the EM driver -- import from its module, not the package
-    # (`from pysp.inference import fit` is ambiguous: the `pysp.inference.fit` gradient-fitting submodule
-    # shadows the re-exported function once that submodule is imported anywhere in the process).
+    from pysp.inference.estimation import fit  # the EM driver -- import from its module to be safe
 
     if not callable(getattr(source, "sampler", None)):
         raise CapabilityError("project requires a sampleable source (a `.sampler(seed)` method).")
