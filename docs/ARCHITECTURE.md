@@ -122,3 +122,24 @@ Build **`pysp/enumeration`** as the exemplar concern module: it re-exports today
 `DistributionEnumerator` contract under one roof, and add **`pysp/ops.py`** with a real `quantize` (+
 the verb surface). Those two modules alone deliver the coherence — enumeration becomes a place, and
 operations become an axis — and concretely answer both questions, with shims so nothing breaks.
+
+---
+
+## Status — realized as namespaces (re-export shims)
+
+The structure above is **live now**, as cycle-free re-export shims (nothing moved, every existing
+import still works):
+
+| Module | Role | Backed by |
+|---|---|---|
+| `pysp.enumeration` | concern | utils.enumeration + utils.quantization + DistributionEnumerator + Enumerable |
+| `pysp.sampling` | concern | pdist samplers + stats.sampling_api + latent_posterior |
+| `pysp.inference` | concern | utils.{estimation,em,fit,fisher} + bayes.conjugate + infer.nuts |
+| `pysp.ops` | operations | new (quantize) + the combinators, capability-gated |
+| `pysp.contracts` | kernel | every ABC/Protocol in one import (capabilities eager, subsystem roles lazy) |
+| `pysp.dist` / `pysp.process` / `pysp.graph` | objects | aliases of stats / the point-process & graph families |
+
+All reachable as `pysp.<ns>` (lazy `__getattr__`, so `import pysp` stays cheap) or `from pysp.<ns>
+import …`. The remaining work is purely cosmetic: physically relocating implementations into the
+concern/object packages and flipping the shims to deprecated re-exports — done later, since the
+namespaces already deliver the coherence.
