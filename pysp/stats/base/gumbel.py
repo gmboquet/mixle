@@ -156,6 +156,14 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
         """Inverse CDF F^{-1}(q)."""
         return float(self.loc - self.scale * math.log(-math.log(float(q))))
 
+    def entropy(self) -> float:
+        """Differential entropy log(scale) + euler_gamma + 1."""
+        import math
+
+        import numpy as np
+
+        return float(math.log(self.scale) + np.euler_gamma + 1.0)
+
     def sampler(self, seed: int | None = None) -> "GumbelSampler":
         """Return a sampler for drawing observations from this distribution."""
         return GumbelSampler(self, seed)

@@ -237,6 +237,14 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float(self.a * self.b / ((self.a + self.b) ** 2 * (self.a + self.b + 1.0)))
 
+    def entropy(self) -> float:
+        """Differential entropy ln B(a,b) - (a-1)psi(a) - (b-1)psi(b) + (a+b-2)psi(a+b)."""
+        from scipy.special import betaln, digamma
+
+        a, b = self.a, self.b
+        return float(betaln(a, b) - (a - 1.0) * digamma(a) - (b - 1.0) * digamma(b)
+                     + (a + b - 2.0) * digamma(a + b))
+
     def sampler(self, seed: int | None = None) -> "BetaSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BetaSampler(self, seed)

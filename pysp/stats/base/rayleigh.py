@@ -160,6 +160,14 @@ class RayleighDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float((2.0 - np.pi / 2.0) * self.sigma * self.sigma)
 
+    def entropy(self) -> float:
+        """Differential entropy 1 + log(sigma/sqrt(2)) + gamma/2."""
+        import math
+
+        import numpy as np
+
+        return float(1.0 + math.log(self.sigma / math.sqrt(2.0)) + np.euler_gamma / 2.0)
+
     def sampler(self, seed: int | None = None) -> "RayleighSampler":
         """Return a sampler for drawing observations from this distribution."""
         return RayleighSampler(self, seed)
