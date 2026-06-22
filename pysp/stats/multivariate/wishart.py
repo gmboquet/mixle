@@ -7,8 +7,11 @@ degrees of freedom and scale matrix ``V``,
 
     log f(X) = (df-p-1)/2 log|X| - 1/2 tr(V^{-1} X) - df p/2 log 2 - df/2 log|V| - log Gamma_p(df/2),
 
-where ``Gamma_p`` is the multivariate gamma. ``df`` is a fixed, known parameter; since ``E[X] = df V``
-the scale ``V`` is estimated in closed form as the mean scatter divided by ``df``.
+where ``Gamma_p`` is the multivariate gamma. Since ``E[X] = df V`` the scale ``V`` is estimated in closed
+form as the mean scatter divided by ``df``. The degrees of freedom may be supplied (``WishartEstimator(dim,
+df=value)``) or estimated by maximum likelihood (``WishartEstimator(dim, df=None)``) -- the latter adds the
+``sum log det(X)`` sufficient statistic and solves the profile-likelihood score for ``df`` by Newton's
+method.
 """
 
 import math
@@ -17,7 +20,7 @@ from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
-from scipy.special import multigammaln
+from scipy.special import digamma, multigammaln, polygamma
 
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -179,7 +182,48 @@ class _MeanScatterAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class WishartAccumulator(_MeanScatterAccumulator):
-    """Accumulate the weighted sum of matrices ``sum_i w_i X_i`` and the total weight."""
+    """Accumulate ``sum_i w_i X_i``, the total weight, and ``sum_i w_i log det(X_i)``.
+
+    The extra ``sum_logdet`` statistic is what enables maximum-likelihood estimation of the degrees of
+    freedom (the inverse-Wishart base accumulator, which does not need it, is left untouched).
+    """
+
+    def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
+        super().__init__(dim, name=name, keys=keys)
+        self.sum_logdet = 0.0
+
+    @staticmethod
+    def _logdet(xx: np.ndarray) -> np.ndarray:
+        sign, logdet = np.linalg.slogdet(xx)
+        return np.where(sign > 0, logdet, -np.inf)
+
+    def update(self, x: np.ndarray, weight: float, estimate: Any | None) -> None:
+        super().update(x, weight, estimate)
+        self.sum_logdet += weight * float(self._logdet(np.asarray(x, dtype=np.float64)))
+
+    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any | None) -> None:
+        super().seq_update(x, weights, estimate)
+        w = np.asarray(weights, dtype=np.float64)
+        self.sum_logdet += float(np.dot(w, self._logdet(np.asarray(x, dtype=np.float64))))
+
+    def combine(self, suff_stat: tuple[np.ndarray, float, float]) -> "WishartAccumulator":
+        super().combine((suff_stat[0], suff_stat[1]))
+        self.sum_logdet += float(suff_stat[2])
+        return self
+
+    def value(self) -> tuple[np.ndarray, float, float]:
+        return self.sum_x.copy(), self.count, self.sum_logdet
+
+    def from_value(self, x: tuple[np.ndarray, float, float]) -> "WishartAccumulator":
+        super().from_value((x[0], x[1]))
+        self.sum_logdet = float(x[2])
+        return self
+
+    def scale(self, c: float) -> "WishartAccumulator":
+        self.sum_x *= c
+        self.count *= c
+        self.sum_logdet *= c
+        return self
 
     def acc_to_encoder(self) -> "WishartDataEncoder":
         return WishartDataEncoder()
@@ -197,25 +241,72 @@ class WishartAccumulatorFactory(StatisticAccumulatorFactory):
         return WishartAccumulator(self.dim, name=self.name, keys=self.keys)
 
 
-class WishartEstimator(ParameterEstimator):
-    """Closed-form scale estimator at fixed ``df``: ``V = (1/df) * mean(X)`` since ``E[X] = df V``."""
+def _solve_wishart_df(mean_logdet: float, logdet_scatter: float, dim: int, df0: float | None = None) -> float:
+    """MLE of the Wishart degrees of freedom by Newton's method on the profile log-likelihood.
 
-    def __init__(self, dim: int, df: float, name: str | None = None, keys: str | None = None) -> None:
+    With the scale profiled out (``V = mean(X)/df``), the profile score in ``df`` is
+    ``g(df) = -p/2 log2 - logdet(S)/2 + p/2 log df - 1/2 sum_j psi((df+1-j)/2) + mean_logdet/2`` where
+    ``S = mean(X)`` and ``mean_logdet = mean(log det X)``; ``g'(df) = p/(2 df) - 1/4 sum_j psi'((df+1-j)/2)``.
+    The root is the MLE; ``df`` is constrained to ``> p - 1`` (the Wishart density's existence bound).
+    """
+    p = dim
+    lo = float(p - 1) + 1e-6
+    df = float(df0) if df0 is not None else float(p + 1.0)
+    df = max(df, lo + 1e-3)
+    for _ in range(100):
+        j = np.arange(1, p + 1)
+        g = (
+            -p / 2.0 * math.log(2.0)
+            - logdet_scatter / 2.0
+            + p / 2.0 * math.log(df)
+            - 0.5 * float(np.sum(digamma((df + 1.0 - j) / 2.0)))
+            + mean_logdet / 2.0
+        )
+        gp = p / (2.0 * df) - 0.25 * float(np.sum(polygamma(1, (df + 1.0 - j) / 2.0)))
+        if not np.isfinite(g) or not np.isfinite(gp) or gp == 0.0:
+            break
+        step = g / gp
+        df_new = df - step
+        if df_new <= lo:  # keep inside the feasible region with a damped step
+            df_new = 0.5 * (df + lo)
+        if abs(df_new - df) < 1e-8:
+            df = df_new
+            break
+        df = df_new
+    return df
+
+
+class WishartEstimator(ParameterEstimator):
+    """Closed-form scale estimator (``V = mean(X)/df``); ``df=None`` also fits the degrees of freedom by MLE.
+
+    With a fixed ``df`` the estimator returns only the closed-form scale (``E[X] = df V``). With ``df=None``
+    it additionally estimates the degrees of freedom from ``sum_i w_i log det(X_i)`` via Newton's method on
+    the profile log-likelihood (:func:`_solve_wishart_df`).
+    """
+
+    def __init__(self, dim: int, df: float | None = None, name: str | None = None, keys: str | None = None) -> None:
         self.dim = dim
-        self.df = float(df)
+        self.df = None if df is None else float(df)
         self.name = name
         self.keys = keys
 
     def accumulator_factory(self) -> WishartAccumulatorFactory:
         return WishartAccumulatorFactory(self.dim, name=self.name, keys=self.keys)
 
-    def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, float]) -> WishartDistribution:
-        sum_x, count = suff_stat
+    def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, float, float]) -> WishartDistribution:
+        sum_x, count, sum_logdet = suff_stat
         if count <= 0.0:
-            return WishartDistribution(self.df, np.eye(self.dim), name=self.name, keys=self.keys)
-        scale = (sum_x / count) / self.df  # E[X] = df V
+            df = self.df if self.df is not None else float(self.dim + 1.0)
+            return WishartDistribution(df, np.eye(self.dim), name=self.name, keys=self.keys)
+        scatter = sum_x / count  # E[X] = df V, so mean(X) = df V
+        if self.df is not None:
+            df = self.df
+        else:
+            sign, logdet_scatter = np.linalg.slogdet(scatter)
+            df = _solve_wishart_df(sum_logdet / count, float(logdet_scatter), self.dim, df0=self.dim + 1.0)
+        scale = scatter / df
         scale = 0.5 * (scale + scale.T)
-        return WishartDistribution(self.df, scale, name=self.name, keys=self.keys)
+        return WishartDistribution(df, scale, name=self.name, keys=self.keys)
 
 
 class WishartDataEncoder(DataSequenceEncoder):
