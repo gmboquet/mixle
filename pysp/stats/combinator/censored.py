@@ -40,10 +40,30 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
+# Tiny finite log-mass floor for an interval that underflowed to 0 in probability space when the base
+# exposes only a linear ``cdf`` (~log of the smallest positive normal double); avoids silently zeroing.
+_LOG_MASS_FLOOR = math.log(np.finfo(np.float64).tiny)
+
 
 def _is_interval(x: Any) -> bool:
     """An observation is a censoring interval if it is a length-2 sequence of bounds."""
     return isinstance(x, (tuple, list)) and len(x) == 2
+
+
+def _logsubexp(log_hi: float, log_lo: float) -> float:
+    """Stable ``log(exp(log_hi) - exp(log_lo))`` for ``log_hi >= log_lo``.
+
+    Evaluates ``log_hi + log1p(-exp(log_lo - log_hi))`` so a far-tail interval whose two CDFs
+    are individually indistinguishable from 0 (or 1) in probability space still returns a finite
+    large-negative log-mass instead of ``log(0) = -inf``.
+    """
+    if log_hi == -math.inf:
+        return -math.inf
+    if log_lo == -math.inf:
+        return log_hi
+    if log_hi <= log_lo:
+        return -math.inf
+    return log_hi + math.log1p(-math.exp(log_lo - log_hi))
 
 
 class CensoredDistribution(SequenceEncodableProbabilityDistribution):
@@ -71,15 +91,41 @@ class CensoredDistribution(SequenceEncodableProbabilityDistribution):
         return "CensoredDistribution(%s, name=%s, keys=%s)" % (str(self.base), repr(self.name), repr(self.keys))
 
     def _interval_log_mass(self, a: float, b: float) -> float:
-        """Return ``log(F(b) - F(a))`` for a censoring interval ``[a, b]``."""
+        """Return ``log(F(b) - F(a))`` for a censoring interval ``[a, b]``, computed in log space.
+
+        Tail censoring is the normal use case, so ``F(b) - F(a)`` routinely underflows to ``0`` in
+        probability space (``log(0) = -inf``) even when the true interval log-mass is a perfectly
+        finite large-negative number. When the base distribution exposes ``logcdf``/``logsf`` the mass
+        is formed by a stable :func:`_logsubexp`; otherwise the linear ``F(b) - F(a)`` is used but the
+        underflow is guarded so a real far-tail interval is not silently zeroed.
+        """
         if b < a:
             a, b = b, a
+        if a == b:
+            # A degenerate (zero-width) interval has genuinely zero mass under a continuous base; this
+            # is a true ``-inf``, not an underflow, so return it before any underflow floor kicks in.
+            return -math.inf
+        has_logsf = hasattr(self.base, "logsf")
+        has_logcdf = hasattr(self.base, "logcdf")
+        if has_logsf or has_logcdf:
+            # log(F(b) - F(a)) = logsubexp(log F(b), log F(a)); in the upper tail prefer the survival
+            # function: F(b) - F(a) = S(a) - S(b) = logsubexp(log S(a), log S(b)).
+            if has_logsf:
+                log_sa = 0.0 if a == -math.inf else float(self.base.logsf(a))
+                log_sb = -math.inf if b == math.inf else float(self.base.logsf(b))
+                return _logsubexp(log_sa, log_sb)
+            log_fa = -math.inf if a == -math.inf else float(self.base.logcdf(a))
+            log_fb = 0.0 if b == math.inf else float(self.base.logcdf(b))
+            return _logsubexp(log_fb, log_fa)
         fa = 0.0 if a == -math.inf else float(self.base.cdf(a))
         fb = 1.0 if b == math.inf else float(self.base.cdf(b))
         mass = fb - fa
-        if mass <= 0.0:
-            return -math.inf
-        return math.log(mass)
+        if mass > 0.0:
+            return math.log(mass)
+        # The interval mass underflowed to 0 in probability space (both CDFs rounded to the same
+        # value). Clamp to a tiny finite floor so a real far-tail interval is not silently zeroed
+        # (-inf) -- the only way to do better is a base that exposes logcdf/logsf (handled above).
+        return _LOG_MASS_FLOOR
 
     def density(self, x: Any) -> float:
         """Return the contribution of ``x`` (density for exact, interval mass for censored)."""
