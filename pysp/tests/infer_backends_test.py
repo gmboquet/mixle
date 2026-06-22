@@ -1,4 +1,4 @@
-"""Engine-agnostic NUTS backend parity (``pysp.infer`` registry).
+"""Engine-agnostic NUTS backend parity (``pysp.inference`` registry).
 
 The same correlated-Gaussian posterior is expressed once per backend *contract* (a numpy fused
 ``value_and_grad``; an ``@njit`` fused ``value_and_grad``; a jax scalar ``logp``; a torch scalar
@@ -12,8 +12,8 @@ import unittest
 
 import numpy as np
 
-import pysp.infer as infer
-from pysp.infer.backends import available_backends, get_inference_backend, select_backend
+import pysp.inference as infer
+from pysp.inference.backends import available_backends, get_inference_backend, select_backend
 
 HAS_NUMBA = importlib.util.find_spec("numba") is not None
 HAS_TORCH = importlib.util.find_spec("torch") is not None

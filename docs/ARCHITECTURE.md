@@ -136,7 +136,7 @@ thin re-export shims left at the old paths); only the object namespaces remain r
 |---|---|---|---|
 | `pysp.enumeration` | concern | **package — machinery moved in** | `_algorithms` (was utils.enumeration) + `quantization/` (was utils.quantization) + `model_enumeration` + DistributionEnumerator (pdist) + Enumerable |
 | `pysp.sampling` | concern | **package — machinery moved in** | `sampling_api` + `latent_posterior` + `_sampling` (were under stats) + pdist samplers + PosteriorPredictive |
-| `pysp.inference` | concern | **package — machinery moved in** | `estimation` / `em` / `fit` / `objectives` / `fisher` (were under utils) + bayes.conjugate + infer.nuts (re-exported from their homes) |
+| `pysp.inference` | concern | **package — machinery moved in** | `estimation` / `em` / `fit` / `objectives` / `fisher` (were utils) + `mcmc/` (were utils.mcmc) + `target` / `backends` / `diagnostics` (the NUTS/ADVI facade, were `pysp.infer`) + bayes.conjugate (re-exported) |
 | `pysp.ops` | operations | self-contained module | new (quantize) + the combinators, capability-gated |
 | `pysp.contracts` | kernel | re-export shim | every ABC/Protocol in one import (capabilities eager, subsystem roles lazy) |
 | `pysp.dist` / `pysp.process` / `pysp.models` | objects | re-export shims (by design) | aliases of stats / the point-process families / the generic-model package |
@@ -156,8 +156,15 @@ inference package could only re-enter a half-built `pysp.stats`. The real fix wa
 object surface — and move them to **`pysp.stats.compute.sequence`** (`pysp.stats` re-exports them, so
 the public `pysp.stats.seq_estimate` API is unchanged). The inference machinery now imports only the
 *compute layer* (`compute.{pdist,sequence}`), never the `pysp.stats` package surface, so
-`pysp/inference/__init__.py` is a **plain eager package init** — no `__getattr__`. `conjugate`
-(bayes-family) and `nuts` (`pysp.infer`) keep their own homes and are re-exported. The only remaining
+`pysp/inference/__init__.py` is a **plain eager package init** — no `__getattr__`.
+
+**All sampling-based inference lives in `inference`.** Inference is one concern — *infer parameters
+from data* — whose entry points differ only in what they **require of the input**: closed-form
+conjugate Bayes needs a `ConjugateUpdatable` family; MLE/EM needs an `Estimator`; NUTS/ADVI need a
+*sampleable / differentiable target*. That precondition is the whole reason MCMC/VI used to look like
+a separate thing — it isn't, so the old `pysp.infer` facade and `pysp.utils.mcmc` samplers were folded
+in (`pysp.inference.{target,backends,diagnostics,mcmc}`); `pysp.infer` is now a deprecated shim.
+`conjugate` (bayes-family) keeps its home in `pysp.stats.bayes` and is re-exported. The only remaining
 dividing line is serialization, which pins the *distribution objects* to `pysp.stats`.
 
 ---

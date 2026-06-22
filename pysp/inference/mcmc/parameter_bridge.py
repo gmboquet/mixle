@@ -361,7 +361,7 @@ def sample_parameter_posterior(
         step_size, num_steps: HMC leapfrog controls (NUTS self-tunes step size).
         grad_log_target: Optional exact gradient of ``log_target`` in the
             unconstrained space (e.g. from
-            :func:`pysp.utils.mcmc.gradients.torch_gradient`). Replaces the
+            :func:`pysp.inference.mcmc.gradients.torch_gradient`). Replaces the
             finite-difference gradient for HMC/NUTS -- one backward pass per step
             instead of ``O(dim)`` target evaluations.
         return_distributions: If True, ``samples`` are rebuilt distribution

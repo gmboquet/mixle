@@ -1,4 +1,4 @@
-"""Tests for the bring-your-own-target inference facade (``pysp.infer``).
+"""Tests for the bring-your-own-target inference facade (``pysp.inference``).
 
 Covers the fast fused-``value_and_grad`` NUTS path, the public R-hat/ESS diagnostics over plain
 arrays, and (when Torch is present) ADVI on an external batched target. Also asserts the F0 fused
@@ -9,10 +9,10 @@ import unittest
 
 import numpy as np
 
-import pysp.infer as infer
-from pysp.infer.diagnostics import ess, rhat
+import pysp.inference as infer
+from pysp.inference.diagnostics import ess, rhat
 from pysp.ppl.autograd import torch_available
-from pysp.utils.mcmc import nuts as nuts_sampler
+from pysp.inference.mcmc import nuts as nuts_sampler
 
 HAS_TORCH = torch_available()
 

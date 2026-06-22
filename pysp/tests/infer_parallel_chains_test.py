@@ -1,10 +1,10 @@
-"""Tests for parallel multi-chain NUTS in pysp.infer (WS-N / distributed MCMC)."""
+"""Tests for parallel multi-chain NUTS in pysp.inference (WS-N / distributed MCMC)."""
 
 import unittest
 
 import numpy as np
 
-from pysp.infer import nuts
+from pysp.inference import nuts
 
 
 def _std_normal_value_and_grad(theta):

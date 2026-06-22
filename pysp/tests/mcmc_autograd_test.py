@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.utils.mcmc import (
+from pysp.inference.mcmc import (
     MCMCResult,
     nuts,
     sample_parameter_posterior,
@@ -12,7 +12,7 @@ from pysp.utils.mcmc import (
     torch_gradient,
     value_and_torch_gradient,
 )
-from pysp.utils.mcmc.parameter_bridge import _finite_difference_gradient
+from pysp.inference.mcmc.parameter_bridge import _finite_difference_gradient
 
 HAS_TORCH = torch_available()
 

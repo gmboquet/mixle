@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.utils.mcmc import (
+from pysp.inference.mcmc import (
     MCMCResult,
     RandomWalkProposal,
     gelman_rubin,

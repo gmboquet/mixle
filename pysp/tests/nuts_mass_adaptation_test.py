@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.utils.mcmc.samplers import nuts
+from pysp.inference.mcmc.samplers import nuts
 
 
 def _ill_scaled(var):

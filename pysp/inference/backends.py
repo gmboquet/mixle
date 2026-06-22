@@ -1,18 +1,18 @@
-"""Inference-backend registry — `register, don't branch` for `pysp.infer`.
+"""Inference-backend registry — `register, don't branch` for `pysp.inference`.
 
 Mirrors :func:`pysp.stats.compute.kernel.register_kernel_factory`: each engine's NUTS
 implementation *self-registers* an :class:`InferenceBackend` at import time, so the dispatcher
-(:func:`pysp.infer.nuts`) never grows a central ``if engine == ...`` switch. A backend declares
+(:func:`pysp.inference.nuts`) never grows a central ``if engine == ...`` switch. A backend declares
 
 * ``name`` — the selector string (``"numpy"``, ``"numba"``, ``"torch"``, ``"jax"``).
 * ``available`` — a zero-arg predicate: is the engine importable on this host?  Kept lazy so
-  ``import pysp.infer`` works with any subset of optional engines installed.
+  ``import pysp.inference`` works with any subset of optional engines installed.
 * ``target_kind`` — what *contract* the caller's target must satisfy: a numpy fused
   ``value_and_grad`` (``"numpy_vg"``), an ``@njit`` fused ``value_and_grad`` (``"njit_vg"``), a
   torch scalar ``logp`` (``"torch_logp"``), or a jax scalar ``logp`` (``"jax_logp"``). The kinds
   cannot be auto-converted across autodiff systems, so the *target* is what ultimately picks a
   backend in ``"auto"`` mode (see :func:`select_backend`).
-* ``nuts`` — the callable that runs the sampler and returns a :class:`pysp.infer.NutsResult`.
+* ``nuts`` — the callable that runs the sampler and returns a :class:`pysp.inference.NutsResult`.
 
 ``available_backends()`` lists the installed engines; ``select_backend()`` resolves the
 ``backend=`` argument (including ``"auto"``).
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from pysp.infer import NutsResult
+    from pysp.inference import NutsResult
 
 # target_kind -> the backend "auto" prefers for a target declared with that kind. A target is the
 # strongest available signal: a torch logp can only run on the torch backend, etc.

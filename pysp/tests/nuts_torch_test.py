@@ -31,7 +31,7 @@ class NutsTorchTestCase(unittest.TestCase):
         self.logp = logp
 
     def test_recovers_gaussian(self):
-        from pysp.infer import nuts_torch
+        from pysp.inference import nuts_torch
 
         res = nuts_torch(self.logp, dim=self.d, num_samples=1500, warmup=600, chains=1, rng=1, compile=False)
         mean = res.samples.mean(axis=0)
@@ -41,7 +41,7 @@ class NutsTorchTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.abs(var - true_var) / true_var < 0.5))  # marginal variances within 50%
 
     def test_compiled_path_runs(self):
-        from pysp.infer import nuts_torch
+        from pysp.inference import nuts_torch
 
         res = nuts_torch(self.logp, dim=self.d, num_samples=400, warmup=300, chains=1, rng=2, compile=True)
         self.assertEqual(res.samples.shape[1], self.d)
@@ -49,15 +49,15 @@ class NutsTorchTestCase(unittest.TestCase):
         np.testing.assert_allclose(res.samples.mean(axis=0), self.mu, atol=0.6)  # rough recovery; exercises compile
 
     def test_multichain_rhat(self):
-        from pysp.infer import nuts_torch
+        from pysp.inference import nuts_torch
 
         res = nuts_torch(self.logp, dim=self.d, num_samples=800, warmup=400, chains=4, rng=3, compile=False)
         self.assertTrue(np.all(res.rhat < 1.05))
         self.assertTrue(np.all(res.ess > 40))
 
     def test_agreement_with_numpy_nuts(self):
-        from pysp.infer import nuts as nuts_np
-        from pysp.infer import nuts_torch
+        from pysp.inference import nuts as nuts_np
+        from pysp.inference import nuts_torch
 
         mu, prec = self.mu, self.prec
 
