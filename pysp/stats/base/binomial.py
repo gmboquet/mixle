@@ -422,6 +422,18 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
             return 1.0
         return float(betainc(self.n - k, k + 1, 1.0 - self.p))
 
+    def skewness(self) -> float:
+        """Skewness (1-2p)/sqrt(npq)."""
+        import math
+
+        p, n = self.p, self.n
+        return float((1.0 - 2.0 * p) / math.sqrt(n * p * (1.0 - p)))
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis (1-6pq)/(npq)."""
+        p, n = self.p, self.n
+        return float((1.0 - 6.0 * p * (1.0 - p)) / (n * p * (1.0 - p)))
+
     def sampler(self, seed: int | None = None) -> "BinomialSampler":
         """Returns BinomialSampler for generating samples from BinomialDistribution(n,p,min_val).
 

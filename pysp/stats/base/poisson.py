@@ -300,6 +300,16 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         k = math.floor(float(x))
         return float(gammaincc(k + 1, self.lam)) if k >= 0 else 0.0
 
+    def skewness(self) -> float:
+        """Skewness 1/sqrt(lambda)."""
+        import math
+
+        return float(1.0 / math.sqrt(self.lam))
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis 1/lambda."""
+        return float(1.0 / self.lam)
+
     def sampler(self, seed: int | None = None) -> "PoissonSampler":
         """Create PoissonSampler object with PoissonDistribution instance and seed (Optional[int]) passed.
 

@@ -341,6 +341,14 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(0.5 * (math.log(2.0 * math.pi * self.sigma2) + 1.0))
 
+    def skewness(self) -> float:
+        """Skewness (0)."""
+        return 0.0
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis (0)."""
+        return 0.0
+
     def sampler(self, seed: int | None = None) -> "GaussianSampler":
         """Create an GaussianSampler object from parameters of GaussianDistribution instance.
 

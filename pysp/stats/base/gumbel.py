@@ -164,6 +164,16 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(math.log(self.scale) + np.euler_gamma + 1.0)
 
+    def skewness(self) -> float:
+        """Skewness 12*sqrt(6)*zeta(3)/pi^3."""
+        import math
+
+        return float(12.0 * math.sqrt(6.0) * 1.2020569031595942 / math.pi ** 3)
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis (12/5)."""
+        return 2.4
+
     def sampler(self, seed: int | None = None) -> "GumbelSampler":
         """Return a sampler for drawing observations from this distribution."""
         return GumbelSampler(self, seed)
