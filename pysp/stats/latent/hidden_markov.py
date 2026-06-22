@@ -41,6 +41,7 @@ from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
 from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge, best_first_union_max
+from pysp.sampling.latent_posterior import MarkovChainLatentPosterior
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -66,7 +67,6 @@ from pysp.stats.latent._hidden_markov_numba_kernels import (
     numba_seq_log_density,
 )
 from pysp.stats.latent.mixture import MixtureDistribution
-from pysp.stats.latent_posterior import MarkovChainLatentPosterior
 from pysp.utils.aliasing import MISSING, coalesce_alias, require
 from pysp.utils.optional_deps import HAS_NUMBA, numba
 
@@ -888,7 +888,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     def latent_posterior(self, x: list[T]) -> "MarkovChainLatentPosterior":
         """Return the exact chain posterior ``q(z | x)`` over hidden states for one observation sequence.
 
-        The returned :class:`~pysp.stats.latent_posterior.MarkovChainLatentPosterior` can
+        The returned :class:`~pysp.sampling.latent_posterior.MarkovChainLatentPosterior` can
         ``.marginals()`` (forward-backward smoothing probabilities), ``.sample(rng)`` a full state path
         by FFBS, ``.mode()`` (the Viterbi path), or ``.entropy()`` (the exact chain entropy).
         """

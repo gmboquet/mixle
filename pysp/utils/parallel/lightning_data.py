@@ -5,7 +5,7 @@ registry (``planner.encoded_data(..., backend="lightning")``). Full-data EM oper
 resident :class:`~pysp.utils.parallel.planner.LocalEncodedData` (identical results to ``backend="local"``); the
 Lightning-specific value is **mini-batch iteration** via a :class:`lightning.pytorch.LightningDataModule`
 + ``DataLoader`` (shuffling, batching, multi-worker collation), which drives stochastic / mini-batch EM
-through :class:`~pysp.utils.streaming.StreamingEstimator`.
+through :class:`~pysp.inference.streaming.StreamingEstimator`.
 
 Lightning is an optional dependency: this module is imported only when the ``"lightning"`` backend is
 requested, so the rest of pysp (and CI without Lightning installed) is unaffected.
@@ -119,10 +119,10 @@ class LightningEncodedData(EncodedDataHandle):
         """Fit ``estimator`` by mini-batch stochastic EM over the Lightning DataLoader batches.
 
         Runs ``epochs`` passes, feeding each DataLoader mini-batch to a
-        :class:`~pysp.utils.streaming.StreamingEstimator` (decayed accumulator + M-step). Returns the
+        :class:`~pysp.inference.streaming.StreamingEstimator` (decayed accumulator + M-step). Returns the
         fitted model.
         """
-        from pysp.utils.streaming import StreamingEstimator
+        from pysp.inference.streaming import StreamingEstimator
 
         stream = StreamingEstimator(estimator, schedule=schedule, init_p=init_p, rng=RandomState(seed))
         model = None
