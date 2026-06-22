@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 
+from pysp.ppl._result import PosteriorResult
 from pysp.utils.estimation import optimize
 
 __all__ = [
@@ -806,7 +807,18 @@ class RandomVariable:
 
     __slots__ = ("_kind", "_family", "_args", "_name", "_keys", "_dist", "_result", "_cache", "_scope")
 
-    def __init__(self, kind, *, family=None, args=(), name=None, keys=None, dist=None, result=None, scope="shared"):
+    def __init__(
+        self,
+        kind,
+        *,
+        family=None,
+        args=(),
+        name=None,
+        keys=None,
+        dist=None,
+        result: PosteriorResult | None = None,
+        scope="shared",
+    ):
         # Private; use the classmethods / family functions. Treated as immutable.
         object.__setattr__(self, "_kind", kind)
         object.__setattr__(self, "_family", family)
@@ -849,7 +861,7 @@ class RandomVariable:
         return self._scope
 
     @classmethod
-    def _bound(cls, dist, *, name=None, result=None) -> RandomVariable:
+    def _bound(cls, dist, *, name=None, result: PosteriorResult | None = None) -> RandomVariable:
         return cls("bound", dist=dist, name=name or getattr(dist, "name", None), result=result)
 
     @classmethod
@@ -1038,7 +1050,7 @@ class RandomVariable:
         return read_params(d)
 
     @property
-    def result(self):
+    def result(self) -> PosteriorResult | None:
         """Inference metadata (EM history / MCMC chain) when present; else None."""
         return self._result
 
