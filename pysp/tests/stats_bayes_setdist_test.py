@@ -67,10 +67,9 @@ class StatsBayesSetDistTestCase(unittest.TestCase):
         """Closed-form per-element Beta posterior-mode inclusion probability in plain [0, 1]."""
         a = (beta_a - 1) + obs_cnt
         b = (beta_b - 1) - obs_cnt + tot_cnt
-        if a > 0 and b > 0 and a > b:
+        if a > 0 and b > 0:
+            # Mode of Beta(a+1, b+1) in plain [0, 1] is a / (a + b) for a, b > 0.
             return a / (a + b)
-        elif a > 0 and b > 0 and b > a:
-            return (a - 1) / (a + b - 2)
         elif a == 0 and b == 0:
             return 0.5
         elif b > a:
