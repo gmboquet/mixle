@@ -9,7 +9,7 @@ parameters alpha = {k: a_k} has log-density
 A single scalar alpha is treated as a symmetric Dirichlet whose dimension is inferred from each
 observation (is_unbounded).
 
-This is the conjugate prior used by :class:`~pysp.stats.leaf.categorical.CategoricalDistribution` (see its
+This is the conjugate prior used by :class:`~pysp.stats.base.categorical.CategoricalDistribution` (see its
 ``prior=`` argument). It is a parameter prior: it is scored on probability maps, not fit from data by
 EM. Ported from pysp.bstats.catdirichlet.
 """

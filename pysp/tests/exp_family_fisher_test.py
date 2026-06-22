@@ -11,10 +11,10 @@ import unittest
 
 import numpy as np
 
+from pysp.stats.base.exponential import ExponentialDistribution
+from pysp.stats.base.gamma import GammaDistribution
+from pysp.stats.base.gaussian import GaussianDistribution
 from pysp.stats.exp_family import to_exponential_family
-from pysp.stats.leaf.exponential import ExponentialDistribution
-from pysp.stats.leaf.gamma import GammaDistribution
-from pysp.stats.leaf.gaussian import GaussianDistribution
 
 
 class ExponentialFamilyFisherTest(unittest.TestCase):

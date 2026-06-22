@@ -11,15 +11,15 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
-from pysp.stats.bayes.dirichlet import DirichletDistribution
-from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
-from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.leaf.integer_categorical import (
+from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.base.integer_categorical import (
     IntegerCategoricalDataEncoder,
     IntegerCategoricalDistribution,
     IntegerCategoricalEstimator,
 )
+from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
+from pysp.stats.bayes.dirichlet import DirichletDistribution
+from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from pysp.utils.special import digamma, gammaln
 
 

@@ -23,8 +23,8 @@ from pysp.stats import (
     PoissonEstimator,
     seq_encode,
 )
+from pysp.stats.base.categorical import CategoricalDistribution
 from pysp.stats.latent.lda import seq_posterior
-from pysp.stats.leaf.categorical import CategoricalDistribution
 from pysp.utils.optsutil import count_by_value
 
 DOCS = [

@@ -12,6 +12,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma
 
+from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.latent.labeled_lda import (
     LabeledLDADistribution,
     LabeledLDAEstimator,
@@ -21,7 +22,6 @@ from pysp.stats.latent.labeled_lda import (
     update_alpha,
     update_alpha_coupled,
 )
-from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 
 VOCAB = ["w0", "w1", "w2", "w3"]
 PMATS = [[0.4, 0.4, 0.1, 0.1], [0.1, 0.1, 0.4, 0.4]]

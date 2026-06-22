@@ -7,7 +7,7 @@ import numpy as np
 
 from pysp.inference import estimate
 from pysp.stats import MultivariateHawkesProcessDistribution
-from pysp.stats.leaf.multivariate_hawkes import _split
+from pysp.stats.base.multivariate_hawkes import _split
 
 
 def _brute_log_density(d, ev):

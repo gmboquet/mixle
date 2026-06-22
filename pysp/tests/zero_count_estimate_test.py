@@ -9,10 +9,10 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.leaf.gamma import GammaEstimator
-from pysp.stats.leaf.geometric import GeometricEstimator
-from pysp.stats.leaf.integer_multinomial import IntegerMultinomialEstimator
-from pysp.stats.leaf.poisson import PoissonEstimator
+from pysp.stats.base.gamma import GammaEstimator
+from pysp.stats.base.geometric import GeometricEstimator
+from pysp.stats.base.integer_multinomial import IntegerMultinomialEstimator
+from pysp.stats.base.poisson import PoissonEstimator
 
 
 class PoissonZeroCountTestCase(unittest.TestCase):

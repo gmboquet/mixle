@@ -12,8 +12,8 @@ import unittest
 
 import numpy as np
 
+from pysp.stats.base.pareto import ParetoDistribution
 from pysp.stats.exp_family import ExponentialFamilyForm, is_exponential_family, to_exponential_family
-from pysp.stats.leaf.pareto import ParetoDistribution
 
 
 class ParetoExponentialFamilyTest(unittest.TestCase):

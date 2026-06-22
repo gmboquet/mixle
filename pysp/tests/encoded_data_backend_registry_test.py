@@ -2,7 +2,7 @@
 
 import unittest
 
-from pysp.stats.leaf.gaussian import GaussianDistribution
+from pysp.stats.base.gaussian import GaussianDistribution
 from pysp.utils.parallel.planner import (
     LocalEncodedData,
     available_encoded_data_backends,

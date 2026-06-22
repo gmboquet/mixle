@@ -109,7 +109,7 @@ class ClassNameAliasTestCase(unittest.TestCase):
 
 class WeightsAliasTestCase(unittest.TestCase):
     def _components(self):
-        from pysp.stats.leaf.categorical import CategoricalDistribution
+        from pysp.stats.base.categorical import CategoricalDistribution
 
         return [CategoricalDistribution({"a": 1.0}), CategoricalDistribution({"a": 0.5, "b": 0.5})]
 
@@ -154,7 +154,7 @@ class WeightsAliasTestCase(unittest.TestCase):
 
 class ProbMapVecCovarAliasTestCase(unittest.TestCase):
     def test_prob_map(self):
-        from pysp.stats.leaf.categorical import CategoricalDistribution
+        from pysp.stats.base.categorical import CategoricalDistribution
         from pysp.stats.sets.bernoulli_set import BernoulliSetDistribution
 
         self.assertEqual(
@@ -166,8 +166,8 @@ class ProbMapVecCovarAliasTestCase(unittest.TestCase):
             CategoricalDistribution({"a": 1.0}, prob_map={"a": 1.0})
 
     def test_prob_vec(self):
-        from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
-        from pysp.stats.leaf.integer_multinomial import IntegerMultinomialDistribution
+        from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
+        from pysp.stats.base.integer_multinomial import IntegerMultinomialDistribution
 
         self.assertTrue(
             np.allclose(
@@ -225,7 +225,7 @@ class NumValuesMaxIterAliasTestCase(unittest.TestCase):
 
     def test_max_iter(self):
         from pysp.inference.em import RestartEM
-        from pysp.stats.leaf.categorical import CategoricalDistribution
+        from pysp.stats.base.categorical import CategoricalDistribution
 
         model = CategoricalDistribution({"a": 1.0})
         self.assertEqual(RestartEM([model], max_iter=13).max_its, 13)

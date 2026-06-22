@@ -11,18 +11,18 @@ quantile/cdf round-trip, and -- the key correctness tie-in -- that d/dx CDF matc
 import math
 import unittest
 
-from pysp.stats.leaf.beta import BetaDistribution
-from pysp.stats.leaf.exponential import ExponentialDistribution
-from pysp.stats.leaf.gamma import GammaDistribution
-from pysp.stats.leaf.gaussian import GaussianDistribution
-from pysp.stats.leaf.laplace import LaplaceDistribution
-from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
-from pysp.stats.leaf.logistic import LogisticDistribution
-from pysp.stats.leaf.pareto import ParetoDistribution
-from pysp.stats.leaf.rayleigh import RayleighDistribution
-from pysp.stats.leaf.student_t import StudentTDistribution
-from pysp.stats.leaf.uniform import UniformDistribution
-from pysp.stats.leaf.weibull import WeibullDistribution
+from pysp.stats.base.beta import BetaDistribution
+from pysp.stats.base.exponential import ExponentialDistribution
+from pysp.stats.base.gamma import GammaDistribution
+from pysp.stats.base.gaussian import GaussianDistribution
+from pysp.stats.base.laplace import LaplaceDistribution
+from pysp.stats.base.log_gaussian import LogGaussianDistribution
+from pysp.stats.base.logistic import LogisticDistribution
+from pysp.stats.base.pareto import ParetoDistribution
+from pysp.stats.base.rayleigh import RayleighDistribution
+from pysp.stats.base.student_t import StudentTDistribution
+from pysp.stats.base.uniform import UniformDistribution
+from pysp.stats.base.weibull import WeibullDistribution
 
 CASES = [
     ("gaussian", GaussianDistribution(0.7, 2.0), [-1.0, 0.5, 2.0]),

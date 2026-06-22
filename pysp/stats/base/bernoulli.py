@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.stats.base.beta import BetaDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -20,7 +21,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.leaf.beta import BetaDistribution
 from pysp.utils.special import digamma
 
 
