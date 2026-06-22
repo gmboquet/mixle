@@ -66,7 +66,7 @@ records:
 ```python
 import numpy as np
 from pysp.stats import *
-from pysp.utils.estimation import optimize
+from pysp.inference import optimize
 
 component = lambda mu, p: CompositeDistribution((
     CategoricalDistribution({'a': p, 'b': 1.0 - p}),
@@ -102,7 +102,7 @@ Each model family implements five cooperating pieces:
 | `...Accumulator`  | Collects sufficient statistics (E-step), mergeable across partitions       |
 | `...DataEncoder`  | `seq_encode(data)` flattens raw Python data into NumPy for the fast path   |
 
-`optimize(data, est)` (in `pysp.utils.estimation`) ties these together — EM to convergence locally
+`optimize(data, est)` (in `pysp.inference`) ties these together — EM to convergence locally
 (vectorized NumPy/Numba), scaling out to Spark/Dask/Torch/MPI by swapping one argument (see
 [Engines & orchestration](#engines--orchestration)).
 
@@ -110,6 +110,12 @@ Also available: `best_of` (random restarts), `StreamingEstimator` / `Incremental
 (online EM), `fit_mle` / `fit_map` (autograd fitting with typed priors), `RecordDistribution` /
 `field(...)` (named dict/DataFrame observations), and `pysp.utils.automatic.get_estimator(data)`
 (infer an estimator straight from raw data).
+
+**Library structure.** Objects (the families) live in `pysp.stats` (and the `pysp.dist` /
+`pysp.process` / `pysp.models` namespaces); the verbs that act on them are organized as concerns —
+`pysp.inference` (fit: MLE/EM/MAP/conjugate/NUTS/VI + Fisher), `pysp.enumeration` (rank / top-k /
+quantization), `pysp.sampling`, and `pysp.ops` (quantize / condition / marginalize / …). `pysp.describe(x)`
+reports in plain English what any object supports.
 
 ## Distribution catalog
 
@@ -210,19 +216,9 @@ fit_reaction_diffusion(snapshots, dx=dx, dt=dt)   # nonlinear Fisher-KPP: du/dt 
 
 It's a thin surface — the `pysp.stats` classes underneath are untouched.
 
-**Head-to-head speed** (`python -m pysp.ppl.benchmark_vs`, same machine/data/model vs the actual
-competing PPLs):
-
-| task | pysp.ppl | competitor | result |
-| ---- | -------- | ---------- | ------ |
-| Poisson-Gamma posterior, N=200k | **5 ms** (exact, 1 pass) | NumPyro NUTS 5690 ms | **~1000× faster**, identical |
-| Beta-Bernoulli posterior, N=100k | **3 ms** (exact) | NumPyro NUTS 3619 ms | **~1400× faster**, identical |
-| Gaussian MLE, N=500k | **45 ms** (EM) | Pyro SVI 11778 ms | **~260× faster**, same answer |
-| Gaussian posterior (ESS/sec) | **8945** (`how='ensemble'`) | emcee 7883 · NumPyro 624 | **highest mixing throughput** |
-
-For conjugate / exponential-family / mixture models pysp returns the *exact* posterior with no
-sampling; for general posteriors the ensemble sampler leads on ESS/sec. See
-[`pysp/ppl/BENCHMARKS.md`](https://github.com/gmboquet/pysparkplug/blob/main/pysp/ppl/BENCHMARKS.md).
+For conjugate / exponential-family / mixture models, `.fit(...)` returns the **exact** posterior in
+closed form with no sampling; for general posteriors it falls back to EM / gradient / sampling
+(`how='auto'` picks the route the model admits).
 
 ## Frequentist & Bayesian — one switch
 
@@ -230,7 +226,7 @@ The prior is the single switch — no prior is maximum likelihood, a conjugate `
 same machinery Bayesian:
 
 ```python
-from pysp.utils.priors import NormalGammaPrior
+from pysp.inference.priors import NormalGammaPrior
 
 GaussianEstimator()                          # MLE
 GaussianEstimator(prior=NormalGammaPrior())  # closed-form conjugate posterior — same EM call
@@ -243,8 +239,8 @@ with typed priors is first-class too:
 
 ```python
 from pysp.engines import TorchEngine
-from pysp.utils.fit import fit_map
-from pysp.utils.priors import DirichletPrior, MixturePrior, NormalGammaPrior
+from pysp.inference.fit import fit_map
+from pysp.inference.priors import DirichletPrior, MixturePrior, NormalGammaPrior
 
 enc = model.dist_to_encoder().seq_encode(data)
 fitted, objective = fit_map(enc, model, engine=TorchEngine(device="cpu", dtype="float64"),
@@ -290,11 +286,12 @@ New frameworks plug in by registering a factory (`register_encoded_data_backend`
 editing the dispatch. For a purely local speedup, `encoded_data(..., parallel_chunks=True)` folds
 resident chunks across threads (bit-identical to serial).
 
-**The planner** (`pysp.planner`) turns a hardware budget into a memory-aware *placement* — chunking,
-device assignment, and (on Torch) model sharding — that you compute once and reuse:
+**The planner** (`pysp.utils.parallel.planner`) turns a hardware budget into a memory-aware
+*placement* — chunking, device assignment, and (on Torch) model sharding — that you compute once and
+reuse:
 
 ```python
-from pysp.planner import plan, Resources
+from pysp.utils.parallel.planner import plan, Resources
 
 placement = plan(data, model=model, estimator=est, resources=Resources.local(num_cpus=8))
 optimize(data, est, placement=placement)
@@ -321,7 +318,7 @@ answer exact **rank / cumulative-probability** queries — even when the support
 unbounded.
 
 ```python
-from pysp.utils.density_rank import density_rank, count_dp_seek
+from pysp.enumeration.density_rank import density_rank, count_dp_seek
 
 dist.enumerator().top_k(5)          # the 5 most probable (value, log_prob), in order
 dist.enumerator().top_p(0.95)       # smallest set covering 95% of the mass (discrete nucleus)
@@ -348,8 +345,8 @@ for value, log_prob in dist.count_budget_distinct(budget_bits=20):
     ...
 ```
 
-`pysp.utils.enumeration` provides the shared machinery (bounded best-first union, quantization,
-Kronecker-substitution count convolution).
+`pysp.enumeration` provides the shared machinery (bounded best-first union, quantization,
+Kronecker-substitution count convolution, k-best assignment / spanning-tree enumeration).
 
 **Continuous families** realize the same operations through the CDF and its inverse. Every univariate
 continuous leaf has an exact `cdf(x)` (the "index of `x`") and `quantile(q)` (the value at
@@ -362,14 +359,16 @@ density quantile, stochastic representatives otherwise.
 
 ## Beyond fitting
 
-- **Inference & analysis** — `pysp.utils.mcmc` (Metropolis–Hastings / HMC / VMP), `pysp.utils.em`
-  (hard, annealed, ECM, Monte-Carlo, variational, online, restart EM), `pysp.utils.fisher`
-  (Fisher-geometry views), and `pysp.utils.hvis` (model-based embeddings — t-SNE / UMAP).
-- **Engine-agnostic inference facade** — `pysp.infer` runs NUTS or ADVI on an *arbitrary*
+- **Inference & analysis** — all under `pysp.inference`: `pysp.inference.mcmc` (Metropolis–Hastings /
+  HMC / VMP), `pysp.inference.em` (hard, annealed, ECM, Monte-Carlo, variational, online, restart EM),
+  `pysp.inference.fisher` (Fisher-geometry views), plus `pysp.utils.hvis` (model-based embeddings —
+  t-SNE / UMAP).
+- **Engine-agnostic inference facade** — `pysp.inference` runs NUTS or ADVI on an *arbitrary*
   differentiable target (bring your own `value_and_grad`) and dispatches to a registered backend
   (NumPy / Numba / Torch / JAX). Multiple chains run in parallel (`parallel="thread"|"process"`,
-  with R̂ + pooled ESS). The underlying `pysp.utils.mcmc` NUTS does dual-averaging step-size and
-  optional diagonal mass-matrix adaptation (`adapt_mass=True`).
+  with R̂ + pooled ESS). The underlying `pysp.inference.mcmc` NUTS does dual-averaging step-size and
+  optional diagonal mass-matrix adaptation (`adapt_mass=True`). (`pysp.infer` remains as a deprecated
+  alias.)
 - **Design of experiments & Bayesian optimization** — `pysp.doe` provides classical designs
   (`latin_hypercube`, `maximin_latin_hypercube`, `full_factorial`, `random_design`) and sequential
   GP-EI Bayesian optimization (`minimize`, `propose_next`, `expected_improvement`).
@@ -410,8 +409,8 @@ go through identical math.
 ## Tests
 
 ```sh
-python -m pytest -m fast                                # quick correctness gate
-python -m pytest -m "not optional and not benchmark"    # full local suite
+python -m pytest -m fast        # quick correctness gate
+python -m pytest -m "not optional"   # full local suite
 ```
 
 Tests use `unittest.TestCase` internally with pytest markers / CI tiers (see
