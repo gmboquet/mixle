@@ -178,6 +178,15 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(_sp.ppf(q, self.alpha, scale=self.xm))
 
+    def mean(self) -> float:
+        """Mean alpha*xm/(alpha-1) for alpha > 1, else inf."""
+        return float(self.alpha * self.xm / (self.alpha - 1.0)) if self.alpha > 1.0 else float("inf")
+
+    def variance(self) -> float:
+        """Variance xm^2 alpha / ((alpha-1)^2 (alpha-2)) for alpha > 2, else inf."""
+        a, xm = self.alpha, self.xm
+        return float(xm * xm * a / ((a - 1.0) ** 2 * (a - 2.0))) if a > 2.0 else float("inf")
+
     def sampler(self, seed: int | None = None) -> "ParetoSampler":
         """Return a sampler for drawing observations from this distribution."""
         return ParetoSampler(self, seed)
