@@ -32,12 +32,20 @@ import numpy as np
 class PosteriorResult(Protocol):
     """Structural contract for a fitted RV's ``.result``.
 
-    Captures the surface that :mod:`pysp.ppl.core` (and the diagnostics) probe on a result object.
-    All members are *optional* in practice — consumers guard every access with ``hasattr`` /
+    Captures the *union* surface that :mod:`pysp.ppl.core` (and the diagnostics) probe on a result
+    object. All members are *optional* in practice — consumers guard every access with ``hasattr`` /
     ``getattr`` / ``callable`` — so a concrete result need only implement the slice it supports
     (e.g. a point-estimate ``RegressionResult`` has ``summary``/``predict`` but no ``samples``;
     a ``_VIResult`` is a bare raw-result holder). ``acceptance_rate`` and ``predictive`` are the two
     attributes every concrete result sets (``None`` when not applicable).
+
+    Because the members are independently optional, this *union* protocol is intentionally **not**
+    the right gate for an individual probe site: a ``runtime_checkable`` ``isinstance`` against it
+    requires *every* member to be present, which only ``Posterior`` satisfies (the conjugate /
+    hierarchical / regression / vmp results all lack ``pointwise_log_likelihood`` and several lack
+    ``samples`` or ``predictive``). Per-capability probes therefore dispatch on the narrow
+    single-method protocols below, each of which is exactly equivalent to the lenient
+    ``hasattr``/``callable`` probe it replaces.
     """
 
     # Set by every concrete result (``None`` when not applicable).
@@ -55,3 +63,26 @@ class PosteriorResult(Protocol):
     def pointwise_log_likelihood(self, data: Any) -> np.ndarray:
         """``(n_draws, n_obs)`` log-likelihood for WAIC / PSIS-LOO."""
         ...
+
+
+@runtime_checkable
+class Summarizable(Protocol):
+    """A result that can report a posterior / fit ``summary()`` (read by ``RandomVariable.summary``).
+
+    Narrow, single-method facet of :class:`PosteriorResult`: ``supports(r, Summarizable)`` is exactly
+    the old ``callable(getattr(r, "summary", None))`` probe for any result whose ``summary`` is a
+    method (every concrete result class is).
+    """
+
+    def summary(self) -> dict: ...
+
+
+@runtime_checkable
+class Sampleable(Protocol):
+    """A result that can return parameter / latent ``samples(...)`` (read by ``RandomVariable.posterior``).
+
+    Narrow, single-method facet of :class:`PosteriorResult`: ``supports(r, Sampleable)`` is exactly
+    the old ``hasattr(r, "samples")`` probe.
+    """
+
+    def samples(self, param: Any = ..., *args: Any, **kwargs: Any) -> np.ndarray: ...
