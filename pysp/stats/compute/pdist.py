@@ -193,6 +193,20 @@ class ProbabilityDistribution(ABC):
         """
         self.prior = prior
 
+    def has_conjugate_prior(self) -> bool:
+        """Return whether this family supports a closed-form conjugate Bayesian update.
+
+        Uniform, family-level signal backed by the single ``conjugate_posterior`` registry: ``True``
+        means ``pysp.stats.bayes.conjugate_posterior(self, data)`` returns an exact closed-form
+        posterior; ``False`` means Bayesian inference must go through the numerical fitters
+        (MAP / Laplace / MCMC / VI). This is the top tier of the inference-capability ladder
+        (see :class:`pysp.capability.ConjugateUpdatable`). Distinct from the per-instance
+        ``has_conj_prior`` flag, which records whether a prior is currently *attached*.
+        """
+        from pysp.stats.bayes.conjugate import is_conjugate_family
+
+        return is_conjugate_family(self)
+
     def expected_log_density(self, x: Any) -> float:
         """Return the variational expectation ``E_q[log p(x | theta)]``.
 
