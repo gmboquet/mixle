@@ -461,3 +461,37 @@ def integrate_dae(
             t = t + h
         result.append(y.copy())
     return np.array(result)
+
+
+# ---------------------------------------------------------------------------
+# Nonlinear PDE right-hand sides (method of lines) -- Burgers' equation
+# ---------------------------------------------------------------------------
+def burgers_rhs(nu: float, dx: float, *, bc: str = "dirichlet") -> Any:
+    """Build the method-of-lines right-hand side of the viscous Burgers equation.
+
+    Returns a callable ``rhs(t, u)`` giving ``du/dt = -u u_x + nu u_xx`` on a uniform 1-D grid of spacing
+    ``dx`` (central differences for both the nonlinear advection and the viscosity ``nu``), to be passed
+    to :func:`integrate_adaptive` (or :func:`integrate_stiff` for small ``nu``). ``bc="dirichlet"`` holds
+    the two endpoints fixed (their initial values); ``bc="periodic"`` wraps the grid. Burgers is the
+    canonical nonlinear convection-diffusion test -- it forms and smears shocks -- and admits the exact
+    travelling wave ``u = (uL+uR)/2 - (uL-uR)/2 tanh((uL-uR)(x - s t)/(4 nu))`` with ``s = (uL+uR)/2``.
+    """
+    nu = float(nu)
+    dx = float(dx)
+    if bc not in ("dirichlet", "periodic"):
+        raise ValueError("bc must be 'dirichlet' or 'periodic'.")
+
+    def rhs(t: float, u: Any) -> np.ndarray:
+        u = np.asarray(u, dtype=np.float64)
+        flux = 0.5 * u * u  # conservative form: -(u^2/2)_x telescopes -> discrete mass is conserved
+        if bc == "periodic":
+            dflux = (np.roll(flux, -1) - np.roll(flux, 1)) / (2.0 * dx)
+            uxx = (np.roll(u, -1) - 2.0 * u + np.roll(u, 1)) / (dx * dx)
+            return -dflux + nu * uxx
+        du = np.zeros_like(u)
+        dflux = (flux[2:] - flux[:-2]) / (2.0 * dx)
+        uxx = (u[2:] - 2.0 * u[1:-1] + u[:-2]) / (dx * dx)
+        du[1:-1] = -dflux + nu * uxx
+        return du
+
+    return rhs
