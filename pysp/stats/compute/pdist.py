@@ -662,6 +662,62 @@ class DistributionEnumerator(ABC):
 
         return QuantizedEnumerationIndex.from_enumerator(self, max_bits=max_bits, bin_width_bits=bin_width_bits)
 
+    # -- where-does-a-value-sit / what-is-at-this-index, as methods on the enumerator ---------------
+    # The enumerator is the one home for "rank a value", "seek the value at an index", and "iterate
+    # from an index" over the weighted structure it enumerates. These delegate to the descending-
+    # probability machinery in pysp.enumeration.density_rank (imported lazily to keep the pdist
+    # contract layer free of an eager dependency on the enumeration package).
+
+    def rank(self, value: Any):
+        """Rank and cumulative probability of ``value`` in the descending-probability order.
+
+        Returns a :class:`~pysp.enumeration.density_rank.DensityRankResult` with ``.rank`` (0-based
+        count of strictly-more-probable outcomes; ``None`` if only the sampling estimate was used) and
+        ``.cumulative_probability`` (``G(value) = P(p(Y) >= p(value))``). Exact head enumeration where
+        the support is countable, with a Monte-Carlo fallback for the deep tail.
+        """
+        from pysp.enumeration.density_rank import density_rank
+
+        return density_rank(self.dist, value)
+
+    def seek(self, index: int):
+        """The value at descending-probability ``index`` (0-based) -- the inverse of :meth:`rank`.
+
+        Returns a :class:`~pysp.enumeration.density_rank.CountDPSeekResult` carrying the value and a
+        provable ``[rank_lower, rank_upper]`` bracket. Uses the structural count-DP for decomposable
+        families, so arbitrarily deep indices are reachable without enumerating the prefix.
+        """
+        from pysp.enumeration.density_rank import count_dp_seek
+
+        return count_dp_seek(self.dist, index)
+
+    def cumulative(self, value: Any):
+        """``G(value) = P(p(Y) >= p(value))`` -- total mass of outcomes at least as probable as ``value``."""
+        from pysp.enumeration.density_rank import cumulative_probability
+
+        return cumulative_probability(self.dist, value)
+
+    def nucleus_size(self, p: float):
+        """Size of :meth:`top_p` (the minimal ``>= p``-mass set) WITHOUT materializing it.
+
+        Returns a :class:`~pysp.enumeration.density_rank.CountDPTopPResult` with a provable size
+        bracket, from the structural count-DP -- usable when the nucleus is far too large to list.
+        """
+        from pysp.enumeration.density_rank import count_dp_top_p
+
+        return count_dp_top_p(self.dist, p)
+
+    def from_index(self, start: int, stop: int | None = None):
+        """Iterate ``(value, log_prob)`` in descending-probability order starting at structural ``start``.
+
+        Yields the same stream as iterating a fresh enumerator but beginning at index ``start`` (and
+        ending before ``stop`` if given). A fresh underlying enumeration is used, so this does not
+        consume ``self``. (Decomposable families admit a direct structural jump via the count-budget
+        index; the current implementation skips the best-first prefix -- the structural fast path is a
+        WS-3 performance follow-up.)
+        """
+        return itertools.islice(self.dist.enumerator(), start, stop)
+
 
 class ConditionalSampler(ABC):
     """Sampler mixin for conditional draws: sample_given(x) draws from P(. | x)."""
