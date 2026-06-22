@@ -175,6 +175,15 @@ class SymbolicEngine(ComputeEngine):
     two = SymbolicExpression.constant(2)
     half = SymbolicExpression("div", (SymbolicExpression.constant(1), SymbolicExpression.constant(2)))
 
+    def with_precision(self, precision: Any) -> SymbolicEngine:
+        """Return this engine unchanged: symbolic expressions carry no float precision policy.
+
+        The numeric engines swap their float dtype here, but symbolic nodes are exact expression
+        trees with no reduced-precision representation, so precision adjustment is a no-op rather than
+        an error -- this lets backend-neutral code call ``with_precision`` uniformly across engines.
+        """
+        return self
+
     def constant(self, value: Any) -> SymbolicExpression:
         """Return ``value`` as a symbolic constant node."""
         return SymbolicExpression.constant(value)
