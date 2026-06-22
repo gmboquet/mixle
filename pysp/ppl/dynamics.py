@@ -272,3 +272,73 @@ def integrate_adaptive(
         else:
             h = hh * max(0.2, 0.9 * err ** (-0.2))
     return np.array(out)
+
+
+# ---------------------------------------------------------------------------
+# Implicit stiff ODE integrator (L-stable SDIRK2)
+# ---------------------------------------------------------------------------
+_SDIRK2_GAMMA = 1.0 - 1.0 / np.sqrt(2.0)  # the L-stable 2nd-order singly-diagonally-implicit choice
+
+
+def integrate_stiff(
+    rhs: Any,
+    y0: Any,
+    t_eval: Any,
+    *,
+    t0: float = 0.0,
+    jac: Any = None,
+    h_max: float = 0.05,
+    newton_tol: float = 1.0e-11,
+    max_newton: int = 50,
+) -> np.ndarray:
+    """Integrate a STIFF system ``dy/dt = rhs(t, y)`` with the L-stable 2nd-order SDIRK2 method.
+
+    Stiff problems (widely separated time scales) make explicit solvers like :func:`integrate_adaptive`
+    take impractically tiny steps; this two-stage singly-diagonally-implicit Runge-Kutta method
+    (``gamma = 1 - 1/sqrt(2)``) is **L-stable**, so it damps the fast modes correctly at any step size
+    while staying 2nd-order accurate on the slow ones. Each stage solves ``k = rhs(t, base + h*gamma*k)``
+    by Newton iteration using the Jacobian ``jac(t, y)`` (a finite-difference Jacobian is used when
+    ``jac`` is ``None``). ``t_eval`` is the increasing array of output times; each interval is covered by
+    substeps capped at ``h_max``. Returns the state at each output time, shape ``(len(t_eval), len(y0))``.
+    """
+    f = lambda t, y: np.atleast_1d(np.asarray(rhs(t, y), dtype=np.float64))  # noqa: E731
+    y = np.atleast_1d(np.asarray(y0, dtype=np.float64)).copy()
+    n = y.size
+    times = np.asarray(t_eval, dtype=np.float64)
+    t = float(t0)
+    g = _SDIRK2_GAMMA
+
+    def jacobian(tc: float, yc: np.ndarray) -> np.ndarray:
+        if jac is not None:
+            return np.atleast_2d(np.asarray(jac(tc, yc), dtype=np.float64))
+        eps = 1.0e-7
+        f0 = f(tc, yc)
+        out = np.empty((n, n))
+        for i in range(n):
+            yp = yc.copy()
+            yp[i] += eps
+            out[:, i] = (f(tc, yp) - f0) / eps
+        return out
+
+    def solve_stage(tc: float, base: np.ndarray, h: float) -> np.ndarray:
+        k = f(tc, base)  # explicit guess
+        for _ in range(max_newton):
+            resid = k - f(tc, base + h * g * k)
+            mat = np.eye(n) - h * g * jacobian(tc, base + h * g * k)
+            dk = np.linalg.solve(mat, -resid)
+            k = k + dk
+            if np.max(np.abs(dk)) < newton_tol:
+                break
+        return k
+
+    result: list[np.ndarray] = []
+    for t_next in times:
+        nsub = max(1, int(np.ceil((t_next - t) / h_max)))
+        h = (t_next - t) / nsub
+        for _ in range(nsub):
+            k1 = solve_stage(t + g * h, y, h)
+            k2 = solve_stage(t + h, y + h * (1.0 - g) * k1, h)
+            y = y + h * ((1.0 - g) * k1 + g * k2)
+            t = t + h
+        result.append(y.copy())
+    return np.array(result)
