@@ -37,10 +37,13 @@ from pysp.inference.target import (
     advi,
     available_backends,
     ess,
+    ess_bulk,
+    ess_tail,
     nuts,
     nuts_torch,
     register_inference_backend,
     rhat,
+    split_rhat,
 )
 from pysp.stats.bayes.conjugate import (
     ConjugatePosterior,
@@ -85,6 +88,9 @@ __all__ = [
     "AdviResult",
     "rhat",
     "ess",
+    "split_rhat",
+    "ess_bulk",
+    "ess_tail",
     "available_backends",
     "InferenceBackend",
     "register_inference_backend",
