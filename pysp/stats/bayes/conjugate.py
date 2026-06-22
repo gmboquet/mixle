@@ -449,7 +449,6 @@ def _build_gaussian(dist, data, weights, prior) -> NormalInverseGammaPosterior:
     x, w = _as_weighted_array(data, weights)
     n = float(w.sum())
     sx = float(np.dot(w, x))
-    sx2 = float(np.dot(w, x * x))
     xbar = sx / n if n > 0 else 0.0
     p = prior or {}
     m0 = float(p.get("m", 0.0))
@@ -459,8 +458,10 @@ def _build_gaussian(dist, data, weights, prior) -> NormalInverseGammaPosterior:
     kn = k0 + n
     mn = (k0 * m0 + sx) / kn
     an = a0 + 0.5 * n
-    # b_n = b0 + 0.5*sum w (x-xbar)^2 + 0.5 k0 n (xbar-m0)^2 / kn
-    ss = sx2 - n * xbar * xbar
+    # b_n = b0 + 0.5*sum w (x-xbar)^2 + 0.5 k0 n (xbar-m0)^2 / kn.
+    # Center the scatter (the raw data is in hand here) rather than computing it as
+    # sx2 - n*xbar^2, which cancels catastrophically for large-|xbar| data.
+    ss = float(np.dot(w, (x - xbar) ** 2)) if n > 0 else 0.0
     bn = b0 + 0.5 * ss + 0.5 * k0 * n * (xbar - m0) ** 2 / kn
     post = NormalInverseGammaPosterior(mn, kn, an, bn)
     post._set_prior(m0, k0, a0, b0, n)

@@ -163,28 +163,46 @@ class ExponentiallyModifiedGaussianSampler(DistributionSampler):
 
 class ExponentiallyModifiedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     def __init__(self, keys: str | None = None, name: str | None = None) -> None:
-        """Accumulate the first three (weighted) moments needed for the MoM fit.
+        """Accumulate the first three (weighted) central moments needed for the MoM fit.
+
+        Stored as ``(count, mean, M2, M3)`` with ``M2 = sum_i w_i (x_i-mean)^2`` and
+        ``M3 = sum_i w_i (x_i-mean)^3``. Centering each batch before squaring/cubing and
+        merging via the Pébay parallel-moment recurrence avoids the ``E[x^2]-E[x]^2``
+        cancellation that destroyed the skewness (and hence ``tau``) for large-``|mean|`` data.
+        EMG is a host-only leaf, so this representation change has no engine-swap implications.
 
         Attributes:
-            sum (float): sum_i w_i*x_i.
-            sum2 (float): sum_i w_i*x_i^2.
-            sum3 (float): sum_i w_i*x_i^3.
             count (float): sum_i w_i.
-
+            mean (float): weighted mean.
+            m2 (float): weighted second central moment sum.
+            m3 (float): weighted third central moment sum.
         """
-        self.sum = 0.0
-        self.sum2 = 0.0
-        self.sum3 = 0.0
         self.count = 0.0
+        self.mean = 0.0
+        self.m2 = 0.0
+        self.m3 = 0.0
         self.keys = keys
         self.name = name
 
+    def _merge(self, c_b: float, mean_b: float, m2_b: float, m3_b: float) -> None:
+        """Merge a second weighted central-moment batch (parallel/Pébay form)."""
+        c_a, mean_a, m2_a, m3_a = self.count, self.mean, self.m2, self.m3
+        count = c_a + c_b
+        if count <= 0.0:
+            return
+        delta = mean_b - mean_a
+        self.mean = mean_a + delta * (c_b / count)
+        self.m2 = m2_a + m2_b + delta * delta * (c_a * c_b / count)
+        self.m3 = (
+            m3_a
+            + m3_b
+            + delta**3 * (c_a * c_b * (c_a - c_b) / (count * count))
+            + 3.0 * delta * (c_a * m2_b - c_b * m2_a) / count
+        )
+        self.count = count
+
     def update(self, x: float, weight: float, estimate: Optional["ExponentiallyModifiedGaussianDistribution"]) -> None:
-        xw = x * weight
-        self.sum += xw
-        self.sum2 += x * xw
-        self.sum3 += x * x * xw
-        self.count += weight
+        self._merge(float(weight), float(x), 0.0, 0.0)
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         self.update(x, weight, None)
@@ -197,46 +215,44 @@ class ExponentiallyModifiedGaussianAccumulator(SequenceEncodableStatisticAccumul
     ) -> None:
         xx = np.asarray(x, dtype=np.float64)
         ww = np.asarray(weights, dtype=np.float64)
-        self.sum += np.dot(xx, ww)
-        self.sum2 += np.dot(xx * xx, ww)
-        self.sum3 += np.dot(xx * xx * xx, ww)
-        self.count += ww.sum()
+        c_b = float(ww.sum())
+        if c_b <= 0.0:
+            return
+        mean_b = float(np.dot(xx, ww) / c_b)
+        dx = xx - mean_b  # center before squaring/cubing -> no cancellation
+        m2_b = float(np.dot(ww, dx * dx))
+        m3_b = float(np.dot(ww, dx * dx * dx))
+        self._merge(c_b, mean_b, m2_b, m3_b)
 
     def combine(self, suff_stat: tuple[float, float, float, float]) -> "ExponentiallyModifiedGaussianAccumulator":
-        self.sum += suff_stat[0]
-        self.sum2 += suff_stat[1]
-        self.sum3 += suff_stat[2]
-        self.count += suff_stat[3]
+        self._merge(float(suff_stat[0]), float(suff_stat[1]), float(suff_stat[2]), float(suff_stat[3]))
         return self
 
     def value(self) -> tuple[float, float, float, float]:
-        return self.sum, self.sum2, self.sum3, self.count
+        return self.count, self.mean, self.m2, self.m3
 
     def from_value(self, x: tuple[float, float, float, float]) -> "ExponentiallyModifiedGaussianAccumulator":
-        self.sum, self.sum2, self.sum3, self.count = x
+        self.count, self.mean, self.m2, self.m3 = float(x[0]), float(x[1]), float(x[2]), float(x[3])
         return self
 
     def scale(self, c: float) -> "ExponentiallyModifiedGaussianAccumulator":
-        self.sum *= c
-        self.sum2 *= c
-        self.sum3 *= c
+        # Scaling all weights by c multiplies the total weight and the central-moment sums by c;
+        # the mean is invariant.
         self.count *= c
+        self.m2 *= c
+        self.m3 *= c
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
         if self.keys is not None:
             if self.keys in stats_dict:
-                s0, s1, s2, c = stats_dict[self.keys]
-                self.sum += s0
-                self.sum2 += s1
-                self.sum3 += s2
-                self.count += c
+                self._merge(*stats_dict[self.keys])
             else:
-                stats_dict[self.keys] = (self.sum, self.sum2, self.sum3, self.count)
+                stats_dict[self.keys] = self.value()
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         if self.keys is not None and self.keys in stats_dict:
-            self.sum, self.sum2, self.sum3, self.count = stats_dict[self.keys]
+            self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> "ExponentiallyModifiedGaussianDataEncoder":
         return ExponentiallyModifiedGaussianDataEncoder()
@@ -275,21 +291,20 @@ class ExponentiallyModifiedGaussianEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[float, float, float, float]
     ) -> "ExponentiallyModifiedGaussianDistribution":
-        """Estimate an EMG from the accumulated (sum, sum2, sum3, count) via method of moments."""
-        s1, s2, s3, n = suff_stat
+        """Estimate an EMG from the accumulated (count, mean, M2, M3) via method of moments."""
+        n, m1, sum_m2, sum_m3 = suff_stat
 
         if n <= 0.0:
             return ExponentiallyModifiedGaussianDistribution(0.0, 1.0, 1.0, name=self.name, keys=self.keys)
 
-        m1 = s1 / n
-        m2 = s2 / n
-        m3 = s3 / n
-        var = m2 - m1 * m1
+        # ``sum_m2``/``sum_m3`` are weighted central moments (see the accumulator), so the sample
+        # variance and third central moment are read off directly without E[x^2]-E[x]^2 cancellation.
+        var = sum_m2 / n
         if var <= _MIN_EMG_PARAM or not np.isfinite(var):
             var = _MIN_EMG_PARAM
 
         # third central moment and skewness
-        mu3 = m3 - 3.0 * m1 * m2 + 2.0 * m1 * m1 * m1
+        mu3 = sum_m3 / n
         skew = mu3 / (var**1.5)
 
         if skew > _MIN_EMG_PARAM:
