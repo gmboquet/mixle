@@ -1,6 +1,6 @@
 """Numba (``@njit``) No-U-Turn Sampler over an analytic ``@njit`` ``value_and_grad``.
 
-A line-for-line port of the numpy NUTS in :mod:`pysp.utils.mcmc.samplers` (recursive tree
+A line-for-line port of the numpy NUTS in :mod:`pysp.inference.mcmc.samplers` (recursive tree
 doubling, U-turn termination, multinomial proposal, dual-averaging step-size adaptation, the
 ``_find_reasonable_eps`` heuristic) compiled with ``@njit``. The (unnormalised) log-target is a
 PASSED ``@njit`` fused ``value_and_grad(theta) -> (float, ndarray)``; numba supports first-class
@@ -14,7 +14,7 @@ analytic-gradient models (no per-step Python dispatch). ``np.random`` (``seed`` 
 ``np.random.seed`` for reproducibility.
 
 The public entry point :func:`nuts_numba` is a thin Python wrapper that loops chains, pools the
-draws, computes R-hat / ESS, and returns a :class:`pysp.utils.mcmc.samplers.MCMCResult` — mirroring
+draws, computes R-hat / ESS, and returns a :class:`pysp.inference.mcmc.samplers.MCMCResult` — mirroring
 the numpy facade's per-chain loop.
 """
 
@@ -26,7 +26,7 @@ from typing import Any
 import numpy as np
 from numba import njit
 
-from pysp.utils.mcmc.samplers import MCMCResult
+from pysp.inference.mcmc.samplers import MCMCResult
 
 
 @njit(cache=True)
@@ -207,7 +207,7 @@ def nuts_numba(
         seed: seed for the in-kernel ``np.random`` (reproducible per chain).
 
     Returns:
-        :class:`~pysp.utils.mcmc.samplers.MCMCResult` with numpy ``samples``, plus ``step_size``
+        :class:`~pysp.inference.mcmc.samplers.MCMCResult` with numpy ``samples``, plus ``step_size``
         and ``num_target_evals`` attributes.
     """
     if num_samples < 0 or warmup < 0 or thin <= 0:

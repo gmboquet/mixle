@@ -141,7 +141,7 @@ def _advi_optimize(
 
     ``log_p_fn(U: Tensor(mc, d)) -> Tensor(mc,)`` is the (unconstrained) batched joint log-target;
     it owns any data minibatching/rescaling. This is the family/objective machinery shared by
-    :meth:`GradTarget.advi` and the public :func:`pysp.infer.advi` facade, with no dependency on
+    :meth:`GradTarget.advi` and the public :func:`pysp.inference.advi` facade, with no dependency on
     ``GradTarget``'s slots or data. Returns ``(mean_u, scale_u, U_draws, objective)`` with the
     unconstrained mean/scale, the draws ``(samples, d)``, and the final variational objective value
     (the ELBO for ``alpha=1``, otherwise the tilted Renyi bound)."""

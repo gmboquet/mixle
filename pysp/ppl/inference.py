@@ -3,7 +3,7 @@
 A model whose parameter slots hold *distributions* (priors) or ``free`` defines a joint
 ``log p(data | theta) + log p(theta)``. Both MAP (maximize) and MCMC (sample) run on the
 exact same target, scored with the existing vectorized ``seq_log_density`` and pysp's
-``pysp.utils.mcmc`` kernels — no new inference engine.
+``pysp.inference.mcmc`` kernels — no new inference engine.
 
 Flat ``Sample`` models (``Normal(Normal(0,10), free)``) and *composite* models (mixtures,
 sequences) are both supported: composites collect their leaf ``free``/prior parameters across
@@ -508,7 +508,7 @@ def _gelman_rubin(chains_u: np.ndarray) -> np.ndarray:
 
 def _mcmc_worker(seed, rv, data, kw):
     """Module-level (picklable) single RW-Metropolis chain (parallel path: no constraints)."""
-    from pysp.utils.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
+    from pysp.inference.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
     log_target, _grad, slots, _build, dmean, dstd, _f = _prepare_target(rv, data, None, None, want_grad=False)
     u0 = _init_u(slots, dmean, dstd)
@@ -527,7 +527,7 @@ def _mcmc_worker(seed, rv, data, kw):
 
 def _hmc_worker(seed, rv, data, kw):
     """Module-level (picklable) single HMC chain (parallel path: no constraints)."""
-    from pysp.utils.mcmc import hamiltonian_monte_carlo
+    from pysp.inference.mcmc import hamiltonian_monte_carlo
 
     log_target, grad, slots, _build, dmean, dstd, _f = _prepare_target(rv, data, None, None, want_grad=True)
     u0 = _init_u(slots, dmean, dstd)
@@ -549,7 +549,7 @@ def _hmc_worker(seed, rv, data, kw):
 
 def _nuts_worker(seed, rv, data, kw):
     """Module-level (picklable) single NUTS chain (parallel path: no constraints)."""
-    from pysp.utils.mcmc import nuts
+    from pysp.inference.mcmc import nuts
 
     log_target, grad, slots, _build, dmean, dstd, _f = _prepare_target(rv, data, None, None, want_grad=True)
     u0 = _init_u(slots, dmean, dstd)
@@ -581,7 +581,7 @@ def _ensemble_p0(slots, dmean, dstd, n_data, walkers, rng):
 
 def _ensemble_worker(seed, rv, data, kw):
     """Module-level (picklable) single ensemble run (parallel path: no constraints)."""
-    from pysp.utils.mcmc import affine_invariant_ensemble
+    from pysp.inference.mcmc import affine_invariant_ensemble
 
     log_target, _grad, slots, _build, dmean, dstd, _f = _prepare_target(
         rv, data, None, None, want_grad=False, numpy_only=True
@@ -874,7 +874,7 @@ def ensemble_fit(
     near-independent samples. Uses the fast NumPy scalar log-target (one eval per proposal).
     ``chains>1`` runs independent ensembles for Gelman-Rubin R-hat / pooled ESS (``parallel``
     spreads them over a process pool)."""
-    from pysp.utils.mcmc import affine_invariant_ensemble
+    from pysp.inference.mcmc import affine_invariant_ensemble
 
     if rng is None:
         rng = np.random.RandomState()
@@ -920,7 +920,7 @@ def mcmc_fit(
     constraints=None,
     penalty=None,
 ) -> RandomVariable:
-    from pysp.utils.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
+    from pysp.inference.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
     if rng is None:
         rng = np.random.RandomState()
@@ -970,7 +970,7 @@ def hmc_fit(
     ``constraints`` truncate the posterior (trajectories leaving the region are rejected);
     for hard constraints ``how='ensemble'`` or ``'mcmc'`` usually mixes better.
     """
-    from pysp.utils.mcmc import hamiltonian_monte_carlo
+    from pysp.inference.mcmc import hamiltonian_monte_carlo
 
     if rng is None:
         rng = np.random.RandomState()
@@ -1029,7 +1029,7 @@ def nuts_fit(
     diagonal mass matrix at the data-informed scale. ``warmup`` (= ``burn``) adapts the step size
     to ``target_accept``. Inequality ``constraints`` truncate the posterior; ``penalty`` adds a
     smooth penalty (which enters the gradient via the numeric-gradient path)."""
-    from pysp.utils.mcmc import nuts
+    from pysp.inference.mcmc import nuts
 
     if rng is None:
         rng = np.random.RandomState()

@@ -2,7 +2,7 @@
 
 These functions are deliberately free of any ``MCMCResult`` / ``_Slot`` dependency: they
 operate on ordinary NumPy arrays so the draws of *any* sampler (pysp's or an external one)
-can be diagnosed. They are the generic cores behind ``pysp.utils.mcmc.gelman_rubin`` and
+can be diagnosed. They are the generic cores behind ``pysp.inference.mcmc.gelman_rubin`` and
 ``MCMCResult.effective_sample_size``.
 """
 
