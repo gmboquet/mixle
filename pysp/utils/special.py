@@ -137,16 +137,6 @@ def logpdet(x_mat: np.ndarray) -> float:
         return -math.inf
 
 
-def polygamma_loc(n, y, out=None):
-    if out is not None:
-        fac2 = zeta(n + 1, y, out=out)
-        fac2 *= (-1.0) ** (n + 1) * gamma(n + 1.0)
-    else:
-        fac2 = (-1.0) ** (n + 1) * gamma(n + 1.0) * zeta(n + 1, y)
-
-    return fac2
-
-
 def trigamma(y: np.ndarray | int | float | Iterable | list[float], out: np.ndarray | None = None) -> np.ndarray | float:
     """Trigamma function.
 
@@ -161,12 +151,11 @@ def trigamma(y: np.ndarray | int | float | Iterable | list[float], out: np.ndarr
     return zeta(2, y, out=out)
 
 
-def digammainv(y: np.ndarray | float, out: np.ndarray | None = None) -> np.ndarray | float:
+def digammainv(y: np.ndarray | float) -> np.ndarray | float:
     """Inverse digamma function evaluated on y.
 
     Args:
         y (Union[np.ndarray, float]): Numpy array of values to be evaluated or single value.
-        out (Optional[np.ndarray]): Deprecated. Kept for consistency with other files.
 
     Returns:
         Numpy array if y is numpy array else float.

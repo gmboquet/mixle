@@ -705,7 +705,7 @@ class GeometricEstimator(ParameterEstimator):
         else:
             p = suff_stat[0] / suff_stat[1]
 
-        p = float(np.clip(p, 1.0e-12, 1.0))
+        p = float(np.clip(p, 1.0e-12, 1.0 - 1.0e-12))
         return GeometricDistribution(p, name=self.name)
 
 

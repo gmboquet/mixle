@@ -600,6 +600,10 @@ def _objective_scalar(value: Any) -> float:
 
 def _objective_best_entry(history: Sequence[float], maximize: bool = True) -> tuple[float, int]:
     values = np.asarray(history, dtype=np.float64)
+    if values.size == 0 or np.all(np.isnan(values)):
+        # No finite entry to choose from; fall back to the last (or initial) value.
+        idx = values.size - 1 if values.size else 0
+        return (float(values[idx]) if values.size else float("nan")), idx
     idx = int(np.nanargmax(values) if maximize else np.nanargmin(values))
     return float(values[idx]), idx
 

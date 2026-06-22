@@ -1001,6 +1001,11 @@ class BinomialEstimator(ParameterEstimator):
             else:
                 max_val = 0
 
+        # Number of trials inferred from the observed support span. CAVEAT: this is data-driven --
+        # if the true maximum (n successes) is never observed, ``max_val`` underestimates it and the
+        # estimated ``n`` (and hence ``p``) is biased high. To pin the trial count, construct the
+        # estimator with an explicit ``max_val`` (and/or ``min_val``); the observed span is then only
+        # widened to include it, never used to shrink a known bound below the data.
         n = max_val - min_val
 
         if self.pseudo_count is not None and self.suff_stat is not None:

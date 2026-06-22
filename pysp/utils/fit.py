@@ -570,6 +570,9 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
             elif pfam == "beta" and spec.constraint == "unit_interval":
                 alpha = engine.asarray(param_prior.get("alpha", 1.0))
                 beta = engine.asarray(param_prior.get("beta", 1.0))
+                # Clamp away from {0, 1}: a saturated sigmoid tail (raw >~ 37) gives value == 1.0
+                # exactly, making log1p(-value) == -inf and poisoning the whole MAP objective.
+                value = torch.clamp(value, 1.0e-12, 1.0 - 1.0e-12)
                 lp = lp + torch.sum((alpha - 1.0) * torch.log(value) + (beta - 1.0) * torch.log1p(-value))
                 matched = True
             elif pfam == "dirichlet" and spec.constraint in (
@@ -579,6 +582,9 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
                 "column_simplex_matrix",
             ):
                 alpha = _dirichlet_alpha_tensor(param_prior.get("alpha"), None, value, engine, torch)
+                # Clamp away from 0: a saturated softmax tail can drive a component to exactly 0,
+                # making log(value) == -inf and poisoning the whole MAP objective.
+                value = torch.clamp(value, 1.0e-12, 1.0 - 1.0e-12)
                 lp = lp + torch.sum((alpha - 1.0) * torch.log(value))
                 matched = True
 
