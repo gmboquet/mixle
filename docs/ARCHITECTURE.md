@@ -136,7 +136,7 @@ thin re-export shims left at the old paths); only the object namespaces remain r
 |---|---|---|---|
 | `pysp.enumeration` | concern | **package — machinery moved in** | `_algorithms` (was utils.enumeration) + `quantization/` (was utils.quantization) + `model_enumeration` + DistributionEnumerator (pdist) + Enumerable |
 | `pysp.sampling` | concern | **package — machinery moved in** | `sampling_api` + `latent_posterior` + `_sampling` (were under stats) + pdist samplers + PosteriorPredictive |
-| `pysp.inference` | concern | **package — machinery moved in (lazy `__init__`)** | `estimation` / `em` / `fit` / `objectives` / `fisher` (were under utils) + bayes.conjugate + infer.nuts (re-exported from their homes) |
+| `pysp.inference` | concern | **package — machinery moved in** | `estimation` / `em` / `fit` / `objectives` / `fisher` (were under utils) + bayes.conjugate + infer.nuts (re-exported from their homes) |
 | `pysp.ops` | operations | self-contained module | new (quantize) + the combinators, capability-gated |
 | `pysp.contracts` | kernel | re-export shim | every ABC/Protocol in one import (capabilities eager, subsystem roles lazy) |
 | `pysp.dist` / `pysp.process` / `pysp.models` | objects | re-export shims (by design) | aliases of stats / the point-process families / the generic-model package |
@@ -147,14 +147,18 @@ The distribution families (`pysp.dist`, `pysp.process`, `pysp.models`) keep thei
 "{cls.__module__}.{cls.__name__}"`); physically moving a distribution would change its type-id and
 break loading of previously-saved models.
 
-**The inference machinery was relocated despite a `stats` coupling.** `em`/`estimation` import
-`pysp.stats` (estimation must iterate over distributions), and the stats leaves import this machinery
-*during* `pysp.stats` import — so a normal eager package `__init__` would re-enter a half-built
-`pysp.stats` and deadlock. The fix: `pysp/inference/__init__.py` resolves its exported names
-**lazily** (`__getattr__`), so importing the package (or a submodule, via the old `utils.*` shims)
-runs a trivial `__init__` and preserves the existing import ordering. `conjugate` (bayes-family) and
-`nuts` (`pysp.infer`) keep their own homes and are re-exported. The only remaining dividing line is
-serialization, which pins the *distribution objects* to `pysp.stats`.
+**The inference machinery moved cleanly once the `stats` coupling was cut at its root.** `em`/
+`estimation` used to import the *vectorized `seq_*` drivers* (`seq_encode` / `seq_estimate` /
+`seq_initialize` / `seq_log_density_sum`) straight out of `pysp.stats.__init__`, where they were
+defined inline — yet the stats leaves import this same machinery *during* `pysp.stats` import, so the
+inference package could only re-enter a half-built `pysp.stats`. The real fix was to recognize those
+`seq_*` functions for what they are — protocol dispatchers over the `pdist` contracts, not part of the
+object surface — and move them to **`pysp.stats.compute.sequence`** (`pysp.stats` re-exports them, so
+the public `pysp.stats.seq_estimate` API is unchanged). The inference machinery now imports only the
+*compute layer* (`compute.{pdist,sequence}`), never the `pysp.stats` package surface, so
+`pysp/inference/__init__.py` is a **plain eager package init** — no `__getattr__`. `conjugate`
+(bayes-family) and `nuts` (`pysp.infer`) keep their own homes and are re-exported. The only remaining
+dividing line is serialization, which pins the *distribution objects* to `pysp.stats`.
 
 ---
 
