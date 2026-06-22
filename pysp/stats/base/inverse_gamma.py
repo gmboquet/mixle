@@ -232,6 +232,19 @@ class InverseGammaDistribution(SequenceEncodableProbabilityDistribution):
             engine.sum(ww * (-log_x)[:, None], axis=0),
         )
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x) = Q(alpha, beta/x) (0 for x <= 0)."""
+        from scipy.special import gammaincc
+
+        x = float(x)
+        return float(gammaincc(self.alpha, self.beta / x)) if x > 0.0 else 0.0
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q)."""
+        from scipy.special import gammainccinv
+
+        return float(self.beta / gammainccinv(self.alpha, float(q)))
+
     def sampler(self, seed: int | None = None) -> "InverseGammaSampler":
         """Return a sampler for drawing observations from this distribution."""
         return InverseGammaSampler(self, seed)
