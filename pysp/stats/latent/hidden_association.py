@@ -158,21 +158,6 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         s5 = repr(self.keys)
         return "HiddenAssociationDistribution(%s, given_dist=%s, len_dist=%s, name=%s, keys=%s)" % (s1, s2, s3, s4, s5)
 
-    def density(self, x: tuple[list[tuple[T, float]], list[tuple[T, float]]]) -> float:
-        """Density of the hidden association model at observation x.
-
-        See log_density() for details.
-
-        Args:
-            x (Tuple[List[Tuple[T, float]], List[Tuple[T, float]]]): Grouped-count observation
-                ([(given value, count)], [(emitted value, count)]).
-
-        Returns:
-            Density at observation x.
-
-        """
-        return exp(self.log_density(x))
-
     def log_density(self, x: tuple[list[tuple[T, float]], list[tuple[T, float]]]) -> float:
         """Log-density of the hidden association model at observation x.
 

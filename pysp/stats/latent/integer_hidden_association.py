@@ -192,21 +192,6 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
             "keys=%s)" % (s1, s2, s3, s4, s5, s6, s7)
         )
 
-    def density(self, x: tuple[list[tuple[int, float]], list[tuple[int, float]]]) -> float:
-        """Density of the integer hidden association model at observation x.
-
-        See log_density() for details.
-
-        Args:
-            x (Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]): Grouped-count observation
-                ([(S1 word, count)], [(S2 word, count)]).
-
-        Returns:
-            Density at observation x.
-
-        """
-        return exp(self.log_density(x))
-
     def log_density(self, x: tuple[list[tuple[int, float]], list[tuple[int, float]]]) -> float:
         """Log-density of the integer hidden association model at observation x.
 
