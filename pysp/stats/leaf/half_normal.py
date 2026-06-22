@@ -242,14 +242,14 @@ class HalfNormalAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted count and sum of squares for half-normal estimation."""
 
     def __init__(self, keys: str | None = None) -> None:
-        self.nobs = 0.0
+        self.count = 0.0
         self.sum2 = 0.0
         self.key = keys
 
     def update(self, x: float, weight: float, estimate: HalfNormalDistribution | None) -> None:
         if x < 0.0 or not np.isfinite(x):
             raise ValueError("HalfNormalDistribution has support x >= 0.")
-        self.nobs += weight
+        self.count += weight
         self.sum2 += x * x * weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
@@ -260,21 +260,21 @@ class HalfNormalAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         _, sq_vals = x
         self.sum2 += np.dot(sq_vals, weights)
-        self.nobs += np.sum(weights, dtype=np.float64)
+        self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float]) -> "HalfNormalAccumulator":
-        self.nobs += suff_stat[0]
+        self.count += suff_stat[0]
         self.sum2 += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, float]:
-        return self.nobs, self.sum2
+        return self.count, self.sum2
 
     def from_value(self, x: tuple[float, float]) -> "HalfNormalAccumulator":
-        self.nobs = x[0]
+        self.count = x[0]
         self.sum2 = x[1]
         return self
 

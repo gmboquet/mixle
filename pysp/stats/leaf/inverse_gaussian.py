@@ -289,7 +289,7 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted count, sum, and sum of reciprocals for inverse Gaussian estimation."""
 
     def __init__(self, keys: str | None = None) -> None:
-        self.nobs = 0.0
+        self.count = 0.0
         self.sum = 0.0
         self.sum_inv = 0.0
         self.key = keys
@@ -297,7 +297,7 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     def update(self, x: float, weight: float, estimate: InverseGaussianDistribution | None) -> None:
         if x <= 0.0 or not np.isfinite(x):
             raise ValueError("InverseGaussianDistribution has support x > 0.")
-        self.nobs += weight
+        self.count += weight
         self.sum += x * weight
         self.sum_inv += weight / x
 
@@ -313,7 +313,7 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         vals, inv_vals, _ = x
         self.sum += np.dot(vals, weights)
         self.sum_inv += np.dot(inv_vals, weights)
-        self.nobs += np.sum(weights, dtype=np.float64)
+        self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(
         self, x: tuple[np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None
@@ -321,16 +321,16 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "InverseGaussianAccumulator":
-        self.nobs += suff_stat[0]
+        self.count += suff_stat[0]
         self.sum += suff_stat[1]
         self.sum_inv += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
-        return self.nobs, self.sum, self.sum_inv
+        return self.count, self.sum, self.sum_inv
 
     def from_value(self, x: tuple[float, float, float]) -> "InverseGaussianAccumulator":
-        self.nobs = x[0]
+        self.count = x[0]
         self.sum = x[1]
         self.sum_inv = x[2]
         return self
