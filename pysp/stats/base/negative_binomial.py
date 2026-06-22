@@ -235,6 +235,12 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         k = math.floor(float(x))
         return float(betainc(self.r, k + 1, self.p)) if k >= 0 else 0.0
 
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q) (via scipy nbinom)."""
+        from scipy.stats import nbinom
+
+        return float(nbinom.ppf(float(q), self.r, self.p))
+
     def sampler(self, seed: int | None = None) -> "NegativeBinomialSampler":
         """Return a sampler for drawing observations from this distribution."""
         return NegativeBinomialSampler(self, seed)

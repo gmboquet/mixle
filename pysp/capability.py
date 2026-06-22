@@ -63,6 +63,7 @@ __all__ = [
     "CAPABILITY_CATALOG",
     "catalog",
     "describe",
+    "summarize",
     "what_supports",
     "render_catalog_markdown",
 ]
@@ -739,6 +740,30 @@ def describe(obj: Any) -> str:
     if missing:
         lines.append("  cannot:    " + " · ".join(missing))
     return "\n".join(lines)
+
+
+def summarize(obj: Any) -> dict[str, float]:
+    """Return every closed-form summary statistic ``obj`` exposes, selected by its capabilities.
+
+    The numeric companion to :func:`describe` (which says *what* an object can do): mean/variance/std
+    (plus skewness/kurtosis when present) for a ``HasMoments`` distribution, ``entropy`` for
+    ``HasEntropy``, and the median for ``HasCDF``. Keys absent from the result are not available in
+    closed form for ``obj`` -- so ``summarize`` never raises on a partially-featured distribution.
+    """
+    out: dict[str, float] = {}
+    if supports(obj, HasMoments):
+        out["mean"] = float(obj.mean())
+        out["variance"] = float(obj.variance())
+        out["std"] = float(out["variance"] ** 0.5)
+        if callable(getattr(obj, "skewness", None)):
+            out["skewness"] = float(obj.skewness())
+        if callable(getattr(obj, "kurtosis", None)):
+            out["kurtosis"] = float(obj.kurtosis())
+    if supports(obj, HasEntropy):
+        out["entropy"] = float(obj.entropy())
+    if supports(obj, HasCDF):
+        out["median"] = float(obj.quantile(0.5))
+    return out
 
 
 def _safe_supports(obj: Any, cap_name: str) -> bool:

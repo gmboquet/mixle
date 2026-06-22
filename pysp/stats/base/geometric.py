@@ -279,6 +279,12 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         k = math.floor(float(x))
         return float(1.0 - (1.0 - self.p) ** k) if k >= 1 else 0.0
 
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q), support >= 1 (via scipy geom)."""
+        from scipy.stats import geom
+
+        return float(geom.ppf(float(q), self.p))
+
     def sampler(self, seed: int | None = None) -> "GeometricSampler":
         """Creates GeometricSampler object from GeometricDistribution instance.
 
