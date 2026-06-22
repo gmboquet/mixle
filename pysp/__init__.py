@@ -16,7 +16,7 @@ The structure (see ``docs/ARCHITECTURE.md`` and ``docs/CAPABILITIES.md``):
 Start with ``pysp.describe(x)`` to see what any object can do.
 """
 
-from pysp.capability import capabilities, catalog, describe, require, supports, what_supports
+from pysp.capability import capabilities, catalog, describe, require, summarize, supports, what_supports
 
 # Top-level namespaces resolved lazily so ``import pysp`` stays cheap and ``pysp.dist`` / ``pysp.ops``
 # / ``pysp.enumeration`` work without importing the whole tree up front.
@@ -51,6 +51,7 @@ __all__ = [
     "supports",
     "capabilities",
     "describe",
+    "summarize",
     "catalog",
     "what_supports",
     "require",

@@ -310,6 +310,12 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         """Excess kurtosis 1/lambda."""
         return float(1.0 / self.lam)
 
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q) (via scipy poisson)."""
+        from scipy.stats import poisson
+
+        return float(poisson.ppf(float(q), self.lam))
+
     def sampler(self, seed: int | None = None) -> "PoissonSampler":
         """Create PoissonSampler object with PoissonDistribution instance and seed (Optional[int]) passed.
 

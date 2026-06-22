@@ -237,6 +237,10 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         p = self.p
         return float((1.0 - 6.0 * p * (1.0 - p)) / (p * (1.0 - p)))
 
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q) over {0, 1}."""
+        return 0.0 if float(q) <= 1.0 - self.p else 1.0
+
     def sampler(self, seed: int | None = None) -> "BernoulliSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BernoulliSampler(self, seed)

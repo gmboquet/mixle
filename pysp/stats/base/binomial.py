@@ -434,6 +434,13 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         p, n = self.p, self.n
         return float((1.0 - 6.0 * p * (1.0 - p)) / (n * p * (1.0 - p)))
 
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q) over min_val + {0..n} (via scipy binom)."""
+        from scipy.stats import binom
+
+        shift = float(getattr(self, "min_val", 0) or 0)
+        return float(shift + binom.ppf(float(q), self.n, self.p))
+
     def sampler(self, seed: int | None = None) -> "BinomialSampler":
         """Returns BinomialSampler for generating samples from BinomialDistribution(n,p,min_val).
 
