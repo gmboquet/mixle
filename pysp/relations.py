@@ -52,6 +52,8 @@ __all__ = [
     "RelationSampler",
     "ShortestPath",
     "is_stable_matching",
+    "max_flow",
+    "min_cut",
     "stable_matching",
     "Solution",
     "SpanningTree",
@@ -246,6 +248,73 @@ def is_stable_matching(
                 if receiver_of[i] == -1 or p_rank[i][j] < p_rank[i][receiver_of[i]]:
                     return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Maximum flow / minimum cut (Edmonds-Karp)
+# ---------------------------------------------------------------------------
+def max_flow(capacity: Any, source: int, sink: int) -> tuple[float, np.ndarray]:
+    """Maximum ``source -> sink`` flow in a directed network (Edmonds-Karp).
+
+    ``capacity`` is an ``n x n`` non-negative matrix of arc capacities. Returns ``(value, flow)`` where
+    ``flow[u, v]`` is the flow on arc ``u -> v`` (conserved at every node but the source/sink) and
+    ``value`` is the total flow out of ``source``. Edmonds-Karp augments along BFS shortest paths in the
+    residual network, so it runs in ``O(V E^2)`` and terminates on real-valued capacities.
+    """
+    cap = np.asarray(capacity, dtype=np.float64)
+    n = cap.shape[0]
+    residual = cap.copy()
+    value = 0.0
+    while True:
+        parent = [-1] * n
+        parent[source] = source
+        q = deque([source])
+        while q and parent[sink] == -1:
+            u = q.popleft()
+            for v in range(n):
+                if parent[v] == -1 and residual[u, v] > 1.0e-12:
+                    parent[v] = u
+                    q.append(v)
+        if parent[sink] == -1:
+            break  # no augmenting path
+        bottleneck = np.inf
+        v = sink
+        while v != source:
+            bottleneck = min(bottleneck, residual[parent[v], v])
+            v = parent[v]
+        v = sink
+        while v != source:
+            u = parent[v]
+            residual[u, v] -= bottleneck
+            residual[v, u] += bottleneck
+            v = u
+        value += float(bottleneck)
+    flow = np.where(cap > 0.0, np.maximum(cap - residual, 0.0), 0.0)
+    return value, flow
+
+
+def min_cut(capacity: Any, source: int, sink: int) -> tuple[float, list[int], list[tuple[int, int]]]:
+    """Minimum ``source/sink`` cut of a directed network (via max-flow; the max-flow min-cut theorem).
+
+    Returns ``(capacity, source_side, cut_edges)``: the cut capacity (equal to the max-flow value), the
+    set of nodes on the source side (reachable from ``source`` in the final residual graph), and the
+    saturated arcs crossing from the source side to the sink side.
+    """
+    cap = np.asarray(capacity, dtype=np.float64)
+    n = cap.shape[0]
+    value, flow = max_flow(cap, source, sink)
+    residual = cap - flow + flow.T  # residual of the optimal flow
+    reachable = {source}
+    q = deque([source])
+    while q:
+        u = q.popleft()
+        for v in range(n):
+            if v not in reachable and residual[u, v] > 1.0e-12:
+                reachable.add(v)
+                q.append(v)
+    cut_edges = [(u, v) for u in reachable for v in range(n) if v not in reachable and cap[u, v] > 0.0]
+    cut_capacity = float(sum(cap[u, v] for u, v in cut_edges))
+    return cut_capacity, sorted(reachable), cut_edges
 
 
 # ---------------------------------------------------------------------------
