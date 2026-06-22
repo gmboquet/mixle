@@ -206,29 +206,11 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         alpha = self.alpha
         num_documents, idx, counts, _, enc_data = x
 
-        idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
-        idx_full *= num_topics
-        idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
-
         log_density_gamma, document_gammas, per_topic_log_densities = seq_posterior(self, x)
 
-        # This block keeps the gammas positive
-        log_density_gamma[np.bitwise_or(np.isnan(log_density_gamma), np.isinf(log_density_gamma))] = sys.float_info.min
-        log_density_gamma[log_density_gamma <= 0] = sys.float_info.min
-        document_gammas[np.bitwise_or(np.isnan(document_gammas), np.isinf(document_gammas))] = sys.float_info.min
-
-        elob0 = digamma(document_gammas) - digamma(np.sum(document_gammas, axis=1, keepdims=True))
-        elob1 = elob0[idx, :]
-        elob2 = log_density_gamma * (
-            elob1 + per_topic_log_densities - np.log(log_density_gamma) + np.log(np.reshape(counts, (-1, 1)))
+        elob = _lda_elbo_from_gamma(
+            alpha, idx, counts, num_topics, log_density_gamma, document_gammas, per_topic_log_densities
         )
-        elob3 = np.sum(elob0 * ((alpha - 1.0) - (document_gammas - 1.0)), axis=1)
-        elob4 = np.bincount(idx_full.flat, weights=elob2.flat)
-        elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
-        elob6 = np.sum(gammaln(document_gammas), axis=1) - gammaln(document_gammas.sum(axis=1))
-        elob7 = gammaln(alpha.sum()) - gammaln(alpha).sum()
-
-        elob = elob3 + elob5 + elob6 + elob7
 
         if self.len_dist is not None and not isinstance(self.len_dist, NullDistribution):
             doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
@@ -825,29 +807,15 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         # Mirrors LDADistribution.seq_log_density exactly (including the gamma-positivity cleanup
         # and the optional length-distribution term). Gated; standard path untouched.
         if self._track_ll:
-            num_topics = self.num_topics
-            alpha = estimate.alpha
-
-            idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
-            idx_full *= num_topics
-            idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
-
-            ldg = log_density_gamma.copy()
-            dg = final_gammas.copy()
-            ldg[np.bitwise_or(np.isnan(ldg), np.isinf(ldg))] = sys.float_info.min
-            ldg[ldg <= 0] = sys.float_info.min
-            dg[np.bitwise_or(np.isnan(dg), np.isinf(dg))] = sys.float_info.min
-
-            elob0 = digamma(dg) - digamma(np.sum(dg, axis=1, keepdims=True))
-            elob1 = elob0[idx, :]
-            elob2 = ldg * (elob1 + per_topic_log_densities - np.log(ldg) + np.log(np.reshape(counts, (-1, 1))))
-            elob3 = np.sum(elob0 * ((alpha - 1.0) - (dg - 1.0)), axis=1)
-            elob4 = np.bincount(idx_full.flat, weights=elob2.flat)
-            elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
-            elob6 = np.sum(gammaln(dg), axis=1) - gammaln(dg.sum(axis=1))
-            elob7 = gammaln(alpha.sum()) - gammaln(alpha).sum()
-
-            elob = elob3 + elob5 + elob6 + elob7
+            elob = _lda_elbo_from_gamma(
+                estimate.alpha,
+                idx,
+                counts,
+                self.num_topics,
+                log_density_gamma,
+                final_gammas,
+                per_topic_log_densities,
+            )
 
             if estimate.len_dist is not None and not isinstance(estimate.len_dist, NullDistribution):
                 doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
@@ -1439,30 +1407,51 @@ def seq_posterior2(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarr
     return log_density_gamma, final_gammas, per_topic_log_densities0
 
 
-def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarray, Any | None, E0]):
-    """Run the per-document variational (gamma) fixed-point iteration for an encoded corpus.
+def _lda_vi_fixed_point(
+    per_doc_alpha,
+    idx,
+    counts,
+    gammas,
+    num_topics,
+    per_topic_log_densities,
+    gamma_threshold,
+    max_gamma_iter,
+):
+    """Shared per-document mean-field variational (gamma) fixed point for (Labeled)LDA.
+
+    This is the Blei-Ng-Jordan per-document coordinate-ascent loop that both ``LDADistribution``
+    and ``LabeledLDADistribution`` run; the only model difference is the per-document Dirichlet
+    prior, supplied here as ``per_doc_alpha``:
+
+        * Plain LDA passes the single shared ``alpha`` broadcast to one identical row per document.
+        * Labeled LDA passes ``alphas_loc`` -- the per-document mean of its label rows.
+
+    Because the prior enters only additively (``gamma <- alpha + sum phi``), a 2-d per-document
+    array subsumes LDA's broadcast ``(1, num_topics)`` case exactly (identical rows stay identical
+    under the document-subsetting the loop performs as documents converge).
 
     Args:
-        estimate (LDADistribution): LDA model under which the posterior is computed.
-        x: Encoded corpus of LDA documents (see LDADataEncoder.seq_encode()).
+        per_doc_alpha (np.ndarray): Per-document Dirichlet parameter (num_documents by num_topics).
+        idx (np.ndarray): Document id for each flattened value.
+        counts (np.ndarray): Flattened per-value counts.
+        gammas (Optional[np.ndarray]): Optional warm-start gammas (num_documents by num_topics).
+        num_topics (int): Number of topics.
+        per_topic_log_densities (np.ndarray): Per-value per-topic log-densities (num_samples by num_topics).
+        gamma_threshold (float): Relative-change convergence threshold for the gamma updates.
+        max_gamma_iter (int): Hard cap on the number of fixed-point iterations.
 
     Returns:
-        Tuple of (log_density_gamma, final_gammas, per_topic_log_densities), where log_density_gamma
-        has a row per flattened value with the expected topic-assignment weights (scaled by counts),
-        final_gammas has a row per document with the converged variational Dirichlet parameters, and
-        per_topic_log_densities has a row per flattened value with each topic's log-density.
+        Tuple of (log_density_gamma, final_gammas), where log_density_gamma has a row per flattened
+        value with the count-scaled expected topic responsibilities and final_gammas has a row per
+        document with the converged variational Dirichlet parameters.
 
     """
-    alpha = estimate.alpha
-    topics = estimate.topics
-    gamma_threshold = estimate.gamma_threshold
-
-    num_documents, idx, counts, gammas, enc_data = x
-
-    num_topics = len(topics)
+    num_documents = per_doc_alpha.shape[0]
     num_samples = len(idx)
 
-    per_topic_log_densities = np.asarray([topics[i].seq_log_density(enc_data) for i in range(num_topics)]).transpose()
+    alphas_loc = per_doc_alpha
+    alphas_loc2 = alphas_loc.copy()
+
     per_topic_log_densities2 = per_topic_log_densities.copy()
     per_topic_log_densities2 -= np.max(per_topic_log_densities2, axis=1, keepdims=True)
     np.exp(per_topic_log_densities2, out=per_topic_log_densities2)
@@ -1471,10 +1460,9 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
     idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
     idx_full *= num_topics
     idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
-    alpha_loc = np.reshape(alpha, (1, num_topics))
 
     if gammas is None:
-        document_gammas = alpha_loc + np.reshape(np.bincount(idx_full.flat), (num_documents, num_topics)) / float(
+        document_gammas = alphas_loc + np.reshape(np.bincount(idx_full.flat), (num_documents, num_topics)) / float(
             num_topics
         )
     else:
@@ -1508,8 +1496,6 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
     itr_cnt = 0
     gamma_itr_cnt = np.zeros(num_documents, dtype=int)
 
-    #
-
     digamma(document_gammas, out=document_gammas2)
     temp = np.max(document_gammas2, axis=1, keepdims=True)
     np.exp(document_gammas2 - temp, out=document_gammas3)
@@ -1517,9 +1503,6 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
     np.multiply(per_topic_log_densities2, document_gammas3[rel_idx, :], out=log_density_gamma_loc)
     np.sum(log_density_gamma_loc, axis=1, keepdims=True, out=posterior_sum_ll_loc)
     log_density_gamma_loc /= posterior_sum_ll_loc
-
-    old_stuff = None
-    max_gamma_iter = getattr(estimate, "max_gamma_iter", 100)
 
     while ndoc > 0 and itr_cnt < max_gamma_iter:
         itr_cnt += 1
@@ -1536,7 +1519,7 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
 
         gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma_loc.flat)
         gamma_updates = np.reshape(gamma_updates, (-1, num_topics))
-        gamma_updates += alpha_loc
+        gamma_updates += alphas_loc2
 
         np.subtract(document_gammas, gamma_updates, out=document_gamma_diff_loc)
         np.abs(document_gamma_diff_loc, out=document_gamma_diff_loc)
@@ -1546,7 +1529,7 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
 
         document_gammas = gamma_updates
 
-        has_finished = np.nonzero(gamma_asum_loc.flat <= gamma_threshold)[0]
+        has_finished = np.flatnonzero(gamma_asum_loc.flat <= gamma_threshold)
 
         if has_finished.size != 0:
             final_gammas[finished_count : (finished_count + len(has_finished)), :] = document_gammas[has_finished, :]
@@ -1585,6 +1568,7 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
             document_gammas = document_gammas[is_rem_idx, :]
             document_gammas2 = document_gammas2[:ndoc, :]
             document_gammas3 = document_gammas3[:ndoc, :]
+            alphas_loc2 = alphas_loc2[is_rem_idx, :]
 
     # Cap reached while some documents were still iterating: their gammas are already converged to
     # far below what EM needs (geometric convergence), so flush the current values as the result.
@@ -1594,10 +1578,6 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
         gamma_itr_cnt[finished_count : finished_count + ndoc] = itr_cnt
         finished_count += ndoc
 
-    #
-    # Accumulate per-bag-sample
-    #
-
     sidx = np.argsort(final_gammas_idx)
     final_gammas = final_gammas[sidx, :]
     gamma_itr_cnt = gamma_itr_cnt[sidx]
@@ -1606,16 +1586,10 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
     temp2 = np.max(digamma_gammas, axis=1, keepdims=True)
     temp3 = np.exp(digamma_gammas - temp2)
 
-    # per_topic_log_densities2  = per_topic_log_densities.copy()
-    # per_topic_log_densities2 -= np.max(per_topic_log_densities2, axis=1, keepdims=True)
-    # np.exp(per_topic_log_densities2, out=per_topic_log_densities2)
-
     np.multiply(per_topic_log_densities3, temp3[idx, :], out=log_density_gamma)
     np.sum(log_density_gamma, axis=1, keepdims=True, out=posterior_sum_ll)
     posterior_sum_ll /= np.reshape(counts, (-1, 1))
     log_density_gamma /= posterior_sum_ll
-
-    effNs = log_density_gamma.sum(axis=0)
 
     idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
     idx_full *= num_topics
@@ -1623,10 +1597,99 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
 
     gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma.flat)
     gamma_updates = np.reshape(gamma_updates, (-1, num_topics))
-    gamma_updates += alpha_loc
+    gamma_updates += alphas_loc
     final_gammas = gamma_updates
 
-    mlpf = digamma(final_gammas) - digamma(np.sum(final_gammas, axis=1, keepdims=True))
+    return log_density_gamma, final_gammas
+
+
+def _lda_elbo_from_gamma(
+    per_doc_alpha,
+    idx,
+    counts,
+    num_topics,
+    log_density_gamma,
+    document_gammas,
+    per_topic_log_densities,
+):
+    """Per-document variational lower bound (ELBO) from converged variational quantities.
+
+    Shared by ``LDADistribution`` and ``LabeledLDADistribution`` (host paths). ``per_doc_alpha`` is
+    the per-document Dirichlet prior: a 1-d ``alpha`` (shape ``num_topics``) for plain LDA -- which
+    broadcasts across documents -- or a 2-d ``(num_documents, num_topics)`` array of per-document
+    label-row means for labeled LDA. Inputs are copied before the gamma-positivity cleanup so the
+    caller's arrays are left untouched.
+
+    Returns:
+        Numpy array with one ELBO value per document (length num_documents). Any document-length or
+        label-set terms are model-specific and added by the caller.
+
+    """
+    idx = np.asarray(idx)
+
+    idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
+    idx_full *= num_topics
+    idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
+
+    ldg = log_density_gamma.copy()
+    dg = document_gammas.copy()
+    ldg[np.bitwise_or(np.isnan(ldg), np.isinf(ldg))] = sys.float_info.min
+    ldg[ldg <= 0] = sys.float_info.min
+    dg[np.bitwise_or(np.isnan(dg), np.isinf(dg))] = sys.float_info.min
+
+    elob0 = digamma(dg) - digamma(np.sum(dg, axis=1, keepdims=True))
+    elob1 = elob0[idx, :]
+    elob2 = ldg * (elob1 + per_topic_log_densities - np.log(ldg) + np.log(np.reshape(counts, (-1, 1))))
+    elob3 = np.sum(elob0 * ((per_doc_alpha - 1.0) - (dg - 1.0)), axis=1)
+    elob4 = np.bincount(idx_full.flat, weights=elob2.flat)
+    elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
+    elob6 = np.sum(gammaln(dg), axis=1) - gammaln(dg.sum(axis=1))
+    if per_doc_alpha.ndim == 1:
+        elob7 = gammaln(per_doc_alpha.sum()) - gammaln(per_doc_alpha).sum()
+    else:
+        elob7 = gammaln(per_doc_alpha.sum(axis=1)) - gammaln(per_doc_alpha).sum(axis=1)
+
+    return elob3 + elob5 + elob6 + elob7
+
+
+def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarray, Any | None, E0]):
+    """Run the per-document variational (gamma) fixed-point iteration for an encoded corpus.
+
+    Args:
+        estimate (LDADistribution): LDA model under which the posterior is computed.
+        x: Encoded corpus of LDA documents (see LDADataEncoder.seq_encode()).
+
+    Returns:
+        Tuple of (log_density_gamma, final_gammas, per_topic_log_densities), where log_density_gamma
+        has a row per flattened value with the expected topic-assignment weights (scaled by counts),
+        final_gammas has a row per document with the converged variational Dirichlet parameters, and
+        per_topic_log_densities has a row per flattened value with each topic's log-density.
+
+    """
+    alpha = estimate.alpha
+    topics = estimate.topics
+    gamma_threshold = estimate.gamma_threshold
+
+    num_documents, idx, counts, gammas, enc_data = x
+
+    num_topics = len(topics)
+
+    per_topic_log_densities = np.asarray([topics[i].seq_log_density(enc_data) for i in range(num_topics)]).transpose()
+
+    # Plain LDA's single shared alpha as one identical row per document (the degenerate case of the
+    # labeled-LDA per-document prior); the shared fixed point subsets these rows as documents converge.
+    per_doc_alpha = np.repeat(np.reshape(alpha, (1, num_topics)), num_documents, axis=0)
+
+    log_density_gamma, final_gammas = _lda_vi_fixed_point(
+        per_doc_alpha,
+        idx,
+        counts,
+        gammas,
+        num_topics,
+        per_topic_log_densities,
+        gamma_threshold,
+        getattr(estimate, "max_gamma_iter", 100),
+    )
 
     return log_density_gamma, final_gammas, per_topic_log_densities
 
