@@ -12,6 +12,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.optimize import minimize
 
+from pysp.models._kernels import stationary_kernel as _kernel
+
 __all__ = ["SparseGaussianProcessRegressor"]
 
 
@@ -19,22 +21,6 @@ def _as2d(x: np.ndarray) -> np.ndarray:
     """A 1-D array is ``n`` points in 1-D (shape (n, 1)); a 2-D array is ``n`` points in ``d`` dims."""
     x = np.asarray(x, dtype=float)
     return x[:, None] if x.ndim == 1 else x
-
-
-def _kernel(x1: np.ndarray, x2: np.ndarray, lengthscale: float, amplitude: float, name: str) -> np.ndarray:
-    x1, x2 = _as2d(x1), _as2d(x2)
-    d2 = np.sum((x1[:, None, :] - x2[None, :, :]) ** 2, axis=-1) / lengthscale**2
-    a2 = amplitude**2
-    if name == "rbf":
-        return a2 * np.exp(-0.5 * d2)
-    r = np.sqrt(np.maximum(d2, 1e-12))
-    if name == "matern32":
-        s = np.sqrt(3.0) * r
-        return a2 * (1.0 + s) * np.exp(-s)
-    if name == "matern52":
-        s = np.sqrt(5.0) * r
-        return a2 * (1.0 + s + s * s / 3.0) * np.exp(-s)
-    raise ValueError(f"unknown kernel {name!r}")
 
 
 class SparseGaussianProcessRegressor:
