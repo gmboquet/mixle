@@ -152,6 +152,14 @@ class RayleighDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(_sp.ppf(q, scale=self.sigma))
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(self.sigma * np.sqrt(np.pi / 2.0))
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float((2.0 - np.pi / 2.0) * self.sigma * self.sigma)
+
     def sampler(self, seed: int | None = None) -> "RayleighSampler":
         """Return a sampler for drawing observations from this distribution."""
         return RayleighSampler(self, seed)

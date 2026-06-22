@@ -123,6 +123,14 @@ class UniformDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(_sp.ppf(q, loc=self.low, scale=self.high - self.low))
 
+    def mean(self) -> float:
+        """Mean E[X] of the distribution."""
+        return float(0.5 * (self.low + self.high))
+
+    def variance(self) -> float:
+        """Variance Var[X] of the distribution."""
+        return float((self.high - self.low) ** 2 / 12.0)
+
     def sampler(self, seed: int | None = None) -> "UniformSampler":
         """Return a sampler for drawing observations from this distribution."""
         return UniformSampler(self, seed)
