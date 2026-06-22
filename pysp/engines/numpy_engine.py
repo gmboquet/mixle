@@ -43,10 +43,9 @@ class NumpyEngine(ComputeEngine):
     def asarray(self, x: Any, dtype: Any = None) -> np.ndarray:
         """Convert ``x`` to a NumPy ndarray under the engine dtype policy."""
         arr = np.asarray(x)
-        dt = dtype
-        if dt is None and self.dtype is not None and arr.dtype.kind == "f":
-            dt = self.dtype
-        return np.asarray(x, dtype=dt)
+        if dtype is None and self.dtype is not None and arr.dtype.kind == "f":
+            return arr.astype(self.dtype, copy=False)
+        return np.asarray(arr, dtype=dtype)
 
     def zeros(self, shape: Any, dtype: Any = None) -> np.ndarray:
         """Allocate a NumPy zero array using the configured float dtype."""
@@ -80,7 +79,22 @@ class NumpyEngine(ComputeEngine):
     floor = staticmethod(np.floor)
     isnan = staticmethod(np.isnan)
     isinf = staticmethod(np.isinf)
-    sum = staticmethod(np.sum)
+
+    def sum(self, a: Any, *args: Any, dtype: Any = None, **kwargs: Any) -> Any:
+        """Reduce with ``np.sum``, accumulating floats in ``accumulator_dtype`` by default.
+
+        A float32 ``np.sum`` drifts on large N; when the caller passes no explicit
+        ``dtype`` we promote floating inputs to the engine's high-precision
+        accumulator (float64) so correctness no longer relies on every caller
+        threading ``dtype=accumulator_dtype``.  Integer inputs and explicit-dtype
+        calls keep NumPy's default behavior.
+        """
+        if dtype is None:
+            arr = np.asarray(a)
+            if arr.dtype.kind == "f":
+                dtype = self.accumulator_dtype
+        return np.sum(a, *args, dtype=dtype, **kwargs)
+
     max = staticmethod(np.max)
     dot = staticmethod(np.dot)
     matmul = staticmethod(np.matmul)
