@@ -285,6 +285,15 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(geom.ppf(float(q), self.p))
 
+    def entropy(self) -> float:
+        """Shannon entropy (-(1-p) log(1-p) - p log p) / p (nats)."""
+        import math
+
+        p = self.p
+        if p >= 1.0:
+            return 0.0
+        return float((-(1.0 - p) * math.log(1.0 - p) - p * math.log(p)) / p)
+
     def sampler(self, seed: int | None = None) -> "GeometricSampler":
         """Creates GeometricSampler object from GeometricDistribution instance.
 

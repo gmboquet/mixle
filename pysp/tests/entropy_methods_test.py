@@ -6,10 +6,12 @@ import scipy.stats as ss
 
 import pysp
 from pysp.capability import HasEntropy
+from pysp.stats.base.bernoulli import BernoulliDistribution
 from pysp.stats.base.beta import BetaDistribution
 from pysp.stats.base.exponential import ExponentialDistribution
 from pysp.stats.base.gamma import GammaDistribution
 from pysp.stats.base.gaussian import GaussianDistribution
+from pysp.stats.base.geometric import GeometricDistribution
 from pysp.stats.base.gumbel import GumbelDistribution
 from pysp.stats.base.half_normal import HalfNormalDistribution
 from pysp.stats.base.laplace import LaplaceDistribution
@@ -35,6 +37,8 @@ CASES = [
     (BetaDistribution(2.0, 5.0), ss.beta(2.0, 5.0)),
     (HalfNormalDistribution(1.5), ss.halfnorm(scale=1.5)),
     (LogGaussianDistribution(0.0, 0.25), ss.lognorm(s=0.5, scale=1.0)),
+    (BernoulliDistribution(0.3), ss.bernoulli(0.3)),
+    (GeometricDistribution(0.4), ss.geom(0.4)),
 ]
 
 
