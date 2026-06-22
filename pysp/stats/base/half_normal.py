@@ -199,6 +199,19 @@ class HalfNormalDistribution(SequenceEncodableProbabilityDistribution):
         ww = engine.asarray(weights)
         return engine.sum(ww, axis=0), engine.sum(ww * sq_vals[:, None], axis=0)
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x) (0 for x < 0)."""
+        from scipy.special import erf
+
+        x = float(x)
+        return float(erf(x / (self.sigma * math.sqrt(2.0)))) if x > 0.0 else 0.0
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q)."""
+        from scipy.special import erfinv
+
+        return float(self.sigma * math.sqrt(2.0) * erfinv(float(q)))
+
     def sampler(self, seed: int | None = None) -> "HalfNormalSampler":
         """Return a sampler for drawing observations from this distribution."""
         return HalfNormalSampler(self, seed)
