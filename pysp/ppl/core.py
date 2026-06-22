@@ -12,12 +12,13 @@ Algebra, conditioning, latent-arg Compound, and MCMC routing land in later slice
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
 
-from pysp.ppl._result import PosteriorResult
+from pysp.capability import supports
+from pysp.ppl._result import PosteriorResult, Sampleable, Summarizable
 from pysp.utils.estimation import optimize
 
 __all__ = [
@@ -41,6 +42,112 @@ __all__ = [
     "lipschitz",
     "ode_residual",
 ]
+
+
+# ----------------------------------------------------------------- fitter registry
+# Pure ``how`` -> fitter dispatch for the inference (non-EM) paths. Each fitter has the uniform
+# signature ``(rv: RandomVariable, data, **kw) -> RandomVariable`` and performs its own lazy import
+# of the heavy inference module (the inference/vmp modules import ``core`` at module level, so the
+# import must stay deferred to the call site to avoid a cycle). ``RandomVariable.fit`` derives
+# ``valid_how`` from these keys plus the EM/auto entries it owns, and looks the fitter up here
+# instead of walking an ``if how == ...`` ladder. Branches that need closure over the RV's local
+# state (the ``vmp`` Mixture special case) are registered as small closures here too, so the whole
+# pure-``how`` dispatch lives in one table.
+_FITTERS: dict[str, Callable[..., RandomVariable]] = {}
+
+
+def register_fitter(name: str) -> Callable[[Callable[..., RandomVariable]], Callable[..., RandomVariable]]:
+    """Register ``fn`` as the fitter for ``how=name`` in :data:`_FITTERS`."""
+
+    def deco(fn: Callable[..., RandomVariable]) -> Callable[..., RandomVariable]:
+        _FITTERS[name] = fn
+        return fn
+
+    return deco
+
+
+@register_fitter("map")
+def _fit_map(rv, data, **kw):
+    from pysp.ppl import inference as _inf
+
+    return _inf.map_fit(rv, data, **kw)
+
+
+@register_fitter("mcmc")
+def _fit_mcmc(rv, data, **kw):
+    from pysp.ppl import inference as _inf
+
+    return _inf.mcmc_fit(rv, data, **kw)
+
+
+@register_fitter("hmc")
+def _fit_hmc(rv, data, **kw):
+    from pysp.ppl import inference as _inf
+
+    return _inf.hmc_fit(rv, data, **kw)
+
+
+@register_fitter("nuts")
+def _fit_nuts(rv, data, **kw):
+    from pysp.ppl import inference as _inf
+
+    return _inf.nuts_fit(rv, data, **kw)
+
+
+@register_fitter("sample")
+def _fit_sample(rv, data, **kw):
+    from pysp.ppl import inference as _inf
+
+    return _inf.sample_fit(rv, data, **kw)
+
+
+@register_fitter("ensemble")
+def _fit_ensemble(rv, data, **kw):
+    from pysp.ppl import inference as _inf
+
+    return _inf.ensemble_fit(rv, data, **kw)
+
+
+@register_fitter("vi")
+def _fit_vi(rv, data, **kw):
+    from pysp.ppl import inference as _inf
+
+    return _inf.vi_fit(rv, data, **kw)
+
+
+@register_fitter("conjugate")
+def _fit_conjugate(rv, data, **kw):
+    from pysp.ppl import inference as _inf
+
+    return _inf.conjugate_fit(rv, data, **kw)
+
+
+@register_fitter("conjugate_mixture")
+def _fit_conjugate_mixture(rv, data, **kw):
+    from pysp.ppl import inference as _inf
+
+    return _inf.conjugate_mixture_fit(rv, data, **kw)
+
+
+@register_fitter("hierarchical")
+def _fit_hierarchical(rv, data, **kw):
+    from pysp.ppl import inference as _inf
+
+    return _inf.hierarchical_fit(rv, data, **kw)
+
+
+@register_fitter("vmp")
+def _fit_vmp(rv, data, **kw):
+    # Entangled branch: a Mixture(...) RV reroutes to ``mixture_vmp`` using the RV's own family/args
+    # (only the component COUNT is threaded; component-level priors/fixed params/constraints are NOT
+    # applied -- use how='vi'/'mcmc' for those). Kept here as a closure over ``rv`` so the special
+    # case travels with the rest of the pure-``how`` table rather than living in the ladder.
+    from pysp.ppl import vmp as _vmp
+
+    if isinstance(rv._family, CompositeFamily) and rv._family.name == "Mixture":
+        comps = rv._args[0]
+        return _vmp.mixture_vmp(data, len(comps), **kw)
+    return _vmp.vmp_fit(rv, data, **kw)
 
 
 # --------------------------------------------------------------------------- free
@@ -1217,7 +1324,7 @@ class RandomVariable:
         multi-chain runs, ``_rhat`` / ``_ess`` / ``_n_chains``. For ``map``/``em`` it returns ``.params``.
         """
         r = self._result
-        if r is not None and callable(getattr(r, "summary", None)):
+        if r is not None and supports(r, Summarizable):
             return r.summary()
         return self.params
 
@@ -1282,7 +1389,11 @@ class RandomVariable:
           RV was fit with ``how='mcmc'`` (read from ``.result``).
         """
         # Parameter posterior: a handle/name/index against an MCMC result.
-        if isinstance(x, (RandomVariable, str, int)) and self._result is not None and hasattr(self._result, "samples"):
+        if (
+            isinstance(x, (RandomVariable, str, int))
+            and self._result is not None
+            and supports(self._result, Sampleable)
+        ):
             return self._result.samples(x)
         d = lower(self, target="dist")
         if not (hasattr(d, "seq_posterior") or hasattr(d, "posterior")):
@@ -1343,21 +1454,9 @@ class RandomVariable:
         ``'auto'`` picks ``map`` when the model has priors else ``em``. EM threads pysp's
         parallel/distributed backends (``backend='mp'|'mpi'|'dask'``).
         """
-        valid_how = {
-            "auto",
-            "em",
-            "map",
-            "mcmc",
-            "hmc",
-            "nuts",
-            "sample",
-            "ensemble",
-            "vi",
-            "vmp",
-            "conjugate",
-            "conjugate_mixture",
-            "hierarchical",
-        }
+        # ``auto`` and ``em`` are resolved/handled by ``fit`` itself; every other ``how`` is a pure
+        # dispatch into the fitter registry.
+        valid_how = {"auto", "em", *_FITTERS}
         if how not in valid_how:
             raise ValueError(f"unknown how={how!r}; choose from {sorted(valid_how)}.")
         if hasattr(data, "__len__") and len(data) == 0:
@@ -1425,51 +1524,12 @@ class RandomVariable:
                 how = "em"
         elif how == "em" and (partial_free or struct_param):
             how = "map"  # EM can't hold params fixed / infer a structural vector param
-        if how in (
-            "map",
-            "mcmc",
-            "hmc",
-            "nuts",
-            "sample",
-            "ensemble",
-            "vi",
-            "vmp",
-            "conjugate",
-            "conjugate_mixture",
-            "hierarchical",
-        ):
-            from pysp.ppl import inference as _inf
-
-            if how == "conjugate_mixture":
-                return _inf.conjugate_mixture_fit(self, data, **kw)
-            if how == "mcmc":
-                return _inf.mcmc_fit(self, data, **kw)
-            if how == "hmc":
-                return _inf.hmc_fit(self, data, **kw)
-            if how == "nuts":
-                return _inf.nuts_fit(self, data, **kw)
-            if how == "sample":
-                return _inf.sample_fit(self, data, **kw)
-            if how == "ensemble":
-                return _inf.ensemble_fit(self, data, **kw)
-            if how == "vi":
-                return _inf.vi_fit(self, data, **kw)
-            if how == "vmp":
-                from pysp.ppl import vmp as _vmp
-
-                if isinstance(self._family, CompositeFamily) and self._family.name == "Mixture":
-                    comps = self._args[0]
-                    # NOTE: mixture_vmp fits a Gaussian mixture under its own default NIG/Dirichlet
-                    # hyperpriors -- only the component COUNT is threaded through, so component-level
-                    # priors, fixed parameters, and constraints on this Mix(...) are NOT applied here.
-                    # Use how='vi' or how='mcmc' to honor custom priors/constraints on a mixture.
-                    return _vmp.mixture_vmp(data, len(comps), **kw)
-                return _vmp.vmp_fit(self, data, **kw)
-            if how == "conjugate":
-                return _inf.conjugate_fit(self, data, **kw)
-            if how == "hierarchical":
-                return _inf.hierarchical_fit(self, data, **kw)
-            return _inf.map_fit(self, data, **kw)
+        # Pure ``how`` -> fitter dispatch (everything except the EM/MLE fall-through below). The
+        # registry replaces the old ``if how == ...`` ladder; the ``vmp`` Mixture special case lives
+        # inside its registered fitter (a closure over the RV's family/args).
+        fitter = _FITTERS.get(how)
+        if fitter is not None:
+            return fitter(self, data, **kw)
         # EM / MLE path
         est = lower(self, target="estimator")
         # Warm-start finicky flat-family MLEs (e.g. negative-binomial) from a moment match.
