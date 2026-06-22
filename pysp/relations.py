@@ -49,6 +49,7 @@ __all__ = [
     "Assignment",
     "BestSubsetRegression",
     "branch_and_bound_milp",
+    "cardinality_constrained_milp",
     "EditDistance",
     "graph_coloring",
     "irreducible_infeasible_subset",
@@ -623,6 +624,58 @@ def branch_and_bound_milp(
         return None
     value = -incumbent[0] if sense == "max" else incumbent[0]
     return value, incumbent[1]
+
+
+def cardinality_constrained_milp(
+    c: Any,
+    a_ub: Any | None,
+    b_ub: Any | None,
+    max_nonzero: int,
+    bounds: Sequence[tuple[float, float]],
+    *,
+    sense: str = "min",
+) -> tuple[float, np.ndarray] | None:
+    """Minimize/maximize ``c @ x`` with at most ``max_nonzero`` of the variables nonzero.
+
+    Adds a cardinality (sparsity) constraint to the linear program ``a_ub @ x <= b_ub`` with per-variable
+    ``bounds`` via the standard big-M indicator formulation: a binary ``z_i`` gates each variable
+    (``lower_i z_i <= x_i <= upper_i z_i``, so ``z_i = 0`` forces ``x_i = 0``) and ``sum z_i <=
+    max_nonzero``; the extended mixed-integer program is solved by :func:`branch_and_bound_milp`. Returns
+    ``(objective, x)`` (the sparse optimizer) or ``None`` if infeasible. This is the indicator/
+    set-membership/cardinality constraint primitive (best-subset selection, sparse design).
+    """
+    c = np.asarray(c, dtype=np.float64)
+    n = c.size
+    a = np.asarray(a_ub, dtype=np.float64) if a_ub is not None else np.zeros((0, n))
+    b = np.asarray(b_ub, dtype=np.float64) if b_ub is not None else np.zeros(0)
+    lo = np.array([bd[0] for bd in bounds], dtype=np.float64)
+    hi = np.array([bd[1] for bd in bounds], dtype=np.float64)
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    for i in range(a.shape[0]):  # original constraints, padded for the z block
+        rows.append(np.concatenate([a[i], np.zeros(n)]))
+        rhs.append(float(b[i]))
+    for i in range(n):  # x_i <= hi_i z_i  and  x_i >= lo_i z_i
+        r = np.zeros(2 * n)
+        r[i], r[n + i] = 1.0, -hi[i]
+        rows.append(r)
+        rhs.append(0.0)
+        r = np.zeros(2 * n)
+        r[i], r[n + i] = -1.0, lo[i]
+        rows.append(r)
+        rhs.append(0.0)
+    z_row = np.zeros(2 * n)  # sum z_i <= max_nonzero
+    z_row[n:] = 1.0
+    rows.append(z_row)
+    rhs.append(float(max_nonzero))
+    ext_c = np.concatenate([c, np.zeros(n)])
+    ext_bounds = [*list(bounds), *([(0.0, 1.0)] * n)]
+    res = branch_and_bound_milp(ext_c, np.array(rows), np.array(rhs), integer=range(n, 2 * n),
+                                bounds=ext_bounds, sense=sense)
+    if res is None:
+        return None
+    value, x_ext = res
+    return value, x_ext[:n]
 
 
 # ---------------------------------------------------------------------------
