@@ -80,6 +80,43 @@ class MultivariateHawkesProcessDistribution(SequenceEncodableProbabilityDistribu
             repr(self.keys),
         )
 
+    def intensity(self, t: float, times: Any, marks: Any) -> np.ndarray:
+        """Per-mark conditional rate vector (the vector-valued variant of ``intensity``).
+
+        Returns ``lambda(t)`` of shape ``(D,)`` with
+        ``lambda_k(t) = mu_k + sum_{(t_i, m_i) < t} alpha[k, m_i] exp(-beta (t - t_i))``.
+        """
+        ti = np.asarray(times, dtype=np.float64).reshape(-1)
+        mi = np.asarray(marks, dtype=np.int64).reshape(-1)
+        past = ti < t
+        lam = self.mu.copy()
+        if np.any(past):
+            decay = np.exp(-self.beta * (t - ti[past]))
+            # s[j] = sum_{past, mark=j} exp(-beta (t - t_i)); lambda = mu + alpha @ s
+            s = np.zeros(self.dim)
+            np.add.at(s, mi[past], decay)
+            lam = lam + self.alpha @ s
+        return lam
+
+    def expected_count(self, t_start: float, t_end: float, times: Any, marks: Any) -> np.ndarray:
+        """Per-mark compensator vector (the vector-valued variant of ``expected_count``).
+
+        Returns ``(D,)`` with the integral of ``lambda_k`` over ``[t_start, t_end]`` given the history.
+        """
+        ti = np.asarray(times, dtype=np.float64).reshape(-1)
+        mi = np.asarray(marks, dtype=np.int64).reshape(-1)
+        rel = ti < t_end
+        comp = self.mu * (t_end - t_start)
+        if np.any(rel):
+            tp, mp = ti[rel], mi[rel]
+            lo = np.maximum(t_start, tp)
+            kernel = (np.exp(-self.beta * (lo - tp)) - np.exp(-self.beta * (t_end - tp))) / self.beta
+            # per-parent-mark integrated kernel mass, then route through the excitation matrix
+            mass = np.zeros(self.dim)
+            np.add.at(mass, mp, kernel)
+            comp = comp + self.alpha @ mass
+        return comp
+
     def density(self, x: Any) -> float:
         """Probability density of one realization (a sequence of ``(time, mark)`` events)."""
         return math.exp(self.log_density(x))
