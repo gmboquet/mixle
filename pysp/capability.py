@@ -581,8 +581,11 @@ def describe(obj: Any) -> str:
     The one-call answer to "what can this do?": its category, the capabilities it has and notably
     lacks, the engines it runs on, and how to fit it. Works on any object; richest for distributions.
     """
-    name = type(obj).__name__
-    is_dist = hasattr(obj, "log_density") and hasattr(obj, "estimator")
+    # A class (e.g. a model class) or any non-distribution object is described by its catalogued
+    # capabilities only — the rich distribution view needs a live instance.
+    is_instance = not isinstance(obj, type)
+    name = obj.__name__ if isinstance(obj, type) else type(obj).__name__
+    is_dist = is_instance and hasattr(obj, "log_density") and hasattr(obj, "estimator")
     if not is_dist:
         have = sorted(s.name for s in CAPABILITY_CATALOG if _safe_supports(obj, s.name))
         return "%s — %s" % (name, ("supports: " + " · ".join(have)) if have else "no catalogued capability detected")

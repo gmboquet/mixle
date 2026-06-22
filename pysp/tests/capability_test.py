@@ -211,6 +211,15 @@ def test_describe_is_plain_english_and_capability_accurate():
     assert "latent-variable model" in mix_text and "no closed-form conjugate" in mix_text
 
 
+def test_describe_is_robust_on_classes_and_non_distributions():
+    import pysp
+
+    # passing a class (e.g. a model class) must not crash — it needs a live instance for the rich view
+    assert isinstance(pysp.describe(GaussianDistribution), str)  # the class
+    assert "RandomForestEstimator" in pysp.describe(pysp.models.RandomForestEstimator)
+    assert "can:" in pysp.describe(GaussianDistribution(0, 1))  # the instance is still rich
+
+
 def test_catalog_is_the_single_vocabulary():
     import pysp
 
