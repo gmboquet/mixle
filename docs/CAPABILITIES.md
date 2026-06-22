@@ -87,6 +87,41 @@ ConjugateUpdatable → closed-form     |  RankableByIndex → Enumerable → sam
 
 ---
 
+## Operations — the verbs (`pysp.ops`)
+
+The third axis: what you can do *to* a distribution, and how each operation changes its capabilities.
+Every verb has a **capability signature**.
+
+```python
+from pysp import ops, describe
+q = ops.quantize(GaussianDistribution(0, 1), bits=8)   # continuous -> discrete
+describe(q)   #  CategoricalDistribution — discrete (finite support). can: … Enumerable · RankableByIndex …
+```
+
+| Operation | input requires | output gains |
+|---|---|---|
+| `ops.quantize(dist, bits)` | any Distribution | FiniteSupport · Enumerable · RankableByIndex |
+| `ops.truncate(dist, allowed=/forbidden=)` | Distribution | Distribution (Enumerable preserved) |
+| `ops.condition(dist, observed)` | Conditionable | Distribution |
+| `ops.marginalize(dist, keep)` | Marginalizable | Distribution |
+| `ops.mixture(dists, w)` | Distributions | LatentStructured |
+| `ops.transform(dist, f)` | Distribution + invertible f | Distribution (Jacobian-corrected) |
+| `ops.tilt(dist, theta)` | ExponentialFamily | Distribution |
+
+Operations are **capability-gated**: `ops.condition(gaussian, …)` raises a clear `CapabilityError`
+because a Gaussian isn't `Conditionable`, while `ops.condition(mvn, …)` works.
+
+## Enumeration is a concern, not a property (`pysp.enumeration`)
+
+Enumeration is shared by distributions **and** relations **and** quantized objects — anything that can
+walk its support in descending probability. `pysp.enumeration` is the one home for that concern: the
+contract (`DistributionEnumerator`), the capability lens (`Enumerable`/`RankableByIndex`), the k-best
+algorithms, and the count-budget unranking. A `Categorical` and an `Assignment` relation both satisfy
+`pysp.supports(x, Enumerable)` through the same `enumerator()`. (This is the exemplar of the
+concern-oriented layout proposed in [`ARCHITECTURE.md`](ARCHITECTURE.md).)
+
+---
+
 ## The capability vocabulary
 
 The full catalog (also `pysp.catalog()` at runtime — this table is rendered from it, so it never drifts):
