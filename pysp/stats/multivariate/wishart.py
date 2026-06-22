@@ -119,8 +119,12 @@ class WishartSampler(DistributionSampler):
         return np.stack([self._one() for _ in range(int(size))])
 
 
-class WishartAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulate the weighted sum of matrices ``sum_i w_i X_i`` and the total weight."""
+class _MeanScatterAccumulator(SequenceEncodableStatisticAccumulator):
+    """Shared accumulator for (inverse-)Wishart: weighted matrix sum ``sum_i w_i X_i`` and total weight.
+
+    Subclasses override :meth:`acc_to_encoder` to return the matching :class:`DataSequenceEncoder`;
+    all other suff-stat scaffolding is shared.
+    """
 
     def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
         self.dim = dim
@@ -129,14 +133,14 @@ class WishartAccumulator(SequenceEncodableStatisticAccumulator):
         self.name = name
         self.key = keys
 
-    def update(self, x: np.ndarray, weight: float, estimate: WishartDistribution | None) -> None:
+    def update(self, x: np.ndarray, weight: float, estimate: Any | None) -> None:
         self.sum_x += weight * np.asarray(x, dtype=np.float64)
         self.count += weight
 
     def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
         self.update(x, weight, None)
 
-    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: WishartDistribution | None) -> None:
+    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any | None) -> None:
         xx = np.asarray(x, dtype=np.float64)
         w = np.asarray(weights, dtype=np.float64)
         self.sum_x += np.einsum("n,nab->ab", w, xx, optimize=True)
@@ -145,7 +149,7 @@ class WishartAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: tuple[np.ndarray, float]) -> "WishartAccumulator":
+    def combine(self, suff_stat: tuple[np.ndarray, float]) -> "_MeanScatterAccumulator":
         self.sum_x += suff_stat[0]
         self.count += suff_stat[1]
         return self
@@ -153,7 +157,7 @@ class WishartAccumulator(SequenceEncodableStatisticAccumulator):
     def value(self) -> tuple[np.ndarray, float]:
         return self.sum_x.copy(), self.count
 
-    def from_value(self, x: tuple[np.ndarray, float]) -> "WishartAccumulator":
+    def from_value(self, x: tuple[np.ndarray, float]) -> "_MeanScatterAccumulator":
         self.sum_x = np.asarray(x[0], dtype=np.float64).copy()
         self.count = float(x[1])
         self.dim = self.sum_x.shape[0]
@@ -169,6 +173,13 @@ class WishartAccumulator(SequenceEncodableStatisticAccumulator):
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None and self.key in stats_dict:
             self.from_value(stats_dict[self.key].value())
+
+    def acc_to_encoder(self) -> DataSequenceEncoder:
+        raise NotImplementedError
+
+
+class WishartAccumulator(_MeanScatterAccumulator):
+    """Accumulate the weighted sum of matrices ``sum_i w_i X_i`` and the total weight."""
 
     def acc_to_encoder(self) -> "WishartDataEncoder":
         return WishartDataEncoder()
