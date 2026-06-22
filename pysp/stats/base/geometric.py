@@ -272,6 +272,13 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float((1.0 - self.p) / (self.p * self.p))
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x) = 1 - (1-p)^floor(x), support x >= 1."""
+        import math
+
+        k = math.floor(float(x))
+        return float(1.0 - (1.0 - self.p) ** k) if k >= 1 else 0.0
+
     def sampler(self, seed: int | None = None) -> "GeometricSampler":
         """Creates GeometricSampler object from GeometricDistribution instance.
 

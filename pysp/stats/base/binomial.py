@@ -408,6 +408,20 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float(self.n * self.p * (1.0 - self.p))
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x) over min_val + {0..n}."""
+        import math
+
+        from scipy.special import betainc
+
+        shift = float(getattr(self, "min_val", 0) or 0)
+        k = math.floor(float(x) - shift)
+        if k < 0:
+            return 0.0
+        if k >= self.n:
+            return 1.0
+        return float(betainc(self.n - k, k + 1, 1.0 - self.p))
+
     def sampler(self, seed: int | None = None) -> "BinomialSampler":
         """Returns BinomialSampler for generating samples from BinomialDistribution(n,p,min_val).
 
