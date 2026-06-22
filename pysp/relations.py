@@ -48,6 +48,7 @@ __all__ = [
     "Assignment",
     "BestSubsetRegression",
     "EditDistance",
+    "graph_coloring",
     "Relation",
     "RelationSampler",
     "ShortestPath",
@@ -375,6 +376,49 @@ def tsp_held_karp(distance: Any) -> tuple[float, list[int]]:
         mask ^= 1 << (j - 1)
         j = k
     return float(cost), [0, *rev[::-1]]
+
+
+# ---------------------------------------------------------------------------
+# Graph coloring (exact chromatic number)
+# ---------------------------------------------------------------------------
+def graph_coloring(adjacency: Any) -> tuple[int, list[int]]:
+    """Exact minimum proper vertex coloring of an undirected graph.
+
+    ``adjacency`` is an ``n x n`` symmetric 0/1 (or boolean) matrix with a zero diagonal. Returns
+    ``(k, coloring)`` where ``k`` is the chromatic number and ``coloring[v]`` in ``0..k-1`` gives no two
+    adjacent vertices the same color. Solved by backtracking with the standard symmetry break (a vertex
+    may introduce at most one new color), trying ``k = 1, 2, ...`` until colorable -- exact, but
+    worst-case exponential, so intended for small/medium graphs.
+    """
+    a = np.asarray(adjacency)
+    n = a.shape[0]
+    if n == 0:
+        return 0, []
+    nb = [[j for j in range(n) if j != i and a[i, j]] for i in range(n)]
+
+    def colorable(k: int) -> list[int] | None:
+        coloring = [-1] * n
+
+        def rec(v: int) -> bool:
+            if v == n:
+                return True
+            cap = min(k, max(coloring[:v], default=-1) + 2)  # symmetry break: <= 1 new color per vertex
+            used = {coloring[u] for u in nb[v] if coloring[u] != -1}
+            for c in range(cap):
+                if c not in used:
+                    coloring[v] = c
+                    if rec(v + 1):
+                        return True
+                    coloring[v] = -1
+            return False
+
+        return coloring if rec(0) else None
+
+    for k in range(1, n + 1):
+        col = colorable(k)
+        if col is not None:
+            return k, col
+    return n, list(range(n))  # unreachable (a graph of n vertices is always n-colorable)
 
 
 # ---------------------------------------------------------------------------
