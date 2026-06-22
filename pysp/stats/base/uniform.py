@@ -137,6 +137,14 @@ class UniformDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(math.log(self.high - self.low))
 
+    def skewness(self) -> float:
+        """Skewness (0)."""
+        return 0.0
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis (-6/5)."""
+        return -1.2
+
     def sampler(self, seed: int | None = None) -> "UniformSampler":
         """Return a sampler for drawing observations from this distribution."""
         return UniformSampler(self, seed)

@@ -168,6 +168,18 @@ class RayleighDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(1.0 + math.log(self.sigma / math.sqrt(2.0)) + np.euler_gamma / 2.0)
 
+    def skewness(self) -> float:
+        """Skewness 2*sqrt(pi)(pi-3)/(4-pi)^1.5."""
+        import math
+
+        return float(2.0 * math.sqrt(math.pi) * (math.pi - 3.0) / (4.0 - math.pi) ** 1.5)
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis -(6pi^2-24pi+16)/(4-pi)^2."""
+        import math
+
+        return float(-(6.0 * math.pi ** 2 - 24.0 * math.pi + 16.0) / (4.0 - math.pi) ** 2)
+
     def sampler(self, seed: int | None = None) -> "RayleighSampler":
         """Return a sampler for drawing observations from this distribution."""
         return RayleighSampler(self, seed)

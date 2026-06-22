@@ -328,6 +328,16 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float(self.k * self.theta * self.theta)
 
+    def skewness(self) -> float:
+        """Skewness 2/sqrt(k)."""
+        import math
+
+        return float(2.0 / math.sqrt(self.k))
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis 6/k."""
+        return float(6.0 / self.k)
+
     def sampler(self, seed: int | None = None) -> "GammaSampler":
         """Create a GammaSampler object from GammaDistribution.
 

@@ -144,6 +144,14 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(1.0 + math.log(2.0 * self.b))
 
+    def skewness(self) -> float:
+        """Skewness (0)."""
+        return 0.0
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis (3)."""
+        return 3.0
+
     def sampler(self, seed: int | None = None) -> "LaplaceSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LaplaceSampler(self, seed)

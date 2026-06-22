@@ -133,6 +133,14 @@ class LogisticDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(math.log(self.scale) + 2.0)
 
+    def skewness(self) -> float:
+        """Skewness (0)."""
+        return 0.0
+
+    def kurtosis(self) -> float:
+        """Excess kurtosis (6/5)."""
+        return 1.2
+
     def sampler(self, seed: int | None = None) -> "LogisticSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LogisticSampler(self, seed)
