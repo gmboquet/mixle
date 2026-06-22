@@ -262,6 +262,10 @@ __all__ = [
     "WrappedNormalSampler",
     "WrappedNormalEstimator",
     "WrappedNormalDataEncoder",
+    "GeneralizedGaussianDistribution",
+    "GeneralizedGaussianSampler",
+    "GeneralizedGaussianEstimator",
+    "GeneralizedGaussianDataEncoder",
     "VonMisesSampler",
     "VonMisesEstimator",
     "VonMisesDataEncoder",
@@ -856,6 +860,12 @@ from pysp.stats.base.projected_normal import (
     ProjectedNormalDistribution,
     ProjectedNormalEstimator,
     ProjectedNormalSampler,
+)
+from pysp.stats.base.generalized_gaussian import (
+    GeneralizedGaussianDataEncoder,
+    GeneralizedGaussianDistribution,
+    GeneralizedGaussianEstimator,
+    GeneralizedGaussianSampler,
 )
 from pysp.stats.base.wrapped_normal import (
     WrappedNormalDataEncoder,
