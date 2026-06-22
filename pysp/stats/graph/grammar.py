@@ -446,16 +446,21 @@ class GrammarSampler(DistributionSampler):
 class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
     """GrammarEstimatorAccumulator object for merging observed grammars into a frequency-weighted grammar."""
 
-    def __init__(self):
+    def __init__(self, keys=None):
         """GrammarEstimatorAccumulator object.
+
+        Args:
+            keys (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
 
         Attributes:
             grammar: VertexReplacementGrammar object accumulating frequency-weighted rules from observations.
+            key (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
 
         """
         #             self.rule_list = []
         #             self.rule_dict = {}
         self.grammar = VertexReplacementGrammar("mu_level_dl", "leiden", "", 4)
+        self.key = keys
 
     def update(self, grammar, weight, estimate):
         """Merge an observed grammar into the accumulated grammar with the given weight.
@@ -583,6 +588,35 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.grammar = x
         return self
 
+    def key_merge(self, stats_dict):
+        """Merge keyed sufficient statistics into stats_dict.
+
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary of keyed sufficient statistics.
+
+        Returns:
+            None.
+
+        """
+        if self.key is not None:
+            if self.key in stats_dict:
+                stats_dict[self.key].combine(self.value())
+            else:
+                stats_dict[self.key] = self
+
+    def key_replace(self, stats_dict):
+        """Replace keyed sufficient statistics from stats_dict.
+
+        Args:
+            stats_dict (Dict[str, Any]): Dictionary of keyed sufficient statistics.
+
+        Returns:
+            None.
+
+        """
+        if self.key is not None and self.key in stats_dict:
+            self.from_value(stats_dict[self.key].value())
+
     def acc_to_encoder(self):
         """Returns a GrammarDataEncoder object for encoding sequences of data."""
         return GrammarDataEncoder()
@@ -591,28 +625,40 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 class GrammarAccumulatorFactory(StatisticAccumulatorFactory):
     """GrammarAccumulatorFactory object for creating GrammarEstimatorAccumulator objects."""
 
+    def __init__(self, keys=None):
+        """GrammarAccumulatorFactory object.
+
+        Args:
+            keys (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
+
+        """
+        self.keys = keys
+
     def make(self):
         """Returns a new GrammarEstimatorAccumulator object."""
-        return GrammarEstimatorAccumulator()
+        return GrammarEstimatorAccumulator(keys=self.keys)
 
 
 class GrammarEstimator(ParameterEstimator):
     """GrammarEstimator object for estimating GrammarDistribution objects from aggregated grammars."""
 
-    def __init__(self, pseudo_count=None, name=None):
+    def __init__(self, pseudo_count=None, name=None, keys=None):
         """GrammarEstimator object.
 
         Args:
             pseudo_count (Optional[float]): Added to each accumulated rule frequency when estimating.
             name (Optional[str]): String name of object instance.
+            keys (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
 
         Attributes:
             pseudo_count (Optional[float]): Added to each accumulated rule frequency when estimating.
             name (Optional[str]): String name of object instance.
+            keys (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
 
         """
         self.name = name
         self.pseudo_count = pseudo_count
+        self.keys = keys
 
     #       self.levels = levels
 
@@ -620,7 +666,7 @@ class GrammarEstimator(ParameterEstimator):
 
     def accumulator_factory(self):
         """Returns a GrammarAccumulatorFactory object."""
-        return GrammarAccumulatorFactory()
+        return GrammarAccumulatorFactory(keys=self.keys)
 
     def accumulatorFactory(self):
         """Deprecated alias for accumulator_factory()."""
