@@ -736,7 +736,7 @@ class VonMisesFisherEstimator(ParameterEstimator):
             mu = np.ones(dim) / np.sqrt(dim)
             k = 0.0
 
-        return VonMisesFisherDistribution(mu, k, name=self.name)
+        return VonMisesFisherDistribution(mu, k, name=self.name, keys=self.key)
 
 
 class VonMisesFisherDataEncoder(DataSequenceEncoder):

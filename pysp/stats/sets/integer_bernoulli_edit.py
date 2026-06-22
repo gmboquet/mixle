@@ -71,6 +71,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         log_edit_pmat: Sequence[tuple[float, float]] | np.ndarray,
         init_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         name: str | None = None,
+        keys: str | None = None,
     ) -> None:
         """IntegerBernoulliEditDistribution object defining edit probabilities between integer sets.
 
@@ -83,9 +84,11 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
             init_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for the previous set x[0].
                 Should be compatible with Sequence[int] observations (e.g. IntegerBernoulliSetDistribution).
             name (Optional[str]): Set name to object instance.
+            keys (Optional[str]): Set keys for merging sufficient statistics.
 
         Attributes:
             name (Optional[str]): Name for object instance.
+            key (Optional[str]): Key for merging sufficient statistics.
             init_dist (SequenceEncodableProbabilityDistribution): Distribution for the previous set x[0].
             num_vals (int): Number of integer values N in the set range.
             orig_log_edit_pmat (np.ndarray): The log_edit_pmat passed at construction.
@@ -98,6 +101,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         """
         num_vals = len(log_edit_pmat)
         self.name = name
+        self.key = keys
         self.init_dist = init_dist if init_dist is not None else NullDistribution()
         self.num_vals = num_vals
 
@@ -125,7 +129,8 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         s1 = repr(list(map(list, self.orig_log_edit_pmat)))
         s2 = repr(self.init_dist)
         s3 = repr(self.name)
-        return "IntegerBernoulliEditDistribution(%s, init_dist=%s, name=%s)" % (s1, s2, s3)
+        s4 = repr(self.key)
+        return "IntegerBernoulliEditDistribution(%s, init_dist=%s, name=%s, keys=%s)" % (s1, s2, s3, s4)
 
     def density(self, x: T) -> float:
         """Density of the Bernoulli edit set distribution at observation x.
@@ -324,7 +329,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
             IntegerBernoulliEditEstimator object.
 
         """
-        return IntegerBernoulliEditEstimator(self.num_vals, pseudo_count=pseudo_count, name=self.name)
+        return IntegerBernoulliEditEstimator(self.num_vals, pseudo_count=pseudo_count, name=self.name, keys=self.key)
 
     def dist_to_encoder(self) -> "IntegerBernoulliEditDataEncoder":
         """Returns an IntegerBernoulliEditDataEncoder object for encoding sequences of data."""
@@ -918,7 +923,7 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
                     log_pmat[:, 2] = np.log(p2)
                     log_pmat[:, 3] = np.log(p3)
 
-        return IntegerBernoulliEditDistribution(log_pmat, init_dist=init_dist, name=self.name)
+        return IntegerBernoulliEditDistribution(log_pmat, init_dist=init_dist, name=self.name, keys=self.keys)
 
 
 class IntegerBernoulliEditDataEncoder(DataSequenceEncoder):

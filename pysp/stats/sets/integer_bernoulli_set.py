@@ -516,7 +516,7 @@ class IntegerBernoulliSetEstimator(ParameterEstimator):
                 log_nvec[~is_one] = np.log(nvec[~is_one])
                 log_nvec[is_one] = -np.inf
 
-        return IntegerBernoulliSetDistribution(log_pvec, log_nvec, name=self.name)
+        return IntegerBernoulliSetDistribution(log_pvec, log_nvec, name=self.name, keys=self.keys)
 
 
 class IntegerBernoulliSetDataEncoder(DataSequenceEncoder):
