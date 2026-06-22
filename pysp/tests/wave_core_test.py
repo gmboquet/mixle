@@ -225,7 +225,13 @@ class ExportsTestCase(unittest.TestCase):
 
 class DataSequenceEncoderStrTestCase(unittest.TestCase):
     def test_base_str_no_recursion(self):
-        self.assertEqual(str(DataSequenceEncoder()), "DataSequenceEncoder")
+        # DataSequenceEncoder is now an enforced ABC (requires __eq__); its default __str__ returns
+        # the class name without recursion. Exercise that default through a minimal concrete encoder.
+        class _BareEncoder(DataSequenceEncoder):
+            def __eq__(self, other):
+                return isinstance(other, _BareEncoder)
+
+        self.assertEqual(str(_BareEncoder()), "_BareEncoder")
 
     def test_subclass_default_str_uses_class_name(self):
         class DummyEncoder(DataSequenceEncoder):
