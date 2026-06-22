@@ -41,3 +41,32 @@ class WishartTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WishartEstimatedDFTest(unittest.TestCase):
+    """WS-2: WishartEstimator(df=None) estimates the degrees of freedom by maximum likelihood."""
+
+    def _V(self):
+        return np.array([[1.0, 0.3, 0.1], [0.3, 1.5, 0.2], [0.1, 0.2, 2.0]])
+
+    def _fit_direct(self, est, data):
+        # deterministic direct M-step (no fit()/global-state dependence)
+        acc = est.accumulator_factory().make()
+        acc.seq_update(np.asarray(data), np.ones(len(data), dtype=np.float64), None)
+        return est.estimate(None, acc.value())
+
+    def test_recovers_degrees_of_freedom(self):
+        from pysp.stats.multivariate.wishart import WishartDistribution, WishartEstimator
+
+        for true_df in (8.0, 15.0):
+            data = WishartDistribution(df=true_df, scale=self._V()).sampler(seed=1).sample(4000)
+            m = self._fit_direct(WishartEstimator(dim=3, df=None), data)
+            self.assertAlmostEqual(m.df, true_df, delta=0.7)  # consistent df MLE
+            self.assertAlmostEqual(m.scale[0, 0], 1.0, delta=0.1)  # scale recovered too
+
+    def test_fixed_df_is_unchanged(self):
+        from pysp.stats.multivariate.wishart import WishartDistribution, WishartEstimator
+
+        data = WishartDistribution(df=8.0, scale=self._V()).sampler(seed=2).sample(500)
+        m = self._fit_direct(WishartEstimator(dim=3, df=8.0), data)
+        self.assertEqual(m.df, 8.0)  # fixed df is honored exactly
