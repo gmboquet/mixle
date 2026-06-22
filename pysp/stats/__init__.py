@@ -612,6 +612,14 @@ __all__ = [
 ]
 
 ### Abstract Classes
+### Generic Distributions
+from pysp.sampling.latent_posterior import (
+    CategoricalLatentPosterior,
+    LatentPosterior,
+    MarkovChainLatentPosterior,
+    MeanFieldLDAPosterior,
+)
+from pysp.sampling.sampling_api import sample
 from pysp.stats.bayes.conjugate import (
     ConjugatePosterior,
     MixtureConjugatePosterior,
@@ -1024,14 +1032,6 @@ from pysp.stats.latent.semi_supervised_mixture import (
     SemiSupervisedMixtureSampler,
 )
 
-### Generic Distributions
-from pysp.stats.latent_posterior import (
-    CategoricalLatentPosterior,
-    LatentPosterior,
-    MarkovChainLatentPosterior,
-    MeanFieldLDAPosterior,
-)
-
 ### Discrete base distributions
 from pysp.stats.leaf.bernoulli import (
     BernoulliDataEncoder,
@@ -1309,7 +1309,6 @@ from pysp.stats.multivariate.wishart import (
     WishartEstimator,
     WishartSampler,
 )
-from pysp.stats.sampling_api import sample
 from pysp.stats.sets.bernoulli_set import (
     BernoulliSetDataEncoder,
     BernoulliSetDistribution,

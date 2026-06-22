@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.enumeration.assignment import k_best_assignments
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -32,7 +33,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.assignment import k_best_assignments
 
 
 @cache

@@ -40,8 +40,8 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from pysp.utils.assignment import k_best_assignments
-from pysp.utils.spanning import k_best_spanning_trees
+from pysp.enumeration.assignment import k_best_assignments
+from pysp.enumeration.spanning import k_best_spanning_trees
 
 __all__ = [
     "Assignment",
