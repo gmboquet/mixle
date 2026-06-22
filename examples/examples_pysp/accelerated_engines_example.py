@@ -14,7 +14,7 @@ from pysp.engines import NUMPY_ENGINE, TorchEngine, torch
 from pysp.stats import *
 from pysp.stats.compute.kernel import NumbaKernelFactory
 from pysp.utils.estimation import optimize
-from pysp.utils.fit import fit_map, fit_mle
+from pysp.inference.gradient_fit import fit_map, fit_mle
 from pysp.utils.priors import DirichletPrior, MixturePrior, NormalGammaPrior
 
 if __name__ == '__main__':
