@@ -143,3 +143,19 @@ All reachable as `pysp.<ns>` (lazy `__getattr__`, so `import pysp` stays cheap) 
 import …`. The remaining work is purely cosmetic: physically relocating implementations into the
 concern/object packages and flipping the shims to deprecated re-exports — done later, since the
 namespaces already deliver the coherence.
+
+---
+
+## Revision — taxonomy review
+
+Per review, two corrections to the namespace layout above:
+
+- **A Markov chain is a distribution (over sequences/state-paths), not a graph.** The structured
+  families are therefore *not* split by structure type. The object namespaces are **minimal**:
+  `pysp.dist` is the umbrella over **every** distribution — graphs, rankings, sets, Markov chains,
+  grammars all live here — and `pysp.process` holds the stochastic processes (Hawkes / Poisson /
+  birth-death / CRP). **`pysp.graph` is dropped** (it was over-splitting; its members are reachable
+  from `pysp.dist`).
+- **`pysp.ops` is kept as-is.** It holds both the genuine unary transformations (`quantize`,
+  `condition`, `marginalize`) and the thin combinator constructors (`truncate`, `mixture`,
+  `transform`, `tilt`); the slight overlap with the combinator object layer is accepted.
