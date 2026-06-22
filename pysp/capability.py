@@ -31,11 +31,16 @@ __all__ = [
     "LatentStructured",
     "PosteriorPredictive",
     "EngineResidentEStep",
+    "Transform",
+    "SupportsBackendScoring",
+    "SupportsBackendComponentScoring",
+    "SupportsStackedBackend",
     "PredicateCapability",
     "Enumerable",
     "FiniteSupport",
     "RankableByIndex",
     "ExponentialFamily",
+    "SetValued",
     "Neutral",
     "ALL_CAPABILITIES",
     "FACET_PRESERVING",
@@ -87,6 +92,37 @@ class EngineResidentEStep(Protocol):
     """An accumulator that can run its E-step on the active compute engine without leaving it."""
 
     def seq_update_engine(self, enc: Any, weights: Any, estimate: Any, engine: Any) -> None: ...
+
+
+@runtime_checkable
+class Transform(Protocol):
+    """An invertible change of variables with a tractable Jacobian (combinator/transform.py)."""
+
+    def forward(self, x: Any) -> Any: ...
+    def inverse(self, y: Any) -> Any: ...
+    def log_abs_det_inverse_jacobian(self, y: Any) -> float: ...
+
+
+@runtime_checkable
+class SupportsBackendScoring(Protocol):
+    """A distribution that can score a batch directly on the active engine (``backend_seq_log_density``)."""
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any: ...
+
+
+@runtime_checkable
+class SupportsBackendComponentScoring(Protocol):
+    """A distribution that exposes per-component engine scoring (``backend_seq_component_log_density``)."""
+
+    def backend_seq_component_log_density(self, x: Any, engine: Any) -> Any: ...
+
+
+@runtime_checkable
+class SupportsStackedBackend(Protocol):
+    """A component type that can score/parameterise a homogeneous stack on the engine."""
+
+    def backend_stacked_params(self, dists: Any, engine: Any) -> Any: ...
+    def backend_stacked_log_density(self, x: Any, params: Any, engine: Any) -> Any: ...
 
 
 # ---------------------------------------------------------------------------
@@ -167,16 +203,40 @@ class Neutral(PredicateCapability):
         return isinstance(obj, (NullDistribution, NullAccumulator, NullDataEncoder))
 
 
+class SetValued(PredicateCapability):
+    """A distribution over sets with forced/required membership (``required`` / ``num_required``)."""
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        return hasattr(obj, "num_required") and hasattr(obj, "required")
+
+
+# Deferred capabilities — named in docs/ABSTRACTIONS.md but NOT yet reliably detectable, because the
+# underlying families do not share a method surface. Formalising these is a family-surface unification
+# (a refactor), not just adding a Protocol here:
+#   * TemporalPointProcess — the point-process leaves (hawkes/inhomogeneous_poisson/birth_death) expose
+#     no common intensity()/compensator() method; give them one first.
+#   * ConjugateUpdatable — the conjugate-prior surface (set_prior / has_conj_prior / pseudo_count) is
+#     inconsistent across leaves; unify it before adding the capability.
+# (The PDE forward operator is free functions in ppl/pde_solve.py; ppl/dynamics.DynamicsOperator is
+# already a formal ABC.)
+
+
+# Capabilities that apply to distributions (iterated by ``capabilities(dist)``). EngineResidentEStep,
+# EncodedDataHandle, EMStrategy and the Transform/backend protocols apply to other object kinds and are
+# queried directly with ``supports(obj, Cap)`` rather than listed here.
 ALL_CAPABILITIES: tuple[type, ...] = (
     Conditionable,
     Marginalizable,
     LatentStructured,
     PosteriorPredictive,
-    EngineResidentEStep,
     Enumerable,
     FiniteSupport,
     RankableByIndex,
     ExponentialFamily,
+    SetValued,
+    SupportsBackendScoring,
+    SupportsBackendComponentScoring,
     Neutral,
 )
 
