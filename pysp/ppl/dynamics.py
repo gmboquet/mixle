@@ -196,3 +196,79 @@ def make_operator(name: str, **kwargs: Any) -> DynamicsOperator:
 register_dynamics_operator("diffusion", DiffusionOperator)
 register_dynamics_operator("advection", AdvectionOperator)
 register_dynamics_operator("advection_diffusion", AdvectionDiffusionOperator)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive explicit ODE integrator (Dormand-Prince RK45)
+# ---------------------------------------------------------------------------
+# Butcher tableau for the Dormand-Prince 5(4) embedded pair (the method behind MATLAB ode45 /
+# scipy RK45): a 5th-order solution with an embedded 4th-order estimate for adaptive step control.
+_DP_C = (0.0, 1 / 5, 3 / 10, 4 / 5, 8 / 9, 1.0, 1.0)
+_DP_A = (
+    (),
+    (1 / 5,),
+    (3 / 40, 9 / 40),
+    (44 / 45, -56 / 15, 32 / 9),
+    (19372 / 6561, -25360 / 2187, 64448 / 6561, -212 / 729),
+    (9017 / 3168, -355 / 33, 46732 / 5247, 49 / 176, -5103 / 18656),
+    (35 / 384, 0.0, 500 / 1113, 125 / 192, -2187 / 6784, 11 / 84),
+)
+_DP_B5 = np.array([35 / 384, 0.0, 500 / 1113, 125 / 192, -2187 / 6784, 11 / 84, 0.0])
+_DP_B4 = np.array([5179 / 57600, 0.0, 7571 / 16695, 393 / 640, -92097 / 339200, 187 / 2100, 1 / 40])
+
+
+def integrate_adaptive(
+    rhs: Any,
+    y0: Any,
+    t_eval: Any,
+    *,
+    t0: float = 0.0,
+    rtol: float = 1.0e-7,
+    atol: float = 1.0e-9,
+    max_step_halving: int = 60,
+) -> np.ndarray:
+    """Integrate ``dy/dt = rhs(t, y)`` with an adaptive-step Dormand-Prince RK45 method.
+
+    A 5th-order explicit solver with an embedded 4th-order error estimate that grows/shrinks the step
+    to meet the ``rtol``/``atol`` tolerance, so smooth stretches take big steps and fast transients take
+    small ones (the same adaptive method as ``scipy.integrate.solve_ivp(method="RK45")``). ``rhs(t, y)``
+    returns the derivative (scalar or vector); ``t_eval`` is the increasing array of output times (the
+    last is the final time). Returns an array of shape ``(len(t_eval), len(y0))`` of the state at each
+    requested time -- each output is produced by a single high-order step from the last accepted point,
+    so it is consistent with the adaptive trajectory. Unlike :meth:`Ops.integrate` (fixed-step, engine
+    differentiable for adjoints), this is a NumPy accuracy-focused forward integrator.
+    """
+    f = lambda t, y: np.atleast_1d(np.asarray(rhs(t, y), dtype=np.float64))  # noqa: E731
+    y = np.atleast_1d(np.asarray(y0, dtype=np.float64)).copy()
+    times = np.asarray(t_eval, dtype=np.float64)
+    tf = float(times[-1])
+    t = float(t0)
+    h = (tf - t) / 100.0 if tf > t else 1.0e-3
+
+    def step(t: float, y: np.ndarray, h: float) -> tuple[np.ndarray, np.ndarray]:
+        k: list[np.ndarray] = []
+        for i in range(7):
+            yi = y + h * sum(_DP_A[i][j] * k[j] for j in range(len(_DP_A[i])))
+            k.append(f(t + _DP_C[i] * h, yi))
+        kk = np.array(k)
+        return y + h * (_DP_B5 @ kk), y + h * (_DP_B4 @ kk)
+
+    out: list[np.ndarray] = []
+    idx = 0
+    while idx < len(times):
+        hh = min(h, tf - t)
+        y5, y4 = step(t, y, hh)
+        scale = atol + rtol * np.maximum(np.abs(y), np.abs(y5))
+        err = float(np.max(np.abs(y5 - y4) / scale))
+        tiny = hh <= (tf - t0) * 2.0**-max_step_halving
+        if err <= 1.0 or tiny:
+            t_new = t + hh
+            while idx < len(times) and times[idx] <= t_new + 1.0e-12:
+                ys, _ = step(t, y, times[idx] - t)  # one high-order step to the exact output time
+                out.append(ys)
+                idx += 1
+            t, y = t_new, y5
+            h = hh * (5.0 if err == 0.0 else min(5.0, 0.9 * err ** (-0.2)))
+        else:
+            h = hh * max(0.2, 0.9 * err ** (-0.2))
+    return np.array(out)
