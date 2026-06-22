@@ -24,6 +24,7 @@ from pysp.doe.bayesopt import (
     propose_batch,
     propose_next,
     register_acquisition,
+    thompson_sampling,
     upper_confidence_bound,
 )
 from pysp.doe.constrained import (
@@ -70,6 +71,7 @@ __all__ = [
     "expected_improvement",
     "probability_of_improvement",
     "upper_confidence_bound",
+    "thompson_sampling",
     "register_acquisition",
     "available_acquisitions",
     "minimize",

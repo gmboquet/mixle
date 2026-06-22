@@ -84,6 +84,24 @@ def upper_confidence_bound(
     return (mean + kappa * std) if maximize else (kappa * std - mean)
 
 
+def thompson_sampling(mean: Any, std: Any, best: float = 0.0, *, maximize: bool = False, rng: Any = None,
+                      **_: Any) -> np.ndarray:
+    """Thompson-sampling acquisition: one marginal posterior draw ``N(mean, std)`` per candidate.
+
+    Returns a merit (maximized over candidates) equal to the drawn value when maximizing and its
+    negation when minimizing, so the selected point is the optimum of the *sampled* objective. A
+    randomized, exploration-aware acquisition -- repeated proposals explore competing optima in
+    proportion to posterior probability, with no exploration knob to tune. This is the cheap *marginal*
+    variant (independent per-candidate draws, ignoring the GP's cross-candidate correlation); pass an
+    ``rng`` (via ``acq_kwargs``) for reproducible proposals. ``best`` is ignored.
+    """
+    rng = rng if rng is not None else np.random.RandomState()
+    mean = np.asarray(mean, dtype=np.float64)
+    std = np.asarray(std, dtype=np.float64)
+    draw = mean + std * rng.standard_normal(mean.shape)
+    return draw if maximize else -draw
+
+
 # --- acquisition registry ("register, don't branch") --------------------------------------------
 # An acquisition is ``fn(mean, std, best, *, maximize, **params) -> merit`` where ``merit`` is
 # maximized over the candidate set. Built-ins are registered below; third parties register their own.
@@ -121,6 +139,7 @@ def _get_acquisition(acq: str | Acquisition) -> Acquisition:
 register_acquisition("expected_improvement", expected_improvement, aliases=("ei",))
 register_acquisition("probability_of_improvement", probability_of_improvement, aliases=("pi",))
 register_acquisition("upper_confidence_bound", upper_confidence_bound, aliases=("ucb", "lcb", "confidence_bound", "cb"))
+register_acquisition("thompson_sampling", thompson_sampling, aliases=("thompson", "ts"))
 
 
 @dataclass(frozen=True)
@@ -338,6 +357,7 @@ __all__: Sequence[str] = [
     "expected_improvement",
     "probability_of_improvement",
     "upper_confidence_bound",
+    "thompson_sampling",
     "register_acquisition",
     "available_acquisitions",
     "propose_next",
