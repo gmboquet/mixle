@@ -28,6 +28,7 @@ from scipy.sparse import csr_matrix, lil_matrix
 
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -191,7 +192,7 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
 
                 rv[i] = ll1 + ll2
 
-        if not isinstance(self.len_dist, NullDistribution):
+        if not supports(self.len_dist, Neutral):
             lln = self.len_dist.seq_log_density(x[1])
             rv += lln
 
@@ -207,7 +208,7 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         from pysp.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         ready = ("numpy", "torch")
-        if not isinstance(self.len_dist, NullDistribution):
+        if not supports(self.len_dist, Neutral):
             ready = intersect_engine_ready((self.len_dist,))
             if "numpy" not in ready:
                 ready = ("numpy",)
@@ -247,7 +248,7 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         ) * engine.asarray(fcxvec)
         rv = rv + engine.index_add(engine.zeros(xlen), engine.asarray(np.asarray(fsqxvec, dtype=np.int64)), init_term)
 
-        if not isinstance(self.len_dist, NullDistribution):
+        if not supports(self.len_dist, Neutral):
             rv = rv + _backend_sld(self.len_dist, x[1], engine)
         return rv
 
@@ -563,7 +564,7 @@ class SparseMarkovAssociationAccumulator(InitTransKeyedAccumulator, SequenceEnco
                 obs_ll = np.bincount(fsqyvec, weights=ll2_terms, minlength=len(x[0]))
                 init_terms = np.log(estimate.init_prob_vec[fvxvec] * b + a) * fcxvec
                 obs_ll += np.bincount(fsqxvec, weights=init_terms, minlength=len(x[0]))
-                if not isinstance(estimate.len_dist, NullDistribution):
+                if not supports(estimate.len_dist, Neutral):
                     obs_ll += estimate.len_dist.seq_log_density(x[1])
                 self._seq_ll += float(np.dot(np.asarray(weights, dtype=np.float64), obs_ll))
             np.divide(weights[fsqyvec] * b, sval, out=sval)
@@ -612,7 +613,7 @@ class SparseMarkovAssociationAccumulator(InitTransKeyedAccumulator, SequenceEnco
                 self.trans_count += umat
 
             if track:
-                if not isinstance(estimate.len_dist, NullDistribution):
+                if not supports(estimate.len_dist, Neutral):
                     obs_ll += estimate.len_dist.seq_log_density(x[1])
                 self._seq_ll += float(np.dot(np.asarray(weights, dtype=np.float64), obs_ll))
 

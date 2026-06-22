@@ -27,6 +27,7 @@ from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -74,7 +75,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
             declaration_for,
         )
 
-        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        length = None if supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = () if length is None else (length,)
         # The canonical exp-family map is the multinomial factor alone; only expose it when there is
         # no separate length (trials) distribution, so it matches seq_log_density exactly.
@@ -318,11 +319,11 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         min_val = int(dists[0].min_val)
         num_vals = int(dists[0].num_vals)
-        null_len_dist = isinstance(dists[0].len_dist, NullDistribution)
+        null_len_dist = supports(dists[0].len_dist, Neutral)
         if any(
             int(dist.min_val) != min_val
             or int(dist.num_vals) != num_vals
-            or isinstance(dist.len_dist, NullDistribution) != null_len_dist
+            or supports(dist.len_dist, Neutral) != null_len_dist
             for dist in dists
         ):
             raise ValueError(
@@ -430,7 +431,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
             IntegerMultinomialSampler object.
 
         """
-        if isinstance(self.len_dist, NullDistribution):
+        if supports(self.len_dist, Neutral):
             raise Exception(
                 "IntegerMultinomialDistribution must have len_dist set to distribution with support on "
                 "non-negative integers."

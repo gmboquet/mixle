@@ -57,6 +57,7 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 from scipy.special import logsumexp
 
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import NullDistribution, NullEstimator
 from pysp.stats.compute.pdist import (
     DistributionEnumerator,
@@ -392,7 +393,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             declaration_for,
         )
 
-        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        length = None if supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = () if length is None else (length,)
         return DistributionDeclaration(
             name="quantized_hidden_markov",
@@ -576,9 +577,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
 
         """
         len_est = (
-            NullEstimator()
-            if isinstance(self.len_dist, NullDistribution)
-            else self.len_dist.estimator(pseudo_count=pseudo_count)
+            NullEstimator() if supports(self.len_dist, Neutral) else self.len_dist.estimator(pseudo_count=pseudo_count)
         )
 
         return QuantizedHiddenMarkovEstimator(
@@ -628,7 +627,7 @@ class QuantizedHiddenMarkovModelEnumerator(DistributionEnumerator):
             raise EnumerationError(dist, reason="taus/topics parameterization is not supported")
         if dist.terminal_values is not None:
             raise EnumerationError(dist, reason="terminal_values semantics are not supported")
-        if isinstance(dist.len_dist, NullDistribution):
+        if supports(dist.len_dist, Neutral):
             raise EnumerationError(dist, reason="no length distribution is modeled (len_dist is Null)")
 
         self._levels = list(dist.levels)

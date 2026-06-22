@@ -32,6 +32,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -126,7 +127,7 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
             declaration_for,
         )
 
-        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        length = None if supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = () if length is None else (length,)
         return DistributionDeclaration(
             name="integer_plsi",
@@ -414,7 +415,7 @@ def bag_stream(element_stream, len_dist, combine):
     head = elem_buf.get(0)
     if head is None:
         return iter([(combine(()), 0.0)])
-    if isinstance(len_dist, NullDistribution):
+    if supports(len_dist, Neutral):
         lp_max = float(head[1])
         if lp_max >= 0.0:
             raise EnumerationError(

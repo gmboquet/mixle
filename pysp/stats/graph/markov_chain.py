@@ -28,6 +28,7 @@ from scipy.sparse import dok_matrix
 
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -355,7 +356,7 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             declaration_for,
         )
 
-        length = None if isinstance(self.len_dist, NullDistribution) else declaration_for(self.len_dist)
+        length = None if supports(self.len_dist, Neutral) else declaration_for(self.len_dist)
         children = () if length is None else (length,)
         return DistributionDeclaration(
             name="markov_chain",
@@ -505,10 +506,9 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.stats.compute.stacked import stacked_component_params
 
         labels = tuple(dists[0].inv_key_map)
-        null_len_dist = isinstance(dists[0].len_dist, NullDistribution)
+        null_len_dist = supports(dists[0].len_dist, Neutral)
         if any(
-            tuple(dist.inv_key_map) != labels or isinstance(dist.len_dist, NullDistribution) != null_len_dist
-            for dist in dists
+            tuple(dist.inv_key_map) != labels or supports(dist.len_dist, Neutral) != null_len_dist for dist in dists
         ):
             raise ValueError("Stacked MarkovChainDistribution components require shared states and length policy.")
 
@@ -644,9 +644,7 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             trans_logits[key] = logits
             leaves.append(logits)
 
-        len_child = (
-            None if isinstance(self.len_dist, NullDistribution) else recurse(self.len_dist, engine, torch, leaves)
-        )
+        len_child = None if supports(self.len_dist, Neutral) else recurse(self.len_dist, engine, torch, leaves)
         return _MarkovChainGradientFitState(self, init_keys, init_logits, trans_keys, trans_logits, len_child)
 
     def sampler(self, seed: int | None = None) -> "MarkovChainSampler":
@@ -711,7 +709,7 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
         if self.default_value != 0.0:
             raise EnumerationError(self, reason="non-zero default_value gives an unbounded support")
-        if isinstance(self.len_dist, NullDistribution):
+        if supports(self.len_dist, Neutral):
             raise EnumerationError(self, reason="no length distribution is modeled (len_dist is Null)")
 
         sr = CountSemiring()
@@ -966,7 +964,7 @@ class MarkovChainEnumerator(DistributionEnumerator):
         super().__init__(dist)
         if dist.default_value != 0.0:
             raise EnumerationError(dist, reason="non-zero default_value gives an unbounded support")
-        if isinstance(dist.len_dist, NullDistribution):
+        if supports(dist.len_dist, Neutral):
             raise EnumerationError(dist, reason="no length distribution is modeled (len_dist is Null)")
         self._init = [(v, lp) for v, lp in dist.loginit_prob_map.items() if lp > -np.inf]
         self._trans = {s: [(w, lp) for w, lp in m.items() if lp > -np.inf] for s, m in dist.log_transition_map.items()}

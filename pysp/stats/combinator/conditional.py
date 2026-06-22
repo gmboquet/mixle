@@ -710,7 +710,7 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
 
         loc_seed = rng.randint(0, maxrandint)
         self.given_sampler = dist.given_dist.sampler(loc_seed)
-        self.has_given_sampler = not isinstance(dist.given_dist, NullDistribution)
+        self.has_given_sampler = not supports(dist.given_dist, Neutral)
 
         self.samplers = {k: u.sampler(rng.randint(0, maxrandint)) for k, u in self.dist.dmap.items()}
 
@@ -827,8 +827,8 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         self.default_accumulator = default_accumulator if default_accumulator is not None else NullAccumulator()
         self.given_accumulator = given_accumulator if given_accumulator is not None else NullAccumulator()
 
-        self.has_default = not isinstance(default_accumulator, NullAccumulator)
-        self.has_given = not isinstance(given_accumulator, NullAccumulator)
+        self.has_default = not supports(default_accumulator, Neutral)
+        self.has_given = not supports(given_accumulator, Neutral)
 
         self.keys = keys
 
@@ -1367,8 +1367,8 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
         self.default_encoder = default_encoder
         self.given_encoder = given_encoder
 
-        self.null_default_encoder = isinstance(self.default_encoder, NullDataEncoder)
-        self.null_given_encoder = isinstance(self.given_encoder, NullDataEncoder)
+        self.null_default_encoder = supports(self.default_encoder, Neutral)
+        self.null_given_encoder = supports(self.given_encoder, Neutral)
 
     def __str__(self) -> str:
         """Return string representation of the ConditionalDataEncoder with member DataSequenceEncoders printed out."""
