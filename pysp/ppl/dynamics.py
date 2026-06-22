@@ -522,3 +522,40 @@ def kdv_rhs(dx: float, *, nonlinearity: float = 6.0, dispersion: float = 1.0) ->
         return -half_a * dflux - b * uxxx
 
     return rhs
+
+
+# ---------------------------------------------------------------------------
+# Shallow-water equations (1-D hyperbolic system, Rusanov finite volume)
+# ---------------------------------------------------------------------------
+def shallow_water_rhs(dx: float, gravity: float = 9.81) -> Any:
+    """Build the periodic finite-volume right-hand side of the 1-D shallow-water equations.
+
+    Returns ``rhs(t, z)`` for the conservative system ``h_t + (h u)_x = 0`` and ``(h u)_t + (h u^2 +
+    g h^2 / 2)_x = 0`` (depth ``h``, momentum ``h u``). The state ``z`` is the concatenation
+    ``[h(0..n-1), hu(0..n-1)]``; the inter-cell fluxes use the Rusanov (local Lax-Friedrichs) numerical
+    flux with wave speed ``|u| + sqrt(g h)``, which is conservative (so the discrete mass and momentum
+    are preserved) and stable through smooth flows and weak bores. Small perturbations propagate at the
+    gravity-wave speed ``sqrt(g h)``. Integrate with :func:`integrate_adaptive`.
+    """
+    g = float(gravity)
+    dx = float(dx)
+
+    def physical_flux(h: np.ndarray, hu: np.ndarray, u: np.ndarray) -> np.ndarray:
+        return np.array([hu, hu * u + 0.5 * g * h * h])
+
+    def rhs(t: float, z: np.ndarray) -> np.ndarray:
+        z = np.asarray(z, dtype=np.float64)
+        n = z.size // 2
+        h = z[:n]
+        hu = z[n:]
+        u = hu / np.maximum(h, 1.0e-12)
+        speed = np.abs(u) + np.sqrt(g * np.maximum(h, 0.0))
+        u_state = np.array([h, hu])
+        f = physical_flux(h, hu, u)
+        # Rusanov flux at interface i+1/2 (periodic): central flux minus the max-speed dissipation
+        a_iface = np.maximum(speed, np.roll(speed, -1))
+        f_iface = 0.5 * (f + np.roll(f, -1, axis=1)) - 0.5 * a_iface * (np.roll(u_state, -1, axis=1) - u_state)
+        d_flux = (f_iface - np.roll(f_iface, 1, axis=1)) / dx
+        return np.concatenate([-d_flux[0], -d_flux[1]])
+
+    return rhs
