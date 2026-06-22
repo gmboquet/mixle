@@ -34,6 +34,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.stats.graph._keyed_accumulator import InitTransKeyedAccumulator
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.optsutil import count_by_value
 
@@ -366,7 +367,7 @@ class MarkovTransformSampler(DistributionSampler):
             return [self.sample() for i in range(size)]
 
 
-class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
+class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableStatisticAccumulator):
     """MarkovTransformAccumulator object for accumulating sufficient statistics of the Markov transform model."""
 
     def __init__(self, num_vals, size_acc=None, keys=(None, None)):
@@ -658,51 +659,7 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def key_merge(self, stats_dict):
-        """Merge keyed sufficient statistics into stats_dict (delegates to the size accumulator).
-
-        Args:
-            stats_dict (Dict[str, Any]): Dictionary of keyed sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.init_key is not None:
-            if self.init_key in stats_dict:
-                stats_dict[self.init_key] += self.init_count
-            else:
-                stats_dict[self.init_key] = self.init_count
-
-        if self.trans_key is not None:
-            if self.trans_key in stats_dict:
-                stats_dict[self.trans_key] += self.trans_count
-            else:
-                stats_dict[self.trans_key] = self.trans_count
-
-        if self.size_accumulator is not None:
-            self.size_accumulator.key_merge(stats_dict)
-
-    def key_replace(self, stats_dict):
-        """Replace keyed sufficient statistics from stats_dict (delegates to the size accumulator).
-
-        Args:
-            stats_dict (Dict[str, Any]): Dictionary of keyed sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.init_key is not None:
-            if self.init_key in stats_dict:
-                self.init_count = stats_dict[self.init_key]
-
-        if self.trans_key is not None:
-            if self.trans_key in stats_dict:
-                self.trans_count = stats_dict[self.trans_key]
-
-        if self.size_accumulator is not None:
-            self.size_accumulator.key_replace(stats_dict)
+    # key_merge / key_replace: provided by InitTransKeyedAccumulator (shared two-key plumbing).
 
     def acc_to_encoder(self):
         """Returns a MarkovTransformDataEncoder object for encoding sequences of data."""
