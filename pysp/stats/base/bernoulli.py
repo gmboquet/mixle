@@ -241,6 +241,15 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         """Inverse CDF F^{-1}(q) over {0, 1}."""
         return 0.0 if float(q) <= 1.0 - self.p else 1.0
 
+    def entropy(self) -> float:
+        """Shannon entropy -p log p - (1-p) log(1-p) (nats)."""
+        import math
+
+        p = self.p
+        if p <= 0.0 or p >= 1.0:
+            return 0.0
+        return float(-p * math.log(p) - (1.0 - p) * math.log(1.0 - p))
+
     def sampler(self, seed: int | None = None) -> "BernoulliSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BernoulliSampler(self, seed)
