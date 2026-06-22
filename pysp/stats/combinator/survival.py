@@ -16,6 +16,7 @@ iteration re-imputes with the improved base, converging to the right-censored ML
 fitting on the observed events alone, is unbiased.
 """
 
+import math
 from collections.abc import Sequence
 from typing import Any
 
@@ -30,6 +31,26 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+
+# Tiny finite log-survival floor when the base exposes only a linear ``cdf`` and ``1 - F(t)`` underflows
+# to 0 in the right tail (~log of the smallest positive normal double); avoids a -inf log-likelihood.
+_LOG_SURVIVAL_FLOOR = math.log(np.finfo(np.float64).tiny)
+
+
+def _log_survival(base: Any, t: float) -> float:
+    """Return ``log S(t) = log(1 - F(t))`` for a right-censored time, computed stably.
+
+    Right censoring is the normal use case, so ``1 - F(t)`` routinely underflows to ``0`` in the
+    right tail (``log1p(-1) = -inf``) even when the true log-survival is finite and large-negative.
+    Routes through the base's ``logsf`` when available; otherwise guards the linear underflow with a
+    tiny finite floor rather than silently zeroing the survival contribution.
+    """
+    if hasattr(base, "logsf"):
+        return float(base.logsf(t))
+    surv = 1.0 - float(base.cdf(t))
+    if surv > 0.0:
+        return math.log1p(-float(base.cdf(t)))
+    return _LOG_SURVIVAL_FLOOR
 
 
 class SurvivalDistribution(SequenceEncodableProbabilityDistribution):
@@ -59,7 +80,7 @@ class SurvivalDistribution(SequenceEncodableProbabilityDistribution):
         t, event = x
         if event:
             return float(self.base.log_density(t))
-        return float(np.log1p(-self.base.cdf(t)))
+        return _log_survival(self.base, float(t))
 
     def seq_log_density(self, x: tuple[Any, np.ndarray, np.ndarray]) -> np.ndarray:
         """Vectorized likelihood: base density for events, log survival for censored rows."""
@@ -67,7 +88,7 @@ class SurvivalDistribution(SequenceEncodableProbabilityDistribution):
         rv = np.asarray(self.base.seq_log_density(base_enc), dtype=np.float64)
         cens = ~event_mask
         if np.any(cens):
-            surv = np.array([np.log1p(-self.base.cdf(float(t))) for t in times[cens]])
+            surv = np.array([_log_survival(self.base, float(t)) for t in times[cens]])
             rv[cens] = surv
         return rv
 

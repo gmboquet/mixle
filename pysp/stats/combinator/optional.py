@@ -85,7 +85,6 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         self.log_pn = -np.inf if self.p == 1 else np.log1p(-self.p)
 
         self.missing_value_is_nan = isinstance(missing_value, (np.floating, float)) and np.isnan(missing_value)
-        self.log1_p = np.log1p(self.p)
         self.missing_value = missing_value
         self.name = name
         self.set_prior(prior)
