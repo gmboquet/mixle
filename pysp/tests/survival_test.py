@@ -23,10 +23,10 @@ class SurvivalDistributionTest(unittest.TestCase):
         np.testing.assert_allclose(self.d.seq_log_density(enc), [self.d.log_density(x) for x in data], atol=1e-12)
 
     def test_requires_cdf_and_quantile(self):
-        from pysp.stats import PoissonDistribution  # no cdf/quantile
+        from pysp.stats import VonMisesDistribution  # circular -- no scalar cdf/quantile
 
         with self.assertRaises(ValueError):
-            SurvivalDistribution(PoissonDistribution(2.0))
+            SurvivalDistribution(VonMisesDistribution(0.0, 2.0))
 
     def test_censored_mle_recovers_true_params(self):
         rng = np.random.RandomState(0)
