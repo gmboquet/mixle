@@ -680,8 +680,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             w[w_nz] = ww[w_nz]
 
             self.accumulators[i].seq_initialize(enc_data, w, self._topic_rng[i])
-            self.comp_counts[:, i] = np.bincount(idx1[idx], w)
-            # self.comp_counts[idx1, i] += np.sum(w)
+            self.comp_counts[:, i] += np.bincount(idx1[idx], w, minlength=self.comp_counts.shape[0])
 
         self.len_accumulator.seq_initialize(enc_len, weights, self._len_rng)
 
