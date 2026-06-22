@@ -15,12 +15,14 @@ from pysp.stats.base.hawkes_process import HawkesProcessDistribution
 from pysp.stats.base.inhomogeneous_poisson import InhomogeneousPoissonProcessDistribution
 from pysp.stats.base.multivariate_hawkes import MultivariateHawkesProcessDistribution
 from pysp.stats.base.power_law_hawkes import PowerLawHawkesDistribution
+from pysp.stats.base.renewal_process import RenewalProcessDistribution
 
 __all__ = [
     "HawkesProcessDistribution",
     "PowerLawHawkesDistribution",
     "MultivariateHawkesProcessDistribution",
     "InhomogeneousPoissonProcessDistribution",
+    "RenewalProcessDistribution",
     "BirthDeathSamplingDistribution",
     "ChineseRestaurantProcessDistribution",
 ]

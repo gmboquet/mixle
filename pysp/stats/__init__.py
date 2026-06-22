@@ -540,6 +540,10 @@ __all__ = [
     "InhomogeneousPoissonProcessSampler",
     "InhomogeneousPoissonProcessEstimator",
     "InhomogeneousPoissonProcessDataEncoder",
+    "RenewalProcessDistribution",
+    "RenewalProcessSampler",
+    "RenewalProcessEstimator",
+    "RenewalProcessDataEncoder",
     "HawkesProcessDistribution",
     "MultivariateHawkesProcessDistribution",
     "MultivariateHawkesProcessSampler",
@@ -806,6 +810,12 @@ from pysp.stats.base.poisson import (
     PoissonSampler,
 )
 from pysp.stats.base.rayleigh import RayleighDataEncoder, RayleighDistribution, RayleighEstimator, RayleighSampler
+from pysp.stats.base.renewal_process import (
+    RenewalProcessDataEncoder,
+    RenewalProcessDistribution,
+    RenewalProcessEstimator,
+    RenewalProcessSampler,
+)
 from pysp.stats.base.skellam import (
     SkellamDataEncoder,
     SkellamDistribution,
