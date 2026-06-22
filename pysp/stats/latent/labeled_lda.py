@@ -43,6 +43,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.stats.latent.lda import _lda_elbo_from_gamma, _lda_vi_fixed_point
 from pysp.utils.special import digammainv
 from pysp.utils.vector import row_choice
 
@@ -136,31 +137,14 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         num_topics = self.nTopics
         num_documents, idx, counts, _, enc_data, _, _, _ = x
 
-        idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
-        idx_full *= num_topics
-        idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
-
         log_density_gamma, document_gammas, document_alphas, per_topic_log_densities = seq_posterior(self, x)
 
-        # This block keeps the gammas positive
-        log_density_gamma[np.bitwise_or(np.isnan(log_density_gamma), np.isinf(log_density_gamma))] = sys.float_info.min
-        log_density_gamma[log_density_gamma <= 0] = sys.float_info.min
-        document_gammas[np.bitwise_or(np.isnan(document_gammas), np.isinf(document_gammas))] = sys.float_info.min
-
-        elob0 = digamma(document_gammas) - digamma(np.sum(document_gammas, axis=1, keepdims=True))
-        elob1 = elob0[idx, :]
-        elob2 = log_density_gamma * (
-            elob1 + per_topic_log_densities - np.log(log_density_gamma) + np.log(np.reshape(counts, (-1, 1)))
+        # LabeledLDA's per-document prior 'document_alphas' is the 2-d coupled mean of label rows;
+        # the shared host ELBO handles both the 1-d (plain LDA) and 2-d (labeled) alpha. LabeledLDA
+        # has no length or label-set term to add.
+        return _lda_elbo_from_gamma(
+            document_alphas, idx, counts, num_topics, log_density_gamma, document_gammas, per_topic_log_densities
         )
-        elob3 = np.sum(elob0 * ((document_alphas - 1.0) - (document_gammas - 1.0)), axis=1)
-        elob4 = np.bincount(idx_full.flat, weights=elob2.flat)
-        elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
-        elob6 = np.sum(gammaln(document_gammas), axis=1) - gammaln(document_gammas.sum(axis=1))
-        elob7 = gammaln(document_alphas.sum(axis=1)) - gammaln(document_alphas).sum(axis=1)
-
-        elob = elob3 + elob5 + elob6 + elob7
-
-        return elob
 
     def seq_encode(self, x):
         """Deprecated: encode a sequence of iid LabeledLDA observations for vectorized 'seq_' calls.
@@ -838,26 +822,9 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         # variational loop and no re-scoring of topics. Mirrors LabeledLDADistribution.seq_log_density
         # exactly (LabeledLDA's ELBO has no length/label-set term). Gated; standard path untouched.
         if self._track_ll:
-            idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
-            idx_full *= num_topics
-            idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
-
-            ldg = log_density_gamma.copy()
-            dg = final_gammas.copy()
-            ldg[np.bitwise_or(np.isnan(ldg), np.isinf(ldg))] = sys.float_info.min
-            ldg[ldg <= 0] = sys.float_info.min
-            dg[np.bitwise_or(np.isnan(dg), np.isinf(dg))] = sys.float_info.min
-
-            elob0 = digamma(dg) - digamma(np.sum(dg, axis=1, keepdims=True))
-            elob1 = elob0[idx, :]
-            elob2 = ldg * (elob1 + per_topic_log_densities - np.log(ldg) + np.log(np.reshape(counts, (-1, 1))))
-            elob3 = np.sum(elob0 * ((doc_alphas - 1.0) - (dg - 1.0)), axis=1)
-            elob4 = np.bincount(idx_full.flat, weights=elob2.flat)
-            elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
-            elob6 = np.sum(gammaln(dg), axis=1) - gammaln(dg.sum(axis=1))
-            elob7 = gammaln(doc_alphas.sum(axis=1)) - gammaln(doc_alphas).sum(axis=1)
-
-            elob = elob3 + elob5 + elob6 + elob7
+            elob = _lda_elbo_from_gamma(
+                doc_alphas, idx, counts, num_topics, log_density_gamma, final_gammas, per_topic_log_densities
+            )
             self._seq_ll += float(np.dot(weights, elob))
 
         # return num_documents, idx, counts, final_gammas, enc_data
@@ -1588,8 +1555,10 @@ def find_alpha(current_alpha, mlp, thresh):
 def seq_posterior(estimate, x):
     """Compute the variational posterior quantities for encoded labeled documents under 'estimate'.
 
-    Runs the per-document mean-field gamma updates until each document's relative gamma change falls below
-    'estimate.gamma_threshold'.
+    Runs the shared per-document mean-field gamma fixed point (see lda._lda_vi_fixed_point), passing
+    each document's coupled Dirichlet prior 'alphas_loc' -- the mean of the alpha rows of the
+    document's label set. This is the only model difference from plain LDA, which uses a single
+    shared alpha; the fixed-point loop is otherwise identical.
 
     Args:
             estimate (LabeledLDADistribution): LabeledLDA model used to evaluate the posterior.
@@ -1608,180 +1577,26 @@ def seq_posterior(estimate, x):
     num_documents, idx, counts, gammas, enc_data, nbx, nbcnt, nbidx = x
 
     num_topics = len(topics)
-    num_samples = len(idx)
-    num_alphas = alphas.shape[0]
 
     per_topic_log_densities = np.asarray([topics[i].seq_log_density(enc_data) for i in range(num_topics)]).transpose()
-    per_topic_log_densities2 = per_topic_log_densities.copy()
-    per_topic_log_densities2 -= np.max(per_topic_log_densities2, axis=1, keepdims=True)
-    np.exp(per_topic_log_densities2, out=per_topic_log_densities2)
-    per_topic_log_densities3 = per_topic_log_densities2.copy()
 
-    idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
-    idx_full *= num_topics
-    idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
-
+    # Per-document coupled prior: mean of the alpha rows over the document's labels.
     ddd = np.reshape(np.bincount(nbidx, minlength=num_documents), (-1, 1)).astype(float)
     alphas_loc = np.zeros((num_documents, num_topics))
     for i in range(num_topics):
         alphas_loc[:, i] = np.bincount(nbidx, weights=alphas[nbx, i], minlength=num_documents)
     alphas_loc /= ddd
-    alphas_loc2 = alphas_loc.copy()
 
-    if gammas is None:
-        document_gammas = alphas_loc + np.reshape(np.bincount(idx_full.flat), (num_documents, num_topics)) / float(
-            num_topics
-        )
-    else:
-        document_gammas = gammas.copy()
-
-    document_gammas2 = np.zeros((num_documents, num_topics), dtype=float)
-    document_gammas3 = np.zeros((num_documents, num_topics), dtype=float)
-
-    gamma_sum = np.zeros((num_documents, 1), dtype=float)
-    gamma_asum = np.zeros((num_documents, 1), dtype=float)
-
-    posterior_sum_ll = np.zeros((num_samples, 1), dtype=float)
-
-    log_density_gamma = np.zeros(per_topic_log_densities.shape, dtype=float)
-    document_gamma_diff_loc = np.zeros((num_documents, num_topics), dtype=float)
-    log_density_gamma_loc = log_density_gamma.view()
-    posterior_sum_ll_loc = posterior_sum_ll.view()
-    gamma_asum_loc = gamma_asum.view()
-    gamma_sum_loc = gamma_sum.view()
-
-    ndoc = num_documents
-
-    rel_idx = idx.copy()
-    rel_counts = counts.copy()
-    rel_counts = np.reshape(rel_counts, (-1, 1))
-
-    rem_gammas_idx = np.arange(num_documents, dtype=int)
-    final_gammas = np.zeros((num_documents, num_topics), dtype=float)
-    final_gammas_idx = np.zeros(num_documents, dtype=int)
-    finished_count = 0
-    itr_cnt = 0
-    gamma_itr_cnt = np.zeros(num_documents, dtype=int)
-
-    #
-
-    digamma(document_gammas, out=document_gammas2)
-    temp = np.max(document_gammas2, axis=1, keepdims=True)
-    np.exp(document_gammas2 - temp, out=document_gammas3)
-
-    np.multiply(per_topic_log_densities2, document_gammas3[rel_idx, :], out=log_density_gamma_loc)
-    np.sum(log_density_gamma_loc, axis=1, keepdims=True, out=posterior_sum_ll_loc)
-    log_density_gamma_loc /= posterior_sum_ll_loc
-
-    old_stuff = None
-    max_gamma_iter = getattr(estimate, "max_gamma_iter", 100)
-
-    while ndoc > 0 and itr_cnt < max_gamma_iter:
-        itr_cnt += 1
-
-        digamma(document_gammas, out=document_gammas2)
-        temp = np.max(document_gammas2, axis=1, keepdims=True)
-        document_gammas2 -= temp
-        np.exp(document_gammas2, out=document_gammas3)
-
-        np.multiply(per_topic_log_densities2, document_gammas3[rel_idx, :], out=log_density_gamma_loc)
-        np.sum(log_density_gamma_loc, axis=1, keepdims=True, out=posterior_sum_ll_loc)
-        posterior_sum_ll_loc /= rel_counts
-        log_density_gamma_loc /= posterior_sum_ll_loc
-
-        gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma_loc.flat)
-        gamma_updates = np.reshape(gamma_updates, (-1, num_topics))
-        gamma_updates += alphas_loc2
-
-        np.subtract(document_gammas, gamma_updates, out=document_gamma_diff_loc)
-        np.abs(document_gamma_diff_loc, out=document_gamma_diff_loc)
-        np.sum(document_gamma_diff_loc, axis=1, keepdims=True, out=gamma_asum_loc)
-        np.sum(gamma_updates, axis=1, keepdims=True, out=gamma_sum_loc)
-        gamma_asum_loc /= gamma_sum_loc
-
-        document_gammas = gamma_updates
-
-        has_finished = np.flatnonzero(gamma_asum_loc.flat <= gamma_threshold)
-
-        if has_finished.size != 0:
-            final_gammas[finished_count : (finished_count + len(has_finished)), :] = document_gammas[has_finished, :]
-            final_gammas_idx[finished_count : (finished_count + len(has_finished))] = rem_gammas_idx[has_finished]
-            gamma_itr_cnt[finished_count : (finished_count + len(has_finished))] = itr_cnt
-
-            is_rem_bool = gamma_asum_loc.flat > gamma_threshold
-
-            is_rem_idx = np.nonzero(is_rem_bool)[0]
-            rem_gammas_idx = rem_gammas_idx[is_rem_bool]
-            finished_count += has_finished.size
-
-            temp = np.zeros(ndoc, dtype=bool)
-            temp[is_rem_bool] = True
-            temp2 = np.arange(ndoc, dtype=int)
-            temp2[temp] = np.arange(is_rem_idx.size, dtype=int)
-
-            keep = temp[rel_idx]
-            rel_idx = temp2[rel_idx[temp[rel_idx]]]
-
-            idx_full = np.repeat(np.reshape(rel_idx, (-1, 1)), num_topics, axis=1)
-            idx_full *= num_topics
-            idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
-
-            per_topic_log_densities2 = per_topic_log_densities2[keep, :]
-            rel_counts = rel_counts[keep]
-            nrec = per_topic_log_densities2.shape[0]
-            ndoc = is_rem_idx.size
-
-            log_density_gamma_loc = log_density_gamma[:nrec, :]
-            posterior_sum_ll_loc = posterior_sum_ll[:nrec, :]
-            gamma_sum_loc = gamma_sum[:ndoc, :]
-            gamma_asum_loc = gamma_asum[:ndoc, :]
-            document_gamma_diff_loc = document_gamma_diff_loc[:ndoc, :]
-
-            document_gammas = document_gammas[is_rem_idx, :]
-            document_gammas2 = document_gammas2[:ndoc, :]
-            document_gammas3 = document_gammas3[:ndoc, :]
-            alphas_loc2 = alphas_loc2[is_rem_idx, :]
-
-    # Cap reached while some documents were still iterating: flush their (already well-converged) gammas.
-    if ndoc > 0:
-        final_gammas[finished_count : finished_count + ndoc, :] = document_gammas
-        final_gammas_idx[finished_count : finished_count + ndoc] = rem_gammas_idx
-        gamma_itr_cnt[finished_count : finished_count + ndoc] = itr_cnt
-        finished_count += ndoc
-
-    #
-    # Accumulate per-bag-sample
-    #
-
-    sidx = np.argsort(final_gammas_idx)
-    final_gammas = final_gammas[sidx, :]
-    gamma_itr_cnt = gamma_itr_cnt[sidx]
-
-    digamma_gammas = digamma(final_gammas)
-    temp2 = np.max(digamma_gammas, axis=1, keepdims=True)
-    temp3 = np.exp(digamma_gammas - temp2)
-
-    # per_topic_log_densities2  = per_topic_log_densities.copy()
-    # per_topic_log_densities2 -= np.max(per_topic_log_densities2, axis=1, keepdims=True)
-    # np.exp(per_topic_log_densities2, out=per_topic_log_densities2)
-
-    np.multiply(per_topic_log_densities3, temp3[idx, :], out=log_density_gamma)
-    np.sum(log_density_gamma, axis=1, keepdims=True, out=posterior_sum_ll)
-    posterior_sum_ll /= np.reshape(counts, (-1, 1))
-    log_density_gamma /= posterior_sum_ll
-
-    effNs = log_density_gamma.sum(axis=0)
-
-    idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
-    idx_full *= num_topics
-    idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
-
-    gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma.flat)
-    gamma_updates = np.reshape(gamma_updates, (-1, num_topics))
-    gamma_updates += alphas_loc
-    final_gammas = gamma_updates
-
-    mlpf = digamma(final_gammas) - digamma(np.sum(final_gammas, axis=1, keepdims=True))
+    log_density_gamma, final_gammas = _lda_vi_fixed_point(
+        alphas_loc,
+        idx,
+        counts,
+        gammas,
+        num_topics,
+        per_topic_log_densities,
+        gamma_threshold,
+        getattr(estimate, "max_gamma_iter", 100),
+    )
 
     return log_density_gamma, final_gammas, alphas_loc, per_topic_log_densities
 
