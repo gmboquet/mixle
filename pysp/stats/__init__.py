@@ -266,6 +266,10 @@ __all__ = [
     "GeneralizedGaussianSampler",
     "GeneralizedGaussianEstimator",
     "GeneralizedGaussianDataEncoder",
+    "NakagamiDistribution",
+    "NakagamiSampler",
+    "NakagamiEstimator",
+    "NakagamiDataEncoder",
     "VonMisesSampler",
     "VonMisesEstimator",
     "VonMisesDataEncoder",
@@ -860,6 +864,12 @@ from pysp.stats.base.projected_normal import (
     ProjectedNormalDistribution,
     ProjectedNormalEstimator,
     ProjectedNormalSampler,
+)
+from pysp.stats.base.nakagami import (
+    NakagamiDataEncoder,
+    NakagamiDistribution,
+    NakagamiEstimator,
+    NakagamiSampler,
 )
 from pysp.stats.base.generalized_gaussian import (
     GeneralizedGaussianDataEncoder,
