@@ -484,6 +484,16 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[i].combine(suff_stat[4][i])
         return self
 
+    def scale(self, c: float) -> "DirichletProcessMixtureAccumulator":
+        # Scale only the linear count statistics (and the component accumulators); ``a`` (the alpha
+        # hyper-posterior) and ``prev_nw`` are non-linear scalar metadata that must stay untouched --
+        # the inherited default would multiply them and corrupt the state.
+        self.comp_counts *= c
+        self.beta_counts *= c
+        for u in self.accumulators:
+            u.scale(c)
+        return self
+
     def value(self) -> tuple:
         """Returns (comp_counts, beta_counts, alpha, prev_nw, component values)."""
         return self.comp_counts, self.beta_counts, self.a, self.prev_nw, tuple([u.value() for u in self.accumulators])

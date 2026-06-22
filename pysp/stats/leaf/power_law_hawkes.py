@@ -23,9 +23,12 @@ from numpy.random import RandomState
 from scipy.optimize import minimize
 
 from pysp.stats.compute.pdist import (
+    DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
 )
 
 __all__ = ["PowerLawHawkesDistribution", "PowerLawHawkesEstimator"]
@@ -154,8 +157,14 @@ class PowerLawHawkesSampler(DistributionSampler):
         return [self._sample_one() for _ in range(int(size))]
 
 
-class PowerLawHawkesDataEncoder:
+class PowerLawHawkesDataEncoder(DataSequenceEncoder):
     """Pass-through encoder: a realization is a ``(times, marks)`` tuple; a batch is a list of them."""
+
+    def __str__(self) -> str:
+        return "PowerLawHawkesDataEncoder()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, PowerLawHawkesDataEncoder)
 
     def seq_encode(self, x):
         return list(x)
@@ -171,15 +180,7 @@ class PowerLawHawkesEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self):
-        from pysp.stats.compute.pdist import StatisticAccumulatorFactory
-
-        window, alpha_fixed = self.window, self.alpha_fixed
-
-        class _Factory(StatisticAccumulatorFactory):
-            def make(self):
-                return PowerLawHawkesAccumulator(window, alpha_fixed)
-
-        return _Factory()
+        return PowerLawHawkesAccumulatorFactory(self.window, self.alpha_fixed, name=self.name, keys=self.keys)
 
     def estimate(self, nobs, suff_stat) -> PowerLawHawkesDistribution:
         realizations, window, alpha_fixed = suff_stat
@@ -209,13 +210,15 @@ class PowerLawHawkesEstimator(ParameterEstimator):
         return PowerLawHawkesDistribution(mu, a, c, 1.0 + pm1, window, alpha=alpha, name=self.name)
 
 
-class PowerLawHawkesAccumulator:
+class PowerLawHawkesAccumulator(SequenceEncodableStatisticAccumulator):
     """Collects realizations (the MLE needs the full event times, not closed-form sufficient statistics)."""
 
-    def __init__(self, window: float, alpha_fixed: float | None):
+    def __init__(self, window: float, alpha_fixed: float | None, name=None, keys=None):
         self.window = float(window)
         self.alpha_fixed = alpha_fixed
         self.realizations: list[Any] = []
+        self.name = name
+        self.keys = keys
 
     def update(self, x, weight, estimate):
         self.realizations.append(x)
@@ -233,6 +236,11 @@ class PowerLawHawkesAccumulator:
         self.realizations.extend(suff_stat[0])
         return self
 
+    def scale(self, c: float) -> PowerLawHawkesAccumulator:
+        # The accumulator stores raw realizations (no weighted sufficient statistics), so there is
+        # nothing meaningful to rescale; keep it a safe no-op rather than corrupting the catalogue.
+        return self
+
     def value(self):
         return (self.realizations, self.window, self.alpha_fixed)
 
@@ -240,5 +248,29 @@ class PowerLawHawkesAccumulator:
         self.realizations, self.window, self.alpha_fixed = x
         return self
 
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].realizations.extend(self.realizations)
+            else:
+                stats_dict[self.keys] = self
+
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        if self.keys is not None and self.keys in stats_dict:
+            self.realizations = stats_dict[self.keys].realizations
+
     def acc_to_encoder(self):
         return PowerLawHawkesDataEncoder()
+
+
+class PowerLawHawkesAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for PowerLawHawkesAccumulator."""
+
+    def __init__(self, window: float, alpha_fixed: float | None, name=None, keys=None):
+        self.window = float(window)
+        self.alpha_fixed = alpha_fixed
+        self.name = name
+        self.keys = keys
+
+    def make(self) -> PowerLawHawkesAccumulator:
+        return PowerLawHawkesAccumulator(self.window, self.alpha_fixed, name=self.name, keys=self.keys)

@@ -251,6 +251,15 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
     """Baum-Welch sufficient statistics for the semi-supervised HMM (transition + emission counts, length)."""
 
     def __init__(self, accumulators, len_accumulator=None, keys=(None, None)):
+        # INTENTIONAL DIVERGENCE from the base HiddenMarkovAccumulator. This model has no learned initial
+        # state distribution (the per-position state prior at t=0 plays that role -- see the module docstring),
+        # so the merge key is a 2-tuple (trans_key, state_key) -- no init_key -- and value()/combine() carry a
+        # 3-tuple (trans_counts, emission_values, len_value) rather than the base 6-tuple (num_states,
+        # init_counts, state_counts, trans_counts, emission_values, len_value). There are no init/state counts
+        # to track, and SemiSupervisedHiddenMarkovEstimator.estimate consumes exactly this 3-tuple. These
+        # accumulators never interoperate with HiddenMarkovAccumulator (the factory makes this type and key
+        # tying is within-class), so the shapes are self-consistent; aligning to the base tuples would require
+        # fabricating statistics the estimator ignores. Keep this shape.
         self.accumulators = list(accumulators)
         self.num_states = len(self.accumulators)
         self.trans_counts = np.zeros((self.num_states, self.num_states))
