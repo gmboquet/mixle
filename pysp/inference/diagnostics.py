@@ -150,3 +150,43 @@ def ess_tail(chains: Any, prob: float = 0.05) -> np.ndarray:
         hi = ess((flat >= q_hi).astype(float)[:, :, None])[0]
         out[k] = min(float(lo), float(hi))
     return out
+
+
+def _fold(arr: np.ndarray) -> np.ndarray:
+    """Fold each parameter about its pooled median: ``z = |x - median(x)|`` (surfaces scale drift)."""
+    out = np.empty_like(arr)
+    for k in range(arr.shape[2]):
+        out[:, :, k] = np.abs(arr[:, :, k] - np.median(arr[:, :, k]))
+    return out
+
+
+def folded_split_rhat(chains: Any) -> np.ndarray:
+    """Folded rank-normalized split-R-hat (Vehtari et al. 2021): split-R-hat on ``|x - median(x)|``.
+
+    The plain :func:`split_rhat` compares chain *locations*; folding about the median makes it compare
+    chain *scales/tails*, catching the case where chains share a mean but differ in spread. Use together
+    with :func:`split_rhat` (or :func:`rhat_max`).
+    """
+    return rhat(_rank_normalize(_split_chains(_fold(_as_chains(chains)))))
+
+
+def rhat_max(chains: Any) -> np.ndarray:
+    """The recommended convergence R-hat: ``max(split_rhat, folded_split_rhat)`` (Vehtari et al. 2021).
+
+    A single number that flags non-convergence in either the location (bulk) or the scale (folded) of
+    the chains; declare convergence at ``< 1.01``.
+    """
+    arr = _as_chains(chains)
+    return np.maximum(split_rhat(arr), folded_split_rhat(arr))
+
+
+def mcse_mean(chains: Any) -> np.ndarray:
+    """Monte Carlo standard error of the posterior mean: ``sd(x) / sqrt(ESS)`` per parameter.
+
+    The sampling error in the estimated mean from autocorrelated draws -- the posterior standard
+    deviation deflated by the (autocorrelation-based) effective sample size of the raw chains.
+    """
+    arr = _as_chains(chains)
+    m, n, d = arr.shape
+    sd = arr.reshape(m * n, d).std(axis=0, ddof=1)
+    return sd / np.sqrt(ess(arr))

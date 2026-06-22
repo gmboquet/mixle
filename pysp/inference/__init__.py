@@ -39,10 +39,13 @@ from pysp.inference.target import (
     ess,
     ess_bulk,
     ess_tail,
+    folded_split_rhat,
+    mcse_mean,
     nuts,
     nuts_torch,
     register_inference_backend,
     rhat,
+    rhat_max,
     split_rhat,
 )
 from pysp.stats.bayes.conjugate import (
@@ -89,6 +92,9 @@ __all__ = [
     "rhat",
     "ess",
     "split_rhat",
+    "folded_split_rhat",
+    "rhat_max",
+    "mcse_mean",
     "ess_bulk",
     "ess_tail",
     "available_backends",
