@@ -45,6 +45,7 @@ from .samplers import (
     metropolis_within_gibbs,
     nuts,
     posterior_predictive,
+    reflective_hmc,
     run_chains,
     sample_distribution,
 )
@@ -65,6 +66,7 @@ __all__ = [
     "distribution_log_target",
     "gelman_rubin",
     "hamiltonian_monte_carlo",
+    "reflective_hmc",
     "metropolis_hastings",
     "metropolis_within_gibbs",
     "nuts",

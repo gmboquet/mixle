@@ -414,6 +414,98 @@ def hamiltonian_monte_carlo(
     )
 
 
+def _reflect_into_box(x: np.ndarray, p: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Reflect any out-of-box coordinates back into ``[lo, hi]``, flipping the corresponding momentum."""
+    x = x.copy()
+    p = p.copy()
+    for _ in range(64):  # repeat until inside (handles a step that overshoots a thin box several times)
+        below = x < lo
+        above = x > hi
+        if not (below.any() or above.any()):
+            break
+        x = np.where(below, 2.0 * lo - x, x)
+        x = np.where(above, 2.0 * hi - x, x)
+        p = np.where(below | above, -p, p)
+    return np.clip(x, lo, hi), p
+
+
+def reflective_hmc(
+    log_target: LogTarget,
+    grad_log_target: Callable[[Any], Any],
+    initial: Any,
+    lower: Any,
+    upper: Any,
+    num_samples: int,
+    step_size: float,
+    num_steps: int,
+    mass: Any = 1.0,
+    burn_in: int = 0,
+    thin: int = 1,
+    rng: np.random.RandomState | None = None,
+) -> MCMCResult:
+    """Hamiltonian Monte Carlo on a box ``[lower, upper]`` by reflecting trajectories off the walls.
+
+    Samples a target constrained to a hyper-rectangle without distorting it: the leapfrog trajectory
+    bounces specularly off each boundary (mirror the position, flip that momentum component), which is
+    volume-preserving and time-reversible, so the usual Metropolis correction leaves the box-restricted
+    target invariant. ``log_target`` (may be unnormalized) and ``grad_log_target`` are defined on the box;
+    ``lower``/``upper`` broadcast to the state shape. Returns an :class:`MCMCResult` whose samples all lie
+    in the box -- the constrained-HMC answer for box/simplex-style bounds (WS-1 constraints).
+    """
+    if step_size <= 0.0 or not np.isfinite(step_size):
+        raise ValueError("step_size must be finite and positive.")
+    if num_steps <= 0:
+        raise ValueError("num_steps must be positive.")
+    if thin <= 0:
+        raise ValueError("thin must be positive.")
+    rng = np.random.RandomState() if rng is None else rng
+    current = _numeric_state(initial)
+    shape = current.shape
+    lo = np.broadcast_to(np.asarray(lower, dtype=float), shape).astype(float)
+    hi = np.broadcast_to(np.asarray(upper, dtype=float), shape).astype(float)
+    if np.any(current < lo) or np.any(current > hi):
+        raise ValueError("initial state is outside the box [lower, upper].")
+    mass_arr = _numeric_mass(mass, shape)
+    current_lp = float(log_target(_restore_numeric_state(current)))
+    if not np.isfinite(current_lp):
+        raise ValueError("initial state has non-finite log target.")
+
+    samples: list[Any] = []
+    log_probs: list[float] = []
+    accepted: list[bool] = []
+    for step in range(burn_in + num_samples * thin):
+        momentum0 = rng.normal(size=shape) * np.sqrt(mass_arr)
+        x = current.copy()
+        p = momentum0.copy()
+        grad = _numeric_gradient(grad_log_target, x, shape)
+        for _ in range(num_steps):
+            p = p + 0.5 * step_size * grad
+            x = x + step_size * (p / mass_arr)
+            x, p = _reflect_into_box(x, p, lo, hi)
+            grad = _numeric_gradient(grad_log_target, x, shape)
+            p = p + 0.5 * step_size * grad
+        proposed_lp = float(log_target(_restore_numeric_state(x)))
+        if np.isfinite(proposed_lp):
+            log_alpha = proposed_lp - current_lp
+            log_alpha += _kinetic_energy(momentum0, mass_arr) - _kinetic_energy(p, mass_arr)
+            accept = np.log(rng.rand()) < min(0.0, log_alpha)
+        else:
+            accept = False
+        if accept:
+            current, current_lp = x, proposed_lp
+        accepted.append(bool(accept))
+        if step >= burn_in and ((step - burn_in) % thin == 0):
+            samples.append(_restore_numeric_state(current))
+            log_probs.append(current_lp)
+
+    return MCMCResult(
+        samples=samples,
+        log_probs=np.asarray(log_probs, dtype=float),
+        accepted=np.asarray(accepted, dtype=bool),
+        transition_labels=tuple("reflective_hmc" for _ in accepted),
+    )
+
+
 def nuts(
     log_target: LogTarget | None = None,
     grad_log_target: Callable[[Any], Any] | None = None,
