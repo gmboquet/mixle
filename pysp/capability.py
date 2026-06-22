@@ -44,6 +44,12 @@ __all__ = [
     "ExponentialFamily",
     "ConjugateUpdatable",
     "SetValued",
+    "HasCDF",
+    "HasMoments",
+    "Discrete",
+    "Continuous",
+    "Fittable",
+    "Optimizable",
     "Neutral",
     "ALL_CAPABILITIES",
     "FACET_PRESERVING",
@@ -253,6 +259,63 @@ class SetValued(PredicateCapability):
         return hasattr(obj, "num_required") and hasattr(obj, "required")
 
 
+class HasCDF(PredicateCapability):
+    """Exposes an exact cumulative distribution function and its inverse (``cdf`` and ``quantile``).
+
+    The CDF/quantile pair is what lets a continuous family answer probability-ordered / rank queries
+    through the inverse transform (the continuous analogue of enumeration).
+    """
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        return callable(getattr(obj, "cdf", None)) and callable(getattr(obj, "quantile", None))
+
+
+class HasMoments(PredicateCapability):
+    """Exposes closed-form moments (``mean`` and ``variance`` at least; optionally skewness/kurtosis)."""
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        return callable(getattr(obj, "mean", None)) and callable(getattr(obj, "variance", None))
+
+
+class Discrete(PredicateCapability):
+    """Countable support: the distribution is enumerable or has explicit finite support."""
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        return FiniteSupport.check(obj) or Enumerable.check(obj)
+
+
+class Continuous(PredicateCapability):
+    """Continuous support: has a CDF/quantile but no countable (enumerable) support."""
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        return HasCDF.check(obj) and not Enumerable.check(obj)
+
+
+class Fittable(PredicateCapability):
+    """Can be fit from data: exposes an ``estimator()`` (the M-step / MLE entry point)."""
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        return callable(getattr(obj, "estimator", None))
+
+
+class Optimizable(PredicateCapability):
+    """Exposes a ranked objective over a structured space -- the ``Relation`` surface (``solve`` / ``top``).
+
+    Optimization-as-distribution: the object can return its optimum (``solve``) and the k-best members
+    (``top`` / ``enumerator``), so optimization is a first-class, capability-gated operation rather than
+    a property of a specific class.
+    """
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        return callable(getattr(obj, "solve", None)) and callable(getattr(obj, "top", None))
+
+
 # All capability facets named in docs/ABSTRACTIONS.md are now formalised. ConjugateUpdatable and
 # TemporalPointProcess (which previously needed a family-surface unification) are detectable above;
 # the PDE forward-operator contract lives in ppl/_operator.py (ForwardOperator) and ppl/dynamics
@@ -273,6 +336,12 @@ ALL_CAPABILITIES: tuple[type, ...] = (
     ExponentialFamily,
     ConjugateUpdatable,
     SetValued,
+    HasCDF,
+    HasMoments,
+    Discrete,
+    Continuous,
+    Fittable,
+    Optimizable,
     SupportsBackendScoring,
     SupportsBackendComponentScoring,
     TemporalPointProcess,
@@ -444,6 +513,48 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "distribution over sets with forced membership",
         "distribution facet",
         "required/num_required",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "HasCDF",
+        "exact cumulative distribution + inverse (rank queries via inverse transform)",
+        "distribution facet",
+        "cdf() and quantile()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "HasMoments",
+        "closed-form moments (mean / variance / …)",
+        "distribution facet",
+        "mean() and variance()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "Discrete",
+        "countable support (enumerable or finite)",
+        "distribution facet",
+        "FiniteSupport or Enumerable",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "Continuous",
+        "continuous support (has a CDF but no countable support)",
+        "distribution facet",
+        "HasCDF and not Enumerable",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "Fittable",
+        "can be fit from data (exposes an estimator / M-step)",
+        "distribution facet",
+        "estimator()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "Optimizable",
+        "ranked objective over a structured space (optimization-as-distribution)",
+        "distribution facet",
+        "solve() and top()",
         "pysp.capability",
     ),
     CapabilitySpec(
