@@ -116,6 +116,17 @@ class ProbabilityDistribution:
         """
         return math.exp(self.log_density(x))
 
+    def capabilities(self) -> frozenset[str]:
+        """Return the capability names this distribution supports (see :mod:`pysp.capability`).
+
+        Feature detection by behaviour rather than class — e.g. ``"Enumerable"``,
+        ``"Conditionable"``, ``"ExponentialFamily"``, ``"RankableByIndex"``. Equivalent to
+        ``pysp.capabilities(self)``; combinators report the set their children jointly preserve.
+        """
+        from pysp.capability import capabilities
+
+        return capabilities(self)
+
     @abstractmethod
     def log_density(self, x: Any) -> float:
         """Return the log-density or log-mass at a single observation."""
