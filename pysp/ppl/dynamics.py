@@ -594,3 +594,25 @@ def conservation_law_rhs(flux: Any, max_speed: Any, dx: float, *, bc: str = "per
         return du
 
     return rhs
+
+
+# ---------------------------------------------------------------------------
+# Spectral (Fourier) differentiation -- the spectral/Galerkin discretization option
+# ---------------------------------------------------------------------------
+def spectral_derivative(u: Any, length: float, order: int = 1) -> np.ndarray:
+    """Differentiate a periodic field by the Fourier spectral method (the global Galerkin option).
+
+    Returns ``d^order u / dx^order`` for ``u`` sampled on a uniform periodic grid covering ``[0, length)``,
+    computed in Fourier space: ``ifft((i k)^order fft(u))`` with wavenumbers ``k = 2*pi*n/length``. For
+    smooth (band-limited) periodic data this is *spectrally accurate* -- the error falls faster than any
+    power of the grid spacing -- so it is exact to machine precision for trigonometric data and many
+    orders of magnitude sharper than the finite-difference stencils used elsewhere in this module. The
+    odd-order Nyquist mode is zeroed so the result is real for real input.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    n = u.size
+    k = 2.0 * np.pi * np.fft.fftfreq(n, d=float(length) / n)
+    factor = (1j * k) ** int(order)
+    if int(order) % 2 == 1:
+        factor[n // 2] = 0.0  # the Nyquist mode has no defined sign for odd derivatives
+    return np.real(np.fft.ifft(factor * np.fft.fft(u)))
