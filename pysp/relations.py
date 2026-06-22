@@ -52,6 +52,8 @@ __all__ = [
     "Relation",
     "RelationSampler",
     "ShortestPath",
+    "max_clique",
+    "max_independent_set",
     "is_stable_matching",
     "max_flow",
     "min_cut",
@@ -419,6 +421,49 @@ def graph_coloring(adjacency: Any) -> tuple[int, list[int]]:
         if col is not None:
             return k, col
     return n, list(range(n))  # unreachable (a graph of n vertices is always n-colorable)
+
+
+# ---------------------------------------------------------------------------
+# Maximum clique / maximum independent set
+# ---------------------------------------------------------------------------
+def max_clique(adjacency: Any) -> list[int]:
+    """A maximum clique (largest mutually-adjacent vertex set) of an undirected graph.
+
+    ``adjacency`` is an ``n x n`` symmetric 0/1 (or boolean) matrix with a zero diagonal. Returns the
+    sorted vertices of one maximum clique via Carraghan-Pardalos branch-and-bound (prune when the
+    current clique plus the remaining candidates cannot beat the incumbent) -- exact, worst-case
+    exponential, intended for small/medium graphs.
+    """
+    a = np.asarray(adjacency)
+    n = a.shape[0]
+    nb = [{j for j in range(n) if j != i and a[i, j]} for i in range(n)]
+    best: list[int] = []
+
+    def expand(clique: list[int], cands: list[int]) -> None:
+        nonlocal best
+        if not cands:
+            if len(clique) > len(best):
+                best = clique[:]
+            return
+        cands = list(cands)
+        while cands:
+            if len(clique) + len(cands) <= len(best):
+                return  # cannot beat the incumbent even taking every candidate
+            v = cands.pop()
+            expand([*clique, v], [u for u in cands if u in nb[v]])
+
+    expand([], list(range(n)))
+    return sorted(best)
+
+
+def max_independent_set(adjacency: Any) -> list[int]:
+    """A maximum independent set (largest pairwise-non-adjacent vertex set) -- a max clique of the complement."""
+    a = np.asarray(adjacency)
+    n = a.shape[0]
+    complement = 1 - np.asarray(a, dtype=int)
+    if n:
+        np.fill_diagonal(complement, 0)
+    return max_clique(complement)
 
 
 # ---------------------------------------------------------------------------
