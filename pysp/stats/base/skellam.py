@@ -105,6 +105,28 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
             log_bessel = np.log(bessel)
         return -self.sqrt_diff_sq + kk * self.log_ratio_half + log_bessel
 
+    def mean(self) -> float:
+        """Mean E[X] = mu1 - mu2."""
+        return float(self.mu1 - self.mu2)
+
+    def variance(self) -> float:
+        """Variance Var[X] = mu1 + mu2."""
+        return float(self.mu1 + self.mu2)
+
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x) (via scipy skellam)."""
+        import math
+
+        from scipy.stats import skellam
+
+        return float(skellam.cdf(math.floor(float(x)), self.mu1, self.mu2))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q) (via scipy skellam)."""
+        from scipy.stats import skellam
+
+        return float(skellam.ppf(float(q), self.mu1, self.mu2))
+
     def sampler(self, seed: int | None = None) -> "SkellamSampler":
         """Return a SkellamSampler for this distribution."""
         return SkellamSampler(self, seed)
