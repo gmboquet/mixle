@@ -258,6 +258,10 @@ __all__ = [
     "ProjectedNormalSampler",
     "ProjectedNormalEstimator",
     "ProjectedNormalDataEncoder",
+    "WrappedNormalDistribution",
+    "WrappedNormalSampler",
+    "WrappedNormalEstimator",
+    "WrappedNormalDataEncoder",
     "VonMisesSampler",
     "VonMisesEstimator",
     "VonMisesDataEncoder",
@@ -852,6 +856,12 @@ from pysp.stats.base.projected_normal import (
     ProjectedNormalDistribution,
     ProjectedNormalEstimator,
     ProjectedNormalSampler,
+)
+from pysp.stats.base.wrapped_normal import (
+    WrappedNormalDataEncoder,
+    WrappedNormalDistribution,
+    WrappedNormalEstimator,
+    WrappedNormalSampler,
 )
 from pysp.stats.base.wrapped_cauchy import (
     WrappedCauchyDataEncoder,
