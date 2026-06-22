@@ -1,5 +1,6 @@
 import unittest
 
+from pysp.inference import seq_estimate
 from pysp.stats import (
     CompositeEstimator,
     GaussianDistribution,
@@ -7,7 +8,6 @@ from pysp.stats import (
     KeyValidationError,
     PoissonEstimator,
     seq_encode,
-    seq_estimate,
     validate_estimator_keys,
 )
 

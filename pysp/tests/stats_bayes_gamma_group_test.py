@@ -14,8 +14,9 @@ import unittest
 import numpy as np
 from scipy.special import gammaln
 
+from pysp.inference import seq_estimate, seq_initialize
 from pysp.inference.estimation import _data_objective_sum, _model_objective, fit, optimize
-from pysp.stats import seq_encode, seq_estimate, seq_initialize
+from pysp.stats import seq_encode
 from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEstimator
 from pysp.stats.leaf.gamma import GammaDistribution, GammaEstimator
 from pysp.stats.leaf.poisson import PoissonDistribution, PoissonEstimator

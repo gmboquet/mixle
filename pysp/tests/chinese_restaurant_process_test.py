@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.special import digamma
 
-from pysp.stats import ChineseRestaurantProcessDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import ChineseRestaurantProcessDistribution
 
 
 def _set_partitions(collection):

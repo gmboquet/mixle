@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.stats import kstest, wrapcauchy
 
-from pysp.stats import WrappedCauchyDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import WrappedCauchyDistribution
 
 
 class WrappedCauchyTest(unittest.TestCase):

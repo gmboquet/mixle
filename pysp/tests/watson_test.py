@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.special import hyp1f1
 
-from pysp.stats import WatsonDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import WatsonDistribution
 from pysp.stats.multivariate.watson import _kummer_ratio
 
 

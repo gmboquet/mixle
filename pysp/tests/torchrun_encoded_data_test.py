@@ -8,9 +8,10 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import seq_estimate
 from pysp.inference.estimation import optimize
 from pysp.inference.streaming import streaming_accumulate
-from pysp.stats import GaussianDistribution, GaussianEstimator, seq_encode, seq_estimate, seq_log_density_sum
+from pysp.stats import GaussianDistribution, GaussianEstimator, seq_encode, seq_log_density_sum
 from pysp.utils.parallel.planner import Resources, encoded_data, is_encoded_data_handle
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

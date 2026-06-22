@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.stats import multivariate_normal, norm
 
-from pysp.stats import GaussianCopulaDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import GaussianCopulaDistribution
 
 
 class GaussianCopulaTest(unittest.TestCase):

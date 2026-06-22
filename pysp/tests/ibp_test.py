@@ -4,11 +4,11 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import seq_initialize
 from pysp.stats import (
     IndianBuffetProcessDistribution,
     IndianBuffetProcessEstimator,
     seq_encode,
-    seq_initialize,
 )
 
 

@@ -13,7 +13,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats import seq_estimate, seq_initialize
+from pysp.inference import seq_estimate, seq_initialize
 from pysp.stats.combinator.null_dist import NullDistribution
 from pysp.stats.latent.hidden_markov import HiddenMarkovModelDistribution
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator

@@ -15,6 +15,7 @@ import numpy as np
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 
+from pysp.inference import seq_estimate
 from pysp.stats import (
     BinomialDistribution,
     BinomialEstimator,
@@ -37,7 +38,6 @@ from pysp.stats import (
     OptionalDistribution,
     OptionalEstimator,
     seq_encode,
-    seq_estimate,
 )
 
 if HAS_TORCH:

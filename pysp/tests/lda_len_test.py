@@ -12,6 +12,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import seq_estimate, seq_initialize
 from pysp.stats import (
     CategoricalEstimator,
     LDADistribution,
@@ -21,8 +22,6 @@ from pysp.stats import (
     PoissonDistribution,
     PoissonEstimator,
     seq_encode,
-    seq_estimate,
-    seq_initialize,
 )
 from pysp.stats.latent.lda import seq_posterior
 from pysp.stats.leaf.categorical import CategoricalDistribution

@@ -16,13 +16,13 @@ if HAS_TORCH:
 else:
     torch = None
 
+from pysp.inference import seq_estimate
 from pysp.stats import (
     CategoricalDistribution,
     CompositeDistribution,
     GaussianDistribution,
     MixtureDistribution,
     seq_encode,
-    seq_estimate,
 )
 
 if HAS_TORCH:

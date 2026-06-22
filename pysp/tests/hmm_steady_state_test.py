@@ -4,12 +4,12 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import estimate
 from pysp.stats import (
     CategoricalDistribution,
     GaussianDistribution,
     GaussianEstimator,
     HiddenMarkovModelDistribution,
-    estimate,
 )
 from pysp.stats.graph.markov_chain import stationary_distribution
 from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator

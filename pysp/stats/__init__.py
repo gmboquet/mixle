@@ -32,16 +32,12 @@ __all__ = [
     "PitmanYorProcessSampler",
     "PitmanYorProcessEstimator",
     "PitmanYorProcessDataEncoder",
-    "initialize",
-    "estimate",
     "sample",
     "seq_encode",
     "seq_log_density",
     "seq_log_density_sum",
     "log_density",
     "density",
-    "seq_estimate",
-    "seq_initialize",
     "load_models",
     "dump_models",
     "DistributionEnumerator",
@@ -826,7 +822,12 @@ from pysp.stats.compute.kernel import (
     kernel_for,
     register_kernel_factory,
 )
-from pysp.stats.compute.pdist import (
+
+# Base contracts re-exported as accessible attributes (e.g. isinstance checks against
+# pysp.stats.SequenceEncodableProbabilityDistribution / pysp.stats.ParameterEstimator), but
+# intentionally NOT in __all__: the distribution catalog scanners (star-import / sampler-seed /
+# serialization-registry) must stay concrete-distributions-only.
+from pysp.stats.compute.pdist import (  # noqa: F401
     DistributionEnumerator,
     DistributionSampler,
     EnumerationError,
@@ -1337,7 +1338,6 @@ from pysp.stats.sets.integer_step_bernoulli_edit import (
     IntegerStepBernoulliEditEstimator,
     IntegerStepBernoulliEditSampler,
 )
-from pysp.utils.optional_deps import RDD_TYPES, pyspark
 
 
 def _register_builtin_compute_metadata() -> None:
@@ -1565,16 +1565,6 @@ def __dir__():
     return sorted(set(globals()) | set(_LAZY_NAMES))
 
 
-### imports
-import pickle
-from collections.abc import Sequence
-from typing import TypeVar
-
-import numpy as np
-
-T = TypeVar("T")
-
-
 def load_models(x: str):
     """Reconstruct a model or collection of models from dump_models() JSON."""
     from pysp.utils.serialization import from_json
@@ -1589,168 +1579,12 @@ def dump_models(x) -> str:
     return to_json(x)
 
 
-def initialize(
-    data: Sequence[T] | pyspark.rdd.RDD, estimator: ParameterEstimator, rng: np.random.RandomState, p: float = 0.1
-) -> SequenceEncodableProbabilityDistribution:
-    """Randomly initialize a model corresponding to ParameterEstimator for iid observations data.
-
-    Note: ParameterEstimator must be of data type T, matching the input data.
-
-    This function sequentially iterates over the entire data set 'data', repeatedly calling initialize() method
-    of the SequenceEncodableStatisticAccumulator object created from 'estimator'. Data points are weighted 0 or 1 with
-    probability p.
-
-    Seq_initialize() is much more efficient, and should produce the same initialized model for the same data sets.
-
-    Args:
-        data (Union[Sequence[T], pyspark.rdd.RDD]): Set of iid observations compatible with 'estimator'.
-        estimator (ParameterEstimator): ParameterEstimator object for desired model to be estimated from data.
-        rng (RandomState): RandomState object for setting seed.
-        p (float): Proportion of data to randomly sample for initializing model.
-
-    Returns:
-        SequenceEncodableProbabilityDistribution object consistent with 'estimator'.
-
-    """
-    validate_estimator_keys(estimator)
-
-    if isinstance(data, RDD_TYPES):
-        factory = estimator.accumulator_factory()
-        sc = data.context
-
-        num_partitions = data.getNumPartitions()
-        seeds = rng.randint(2**31, size=num_partitions)
-
-        estimator_broadcast = sc.broadcast(estimator)
-        seeds_broadcast = sc.broadcast(seeds)
-
-        def acc(split_index, itr):
-            accumulator_for_split = estimator_broadcast.value.accumulator_factory().make()
-            counts_for_split = 0.0
-            rng_loc = np.random.RandomState(seeds_broadcast.value[split_index])
-            rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
-
-            for x in itr:
-                w = rng_w.binomial(n=1, p=p)  # partition-local rng; the driver's rng is identical on every split
-                counts_for_split += w
-                accumulator_for_split.initialize(x, w, rng_loc)
-
-            return iter([(counts_for_split, accumulator_for_split.value())])
-
-        temp = data.mapPartitionsWithIndex(acc, True)
-        nobs = 0.0
-        accumulator = factory.make()
-
-        for nobs_for_split, stats_for_split in temp.collect():
-            nobs = nobs + nobs_for_split
-            accumulator.combine(stats_for_split)
-
-        stats_dict = dict()
-        accumulator.key_merge(stats_dict)
-        accumulator.key_replace(stats_dict)
-
-        return estimator.estimate(nobs, accumulator.value())
-
-    elif hasattr(data, "__iter__"):
-        idata = iter(data)
-        accumulator = estimator.accumulator_factory().make()
-        nobs = 0.0
-        rng_w = np.random.RandomState(seed=rng.randint(2**31))
-
-        for i, x in enumerate(idata):
-            w = rng_w.binomial(n=1, p=p)
-            nobs += w
-            accumulator.initialize(x, w, rng)
-
-        stats_dict = dict()
-        accumulator.key_merge(stats_dict)
-        accumulator.key_replace(stats_dict)
-
-        return estimator.estimate(nobs, accumulator.value())
-
-
-def estimate(
-    data: Sequence[T] | pyspark.rdd.RDD,
-    estimator: ParameterEstimator,
-    prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
-) -> SequenceEncodableProbabilityDistribution:
-    """Perform E-step in EM algorithm by iterating over all observations in 'data'.
-
-    Arg estimator must be consistent with prev_estimate. That is, prev_estimate must be an estimate that could be
-    obtained from estimator.
-
-    Data must type consistent with estimator and prev_estimate.
-
-    Returns the next iteration of EM algorithm by iterating over each observation of data. See seq_estimate() for
-    a more computationally efficient implementation.
-
-    Args:
-        data (Union[Sequence[T], pyspark.rdd.RDD]): Sequence of iid observations of data type consistent with
-            'estimator' and/or 'prev_estimate'.
-        estimator (ParameterEstimator): Model to be estimated from 'data'.
-        prev_estimate (Optional[SequenceEncodableProbabilityDistribution]): Previous estimate of EM algorithm. Must
-            be included for distributions that require initialization.
-
-    Returns:
-        SequenceEncodableProbabilityDistribution object.
-
-    """
-    validate_estimator_keys(estimator)
-
-    # accumulators distinguish estimate-free updates with `estimate is None`;
-    # substituting a NullDistribution here would defeat those guards
-    if isinstance(prev_estimate, NullDistribution):
-        prev_estimate = None
-
-    if isinstance(data, RDD_TYPES):
-        sc = data.context
-        factory = estimator.accumulator_factory()
-        estimator_broadcast = sc.broadcast(estimator)
-
-        temp_estimate = pickle.dumps(prev_estimate, protocol=0)
-        temp_estimate_b = sc.broadcast(temp_estimate)
-
-        def acc(split_index, itr):
-            accumulator_for_split = estimator_broadcast.value.accumulator_factory().make()
-            counts_for_split = 0.0
-            loc_prev_estimate = pickle.loads(temp_estimate_b.value)
-
-            for x in itr:
-                counts_for_split = counts_for_split + 1.0
-                accumulator_for_split.update(x, 1.0, estimate=loc_prev_estimate)
-
-            return iter([(counts_for_split, accumulator_for_split.value())])
-
-        temp = data.mapPartitionsWithIndex(acc, True)
-        nobs = 0.0
-        accumulator = factory.make()
-
-        for nobs_for_split, stats_for_split in temp.collect():
-            nobs = nobs + nobs_for_split
-            accumulator.combine(stats_for_split)
-
-        return estimator.estimate(nobs, accumulator.value())
-
-    elif hasattr(data, "__iter__"):
-        idata = iter(data)
-        accumulator = estimator.accumulator_factory().make()
-        nobs = 0.0
-
-        for x in idata:
-            nobs += 1.0
-            accumulator.update(x, 1.0, estimate=prev_estimate)
-
-        return estimator.estimate(nobs, accumulator.value())
-
-
 # Vectorized sequence-driver API — implementations live in pysp.stats.compute.sequence so the
 # inference machinery can import them without importing this package. Re-exported here unchanged.
 from pysp.stats.compute.sequence import (  # noqa: E402
     density,
     log_density,
     seq_encode,
-    seq_estimate,
-    seq_initialize,
     seq_log_density,
     seq_log_density_sum,
 )

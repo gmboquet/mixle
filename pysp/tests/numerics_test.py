@@ -14,6 +14,7 @@ import numpy as np
 import scipy.special
 import scipy.stats
 
+from pysp.inference import estimate, initialize
 from pysp.stats import (
     BetaDistribution,
     BinomialDistribution,
@@ -34,8 +35,6 @@ from pysp.stats import (
     ParetoDistribution,
     PoissonDistribution,
     SequenceDistribution,
-    estimate,
-    initialize,
     seq_encode,
 )
 from pysp.stats.leaf.geometric import GeometricEstimator

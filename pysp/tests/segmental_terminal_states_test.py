@@ -5,7 +5,8 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import GaussianDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import GaussianDistribution
 from pysp.stats.latent.segmental_hidden_markov_model import SegmentalHiddenMarkovModelDistribution as SHMM
 
 
