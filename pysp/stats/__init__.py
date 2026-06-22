@@ -396,6 +396,7 @@ __all__ = [
     "MixtureEnumerator",
     "MultivariateGaussianDistribution",
     "MultivariateGaussianEstimator",
+    "LedoitWolfEstimator",
     "MultivariateGaussianSampler",
     "MultivariateGaussianDataEncoder",
     "NullDistribution",
@@ -1278,6 +1279,7 @@ from pysp.stats.multivariate.matrix_normal import (
     MatrixNormalEstimator,
     MatrixNormalSampler,
 )
+from pysp.stats.multivariate.covariance_shrinkage import LedoitWolfEstimator
 from pysp.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDataEncoder,
     MultivariateGaussianDistribution,

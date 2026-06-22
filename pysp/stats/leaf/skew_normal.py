@@ -184,6 +184,15 @@ class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self.count, self.mean, self.m2, self.m3 = float(x[0]), float(x[1]), float(x[2]), float(x[3])
         return self
 
+    def scale(self, c: float) -> "SkewNormalAccumulator":
+        # value() carries (count, mean, M2, M3): the count and the central-moment sums are linear
+        # in the weights, but ``mean`` is an average and must NOT be scaled. Override the structural
+        # default (which would multiply every element, corrupting the mean).
+        self.count *= c
+        self.m2 *= c
+        self.m3 *= c
+        return self
+
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
         if self.key is not None:
             if self.key in stats_dict:
