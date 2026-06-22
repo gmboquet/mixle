@@ -212,6 +212,36 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
         ww = engine.asarray(weights)
         return engine.sum(ww, axis=0), engine.sum(ww * k[:, None], axis=0)
 
+    def mean(self) -> float:
+        """Mean E[X] = -p / ((1-p) log(1-p))."""
+        import math
+
+        l1m = math.log(1.0 - self.p)
+        return float(-self.p / ((1.0 - self.p) * l1m))
+
+    def variance(self) -> float:
+        """Variance Var[X] = -p (p + log(1-p)) / ((1-p)^2 log(1-p)^2)."""
+        import math
+
+        p = self.p
+        l1m = math.log(1.0 - p)
+        return float(-p * (p + l1m) / ((1.0 - p) ** 2 * l1m * l1m))
+
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x), support x >= 1 (via scipy logser)."""
+        import math
+
+        from scipy.stats import logser
+
+        k = math.floor(float(x))
+        return float(logser.cdf(k, self.p)) if k >= 1 else 0.0
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q) (via scipy logser)."""
+        from scipy.stats import logser
+
+        return float(logser.ppf(float(q), self.p))
+
     def sampler(self, seed: int | None = None) -> "LogSeriesSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LogSeriesSampler(self, seed)
