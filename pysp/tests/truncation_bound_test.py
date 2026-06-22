@@ -8,6 +8,7 @@ top-k items are exact, and every un-enumerated item has probability <= p_k, so t
 import math
 import unittest
 
+from pysp.enumeration.density_rank import truncated_sum_bound
 from pysp.stats.combinator.composite import CompositeDistribution
 from pysp.stats.combinator.record import RecordDistribution
 from pysp.stats.latent.mixture import MixtureDistribution
@@ -17,7 +18,6 @@ from pysp.stats.leaf.categorical import CategoricalDistribution
 from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
 from pysp.stats.leaf.point_mass import PointMassDistribution
 from pysp.stats.leaf.poisson import PoissonDistribution
-from pysp.utils.density_rank import truncated_sum_bound
 
 TOL = 1e-9
 

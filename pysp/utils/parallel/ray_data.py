@@ -19,8 +19,8 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.planner import EncodedDataHandle, _global_key_merge, _split_range
 from pysp.stats.compute.pdist import DataSequenceEncoder
+from pysp.utils.parallel.planner import EncodedDataHandle, _global_key_merge, _split_range
 
 
 def _resolve_encoder(estimator: Any, model: Any, encoder: DataSequenceEncoder | None) -> DataSequenceEncoder:

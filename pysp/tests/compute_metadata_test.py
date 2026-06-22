@@ -468,7 +468,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
             pysp_root / "inference" / "fisher.py",
             pysp_root / "utils" / "automatic" / "factories.py",
             pysp_root / "utils" / "automatic" / "profiling.py",
-            pysp_root / "planner.py",
+            pysp_root / "utils" / "parallel" / "planner.py",  # moved here with the parallel backends it serves
         ] + sorted((pysp_root / "engines").glob("*.py"))
         allowed_modules = {
             "pysp.stats",

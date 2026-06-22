@@ -309,7 +309,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
 
         For a multivariate Gaussian ``p(y) >= p(x)`` iff the squared Mahalanobis distance is no larger,
         and that distance is chi-square with ``dim`` degrees of freedom, so ``G(x) = chi2.cdf(maha2, dim)``.
-        Used by :func:`pysp.utils.density_rank.density_rank` to return an EXACT cumulative for the MVN.
+        Used by :func:`pysp.enumeration.density_rank.density_rank` to return an EXACT cumulative for the MVN.
         """
         from scipy.stats import chi2
 
