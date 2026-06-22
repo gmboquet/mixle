@@ -22,6 +22,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
+from pysp.capability import Neutral, supports
 from pysp.stats.combinator.composite import _distribute_child_prior
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
@@ -134,8 +135,8 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         self.default_dist = default_dist if default_dist is not None else NullDistribution()
         self.given_dist = given_dist if given_dist is not None else NullDistribution()
 
-        self.has_default = not isinstance(self.default_dist, NullDistribution)
-        self.has_given = not isinstance(self.given_dist, NullDistribution)
+        self.has_default = not supports(self.default_dist, Neutral)
+        self.has_given = not supports(self.given_dist, Neutral)
         self.name = name
         self.keys = keys
         self.set_prior(prior)
