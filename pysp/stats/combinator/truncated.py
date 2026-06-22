@@ -10,11 +10,13 @@ finite ``allowed`` set to keep (``Z = sum_a p_base(a)``).  It pairs with the Pha
 the renormalizer is exactly the truncated tail/total the enumeration bounds reason about.
 """
 
+import math
 from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.special import logsumexp
 
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -29,6 +31,20 @@ from pysp.stats.compute.pdist import (
 from pysp.utils.enumeration import freeze
 
 _REJECTION_BUDGET = 1_000_000  # max base draws before a rejection sampler gives up
+
+
+def _log1mexp(log_p: float) -> float:
+    """Return ``log(1 - exp(log_p))`` for ``log_p <= 0``, stable across the whole range.
+
+    Uses the two-regime split (Mächler): ``log(-expm1(log_p))`` when the forbidden mass is small and
+    ``log1p(-exp(log_p))`` when it is close to 1, so the retained mass ``1 - p_forbidden`` is never
+    formed by a catastrophically cancelling subtraction in probability space.
+    """
+    if log_p >= 0.0:
+        return -math.inf
+    if log_p > -math.log(2.0):
+        return math.log(-math.expm1(log_p))
+    return math.log1p(-math.exp(log_p))
 
 
 class TruncatedDistribution(SequenceEncodableProbabilityDistribution):
@@ -59,14 +75,22 @@ class TruncatedDistribution(SequenceEncodableProbabilityDistribution):
         self._forbidden_values = None if forbidden is None else list(forbidden)
         self._allowed_keys = None if allowed is None else {freeze(v) for v in allowed}
         self._forbidden_keys = None if forbidden is None else {freeze(v) for v in forbidden}
-        with np.errstate(divide="ignore"):
-            if self._allowed_values is not None:
-                z = float(sum(np.exp(float(base.log_density(v))) for v in self._allowed_values))
-            else:
-                z = 1.0 - float(sum(np.exp(float(base.log_density(v))) for v in self._forbidden_values))
-            if not (z > 0.0):
-                raise ValueError("Truncation retains no probability mass.")
-            self.log_z = float(np.log(z))
+        # The retained log-mass ``log Z`` is formed in log space so it survives the tail-censoring
+        # regime: an ``allowed`` set whose atoms are individually tiny is summed by ``logsumexp``, and
+        # a ``forbidden`` set whose mass is ~1 uses a stable ``log(1 - p_forbidden)`` instead of the
+        # catastrophically cancelling ``1 - sum(exp(...))``.
+        if self._allowed_values is not None:
+            log_probs = [float(base.log_density(v)) for v in self._allowed_values]
+            finite = [lp for lp in log_probs if lp > -math.inf]
+            log_z = float(logsumexp(finite)) if finite else -math.inf
+        else:
+            log_forbidden = [float(base.log_density(v)) for v in self._forbidden_values]
+            finite = [lp for lp in log_forbidden if lp > -math.inf]
+            log_p_forbidden = float(logsumexp(finite)) if finite else -math.inf
+            log_z = _log1mexp(log_p_forbidden)
+        if not (log_z > -math.inf):
+            raise ValueError("Truncation retains no probability mass.")
+        self.log_z = log_z
 
     def __str__(self) -> str:
         sel = (
