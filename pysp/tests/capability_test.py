@@ -107,6 +107,32 @@ def test_intersect_capabilities_is_facet_preserving():
     assert cap.intersect_capabilities([]) == frozenset(c.__name__ for c in cap.FACET_PRESERVING)
 
 
+# --------------------------------------------------------------- combinators compose capabilities
+def test_combinators_compose_capabilities_automatically():
+    from pysp.stats.combinator.composite import CompositeDistribution
+    from pysp.stats.combinator.sequence import SequenceDistribution
+
+    # A composite of two finite-support leaves is itself finite, enumerable, and rankable —
+    # support_size composes structurally, so capabilities() reflects it with no class names.
+    comp = CompositeDistribution([_cat(), CategoricalDistribution({"x": 0.5, "y": 0.5})])
+    assert {"Enumerable", "FiniteSupport", "RankableByIndex"} <= cap.capabilities(comp)
+    assert comp.support_size() == 6
+    # A sequence with an unbounded (Poisson) length is still enumerable but no longer finite/rankable.
+    seq = SequenceDistribution(_cat(), PoissonDistribution(2.0))
+    seq_caps = cap.capabilities(seq)
+    assert "Enumerable" in seq_caps
+    assert "FiniteSupport" not in seq_caps and "RankableByIndex" not in seq_caps
+
+
+def test_distribution_capabilities_method():
+    # dist.capabilities() is the public UX surface; equivalent to pysp.capabilities(dist).
+    d = _cat()
+    assert d.capabilities() == cap.capabilities(d)
+    import pysp
+
+    assert pysp.supports(d, cap.Enumerable) and pysp.capabilities(d) == d.capabilities()
+
+
 # --------------------------------------------------------------- generic capability-tiered algorithm
 def test_top_k_dispatches_on_capability():
     out = cap.top_k(_cat(), 2)
