@@ -214,7 +214,7 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum_of_logs = 0.0
         self.min_val = np.inf
         self.name = name
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: float, weight: float, estimate: ParetoDistribution | None) -> None:
         if x <= 0.0:
@@ -278,15 +278,15 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "ParetoDataEncoder":
         return ParetoDataEncoder()

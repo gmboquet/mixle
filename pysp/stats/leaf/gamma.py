@@ -404,7 +404,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = zero
         self.sum = zero
         self.sum_of_logs = zero
-        self.key = keys
+        self.keys = keys
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         """Initialize sufficient statistics of GammaAccumulator with weighted observation.
@@ -520,15 +520,15 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                x0, x1, x2 = stats_dict[self.key]
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                x0, x1, x2 = stats_dict[self.keys]
                 self.count += x0
                 self.sum += x1
                 self.sum_of_logs += x2
 
             else:
-                stats_dict[self.key] = (self.count, self.sum, self.sum_of_logs)
+                stats_dict[self.keys] = (self.count, self.sum, self.sum_of_logs)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set sufficient statistics of object instance to suff_stats with matching keys.
@@ -540,9 +540,9 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                x0, x1, x2 = stats_dict[self.key]
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                x0, x1, x2 = stats_dict[self.keys]
                 self.count = x0
                 self.sum = x1
                 self.sum_of_logs = x2

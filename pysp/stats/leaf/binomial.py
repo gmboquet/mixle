@@ -625,7 +625,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.sum = 0.0
         self.count = 0.0
-        self.key = keys
+        self.keys = keys
         self.name = name
         self.max_val = max_val
         self.min_val = min_val
@@ -812,11 +812,11 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set sufficient statistics of object instance to matching instances with matching keys.
@@ -828,9 +828,9 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "BinomialDataEncoder":
         """Create BinomialDataEncoder object for encoding data.

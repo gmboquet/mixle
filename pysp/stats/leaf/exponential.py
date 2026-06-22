@@ -351,7 +351,7 @@ class ExponentialAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.sum = 0.0
         self.count = 0.0
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: float, weight: float, estimate: Optional["ExponentialDistribution"]) -> None:
         """Update sufficient statistics for ExponentialAccumulator with one weighted observation.
@@ -467,13 +467,13 @@ class ExponentialAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                x0, x1 = stats_dict[self.key]
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                x0, x1 = stats_dict[self.keys]
                 self.count += x0
                 self.sum += x1
             else:
-                stats_dict[self.key] = (self.count, self.sum)
+                stats_dict[self.keys] = (self.count, self.sum)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set the sufficient statistics of ExponentialAccumulator to stats_key sufficient statistics if key is in
@@ -486,10 +486,10 @@ class ExponentialAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.count = stats_dict[self.key][0]
-                self.sum = stats_dict[self.key][1]
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.count = stats_dict[self.keys][0]
+                self.sum = stats_dict[self.keys][1]
 
     def acc_to_encoder(self) -> "ExponentialDataEncoder":
         """Returns an ExponentialDataEncoder object."""

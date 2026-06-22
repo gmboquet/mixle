@@ -112,7 +112,7 @@ class DirichletMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.c = np.zeros((dim, max(n, 1)), dtype=np.float64)
         self.count = 0.0
         self.name = name
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: np.ndarray, weight: float, estimate: DirichletMultinomialDistribution | None) -> None:
         xx = np.asarray(x, dtype=int)
@@ -150,15 +150,15 @@ class DirichletMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "DirichletMultinomialDataEncoder":
         return DirichletMultinomialDataEncoder()

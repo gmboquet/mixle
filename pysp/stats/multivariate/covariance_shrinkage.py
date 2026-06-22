@@ -86,7 +86,7 @@ class LedoitWolfAccumulator(SequenceEncodableStatisticAccumulator):
 
     def __init__(self, dim: int | None = None, keys: str | None = None, name: str | None = None):
         self.dim = dim
-        self.key = keys
+        self.keys = keys
         self.name = name
         self.count = 0.0
         self.s4 = 0.0

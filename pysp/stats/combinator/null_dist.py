@@ -246,7 +246,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
             key (Optional[str]): Optional key for merging sufficient statistics.
 
         """
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: Any | None, weight: float, estimate: Optional["NullDistribution"]) -> None:
         """No-op update. Nothing is accumulated for the NullDistribution.
@@ -334,11 +334,11 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
+        if self.keys is not None:
+            if self.keys in stats_dict:
                 pass
             else:
-                stats_dict[self.key] = None
+                stats_dict[self.keys] = None
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """No-op kept for interface consistency (the NullAccumulator stores no sufficient statistics).

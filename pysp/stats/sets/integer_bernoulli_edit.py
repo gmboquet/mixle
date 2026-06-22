@@ -101,7 +101,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         """
         num_vals = len(log_edit_pmat)
         self.name = name
-        self.key = keys
+        self.keys = keys
         self.init_dist = init_dist if init_dist is not None else NullDistribution()
         self.num_vals = num_vals
 
@@ -129,7 +129,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         s1 = repr(list(map(list, self.orig_log_edit_pmat)))
         s2 = repr(self.init_dist)
         s3 = repr(self.name)
-        s4 = repr(self.key)
+        s4 = repr(self.keys)
         return "IntegerBernoulliEditDistribution(%s, init_dist=%s, name=%s, keys=%s)" % (s1, s2, s3, s4)
 
     def density(self, x: T) -> float:
@@ -329,7 +329,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
             IntegerBernoulliEditEstimator object.
 
         """
-        return IntegerBernoulliEditEstimator(self.num_vals, pseudo_count=pseudo_count, name=self.name, keys=self.key)
+        return IntegerBernoulliEditEstimator(self.num_vals, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "IntegerBernoulliEditDataEncoder":
         """Returns an IntegerBernoulliEditDataEncoder object for encoding sequences of data."""
@@ -541,7 +541,7 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         self.pcnt = np.zeros((num_vals, 3), dtype=np.float64)
-        self.key = keys
+        self.keys = keys
         self.num_vals = num_vals
         self.init_acc = init_acc if init_acc is not None else NullAccumulator()
         self.tot_sum = 0.0
@@ -713,12 +713,12 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
             stats_dict (Dict[str, Any]): Maps keys to merged sufficient statistics.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                temp = stats_dict[self.key]
-                stats_dict[self.key] = (temp[0] + self.pcnt, temp[1] + self.tot_sum)
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                temp = stats_dict[self.keys]
+                stats_dict[self.keys] = (temp[0] + self.pcnt, temp[1] + self.tot_sum)
             else:
-                stats_dict[self.key] = (self.pcnt, self.tot_sum)
+                stats_dict[self.keys] = (self.pcnt, self.tot_sum)
 
         self.init_acc.key_merge(stats_dict)
 
@@ -729,9 +729,9 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
             stats_dict (Dict[str, Any]): Maps keys to merged sufficient statistics.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.pcnt, self.tot_sum = stats_dict[self.key]
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.pcnt, self.tot_sum = stats_dict[self.keys]
 
         self.init_acc.key_replace(stats_dict)
 

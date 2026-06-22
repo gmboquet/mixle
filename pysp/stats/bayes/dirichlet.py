@@ -330,13 +330,13 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         self.log_const = sum(gammaln(self.alpha)) - gammaln(sum(self.alpha))
         self.has_invalid = np.any(temp_mask)
         self.name = name
-        self.key = keys
+        self.keys = keys
 
     def __str__(self) -> str:
         """Returns a string representation of object instance."""
         s1 = repr(list(self.alpha))
         s2 = repr(self.name)
-        s3 = repr(self.key)
+        s3 = repr(self.keys)
         return "DirichletDistribution(%s, name=%s, keys=%s)" % (s1, s2, s3)
 
     def get_parameters(self) -> np.ndarray:
@@ -600,7 +600,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum = np.zeros(dim)
         self.sum2 = np.zeros(dim)
         self.counts = 0
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: np.ndarray | list[float], weight: float, estimate: Optional["DirichletDistribution"]) -> None:
         """Update sufficient statistics with a single weighted observation.
@@ -760,11 +760,11 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace sufficient statistics with values from stats_dict for a matching key.
@@ -776,9 +776,9 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "DirichletDataEncoder":
         """Create DirichletDataEncoder object for encoding sequences of iid Dirichlet observations."""

@@ -147,7 +147,7 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         self.init_dist = init_dist if init_dist is not None else NullDistribution()
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         self.name = name
-        self.key = keys
+        self.keys = keys
 
     def __str__(self) -> str:
         """Return string representation of object instance."""
@@ -157,7 +157,7 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         s4 = repr(self.init_dist) if self.init_dist is None else str(self.init_dist)
         s5 = repr(self.len_dist) if self.len_dist is None else str(self.len_dist)
         s6 = repr(self.name)
-        s7 = repr(self.key)
+        s7 = repr(self.keys)
 
         return "IntegerMarkovChainDistribution(%s, %s, lag=%s, init_dist=%s, len_dist=%s, name=%s, keys=%s)" % (
             s1,
@@ -464,7 +464,7 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             len_estimator=len_est,
             pseudo_count=pseudo_count,
             name=self.name,
-            keys=self.key,
+            keys=self.keys,
         )
 
     def dist_to_encoder(self) -> "IntegerMarkovChainDataEncoder":
@@ -787,7 +787,7 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
         self.init_accumulator = init_accumulator if init_accumulator is not None else NullAccumulator()
         self.max_value = -1
-        self.key = keys
+        self.keys = keys
 
         self._acc_rng = None
         self._len_rng = None
@@ -1067,11 +1067,11 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
         self.len_accumulator.key_merge(stats_dict)
 
@@ -1085,9 +1085,9 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
 
         self.len_accumulator.key_replace(stats_dict)
 
@@ -1133,14 +1133,14 @@ class IntegerMarkovChainAccumulatorFactory(StatisticAccumulatorFactory):
         self.lag = lag
         self.init_factory = init_factory if init_factory is not None else NullAccumulatorFactory()
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
-        self.key = keys
+        self.keys = keys
         self.name = name
 
     def make(self) -> "IntegerMarkovChainAccumulator":
         """Returns an IntegerMarkovChainAccumulator object from instance."""
         init_acc = self.init_factory.make()
         len_acc = self.len_factory.make()
-        return IntegerMarkovChainAccumulator(self.lag, init_acc, len_acc, keys=self.key, name=self.name)
+        return IntegerMarkovChainAccumulator(self.lag, init_acc, len_acc, keys=self.keys, name=self.name)
 
 
 class IntegerMarkovChainEstimator(ParameterEstimator):
@@ -1200,13 +1200,13 @@ class IntegerMarkovChainEstimator(ParameterEstimator):
         self.len_dist = len_dist
         self.pseudo_count = pseudo_count
         self.name = name
-        self.key = keys
+        self.keys = keys
 
     def accumulator_factory(self) -> "IntegerMarkovChainAccumulatorFactory":
         """Returns an IntegerMarkovChainAccumulatorFactory object from attributes values."""
         len_factory = self.len_estimator.accumulator_factory()
         init_factory = self.init_estimator.accumulator_factory()
-        return IntegerMarkovChainAccumulatorFactory(self.lag, init_factory, len_factory, keys=self.key)
+        return IntegerMarkovChainAccumulatorFactory(self.lag, init_factory, len_factory, keys=self.keys)
 
     def estimate(
         self,

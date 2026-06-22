@@ -241,7 +241,7 @@ class PlackettLuceAccumulator(SequenceEncodableStatisticAccumulator):
         self.num = np.zeros(dim)
         self.den = np.zeros(dim)
         self.count = 0.0
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: Sequence[int], weight: float, estimate: PlackettLuceDistribution | None) -> None:
         self.seq_update(np.asarray([x], dtype=int), np.asarray([weight], dtype=float), estimate)
@@ -285,15 +285,15 @@ class PlackettLuceAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "PlackettLuceDataEncoder":
         return PlackettLuceDataEncoder(dim=self.dim)
@@ -422,7 +422,7 @@ class PlackettLucePartialAccumulator(SequenceEncodableStatisticAccumulator):
         self.num = np.zeros(self.dim)
         self.den = np.zeros(self.dim)
         self.count = 0.0
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: Sequence[int], weight: float, estimate: PlackettLuceDistribution | None) -> None:
         self.seq_update([np.asarray(list(x), dtype=int)], np.asarray([weight], dtype=float), estimate)
@@ -466,15 +466,15 @@ class PlackettLucePartialAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "PlackettLucePartialDataEncoder":
         return PlackettLucePartialDataEncoder(dim=self.dim)

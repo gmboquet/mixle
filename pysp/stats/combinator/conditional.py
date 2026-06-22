@@ -829,7 +829,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         self.has_default = not isinstance(default_accumulator, NullAccumulator)
         self.has_given = not isinstance(given_accumulator, NullAccumulator)
 
-        self.key = keys
+        self.keys = keys
 
         #### seeds for intializers
         self._init_rng = False

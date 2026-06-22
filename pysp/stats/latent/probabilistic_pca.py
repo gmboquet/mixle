@@ -176,7 +176,7 @@ class ProbabilisticPCAAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = 0.0
         self.sum = np.zeros(dim) if dim is not None else None
         self.sum2 = np.zeros((dim, dim)) if dim is not None else None
-        self.key = keys
+        self.keys = keys
 
     def _ensure_dim(self, d: int) -> None:
         if self.dim is None:
@@ -222,15 +222,15 @@ class ProbabilisticPCAAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "ProbabilisticPCADataEncoder":
         return ProbabilisticPCADataEncoder()
