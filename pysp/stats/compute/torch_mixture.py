@@ -21,8 +21,8 @@ from typing import Any
 import numpy as np
 
 from pysp.engines import TorchEngine
-from pysp.inference.fit import fit_map as _fit_map
-from pysp.inference.fit import fit_mle as _fit_mle
+from pysp.inference.gradient_fit import fit_map as _fit_map
+from pysp.inference.gradient_fit import fit_mle as _fit_mle
 from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
 __all__ = ["TorchMixture"]

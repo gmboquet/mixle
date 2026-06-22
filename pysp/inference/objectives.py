@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.inference.fit import (
+from pysp.inference.gradient_fit import (
     _gradient_build_state,
     _gradient_raw_state,
     _gradient_shadow_state,

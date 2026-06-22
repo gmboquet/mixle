@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 import pytest
 
-from pysp.inference.fit import fit_map, fit_mle
+from pysp.inference.gradient_fit import fit_map, fit_mle
 from pysp.inference.priors import (
     BetaPrior,
     ConditionalPrior,

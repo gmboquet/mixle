@@ -506,6 +506,47 @@ def reflective_hmc(
     )
 
 
+def particle_filter(
+    observations: Any,
+    propagate: Callable[[np.ndarray, np.random.RandomState], Any],
+    log_likelihood: Callable[[np.ndarray, Any], Any],
+    initial_particles: Any,
+    *,
+    resample: bool = True,
+    rng: np.random.RandomState | None = None,
+) -> tuple[np.ndarray, float]:
+    """Bootstrap particle filter (sequential Monte Carlo) for a general state-space model.
+
+    Propagates a cloud of weighted particles through a user-supplied state-space model and conditions on
+    each observation in turn -- the nonlinear/non-Gaussian generalization of the Kalman filter (and a
+    member of the SMC family). ``initial_particles`` is an ``(N, d)`` array from the prior; ``propagate(
+    particles, rng)`` returns the particles advanced one step through the transition (including process
+    noise); ``log_likelihood(particles, y)`` returns the per-particle observation log-density. Each step
+    reweights by the likelihood, records the weighted-mean filtered state, and (by default) multinomially
+    resamples to fight weight degeneracy. Returns ``(filtered_means, log_likelihood)`` where the second
+    value is the SMC estimate of the model's marginal log-likelihood ``log p(y_1:T)`` (an unbiased
+    evidence estimate, usable for parameter inference). For a linear-Gaussian model it converges to the
+    exact Kalman filter as ``N -> infinity``.
+    """
+    rng = np.random.RandomState() if rng is None else rng
+    particles = np.array(initial_particles, dtype=np.float64)
+    n = particles.shape[0]
+    means: list[np.ndarray] = []
+    log_lik = 0.0
+    for y in observations:
+        particles = np.asarray(propagate(particles, rng), dtype=np.float64)
+        log_w = np.asarray(log_likelihood(particles, y), dtype=np.float64)
+        max_lw = float(np.max(log_w))
+        weights = np.exp(log_w - max_lw)
+        w_sum = float(weights.sum())
+        log_lik += max_lw + np.log(w_sum / n)  # marginal-likelihood increment (log-sum-exp / N)
+        weights = weights / w_sum
+        means.append(weights @ particles)
+        if resample:
+            particles = particles[rng.choice(n, size=n, p=weights)]
+    return np.array(means), log_lik
+
+
 def nuts(
     log_target: LogTarget | None = None,
     grad_log_target: Callable[[Any], Any] | None = None,
