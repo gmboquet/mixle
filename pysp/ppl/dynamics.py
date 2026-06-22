@@ -393,3 +393,71 @@ def integrate_sensitivity(
     z = integrate_adaptive(aug, z0, t_eval, t0=t0, rtol=rtol, atol=atol)
     times = np.asarray(t_eval, dtype=np.float64)
     return z[:, :n], z[:, n:].reshape(len(times), n, n_par)
+
+
+# ---------------------------------------------------------------------------
+# Differential-algebraic equations (semi-explicit index-1, mass-matrix form)
+# ---------------------------------------------------------------------------
+def integrate_dae(
+    rhs: Any,
+    y0: Any,
+    t_eval: Any,
+    mass: Any,
+    *,
+    t0: float = 0.0,
+    jac: Any = None,
+    h_max: float = 0.02,
+    newton_tol: float = 1.0e-12,
+    max_newton: int = 60,
+) -> np.ndarray:
+    """Integrate a mass-matrix DAE/ODE ``M y' = rhs(t, y)`` with the L-stable SDIRK2 method.
+
+    Generalizes :func:`integrate_stiff` to a constant (possibly **singular**) mass matrix ``M``: rows
+    where ``M`` is zero are algebraic constraints ``0 = rhs_row(t, y)``, so this solves semi-explicit
+    index-1 differential-algebraic equations (and ordinary stiff ODEs when ``M`` is invertible). Each
+    SDIRK stage solves ``M k = rhs(t, base + h*gamma*k)`` for the stage slope ``k`` by Newton, using the
+    linearization ``(M - h*gamma*df/dy)``. The initial condition must be consistent (satisfy the
+    algebraic constraints). Returns the state at each ``t_eval`` time, shape ``(len(t_eval), len(y0))``.
+    """
+    f = lambda t, y: np.atleast_1d(np.asarray(rhs(t, y), dtype=np.float64))  # noqa: E731
+    m = np.asarray(mass, dtype=np.float64)
+    y = np.atleast_1d(np.asarray(y0, dtype=np.float64)).copy()
+    n = y.size
+    times = np.asarray(t_eval, dtype=np.float64)
+    t = float(t0)
+    g = _SDIRK2_GAMMA
+
+    def jacobian(tc: float, yc: np.ndarray) -> np.ndarray:
+        if jac is not None:
+            return np.atleast_2d(np.asarray(jac(tc, yc), dtype=np.float64))
+        eps = 1.0e-7
+        f0 = f(tc, yc)
+        out = np.empty((n, n))
+        for i in range(n):
+            yp = yc.copy()
+            yp[i] += eps
+            out[:, i] = (f(tc, yp) - f0) / eps
+        return out
+
+    def solve_stage(tc: float, base: np.ndarray, h: float) -> np.ndarray:
+        k = np.linalg.lstsq(m, f(tc, base), rcond=None)[0]  # consistent initial guess (handles singular M)
+        for _ in range(max_newton):
+            resid = m @ k - f(tc, base + h * g * k)
+            mat = m - h * g * jacobian(tc, base + h * g * k)
+            dk = np.linalg.solve(mat, -resid)
+            k = k + dk
+            if np.max(np.abs(dk)) < newton_tol:
+                break
+        return k
+
+    result: list[np.ndarray] = []
+    for t_next in times:
+        nsub = max(1, int(np.ceil((t_next - t) / h_max)))
+        h = (t_next - t) / nsub
+        for _ in range(nsub):
+            k1 = solve_stage(t + g * h, y, h)
+            k2 = solve_stage(t + h, y + h * (1.0 - g) * k1, h)
+            y = y + h * ((1.0 - g) * k1 + g * k2)
+            t = t + h
+        result.append(y.copy())
+    return np.array(result)
