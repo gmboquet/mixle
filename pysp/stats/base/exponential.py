@@ -293,6 +293,10 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         """Excess kurtosis (6)."""
         return 6.0
 
+    def mode(self) -> float:
+        """Mode (0)."""
+        return 0.0
+
     def sampler(self, seed: int | None = None) -> "ExponentialSampler":
         """Create an ExponentialSampler object with scale beta.
 

@@ -349,6 +349,10 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         """Excess kurtosis (0)."""
         return 0.0
 
+    def mode(self) -> float:
+        """Mode (= the mean mu)."""
+        return float(self.mu)
+
     def sampler(self, seed: int | None = None) -> "GaussianSampler":
         """Create an GaussianSampler object from parameters of GaussianDistribution instance.
 

@@ -763,6 +763,8 @@ def summarize(obj: Any) -> dict[str, float]:
         out["entropy"] = float(obj.entropy())
     if supports(obj, HasCDF):
         out["median"] = float(obj.quantile(0.5))
+    if callable(getattr(obj, "mode", None)):
+        out["mode"] = float(obj.mode())
     return out
 
 

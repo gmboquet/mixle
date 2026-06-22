@@ -152,6 +152,10 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
         """Excess kurtosis (3)."""
         return 3.0
 
+    def mode(self) -> float:
+        """Mode (= the location mu)."""
+        return float(self.mu)
+
     def sampler(self, seed: int | None = None) -> "LaplaceSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LaplaceSampler(self, seed)

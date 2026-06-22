@@ -441,6 +441,12 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         shift = float(getattr(self, "min_val", 0) or 0)
         return float(shift + binom.ppf(float(q), self.n, self.p))
 
+    def mode(self) -> float:
+        """Mode min_val + floor((n+1)p)."""
+        import math
+
+        return float(getattr(self, "min_val", 0) or 0) + math.floor((self.n + 1.0) * self.p)
+
     def sampler(self, seed: int | None = None) -> "BinomialSampler":
         """Returns BinomialSampler for generating samples from BinomialDistribution(n,p,min_val).
 
