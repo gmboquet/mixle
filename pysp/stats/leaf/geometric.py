@@ -64,12 +64,12 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
                 sufficient_statistics=cls.exp_family_sufficient_statistics,
                 natural_parameters=cls.exp_family_natural_parameters,
                 log_partition=cls.exp_family_log_partition,
-                legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+                legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
             ),
         )
 
     @staticmethod
-    def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+    def exp_family_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Return per-row Geometric sufficient statistics in accumulator order."""
         xx = engine.asarray(x)
         return xx * 0.0 + engine.asarray(1.0), xx
