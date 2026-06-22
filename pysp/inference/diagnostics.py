@@ -190,3 +190,34 @@ def mcse_mean(chains: Any) -> np.ndarray:
     m, n, d = arr.shape
     sd = arr.reshape(m * n, d).std(axis=0, ddof=1)
     return sd / np.sqrt(ess(arr))
+
+
+def mcmc_summary(chains: Any) -> list[dict[str, float]]:
+    """Per-parameter posterior + convergence summary (the ArviZ-style ``summary`` table).
+
+    Returns one dict per parameter with the posterior ``mean``/``sd`` and 5/50/95% quantiles, plus the
+    recommended convergence diagnostics: ``r_hat`` (= :func:`rhat_max`, the max of the bulk and folded
+    rank-normalized split-R-hats), ``ess_bulk``, ``ess_tail``, and ``mcse_mean`` (Vehtari et al. 2021).
+    Declare convergence at ``r_hat < 1.01`` with ``ess_bulk``/``ess_tail`` comfortably in the hundreds.
+    """
+    arr = _as_chains(chains)
+    m, n, d = arr.shape
+    flat = arr.reshape(m * n, d)
+    rh, eb, et, mc = rhat_max(arr), ess_bulk(arr), ess_tail(arr), mcse_mean(arr)
+    out: list[dict[str, float]] = []
+    for k in range(d):
+        col = flat[:, k]
+        out.append(
+            {
+                "mean": float(col.mean()),
+                "sd": float(col.std(ddof=1)),
+                "q05": float(np.quantile(col, 0.05)),
+                "q50": float(np.quantile(col, 0.5)),
+                "q95": float(np.quantile(col, 0.95)),
+                "r_hat": float(rh[k]),
+                "ess_bulk": float(eb[k]),
+                "ess_tail": float(et[k]),
+                "mcse_mean": float(mc[k]),
+            }
+        )
+    return out
