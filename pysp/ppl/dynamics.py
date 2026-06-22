@@ -559,3 +559,38 @@ def shallow_water_rhs(dx: float, gravity: float = 9.81) -> Any:
         return np.concatenate([-d_flux[0], -d_flux[1]])
 
     return rhs
+
+
+# ---------------------------------------------------------------------------
+# Generic scalar hyperbolic conservation law (Rusanov / Riemann)
+# ---------------------------------------------------------------------------
+def conservation_law_rhs(flux: Any, max_speed: Any, dx: float, *, bc: str = "periodic") -> Any:
+    """Build the finite-volume right-hand side of a scalar conservation law ``u_t + flux(u)_x = 0``.
+
+    Returns ``rhs(t, u)`` using the Rusanov (local Lax-Friedrichs) numerical flux, an approximate Riemann
+    solver that captures shocks at the correct Rankine-Hugoniot speed (and resolves rarefactions) without
+    spurious oscillations. ``flux(u)`` is the physical flux ``f(u)`` and ``max_speed(u)`` its maximum
+    characteristic speed ``|f'(u)|`` (used for the interface dissipation). ``bc="periodic"`` wraps the
+    grid; ``bc="outflow"`` uses zero-gradient (non-reflecting) boundaries. Examples: inviscid Burgers
+    (``flux = u^2/2``, ``max_speed = |u|``) forms a shock; linear advection (``flux = c u``) transports at
+    speed ``c``. Integrate with :func:`integrate_adaptive`.
+    """
+    dx = float(dx)
+    if bc not in ("periodic", "outflow"):
+        raise ValueError("bc must be 'periodic' or 'outflow'.")
+
+    def rhs(t: float, u: Any) -> np.ndarray:
+        u = np.asarray(u, dtype=np.float64)
+        f = np.asarray(flux(u), dtype=np.float64)
+        a = np.asarray(max_speed(u), dtype=np.float64)
+        if bc == "periodic":
+            a_iface = np.maximum(a, np.roll(a, -1))
+            f_iface = 0.5 * (f + np.roll(f, -1)) - 0.5 * a_iface * (np.roll(u, -1) - u)  # at i+1/2
+            return -(f_iface - np.roll(f_iface, 1)) / dx
+        a_iface = np.maximum(a[:-1], a[1:])
+        f_iface = 0.5 * (f[:-1] + f[1:]) - 0.5 * a_iface * (u[1:] - u[:-1])  # interfaces 1/2 .. n-3/2
+        du = np.zeros_like(u)
+        du[1:-1] = -(f_iface[1:] - f_iface[:-1]) / dx  # zero-gradient (outflow) at the two edge cells
+        return du
+
+    return rhs
