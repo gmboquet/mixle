@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from pysp.models._result import FitResult
+
 
 @dataclass
 class PartiallyObservableMarkovDecisionProcessFilterResult:
@@ -19,11 +21,8 @@ class PartiallyObservableMarkovDecisionProcessFilterResult:
 
 
 @dataclass
-class PartiallyObservableMarkovDecisionProcessFitResult:
+class PartiallyObservableMarkovDecisionProcessFitResult(FitResult["PartiallyObservableMarkovDecisionProcessModel"]):
     """Baum-Welch style fit result for known-action PartiallyObservableMarkovDecisionProcess sequences."""
-
-    model: PartiallyObservableMarkovDecisionProcessModel
-    history: list[float]
 
 
 class PartiallyObservableMarkovDecisionProcessModel:

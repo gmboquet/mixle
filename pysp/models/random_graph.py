@@ -12,15 +12,14 @@ from typing import Any
 
 import numpy as np
 
+from pysp.models._result import FitResult
+
 _EPS = 1.0e-12
 
 
 @dataclass
-class HardEMResult:
+class HardEMResult(FitResult["StochasticBlockGraphModel"]):
     """Result from hard-EM fitting of a stochastic block model."""
-
-    model: StochasticBlockGraphModel
-    history: list[float]
 
 
 class ErdosRenyiGraphModel:

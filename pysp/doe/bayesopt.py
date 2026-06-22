@@ -123,13 +123,24 @@ register_acquisition("upper_confidence_bound", upper_confidence_bound, aliases=(
 
 
 @dataclass(frozen=True)
-class BayesOptResult:
+class OptimizationResult:
+    """Common outcome of a model-based optimization run: the full evaluation history.
+
+    ``x`` is the ``(N, d)`` matrix of evaluated points and ``y`` the corresponding objective
+    values (an ``(N,)`` vector for single-objective runs, an ``(N, M)`` matrix for multi-objective).
+    Concrete result types extend this with their best-point / Pareto-front fields.
+    """
+
+    x: np.ndarray
+    y: np.ndarray
+
+
+@dataclass(frozen=True)
+class BayesOptResult(OptimizationResult):
     """Outcome of a Bayesian-optimization run."""
 
     best_x: np.ndarray
     best_y: float
-    x: np.ndarray
-    y: np.ndarray
 
 
 def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Any | None, fit_kwargs: dict[str, Any] | None) -> Any:
@@ -329,5 +340,6 @@ __all__: Sequence[str] = [
     "propose_next",
     "propose_batch",
     "minimize",
+    "OptimizationResult",
     "BayesOptResult",
 ]
