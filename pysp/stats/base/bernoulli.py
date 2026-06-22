@@ -250,6 +250,10 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
             return 0.0
         return float(-p * math.log(p) - (1.0 - p) * math.log(1.0 - p))
 
+    def mode(self) -> float:
+        """Mode (0 if p<1/2 else 1)."""
+        return 0.0 if self.p < 0.5 else 1.0
+
     def sampler(self, seed: int | None = None) -> "BernoulliSampler":
         """Return a sampler for drawing observations from this distribution."""
         return BernoulliSampler(self, seed)

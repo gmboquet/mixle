@@ -174,6 +174,10 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
         """Excess kurtosis (12/5)."""
         return 2.4
 
+    def mode(self) -> float:
+        """Mode (= the location loc)."""
+        return float(self.loc)
+
     def sampler(self, seed: int | None = None) -> "GumbelSampler":
         """Return a sampler for drawing observations from this distribution."""
         return GumbelSampler(self, seed)

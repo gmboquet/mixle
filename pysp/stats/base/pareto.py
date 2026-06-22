@@ -193,6 +193,10 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(math.log(self.xm / self.alpha) + 1.0 / self.alpha + 1.0)
 
+    def mode(self) -> float:
+        """Mode (the scale xm)."""
+        return float(self.xm)
+
     def sampler(self, seed: int | None = None) -> "ParetoSampler":
         """Return a sampler for drawing observations from this distribution."""
         return ParetoSampler(self, seed)

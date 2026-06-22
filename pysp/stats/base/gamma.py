@@ -338,6 +338,10 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         """Excess kurtosis 6/k."""
         return float(6.0 / self.k)
 
+    def mode(self) -> float:
+        """Mode (k-1)*theta for k>=1, else 0."""
+        return float((self.k - 1.0) * self.theta) if self.k >= 1.0 else 0.0
+
     def sampler(self, seed: int | None = None) -> "GammaSampler":
         """Create a GammaSampler object from GammaDistribution.
 

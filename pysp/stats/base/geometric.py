@@ -294,6 +294,10 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
             return 0.0
         return float((-(1.0 - p) * math.log(1.0 - p) - p * math.log(p)) / p)
 
+    def mode(self) -> float:
+        """Mode (1 -- the minimum of the decreasing pmf)."""
+        return 1.0
+
     def sampler(self, seed: int | None = None) -> "GeometricSampler":
         """Creates GeometricSampler object from GeometricDistribution instance.
 
