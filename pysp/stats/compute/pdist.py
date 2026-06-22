@@ -682,11 +682,26 @@ class StatisticAccumulator(Generic[SS]):
         """
         return self.from_value(scale_suff_stat(self.value(), c))
 
-    @abstractmethod
-    def key_merge(self, stats_dict: dict[str, Any]) -> None: ...
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Pool this accumulator's statistics into ``stats_dict`` under its merge key.
 
-    @abstractmethod
-    def key_replace(self, stats_dict: dict[str, Any]) -> None: ...
+        The structural default implements the common single-key pattern: store the accumulator
+        under ``self.keys`` the first time the key is seen, else ``combine`` into the one already
+        there. Accumulators with several named keys (e.g. an HMM's init/trans/state keys) or a
+        non-accumulator stats payload override this. A ``keys`` of ``None`` (the default) is a no-op.
+        """
+        keys = getattr(self, "keys", None)
+        if keys is not None:
+            if keys in stats_dict:
+                stats_dict[keys].combine(self.value())
+            else:
+                stats_dict[keys] = self
+
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's statistics from the pooled ``stats_dict`` entry (see key_merge)."""
+        keys = getattr(self, "keys", None)
+        if keys is not None and keys in stats_dict:
+            self.from_value(stats_dict[keys].value())
 
 
 class SequenceEncodableStatisticAccumulator(StatisticAccumulator[SS]):
