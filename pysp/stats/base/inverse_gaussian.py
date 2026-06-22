@@ -246,6 +246,18 @@ class InverseGaussianDistribution(SequenceEncodableProbabilityDistribution):
             engine.sum(ww * inv_vals[:, None], axis=0),
         )
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x) (Wald, via scipy invgauss)."""
+        from scipy.stats import invgauss
+
+        return float(invgauss.cdf(float(x), mu=self.mu / self.lam, scale=self.lam))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q)."""
+        from scipy.stats import invgauss
+
+        return float(invgauss.ppf(float(q), mu=self.mu / self.lam, scale=self.lam))
+
     def sampler(self, seed: int | None = None) -> "InverseGaussianSampler":
         """Return a sampler for drawing observations from this distribution."""
         return InverseGaussianSampler(self, seed)

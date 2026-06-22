@@ -148,6 +148,14 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
             engine.sum(ww, axis=0),
         )
 
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x)."""
+        return math.exp(-math.exp(-(float(x) - self.loc) / self.scale))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q)."""
+        return float(self.loc - self.scale * math.log(-math.log(float(q))))
+
     def sampler(self, seed: int | None = None) -> "GumbelSampler":
         """Return a sampler for drawing observations from this distribution."""
         return GumbelSampler(self, seed)
