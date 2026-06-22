@@ -29,6 +29,7 @@ from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
 from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge
+from pysp.stats.base.categorical_multinomial import MultisetProductEnumerator
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -46,7 +47,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.leaf.categorical_multinomial import MultisetProductEnumerator
 from pysp.utils.aliasing import coalesce_alias
 
 SS0 = TypeVar("SS0")

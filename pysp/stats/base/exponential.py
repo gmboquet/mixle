@@ -15,6 +15,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
+from pysp.stats.base.gamma import GammaDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -23,7 +24,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.leaf.gamma import GammaDistribution
 from pysp.utils.special import digamma
 
 
@@ -109,7 +109,7 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
             beta (float): Positive valued real number defining scale of exponential distribution.
             name (Optional[str]): Assign a name to ExponentialDistribution object.
             prior (Optional): Conjugate parameter prior over the rate ``1/beta``. A
-                :class:`~pysp.stats.leaf.gamma.GammaDistribution` enables the Bayesian/variational
+                :class:`~pysp.stats.base.gamma.GammaDistribution` enables the Bayesian/variational
                 machinery (``expected_log_density`` and the conjugate posterior update); ``None``
                 (default) is a plain point model.
 

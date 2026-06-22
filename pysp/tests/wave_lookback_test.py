@@ -14,10 +14,10 @@ from numpy.random import RandomState
 import pysp.stats.latent.lookback_hidden_markov_model as new_mod
 from pysp.inference import seq_estimate, seq_initialize
 from pysp.stats import seq_encode, seq_log_density_sum
+from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
 from pysp.stats.graph.integer_markov_chain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 
 MODULES = [new_mod]
 

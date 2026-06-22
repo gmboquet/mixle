@@ -7,7 +7,7 @@ in chunk order the outcome must be *bit-identical* to the serial path.
 
 import unittest
 
-from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.base.gaussian import GaussianDistribution, GaussianEstimator
 from pysp.utils.parallel.planner import LocalEncodedData, encoded_data
 
 

@@ -59,6 +59,7 @@ from scipy.special import logsumexp
 
 from pysp.capability import Neutral, supports
 from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge
+from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.combinator.null_dist import NullDistribution, NullEstimator
 from pysp.stats.compute.pdist import (
     DistributionEnumerator,
@@ -69,7 +70,6 @@ from pysp.stats.compute.pdist import (
 )
 from pysp.stats.graph.markov_chain import stationary_distribution
 from pysp.stats.latent.hidden_markov import HiddenMarkovAccumulatorFactory, HiddenMarkovModelDistribution
-from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.utils.optional_deps import HAS_NUMBA
 
 STRUCTURAL_ZERO = -1

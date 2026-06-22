@@ -21,13 +21,13 @@ import unittest
 import numpy as np
 import scipy.stats
 
+from pysp.stats.base.gamma import GammaDistribution, GammaEstimator
+from pysp.stats.base.gaussian import GaussianDistribution
+from pysp.stats.base.point_mass import PointMassDistribution, PointMassEstimator
 from pysp.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
 from pysp.stats.combinator.conditional import ConditionalDistribution, ConditionalDistributionEstimator
 from pysp.stats.combinator.null_dist import NullDistribution, NullSampler
 from pysp.stats.combinator.sequence import SequenceDistribution
-from pysp.stats.leaf.gamma import GammaDistribution, GammaEstimator
-from pysp.stats.leaf.gaussian import GaussianDistribution
-from pysp.stats.leaf.point_mass import PointMassDistribution, PointMassEstimator
 
 
 def fit(data, est):

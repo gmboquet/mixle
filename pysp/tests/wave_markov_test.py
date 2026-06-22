@@ -14,9 +14,9 @@ import numpy as np
 
 
 def _make_markov_transform_dist(alpha=0.05, with_len=True):
+    from pysp.stats.base.categorical import CategoricalDistribution
     from pysp.stats.combinator.composite import CompositeDistribution
     from pysp.stats.graph.markov_transform import MarkovTransformDistribution
-    from pysp.stats.leaf.categorical import CategoricalDistribution
 
     nw = 3
     init_prob = np.asarray([0.5, 0.3, 0.2])
@@ -39,9 +39,9 @@ def _make_markov_transform_dist(alpha=0.05, with_len=True):
 
 
 def _make_sparse_assoc_dist(low_memory=False):
+    from pysp.stats.base.categorical import CategoricalDistribution
     from pysp.stats.combinator.composite import CompositeDistribution
     from pysp.stats.graph.sparse_markov_transform import SparseMarkovAssociationDistribution
-    from pysp.stats.leaf.categorical import CategoricalDistribution
 
     nw = 3
     init_prob = np.asarray([0.5, 0.3, 0.2])

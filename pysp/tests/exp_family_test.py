@@ -12,6 +12,23 @@ import unittest
 import numpy as np
 
 from pysp.ppl import Bernoulli, Field, Normal, Poisson, free
+from pysp.stats.base.bernoulli import BernoulliDistribution
+from pysp.stats.base.beta import BetaDistribution
+from pysp.stats.base.binomial import BinomialDistribution
+from pysp.stats.base.categorical_multinomial import MultinomialDistribution
+from pysp.stats.base.exponential import ExponentialDistribution
+from pysp.stats.base.gamma import GammaDistribution
+from pysp.stats.base.gaussian import GaussianDistribution
+from pysp.stats.base.geometric import GeometricDistribution
+from pysp.stats.base.half_normal import HalfNormalDistribution
+from pysp.stats.base.inverse_gamma import InverseGammaDistribution
+from pysp.stats.base.inverse_gaussian import InverseGaussianDistribution
+from pysp.stats.base.log_gaussian import LogGaussianDistribution
+from pysp.stats.base.logseries import LogSeriesDistribution
+from pysp.stats.base.negative_binomial import NegativeBinomialDistribution
+from pysp.stats.base.poisson import PoissonDistribution
+from pysp.stats.base.rayleigh import RayleighDistribution
+from pysp.stats.base.von_mises import VonMisesDistribution
 from pysp.stats.combinator.composite import CompositeDistribution
 from pysp.stats.combinator.sequence import SequenceDistribution
 from pysp.stats.exp_family import (
@@ -20,23 +37,6 @@ from pysp.stats.exp_family import (
     is_exponential_family,
     to_exponential_family,
 )
-from pysp.stats.leaf.bernoulli import BernoulliDistribution
-from pysp.stats.leaf.beta import BetaDistribution
-from pysp.stats.leaf.binomial import BinomialDistribution
-from pysp.stats.leaf.categorical_multinomial import MultinomialDistribution
-from pysp.stats.leaf.exponential import ExponentialDistribution
-from pysp.stats.leaf.gamma import GammaDistribution
-from pysp.stats.leaf.gaussian import GaussianDistribution
-from pysp.stats.leaf.geometric import GeometricDistribution
-from pysp.stats.leaf.half_normal import HalfNormalDistribution
-from pysp.stats.leaf.inverse_gamma import InverseGammaDistribution
-from pysp.stats.leaf.inverse_gaussian import InverseGaussianDistribution
-from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
-from pysp.stats.leaf.logseries import LogSeriesDistribution
-from pysp.stats.leaf.negative_binomial import NegativeBinomialDistribution
-from pysp.stats.leaf.poisson import PoissonDistribution
-from pysp.stats.leaf.rayleigh import RayleighDistribution
-from pysp.stats.leaf.von_mises import VonMisesDistribution
 
 
 def _leaf_cases():
@@ -145,7 +145,7 @@ class CompositeExponentialFamilyTest(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(form.log_density(xs)), ref, atol=1e-9)
 
     def test_non_exp_family_child_returns_none(self):
-        from pysp.stats.leaf.laplace import LaplaceDistribution
+        from pysp.stats.base.laplace import LaplaceDistribution
 
         comp = CompositeDistribution((GaussianDistribution(0.0, 1.0), LaplaceDistribution(0.0, 1.0)))
         self.assertIsNone(to_exponential_family(comp))
@@ -208,7 +208,7 @@ class MultinomialExponentialFamilyTest(unittest.TestCase):
         self.assertIsNone(to_exponential_family(mn))
 
     def test_non_exp_family_child_returns_none(self):
-        from pysp.stats.leaf.laplace import LaplaceDistribution
+        from pysp.stats.base.laplace import LaplaceDistribution
 
         mn = MultinomialDistribution(LaplaceDistribution(0.0, 1.0))
         self.assertIsNone(to_exponential_family(mn))
@@ -265,7 +265,7 @@ class ConditionalExponentialFamilyTest(unittest.TestCase):
 
 class NonExpFamilyTest(unittest.TestCase):
     def test_returns_none_for_non_exp_family(self):
-        from pysp.stats.leaf.laplace import LaplaceDistribution
+        from pysp.stats.base.laplace import LaplaceDistribution
 
         d = LaplaceDistribution(0.0, 1.0)
         self.assertIsNone(to_exponential_family(d))

@@ -12,9 +12,9 @@ import unittest
 import numpy as np
 
 from pysp.inference.estimation import _resolve_objective, fit, optimize
+from pysp.stats.base.gaussian import GaussianDistribution, GaussianEstimator
 from pysp.stats.bayes.dirichlet_process_mixture import DirichletProcessMixtureEstimator
 from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
-from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
 
 
 def _gaussian_prior():

@@ -18,7 +18,7 @@ from pysp.stats import (
     seq_encode,
     seq_log_density_sum,
 )
-from pysp.stats.leaf.gaussian import GaussianDistribution
+from pysp.stats.base.gaussian import GaussianDistribution
 
 
 class LogDensityConvenienceTestCase(unittest.TestCase):

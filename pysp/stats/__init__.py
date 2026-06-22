@@ -616,6 +616,229 @@ from pysp.sampling.latent_posterior import (
     MeanFieldLDAPosterior,
 )
 from pysp.sampling.sampling_api import sample
+
+### Discrete base distributions
+from pysp.stats.base.bernoulli import (
+    BernoulliDataEncoder,
+    BernoulliDistribution,
+    BernoulliEnumerator,
+    BernoulliEstimator,
+    BernoulliSampler,
+)
+
+### Continuous base distributions
+from pysp.stats.base.beta import BetaDataEncoder, BetaDistribution, BetaEstimator, BetaSampler
+from pysp.stats.base.beta_binomial import (
+    BetaBinomialDataEncoder,
+    BetaBinomialDistribution,
+    BetaBinomialEstimator,
+    BetaBinomialSampler,
+)
+from pysp.stats.base.binomial import (
+    BinomialDataEncoder,
+    BinomialDistribution,
+    BinomialEnumerator,
+    BinomialEstimator,
+    BinomialSampler,
+)
+from pysp.stats.base.birth_death import (
+    BirthDeathSamplingDataEncoder,
+    BirthDeathSamplingDistribution,
+    BirthDeathSamplingEstimator,
+    BirthDeathSamplingSampler,
+)
+from pysp.stats.base.categorical import (
+    CategoricalDataEncoder,
+    CategoricalDistribution,
+    CategoricalEnumerator,
+    CategoricalEstimator,
+    CategoricalSampler,
+)
+from pysp.stats.base.categorical_multinomial import (
+    MultinomialDataEncoder,
+    MultinomialDistribution,
+    MultinomialEnumerator,
+    MultinomialEstimator,
+    MultinomialSampler,
+)
+from pysp.stats.base.chinese_restaurant_process import (
+    ChineseRestaurantProcessDataEncoder,
+    ChineseRestaurantProcessDistribution,
+    ChineseRestaurantProcessEstimator,
+    ChineseRestaurantProcessSampler,
+)
+from pysp.stats.base.dirichlet_multinomial import (
+    DirichletMultinomialDataEncoder,
+    DirichletMultinomialDistribution,
+    DirichletMultinomialEstimator,
+    DirichletMultinomialSampler,
+)
+from pysp.stats.base.exgaussian import (
+    ExponentiallyModifiedGaussianDataEncoder,
+    ExponentiallyModifiedGaussianDistribution,
+    ExponentiallyModifiedGaussianEstimator,
+    ExponentiallyModifiedGaussianSampler,
+)
+from pysp.stats.base.exponential import (
+    ExponentialDataEncoder,
+    ExponentialDistribution,
+    ExponentialEstimator,
+    ExponentialSampler,
+)
+from pysp.stats.base.gamma import GammaDataEncoder, GammaDistribution, GammaEstimator, GammaSampler
+from pysp.stats.base.gaussian import GaussianDataEncoder, GaussianDistribution, GaussianEstimator, GaussianSampler
+from pysp.stats.base.generalized_extreme_value import (
+    GeneralizedExtremeValueDataEncoder,
+    GeneralizedExtremeValueDistribution,
+    GeneralizedExtremeValueEstimator,
+    GeneralizedExtremeValueSampler,
+)
+from pysp.stats.base.generalized_pareto import (
+    GeneralizedParetoDataEncoder,
+    GeneralizedParetoDistribution,
+    GeneralizedParetoEstimator,
+    GeneralizedParetoSampler,
+)
+from pysp.stats.base.geometric import (
+    GeometricDataEncoder,
+    GeometricDistribution,
+    GeometricEnumerator,
+    GeometricEstimator,
+    GeometricSampler,
+)
+from pysp.stats.base.gumbel import (
+    GumbelDataEncoder,
+    GumbelDistribution,
+    GumbelEstimator,
+    GumbelSampler,
+)
+from pysp.stats.base.half_normal import (
+    HalfNormalDataEncoder,
+    HalfNormalDistribution,
+    HalfNormalEstimator,
+    HalfNormalSampler,
+)
+from pysp.stats.base.hawkes_process import (
+    HawkesProcessDataEncoder,
+    HawkesProcessDistribution,
+    HawkesProcessEstimator,
+    HawkesProcessSampler,
+)
+from pysp.stats.base.inhomogeneous_poisson import (
+    InhomogeneousPoissonProcessDataEncoder,
+    InhomogeneousPoissonProcessDistribution,
+    InhomogeneousPoissonProcessEstimator,
+    InhomogeneousPoissonProcessSampler,
+)
+from pysp.stats.base.integer_categorical import (
+    IntegerCategoricalDataEncoder,
+    IntegerCategoricalDistribution,
+    IntegerCategoricalEnumerator,
+    IntegerCategoricalEstimator,
+    IntegerCategoricalSampler,
+)
+from pysp.stats.base.integer_multinomial import (
+    IntegerMultinomialDataEncoder,
+    IntegerMultinomialDistribution,
+    IntegerMultinomialEnumerator,
+    IntegerMultinomialEstimator,
+    IntegerMultinomialSampler,
+)
+from pysp.stats.base.integer_uniform_spike import (
+    IntegerUniformSpikeDataEncoder,
+    IntegerUniformSpikeDistribution,
+    IntegerUniformSpikeEnumerator,
+    IntegerUniformSpikeEstimator,
+    IntegerUniformSpikeSampler,
+)
+from pysp.stats.base.inverse_gamma import (
+    InverseGammaDataEncoder,
+    InverseGammaDistribution,
+    InverseGammaEstimator,
+    InverseGammaSampler,
+)
+from pysp.stats.base.inverse_gaussian import (
+    InverseGaussianDataEncoder,
+    InverseGaussianDistribution,
+    InverseGaussianEstimator,
+    InverseGaussianSampler,
+)
+from pysp.stats.base.laplace import LaplaceDataEncoder, LaplaceDistribution, LaplaceEstimator, LaplaceSampler
+from pysp.stats.base.log_gaussian import (
+    LogGaussianDataEncoder,
+    LogGaussianDistribution,
+    LogGaussianEstimator,
+    LogGaussianSampler,
+)
+from pysp.stats.base.logistic import LogisticDataEncoder, LogisticDistribution, LogisticEstimator, LogisticSampler
+from pysp.stats.base.logseries import (
+    LogSeriesDataEncoder,
+    LogSeriesDistribution,
+    LogSeriesEstimator,
+    LogSeriesSampler,
+)
+from pysp.stats.base.multivariate_hawkes import (
+    MultivariateHawkesProcessDataEncoder,
+    MultivariateHawkesProcessDistribution,
+    MultivariateHawkesProcessEstimator,
+    MultivariateHawkesProcessSampler,
+)
+from pysp.stats.base.negative_binomial import (
+    NegativeBinomialDataEncoder,
+    NegativeBinomialDistribution,
+    NegativeBinomialEnumerator,
+    NegativeBinomialEstimator,
+    NegativeBinomialSampler,
+)
+from pysp.stats.base.pareto import ParetoDataEncoder, ParetoDistribution, ParetoEstimator, ParetoSampler
+from pysp.stats.base.point_mass import (
+    PointMassDataEncoder,
+    PointMassDistribution,
+    PointMassEnumerator,
+    PointMassEstimator,
+    PointMassSampler,
+)
+from pysp.stats.base.poisson import (
+    PoissonDataEncoder,
+    PoissonDistribution,
+    PoissonEnumerator,
+    PoissonEstimator,
+    PoissonSampler,
+)
+from pysp.stats.base.rayleigh import RayleighDataEncoder, RayleighDistribution, RayleighEstimator, RayleighSampler
+from pysp.stats.base.skellam import (
+    SkellamDataEncoder,
+    SkellamDistribution,
+    SkellamEstimator,
+    SkellamSampler,
+)
+from pysp.stats.base.skew_normal import (
+    SkewNormalDataEncoder,
+    SkewNormalDistribution,
+    SkewNormalEstimator,
+    SkewNormalSampler,
+)
+from pysp.stats.base.student_t import StudentTDataEncoder, StudentTDistribution, StudentTEstimator, StudentTSampler
+from pysp.stats.base.tweedie import (
+    TweedieDataEncoder,
+    TweedieDistribution,
+    TweedieEstimator,
+    TweedieSampler,
+)
+from pysp.stats.base.uniform import UniformDataEncoder, UniformDistribution, UniformEstimator, UniformSampler
+from pysp.stats.base.von_mises import (
+    VonMisesDataEncoder,
+    VonMisesDistribution,
+    VonMisesEstimator,
+    VonMisesSampler,
+)
+from pysp.stats.base.weibull import WeibullDataEncoder, WeibullDistribution, WeibullEstimator, WeibullSampler
+from pysp.stats.base.wrapped_cauchy import (
+    WrappedCauchyDataEncoder,
+    WrappedCauchyDistribution,
+    WrappedCauchyEstimator,
+    WrappedCauchySampler,
+)
 from pysp.stats.bayes.conjugate import (
     ConjugatePosterior,
     MixtureConjugatePosterior,
@@ -1031,229 +1254,6 @@ from pysp.stats.latent.semi_supervised_mixture import (
     SemiSupervisedMixtureDistribution,
     SemiSupervisedMixtureEstimator,
     SemiSupervisedMixtureSampler,
-)
-
-### Discrete base distributions
-from pysp.stats.leaf.bernoulli import (
-    BernoulliDataEncoder,
-    BernoulliDistribution,
-    BernoulliEnumerator,
-    BernoulliEstimator,
-    BernoulliSampler,
-)
-
-### Continuous base distributions
-from pysp.stats.leaf.beta import BetaDataEncoder, BetaDistribution, BetaEstimator, BetaSampler
-from pysp.stats.leaf.beta_binomial import (
-    BetaBinomialDataEncoder,
-    BetaBinomialDistribution,
-    BetaBinomialEstimator,
-    BetaBinomialSampler,
-)
-from pysp.stats.leaf.binomial import (
-    BinomialDataEncoder,
-    BinomialDistribution,
-    BinomialEnumerator,
-    BinomialEstimator,
-    BinomialSampler,
-)
-from pysp.stats.leaf.birth_death import (
-    BirthDeathSamplingDataEncoder,
-    BirthDeathSamplingDistribution,
-    BirthDeathSamplingEstimator,
-    BirthDeathSamplingSampler,
-)
-from pysp.stats.leaf.categorical import (
-    CategoricalDataEncoder,
-    CategoricalDistribution,
-    CategoricalEnumerator,
-    CategoricalEstimator,
-    CategoricalSampler,
-)
-from pysp.stats.leaf.categorical_multinomial import (
-    MultinomialDataEncoder,
-    MultinomialDistribution,
-    MultinomialEnumerator,
-    MultinomialEstimator,
-    MultinomialSampler,
-)
-from pysp.stats.leaf.chinese_restaurant_process import (
-    ChineseRestaurantProcessDataEncoder,
-    ChineseRestaurantProcessDistribution,
-    ChineseRestaurantProcessEstimator,
-    ChineseRestaurantProcessSampler,
-)
-from pysp.stats.leaf.dirichlet_multinomial import (
-    DirichletMultinomialDataEncoder,
-    DirichletMultinomialDistribution,
-    DirichletMultinomialEstimator,
-    DirichletMultinomialSampler,
-)
-from pysp.stats.leaf.exgaussian import (
-    ExponentiallyModifiedGaussianDataEncoder,
-    ExponentiallyModifiedGaussianDistribution,
-    ExponentiallyModifiedGaussianEstimator,
-    ExponentiallyModifiedGaussianSampler,
-)
-from pysp.stats.leaf.exponential import (
-    ExponentialDataEncoder,
-    ExponentialDistribution,
-    ExponentialEstimator,
-    ExponentialSampler,
-)
-from pysp.stats.leaf.gamma import GammaDataEncoder, GammaDistribution, GammaEstimator, GammaSampler
-from pysp.stats.leaf.gaussian import GaussianDataEncoder, GaussianDistribution, GaussianEstimator, GaussianSampler
-from pysp.stats.leaf.generalized_extreme_value import (
-    GeneralizedExtremeValueDataEncoder,
-    GeneralizedExtremeValueDistribution,
-    GeneralizedExtremeValueEstimator,
-    GeneralizedExtremeValueSampler,
-)
-from pysp.stats.leaf.generalized_pareto import (
-    GeneralizedParetoDataEncoder,
-    GeneralizedParetoDistribution,
-    GeneralizedParetoEstimator,
-    GeneralizedParetoSampler,
-)
-from pysp.stats.leaf.geometric import (
-    GeometricDataEncoder,
-    GeometricDistribution,
-    GeometricEnumerator,
-    GeometricEstimator,
-    GeometricSampler,
-)
-from pysp.stats.leaf.gumbel import (
-    GumbelDataEncoder,
-    GumbelDistribution,
-    GumbelEstimator,
-    GumbelSampler,
-)
-from pysp.stats.leaf.half_normal import (
-    HalfNormalDataEncoder,
-    HalfNormalDistribution,
-    HalfNormalEstimator,
-    HalfNormalSampler,
-)
-from pysp.stats.leaf.hawkes_process import (
-    HawkesProcessDataEncoder,
-    HawkesProcessDistribution,
-    HawkesProcessEstimator,
-    HawkesProcessSampler,
-)
-from pysp.stats.leaf.inhomogeneous_poisson import (
-    InhomogeneousPoissonProcessDataEncoder,
-    InhomogeneousPoissonProcessDistribution,
-    InhomogeneousPoissonProcessEstimator,
-    InhomogeneousPoissonProcessSampler,
-)
-from pysp.stats.leaf.integer_categorical import (
-    IntegerCategoricalDataEncoder,
-    IntegerCategoricalDistribution,
-    IntegerCategoricalEnumerator,
-    IntegerCategoricalEstimator,
-    IntegerCategoricalSampler,
-)
-from pysp.stats.leaf.integer_multinomial import (
-    IntegerMultinomialDataEncoder,
-    IntegerMultinomialDistribution,
-    IntegerMultinomialEnumerator,
-    IntegerMultinomialEstimator,
-    IntegerMultinomialSampler,
-)
-from pysp.stats.leaf.integer_uniform_spike import (
-    IntegerUniformSpikeDataEncoder,
-    IntegerUniformSpikeDistribution,
-    IntegerUniformSpikeEnumerator,
-    IntegerUniformSpikeEstimator,
-    IntegerUniformSpikeSampler,
-)
-from pysp.stats.leaf.inverse_gamma import (
-    InverseGammaDataEncoder,
-    InverseGammaDistribution,
-    InverseGammaEstimator,
-    InverseGammaSampler,
-)
-from pysp.stats.leaf.inverse_gaussian import (
-    InverseGaussianDataEncoder,
-    InverseGaussianDistribution,
-    InverseGaussianEstimator,
-    InverseGaussianSampler,
-)
-from pysp.stats.leaf.laplace import LaplaceDataEncoder, LaplaceDistribution, LaplaceEstimator, LaplaceSampler
-from pysp.stats.leaf.log_gaussian import (
-    LogGaussianDataEncoder,
-    LogGaussianDistribution,
-    LogGaussianEstimator,
-    LogGaussianSampler,
-)
-from pysp.stats.leaf.logistic import LogisticDataEncoder, LogisticDistribution, LogisticEstimator, LogisticSampler
-from pysp.stats.leaf.logseries import (
-    LogSeriesDataEncoder,
-    LogSeriesDistribution,
-    LogSeriesEstimator,
-    LogSeriesSampler,
-)
-from pysp.stats.leaf.multivariate_hawkes import (
-    MultivariateHawkesProcessDataEncoder,
-    MultivariateHawkesProcessDistribution,
-    MultivariateHawkesProcessEstimator,
-    MultivariateHawkesProcessSampler,
-)
-from pysp.stats.leaf.negative_binomial import (
-    NegativeBinomialDataEncoder,
-    NegativeBinomialDistribution,
-    NegativeBinomialEnumerator,
-    NegativeBinomialEstimator,
-    NegativeBinomialSampler,
-)
-from pysp.stats.leaf.pareto import ParetoDataEncoder, ParetoDistribution, ParetoEstimator, ParetoSampler
-from pysp.stats.leaf.point_mass import (
-    PointMassDataEncoder,
-    PointMassDistribution,
-    PointMassEnumerator,
-    PointMassEstimator,
-    PointMassSampler,
-)
-from pysp.stats.leaf.poisson import (
-    PoissonDataEncoder,
-    PoissonDistribution,
-    PoissonEnumerator,
-    PoissonEstimator,
-    PoissonSampler,
-)
-from pysp.stats.leaf.rayleigh import RayleighDataEncoder, RayleighDistribution, RayleighEstimator, RayleighSampler
-from pysp.stats.leaf.skellam import (
-    SkellamDataEncoder,
-    SkellamDistribution,
-    SkellamEstimator,
-    SkellamSampler,
-)
-from pysp.stats.leaf.skew_normal import (
-    SkewNormalDataEncoder,
-    SkewNormalDistribution,
-    SkewNormalEstimator,
-    SkewNormalSampler,
-)
-from pysp.stats.leaf.student_t import StudentTDataEncoder, StudentTDistribution, StudentTEstimator, StudentTSampler
-from pysp.stats.leaf.tweedie import (
-    TweedieDataEncoder,
-    TweedieDistribution,
-    TweedieEstimator,
-    TweedieSampler,
-)
-from pysp.stats.leaf.uniform import UniformDataEncoder, UniformDistribution, UniformEstimator, UniformSampler
-from pysp.stats.leaf.von_mises import (
-    VonMisesDataEncoder,
-    VonMisesDistribution,
-    VonMisesEstimator,
-    VonMisesSampler,
-)
-from pysp.stats.leaf.weibull import WeibullDataEncoder, WeibullDistribution, WeibullEstimator, WeibullSampler
-from pysp.stats.leaf.wrapped_cauchy import (
-    WrappedCauchyDataEncoder,
-    WrappedCauchyDistribution,
-    WrappedCauchyEstimator,
-    WrappedCauchySampler,
 )
 from pysp.stats.multivariate.covariance_shrinkage import LedoitWolfEstimator
 from pysp.stats.multivariate.diagonal_gaussian import (

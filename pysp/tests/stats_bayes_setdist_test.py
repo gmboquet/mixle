@@ -10,7 +10,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.leaf.beta import BetaDistribution
+from pysp.stats.base.beta import BetaDistribution
 from pysp.stats.sets.bernoulli_set import (
     BernoulliSetDataEncoder,
     BernoulliSetDistribution,

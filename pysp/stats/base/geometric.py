@@ -18,6 +18,7 @@ from numpy.random import RandomState
 
 from pysp.arithmetic import *
 from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.stats.base.beta import BetaDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -27,7 +28,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.leaf.beta import BetaDistribution
 from pysp.utils.special import digamma
 
 
@@ -111,7 +111,7 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
             p (float): Must between (0,1).
             name (Optional[str]): Assign name to GeometricDistribution object.
             prior (Optional): Conjugate Beta prior on the success probability ``p``. A
-                :class:`~pysp.stats.leaf.beta.BetaDistribution` enables the Bayesian/variational
+                :class:`~pysp.stats.base.beta.BetaDistribution` enables the Bayesian/variational
                 machinery (``expected_log_density`` and the conjugate posterior update);
                 ``None`` (default) is a plain point model.
 

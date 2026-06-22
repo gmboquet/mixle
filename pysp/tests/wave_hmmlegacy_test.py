@@ -10,6 +10,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.inference import seq_estimate, seq_initialize
+from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.latent.labeled_lda import (
     LabeledLDADataEncoder,
     LabeledLDADistribution,
@@ -17,7 +18,6 @@ from pysp.stats.latent.labeled_lda import (
     LabeledLDAEstimatorAccumulator,
     LabeledLDAEstimatorAccumulatorFactory,
 )
-from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 
 
 def make_llda_model():

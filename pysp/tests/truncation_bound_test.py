@@ -9,15 +9,15 @@ import math
 import unittest
 
 from pysp.enumeration.density_rank import truncated_sum_bound
+from pysp.stats.base.bernoulli import BernoulliDistribution
+from pysp.stats.base.binomial import BinomialDistribution
+from pysp.stats.base.categorical import CategoricalDistribution
+from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
+from pysp.stats.base.point_mass import PointMassDistribution
+from pysp.stats.base.poisson import PoissonDistribution
 from pysp.stats.combinator.composite import CompositeDistribution
 from pysp.stats.combinator.record import RecordDistribution
 from pysp.stats.latent.mixture import MixtureDistribution
-from pysp.stats.leaf.bernoulli import BernoulliDistribution
-from pysp.stats.leaf.binomial import BinomialDistribution
-from pysp.stats.leaf.categorical import CategoricalDistribution
-from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
-from pysp.stats.leaf.point_mass import PointMassDistribution
-from pysp.stats.leaf.poisson import PoissonDistribution
 
 TOL = 1e-9
 

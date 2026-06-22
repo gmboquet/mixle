@@ -37,6 +37,20 @@ from pysp.inference.estimation import fit as fit_driver
 from pysp.stats import (
     seq_encode,
 )
+from pysp.stats.base.beta import BetaDistribution
+from pysp.stats.base.binomial import BinomialDistribution, BinomialEstimator
+from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.base.exponential import ExponentialDistribution, ExponentialEstimator
+from pysp.stats.base.gamma import GammaDistribution
+from pysp.stats.base.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.base.geometric import GeometricDistribution
+from pysp.stats.base.integer_categorical import (
+    IntegerCategoricalDistribution,
+    IntegerCategoricalEstimator,
+)
+from pysp.stats.base.log_gaussian import LogGaussianDistribution
+from pysp.stats.base.point_mass import PointMassDistribution
+from pysp.stats.base.poisson import PoissonDistribution, PoissonEstimator
 from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.bayes.dirichlet_process_mixture import DirichletProcessMixtureEstimator
@@ -59,20 +73,6 @@ from pysp.stats.latent.mixture import (
     MixtureEstimator,
     mixture_prior,
 )
-from pysp.stats.leaf.beta import BetaDistribution
-from pysp.stats.leaf.binomial import BinomialDistribution, BinomialEstimator
-from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.leaf.exponential import ExponentialDistribution, ExponentialEstimator
-from pysp.stats.leaf.gamma import GammaDistribution
-from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.stats.leaf.geometric import GeometricDistribution
-from pysp.stats.leaf.integer_categorical import (
-    IntegerCategoricalDistribution,
-    IntegerCategoricalEstimator,
-)
-from pysp.stats.leaf.log_gaussian import LogGaussianDistribution
-from pysp.stats.leaf.point_mass import PointMassDistribution
-from pysp.stats.leaf.poisson import PoissonDistribution, PoissonEstimator
 from pysp.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDistribution,
     MultivariateGaussianEstimator,
@@ -310,7 +310,7 @@ class PriorDensityTestCase(unittest.TestCase):
                     _encode(dist, data)
 
     def test_seq_expected_log_density_falls_back_without_conjugate_prior(self):
-        from pysp.stats.leaf.bernoulli import BernoulliDistribution
+        from pysp.stats.base.bernoulli import BernoulliDistribution
 
         cases = [
             (BernoulliDistribution(0.3), [True, False]),
