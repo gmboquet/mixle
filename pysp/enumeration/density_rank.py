@@ -446,9 +446,14 @@ def count_dp_seek(
     lp = float(lp)
     fb_v = q.fine_bucket(lp)
     wl, wu, exact_rank = _window_bracket(idx, fb_v, smear, lp, resolve_max, tol)
+    # The bucket/bracket math above uses the structural cost ``lp`` the index is built on (the tropical
+    # dominant-path/component cost for HMM/mixture). The reported ``log_prob`` must be the documented
+    # ``log p(value)``: for decomposable families this equals ``lp``, but for the tropical projection the
+    # true marginal is a logsumexp over paths/components, so recompute it from the value.
+    log_prob = float(dist.log_density(value))
     if exact_rank is not None:
-        return CountDPSeekResult(value, lp, index, exact_rank, exact_rank, True, oversample)
-    return CountDPSeekResult(value, lp, index, wl, wu, False, oversample)
+        return CountDPSeekResult(value, log_prob, index, exact_rank, exact_rank, True, oversample)
+    return CountDPSeekResult(value, log_prob, index, wl, wu, False, oversample)
 
 
 def _mass_histogram(dist, quantizer, max_fine_bucket):
