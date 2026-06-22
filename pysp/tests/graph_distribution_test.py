@@ -52,8 +52,8 @@ class GraphDistributionTestCase(unittest.TestCase):
         import itertools
 
         from pysp.data.graph_data import _edge_indices
+        from pysp.enumeration.algorithms import freeze
         from pysp.utils.density_rank import density_rank
-        from pysp.utils.enumeration import freeze
 
         def brute(dist, n):
             edges = list(_edge_indices(n, dist.directed, dist.self_loops))

@@ -4,12 +4,12 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.stats import (
     HawkesProcessDataEncoder,
     HawkesProcessDistribution,
     HawkesProcessEstimator,
 )
-from pysp.utils.estimation import optimize
 
 
 def _brute_log_density(t, mu, alpha, beta, window):

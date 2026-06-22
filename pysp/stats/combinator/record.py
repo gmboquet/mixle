@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 
+from pysp.enumeration.algorithms import BufferedStream, ProductEnumerator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -26,7 +27,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 FieldSpec = Any
 
@@ -298,7 +298,7 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
         semiring); the only difference is that the unranked structural tuple is relabelled into a
         mapping record keyed by source, so witnesses match what the model actually scores.
         """
-        from pysp.utils.quantization.semiring import CountSemiring
+        from pysp.enumeration.quantization.semiring import CountSemiring
 
         semiring = CountSemiring()
         children = []

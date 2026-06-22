@@ -165,7 +165,7 @@ class Enumerable(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
-        from pysp.utils.enumeration import supports_enumeration
+        from pysp.enumeration.algorithms import supports_enumeration
 
         try:
             return bool(supports_enumeration(obj))
@@ -489,7 +489,7 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "pysp_seq_* methods",
         "pysp.planner",
     ),
-    CapabilitySpec("EMStrategy", "an EM-step strategy", "object contract", "step() -> EMStepResult", "pysp.utils.em"),
+    CapabilitySpec("EMStrategy", "an EM-step strategy", "object contract", "step() -> EMStepResult", "pysp.inference.em"),
     CapabilitySpec(
         "Relation",
         "optimisation-as-distribution over a constrained space",
@@ -509,7 +509,7 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "a semiring for structural count/enumeration DP",
         "subsystem role",
         "DecomposableSemiring (ABC)",
-        "pysp.utils.quantization",
+        "pysp.enumeration.quantization",
     ),
     CapabilitySpec(
         "DynamicsOperator",

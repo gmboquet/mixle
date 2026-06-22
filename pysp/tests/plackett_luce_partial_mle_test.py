@@ -5,13 +5,13 @@ import unittest
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.inference.estimation import optimize
 from pysp.stats.graph.plackett_luce import (
     PlackettLuceAccumulator,
     PlackettLuceDistribution,
     PlackettLucePartialAccumulator,
     PlackettLucePartialEstimator,
 )
-from pysp.utils.estimation import optimize
 
 
 class PlackettLucePartialMleTest(unittest.TestCase):

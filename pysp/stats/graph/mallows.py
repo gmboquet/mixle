@@ -28,6 +28,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.enumeration.algorithms import BufferedStream, ProductEnumerator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -37,7 +38,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 _MAX_THETA = 700.0
 

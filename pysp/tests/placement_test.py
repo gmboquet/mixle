@@ -5,6 +5,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.planner import (
     CalibrationCatalog,
     DeviceSpec,
@@ -28,7 +29,6 @@ from pysp.stats import (
     seq_initialize,
     seq_log_density_sum,
 )
-from pysp.utils.estimation import optimize
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 if HAS_TORCH:

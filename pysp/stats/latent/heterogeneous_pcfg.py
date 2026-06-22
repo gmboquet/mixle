@@ -21,6 +21,12 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
+from pysp.enumeration.algorithms import (
+    BufferedStream,
+    LazyQuantizedEnumerationIndex,
+    ProductEnumerator,
+    best_first_union,
+)
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -32,7 +38,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream, LazyQuantizedEnumerationIndex, ProductEnumerator, best_first_union
 
 
 def _logsumexp_1d(vals: np.ndarray) -> float:
@@ -445,7 +450,7 @@ class HeterogeneousPCFGDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Inside-outside Fisher view for the PCFG."""
         if hasattr(self, "terminal_rules") and hasattr(self, "_inside_outside"):
-            from pysp.utils.fisher import HeterogeneousPCFGFisherView
+            from pysp.inference.fisher import HeterogeneousPCFGFisherView
 
             return HeterogeneousPCFGFisherView(self)
         return super().to_fisher(**kwargs)

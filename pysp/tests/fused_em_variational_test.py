@@ -20,6 +20,7 @@ import unittest
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.inference.estimation import optimize
 from pysp.stats import (
     CategoricalDistribution,
     CategoricalEstimator,
@@ -31,7 +32,6 @@ from pysp.stats import (
 )
 from pysp.stats.latent.labeled_lda import LabeledLDADistribution, LabeledLDAEstimator
 from pysp.stats.latent.lda import LDAEstimator
-from pysp.utils.estimation import optimize
 from pysp.utils.optsutil import count_by_value
 
 

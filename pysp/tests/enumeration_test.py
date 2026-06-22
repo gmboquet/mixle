@@ -12,9 +12,9 @@ import unittest
 
 import numpy as np
 
+from pysp.enumeration.algorithms import freeze, sound_top_k, supports_enumeration
 from pysp.stats import *
 from pysp.stats.compute.pdist import EnumerationError
-from pysp.utils.enumeration import freeze, sound_top_k, supports_enumeration
 
 TOL = 1e-9
 

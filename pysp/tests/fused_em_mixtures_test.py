@@ -15,6 +15,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.stats import (
     CategoricalDistribution,
     DiracLengthMixtureDistribution,
@@ -37,7 +38,6 @@ from pysp.stats.latent.heterogeneous_mixture import HeterogeneousMixtureEstimato
 from pysp.stats.latent.hierarchical_mixture import HierarchicalMixtureEstimator
 from pysp.stats.latent.joint_mixture import JointMixtureEstimator
 from pysp.stats.latent.semi_supervised_mixture import SemiSupervisedMixtureEstimator
-from pysp.utils.estimation import optimize
 
 
 class FusedEMMixturesTestCase(unittest.TestCase):

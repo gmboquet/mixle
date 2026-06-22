@@ -1,7 +1,7 @@
 """Regression tests for the EM driver's non-finite log-likelihood guard (WS-L P5).
 
 A collapsed/singular covariance can make an EM step's data log-likelihood NaN or -inf.
-The shared EM loops (:func:`pysp.utils.estimation._em_loop` and ``_fused_em_loop``) must
+The shared EM loops (:func:`pysp.inference.estimation._em_loop` and ``_fused_em_loop``) must
 never *accept* such a step and must not let the non-finite value poison the convergence
 reference (which would stall every subsequent iteration on NaN comparisons). These tests
 pin that behavior with deterministic stub steps, and a high-dimensional diagonal Gaussian
@@ -13,8 +13,8 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import _em_loop, optimize
 from pysp.stats import DiagonalGaussianEstimator, MixtureEstimator
-from pysp.utils.estimation import _em_loop, optimize
 
 
 class _Model:

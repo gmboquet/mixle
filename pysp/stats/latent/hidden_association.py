@@ -40,6 +40,7 @@ import numpy as np
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, frontier_merge
 from pysp.stats.combinator.conditional import (
     ConditionalDistribution,
     ConditionalDistributionAccumulator,
@@ -64,7 +65,6 @@ from pysp.stats.compute.pdist import (
     child_enumerator,
 )
 from pysp.stats.latent.mixture import MixtureDistribution
-from pysp.utils.enumeration import BufferedStream, frontier_merge
 from pysp.utils.optsutil import count_by_value
 
 T = TypeVar("T")  ### value data type

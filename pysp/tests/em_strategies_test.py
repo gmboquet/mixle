@@ -2,15 +2,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import (
-    GaussianDistribution,
-    GaussianEstimator,
-    MixtureDistribution,
-    MixtureEstimator,
-    seq_encode,
-    seq_estimate,
-)
-from pysp.utils.em import (
+from pysp.inference.em import (
     AcceleratedEM,
     AnnealedEM,
     ConditionalMaximizationEM,
@@ -26,7 +18,15 @@ from pysp.utils.em import (
     observed_log_likelihood,
     run_em,
 )
-from pysp.utils.estimation import constant
+from pysp.inference.estimation import constant
+from pysp.stats import (
+    GaussianDistribution,
+    GaussianEstimator,
+    MixtureDistribution,
+    MixtureEstimator,
+    seq_encode,
+    seq_estimate,
+)
 from pysp.utils.streaming import IncrementalEstimator, StreamingEstimator
 
 
@@ -302,7 +302,7 @@ class EMStrategiesTestCase(unittest.TestCase):
         # callable strategy must also be accepted
         import io
 
-        from pysp.utils.estimation import optimize
+        from pysp.inference.estimation import optimize
 
         default_fit = optimize(self.data, self.estimator, max_its=15, rng=np.random.RandomState(2), out=io.StringIO())
         strategy_fit = optimize(

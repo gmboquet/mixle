@@ -17,6 +17,7 @@ from typing import Any, Optional
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -26,7 +27,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 
 
 class NullDistribution(SequenceEncodableProbabilityDistribution):

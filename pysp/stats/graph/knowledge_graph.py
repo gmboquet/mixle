@@ -486,7 +486,7 @@ def fit_knowledge_graph_ensemble(
     resample of the triples (bagging), which spreads the members further apart where the data is thin
     and so sharpens the epistemic-uncertainty estimate.
     """
-    from pysp.utils.estimation import optimize
+    from pysp.inference.estimation import optimize
 
     base = RandomState() if rng is None else rng
     triples = list(triples)

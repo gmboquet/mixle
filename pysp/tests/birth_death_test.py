@@ -5,8 +5,8 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.stats import BirthDeathSamplingDistribution, BirthDeathSamplingEstimator
-from pysp.utils.estimation import optimize
 
 
 class BirthDeathSamplingTest(unittest.TestCase):

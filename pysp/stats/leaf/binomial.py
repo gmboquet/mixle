@@ -14,6 +14,7 @@ from typing import Any, Optional
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -24,7 +25,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.stats.leaf.beta import BetaDistribution
-from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.utils.special import digamma
 from pysp.utils.vector import gammaln
 
@@ -396,7 +396,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     def to_fisher(self, **kwargs):
         """Return the Binomial's count-family Fisher view."""
-        from pysp.utils.fisher import CountFisherView, _count_data
+        from pysp.inference.fisher import CountFisherView, _count_data
 
         return CountFisherView(self, _fisher_mean_var, _count_data, _fisher_encoded)
 

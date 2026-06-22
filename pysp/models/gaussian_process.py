@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from pysp.utils.objectives import optimize_torch_objective
+from pysp.inference.objectives import optimize_torch_objective
 
 _KERNELS = {
     "rbf": "rbf",

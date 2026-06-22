@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 from scipy.stats import poisson
 
+from pysp.inference.estimation import optimize
 from pysp.stats import (
     BinomialDistribution,
     BinomialEstimator,
@@ -14,7 +15,6 @@ from pysp.stats import (
     ZeroInflatedDistribution,
     ZeroInflatedEstimator,
 )
-from pysp.utils.estimation import optimize
 
 
 class ZeroInflatedDensityTest(unittest.TestCase):

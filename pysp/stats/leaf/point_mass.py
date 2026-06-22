@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.enumeration.algorithms import QuantizedEnumerationIndex, freeze
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -15,7 +16,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.enumeration import QuantizedEnumerationIndex, freeze
 
 
 def _same_value(a: Any, b: Any) -> bool:

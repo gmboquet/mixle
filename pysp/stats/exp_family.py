@@ -483,7 +483,7 @@ class ConditionalExponentialFamilyForm:
 def to_exponential_family(dist: ProbabilityDistribution, engine: Any = NUMPY_ENGINE) -> ExponentialFamilyForm | None:
     """Return the canonical exponential-family view of ``dist`` or ``None``.
 
-    Mirrors :func:`pysp.utils.fisher.to_fisher`: a thin top-level helper that defers
+    Mirrors :func:`pysp.inference.fisher.to_fisher`: a thin top-level helper that defers
     to :meth:`ProbabilityDistribution.to_exponential_family`.  Returns ``None`` when
     ``dist`` is not a (single) exponential family.
     """

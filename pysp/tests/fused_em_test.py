@@ -10,6 +10,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.stats import (
     GaussianDistribution,
     GaussianEstimator,
@@ -24,7 +25,6 @@ from pysp.stats import (
     seq_encode,
     seq_log_density_sum,
 )
-from pysp.utils.estimation import optimize
 
 
 class FusedEMTestCase(unittest.TestCase):
@@ -147,7 +147,7 @@ class FusedEMTestCase(unittest.TestCase):
 
     def test_best_of_reuse_estep_ll(self):
         # best_of forwards reuse_estep_ll to each trial's optimize; same trials/seed -> same result.
-        from pysp.utils.estimation import best_of
+        from pysp.inference.estimation import best_of
 
         std = best_of(self.data, None, self._mk(), 3, 20, 0.1, None, np.random.RandomState(1), out=io.StringIO())
         fused = best_of(

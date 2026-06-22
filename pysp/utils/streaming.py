@@ -24,7 +24,7 @@ T = TypeVar("T")
 E0 = TypeVar("E0")
 
 
-from pysp.utils.estimation import _local_encoded_chunks, harmonic
+from pysp.inference.estimation import _local_encoded_chunks, harmonic
 
 
 def streaming_accumulate(

@@ -62,7 +62,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
                 param.zero_()
 
     def test_fit_objective_maximizes_user_supplied_distribution_objective(self):
-        from pysp.utils.objectives import ExpectedLogDensity, fit_objective
+        from pysp.inference.objectives import ExpectedLogDensity, fit_objective
 
         truth = GaussianDistribution(1.5, 0.7)
         start = GaussianDistribution(-1.0, 3.0)
@@ -79,7 +79,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(abs(fitted.sigma2 - np.var(data)), 0.20)
 
     def test_variational_projection_matches_source_moments(self):
-        from pysp.utils.objectives import variational_projection
+        from pysp.inference.objectives import variational_projection
 
         source = GaussianDistribution(2.0, 0.5)
         target = GaussianDistribution(-2.0, 4.0)
@@ -94,7 +94,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(abs(projected.sigma2 - np.var(data)), 0.15)
 
     def test_variational_projection_result_reports_diagnostics(self):
-        from pysp.utils.objectives import variational_projection
+        from pysp.inference.objectives import variational_projection
 
         source = GaussianDistribution(1.0, 0.8)
         target = GaussianDistribution(-1.5, 3.5)
@@ -108,7 +108,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertObjectiveResultDiagnostics(result)
 
     def test_unnormalized_log_likelihood_with_exact_partition(self):
-        from pysp.utils.objectives import UnnormalizedLogLikelihood, fit_objective
+        from pysp.inference.objectives import UnnormalizedLogLikelihood, fit_objective
 
         truth = GaussianDistribution(1.25, 0.6)
         start = GaussianDistribution(-1.0, 3.0)
@@ -130,7 +130,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(abs(fitted.sigma2 - np.var(data)), 0.20)
 
     def test_optimize_torch_objective_accepts_arbitrary_parameters(self):
-        from pysp.utils.objectives import optimize_torch_objective
+        from pysp.inference.objectives import optimize_torch_objective
 
         x = torch.tensor(-4.0, dtype=torch.float64, requires_grad=True)
         value, _ = optimize_torch_objective(
@@ -141,7 +141,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(abs(float(x.detach().cpu().item()) - 3.0), 0.02)
 
     def test_optimize_torch_objective_restores_best_seen_tensor_state(self):
-        from pysp.utils.objectives import optimize_torch_objective
+        from pysp.inference.objectives import optimize_torch_objective
 
         x = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
         value, _ = optimize_torch_objective(
@@ -160,7 +160,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertGreater(abs(float(y.detach().cpu().item())), 5.0)
 
     def test_optimize_torch_objective_result_reports_diagnostics(self):
-        from pysp.utils.objectives import optimize_torch_objective
+        from pysp.inference.objectives import optimize_torch_objective
 
         x = torch.tensor(-4.0, dtype=torch.float64, requires_grad=True)
         result = optimize_torch_objective(
@@ -179,7 +179,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(result.final_gradient_norm, 0.1)
 
     def test_fit_parameter_objective_handles_named_constraints(self):
-        from pysp.utils.objectives import ObjectiveParameter, fit_parameter_objective
+        from pysp.inference.objectives import ObjectiveParameter, fit_parameter_objective
 
         params, value = fit_parameter_objective(
             [
@@ -200,7 +200,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(abs(params["gate"] - 0.8), 0.02)
 
     def test_fit_parameter_objective_handles_simplex_vectors(self):
-        from pysp.utils.objectives import ObjectiveParameter, fit_parameter_objective
+        from pysp.inference.objectives import ObjectiveParameter, fit_parameter_objective
 
         target = np.asarray([0.1, 0.25, 0.65], dtype=float)
 
@@ -222,7 +222,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(np.linalg.norm(params["w"] - target), 0.02)
 
     def test_fit_parameter_objective_accepts_simplex_alias_and_positive_matrix(self):
-        from pysp.utils.objectives import ObjectiveParameter, fit_parameter_objective
+        from pysp.inference.objectives import ObjectiveParameter, fit_parameter_objective
 
         target_w = np.asarray([0.2, 0.8], dtype=float)
         target_mat = np.asarray([[0.5, 1.0], [1.5, 2.0]], dtype=float)
@@ -266,7 +266,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(np.linalg.norm(params["topic"] - target_col), 0.03)
 
     def test_fit_parameter_objective_accepts_coupled_bound_constraints(self):
-        from pysp.utils.objectives import ObjectiveParameter, fit_parameter_objective
+        from pysp.inference.objectives import ObjectiveParameter, fit_parameter_objective
 
         def objective(params, enc, engine):
             return -(
@@ -299,7 +299,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(abs(params["floor"] - 2.0), 0.02)
 
     def test_fit_parameter_objective_accepts_prebuilt_parameter_set(self):
-        from pysp.utils.objectives import ObjectiveParameter, ObjectiveParameterSet, fit_parameter_objective
+        from pysp.inference.objectives import ObjectiveParameter, ObjectiveParameterSet, fit_parameter_objective
 
         param_set = ObjectiveParameterSet([ObjectiveParameter("x", -3.0)], engine=self.engine)
         params, value = fit_parameter_objective(
@@ -314,7 +314,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(abs(params["x"] - 2.0), 0.02)
 
     def test_fit_parameter_objective_restores_best_seen_named_parameters(self):
-        from pysp.utils.objectives import ObjectiveParameter, fit_parameter_objective
+        from pysp.inference.objectives import ObjectiveParameter, fit_parameter_objective
 
         result = fit_parameter_objective(
             [ObjectiveParameter("x", 0.0)],
@@ -333,7 +333,7 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertLess(result.history[-1], result.best_value)
 
     def test_fit_parameter_objective_fits_user_normal_likelihood(self):
-        from pysp.utils.objectives import ObjectiveParameter, fit_parameter_objective
+        from pysp.inference.objectives import ObjectiveParameter, fit_parameter_objective
 
         rng = np.random.RandomState(11)
         data = rng.normal(1.25, np.sqrt(0.55), size=260)

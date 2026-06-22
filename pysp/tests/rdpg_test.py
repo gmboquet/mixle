@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import fit
 from pysp.stats import RandomDotProductGraphDistribution
-from pysp.utils.estimation import fit
 
 _X = np.array([[0.7, 0.1], [0.6, 0.2], [0.1, 0.7], [0.2, 0.6], [0.5, 0.5], [0.3, 0.3]])
 _MASK = np.triu(np.ones((6, 6), dtype=bool), 1)

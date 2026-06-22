@@ -23,6 +23,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
+from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -34,7 +35,6 @@ from pysp.stats.compute.pdist import (
 )
 from pysp.stats.leaf.categorical import CategoricalFisherView
 from pysp.utils.aliasing import MISSING, coalesce_alias
-from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.utils.special import digamma
 
 

@@ -192,8 +192,8 @@ class ConformalLinkPredictorTestCase(unittest.TestCase):
 
 class ConformalKnowledgeGraphTestCase(unittest.TestCase):
     def setUp(self):
+        from pysp.inference.estimation import optimize
         from pysp.stats import KnowledgeGraphEstimator
-        from pysp.utils.estimation import optimize
 
         rng = np.random.RandomState(0)
         nE, nR, d = 50, 4, 12

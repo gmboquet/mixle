@@ -294,8 +294,8 @@ def count_dp_rank(
     (dominant-path) cost and over-counts, so this returns a *tropical* rank, not the true-marginal
     rank -- use :func:`density_rank` (head enumeration + sampling) for those.
     """
+    from pysp.enumeration.quantization.core import Quantizer
     from pysp.stats.compute.pdist import EnumerationError
-    from pysp.utils.quantization.core import Quantizer
 
     t = float(dist.log_density(value))
     q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
@@ -409,8 +409,8 @@ def count_dp_seek(
     For decomposable families this is exact up to quantization; for mixtures/HMMs it seeks into the
     tropical (dominant-component/path) projection and the bracket is that projection's error envelope.
     """
+    from pysp.enumeration.quantization.core import Quantizer
     from pysp.stats.compute.pdist import EnumerationError
-    from pysp.utils.quantization.core import Quantizer
 
     if index < 0:
         raise IndexError("index must be non-negative")
@@ -537,7 +537,7 @@ def cumulative_probability(dist, value, oversample: int = 64, bin_width_bits: fl
     to 1e-16 on a 12-factor product, where the count-times-representative-probability shortcut returns
     G > 1. Deterministic, so it complements :func:`density_rank` (whose deep path is Monte-Carlo).
     """
-    from pysp.utils.quantization.core import Quantizer
+    from pysp.enumeration.quantization.core import Quantizer
 
     q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
     t = float(dist.log_density(value))
@@ -577,8 +577,8 @@ def count_dp_top_p(
     """
     if not 0.0 <= p <= 1.0:
         raise ValueError("p must be in [0, 1].")
+    from pysp.enumeration.quantization.core import Quantizer
     from pysp.stats.compute.pdist import EnumerationError
-    from pysp.utils.quantization.core import Quantizer
 
     q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
     bits_per_bucket = bin_width_bits / oversample
@@ -658,9 +658,9 @@ def _joint_bucket_histogram(components, quantizer, max_fine_bucket):
     Returns ``{(b_1, ..., b_K): count}``. Raises EnumerationError for component structures not
     handled here (only Composite and atomic/enumerable leaves are supported).
     """
+    from pysp.enumeration.algorithms import freeze
     from pysp.stats.combinator.composite import CompositeDistribution
     from pysp.stats.compute.pdist import EnumerationError
-    from pysp.utils.enumeration import freeze
 
     head = components[0]
     if isinstance(head, CompositeDistribution):
@@ -710,7 +710,7 @@ def mixture_cross_rank(mixture, value, oversample: int = 64, bin_width_bits: flo
     enumeration, so it scales to deep ranks. For non-mixtures use :func:`count_dp_rank`; for the head
     of any model use :func:`density_rank`.
     """
-    from pysp.utils.quantization.core import Quantizer
+    from pysp.enumeration.quantization.core import Quantizer
 
     comps = [c for c, w in zip(mixture.components, mixture.w, strict=False) if w > 0.0]
     log_w = [float(lw) for lw, w in zip(mixture.log_w, mixture.w, strict=False) if w > 0.0]

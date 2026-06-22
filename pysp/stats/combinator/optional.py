@@ -17,6 +17,7 @@ from typing import Any, TypeVar
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.enumeration.algorithms import freeze, merge_enumerators
 from pysp.stats.combinator.composite import _distribute_child_prior
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -29,7 +30,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import freeze, merge_enumerators
 from pysp.utils.special import digamma
 
 T = TypeVar("T")
@@ -359,7 +359,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Fisher view for the optional/missing-gate."""
         if hasattr(self, "dist"):
-            from pysp.utils.fisher import OptionalFisherView
+            from pysp.inference.fisher import OptionalFisherView
 
             return OptionalFisherView(self)
         return super().to_fisher(**kwargs)

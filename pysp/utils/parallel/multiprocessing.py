@@ -13,7 +13,7 @@ the M-step.
 Usage - the handle plugs into the ordinary estimation entry points::
 
     from pysp.utils.parallel.multiprocessing import MPEncodedData
-    from pysp.utils.estimation import optimize
+    from pysp.inference.estimation import optimize
 
     with MPEncodedData(data, estimator=est, num_workers=8) as enc:
         model = optimize(None, est, enc_data=enc, max_its=50)

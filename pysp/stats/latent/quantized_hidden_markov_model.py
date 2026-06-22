@@ -41,7 +41,7 @@ after each M-step for state pairs whose quantized log-probabilities differ by le
 everywhere and pushes them split_nats apart along the strongest raw-count asymmetry
 (split_collapsed=True), restoring a hill-climbing direction for the next E-step; an unwarranted
 split is simply rounded back by the next M-step. Random restarts
-(e.g. pysp.utils.estimation.best_of) remain useful for multimodality, as with any HMM.
+(e.g. pysp.inference.estimation.best_of) remain useful for multimodality, as with any HMM.
 
 If included, the length of the sequences is modeled through a length distribution with support on
 non-negative integers.
@@ -58,6 +58,7 @@ from scipy.optimize import minimize_scalar
 from scipy.special import logsumexp
 
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge
 from pysp.stats.combinator.null_dist import NullDistribution, NullEstimator
 from pysp.stats.compute.pdist import (
     DistributionEnumerator,
@@ -69,7 +70,6 @@ from pysp.stats.compute.pdist import (
 from pysp.stats.graph.markov_chain import stationary_distribution
 from pysp.stats.latent.hidden_markov import HiddenMarkovAccumulatorFactory, HiddenMarkovModelDistribution
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
 from pysp.utils.optional_deps import HAS_NUMBA
 
 STRUCTURAL_ZERO = -1
@@ -560,7 +560,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
     def to_fisher(self, **kwargs):
         """Forward-backward Fisher view for the quantized HMM."""
         if hasattr(self, "topics") and hasattr(self, "transitions"):
-            from pysp.utils.fisher import HiddenMarkovFisherView
+            from pysp.inference.fisher import HiddenMarkovFisherView
 
             return HiddenMarkovFisherView(self)
         return super().to_fisher(**kwargs)

@@ -28,6 +28,7 @@ import pysp.utils.vector as vec
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -47,7 +48,6 @@ from pysp.stats.compute.pdist import (
 )
 from pysp.stats.leaf.categorical_multinomial import MultisetProductEnumerator
 from pysp.utils.aliasing import coalesce_alias
-from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
 
 SS0 = TypeVar("SS0")
 D = Sequence[tuple[int, float]]

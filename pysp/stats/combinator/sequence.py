@@ -23,6 +23,7 @@ from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge, ProductEnumerator
 from pysp.stats.combinator.composite import _distribute_child_prior
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
@@ -41,7 +42,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, ProductEnumerator
 
 T = TypeVar("T")  # Data type of Sequence distribution dist.
 E1 = TypeVar("E1")  # Generic type of distribution encoding.
@@ -407,7 +407,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Structural Fisher view for the sequence."""
         if hasattr(self, "dist"):
-            from pysp.utils.fisher import SequenceFisherView
+            from pysp.inference.fisher import SequenceFisherView
 
             return SequenceFisherView(self)
         return super().to_fisher(**kwargs)
@@ -497,9 +497,9 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         the depth bound every later length does too and we stop. Sequences are unranked by resolving
         the contributing length, then the per-position element buckets via the convolution unranker.
         """
+        from pysp.enumeration.quantization.core import child_count_index
+        from pysp.enumeration.quantization.semiring import CountSemiring
         from pysp.stats.compute.pdist import EnumerationError
-        from pysp.utils.quantization.core import child_count_index
-        from pysp.utils.quantization.semiring import CountSemiring
 
         if self.null_len_dist:
             raise EnumerationError(self, reason="no length distribution is modeled (len_dist is Null)")

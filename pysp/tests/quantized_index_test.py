@@ -5,6 +5,12 @@ import unittest
 
 import numpy as np
 
+from pysp.enumeration.algorithms import (
+    BufferedStream,
+    QuantizedEnumerationIndex,
+    bounded_best_first_union_index,
+    freeze,
+)
 from pysp.stats import (
     BinomialDistribution,
     CategoricalDistribution,
@@ -18,7 +24,6 @@ from pysp.stats import (
 )
 from pysp.stats.compute.pdist import EnumerationError
 from pysp.tests.enumeration_test import make_cases
-from pysp.utils.enumeration import BufferedStream, QuantizedEnumerationIndex, bounded_best_first_union_index, freeze
 
 
 def bounded_items(dist, max_bits, bin_width_bits=1.0):

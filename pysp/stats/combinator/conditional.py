@@ -23,6 +23,7 @@ from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream
 from pysp.stats.combinator.composite import _distribute_child_prior
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
@@ -43,7 +44,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream
 
 T0 = TypeVar("T0")
 T1 = TypeVar("T1")
