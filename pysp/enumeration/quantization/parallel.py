@@ -9,7 +9,7 @@ Two capabilities, both built on the existing resource/chunking layer
     so a worker pool computes disjoint output slices and the result is concatenated. Output
     ``out[k] = sum_i a[i]*b[k-i]`` is independent of the chunk boundaries, so the parallel result
     equals the serial one exactly. Attach an executor to a ``Quantizer`` and the DP routes its
-    convolutions through it (see :meth:`pysp.utils.quantization.Quantizer.convolve`).
+    convolutions through it (see :meth:`pysp.enumeration.quantization.Quantizer.convolve`).
 
   - **Distributed unranking** (:func:`distributed_unrank`): unranking a contiguous rank range is
     embarrassingly parallel. The structural unrankers are closures (not picklable), so each worker
@@ -83,7 +83,7 @@ class ConvolutionExecutor:
     """Process-pool executor for big-integer histogram convolutions (parallel quantization).
 
     A context manager holding a reusable pool. ``convolve(a, b, max_fine_bucket)`` returns a
-    :class:`pysp.utils.quantization.CountHistogram` equal to the serial convolution. Falls back to
+    :class:`pysp.enumeration.quantization.CountHistogram` equal to the serial convolution. Falls back to
     serial when the output is small or only one worker is available.
     """
 

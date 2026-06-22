@@ -11,7 +11,7 @@ is a small adapter over the modular compute-engine stack:
 * unsupported object-valued models fall back to the legacy ``seq_*`` protocol
   as fixed, CPU-scored compatibility paths;
 * gradient fitting delegates to the declaration/objective-based generic
-  optimizers in ``pysp.utils.estimation``.
+  optimizers in ``pysp.inference.estimation``.
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ from typing import Any
 import numpy as np
 
 from pysp.engines import TorchEngine
+from pysp.inference.fit import fit_map as _fit_map
+from pysp.inference.fit import fit_mle as _fit_mle
 from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
-from pysp.utils.fit import fit_map as _fit_map
-from pysp.utils.fit import fit_mle as _fit_mle
 
 __all__ = ["TorchMixture"]
 
@@ -33,7 +33,7 @@ class TorchMixture:
 
     New code should prefer ``dist.kernel(engine=TorchEngine(...))``,
     ``optimize(..., engine=...)``, ``fit_mle`` / ``fit_map``, or
-    ``pysp.utils.objectives`` directly.  This class exists so older code and
+    ``pysp.inference.objectives`` directly.  This class exists so older code and
     compatibility tests importing ``pysp.stats.compute.torch_mixture.TorchMixture`` keep
     working while distribution math remains distribution-owned.
     """

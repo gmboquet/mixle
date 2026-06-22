@@ -10,8 +10,8 @@ import unittest
 import numpy as np
 from scipy.stats import skellam as _ref
 
+from pysp.inference.estimation import optimize
 from pysp.stats import SkellamDistribution, SkellamEstimator
-from pysp.utils.estimation import optimize
 
 
 class SkellamTest(unittest.TestCase):

@@ -18,8 +18,8 @@ from typing import Any
 import numpy as np
 
 from pysp.capability import supports
+from pysp.inference.estimation import optimize
 from pysp.ppl._result import PosteriorResult, Sampleable, Summarizable
-from pysp.utils.estimation import optimize
 
 __all__ = [
     "RandomVariable",

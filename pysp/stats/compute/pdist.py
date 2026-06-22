@@ -145,9 +145,9 @@ class ProbabilityDistribution(ABC):
         The default view is accumulator-backed, so distributions inherit a generic
         sufficient-statistic/Fisher-vector interface.  Each distribution owns its Fisher view by
         overriding this method in its own module; families not yet migrated to a per-file hook are
-        resolved by the transitional type-name dispatch in :func:`pysp.utils.fisher._legacy_to_fisher`.
+        resolved by the transitional type-name dispatch in :func:`pysp.inference.fisher._legacy_to_fisher`.
         """
-        from pysp.utils.fisher import _legacy_to_fisher
+        from pysp.inference.fisher import _legacy_to_fisher
 
         return _legacy_to_fisher(self, **kwargs)
 
@@ -252,7 +252,7 @@ class ProbabilityDistribution(ABC):
             bin_width_bits (float): Width of each quantized probability bin in bits.
 
         Returns:
-            pysp.utils.enumeration.QuantizedEnumerationIndex.
+            pysp.enumeration.algorithms.QuantizedEnumerationIndex.
 
         """
         return self.enumerator().quantized_index(max_bits=max_bits, bin_width_bits=bin_width_bits)
@@ -301,7 +301,7 @@ class ProbabilityDistribution(ABC):
             n_samples (int): Monte-Carlo sample budget.
             seed (Optional[int]): Sampler seed (reproducible).
         """
-        from pysp.utils.enumeration import freeze
+        from pysp.enumeration.algorithms import freeze
 
         samples = self.sampler(seed).sample(int(n_samples))
         with np.errstate(divide="ignore"):
@@ -334,7 +334,7 @@ class ProbabilityDistribution(ABC):
         a dynamic program over the model's likelihood recursion.
 
         Args:
-            quantizer (pysp.utils.quantization.Quantizer): Fine/coarse bucketing.
+            quantizer (pysp.enumeration.quantization.Quantizer): Fine/coarse bucketing.
             max_fine_bucket (int): Inclusive depth bound on indexed fine buckets.
 
         Returns:
@@ -342,7 +342,7 @@ class ProbabilityDistribution(ABC):
             because they fell beyond the depth bound.
 
         """
-        from pysp.utils.quantization.core import leaf_count_index
+        from pysp.enumeration.quantization.core import leaf_count_index
 
         return leaf_count_index(self.enumerator(), quantizer, max_fine_bucket)
 
@@ -362,10 +362,10 @@ class ProbabilityDistribution(ABC):
             oversample (int): Fine buckets per coarse bin (accumulation resolution).
 
         Returns:
-            pysp.utils.enumeration.LazyQuantizedEnumerationIndex.
+            pysp.enumeration.algorithms.LazyQuantizedEnumerationIndex.
 
         """
-        from pysp.utils.quantization.core import count_budget_index
+        from pysp.enumeration.quantization.core import count_budget_index
 
         return count_budget_index(
             self, budget_bits, bin_width_bits=bin_width_bits, oversample=oversample, num_workers=num_workers
@@ -407,7 +407,7 @@ class ProbabilityDistribution(ABC):
         the k-th *distinct* value in O(1) is not possible -- it needs exact distinct per-bin counts,
         which require the overlap structure this design deliberately avoids materializing.
         """
-        from pysp.utils.quantization.core import distinct_budget_stream
+        from pysp.enumeration.quantization.core import distinct_budget_stream
 
         return distinct_budget_stream(
             self,
@@ -454,7 +454,7 @@ class ProbabilityDistribution(ABC):
         candidate under every distribution. Structured distributions can override this
         to build the same aligned rows from support algebra instead.
         """
-        from pysp.utils.enumeration import QuantizedCrossIndex, freeze
+        from pysp.enumeration.algorithms import QuantizedCrossIndex, freeze
 
         dists = [self] + list(others)
         if isinstance(max_bits, np.ndarray):
@@ -655,10 +655,10 @@ class DistributionEnumerator(ABC):
             bin_width_bits (float): Width of each quantized probability bin in bits.
 
         Returns:
-            pysp.utils.enumeration.QuantizedEnumerationIndex.
+            pysp.enumeration.algorithms.QuantizedEnumerationIndex.
 
         """
-        from pysp.utils.enumeration import QuantizedEnumerationIndex
+        from pysp.enumeration.algorithms import QuantizedEnumerationIndex
 
         return QuantizedEnumerationIndex.from_enumerator(self, max_bits=max_bits, bin_width_bits=bin_width_bits)
 

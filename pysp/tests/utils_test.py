@@ -5,8 +5,8 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import best_of
 from pysp.stats import GaussianEstimator
-from pysp.utils.estimation import best_of
 from pysp.utils.metrics import roc_auc, roc_curve
 from pysp.utils.optsutil import least_occurring
 from pysp.utils.vector import sorted_dict_merge_add

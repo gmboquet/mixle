@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE, NumpyEngine
+from pysp.inference.estimation import optimize
 from pysp.stats import (
     AffineTransform,
     BetaDistribution,
@@ -40,7 +41,6 @@ from pysp.stats import (
 )
 from pysp.stats.compute.kernel import GenericKernel, KernelFactory
 from pysp.stats.compute.stacked import StackedMixtureKernel, estimate_component_shard_value, tie_component_shard_values
-from pysp.utils.estimation import optimize
 
 
 def _assert_stats_close(test_case, actual, expected):

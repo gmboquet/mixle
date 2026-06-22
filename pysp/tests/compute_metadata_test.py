@@ -461,12 +461,13 @@ class ComputeMetadataTestCase(unittest.TestCase):
         pysp_root = Path(__file__).resolve().parents[1]
         targets = [
             pysp_root / "stats" / "compute" / "torch_mixture.py",
-            pysp_root / "utils" / "estimation.py",
-            pysp_root / "utils" / "objectives.py",
-            pysp_root / "utils" / "em.py",
+            # the fitting machinery now lives in pysp.inference (was pysp.utils)
+            pysp_root / "inference" / "estimation.py",
+            pysp_root / "inference" / "objectives.py",
+            pysp_root / "inference" / "em.py",
+            pysp_root / "inference" / "fisher.py",
             pysp_root / "utils" / "automatic" / "factories.py",
             pysp_root / "utils" / "automatic" / "profiling.py",
-            pysp_root / "utils" / "fisher.py",
             pysp_root / "planner.py",
         ] + sorted((pysp_root / "engines").glob("*.py"))
         allowed_modules = {
@@ -476,6 +477,8 @@ class ComputeMetadataTestCase(unittest.TestCase):
             "pysp.stats.compute.declarations",
             "pysp.stats.compute.gradient",
             "pysp.stats.compute.pdist",
+            # the vectorized seq_* drivers — pure pdist-protocol dispatch, not concrete distributions
+            "pysp.stats.compute.sequence",
         }
         concrete_suffixes = (
             "Accumulator",

@@ -416,7 +416,7 @@ def get_dpm_mixture(
     Component estimators are constructed with get_estimator(use_bstats=True)
     (one independent conjugate-prior instance per stick), and the truncated
     stick-breaking posterior is fit with variational inference via
-    pysp.utils.estimation.fit.
+    pysp.inference.estimation.fit.
 
     Args:
         data: Sequence of observations of any auto-detectable type.
@@ -434,7 +434,7 @@ def get_dpm_mixture(
     import sys
 
     import pysp.stats as provider
-    from pysp.utils.estimation import fit
+    from pysp.inference.estimation import fit
 
     from .profiling import get_estimator
 

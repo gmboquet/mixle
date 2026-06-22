@@ -194,9 +194,9 @@ class AutomaticDetectionTestCase(unittest.TestCase):
         self.assertEqual(len(profile.fields), 3)
 
     def test_bayesian_integral_float_record_fields_are_fittable(self):
+        from pysp.inference.estimation import fit
         from pysp.stats import initialize
         from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
-        from pysp.utils.estimation import fit
 
         data = [(0.0, float(i % 4) + 0.25) for i in range(80)]
         est = get_estimator(data, use_bstats=True)

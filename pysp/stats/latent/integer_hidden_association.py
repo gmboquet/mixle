@@ -34,6 +34,7 @@ import numpy as np
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, frontier_merge
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -52,7 +53,6 @@ from pysp.stats.compute.pdist import (
     child_enumerator,
 )
 from pysp.stats.latent.integer_probabilistic_latent_semantic_indexing import multinomial_bag_stream
-from pysp.utils.enumeration import BufferedStream, frontier_merge
 from pysp.utils.optional_deps import HAS_NUMBA, numba
 from pysp.utils.optsutil import count_by_value
 

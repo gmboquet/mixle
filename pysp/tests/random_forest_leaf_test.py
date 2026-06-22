@@ -9,6 +9,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.models.random_forest import (
     RandomForestAccumulatorFactory,
     RandomForestConditional,
@@ -16,7 +17,6 @@ from pysp.models.random_forest import (
     RandomForestEstimator,
 )
 from pysp.stats import log_density, seq_encode
-from pysp.utils.estimation import optimize
 
 
 def _classification_data(seed=0, n=400):

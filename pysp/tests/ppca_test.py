@@ -5,8 +5,8 @@ import unittest
 import numpy as np
 import scipy.stats
 
+from pysp.inference.estimation import fit
 from pysp.stats import ProbabilisticPCADistribution
-from pysp.utils.estimation import fit
 
 
 def _dist(seed=0):

@@ -15,6 +15,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
+from pysp.inference.fisher import FixedFisherView
 from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -24,7 +25,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.fisher import FixedFisherView
 from pysp.utils.special import digamma
 
 

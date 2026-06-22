@@ -21,6 +21,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
+from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -30,7 +31,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 
 
 class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):

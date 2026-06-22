@@ -162,7 +162,7 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Fisher view for the weighted wrapper."""
         if hasattr(self, "dist"):
-            from pysp.utils.fisher import WeightedFisherView
+            from pysp.inference.fisher import WeightedFisherView
 
             return WeightedFisherView(self)
         return super().to_fisher(**kwargs)

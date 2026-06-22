@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from pysp.engines import NumpyEngine, TorchEngine, torch
+from pysp.enumeration.algorithms import freeze
 from pysp.stats import (
     BernoulliEstimator,
     CategoricalDistribution,
@@ -13,7 +14,6 @@ from pysp.stats import (
     capabilities_for,
     declaration_for,
 )
-from pysp.utils.enumeration import freeze
 
 
 def _assert_suff_close(test_case, actual, expected):

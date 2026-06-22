@@ -46,8 +46,8 @@ class AutoPrecisionTestCase(unittest.TestCase):
         # 'auto' on CPU resolves to float64 (keeps the default host path) -> identical fit.
         import io
 
+        from pysp.inference.estimation import optimize
         from pysp.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator
-        from pysp.utils.estimation import optimize
 
         truth = MixtureDistribution(
             [GaussianDistribution(-3.0, 1.0), GaussianDistribution(0.0, 1.0), GaussianDistribution(4.0, 1.0)],

@@ -18,6 +18,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import logsumexp
 
+from pysp.enumeration.algorithms import freeze
 from pysp.stats.combinator._base import MaskedBaseEncoder, SingleChildAccumulator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -29,7 +30,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.enumeration import freeze
 from pysp.utils.special import log1mexp
 
 _REJECTION_BUDGET = 1_000_000  # max base draws before a rejection sampler gives up

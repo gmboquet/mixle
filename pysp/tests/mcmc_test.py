@@ -2,13 +2,6 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import (
-    BernoulliDistribution,
-    CategoricalDistribution,
-    GammaDistribution,
-    GaussianDistribution,
-    PoissonDistribution,
-)
 from pysp.inference.mcmc import (
     AdaptiveCovarianceProposal,
     AdaptiveRandomWalkProposal,
@@ -27,6 +20,13 @@ from pysp.inference.mcmc import (
     sample_conjugate_posterior,
     sample_distribution,
     sample_parameter_posterior,
+)
+from pysp.stats import (
+    BernoulliDistribution,
+    CategoricalDistribution,
+    GammaDistribution,
+    GaussianDistribution,
+    PoissonDistribution,
 )
 
 

@@ -7,6 +7,7 @@ import unittest
 
 import numpy as np
 
+from pysp.enumeration.algorithms import freeze
 from pysp.stats import DiagonalGaussianSampler, DistributionSampler
 from pysp.stats.combinator.weighted import WeightedDistribution, WeightedSampler
 from pysp.stats.compute.pdist import DataSequenceEncoder, EnumerationError
@@ -15,7 +16,6 @@ from pysp.stats.leaf.gaussian import GaussianDistribution
 from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution
 from pysp.stats.leaf.integer_uniform_spike import IntegerUniformSpikeDistribution
 from pysp.stats.leaf.poisson import PoissonDistribution
-from pysp.utils.enumeration import freeze
 
 TOL = 1e-9
 

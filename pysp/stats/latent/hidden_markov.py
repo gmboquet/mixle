@@ -40,6 +40,7 @@ import pysp.utils.vector as vec
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge, best_first_union_max
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -67,7 +68,6 @@ from pysp.stats.latent._hidden_markov_numba_kernels import (
 from pysp.stats.latent.mixture import MixtureDistribution
 from pysp.stats.latent_posterior import MarkovChainLatentPosterior
 from pysp.utils.aliasing import MISSING, coalesce_alias, require
-from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, best_first_union_max
 from pysp.utils.optional_deps import HAS_NUMBA, numba
 
 T = TypeVar("T")
@@ -957,7 +957,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Forward-backward Fisher view for the HMM."""
         if hasattr(self, "topics") and hasattr(self, "transitions"):
-            from pysp.utils.fisher import HiddenMarkovFisherView
+            from pysp.inference.fisher import HiddenMarkovFisherView
 
             return HiddenMarkovFisherView(self)
         return super().to_fisher(**kwargs)
@@ -1040,8 +1040,8 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         predecessor state) -- O(L), no recursion. Falls back to capped enumerate-and-bin for
         non-plain HMMs (taus / terminal_values) or emissions that cannot count structurally.
         """
+        from pysp.enumeration.quantization.core import CountHistogram, CountIndex, child_count_index, leaf_count_index
         from pysp.stats.compute.pdist import EnumerationError
-        from pysp.utils.quantization.core import CountHistogram, CountIndex, child_count_index, leaf_count_index
 
         if supports(self.len_dist, Neutral):
             raise EnumerationError(self, reason="no length distribution is modeled (len_dist is Null)")

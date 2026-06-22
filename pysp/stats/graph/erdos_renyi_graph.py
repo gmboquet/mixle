@@ -20,6 +20,7 @@ from pysp.data.graph_data import (
     _edge_indices,
     _extract_observation,
 )
+from pysp.enumeration.algorithms import BufferedStream, ProductEnumerator
 from pysp.stats.compute.pdist import (
     DistributionEnumerator,
     DistributionSampler,
@@ -29,7 +30,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 
 class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):

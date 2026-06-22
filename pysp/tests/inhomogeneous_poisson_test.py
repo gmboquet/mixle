@@ -5,8 +5,8 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.stats import InhomogeneousPoissonProcessDistribution, InhomogeneousPoissonProcessEstimator
-from pysp.utils.estimation import optimize
 
 
 class InhomogeneousPoissonProcessTest(unittest.TestCase):

@@ -29,7 +29,7 @@ from pysp.capability import (
 )
 
 # --- the k-best / descending-probability algorithms ---
-from pysp.enumeration._algorithms import (
+from pysp.enumeration.algorithms import (
     LazyQuantizedEnumerationIndex,
     ProductEnumerator,
     QuantizedEnumerationIndex,

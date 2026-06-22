@@ -5,9 +5,9 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import constant, optimize
 from pysp.planner import SparkEncodedData, encoded_data, is_encoded_data_handle
 from pysp.stats import GaussianDistribution, GaussianEstimator, seq_encode, seq_estimate, seq_log_density_sum
-from pysp.utils.estimation import constant, optimize
 from pysp.utils.streaming import StreamingEstimator, streaming_accumulate
 
 

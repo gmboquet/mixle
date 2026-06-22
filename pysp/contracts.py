@@ -56,13 +56,13 @@ from pysp.stats.compute.pdist import (
 if TYPE_CHECKING:  # let static tools / __all__ see the lazily-resolved subsystem contracts
     from pysp.doe._contracts import Acquisition, Criterion, Surrogate
     from pysp.engines.base import ComputeEngine
+    from pysp.enumeration.quantization.semiring import DecomposableSemiring
+    from pysp.inference.em import EMStrategy
     from pysp.planner import EncodedFold
     from pysp.ppl._operator import ForwardOperator
     from pysp.ppl.dynamics import DynamicsOperator
     from pysp.relations import Relation
     from pysp.stats.compute.kernel import Kernel, KernelFactory
-    from pysp.utils.em import EMStrategy
-    from pysp.utils.quantization.semiring import DecomposableSemiring
 
 # Heavier subsystem-role contracts — imported on first access to keep this module a light leaf.
 _LAZY: dict[str, tuple[str, str]] = {
@@ -70,8 +70,8 @@ _LAZY: dict[str, tuple[str, str]] = {
     "ComputeEngine": ("pysp.engines.base", "ComputeEngine"),
     "Kernel": ("pysp.stats.compute.kernel", "Kernel"),
     "KernelFactory": ("pysp.stats.compute.kernel", "KernelFactory"),
-    "DecomposableSemiring": ("pysp.utils.quantization.semiring", "DecomposableSemiring"),
-    "EMStrategy": ("pysp.utils.em", "EMStrategy"),
+    "DecomposableSemiring": ("pysp.enumeration.quantization.semiring", "DecomposableSemiring"),
+    "EMStrategy": ("pysp.inference.em", "EMStrategy"),
     "EncodedFold": ("pysp.planner", "EncodedFold"),
     "DynamicsOperator": ("pysp.ppl.dynamics", "DynamicsOperator"),
     "ForwardOperator": ("pysp.ppl._operator", "ForwardOperator"),

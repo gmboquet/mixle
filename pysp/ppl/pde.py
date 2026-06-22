@@ -216,8 +216,8 @@ def fit_diffusivity(
     """
     import torch
 
+    from pysp.inference.objectives import optimize_torch_objective
     from pysp.ppl.dynamics import laplacian_matrix
-    from pysp.utils.objectives import optimize_torch_objective
 
     y = np.asarray(observations, dtype=float)
     if y.ndim != 2 or y.shape[0] < 2:
@@ -277,7 +277,7 @@ def fit_pde_parameters(
     """
     import torch
 
-    from pysp.utils.objectives import optimize_torch_objective
+    from pysp.inference.objectives import optimize_torch_objective
 
     y = np.asarray(observations, dtype=float)
     if y.ndim != 2 or y.shape[0] < 2:

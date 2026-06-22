@@ -4,6 +4,7 @@ import unittest
 import numpy as np
 import pytest
 
+from pysp.inference.fit import fit_map, fit_mle
 from pysp.stats import (
     AffineTransform,
     BernoulliDistribution,
@@ -35,7 +36,6 @@ from pysp.stats import (
     WeibullDistribution,
     field,
 )
-from pysp.utils.fit import fit_map, fit_mle
 from pysp.utils.priors import (
     BetaPrior,
     ConditionalPrior,

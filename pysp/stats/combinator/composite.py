@@ -18,6 +18,12 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
+from pysp.enumeration.algorithms import (
+    BufferedStream,
+    LazyQuantizedEnumerationIndex,
+    ProductEnumerator,
+    QuantizedCrossIndex,
+)
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -29,7 +35,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream, LazyQuantizedEnumerationIndex, ProductEnumerator, QuantizedCrossIndex
 
 T = tuple[Any, ...]
 E = TypeVar("E")
@@ -295,7 +300,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Structural Fisher view (product of child views)."""
         if hasattr(self, "dists"):
-            from pysp.utils.fisher import CompositeFisherView
+            from pysp.inference.fisher import CompositeFisherView
 
             return CompositeFisherView(self)
         return super().to_fisher(**kwargs)
@@ -486,12 +491,12 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
         The complete log density is the sum of independent child log densities, so the joint count
         histogram is the ``times``/``product`` (convolution) of the child histograms in the
-        witness-retaining count semiring (pysp.utils.quantization.semiring). Children are consumed
+        witness-retaining count semiring (pysp.enumeration.quantization.semiring). Children are consumed
         by their *counts* and lazy unranker -- never drained -- so a child with astronomically large
         support (e.g. a Sequence) composes without being materialized. Swapping the carrier (e.g. a
         tropical one) would reuse this same reduction.
         """
-        from pysp.utils.quantization.semiring import CountSemiring
+        from pysp.enumeration.quantization.semiring import CountSemiring
 
         semiring = CountSemiring()
         if self.count == 0:

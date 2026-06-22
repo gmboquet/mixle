@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-from pysp.utils.enumeration import freeze
+from pysp.enumeration.algorithms import freeze
 
 
 def tiers(pairs):
@@ -213,11 +213,11 @@ class HiddenAssociationEnumerationTestCase(unittest.TestCase):
 
 class LabeledLDANonEnumerableTestCase(unittest.TestCase):
     def test_llda_raises_enumeration_error(self):
+        from pysp.enumeration.algorithms import supports_enumeration
         from pysp.stats.compute.pdist import EnumerationError
 
         # LabeledLDA's log_density is a variational ELBO, so it is intentionally not enumerable.
         from pysp.stats.latent.labeled_lda import LabeledLDADistribution
-        from pysp.utils.enumeration import supports_enumeration
 
         topics = [np.log([0.6, 0.3, 0.1]), np.log([0.1, 0.4, 0.5])]
         dist = LabeledLDADistribution(topics, [1.0, 1.0])

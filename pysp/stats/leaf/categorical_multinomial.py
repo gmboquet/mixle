@@ -34,6 +34,7 @@ from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge
 from pysp.stats.combinator.null_dist import NullAccumulator, NullAccumulatorFactory, NullDistribution, NullEstimator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -46,7 +47,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
 
 T = TypeVar("T")  ## Generic data type for value.
 T1 = TypeVar("T1")  ## encoded type for dist
@@ -361,7 +361,7 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Structural Fisher view for the multinomial bag."""
         if hasattr(self, "dist") and hasattr(self, "len_dist"):
-            from pysp.utils.fisher import MultinomialFisherView
+            from pysp.inference.fisher import MultinomialFisherView
 
             return MultinomialFisherView(self)
         return super().to_fisher(**kwargs)

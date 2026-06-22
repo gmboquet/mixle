@@ -1,6 +1,6 @@
 """Structural quantized enumeration: count the support without enumerating it.
 
-The smart-enumeration index (see :mod:`pysp.utils.enumeration` and
+The smart-enumeration index (see :mod:`pysp.enumeration.algorithms` and
 :class:`pysp.stats.compute.pdist.DistributionEnumerator`) is a *seek structure* over a
 distribution's exact descending-probability enumeration: it precomputes how many
 support values fall in each quantized log-probability bin so that an arbitrary rank
@@ -27,7 +27,7 @@ This module provides that semiring:
   - :func:`convolve_indices` composes child indices (the Composite reference case),
     and :func:`build_budget_index` accumulates coarse bins until the cumulative count
     reaches the requested ``2**budget_bits`` budget, returning a
-    :class:`pysp.utils.enumeration.LazyQuantizedEnumerationIndex`.
+    :class:`pysp.enumeration.algorithms.LazyQuantizedEnumerationIndex`.
 
 The bin assignment is the only approximation (intermediate fine-bucket rounding shifts
 items by at most ``num_terms / oversample`` coarse bins); the *value set*, *total
@@ -110,7 +110,7 @@ class Quantizer:
             raise ValueError("oversample must be a positive integer.")
         self.bin_width_bits = float(bin_width_bits)
         self.oversample = int(oversample)
-        # Optional convolution executor (see pysp.utils.quantization.parallel). Lives only in the
+        # Optional convolution executor (see pysp.enumeration.quantization.parallel). Lives only in the
         # building process; the count-DP routes its heavy convolutions through it when present.
         self.executor = executor
 
@@ -433,7 +433,7 @@ def build_budget_index(
     and reports the exact log density (recomputed via ``exact_log_density`` when supplied,
     otherwise the structurally accumulated log probability).
     """
-    from pysp.utils.enumeration import LazyQuantizedEnumerationIndex
+    from pysp.enumeration.algorithms import LazyQuantizedEnumerationIndex
 
     R = quantizer.oversample
     bw = quantizer.bin_width_bits

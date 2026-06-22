@@ -8,7 +8,7 @@ The enumeration system has two orthogonal computational modes:
     and the carrier decides what is computed. The carrier must be *witness-retaining* -- its
     elements keep enough structure to invert a rank back to a value (unranking) -- which a plain
     scalar semiring cannot do. :class:`CountSemiring` is the witness-retaining carrier over
-    :class:`pysp.utils.quantization.CountIndex` that yields the count-budget seek index.
+    :class:`pysp.enumeration.quantization.CountIndex` that yields the count-budget seek index.
 
   Axis B -- ordered access: produce values in strict descending probability order, lazily. This is
     a best-first *search*, not a fold, and a semiring cannot generate it; it is the existing
@@ -16,7 +16,7 @@ The enumeration system has two orthogonal computational modes:
     :class:`OrderedStream` for symmetry.
 
 The two axes trade in one currency -- ``(value, log_prob)`` pairs under a shared
-:class:`pysp.utils.quantization.Quantizer` -- connected by two coercion bridges:
+:class:`pysp.enumeration.quantization.Quantizer` -- connected by two coercion bridges:
 
   - :func:`enumerate_and_bin`  (Axis B -> Axis A): the universal fallback. Any ``OrderedStream``
     can be tabulated into a bounded count index; O(count), so only viable for small budgets.
@@ -148,7 +148,7 @@ class CountSemiring(DecomposableSemiring):
 
     ``leaf``/``plus``/``scale``/``map_values`` build :class:`_CNode` trees unranked by the iterative
     :func:`_unrank` (bounded call-stack regardless of chain depth); ``times``/``product`` convolve
-    via :func:`pysp.utils.quantization.convolve_indices` (flat unranker -- identical bin counts and
+    via :func:`pysp.enumeration.quantization.convolve_indices` (flat unranker -- identical bin counts and
     within-bucket order to the previous path). Both element kinds expose ``.hist`` and
     ``.get_in_bucket``, so they interoperate freely.
     """
@@ -265,7 +265,7 @@ def bounded_dedup_stream(
     from collections import OrderedDict
 
     if key is None:
-        from pysp.utils.enumeration import freeze as key
+        from pysp.enumeration.algorithms import freeze as key
     seen: OrderedDict = OrderedDict()
     for value, lp in stream:
         k = key(value)

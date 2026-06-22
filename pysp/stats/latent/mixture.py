@@ -22,6 +22,13 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import maxrandint
+from pysp.enumeration.algorithms import (
+    BufferedStream,
+    QuantizedEnumerationIndex,
+    best_first_union,
+    bounded_best_first_union_index,
+    freeze,
+)
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from pysp.stats.compute.pdist import (
@@ -37,13 +44,6 @@ from pysp.stats.compute.pdist import (
 )
 from pysp.stats.latent_posterior import CategoricalLatentPosterior
 from pysp.utils.aliasing import MISSING, coalesce_alias
-from pysp.utils.enumeration import (
-    BufferedStream,
-    QuantizedEnumerationIndex,
-    best_first_union,
-    bounded_best_first_union_index,
-    freeze,
-)
 from pysp.utils.special import digamma
 
 T = TypeVar("T")  ### Type of Mixture component data.
@@ -617,7 +617,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Structural Fisher view for the mixture."""
         if hasattr(self, "components") and hasattr(self, "w"):
-            from pysp.utils.fisher import MixtureFisherView
+            from pysp.inference.fisher import MixtureFisherView
 
             return MixtureFisherView(self)
         return super().to_fisher(**kwargs)
@@ -771,8 +771,8 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         budget builder). For an exact small-budget index (best-first union with dedup), use
         ``quantized_index``. Components that cannot count structurally raise EnumerationError.
         """
-        from pysp.utils.quantization.core import child_count_index
-        from pysp.utils.quantization.semiring import CountSemiring
+        from pysp.enumeration.quantization.core import child_count_index
+        from pysp.enumeration.quantization.semiring import CountSemiring
 
         sr = CountSemiring()
         total = sr.zero()

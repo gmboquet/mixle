@@ -15,6 +15,7 @@ import unittest
 import numpy as np
 from scipy.special import logsumexp
 
+from pysp.inference.estimation import _data_objective_sum, _model_objective, fit, optimize
 from pysp.stats import seq_encode, seq_estimate, seq_initialize
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
@@ -27,7 +28,6 @@ from pysp.stats.latent.mixture import (
     mixture_prior,
 )
 from pysp.stats.leaf.gaussian import GaussianDistribution
-from pysp.utils.estimation import _data_objective_sum, _model_objective, fit, optimize
 from pysp.utils.special import digamma
 
 

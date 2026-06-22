@@ -10,12 +10,12 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.stats import GaussianDistribution as G
 from pysp.stats.latent.semi_supervised_hidden_markov_model import (
     IndPiHiddenMarkovModelDistribution,
     SemiSupervisedHiddenMarkovModelDistribution,
 )
-from pysp.utils.estimation import optimize
 
 _A = np.array([[0.6, 0.3, 0.1], [0.2, 0.6, 0.2], [0.1, 0.3, 0.6]])
 _TOPICS = [G(-2.0, 1.0), G(2.0, 1.0), G(5.0, 1.0)]
