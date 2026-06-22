@@ -82,6 +82,34 @@ def test_engine_resident_matches_legacy_getattr_hook():
         assert cap.supports(acc, cap.EngineResidentEStep) == callable(getattr(acc, "seq_update_engine", None))
 
 
+# --------------------------------------------------------------- the newly-formalized facets
+def test_transform_setvalued_backend_facets():
+    from pysp.stats.combinator.transform import AffineTransform
+    from pysp.stats.sets.bernoulli_set import BernoulliSetDistribution
+
+    assert cap.supports(AffineTransform(2.0, 1.0), cap.Transform)
+    assert not cap.supports(GaussianDistribution(0, 1), cap.Transform)
+    assert cap.supports(BernoulliSetDistribution({"a": 0.5, "b": 0.5}), cap.SetValued)
+    assert not cap.supports(_cat(), cap.SetValued)
+    # exp-family leaves expose engine backend scoring
+    assert cap.supports(GaussianDistribution(0, 1), cap.SupportsBackendScoring)
+
+
+def test_core_contracts_are_enforced_abcs():
+    # The pdist contracts are real ABCs now: isinstance works, and an incomplete subclass can't
+    # be instantiated.
+    from pysp.stats.compute.pdist import ParameterEstimator, ProbabilityDistribution
+
+    assert isinstance(_cat(), ProbabilityDistribution)
+    assert isinstance(_cat().estimator(), ParameterEstimator)
+
+    class _Incomplete(ProbabilityDistribution):
+        pass  # missing log_density/sampler/estimator
+
+    with pytest.raises(TypeError):
+        _Incomplete()
+
+
 # --------------------------------------------------------------- query surface
 def test_require_raises_with_clear_message():
     with pytest.raises(cap.CapabilityError) as ei:
