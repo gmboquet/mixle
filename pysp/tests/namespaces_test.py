@@ -9,7 +9,9 @@ def test_object_namespaces_alias_the_families():
     gauss = importlib.import_module("pysp.stats.leaf.gaussian").GaussianDistribution
     assert pysp.dist.GaussianDistribution is gauss  # pysp.dist aliases pysp.stats
     assert pysp.process.HawkesProcessDistribution.__name__ == "HawkesProcessDistribution"
-    assert pysp.graph.MarkovChainDistribution.__name__ == "MarkovChainDistribution"
+    # a Markov chain is a distribution, not a graph — it lives in the pysp.dist umbrella
+    assert pysp.dist.MarkovChainDistribution.__name__ == "MarkovChainDistribution"
+    assert not hasattr(pysp, "graph")  # pysp.graph was dropped (minimal namespaces)
     assert "GaussianDistribution" in pysp.dist.__all__
 
 
@@ -43,5 +45,5 @@ def test_contracts_gathers_every_contract_in_one_import():
 def test_pysp_dir_advertises_the_namespaces():
     import pysp
 
-    for ns in ("dist", "process", "graph", "enumeration", "sampling", "inference", "ops", "contracts"):
+    for ns in ("dist", "process", "enumeration", "sampling", "inference", "ops", "contracts"):
         assert ns in dir(pysp)
