@@ -1009,8 +1009,18 @@ class JointMixtureEstimator(ParameterEstimator):
             taus21 = taus / taus21_sum
 
         else:
-            w1 = counts1 / counts1.sum()
-            w2 = counts2 / counts2.sum()
+            counts1_sum = counts1.sum()
+            counts2_sum = counts2.sum()
+            w1 = (
+                np.full(self.num_components1, 1.0 / self.num_components1)
+                if counts1_sum <= 0.0
+                else counts1 / counts1_sum
+            )
+            w2 = (
+                np.full(self.num_components2, 1.0 / self.num_components2)
+                if counts2_sum <= 0.0
+                else counts2 / counts2_sum
+            )
             taus = joint_counts
 
             taus12_sum = np.sum(taus, axis=1, keepdims=True)

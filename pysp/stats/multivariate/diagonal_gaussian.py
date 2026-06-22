@@ -7,7 +7,7 @@ pysparkplug.
 The log-density of an 'n' dimensional diagonal-gaussian observation x = (x_1,x_2,...,x_n) with mean mu=(m_1,m_2,..,m_n),
 and diagonal covariance matrix given by covar = diag(s2_1, s2_2,...,s2_n).
 
-    log(p_mat(x)) = -0.5*sum_{i=1}^{n} (x_i-m_i)^2 / s2_i - 0.5*log(s2_i) - (n/2)*log(pi).
+    log(p_mat(x)) = -0.5*sum_{i=1}^{n} (x_i-m_i)^2 / s2_i - 0.5*log(s2_i) - (n/2)*log(2*pi).
 
 Data type: x (List[float], np.ndarray).
 
@@ -797,6 +797,16 @@ class DiagonalGaussianEstimator(ParameterEstimator):
 
         nobs = suff_stat[2]
         pc1, pc2 = self.pseudo_count
+
+        if nobs <= 0:
+            # zero-responsibility component: fall back to the prior mean (or zeros)
+            # rather than dividing by zero and emitting a NaN mean.
+            d = self.dim if self.dim is not None else len(suff_stat[0])
+            mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
+            covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.ones(d)
+            floor = max(self.min_covar, self.ridge * float(np.mean(covar[covar > 0.0])) if np.any(covar > 0.0) else 0.0)
+            covar = np.maximum(covar, floor)
+            return DiagonalGaussianDistribution(mu, covar, name=self.name)
 
         if pc1 is not None and self.prior_mu is not None:
             mu = (suff_stat[0] + pc1 * self.prior_mu) / (nobs + pc1)
