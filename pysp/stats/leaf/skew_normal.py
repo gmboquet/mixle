@@ -112,47 +112,76 @@ class SkewNormalSampler(DistributionSampler):
 
 
 class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulate weighted first three moments for skew-normal estimation."""
+    """Accumulate weighted central moments for skew-normal estimation.
+
+    The sufficient statistic is stored as ``(count, mean, M2, M3)`` where
+    ``M2 = sum_i w_i (x_i - mean)^2`` and ``M3 = sum_i w_i (x_i - mean)^3`` are the
+    weighted central moments. This is mathematically equivalent to the raw power sums
+    ``(sum x, sum x^2, sum x^3)`` but avoids the catastrophic ``E[x^2] - E[x]^2``
+    cancellation when ``|mean|`` is large relative to the spread: each batch is centered
+    on its own mean *before* squaring/cubing, and batches merge through the
+    Pébay/West parallel-moment formulas (exact for real weights). SkewNormal is a
+    host-only leaf (no exponential-family / engine-resident path), so changing the
+    accumulator representation has no engine-swap parity implications.
+    """
 
     def __init__(self, name: str | None = None, keys: str | None = None) -> None:
-        self.sum = 0.0
-        self.sum2 = 0.0
-        self.sum3 = 0.0
         self.count = 0.0
+        self.mean = 0.0
+        self.m2 = 0.0
+        self.m3 = 0.0
         self.name = name
         self.key = keys
 
+    def _merge(self, c_b: float, mean_b: float, m2_b: float, m3_b: float) -> None:
+        """Merge a second weighted central-moment batch into this one (parallel form)."""
+        c_a, mean_a, m2_a, m3_a = self.count, self.mean, self.m2, self.m3
+        count = c_a + c_b
+        if count <= 0.0:
+            return
+        delta = mean_b - mean_a
+        # mean_a stays correct when c_b == 0; otherwise shift toward the merged mean.
+        self.mean = mean_a + delta * (c_b / count)
+        self.m2 = m2_a + m2_b + delta * delta * (c_a * c_b / count)
+        self.m3 = (
+            m3_a
+            + m3_b
+            + delta**3 * (c_a * c_b * (c_a - c_b) / (count * count))
+            + 3.0 * delta * (c_a * m2_b - c_b * m2_a) / count
+        )
+        self.count = count
+
     def update(self, x: float, weight: float, estimate: SkewNormalDistribution | None) -> None:
-        self.sum += weight * x
-        self.sum2 += weight * x * x
-        self.sum3 += weight * x * x * x
-        self.count += weight
+        # A single observation is a batch with zero internal spread (M2 = M3 = 0).
+        self._merge(float(weight), float(x), 0.0, 0.0)
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: SkewNormalDistribution | None) -> None:
         xx = np.asarray(x, dtype=np.float64)
-        self.sum += float(np.dot(xx, weights))
-        self.sum2 += float(np.dot(xx * xx, weights))
-        self.sum3 += float(np.dot(xx * xx * xx, weights))
-        self.count += float(np.sum(weights))
+        ww = np.asarray(weights, dtype=np.float64)
+        c_b = float(np.sum(ww))
+        if c_b <= 0.0:
+            return
+        mean_b = float(np.dot(xx, ww) / c_b)
+        dx = xx - mean_b  # center before squaring/cubing -> no cancellation
+        m2_b = float(np.dot(ww, dx * dx))
+        m3_b = float(np.dot(ww, dx * dx * dx))
+        self._merge(c_b, mean_b, m2_b, m3_b)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float, float]) -> "SkewNormalAccumulator":
-        self.sum += suff_stat[0]
-        self.sum2 += suff_stat[1]
-        self.sum3 += suff_stat[2]
-        self.count += suff_stat[3]
+        self._merge(float(suff_stat[0]), float(suff_stat[1]), float(suff_stat[2]), float(suff_stat[3]))
         return self
 
     def value(self) -> tuple[float, float, float, float]:
-        return self.sum, self.sum2, self.sum3, self.count
+        return self.count, self.mean, self.m2, self.m3
 
     def from_value(self, x: tuple[float, float, float, float]) -> "SkewNormalAccumulator":
-        self.sum, self.sum2, self.sum3, self.count = float(x[0]), float(x[1]), float(x[2]), float(x[3])
+        self.count, self.mean, self.m2, self.m3 = float(x[0]), float(x[1]), float(x[2]), float(x[3])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -193,14 +222,15 @@ class SkewNormalEstimator(ParameterEstimator):
         return SkewNormalAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> SkewNormalDistribution:
-        sum_x, sum_x2, sum_x3, count = suff_stat
+        count, mean, sum_m2, sum_m3 = suff_stat
         if count <= 0.0:
             return SkewNormalDistribution(0.0, 1.0, 0.0, name=self.name, keys=self.keys)
-        mean = sum_x / count
-        var = sum_x2 / count - mean * mean
+        # ``sum_m2``/``sum_m3`` are the weighted central moments (see SkewNormalAccumulator),
+        # so var/m3 are read off directly with no E[x^2]-E[x]^2 cancellation.
+        var = sum_m2 / count
         if var <= 0.0:
             return SkewNormalDistribution(mean, self.min_scale, 0.0, name=self.name, keys=self.keys)
-        m3 = sum_x3 / count - 3.0 * mean * (sum_x2 / count) + 2.0 * mean**3  # central third moment
+        m3 = sum_m3 / count  # central third moment
         skew = m3 / var**1.5
         skew = min(max(skew, -_MAX_SKEW * (1.0 - 1.0e-6)), _MAX_SKEW * (1.0 - 1.0e-6))
         # invert skewness -> u = b^2 delta^2 in [0,1): (1-u)/u = (((4-pi)/2)/|skew|)^{2/3}

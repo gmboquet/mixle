@@ -30,7 +30,9 @@ def gammaln(x: np.ndarray | float | int) -> np.ndarray | float:
         log(Gamma(x)) as float if x is a float/int, or np.ndarray[np.float] if x is a numpy array.
 
     """
-    if isinstance(x, float):
+    # Return a Python float for any scalar input (float/int/np.floating/np.integer), as the
+    # docstring and overloads promise; previously a python-int or np.float64 leaked a 0-d ndarray.
+    if isinstance(x, (float, int, np.floating, np.integer)):
         return float(scipy.special.gammaln(x))
 
     return np.asarray(scipy.special.gammaln(x))

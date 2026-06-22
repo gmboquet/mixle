@@ -4,7 +4,7 @@ Defines the GaussianDistribution, GaussianSampler, GaussianAccumulatorFactory, G
 GaussianEstimator, and the GaussianDataEncoder classes for use with pysparkplug.
 
 Data type: (float): The GaussianDistribution with mean mu and variance sigma2 > 0.0, has log-density
-    log(f(x;mu, sigma2)) = -log(2*pi*sigma2) - (x-mu)^2/sigma2, for real-valued x.
+    log(f(x;mu, sigma2)) = -0.5*log(2*pi*sigma2) - 0.5*(x-mu)^2/sigma2, for real-valued x.
 
 """
 
@@ -722,6 +722,12 @@ class GaussianEstimator(ParameterEstimator):
                 nobs_loc2 + self.pseudo_count[1]
             )
         else:
+            # E[x^2] - E[x]^2 from the (count, sum, sum_sq) exponential-family sufficient statistic.
+            # This is the *required* form for engine-swap parity: the streaming/stacked (numpy/torch)
+            # reduction produces sum_sq in a single pass, so the M-step cannot use a centered
+            # (Welford) scatter without breaking numpy<->torch accumulate parity. The subtraction can
+            # lose precision when |mu| >> sigma (large-offset data); the floor below caps the
+            # degenerate tail, and pre-centering the data is the recommended remedy for extreme offsets.
             sigma2 = suff_stat[1] / nobs_loc2 - mu * mu
 
         # P1 variance floor: clamp non-finite / non-positive variance and apply a
