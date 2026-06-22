@@ -495,3 +495,30 @@ def burgers_rhs(nu: float, dx: float, *, bc: str = "dirichlet") -> Any:
         return du
 
     return rhs
+
+
+# ---------------------------------------------------------------------------
+# Korteweg-de Vries equation (dispersive, periodic method of lines)
+# ---------------------------------------------------------------------------
+def kdv_rhs(dx: float, *, nonlinearity: float = 6.0, dispersion: float = 1.0) -> Any:
+    """Build the periodic method-of-lines right-hand side of the Korteweg-de Vries equation.
+
+    Returns ``rhs(t, u)`` for ``u_t + a u u_x + b u_xxx = 0`` (``a = nonlinearity``, ``b = dispersion``),
+    written conservatively as ``u_t = -(a/2) (u^2)_x - b u_xxx`` with central differences on a periodic
+    grid of spacing ``dx`` (the ``u^2`` flux and a 4-point ``u_xxx`` stencil). KdV is the canonical
+    dispersive nonlinear PDE: the dispersion ``u_xxx`` exactly balances the steepening ``u u_x`` to give
+    solitons -- ``u = (c/a) * 3 sech^2(...)``; for the standard ``a=6, b=1`` a soliton ``u = (c/2)
+    sech^2((sqrt(c)/2)(x - c t - x0))`` travels at speed ``c`` without changing shape. Integrate with
+    :func:`integrate_adaptive` (its error control shrinks the step to resolve the stiff dispersion).
+    """
+    dx = float(dx)
+    half_a = 0.5 * float(nonlinearity)
+    b = float(dispersion)
+
+    def rhs(t: float, u: Any) -> np.ndarray:
+        u = np.asarray(u, dtype=np.float64)
+        dflux = (np.roll(u * u, -1) - np.roll(u * u, 1)) / (2.0 * dx)
+        uxxx = (np.roll(u, -2) - 2.0 * np.roll(u, -1) + 2.0 * np.roll(u, 1) - np.roll(u, 2)) / (2.0 * dx**3)
+        return -half_a * dflux - b * uxxx
+
+    return rhs
