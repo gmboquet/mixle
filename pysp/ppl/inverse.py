@@ -31,11 +31,12 @@ Example -- recover a source field from a steady diffusion equation (the shared f
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 
+from pysp.ppl._operator import ForwardModel, ObserveFn, RhsFn
 from pysp.ppl.field import Proxy, _ParamSpec
 from pysp.ppl.ops import _Params, make_ops
 
@@ -56,7 +57,18 @@ def _driver_spec(handle):
 class _DifferentialProxy(Proxy):
     """Internal proxy: solve a forward model from the drivers/field and score the observed output."""
 
-    def __init__(self, y, *, forward, observe, drivers, over_name, scale, family, prefix="diff"):
+    def __init__(
+        self,
+        y,
+        *,
+        forward: ForwardModel,
+        observe: ObserveFn | None,
+        drivers,
+        over_name,
+        scale,
+        family,
+        prefix="diff",
+    ):
         self.complex = np.iscomplexobj(np.asarray(y))
         self.y = np.asarray(y) if self.complex else np.asarray(y, dtype=float)
         self.forward = forward
@@ -122,12 +134,12 @@ class _DifferentialProxy(Proxy):
 def Differential(
     y: np.ndarray,
     *,
-    forward: Callable | None = None,
-    rhs: Callable | None = None,
+    forward: ForwardModel | None = None,
+    rhs: RhsFn | None = None,
     y0: Any = None,
     t_grid: np.ndarray | None = None,
     method: str = "rk4",
-    observe: Callable | None = None,
+    observe: ObserveFn | None = None,
     drivers: Sequence = (),
     over=None,
     scale: Any = 1.0,
