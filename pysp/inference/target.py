@@ -34,7 +34,7 @@ from .backends import (
     register_inference_backend,
     select_backend,
 )
-from .diagnostics import ess, rhat
+from .diagnostics import ess, ess_bulk, ess_tail, rhat, split_rhat
 
 __all__ = [
     "NutsResult",
@@ -44,6 +44,9 @@ __all__ = [
     "advi",
     "rhat",
     "ess",
+    "split_rhat",
+    "ess_bulk",
+    "ess_tail",
     "available_backends",
     "InferenceBackend",
     "register_inference_backend",

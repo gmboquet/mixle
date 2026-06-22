@@ -11,6 +11,8 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from scipy.special import ndtri
+from scipy.stats import rankdata
 
 
 def _as_chains(chains: Any) -> np.ndarray:
@@ -93,4 +95,58 @@ def ess(samples: Any, max_lag: int | None = None) -> np.ndarray:
             break
         tau += 2.0 * np.where(positive, rho, 0.0)
     out[nonzero] = np.maximum(1.0, n_total / tau)
+    return out
+
+
+def _split_chains(arr: np.ndarray) -> np.ndarray:
+    """Split each chain into first/second halves -> ``(2*n_chains, n_draws//2, d)`` (drops an odd tail draw)."""
+    m, n, d = arr.shape
+    h = n // 2
+    if h < 1:
+        return arr
+    return np.concatenate([arr[:, :h, :], arr[:, h : 2 * h, :]], axis=0)
+
+
+def _rank_normalize(arr: np.ndarray) -> np.ndarray:
+    """Pooled rank-normal-score transform per parameter (Blom plotting positions)."""
+    m, n, d = arr.shape
+    total = m * n
+    out = np.empty_like(arr)
+    for k in range(d):
+        ranks = rankdata(arr[:, :, k].ravel(), method="average")
+        out[:, :, k] = ndtri((ranks - 0.375) / (total - 0.25)).reshape(m, n)
+    return out
+
+
+def split_rhat(chains: Any) -> np.ndarray:
+    """Rank-normalized split-R-hat (Vehtari et al. 2021) -- the robust, recommended R-hat.
+
+    Splits each chain in half (doubling the chain count, so within-chain non-stationarity is caught),
+    rank-normalizes the pooled draws (robust to heavy tails / non-normality), then applies the
+    Gelman-Rubin R-hat. Convergence is typically declared at ``< 1.01``.
+    """
+    return rhat(_rank_normalize(_split_chains(_as_chains(chains))))
+
+
+def ess_bulk(chains: Any) -> np.ndarray:
+    """Bulk effective sample size: ESS of the rank-normalized split chains (mixing in the distribution body)."""
+    return ess(_rank_normalize(_split_chains(_as_chains(chains))))
+
+
+def ess_tail(chains: Any, prob: float = 0.05) -> np.ndarray:
+    """Tail effective sample size: the smaller ESS of the lower-/upper-``prob`` tail indicators.
+
+    Tail quantiles mix more slowly than the bulk; tail-ESS is ``min(ESS[1(x <= q_prob)], ESS[1(x >=
+    q_{1-prob})])`` over the split chains (Vehtari et al. 2021), surfacing poor tail exploration that
+    bulk-ESS misses.
+    """
+    s = _split_chains(_as_chains(chains))
+    m, n, d = s.shape
+    out = np.empty(d, dtype=float)
+    for k in range(d):
+        flat = s[:, :, k]
+        q_lo, q_hi = np.quantile(flat, prob), np.quantile(flat, 1.0 - prob)
+        lo = ess((flat <= q_lo).astype(float)[:, :, None])[0]
+        hi = ess((flat >= q_hi).astype(float)[:, :, None])[0]
+        out[k] = min(float(lo), float(hi))
     return out
