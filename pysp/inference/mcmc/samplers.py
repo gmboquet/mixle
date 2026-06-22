@@ -547,6 +547,83 @@ def particle_filter(
     return np.array(means), log_lik
 
 
+def _dense_hmc_run(lp, grad, x0, num, step, n_leap, m_inv, m_chol, rng):
+    """Run HMC for ``num`` samples with a (dense) mass metric; returns ``(samples, n_accepted)``."""
+    d = x0.size
+    x = x0.copy()
+    cur_lp = lp(x)
+    out = np.empty((num, d))
+    accepted = 0
+    for it in range(num):
+        p0 = m_chol @ rng.standard_normal(d)
+        xn, pn = x.copy(), p0.copy()
+        g = grad(xn)
+        for _ in range(n_leap):
+            pn = pn + 0.5 * step * g
+            xn = xn + step * (m_inv @ pn)
+            g = grad(xn)
+            pn = pn + 0.5 * step * g
+        prop_lp = lp(xn)
+        ham0 = -cur_lp + 0.5 * p0 @ (m_inv @ p0)
+        ham1 = -prop_lp + 0.5 * pn @ (m_inv @ pn)
+        if np.isfinite(prop_lp) and np.log(rng.rand()) < ham0 - ham1:
+            x, cur_lp = xn, prop_lp
+            accepted += 1
+        out[it] = x
+    return out, accepted
+
+
+def dense_mass_hmc(
+    log_target: LogTarget,
+    grad_log_target: Callable[[Any], Any],
+    initial: Any,
+    num_samples: int,
+    step_size: float,
+    num_steps: int,
+    warmup: int = 500,
+    rng: np.random.RandomState | None = None,
+) -> MCMCResult:
+    """HMC with a warmup-adapted dense mass matrix (the Stan-style Euclidean metric).
+
+    Runs a warmup phase with an identity metric, estimates the posterior covariance ``Sigma`` from the
+    warmup draws, and runs the sampling phase with mass matrix ``M = Sigma^{-1}`` (momentum ``~ N(0, M)``,
+    position step ``M^{-1} p``). Matching the metric to the posterior shape decorrelates the parameters,
+    so strongly-correlated/ill-conditioned targets mix far better than identity-mass HMC -- the standard
+    fix that makes HMC competitive on realistic posteriors. ``log_target`` may be unnormalized;
+    ``grad_log_target`` returns its gradient. Returns an :class:`MCMCResult` from the sampling phase.
+    """
+    rng = np.random.RandomState() if rng is None else rng
+    x0 = _numeric_state(initial)
+    shape = x0.shape
+    d = x0.size
+
+    def lp(flat: np.ndarray) -> float:
+        return float(log_target(_restore_numeric_state(flat.reshape(shape))))
+
+    def grad(flat: np.ndarray) -> np.ndarray:
+        return np.asarray(_numeric_gradient(grad_log_target, flat.reshape(shape), shape), dtype=float).ravel()
+
+    flat0 = x0.ravel().astype(float)
+    eye = np.eye(d)
+    warm_samples, _ = _dense_hmc_run(lp, grad, flat0, max(warmup, 0), step_size, num_steps, eye, eye, rng)
+    if warm_samples.shape[0] > d + 1:  # enough warmup draws to estimate a covariance
+        cov = np.cov(warm_samples[warm_samples.shape[0] // 2 :].T)
+        cov = np.atleast_2d(cov) + 1.0e-8 * eye
+        mass = np.linalg.inv(cov)
+    else:
+        mass = eye
+    start = warm_samples[-1] if warm_samples.shape[0] else flat0
+    m_inv = np.linalg.inv(mass)
+    m_chol = np.linalg.cholesky(mass)
+    samples, accepted = _dense_hmc_run(lp, grad, start, num_samples, step_size, num_steps, m_inv, m_chol, rng)
+    return MCMCResult(
+        samples=[_restore_numeric_state(s.reshape(shape)) for s in samples],
+        log_probs=np.asarray([lp(s) for s in samples], dtype=float),
+        accepted=np.concatenate([np.ones(accepted, bool), np.zeros(num_samples - accepted, bool)]),
+        transition_labels=tuple("dense_mass_hmc" for _ in range(num_samples)),
+    )
+
+
 def nuts(
     log_target: LogTarget | None = None,
     grad_log_target: Callable[[Any], Any] | None = None,
