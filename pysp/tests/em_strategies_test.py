@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import seq_estimate
 from pysp.inference.em import (
     AcceleratedEM,
     AnnealedEM,
@@ -26,7 +27,6 @@ from pysp.stats import (
     MixtureDistribution,
     MixtureEstimator,
     seq_encode,
-    seq_estimate,
 )
 
 

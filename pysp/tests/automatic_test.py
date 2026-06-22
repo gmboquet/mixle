@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import estimate, initialize
 from pysp.stats import (
     BernoulliSetEstimator,
     CategoricalEstimator,
@@ -15,8 +16,6 @@ from pysp.stats import (
     OptionalEstimator,
     PoissonEstimator,
     SequenceEstimator,
-    estimate,
-    initialize,
 )
 from pysp.utils.automatic import DictRecordEstimator, analyze_structure, get_estimator
 
@@ -194,8 +193,8 @@ class AutomaticDetectionTestCase(unittest.TestCase):
         self.assertEqual(len(profile.fields), 3)
 
     def test_bayesian_integral_float_record_fields_are_fittable(self):
+        from pysp.inference import initialize
         from pysp.inference.estimation import fit
-        from pysp.stats import initialize
         from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 
         data = [(0.0, float(i % 4) + 0.25) for i in range(80)]

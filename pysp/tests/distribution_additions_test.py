@@ -4,6 +4,7 @@ import numpy as np
 import scipy.special
 import scipy.stats
 
+from pysp.inference import seq_estimate
 from pysp.stats import (
     AffineTransform,
     BernoulliDistribution,
@@ -43,7 +44,6 @@ from pysp.stats import (
     WeibullDistribution,
     WeibullEstimator,
     seq_encode,
-    seq_estimate,
     seq_log_density_sum,
 )
 

@@ -5,7 +5,8 @@ import warnings
 
 import numpy as np
 
-from pysp.stats import MultivariateHawkesProcessDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import MultivariateHawkesProcessDistribution
 from pysp.stats.leaf.multivariate_hawkes import _split
 
 

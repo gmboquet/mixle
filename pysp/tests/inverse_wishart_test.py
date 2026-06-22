@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.stats import invwishart as siw
 
-from pysp.stats import InverseWishartDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import InverseWishartDistribution
 
 
 class InverseWishartTest(unittest.TestCase):

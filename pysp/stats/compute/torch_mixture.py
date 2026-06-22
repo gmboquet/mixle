@@ -145,7 +145,7 @@ class TorchMixture:
         self, enc: tuple[int, Any], estimator: ParameterEstimator, rng: np.random.RandomState, p: float = 0.1
     ) -> Any:
         """Initialize through the standard sequence-initialization protocol."""
-        from pysp.stats import seq_initialize
+        from pysp.inference import seq_initialize
 
         return seq_initialize([enc], estimator, rng, p)
 

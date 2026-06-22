@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.stats import kstest, skewnorm
 
-from pysp.stats import SkewNormalDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import SkewNormalDistribution
 
 
 class SkewNormalTest(unittest.TestCase):

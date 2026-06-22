@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.stats import multivariate_normal as mvn
 
-from pysp.stats import MatrixNormalDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import MatrixNormalDistribution
 
 
 class MatrixNormalTest(unittest.TestCase):

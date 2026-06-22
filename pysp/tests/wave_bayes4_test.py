@@ -19,15 +19,13 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import estimate, initialize, seq_estimate
 from pysp.stats import (
     GaussianDistribution,
     GaussianEstimator,
     MixtureDistribution,
     MixtureEstimator,
-    estimate,
-    initialize,
     seq_encode,
-    seq_estimate,
     seq_log_density_sum,
 )
 from pysp.stats.combinator.ignored import (

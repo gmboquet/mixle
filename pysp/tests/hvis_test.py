@@ -12,6 +12,7 @@ import unittest
 import numpy as np
 import scipy.sparse
 
+from pysp.inference import seq_estimate, seq_initialize
 from pysp.inference.fisher import FisherView
 from pysp.stats import (
     CategoricalDistribution,
@@ -29,8 +30,6 @@ from pysp.stats import (
     PoissonDistribution,
     SequenceDistribution,
     seq_encode,
-    seq_estimate,
-    seq_initialize,
 )
 from pysp.utils.hvis import (
     _barnes_hut_negative_forces,

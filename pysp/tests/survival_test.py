@@ -5,7 +5,8 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import SurvivalDistribution, WeibullDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import SurvivalDistribution, WeibullDistribution
 
 
 class SurvivalDistributionTest(unittest.TestCase):

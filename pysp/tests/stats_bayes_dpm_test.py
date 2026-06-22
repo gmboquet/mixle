@@ -22,8 +22,9 @@ import io
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.inference import seq_estimate, seq_initialize
 from pysp.inference.estimation import fit
-from pysp.stats import seq_encode, seq_estimate, seq_initialize
+from pysp.stats import seq_encode
 from pysp.stats.bayes.dirichlet_process_mixture import (
     DirichletProcessMixtureDistribution,
     DirichletProcessMixtureEstimator,

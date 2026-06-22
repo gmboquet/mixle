@@ -18,8 +18,8 @@ Usage - the handle plugs into the ordinary estimation entry points::
     with MPEncodedData(data, estimator=est, num_workers=8) as enc:
         model = optimize(None, est, enc_data=enc, max_its=50)
 
-``optimize``/``best_of`` need no changes: ``pysp.stats.seq_estimate``,
-``seq_initialize`` and ``seq_log_density_sum`` recognize the handle and
+``optimize``/``best_of`` need no changes: ``pysp.inference.seq_estimate``,
+``seq_initialize`` and ``pysp.stats.seq_log_density_sum`` recognize the handle and
 delegate to it. Validation data can stay locally encoded (a plain
 ``seq_encode`` result) alongside an ``MPEncodedData`` training handle.
 

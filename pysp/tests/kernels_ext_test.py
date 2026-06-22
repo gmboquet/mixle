@@ -11,6 +11,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import seq_estimate
 from pysp.stats import (
     BinomialDistribution,
     BinomialEstimator,
@@ -33,7 +34,6 @@ from pysp.stats import (
     OptionalDistribution,
     OptionalEstimator,
     seq_encode,
-    seq_estimate,
 )
 from pysp.stats.compute.fused_kernels import CompiledMixture
 

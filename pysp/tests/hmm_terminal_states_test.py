@@ -5,7 +5,8 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import CategoricalDistribution, GaussianDistribution, HiddenMarkovModelDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import CategoricalDistribution, GaussianDistribution, HiddenMarkovModelDistribution
 
 
 class HmmTerminalStatesTest(unittest.TestCase):

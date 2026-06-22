@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.stats import betabinom
 
-from pysp.stats import BetaBinomialDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import BetaBinomialDistribution
 
 
 class BetaBinomialTest(unittest.TestCase):

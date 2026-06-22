@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.stats import genextreme, kstest
 
-from pysp.stats import GeneralizedExtremeValueDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import GeneralizedExtremeValueDistribution
 
 
 class GeneralizedExtremeValueTest(unittest.TestCase):

@@ -10,6 +10,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import seq_estimate
 from pysp.stats import (
     CategoricalDistribution,
     CategoricalEstimator,
@@ -28,7 +29,6 @@ from pysp.stats import (
     SequenceDistribution,
     SequenceEstimator,
     seq_encode,
-    seq_estimate,
 )
 from pysp.stats.compute.fused_kernels import CompiledMixture, build_kernel
 
