@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 from scipy.special import logsumexp
 
+from pysp.inference import seq_estimate, seq_initialize
 from pysp.stats import (
     CategoricalDistribution,
     GaussianDistribution,
@@ -13,8 +14,6 @@ from pysp.stats import (
     SequenceEstimator,
     StudentTDistribution,
     seq_encode,
-    seq_estimate,
-    seq_initialize,
 )
 from pysp.stats.compute.pdist import EnumerationError
 

@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import estimate
+from pysp.inference import estimate
 from pysp.stats.temporal import PeriodicTimeDistribution, SeasonalTimeSeries, cyclic_phase, to_unix_seconds
 
 

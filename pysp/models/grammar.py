@@ -8,13 +8,12 @@ from typing import Any
 
 import numpy as np
 
+from pysp.inference import seq_estimate, seq_initialize
 from pysp.models._result import FitResult
 from pysp.stats import (
     HeterogeneousPCFGDistribution,
     InducedHeterogeneousPCFGEstimator,
     seq_encode,
-    seq_estimate,
-    seq_initialize,
 )
 from pysp.stats.compute.pdist import ParameterEstimator
 

@@ -10,6 +10,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import seq_estimate, seq_initialize
 from pysp.inference.estimation import constant, optimize
 from pysp.inference.streaming import StreamingEstimator
 from pysp.stats import (
@@ -22,8 +23,6 @@ from pysp.stats import (
     MixtureDistribution,
     MixtureEstimator,
     seq_encode,
-    seq_estimate,
-    seq_initialize,
     seq_log_density_sum,
 )
 from pysp.utils.parallel.multiprocessing import MPEncodedData

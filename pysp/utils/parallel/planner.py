@@ -1089,13 +1089,13 @@ class SparkEncodedData(EncodedDataHandle):
 
     def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any:
         """Run one Spark distributed E-step fold and estimator M-step."""
-        from pysp.stats import seq_estimate
+        from pysp.inference import seq_estimate
 
         return seq_estimate(self.enc_rdd, estimator, prev_estimate)
 
     def pysp_seq_initialize(self, estimator: Any, rng: np.random.RandomState, p: float) -> Any:
         """Initialize a model over the resident Spark encoded RDD."""
-        from pysp.stats import seq_initialize
+        from pysp.inference import seq_initialize
 
         return seq_initialize(self.enc_rdd, estimator, rng, p)
 

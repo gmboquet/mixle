@@ -6,7 +6,8 @@ from itertools import product
 import numpy as np
 from scipy.stats import dirichlet_multinomial as sdm
 
-from pysp.stats import DirichletMultinomialDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import DirichletMultinomialDistribution
 
 
 class DirichletMultinomialTest(unittest.TestCase):

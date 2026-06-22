@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import estimate
+from pysp.inference import estimate
 from pysp.stats.hierarchical import HierarchicalNormalDistribution
 
 

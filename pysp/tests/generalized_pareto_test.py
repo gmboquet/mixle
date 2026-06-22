@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.stats import genpareto, kstest
 
-from pysp.stats import GeneralizedParetoDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import GeneralizedParetoDistribution
 
 
 class GeneralizedParetoTest(unittest.TestCase):

@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 from scipy.stats import wishart as sw
 
-from pysp.stats import WishartDistribution, estimate
+from pysp.inference import estimate
+from pysp.stats import WishartDistribution
 
 
 class WishartTest(unittest.TestCase):

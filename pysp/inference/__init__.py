@@ -51,9 +51,16 @@ from pysp.stats.bayes.conjugate import (
 )
 from pysp.stats.compute.pdist import ParameterEstimator
 
+# the functional estimation drivers (moved off the pysp.stats object namespace)
+from pysp.stats.compute.sequence import estimate, initialize, seq_estimate, seq_initialize
+
 __all__ = [
     # the estimator contract + MLE/EM/MAP drivers
     "ParameterEstimator",
+    "estimate",
+    "initialize",
+    "seq_estimate",
+    "seq_initialize",
     "optimize",
     "fit",
     "best_of",

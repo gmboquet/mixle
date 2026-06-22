@@ -4,11 +4,11 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import estimate
 from pysp.stats import (
     GeometricDistribution,
     HurdleDistribution,
     PoissonDistribution,
-    estimate,
 )
 
 

@@ -32,12 +32,10 @@ import unittest
 import numpy as np
 import scipy.stats
 
+from pysp.inference import estimate, initialize, seq_estimate
 from pysp.inference.estimation import fit as fit_driver
 from pysp.stats import (
-    estimate,
-    initialize,
     seq_encode,
-    seq_estimate,
 )
 from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 from pysp.stats.bayes.dirichlet import DirichletDistribution

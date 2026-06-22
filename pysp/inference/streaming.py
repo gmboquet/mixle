@@ -13,9 +13,9 @@ from typing import Any, TypeVar
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.inference import seq_initialize
 from pysp.stats import (
     seq_encode,
-    seq_initialize,
     validate_estimator_keys,
 )
 from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution

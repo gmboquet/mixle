@@ -9,7 +9,7 @@ import unittest
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.stats import seq_estimate, seq_initialize
+from pysp.inference import seq_estimate, seq_initialize
 from pysp.stats.latent.labeled_lda import (
     LabeledLDADataEncoder,
     LabeledLDADistribution,

@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE, NumpyEngine
+from pysp.inference import seq_estimate
 from pysp.inference.estimation import optimize
 from pysp.stats import (
     AffineTransform,
@@ -36,7 +37,6 @@ from pysp.stats import (
     generated_stacked_params,
     generated_sufficient_statistics,
     kernel_for,
-    seq_estimate,
     seq_log_density_sum,
 )
 from pysp.stats.compute.kernel import GenericKernel, KernelFactory

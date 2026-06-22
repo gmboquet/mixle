@@ -5,6 +5,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference import estimate, initialize, seq_estimate
 from pysp.stats import (
     BernoulliSetEstimator,
     CompositeEstimator,
@@ -13,10 +14,7 @@ from pysp.stats import (
     IntegerCategoricalEstimator,
     PoissonEstimator,
     SequenceEstimator,
-    estimate,
-    initialize,
     seq_encode,
-    seq_estimate,
     seq_log_density_sum,
 )
 from pysp.utils.automatic import DictRecordDistribution, DictRecordEstimator, analyze_structure, get_estimator

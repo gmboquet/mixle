@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import estimate
+from pysp.inference import estimate
 from pysp.stats.composition import AitchisonNormalDistribution as AitchisonNormal
 from pysp.stats.composition import closure, clr, clr_inv, ilr, ilr_basis, ilr_inv
 
