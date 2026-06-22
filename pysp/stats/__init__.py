@@ -270,6 +270,10 @@ __all__ = [
     "NakagamiSampler",
     "NakagamiEstimator",
     "NakagamiDataEncoder",
+    "RicianDistribution",
+    "RicianSampler",
+    "RicianEstimator",
+    "RicianDataEncoder",
     "VonMisesSampler",
     "VonMisesEstimator",
     "VonMisesDataEncoder",
@@ -864,6 +868,12 @@ from pysp.stats.base.projected_normal import (
     ProjectedNormalDistribution,
     ProjectedNormalEstimator,
     ProjectedNormalSampler,
+)
+from pysp.stats.base.rician import (
+    RicianDataEncoder,
+    RicianDistribution,
+    RicianEstimator,
+    RicianSampler,
 )
 from pysp.stats.base.nakagami import (
     NakagamiDataEncoder,
