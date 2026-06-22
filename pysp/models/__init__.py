@@ -63,6 +63,8 @@ from pysp.models.random_graph import (
     ErdosRenyiGraphModel,
     HardEMResult,
     StochasticBlockGraphModel,
+    fit_erdos_renyi_mle,
+    fit_stochastic_block_mle,
     hard_em_stochastic_block_model,
 )
 
@@ -91,6 +93,8 @@ __all__ = [
     "baum_welch_pomdp",
     "discrete_conditional_mutual_information",
     "expected_log_stick_weights",
+    "fit_erdos_renyi_mle",
+    "fit_stochastic_block_mle",
     "fit_truncated_dpm",
     "fit_induced_pcfg",
     "gaussian_conditional_independence",
