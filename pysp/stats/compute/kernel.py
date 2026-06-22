@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 
+from pysp.capability import EngineResidentEStep, supports
 from pysp.engines import NUMPY_ENGINE, ComputeEngine
 from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
@@ -132,7 +133,7 @@ class GenericKernel(Kernel):
         # Engine-resident E-step: when the accumulator provides a backend update and the engine
         # prefers staying resident, run the sufficient-statistic accumulation on the active engine
         # instead of falling back to the host seq_update path.
-        if getattr(self.engine, "resident_estep", True) and callable(getattr(accumulator, "seq_update_engine", None)):
+        if getattr(self.engine, "resident_estep", True) and supports(accumulator, EngineResidentEStep):
             accumulator.seq_update_engine(enc, weights, self.dist, self.engine)
             return accumulator.value()
         weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
