@@ -95,7 +95,7 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.num_vals = num_vals
         self.log_pvec = np.asarray(log_pvec, dtype=np.float64).copy()
-        self.key = keys
+        self.keys = keys
 
         with np.errstate(divide="ignore"):
             if log_nvec is None:
@@ -316,7 +316,7 @@ class IntegerBernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         self.pcnt = np.zeros(num_vals, dtype=np.float64)
-        self.key = keys
+        self.keys = keys
         self.num_vals = num_vals
         self.tot_sum = 0.0
 
@@ -400,17 +400,17 @@ class IntegerBernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                temp = stats_dict[self.key]
-                stats_dict[self.key] = (temp[0] + self.pcnt, temp[1] + self.tot_sum)
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                temp = stats_dict[self.keys]
+                stats_dict[self.keys] = (temp[0] + self.pcnt, temp[1] + self.tot_sum)
             else:
-                stats_dict[self.key] = (self.pcnt, self.tot_sum)
+                stats_dict[self.keys] = (self.pcnt, self.tot_sum)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.pcnt, self.tot_sum = stats_dict[self.key]
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.pcnt, self.tot_sum = stats_dict[self.keys]
 
     def acc_to_encoder(self) -> "IntegerBernoulliSetDataEncoder":
         return IntegerBernoulliSetDataEncoder()

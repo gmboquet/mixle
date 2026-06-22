@@ -387,7 +387,7 @@ class SpearmanRankingAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.sum = np.zeros(dim, dtype=np.float64)
         self.count = 0.0
-        self.key = keys
+        self.keys = keys
         self.name = name
 
     def update(self, x: list[int] | np.ndarray, weight: float, estimate: SpearmanRankingDistribution | None) -> None:
@@ -480,12 +480,12 @@ class SpearmanRankingAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                vals = stats_dict[self.key]
-                stats_dict[self.key] = (vals[0] + self.count, vals[1] + self.sum)
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                vals = stats_dict[self.keys]
+                stats_dict[self.keys] = (vals[0] + self.count, vals[1] + self.sum)
             else:
-                stats_dict[self.key] = (self.count, self.sum)
+                stats_dict[self.keys] = (self.count, self.sum)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set sufficient statistics of object instance to suff stats with matching keys.
@@ -497,9 +497,9 @@ class SpearmanRankingAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                vals = stats_dict[self.key]
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                vals = stats_dict[self.keys]
                 self.count = vals[0]
                 self.sum = vals[1]
 

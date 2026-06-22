@@ -160,7 +160,7 @@ class PointMassAccumulator(SequenceEncodableStatisticAccumulator):
 
     def __init__(self, value: Any, keys: str | None = None) -> None:
         self.atom = value
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: PointMassDistribution | None) -> None:
         pass
@@ -190,8 +190,8 @@ class PointMassAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key not in stats_dict:
-            stats_dict[self.key] = None
+        if self.keys is not None and self.keys not in stats_dict:
+            stats_dict[self.keys] = None
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         pass

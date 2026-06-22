@@ -180,7 +180,7 @@ class MultivariateHawkesProcessAccumulator(SequenceEncodableStatisticAccumulator
         self.mass = np.zeros(dim)  # per-mark integrated excitation mass sum_k (1-exp(-beta(W-t_k)))/beta
         self.total_window = 0.0
         self.name = name
-        self.key = keys
+        self.keys = keys
 
     def _accumulate(self, events: Any, weight: float, estimate: MultivariateHawkesProcessDistribution | None) -> None:
         times, marks = _split(events)
@@ -264,15 +264,15 @@ class MultivariateHawkesProcessAccumulator(SequenceEncodableStatisticAccumulator
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "MultivariateHawkesProcessDataEncoder":
         return MultivariateHawkesProcessDataEncoder(self.window, self.dim)

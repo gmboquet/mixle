@@ -460,7 +460,7 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         #             self.rule_list = []
         #             self.rule_dict = {}
         self.grammar = VertexReplacementGrammar("mu_level_dl", "leiden", "", 4)
-        self.key = keys
+        self.keys = keys
 
     def update(self, grammar, weight, estimate):
         """Merge an observed grammar into the accumulated grammar with the given weight.
@@ -598,11 +598,11 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict):
         """Replace keyed sufficient statistics from stats_dict.
@@ -614,8 +614,8 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self):
         """Returns a GrammarDataEncoder object for encoding sequences of data."""

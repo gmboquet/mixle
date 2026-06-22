@@ -100,7 +100,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         pmap = coalesce_alias("pmap", pmap, "prob_map", prob_map, default=MISSING)
-        self.key = keys
+        self.keys = keys
         self.name = name
         self.pmap = pmap
         self.required = set()
@@ -231,7 +231,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         s1 = repr(sorted(self.pmap.items(), key=lambda t: t[0]))
         s2 = repr(self.min_prob)
         s3 = repr(self.name)
-        s4 = repr(self.key)
+        s4 = repr(self.keys)
         return "BernoulliSetDistribution(dict(%s), min_prob=%s, name=%s, keys=%s)" % (s1, s2, s3, s4)
 
     def density(self, x: Sequence[Any]) -> float:
@@ -535,7 +535,7 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.pmap = defaultdict(float)
         self.tot_sum = 0.0
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: Sequence[Any], weight: float, estimate: BernoulliSetDistribution | None) -> None:
         """Add weight to the inclusion count of each element of the observed set x.
@@ -673,11 +673,11 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
             stats_dict (Dict[str, Any]): Maps keys to merged accumulators or sufficient statistics.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace this accumulator's statistics with the keyed statistics in stats_dict, if keyed.
@@ -686,9 +686,9 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
             stats_dict (Dict[str, Any]): Maps keys to merged accumulators or sufficient statistics.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "BernoulliSetDataEncoder":
         """Returns a BernoulliSetDataEncoder object for encoding sequences of data."""

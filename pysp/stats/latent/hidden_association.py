@@ -109,7 +109,7 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         self.given_dist = given_dist if given_dist is not None else NullDistribution()
         self.name = name
-        self.key = keys if keys is not None else (None, None)
+        self.keys = keys if keys is not None else (None, None)
 
     def compute_capabilities(self):
         """Return backend capability metadata for this concrete hidden association model."""
@@ -155,7 +155,7 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         s2 = repr(self.given_dist)
         s3 = repr(self.len_dist)
         s4 = repr(self.name)
-        s5 = repr(self.key)
+        s5 = repr(self.keys)
         return "HiddenAssociationDistribution(%s, given_dist=%s, len_dist=%s, name=%s, keys=%s)" % (s1, s2, s3, s4, s5)
 
     def density(self, x: tuple[list[tuple[T, float]], list[tuple[T, float]]]) -> float:

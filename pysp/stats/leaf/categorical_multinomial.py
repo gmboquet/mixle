@@ -603,7 +603,7 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.accumulator = accumulator
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
-        self.key = keys
+        self.keys = keys
         self.len_normalized = len_normalized
 
         ### protected for initialization.
@@ -818,11 +818,11 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
         self.accumulator.key_merge(stats_dict)
         self.len_accumulator.key_merge(stats_dict)
@@ -837,9 +837,9 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
 
         self.accumulator.key_replace(stats_dict)
         self.len_accumulator.key_replace(stats_dict)

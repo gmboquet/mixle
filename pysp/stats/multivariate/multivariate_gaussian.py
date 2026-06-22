@@ -553,7 +553,7 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.dim = dim
         self.count = 0.0
-        self.key = keys
+        self.keys = keys
         self.name = name
 
         if dim is not None:
@@ -690,9 +690,9 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.combine(stats_dict[self.key])
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.combine(stats_dict[self.keys])
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace sufficient statistics with values from stats_dict for a matching key.
@@ -704,9 +704,9 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key])
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> "MultivariateGaussianDataEncoder":
         """Returns a MultivariateGaussianDataEncoder object for encoding sequences of iid observations."""
@@ -731,12 +731,12 @@ class MultivariateGaussianAccumulatorFactory(StatisticAccumulatorFactory):
 
         """
         self.dim = dim
-        self.key = keys
+        self.keys = keys
         self.name = name
 
     def make(self) -> "MultivariateGaussianAccumulator":
         """Returns a new MultivariateGaussianAccumulator with the factory's dim, keys, and name."""
-        return MultivariateGaussianAccumulator(dim=self.dim, keys=self.key, name=self.name)
+        return MultivariateGaussianAccumulator(dim=self.dim, keys=self.keys, name=self.name)
 
 
 class MultivariateGaussianEstimator(ParameterEstimator):
@@ -799,7 +799,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         self.prior_mu = None if suff_stat[0] is None else np.reshape(suff_stat[0], dim_loc)
         self.prior_covar = None if suff_stat[1] is None else np.reshape(suff_stat[1], (dim_loc, dim_loc))
         self.name = name
-        self.key = keys
+        self.keys = keys
         self.prior = prior
         self.has_conj_prior = isinstance(prior, NormalWishartDistribution)
         self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
@@ -807,7 +807,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
 
     def accumulator_factory(self) -> "MultivariateGaussianAccumulatorFactory":
         """Returns a MultivariateGaussianAccumulatorFactory built from the estimator's attributes."""
-        return MultivariateGaussianAccumulatorFactory(dim=self.dim, keys=self.key, name=self.name)
+        return MultivariateGaussianAccumulatorFactory(dim=self.dim, keys=self.keys, name=self.name)
 
     def model_log_density(self, model: "MultivariateGaussianDistribution") -> float:
         """Log-density of the model parameters under the NormalWishart prior (ELBO global term).
@@ -884,7 +884,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
             covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.eye(d)
             covar = self._regularize_covar(covar)
-            return MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.key)
+            return MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
 
         if pc1 is not None and self.prior_mu is not None:
             mu = (suff_stat[0] + pc1 * self.prior_mu) / (nobs + pc1)
@@ -898,7 +898,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
 
         covar = self._regularize_covar(covar)
 
-        return MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.key)
+        return MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
 
     def _regularize_covar(self, covar: np.ndarray) -> np.ndarray:
         """P1 covariance ridge: cov <- cov + eps*I with eps = max(min_covar, ridge*trace/d).

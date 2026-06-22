@@ -350,7 +350,7 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
             self.counts = None
             self.marginal_counts = None
 
-        self.key = keys
+        self.keys = keys
         self.name = name
 
     def _expand_states(self, num_states: int, num_features: int):

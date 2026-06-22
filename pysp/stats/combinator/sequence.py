@@ -691,7 +691,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.accumulator = accumulator
         self.len_accumulator = len_accumulator
-        self.key = keys
+        self.keys = keys
         self.len_normalized = len_normalized
 
         self.null_len_accumulator = isinstance(self.len_accumulator, NullAccumulator)
@@ -912,11 +912,11 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
         self.accumulator.key_merge(stats_dict)
 
@@ -933,9 +933,9 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
 
         self.accumulator.key_replace(stats_dict)
 

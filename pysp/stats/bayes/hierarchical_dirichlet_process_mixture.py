@@ -336,7 +336,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
         self.accumulators = list(accumulators)
         self.num_components = len(accumulators)
         self.name = name
-        self.key = keys
+        self.keys = keys
         self.group_counts: list[np.ndarray] = []  # one (K,) count vector per group, in data order
         self.prev_beta: np.ndarray | None = None
         self.prev_alpha: float | None = None
@@ -475,19 +475,19 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge this accumulator's keyed statistics into a shared dict."""
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
         for u in self.accumulators:
             u.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace this accumulator's statistics with the pooled keyed values."""
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
         for u in self.accumulators:
             u.key_replace(stats_dict)
 

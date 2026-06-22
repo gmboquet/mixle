@@ -599,7 +599,7 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         self.count_map = dict()
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: Optional["CategoricalDistribution"]) -> None:
         """Adds weight to the category_count for category x.
@@ -739,12 +739,12 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
 
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set CategoricalAccumulator sufficient statistic member variables to the value of stats_dict
@@ -758,9 +758,9 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "CategoricalDataEncoder":
         """Creates a CategoricalDataEncoder object for sequence encoding data.

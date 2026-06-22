@@ -183,7 +183,7 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         self.ca = -0.5 / self.covar
         self.cb = self.mu / self.covar
         self.cc = (-0.5 * self.mu * self.mu / self.covar).sum() + self.log_c
-        self.key = keys
+        self.keys = keys
 
         self.set_prior(prior)
 
@@ -410,10 +410,10 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return DiagonalGaussianEstimator(name=self.name, keys=self.key, prior=self.prior)
+            return DiagonalGaussianEstimator(name=self.name, keys=self.keys, prior=self.prior)
         else:
             return DiagonalGaussianEstimator(
-                pseudo_count=(pseudo_count, pseudo_count), name=self.name, keys=self.key, prior=self.prior
+                pseudo_count=(pseudo_count, pseudo_count), name=self.name, keys=self.keys, prior=self.prior
             )
 
     def dist_to_encoder(self) -> "DiagonalGaussianDataEncoder":
@@ -482,7 +482,7 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = 0.0
         self.sum = vec.zeros(dim) if dim is not None else None
         self.sum2 = vec.zeros(dim) if dim is not None else None
-        self.key = keys
+        self.keys = keys
 
     def update(
         self, x: Sequence[float] | np.ndarray, weight: float, estimate: DiagonalGaussianDistribution | None
@@ -614,11 +614,11 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.combine(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.combine(stats_dict[self.keys].value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace sufficient statistics with values from stats_dict for a matching key.
@@ -630,9 +630,9 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key])
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> "DiagonalGaussianDataEncoder":
         """Returns a DiagonalGaussianDataEncoder object for encoding sequences of iid observations."""
@@ -655,11 +655,11 @@ class DiagonalGaussianAccumulatorFactory(StatisticAccumulatorFactory):
 
         """
         self.dim = dim
-        self.key = keys
+        self.keys = keys
 
     def make(self) -> "DiagonalGaussianAccumulator":
         """Returns a new DiagonalGaussianAccumulator with the factory's dim and keys."""
-        return DiagonalGaussianAccumulator(dim=self.dim, keys=self.key)
+        return DiagonalGaussianAccumulator(dim=self.dim, keys=self.keys)
 
 
 class DiagonalGaussianEstimator(ParameterEstimator):
@@ -723,7 +723,7 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         self.pseudo_count = pseudo_count
         self.prior_mu = None if suff_stat[0] is None else np.reshape(suff_stat[0], dim_loc)
         self.prior_covar = None if suff_stat[1] is None else np.reshape(suff_stat[1], dim_loc)
-        self.key = keys
+        self.keys = keys
         self.prior = prior
         self.has_conj_prior = isinstance(prior, MultivariateNormalGammaDistribution)
         self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
@@ -731,7 +731,7 @@ class DiagonalGaussianEstimator(ParameterEstimator):
 
     def accumulator_factory(self) -> "DiagonalGaussianAccumulatorFactory":
         """Returns a DiagonalGaussianAccumulatorFactory built from the estimator's attributes."""
-        return DiagonalGaussianAccumulatorFactory(dim=self.dim, keys=self.key)
+        return DiagonalGaussianAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def model_log_density(self, model: "DiagonalGaussianDistribution") -> float:
         """Log-density of the model parameters under the MultivariateNormalGamma prior (ELBO global term).
