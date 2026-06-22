@@ -489,7 +489,9 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "pysp_seq_* methods",
         "pysp.utils.parallel.planner",
     ),
-    CapabilitySpec("EMStrategy", "an EM-step strategy", "object contract", "step() -> EMStepResult", "pysp.inference.em"),
+    CapabilitySpec(
+        "EMStrategy", "an EM-step strategy", "object contract", "step() -> EMStepResult", "pysp.inference.em"
+    ),
     CapabilitySpec(
         "Relation",
         "optimisation-as-distribution over a constrained space",
