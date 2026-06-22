@@ -212,12 +212,32 @@ def _sage_ops(sage) -> dict[str, Callable[..., Any]]:
 
 
 def _sage_where(sage, cond, a, b):
-    # Sage lacks a Piecewise-over-relations primitive comparable to sympy's;
-    # encode where(cond, a, b) as a*[cond] + b*[!cond] via Heaviside-free
-    # indicator using the boolean's truth as 0/1 through `cond.subs`-friendly
-    # form.  We use a symbolic indicator built from the relation.
-    indicator = sage.SR(cond)
+    # Match the sympy lowering ``Piecewise((a, cond), (b, True))``: return ``a``
+    # where ``cond`` holds, else ``b``.  ``sage.SR(<relation>)`` is the relation
+    # itself, not a 0/1 indicator, so ``a*SR(cond) + b*(1-SR(cond))`` is wrong.
+    # Build a genuine 0/1 indicator from the relation via Heaviside of its
+    # residual ``lhs - rhs`` (relations carry ``.lhs()``/``.rhs()`` and an
+    # ``.operator()``); fall back to ``cases`` for non-inequality relations.
+    indicator = _sage_indicator(sage, cond)
     return a * indicator + b * (1 - indicator)
+
+
+def _sage_indicator(sage, cond):
+    """Return a symbolic 0/1 indicator for the relation ``cond`` (1 when true)."""
+    import operator
+
+    op = getattr(cond, "operator", lambda: None)()
+    if op in (operator.lt, operator.le, operator.gt, operator.ge):
+        residual = cond.lhs() - cond.rhs()
+        # heaviside(0) == 1/2 in sage, so build a strict/non-strict step that
+        # is exactly 1 on the satisfied side and 0 otherwise.
+        if op in (operator.gt, operator.ge):
+            return sage.heaviside(residual) if op is operator.ge else 1 - sage.heaviside(-residual)
+        # lt / le: indicator on residual < 0.
+        return sage.heaviside(-residual) if op is operator.le else 1 - sage.heaviside(residual)
+    # Equality / inequality relations: encode via the symbolic ``cases`` form,
+    # which evaluates the boolean relation to a genuine 1/0 branch.
+    return sage.function("cases")(cond, sage.SR(1), sage.SR(0))
 
 
 def _sage_clip(sage, x, a_min, a_max):
