@@ -9,6 +9,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.stats import (
     MixtureEstimator,
     MultivariateGaussianEstimator,
@@ -18,7 +19,6 @@ from pysp.stats import (
     seq_log_density_sum,
 )
 from pysp.stats.leaf.gaussian import GaussianDistribution
-from pysp.utils.estimation import optimize
 
 
 class LogDensityConvenienceTestCase(unittest.TestCase):

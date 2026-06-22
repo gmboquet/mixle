@@ -5,8 +5,8 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import fit
 from pysp.stats import PitmanYorProcessDistribution, PitmanYorProcessEstimator
-from pysp.utils.estimation import fit
 
 
 def _set_partitions(collection):

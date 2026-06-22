@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.fisher import FisherView, SufficientStatisticVectorizer
 from pysp.stats import (
     BernoulliDistribution,
     BetaDistribution,
@@ -32,7 +33,6 @@ from pysp.stats import (
     SequenceDistribution,
     WeightedDistribution,
 )
-from pysp.utils.fisher import FisherView, SufficientStatisticVectorizer
 from pysp.utils.special import digamma, trigamma
 
 

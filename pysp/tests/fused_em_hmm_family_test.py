@@ -19,6 +19,7 @@ import unittest
 import numpy as np
 
 import pysp.stats.latent.lookback_hidden_markov_model as look_back_mod
+from pysp.inference.estimation import optimize
 from pysp.stats import (
     CategoricalDistribution,
     CategoricalEstimator,
@@ -33,7 +34,6 @@ from pysp.stats.graph.integer_markov_chain import IntegerMarkovChainDistribution
 from pysp.stats.latent.segmental_hidden_markov_model import SegmentalHiddenMarkovModelDistribution
 from pysp.stats.latent.tree_hidden_markov_model import TreeHiddenMarkovEstimator, TreeHiddenMarkovModelDistribution
 from pysp.stats.leaf.integer_categorical import IntegerCategoricalDistribution, IntegerCategoricalEstimator
-from pysp.utils.estimation import optimize
 
 
 class FusedEMHmmFamilyTestCase(unittest.TestCase):

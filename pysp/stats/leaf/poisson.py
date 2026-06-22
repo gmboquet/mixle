@@ -23,6 +23,7 @@ from typing import Any, Optional
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -33,7 +34,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.stats.leaf.gamma import GammaDistribution
-from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.utils.special import digamma
 from pysp.utils.vector import gammaln
 
@@ -279,7 +279,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
 
     def to_fisher(self, **kwargs):
         """Return the Poisson's count-family Fisher view."""
-        from pysp.utils.fisher import CountFisherView, _count_data
+        from pysp.inference.fisher import CountFisherView, _count_data
 
         return CountFisherView(self, _fisher_mean_var, _count_data, _fisher_encoded)
 

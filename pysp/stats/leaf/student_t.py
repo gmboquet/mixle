@@ -239,7 +239,7 @@ class StudentTEstimator(ParameterEstimator):
 
     The exact MLE has no simple closed-form update. This estimator keeps df fixed
     and uses weighted moments, while generic gradient optimizers such as
-    ``pysp.utils.estimation.fit_mle`` / ``fit_map`` can fit all three
+    ``pysp.inference.estimation.fit_mle`` / ``fit_map`` can fit all three
     parameters through distribution-owned backend math.
     """
 

@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from pysp.data import dataframe_records, seq_encode_dataframe
+from pysp.inference.estimation import optimize
 from pysp.stats import (
     CategoricalDistribution,
     CompositeDistribution,
@@ -16,7 +17,6 @@ from pysp.stats import (
     seq_encode,
     seq_log_density_sum,
 )
-from pysp.utils.estimation import optimize
 
 
 class DataFrameAdapterTestCase(unittest.TestCase):

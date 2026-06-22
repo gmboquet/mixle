@@ -18,6 +18,7 @@ from numpy.random import RandomState
 from scipy.sparse.csgraph import breadth_first_order, minimum_spanning_tree
 
 from pysp.arithmetic import maxrandint
+from pysp.enumeration.algorithms import freeze
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -28,7 +29,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import freeze
 
 SS = tuple[
     float,

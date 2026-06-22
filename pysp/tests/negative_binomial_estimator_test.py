@@ -10,9 +10,9 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.stats import NegativeBinomialDistribution, NegativeBinomialEstimator
 from pysp.stats.combinator.zero_inflated import ZeroInflatedDistribution, ZeroInflatedEstimator
-from pysp.utils.estimation import optimize
 
 
 class NegativeBinomialEstimatorTestCase(unittest.TestCase):

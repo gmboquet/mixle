@@ -5,8 +5,8 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import fit
 from pysp.stats import PlackettLuceDistribution
-from pysp.utils.estimation import fit
 
 
 def _orderings(k):

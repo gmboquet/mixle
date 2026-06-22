@@ -14,7 +14,7 @@ in lockstep across ranks with no further coordination.
 Usage (run with ``mpiexec -n 4 python script.py``)::
 
     from pysp.utils.parallel.mpi import MPIEncodedData, mpi_out
-    from pysp.utils.estimation import optimize
+    from pysp.inference.estimation import optimize
 
     data = load_data()                       # every rank loads (or root_only=True)
     enc = MPIEncodedData(data, estimator=est)

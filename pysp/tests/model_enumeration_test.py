@@ -11,7 +11,7 @@ import unittest
 
 import numpy as np
 
-from pysp.utils.model_enumeration import (
+from pysp.enumeration.model_enumeration import (
     beam_search,
     best_first,
     best_first_decode,

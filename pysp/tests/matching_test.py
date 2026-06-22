@@ -6,9 +6,9 @@ from collections import Counter
 
 import numpy as np
 
+from pysp.inference.estimation import fit
 from pysp.stats import MatchingDistribution
 from pysp.stats.graph.matching import _edge_marginals, _permanent
-from pysp.utils.estimation import fit
 
 _W = np.array([[2.0, 1.0, 3.0], [1.0, 4.0, 1.0], [2.0, 1.0, 5.0]])
 

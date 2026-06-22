@@ -22,6 +22,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import *
+from pysp.enumeration.algorithms import BufferedStream, best_first_union_max
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -32,7 +33,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream, best_first_union_max
 
 T = TypeVar("T")
 
@@ -263,7 +263,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Fisher view for the select combinator."""
         if hasattr(self, "dists"):
-            from pysp.utils.fisher import SelectFisherView
+            from pysp.inference.fisher import SelectFisherView
 
             return SelectFisherView(self)
         return super().to_fisher(**kwargs)

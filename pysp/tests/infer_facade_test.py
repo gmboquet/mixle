@@ -11,8 +11,8 @@ import numpy as np
 
 import pysp.inference as infer
 from pysp.inference.diagnostics import ess, rhat
-from pysp.ppl.autograd import torch_available
 from pysp.inference.mcmc import nuts as nuts_sampler
+from pysp.ppl.autograd import torch_available
 
 HAS_TORCH = torch_available()
 

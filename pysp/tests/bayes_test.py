@@ -4,7 +4,7 @@ Covers:
   - conjugate posterior updates checked against textbook closed forms,
   - prior density evaluations checked against scipy.stats,
   - consistency between log_density, expected_log_density and their seq_* forms,
-  - convergence of the pysp.utils.estimation.fit driver: the penalized objective
+  - convergence of the pysp.inference.estimation.fit driver: the penalized objective
     (data term + prior term) must increase monotonically for MAP-EM mixtures
     and the ELBO must increase monotonically for DPM variational inference.
 
@@ -13,7 +13,7 @@ Conventions exercised here:
     catdirichlet / gamma / beta / dirichlet;
   * the estimator API is the 2-arg ``estimate(nobs, suff_stat)``, so calls become
     ``estimate(None, suff_stat)``;
-  * the posterior fit driver is ``pysp.utils.estimation.fit``; it prints ``OBJ=``
+  * the posterior fit driver is ``pysp.inference.estimation.fit``; it prints ``OBJ=``
     lines that the convergence checks parse;
   * ``mixture_prior`` is in pysp.stats.latent.mixture and returns the tuple
     ``(weight_prior, component_priors)``;
@@ -32,6 +32,7 @@ import unittest
 import numpy as np
 import scipy.stats
 
+from pysp.inference.estimation import fit as fit_driver
 from pysp.stats import (
     estimate,
     initialize,
@@ -79,7 +80,6 @@ from pysp.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianEstimator,
 )
 from pysp.stats.sets.bernoulli_set import BernoulliSetDistribution
-from pysp.utils.estimation import fit as fit_driver
 from pysp.utils.evaluation import k_fold_split_index
 from pysp.utils.special import stirling2
 

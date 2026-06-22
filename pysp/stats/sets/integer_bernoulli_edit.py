@@ -33,6 +33,7 @@ from numpy.random import RandomState
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, ProductEnumerator
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -50,7 +51,6 @@ from pysp.stats.compute.pdist import (
     child_enumerator,
 )
 from pysp.utils.aliasing import MISSING, coalesce_alias
-from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 T = tuple[Sequence[int] | np.ndarray, Sequence[int] | np.ndarray]
 E1 = TypeVar("E1")  ## encoded type for init

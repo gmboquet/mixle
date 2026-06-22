@@ -214,7 +214,7 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     def to_fisher(self, **kwargs):
         """Return the NegativeBinomial's count-family Fisher view."""
-        from pysp.utils.fisher import CountFisherView, _count_data
+        from pysp.inference.fisher import CountFisherView, _count_data
 
         return CountFisherView(self, _fisher_mean_var, _count_data, _fisher_encoded)
 

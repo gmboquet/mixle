@@ -10,8 +10,8 @@ import unittest
 import numpy as np
 
 from pysp.engines import NumpyEngine, TorchEngine, torch
+from pysp.enumeration.algorithms import freeze
 from pysp.stats import *
-from pysp.utils.enumeration import freeze
 
 TOL = 1e-9
 

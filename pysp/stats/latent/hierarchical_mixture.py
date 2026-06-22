@@ -34,6 +34,7 @@ from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, best_first_union
 from pysp.stats.combinator.null_dist import NullAccumulator, NullAccumulatorFactory, NullDistribution, NullEstimator
 from pysp.stats.combinator.sequence import SequenceDistribution
 from pysp.stats.compute.pdist import (
@@ -47,7 +48,6 @@ from pysp.stats.compute.pdist import (
     child_enumerator,
 )
 from pysp.stats.latent.mixture import MixtureDistribution
-from pysp.utils.enumeration import BufferedStream, best_first_union
 
 T = TypeVar("T")  ## Data type for topics
 E1 = TypeVar("E1")  ## Encoded sequence from topic encoder.

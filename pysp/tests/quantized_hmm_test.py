@@ -24,13 +24,13 @@ try:
     _TORCH = TorchEngine(device="cpu", dtype="float64")
 except Exception:
     _TORCH = None
+from pysp.enumeration.algorithms import freeze
 from pysp.stats.latent.quantized_hidden_markov_model import (
     QuantizedHiddenMarkovEstimator,
     QuantizedHiddenMarkovModelDistribution,
     QuantizedHiddenMarkovModelEnumerator,
     _split_collapsed_states,
 )
-from pysp.utils.enumeration import freeze
 
 
 def make_quantized_dist(init_mode="quantized", use_numba=False, theta=0.5):

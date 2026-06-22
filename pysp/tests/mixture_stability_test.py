@@ -16,6 +16,8 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.em import MonotonicEM
+from pysp.inference.estimation import optimize
 from pysp.stats import (
     DiagonalGaussianDistribution,
     DiagonalGaussianEstimator,
@@ -27,8 +29,6 @@ from pysp.stats import (
     seq_log_density_sum,
 )
 from pysp.stats.latent.mixture import MixtureAccumulator
-from pysp.utils.em import MonotonicEM
-from pysp.utils.estimation import optimize
 
 
 def _high_dim_data(rng, d=300, k=4, n=200):

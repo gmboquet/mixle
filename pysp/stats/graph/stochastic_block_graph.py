@@ -23,6 +23,7 @@ from pysp.data.graph_data import (
     _validate_block_indices,
     _validate_block_probs,
 )
+from pysp.enumeration.algorithms import BufferedStream, ProductEnumerator
 from pysp.stats.compute.pdist import (
     DistributionEnumerator,
     DistributionSampler,
@@ -32,7 +33,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.enumeration import BufferedStream, ProductEnumerator
 
 
 class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution):

@@ -9,10 +9,10 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import _data_objective_sum, _model_objective, fit, optimize
 from pysp.stats import seq_encode, seq_estimate, seq_initialize
 from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.utils.estimation import _data_objective_sum, _model_objective, fit, optimize
 from pysp.utils.special import digamma
 
 

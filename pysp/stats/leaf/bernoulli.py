@@ -206,7 +206,7 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
 
     def to_fisher(self, **kwargs):
         """Return the Bernoulli's count-family Fisher view."""
-        from pysp.utils.fisher import CountFisherView, _count_data, _identity_encoded
+        from pysp.inference.fisher import CountFisherView, _count_data, _identity_encoded
 
         return CountFisherView(self, _fisher_mean_var, _count_data, _identity_encoded)
 

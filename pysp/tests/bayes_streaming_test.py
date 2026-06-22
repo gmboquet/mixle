@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import BayesianStreamingEstimator, forgetting
 from pysp.stats import (
     BetaDistribution,
     BinomialDistribution,
@@ -34,7 +35,6 @@ from pysp.stats import (
 from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 from pysp.stats.latent.mixture import mixture_prior
-from pysp.utils.estimation import BayesianStreamingEstimator, forgetting
 
 
 def _accumulate(estimator, model, data):

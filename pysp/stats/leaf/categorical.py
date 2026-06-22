@@ -16,6 +16,8 @@ from typing import Any, Optional, TypeVar
 import numpy as np
 from numpy.random import RandomState
 
+from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
+from pysp.inference.fisher import FixedFisherView
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -27,8 +29,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.utils.aliasing import MISSING, coalesce_alias
-from pysp.utils.enumeration import QuantizedCrossIndex, QuantizedEnumerationIndex
-from pysp.utils.fisher import FixedFisherView
 from pysp.utils.special import digamma
 
 T = TypeVar("T")

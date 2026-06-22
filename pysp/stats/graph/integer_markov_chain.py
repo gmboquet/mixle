@@ -31,6 +31,7 @@ from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge, ProductEnumerator
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -49,7 +50,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, ProductEnumerator
 
 E1 = TypeVar("E1")  ## init encoding
 E2 = TypeVar("E2")  ## len encoding

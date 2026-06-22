@@ -29,6 +29,7 @@ from scipy.sparse import dok_matrix
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -47,7 +48,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge
 
 T = TypeVar("T")  ### state type
 T1 = TypeVar("T1")  ### Type for length distribution sufficient statsitics value.
@@ -704,8 +704,8 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         lengths. Sequences are unranked by choosing the end state, then walking the trellis
         backward choosing predecessors by count.
         """
+        from pysp.enumeration.quantization.semiring import CountSemiring
         from pysp.stats.compute.pdist import EnumerationError
-        from pysp.utils.quantization.semiring import CountSemiring
 
         if self.default_value != 0.0:
             raise EnumerationError(self, reason="non-zero default_value gives an unbounded support")

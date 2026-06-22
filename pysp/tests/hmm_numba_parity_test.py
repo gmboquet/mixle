@@ -15,10 +15,10 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator, HiddenMarkovModelDistribution
 from pysp.stats.leaf.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.leaf.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.utils.estimation import optimize
 
 _HAS_NUMBA = importlib.util.find_spec("numba") is not None
 

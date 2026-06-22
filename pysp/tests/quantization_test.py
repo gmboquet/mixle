@@ -1,4 +1,4 @@
-"""Tests for structural quantized enumeration (pysp.utils.quantization.core).
+"""Tests for structural quantized enumeration (pysp.enumeration.quantization.core).
 
 Covers the count semiring against brute force; the count-budget index for the additive families
 (Composite/Sequence/MarkovChain) against the exact enumerator on finite supports (value set, exact
@@ -12,17 +12,17 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import *
-from pysp.utils.enumeration import freeze
-from pysp.utils.quantization.core import (
+from pysp.enumeration.algorithms import freeze
+from pysp.enumeration.quantization.core import (
     CountHistogram,
     Quantizer,
     convolve_indices,
     count_budget_index,
     leaf_count_index,
 )
-from pysp.utils.quantization.parallel import distributed_unrank
-from pysp.utils.quantization.semiring import CountSemiring, enumerate_and_bin, ordered_stream_from_count_index
+from pysp.enumeration.quantization.parallel import distributed_unrank
+from pysp.enumeration.quantization.semiring import CountSemiring, enumerate_and_bin, ordered_stream_from_count_index
+from pysp.stats import *
 
 
 def _collect(index):
@@ -52,7 +52,7 @@ class CountSemiringTestCase(unittest.TestCase):
         # gaps, delta operands, and a depth cap. Force each backend by toggling the threshold.
         import random
 
-        import pysp.utils.quantization.core as core
+        import pysp.enumeration.quantization.core as core
 
         def brute(a, b, cap):
             base = a.base + b.base

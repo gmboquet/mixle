@@ -33,6 +33,7 @@ from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge, merge_enumerators
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -52,7 +53,6 @@ from pysp.stats.compute.pdist import (
     child_enumerator,
 )
 from pysp.stats.leaf.categorical_multinomial import MultisetProductEnumerator
-from pysp.utils.enumeration import BufferedStream, LengthFrontierMerge, merge_enumerators
 from pysp.utils.optional_deps import numba
 from pysp.utils.optsutil import count_by_value
 

@@ -20,6 +20,8 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import betaln, digamma
 
+from pysp.enumeration.algorithms import BufferedStream, ProductEnumerator
+from pysp.inference.fisher import FixedFisherView
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -29,8 +31,6 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.enumeration import BufferedStream, ProductEnumerator
-from pysp.utils.fisher import FixedFisherView
 
 SS = tuple[np.ndarray, float, float | None]
 

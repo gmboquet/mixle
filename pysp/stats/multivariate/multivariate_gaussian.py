@@ -24,6 +24,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
+from pysp.inference.fisher import FixedFisherView
 from pysp.stats.bayes.normal_wishart import NormalWishartDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -34,7 +35,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from pysp.utils.aliasing import MISSING, coalesce_alias
-from pysp.utils.fisher import FixedFisherView
 
 
 class MultivariateGaussianFisherView(FixedFisherView):

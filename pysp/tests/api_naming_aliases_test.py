@@ -224,8 +224,8 @@ class NumValuesMaxIterAliasTestCase(unittest.TestCase):
                 cls(6, num_values=6)
 
     def test_max_iter(self):
+        from pysp.inference.em import RestartEM
         from pysp.stats.leaf.categorical import CategoricalDistribution
-        from pysp.utils.em import RestartEM
 
         model = CategoricalDistribution({"a": 1.0})
         self.assertEqual(RestartEM([model], max_iter=13).max_its, 13)

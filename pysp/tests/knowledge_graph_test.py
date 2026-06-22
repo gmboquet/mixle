@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 
+from pysp.inference.estimation import optimize
 from pysp.stats import KnowledgeGraphDistribution, KnowledgeGraphEstimator, fit_knowledge_graph_ensemble
-from pysp.utils.estimation import optimize
 
 
 def _kg_truth(nE=60, nR=4, d=12, seed=0):

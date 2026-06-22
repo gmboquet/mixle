@@ -20,6 +20,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.arithmetic import maxrandint
+from pysp.enumeration.algorithms import BufferedStream, best_first_union
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -30,7 +31,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream, best_first_union
 
 E0 = TypeVar("E0")  # Type of encoded data.
 E = tuple[int, np.ndarray, np.ndarray, E0]

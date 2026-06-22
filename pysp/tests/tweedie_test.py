@@ -11,8 +11,8 @@ import unittest
 import numpy as np
 from scipy import integrate
 
+from pysp.inference.estimation import optimize
 from pysp.stats import TweedieDistribution, TweedieEstimator
-from pysp.utils.estimation import optimize
 
 
 class TweedieDistributionTest(unittest.TestCase):

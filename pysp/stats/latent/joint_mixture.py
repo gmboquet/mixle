@@ -25,6 +25,7 @@ from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.arithmetic import *
 from pysp.arithmetic import maxrandint
+from pysp.enumeration.algorithms import BufferedStream, ProductEnumerator, best_first_union
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -35,7 +36,6 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.utils.enumeration import BufferedStream, ProductEnumerator, best_first_union
 
 T0 = TypeVar("T0")
 T1 = TypeVar("T1")
@@ -294,7 +294,7 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Structural Fisher view for the joint mixture."""
         if hasattr(self, "components1") and hasattr(self, "components2"):
-            from pysp.utils.fisher import JointMixtureFisherView
+            from pysp.inference.fisher import JointMixtureFisherView
 
             return JointMixtureFisherView(self)
         return super().to_fisher(**kwargs)

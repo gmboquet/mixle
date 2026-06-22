@@ -1088,7 +1088,7 @@ def sound_top_k(
     top-k from rank 0 ``dist.enumerator()`` is usually leaner; this adds the soundness certificate
     and the arbitrary start offset the sequential enumerator lacks.
     """
-    from pysp.utils.quantization.core import count_budget_index
+    from pysp.enumeration.quantization.core import count_budget_index
 
     if k < 1:
         raise ValueError("k must be a positive integer.")
