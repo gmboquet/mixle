@@ -129,27 +129,32 @@ operations become an axis — and concretely answer both questions, with shims s
 
 The structure above is **live**. Every namespace is reachable as `pysp.<ns>` (lazy `__getattr__`, so
 `import pysp` stays cheap) or `from pysp.<ns> import …`, and **every existing import still works**.
-Two of the concern packages now physically *own* their machinery (the files were `git mv`d in, with
-thin re-export shims left at the old paths); the rest remain cycle-free re-export shims.
+All three concern packages now physically *own* their machinery (the files were `git mv`d in, with
+thin re-export shims left at the old paths); only the object namespaces remain re-export shims.
 
 | Module | Role | Physical state | Backed by |
 |---|---|---|---|
 | `pysp.enumeration` | concern | **package — machinery moved in** | `_algorithms` (was utils.enumeration) + `quantization/` (was utils.quantization) + `model_enumeration` + DistributionEnumerator (pdist) + Enumerable |
 | `pysp.sampling` | concern | **package — machinery moved in** | `sampling_api` + `latent_posterior` + `_sampling` (were under stats) + pdist samplers + PosteriorPredictive |
-| `pysp.inference` | concern | re-export shim (by design) | utils.{estimation,em,fit,fisher} + bayes.conjugate + infer.nuts |
+| `pysp.inference` | concern | **package — machinery moved in (lazy `__init__`)** | `estimation` / `em` / `fit` / `objectives` / `fisher` (were under utils) + bayes.conjugate + infer.nuts (re-exported from their homes) |
 | `pysp.ops` | operations | self-contained module | new (quantize) + the combinators, capability-gated |
 | `pysp.contracts` | kernel | re-export shim | every ABC/Protocol in one import (capabilities eager, subsystem roles lazy) |
 | `pysp.dist` / `pysp.process` / `pysp.models` | objects | re-export shims (by design) | aliases of stats / the point-process families / the generic-model package |
 
-**Why `inference` and the object namespaces stay as re-export shims (not a TODO — a decision).**
-The distribution families (`pysp.dist`, `pysp.process`) keep their canonical home in `pysp.stats`
-because **serialization type-ids are the fully-qualified module path** (`_type_id(cls) =
+**Why the object namespaces stay as re-export shims (not a TODO — a decision).**
+The distribution families (`pysp.dist`, `pysp.process`, `pysp.models`) keep their canonical home in
+`pysp.stats` because **serialization type-ids are the fully-qualified module path** (`_type_id(cls) =
 "{cls.__module__}.{cls.__name__}"`); physically moving a distribution would change its type-id and
-break loading of previously-saved models. The inference machinery (`em`, `estimation`) is in a
-pre-existing tight import cycle with `pysp.stats` — estimation must iterate over distributions — so it
-stays adjacent to `stats`, with `pysp.inference` re-exporting it. The *self-contained* concern
-machinery (enumeration, sampling) has no such coupling, so it was relocated; that is the dividing
-line.
+break loading of previously-saved models.
+
+**The inference machinery was relocated despite a `stats` coupling.** `em`/`estimation` import
+`pysp.stats` (estimation must iterate over distributions), and the stats leaves import this machinery
+*during* `pysp.stats` import — so a normal eager package `__init__` would re-enter a half-built
+`pysp.stats` and deadlock. The fix: `pysp/inference/__init__.py` resolves its exported names
+**lazily** (`__getattr__`), so importing the package (or a submodule, via the old `utils.*` shims)
+runs a trivial `__init__` and preserves the existing import ordering. `conjugate` (bayes-family) and
+`nuts` (`pysp.infer`) keep their own homes and are re-exported. The only remaining dividing line is
+serialization, which pins the *distribution objects* to `pysp.stats`.
 
 ---
 
