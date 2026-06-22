@@ -40,6 +40,7 @@ __all__ = [
     "FiniteSupport",
     "RankableByIndex",
     "ExponentialFamily",
+    "ConjugateUpdatable",
     "SetValued",
     "Neutral",
     "ALL_CAPABILITIES",
@@ -189,6 +190,24 @@ class ExponentialFamily(PredicateCapability):
         return decl is not None and decl.exponential_family is not None
 
 
+class ConjugateUpdatable(PredicateCapability):
+    """Has a closed-form conjugate Bayesian update (the top tier of the inference ladder).
+
+    ``supports(x, ConjugateUpdatable)`` is True iff ``conjugate_posterior(x, data)`` returns an exact
+    closed-form posterior; otherwise Bayesian inference falls back to the numerical fitters
+    (MAP / Laplace / MCMC / VI). Detection is the single ``conjugate_posterior`` registry.
+    """
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        from pysp.stats.bayes.conjugate import is_conjugate_family
+
+        try:
+            return bool(is_conjugate_family(obj))
+        except Exception:
+            return False
+
+
 class Neutral(PredicateCapability):
     """The identity / no-op element of a combinator (a Null distribution, accumulator, or encoder)."""
 
@@ -211,15 +230,14 @@ class SetValued(PredicateCapability):
         return hasattr(obj, "num_required") and hasattr(obj, "required")
 
 
-# Deferred capabilities — named in docs/ABSTRACTIONS.md but NOT yet reliably detectable, because the
-# underlying families do not share a method surface. Formalising these is a family-surface unification
+# Deferred capability — named in docs/ABSTRACTIONS.md but NOT yet reliably detectable, because the
+# underlying families do not share a method surface. Formalising it is a family-surface unification
 # (a refactor), not just adding a Protocol here:
 #   * TemporalPointProcess — the point-process leaves (hawkes/inhomogeneous_poisson/birth_death) expose
 #     no common intensity()/compensator() method; give them one first.
-#   * ConjugateUpdatable — the conjugate-prior surface (set_prior / has_conj_prior / pseudo_count) is
-#     inconsistent across leaves; unify it before adding the capability.
-# (The PDE forward operator is free functions in ppl/pde_solve.py; ppl/dynamics.DynamicsOperator is
-# already a formal ABC.)
+# (ConjugateUpdatable was deferred for the same reason and is now formalised above, backed by the
+# single conjugate_posterior registry. The PDE forward operator is free functions in ppl/pde_solve.py;
+# ppl/dynamics.DynamicsOperator is already a formal ABC.)
 
 
 # Capabilities that apply to distributions (iterated by ``capabilities(dist)``). EngineResidentEStep,
@@ -234,6 +252,7 @@ ALL_CAPABILITIES: tuple[type, ...] = (
     FiniteSupport,
     RankableByIndex,
     ExponentialFamily,
+    ConjugateUpdatable,
     SetValued,
     SupportsBackendScoring,
     SupportsBackendComponentScoring,

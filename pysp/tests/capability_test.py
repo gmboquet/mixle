@@ -95,6 +95,23 @@ def test_transform_setvalued_backend_facets():
     assert cap.supports(GaussianDistribution(0, 1), cap.SupportsBackendScoring)
 
 
+def test_conjugate_updatable_is_the_closed_form_tier():
+    from pysp.stats.leaf.poisson import PoissonDistribution
+    from pysp.stats.leaf.weibull import WeibullDistribution
+
+    # Conjugate families report the capability (closed-form Bayesian update available)...
+    assert cap.supports(_cat(), cap.ConjugateUpdatable)
+    assert cap.supports(GaussianDistribution(0, 1), cap.ConjugateUpdatable)
+    assert cap.supports(PoissonDistribution(2.0), cap.ConjugateUpdatable)
+    # ...non-conjugate families don't (Bayesian inference must go numerical: MAP/Laplace/MCMC/VI).
+    assert not cap.supports(WeibullDistribution(1.5, 2.0), cap.ConjugateUpdatable)
+    # the uniform family-level method agrees with the capability and the registry
+    from pysp.stats.bayes.conjugate import is_conjugate_family
+
+    for d in (_cat(), GaussianDistribution(0, 1), WeibullDistribution(1.5, 2.0)):
+        assert d.has_conjugate_prior() == cap.supports(d, cap.ConjugateUpdatable) == is_conjugate_family(d)
+
+
 def test_core_contracts_are_enforced_abcs():
     # The pdist contracts are real ABCs now: isinstance works, and an incomplete subclass can't
     # be instantiated.

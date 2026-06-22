@@ -37,7 +37,21 @@ __all__ = [
     "MixtureConjugatePosterior",
     "conjugate_posterior",
     "mixture_conjugate_posterior",
+    "is_conjugate_family",
 ]
+
+
+def is_conjugate_family(dist: Any) -> bool:
+    """Return whether ``dist`` (instance or type) has a closed-form conjugate posterior.
+
+    Single source of truth: membership in the ``conjugate_posterior`` builder registry. This is the
+    family-level capability — "can this distribution be updated in closed form?" — distinct from the
+    instance-level ``has_conj_prior`` flag (whether a conjugate prior is currently attached for the
+    MAP path). Backs :class:`pysp.capability.ConjugateUpdatable` and
+    :meth:`ProbabilityDistribution.has_conjugate_prior`.
+    """
+    cls = dist if isinstance(dist, type) else type(dist)
+    return cls in _registry()
 
 
 def _as_weighted_array(data: Any, weights: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
