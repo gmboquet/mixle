@@ -1248,7 +1248,12 @@ class IntegerMarkovChainEstimator(ParameterEstimator):
         if self.pseudo_count is not None:
             cond_mat += self.pseudo_count
 
-        cond_mat /= cond_mat.sum(axis=1, keepdims=True)
+        row_sum = cond_mat.sum(axis=1, keepdims=True)
+        bad_rows = row_sum.flatten() == 0.0
+        if np.any(bad_rows):
+            cond_mat[bad_rows, :] = 1.0
+            row_sum[bad_rows] = num_values
+        cond_mat /= row_sum
 
         return IntegerMarkovChainDistribution(
             num_values, cond_mat, init_dist=init_dist, lag=lag, len_dist=len_dist, name=self.name
