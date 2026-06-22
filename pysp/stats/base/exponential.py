@@ -279,6 +279,12 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float(self.beta * self.beta)
 
+    def entropy(self) -> float:
+        """Differential entropy 1 + log(scale)."""
+        import math
+
+        return float(1.0 + math.log(self.beta))
+
     def sampler(self, seed: int | None = None) -> "ExponentialSampler":
         """Create an ExponentialSampler object with scale beta.
 

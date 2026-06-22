@@ -187,6 +187,12 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
         a, xm = self.alpha, self.xm
         return float(xm * xm * a / ((a - 1.0) ** 2 * (a - 2.0))) if a > 2.0 else float("inf")
 
+    def entropy(self) -> float:
+        """Differential entropy log(xm/alpha) + 1/alpha + 1."""
+        import math
+
+        return float(math.log(self.xm / self.alpha) + 1.0 / self.alpha + 1.0)
+
     def sampler(self, seed: int | None = None) -> "ParetoSampler":
         """Return a sampler for drawing observations from this distribution."""
         return ParetoSampler(self, seed)

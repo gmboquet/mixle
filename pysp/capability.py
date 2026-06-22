@@ -46,6 +46,7 @@ __all__ = [
     "SetValued",
     "HasCDF",
     "HasMoments",
+    "HasEntropy",
     "Discrete",
     "Continuous",
     "Fittable",
@@ -279,6 +280,14 @@ class HasMoments(PredicateCapability):
         return callable(getattr(obj, "mean", None)) and callable(getattr(obj, "variance", None))
 
 
+class HasEntropy(PredicateCapability):
+    """Exposes a closed-form (differential or Shannon) ``entropy()`` in nats."""
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        return callable(getattr(obj, "entropy", None))
+
+
 class Discrete(PredicateCapability):
     """Countable support: the distribution is enumerable or has explicit finite support."""
 
@@ -338,6 +347,7 @@ ALL_CAPABILITIES: tuple[type, ...] = (
     SetValued,
     HasCDF,
     HasMoments,
+    HasEntropy,
     Discrete,
     Continuous,
     Fittable,
@@ -527,6 +537,13 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "closed-form moments (mean / variance / …)",
         "distribution facet",
         "mean() and variance()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "HasEntropy",
+        "closed-form entropy in nats",
+        "distribution facet",
+        "entropy()",
         "pysp.capability",
     ),
     CapabilitySpec(

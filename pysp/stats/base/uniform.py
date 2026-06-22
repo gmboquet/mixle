@@ -131,6 +131,12 @@ class UniformDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float((self.high - self.low) ** 2 / 12.0)
 
+    def entropy(self) -> float:
+        """Differential entropy log(high - low)."""
+        import math
+
+        return float(math.log(self.high - self.low))
+
     def sampler(self, seed: int | None = None) -> "UniformSampler":
         """Return a sampler for drawing observations from this distribution."""
         return UniformSampler(self, seed)

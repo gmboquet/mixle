@@ -138,6 +138,12 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] of the distribution."""
         return float(2.0 * self.b * self.b)
 
+    def entropy(self) -> float:
+        """Differential entropy 1 + log(2b)."""
+        import math
+
+        return float(1.0 + math.log(2.0 * self.b))
+
     def sampler(self, seed: int | None = None) -> "LaplaceSampler":
         """Return a sampler for drawing observations from this distribution."""
         return LaplaceSampler(self, seed)
