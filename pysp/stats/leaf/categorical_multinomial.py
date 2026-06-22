@@ -9,13 +9,14 @@ Let P_dist(V_k) be a distribution for a countable set of discrete observations o
 
 as the probability of success for value V_k. Then sum_{k=0}^{inf} p_k = 1. Let x = (x_0, x_1,....,x_{n-1}) be a
 multinomial observation for a 'n' trials, where each x_i = (V_j, n_j) for some value V_j in the observation space and
-n_j is the associated number of success for the value. (note: sum n_j = n). Then, denoting p_j = p_mat(V_j), we have
-log-density:
+n_j is the associated number of success for the value. (note: sum n_j = n). Then, denoting p_j = p_mat(V_j), we score
+the un-normalized log-density:
 
-    log(p_mat(x)) = log(n!) - sum_{j=0}^{n-1} n_j * log(p_j) - log(n_j!) + log(P_len(n)),
+    log(p_mat(x)) = sum_{j=0}^{n-1} n_j * log(p_j) + log(P_len(n)),
 
 where P_len(n) is a distribution for the number of trials in the multinomial having support on the non-negative
-integers.
+integers. The multinomial coefficient (log(n!) - sum_j log(n_j!)) is intentionally omitted, so this is a per-category
+scoring form rather than a normalized probability mass over count vectors.
 
 The multinomial is assumed to have data type: Sequence[Tuple[T, float]], where T is the data type of the 'categories'.
 
@@ -168,12 +169,13 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         as the probability of success for value V_k. Then sum_{k=0}^{inf} p_k = 1. Let x = (x_0, x_1,....,x_{n-1}) be a
         multinomial observation for a 'n' trials, where each x_i = (V_j, n_j) for some value V_j in the observation
         space and n_j is the associated number of success for the value. (note: sum n_j = n). Then, denoting p_j =
-        p_mat(V_j), we have log-density:
+        p_mat(V_j), we score the un-normalized log-density:
 
-            log(p_mat(x)) = log(n!) - sum_{j=0}^{n-1} n_j * log(p_j) - log(n_j!) + log(P_len(n)),
+            log(p_mat(x)) = sum_{j=0}^{n-1} n_j * log(p_j) + log(P_len(n)),
 
         where P_len(n) is a distribution for the number of trials in the multinomial having support on the non-negative
-        integers.
+        integers. The multinomial coefficient is intentionally omitted (see the module docstring), so this is a
+        per-category scoring form, not a normalized mass over count vectors.
 
         Args:
             x (Sequence[Tuple[T, float]]): Tuples of observed multinomial values and success s.t. success sum to number

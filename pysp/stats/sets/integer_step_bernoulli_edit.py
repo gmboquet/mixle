@@ -509,7 +509,7 @@ class IntegerStepBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator)
         self.pcnt[: len(agg_cnt2), 2] += agg_cnt2
         self.tot_sum += weights.sum()
 
-        self.init_acc.seq_update(init_enc, weights, estimate.init_dist)
+        self.init_acc.seq_update(init_enc, weights, None if estimate is None else estimate.init_dist)
 
     def seq_update_engine(
         self, x: E, weights: Any, estimate: IntegerStepBernoulliEditDistribution | None, engine: Any

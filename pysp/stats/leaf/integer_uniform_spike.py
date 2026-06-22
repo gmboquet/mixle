@@ -95,7 +95,13 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
 
         self.log_p = np.log(p)
         self.num_vals = num_vals
-        self.log_1p = np.log1p(-self.p) - np.log(self.num_vals - 1)
+        # With a single value there is no non-spike category, so the off-spike log-mass is
+        # -inf (the spike carries all probability); avoids log(num_vals - 1) = log(0) = -inf
+        # feeding a +inf into log_1p.
+        if num_vals == 1:
+            self.log_1p = -np.inf
+        else:
+            self.log_1p = np.log1p(-self.p) - np.log(self.num_vals - 1)
         self.name = name
 
     def __str__(self) -> str:
@@ -714,6 +720,8 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
                     name=self.name,
                 )
             if self.pseudo_count is not None:
+                # Copy so the pseudo_count adjustments below do not mutate the caller's array.
+                count_vec = np.array(count_vec, dtype=np.float64)
                 if self.suff_stat[0] is not None and self.suff_stat[1] is None:
                     k_pseudo = self.suff_stat[0] if min_val is None else self.suff_stat[0] - min_val
                     count_vec[k_pseudo] += self.pseudo_count
