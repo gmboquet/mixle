@@ -195,6 +195,20 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(_sp.ppf(q, self.shape, scale=self.scale))
 
+    def mean(self) -> float:
+        """Mean scale * Gamma(1 + 1/shape)."""
+        import math
+
+        return float(self.scale * math.gamma(1.0 + 1.0 / self.shape))
+
+    def variance(self) -> float:
+        """Variance scale^2 * (Gamma(1+2/shape) - Gamma(1+1/shape)^2)."""
+        import math
+
+        g1 = math.gamma(1.0 + 1.0 / self.shape)
+        g2 = math.gamma(1.0 + 2.0 / self.shape)
+        return float(self.scale * self.scale * (g2 - g1 * g1))
+
     def sampler(self, seed: int | None = None) -> "WeibullSampler":
         """Return a sampler for drawing observations from this distribution."""
         return WeibullSampler(self, seed)

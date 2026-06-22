@@ -218,6 +218,14 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         return CountFisherView(self, _fisher_mean_var, _count_data, _fisher_encoded)
 
+    def mean(self) -> float:
+        """Mean E[X] (failures before r successes): r(1-p)/p."""
+        return float(self.r * (1.0 - self.p) / self.p)
+
+    def variance(self) -> float:
+        """Variance Var[X]: r(1-p)/p^2."""
+        return float(self.r * (1.0 - self.p) / (self.p * self.p))
+
     def sampler(self, seed: int | None = None) -> "NegativeBinomialSampler":
         """Return a sampler for drawing observations from this distribution."""
         return NegativeBinomialSampler(self, seed)
