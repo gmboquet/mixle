@@ -6,7 +6,7 @@ objects, ``(adjacency, block_assignments)`` pairs, or mappings with
 """
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -143,44 +143,75 @@ def _as_assignments(assignments: Any | None, n: int) -> np.ndarray | None:
     return rv
 
 
-def _extract_observation(x: Any, directed: bool = False, fallback_assignments: Any | None = None) -> GraphObservation:
-    if isinstance(x, GraphObservation):
-        adj = _as_adjacency(x.adjacency)
-        assignments = x.block_assignments
-    elif isinstance(x, Mapping):
-        assignments = x.get("block_assignments", x.get("blocks", fallback_assignments))
-        if "adjacency" in x:
-            adj = _as_adjacency(x["adjacency"])
-        elif "adj" in x:
-            adj = _as_adjacency(x["adj"])
-        elif "graph" in x:
-            adj, graph_assignments = _networkx_like_to_adjacency(x["graph"])
-            if assignments is None:
-                assignments = graph_assignments
-            adj = _as_adjacency(adj)
-        elif "edges" in x and "num_nodes" in x:
-            adj = _edge_list_to_adjacency(x["edges"], int(x["num_nodes"]), directed=directed)
-        else:
-            raise ValueError("graph mapping must contain adjacency, adj, graph, or edges+num_nodes.")
-    elif isinstance(x, tuple) and len(x) == 2:
+def _coerce_graph_observation(x: Any, directed: bool, fallback_assignments: Any | None) -> GraphObservation:
+    adj = _as_adjacency(x.adjacency)
+    return GraphObservation(adj, _as_assignments(x.block_assignments, adj.shape[0]))
+
+
+def _coerce_mapping(x: Any, directed: bool, fallback_assignments: Any | None) -> GraphObservation:
+    assignments = x.get("block_assignments", x.get("blocks", fallback_assignments))
+    if "adjacency" in x:
+        adj = _as_adjacency(x["adjacency"])
+    elif "adj" in x:
+        adj = _as_adjacency(x["adj"])
+    elif "graph" in x:
+        adj, graph_assignments = _networkx_like_to_adjacency(x["graph"])
+        if assignments is None:
+            assignments = graph_assignments
+        adj = _as_adjacency(adj)
+    elif "edges" in x and "num_nodes" in x:
+        adj = _edge_list_to_adjacency(x["edges"], int(x["num_nodes"]), directed=directed)
+    else:
+        raise ValueError("graph mapping must contain adjacency, adj, graph, or edges+num_nodes.")
+    return GraphObservation(adj, _as_assignments(assignments, adj.shape[0]))
+
+
+def _coerce_pair_tuple(x: Any, directed: bool, fallback_assignments: Any | None) -> GraphObservation:
+    adj = _as_adjacency(x[0])
+    assignments = x[1] if x[1] is not None else fallback_assignments
+    return GraphObservation(adj, _as_assignments(assignments, adj.shape[0]))
+
+
+def _coerce_pair_list(x: Any, directed: bool, fallback_assignments: Any | None) -> GraphObservation:
+    try:
         adj = _as_adjacency(x[0])
         assignments = x[1] if x[1] is not None else fallback_assignments
-    elif isinstance(x, list) and len(x) == 2 and not np.isscalar(x[0]):
-        try:
-            adj = _as_adjacency(x[0])
-            assignments = x[1] if x[1] is not None else fallback_assignments
-        except Exception:
-            adj = _as_adjacency(x)
-            assignments = fallback_assignments
-    elif hasattr(x, "nodes") and hasattr(x, "edges"):
-        adj, graph_assignments = _networkx_like_to_adjacency(x)
-        assignments = graph_assignments if graph_assignments is not None else fallback_assignments
-        adj = _as_adjacency(adj)
-    else:
+    except Exception:
         adj = _as_adjacency(x)
         assignments = fallback_assignments
-
     return GraphObservation(adj, _as_assignments(assignments, adj.shape[0]))
+
+
+def _coerce_networkx_like(x: Any, directed: bool, fallback_assignments: Any | None) -> GraphObservation:
+    adj, graph_assignments = _networkx_like_to_adjacency(x)
+    assignments = graph_assignments if graph_assignments is not None else fallback_assignments
+    adj = _as_adjacency(adj)
+    return GraphObservation(adj, _as_assignments(assignments, adj.shape[0]))
+
+
+def _coerce_adjacency_like(x: Any, directed: bool, fallback_assignments: Any | None) -> GraphObservation:
+    adj = _as_adjacency(x)
+    return GraphObservation(adj, _as_assignments(fallback_assignments, adj.shape[0]))
+
+
+#: Ordered coercer registry: the first ``(predicate, handler)`` whose predicate matches ``x`` wins.
+#: New input types register here instead of extending an ``isinstance`` ladder. Order matters --
+#: it preserves the original precedence (GraphObservation -> Mapping -> 2-tuple -> 2-list ->
+#: networkx-like -> raw adjacency fallback).
+_OBSERVATION_COERCERS: list[tuple[Callable[[Any], bool], Callable[..., GraphObservation]]] = [
+    (lambda x: isinstance(x, GraphObservation), _coerce_graph_observation),
+    (lambda x: isinstance(x, Mapping), _coerce_mapping),
+    (lambda x: isinstance(x, tuple) and len(x) == 2, _coerce_pair_tuple),
+    (lambda x: isinstance(x, list) and len(x) == 2 and not np.isscalar(x[0]), _coerce_pair_list),
+    (lambda x: hasattr(x, "nodes") and hasattr(x, "edges"), _coerce_networkx_like),
+]
+
+
+def _extract_observation(x: Any, directed: bool = False, fallback_assignments: Any | None = None) -> GraphObservation:
+    for predicate, handler in _OBSERVATION_COERCERS:
+        if predicate(x):
+            return handler(x, directed, fallback_assignments)
+    return _coerce_adjacency_like(x, directed, fallback_assignments)
 
 
 def _edge_counts(adj: np.ndarray, directed: bool, self_loops: bool) -> tuple[float, float]:
