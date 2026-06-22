@@ -120,6 +120,32 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
 
         return float(_sp.ppf(q, -self.shape, loc=self.loc, scale=self.scale))
 
+    def mean(self) -> float:
+        """Mean: loc + scale*(Gamma(1-xi)-1)/xi (loc+scale*euler_gamma at xi=0); inf for xi>=1."""
+        from scipy.special import gamma as _gamma
+
+        xi = self.shape
+        if abs(xi) < 1.0e-12:
+            return float(self.loc + self.scale * np.euler_gamma)
+        if xi < 1.0:
+            return float(self.loc + self.scale * (_gamma(1.0 - xi) - 1.0) / xi)
+        return float("inf")
+
+    def variance(self) -> float:
+        """Variance: scale^2 (Gamma(1-2xi)-Gamma(1-xi)^2)/xi^2 (scale^2 pi^2/6 at xi=0); inf for xi>=1/2."""
+        import math
+
+        from scipy.special import gamma as _gamma
+
+        xi = self.shape
+        if abs(xi) < 1.0e-12:
+            return float(self.scale * self.scale * math.pi * math.pi / 6.0)
+        if xi < 0.5:
+            g1 = _gamma(1.0 - xi)
+            g2 = _gamma(1.0 - 2.0 * xi)
+            return float(self.scale * self.scale * (g2 - g1 * g1) / (xi * xi))
+        return float("inf")
+
     def sampler(self, seed: int | None = None) -> "GeneralizedExtremeValueSampler":
         """Return a sampler for drawing observations from this distribution."""
         return GeneralizedExtremeValueSampler(self, seed)

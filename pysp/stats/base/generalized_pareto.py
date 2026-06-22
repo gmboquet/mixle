@@ -102,6 +102,18 @@ class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(_sp.ppf(q, self.shape, loc=self.loc, scale=self.scale))
 
+    def mean(self) -> float:
+        """Mean loc + scale/(1-xi) for xi < 1, else inf."""
+        xi = self.shape
+        return float(self.loc + self.scale / (1.0 - xi)) if xi < 1.0 else float("inf")
+
+    def variance(self) -> float:
+        """Variance scale^2 / ((1-xi)^2 (1-2xi)) for xi < 1/2, else inf."""
+        xi = self.shape
+        if xi < 0.5:
+            return float(self.scale * self.scale / ((1.0 - xi) ** 2 * (1.0 - 2.0 * xi)))
+        return float("inf")
+
     def sampler(self, seed: int | None = None) -> "GeneralizedParetoSampler":
         """Return a sampler for drawing observations from this distribution."""
         return GeneralizedParetoSampler(self, seed)
