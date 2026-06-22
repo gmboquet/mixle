@@ -12,6 +12,7 @@ documents its **capability signature** — what it requires of its input and wha
     mixture(dists, w)         : Distributions         -> LatentStructured
     transform(dist, f)        : Distribution + inv. f -> Distribution (Jacobian-corrected)
     tilt(dist, theta)         : ExponentialFamily     -> Distribution
+    project(source, target)   : Sampleable x Fittable -> Distribution (forward-KL M-projection)
 
 See ``docs/ARCHITECTURE.md`` and the operation table in ``docs/CAPABILITIES.md``.
 """
@@ -20,9 +21,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from pysp.capability import Conditionable, ExponentialFamily, Marginalizable, require
+from pysp.capability import CapabilityError, Conditionable, ExponentialFamily, Marginalizable, require
 
-__all__ = ["quantize", "truncate", "condition", "marginalize", "mixture", "transform", "tilt"]
+__all__ = ["quantize", "truncate", "condition", "marginalize", "mixture", "transform", "tilt", "project"]
 
 
 def quantize(
@@ -108,3 +109,28 @@ def tilt(dist: Any, theta: Any):
     from pysp.stats.combinator.exponential_tilt import ExponentialTiltedDistribution
 
     return ExponentialTiltedDistribution(dist, theta)
+
+
+def project(source: Any, target: Any, *, n_samples: int = 20_000, seed: int = 0, max_its: int = 50):
+    """Variationally project ``source`` onto the family of ``target`` (the sample-based M-projection).
+
+    Capability signature: ``Sampleable source x Fittable target -> Distribution``. Draws ``n_samples``
+    from ``source`` and fits ``target`` to them by maximum likelihood -- which is exactly the projection
+    minimizing the forward divergence ``KL(source || target_family)`` (the M-/moment projection). Works
+    for any ``source`` exposing a ``sampler`` (a distribution, mixture, GP, or a trained neural model)
+    onto any fittable ``target`` family, so e.g. a neural sequence model can be distilled onto an HMM.
+
+    ``target`` may be a distribution (its :meth:`estimator` supplies the family) or an estimator directly.
+    The returned model is a member of the target family; ``describe(project(...))`` shows its capabilities.
+    """
+    import numpy as np
+
+    from pysp.inference.estimation import fit  # the EM driver -- import from its module, not the package
+    # (`from pysp.inference import fit` is ambiguous: the `pysp.inference.fit` gradient-fitting submodule
+    # shadows the re-exported function once that submodule is imported anywhere in the process).
+
+    if not callable(getattr(source, "sampler", None)):
+        raise CapabilityError("project requires a sampleable source (a `.sampler(seed)` method).")
+    estimator = target.estimator() if callable(getattr(target, "estimator", None)) else target
+    data = list(source.sampler(seed).sample(int(n_samples)))
+    return fit(data, estimator, max_its=max_its, rng=np.random.RandomState(seed), out=None)
