@@ -231,7 +231,7 @@ class MatchingAccumulator(SequenceEncodableStatisticAccumulator):
         self.dim = dim
         self.assign_counts = np.zeros((dim, dim))
         self.count = 0.0
-        self.key = keys
+        self.keys = keys
 
     def update(self, x: Sequence[int], weight: float, estimate: MatchingDistribution | None) -> None:
         sigma = np.asarray(x, dtype=int)
@@ -264,15 +264,15 @@ class MatchingAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "MatchingDataEncoder":
         return MatchingDataEncoder(dim=self.dim)

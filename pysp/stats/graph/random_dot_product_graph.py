@@ -165,7 +165,7 @@ class RandomDotProductGraphAccumulator(SequenceEncodableStatisticAccumulator):
     def __init__(self, keys: str | None = None) -> None:
         self.adj_sum: np.ndarray | None = None
         self.count = 0.0
-        self.key = keys
+        self.keys = keys
 
     def _add(self, adjacency: np.ndarray, weight: float) -> None:
         a = np.asarray(adjacency, dtype=float)
@@ -207,15 +207,15 @@ class RandomDotProductGraphAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> GraphDataEncoder:
         return GraphDataEncoder(directed=False)

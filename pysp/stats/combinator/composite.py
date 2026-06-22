@@ -681,7 +681,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.accumulators = accumulators
         self.count = len(accumulators)
-        self.key = keys
+        self.keys = keys
 
         ### variables for initialization
         self._init_rng = False
@@ -850,11 +850,11 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
         for u in self.accumulators:
             u.key_merge(stats_dict)
@@ -870,9 +870,9 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
 
         for u in self.accumulators:
             u.key_replace(stats_dict)

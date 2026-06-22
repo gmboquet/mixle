@@ -131,7 +131,7 @@ class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self.m2 = 0.0
         self.m3 = 0.0
         self.name = name
-        self.key = keys
+        self.keys = keys
 
     def _merge(self, c_b: float, mean_b: float, m2_b: float, m3_b: float) -> None:
         """Merge a second weighted central-moment batch into this one (parallel form)."""
@@ -194,15 +194,15 @@ class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "SkewNormalDataEncoder":
         return SkewNormalDataEncoder()

@@ -193,14 +193,14 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         self.dim = dim
         self.mu = mu
         self.kappa = kappa
-        self.key = keys
+        self.keys = keys
 
     def __str__(self) -> str:
         """Returns string representation of VonMisesFisherDistribution object."""
         s1 = repr(list(self.mu))
         s2 = repr(self.kappa)
         s3 = repr(self.name)
-        s4 = self.key
+        s4 = self.keys
         return "VonMisesFisherDistribution(%s, %s, name=%s, keys=%s)" % (s1, s2, s3, s4)
 
     def density(self, x: Sequence[float] | np.ndarray) -> float:
@@ -379,9 +379,9 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return VonMisesFisherEstimator(name=self.name, keys=self.key)
+            return VonMisesFisherEstimator(name=self.name, keys=self.keys)
         else:
-            return VonMisesFisherEstimator(name=self.name, keys=self.key)
+            return VonMisesFisherEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "VonMisesFisherDataEncoder":
         """Returns a VonMisesFisherDataEncoder object for encoding sequences of data."""
@@ -495,7 +495,7 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
         else:
             self.ssum = None
 
-        self.key = keys
+        self.keys = keys
         self.name = name
 
     def update(
@@ -609,11 +609,11 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.combine(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.combine(stats_dict[self.keys].value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set sufficient statistics of object instance to suff stats with matching keys.
@@ -625,9 +625,9 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "VonMisesFisherDataEncoder":
         """Returns a VonMisesFisherDataEncoder object for encoding sequences of data."""
@@ -647,12 +647,12 @@ class VonMisesFisherAccumulatorFactory(StatisticAccumulatorFactory):
 
         """
         self.dim = dim
-        self.key = keys
+        self.keys = keys
         self.name = name
 
     def make(self) -> "SequenceEncodableStatisticAccumulator":
         """Returns a new VonMisesFisherAccumulator object."""
-        return VonMisesFisherAccumulator(dim=self.dim, keys=self.key)
+        return VonMisesFisherAccumulator(dim=self.dim, keys=self.keys)
 
 
 class VonMisesFisherEstimator(ParameterEstimator):
@@ -678,11 +678,11 @@ class VonMisesFisherEstimator(ParameterEstimator):
         self.name = name
         self.pseudo_count = pseudo_count
         self.name = name
-        self.key = keys
+        self.keys = keys
 
     def accumulator_factory(self):
         """Returns a VonMisesFisherAccumulatorFactory for creating VonMisesFisherAccumulator objects."""
-        return VonMisesFisherAccumulatorFactory(dim=self.dim, name=self.name, keys=self.key)
+        return VonMisesFisherAccumulatorFactory(dim=self.dim, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray]) -> "VonMisesFisherDistribution":
         """Estimate a VonMisesFisherDistribution from sufficient statistics.
@@ -736,7 +736,7 @@ class VonMisesFisherEstimator(ParameterEstimator):
             mu = np.ones(dim) / np.sqrt(dim)
             k = 0.0
 
-        return VonMisesFisherDistribution(mu, k, name=self.name, keys=self.key)
+        return VonMisesFisherDistribution(mu, k, name=self.name, keys=self.keys)
 
 
 class VonMisesFisherDataEncoder(DataSequenceEncoder):

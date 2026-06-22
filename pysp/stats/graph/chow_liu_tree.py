@@ -323,7 +323,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         self.estimators = list(estimators)
         self.num_features = len(self.estimators)
-        self.key = keys
+        self.keys = keys
         self.name = name
         self.total_weight = 0.0
 
@@ -505,11 +505,11 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
         for acc in self.marginal_accumulators:
             acc.key_merge(stats_dict)
         for by_parent in self.conditional_accumulators.values():
@@ -517,8 +517,8 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
                 acc.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
         for acc in self.marginal_accumulators:
             acc.key_replace(stats_dict)
         for by_parent in self.conditional_accumulators.values():

@@ -437,7 +437,7 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.sum = 0.0
         self.count = 0.0
-        self.key = keys
+        self.keys = keys
         self.name = name
 
     def update(self, x: int, weight: float, estimate: Optional["GeometricDistribution"]) -> None:
@@ -554,14 +554,14 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                x0, x1 = stats_dict[self.key]
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                x0, x1 = stats_dict[self.keys]
                 self.count += x0
                 self.sum += x1
 
             else:
-                stats_dict[self.key] = (self.count, self.sum)
+                stats_dict[self.keys] = (self.count, self.sum)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Set sufficient statistics of object instance to suff_stats with matching keys.
@@ -573,9 +573,9 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.count, self.sum = stats_dict[self.key]
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.count, self.sum = stats_dict[self.keys]
 
     def acc_to_encoder(self) -> "GeometricDataEncoder":
         """Returns GeometricDataEncoder object for encoding sequence of GeometricDistribution observations."""

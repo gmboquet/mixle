@@ -610,7 +610,7 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.name = name
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
         self.count_vec = vec.zeros(max_val - min_val + 1) if min_val is not None and max_val is not None else None
-        self.key = keys
+        self.keys = keys
 
     def update(
         self, x: Sequence[tuple[int, float]], weight: float, estimate: IntegerMultinomialDistribution | None
@@ -889,11 +889,11 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.key] = self
+                stats_dict[self.keys] = self
 
         if self.len_accumulator is not None:
             self.len_accumulator.key_merge(stats_dict)
@@ -910,9 +910,9 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.key is not None:
-            if self.key in stats_dict:
-                self.from_value(stats_dict[self.key].value())
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                self.from_value(stats_dict[self.keys].value())
 
         if self.len_accumulator is not None:
             self.len_accumulator.key_replace(stats_dict)
