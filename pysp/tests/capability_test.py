@@ -198,3 +198,35 @@ def test_top_k_dispatches_on_capability():
     assert out[0][1] >= out[1][1]
     with pytest.raises(cap.CapabilityError):
         cap.top_k(GaussianDistribution(0, 1), 2)  # continuous => not enumerable => clear failure
+
+
+# --------------------------------------------------------------- the coherence layer
+def test_describe_is_plain_english_and_capability_accurate():
+    import pysp
+
+    text = pysp.describe(_cat())
+    assert "CategoricalDistribution" in text and "can:" in text
+    assert "Enumerable" in text and "ConjugateUpdatable" in text  # categorical has both
+    mix_text = pysp.describe(MixtureDistribution([GaussianDistribution(0, 1), GaussianDistribution(3, 1)], [0.5, 0.5]))
+    assert "latent-variable model" in mix_text and "no closed-form conjugate" in mix_text
+
+
+def test_catalog_is_the_single_vocabulary():
+    import pysp
+
+    names = {s.name for s in pysp.catalog()}
+    for c in cap.ALL_CAPABILITIES:
+        if c.__name__ != "SupportsBackendComponentScoring":  # internal variant
+            assert c.__name__ in names, f"{c.__name__} missing from the catalog"
+    assert {"Relation", "ComputeEngine", "ForwardOperator", "Surrogate", "EncodedFold"} <= names
+    assert cap.render_catalog_markdown().startswith("| Capability |")
+
+
+def test_what_supports_filters_by_capability():
+    import numpy as np
+
+    import pysp
+    from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
+
+    pool = [GaussianDistribution(0, 1), MultivariateGaussianDistribution(np.zeros(2), np.eye(2)), _cat()]
+    assert pysp.what_supports(cap.Conditionable, pool) == ["MultivariateGaussianDistribution"]
