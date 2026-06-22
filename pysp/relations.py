@@ -45,6 +45,7 @@ from pysp.enumeration.assignment import k_best_assignments
 from pysp.enumeration.spanning import k_best_spanning_trees
 
 __all__ = [
+    "admm_bounded_least_squares",
     "Assignment",
     "BestSubsetRegression",
     "branch_and_bound_milp",
@@ -660,6 +661,48 @@ def irreducible_infeasible_subset(
         if not _lp_feasible(a[trial], b[trial], bnds):
             rows = trial  # constraint i is not needed for infeasibility -> drop it
     return rows
+
+
+# ---------------------------------------------------------------------------
+# ADMM for box-constrained least squares (augmented-Lagrangian splitting)
+# ---------------------------------------------------------------------------
+def admm_bounded_least_squares(
+    a: Any,
+    b: Any,
+    lower: Any = 0.0,
+    upper: Any = np.inf,
+    *,
+    rho: float = 1.0,
+    max_iter: int = 5000,
+    tol: float = 1.0e-8,
+) -> np.ndarray:
+    """Solve ``min_x ||A x - b||^2`` subject to ``lower <= x <= upper`` by ADMM.
+
+    The alternating-direction method of multipliers splits the problem as ``f(x) = ||A x - b||^2`` plus
+    the box indicator ``g(z)``, with ``x = z``, and alternates: an ``x``-update (the ridge solve
+    ``(A^T A + rho I) x = A^T b + rho (z - u)``, factorized once), a ``z``-update (project ``x + u`` onto
+    the box), and the scaled dual update ``u += x - z``. This is the augmented-Lagrangian path "beyond
+    pure penalty": it converges to the exact constrained optimum (``lower=0, upper=inf`` recovers
+    non-negative least squares). Returns the bounded solution ``x``.
+    """
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    n = a.shape[1]
+    lo = np.broadcast_to(np.asarray(lower, dtype=np.float64), (n,))
+    hi = np.broadcast_to(np.asarray(upper, dtype=np.float64), (n,))
+    chol = np.linalg.cholesky(a.T @ a + rho * np.eye(n))  # SPD for rho > 0; factor once
+    atb = a.T @ b
+    x = np.zeros(n)
+    z = np.zeros(n)
+    u = np.zeros(n)
+    for _ in range(max_iter):
+        x = np.linalg.solve(chol.T, np.linalg.solve(chol, atb + rho * (z - u)))
+        z_old = z
+        z = np.clip(x + u, lo, hi)
+        u = u + x - z
+        if np.linalg.norm(x - z) < tol and rho * np.linalg.norm(z - z_old) < tol:
+            break  # primal + dual residuals small
+    return z
 
 
 # ---------------------------------------------------------------------------
