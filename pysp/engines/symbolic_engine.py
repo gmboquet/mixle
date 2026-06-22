@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import scipy.special
 
 from pysp.engines.base import ComputeEngine
 
@@ -393,11 +394,15 @@ def _max_values(values: Any) -> SymbolicExpression:
 
 def _logsumexp_values(values: Any) -> SymbolicExpression:
     values = np.asarray(values, dtype=object).reshape(-1)
-    terms = [SymbolicExpression.call("exp", value) for value in values]
+    # Build the max-shifted form ``m + log(sum(exp(x - m)))`` so the numeric
+    # evaluate path is stable (a naive ``log(sum(exp(x)))`` overflows, e.g.
+    # ``[1000, 1000]``) while staying algebraically equivalent for export.
+    shift = _max_values(values)
+    terms = [SymbolicExpression.call("exp", _sym(value) - shift) for value in values]
     total = SymbolicExpression.constant(0.0)
     for term in terms:
         total = total + term
-    return SymbolicExpression.call("log", total)
+    return shift + SymbolicExpression.call("log", total)
 
 
 def _reduce_symbolic(x: Any, reducer: Callable[[Any], SymbolicExpression], axis: Any = None) -> Any:
@@ -524,6 +529,7 @@ _EVAL_OPS: dict[str, Callable[..., Any]] = {
     "where": lambda cond, x, y: x if bool(cond) else y,
     "clip": _clip_value,
     "gammaln": math.lgamma,
+    "digamma": scipy.special.digamma,
     "erf": math.erf,
     "isnan": math.isnan,
     "isinf": math.isinf,

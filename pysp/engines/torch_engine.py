@@ -57,7 +57,12 @@ class TorchEngine(ComputeEngine):
         )
 
     def asarray(self, x: Any, dtype: Any = None) -> Any:
-        """Convert ``x`` to a Torch tensor or DTensor on the configured device."""
+        """Convert ``x`` to a Torch tensor or DTensor on the configured device.
+
+        Contract: float inputs are force-cast to the engine's float dtype (e.g. a
+        float32 numpy array becomes the engine's float64) unless ``dtype`` is given;
+        this differs from numpy's ``asarray``, which preserves the input dtype.
+        """
         if torch is None:
             require("torch", "torch")
         if self._is_dtensor(x):
@@ -179,15 +184,35 @@ class TorchEngine(ComputeEngine):
 
     @staticmethod
     def max(x, *args, **kwargs):
-        """Return ``torch.max`` accepting either ``axis`` or ``dim``."""
+        """Return ``torch.max`` accepting either ``axis`` or ``dim`` (incl. a tuple of axes)."""
         if "axis" in kwargs and "dim" not in kwargs:
             kwargs["dim"] = kwargs.pop("axis")
+        dim = kwargs.pop("dim", None)
+        if isinstance(dim, (tuple, list)):
+            # torch.max reduces a single dim; fold over a tuple of axes to match numpy.
+            rv = x
+            for one_dim in sorted((int(d) for d in dim), reverse=True):
+                rv = torch.max(rv, dim=one_dim, **kwargs)
+                rv = rv.values if hasattr(rv, "values") else rv
+            return rv
+        if dim is not None:
+            kwargs["dim"] = dim
         rv = torch.max(x, *args, **kwargs)
         return rv.values if hasattr(rv, "values") else rv
 
     dot = staticmethod(lambda x, y: torch.dot(x, y))
     matmul = staticmethod(lambda x, y: torch.matmul(x, y))
-    cumsum = staticmethod(lambda x, *args, **kwargs: torch.cumsum(x, *args, **kwargs))
+
+    @staticmethod
+    def cumsum(x, *args, **kwargs):
+        """Return ``torch.cumsum`` accepting ``axis``/``dim`` and defaulting to a flattened scan."""
+        if "axis" in kwargs and "dim" not in kwargs:
+            kwargs["dim"] = kwargs.pop("axis")
+        if not args and "dim" not in kwargs:
+            # numpy's ``cumsum`` with no axis flattens; torch requires a dim.
+            x = torch.reshape(x, (-1,))
+            kwargs["dim"] = 0
+        return torch.cumsum(x, *args, **kwargs)
 
     @staticmethod
     def logsumexp(x, *args, **kwargs):
@@ -205,7 +230,12 @@ class TorchEngine(ComputeEngine):
     erf = staticmethod(lambda x: torch.erf(x))
 
     def index_add(self, out: Any, index: Any, values: Any) -> Any:
-        """Add ``values`` into ``out`` along axis 0 using Torch ``index_add``."""
+        """Add ``values`` into ``out`` along axis 0 using Torch ``index_add``.
+
+        Contract: return-value-only -- ``torch.Tensor.index_add`` (no trailing
+        underscore) does not mutate ``out`` in place, unlike numpy's ``add.at``;
+        callers must use the returned tensor.
+        """
         # index must be a long tensor on out's device; coerce defensively so a
         # numpy index (or one on another device) does not raise a cryptic error
         index = torch.as_tensor(index, dtype=torch.long, device=out.device)
