@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -26,6 +26,26 @@ class EMStepResult:
     objective: float | None = None
     accepted: bool = True
     metadata: dict | None = None
+
+
+@runtime_checkable
+class EMStrategy(Protocol):
+    """Structural contract for an EM-family strategy consumed by :func:`run_em`.
+
+    Every strategy object in this module (``StandardEM``, ``PosteriorTransformEM``,
+    ``AnnealedEM``, ...) satisfies this Protocol structurally by exposing a
+    ``step(...) -> EMStepResult`` method.  ``run_em`` and ``_em_step_fn`` dispatch
+    on it polymorphically; membership is decided by :func:`isinstance`.
+    """
+
+    def step(
+        self,
+        enc_data: Any,
+        estimator: ParameterEstimator,
+        model: SequenceEncodableProbabilityDistribution,
+        engine: Any | None = ...,
+        objective: Callable[[Any], float] | None = ...,
+    ) -> EMStepResult: ...
 
 
 class StandardEM:
@@ -656,7 +676,7 @@ def run_em(
     enc_data: Any,
     estimator: ParameterEstimator,
     initial_model: SequenceEncodableProbabilityDistribution,
-    strategy: Any | None = None,
+    strategy: EMStrategy | None = None,
     max_its: int = 10,
     delta: float | None = 1.0e-9,
     engine: Any | None = None,

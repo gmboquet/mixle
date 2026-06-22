@@ -14,7 +14,7 @@ import sys
 import time
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -28,6 +28,7 @@ __all__ = [
     "DeviceSpec",
     "DaskEncodedData",
     "EncodedDataHandle",
+    "EncodedFold",
     "LocalEncodedData",
     "ModelShard",
     "Placement",
@@ -615,17 +616,29 @@ class EncodedDataHandle:
         self.close()
 
 
+@runtime_checkable
+class EncodedFold(Protocol):
+    """Structural contract for the parallel/distributed fold consumed by ``pysp.stats``.
+
+    This formalizes the duck-typed orchestrator contract that the concrete
+    :class:`EncodedDataHandle` base class documents.  Local, multiprocessing,
+    MPI, Spark, dask, Ray, Lightning, or future worker handles satisfy this
+    Protocol structurally without sharing inheritance.  Membership is decided by
+    :func:`isinstance` against the four ``pysp_seq_*``/``pysp_stream_*`` methods.
+    """
+
+    def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]: ...
+
+    def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any: ...
+
+    def pysp_seq_initialize(self, estimator: Any, rng: np.random.RandomState, p: float) -> Any: ...
+
+    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]: ...
+
+
 def is_encoded_data_handle(obj: Any) -> bool:
     """Return true when ``obj`` exposes the sequence-orchestrator contract."""
-    return all(
-        callable(getattr(obj, name, None))
-        for name in (
-            "pysp_seq_log_density_sum",
-            "pysp_seq_estimate",
-            "pysp_seq_initialize",
-            "pysp_stream_accumulate",
-        )
-    )
+    return isinstance(obj, EncodedFold)
 
 
 def encoded_data(
