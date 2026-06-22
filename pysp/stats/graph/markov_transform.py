@@ -668,21 +668,18 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        """
-        if self.weight_key is not None:
-            if self.weight_key in stats_dict:
-                stats_dict[self.weight_key] += self.comp_counts
+        if self.init_key is not None:
+            if self.init_key in stats_dict:
+                stats_dict[self.init_key] += self.init_count
             else:
-                stats_dict[self.weight_key] = self.comp_counts
+                stats_dict[self.init_key] = self.init_count
 
-        if self.comp_key is not None:
-            if self.comp_key in stats_dict:
-                acc = stats_dict[self.comp_key]
-                for i in range(len(acc)):
-                    acc[i] = acc[i].combine(self.accumulators[i].value())
+        if self.trans_key is not None:
+            if self.trans_key in stats_dict:
+                stats_dict[self.trans_key] += self.trans_count
             else:
-                stats_dict[self.comp_key] = self.accumulators
-        """
+                stats_dict[self.trans_key] = self.trans_count
+
         if self.size_accumulator is not None:
             self.size_accumulator.key_merge(stats_dict)
 
@@ -696,16 +693,14 @@ class MarkovTransformAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        """
-        if self.weight_key is not None:
-            if self.weight_key in stats_dict:
-                self.comp_counts = stats_dict[self.weight_key]
+        if self.init_key is not None:
+            if self.init_key in stats_dict:
+                self.init_count = stats_dict[self.init_key]
 
-        if self.comp_key is not None:
-            if self.comp_key in stats_dict:
-                acc = stats_dict[self.comp_key]
-                self.accumulators = acc
-        """
+        if self.trans_key is not None:
+            if self.trans_key in stats_dict:
+                self.trans_count = stats_dict[self.trans_key]
+
         if self.size_accumulator is not None:
             self.size_accumulator.key_replace(stats_dict)
 

@@ -823,7 +823,7 @@ class BernoulliSetEstimator(ParameterEstimator):
             else:
                 pmap = {k: 0.5 for k in suff_stat[0].keys()}
 
-        return BernoulliSetDistribution(pmap, min_prob=self.min_prob, name=self.name)
+        return BernoulliSetDistribution(pmap, min_prob=self.min_prob, name=self.name, keys=self.keys)
 
 
 class BernoulliSetDataEncoder(DataSequenceEncoder):

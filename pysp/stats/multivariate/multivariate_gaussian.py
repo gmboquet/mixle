@@ -884,7 +884,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
             covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.eye(d)
             covar = self._regularize_covar(covar)
-            return MultivariateGaussianDistribution(mu, covar, name=self.name)
+            return MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.key)
 
         if pc1 is not None and self.prior_mu is not None:
             mu = (suff_stat[0] + pc1 * self.prior_mu) / (nobs + pc1)
@@ -898,7 +898,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
 
         covar = self._regularize_covar(covar)
 
-        return MultivariateGaussianDistribution(mu, covar, name=self.name)
+        return MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.key)
 
     def _regularize_covar(self, covar: np.ndarray) -> np.ndarray:
         """P1 covariance ridge: cov <- cov + eps*I with eps = max(min_covar, ridge*trace/d).
