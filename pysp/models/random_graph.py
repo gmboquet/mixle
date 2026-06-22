@@ -52,16 +52,15 @@ class ErdosRenyiGraphModel:
         prior_p: float = 0.5,
         name: str | None = None,
     ) -> ErdosRenyiGraphModel:
-        """Fit the edge probability by moment matching."""
-        adj = _as_adjacency(adjacency)
-        values = _edge_values(adj, directed=directed, self_loops=self_loops)
-        successes = float(values.sum())
-        total = float(values.size)
-        if pseudo_count > 0.0:
-            successes += float(pseudo_count) * float(prior_p)
-            total += float(pseudo_count)
-        p = 0.5 if total == 0.0 else successes / total
-        return cls(p, directed=directed, self_loops=self_loops, name=name)
+        """Thin shim delegating to ``fit_erdos_renyi_mle`` (kept for the classmethod-fit call API)."""
+        return fit_erdos_renyi_mle(
+            adjacency,
+            directed=directed,
+            self_loops=self_loops,
+            pseudo_count=pseudo_count,
+            prior_p=prior_p,
+            name=name,
+        )
 
     def log_likelihood(self, adjacency: Any) -> float:
         """Return the Bernoulli graph log likelihood."""
@@ -141,30 +140,17 @@ class StochasticBlockGraphModel:
         prior_p: float = 0.5,
         name: str | None = None,
     ) -> StochasticBlockGraphModel:
-        """Fit block edge probabilities for fixed node assignments."""
-        adj = _as_adjacency(adjacency)
-        assignments = np.asarray(block_assignments, dtype=np.int64)
-        if assignments.shape[0] != adj.shape[0]:
-            raise ValueError("block_assignments length must equal the number of nodes.")
-        if num_blocks is None:
-            num_blocks = 0 if assignments.size == 0 else int(assignments.max()) + 1
-        successes = np.zeros((num_blocks, num_blocks), dtype=np.float64)
-        totals = np.zeros((num_blocks, num_blocks), dtype=np.float64)
-        for i, j in _edge_indices(adj.shape[0], directed=directed, self_loops=self_loops):
-            a = assignments[i]
-            b = assignments[j]
-            successes[a, b] += adj[i, j]
-            totals[a, b] += 1.0
-            if not directed and a != b:
-                successes[b, a] += adj[i, j]
-                totals[b, a] += 1.0
-        if pseudo_count > 0.0:
-            successes += float(pseudo_count) * float(prior_p)
-            totals += float(pseudo_count)
-        probs = np.divide(successes, totals, out=np.full_like(successes, float(prior_p)), where=totals > 0.0)
-        if not directed:
-            probs = 0.5 * (probs + probs.T)
-        return cls(probs, assignments, directed=directed, self_loops=self_loops, name=name)
+        """Thin shim delegating to ``fit_stochastic_block_mle`` (kept for the classmethod-fit call API)."""
+        return fit_stochastic_block_mle(
+            adjacency,
+            block_assignments,
+            num_blocks=num_blocks,
+            directed=directed,
+            self_loops=self_loops,
+            pseudo_count=pseudo_count,
+            prior_p=prior_p,
+            name=name,
+        )
 
     def log_likelihood(self, adjacency: Any) -> float:
         """Return the Bernoulli SBM log likelihood."""
@@ -197,6 +183,62 @@ class StochasticBlockGraphModel:
         return -2.0 * self.log_likelihood(adjacency) + float(k) * np.log(max(1, n_edges))
 
 
+def fit_erdos_renyi_mle(
+    adjacency: Any,
+    directed: bool = False,
+    self_loops: bool = False,
+    pseudo_count: float = 0.0,
+    prior_p: float = 0.5,
+    name: str | None = None,
+) -> ErdosRenyiGraphModel:
+    """Conjugate-Bernoulli MLE of the edge probability (module-level estimation, not a classmethod-fit)."""
+    adj = _as_adjacency(adjacency)
+    values = _edge_values(adj, directed=directed, self_loops=self_loops)
+    successes = float(values.sum())
+    total = float(values.size)
+    if pseudo_count > 0.0:
+        successes += float(pseudo_count) * float(prior_p)
+        total += float(pseudo_count)
+    p = 0.5 if total == 0.0 else successes / total
+    return ErdosRenyiGraphModel(p, directed=directed, self_loops=self_loops, name=name)
+
+
+def fit_stochastic_block_mle(
+    adjacency: Any,
+    block_assignments: Sequence[int],
+    num_blocks: int | None = None,
+    directed: bool = False,
+    self_loops: bool = False,
+    pseudo_count: float = 0.0,
+    prior_p: float = 0.5,
+    name: str | None = None,
+) -> StochasticBlockGraphModel:
+    """Conjugate-Bernoulli MLE of block edge probabilities for fixed assignments (module-level estimation)."""
+    adj = _as_adjacency(adjacency)
+    assignments = np.asarray(block_assignments, dtype=np.int64)
+    if assignments.shape[0] != adj.shape[0]:
+        raise ValueError("block_assignments length must equal the number of nodes.")
+    if num_blocks is None:
+        num_blocks = 0 if assignments.size == 0 else int(assignments.max()) + 1
+    successes = np.zeros((num_blocks, num_blocks), dtype=np.float64)
+    totals = np.zeros((num_blocks, num_blocks), dtype=np.float64)
+    for i, j in _edge_indices(adj.shape[0], directed=directed, self_loops=self_loops):
+        a = assignments[i]
+        b = assignments[j]
+        successes[a, b] += adj[i, j]
+        totals[a, b] += 1.0
+        if not directed and a != b:
+            successes[b, a] += adj[i, j]
+            totals[b, a] += 1.0
+    if pseudo_count > 0.0:
+        successes += float(pseudo_count) * float(prior_p)
+        totals += float(pseudo_count)
+    probs = np.divide(successes, totals, out=np.full_like(successes, float(prior_p)), where=totals > 0.0)
+    if not directed:
+        probs = 0.5 * (probs + probs.T)
+    return StochasticBlockGraphModel(probs, assignments, directed=directed, self_loops=self_loops, name=name)
+
+
 def hard_em_stochastic_block_model(
     adjacency: Any,
     num_blocks: int,
@@ -220,7 +262,7 @@ def hard_em_stochastic_block_model(
     for _ in range(max(1, int(restarts))):
         assignments = _initial_assignments(adj.shape[0], num_blocks, rng)
         history: list[float] = []
-        model = StochasticBlockGraphModel.fit_mle(
+        model = fit_stochastic_block_mle(
             adj,
             assignments,
             num_blocks=num_blocks,
@@ -233,7 +275,7 @@ def hard_em_stochastic_block_model(
         history.append(ll)
         for _ in range(max(1, int(max_its))):
             candidate_assignments = _hard_reassign(adj, model)
-            candidate_model = StochasticBlockGraphModel.fit_mle(
+            candidate_model = fit_stochastic_block_mle(
                 adj,
                 candidate_assignments,
                 num_blocks=num_blocks,

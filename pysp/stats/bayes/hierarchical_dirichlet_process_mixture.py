@@ -440,6 +440,17 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
             self.len_accumulator.combine(suff_stat[4])
         return self
 
+    def scale(self, c: float) -> "HierarchicalDirichletProcessMixtureAccumulator":
+        # Scale only the linear count statistics (per-group counts, atom accumulators, len accumulator).
+        # ``prev_beta`` and ``prev_alpha`` are non-linear scalar/vector metadata carried for the
+        # estimator's global-weight update; the inherited default would multiply and corrupt them.
+        self.group_counts = [gc * c for gc in self.group_counts]
+        for u in self.accumulators:
+            u.scale(c)
+        if not isinstance(self.len_accumulator, NullAccumulator):
+            self.len_accumulator.scale(c)
+        return self
+
     def value(self) -> tuple:
         """Returns (group_counts, prev_beta, prev_alpha, atom values, len_value)."""
         len_val = None if isinstance(self.len_accumulator, NullAccumulator) else self.len_accumulator.value()

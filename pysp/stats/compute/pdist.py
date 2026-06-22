@@ -497,7 +497,7 @@ class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
 
     def seq_ld_lambda(self):
         """Return vectorized log-density callables for encoded data."""
-        pass
+        return [self.seq_log_density]
 
     def seq_log_density(self, x: Any) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
