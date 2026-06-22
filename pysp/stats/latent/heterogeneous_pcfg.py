@@ -42,6 +42,9 @@ def _logsumexp_1d(vals: np.ndarray) -> float:
     The inside/inside-outside dynamic program calls it once per chart cell, so for many short
     parses that overhead dominates; this inline version is numerically equivalent for the 1-D,
     real-valued inputs used here.
+
+    This is a deliberate hot-loop perf fork of the canonical ``pysp.utils.special.logsumexp``; do
+    not repoint it -- the per-call overhead of the general version is exactly what this avoids.
     """
     m = vals.max()
     if m == -np.inf:

@@ -31,6 +31,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.special import log1mexp
 
 # Tiny finite log-survival floor when the base exposes only a linear ``cdf`` and ``1 - F(t)`` underflows
 # to 0 in the right tail (~log of the smallest positive normal double); avoids a -inf log-likelihood.
@@ -42,14 +43,16 @@ def _log_survival(base: Any, t: float) -> float:
 
     Right censoring is the normal use case, so ``1 - F(t)`` routinely underflows to ``0`` in the
     right tail (``log1p(-1) = -inf``) even when the true log-survival is finite and large-negative.
-    Routes through the base's ``logsf`` when available; otherwise guards the linear underflow with a
-    tiny finite floor rather than silently zeroing the survival contribution.
+    Routes through the base's ``logsf`` when available; otherwise forms ``1 - F(t)`` via the shared
+    :func:`pysp.utils.special.log1mexp` and guards a fully-saturated ``F(t) = 1`` with a tiny finite
+    floor rather than silently zeroing the survival contribution.
     """
     if hasattr(base, "logsf"):
         return float(base.logsf(t))
-    surv = 1.0 - float(base.cdf(t))
-    if surv > 0.0:
-        return math.log1p(-float(base.cdf(t)))
+    cdf = float(base.cdf(t))
+    if cdf < 1.0:
+        # log(1 - F(t)) = log(1 - exp(log F(t))); log1mexp(-inf) correctly yields 0 when F(t) = 0.
+        return log1mexp(math.log(cdf)) if cdf > 0.0 else 0.0
     return _LOG_SURVIVAL_FLOOR
 
 

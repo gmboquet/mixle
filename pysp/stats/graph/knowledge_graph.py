@@ -36,18 +36,16 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
+# Canonical guarded row-wise softmax. The DistMult scores fed here are finite dot-products of
+# embeddings, so the all-(-inf)-row guard never triggers and results are identical to the previous
+# local implementation; the guard is a harmless safety net.
+from pysp.utils.special import softmax_rows as _softmax_rows
+
 
 def _tail_log_posterior(entity: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Log softmax over all entities of the DistMult scores ``entity @ v`` for one query vector ``v``."""
     scores = entity @ v
     return scores - (scores.max() + np.log(np.sum(np.exp(scores - scores.max()))))
-
-
-def _softmax_rows(scores: np.ndarray) -> np.ndarray:
-    """Row-wise softmax of a ``(B, K)`` score matrix."""
-    scores = scores - scores.max(axis=1, keepdims=True)
-    e = np.exp(scores)
-    return e / e.sum(axis=1, keepdims=True)
 
 
 class KnowledgeGraphDistribution(SequenceEncodableProbabilityDistribution):

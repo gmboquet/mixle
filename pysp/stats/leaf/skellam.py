@@ -33,6 +33,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.utils.special import valid_integer
 
 _MIN_SKELLAM_RATE = 1.0e-12
 
@@ -78,14 +79,6 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.keys),
         )
 
-    @staticmethod
-    def _valid_count(x: Any) -> bool:
-        try:
-            xx = float(x)
-        except (TypeError, ValueError):
-            return False
-        return np.isfinite(xx) and math.floor(xx) == xx
-
     def density(self, x: int) -> float:
         """Probability mass at integer ``x`` (see ``log_density``)."""
         return math.exp(self.log_density(x))
@@ -94,7 +87,7 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
         """Stable Skellam log-mass at integer ``x`` (``-inf`` for non-integer input)."""
         from scipy.special import ive
 
-        if not self._valid_count(x):
+        if not valid_integer(x, nonneg=False):
             return -np.inf
         k = float(x)
         bessel = float(ive(abs(k), self.two_sqrt_prod))
@@ -151,7 +144,7 @@ class SkellamAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: int, weight: float, estimate: SkellamDistribution | None) -> None:
-        if not SkellamDistribution._valid_count(x):
+        if not valid_integer(x, nonneg=False):
             raise ValueError("SkellamDistribution requires integer observations.")
         xw = float(x) * weight
         self.count += weight

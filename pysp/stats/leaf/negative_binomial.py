@@ -27,7 +27,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.utils.special import digamma
+from pysp.utils.special import digamma, valid_integer
 from pysp.utils.vector import gammaln
 
 _MIN_NB_SHAPE = 1.0e-8
@@ -152,21 +152,13 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.keys),
         )
 
-    @staticmethod
-    def _valid_count(x: Any) -> bool:
-        try:
-            xx = float(x)
-        except Exception:
-            return False
-        return np.isfinite(xx) and xx >= 0.0 and math.floor(xx) == xx
-
     def density(self, x: int) -> float:
         """Return the probability density or mass at a single observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: int) -> float:
         """Return the log-density or log-mass at a single observation."""
-        if not self._valid_count(x):
+        if not valid_integer(x, nonneg=True):
             return -np.inf
         xx = float(x)
         return (
@@ -310,7 +302,7 @@ class NegativeBinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.key = keys
 
     def update(self, x: int, weight: float, estimate: NegativeBinomialDistribution | None) -> None:
-        if not NegativeBinomialDistribution._valid_count(x):
+        if not valid_integer(x, nonneg=True):
             raise ValueError("NegativeBinomialDistribution requires non-negative integer observations.")
         xi = int(x)
         self.count += weight
