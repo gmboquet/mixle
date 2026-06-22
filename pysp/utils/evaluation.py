@@ -64,6 +64,28 @@ def empirical_kl_divergence(
     return r1, r2, r3
 
 
+def ks_test(data: Sequence[float], dist: Any) -> tuple[float, float]:
+    """One-sample Kolmogorov-Smirnov goodness-of-fit test of ``data`` against ``dist``.
+
+    Returns ``(D, p_value)`` where ``D = sup_x |F_n(x) - dist.cdf(x)|`` is the KS statistic and the
+    two-sided p-value is the exact Kolmogorov distribution ``P(D_n >= D)`` (``scipy.stats.kstwo``). ``dist``
+    must expose a scalar ``cdf`` (the ``HasCDF`` capability). A small p-value is evidence that ``data`` is
+    not distributed as ``dist`` -- continuous goodness-of-fit / model checking.
+    """
+    from scipy.stats import kstwo
+
+    x = np.sort(np.asarray(data, dtype=np.float64))
+    n = x.size
+    if n == 0:
+        raise ValueError("ks_test requires at least one observation.")
+    cdf = np.array([float(dist.cdf(float(xi))) for xi in x])
+    idx = np.arange(1, n + 1, dtype=np.float64)
+    d_plus = float(np.max(idx / n - cdf))
+    d_minus = float(np.max(cdf - (idx - 1.0) / n))
+    d = max(d_plus, d_minus)
+    return d, float(kstwo.sf(d, n))
+
+
 def k_fold_split_index(sz: int, k: int, rng: RandomState) -> np.ndarray:
     """Returns integer numpy index vector for k-fold split. Entry j is the fold-id for the j^{th} data point.
 
