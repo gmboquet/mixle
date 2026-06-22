@@ -47,6 +47,7 @@ from pysp.enumeration.spanning import k_best_spanning_trees
 __all__ = [
     "Assignment",
     "BestSubsetRegression",
+    "branch_and_bound_milp",
     "EditDistance",
     "graph_coloring",
     "Relation",
@@ -554,6 +555,72 @@ def min_arborescence(weight: Any, root: int = 0) -> tuple[float, list[int]] | No
         parent[v] = u
         total += ew
     return total, parent
+
+
+# ---------------------------------------------------------------------------
+# Mixed-integer linear program (branch-and-bound over the LP relaxation)
+# ---------------------------------------------------------------------------
+def branch_and_bound_milp(
+    c: Any,
+    a_ub: Any | None = None,
+    b_ub: Any | None = None,
+    integer: Sequence[int] | None = None,
+    bounds: Sequence[tuple[float, float]] | None = None,
+    *,
+    sense: str = "min",
+    tol: float = 1.0e-6,
+) -> tuple[float, np.ndarray] | None:
+    """Solve a mixed-integer linear program by branch-and-bound over the LP relaxation.
+
+    Minimizes (``sense="min"``) or maximizes (``sense="max"``) ``c @ x`` subject to ``a_ub @ x <= b_ub``
+    and per-variable ``bounds`` ``(lo, hi)``, with the variables indexed by ``integer`` constrained to
+    integers (default: all). Returns ``(objective, x)`` or ``None`` if infeasible. Each node solves the
+    continuous relaxation with ``scipy.optimize.linprog`` (HiGHS) and, if an integer variable is
+    fractional, branches into ``x_i <= floor`` and ``x_i >= ceil``; best-bound search prunes nodes that
+    cannot beat the incumbent. Exact for bounded integer feasible regions.
+    """
+    from scipy.optimize import linprog
+
+    cvec = np.asarray(c, dtype=np.float64)
+    n = cvec.size
+    obj = -cvec if sense == "max" else cvec
+    if sense not in ("min", "max"):
+        raise ValueError("sense must be 'min' or 'max'")
+    integer = range(n) if integer is None else integer
+    lo0 = [(-np.inf if bounds is None else bounds[i][0]) for i in range(n)]
+    hi0 = [(np.inf if bounds is None else bounds[i][1]) for i in range(n)]
+
+    def relax(lo: list[float], hi: list[float]) -> tuple[float, np.ndarray] | None:
+        res = linprog(obj, A_ub=a_ub, b_ub=b_ub, bounds=list(zip(lo, hi, strict=False)), method="highs")
+        return (float(res.fun), res.x) if res.success else None
+
+    root = relax(lo0, hi0)
+    if root is None:
+        return None
+    counter = itertools.count()
+    incumbent: list[Any] = [np.inf, None]
+    heap: list[tuple[float, int, list[float], list[float], np.ndarray]] = [(root[0], next(counter), lo0, hi0, root[1])]
+    while heap:
+        f, _, lo, hi, x = heapq.heappop(heap)
+        if f >= incumbent[0] - tol:
+            continue  # bound: cannot improve on the incumbent
+        frac = next((i for i in integer if abs(x[i] - round(x[i])) > tol), None)
+        if frac is None:
+            if f < incumbent[0]:
+                incumbent = [f, np.array(x)]
+            continue
+        floor_hi = [hi[j] if j != frac else float(np.floor(x[frac])) for j in range(n)]
+        ceil_lo = [lo[j] if j != frac else float(np.ceil(x[frac])) for j in range(n)]
+        for nlo, nhi in ((lo, floor_hi), (ceil_lo, hi)):
+            if nlo[frac] > nhi[frac]:
+                continue
+            child = relax(nlo, nhi)
+            if child is not None and child[0] < incumbent[0] - tol:
+                heapq.heappush(heap, (child[0], next(counter), nlo, nhi, child[1]))
+    if incumbent[1] is None:
+        return None
+    value = -incumbent[0] if sense == "max" else incumbent[0]
+    return value, incumbent[1]
 
 
 # ---------------------------------------------------------------------------
