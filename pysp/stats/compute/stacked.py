@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from pysp.capability import SupportsStackedBackend, supports
 from pysp.engines import ComputeEngine
 from pysp.stats.compute.declarations import (
     declaration_for,
@@ -443,10 +444,7 @@ def _stackable_mixture(dist: Any) -> bool:
     component_type = type(components[0])
     if not all(type(component) is component_type for component in components):
         return False
-    return (
-        callable(getattr(component_type, "backend_stacked_params", None))
-        and callable(getattr(component_type, "backend_stacked_log_density", None))
-    ) or generated_stacked_available(component_type)
+    return supports(component_type, SupportsStackedBackend) or generated_stacked_available(component_type)
 
 
 def _has_generated_backend_hook(dist_type: type[Any]) -> bool:
@@ -481,9 +479,7 @@ def stacked_component_strategy(dist_type: type[Any]) -> str:
         return "generated_exp_family"
     if _has_generated_backend_hook(dist_type):
         return "generated_backend_hook"
-    if callable(getattr(dist_type, "backend_stacked_params", None)) and callable(
-        getattr(dist_type, "backend_stacked_log_density", None)
-    ):
+    if supports(dist_type, SupportsStackedBackend):
         return "explicit_stacked"
     return "generic"
 

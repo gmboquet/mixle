@@ -6,6 +6,11 @@ from typing import Any
 
 import numpy as np
 
+from pysp.capability import (
+    SupportsBackendComponentScoring,
+    SupportsBackendScoring,
+    supports,
+)
 from pysp.engines import NUMPY_ENGINE, ComputeEngine
 
 
@@ -35,9 +40,8 @@ def child_seq_update(accumulator: Any, enc: Any, weights: Any, estimate: Any, en
 def backend_seq_log_density(dist: Any, enc: Any, engine: ComputeEngine = NUMPY_ENGINE) -> Any:
     """Return per-row log densities using ``engine`` and distribution-local math."""
     enc = getattr(enc, "engine_payload", enc)
-    fn = getattr(dist, "backend_seq_log_density", None)
-    if callable(fn):
-        return fn(enc, engine)
+    if supports(dist, SupportsBackendScoring):
+        return dist.backend_seq_log_density(enc, engine)
     try:
         from pysp.stats.compute.declarations import generated_log_density
 
@@ -51,10 +55,9 @@ def backend_seq_log_density(dist: Any, enc: Any, engine: ComputeEngine = NUMPY_E
 def backend_seq_component_log_density(dist: Any, enc: Any, engine: ComputeEngine = NUMPY_ENGINE) -> Any:
     """Return component log densities when a distribution exposes them."""
     enc = getattr(enc, "engine_payload", enc)
-    fn = getattr(dist, "backend_seq_component_log_density", None)
-    if not callable(fn):
+    if not supports(dist, SupportsBackendComponentScoring):
         raise BackendScoringError("%s does not implement backend_seq_component_log_density." % type(dist).__name__)
-    return fn(enc, engine)
+    return dist.backend_seq_component_log_density(enc, engine)
 
 
 def backend_log_density_sum(dist: Any, enc: Any, engine: ComputeEngine = NUMPY_ENGINE) -> Any:
