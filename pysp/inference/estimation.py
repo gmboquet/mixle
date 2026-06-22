@@ -13,14 +13,17 @@ from typing import IO, Any, TypeVar
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.stats import (
+from pysp.stats.compute.pdist import (
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    validate_estimator_keys,
+)
+from pysp.stats.compute.sequence import (
     seq_encode,
     seq_estimate,
     seq_initialize,
     seq_log_density_sum,
-    validate_estimator_keys,
 )
-from pysp.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
 T = TypeVar("T")
 E0 = TypeVar("E0")
