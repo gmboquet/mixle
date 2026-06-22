@@ -31,6 +31,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import logsumexp
 
+from pysp.stats.combinator._base import MaskedBaseEncoder, SingleChildAccumulator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -337,8 +338,12 @@ class ExponentialTiltedSampler(DistributionSampler):
         return pool[int(self.rng.choice(len(pool), p=w / w.sum()))]
 
 
-class ExponentialTiltedAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulate the count and the weighted sum of the statistic ``T`` (the exp-family score data)."""
+class ExponentialTiltedAccumulator(SingleChildAccumulator):
+    """Accumulate the count and the weighted sum of the statistic ``T`` (the exp-family score data).
+
+    Carries extra scalar statistics ``(sum_t, count)`` alongside the bare child value, so it overrides
+    the delegation trio; only ``key_merge``/``key_replace`` (which forward to the child) are inherited.
+    """
 
     def __init__(self, dim: int, base_accumulator: SequenceEncodableStatisticAccumulator, keys: str | None = None):
         self.dim = dim
@@ -393,12 +398,6 @@ class ExponentialTiltedAccumulator(SequenceEncodableStatisticAccumulator):
         self.count *= c
         self.base_accumulator.scale(c)
         return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        self.base_accumulator.key_merge(stats_dict)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        self.base_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "DataSequenceEncoder":
         return self.base_accumulator.acc_to_encoder()
@@ -529,19 +528,12 @@ class ExponentialTiltedEstimator(ParameterEstimator):
         return proto._stat_fn
 
 
-class ExponentialTiltedDataEncoder(DataSequenceEncoder):
+class ExponentialTiltedDataEncoder(MaskedBaseEncoder):
     """Encode observations via the base encoder, plus the precomputed statistic ``T`` per row."""
 
     def __init__(self, dist: ExponentialTiltedDistribution) -> None:
         self.base_encoder = dist.base.dist_to_encoder()
         self._dist = dist
 
-    def __str__(self) -> str:
-        return "ExponentialTiltedDataEncoder(%s)" % str(self.base_encoder)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, ExponentialTiltedDataEncoder) and other.base_encoder == self.base_encoder
-
-    def seq_encode(self, x: Sequence[Any]) -> tuple[Any, np.ndarray]:
-        tvals = np.asarray([self._dist._statistic(v) for v in x], dtype=float)
-        return self.base_encoder.seq_encode(list(x)), tvals
+    def _extra_columns(self, x: Sequence[Any]) -> tuple[np.ndarray]:
+        return (np.asarray([self._dist._statistic(v) for v in x], dtype=float),)

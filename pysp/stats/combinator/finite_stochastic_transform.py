@@ -28,6 +28,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import logsumexp
 
+from pysp.stats.combinator._base import SingleChildAccumulator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -164,8 +165,10 @@ class FiniteStochasticTransformSampler(DistributionSampler):
         return [self.sample() for _ in range(size)]
 
 
-class FiniteStochasticTransformAccumulator(SequenceEncodableStatisticAccumulator):
+class FiniteStochasticTransformAccumulator(SingleChildAccumulator):
     """Accumulate expected source counts via one channel E-step over aggregated output counts."""
+
+    _child_attr = "source_accumulator"
 
     def __init__(
         self,
@@ -230,27 +233,6 @@ class FiniteStochasticTransformAccumulator(SequenceEncodableStatisticAccumulator
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
         self.seq_update(x, weights, None)
-
-    def combine(self, suff_stat: Any) -> "FiniteStochasticTransformAccumulator":
-        self.source_accumulator.combine(suff_stat)
-        return self
-
-    def value(self) -> Any:
-        return self.source_accumulator.value()
-
-    def from_value(self, x: Any) -> "FiniteStochasticTransformAccumulator":
-        self.source_accumulator.from_value(x)
-        return self
-
-    def scale(self, c: float) -> "FiniteStochasticTransformAccumulator":
-        self.source_accumulator.scale(c)
-        return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        self.source_accumulator.key_merge(stats_dict)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        self.source_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "FiniteStochasticTransformDataEncoder":
         return FiniteStochasticTransformDataEncoder(self.num_output)

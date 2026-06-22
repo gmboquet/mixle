@@ -18,6 +18,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import logsumexp
 
+from pysp.stats.combinator._base import MaskedBaseEncoder, SingleChildAccumulator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -238,7 +239,7 @@ class TruncatedSampler(DistributionSampler):
         return out[:size]
 
 
-class TruncatedAccumulator(SequenceEncodableStatisticAccumulator):
+class TruncatedAccumulator(SingleChildAccumulator):
     """Delegate accumulation to the base accumulator over in-support observations."""
 
     def __init__(self, base_accumulator: SequenceEncodableStatisticAccumulator, keys: str | None = None) -> None:
@@ -261,27 +262,6 @@ class TruncatedAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(self, x: tuple[Any, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
         base_enc, allowed_mask = x
         self.base_accumulator.seq_initialize(base_enc, np.asarray(weights, dtype=np.float64) * allowed_mask, rng)
-
-    def combine(self, suff_stat: Any) -> "TruncatedAccumulator":
-        self.base_accumulator.combine(suff_stat)
-        return self
-
-    def value(self) -> Any:
-        return self.base_accumulator.value()
-
-    def from_value(self, x: Any) -> "TruncatedAccumulator":
-        self.base_accumulator.from_value(x)
-        return self
-
-    def scale(self, c: float) -> "TruncatedAccumulator":
-        self.base_accumulator.scale(c)
-        return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        self.base_accumulator.key_merge(stats_dict)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        self.base_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "DataSequenceEncoder":
         return self.base_accumulator.acc_to_encoder()
@@ -325,19 +305,12 @@ class TruncatedEstimator(ParameterEstimator):
         )
 
 
-class TruncatedDataEncoder(DataSequenceEncoder):
+class TruncatedDataEncoder(MaskedBaseEncoder):
     """Encode observations via the base encoder, plus a boolean allowed-membership mask."""
 
     def __init__(self, dist: TruncatedDistribution) -> None:
         self.base_encoder = dist.base.dist_to_encoder()
         self._dist = dist
 
-    def __str__(self) -> str:
-        return "TruncatedDataEncoder(%s)" % str(self.base_encoder)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, TruncatedDataEncoder) and other.base_encoder == self.base_encoder
-
-    def seq_encode(self, x: Sequence[Any]) -> tuple[Any, np.ndarray]:
-        mask = np.asarray([self._dist._allowed(v) for v in x], dtype=bool)
-        return self.base_encoder.seq_encode(list(x)), mask
+    def _extra_columns(self, x: Sequence[Any]) -> tuple[np.ndarray]:
+        return (np.asarray([self._dist._allowed(v) for v in x], dtype=bool),)
