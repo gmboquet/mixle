@@ -342,3 +342,54 @@ def integrate_stiff(
             t = t + h
         result.append(y.copy())
     return np.array(result)
+
+
+# ---------------------------------------------------------------------------
+# Forward sensitivity of an ODE solution to its parameters
+# ---------------------------------------------------------------------------
+def integrate_sensitivity(
+    rhs: Any,
+    y0: Any,
+    t_eval: Any,
+    params: Any,
+    *,
+    t0: float = 0.0,
+    rtol: float = 1.0e-9,
+    atol: float = 1.0e-11,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Integrate ``dy/dt = rhs(t, y, p)`` together with the forward sensitivities ``S = dy/dp``.
+
+    Returns ``(Y, S)`` where ``Y`` has shape ``(len(t_eval), n)`` (the trajectory) and ``S`` has shape
+    ``(len(t_eval), n, n_params)`` with ``S[k, i, j] = d y_i(t_eval[k]) / d p_j``. The sensitivity obeys
+    the variational equation ``dS/dt = (df/dy) S + (df/dp)`` (with ``S(t0) = 0`` since the initial state
+    is parameter-independent); the augmented ``[y, S]`` system is solved with the adaptive RK45 of
+    :func:`integrate_adaptive`, and ``df/dy``/``df/dp`` are obtained by finite differences. This is the
+    forward-mode answer to "how does the solution move as I perturb the parameters" -- gradients for
+    calibration, design, and optimal-control without re-running the solve per parameter.
+    """
+    y_init = np.atleast_1d(np.asarray(y0, dtype=np.float64))
+    n = y_init.size
+    p = np.atleast_1d(np.asarray(params, dtype=np.float64))
+    n_par = p.size
+    eps = 1.0e-7
+
+    def aug(t: float, z: np.ndarray) -> np.ndarray:
+        y = z[:n]
+        s = z[n:].reshape(n, n_par)
+        f0 = np.atleast_1d(np.asarray(rhs(t, y, p), dtype=np.float64))
+        jy = np.empty((n, n))
+        for i in range(n):
+            yp = y.copy()
+            yp[i] += eps
+            jy[:, i] = (np.atleast_1d(np.asarray(rhs(t, yp, p), dtype=np.float64)) - f0) / eps
+        jp = np.empty((n, n_par))
+        for j in range(n_par):
+            pp = p.copy()
+            pp[j] += eps
+            jp[:, j] = (np.atleast_1d(np.asarray(rhs(t, y, pp), dtype=np.float64)) - f0) / eps
+        return np.concatenate([f0, (jy @ s + jp).ravel()])
+
+    z0 = np.concatenate([y_init, np.zeros(n * n_par)])
+    z = integrate_adaptive(aug, z0, t_eval, t0=t0, rtol=rtol, atol=atol)
+    times = np.asarray(t_eval, dtype=np.float64)
+    return z[:, :n], z[:, n:].reshape(len(times), n, n_par)
