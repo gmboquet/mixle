@@ -13,7 +13,6 @@ form as ``Psi = (df - p - 1) * mean(X)`` (for ``df > p + 1``).
 
 import math
 from collections.abc import Sequence
-from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -24,10 +23,9 @@ from pysp.stats.compute.pdist import (
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
-    SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.multivariate.wishart import WishartDistribution
+from pysp.stats.multivariate.wishart import WishartDistribution, _MeanScatterAccumulator
 
 
 class InverseWishartDistribution(SequenceEncodableProbabilityDistribution):
@@ -110,56 +108,8 @@ class InverseWishartSampler(DistributionSampler):
         return np.linalg.inv(w)
 
 
-class InverseWishartAccumulator(SequenceEncodableStatisticAccumulator):
+class InverseWishartAccumulator(_MeanScatterAccumulator):
     """Accumulate the weighted sum of matrices ``sum_i w_i X_i`` and the total weight."""
-
-    def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
-        self.dim = dim
-        self.sum_x = np.zeros((dim, dim), dtype=np.float64)
-        self.count = 0.0
-        self.name = name
-        self.key = keys
-
-    def update(self, x: np.ndarray, weight: float, estimate: InverseWishartDistribution | None) -> None:
-        self.sum_x += weight * np.asarray(x, dtype=np.float64)
-        self.count += weight
-
-    def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
-        self.update(x, weight, None)
-
-    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: InverseWishartDistribution | None) -> None:
-        xx = np.asarray(x, dtype=np.float64)
-        w = np.asarray(weights, dtype=np.float64)
-        self.sum_x += np.einsum("n,nab->ab", w, xx, optimize=True)
-        self.count += float(w.sum())
-
-    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
-        self.seq_update(x, weights, None)
-
-    def combine(self, suff_stat: tuple[np.ndarray, float]) -> "InverseWishartAccumulator":
-        self.sum_x += suff_stat[0]
-        self.count += suff_stat[1]
-        return self
-
-    def value(self) -> tuple[np.ndarray, float]:
-        return self.sum_x.copy(), self.count
-
-    def from_value(self, x: tuple[np.ndarray, float]) -> "InverseWishartAccumulator":
-        self.sum_x = np.asarray(x[0], dtype=np.float64).copy()
-        self.count = float(x[1])
-        self.dim = self.sum_x.shape[0]
-        return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None:
-            if self.key in stats_dict:
-                stats_dict[self.key].combine(self.value())
-            else:
-                stats_dict[self.key] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.key is not None and self.key in stats_dict:
-            self.from_value(stats_dict[self.key].value())
 
     def acc_to_encoder(self) -> "InverseWishartDataEncoder":
         return InverseWishartDataEncoder()
