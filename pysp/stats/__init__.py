@@ -254,6 +254,10 @@ __all__ = [
     "WrappedCauchySampler",
     "WrappedCauchyEstimator",
     "WrappedCauchyDataEncoder",
+    "ProjectedNormalDistribution",
+    "ProjectedNormalSampler",
+    "ProjectedNormalEstimator",
+    "ProjectedNormalDataEncoder",
     "VonMisesSampler",
     "VonMisesEstimator",
     "VonMisesDataEncoder",
@@ -843,6 +847,12 @@ from pysp.stats.base.von_mises import (
     VonMisesSampler,
 )
 from pysp.stats.base.weibull import WeibullDataEncoder, WeibullDistribution, WeibullEstimator, WeibullSampler
+from pysp.stats.base.projected_normal import (
+    ProjectedNormalDataEncoder,
+    ProjectedNormalDistribution,
+    ProjectedNormalEstimator,
+    ProjectedNormalSampler,
+)
 from pysp.stats.base.wrapped_cauchy import (
     WrappedCauchyDataEncoder,
     WrappedCauchyDistribution,
