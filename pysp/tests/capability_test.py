@@ -220,6 +220,24 @@ def test_describe_is_robust_on_classes_and_non_distributions():
     assert "can:" in pysp.describe(GaussianDistribution(0, 1))  # the instance is still rich
 
 
+def test_ws4_distribution_capabilities():
+    import numpy as np
+
+    import pysp
+    from pysp.capability import Continuous, Discrete, Fittable, HasCDF, Optimizable
+    from pysp.relations import Assignment
+    from pysp.stats.leaf.categorical import CategoricalDistribution
+
+    g = GaussianDistribution(0.0, 1.0)
+    c = CategoricalDistribution({"a": 0.5, "b": 0.5})
+    assert pysp.supports(g, HasCDF) and pysp.supports(g, Continuous) and not pysp.supports(g, Discrete)
+    assert pysp.supports(c, Discrete) and not pysp.supports(c, Continuous)
+    assert pysp.supports(g, Fittable) and pysp.supports(c, Fittable)
+    assert pysp.supports(Assignment(np.array([[1.0, 2.0], [3.0, 4.0]])), Optimizable)
+    for d in (g, c):  # Discrete and Continuous are mutually exclusive
+        assert not (pysp.supports(d, Discrete) and pysp.supports(d, Continuous))
+
+
 def test_catalog_is_the_single_vocabulary():
     import pysp
 
