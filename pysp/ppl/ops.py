@@ -31,7 +31,12 @@ class _Params:
 
 class _Ops:
     """A backend-agnostic math namespace: elementwise functions, reductions, an ODE integrator, and the
-    differentiable grid operators / sparse solve from :mod:`pysp.ppl.pde_solve`."""
+    differentiable grid operators / sparse solve from :mod:`pysp.ppl.pde_solve`.
+
+    This is the concrete forward-operator facade of the PDE-inverse stack; it satisfies the
+    :class:`pysp.ppl._operator.ForwardOperator` protocol (assemble + adjoint solve + integrate), which
+    formalizes the structural method surface that forward-model callbacks rely on.
+    """
 
     def __init__(self):
         import torch
