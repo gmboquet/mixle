@@ -262,6 +262,7 @@ def _stats_public_distribution_catalog():
         "WrappedCauchyDistribution": stats.WrappedCauchyDistribution(0.7, 0.6),
         "ProjectedNormalDistribution": stats.ProjectedNormalDistribution(1.5, -1.0),
         "WrappedNormalDistribution": stats.WrappedNormalDistribution(0.7, 0.8),
+        "GeneralizedGaussianDistribution": stats.GeneralizedGaussianDistribution(1.0, 2.0, 1.5),
         "BetaBinomialDistribution": stats.BetaBinomialDistribution(10, 2.0, 3.0),
         "DirichletMultinomialDistribution": stats.DirichletMultinomialDistribution([1.0, 2.0, 1.5], 8),
         "WatsonDistribution": stats.WatsonDistribution([0.0, 0.0, 1.0], 5.0),
