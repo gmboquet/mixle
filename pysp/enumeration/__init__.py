@@ -28,15 +28,8 @@ from pysp.capability import (
     top_k,
 )
 
-# --- the contract (implemented by distributions AND relations) ---
-from pysp.stats.compute.pdist import (
-    DistributionEnumerator,
-    EnumerationError,
-    child_enumerator,
-)
-
 # --- the k-best / descending-probability algorithms ---
-from pysp.utils.enumeration import (
+from pysp.enumeration._algorithms import (
     LazyQuantizedEnumerationIndex,
     ProductEnumerator,
     QuantizedEnumerationIndex,
@@ -46,11 +39,18 @@ from pysp.utils.enumeration import (
     sound_top_k,
     supports_enumeration,
 )
-from pysp.utils.model_enumeration import quantized_best_first_decode
+from pysp.enumeration.model_enumeration import quantized_best_first_decode
 
 # --- the count-budget seek / unrank index + the count semiring (rank-by-index machinery) ---
-from pysp.utils.quantization.core import count_budget_index
-from pysp.utils.quantization.semiring import CountSemiring, DecomposableSemiring
+from pysp.enumeration.quantization.core import count_budget_index
+from pysp.enumeration.quantization.semiring import CountSemiring, DecomposableSemiring
+
+# --- the contract (implemented by distributions AND relations) ---
+from pysp.stats.compute.pdist import (
+    DistributionEnumerator,
+    EnumerationError,
+    child_enumerator,
+)
 
 __all__ = [
     # capability lens
