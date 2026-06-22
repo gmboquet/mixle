@@ -22,6 +22,7 @@ dependency-free leaf that any layer can import without cycles.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 __all__ = [
@@ -51,6 +52,12 @@ __all__ = [
     "require",
     "intersect_capabilities",
     "top_k",
+    "CapabilitySpec",
+    "CAPABILITY_CATALOG",
+    "catalog",
+    "describe",
+    "what_supports",
+    "render_catalog_markdown",
 ]
 
 
@@ -325,3 +332,311 @@ def top_k(dist: Any, k: int) -> list[tuple[Any, float]]:
 
     require(dist, Enumerable, "top_k")
     return list(islice(dist.enumerator(), k))
+
+
+# ---------------------------------------------------------------------------
+# The capability catalog — one legible place that answers "what can pysp do?"
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CapabilitySpec:
+    """One row of the capability vocabulary: what it means, what backs it, where it lives."""
+
+    name: str
+    summary: str  # one line, plain English
+    kind: str  # "distribution facet" | "object contract" | "core contract" | "subsystem role"
+    backed_by: str  # the method / registry / ABC that backs detection
+    home: str  # the module that defines the protocol/ABC
+
+
+# The single source of truth for the whole capability vocabulary, across every subsystem. Pure data
+# (no imports), so it never drifts and can be rendered to docs or introspected at runtime.
+CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
+    # --- core contracts (the cast every distribution implements) ---
+    CapabilitySpec(
+        "Distribution",
+        "score · sample · estimate",
+        "core contract",
+        "log_density/sampler/estimator (ABC)",
+        "pysp.stats.compute.pdist",
+    ),
+    CapabilitySpec(
+        "Sampler", "draw observations", "core contract", "DistributionSampler.sample (ABC)", "pysp.stats.compute.pdist"
+    ),
+    CapabilitySpec(
+        "Estimator",
+        "fit parameters from data (M-step)",
+        "core contract",
+        "ParameterEstimator.estimate (ABC)",
+        "pysp.stats.compute.pdist",
+    ),
+    CapabilitySpec(
+        "Enumerator",
+        "k-best descending-probability iteration",
+        "core contract",
+        "DistributionEnumerator (ABC)",
+        "pysp.stats.compute.pdist",
+    ),
+    # --- distribution facets (detect with capabilities(dist) / supports(dist, X)) ---
+    CapabilitySpec(
+        "Enumerable",
+        "iterate the support in descending probability",
+        "distribution facet",
+        "enumerator()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "FiniteSupport", "a finite number of support points", "distribution facet", "support_size()", "pysp.capability"
+    ),
+    CapabilitySpec(
+        "RankableByIndex",
+        "random access / unrank the support by integer rank",
+        "distribution facet",
+        "count_budget_index()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "ExponentialFamily",
+        "canonical exp-family form; generated numpy/torch kernels",
+        "distribution facet",
+        "compute_declaration().exponential_family",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "ConjugateUpdatable",
+        "closed-form conjugate Bayesian posterior",
+        "distribution facet",
+        "conjugate_posterior registry",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "Conditionable", "condition on a subset of coordinates", "distribution facet", "condition()", "pysp.capability"
+    ),
+    CapabilitySpec(
+        "Marginalizable",
+        "marginalise to a subset of coordinates",
+        "distribution facet",
+        "marginal()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "LatentStructured",
+        "expose q(z|x), the latent posterior + posterior-predictive",
+        "distribution facet",
+        "latent_posterior()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "PosteriorPredictive",
+        "sample/score new data from inferred latent state",
+        "distribution facet",
+        "posterior_predictive()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "TemporalPointProcess",
+        "conditional intensity λ(t) + compensator",
+        "distribution facet",
+        "intensity()/expected_count()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "SetValued",
+        "distribution over sets with forced membership",
+        "distribution facet",
+        "required/num_required",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "Neutral",
+        "the identity / no-op element of a combinator",
+        "distribution facet",
+        "isinstance Null*",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "SupportsBackendScoring",
+        "score a batch directly on the active engine",
+        "distribution facet",
+        "backend_seq_log_density()",
+        "pysp.capability",
+    ),
+    # --- object contracts (non-distribution roles) ---
+    CapabilitySpec(
+        "EngineResidentEStep",
+        "run the E-step on the engine without leaving it",
+        "object contract",
+        "seq_update_engine()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "Transform",
+        "invertible change of variables with a Jacobian",
+        "object contract",
+        "forward/inverse/log_abs_det",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "SupportsStackedBackend",
+        "score a homogeneous component stack on the engine",
+        "object contract",
+        "backend_stacked_*",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "EncodedFold",
+        "fold the E-step over distributed/streaming data",
+        "object contract",
+        "pysp_seq_* methods",
+        "pysp.planner",
+    ),
+    CapabilitySpec("EMStrategy", "an EM-step strategy", "object contract", "step() -> EMStepResult", "pysp.utils.em"),
+    CapabilitySpec(
+        "Relation",
+        "optimisation-as-distribution over a constrained space",
+        "subsystem role",
+        "Relation (ABC): enumerate/solve/top/sample",
+        "pysp.relations",
+    ),
+    CapabilitySpec(
+        "ComputeEngine",
+        "a numpy/torch/symbolic backend (REQUIRED_OPS)",
+        "subsystem role",
+        "ComputeEngine (ABC)",
+        "pysp.engines.base",
+    ),
+    CapabilitySpec(
+        "DecomposableSemiring",
+        "a semiring for structural count/enumeration DP",
+        "subsystem role",
+        "DecomposableSemiring (ABC)",
+        "pysp.utils.quantization",
+    ),
+    CapabilitySpec(
+        "DynamicsOperator",
+        "a PDE/ODE evolution operator",
+        "subsystem role",
+        "DynamicsOperator (ABC)",
+        "pysp.ppl.dynamics",
+    ),
+    CapabilitySpec(
+        "ForwardOperator",
+        "the PDE forward solve + adjoint namespace",
+        "subsystem role",
+        "ForwardOperator/ForwardModel protocols",
+        "pysp.ppl._operator",
+    ),
+    CapabilitySpec(
+        "Surrogate",
+        "a fit/predict surrogate for Bayesian optimisation",
+        "subsystem role",
+        "Surrogate protocol",
+        "pysp.doe._contracts",
+    ),
+    CapabilitySpec(
+        "Acquisition",
+        "a BO acquisition function (EI/PI/UCB)",
+        "subsystem role",
+        "Acquisition protocol + register_acquisition",
+        "pysp.doe._contracts",
+    ),
+)
+
+_CATALOG_BY_NAME = {spec.name: spec for spec in CAPABILITY_CATALOG}
+# the "interesting" facets to report as present/absent in describe()
+_HIGHLIGHT = (
+    "Enumerable",
+    "RankableByIndex",
+    "Conditionable",
+    "Marginalizable",
+    "LatentStructured",
+    "ExponentialFamily",
+    "ConjugateUpdatable",
+    "TemporalPointProcess",
+    "SetValued",
+)
+
+
+def catalog() -> tuple[CapabilitySpec, ...]:
+    """Return the full capability vocabulary (every facet/contract/role), as data."""
+    return CAPABILITY_CATALOG
+
+
+def _category(have: frozenset[str]) -> str:
+    if "SetValued" in have:
+        return "set-valued distribution"
+    if "TemporalPointProcess" in have:
+        return "temporal point process"
+    if "FiniteSupport" in have:
+        return "discrete distribution (finite support)"
+    if "Enumerable" in have:
+        return "discrete distribution (countable support)"
+    if "LatentStructured" in have:
+        return "latent-variable model"
+    return "distribution"
+
+
+def describe(obj: Any) -> str:
+    """Return a plain-English summary of what ``obj`` is and what you can do with it.
+
+    The one-call answer to "what can this do?": its category, the capabilities it has and notably
+    lacks, the engines it runs on, and how to fit it. Works on any object; richest for distributions.
+    """
+    name = type(obj).__name__
+    is_dist = hasattr(obj, "log_density") and hasattr(obj, "estimator")
+    if not is_dist:
+        have = sorted(s.name for s in CAPABILITY_CATALOG if _safe_supports(obj, s.name))
+        return "%s — %s" % (name, ("supports: " + " · ".join(have)) if have else "no catalogued capability detected")
+
+    have = capabilities(obj)
+    can = (
+        ["score", "sample", "estimate"]
+        + sorted(have & set(_HIGHLIGHT))
+        + sorted(c for c in ("SupportsBackendScoring", "PosteriorPredictive") if c in have)
+    )
+    lines = ["%s — %s." % (name, _category(have))]
+    lines.append("  can:       " + " · ".join(can))
+    engines = obj.supported_engines() if hasattr(obj, "supported_engines") else None
+    if engines:
+        lines.append("  engines:   " + ", ".join(engines))
+    if "ConjugateUpdatable" in have:
+        lines.append("  inference: closed-form conjugate Bayes, or numerical (MAP/Laplace/MCMC/VI)")
+    else:
+        lines.append("  inference: numerical (MAP/Laplace/MCMC/VI) — no closed-form conjugate prior")
+    missing = [c for c in _HIGHLIGHT if c not in have]
+    if missing:
+        lines.append("  cannot:    " + " · ".join(missing))
+    return "\n".join(lines)
+
+
+def _safe_supports(obj: Any, cap_name: str) -> bool:
+    cap = globals().get(cap_name)
+    if cap is None or not isinstance(cap, type):
+        return False
+    try:
+        return supports(obj, cap)
+    except Exception:
+        return False
+
+
+def what_supports(capability: type, among: Any) -> list[str]:
+    """Return the names of the objects in ``among`` that provide ``capability``.
+
+    ``among`` is an iterable of instances (or classes for method-presence protocols) — e.g.
+    ``what_supports(Conditionable, [mvn, gaussian, mixture])``.
+    """
+    out = []
+    for obj in among:
+        try:
+            if supports(obj, capability):
+                out.append(getattr(obj, "__name__", type(obj).__name__))
+        except Exception:
+            continue
+    return out
+
+
+def render_catalog_markdown() -> str:
+    """Render :data:`CAPABILITY_CATALOG` as a markdown table (the source for docs/CAPABILITIES.md)."""
+    rows = ["| Capability | What it means | Kind | Backed by | Home |", "|---|---|---|---|---|"]
+    for s in CAPABILITY_CATALOG:
+        rows.append("| `%s` | %s | %s | `%s` | `%s` |" % (s.name, s.summary, s.kind, s.backed_by, s.home))
+    return "\n".join(rows)
