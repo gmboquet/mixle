@@ -170,6 +170,66 @@ class GrammarTestCase(unittest.TestCase):
         self.assertEqual(len(graphs), 2)
         self.assertTrue(all(g.number_of_nodes() >= 2 for g in graphs))
 
+    @staticmethod
+    def _labeled_edge():
+        g = nx.Graph()
+        g.add_node(0, label="A", node_color="")
+        g.add_node(1, label="B", node_color="")
+        g.add_edge(0, 1, weight=1.0, edge_color="")
+        return g
+
+    def test_log_density_is_a_valid_log_probability(self):
+        from pysp.stats.sequences.grammar import GrammarDistribution, VertexReplacementGrammar
+
+        dist = GrammarDistribution(self._grammar(), 0.05)
+        self.assertLessEqual(dist.log_density(self._grammar()), 1e-9)  # a real probability: log <= 0
+        self.assertEqual(dist.log_density(VertexReplacementGrammar()), 0.0)  # empty product over rules
+
+    def test_matching_rule_scores_higher_than_non_matching(self):
+        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarRule, VertexReplacementGrammar
+
+        dist = GrammarDistribution(self._grammar(), 0.05)
+        match = VertexReplacementGrammar()
+        match.add_rule(GrammarRule(2, self._labeled_edge(), 1.0))
+        star = nx.Graph()
+        for i in range(4):
+            star.add_node(i, label="Z", node_color="")
+        for i in (1, 2, 3):
+            star.add_edge(0, i, weight=1.0, edge_color="")
+        miss = VertexReplacementGrammar()
+        miss.add_rule(GrammarRule(2, star, 1.0))
+        self.assertGreater(dist.log_density(match), dist.log_density(miss))
+
+    def test_decomposition_matches_a_disconnected_rule(self):
+        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarRule, VertexReplacementGrammar
+
+        two_edges = nx.disjoint_union(self._labeled_edge(), self._labeled_edge())
+        obs = VertexReplacementGrammar()
+        obs.add_rule(GrammarRule(4, two_edges, 1.0))
+        without = GrammarDistribution(self._grammar(), mix_p=0.0, decomp_level=0)
+        with_decomp = GrammarDistribution(self._grammar(), mix_p=0.0, decomp_level=2, lhs_delta=2)
+        self.assertEqual(without.log_density(obs), float("-inf"))  # no direct match, no background
+        self.assertTrue(np.isfinite(with_decomp.log_density(obs)))  # matched component-by-component
+
+    def test_sampler_generates_a_connected_graph(self):
+        from pysp.stats.sequences.grammar import GrammarSampler
+
+        g = GrammarSampler(self._grammar(), orig_n=6, seed=1).sample()
+        self.assertGreaterEqual(g.number_of_nodes(), 6)
+        self.assertTrue(nx.is_connected(g))
+
+    def test_accumulator_keeps_num_rules_consistent(self):
+        from pysp.stats.sequences.grammar import GrammarEstimatorAccumulator, GrammarRule, VertexReplacementGrammar
+
+        other = VertexReplacementGrammar()
+        other.add_rule(GrammarRule(5, self._labeled_edge(), 2.0))
+        acc = GrammarEstimatorAccumulator()
+        acc.update(self._grammar(), 2.0, None)
+        acc.update(other, 1.0, None)
+        g = acc.value()
+        self.assertEqual(g.num_rules, len(g.rule_list))
+        self.assertEqual(g.num_rules, 2)
+
 
 class MarkovTransformTestCase(unittest.TestCase):
     def setUp(self):
