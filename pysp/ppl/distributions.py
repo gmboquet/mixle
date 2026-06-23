@@ -193,16 +193,8 @@ def AR1(*, name: str | None = None) -> RandomVariable:
     return RandomVariable._sample("StateSpace", (True,), name=name)
 
 
-def PDE(operator: Any, *, name: str | None = None) -> RandomVariable:
-    """PDE-constrained latent-field model for spatiotemporal data.
-
-    ``operator`` is a :class:`pysp.ppl.dynamics.DynamicsOperator` (e.g. ``DiffusionOperator``,
-    ``AdvectionOperator``) whose method-of-lines discretization fixes the linear state
-    transition. Fit on a ``(T, m)`` array of noisy field observations: the Kalman/RTS smoother
-    recovers the latent field and EM estimates the process/observation noise levels while the
-    physics-derived dynamics are held fixed. Pass ``dt=`` and an optional sensor operator ``H=``
-    to ``fit()``."""
-    return RandomVariable._sample("PDEStateSpace", (operator,), name=name)
+# The PDE(operator) constructor lives in the pysparkplug-pde plugin (it lowers to the PDEStateSpace
+# family that plugin registers); pysp.ppl no longer ships PDE-constrained modeling.
 
 
 def _mean_spec(mean, dim):

@@ -32,12 +32,11 @@ def test_contracts_gathers_every_contract_in_one_import():
         Conditionable,
         Distribution,
         Enumerable,
-        ForwardOperator,
         Relation,
         Surrogate,
     )
 
-    for c in (Distribution, Enumerable, Conditionable, Relation, ComputeEngine, ForwardOperator, Surrogate):
+    for c in (Distribution, Enumerable, Conditionable, Relation, ComputeEngine, Surrogate):
         assert isinstance(c, type)
     # the subsystem roles really come from their home modules
     assert Relation is importlib.import_module("pysp.relations").Relation

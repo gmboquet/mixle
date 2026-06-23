@@ -74,6 +74,18 @@ def _torch():
     return torch
 
 
+# Plugins (e.g. pysparkplug-pde) register a detector ``fn(reset: bool = False) -> bool`` reporting
+# whether a sparse adjoint solve ran during the last forward evaluation. fit_field uses it to refuse
+# how='laplace' on a sparse forward (whose dense double-backward Hessian would be silently wrong).
+# Empty by default -> pysp has no PDE dependency and the guard is a no-op.
+_SPARSE_SOLVE_DETECTORS: list = []
+
+
+def register_sparse_solve_detector(fn) -> None:
+    """Register a sparse-solve detector for the fit_field ``how='laplace'`` safety guard."""
+    _SPARSE_SOLVE_DETECTORS.append(fn)
+
+
 # --------------------------------------------------------------------------------------------------
 # Field priors: a kernel turns an index grid into a prior precision matrix Lambda (field ~ N(0, Lambda^-1)).
 # --------------------------------------------------------------------------------------------------
@@ -840,18 +852,13 @@ def fit_field(
         return loss
 
     opt.step(closure)
-    # The sparse-forward instrumentation lives with the PDE solver (pysparkplug-pde). Without it there
-    # are no sparse forwards, so the laplace guard below is vacuous -- degrade to "no sparse solve".
-    try:
-        from pysp.ppl.physics.pde_solve import sparse_used_since
-    except ImportError:
-
-        def sparse_used_since(reset: bool = False) -> bool:
-            return False
-
-    sparse_used_since(reset=True)
+    # The sparse-forward instrumentation lives with the PDE solver plugin (pysparkplug-pde), which
+    # registers a detector. Without the plugin there are no sparse forwards, so the laplace guard is a
+    # no-op. Reset every detector, run one forward, then check whether any sparse solve fired.
+    for _detect in _SPARSE_SOLVE_DETECTORS:
+        _detect(reset=True)
     obj = float(neg_log_post(u).detach())  # one eval to detect whether the forward uses the sparse solve
-    if how == "laplace" and sparse_used_since():
+    if how == "laplace" and any(_detect() for _detect in _SPARSE_SOLVE_DETECTORS):
         raise ValueError(
             "how='laplace' builds a dense Hessian by double-backward, which the adjoint sparse solve does "
             "not support (the Hessian would be silently wrong). Use how='gauss_newton' for sparse forwards."
