@@ -1,4 +1,7 @@
-"""Create, estimate, and sample from a beta distribution on (0, 1)."""
+"""Create, estimate, and sample from a beta distribution on (0, 1).
+
+Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
+"""
 
 import math
 from collections.abc import Sequence

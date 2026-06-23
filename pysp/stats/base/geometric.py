@@ -7,6 +7,9 @@ Data type (int): The geometric distribution with probability of success p, has d
 
     P(x=k) = (k-1)*log(1-p) + log(p), for k = 1,2,...
 
+
+
+Reference: Johnson, Kemp & Kotz, *Univariate Discrete Distributions* (3rd ed., Wiley, 2005).
 """
 
 import math
