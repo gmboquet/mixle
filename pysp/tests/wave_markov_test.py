@@ -228,10 +228,37 @@ class GrammarTestCase(unittest.TestCase):
 
     # --- density and estimation: the grammar's own likelihood, computed by PARSING the graph ---
     def test_log_density_is_the_parse_based_likelihood(self):
-        dist = self._freq_dist()  # P(A-x) = freq(x)/total from the best derivation
+        dist = self._freq_dist()  # each A-x has a single parse, so marginal == freq(x)/total
         for lb, freq in (("B", 5.0), ("C", 3.0), ("D", 2.0)):
             self.assertAlmostEqual(dist.log_density(self._edge("A", lb)), float(np.log(freq / 10.0)), places=9)
         self.assertEqual(dist.log_density(self._edge("A", "Z")), float("-inf"))  # grammar cannot derive it
+
+    def test_marginal_likelihood_sums_over_derivations(self):
+        # ambiguous grammar: A-B derives two ways (directly, or A-nt(T) then T->B), each probability 1/2,
+        # so the marginal log-density is log(1/2 + 1/2) = 0 -- strictly above the Viterbi lower bound.
+        from pysp.stats.sequences.grammar import (
+            GrammarDistribution,
+            GrammarRule,
+            VertexReplacementGrammar,
+            best_derivation,
+        )
+
+        a_t = nx.Graph()
+        a_t.add_node(0, label="A", node_color="")
+        a_t.add_node(1, nonterminal="T")
+        a_t.add_edge(0, 1, weight=1.0, edge_color="")
+        b = nx.Graph()
+        b.add_node(0, label="B", node_color="")
+        g = VertexReplacementGrammar()
+        g.add_rule(GrammarRule("S", self._edge("A", "B"), 1.0))
+        g.add_rule(GrammarRule("S", a_t, 1.0))
+        g.add_rule(GrammarRule("T", b, 1.0))
+        dist = GrammarDistribution(g, 0.0, start_symbol="S")
+        marginal = dist.log_density(self._edge("A", "B"))
+        viterbi = best_derivation(self._edge("A", "B"), g, "S")[0]
+        self.assertAlmostEqual(marginal, 0.0, places=9)  # log(1/2 + 1/2)
+        self.assertAlmostEqual(viterbi, float(np.log(0.5)), places=9)
+        self.assertGreater(marginal, viterbi)
 
     def test_generated_graphs_parse_and_foreign_graphs_are_neg_inf(self):
         from pysp.stats.sequences.grammar import GrammarDistribution, GrammarSampler
