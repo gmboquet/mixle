@@ -1237,7 +1237,12 @@ class IntegerMarkovChainEstimator(ParameterEstimator):
         len_dist = self.len_dist if self.len_dist is not None else self.len_estimator.estimate(None, len_ss)
         init_dist = self.init_dist if self.init_dist is not None else self.init_estimator.estimate(None, init_ss)
 
-        num_values = 1 + max([max(max(u[0]), u[1]) for u in trans_count_map.keys()])
+        # Honor the declared support: estimating from a data shard that happens not to contain every
+        # value (common when streaming, or with rare symbols) must NOT shrink num_values, or a later shard
+        # with an out-of-range value would break the index arithmetic. Fall back to the observed max only
+        # if no support was declared.
+        observed = (1 + max(max(max(u[0]), u[1]) for u in trans_count_map.keys())) if trans_count_map else 1
+        num_values = max(self.num_values, observed) if self.num_values is not None else observed
 
         cond_mat = np.zeros((num_values**lag, num_values), dtype=np.float32)
 
