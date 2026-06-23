@@ -313,7 +313,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         any child is not a (single) exponential family.
         """
         from pysp.engines import NUMPY_ENGINE
-        from pysp.stats.exp_family import ProductExponentialFamilyForm, to_exponential_family
+        from pysp.stats.compute.exp_family import ProductExponentialFamilyForm, to_exponential_family
 
         eng = NUMPY_ENGINE if engine is None else engine
         children = [to_exponential_family(d, engine=eng) for d in self.dists]

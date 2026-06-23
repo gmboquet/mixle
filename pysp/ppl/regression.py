@@ -105,13 +105,13 @@ class RegressionResult:
         ``eta(x) = offset + X @ beta`` is the logit (Bernoulli) / log-rate (Poisson)
         directly, and the mean ``mu(x)/sigma^2`` paired with ``-1/(2 sigma^2)`` for the
         Normal.  The returned
-        :class:`~pysp.stats.exp_family.ConditionalExponentialFamilyForm` exposes
+        :class:`~pysp.stats.compute.exp_family.ConditionalExponentialFamilyForm` exposes
         ``natural_parameters(x)``, ``sufficient_statistics(y)``, ``log_partition``,
         ``log_base_measure(y)``, ``mean(x)`` (the inverse link == :meth:`predict`), and
         ``log_density(y, x)``.
         """
         from pysp.engines import NUMPY_ENGINE
-        from pysp.stats.exp_family import ConditionalExponentialFamilyForm
+        from pysp.stats.compute.exp_family import ConditionalExponentialFamilyForm
 
         eng = NUMPY_ENGINE if engine is None else engine
         link = self.link

@@ -14,7 +14,7 @@ import unittest
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats.exp_family import ExponentialFamilyForm, is_exponential_family, to_exponential_family
+from pysp.stats.compute.exp_family import ExponentialFamilyForm, is_exponential_family, to_exponential_family
 from pysp.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution
 
 

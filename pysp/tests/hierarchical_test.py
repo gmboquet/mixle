@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from pysp.inference import estimate
-from pysp.stats.hierarchical import HierarchicalNormalDistribution
+from pysp.stats.latent.hierarchical import HierarchicalNormalDistribution
 
 
 def _hier_data(mu, tau, sigma, sizes, seed=0):

@@ -876,6 +876,7 @@ from pysp.stats.compute.posterior import (
     MeanFieldLDAPosterior,
     Posterior,
 )
+from pysp.stats.compute.sampling_api import sample
 from pysp.stats.compute.stacked import (
     StackedComponentParams,
     StackedMixtureKernel,
@@ -1175,7 +1176,6 @@ from pysp.stats.rankings.spearman_rho import (
     SpearmanRankingEstimator,
     SpearmanRankingSampler,
 )
-from pysp.stats.sampling_api import sample
 from pysp.stats.sequences.integer_markov_chain import (
     IntegerMarkovChainDataEncoder,
     IntegerMarkovChainDistribution,

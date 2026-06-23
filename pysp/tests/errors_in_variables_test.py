@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.errors_in_variables import deming_regression
+from pysp.inference.errors_in_variables import deming_regression
 
 
 class DemingRegressionTest(unittest.TestCase):
