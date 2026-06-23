@@ -735,6 +735,17 @@ def _recommended_integer_model(vdict: dict[Any, float]) -> tuple[str, dict[str, 
         scores["poisson"] = _poisson_bic_bits(vdict, mean)
     scores["gaussian"] = _integer_gaussian_bic_bits(vdict, mean, var)
 
+    # registered discrete detectors (additive -- a count family only wins if its BIC beats Poisson/Gaussian;
+    # it must also see real variety, so it cannot overfit a couple of repeated integers).
+    if distinct >= 5:
+        from pysp.utils.automatic.detectors import discrete_detectors
+
+        arr = _value_array_from_vdict(vdict)
+        if arr.size:
+            for d in discrete_detectors():
+                if d.name not in scores and d.applies(arr):
+                    scores[d.name] = d.score(arr, n)
+
     clean = _clean_scores(scores)
     if not clean:
         return "ignored", {}
@@ -1772,6 +1783,11 @@ class DatumNode:
                 return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
             if recommendation == "poisson":
                 return get_poisson_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+            from pysp.utils.automatic.detectors import get_detector
+
+            det = get_detector(recommendation)
+            if det is not None:
+                return det.factory(self.vdict, pseudo_count, emp_suff_stat, use_bstats)
             return get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
         return get_ignored_estimator(use_bstats=use_bstats)
