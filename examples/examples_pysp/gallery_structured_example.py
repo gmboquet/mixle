@@ -2,11 +2,11 @@
 
 Covers a first-order Markov chain, a heterogeneous mixture (components from different families), the
 Indian Buffet Process feature-allocation model, a Chow-Liu tree and an ICL tree over discrete
-features, Erdos-Renyi and stochastic-block random graphs, a quantized HMM (theta^k
-parameterization), a tree-structured HMM, a segmental HMM, and named-field Record / DictRecord
-models. Self-contained random data only. Other structured models have their own focused scripts
-(hidden_markov, lda, look_back_hmm, association, set_edit, ...); the grammar (HeterogeneousPCFG) and
-sparse-association (SparseMarkovAssociation) models are exercised in pysp/tests.
+features, a quantized HMM (theta^k parameterization), a tree-structured HMM, a segmental HMM, and
+named-field Record / DictRecord models. Self-contained random data only. Other model groups have
+their own focused scripts (hidden_markov, lda, lookback_hmm, association, set_edit, ...) or galleries
+(gallery_graphs for the random-graph families); the grammar (HeterogeneousPCFG) and sparse-association
+(SparseMarkovAssociation) models are exercised in pysp/tests.
 """
 import numpy as np
 
@@ -57,20 +57,6 @@ if __name__ == '__main__':
     m = optimize(icl_data, ICLTreeEstimator(num_features=3, num_states=2), max_its=1, rng=RNG())
     print('  learned dependencies (feature, parent): %s'
           % [(int(a), None if b is None else int(b)) for a, b in m.dependency_list])
-
-    print('# ErdosRenyiGraph: i.i.d. edges over a fixed node set (adjacency matrices)')
-    d = ErdosRenyiGraphDistribution(0.3, num_nodes=6)
-    m = optimize(d.sampler(1).sample(500), ErdosRenyiGraphEstimator(num_nodes=6), max_its=1, rng=RNG())
-    print('  edge prob: %.3f' % m.p)
-
-    print('# StochasticBlockGraph: edge probability depends on node block membership')
-    assignments = [0, 0, 0, 1, 1, 1]
-    d = StochasticBlockGraphDistribution([[0.8, 0.1], [0.1, 0.7]], block_assignments=assignments,
-                                         block_prior=[0.5, 0.5])
-    m = optimize(d.sampler(1).sample(400),
-                 StochasticBlockGraphEstimator(num_blocks=2, block_assignments=assignments),
-                 max_its=1, rng=RNG())
-    print('  block_probs: %s' % np.round(np.asarray(m.block_probs), 2).tolist())
 
     print('# QuantizedHMM: HMM whose probabilities are powers of a shared theta')
     levels = [0.2, 0.8]
