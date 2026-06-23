@@ -21,7 +21,7 @@ from typing import Any, Optional, TypeVar
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
 from pysp.enumeration.algorithms import BufferedStream
 from pysp.stats.combinator.composite import _distribute_child_prior

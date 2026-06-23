@@ -178,7 +178,7 @@ def _isolate_global_process_state():
     """
     import numpy as np
 
-    from pysp.arithmetic import get_default_engine, set_default_engine
+    from pysp.engines.arithmetic import get_default_engine, set_default_engine
 
     engine = get_default_engine()
     rng_state = np.random.get_state()

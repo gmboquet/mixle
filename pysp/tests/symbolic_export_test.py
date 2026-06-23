@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from pysp import arithmetic as ar
+from pysp.engines import arithmetic as ar
 from pysp.engines import (
     SYMBOLIC_ENGINE,
     SymbolicExpression,

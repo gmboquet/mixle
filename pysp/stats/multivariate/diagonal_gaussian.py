@@ -23,7 +23,7 @@ import numpy as np
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 from pysp.inference.fisher import FixedFisherView
 from pysp.stats.bayes.multivariate_normal_gamma import MultivariateNormalGammaDistribution
 from pysp.stats.compute.pdist import (

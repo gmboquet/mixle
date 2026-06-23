@@ -1,11 +1,11 @@
-"""Engine-aware mathematical constants in pysp.arithmetic (numeric by default, symbolic on request)."""
+"""Engine-aware mathematical constants in pysp.engines.arithmetic (numeric by default, symbolic on request)."""
 
 import math
 import unittest
 
 import numpy as np
 
-import pysp.arithmetic as arith
+import pysp.engines.arithmetic as arith
 from pysp.engines import NUMPY_ENGINE, SYMBOLIC_ENGINE, SymbolicExpression, to_sympy
 
 try:

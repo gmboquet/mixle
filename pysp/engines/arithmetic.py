@@ -6,7 +6,7 @@ default (plain floats, the historical behaviour).  Select a different one to mak
 from it, e.g. the symbolic engine, so that ``pi`` stays a symbolic ``pi`` and ``half`` an exact 1/2
 instead of collapsing to floats during exact arithmetic::
 
-    import pysp.arithmetic as arith
+    import pysp.engines.arithmetic as arith
     with arith.using_engine("symbolic"):
         arith.pi      # SymbolicExpression "pi", not 3.141592...
 
@@ -41,8 +41,8 @@ __all__ = [
     "isnan",
     "isinf",
     # NOTE: ``sum`` and ``max`` are dispatched and importable by explicit name
-    # (``from pysp.arithmetic import sum``) but are deliberately kept OUT of
-    # ``__all__``: many leaf/latent modules do ``from pysp.arithmetic import *``
+    # (``from pysp.engines.arithmetic import sum``) but are deliberately kept OUT of
+    # ``__all__``: many leaf/latent modules do ``from pysp.engines.arithmetic import *``
     # and call the *builtins* ``max``/``sum`` inside numba ``nopython`` kernels.
     # Exporting the dispatch wrappers would shadow those builtins in the module
     # namespace and break numba type inference (Untyped global name 'max').

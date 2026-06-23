@@ -21,7 +21,7 @@ import numpy as np
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import maxrandint
 from pysp.enumeration.algorithms import (
     BufferedStream,
     QuantizedEnumerationIndex,

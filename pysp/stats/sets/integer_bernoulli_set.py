@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 from pysp.enumeration.algorithms import BufferedStream, ProductEnumerator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,

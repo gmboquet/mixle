@@ -7,7 +7,7 @@ import numpy as np
 import scipy.linalg
 import scipy.special
 
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 
 
 @overload
