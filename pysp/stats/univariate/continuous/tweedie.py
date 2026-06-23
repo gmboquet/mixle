@@ -23,7 +23,6 @@ Reference: Jorgensen, *The Theory of Dispersion Models* (Chapman & Hall, 1997).
 
 import math
 from collections.abc import Sequence
-from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -236,20 +235,6 @@ class TweedieAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum *= c
         self.sum2 *= c
         return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                c, s, s2 = stats_dict[self.keys]
-                self.count += c
-                self.sum += s
-                self.sum2 += s2
-            else:
-                stats_dict[self.keys] = (self.count, self.sum, self.sum2)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        if self.keys is not None and self.keys in stats_dict:
-            self.count, self.sum, self.sum2 = stats_dict[self.keys]
 
     def acc_to_encoder(self) -> "TweedieDataEncoder":
         return TweedieDataEncoder()
