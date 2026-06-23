@@ -24,9 +24,11 @@ from typing import Any
 import numpy as np
 
 from pysp.stats.compute.pdist import (
+    DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
 from pysp.stats.directional.von_mises import VonMisesDistribution, VonMisesEstimator
@@ -146,12 +148,22 @@ class PeriodicTimeSampler(DistributionSampler):
         return float(secs) if size is None else secs
 
 
-class PeriodicTimeDataEncoder:
+class PeriodicTimeDataEncoder(DataSequenceEncoder):
     """Encode timestamps by the cycle phase, then defer to the von Mises encoder over the angles."""
 
     def __init__(self, period, von_mises_encoder):
         self.period = period
         self.von_mises_encoder = von_mises_encoder
+
+    def __str__(self) -> str:
+        return "PeriodicTimeDataEncoder(%r)" % (self.period,)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, PeriodicTimeDataEncoder)
+            and self.period == other.period
+            and self.von_mises_encoder == other.von_mises_encoder
+        )
 
     def seq_encode(self, x):
         return self.von_mises_encoder.seq_encode(cyclic_phase(x, self.period))
@@ -168,11 +180,12 @@ class PeriodicTimeEstimator(ParameterEstimator):
 
     def accumulator_factory(self) -> StatisticAccumulatorFactory:
         period = self.period
+        keys = self.keys
         von_mises_factory = self.von_mises_estimator.accumulator_factory()
 
         class _Factory(StatisticAccumulatorFactory):
             def make(self):
-                return PeriodicTimeAccumulator(period, von_mises_factory.make())
+                return PeriodicTimeAccumulator(period, von_mises_factory.make(), keys=keys)
 
         return _Factory()
 
@@ -181,12 +194,13 @@ class PeriodicTimeEstimator(ParameterEstimator):
         return PeriodicTimeDistribution(self.period, vm.mu, vm.kappa, name=self.name, keys=self.keys)
 
 
-class PeriodicTimeAccumulator:
+class PeriodicTimeAccumulator(SequenceEncodableStatisticAccumulator):
     """Wrap a von Mises accumulator; timestamps are mapped to cycle phases, then the stats are delegated."""
 
-    def __init__(self, period, von_mises_acc):
+    def __init__(self, period, von_mises_acc, keys=None):
         self.period = period
         self.von_mises_acc = von_mises_acc
+        self.keys = keys
 
     def update(self, t, weight, estimate):
         self.von_mises_acc.update(
@@ -212,6 +226,21 @@ class PeriodicTimeAccumulator:
     def from_value(self, x):
         self.von_mises_acc.from_value(x)
         return self
+
+    def scale(self, c):
+        self.von_mises_acc.scale(c)
+        return self
+
+    def key_merge(self, stats_dict):
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
+            else:
+                stats_dict[self.keys] = self
+
+    def key_replace(self, stats_dict):
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self):
         return PeriodicTimeDataEncoder(self.period, self.von_mises_acc.acc_to_encoder())

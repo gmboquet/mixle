@@ -58,5 +58,30 @@ class TweedieDistributionTest(unittest.TestCase):
         self.assertAlmostEqual(fit.phi, 0.7, delta=0.2)
 
 
+class TweedieKeyedSharingTest(unittest.TestCase):
+    def test_keyed_accumulators_carry_pooled_statistics(self):
+        """Three keyed accumulators over {1,2,3} must all carry the POOLED stats.
+
+        Regression for the key_merge/key_replace bug where a tuple was stored under the
+        key instead of the accumulator object, so only the first batch survived.
+        """
+        from pysp.stats import TweedieEstimator
+
+        est = TweedieEstimator(p=1.5, keys="shared")
+        accs = [est.accumulator_factory().make() for _ in range(3)]
+        for acc, x in zip(accs, (1.0, 2.0, 3.0)):
+            acc.update(x, 1.0, None)
+
+        stats_dict: dict = {}
+        for acc in accs:
+            acc.key_merge(stats_dict)
+        for acc in accs:
+            acc.key_replace(stats_dict)
+
+        # Pooled: count=3, sum=1+2+3=6, sum2=1+4+9=14.
+        for acc in accs:
+            self.assertEqual(acc.value(), (3.0, 6.0, 14.0))
+
+
 if __name__ == "__main__":
     unittest.main()

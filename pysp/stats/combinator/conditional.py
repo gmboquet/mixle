@@ -1470,6 +1470,12 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
             if self.null_default_encoder:
                 if u[0] in self.encoder_map:
                     eobs_vals.append(self.encoder_map[u[0]].seq_encode(u[1][0]))
+                else:
+                    # No encoder and no default for this conditioning value: append a
+                    # placeholder so eobs_vals stays aligned with cond_vals/idx_vals.
+                    # seq_log_density/seq_update guard on the cond key, so it is never
+                    # dereferenced (the group scores -inf / is skipped).
+                    eobs_vals.append(None)
             else:
                 eobs_vals.append(self.encoder_map.get(u[0], self.default_encoder).seq_encode(u[1][0]))
 

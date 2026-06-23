@@ -114,3 +114,30 @@ def test_combine_and_value_roundtrip():
     assert mean == pytest.approx(data.mean())
     assert m2 == pytest.approx(np.sum((data - data.mean()) ** 2))
     assert m3 == pytest.approx(np.sum((data - data.mean()) ** 3))
+
+
+def test_keyed_sharing_pools_statistics():
+    """Three accumulators tied by a shared key must end up carrying the POOLED moments.
+
+    Regression for the keyed-sharing defect where key_merge stored a raw tuple and discarded
+    every batch after the first (all three accumulators collapsed to the first batch).
+    """
+    est = ExponentiallyModifiedGaussianEstimator(keys="shared")
+    accs = [est.accumulator_factory().make() for _ in range(3)]
+    accs[0].seq_update(np.array([1.0]), np.ones(1), None)
+    accs[1].seq_update(np.array([2.0]), np.ones(1), None)
+    accs[2].seq_update(np.array([3.0]), np.ones(1), None)
+
+    shared: dict = {}
+    for a in accs:
+        a.key_merge(shared)
+    for a in accs:
+        a.key_replace(shared)
+
+    data = np.array([1.0, 2.0, 3.0])
+    for a in accs:
+        count, mean, m2, m3 = a.value()
+        assert count == 3.0
+        assert mean == pytest.approx(data.mean())
+        assert m2 == pytest.approx(np.sum((data - data.mean()) ** 2))
+        assert m3 == pytest.approx(np.sum((data - data.mean()) ** 3))

@@ -695,7 +695,9 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         """
         if self.keys is not None:
             if self.keys in stats_dict:
-                self.combine(stats_dict[self.keys])
+                stats_dict[self.keys].combine(self.value())
+            else:
+                stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace sufficient statistics with values from stats_dict for a matching key.
@@ -709,7 +711,7 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         """
         if self.keys is not None:
             if self.keys in stats_dict:
-                self.from_value(stats_dict[self.keys])
+                self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "MultivariateGaussianDataEncoder":
         """Returns a MultivariateGaussianDataEncoder object for encoding sequences of iid observations."""
