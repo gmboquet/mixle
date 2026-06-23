@@ -776,6 +776,12 @@ def fit(
 
     rng = RandomState() if rng is None else rng
     est = estimator if init_estimator is None else init_estimator
+    # opt-in sample-structure check: a tagged DataSource is verified against the model it feeds (warns on
+    # a mismatch, e.g. a SEQUENTIAL source handed to an i.i.d. leaf). Bare lists carry no structure tag.
+    if data is not None and getattr(data, "structure", None) is not None:
+        from pysp.data.structure import check_model_structure
+
+        check_model_structure(est, data.structure)
     div_error = np.seterr(divide="ignore")
     try:
         encoder = _resolve_encoder(est, prev_estimate)

@@ -71,3 +71,33 @@ class DataLayerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StructureCapabilityTest(unittest.TestCase):
+    def test_supported_structures_inference(self):
+        from pysp.data.structure import supported_structures
+
+        self.assertEqual(supported_structures(st.GaussianDistribution(0, 1).estimator()), frozenset({"iid", "exchangeable"}))
+        hmm = st.HiddenMarkovModelDistribution([st.GaussianDistribution(0, 1)], [1.0], [[1.0]])
+        self.assertEqual(supported_structures(hmm.estimator()), frozenset({"sequential"}))
+
+    def test_fit_warns_on_structure_mismatch_but_not_on_default(self):
+        import warnings
+
+        data = list(np.random.RandomState(0).randn(40))
+        from pysp.inference.estimation import fit
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            fit(MaterializedSource(data, SEQUENTIAL), st.GaussianDistribution(0, 1).estimator(), max_its=2, out=None)
+            self.assertTrue(any("structure" in str(x.message) for x in w))  # footgun caught
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            fit(data, st.GaussianDistribution(0, 1).estimator(), max_its=2, out=None)  # bare list
+            self.assertFalse(any("structure" in str(x.message) for x in w))  # never on existing calls
+
+    def test_strict_mode_raises(self):
+        from pysp.data.structure import check_model_structure
+
+        with self.assertRaises(ValueError):
+            check_model_structure(st.GaussianDistribution(0, 1).estimator(), SEQUENTIAL, strict=True)

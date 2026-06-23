@@ -61,3 +61,47 @@ SEQUENTIAL = SampleStructure("sequential")
 def partially_exchangeable(by: str | Callable[[Any], Any]) -> SampleStructure:
     """Return a ``PARTIALLY_EXCHANGEABLE`` structure grouped by field name or key function ``by``."""
     return SampleStructure("partially_exchangeable", by)
+
+
+# --- model <-> structure compatibility (the capability check) -------------------------------------
+#
+# A model declares which sample structures it can consume. Sequential models (HMM/Markov/Hawkes/AR)
+# read order off each record; exchangeable latent models (mixtures, Dirichlet-process) are invariant to
+# order; grouped models (HDP, labeled-LDA, hierarchical) consume partial exchangeability; plain leaves
+# are IID. The default for a bare list is EXCHANGEABLE, so the check is opt-in and never fires on
+# existing call sites -- it only catches a mismatch once a user explicitly tags a source.
+
+_SEQUENTIAL_HINTS = ("markov", "hmm", "hawkes", "pcfg", "grammar", "renewal", "sequence", "segmental",
+                     "lookback", "inhomogeneous", "birth_death", "temporal", "autoreg")
+_GROUPED_HINTS = ("hdp", "hierarchical", "labeled_lda", "labeledlda", "ldadistribution", "lda")
+_EXCHANGEABLE_HINTS = ("mixture", "dirichletprocess", "dirichlet_process", "pitman", "buffet", "latent")
+
+
+def supported_structures(model: Any) -> frozenset[str]:
+    """Return the ``SampleStructure`` kinds a model/estimator can consume (by capability + name)."""
+    cls = type(model).__name__.lower()
+    if any(h in cls for h in _SEQUENTIAL_HINTS):
+        return frozenset({"sequential"})
+    if any(h in cls for h in _GROUPED_HINTS):
+        return frozenset({"partially_exchangeable", "exchangeable", "iid"})
+    if any(h in cls for h in _EXCHANGEABLE_HINTS):
+        return frozenset({"exchangeable", "iid"})
+    return frozenset({"iid", "exchangeable"})  # a plain leaf is i.i.d./exchangeable
+
+
+def check_model_structure(model: Any, structure: SampleStructure, *, strict: bool = False) -> None:
+    """Warn (or, if ``strict``, raise) when a model cannot consume a source's sample structure.
+
+    Catches the silent footgun: a source tagged ``SEQUENTIAL`` handed to an i.i.d. leaf ("did you mean an
+    HMM?"), or grouped data handed to a model that ignores groups. A no-op when compatible.
+    """
+    if structure.kind in supported_structures(model):
+        return
+    msg = ("data is %s, but %s consumes %s -- the structure assumption does not match (e.g. an i.i.d. "
+           "model on an ordered series silently strides away the order)." % (
+               structure, type(model).__name__, "/".join(sorted(supported_structures(model)))))
+    if strict:
+        raise ValueError(msg)
+    import warnings
+
+    warnings.warn(msg, stacklevel=3)
