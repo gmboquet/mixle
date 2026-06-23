@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.uq import calibrate
+from pysp.doe import calibrate
 
 
 def _sim(x, theta):

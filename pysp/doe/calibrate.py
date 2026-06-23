@@ -13,16 +13,15 @@ from collections.abc import Callable, Sequence
 import numpy as np
 from scipy.optimize import minimize
 
-from pysp.models._kernels import rbf_from_scaled_sqdist
+from pysp.models._kernels import stationary_kernel
 
 __all__ = ["calibrate", "KOCalibration"]
 
 
 def _rbf(x1: np.ndarray, x2: np.ndarray, ls: float, amp: float) -> np.ndarray:
-    x1 = x1[:, None] if x1.ndim == 1 else x1
-    x2 = x2[:, None] if x2.ndim == 1 else x2
-    d2 = np.sum((x1[:, None, :] - x2[None, :, :]) ** 2, axis=-1)
-    return rbf_from_scaled_sqdist(d2 / ls**2, amp)
+    # Squared-exponential covariance via pysp's shared NumPy kernel: identical
+    # `sum((x1-x2)**2)/ls**2 -> amp**2 * exp(-d2/2)` shape, so results are unchanged.
+    return stationary_kernel(x1, x2, ls, amp, "rbf")
 
 
 class KOCalibration:

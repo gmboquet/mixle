@@ -1,7 +1,7 @@
 """Shared NumPy stationary-kernel primitives (RBF / Matern-3/2 / Matern-5/2).
 
 The RBF and Matern covariance shapes were re-implemented independently in several places
-(:mod:`pysp.models.sparse_gaussian_process`, :mod:`pysp.ppl.field`, :mod:`pysp.uq.calibration`),
+(:mod:`pysp.models.sparse_gaussian_process`, :mod:`pysp.ppl.field`, :mod:`pysp.doe.calibrate`),
 each with its own ``sqrt(3)``/``sqrt(5)`` constants. This module is the single source of those shapes
 for the NumPy back-end. (The Torch GP in :mod:`pysp.models.gaussian_process` keeps its own autograd
 kernel -- a real back-end difference, not duplication that can be shared here.)

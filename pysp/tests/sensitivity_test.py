@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.uq import morris_screening, sobol_indices
+from pysp.doe import morris_screening, sobol_indices
 
 
 def ishigami(x, a=7.0, b=0.1):
