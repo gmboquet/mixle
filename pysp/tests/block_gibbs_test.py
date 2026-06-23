@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.block_gibbs import BlockGibbs, ConjugateBlock, MetropolisBlock
+from pysp.inference.block_gibbs import BlockGibbs, ConjugateBlock, MetropolisBlock
 
 
 class BlockGibbsTest(unittest.TestCase):

@@ -10,7 +10,7 @@ import unittest
 import numpy as np
 
 from pysp.inference import estimate
-from pysp.stats.temporal import PeriodicTimeDistribution, SeasonalTimeSeries, cyclic_phase, to_unix_seconds
+from pysp.stats.processes.temporal import PeriodicTimeDistribution, SeasonalTimeSeries, cyclic_phase, to_unix_seconds
 
 
 def _fit_periodic(times, period="day"):
