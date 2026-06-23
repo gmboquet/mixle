@@ -616,3 +616,68 @@ def spectral_derivative(u: Any, length: float, order: int = 1) -> np.ndarray:
     if int(order) % 2 == 1:
         factor[n // 2] = 0.0  # the Nyquist mode has no defined sign for odd derivatives
     return np.real(np.fft.ifft(factor * np.fft.fft(u)))
+
+
+# ---------------------------------------------------------------------------
+# Black-Scholes equation (quantitative finance -- option pricing PDE)
+# ---------------------------------------------------------------------------
+def black_scholes_rhs(sigma: float, rate: float, s_grid: Any, *, dividend: float = 0.0) -> Any:
+    """Build the method-of-lines right-hand side of the Black-Scholes option-pricing PDE.
+
+    Returns ``rhs(tau, v)`` for the value ``V(S, tau)`` of a European option as a function of underlying
+    price ``S`` and time-to-maturity ``tau = T - t``, marching the (forward-in-``tau``) Black-Scholes
+    equation ``V_tau = (1/2) sigma^2 S^2 V_SS + (rate - dividend) S V_S - rate V`` on the price grid
+    ``s_grid`` (uniform spacing; central differences). Integrate from the payoff at ``tau = 0`` -- a call's
+    ``max(S - K, 0)`` or a put's ``max(K - S, 0)`` -- to ``tau = T`` with :func:`integrate_adaptive`. The
+    boundaries impose the far-field linearity ``V_SS = 0`` (so ``V_tau = (rate-dividend) S V_S - rate V`` at
+    the top of the grid and ``V_tau = -rate V`` at ``S = 0``), which reproduces the closed-form
+    Black-Scholes-Merton price to grid accuracy.
+
+    Reference: Black & Scholes, "The pricing of options and corporate liabilities", *J. Political Economy*
+    81 (1973); Merton (1973).
+    """
+    s = np.asarray(s_grid, dtype=np.float64)
+    ds = float(s[1] - s[0])
+    s2 = float(sigma) * float(sigma)
+    drift = float(rate) - float(dividend)
+    r = float(rate)
+
+    def rhs(tau: float, v: Any) -> np.ndarray:
+        v = np.asarray(v, dtype=np.float64)
+        dv = np.zeros_like(v)
+        vss = (v[2:] - 2.0 * v[1:-1] + v[:-2]) / (ds * ds)
+        vs = (v[2:] - v[:-2]) / (2.0 * ds)
+        dv[1:-1] = 0.5 * s2 * s[1:-1] ** 2 * vss + drift * s[1:-1] * vs - r * v[1:-1]
+        dv[0] = -r * v[0]  # S = 0: only the discount term survives
+        dv[-1] = drift * s[-1] * (v[-1] - v[-2]) / ds - r * v[-1]  # far field: V_SS = 0
+        return dv
+
+    return rhs
+
+
+# ---------------------------------------------------------------------------
+# Lane-Emden equation (astrophysics -- self-gravitating polytropes)
+# ---------------------------------------------------------------------------
+def lane_emden_rhs(index: float) -> Any:
+    """Build the right-hand side of the Lane-Emden equation of astrophysical polytrope structure.
+
+    Returns ``rhs(xi, y)`` for the first-order system of ``theta'' + (2/xi) theta' + theta^n = 0`` with
+    state ``y = [theta, theta']`` (dimensionless density ``theta``, scaled radius ``xi``, polytropic
+    ``index = n``). This is the equation of hydrostatic equilibrium for a self-gravitating gas sphere with
+    ``P = K rho^(1+1/n)``; ``theta`` runs from ``1`` at the centre to its first zero ``xi_1`` (the stellar
+    surface). Start the integration just off the regular singular point at a small ``xi_0`` from the series
+    ``theta = 1 - xi^2/6``, ``theta' = -xi/3`` and march with :func:`integrate_adaptive`. The source
+    ``theta^n`` is clamped to ``max(theta, 0)^n`` so the march is stable across the surface. Closed forms
+    exist for ``n = 0`` (``1 - xi^2/6``), ``n = 1`` (``sin xi / xi``) and ``n = 5`` (``(1 + xi^2/3)^{-1/2}``).
+
+    Reference: Chandrasekhar, *An Introduction to the Study of Stellar Structure* (1939), ch. 4.
+    """
+    n = float(index)
+
+    def rhs(xi: float, y: Any) -> np.ndarray:
+        theta = float(y[0])
+        phi = float(y[1])
+        source = theta**n if theta > 0.0 else 0.0  # theta^n, clamped past the surface zero
+        return np.array([phi, -source - 2.0 * phi / xi])
+
+    return rhs
