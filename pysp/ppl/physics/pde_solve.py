@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from pysp.ppl._grid import _grid_faces
+
 __all__ = ["sparse_solve", "divergence_form", "helmholtz_operator", "laplacian"]
 
 
@@ -173,46 +175,6 @@ def sparse_solve(vals, rows, cols, n, b):
 # --------------------------------------------------------------------------------------------------
 # Differentiable assembly of structured-grid operators (vals carry gradients to the coefficient field).
 # --------------------------------------------------------------------------------------------------
-def _grid_faces(shape, spacing):
-    """Precompute the fixed face list of a structured grid: every adjacent node pair ``(a, b)`` along an
-    axis with its ``1/h^2``, plus the boundary mask. Boundary nodes get a Dirichlet identity row; an
-    interior node keeps the flux coupling to a boundary neighbour (whose value the source sets)."""
-    shape = tuple(int(s) for s in shape)
-    ndim = len(shape)
-    spacing = np.broadcast_to(np.asarray(spacing, dtype=float), (ndim,))
-    n = int(np.prod(shape))
-    idx = np.arange(n).reshape(shape)
-    on_boundary = np.zeros(shape, dtype=bool)
-    for ax in range(ndim):
-        sl0 = [slice(None)] * ndim
-        sl1 = [slice(None)] * ndim
-        sl0[ax] = 0
-        sl1[ax] = shape[ax] - 1
-        on_boundary[tuple(sl0)] = True
-        on_boundary[tuple(sl1)] = True
-    face_a, face_b, face_w = [], [], []
-    for ax in range(ndim):
-        lo = [slice(None)] * ndim
-        hi = [slice(None)] * ndim
-        lo[ax] = slice(0, shape[ax] - 1)
-        hi[ax] = slice(1, shape[ax])
-        a = idx[tuple(lo)].ravel()
-        b = idx[tuple(hi)].ravel()
-        face_a.append(a)
-        face_b.append(b)
-        face_w.append(np.full(len(a), 1.0 / spacing[ax] ** 2))
-    return {
-        "n": n,
-        "shape": shape,
-        "boundary": np.where(on_boundary.ravel())[0],
-        "interior": np.where(~on_boundary.ravel())[0],
-        "boundary_mask": on_boundary.ravel(),
-        "face_a": np.concatenate(face_a) if face_a else np.array([], dtype=int),
-        "face_b": np.concatenate(face_b) if face_b else np.array([], dtype=int),
-        "face_w": np.concatenate(face_w) if face_w else np.array([], dtype=float),
-    }
-
-
 def divergence_form(kappa, shape, *, spacing=1.0, torch=None):
     """Assemble ``-div(kappa grad u)`` with Dirichlet boundaries on a structured grid.
 

@@ -463,17 +463,8 @@ def _diag_read(d, read_params):
 register_composite("DiagGaussian", _diag_dist, _diag_est, dist_cls=DiagonalGaussianDistribution, read=_diag_read)
 
 
-# --- linear-Gaussian state space (time series) ------------------------------------
-def _ss_err(*a, **k):
-    raise NotImplementedError("state-space models are fit via fit(); they have no single dist.")
-
-
-register_composite("StateSpace", _ss_err, _ss_err)
-
-
-# --- PDE-constrained latent field (spatiotemporal) --------------------------------
-def _pde_err(*a, **k):
-    raise NotImplementedError("PDE models are fit via fit(); they have no single dist.")
-
-
-register_composite("PDEStateSpace", _pde_err, _pde_err)
+# Linear-Gaussian state space (time series): the StateSpace composite self-registers (with its
+# Kalman/RTS+EM fit_fn) when statespace.py is imported. The PDE-constrained PDEStateSpace composite
+# self-registers from its own module, fired by whichever package owns it (pysp.ppl.physics here; the
+# pysparkplug-pde plugin once relocated) -- so this lowering hub no longer references the PDE stack.
+from pysp.ppl import statespace  # noqa: F401, E402  (import-time StateSpace registration)
