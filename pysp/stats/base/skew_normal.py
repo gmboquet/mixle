@@ -8,6 +8,9 @@ with location ``xi``, scale ``omega > 0`` and shape ``alpha`` (``alpha = 0`` rec
 sign of ``alpha`` sets the direction of skew). It samples exactly from two standard normals, and is fit
 by method of moments: the sample skewness fixes ``alpha`` through the monotone skewness-vs-shape
 relation, then the variance fixes ``omega`` and the mean fixes ``xi``.
+
+
+Reference: Azzalini, 'A class of distributions which includes the normal ones', Scand. J. Statist. (1985).
 """
 
 import math

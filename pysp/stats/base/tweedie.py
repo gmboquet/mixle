@@ -16,6 +16,9 @@ is a point mass ``P(Y=0) = exp(-lam)``; for ``y > 0`` the density is the (conver
 evaluated here in log-space via a windowed log-sum-exp over ``n``. ``E[Y] = mu`` and
 ``Var[Y] = phi * mu**p``, so the method of moments (mean for ``mu``, Pearson for ``phi``) is exact;
 ``p`` is a fixed hyperparameter (the profile likelihood over ``p`` is left to the caller).
+
+
+Reference: Jorgensen, *The Theory of Dispersion Models* (Chapman & Hall, 1997).
 """
 
 import math

@@ -14,6 +14,9 @@ word-frequency / type-token models). The mean is ``-p / ((1 - p) * log(1 - p))``
 
 The per-row score is linear in the encoded ``k`` and ``log(k)`` fields once the scalar normalizer
 ``log(-log(1 - p))`` is precomputed, so the family gets generated NumPy, Torch, and Numba kernels.
+
+
+Reference: Fisher, Corbet & Williams, 'The relation between the number of species and the number of individuals...', J. Animal Ecology (1943).
 """
 
 import math

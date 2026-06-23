@@ -6,6 +6,9 @@ LogGaussianEstimator, and the LogGaussianDataEncoder classes for use with pyspar
 Data type: (float): The LogGaussianDistribution with mu and sigma2 > 0.0, has log-density
     log(f(x;mu, sigma2)) = -log(2*pi*sigma2) - log(x) - (log(x)-mu)^2/sigma2, for positive-valued x.
 
+
+
+Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
 
 from collections.abc import Callable, Sequence

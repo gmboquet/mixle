@@ -7,6 +7,9 @@ Data type: Any. The data type is taken as the categorical object and a probabili
 
 If Data type is int, consider using pysp.stats.base.integer_categorical (IntegerCategoricalDistribution) instead.
 
+
+
+Reference: Johnson, Kemp & Kotz, *Univariate Discrete Distributions* (3rd ed., Wiley, 2005).
 """
 
 import math

@@ -16,6 +16,9 @@ Data type (int): ``K = N1 - N2`` with ``N1 ~ Poisson(mu1)``, ``N2 ~ Poisson(mu2)
 The MLE has no closed form, but the method of moments is exact and closed-form here: with sample
 mean ``m`` and variance ``v``, ``mu1 = (v + m)/2`` and ``mu2 = (v - m)/2`` (since ``E[K] = mu1-mu2``
 and ``Var[K] = mu1+mu2``), which the estimator uses (clamped to keep both rates positive).
+
+
+Reference: Skellam, 'The frequency distribution of the difference between two Poisson variates', JRSS A (1946).
 """
 
 import math
