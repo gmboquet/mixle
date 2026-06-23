@@ -6,62 +6,64 @@
 
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
-![tests](https://img.shields.io/badge/tests-1900%2B-brightgreen)
+![tests](https://img.shields.io/badge/tests-2500%2B-brightgreen)
 
-**Composable, distributed density estimation for messy, mixed-type records** — tuples of
-categories, counts, reals, vectors, sets, sequences, and trees. Specify a probabilistic model in a
-few lines and fit it with EM — locally (vectorized NumPy + Numba) or at scale on Spark, Dask, or
-Torch (GPU).
+**Composable density estimation for heterogeneous records.** A single observation can be a tuple of a
+category, a real number, a count sequence, a vector, a set, or a tree — and pysparkplug fits a
+probabilistic model to a dataset of them by expectation–maximization, locally on vectorized
+NumPy/Numba or distributed across Spark, Dask, Ray, MPI, or Torch (GPU).
 
-- **Mixed-type & composable** — a Gaussian and a categorical compose into a tuple model, tuple
-  models become mixture components, mixtures become HMM emissions. Nest to any depth.
-- **One interface, everywhere** — every family shares the same five parts (distribution · sampler ·
-  estimator · accumulator · encoder), so sampling, scoring, and estimation work uniformly.
-- **Fit anywhere** — the same `optimize(...)` call runs local NumPy/Numba or distributed Spark /
-  Dask / Torch by swapping one argument.
-- **Frequentist *or* Bayesian** — MLE, MAP, conjugate posteriors, and variational mixtures
-  (Dirichlet processes) selected by a single `prior=` switch.
-- **A PPL surface** — [`pysp.ppl`](#probabilistic-programming-pyspppl): put `free` or another
-  distribution in any parameter slot, then `.fit().sample().posterior()`.
+The unit of composition is the distribution. Leaves (Gaussian, categorical, Poisson, …) combine into
+tuples; tuples become mixture components; mixtures become HMM emissions; and so on, to any depth. A
+model and the estimator that fits it have the same shape, so what you can express you can fit.
+
+- **Heterogeneous & composable** — model a record like `('a', -0.31, [5, 4, 6])` directly, no flattening.
+- **Uniform contract** — every family exposes the same five pieces (distribution · sampler · estimator ·
+  accumulator · encoder), so sampling, scoring, and estimation behave identically across all of them.
+- **Local or distributed** — the same `optimize(...)` runs on one machine or a cluster; the backend is
+  an argument, not a rewrite.
+- **Frequentist or Bayesian** — MLE, MAP, closed-form conjugate posteriors, and variational
+  (Dirichlet-process) mixtures, selected by a single `prior=`.
+- **A probabilistic-programming surface** — [`pysp.ppl`](#probabilistic-programming-pyspppl): write the
+  generative model in a few lines, then `.fit().sample().posterior()`.
 
 ## Contents
 
 [Installation](#installation) · [Quickstart](#quickstart) · [Core concepts](#core-concepts) ·
 [Distribution catalog](#distribution-catalog) · [Probabilistic programming](#probabilistic-programming-pyspppl) ·
-[Frequentist & Bayesian](#frequentist--bayesian--one-switch) · [Engines & orchestration](#engines--orchestration) ·
+[Frequentist & Bayesian](#frequentist--bayesian) · [Engines & orchestration](#engines--orchestration) ·
 [Enumeration & ranking](#enumeration--ranking) · [Beyond fitting](#beyond-fitting) ·
-[Examples & notebooks](#examples--notebooks) · [Tests](#tests) · [License](#license)
+[Companion packages](#companion-packages) · [Examples](#examples) · [Tests](#tests) · [License](#license)
 
 ## Installation
 
-Python 3.10+ (developed on 3.12). The base install (numpy, scipy, pandas, mpmath) covers every
-distribution and local estimation. The package is published on PyPI as `pysp-learn` (the import
-name is `pysp`):
+Python 3.10+ (developed on 3.12). The base install (numpy, scipy, mpmath, networkx, tqdm) covers
+every distribution and local estimation. The package is published on PyPI as `pysp-learn`; the import
+name is `pysp`:
 
 ```sh
 pip install pysp-learn
 ```
 
-Back-ends are opt-in extras — `numba` (JIT estimation), `spark` / `dask` (distributed),
-`torch` (GPU/autograd), `umap`, or `all`:
+Acceleration and scale-out are opt-in extras — `numba` (JIT estimation), `gmpy2` (fast big-integer
+enumeration), `spark` / `dask` (distributed), `torch` (GPU/autograd), `pandas`, `umap`, or `all`:
 
 ```sh
 pip install "pysp-learn[all]"
 ```
 
-To install the latest unreleased code straight from source:
+Without an extra, that path still works — numba-flagged kernels fall back to pure Python (correct,
+slower) and the distributed backends are simply unavailable. For development:
 
 ```sh
-pip install "pysp-learn[all] @ git+https://github.com/gmboquet/pysparkplug.git"
+git clone https://github.com/gmboquet/pysparkplug && cd pysparkplug
+pip install -e ".[all]"
 ```
-
-Without extras, numba-flagged paths run as pure Python (correct, slower) and Spark/Dask inputs are
-unavailable. For development: `git clone` then `pip install -e ".[all]"`.
 
 ## Quickstart
 
-Fit a two-component mixture over heterogeneous `(category, real, variable-length count sequence)`
-records:
+A dataset where each record is a `(category, real, variable-length count sequence)` drawn from one of
+two latent clusters. Define the generating model, sample a dataset, then recover the parameters with EM:
 
 ```python
 import numpy as np
@@ -75,9 +77,11 @@ component = lambda mu, p: CompositeDistribution((
                          len_dist=CategoricalDistribution({2: 0.5, 3: 0.5})),
 ))
 truth = MixtureDistribution([component(0.0, 0.8), component(5.0, 0.2)], [0.6, 0.4])
-data = truth.sampler(seed=1).sample(2000)   # data[0] -> ('a', -0.3, [5, 4, 6])
+data = truth.sampler(seed=1).sample(2000)
+#   data[0] -> ('a', -0.59, [5, 7])      each record is a (label, real, count-sequence) tuple,
+#   data[1] -> ('b',  4.54, [7, 7])      the sequence 2 or 3 long, all from one latent cluster
 
-# Estimators mirror the distribution structure
+# The estimator mirrors the distribution's structure exactly.
 est = MixtureEstimator([CompositeEstimator((
     CategoricalEstimator(),
     GaussianEstimator(),
@@ -85,48 +89,60 @@ est = MixtureEstimator([CompositeEstimator((
 ))] * 2)
 
 model = optimize(data, est, max_its=100, rng=np.random.RandomState(1))
-print(model.w)   # ≈ [0.6, 0.4]
+print(model.w)   # ~ [0.6, 0.4] — the recovered mixing weights
 ```
 
-For the same model in a more concise dialect, see [`pysp.ppl`](#probabilistic-programming-pyspppl).
+The same model in the shorter [`pysp.ppl`](#probabilistic-programming-pyspppl) dialect is a few lines.
 
 ## Core concepts
 
-Each model family implements five cooperating pieces:
+Each family is five cooperating pieces:
 
-| Piece             | Role                                                                        |
-| ----------------- | -------------------------------------------------------------------------- |
-| `...Distribution` | Parameters + `log_density(x)` / vectorized `seq_log_density(enc)`          |
-| `...Sampler`      | Draw samples (`dist.sampler(seed).sample(size)`)                           |
-| `...Estimator`    | Specifies the model to fit; closed-form M-step via `estimate()`           |
-| `...Accumulator`  | Collects sufficient statistics (E-step), mergeable across partitions       |
-| `...DataEncoder`  | `seq_encode(data)` flattens raw Python data into NumPy for the fast path   |
+| Piece             | Role                                                                       |
+| ----------------- | ------------------------------------------------------------------------- |
+| `...Distribution` | parameters + `log_density(x)` and vectorized `seq_log_density(encoded)`    |
+| `...Sampler`      | draw observations — `dist.sampler(seed).sample(size)`                      |
+| `...Estimator`    | declares the model to fit; closed-form M-step in `estimate()`             |
+| `...Accumulator`  | sufficient statistics for the E-step, mergeable across data partitions     |
+| `...DataEncoder`  | `seq_encode(data)` packs raw Python records into arrays for the fast path  |
 
-`optimize(data, est)` (in `pysp.inference`) ties these together — EM to convergence locally
-(vectorized NumPy/Numba), scaling out to Spark/Dask/Torch/MPI by swapping one argument (see
-[Engines & orchestration](#engines--orchestration)).
+`optimize(data, est)` (from `pysp.inference`) runs EM to convergence — vectorized NumPy/Numba locally,
+or distributed by passing a `backend=` (see [Engines & orchestration](#engines--orchestration)).
+Related entry points: `best_of` (random restarts), `StreamingEstimator` / `IncrementalEstimator`
+(online EM), `fit_mle` / `fit_map` (autograd fitting with typed priors), and
+`pysp.utils.automatic.get_estimator(data)` (infer an estimator from raw data).
 
-Also available: `best_of` (random restarts), `StreamingEstimator` / `IncrementalEstimator`
-(online EM), `fit_mle` / `fit_map` (autograd fitting with typed priors), `RecordDistribution` /
-`field(...)` (named dict/DataFrame observations), and `pysp.utils.automatic.get_estimator(data)`
-(infer an estimator straight from raw data).
-
-**Library structure.** Objects (the families) live in `pysp.stats` (and the `pysp.dist` /
-`pysp.process` / `pysp.models` namespaces); the verbs that act on them are organized as concerns —
-`pysp.inference` (fit: MLE/EM/MAP/conjugate/NUTS/VI + Fisher), `pysp.enumeration` (rank / top-k /
-quantization), `pysp.sampling`, and `pysp.ops` (quantize / condition / marginalize / …). `pysp.describe(x)`
-reports in plain English what any object supports.
+**Library layout.** The families (objects) live in `pysp.stats`; the operations on them are grouped by
+concern — `pysp.inference` (MLE / EM / MAP / conjugate / NUTS / VI / Fisher), `pysp.enumeration`
+(rank / top-k / quantized unranking), and `pysp.ops` (quantize / condition / marginalize / project).
+Drawing from a model is a method, not a concern: `pysp.stats.sample(model, n)` works for any samplable
+object. `pysp.describe(x)` reports, in plain English, what any object supports.
 
 ## Distribution catalog
 
-~90 composable families live in `pysp.stats`, grouped into subpackages (`leaf`, `multivariate`,
-`combinator`, `sets`, `latent`, `graph`, `bayes`, `compute`) but all re-exported at the top level —
-`from pysp.stats import GaussianDistribution` works regardless of where the file lives.
+About 90 families live in `pysp.stats`, organized into subpackages (`leaf`, `multivariate`,
+`combinator`, `sets`, `latent`, `graph`, `bayes`, `compute`) and re-exported at the top level. What
+distinguishes pysparkplug is that the **combinators turn a heterogeneous record into one model** —
+here is what a single datum looks like under each:
 
-- **Scalar / basic:** Gaussian, Student-t / Cauchy, Logistic, LogGaussian, Laplace, Uniform,
+| Model | One observation |
+| --- | --- |
+| `GaussianDistribution` / `PoissonDistribution` | `-0.31` / `7` |
+| `CategoricalDistribution` | `'b'` |
+| `MultivariateGaussianDistribution` | `[1.2, -0.4, 0.8]` |
+| `CompositeDistribution((Cat, Gaussian, Poisson))` | `('a', -0.31, 7)` |
+| `RecordDistribution({...})` | `{'country': 'US', 'age': 41, 'spend': 12.5}` |
+| `SequenceDistribution(Poisson)` | `[5, 4, 6]` (variable length) |
+| `OptionalDistribution(Gaussian)` | `-0.31` or `None` (missing) |
+| `BernoulliSetDistribution` | `{'sports', 'news'}` |
+| `MixtureDistribution([...])` | a component's shape, with the cluster latent |
+| `HiddenMarkovModelDistribution` | `[0.1, 5.0, 4.9, 0.2]` (states latent) |
+| graph families | an adjacency matrix |
+
+- **Scalar / univariate:** Gaussian, Student-t / Cauchy, Logistic, LogGaussian, Laplace, Uniform,
   Exponential, Gamma, Inverse Gamma, Inverse Gaussian, Half-Normal, Gumbel, Beta, Weibull, Rayleigh,
   Pareto, Poisson, Bernoulli, Geometric, Binomial, Negative Binomial, Log-Series, von Mises, Dirichlet,
-  categorical, plus multivariate / diagonal Gaussian, von Mises–Fisher, and multivariate Student-t.
+  categorical; multivariate / diagonal Gaussian, von Mises–Fisher, multivariate Student-t.
 - **Combinators:** `CompositeDistribution` (tuples), `RecordDistribution` (named fields),
   `SequenceDistribution`, `OptionalDistribution` (missing data), `TransformDistribution`,
   `ConditionalDistribution`, `WeightedDistribution`.
@@ -135,141 +151,132 @@ reports in plain English what any object supports.
   hidden associations, IBP, Pitman-Yor processes, Bernoulli sets.
 - **Permutations & graphs:** Mallows and Plackett-Luce rankings, matchings, spanning trees, random
   graphs (Erdős–Rényi, stochastic block, random dot-product), Spearman ranking.
-- **Processes:** a general linear birth-death-sampling process (`BirthDeathSamplingDistribution` —
-  fossilized birth-death is the positive-`sampling_rate` case).
+- **Processes:** a general linear birth-death-sampling process (fossilized birth-death is the
+  positive-`sampling_rate` case).
 - **Bayesian:** conjugate priors (NormalGamma, NormalWishart, MvnGamma, Dirichlet, SymmetricDirichlet)
   and variational Dirichlet-process / hierarchical-DP mixtures.
 
-Estimators accept `pseudo_count` (regularization), `prior` (a conjugate prior — `None` gives MLE),
-and `keys` (tying statistics across model parts). HMM-family models take `use_numba=True` for
-parallel Numba kernels (the first call pays a cached JIT cost).
+Estimators accept `pseudo_count` (regularization), `prior` (a conjugate prior; `None` is MLE), and
+`keys` (tying statistics across model parts). HMM-family models take `use_numba=True` for parallel
+Numba kernels (the first call pays a cached JIT cost).
 
-**API naming.** One stem per family (`<Stem>Distribution` / `Estimator` / `Sampler` /
-`Accumulator`, …) and descriptive argument names. Legacy spellings stay as aliases (prefer `weights`
-over `w`, `covariance` over `covar`, `max_iter` over `max_its`, …); passing both raises `TypeError`.
+**Naming.** One stem per family (`<Stem>Distribution` / `Estimator` / `Sampler` / `Accumulator`),
+descriptive keyword arguments, and legacy spellings kept as aliases (prefer `weights` over `w`,
+`covariance` over `covar`, `max_iter` over `max_its`); passing both raises `TypeError`.
 
 ## Probabilistic programming (`pysp.ppl`)
 
-`pysp.ppl` is a concise, optional dialect over the same distributions. **One rule:** any parameter
-slot is a value, the token `free` (estimate it), or another distribution (a prior — random /
-hierarchical):
+`pysp.ppl` is a concise dialect over the same distributions. **One rule:** any parameter slot is a
+value, the token `free` (estimate it), or another distribution (a prior — random / hierarchical):
+
+```python
+from pysp.ppl import Normal, free
+
+Normal(0.0, 1.0)             # fixed parameters
+Normal(free, free)           # estimate the mean and standard deviation
+Normal(Normal(0, 10), 1.0)   # a prior on the mean (hierarchical)
+```
+
+Build a model over your data, `.fit(...)`, and query it. A mixture over 1-D reals and an HMM over
+real-valued sequences:
 
 ```python
 from pysp.ppl import Normal, Mix, Markov, free
 
-Normal(0.0, 1.0)             # value        — fixed parameter
-Normal(free, free)           # free         — estimate mean & sd
-Normal(Normal(0, 10), 1.0)   # distribution — a prior on the mean (hierarchical)
+data = [-2.1, 1.9, -1.8, 2.3, -2.0, 2.1]            # reals from two clusters
+m = Mix([Normal(free, free), Normal(free, free)]).fit(data)
+m.posterior(data)                                    # per-point responsibilities
+
+sequences = [[0.1, 0.2, 5.1, 4.9], [4.8, 5.0], [0.0, 0.1, 0.2]]   # variable-length real sequences
+Markov(Normal(free, free), states=2).fit(sequences)  # 2-state Gaussian HMM (k-means++ seeded)
 ```
 
-Build a model, `.fit(data)`, then query with `.sample` / `.log_prob` / `.posterior` / `.params`:
+A `free` coefficient times a `Field` makes the same surface a generalized linear model — `given=`
+supplies the predictor columns:
 
 ```python
-m = Mix([Normal(free, free), Normal(free, free)]).fit(data)   # 2-component Gaussian mixture
-m.posterior(data)                                             # responsibilities
-Markov(Normal(free, free), states=2).fit(sequences)          # 2-state Gaussian HMM (k-means++ seeded)
+from pysp.ppl import Normal, Bernoulli, Field, free
+
+#   y[i] ~ Normal(b0 + b1*x[i] + b2*z[i],  sd),  fit b0, b1, b2, sd
+Normal(free * Field("x") + free * Field("z") + free, free).fit(y, given={"x": x, "z": z})
+
+#   y[i] in {0, 1} ~ Bernoulli(sigmoid(b0 + b1*x[i]))   (logistic regression)
+Bernoulli(free * Field("x") + free).fit(y, given={"x": x})
 ```
 
-A `free` coefficient times a `Field` turns the same surface into generalized linear models:
-
-```python
-from pysp.ppl import Normal, Bernoulli, Poisson, Field, free
-
-Normal(free * Field("x") + free * Field("z") + free, free).fit(y, given={"x": x, "z": z})  # linear
-Bernoulli(free * Field("x") + free).fit(y, given={"x": x})                                 # logistic
-Poisson(free * Field("x") + free).fit(y, given={"x": x})                                   # Poisson
-```
-
-`how=` selects the engine — `auto` (default) takes an exact route when one exists, else falls back to
+`how=` selects the inference route — `auto` (default) takes an exact path when one exists, otherwise
 EM / gradient / sampling:
 
 ```python
 Mix([Normal(free, free), Normal(free, free)]).fit(data, how="nuts")
-Markov(Normal(free, free), states=2).fit(seqs, how="ensemble", chains=4, parallel=True)  # R̂ + pooled ESS
+Markov(Normal(free, free), states=2).fit(sequences, how="ensemble", chains=4, parallel=True)  # R̂ + ESS
 # how = auto | conjugate | conjugate_mixture | em | map | vi | vmp | mcmc | hmc | nuts | ensemble
 ```
 
-**Constraints** among random variables are plain comparisons (combine with `& | ~`); they shape
-both inference and sampling:
+Constraints among named variables are plain comparisons (combine with `& | ~`); they shape both
+inference and sampling:
 
 ```python
+from pysp.ppl import Normal, Mix, constrain
+
 a, b = Normal(0, 10, name="a"), Normal(0, 10, name="b")
 Mix([Normal(a, 1), Normal(b, 1)]).fit(data, constraints=a < b)   # ordered means break label-switching
-constrain(2*a - b >= 1).sample(100)                              # draw from the truncated joint
+constrain(2 * a - b >= 1).sample(100)                            # draw from the truncated joint
 ```
 
-```python
-# model constructors: Mix · Seq · Markov · LDA · MVN · DiagGaussian · LocalLevel · AR1 · Graph
-compare([model_a, model_b], data)   # rank fitted models, best first
-```
+Model constructors: `Mix · Seq · Markov · LDA · MVN · DiagGaussian · LocalLevel · AR1 · Graph`;
+`compare([model_a, model_b], data)` ranks fitted models best-first. For conjugate / exponential-family
+/ mixture models `.fit(...)` returns the **exact** posterior in closed form; otherwise it falls back to
+EM / gradient / sampling. The dialect is a thin layer — the `pysp.stats` classes underneath are
+untouched.
 
-**PDE-constrained state-space models** (`pysp.ppl.pde`) fit a latent spatial field that evolves by a
-PDE (method-of-lines discretization → linear/nonlinear transition) from noisy spatiotemporal
-snapshots, via multivariate Kalman/RTS + EM or the autograd adjoint:
+## Frequentist & Bayesian
 
-```python
-from pysp.ppl.pde import fit_diffusivity, fit_reaction_diffusion
-
-fit_diffusivity(snapshots, dx=dx, dt=dt)          # infer a 1-D diffusion coefficient + noise
-fit_reaction_diffusion(snapshots, dx=dx, dt=dt)   # nonlinear Fisher-KPP: du/dt = D u_xx + r u(1-u)
-```
-
-It's a thin surface — the `pysp.stats` classes underneath are untouched.
-
-For conjugate / exponential-family / mixture models, `.fit(...)` returns the **exact** posterior in
-closed form with no sampling; for general posteriors it falls back to EM / gradient / sampling
-(`how='auto'` picks the route the model admits).
-
-## Frequentist & Bayesian — one switch
-
-The prior is the single switch — no prior is maximum likelihood, a conjugate `prior=` makes the
-same machinery Bayesian:
+The prior is the only switch. No prior is maximum likelihood; a conjugate `prior=` makes the identical
+machinery Bayesian:
 
 ```python
 from pysp.inference.priors import NormalGammaPrior
 
 GaussianEstimator()                          # MLE
-GaussianEstimator(prior=NormalGammaPrior())  # closed-form conjugate posterior — same EM call
+GaussianEstimator(prior=NormalGammaPrior())  # closed-form conjugate posterior — same optimize() call
 ```
 
-`optimize` / `fit` auto-select the objective from the model (MLE, MAP, or variational ELBO; force it
-with `objective=`); `fit(...)` returns the posterior, `BayesianStreamingEstimator` carries it across
-batches, and `pysp.stats.dpm` / `hdpm` add (hierarchical) Dirichlet-process mixtures. Gradient MAP
-with typed priors is first-class too:
+`optimize` / `fit` select the objective from the model (likelihood, MAP, or variational ELBO; override
+with `objective=`). `BayesianStreamingEstimator` carries a posterior across batches, and
+`pysp.stats.bayes` adds (hierarchical) Dirichlet-process mixtures. Gradient MAP with typed priors is
+first-class:
 
 ```python
 from pysp.engines import TorchEngine
-from pysp.inference.fit import fit_map
+from pysp.inference.gradient_fit import fit_map
 from pysp.inference.priors import DirichletPrior, MixturePrior, NormalGammaPrior
 
 enc = model.dist_to_encoder().seq_encode(data)
-fitted, objective = fit_map(enc, model, engine=TorchEngine(device="cpu", dtype="float64"),
-                            priors=MixturePrior(
-                                components=[NormalGammaPrior(mu0=-2.0), NormalGammaPrior(mu0=2.0)],
-                                weights=DirichletPrior([2.0, 2.0])))
+fitted, objective = fit_map(
+    enc, model, engine=TorchEngine(device="cpu", dtype="float64"),
+    priors=MixturePrior(
+        components=[NormalGammaPrior(mu0=-2.0), NormalGammaPrior(mu0=2.0)],
+        weights=DirichletPrior([2.0, 2.0]),
+    ),
+)
 ```
 
 ## Engines & orchestration
 
-Distributions own the likelihood and sufficient-statistic math; **compute engines** supply the
-array ops, device, and precision — so the same EM contract runs unchanged on NumPy, Numba, Torch
-(CPU / GPU / multi-device), or a symbolic backend.
+Distributions own the likelihood and sufficient-statistic math; **compute engines** supply the array
+operations, device, and precision — so the same EM contract runs unchanged on NumPy, Numba, Torch (CPU
+/ GPU / multi-device), or a symbolic backend.
 
 ```python
 from pysp.engines import TorchEngine
 
 optimize(data, est, engine=TorchEngine(device="cuda", dtype="float32"))   # GPU
 optimize(data, est, engine=TorchEngine(mesh=mesh, shard="components"))    # multi-GPU (DTensor)
+optimize(data, est, precision="auto")   # pick float32/float64 from the data; stats accumulate in float64
 ```
 
-**Precision is data-aware** — `precision='auto'` picks float32/float64 from the data and engine, and
-sufficient statistics always accumulate in float64, so reduced precision stays safe:
-
-```python
-optimize(data, est, precision="auto")
-```
-
-**Scale by swapping the back-end, not the model** — local and distributed go through identical math:
+Scale out by changing the backend, not the model — local and distributed go through identical math:
 
 ```python
 optimize(data, est)                                   # local NumPy / Numba
@@ -281,27 +288,19 @@ optimize(data, est, backend="ray")                    # Ray
 optimize(data, est, backend="lightning")              # PyTorch Lightning
 ```
 
-New frameworks plug in by registering a factory (`register_encoded_data_backend`) — the same
-"register, don't branch" pattern as the engines, so `ray` and `lightning` were added without
-editing the dispatch. For a purely local speedup, `encoded_data(..., parallel_chunks=True)` folds
-resident chunks across threads (bit-identical to serial).
-
-**The planner** (`pysp.utils.parallel.planner`) turns a hardware budget into a memory-aware
-*placement* — chunking, device assignment, and (on Torch) model sharding — that you compute once and
-reuse:
+New frameworks register a factory (`register_encoded_data_backend`) rather than editing a dispatch.
+The **planner** (`pysp.utils.parallel.planner`) turns a hardware budget into a memory-aware placement
+(chunking, device assignment, Torch sharding) you compute once and reuse:
 
 ```python
 from pysp.utils.parallel.planner import plan, Resources
 
 placement = plan(data, model=model, estimator=est, resources=Resources.local(num_cpus=8))
 optimize(data, est, placement=placement)
-optimize(data, est, resources=Resources.local(num_cpus=8))   # or let optimize plan it for you
 ```
 
-`Resources.{single_cpu, local, from_spark, from_dask, from_mpi, from_specs}` describe the hardware.
-
-**Symbolic export.** The `SymbolicEngine` runs a distribution's density through SymPy, so a model can
-emit its closed-form log-density as LaTeX / SymPy / Sage:
+The `SymbolicEngine` runs a density through SymPy, so a model can emit its closed-form log-density as
+LaTeX / SymPy / Sage:
 
 ```python
 from pysp.engines import SYMBOLIC_ENGINE, to_latex
@@ -314,76 +313,63 @@ to_latex(GaussianDistribution(0.0, 1.0).backend_seq_log_density(x, SYMBOLIC_ENGI
 ## Enumeration & ranking
 
 Discrete and structured models can **enumerate their support in descending-probability order** and
-answer exact **rank / cumulative-probability** queries — even when the support is enormous or
-unbounded.
+answer exact **rank / cumulative-probability** queries — even when the support is enormous or unbounded.
 
 ```python
-e = dist.enumerator()               # the weighted-structure enumerator
-e.top_k(5)                          # the 5 most probable (value, log_prob), in order
-e.top_p(0.95)                       # smallest set covering 95% of the mass (discrete nucleus)
-e.rank(value)                       # exact-head + sampling rank & CDF of an observation
-e.seek(10_000)                      # the ~10,000th most probable value, by structural count-DP
-e.from_index(10_000)                # iterate (value, log_prob) descending from a structural index
-e.nucleus_size(0.95)                # size of the 95% nucleus without materializing it
+e = dist.enumerator()
+e.top_k(5)            # the 5 most probable (value, log_prob), in order
+e.top_p(0.95)         # smallest set covering 95% of the mass (the discrete nucleus)
+e.rank(value)         # how many values are strictly more probable than `value`
+e.seek(10_000)        # the ~10,000th most probable value, by structural count-DP
 ```
 
-`Composite` / `Record` also support **conditional enumeration** — most-probable completions given
-some fields, best-first:
-
-```python
-record.conditional_enumerator({"country": "US"}).top_k(5)   # 5 likeliest records with country=US
-```
-
-For decomposable families (`Composite` / `Record` / `Sequence` / `MarkovChain`), rank↔value is an
+For decomposable families (`Composite` / `Record` / `Sequence` / `MarkovChain`), rank ↔ value is an
 exact count dynamic program at any depth (`count_dp_rank`, `count_dp_seek`, `cumulative_probability`,
-`count_dp_top_p` — the nucleus *size* without enumerating it, `mixture_cross_rank`). For very large
-or infinite supports, **budget-bounded quantized indexes** seek and unrank over just the
-most-probable region without enumerating everything:
+`count_dp_top_p`). For enormous or infinite supports, budget-bounded quantized indexes seek and unrank
+over just the most-probable region (`count_budget_index`); with the `gmpy2` extra the underlying
+big-integer count convolution uses GMP's FFT multiply. Non-decomposable families (mixtures, HMMs) have
+provably hard exact marginal rank, so they return the Viterbi/tropical bound or a certified
+Monte-Carlo estimate (`density_rank`, with a reported standard error) instead of a silent approximation.
 
-```python
-index = dist.count_budget_index(budget_bits=20)               # index the top ~2**20 values
-for value, log_prob in dist.count_budget_distinct(budget_bits=20):
-    ...
-```
+**Continuous families** realize the same operations through the CDF and its inverse: every univariate
+continuous leaf has an exact `cdf(x)` and `quantile(q)`; multivariate Gaussian and von Mises–Fisher
+expose an exact probability-ordered cumulative plus `density_quantile(q)`. Any other samplable family
+falls back to a Monte-Carlo estimate, so the four operations are reachable everywhere.
 
-`pysp.enumeration` provides the shared machinery (bounded best-first union, quantization,
-Kronecker-substitution count convolution, k-best assignment / spanning-tree enumeration).
-
-**Continuous families** realize the same operations through the CDF and its inverse. Every univariate
-continuous leaf has an exact `cdf(x)` (the "index of `x`") and `quantile(q)` (the value at
-cumulative-probability `q`); multivariate Gaussian and von Mises–Fisher expose an exact
-probability-ordered cumulative plus `density_quantile(q)` (a representative point on the `q`-HDR
-contour) — both surfaced via `density_rank` as method `exact-analytic`. Any other samplable family
-falls back to a Monte-Carlo `density_rank` / `density_quantile(q)` / `density_enumeration(n)`, so all
-four operations are reachable everywhere — exact where the support is countable or has a closed-form
-density quantile, stochastic representatives otherwise.
+`pysp.enumeration` provides the shared machinery (bounded best-first union, quantization, count
+convolution, k-best assignment / spanning-tree enumeration, HMM path enumeration).
 
 ## Beyond fitting
 
-- **Inference & analysis** — all under `pysp.inference`: `pysp.inference.mcmc` (Metropolis–Hastings /
-  HMC / VMP), `pysp.inference.em` (hard, annealed, ECM, Monte-Carlo, variational, online, restart EM),
-  `pysp.inference.fisher` (Fisher-geometry views), plus `pysp.utils.hvis` (model-based embeddings —
-  t-SNE / UMAP).
-- **Engine-agnostic inference facade** — `pysp.inference` runs NUTS or ADVI on an *arbitrary*
-  differentiable target (bring your own `value_and_grad`) and dispatches to a registered backend
-  (NumPy / Numba / Torch / JAX). Multiple chains run in parallel (`parallel="thread"|"process"`,
-  with R̂ + pooled ESS). The underlying `pysp.inference.mcmc` NUTS does dual-averaging step-size and
-  optional diagonal mass-matrix adaptation (`adapt_mass=True`). (`pysp.infer` remains as a deprecated
-  alias.)
-- **Design of experiments & Bayesian optimization** — `pysp.doe` provides classical designs
-  (`latin_hypercube`, `maximin_latin_hypercube`, `full_factorial`, `random_design`) and sequential
-  GP-EI Bayesian optimization (`minimize`, `propose_next`, `expected_improvement`).
-- **Non-iid & supervised models** — `pysp.models` holds GP regression, neural regressors, random
-  forests (a conditional `p(y | x)` leaf that fits the estimation framework), random graphs,
-  grammars, and knowledge graphs.
+- **Inference & analysis** (`pysp.inference`): `mcmc` (Metropolis–Hastings / HMC / NUTS / VMP), `em`
+  (hard, annealed, ECM, Monte-Carlo, variational, online, restart), `fisher` (Fisher-geometry views),
+  and the `Posterior` algebra — `posterior(model, data, over="latent"|"params"|"predictive")` returns
+  one uniform object you can `sample` / `mean` / `interval`. An engine-agnostic facade runs NUTS or
+  ADVI on an arbitrary differentiable target (bring your own `value_and_grad`) with parallel chains
+  (R̂ + pooled ESS).
+- **Design & analysis of experiments** (`pysp.doe`): classical designs (`latin_hypercube`,
+  `maximin_latin_hypercube`, `full_factorial`, `sobol_design`), GP Bayesian optimization
+  (`minimize`, `expected_improvement`), and the analysis half — Sobol/Morris sensitivity, uncertainty
+  propagation, and Kennedy-O'Hagan calibration.
+- **Embeddings** (`pysp.utils.hvis`): model-based t-SNE / UMAP over per-record posteriors.
+- **Supervised & non-iid models** (`pysp.models`): GP regression, neural regressors, random forests (a
+  conditional `p(y | x)` leaf that fits the estimation framework), random graphs, grammars, and
+  knowledge graphs.
 
-## Examples & notebooks
+## Companion packages
 
-Worked tutorials live in the companion
-[**pysparkplug-notebooks**](https://github.com/gmboquet/pysparkplug-notebooks) repo.
+- [**pysparkplug-pde**](https://github.com/gmboquet/pysparkplug-pde) — PDE/ODE-constrained Bayesian
+  inverse problems (diffusion, Navier–Stokes, wave/full-waveform inversion, FEM, level-set shape
+  inference). It builds on pysp's field models and registers itself as a plugin: `import
+  pysparkplug_pde` makes `PDE(operator).fit(snapshots)` and the forward solvers available, while pysp's
+  own core stays free of PDE machinery.
+- [**pysparkplug-notebooks**](https://github.com/gmboquet/pysparkplug-notebooks) — worked tutorials and
+  master-level courses.
 
-Runnable scripts ship in [examples/](https://github.com/gmboquet/pysparkplug/tree/main/examples) — `examples_pysp/` (core), `examples_bayes/`
-(Bayesian), `examples_spark/`, `examples_mp/`, and `examples_mpi/`:
+## Examples
+
+Runnable scripts ship in [examples/](https://github.com/gmboquet/pysparkplug/tree/main/examples) —
+`examples_pysp/` (core), `examples_bayes/`, `examples_spark/`, `examples_mp/`, `examples_mpi/`:
 
 ```sh
 cd examples/examples_pysp
@@ -391,9 +377,8 @@ python mixture_example.py
 python hidden_markov_example.py
 ```
 
-Every script is self-contained — it samples from a known model, then refits and recovers it (no
-downloads). The `gallery_*_example.py` scripts tour the families in bulk; the rest focus on
-individual models end to end.
+Each script is self-contained: it samples from a known model, refits, and recovers it — no downloads.
+The `gallery_*_example.py` scripts tour the families in bulk; the rest cover one model end to end.
 
 **Running on Spark.** PySpark 4.x needs a JVM (Java 17/21), and workers must use the driver's Python:
 
@@ -404,22 +389,22 @@ export PYSPARK_DRIVER_PYTHON=$PYSPARK_PYTHON
 python examples/examples_spark/mixture_example.py
 ```
 
-Estimation helpers detect RDD inputs automatically, so a model fit locally and one fit on a cluster
-go through identical math.
+RDD inputs are detected automatically, so a model fit locally and one fit on a cluster run identical math.
 
 ## Tests
 
 ```sh
-python -m pytest -m fast        # quick correctness gate
-python -m pytest -m "not optional"   # full local suite
+python -m pytest                              # fast gate (parallel), ~25 s
+python -m pytest -m "not optional and not benchmark"   # full suite incl. slow tests
 ```
 
-Tests use `unittest.TestCase` internally with pytest markers / CI tiers (see
-[`pysp/tests/README.md`](https://github.com/gmboquet/pysparkplug/blob/main/pysp/tests/README.md)). `base_dist_test.py` checks each distribution
-end-to-end: sampler repeatability, `str`/`eval` round-trips, vectorized-vs-scalar densities, and
-EM convergence.
+The suite is `unittest.TestCase` collected under pytest with marker tiers (see
+[`pysp/tests/README.md`](https://github.com/gmboquet/pysparkplug/blob/main/pysp/tests/README.md)).
+`base_dist_test.py` exercises each family end to end: sampler repeatability, `str`/`eval` round-trips,
+vectorized-vs-scalar density agreement, and EM convergence.
 
 ## License
 
-MIT — see [LICENSE](https://github.com/gmboquet/pysparkplug/blob/main/LICENSE) and [NOTICE](https://github.com/gmboquet/pysparkplug/blob/main/NOTICE). Originally developed at Lawrence Livermore
-National Laboratory (LLNL-CODE-844837).
+MIT — see [LICENSE](https://github.com/gmboquet/pysparkplug/blob/main/LICENSE) and
+[NOTICE](https://github.com/gmboquet/pysparkplug/blob/main/NOTICE). Originally developed at Lawrence
+Livermore National Laboratory (LLNL-CODE-844837).
