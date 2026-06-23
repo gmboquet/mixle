@@ -32,7 +32,7 @@ from typing import Any, TypeVar
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
 from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge
 from pysp.stats.combinator.null_dist import NullAccumulator, NullAccumulatorFactory, NullDistribution, NullEstimator

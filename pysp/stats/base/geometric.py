@@ -19,7 +19,7 @@ from typing import Any, Optional
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.stats.base.beta import BetaDistribution
 from pysp.stats.compute.pdist import (

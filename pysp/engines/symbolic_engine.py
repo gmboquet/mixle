@@ -554,7 +554,7 @@ _EVAL_OPS: dict[str, Callable[..., Any]] = {
 #: Shared symbolic engine; arithmetic on symbolic nodes/object arrays dispatches here.
 SYMBOLIC_ENGINE = SymbolicEngine()
 
-# Tag scalar expression nodes so pysp.arithmetic recovers the symbolic engine.
+# Tag scalar expression nodes so pysp.engines.arithmetic recovers the symbolic engine.
 SymbolicExpression.__pysp_engine__ = SYMBOLIC_ENGINE
 
 

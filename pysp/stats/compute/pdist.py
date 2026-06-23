@@ -12,7 +12,7 @@ from typing import Any, Generic, Optional, TypeVar
 
 import numpy as np
 
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 
 SS = TypeVar("SS")
 

@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import maxrandint
 from pysp.inference.mcmc.parameter_bridge import sample_parameter_posterior
 from pysp.stats.bayes.conjugate import ConjugatePosterior, conjugate_posterior, is_conjugate_family
 from pysp.stats.compute.posterior import Posterior

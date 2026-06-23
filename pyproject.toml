@@ -116,8 +116,8 @@ extend-exclude = ["examples"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = [
-    "F403", # `from pysp.arithmetic import *` is an intentional dispatch namespace
-    "F405", #   (pysp.arithmetic defines __all__); the star is deliberate, not accidental.
+    "F403", # `from pysp.engines.arithmetic import *` is an intentional dispatch namespace
+    "F405", #   (pysp.engines.arithmetic defines __all__); the star is deliberate, not accidental.
     "E501", # line length is governed by the formatter, not flagged by the linter.
     "B008", # immutable sentinel instances as defaults (e.g. NullDistribution()) are intentional.
     # The rules below are deliberately not enforced over this scientific codebase; they are

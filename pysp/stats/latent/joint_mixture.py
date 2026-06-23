@@ -23,8 +23,8 @@ import numpy as np
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
-from pysp.arithmetic import *
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import *
+from pysp.engines.arithmetic import maxrandint
 from pysp.enumeration.algorithms import BufferedStream, ProductEnumerator, best_first_union
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,

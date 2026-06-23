@@ -28,7 +28,7 @@ from scipy.special import (  # noqa: F401  -- re-exported
 )
 from scipy.special import logsumexp as _scipy_logsumexp
 
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 
 D1 = digamma(1.0)
 

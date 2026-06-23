@@ -26,8 +26,8 @@ from typing import Any, TypeVar
 import numpy as np
 from scipy.sparse import csr_matrix, lil_matrix
 
-from pysp.arithmetic import *
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import *
+from pysp.engines.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,

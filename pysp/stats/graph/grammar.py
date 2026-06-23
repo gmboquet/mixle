@@ -15,7 +15,7 @@ import networkx.algorithms.isomorphism as iso
 import numpy as np
 from networkx.readwrite import json_graph
 
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,

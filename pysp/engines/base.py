@@ -85,7 +85,7 @@ class ComputeEngine(ABC):
 
     # Mathematical constants are part of the engine's arithmetic policy: a numeric engine returns
     # plain floats, but an exact/symbolic engine overrides these so that e.g. ``pi`` stays a symbolic
-    # ``pi`` (and ``half`` an exact 1/2) instead of collapsing to a float.  ``pysp.arithmetic`` reads
+    # ``pi`` (and ``half`` an exact 1/2) instead of collapsing to a float.  ``pysp.engines.arithmetic`` reads
     # them from the active engine so call sites can be backend-neutral.
     pi = math.pi
     e = math.e

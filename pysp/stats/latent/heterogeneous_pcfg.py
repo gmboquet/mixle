@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import maxrandint
 from pysp.enumeration.algorithms import (
     BufferedStream,
     LazyQuantizedEnumerationIndex,

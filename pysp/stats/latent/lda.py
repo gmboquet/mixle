@@ -25,7 +25,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma, gammaln, logsumexp
 
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
 from pysp.stats.compute.posterior import MeanFieldLDAPosterior
 from pysp.stats.bayes.dirichlet import DirichletDistribution
