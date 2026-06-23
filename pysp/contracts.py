@@ -1,11 +1,11 @@
 """pysp.contracts — every contract (ABC / Protocol) in one import.
 
-The capability vocabulary was correct but spread across ~8 modules (`capability`, `pdist`, `relations`,
-`engines.base`, `planner`, `utils.em`, `ppl._operator`, `doe._contracts`). This module gathers them so
+The capability vocabulary was correct but spread across several modules (`capability`, `pdist`,
+`relations`, `engines.base`, `planner`, `utils.em`, `doe._contracts`). This module gathers them so
 the whole contract surface has one home:
 
     from pysp.contracts import Distribution, Enumerable, Conditionable, Relation, ComputeEngine, \
-        ForwardOperator, Surrogate, EMStrategy
+        Surrogate, EMStrategy
 
 The light contracts (the object cast + the capability protocols) are imported eagerly; the heavier
 subsystem roles are resolved lazily (PEP 562 ``__getattr__``) so this stays a cheap leaf import with no
@@ -58,8 +58,6 @@ if TYPE_CHECKING:  # let static tools / __all__ see the lazily-resolved subsyste
     from pysp.engines.base import ComputeEngine
     from pysp.enumeration.quantization.semiring import DecomposableSemiring
     from pysp.inference.em import EMStrategy
-    from pysp.ppl.physics._operator import ForwardOperator
-    from pysp.ppl.physics.dynamics import DynamicsOperator
     from pysp.relations import Relation
     from pysp.stats.compute.kernel import Kernel, KernelFactory
     from pysp.utils.parallel.planner import EncodedFold
@@ -73,8 +71,6 @@ _LAZY: dict[str, tuple[str, str]] = {
     "DecomposableSemiring": ("pysp.enumeration.quantization.semiring", "DecomposableSemiring"),
     "EMStrategy": ("pysp.inference.em", "EMStrategy"),
     "EncodedFold": ("pysp.utils.parallel.planner", "EncodedFold"),
-    "DynamicsOperator": ("pysp.ppl.physics.dynamics", "DynamicsOperator"),
-    "ForwardOperator": ("pysp.ppl.physics._operator", "ForwardOperator"),
     "Surrogate": ("pysp.doe._contracts", "Surrogate"),
     "Acquisition": ("pysp.doe._contracts", "Acquisition"),
     "Criterion": ("pysp.doe._contracts", "Criterion"),
@@ -129,8 +125,6 @@ __all__ = [
     "DecomposableSemiring",
     "EMStrategy",
     "EncodedFold",
-    "DynamicsOperator",
-    "ForwardOperator",
     "Surrogate",
     "Acquisition",
     "Criterion",

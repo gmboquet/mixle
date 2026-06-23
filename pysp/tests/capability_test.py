@@ -245,7 +245,7 @@ def test_catalog_is_the_single_vocabulary():
     for c in cap.ALL_CAPABILITIES:
         if c.__name__ != "SupportsBackendComponentScoring":  # internal variant
             assert c.__name__ in names, f"{c.__name__} missing from the catalog"
-    assert {"Relation", "ComputeEngine", "ForwardOperator", "Surrogate", "EncodedFold"} <= names
+    assert {"Relation", "ComputeEngine", "Surrogate", "EncodedFold"} <= names
     assert cap.render_catalog_markdown().startswith("| Capability |")
 
 
