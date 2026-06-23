@@ -215,11 +215,22 @@ def _extract_observation(x: Any, directed: bool = False, fallback_assignments: A
 
 
 def _edge_counts(adj: np.ndarray, directed: bool, self_loops: bool) -> tuple[float, float]:
-    total = 0.0
-    successes = 0.0
-    for i, j in _edge_indices(adj.shape[0], directed=directed, self_loops=self_loops):
-        successes += adj[i, j]
-        total += 1.0
+    n = adj.shape[0]
+    diag = np.trace(adj)
+    if directed:
+        if self_loops:
+            total = float(n * n)
+            successes = float(adj.sum())
+        else:
+            total = float(n * (n - 1))
+            successes = float(adj.sum() - diag)
+    else:
+        if self_loops:
+            total = float(n * (n + 1) // 2)
+            successes = float(adj[np.triu_indices(n, k=0)].sum())
+        else:
+            total = float(n * (n - 1) // 2)
+            successes = float(adj[np.triu_indices(n, k=1)].sum())
     return total, successes
 
 

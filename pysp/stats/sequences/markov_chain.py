@@ -1362,38 +1362,22 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             if v != 0:
                 self.init_count_map[inv_key_map[i]] = self.init_count_map.get(inv_key_map[i], 0.0) + v
 
-        """
-        trans_count = np.bincount(prev_x*key_sz + next_x, weights=weights[idx1], minlength=key_sz*key_sz)
-        trans_count = np.reshape(trans_count, (key_sz, key_sz))
-        trans_count_nz1, trans_count_nz2 = np.nonzero(trans_count)
+        # Aggregate transition weights over (prev, next) pairs in one vectorized pass,
+        # then scatter only the distinct nonzero pairs into the sparse count map.
+        if len(prev_x) > 0:
+            flat = np.asarray(prev_x) * key_sz + np.asarray(next_x)
+            trans_count = np.bincount(flat, weights=weights[idx1], minlength=key_sz * key_sz)
+            nz = np.nonzero(trans_count)[0]
+            for f in nz:
+                k1 = inv_key_map[f // key_sz]
+                k2 = inv_key_map[f % key_sz]
+                v = trans_count[f]
 
-        for i in range(len(trans_count_nz1)):
-            j1 = trans_count_nz1[i]
-            j2 = trans_count_nz2[i]
-            k1 = inv_key_map[j1]
-            k2 = inv_key_map[j2]
-
-            if k1 not in self.trans_count_map:
-                self.trans_count_map[k1] = {k2 : trans_count[j1,j2]}
-            else:
-                m = self.trans_count_map[k1]
-                m[k2] = m.get(k2,0.0) + trans_count[j1,j2]
-        """
-
-        # ------------- slow and sparse...
-
-        for i in range(len(prev_x)):
-            k1 = inv_key_map[prev_x[i]]
-            k2 = inv_key_map[next_x[i]]
-            ww = weights[idx1[i]]
-
-            if k1 not in self.trans_count_map:
-                self.trans_count_map[k1] = {k2: ww}
-            else:
-                m = self.trans_count_map[k1]
-                m[k2] = m.get(k2, 0.0) + ww
-
-        # ------------- slow and sparse...
+                if k1 not in self.trans_count_map:
+                    self.trans_count_map[k1] = {k2: v}
+                else:
+                    m = self.trans_count_map[k1]
+                    m[k2] = m.get(k2, 0.0) + v
 
     def seq_update(self, x: enc_data_type, weights: np.ndarray, estimate: MarkovChainDistribution) -> None:
         """Vectorized update of Markov chain sufficient statistics for a sequence encoded x.
@@ -1434,38 +1418,23 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             if v != 0:
                 self.init_count_map[inv_key_map[i]] = self.init_count_map.get(inv_key_map[i], 0.0) + v
 
-        """
-        trans_count = np.bincount(prev_x*key_sz + next_x, weights=weights[idx1], minlength=key_sz*key_sz)
-        trans_count = np.reshape(trans_count, (key_sz, key_sz))
-        trans_count_nz1, trans_count_nz2 = np.nonzero(trans_count)
+        # Aggregate transition weights over (prev, next) pairs in one vectorized pass,
+        # then scatter only the distinct nonzero pairs into the sparse count map.
+        if len(prev_x) > 0:
+            flat = np.asarray(prev_x) * key_sz + np.asarray(next_x)
+            trans_count = np.bincount(flat, weights=weights[idx1], minlength=key_sz * key_sz)
+            nz = np.nonzero(trans_count)[0]
+            for f in nz:
+                k1 = inv_key_map[f // key_sz]
+                k2 = inv_key_map[f % key_sz]
+                v = trans_count[f]
 
-        for i in range(len(trans_count_nz1)):
-            j1 = trans_count_nz1[i]
-            j2 = trans_count_nz2[i]
-            k1 = inv_key_map[j1]
-            k2 = inv_key_map[j2]
+                if k1 not in self.trans_count_map:
+                    self.trans_count_map[k1] = {k2: v}
+                else:
+                    m = self.trans_count_map[k1]
+                    m[k2] = m.get(k2, 0.0) + v
 
-            if k1 not in self.trans_count_map:
-                self.trans_count_map[k1] = {k2 : trans_count[j1,j2]}
-            else:
-                m = self.trans_count_map[k1]
-                m[k2] = m.get(k2,0.0) + trans_count[j1,j2]
-        """
-
-        # ------------- slow and sparse...
-
-        for i in range(len(prev_x)):
-            k1 = inv_key_map[prev_x[i]]
-            k2 = inv_key_map[next_x[i]]
-            ww = weights[idx1[i]]
-
-            if k1 not in self.trans_count_map:
-                self.trans_count_map[k1] = {k2: ww}
-            else:
-                m = self.trans_count_map[k1]
-                m[k2] = m.get(k2, 0.0) + ww
-
-        # ------------- slow and sparse...
         self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
 
     def seq_update_engine(self, x: enc_data_type, weights: Any, estimate: MarkovChainDistribution, engine: Any) -> None:
