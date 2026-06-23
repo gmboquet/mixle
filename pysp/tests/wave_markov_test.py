@@ -6,11 +6,15 @@ equality / encode round-trip consistency.
 """
 
 import importlib
+import importlib.util
 import unittest
 import warnings
 
-import networkx as nx
 import numpy as np
+
+HAS_NETWORKX = importlib.util.find_spec("networkx") is not None
+if HAS_NETWORKX:
+    import networkx as nx
 
 
 def _make_markov_transform_dist(alpha=0.05, with_len=True):
@@ -97,6 +101,7 @@ class ImportTestCase(unittest.TestCase):
             self.assertTrue(hasattr(mod, name), name)
 
 
+@unittest.skipUnless(HAS_NETWORKX, "networkx is not installed")
 class GrammarTestCase(unittest.TestCase):
     @staticmethod
     def _grammar():

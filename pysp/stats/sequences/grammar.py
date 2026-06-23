@@ -10,10 +10,22 @@ degree-distribution background model weighted by mix_p.
 
 """
 
-import networkx as nx
-import networkx.algorithms.isomorphism as iso
 import numpy as np
-from networkx.readwrite import json_graph
+
+try:
+    import networkx as nx
+    import networkx.algorithms.isomorphism as iso
+    from networkx.readwrite import json_graph
+except ImportError:  # networkx is an optional extra; the module stays importable (serialization walks it)
+    nx = iso = json_graph = None
+
+
+def _require_networkx() -> None:
+    if nx is None:
+        raise ImportError(
+            "The graph-grammar models require networkx. Install it with `pip install pysp-learn[grammar]`."
+        )
+
 
 from pysp.engines.arithmetic import *
 from pysp.stats.compute.pdist import (
@@ -32,6 +44,7 @@ class GrammarRule:
     __pysp_serializable__ = True
 
     def __init__(self, lhs, graph, frequency=1.0) -> None:
+        _require_networkx()
         self.lhs = lhs
         self.graph = graph.copy()
         self.frequency = float(frequency)
@@ -63,6 +76,7 @@ class VertexReplacementGrammar:
     __pysp_serializable__ = True
 
     def __init__(self, grammar_type="mu_level_dl", clustering="leiden", name="", mu=4) -> None:
+        _require_networkx()
         self.type = grammar_type
         self.clustering = clustering
         self.name = name
@@ -225,6 +239,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
             orig_n (int): Target number of nodes used when sampling graphs.
 
         """
+        _require_networkx()
         self.name = name
         self.grammar = grammar
         self.mix_p = mix_p
@@ -656,6 +671,7 @@ class GrammarEstimator(ParameterEstimator):
             keys (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
 
         """
+        _require_networkx()
         self.name = name
         self.pseudo_count = pseudo_count
         self.keys = keys
