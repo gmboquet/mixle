@@ -113,8 +113,9 @@ def upper_confidence_bound(
     return (mean + kappa * std) if maximize else (kappa * std - mean)
 
 
-def thompson_sampling(mean: Any, std: Any, best: float = 0.0, *, maximize: bool = False, rng: Any = None,
-                      **_: Any) -> np.ndarray:
+def thompson_sampling(
+    mean: Any, std: Any, best: float = 0.0, *, maximize: bool = False, rng: Any = None, **_: Any
+) -> np.ndarray:
     """Thompson-sampling acquisition: one marginal posterior draw ``N(mean, std)`` per candidate.
 
     Returns a merit (maximized over candidates) equal to the drawn value when maximizing and its

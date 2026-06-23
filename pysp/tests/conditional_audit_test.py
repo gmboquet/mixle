@@ -22,9 +22,7 @@ class ConditionalAbsentKeyAlignmentTest(unittest.TestCase):
     def setUp(self):
         # Two real conditional components, NO default distribution -> has_default False
         # (the documented -inf-for-absent-key case), and no given distribution.
-        self.d = ConditionalDistribution(
-            {0: PoissonDistribution(2.0), 2: PoissonDistribution(9.0)}
-        )
+        self.d = ConditionalDistribution({0: PoissonDistribution(2.0), 2: PoissonDistribution(9.0)})
         self.assertFalse(self.d.has_default)
 
     def _naive(self, data):

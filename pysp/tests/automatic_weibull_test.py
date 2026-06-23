@@ -15,7 +15,8 @@ class AutomaticWeibullTest(unittest.TestCase):
             data = list(scale * rng.weibull(shape, size=5000))
             m = fit(data, get_estimator(data), max_its=25, out=None)
             self.assertEqual(
-                type(m).__name__, "WeibullDistribution",
+                type(m).__name__,
+                "WeibullDistribution",
                 msg=f"failed to recover Weibull(shape={shape}, scale={scale})",
             )
 

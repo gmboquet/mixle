@@ -30,12 +30,12 @@ class MaxFlowTest(unittest.TestCase):
             scipy_val = maximum_flow(csr_matrix(cap.astype(np.int64)), src, snk).flow_value
             cut_cap, _, _ = min_cut(cap, src, snk)
             with self.subTest(seed=seed):
-                self.assertAlmostEqual(value, float(scipy_val), places=9)   # vs scipy
-                self.assertAlmostEqual(cut_cap, value, places=9)            # max-flow min-cut theorem
-                for k in range(n):                                         # flow conservation
+                self.assertAlmostEqual(value, float(scipy_val), places=9)  # vs scipy
+                self.assertAlmostEqual(cut_cap, value, places=9)  # max-flow min-cut theorem
+                for k in range(n):  # flow conservation
                     if k not in (src, snk):
                         self.assertAlmostEqual(flow[k].sum(), flow[:, k].sum(), places=9)
-                self.assertTrue(np.all(flow <= cap + 1e-9))                # capacity respected
+                self.assertTrue(np.all(flow <= cap + 1e-9))  # capacity respected
 
     def test_disconnected_is_zero(self):
         cap = np.array([[0, 5, 0], [0, 0, 0], [0, 0, 0]])  # no path 0->2

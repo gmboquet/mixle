@@ -77,5 +77,14 @@ def _cdf(arr: np.ndarray):
     return stats.gennorm.cdf(arr, beta, loc=loc, scale=scale)
 
 
-register(Detector(name="generalized_gaussian", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=3))
+register(
+    Detector(
+        name="generalized_gaussian",
+        kind="continuous",
+        applies=_applies,
+        score=_score,
+        factory=_factory,
+        cdf=_cdf,
+        n_params=3,
+    )
+)

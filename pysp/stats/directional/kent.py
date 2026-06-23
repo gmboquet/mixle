@@ -73,8 +73,9 @@ def _orthonormalize(gamma: np.ndarray) -> np.ndarray:
 class KentDistribution(SequenceEncodableProbabilityDistribution):
     """Kent (FB5) distribution on ``S^2`` with orientation ``gamma`` (3x3), concentration and ovalness."""
 
-    def __init__(self, gamma: np.ndarray, kappa: float, beta: float, name: str | None = None,
-                 keys: str | None = None) -> None:
+    def __init__(
+        self, gamma: np.ndarray, kappa: float, beta: float, name: str | None = None, keys: str | None = None
+    ) -> None:
         g = np.asarray(gamma, dtype=np.float64)
         if g.shape != (3, 3):
             raise ValueError("KentDistribution gamma must be a 3x3 orthonormal matrix (columns g1, g2, g3).")
@@ -275,8 +276,12 @@ class KentEstimator(ParameterEstimator):
         # initialize from the large-concentration Kent moment approximation
         q = max(t22 + t33 - 2.0 * min(t22, t33), 1e-6)
         k0 = max(1.0 / max(2.0 - 2.0 * r1, 1e-3), 1.0)
-        res = minimize(neg_ll, np.array([math.log(k0), 0.0]), method="Nelder-Mead",
-                       options={"xatol": 1e-6, "fatol": 1e-8, "maxiter": 2000})
+        res = minimize(
+            neg_ll,
+            np.array([math.log(k0), 0.0]),
+            method="Nelder-Mead",
+            options={"xatol": 1e-6, "fatol": 1e-8, "maxiter": 2000},
+        )
         kappa = math.exp(res.x[0])
         beta = 0.5 * kappa / (1.0 + math.exp(-res.x[1]))
         beta = min(beta, 0.4999 * kappa)

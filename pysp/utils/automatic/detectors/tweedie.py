@@ -77,5 +77,6 @@ def _cdf(arr: np.ndarray):
     return None
 
 
-register(Detector(name="tweedie", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=3))
+register(
+    Detector(name="tweedie", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=3)
+)

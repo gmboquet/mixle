@@ -12,8 +12,10 @@ class CountDPSeekLogProbTest(unittest.TestCase):
     def _hmm(self):
         return stats.HiddenMarkovModelDistribution(
             [stats.CategoricalDistribution({"a": 0.7, "b": 0.3}), stats.CategoricalDistribution({"a": 0.2, "b": 0.8})],
-            [0.6, 0.4], [[0.7, 0.3], [0.4, 0.6]],
-            len_dist=stats.CategoricalDistribution({2: 0.5, 3: 0.5}), use_numba=False,
+            [0.6, 0.4],
+            [[0.7, 0.3], [0.4, 0.6]],
+            len_dist=stats.CategoricalDistribution({2: 0.5, 3: 0.5}),
+            use_numba=False,
         )
 
     def test_hmm_seek_logprob_is_true_marginal(self):

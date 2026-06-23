@@ -16,9 +16,16 @@ except ImportError:  # pragma: no cover - exercised only without sqlalchemy
     _sa = None
 
 
-def read_sql(url: str, query: str, columns: list[str] | None = None, *,
-             structure: SampleStructure = EXCHANGEABLE, schema: Schema | None = None) -> LazySource:
+def read_sql(
+    url: str,
+    query: str,
+    columns: list[str] | None = None,
+    *,
+    structure: SampleStructure = EXCHANGEABLE,
+    schema: Schema | None = None,
+) -> LazySource:
     """Read the rows of ``query`` against the database at ``url`` into a lazy DataSource."""
+
     def factory():
         if _sa is None:
             from pysp.utils.optional_deps import require
@@ -34,4 +41,5 @@ def read_sql(url: str, query: str, columns: list[str] | None = None, *,
                 picked = [row[i] for i in idx]
                 rows.append(picked[0] if len(picked) == 1 else tuple(picked))
             return rows
+
     return LazySource(factory, structure, schema)

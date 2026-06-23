@@ -51,8 +51,7 @@ class ProjectedNormalTest(unittest.TestCase):
         self.assertAlmostEqual(model.mu_x, 2.0, delta=0.1)
         self.assertAlmostEqual(model.mu_y, -1.0, delta=0.1)
         # fitted log-likelihood beats the uniform (mu=0) baseline
-        self.assertGreater(float(np.sum(model.seq_log_density(enc))),
-                           float(np.sum(PN(0.0, 0.0).seq_log_density(enc))))
+        self.assertGreater(float(np.sum(model.seq_log_density(enc))), float(np.sum(PN(0.0, 0.0).seq_log_density(enc))))
 
     def test_not_a_cdf_family(self):
         self.assertFalse(pysp.supports(PN(1.0, 0.0), HasCDF))  # circular: no scalar cdf/quantile

@@ -86,7 +86,9 @@ def ks_test(data: Sequence[float], dist: Any) -> tuple[float, float]:
     return d, float(kstwo.sf(d, n))
 
 
-def chi_square_test(data: Sequence[int], dist: Any, *, lo: int | None = None, hi: int | None = None) -> tuple[float, int, float]:
+def chi_square_test(
+    data: Sequence[int], dist: Any, *, lo: int | None = None, hi: int | None = None
+) -> tuple[float, int, float]:
     """Pearson chi-square goodness-of-fit test for a discrete ``dist`` against integer ``data``.
 
     Bins the observations over each value in ``[lo, hi]`` plus a single combined tail bin for everything

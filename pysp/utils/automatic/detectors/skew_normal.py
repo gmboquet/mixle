@@ -83,5 +83,8 @@ def _cdf(arr: np.ndarray):
     return stats.skewnorm.cdf(arr, shape, loc=loc, scale=scale)
 
 
-register(Detector(name="skew_normal", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=3))
+register(
+    Detector(
+        name="skew_normal", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=3
+    )
+)

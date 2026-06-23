@@ -67,7 +67,9 @@ class RicianDistribution(SequenceEncodableProbabilityDistribution):
             return -math.inf
         z = xv * self.nu / self._sig2
         # I0(z) = ive(0, z) * exp(z), so log I0(z) = log ive(0, z) + z
-        return math.log(xv) - self._log_sig2 - (xv * xv + self.nu * self.nu) / (2.0 * self._sig2) + math.log(ive(0, z)) + z
+        return (
+            math.log(xv) - self._log_sig2 - (xv * xv + self.nu * self.nu) / (2.0 * self._sig2) + math.log(ive(0, z)) + z
+        )
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density for a sequence-encoded array of observations."""
@@ -75,11 +77,7 @@ class RicianDistribution(SequenceEncodableProbabilityDistribution):
         z = xv * self.nu / self._sig2
         with np.errstate(divide="ignore", invalid="ignore"):
             out = (
-                np.log(xv)
-                - self._log_sig2
-                - (xv * xv + self.nu * self.nu) / (2.0 * self._sig2)
-                + np.log(ive(0, z))
-                + z
+                np.log(xv) - self._log_sig2 - (xv * xv + self.nu * self.nu) / (2.0 * self._sig2) + np.log(ive(0, z)) + z
             )
         return np.where(xv > 0.0, out, -np.inf)
 

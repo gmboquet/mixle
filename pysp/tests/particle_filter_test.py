@@ -52,7 +52,7 @@ class ParticleFilterTest(unittest.TestCase):
         pm, pll = particle_filter(ys, propagate, loglik, p0, rng=np.random.RandomState(0))
         # filtered means converge to the exact Kalman filter (Monte Carlo error ~ 1/sqrt(N))
         self.assertLess(np.mean(np.abs(pm - km)), 0.03)  # tight on the average over all steps
-        self.assertLess(np.max(np.abs(pm - km)), 0.12)   # even the worst step is close
+        self.assertLess(np.max(np.abs(pm - km)), 0.12)  # even the worst step is close
         self.assertEqual(pm.shape, km.shape)
         self.assertTrue(np.isfinite(pll))
 

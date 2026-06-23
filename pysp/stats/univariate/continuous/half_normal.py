@@ -219,7 +219,7 @@ class HalfNormalDistribution(SequenceEncodableProbabilityDistribution):
         """Differential entropy 0.5*log(pi*sigma^2/2) + 1/2."""
         import math
 
-        return float(0.5 * math.log(math.pi * self.sigma ** 2 / 2.0) + 0.5)
+        return float(0.5 * math.log(math.pi * self.sigma**2 / 2.0) + 0.5)
 
     def sampler(self, seed: int | None = None) -> "HalfNormalSampler":
         """Return a sampler for drawing observations from this distribution."""

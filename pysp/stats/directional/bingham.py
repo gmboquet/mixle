@@ -50,9 +50,11 @@ def _bingham_norm(z: np.ndarray) -> float:
     """Return ``c(Z)`` via the stable 1-D reduction of the sphere integral (third axis = ``z[2]``)."""
     z1, z2, z3 = float(z[0]), float(z[1]), float(z[2])
     val, _ = quad(
-        lambda t: math.exp(z3 * math.cos(t) ** 2 + 0.5 * (z1 + z2) * math.sin(t) ** 2)
-        * iv(0, 0.5 * (z1 - z2) * math.sin(t) ** 2)
-        * math.sin(t),
+        lambda t: (
+            math.exp(z3 * math.cos(t) ** 2 + 0.5 * (z1 + z2) * math.sin(t) ** 2)
+            * iv(0, 0.5 * (z1 - z2) * math.sin(t) ** 2)
+            * math.sin(t)
+        ),
         0.0,
         math.pi,
     )
@@ -62,8 +64,7 @@ def _bingham_norm(z: np.ndarray) -> float:
 class BinghamDistribution(SequenceEncodableProbabilityDistribution):
     """Bingham distribution on ``S^2`` with orientation ``m`` (3x3) and concentrations ``z`` (length 3)."""
 
-    def __init__(self, m: np.ndarray, z: Sequence[float], name: str | None = None,
-                 keys: str | None = None) -> None:
+    def __init__(self, m: np.ndarray, z: Sequence[float], name: str | None = None, keys: str | None = None) -> None:
         mm = np.asarray(m, dtype=np.float64)
         zz = np.asarray(z, dtype=np.float64).reshape(3)
         if mm.shape != (3, 3):
@@ -235,8 +236,9 @@ class BinghamEstimator(ParameterEstimator):
             z = np.array([z12[0], z12[1], 0.0])
             return math.log(_bingham_norm(z)) - float(np.dot(z, omega))
 
-        res = minimize(neg_g, np.array([-1.0, -0.5]), method="Nelder-Mead",
-                       options={"xatol": 1e-6, "fatol": 1e-8, "maxiter": 2000})
+        res = minimize(
+            neg_g, np.array([-1.0, -0.5]), method="Nelder-Mead", options={"xatol": 1e-6, "fatol": 1e-8, "maxiter": 2000}
+        )
         z = np.array([res.x[0], res.x[1], 0.0])
         return BinghamDistribution(m, z, name=self.name, keys=self.keys)
 

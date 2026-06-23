@@ -405,7 +405,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     def mean(self) -> float:
         """Mean E[X] of the distribution."""
-        return float(float(getattr(self, 'min_val', 0) or 0) + self.n * self.p)
+        return float(float(getattr(self, "min_val", 0) or 0) + self.n * self.p)
 
     def variance(self) -> float:
         """Variance Var[X] of the distribution."""

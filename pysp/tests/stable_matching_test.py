@@ -35,8 +35,8 @@ class StableMatchingTest(unittest.TestCase):
             self.assertTrue(is_stable_matching(m, pp, rp), f"unstable at seed {seed}")
 
     def test_partial_preferences_and_unequal_sizes(self):
-        pp = [[0], [0, 1]]      # proposer 0 only accepts receiver 0
-        rp = [[1, 0], [1]]      # receiver 0 prefers proposer 1; receiver 1 only accepts proposer 1
+        pp = [[0], [0, 1]]  # proposer 0 only accepts receiver 0
+        rp = [[1, 0], [1]]  # receiver 0 prefers proposer 1; receiver 1 only accepts proposer 1
         m = stable_matching(pp, rp)
         self.assertEqual(m, [-1, 0])  # proposer 1 wins receiver 0; proposer 0 left unmatched
         self.assertTrue(is_stable_matching(m, pp, rp))

@@ -87,8 +87,8 @@ def test_seq_update_empty_transitions_does_not_raise():
     # exercise the len(prev_x) > 0 guard directly. (The encoder itself cannot
     # currently emit such a tuple, so we synthesize it from a real encode.)
     dist = _make_dist()
-    sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = (
-        dist.dist_to_encoder().seq_encode([["a", "b"], ["c", "a"]])
+    sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = dist.dist_to_encoder().seq_encode(
+        [["a", "b"], ["c", "a"]]
     )
 
     empty = np.asarray([], dtype=prev_x.dtype)

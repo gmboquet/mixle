@@ -36,9 +36,11 @@ class ModeMethodsTest(unittest.TestCase):
                 self.assertAlmostEqual(dist.mode(), xs[int(np.argmax(dens))], delta=(hi - lo) / 4000)
 
     def test_discrete_mode_is_pmf_argmax(self):
-        for dist, ks in [(PoissonDistribution(4.3), range(0, 20)),
-                         (BinomialDistribution(0.3, 10), range(0, 11)),
-                         (BernoulliDistribution(0.3), range(0, 2))]:
+        for dist, ks in [
+            (PoissonDistribution(4.3), range(0, 20)),
+            (BinomialDistribution(0.3, 10), range(0, 11)),
+            (BernoulliDistribution(0.3), range(0, 2)),
+        ]:
             pmf = np.array([np.exp(dist.log_density(k)) for k in ks])
             with self.subTest(dist=type(dist).__name__):
                 self.assertEqual(int(dist.mode()), list(ks)[int(np.argmax(pmf))])
@@ -49,7 +51,7 @@ class ModeMethodsTest(unittest.TestCase):
         self.assertAlmostEqual(s["mode"], s["mean"])  # symmetric -> mode == mean == median
 
     def test_range_guards(self):
-        self.assertEqual(GammaDistribution(0.5, 1.0).mode(), 0.0)   # k<1 -> mode at 0
+        self.assertEqual(GammaDistribution(0.5, 1.0).mode(), 0.0)  # k<1 -> mode at 0
         self.assertEqual(WeibullDistribution(0.8, 2.0).mode(), 0.0)  # shape<1 -> mode at 0
 
 

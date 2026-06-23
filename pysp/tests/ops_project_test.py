@@ -24,8 +24,9 @@ class OpsProjectTest(unittest.TestCase):
         self.assertAlmostEqual(proj.variance(), 0.75, delta=0.05)  # var k*theta^2
 
     def test_target_may_be_an_estimator(self):
-        proj = project(GammaDistribution(3.0, 0.5), GaussianDistribution(0.0, 1.0).estimator(),
-                       n_samples=20_000, seed=2)
+        proj = project(
+            GammaDistribution(3.0, 0.5), GaussianDistribution(0.0, 1.0).estimator(), n_samples=20_000, seed=2
+        )
         self.assertIsInstance(proj, GaussianDistribution)
 
     def test_projected_model_carries_target_capabilities(self):

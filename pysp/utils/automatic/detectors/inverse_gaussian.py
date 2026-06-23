@@ -67,5 +67,14 @@ def _cdf(arr: np.ndarray):
     return stats.invgauss.cdf(arr, mu / lam, scale=lam)
 
 
-register(Detector(name="inverse_gaussian", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=2))
+register(
+    Detector(
+        name="inverse_gaussian",
+        kind="continuous",
+        applies=_applies,
+        score=_score,
+        factory=_factory,
+        cdf=_cdf,
+        n_params=2,
+    )
+)

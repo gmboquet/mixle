@@ -15,8 +15,17 @@ def _samples(res):
 class ReflectiveHMCTest(unittest.TestCase):
     def test_truncated_normal_1d(self):
         a, b = -0.5, 1.5
-        res = reflective_hmc(lambda x: -0.5 * np.dot(x, x), lambda x: -np.asarray(x), [0.5], [a], [b],
-                             num_samples=20000, step_size=0.3, num_steps=15, rng=np.random.RandomState(0))
+        res = reflective_hmc(
+            lambda x: -0.5 * np.dot(x, x),
+            lambda x: -np.asarray(x),
+            [0.5],
+            [a],
+            [b],
+            num_samples=20000,
+            step_size=0.3,
+            num_steps=15,
+            rng=np.random.RandomState(0),
+        )
         s = _samples(res)[2000:, 0]
         tn = ss.truncnorm(a, b)
         self.assertGreaterEqual(s.min(), a - 1e-9)
@@ -25,9 +34,17 @@ class ReflectiveHMCTest(unittest.TestCase):
         self.assertAlmostEqual(s.std(), tn.std(), delta=0.02)
 
     def test_box_2d_stays_inside(self):
-        res = reflective_hmc(lambda x: -0.5 * np.dot(x, x), lambda x: -np.asarray(x), [0.0, 0.0],
-                             [-1.0, -1.0], [1.0, 1.0], num_samples=15000, step_size=0.3, num_steps=15,
-                             rng=np.random.RandomState(1))
+        res = reflective_hmc(
+            lambda x: -0.5 * np.dot(x, x),
+            lambda x: -np.asarray(x),
+            [0.0, 0.0],
+            [-1.0, -1.0],
+            [1.0, 1.0],
+            num_samples=15000,
+            step_size=0.3,
+            num_steps=15,
+            rng=np.random.RandomState(1),
+        )
         s = _samples(res)[2000:]
         self.assertTrue(np.all(s >= -1.0 - 1e-9) and np.all(s <= 1.0 + 1e-9))
         self.assertTrue(np.allclose(s.mean(axis=0), 0.0, atol=0.03))  # symmetric box -> mean 0
@@ -35,8 +52,16 @@ class ReflectiveHMCTest(unittest.TestCase):
 
     def test_initial_outside_box_raises(self):
         with self.assertRaises(ValueError):
-            reflective_hmc(lambda x: 0.0, lambda x: np.zeros_like(x), [2.0], [-1.0], [1.0],
-                           num_samples=1, step_size=0.1, num_steps=5)
+            reflective_hmc(
+                lambda x: 0.0,
+                lambda x: np.zeros_like(x),
+                [2.0],
+                [-1.0],
+                [1.0],
+                num_samples=1,
+                step_size=0.1,
+                num_steps=5,
+            )
 
 
 if __name__ == "__main__":
