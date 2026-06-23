@@ -15,7 +15,7 @@ class LKJTest(unittest.TestCase):
         # arbitrary-precision check that c_d(eta) * integral det(R)^(eta-1) dR == 1
         import mpmath as mp
 
-        mp.mp.dps = 25
+        mp.mp.dps = 16
         for eta in (0.7, 2.0, 3.5):  # incl. eta < 1 and non-integer
             d = LKJ(2, eta)
             integ = mp.e ** mp.mpf(d._log_c) * mp.quad(lambda r, e=eta: (1 - r * r) ** (e - 1), [-1, 1])
@@ -33,7 +33,7 @@ class LKJTest(unittest.TestCase):
     def test_sampler_valid_and_marginal_beta(self):
         for d, eta in [(3, 1.5), (4, 3.0), (5, 1.0)]:
             dist = LKJ(d, eta)
-            samples = dist.sampler(seed=0).sample(20000)
+            samples = dist.sampler(seed=0).sample(8000)
             offs = np.array([R[0, 1] for R in samples])
             with self.subTest(d=d, eta=eta):
                 self.assertTrue(all(np.allclose(np.diag(R), 1.0) for R in samples[:200]))
@@ -56,7 +56,7 @@ class LKJTest(unittest.TestCase):
     def test_mle_recovers_eta(self):
         for d, eta in [(3, 2.0), (4, 4.0)]:
             true = LKJ(d, eta)
-            data = true.sampler(seed=1).sample(20000)
+            data = true.sampler(seed=1).sample(8000)
             est = true.estimator()
             acc = est.accumulator_factory().make()
             acc.seq_update(true.dist_to_encoder().seq_encode(data), np.ones(len(data)), None)

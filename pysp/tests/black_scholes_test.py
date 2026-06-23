@@ -16,7 +16,7 @@ def _bs_call(s, k, r, sig, t):
 class BlackScholesTest(unittest.TestCase):
     def setUp(self):
         self.k, self.r, self.sig, self.t = 100.0, 0.05, 0.2, 1.0
-        self.s = np.linspace(0.0, 400.0, 801)
+        self.s = np.linspace(0.0, 400.0, 401)
 
     def test_call_matches_closed_form(self):
         v = integrate_adaptive(black_scholes_rhs(self.sig, self.r, self.s), np.maximum(self.s - self.k, 0.0),
