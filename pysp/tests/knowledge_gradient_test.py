@@ -1,10 +1,13 @@
 """WS-11: knowledge-gradient acquisition (Frazier 2009), checked vs Monte Carlo."""
 
+import importlib.util
 import unittest
 
 import numpy as np
 
 from pysp.doe import knowledge_gradient, propose_knowledge_gradient
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None  # propose_knowledge_gradient uses the torch GP surrogate
 
 
 def _kg_mc(mean, cov, noise=1e-6, m=60000, seed=0):
@@ -31,6 +34,7 @@ class KnowledgeGradientTest(unittest.TestCase):
                 self.assertTrue(np.all(kg >= -1e-9))  # KG is non-negative
                 self.assertTrue(np.allclose(kg, _kg_mc(mean, cov), atol=0.02))
 
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_propose_finds_optimum_region(self):
         # minimize (x-0.7)^2; KG should propose a point in [0,1]
         rng = np.random.RandomState(0)

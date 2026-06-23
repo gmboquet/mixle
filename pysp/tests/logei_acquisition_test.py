@@ -1,10 +1,13 @@
 """WS-11/WS-12: numerically stable log Expected Improvement acquisition (Ament et al. 2023)."""
 
+import importlib.util
 import unittest
 
 import numpy as np
 
 from pysp.doe import available_acquisitions, expected_improvement, log_expected_improvement, propose_next
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None  # propose_next uses the torch GP surrogate
 
 
 class LogEITest(unittest.TestCase):
@@ -35,6 +38,7 @@ class LogEITest(unittest.TestCase):
     def test_zero_std_is_neg_inf(self):
         self.assertEqual(log_expected_improvement(np.array([0.5]), np.array([0.0]), 1.0)[0], -np.inf)
 
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_usable_in_propose_next(self):
         rng = np.random.RandomState(0)
         x = rng.rand(10, 1)

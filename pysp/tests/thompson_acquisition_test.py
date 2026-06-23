@@ -1,10 +1,13 @@
 """WS-11: Thompson-sampling acquisition for Bayesian optimization."""
 
+import importlib.util
 import unittest
 
 import numpy as np
 
 from pysp.doe import available_acquisitions, propose_next, thompson_sampling
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None  # propose_next uses the torch GP surrogate
 
 
 class ThompsonAcquisitionTest(unittest.TestCase):
@@ -23,6 +26,7 @@ class ThompsonAcquisitionTest(unittest.TestCase):
         # non-zero std injects randomness
         self.assertFalse(np.allclose(thompson_sampling(mean, std, 0.0, rng=np.random.RandomState(0)), -mean))
 
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_proposes_near_the_optimum(self):
         # minimize f(x) = (x - 0.7)^2 on [0, 1]; Thompson should steer toward the basin
         rng = np.random.RandomState(0)
