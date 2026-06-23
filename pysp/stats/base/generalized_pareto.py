@@ -13,6 +13,9 @@ endpoint at ``mu - sigma/xi``. The threshold ``mu`` is treated as a *fixed, know
 fit -- the standard peaks-over-threshold setup); ``sigma`` and ``xi`` are fit by method of moments,
 which is closed-form: ``xi = (1 - m^2/v)/2`` and ``sigma = m (1 - xi)`` from the exceedance mean ``m``
 and variance ``v`` (valid for ``xi < 1/2``, where the variance is finite).
+
+
+Reference: Pickands, 'Statistical inference using extreme order statistics', Ann. Statist. (1975).
 """
 
 import math

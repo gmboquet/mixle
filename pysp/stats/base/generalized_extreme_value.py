@@ -12,6 +12,9 @@ location ``mu``, scale ``sigma > 0`` and shape ``xi`` (the EVT sign convention; 
 type (all reals), ``xi < 0`` the bounded Weibull type (``x <= mu - sigma/xi``). All three parameters
 are fit by method of moments: the shape is solved from the (monotone) skewness-vs-``xi`` relation,
 then scale from the variance and location from the mean.
+
+
+Reference: Coles, *An Introduction to Statistical Modeling of Extreme Values* (Springer, 2001).
 """
 
 import math

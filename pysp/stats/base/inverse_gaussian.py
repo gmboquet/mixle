@@ -21,6 +21,9 @@ The inverse Gaussian is a two-parameter exponential family with sufficient stati
 
 Declaring those pieces gives the family generated NumPy/Torch/Numba scoring through the shared
 exponential-family compute path, exactly as for the Gamma family.
+
+
+Reference: Chhikara & Folks, *The Inverse Gaussian Distribution* (Dekker, 1989).
 """
 
 import math

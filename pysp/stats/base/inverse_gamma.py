@@ -17,6 +17,9 @@ positive-support leaf.
 It is a two-parameter exponential family with sufficient statistics ``(log x, 1/x)``; once the scalar
 normalizer ``alpha*log(beta) - lgamma(alpha)`` is precomputed the per-row score is linear in the encoded
 ``log x`` and ``1/x`` fields, so the family gets generated NumPy, Torch, and Numba kernels.
+
+
+Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
 
 import math

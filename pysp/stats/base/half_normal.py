@@ -19,6 +19,9 @@ The half-normal is a one-parameter exponential family with sufficient statistic 
 
 Declaring those pieces gives the family generated NumPy/Torch/Numba scoring through the shared
 exponential-family compute path, exactly as for the Gamma and inverse Gaussian families.
+
+
+Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
 
 import math
