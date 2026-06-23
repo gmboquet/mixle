@@ -13,6 +13,9 @@ for x in {0,1,2,...}, and
 
 else.
 
+
+
+Reference: Johnson, Kemp & Kotz, *Univariate Discrete Distributions* (3rd ed., Wiley, 2005).
 """
 
 import math

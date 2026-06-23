@@ -6,6 +6,9 @@ and the GammaDataEncoder classes for use with pysparkplug.
 Data type: (float): The GammaDistribution with shape k > 0.0 and scale theta > 0.0, has log-density
     log(f(x;k,theta)) = -gammaln(k) - k*log(theta) + (k-1) * log(x) - x / theta, for x > 0.0, else -np.inf
 
+
+
+Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
 
 import math

@@ -9,6 +9,9 @@ success probability p:
 The dispersion ``r`` has no closed-form MLE; the estimator recovers it by a 1-D
 numerical solve of the digamma score equation (with ``p`` profiled out), then ``p``
 follows in closed form. Pass ``estimate_r=False`` to hold ``r`` fixed instead.
+
+
+Reference: Johnson, Kemp & Kotz, *Univariate Discrete Distributions* (3rd ed., Wiley, 2005).
 """
 
 import math

@@ -5,6 +5,9 @@ and the BinomialDataEncoder classes for use with pysparkplug.
 
 Data type: int.
 
+
+
+Reference: Johnson, Kemp & Kotz, *Univariate Discrete Distributions* (3rd ed., Wiley, 2005).
 """
 
 import math

@@ -1,4 +1,7 @@
-"""Create, estimate, and sample from a location-scale logistic distribution."""
+"""Create, estimate, and sample from a location-scale logistic distribution.
+
+Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
+"""
 
 import math
 from collections.abc import Sequence

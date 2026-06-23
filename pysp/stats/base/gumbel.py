@@ -12,6 +12,9 @@ Euler-Mascheroni constant) and the variance is (pi^2 / 6) * beta^2, which the mo
 
 The per-row log-density lowers cleanly to the shared symbolic kernel, so the family gets generated
 NumPy, Torch, and Numba scoring through ``backend_log_density_from_params``.
+
+
+Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
 
 import math
