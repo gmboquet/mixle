@@ -3,6 +3,7 @@
 import numpy as np
 
 from pysp.stats import *
+from pysp.inference import estimate, initialize
 from pysp.utils.automatic import get_estimator
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@
 import numpy as np
 
 from pysp.stats import *
+from pysp.inference import initialize, seq_estimate
 from pysp.utils.evaluation import empirical_kl_divergence, partition_data
 
 if __name__ == '__main__':
@@ -50,7 +51,7 @@ if __name__ == '__main__':
     est = MixtureEstimator([CompositeEstimator((e0, e1, e2, e3, e4))] * 2)
 
     # Estimate parameters
-    # Note: Checkout pysp.utils.estimation.best_of/optimize for methods that handle this computation
+    # Note: Checkout pysp.inference.best_of/optimize for methods that handle this computation
 
     mm = initialize(train_data, iest, rng, 0.01)
 

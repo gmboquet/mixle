@@ -18,6 +18,7 @@ from pyspark import SparkContext, SparkConf
 
 import pysp.utils.optsutil as ops
 from pysp.stats import *
+from pysp.inference import initialize, seq_estimate
 
 
 def make_corpus(num_topics, num_words, num_docs, words_per_doc, seed=2):

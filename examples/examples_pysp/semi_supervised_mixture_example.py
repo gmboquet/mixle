@@ -1,8 +1,9 @@
 """Example of semi-supervised mixture example. Note that None is included for obs with no known labels."""
 
 from pysp.stats import *
-from pysp.stats.latent.ss_mixture import *
-from pysp.utils.estimation import best_of
+import numpy as np
+from pysp.stats import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureEstimator
+from pysp.inference import best_of
 
 if __name__ == '__main__':
     seq_samp = 10

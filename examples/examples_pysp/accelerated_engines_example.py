@@ -13,9 +13,9 @@ import numpy as np
 from pysp.engines import NUMPY_ENGINE, TorchEngine, torch
 from pysp.stats import *
 from pysp.stats.compute.kernel import NumbaKernelFactory
-from pysp.utils.estimation import optimize
+from pysp.inference import estimate, optimize
 from pysp.inference.gradient_fit import fit_map, fit_mle
-from pysp.utils.priors import DirichletPrior, MixturePrior, NormalGammaPrior
+from pysp.inference.priors import DirichletPrior, MixturePrior, NormalGammaPrior
 
 if __name__ == '__main__':
     rng = np.random.RandomState(1)
@@ -78,7 +78,7 @@ if __name__ == '__main__':
         _, ll = seq_log_density_sum(enc_data, m)
         print('%-8s ll=%.6f   20 EM iterations in %.2fs' % (name, ll, t))
 
-    # Gradient fitting lives in pysp.utils.estimation and uses the same engine object.
+    # Gradient fitting lives in pysp.inference and uses the same engine object.
     small_truth = MixtureDistribution(
         [GaussianDistribution(-2.0, 0.6), GaussianDistribution(2.0, 0.9)],
         [0.45, 0.55],

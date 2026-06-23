@@ -5,9 +5,9 @@
 import numpy as np
 
 from pysp.stats import *
-from pysp.stats.graph.int_markovchain import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-from pysp.stats.latent.look_back_hmm import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
-from pysp.utils.estimation import optimize
+from pysp.stats import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
+from pysp.stats.latent.lookback_hidden_markov_model import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
+from pysp.inference import optimize
 
 if __name__ == '__main__':
 

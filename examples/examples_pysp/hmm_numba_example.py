@@ -9,7 +9,7 @@ import time
 import numpy as np
 
 from pysp.stats import *
-from pysp.utils.estimation import optimize
+from pysp.inference import optimize
 
 
 def make_data(num_states=10, num_words=500, num_seqs=100, seq_len=100, seed=2):
