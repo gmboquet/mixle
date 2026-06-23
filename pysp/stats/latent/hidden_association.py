@@ -192,8 +192,14 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
                 else:
                     ll = math.log1p(math.exp(ll - tt)) + tt
 
-            ll -= math.log(cc)
-            rv += ll * c1
+            if ll == -np.inf or cc <= 0:
+                # Empty/all-zero given-set: no association mass for this emitted
+                # value. Matches backend_seq_log_density's -inf handling and
+                # avoids -inf - (-inf) = NaN from the log(cc) normalizer.
+                rv += -np.inf * c1
+            else:
+                ll -= math.log(cc)
+                rv += ll * c1
 
         rv += self.given_dist.log_density(x[0])
         rv += self.len_dist.log_density(nn)
@@ -537,6 +543,15 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
                     ll = math.log1p(math.exp(tt - ll)) + ll
                 else:
                     ll = math.log1p(math.exp(ll - tt)) + tt
+
+            if ll == -np.inf or cc <= 0:
+                # Empty/all-zero given-set: no association mass. Avoid the
+                # -inf - (-inf) = NaN normalizer that would corrupt sufficient
+                # statistics, and contribute -inf to the tracked log-density to
+                # match HiddenAssociationDistribution.log_density.
+                if track:
+                    obs_ll += -np.inf * c1
+                continue
 
             if track:
                 obs_ll += (ll - math.log(cc)) * c1

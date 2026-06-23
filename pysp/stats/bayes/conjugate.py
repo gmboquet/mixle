@@ -164,6 +164,10 @@ class BetaPosterior(ConjugatePosterior):
             from pysp.stats.univariate.discrete.binomial import BinomialDistribution
 
             return BinomialDistribution(p, self.n_trials)
+        if self.kind == "negative_binomial" and getattr(self, "_nb_r", None) is not None:
+            from pysp.stats.univariate.discrete.negative_binomial import NegativeBinomialDistribution
+
+            return NegativeBinomialDistribution(self._nb_r, p)
         from pysp.stats.univariate.discrete.bernoulli import BernoulliDistribution
 
         return BernoulliDistribution(p)

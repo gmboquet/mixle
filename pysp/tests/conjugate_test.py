@@ -50,6 +50,24 @@ class BetaConjugateTest(unittest.TestCase):
         self.assertEqual(pb.kind, "binomial")
         self.assertAlmostEqual(pb.mean()["p"], 0.4, delta=0.02)
 
+    def test_negative_binomial_rebuilds_negative_binomial_family(self):
+        # Regression: the NegativeBinomial conjugate posterior must rebuild a
+        # NegativeBinomial likelihood/predictive (not silently fall through to Bernoulli).
+        from pysp.stats import NegativeBinomialDistribution
+
+        rng = np.random.RandomState(7)
+        r = 3.0
+        x = rng.negative_binomial(r, 0.4, size=3000)
+        post = conjugate_posterior(NegativeBinomialDistribution(r, 0.5), x)
+        self.assertEqual(post.kind, "negative_binomial")
+        # posterior over p is still correct
+        self.assertAlmostEqual(post.mean()["p"], 0.4, delta=0.03)
+        for built in (post.point_estimate(), post.posterior_predictive()):
+            self.assertIsInstance(built, NegativeBinomialDistribution)
+            self.assertNotIsInstance(built, BernoulliDistribution)
+            self.assertEqual(built.r, r)
+            self.assertAlmostEqual(built.p, post.mean()["p"], places=12)
+
 
 class GammaConjugateTest(unittest.TestCase):
     def test_poisson_posterior_predictive_and_exact_evidence(self):
