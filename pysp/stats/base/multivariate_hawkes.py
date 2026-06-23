@@ -12,6 +12,9 @@ exact log-likelihood ``sum_n log lambda_{mark_n}(t_n) - sum_d \\int_0^T lambda_d
 parameters are fit by the Veen-Schoenberg branching EM (each event is an immigrant of its mark or the
 offspring of an earlier event, with the excitation kernel as the parent likelihood). The process is
 stationary when the spectral radius of ``alpha / beta`` is below 1.
+
+
+Reference: Hawkes, 'Spectra of some self-exciting and mutually exciting point processes', Biometrika (1971).
 """
 
 import math

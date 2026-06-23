@@ -13,6 +13,9 @@ realization with per-bin event counts ``n_b`` is
 
 i.e. the standard Poisson-process log-likelihood ``sum_i log lambda(t_i) - integral lambda``. The
 MLE is closed-form: ``rates[b] = (total events in bin b) / (width[b] * n_realizations)``.
+
+
+Reference: Daley & Vere-Jones, *An Introduction to the Theory of Point Processes* (Springer, 2003).
 """
 
 import math

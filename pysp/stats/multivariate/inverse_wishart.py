@@ -9,6 +9,9 @@ prior for a multivariate-normal covariance and the standard model for a random c
 
 ``df`` is a fixed, known parameter; since ``E[X] = Psi / (df - p - 1)`` the scale is estimated in closed
 form as ``Psi = (df - p - 1) * mean(X)`` (for ``df > p + 1``).
+
+
+Reference: Mardia, Kent & Bibby, *Multivariate Analysis* (Academic Press, 1979).
 """
 
 import math

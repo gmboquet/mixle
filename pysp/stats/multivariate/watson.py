@@ -11,6 +11,9 @@ the sphere's surface area. ``kappa > 0`` is *bipolar* (mass near the axis +/-mu)
 *girdle* (mass on the equator orthogonal to mu); both are antipodally symmetric. It is fit by maximum
 likelihood: ``mu`` is the leading (kappa>0) or trailing (kappa<0) eigenvector of the scatter matrix,
 and ``kappa`` solves ``E[(mu^T x)^2] = mu^T S mu`` (a monotone 1-D equation in the Kummer ratio).
+
+
+Reference: Mardia & Jupp, *Directional Statistics* (Wiley, 2000).
 """
 
 import math
