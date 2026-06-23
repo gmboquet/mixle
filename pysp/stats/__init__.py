@@ -613,6 +613,10 @@ __all__ = [
     "KentSampler",
     "KentEstimator",
     "KentDataEncoder",
+    "BinghamDistribution",
+    "BinghamSampler",
+    "BinghamEstimator",
+    "BinghamDataEncoder",
     "InverseWishartDistribution",
     "InverseWishartSampler",
     "InverseWishartEstimator",
@@ -1371,6 +1375,12 @@ from pysp.stats.multivariate.watson import (
     WatsonDistribution,
     WatsonEstimator,
     WatsonSampler,
+)
+from pysp.stats.multivariate.bingham import (
+    BinghamDataEncoder,
+    BinghamDistribution,
+    BinghamEstimator,
+    BinghamSampler,
 )
 from pysp.stats.multivariate.kent import (
     KentDataEncoder,
