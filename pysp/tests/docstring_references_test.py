@@ -6,7 +6,9 @@ import unittest
 STANDARD = [
     "gaussian", "gamma", "beta", "exponential", "uniform", "laplace", "logistic", "rayleigh",
     "weibull", "pareto", "gumbel", "student_t", "poisson", "binomial", "bernoulli", "geometric",
-    "negative_binomial",
+    "negative_binomial", "half_normal", "inverse_gamma", "inverse_gaussian", "log_gaussian",
+    "categorical", "generalized_extreme_value", "generalized_pareto", "skellam", "logseries",
+    "skew_normal", "tweedie",
 ]
 
 
