@@ -15,9 +15,12 @@ class DetectorRegistryTest(unittest.TestCase):
         self.assertIn("laplace", names)
         self.assertIsNotNone(get_detector("laplace"))
 
-    def test_register_is_idempotent_and_typed(self):
-        d = register(Detector("laplace", "continuous", lambda a: True, lambda a, n: 0.0, lambda *a, **k: None))
-        self.assertEqual(d.name, "laplace")
+    def test_detector_constructs_and_register_returns_it(self):
+        # NB: never register a real family name (or an always-applying detector) from a test -- the
+        # registry is a process-global singleton, so that would poison every other automatic test.
+        d = Detector("__never_applies__", "continuous", lambda a: False, lambda a, n: 0.0, lambda *a, **k: None)
+        self.assertEqual(d.name, "__never_applies__")
+        self.assertIs(register(d), d)  # registering an inert (applies->False) detector cannot affect selection
 
     def test_laplace_recovered_from_laplace_data(self):
         rng = np.random.RandomState(0)
