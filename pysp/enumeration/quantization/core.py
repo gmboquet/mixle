@@ -433,7 +433,7 @@ def build_budget_index(
     and reports the exact log density (recomputed via ``exact_log_density`` when supplied,
     otherwise the structurally accumulated log probability).
     """
-    from pysp.enumeration.algorithms import LazyQuantizedEnumerationIndex
+    from pysp.enumeration.quantization.seek import LazyQuantizedEnumerationIndex
 
     R = quantizer.oversample
     bw = quantizer.bin_width_bits
