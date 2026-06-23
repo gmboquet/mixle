@@ -174,23 +174,22 @@ class GrammarTestCase(unittest.TestCase):
             builder.edges[a, b].setdefault("edge_color", "")
         return builder
 
-    @classmethod
-    def _path(cls, n):
-        return cls._labeled(nx.path_graph(n))
+    @staticmethod
+    def _edge(la, lb):
+        g = nx.Graph()
+        g.add_node(0, label=la, node_color="")
+        g.add_node(1, label=lb, node_color="")
+        g.add_edge(0, 1, weight=1.0, edge_color="")
+        return g
 
-    @classmethod
-    def _star(cls, n):
-        return cls._labeled(nx.star_graph(n - 1))
+    def _freq_dist(self):
+        # an unambiguous grammar: S -> A-B | A-C | A-D with true frequencies 5 : 3 : 2
+        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarRule, VertexReplacementGrammar
 
-    def _path_model(self, n=200, pseudo_count=0.5, seed=0):
-        # the estimator is closed-form (count node ego patterns), so a single accumulation pass is the MLE
-        from pysp.stats.sequences.grammar import GrammarEstimator, GrammarEstimatorAccumulator
-
-        rng = np.random.RandomState(seed)
-        acc = GrammarEstimatorAccumulator()
-        for _ in range(n):
-            acc.update(self._path(rng.randint(4, 8)), 1.0, None)
-        return GrammarEstimator(pseudo_count=pseudo_count).estimate(None, acc.value())
+        g = VertexReplacementGrammar()
+        for lb, freq in (("B", 5.0), ("C", 3.0), ("D", 2.0)):
+            g.add_rule(GrammarRule("S", self._edge("A", lb), freq))
+        return GrammarDistribution(g, 0.0, start_symbol="S")
 
     # --- generation: the sampler runs a real derivation and emits graphs ---
     def test_non_recursive_grammar_derives_its_right_hand_side(self):
@@ -227,56 +226,60 @@ class GrammarTestCase(unittest.TestCase):
         self.assertEqual(len(batch), 5)
         self.assertTrue(all(isinstance(g, nx.Graph) for g in batch))
 
-    # --- density and estimation operate on GRAPHS (same space as the sampler) ---
-    def test_log_density_takes_a_graph_and_is_a_valid_log_probability(self):
-        model = self._path_model()
-        lp = model.log_density(self._path(6))
-        self.assertLessEqual(lp, 1e-9)  # a real probability: log <= 0
-        self.assertTrue(np.isfinite(lp))
-        self.assertEqual(model.log_density(nx.Graph()), 0.0)  # empty graph -> empty product over nodes
+    # --- density and estimation: the grammar's own likelihood, computed by PARSING the graph ---
+    def test_log_density_is_the_parse_based_likelihood(self):
+        dist = self._freq_dist()  # P(A-x) = freq(x)/total from the best derivation
+        for lb, freq in (("B", 5.0), ("C", 3.0), ("D", 2.0)):
+            self.assertAlmostEqual(dist.log_density(self._edge("A", lb)), float(np.log(freq / 10.0)), places=9)
+        self.assertEqual(dist.log_density(self._edge("A", "Z")), float("-inf"))  # grammar cannot derive it
 
-    def test_density_is_discriminative(self):
-        model = self._path_model(n=300)
-        rng = np.random.RandomState(7)
-        in_dist = np.mean([model.log_density(self._path(rng.randint(4, 8))) for _ in range(40)])
-        out_dist = np.mean([model.log_density(self._star(rng.randint(4, 8))) for _ in range(40)])
-        self.assertGreater(in_dist, out_dist)  # in-distribution paths beat out-of-distribution stars
+    def test_generated_graphs_parse_and_foreign_graphs_are_neg_inf(self):
+        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarSampler
 
-    def test_estimator_consistent_and_converges_on_graphs(self):
-        rng = np.random.RandomState(1)
-        held = [self._path(rng.randint(4, 8)) for _ in range(40)]
-        avgs = []
-        for n in (50, 400, 1500):
-            model = self._path_model(n=n, seed=n)  # build once per sample size, then score the held-out set
-            avgs.append(np.mean([model.log_density(g) for g in held]))
-        self.assertTrue(all(np.isfinite(a) for a in avgs))
-        self.assertLess(abs(avgs[2] - avgs[1]), 0.05)  # held-out average log-density has converged
+        recursive = self._recursive_grammar()
+        dist = GrammarDistribution(recursive, 0.0, start_symbol=1)
+        for s in range(8):
+            g = GrammarSampler(recursive, orig_n=8, seed=s, start_symbol=1).sample()
+            lp = dist.log_density(g)  # a graph the grammar generated must be derivable -> finite
+            self.assertTrue(np.isfinite(lp))
+            self.assertLessEqual(lp, 1e-9)
+        self.assertEqual(dist.log_density(self._labeled(nx.complete_graph(4))), float("-inf"))
+
+    def test_estimator_recovers_frequencies_by_parsing(self):
+        # Viterbi parse-counting recovers the rule frequencies the data was generated with.
+        dist = self._freq_dist()
+        acc = dist.estimator().accumulator_factory().make()
+        for s in range(3000):
+            acc.update(dist.sampler(seed=s).sample(), 1.0, None)  # parse each graph, count the rule it fires
+        fit = dist.estimator().estimate(None, acc.value())
+        freqs = np.array([fit.grammar.rule_dict["S"][i].frequency for i in range(3)])
+        self.assertLess(np.abs(freqs / freqs.sum() - np.array([0.5, 0.3, 0.2])).sum(), 0.06)
 
     def test_estimate_driver_integration(self):
-        # the high-level estimate() driver fits the model from a list of graphs
         from pysp.inference import estimate
-        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarEstimator
+        from pysp.stats.sequences.grammar import GrammarDistribution
 
-        rng = np.random.RandomState(4)
-        model = estimate([self._path(rng.randint(4, 8)) for _ in range(60)], GrammarEstimator(pseudo_count=0.5))
-        self.assertIsInstance(model, GrammarDistribution)
-        self.assertTrue(np.isfinite(model.log_density(self._path(5))))
+        dist = self._freq_dist()
+        fit = estimate([dist.sampler(seed=s).sample() for s in range(60)], dist.estimator())
+        self.assertIsInstance(fit, GrammarDistribution)
+        self.assertTrue(np.isfinite(fit.log_density(self._edge("A", "B"))))
 
     def test_log_density_of_a_sample_is_finite(self):
-        # sample() emits a graph and log_density scores a graph -- they share a sample space now.
-        model = self._path_model(seed=2)
-        g = model.sampler(seed=3).sample()
+        # sample() emits a graph and log_density scores a graph -- one sample space.
+        dist = self._freq_dist()
+        g = dist.sampler(seed=3).sample()
         self.assertIsInstance(g, nx.Graph)
-        self.assertTrue(np.isfinite(model.log_density(g)))
+        self.assertTrue(np.isfinite(dist.log_density(g)))
 
-    def test_accumulator_keeps_num_rules_consistent(self):
-        from pysp.stats.sequences.grammar import GrammarEstimatorAccumulator
-
-        acc = GrammarEstimatorAccumulator()
-        acc.update(self._path(5), 2.0, None)
-        acc.update(self._star(5), 1.0, None)
-        g = acc.value()
-        self.assertEqual(g.num_rules, len(g.rule_list))
+    def test_accumulator_counts_align_with_structure(self):
+        dist = self._freq_dist()
+        acc = dist.estimator().accumulator_factory().make()
+        acc.update(self._edge("A", "B"), 2.0, None)
+        acc.update(self._edge("A", "C"), 1.0, None)
+        counts = acc.value()
+        self.assertEqual(counts.num_rules, len(counts.rule_list))
+        self.assertEqual(counts.rule_dict["S"][0].frequency, 2.0)  # the A-B rule fired with weight 2
+        self.assertEqual(counts.rule_dict["S"][1].frequency, 1.0)  # the A-C rule fired with weight 1
 
 
 class MarkovTransformTestCase(unittest.TestCase):
