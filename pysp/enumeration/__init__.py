@@ -44,6 +44,9 @@ from pysp.enumeration.algorithms import (
     sound_top_k,
     supports_enumeration,
 )
+
+# --- exact descending-probability enumeration of HMM state paths (list-Viterbi / A*) ---
+from pysp.enumeration.hmm_paths import hmm_best_paths
 from pysp.enumeration.model_enumeration import quantized_best_first_decode
 
 # --- the count-budget seek / unrank index + the count semiring (rank-by-index machinery) ---
@@ -82,4 +85,6 @@ __all__ = [
     "ProductEnumerator",
     "sound_top_k",
     "quantized_best_first_decode",
+    # HMM path enumeration (non-decomposable family, served by A* not the count index)
+    "hmm_best_paths",
 ]
