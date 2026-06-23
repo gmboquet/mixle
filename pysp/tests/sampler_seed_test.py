@@ -262,6 +262,7 @@ def _stats_public_distribution_catalog():
         "WrappedCauchyDistribution": stats.WrappedCauchyDistribution(0.7, 0.6),
         "ProjectedNormalDistribution": stats.ProjectedNormalDistribution(1.5, -1.0),
         "WrappedNormalDistribution": stats.WrappedNormalDistribution(0.7, 0.8),
+        "LKJDistribution": stats.LKJDistribution(3, 2.0),
         "GeneralizedGaussianDistribution": stats.GeneralizedGaussianDistribution(1.0, 2.0, 1.5),
         "NakagamiDistribution": stats.NakagamiDistribution(2.5, 3.0),
         "RicianDistribution": stats.RicianDistribution(2.0, 1.5),
