@@ -12,7 +12,7 @@ import math
 
 import numpy as np
 
-from pysp.ppl.core import RandomVariable
+from pysp.ppl.core import RandomVariable, register_composite
 
 
 class StateSpaceResult:
@@ -116,3 +116,12 @@ def statespace_fit(rv: RandomVariable, data, *, max_its: int = 200, tol: float =
     (phi_free,) = rv._args
     result = _kalman_em(data, bool(phi_free), max_its, tol)
     return RandomVariable._bound(None, name=rv._name, result=result)
+
+
+def _ss_err(*a, **k):
+    raise NotImplementedError("state-space models are fit via fit(); they have no single dist.")
+
+
+# Self-register the StateSpace composite with its bespoke fitter (the fit_fn hook), so core dispatches
+# to statespace_fit without a per-family branch. LocalLevel()/AR1() build RandomVariables of this family.
+register_composite("StateSpace", _ss_err, _ss_err, fit_fn=statespace_fit)

@@ -178,7 +178,7 @@ def _dataframe_fields(fields: Any, estimator: Any, model: Any) -> Any:
 def _data_records_for_encoding(data: Any, fields: Any, estimator: Any, model: Any) -> Any:
     if not _dataframe_like(data) and fields is None:
         return data
-    from pysp.data.dataframe import dataframe_records
+    from pysp.data.sources.pandas_source import dataframe_records
 
     record_fields = _dataframe_fields(fields, estimator, model)
     return dataframe_records(data, fields=record_fields, as_dict=_recordish(model) or _recordish(estimator))

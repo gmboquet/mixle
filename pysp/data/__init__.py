@@ -8,9 +8,6 @@ input/representation helpers (not probability distributions), so they live outsi
 """
 
 from pysp.data.core import DataSource, LazySource, MaterializedSource, as_source
-from pysp.data.dataframe import dataframe_records, seq_encode_dataframe
-from pysp.data.graph_data import GraphDataEncoder, GraphObservation
-from pysp.data.rdd_sampler import sample_rdd, sample_seq_as_rdd, take_sample
 from pysp.data.schema import (
     Boolean,
     Categorical,
@@ -27,6 +24,9 @@ from pysp.data.schema import (
 )
 from pysp.data.sources import kinds as source_kinds
 from pysp.data.sources import open as open_source
+from pysp.data.sources.graph_source import GraphDataEncoder, GraphObservation
+from pysp.data.sources.pandas_source import dataframe_records, seq_encode_dataframe
+from pysp.data.sources.spark_source import sample_rdd, sample_seq_as_rdd, take_sample
 from pysp.data.structure import EXCHANGEABLE, IID, SEQUENTIAL, SampleStructure, partially_exchangeable
 
 __all__ = [

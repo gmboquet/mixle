@@ -774,9 +774,9 @@ class CompositeFamily:
     that lowers a child RandomVariable to a dist / estimator.
     """
 
-    __slots__ = ("name", "dist_fn", "est_fn", "seed_fn", "read")
+    __slots__ = ("name", "dist_fn", "est_fn", "seed_fn", "read", "fit_fn")
 
-    def __init__(self, name, dist_fn, est_fn, seed_fn=None, read=None):
+    def __init__(self, name, dist_fn, est_fn, seed_fn=None, read=None, fit_fn=None):
         self.name = name
         self.dist_fn = dist_fn
         self.est_fn = est_fn
@@ -786,6 +786,12 @@ class CompositeFamily:
         # read(dist, read_params) -> structured params in PPL vocabulary, recursing into
         # children via read_params (so the whole read surface is leak-free).
         self.read = read
+        # fit_fn(rv, data, **kw) -> a fully fitted RandomVariable, for composites whose fitting is a
+        # bespoke pipeline rather than EM over a single lowered distribution (state-space, PDE). When
+        # set, RandomVariable.fit dispatches to it instead of the generic estimator path, so the
+        # family owns its fitter and core needs no per-family branch. This is the extension point a
+        # plugin (e.g. pysparkplug-pde) uses to register a fittable composite without touching core.
+        self.fit_fn = fit_fn
 
 
 _FAMILIES: dict[str, Any] = {}
@@ -813,8 +819,8 @@ def register_family(
     return fam
 
 
-def register_composite(name, dist_fn, est_fn, seed_fn=None, dist_cls=None, read=None) -> CompositeFamily:
-    fam = CompositeFamily(name, dist_fn, est_fn, seed_fn=seed_fn, read=read)
+def register_composite(name, dist_fn, est_fn, seed_fn=None, dist_cls=None, read=None, fit_fn=None) -> CompositeFamily:
+    fam = CompositeFamily(name, dist_fn, est_fn, seed_fn=seed_fn, read=read, fit_fn=fit_fn)
     _FAMILIES[name] = fam
     if dist_cls is not None and read is not None:
         _DIST_TO_COMPOSITE_READ[dist_cls] = read
@@ -1468,21 +1474,11 @@ class RandomVariable:
 
             return _reg.regression_fit(self, data, **kw)
 
-        # state-space time-series models (Kalman/RTS + EM)
-        if self._kind == "sample" and isinstance(self._family, CompositeFamily) and self._family.name == "StateSpace":
-            from pysp.ppl import statespace as _ss
-
-            return _ss.statespace_fit(self, data, **kw)
-
-        # PDE-constrained latent-field models (method-of-lines + multivariate Kalman/RTS + EM)
-        if (
-            self._kind == "sample"
-            and isinstance(self._family, CompositeFamily)
-            and self._family.name == "PDEStateSpace"
-        ):
-            from pysp.ppl.physics import pde as _pde
-
-            return _pde.pde_fit(self, data, **kw)
+        # Composite families with a bespoke fitter (state-space Kalman/RTS+EM, PDE-constrained fields)
+        # own their fit through the registered fit_fn hook -- no per-family branch in core. State-space
+        # is registered in pysp.ppl.statespace; PDEStateSpace by the pysparkplug-pde plugin.
+        if self._kind == "sample" and isinstance(self._family, CompositeFamily) and self._family.fit_fn is not None:
+            return self._family.fit_fn(self, data, **kw)
 
         grouped = self._kind == "sample" and any(
             isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args

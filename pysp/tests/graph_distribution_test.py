@@ -51,7 +51,7 @@ class GraphDistributionTestCase(unittest.TestCase):
     def test_erdos_renyi_enumeration_matches_brute_force(self):
         import itertools
 
-        from pysp.data.graph_data import _edge_indices
+        from pysp.data.sources.graph_source import _edge_indices
         from pysp.enumeration.algorithms import freeze
         from pysp.enumeration.density_rank import density_rank
 
@@ -93,7 +93,7 @@ class GraphDistributionTestCase(unittest.TestCase):
     def test_stochastic_block_enumeration_matches_brute_force(self):
         import itertools
 
-        from pysp.data.graph_data import _edge_indices
+        from pysp.data.sources.graph_source import _edge_indices
         from pysp.stats.compute.pdist import EnumerationError
 
         bp = np.array([[0.7, 0.2], [0.2, 0.5]])

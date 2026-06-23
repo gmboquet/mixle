@@ -840,7 +840,14 @@ def fit_field(
         return loss
 
     opt.step(closure)
-    from pysp.ppl.physics.pde_solve import sparse_used_since
+    # The sparse-forward instrumentation lives with the PDE solver (pysparkplug-pde). Without it there
+    # are no sparse forwards, so the laplace guard below is vacuous -- degrade to "no sparse solve".
+    try:
+        from pysp.ppl.physics.pde_solve import sparse_used_since
+    except ImportError:
+
+        def sparse_used_since(reset: bool = False) -> bool:
+            return False
 
     sparse_used_since(reset=True)
     obj = float(neg_log_post(u).detach())  # one eval to detect whether the forward uses the sparse solve

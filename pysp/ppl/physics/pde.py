@@ -18,7 +18,7 @@ import math
 
 import numpy as np
 
-from pysp.ppl.core import RandomVariable
+from pysp.ppl.core import RandomVariable, register_composite
 from pysp.ppl.physics.dynamics import DynamicsOperator
 
 
@@ -339,3 +339,14 @@ def fit_reaction_diffusion(
         y, transition, {"diffusivity": init_diffusivity, "growth": init_growth}, max_its=max_its, lr=lr
     )
     return fitted
+
+
+def _pde_err(*a, **k):
+    raise NotImplementedError("PDE models are fit via fit(); they have no single dist.")
+
+
+# Self-register the PDE-constrained state-space composite with its bespoke fitter (the fit_fn hook),
+# so core dispatches to pde_fit without a per-family branch. This module is imported by the package
+# init (in pysp: pysp.ppl.physics; once relocated: the pysparkplug-pde plugin), which fires the
+# registration; the PDE(operator) constructor builds RandomVariables of this family.
+register_composite("PDEStateSpace", _pde_err, _pde_err, fit_fn=pde_fit)
