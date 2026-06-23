@@ -25,9 +25,8 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma, gammaln, logsumexp
 
-from pysp.engines.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
-from pysp.stats.compute.posterior import MeanFieldLDAPosterior
+from pysp.engines.arithmetic import maxrandint
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
@@ -44,6 +43,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.stats.compute.posterior import MeanFieldLDAPosterior
 from pysp.utils.special import digammainv
 from pysp.utils.vector import row_choice
 

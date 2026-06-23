@@ -13,10 +13,10 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.base.gaussian import GaussianDistribution
-from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
 from pysp.stats.combinator.null_dist import NullDistribution
 from pysp.stats.latent.tree_hidden_markov_model import TreeHiddenMarkovModelDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution
 
 
 class TreeHmmSamplerGuardTest(unittest.TestCase):

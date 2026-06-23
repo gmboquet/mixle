@@ -5,8 +5,8 @@ import unittest
 import pysp
 from pysp.capability import CapabilityError, HasMoments
 from pysp.ops import mixture, project
-from pysp.stats.base.gamma import GammaDistribution
-from pysp.stats.base.gaussian import GaussianDistribution
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
 
 
 class OpsProjectTest(unittest.TestCase):

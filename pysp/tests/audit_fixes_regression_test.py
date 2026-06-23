@@ -48,7 +48,7 @@ def test_m4_diagonal_gaussian_zero_nobs_mean_is_finite():
 
 # --------------------------------------------------------------------------- C1
 def test_c1_integer_multinomial_out_of_support_zero_count_is_finite():
-    from pysp.stats.base.integer_multinomial import IntegerMultinomialDistribution
+    from pysp.stats.multivariate.integer_multinomial import IntegerMultinomialDistribution
 
     d = IntegerMultinomialDistribution(0, [0.5, 0.5])
     # value 5 is out of the 2-symbol support but carries count 0: (-inf)*0 must not be NaN.
@@ -58,7 +58,7 @@ def test_c1_integer_multinomial_out_of_support_zero_count_is_finite():
 
 # --------------------------------------------------------------------------- C2
 def test_c2_categorical_estimate_does_not_mutate_suff_stat():
-    from pysp.stats.base.categorical import CategoricalEstimator
+    from pysp.stats.univariate.discrete.categorical import CategoricalEstimator
 
     est = CategoricalEstimator(pseudo_count=1.0)
     suff = {"a": 3.0, "b": 1.0}
@@ -69,7 +69,7 @@ def test_c2_categorical_estimate_does_not_mutate_suff_stat():
 
 # --------------------------------------------------------------------------- M2 (variance cancellation)
 def test_m2_skew_normal_recovers_shape_under_large_offset():
-    from pysp.stats.base.skew_normal import SkewNormalDistribution, SkewNormalEstimator
+    from pysp.stats.univariate.continuous.skew_normal import SkewNormalDistribution, SkewNormalEstimator
 
     est = SkewNormalEstimator()
     d = SkewNormalDistribution(1.0e6, 1.3, 4.0)
@@ -82,7 +82,7 @@ def test_m2_skew_normal_recovers_shape_under_large_offset():
 
 
 def test_m2_skew_normal_combine_matches_single_batch():
-    from pysp.stats.base.skew_normal import SkewNormalDistribution, SkewNormalEstimator
+    from pysp.stats.univariate.continuous.skew_normal import SkewNormalDistribution, SkewNormalEstimator
 
     est = SkewNormalEstimator()
     d = SkewNormalDistribution(1.0e6, 1.3, 4.0)
@@ -99,10 +99,10 @@ def test_m2_skew_normal_combine_matches_single_batch():
 
 
 def test_m2_exgaussian_recovers_under_large_offset():
-    from pysp.stats.base.exgaussian import (
+    from pysp.stats.univariate.continuous.exgaussian import (
         ExponentiallyModifiedGaussianDistribution as EMG,
     )
-    from pysp.stats.base.exgaussian import (
+    from pysp.stats.univariate.continuous.exgaussian import (
         ExponentiallyModifiedGaussianEstimator as EMGEst,
     )
 
@@ -129,8 +129,8 @@ def test_m8_gaussian_conjugate_scatter_is_nonnegative_offset_data():
 
 # --------------------------------------------------------------------------- M6 (survival tail)
 def test_m6_survival_deep_tail_is_finite_not_neg_inf():
-    from pysp.stats.base.gaussian import GaussianDistribution
     from pysp.stats.combinator.survival import SurvivalDistribution
+    from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
 
     base = GaussianDistribution(0.0, 1.0)
     with warnings.catch_warnings():
@@ -160,7 +160,7 @@ def test_e3_symbolic_logsumexp_is_overflow_safe():
 
 # --------------------------------------------------------------------------- geometric no-warn
 def test_geometric_all_ones_does_not_warn():
-    from pysp.stats.base.geometric import GeometricEstimator
+    from pysp.stats.univariate.discrete.geometric import GeometricEstimator
 
     est = GeometricEstimator()
     with warnings.catch_warnings():

@@ -14,9 +14,9 @@ from numpy.random import RandomState
 
 from pysp.engines import NUMPY_ENGINE
 from pysp.inference import seq_estimate, seq_initialize
-from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.combinator.null_dist import NullDistribution
 from pysp.stats.latent.hidden_markov import HiddenMarkovModelDistribution
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution, CategoricalEstimator
 
 try:
     from pysp.engines import TorchEngine

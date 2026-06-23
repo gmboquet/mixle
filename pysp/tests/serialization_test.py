@@ -113,7 +113,7 @@ class DistributionSerializationTestCase(unittest.TestCase):
         self.assertEqual(sparse_loaded.cond_prob_mat.getformat(), "csr")
 
     def test_grammar_distribution_json_round_trip(self):
-        from pysp.stats.graph.grammar import GrammarDistribution, GrammarRule, VertexReplacementGrammar
+        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarRule, VertexReplacementGrammar
 
         graph = nx.Graph()
         graph.add_node(0, label="A", node_color="")

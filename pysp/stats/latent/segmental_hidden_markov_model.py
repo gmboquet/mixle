@@ -19,8 +19,8 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import logsumexp
 
-from pysp.engines.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.engines.arithmetic import maxrandint
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -37,7 +37,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.graph.markov_chain import MarkovChainDistribution
+from pysp.stats.sequences.markov_chain import MarkovChainDistribution
 from pysp.utils.aliasing import MISSING, coalesce_alias, require
 
 

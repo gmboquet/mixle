@@ -9,9 +9,9 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.base.categorical import CategoricalEstimator
 from pysp.stats.combinator.conditional import ConditionalDistributionEstimator
 from pysp.stats.latent.hidden_association import HiddenAssociationEstimator
+from pysp.stats.univariate.discrete.categorical import CategoricalEstimator
 
 
 def make_accumulator(cond_key="cond_suff_stats", keys=(None, None)):

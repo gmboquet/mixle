@@ -95,7 +95,7 @@ def _iter_distribution_modules(package_name: str) -> Iterable[Any]:
         return
     prefix = package.__name__ + "."
     # walk_packages (not iter_modules) so distributions grouped into subpackages
-    # (pysp.stats.base, pysp.stats.latent, ...) are still discovered for the registry.
+    # (pysp.stats.univariate.continuous, pysp.stats.latent, ...) are still discovered for the registry.
     for info in pkgutil.walk_packages(package_path, prefix):
         try:
             yield importlib.import_module(info.name)

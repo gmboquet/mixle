@@ -9,13 +9,13 @@ import numpy as np
 
 from pysp.enumeration.algorithms import freeze
 from pysp.stats import DiagonalGaussianSampler, DistributionSampler
-from pysp.stats.base.gaussian import GaussianDistribution
-from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
-from pysp.stats.base.integer_uniform_spike import IntegerUniformSpikeDistribution
-from pysp.stats.base.poisson import PoissonDistribution
 from pysp.stats.combinator.weighted import WeightedDistribution, WeightedSampler
 from pysp.stats.compute.pdist import DataSequenceEncoder, EnumerationError
 from pysp.stats.latent.dirac_length import DiracLengthMixtureDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution
+from pysp.stats.univariate.discrete.integer_uniform_spike import IntegerUniformSpikeDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
 TOL = 1e-9
 

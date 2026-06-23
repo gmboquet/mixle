@@ -15,8 +15,8 @@ def _merge_key(dist):
 
 # --------------------------------------------------------------------------- A1
 def test_a1_power_law_hawkes_encoder_is_abc_and_equal():
-    from pysp.stats.base.power_law_hawkes import PowerLawHawkesDataEncoder
     from pysp.stats.compute.pdist import DataSequenceEncoder
+    from pysp.stats.processes.power_law_hawkes import PowerLawHawkesDataEncoder
 
     e1, e2 = PowerLawHawkesDataEncoder(), PowerLawHawkesDataEncoder()
     assert isinstance(e1, DataSequenceEncoder)  # was a bare object -> broke encoder interchange
@@ -24,11 +24,11 @@ def test_a1_power_law_hawkes_encoder_is_abc_and_equal():
 
 
 def test_a1_power_law_hawkes_accumulator_is_abc():
-    from pysp.stats.base.power_law_hawkes import (
+    from pysp.stats.compute.pdist import SequenceEncodableStatisticAccumulator
+    from pysp.stats.processes.power_law_hawkes import (
         PowerLawHawkesAccumulatorFactory,
         PowerLawHawkesEstimator,
     )
-    from pysp.stats.compute.pdist import SequenceEncodableStatisticAccumulator
 
     acc = PowerLawHawkesEstimator(window=10.0).accumulator_factory().make()
     assert isinstance(acc, SequenceEncodableStatisticAccumulator)
@@ -39,7 +39,7 @@ def test_a1_power_law_hawkes_accumulator_is_abc():
 
 # --------------------------------------------------------------------------- A2
 def test_a2_seq_ld_lambda_default_returns_list():
-    from pysp.stats.base.gaussian import GaussianDistribution
+    from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
 
     # The base default used to `pass` (return None); sequence.py calls `.extend()` on it.
     rv = GaussianDistribution(0.0, 1.0).seq_ld_lambda()
@@ -48,7 +48,7 @@ def test_a2_seq_ld_lambda_default_returns_list():
 
 # --------------------------------------------------------------------------- A3
 def test_a3_vmf_estimate_preserves_keys():
-    from pysp.stats.multivariate.von_mises_fisher import VonMisesFisherEstimator
+    from pysp.stats.directional.von_mises_fisher import VonMisesFisherEstimator
 
     est = VonMisesFisherEstimator(keys="grp")
     acc = est.accumulator_factory().make()

@@ -28,9 +28,9 @@ import numpy as np
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
+from pysp.capability import Neutral, supports
 from pysp.engines.arithmetic import *
 from pysp.engines.arithmetic import maxrandint
-from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,

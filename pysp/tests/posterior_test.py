@@ -6,10 +6,10 @@ import numpy as np
 
 from pysp.inference import ParameterPosterior, PredictivePosterior, posterior
 from pysp.stats import sample
-from pysp.stats.base.bernoulli import BernoulliDistribution
-from pysp.stats.base.gaussian import GaussianDistribution
 from pysp.stats.compute.posterior import LatentPosterior, Posterior
 from pysp.stats.latent.mixture import MixtureDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.discrete.bernoulli import BernoulliDistribution
 
 
 class PredictivePosteriorTest(unittest.TestCase):

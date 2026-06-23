@@ -4,12 +4,12 @@ import numpy as np
 import pytest
 
 from pysp import capability as cap
-from pysp.stats.base.categorical import CategoricalDistribution
-from pysp.stats.base.gaussian import GaussianDistribution
-from pysp.stats.base.poisson import PoissonDistribution
 from pysp.stats.combinator.null_dist import NullDistribution
 from pysp.stats.latent.mixture import MixtureDistribution
 from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
 
 def _cat():
@@ -96,8 +96,8 @@ def test_transform_setvalued_backend_facets():
 
 
 def test_conjugate_updatable_is_the_closed_form_tier():
-    from pysp.stats.base.poisson import PoissonDistribution
-    from pysp.stats.base.weibull import WeibullDistribution
+    from pysp.stats.univariate.continuous.weibull import WeibullDistribution
+    from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
     # Conjugate families report the capability (closed-form Bayesian update available)...
     assert cap.supports(_cat(), cap.ConjugateUpdatable)
@@ -113,7 +113,7 @@ def test_conjugate_updatable_is_the_closed_form_tier():
 
 
 def test_temporal_point_process_facet():
-    from pysp.stats.base.hawkes_process import HawkesProcessDistribution
+    from pysp.stats.processes.hawkes_process import HawkesProcessDistribution
 
     h = HawkesProcessDistribution(0.5, 0.3, 1.5, window=10.0)
     assert cap.supports(h, cap.TemporalPointProcess)
@@ -226,7 +226,7 @@ def test_ws4_distribution_capabilities():
     import pysp
     from pysp.capability import Continuous, Discrete, Fittable, HasCDF, Optimizable
     from pysp.relations import Assignment
-    from pysp.stats.base.categorical import CategoricalDistribution
+    from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
 
     g = GaussianDistribution(0.0, 1.0)
     c = CategoricalDistribution({"a": 0.5, "b": 0.5})

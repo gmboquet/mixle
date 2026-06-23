@@ -25,14 +25,14 @@ from numpy.random import RandomState
 from pysp.inference import seq_estimate, seq_initialize
 from pysp.inference.estimation import fit
 from pysp.stats import seq_encode
-from pysp.stats.base.gamma import GammaDistribution
-from pysp.stats.base.gaussian import GaussianDistribution, GaussianEstimator
 from pysp.stats.bayes.dirichlet_process_mixture import (
     DirichletProcessMixtureDistribution,
     DirichletProcessMixtureEstimator,
 )
 from pysp.stats.bayes.hierarchical_dirichlet_process_mixture import HierarchicalDirichletProcessMixtureEstimator
 from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution, GaussianEstimator
 
 TRUE_MUS = [-8.0, 0.0, 8.0]
 

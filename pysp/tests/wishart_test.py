@@ -56,7 +56,7 @@ class WishartEstimatedDFTest(unittest.TestCase):
         return est.estimate(None, acc.value())
 
     def test_recovers_degrees_of_freedom(self):
-        from pysp.stats.multivariate.wishart import WishartDistribution, WishartEstimator
+        from pysp.stats.matrix.wishart import WishartDistribution, WishartEstimator
 
         for true_df in (8.0, 15.0):
             data = WishartDistribution(df=true_df, scale=self._V()).sampler(seed=1).sample(4000)
@@ -65,7 +65,7 @@ class WishartEstimatedDFTest(unittest.TestCase):
             self.assertAlmostEqual(m.scale[0, 0], 1.0, delta=0.1)  # scale recovered too
 
     def test_fixed_df_is_unchanged(self):
-        from pysp.stats.multivariate.wishart import WishartDistribution, WishartEstimator
+        from pysp.stats.matrix.wishart import WishartDistribution, WishartEstimator
 
         data = WishartDistribution(df=8.0, scale=self._V()).sampler(seed=2).sample(500)
         m = self._fit_direct(WishartEstimator(dim=3, df=8.0), data)

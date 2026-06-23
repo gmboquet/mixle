@@ -9,13 +9,13 @@ place (``docs/ARCHITECTURE.md``).
 
 from __future__ import annotations
 
-from pysp.stats.base.birth_death import BirthDeathSamplingDistribution
-from pysp.stats.base.chinese_restaurant_process import ChineseRestaurantProcessDistribution
-from pysp.stats.base.hawkes_process import HawkesProcessDistribution
-from pysp.stats.base.inhomogeneous_poisson import InhomogeneousPoissonProcessDistribution
-from pysp.stats.base.multivariate_hawkes import MultivariateHawkesProcessDistribution
-from pysp.stats.base.power_law_hawkes import PowerLawHawkesDistribution
-from pysp.stats.base.renewal_process import RenewalProcessDistribution
+from pysp.stats.processes.birth_death import BirthDeathSamplingDistribution
+from pysp.stats.processes.chinese_restaurant_process import ChineseRestaurantProcessDistribution
+from pysp.stats.processes.hawkes_process import HawkesProcessDistribution
+from pysp.stats.processes.inhomogeneous_poisson import InhomogeneousPoissonProcessDistribution
+from pysp.stats.processes.multivariate_hawkes import MultivariateHawkesProcessDistribution
+from pysp.stats.processes.power_law_hawkes import PowerLawHawkesDistribution
+from pysp.stats.processes.renewal_process import RenewalProcessDistribution
 
 __all__ = [
     "HawkesProcessDistribution",

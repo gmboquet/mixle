@@ -9,11 +9,11 @@ import unittest
 import numpy as np
 
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats.base.integer_uniform_spike import IntegerUniformSpikeDistribution
-from pysp.stats.base.laplace import LaplaceDistribution
-from pysp.stats.base.pareto import ParetoDistribution
-from pysp.stats.base.point_mass import PointMassDistribution
-from pysp.stats.base.uniform import UniformDistribution
+from pysp.stats.univariate.continuous.laplace import LaplaceDistribution
+from pysp.stats.univariate.continuous.pareto import ParetoDistribution
+from pysp.stats.univariate.continuous.uniform import UniformDistribution
+from pysp.stats.univariate.discrete.integer_uniform_spike import IntegerUniformSpikeDistribution
+from pysp.stats.univariate.discrete.point_mass import PointMassDistribution
 
 try:
     from pysp.engines import TorchEngine

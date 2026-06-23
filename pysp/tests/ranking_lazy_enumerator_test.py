@@ -10,9 +10,9 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.graph.mallows import MallowsDistribution
-from pysp.stats.graph.plackett_luce import PlackettLuceDistribution
-from pysp.stats.graph.spearman_rho import SpearmanRankingDistribution
+from pysp.stats.rankings.mallows import MallowsDistribution
+from pysp.stats.rankings.plackett_luce import PlackettLuceDistribution
+from pysp.stats.rankings.spearman_rho import SpearmanRankingDistribution
 
 
 def _brute(dist, n):

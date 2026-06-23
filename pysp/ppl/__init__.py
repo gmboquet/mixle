@@ -86,29 +86,6 @@ from pysp.ppl.multiphysics import CoupledPDESystem, solve_poisson
 from pysp.ppl.priors import Potts, TotalVariation
 from pysp.ppl.shape import level_set_material, shape_optimize
 from pysp.ppl.wave import WaveEquation2D
-from pysp.stats.base.bernoulli import BernoulliDistribution, BernoulliEstimator
-from pysp.stats.base.beta import BetaDistribution, BetaEstimator
-from pysp.stats.base.binomial import BinomialDistribution, BinomialEstimator
-from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.base.exgaussian import (
-    ExponentiallyModifiedGaussianDistribution,
-    ExponentiallyModifiedGaussianEstimator,
-)
-from pysp.stats.base.exponential import ExponentialDistribution, ExponentialEstimator
-from pysp.stats.base.gamma import GammaDistribution, GammaEstimator
-from pysp.stats.base.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.stats.base.geometric import GeometricDistribution, GeometricEstimator
-from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution, IntegerCategoricalEstimator
-from pysp.stats.base.laplace import LaplaceDistribution, LaplaceEstimator
-from pysp.stats.base.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
-from pysp.stats.base.logistic import LogisticDistribution, LogisticEstimator
-from pysp.stats.base.negative_binomial import NegativeBinomialDistribution, NegativeBinomialEstimator
-from pysp.stats.base.pareto import ParetoDistribution, ParetoEstimator
-from pysp.stats.base.poisson import PoissonDistribution, PoissonEstimator
-from pysp.stats.base.rayleigh import RayleighDistribution, RayleighEstimator
-from pysp.stats.base.student_t import StudentTDistribution, StudentTEstimator
-from pysp.stats.base.uniform import UniformDistribution, UniformEstimator
-from pysp.stats.base.weibull import WeibullDistribution, WeibullEstimator
 
 # Low-level numeric primitives (sparse_solve, grid assembly, the ODE integrator) live in
 # pysp.ppl.pde_solve and are reached through the `ops` namespace handed to forward callbacks; they are
@@ -124,6 +101,32 @@ from pysp.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDistribution,
     MultivariateGaussianEstimator,
 )
+from pysp.stats.univariate.continuous.beta import BetaDistribution, BetaEstimator
+from pysp.stats.univariate.continuous.exgaussian import (
+    ExponentiallyModifiedGaussianDistribution,
+    ExponentiallyModifiedGaussianEstimator,
+)
+from pysp.stats.univariate.continuous.exponential import ExponentialDistribution, ExponentialEstimator
+from pysp.stats.univariate.continuous.gamma import GammaDistribution, GammaEstimator
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.univariate.continuous.laplace import LaplaceDistribution, LaplaceEstimator
+from pysp.stats.univariate.continuous.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
+from pysp.stats.univariate.continuous.logistic import LogisticDistribution, LogisticEstimator
+from pysp.stats.univariate.continuous.pareto import ParetoDistribution, ParetoEstimator
+from pysp.stats.univariate.continuous.rayleigh import RayleighDistribution, RayleighEstimator
+from pysp.stats.univariate.continuous.student_t import StudentTDistribution, StudentTEstimator
+from pysp.stats.univariate.continuous.uniform import UniformDistribution, UniformEstimator
+from pysp.stats.univariate.continuous.weibull import WeibullDistribution, WeibullEstimator
+from pysp.stats.univariate.discrete.bernoulli import BernoulliDistribution, BernoulliEstimator
+from pysp.stats.univariate.discrete.binomial import BinomialDistribution, BinomialEstimator
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.univariate.discrete.geometric import GeometricDistribution, GeometricEstimator
+from pysp.stats.univariate.discrete.integer_categorical import (
+    IntegerCategoricalDistribution,
+    IntegerCategoricalEstimator,
+)
+from pysp.stats.univariate.discrete.negative_binomial import NegativeBinomialDistribution, NegativeBinomialEstimator
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution, PoissonEstimator
 
 __all__ = [
     "RandomVariable",

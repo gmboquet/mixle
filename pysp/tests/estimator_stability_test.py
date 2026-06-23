@@ -2,8 +2,8 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.base.gamma import GammaDistribution, GammaEstimator
 from pysp.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
+from pysp.stats.univariate.continuous.gamma import GammaDistribution, GammaEstimator
 
 
 class GammaEstimatorStabilityTestCase(unittest.TestCase):

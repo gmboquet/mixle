@@ -6,8 +6,8 @@ import scipy.stats as ss
 
 import pysp
 from pysp.capability import HasCDF, HasMoments
-from pysp.stats.base.logseries import LogSeriesDistribution
-from pysp.stats.base.skellam import SkellamDistribution
+from pysp.stats.univariate.discrete.logseries import LogSeriesDistribution
+from pysp.stats.univariate.discrete.skellam import SkellamDistribution
 
 
 class SkellamLogSeriesMethodsTest(unittest.TestCase):

@@ -11,18 +11,18 @@ quantile/cdf round-trip, and -- the key correctness tie-in -- that d/dx CDF matc
 import math
 import unittest
 
-from pysp.stats.base.beta import BetaDistribution
-from pysp.stats.base.exponential import ExponentialDistribution
-from pysp.stats.base.gamma import GammaDistribution
-from pysp.stats.base.gaussian import GaussianDistribution
-from pysp.stats.base.laplace import LaplaceDistribution
-from pysp.stats.base.log_gaussian import LogGaussianDistribution
-from pysp.stats.base.logistic import LogisticDistribution
-from pysp.stats.base.pareto import ParetoDistribution
-from pysp.stats.base.rayleigh import RayleighDistribution
-from pysp.stats.base.student_t import StudentTDistribution
-from pysp.stats.base.uniform import UniformDistribution
-from pysp.stats.base.weibull import WeibullDistribution
+from pysp.stats.univariate.continuous.beta import BetaDistribution
+from pysp.stats.univariate.continuous.exponential import ExponentialDistribution
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.continuous.laplace import LaplaceDistribution
+from pysp.stats.univariate.continuous.log_gaussian import LogGaussianDistribution
+from pysp.stats.univariate.continuous.logistic import LogisticDistribution
+from pysp.stats.univariate.continuous.pareto import ParetoDistribution
+from pysp.stats.univariate.continuous.rayleigh import RayleighDistribution
+from pysp.stats.univariate.continuous.student_t import StudentTDistribution
+from pysp.stats.univariate.continuous.uniform import UniformDistribution
+from pysp.stats.univariate.continuous.weibull import WeibullDistribution
 
 CASES = [
     ("gaussian", GaussianDistribution(0.7, 2.0), [-1.0, 0.5, 2.0]),
@@ -96,7 +96,7 @@ class MultivariateCumulativeTestCase(unittest.TestCase):
         import numpy as np
 
         from pysp.enumeration.density_rank import density_rank
-        from pysp.stats.multivariate.von_mises_fisher import VonMisesFisherDistribution
+        from pysp.stats.directional.von_mises_fisher import VonMisesFisherDistribution
 
         # d=3: closed form G = (e^k - e^{k t}) / (e^k - e^{-k}), t = mu . x
         mu = np.array([1.0, 0.0, 0.0])
@@ -125,9 +125,9 @@ class MultivariateCumulativeTestCase(unittest.TestCase):
         # (sweeping q enumerates the support in descending density).
         import numpy as np
 
+        from pysp.stats.directional.von_mises_fisher import VonMisesFisherDistribution
         from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
         from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
-        from pysp.stats.multivariate.von_mises_fisher import VonMisesFisherDistribution
 
         dists = [
             MultivariateGaussianDistribution(np.array([0.5, -1.0]), np.array([[2.0, 0.3], [0.3, 1.0]])),

@@ -25,11 +25,10 @@ import numpy as np
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
+from pysp.capability import Neutral, supports
 from pysp.engines.arithmetic import *
 from pysp.engines.arithmetic import maxrandint
-from pysp.capability import Neutral, supports
 from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge
-from pysp.stats.base.categorical_multinomial import MultisetProductEnumerator
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -47,6 +46,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.stats.multivariate.categorical_multinomial import MultisetProductEnumerator
 from pysp.utils.aliasing import coalesce_alias
 
 SS0 = TypeVar("SS0")
