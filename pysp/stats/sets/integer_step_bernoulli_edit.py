@@ -33,7 +33,7 @@ from typing import TypeVar
 
 import numpy as np
 
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 from pysp.stats.combinator.null_dist import (
     NullEstimator,
 )

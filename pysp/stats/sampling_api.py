@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import maxrandint
 
 __all__ = ["sample"]
 

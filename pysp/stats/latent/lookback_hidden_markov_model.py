@@ -40,8 +40,8 @@ import numpy as np
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
-from pysp.arithmetic import *
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import *
+from pysp.engines.arithmetic import maxrandint
 from pysp.stats.combinator.null_dist import (
     NullAccumulatorFactory,
     NullDataEncoder,

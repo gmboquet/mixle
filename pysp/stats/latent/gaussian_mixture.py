@@ -30,7 +30,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import maxrandint
 from pysp.stats.compute._sampling import scatter_component_draws
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,

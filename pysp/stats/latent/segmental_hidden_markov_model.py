@@ -19,7 +19,7 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import logsumexp
 
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,

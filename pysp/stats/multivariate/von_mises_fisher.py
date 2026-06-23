@@ -40,7 +40,7 @@ from numpy.random import RandomState
 from scipy.special import gammaln
 
 import pysp.utils.vector as vec
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,

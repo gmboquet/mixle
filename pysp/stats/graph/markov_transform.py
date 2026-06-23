@@ -24,8 +24,8 @@ import itertools
 import numpy as np
 from scipy.sparse import csc_matrix
 
-from pysp.arithmetic import *
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import *
+from pysp.engines.arithmetic import maxrandint
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,

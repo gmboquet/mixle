@@ -8,8 +8,8 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.arithmetic import *
-from pysp.arithmetic import maxrandint
+from pysp.engines.arithmetic import *
+from pysp.engines.arithmetic import maxrandint
 
 
 def take_sample(rdd: Any, with_replacement: bool, n: int, seed: int | None = None):

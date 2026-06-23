@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp import arithmetic as ar
+from pysp.engines import arithmetic as ar
 from pysp.engines import (
     NUMPY_ENGINE,
     NumpyEngine,
@@ -150,7 +150,7 @@ class EngineTestCase(unittest.TestCase):
         self.assertIs(engine_of(arr), SYMBOLIC_ENGINE)
         self.assertEqual(engine_of(np.array([1.0, 2.0])).name, "numpy")
 
-        # pysp.arithmetic dispatches symbolic inputs to the symbolic engine
+        # pysp.engines.arithmetic dispatches symbolic inputs to the symbolic engine
         expr = ar.log(ar.exp(node) + 1.0)
         self.assertIsInstance(expr, SymbolicExpression)
         self.assertAlmostEqual(float(SYMBOLIC_ENGINE.evaluate(expr, {"x": 0.0})), np.log(2.0))

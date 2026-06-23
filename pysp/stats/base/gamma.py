@@ -18,7 +18,7 @@ from typing import Any, Optional
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 from pysp.inference.fisher import FixedFisherView
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,

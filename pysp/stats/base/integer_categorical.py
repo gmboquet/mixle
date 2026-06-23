@@ -22,7 +22,7 @@ import numpy as np
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
-from pysp.arithmetic import *
+from pysp.engines.arithmetic import *
 from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
 from pysp.stats.base.categorical import CategoricalFisherView
 from pysp.stats.compute.pdist import (
