@@ -609,6 +609,10 @@ __all__ = [
     "LKJSampler",
     "LKJEstimator",
     "LKJDataEncoder",
+    "KentDistribution",
+    "KentSampler",
+    "KentEstimator",
+    "KentDataEncoder",
     "InverseWishartDistribution",
     "InverseWishartSampler",
     "InverseWishartEstimator",
@@ -1367,6 +1371,12 @@ from pysp.stats.multivariate.watson import (
     WatsonDistribution,
     WatsonEstimator,
     WatsonSampler,
+)
+from pysp.stats.multivariate.kent import (
+    KentDataEncoder,
+    KentDistribution,
+    KentEstimator,
+    KentSampler,
 )
 from pysp.stats.multivariate.lkj import (
     LKJDataEncoder,
