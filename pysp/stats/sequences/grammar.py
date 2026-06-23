@@ -522,17 +522,27 @@ class GrammarSampler(DistributionSampler):
         self.start_symbol = start_symbol
         self.rng = np.random.RandomState(seed)
 
-    def sample(self):
-        """Generate a single graph from the grammar by an NLC vertex-replacement derivation.
-
-        Returns:
-            A networkx graph generated from the grammar.
-
-        """
+    def _sample_one(self):
         g, _ = generate_graph(
             rule_dict=self.grammar.rule_dict, target_n=self.orig_n, rng=self.rng, start_symbol=self.start_symbol
         )
         return g
+
+    def sample(self, size=None, *, batched=True):
+        """Generate graphs from the grammar by NLC vertex-replacement derivation.
+
+        Args:
+            size (Optional[int]): Number of graphs to draw; ``None`` returns a single graph (honouring
+                the DistributionSampler contract). Each graph uses the sampler's ``orig_n`` node budget.
+            batched (bool): Accepted for interface compatibility; results are returned as a list.
+
+        Returns:
+            A single networkx graph when ``size`` is None, else a list of ``size`` graphs.
+
+        """
+        if size is None:
+            return self._sample_one()
+        return [self._sample_one() for _ in range(int(size))]
 
     def sample_seq(self, size_arr):
         """Generate one graph per entry of size_arr, each with that node budget.

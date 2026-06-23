@@ -249,6 +249,72 @@ class GrammarTestCase(unittest.TestCase):
         self.assertTrue(tt_edges)
         self.assertTrue(nx.is_connected(g))
 
+    @staticmethod
+    def _labeled(nodes, edges):
+        g = nx.Graph()
+        for i in range(nodes):
+            g.add_node(i, label="X", node_color="")
+        for a, b in edges:
+            g.add_edge(a, b, weight=1.0, edge_color="")
+        return g
+
+    def _three_class_model(self):
+        from pysp.stats.sequences.grammar import GrammarRule, VertexReplacementGrammar
+
+        classes = [
+            self._labeled(2, [(0, 1)]),  # K2
+            self._labeled(3, [(0, 1), (1, 2), (0, 2)]),  # K3 (triangle)
+            self._labeled(3, [(0, 1), (1, 2)]),  # P3 (path) -- not isomorphic to K3
+        ]
+        model = VertexReplacementGrammar()
+        for graph, freq in zip(classes, (5.0, 3.0, 2.0)):
+            model.add_rule(GrammarRule(2, graph, freq))
+        return classes, model
+
+    def test_density_equals_log_frequency_share(self):
+        # the model assigns each rule probability freq/total, so log_density of a single-rule grammar
+        # is exactly log(freq/total) -- the distribution is accurate, not just monotone.
+        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarRule, VertexReplacementGrammar
+
+        classes, model = self._three_class_model()
+        dist = GrammarDistribution(model, mix_p=0.0)
+        for graph, freq in zip(classes, (5.0, 3.0, 2.0)):
+            obs = VertexReplacementGrammar()
+            obs.add_rule(GrammarRule(2, graph, 1.0))
+            self.assertAlmostEqual(dist.log_density(obs), float(np.log(freq / 10.0)), places=9)
+
+    def test_estimator_recovers_rule_proportions(self):
+        # accumulating i.i.d. rule observations recovers the generating proportions (consistent MLE).
+        from pysp.stats.sequences.grammar import (
+            GrammarEstimatorAccumulator,
+            GrammarRule,
+            VertexReplacementGrammar,
+            _isomorphic_rule_graph,
+        )
+
+        classes, _ = self._three_class_model()
+        true_p = np.array([0.5, 0.3, 0.2])
+        rng = np.random.RandomState(0)
+        acc = GrammarEstimatorAccumulator()
+        for _ in range(4000):
+            obs = VertexReplacementGrammar()
+            obs.add_rule(GrammarRule(2, classes[rng.choice(3, p=true_p)], 1.0))
+            acc.update(obs, 1.0, None)
+        merged = acc.value()
+        freqs = np.array(
+            [sum(r.frequency for r in merged.rule_dict[2] if _isomorphic_rule_graph(r.graph, c)) for c in classes]
+        )
+        self.assertLess(np.abs(freqs / freqs.sum() - true_p).sum(), 0.06)
+
+    def test_sample_honors_size_argument(self):
+        from pysp.stats.sequences.grammar import GrammarSampler
+
+        sampler = GrammarSampler(self._grammar(), orig_n=2, seed=1)
+        self.assertIsInstance(sampler.sample(), nx.Graph)
+        batch = sampler.sample(5)
+        self.assertEqual(len(batch), 5)
+        self.assertTrue(all(isinstance(g, nx.Graph) for g in batch))
+
     def test_accumulator_keeps_num_rules_consistent(self):
         from pysp.stats.sequences.grammar import GrammarEstimatorAccumulator, GrammarRule, VertexReplacementGrammar
 
