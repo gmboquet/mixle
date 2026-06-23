@@ -1,13 +1,14 @@
-"""Uncertainty quantification: the workflow around fitted models.
+"""Deprecated shim: uncertainty quantification now lives in :mod:`pysp.doe`.
 
-Sensitivity analysis (which inputs drive the output variance), forward uncertainty propagation, and model
-calibration -- the classical UQ loop layered on top of pysp's Bayesian inference. Part of the
-earth-science/multiphysics/UQ plan (Phase 4).
+The sensitivity / propagation / calibration tools were folded into ``pysp.doe`` -- they are the
+analysis half of the same "design and analysis of computer experiments" concern, and reuse that
+package's quasi-Monte-Carlo sampling, GP surrogate, and kernels. Import from ``pysp.doe`` instead;
+this module re-exports the same names for backward compatibility.
 """
 
-from pysp.uq.calibration import KOCalibration, calibrate
-from pysp.uq.propagate import propagate, unscented_transform
-from pysp.uq.sensitivity import morris_screening, sobol_indices
+from pysp.doe.calibrate import KOCalibration, calibrate
+from pysp.doe.propagate import propagate, unscented_transform
+from pysp.doe.sensitivity import morris_screening, sobol_indices
 
 __all__ = [
     "sobol_indices",

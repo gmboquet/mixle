@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.uq import propagate, unscented_transform
+from pysp.doe import propagate, unscented_transform
 
 
 class PropagateTest(unittest.TestCase):
