@@ -122,6 +122,91 @@ def incompressible_ns_spectral(
     return tuple(ifftn(h).real for h in uh)
 
 
+def incompressible_boussinesq_spectral(
+    velocity: Any,
+    temperature: Any,
+    nu: float,
+    kappa: float,
+    buoyancy: float,
+    dt: float,
+    n_steps: int,
+    *,
+    length: float = 2.0 * math.pi,
+    gravity_axis: int = -1,
+    dealias: bool = False,
+) -> tuple[tuple[np.ndarray, ...], np.ndarray]:
+    """Evolve coupled buoyant flow under the Boussinesq approximation (NS + advected temperature).
+
+    Solves, pseudo-spectrally with RK4 on a periodic box, the coupled system
+
+        du/dt + (u.grad)u = -grad p + nu laplacian(u) + buoyancy * T * e_g,   div u = 0,
+        dT/dt + (u.grad)T = kappa laplacian(T),
+
+    where ``T`` is a temperature (or density) perturbation advected and diffused by the flow and ``e_g`` is
+    the unit vector along ``gravity_axis`` (the buoyancy force feeds back into the momentum equation). This
+    is the canonical model for thermal convection (Rayleigh-Benard, atmospheric/oceanic buoyant flows) and
+    the simplest two-way-coupled-physics PDE. In the passive limit (``buoyancy = 0``, ``u = 0``) the
+    temperature obeys the heat equation exactly; with buoyancy, unstable stratification converts potential
+    energy into kinetic energy.
+
+    Args:
+        velocity: tuple of ``d`` real arrays (``d = 2`` or ``3``), the velocity components.
+        temperature: a single real array of the same shape, the temperature/buoyancy field.
+        nu: kinematic viscosity.
+        kappa: thermal diffusivity.
+        buoyancy: buoyancy coefficient (``g * alpha`` in the Boussinesq force ``buoyancy * T``).
+        dt, n_steps: time step and number of RK4 steps.
+        length: periodic box side length.
+        gravity_axis: the axis along which buoyancy acts (default the last, i.e. "vertical").
+        dealias: apply the 2/3-rule to the nonlinear terms.
+
+    Returns:
+        ``(velocity_components, temperature)`` after ``n_steps`` steps.
+    """
+    fields = [np.asarray(u, dtype=np.float64) for u in velocity]
+    temp = np.asarray(temperature, dtype=np.float64)
+    d = len(fields)
+    if d not in (2, 3):
+        raise ValueError("incompressible_boussinesq_spectral supports 2-D or 3-D fields.")
+    shape = fields[0].shape
+    g_axis = gravity_axis % d
+    grids, k2, k2_safe = _wavenumbers(shape, float(length))
+    mask = _dealias_mask(shape) if dealias else None
+    fftn, ifftn = np.fft.fftn, np.fft.ifftn
+
+    def grad(fh: np.ndarray, j: int) -> np.ndarray:
+        return ifftn(1j * grids[j] * fh).real
+
+    def rhs(state: list[np.ndarray]) -> list[np.ndarray]:
+        uh = state[:d]
+        th = state[d]
+        u = [ifftn(h).real for h in uh]
+        t_phys = ifftn(th).real
+        nh = []
+        for i in range(d):
+            adv = fftn(-sum(u[j] * grad(uh[i], j) for j in range(d)))
+            if i == g_axis:
+                adv = adv + float(buoyancy) * th  # Boussinesq buoyancy force
+            nh.append(adv)
+        nt = fftn(-sum(u[j] * grad(th, j) for j in range(d)))
+        if mask is not None:
+            nh = [n * mask for n in nh]
+            nt = nt * mask
+        div = sum(grids[j] * nh[j] for j in range(d)) / k2_safe
+        out = [nh[i] - grids[i] * div - nu * k2 * uh[i] for i in range(d)]
+        out.append(nt - kappa * k2 * th)
+        return out
+
+    state = [fftn(f) for f in fields] + [fftn(temp)]
+    for _ in range(int(n_steps)):
+        k1 = rhs(state)
+        k2_ = rhs([state[i] + 0.5 * dt * k1[i] for i in range(d + 1)])
+        k3 = rhs([state[i] + 0.5 * dt * k2_[i] for i in range(d + 1)])
+        k4 = rhs([state[i] + dt * k3[i] for i in range(d + 1)])
+        state = [state[i] + dt / 6.0 * (k1[i] + 2.0 * k2_[i] + 2.0 * k3[i] + k4[i]) for i in range(d + 1)]
+    return tuple(ifftn(state[i]).real for i in range(d)), ifftn(state[d]).real
+
+
 def kinetic_energy(velocity: Any, length: float = 2.0 * math.pi) -> float:
     """Return the total kinetic energy ``(1/2) integral |u|^2 dV`` of a periodic velocity field."""
     fields = [np.asarray(u, dtype=np.float64) for u in velocity]
