@@ -157,23 +157,125 @@ def _copy_rule(rule):
     return GrammarRule(rule.lhs, rule.graph, rule.frequency, embedding=rule.embedding)
 
 
-def graph_to_grammar(graph):
-    """Map a graph to its node-neighbourhood grammar: one rule per node, keyed by degree.
+#: Default cap on reduction-step expansions while parsing a single graph (graph-grammar parsing is
+#: NP-hard, so the search is bounded; a graph the grammar cannot derive scores -inf).
+_PARSE_BUDGET = 50_000
 
-    Each node v yields a rule whose left-hand side is deg(v) and whose right-hand side is the labelled
-    radius-1 ego graph around v (v, its neighbours, and the induced edges), with frequency 1. This is
-    the in-tree graph -> grammar bridge that lets GrammarDistribution score and estimate from graphs:
-    a graph's likelihood factorises over its nodes as the product of the model probability of each
-    node's ego pattern. Computing the exact likelihood of a graph under a vertex-replacement grammar
-    would require parsing (intractable), so this local (radius-1) factorisation is used instead.
+
+def _grammar_node_match(g_attrs, p_attrs):
+    """Match a host-graph node to a right-hand-side node: terminals by label, nonterminals by symbol."""
+    g_nt = g_attrs.get(_NONTERMINAL)
+    p_nt = p_attrs.get(_NONTERMINAL)
+    if (g_nt is None) != (p_nt is None):
+        return False
+    if g_nt is not None:
+        return g_nt == p_nt
+    return g_attrs.get("label") == p_attrs.get("label") and g_attrs.get("node_color", "") == p_attrs.get(
+        "node_color", ""
+    )
+
+
+def _grammar_edge_match(g_attrs, p_attrs):
+    return g_attrs.get("edge_color", "") == p_attrs.get("edge_color", "") and g_attrs.get("weight", 1.0) == p_attrs.get(
+        "weight", 1.0
+    )
+
+
+def _reduce_occurrence(graph, mapping, rule, symbol):
+    """Reverse one rule application: collapse a matched right-hand-side occurrence to one ``symbol`` node.
+
+    ``mapping`` is a host-node -> rhs-node induced-subgraph isomorphism. The reduction is valid only if
+    the occurrence's external edges are exactly what ``rule``'s embedding would have produced when the
+    rule was applied (otherwise this occurrence could not have come from this rule). Returns the reduced
+    graph, or None if the embedding check fails.
     """
-    grammar = VertexReplacementGrammar(name="ego")
-    for v in graph.nodes:
-        degree = graph.degree(v)
-        ego = nx.ego_graph(graph, v, radius=1, undirected=True)
-        grammar.rule_dict.setdefault(degree, []).append(GrammarRule(degree, ego, 1.0))
-    grammar.refresh_rules()
-    return grammar
+    rhs = rule.graph
+    occurrence = set(mapping)
+    inv = {p: g for g, p in mapping.items()}  # rhs node -> host node
+    relation = rule.embedding_relation
+    connector = None if relation else inv[next(iter(rhs.nodes()))]  # forward's canonical connector
+
+    external = {}  # external neighbour -> [host nodes in the occurrence it touches], + representative edge data
+    edge_data = {}
+    for g_node in occurrence:
+        for u, data in graph[g_node].items():
+            if u in occurrence:
+                continue
+            external.setdefault(u, set()).add(g_node)
+            edge_data[u] = data
+
+    for u, touched in external.items():
+        if relation:
+            u_label = graph.nodes[u].get("label")
+            expected = {inv[w] for w in rhs.nodes if (u_label, rhs.nodes[w].get("label")) in relation}
+        else:
+            expected = {connector}
+        if touched != expected:
+            return None  # external connectivity inconsistent with the embedding -> not this rule application
+
+    reduced = graph.copy()
+    reduced.remove_nodes_from(occurrence)
+    new_node = object()  # unique, transient id for the reinstated nonterminal
+    reduced.add_node(new_node, **{_NONTERMINAL: symbol})
+    for u, data in edge_data.items():
+        reduced.add_edge(u, new_node, **dict(data))
+    return reduced
+
+
+def _reductions(graph, grammar):
+    """Yield ``(reduced_graph, rule, symbol_total_frequency)`` for every valid single reverse step."""
+    totals = {s: float(sum(r.frequency for r in rules)) for s, rules in grammar.rule_dict.items()}
+    for symbol, rules in grammar.rule_dict.items():
+        if totals[symbol] <= 0.0:
+            continue
+        for rule in rules:
+            if rule.frequency <= 0.0 or rule.graph.number_of_nodes() == 0:
+                continue
+            matcher = iso.GraphMatcher(
+                graph, rule.graph, node_match=_grammar_node_match, edge_match=_grammar_edge_match
+            )
+            for mapping in matcher.subgraph_isomorphisms_iter():
+                reduced = _reduce_occurrence(graph, mapping, rule, symbol)
+                if reduced is not None:
+                    yield reduced, rule, totals[symbol]
+
+
+def best_derivation(graph, grammar, start_symbol, budget=_PARSE_BUDGET):
+    """Best (Viterbi) derivation of a graph under the grammar: parse by reducing to the start symbol.
+
+    Repeatedly un-applies rules (``_reductions``) until a single ``start_symbol`` node remains, searching
+    for the reduction sequence of highest probability ``prod freq(rule)/total(lhs)``. Returns
+    ``(log_probability, [rules applied in derivation order])``; ``(-inf, None)`` if the graph cannot be
+    reduced to the start symbol (the grammar does not generate it) or the search budget is exhausted.
+
+    This is the max over derivations, a tractable lower bound on the exact likelihood (sum over all
+    derivations), which is intractable -- general graph-grammar parsing is NP-hard.
+    """
+    remaining = [budget]
+
+    def solve(h, depth):
+        if h.number_of_nodes() == 1 and h.number_of_edges() == 0:
+            (only,) = h.nodes
+            if h.nodes[only].get(_NONTERMINAL) == start_symbol:
+                return 0.0, []  # reached the start symbol -- a complete derivation
+            # otherwise (e.g. a lone terminal from a single-node rule) keep reducing below
+        if depth <= 0 or remaining[0] <= 0:
+            return float("-inf"), None
+        best_lp, best_seq = float("-inf"), None
+        for reduced, rule, total in _reductions(h, grammar):
+            remaining[0] -= 1
+            if remaining[0] <= 0:
+                break
+            sub_lp, sub_seq = solve(reduced, depth - 1)
+            if sub_seq is not None:
+                lp = float(np.log(rule.frequency / total)) + sub_lp
+                if lp > best_lp:
+                    best_lp, best_seq = lp, [rule, *sub_seq]
+        return best_lp, best_seq
+
+    if graph.number_of_nodes() == 0:
+        return float("-inf"), None  # the start symbol always derives at least one node
+    return solve(graph, 3 * graph.number_of_nodes() + 10)
 
 
 def _isomorphic_rule_graph(g1, g2):
@@ -327,20 +429,6 @@ def get_degree_dist(rule_list):
     return dist
 
 
-def _background_log_prob(graph, degree_counts):
-    """Mean log-probability of a graph's node degrees under the model's degree distribution.
-
-    Each node contributes the (Laplace-smoothed) model probability of its degree; degrees unseen in
-    the model fall back to the ``'inf'`` smoothing bucket. The returned value is in ``(-inf, 0]`` so
-    its exponential is a proper probability in ``(0, 1]`` suitable for the background mixture term.
-    """
-    total = float(sum(degree_counts.values()))
-    if graph.number_of_nodes() == 0:
-        return float(np.log(degree_counts["inf"] / total))
-    log_ps = [np.log(degree_counts.get(degree, degree_counts["inf"]) / total) for _, degree in graph.degree()]
-    return float(np.mean(log_ps))
-
-
 class GrammarDistribution(SequenceEncodableProbabilityDistribution):
     """GrammarDistribution: a distribution over GRAPHS parameterised by a node-replacement grammar.
 
@@ -410,70 +498,36 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         """
         return np.exp(self.log_density(x))
 
-    def _match_prob(self, lhs, graph, total_freq, depth):
-        """Model match probability of a single rule (lhs, graph), in [0, 1].
-
-        The direct term is the total frequency of model rules isomorphic to ``graph`` whose left-hand
-        side is within ``lhs_delta`` of ``lhs``, divided by the model's total rule frequency. If nothing
-        matches and ``depth`` remains, the graph is split into connected components and the match
-        probabilities of the parts are multiplied (a conservative decomposition fallback).
-        """
-        matched = 0.0
-        for cand_lhs in range(lhs - self.lhs_delta, lhs + self.lhs_delta + 1):
-            for m_rule in self.grammar.rule_dict.get(cand_lhs, ()):
-                if _isomorphic_rule_graph(m_rule.graph, graph):
-                    matched += m_rule.frequency
-        if matched > 0.0 or depth <= 0:
-            return matched / total_freq
-        decomposition = decomp_pair((lhs, graph))
-        if not decomposition:
-            return 0.0
-        prob = 1.0
-        for sub_lhs, sub_graph in decomposition:
-            prob *= self._match_prob(sub_lhs, sub_graph, total_freq, depth - 1)
-        return prob
+    def _resolve_start(self):
+        """The derivation start symbol: ``self.start_symbol`` or, if None, the most frequent left-hand side."""
+        if self.start_symbol is not None:
+            return self.start_symbol
+        if not self.grammar.rule_dict:
+            return None
+        return max(self.grammar.rule_dict, key=lambda s: sum(r.frequency for r in self.grammar.rule_dict[s]))
 
     def log_density(self, x):
         """Log-density of the grammar distribution at an observed GRAPH x.
 
-        The graph's likelihood factorises over its nodes: each node v contributes the model probability
-        of its radius-1 ego pattern (its degree and labelled neighbourhood; see ``graph_to_grammar``),
-        and the log-density is the sum of those log-probabilities. Each ego pattern's probability is a
-        two-component mixture::
+        This is the grammar's own likelihood, computed by PARSING: ``x`` is reduced back to the start
+        symbol along the grammar's productions (``best_derivation``), and the score is the log-probability
+        of the best (Viterbi) derivation that yields it -- the sum over its rule applications of
+        ``log(freq(rule) / total(lhs))``. A graph the grammar cannot generate scores ``-inf``.
 
-            p(pattern) = (1 - mix_p) * p_match(pattern) + mix_p * p_background(pattern)
-
-        where ``p_match`` is the frequency of model ego patterns isomorphic to it (degree within
-        ``lhs_delta``, optionally via connected-component decomposition up to ``decomp_level``) over the
-        model's total frequency, and ``p_background`` is the pattern's mean node-degree probability under
-        the model degree distribution. Both components lie in [0, 1], so the log-density is <= 0. An
-        empty graph has log-density 0 (the empty product over nodes).
+        The best derivation is the max over derivations, a tractable lower bound on the exact likelihood
+        (sum over all derivations), which is intractable because general graph-grammar parsing is NP-hard.
 
         Args:
             x: Observed graph (a networkx graph).
 
         Returns:
-            Log-density at observation x (a float <= 0, or -inf if some node pattern has zero probability).
+            Log-density at observation x (<= 0, or -inf if the grammar cannot derive x).
 
         """
-        observed = graph_to_grammar(x)
-        if len(observed.rule_list) == 0:
-            return 0.0
-
-        total_freq = sum(r.frequency for r in self.grammar.rule_list)
-        if total_freq <= 0.0:
-            total_freq = 1.0  # degenerate/empty model -> rely entirely on the background term
-        degree_counts = get_degree_dist(self.grammar.rule_list) if self.grammar.rule_list else {"inf": 1}
-
-        log_p = 0.0
-        for t_rule in observed.rule_list:
-            p_match = self._match_prob(t_rule.lhs, t_rule.graph, total_freq, self.decomp_level)
-            p_background = np.exp(_background_log_prob(t_rule.graph, degree_counts))
-            p = (1.0 - self.mix_p) * p_match + self.mix_p * p_background
-            if p <= 0.0:
-                return float("-inf")
-            log_p += float(np.log(p))
-        return log_p
+        start = self._resolve_start()
+        if start is None:
+            return float("-inf")
+        return best_derivation(x, self.grammar, start)[0]
 
     # combine list of grammars into singular grammar? need to take multiple sample outputs as input
     def seq_encode(self, x):
@@ -522,7 +576,9 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
             GrammarEstimator object.
 
         """
-        return GrammarEstimator(pseudo_count=pseudo_count, name=self.name)
+        return GrammarEstimator(
+            grammar=self.grammar, start_symbol=self.start_symbol, pseudo_count=pseudo_count, name=self.name
+        )
 
     def dist_to_encoder(self):
         """Returns a GrammarDataEncoder object for encoding sequences of data."""
@@ -593,147 +649,90 @@ class GrammarSampler(DistributionSampler):
         return rv
 
 
+def _zeroed_counts(grammar):
+    """A copy of ``grammar``'s rule structure with every frequency set to 0 (a counts accumulator)."""
+    counts = VertexReplacementGrammar(grammar.type, grammar.clustering, grammar.name, grammar.mu)
+    for symbol, rules in grammar.rule_dict.items():
+        counts.rule_dict[symbol] = [GrammarRule(r.lhs, r.graph, 0.0, embedding=r.embedding) for r in rules]
+    counts.refresh_rules()
+    return counts
+
+
 class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
-    """GrammarEstimatorAccumulator object for merging observed grammars into a frequency-weighted grammar."""
+    """Accumulate Viterbi rule-firing counts: parse each observed graph and tally how often each rule fires.
 
-    def __init__(self, keys=None):
-        """GrammarEstimatorAccumulator object.
+    This estimates rule FREQUENCIES only. The rule STRUCTURE (which right-hand sides / embeddings exist)
+    is supplied via the estimator's ``grammar`` argument; inducing the structure from graphs is a separate
+    problem and out of scope here. Counting aligns rules by (symbol, index), which is stable because every
+    model in the EM loop is built from the same structure.
+    """
 
-        Args:
-            keys (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
-
-        Attributes:
-            grammar: VertexReplacementGrammar object accumulating frequency-weighted rules from observations.
-            key (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
-
-        """
-        #             self.rule_list = []
-        #             self.rule_dict = {}
-        self.grammar = VertexReplacementGrammar("mu_level_dl", "leiden", "", 4)
+    def __init__(self, grammar=None, start_symbol=None, keys=None):
+        self.structure = grammar  # rule structure whose frequencies are being estimated
+        self.start_symbol = start_symbol
         self.keys = keys
+        self.counts = _zeroed_counts(grammar) if grammar is not None else None
 
-    def _merge_grammar(self, observed, weight):
-        """Merge a node-pattern grammar (an observation's ego patterns, or another accumulator's stat).
-
-        Ego patterns isomorphic to an already-accumulated one (matching degree, edge colors/weights,
-        node labels/colors) have their frequency incremented by the weight; new patterns are added with
-        weight-scaled frequency.
-        """
-        rgrammar = self.grammar
-        rgrammar.cost += observed.cost
-        for lhs in observed.rule_dict:
-            if lhs not in rgrammar.rule_dict:
-                rgrammar.rule_dict[lhs] = [_copy_rule(rule) for rule in observed.rule_dict[lhs]]
-                for rule in rgrammar.rule_dict[lhs]:
-                    rule.frequency *= weight
-            else:
-                for rule in observed.rule_dict[lhs]:
-                    found_rule = False
-                    for r_rule in rgrammar.rule_dict[lhs]:
-                        if _isomorphic_rule_graph(r_rule.graph, rule.graph):
-                            found_rule = True
-                            r_rule.frequency += weight * rule.frequency
-                            break
-                    if not found_rule:
-                        crule = _copy_rule(rule)
-                        crule.frequency *= weight
-                        rgrammar.rule_dict[lhs].append(crule)
-
-        rgrammar.refresh_rules()  # keep rule_list and num_rules consistent with rule_dict
-        return rgrammar
+    def _parse_model(self, estimate):
+        """The (grammar, start_symbol) to parse against: the previous estimate, else the given structure."""
+        if estimate is not None:
+            return estimate.grammar, estimate._resolve_start()
+        if self.structure is None or not self.structure.rule_dict:
+            return None, None
+        start = self.start_symbol
+        if start is None:
+            start = max(self.structure.rule_dict, key=lambda s: sum(r.frequency for r in self.structure.rule_dict[s]))
+        return self.structure, start
 
     def update(self, x, weight, estimate):
-        """Merge an observed GRAPH into the accumulated model with the given weight.
-
-        The graph is mapped to its node-neighbourhood grammar (``graph_to_grammar``) and those ego
-        patterns are merged into the accumulator.
-
-        Args:
-            x: Observed graph (a networkx graph).
-            weight (float): Weight of the observation.
-            estimate (Optional[GrammarDistribution]): Previous estimate (unused).
-
-        Returns:
-            The accumulated VertexReplacementGrammar object (the node-pattern model).
-
-        """
-        return self._merge_grammar(graph_to_grammar(x), weight)
+        """Parse graph ``x`` with the current model and add ``weight`` to every rule its derivation fires."""
+        model_grammar, start = self._parse_model(estimate)
+        if model_grammar is None or start is None:
+            return  # no rule structure to count against
+        if self.counts is None:
+            self.counts = _zeroed_counts(model_grammar)
+        _, derivation = best_derivation(x, model_grammar, start)
+        if derivation is None:
+            return  # the current model cannot derive x -> it contributes no counts
+        position = {id(r): (s, i) for s, rules in model_grammar.rule_dict.items() for i, r in enumerate(rules)}
+        for rule in derivation:
+            symbol, index = position[id(rule)]
+            self.counts.rule_dict[symbol][index].frequency += weight
+        self.counts.refresh_rules()
 
     def initialize(self, x, weight, rng):
-        """Initialize the accumulator with a single weighted observed graph.
-
-        Args:
-            x: Observed graph (a networkx graph).
-            weight (float): Weight of the observation.
-            rng: RandomState (unused).
-
-        Returns:
-            None.
-
-        """
+        """Initialize from one weighted observed graph (parse with the structure's current frequencies)."""
         self.update(x, weight, None)
 
     def seq_initialize(self, x, weights, rng):
-        """Initialize the accumulator with a sequence of weighted observed graphs.
-
-        Args:
-            x: Sequence of observed graphs (from seq_encode).
-            weights: Sequence of observation weights.
-            rng: RandomState (unused).
-
-        Returns:
-            None.
-
-        """
+        """Initialize from a sequence of weighted observed graphs."""
         for i in range(len(x)):
             self.initialize(x[i], weights[i], rng)
 
     def seq_update(self, x, weights, estimate):
-        """Merge a sequence of weighted observed graphs into the accumulated model.
-
-        Args:
-            x: Sequence of observed graphs (from seq_encode).
-            weights: Sequence of observation weights.
-            estimate (Optional[GrammarDistribution]): Previous estimate (unused).
-
-        Returns:
-            None.
-
-        """
-        #            for grammar in x:
+        """Parse-and-count a sequence of weighted observed graphs against the previous estimate."""
         for i in range(len(x)):
-            grammar = x[i]
-            weight = weights[i]
-            self.update(grammar, weight, estimate)
+            self.update(x[i], weights[i], estimate)
 
     def combine(self, suff_stat):
-        """Merge the sufficient statistic of another accumulator (a node-pattern grammar) into this one.
-
-        Args:
-            suff_stat: VertexReplacementGrammar object from another accumulator's value().
-
-        Returns:
-            This GrammarEstimatorAccumulator object.
-
-        """
-        self._merge_grammar(suff_stat, 1.0)  # suff_stat is already an ego-pattern grammar, not a graph
+        """Add another accumulator's rule-firing counts (same structure) position-wise."""
+        if suff_stat is None:
+            return self
+        if self.counts is None:
+            self.counts = _zeroed_counts(suff_stat)
+        for symbol, rules in suff_stat.rule_dict.items():
+            for index, rule in enumerate(rules):
+                self.counts.rule_dict[symbol][index].frequency += rule.frequency
+        self.counts.refresh_rules()
         return self
 
     def value(self):
-        """Returns the accumulated VertexReplacementGrammar object sufficient statistic."""
-        return self.grammar
+        """Returns the accumulated rule-firing counts as a VertexReplacementGrammar."""
+        return self.counts
 
     def from_value(self, x):
-        """Set the accumulated sufficient statistic from a VertexReplacementGrammar object.
-
-        Args:
-            x: VertexReplacementGrammar object.
-
-        Returns:
-            This GrammarEstimatorAccumulator object.
-
-        """
-        self.grammar = x
+        """Set the accumulated counts from a VertexReplacementGrammar object."""
+        self.counts = x
         return self
 
     def key_merge(self, stats_dict):
@@ -771,74 +770,71 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class GrammarAccumulatorFactory(StatisticAccumulatorFactory):
-    """GrammarAccumulatorFactory object for creating GrammarEstimatorAccumulator objects."""
+    """Creates GrammarEstimatorAccumulator objects carrying the rule structure to estimate frequencies for."""
 
-    def __init__(self, keys=None):
-        """GrammarAccumulatorFactory object.
-
-        Args:
-            keys (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
-
-        """
+    def __init__(self, grammar=None, start_symbol=None, keys=None):
+        self.grammar = grammar
+        self.start_symbol = start_symbol
         self.keys = keys
 
     def make(self):
         """Returns a new GrammarEstimatorAccumulator object."""
-        return GrammarEstimatorAccumulator(keys=self.keys)
+        return GrammarEstimatorAccumulator(grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys)
 
 
 class GrammarEstimator(ParameterEstimator):
-    """GrammarEstimator object for estimating GrammarDistribution objects from aggregated grammars."""
+    """Estimate a GrammarDistribution's rule FREQUENCIES from graphs by Viterbi parse-counting.
 
-    def __init__(self, pseudo_count=None, name=None, keys=None):
+    The rule structure is supplied via ``grammar`` (e.g. from ``dist.estimator()``): each training graph is
+    parsed with the current model and the rules its best derivation fires are counted; frequencies are the
+    accumulated counts. Inducing the structure (the right-hand sides / embeddings) from graphs is a separate
+    problem and out of scope.
+    """
+
+    def __init__(self, grammar=None, start_symbol=None, pseudo_count=None, name=None, keys=None):
         """GrammarEstimator object.
 
         Args:
-            pseudo_count (Optional[float]): Added to each accumulated rule frequency when estimating.
+            grammar: VertexReplacementGrammar giving the rule structure whose frequencies are estimated.
+            start_symbol: Symbol to start derivations from (default: the most frequent left-hand side).
+            pseudo_count (Optional[float]): Added to each rule's counted frequency before normalising.
             name (Optional[str]): String name of object instance.
             keys (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
-
-        Attributes:
-            pseudo_count (Optional[float]): Added to each accumulated rule frequency when estimating.
-            name (Optional[str]): String name of object instance.
-            keys (Optional[str]): Key for merging sufficient statistics with matching key'd objects.
-
         """
         _require_networkx()
-        self.name = name
+        self.grammar = grammar
+        self.start_symbol = start_symbol
         self.pseudo_count = pseudo_count
+        self.name = name
         self.keys = keys
 
-    #       self.levels = levels
-
-    #                self.grammar = VertexReplacementGrammar('mu_level_dl','leiden','',4)
-
     def accumulator_factory(self):
-        """Returns a GrammarAccumulatorFactory object."""
-        return GrammarAccumulatorFactory(keys=self.keys)
+        """Returns a GrammarAccumulatorFactory carrying the rule structure."""
+        return GrammarAccumulatorFactory(grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys)
 
     def accumulatorFactory(self):
         """Deprecated alias for accumulator_factory()."""
         return self.accumulator_factory()
 
     def estimate(self, nobs, suff_stat):
-        """Estimate a GrammarDistribution from an accumulated grammar sufficient statistic.
+        """Build a GrammarDistribution from accumulated rule-firing counts (frequencies).
 
         Args:
             nobs (Optional[float]): Weighted number of observations (unused).
-            suff_stat: grammar object of accumulated rule frequencies.
+            suff_stat: VertexReplacementGrammar of accumulated rule-firing counts.
 
         Returns:
             GrammarDistribution object.
 
         """
-        grammar = suff_stat
+        grammar = suff_stat if suff_stat is not None else self.grammar
+        if grammar is None:
+            raise ValueError("GrammarEstimator needs a rule structure (grammar=...) to estimate frequencies.")
         if self.pseudo_count is not None:
             for rlist in grammar.rule_dict.values():
                 for rule in rlist:
                     rule.frequency += self.pseudo_count
-
-        return GrammarDistribution(grammar, 0.01)
+        return GrammarDistribution(grammar, 0.01, start_symbol=self.start_symbol, name=self.name)
 
 
 class GrammarDataEncoder(DataSequenceEncoder):
