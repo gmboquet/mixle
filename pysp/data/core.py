@@ -65,6 +65,40 @@ class MaterializedSource:
         return encode_partitions(self.materialize(), encoder, self.structure, num_chunks, chunk_size)
 
 
+class LazySource:
+    """A :class:`DataSource` that defers reading to a records *factory* and materializes on demand.
+
+    Connectors (Parquet, SQL, CSV, ...) return one of these so ``open(...)`` does no I/O until the data
+    is actually encoded; the records are read (and schema-coerced) once and cached.
+    """
+
+    def __init__(self, factory: Any, structure: SampleStructure = EXCHANGEABLE, schema: Schema | None = None,
+                 length: int | None = None) -> None:
+        self._factory = factory
+        self.structure = structure
+        self.schema = schema
+        self._length = length
+        self._cache: list[Any] | None = None
+
+    def materialize(self) -> list[Any]:
+        if self._cache is None:
+            records = list(self._factory())
+            self._cache = self.schema.conform(records) if self.schema is not None else records
+        return self._cache
+
+    def records(self) -> Iterable[Any]:
+        return iter(self.materialize())
+
+    def __len__(self) -> int:
+        return self._length if self._length is not None else len(self.materialize())
+
+    def partition(self, n: int, *, by: Any = None) -> list[MaterializedSource]:
+        return MaterializedSource(self.materialize(), self.structure, self.schema).partition(n, by=by)
+
+    def encode(self, encoder: Any, num_chunks: int = 1, chunk_size: int | None = None) -> list[tuple[int, Any]]:
+        return encode_partitions(self.materialize(), encoder, self.structure, num_chunks, chunk_size)
+
+
 def as_source(data: Any, structure: SampleStructure = EXCHANGEABLE, schema: Schema | None = None) -> DataSource:
     """Coerce ``data`` to a :class:`DataSource` (pass a source through; wrap a sequence as materialized)."""
     if isinstance(data, DataSource):
@@ -72,4 +106,4 @@ def as_source(data: Any, structure: SampleStructure = EXCHANGEABLE, schema: Sche
     return MaterializedSource(data, structure, schema)
 
 
-__all__ = ["DataSource", "MaterializedSource", "as_source", "num_chunks_for"]
+__all__ = ["DataSource", "MaterializedSource", "LazySource", "as_source", "num_chunks_for"]

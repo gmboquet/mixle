@@ -7,7 +7,7 @@ input that funnels into the same encoder contract. The DataFrame / graph / RDD a
 input/representation helpers (not probability distributions), so they live outside ``pysp.stats``.
 """
 
-from pysp.data.core import DataSource, MaterializedSource, as_source
+from pysp.data.core import DataSource, LazySource, MaterializedSource, as_source
 from pysp.data.dataframe import dataframe_records, seq_encode_dataframe
 from pysp.data.graph_data import GraphDataEncoder, GraphObservation
 from pysp.data.rdd_sampler import sample_rdd, sample_seq_as_rdd, take_sample
@@ -25,13 +25,18 @@ from pysp.data.schema import (
     Timestamp,
     Vector,
 )
+from pysp.data.sources import kinds as source_kinds
+from pysp.data.sources import open as open_source
 from pysp.data.structure import EXCHANGEABLE, IID, SEQUENTIAL, SampleStructure, partially_exchangeable
 
 __all__ = [
     # core abstraction
     "DataSource",
     "MaterializedSource",
+    "LazySource",
     "as_source",
+    "open_source",
+    "source_kinds",
     # schema / logical types
     "Schema",
     "Field",
