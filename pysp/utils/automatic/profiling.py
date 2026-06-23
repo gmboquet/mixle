@@ -578,6 +578,13 @@ def _numeric_candidate_bics(arr: np.ndarray, nobs: int) -> dict[str, float]:
     if arr.size and np.all(arr > 0.0):
         candidates["lognormal"] = _lognormal_bic_bits(arr, nobs)
         candidates["gamma"] = _gamma_bic_bits(arr, nobs)
+    # registered continuous detectors (additive -- a richer family only wins if its BIC beats the builtins)
+    if arr.size:
+        from pysp.utils.automatic.detectors import continuous_detectors
+
+        for d in continuous_detectors():
+            if d.name not in candidates and d.applies(arr):
+                candidates[d.name] = d.score(arr, nobs)
     return _clean_scores(candidates)
 
 
@@ -661,6 +668,11 @@ def _numeric_pit(arr: np.ndarray, recommendation: str, gmean: float, gvar: float
         if moments is not None:
             k, theta = moments
             return stats.gamma.cdf(arr, a=k, scale=theta)
+    from pysp.utils.automatic.detectors import get_detector
+
+    detector = get_detector(recommendation)
+    if detector is not None and detector.cdf is not None:
+        return detector.cdf(arr)
     return None
 
 
@@ -1728,6 +1740,10 @@ class DatumNode:
                 "lognormal": get_lognormal_estimator,
                 "gamma": get_gamma_estimator,
             }
+            from pysp.utils.automatic.detectors import continuous_detectors
+
+            for _d in continuous_detectors():
+                builders.setdefault(_d.name, _d.factory)
             arr = _value_array_from_vdict(self.vdict)
             if arr.size:
                 bics = _numeric_candidate_bics(arr, arr.size)
