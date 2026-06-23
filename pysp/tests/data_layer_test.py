@@ -149,3 +149,26 @@ class ConnectorTest(unittest.TestCase):
         if getattr(sql_source, "_sa", None) is None:  # only when sqlalchemy is absent
             with self.assertRaises(ImportError):
                 sql_source.read_sql("sqlite://", "select 1").materialize()
+
+
+class ColdImportTest(unittest.TestCase):
+    """``import pysp.data`` must work standalone. The graph adapter (GraphDataEncoder) subclasses a
+    contract under pysp.stats whose graph distributions import the adapter back, so eager re-export
+    used to deadlock when pysp.data was imported before pysp.stats. Each case runs in a fresh
+    interpreter because the test process has already imported everything."""
+
+    def _run(self, snippet):
+        import subprocess
+        import sys
+
+        r = subprocess.run([sys.executable, "-c", snippet], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+
+    def test_import_pysp_data_cold(self):
+        self._run("import pysp.data")
+
+    def test_cold_graph_adapter_access_without_stats_first(self):
+        self._run("from pysp.data import GraphDataEncoder; assert GraphDataEncoder().directed is False")
+
+    def test_cold_star_import(self):
+        self._run("from pysp.data import *; assert GraphObservation is not None and Schema is not None")
