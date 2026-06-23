@@ -99,7 +99,7 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         value element to be an exponential family. Otherwise returns ``None``.
         """
         from pysp.engines import NUMPY_ENGINE
-        from pysp.stats.exp_family import MultinomialExponentialFamilyForm, to_exponential_family
+        from pysp.stats.compute.exp_family import MultinomialExponentialFamilyForm, to_exponential_family
 
         if not supports(self.len_dist, Neutral) or self.len_normalized:
             return None

@@ -11,7 +11,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.exp_family import to_exponential_family
+from pysp.stats.compute.exp_family import to_exponential_family
 from pysp.stats.univariate.continuous.exponential import ExponentialDistribution
 from pysp.stats.univariate.continuous.gamma import GammaDistribution
 from pysp.stats.univariate.continuous.gaussian import GaussianDistribution

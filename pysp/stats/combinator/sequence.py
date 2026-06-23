@@ -422,7 +422,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         as does a non-exp-family element.
         """
         from pysp.engines import NUMPY_ENGINE
-        from pysp.stats.exp_family import IIDExponentialFamilyForm, to_exponential_family
+        from pysp.stats.compute.exp_family import IIDExponentialFamilyForm, to_exponential_family
 
         if not self.null_len_dist or self.len_normalized:
             return None

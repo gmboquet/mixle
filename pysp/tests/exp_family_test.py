@@ -14,13 +14,13 @@ import numpy as np
 from pysp.ppl import Bernoulli, Field, Normal, Poisson, free
 from pysp.stats.combinator.composite import CompositeDistribution
 from pysp.stats.combinator.sequence import SequenceDistribution
-from pysp.stats.directional.von_mises import VonMisesDistribution
-from pysp.stats.exp_family import (
+from pysp.stats.compute.exp_family import (
     ConditionalExponentialFamilyForm,
     ExponentialFamilyForm,
     is_exponential_family,
     to_exponential_family,
 )
+from pysp.stats.directional.von_mises import VonMisesDistribution
 from pysp.stats.multivariate.categorical_multinomial import MultinomialDistribution
 from pysp.stats.univariate.continuous.beta import BetaDistribution
 from pysp.stats.univariate.continuous.exponential import ExponentialDistribution

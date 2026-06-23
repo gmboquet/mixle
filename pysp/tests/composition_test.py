@@ -5,8 +5,8 @@ import unittest
 import numpy as np
 
 from pysp.inference import estimate
-from pysp.stats.composition import AitchisonNormalDistribution as AitchisonNormal
-from pysp.stats.composition import closure, clr, clr_inv, ilr, ilr_basis, ilr_inv
+from pysp.stats.multivariate.composition import AitchisonNormalDistribution as AitchisonNormal
+from pysp.stats.multivariate.composition import closure, clr, clr_inv, ilr, ilr_basis, ilr_inv
 
 
 class LogratioTransformTest(unittest.TestCase):

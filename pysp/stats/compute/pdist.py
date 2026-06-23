@@ -157,13 +157,13 @@ class ProbabilityDistribution(ABC):
         The canonical form is ``p(x) = h(x) * exp(<eta, T(x)> - A(eta))``.  The default
         reads ``declaration_for(self).exponential_family`` (the per-family
         ``ExponentialFamilySpec``) and wraps it in an
-        :class:`~pysp.stats.exp_family.ExponentialFamilyForm`; it returns ``None`` when
+        :class:`~pysp.stats.compute.exp_family.ExponentialFamilyForm`; it returns ``None`` when
         this family is not a (single) exponential family.  There is no type switch --
         adding a family is a matter of providing its spec.
         """
         from pysp.engines import NUMPY_ENGINE
         from pysp.stats.compute.declarations import declaration_for
-        from pysp.stats.exp_family import ExponentialFamilyForm
+        from pysp.stats.compute.exp_family import ExponentialFamilyForm
 
         declaration = declaration_for(self)
         if declaration is None or declaration.exponential_family is None:

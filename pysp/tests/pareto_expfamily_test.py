@@ -12,7 +12,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.exp_family import ExponentialFamilyForm, is_exponential_family, to_exponential_family
+from pysp.stats.compute.exp_family import ExponentialFamilyForm, is_exponential_family, to_exponential_family
 from pysp.stats.univariate.continuous.pareto import ParetoDistribution
 
 
