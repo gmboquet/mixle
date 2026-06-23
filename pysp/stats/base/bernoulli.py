@@ -2,6 +2,9 @@
 
 Data type: bool or values in {0, 1}. The distribution has success
 probability p and log-density log(p) for True/1 and log(1-p) for False/0.
+
+
+Reference: Johnson, Kemp & Kotz, *Univariate Discrete Distributions* (3rd ed., Wiley, 2005).
 """
 
 import math

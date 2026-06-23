@@ -6,6 +6,9 @@ GaussianEstimator, and the GaussianDataEncoder classes for use with pysparkplug.
 Data type: (float): The GaussianDistribution with mean mu and variance sigma2 > 0.0, has log-density
     log(f(x;mu, sigma2)) = -0.5*log(2*pi*sigma2) - 0.5*(x-mu)^2/sigma2, for real-valued x.
 
+
+
+Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
 
 from collections.abc import Callable, Sequence

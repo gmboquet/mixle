@@ -6,6 +6,9 @@ ExponentialEstimator, and the ExponentialDataEncoder classes for use with pyspar
 Data type: (float): The ExponentialDistribution with scale beta > 0.0, has log-density
     log(f(x;beta)) = -log(beta) - x/beta, for x >= 0, else -np.inf.
 
+
+
+Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
 
 from collections.abc import Sequence
