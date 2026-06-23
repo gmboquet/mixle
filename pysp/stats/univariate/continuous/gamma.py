@@ -371,7 +371,7 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         if pseudo_count is None:
             return GammaEstimator(name=self.name)
         else:
-            suff_stat = (self.k * self.theta, exp(digamma(self.k) + log(self.theta)))
+            suff_stat = (self.k * self.theta, digamma(self.k) + log(self.theta))
             return GammaEstimator(pseudo_count=(pseudo_count, pseudo_count), suff_stat=suff_stat, name=self.name)
 
     def dist_to_encoder(self) -> "GammaDataEncoder":

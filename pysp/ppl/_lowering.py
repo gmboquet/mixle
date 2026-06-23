@@ -175,6 +175,7 @@ register_family(
     lambda r, p: {"r": float(r), "p": float(p)},
     arity=2,
     positive=(True, False),
+    support=("positive", "unit"),
     init_fit=_nb_init,
     read=lambda d: {"r": d.r, "p": d.p},
 )

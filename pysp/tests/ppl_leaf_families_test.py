@@ -98,6 +98,26 @@ class UnitIntervalBayesTestCase(unittest.TestCase):
         self.assertAlmostEqual(m.params["shape"], 1.5, delta=0.3)
         self.assertAlmostEqual(m.params["scale"], 2.0, delta=0.3)
 
+    def test_negative_binomial_p_slot_is_logit_reparameterized(self):
+        """NB success-probability p must live on the unit interval, not the real line.
+
+        Regression for the slot-support bug: with p registered on 'real' the
+        unconstrained optimizer drives p out of (0, 1) and the underlying
+        NegativeBinomialDistribution raises. The logit ('unit') reparameterization
+        keeps p in (0, 1) and recovers the truth.
+        """
+        from pysp.ppl import NegativeBinomial
+        from pysp.ppl.core import _FAMILIES
+
+        # The p slot (index 1) must be the logit-reparameterized 'unit' support.
+        self.assertEqual(_FAMILIES["NegativeBinomial"].support, ("positive", "unit"))
+
+        rng = np.random.RandomState(0)
+        data = list(rng.negative_binomial(5, 0.4, 3000).astype(float))
+        m = NegativeBinomial(5.0, Beta(2, 2, name="p")).fit(data, how="map")
+        self.assertTrue(0.0 < m.dist.p < 1.0)
+        self.assertAlmostEqual(m.dist.p, 0.4, delta=0.05)
+
 
 class ConjugatePairsTestCase(unittest.TestCase):
     """New closed-form conjugate posteriors (exact, instant) must match MCMC."""
