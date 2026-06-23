@@ -38,7 +38,7 @@ from numpy.random import RandomState
 
 import pysp.utils.vector as vec
 from pysp.arithmetic import maxrandint
-from pysp.sampling._sampling import scatter_component_draws
+from pysp.stats.compute._sampling import scatter_component_draws
 from pysp.stats.base.gamma import GammaDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,

@@ -73,7 +73,7 @@ def sample(
         return model.sample(1 if size is None else size, rng=_resolve_rng(seed, rng), **kwargs)
 
     # LatentPosterior -- latent-variable draws (one per call; loop for a collection).
-    from pysp.sampling.latent_posterior import LatentPosterior
+    from pysp.stats.compute.posterior import LatentPosterior
 
     if isinstance(model, LatentPosterior):
         r = _resolve_rng(seed, rng)
