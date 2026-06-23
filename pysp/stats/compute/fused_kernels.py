@@ -391,6 +391,13 @@ class _LeafBuilder:
     def stats_to_ss(self, stats, k):
         raise NotImplementedError
 
+    def merge_stats(self, dst, src):
+        # Default: every stat field is additive across chunked buffers.
+        # dst/src fields are numpy arrays held in a tuple, so accumulate in
+        # place (np.add out=) rather than reassigning the tuple slot.
+        for d, s in zip(dst, src):
+            np.add(d, s, out=d)
+
 
 class _GaussianB(_LeafBuilder):
     kernel = staticmethod(_gaussian_ld)
@@ -652,6 +659,12 @@ class _ParetoB(_LeafBuilder):
     def stats_to_ss(self, stats, k):
         return stats[0][k], stats[1][k], stats[2][k]
 
+    def merge_stats(self, dst, src):
+        # stats[2] is the support minimum (init +inf); non-additive.
+        np.add(dst[0], src[0], out=dst[0])
+        np.add(dst[1], src[1], out=dst[1])
+        np.minimum(dst[2], src[2], out=dst[2])
+
 
 class _UniformB(_LeafBuilder):
     kernel = staticmethod(_uniform_ld)
@@ -667,6 +680,13 @@ class _UniformB(_LeafBuilder):
 
     def stats_to_ss(self, stats, k):
         return stats[0][k], stats[1][k], stats[2][k]
+
+    def merge_stats(self, dst, src):
+        # stats[1] is the support minimum (init +inf), stats[2] the maximum
+        # (init -inf); both non-additive.
+        np.add(dst[0], src[0], out=dst[0])
+        np.minimum(dst[1], src[1], out=dst[1])
+        np.maximum(dst[2], src[2], out=dst[2])
 
 
 class _GammaB(_LeafBuilder):
@@ -886,6 +906,12 @@ class _CompositeB:
         flat = self._untree(stats, len(self.child_builders))
         return tuple(b.stats_to_ss(flat[j], k) for j, b in enumerate(self.child_builders))
 
+    def merge_stats(self, dst, src):
+        dflat = self._untree(dst, len(self.child_builders))
+        sflat = self._untree(src, len(self.child_builders))
+        for j, b in enumerate(self.child_builders):
+            b.merge_stats(dflat[j], sflat[j])
+
 
 def _sequence_kernel(inner, len_kern, has_len):
     if has_len:
@@ -978,6 +1004,11 @@ class _SequenceB:
         len_ss = self.len_b.stats_to_ss(stats[1], k) if self.has_len else None
         return self.inner.stats_to_ss(stats[0], k), len_ss
 
+    def merge_stats(self, dst, src):
+        self.inner.merge_stats(dst[0], src[0])
+        if self.has_len:
+            self.len_b.merge_stats(dst[1], src[1])
+
 
 def _optional_kernel(inner):
     @numba.njit(inline="always")
@@ -1064,6 +1095,11 @@ class _OptionalB:
         # legacy OptionalEstimatorAccumulator.value(): ([missing_w, present_w], child)
         return [stats[0][k], stats[1][k]], self.inner.stats_to_ss(stats[2], k)
 
+    def merge_stats(self, dst, src):
+        np.add(dst[0], src[0], out=dst[0])
+        np.add(dst[1], src[1], out=dst[1])
+        self.inner.merge_stats(dst[2], src[2])
+
 
 class _IgnoredB:
     """Fixed wrapped dists: per-component log-densities are precomputed at
@@ -1106,6 +1142,11 @@ class _IgnoredB:
     def stats_to_ss(self, stats, k):
         # legacy IgnoredAccumulator.value(): None (nothing is estimated)
         return None
+
+    def merge_stats(self, dst, src):
+        # nothing is estimated; the dummy slot stays additive (zeros).
+        for d, s in zip(dst, src):
+            np.add(d, s, out=d)
 
 
 _BUILDERS = {
@@ -1174,14 +1215,6 @@ def _make_acc_driver(acc):
                     acc(i, k, w, params, cols, stats)
 
     return drv
-
-
-def _merge_stats(dst, src):
-    if isinstance(dst, tuple):
-        for d, s in zip(dst, src):
-            _merge_stats(d, s)
-    else:
-        dst += src
 
 
 class CompiledMixture:
@@ -1324,7 +1357,7 @@ class CompiledMixture:
                 f.result()
             stats = bufs[0]
             for b in bufs[1:]:
-                _merge_stats(stats, b)
+                self.builder.merge_stats(stats, b)
 
         comp_ss = tuple(self.builder.stats_to_ss(stats, k) for k in range(self.K))
         if self.is_mixture:
