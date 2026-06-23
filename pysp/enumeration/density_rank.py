@@ -33,12 +33,17 @@ class DensityRankResult:
 
     Attributes:
         cumulative_probability: ``G(x) = sum_{y: p(y) >= p(x)} p(y)`` (the descending-order CDF at x).
-        rank: number of observations strictly more probable than x (0-based position), or ``None``
-            when only the sampling estimate was used (sampling estimates mass, not the integer count).
+        rank: number of observations strictly more probable than x (0-based position). Exact when the
+            head enumeration resolved it; in ``"sampling"`` mode it is the rounded unbiased Monte-Carlo
+            estimate (see ``rank_stderr``); ``None`` only when ``log p(x) = -inf`` or an exact-analytic
+            CDF (no count) was used.
         exact: True when the head enumeration resolved the query exactly; False for a sampling estimate.
         stderr: standard error of ``cumulative_probability`` (0.0 when exact).
         log_prob: ``log p(x)``.
-        method: ``"exact-head"``, ``"exact-exhausted"``, or ``"sampling"``.
+        method: ``"exact-head"``, ``"exact-exhausted"``, ``"exact-analytic"``, or ``"sampling"``.
+        rank_stderr: standard error of the Monte-Carlo ``rank`` estimate (0.0 when exact). Large
+            relative to ``rank`` exactly in the deep-tail / high-entropy band where exact marginal
+            rank is provably hard -- treat the estimate as unreliable there.
     """
 
     cumulative_probability: float
@@ -47,6 +52,7 @@ class DensityRankResult:
     stderr: float
     log_prob: float
     method: str
+    rank_stderr: float = 0.0
 
 
 def density_rank(
@@ -111,17 +117,29 @@ def density_rank(
         g = float(exact_cumulative(value))
         return DensityRankResult(min(1.0, max(0.0, g)), None, True, 0.0, t, "exact-analytic")
 
-    # Sampling fallback: estimate G(value) = P(log p(Y) >= t).
+    # Sampling fallback. Two unbiased Monte-Carlo estimators from the SAME draws Y_i ~ dist:
+    #   * mass  G(x) = P[log p(Y) >= t]                      ~ mean_i 1[lp_i >= t]
+    #   * rank  #{y: p(y) > p(x)} = E_Y[1[p(Y) > p(x)] / p(Y)] ~ mean_i 1[lp_i > t] * exp(-lp_i)
+    # The rank identity holds for ANY discrete samplable model (finite or infinite support): the
+    # importance weight 1/p(Y) under Y ~ p telescopes the indicator set to its cardinality. This is the
+    # count analogue of the mass estimate -- the marginal rank that the exact head and the tropical
+    # count index cannot give for non-decomposable families (mixtures/HMMs), where exact marginal rank
+    # is provably hard. Its variance is driven by the least-probable counted point (~1/p(x)), so the
+    # estimate is reliable in the body and noisy in the deep tail (reported via rank_stderr).
     samples = dist.sampler(seed).sample(n_samples)
     try:
         # vectorized: one seq_log_density pass instead of n_samples per-sample log_density calls
         lp = np.asarray(dist.seq_log_density(dist.dist_to_encoder().seq_encode(samples)), dtype=float)
-        hits = int(np.count_nonzero(lp >= t - tol))
     except Exception:
-        hits = sum(1 for y in samples if float(dist.log_density(y)) >= t - tol)
-    g = hits / n_samples
+        lp = np.asarray([float(dist.log_density(y)) for y in samples], dtype=float)
+    g = float(np.count_nonzero(lp >= t - tol)) / n_samples
     stderr = math.sqrt(max(g * (1.0 - g), 0.0) / n_samples)
-    return DensityRankResult(g, None, False, stderr, t, "sampling")
+    # rank weights: 1/p(y) for the strictly-more-probable draws (matching the exact path's `> t`), else 0
+    weights = np.where(lp > t + tol, np.exp(-lp), 0.0)
+    rank_mean = float(weights.mean())
+    rank_stderr = float(weights.std(ddof=1) / math.sqrt(n_samples)) if n_samples > 1 else float("inf")
+    rank_est = int(round(rank_mean))
+    return DensityRankResult(g, rank_est, False, stderr, t, "sampling", rank_stderr=rank_stderr)
 
 
 def _try_enumerator(dist: Any):
