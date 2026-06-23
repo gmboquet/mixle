@@ -1074,6 +1074,7 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             else:
                 stats_dict[self.keys] = self
 
+        self.init_accumulator.key_merge(stats_dict)
         self.len_accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
@@ -1090,6 +1091,7 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             if self.keys in stats_dict:
                 self.from_value(stats_dict[self.keys].value())
 
+        self.init_accumulator.key_replace(stats_dict)
         self.len_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "IntegerMarkovChainDataEncoder":
