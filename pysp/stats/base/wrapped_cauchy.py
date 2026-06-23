@@ -10,6 +10,9 @@ uniform on the circle at ``rho = 0`` and increasingly peaked at ``mu`` as ``rho 
 trigonometric moment is exactly ``rho e^{i mu}``, so the mean direction and concentration are estimated
 in closed form from the mean resultant (the circular analogue of the sample mean). It samples exactly:
 ``rho`` corresponds to wrapping a Cauchy of scale ``gamma = -log rho``.
+
+
+Reference: Mardia & Jupp, *Directional Statistics* (Wiley, 2000).
 """
 
 import math

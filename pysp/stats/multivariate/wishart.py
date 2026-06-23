@@ -12,6 +12,9 @@ form as the mean scatter divided by ``df``. The degrees of freedom may be suppli
 df=value)``) or estimated by maximum likelihood (``WishartEstimator(dim, df=None)``) -- the latter adds the
 ``sum log det(X)`` sufficient statistic and solves the profile-likelihood score for ``df`` by Newton's
 method.
+
+
+Reference: Wishart, 'The generalised product moment distribution in samples...', Biometrika (1928).
 """
 
 import math

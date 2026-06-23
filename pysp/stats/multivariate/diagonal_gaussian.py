@@ -11,6 +11,9 @@ and diagonal covariance matrix given by covar = diag(s2_1, s2_2,...,s2_n).
 
 Data type: x (List[float], np.ndarray).
 
+
+
+Reference: Mardia, Kent & Bibby, *Multivariate Analysis* (Academic Press, 1979).
 """
 
 from collections.abc import Sequence

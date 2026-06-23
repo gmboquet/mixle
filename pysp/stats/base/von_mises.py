@@ -20,6 +20,9 @@ It is a two-parameter exponential family with sufficient statistics ``(cos theta
 The natural parameters and normalizer are precomputed (the Bessel term ``I_0`` lives only in the scalar
 ``log_const``), so the per-row score is linear in the encoded ``cos``/``sin`` fields and lowers cleanly
 to generated NumPy, Torch, and Numba kernels.
+
+
+Reference: Mardia & Jupp, *Directional Statistics* (Wiley, 2000).
 """
 
 import math

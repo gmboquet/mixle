@@ -11,6 +11,9 @@ copula puts that dependence in a correlation matrix ``R``: pull each uniform bac
 dependence separately from the marginals is the whole point of copulas -- couple any marginals you
 like (fit each separately) through one ``R``. ``R`` is fit by the standard inversion estimator: the
 sample correlation of the transformed ``z``.
+
+
+Reference: Nelsen, *An Introduction to Copulas* (2nd ed., Springer, 2006).
 """
 
 import math

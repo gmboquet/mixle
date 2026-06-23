@@ -21,6 +21,9 @@ Estimation keeps nu fixed and runs the EM / iteratively-reweighted update (each 
 latent-scale weight u_i = (nu + p)/(nu + delta_i) under the current estimate), which is the standard
 maximum-likelihood scheme for a known degrees of freedom. The engine-neutral
 ``backend_log_density_from_params`` gives the family generated NumPy and Torch scoring.
+
+
+Reference: Kotz & Nadarajah, *Multivariate t Distributions and Their Applications* (Cambridge, 2004).
 """
 
 from collections.abc import Sequence
