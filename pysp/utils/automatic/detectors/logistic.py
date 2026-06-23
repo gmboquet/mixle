@@ -1,0 +1,61 @@
+"""Logistic continuous candidate -- symmetric, heavier tails than Gaussian, lighter peak than Laplace."""
+
+import math
+
+import numpy as np
+
+from pysp.utils.automatic.detectors import Detector, register
+
+
+def _applies(arr: np.ndarray) -> bool:
+    if arr.size == 0:
+        return False
+    return bool(np.all(np.isfinite(arr)))  # any real-valued data
+
+
+def _fit(arr: np.ndarray):
+    from scipy import stats
+
+    try:
+        loc, scale = stats.logistic.fit(arr)
+    except Exception:
+        return None
+    if not (scale > 0.0) or not math.isfinite(scale) or not math.isfinite(loc):
+        return None
+    return float(loc), float(scale)
+
+
+def _score(arr: np.ndarray, nobs: int) -> float | None:
+    from scipy import stats
+
+    from pysp.utils.automatic.profiling import _bic_penalty_bits
+
+    fit = _fit(arr)
+    if fit is None:
+        return None
+    loc, scale = fit
+    logpdf = stats.logistic.logpdf(arr, loc=loc, scale=scale)
+    if not np.all(np.isfinite(logpdf)):
+        return None
+    nll_nats_per_obs = -float(np.mean(logpdf))
+    return nll_nats_per_obs / math.log(2.0) + _bic_penalty_bits(2, nobs)
+
+
+def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
+    from pysp.stats import LogisticDistribution
+
+    return LogisticDistribution(0.0, 1.0).estimator()
+
+
+def _cdf(arr: np.ndarray):
+    from scipy import stats
+
+    fit = _fit(arr)
+    if fit is None:
+        return None
+    loc, scale = fit
+    return stats.logistic.cdf(arr, loc=loc, scale=scale)
+
+
+register(Detector(name="logistic", kind="continuous", applies=_applies, score=_score,
+                  factory=_factory, cdf=_cdf, n_params=2))
