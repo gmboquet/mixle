@@ -74,10 +74,10 @@ def registered_tilt_families() -> list[str]:
 
 
 def _register_builtin_tilts() -> None:
-    from pysp.stats.base.exponential import ExponentialDistribution
-    from pysp.stats.base.gamma import GammaDistribution
-    from pysp.stats.base.gaussian import GaussianDistribution
-    from pysp.stats.base.poisson import PoissonDistribution
+    from pysp.stats.univariate.continuous.exponential import ExponentialDistribution
+    from pysp.stats.univariate.continuous.gamma import GammaDistribution
+    from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+    from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
     def gaussian_tilt(base: Any, theta: float) -> TiltResult:
         # N(mu, s2) tilted by theta (identity stat) -> N(mu + theta s2, s2); logZ = theta mu + theta^2 s2 / 2.

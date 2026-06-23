@@ -11,7 +11,6 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.base.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
 from pysp.stats.bayes.multivariate_normal_gamma import MultivariateNormalGammaDistribution
 from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 from pysp.stats.bayes.normal_wishart import NormalWishartDistribution
@@ -20,6 +19,7 @@ from pysp.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDistribution,
     MultivariateGaussianEstimator,
 )
+from pysp.stats.univariate.continuous.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
 from pysp.utils.special import digamma
 
 

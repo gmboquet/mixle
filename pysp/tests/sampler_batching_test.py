@@ -11,12 +11,12 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.base.categorical import CategoricalDistribution
-from pysp.stats.base.gaussian import GaussianDistribution
-from pysp.stats.base.poisson import PoissonDistribution
 from pysp.stats.combinator.composite import CompositeDistribution
 from pysp.stats.combinator.sequence import SequenceDistribution
 from pysp.stats.latent.mixture import MixtureDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
 
 class SamplerBatchingParityTestCase(unittest.TestCase):

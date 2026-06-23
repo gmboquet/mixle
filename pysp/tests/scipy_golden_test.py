@@ -8,27 +8,27 @@ import unittest
 
 import scipy.stats as ss
 
-from pysp.stats.base.bernoulli import BernoulliDistribution
-from pysp.stats.base.beta import BetaDistribution
-from pysp.stats.base.binomial import BinomialDistribution
-from pysp.stats.base.exponential import ExponentialDistribution
-from pysp.stats.base.gamma import GammaDistribution
-from pysp.stats.base.gaussian import GaussianDistribution
-from pysp.stats.base.geometric import GeometricDistribution
-from pysp.stats.base.gumbel import GumbelDistribution
-from pysp.stats.base.half_normal import HalfNormalDistribution
-from pysp.stats.base.inverse_gamma import InverseGammaDistribution
-from pysp.stats.base.inverse_gaussian import InverseGaussianDistribution
-from pysp.stats.base.laplace import LaplaceDistribution
-from pysp.stats.base.log_gaussian import LogGaussianDistribution
-from pysp.stats.base.logistic import LogisticDistribution
-from pysp.stats.base.negative_binomial import NegativeBinomialDistribution
-from pysp.stats.base.pareto import ParetoDistribution
-from pysp.stats.base.poisson import PoissonDistribution
-from pysp.stats.base.rayleigh import RayleighDistribution
-from pysp.stats.base.student_t import StudentTDistribution
-from pysp.stats.base.uniform import UniformDistribution
-from pysp.stats.base.weibull import WeibullDistribution
+from pysp.stats.univariate.continuous.beta import BetaDistribution
+from pysp.stats.univariate.continuous.exponential import ExponentialDistribution
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.continuous.gumbel import GumbelDistribution
+from pysp.stats.univariate.continuous.half_normal import HalfNormalDistribution
+from pysp.stats.univariate.continuous.inverse_gamma import InverseGammaDistribution
+from pysp.stats.univariate.continuous.inverse_gaussian import InverseGaussianDistribution
+from pysp.stats.univariate.continuous.laplace import LaplaceDistribution
+from pysp.stats.univariate.continuous.log_gaussian import LogGaussianDistribution
+from pysp.stats.univariate.continuous.logistic import LogisticDistribution
+from pysp.stats.univariate.continuous.pareto import ParetoDistribution
+from pysp.stats.univariate.continuous.rayleigh import RayleighDistribution
+from pysp.stats.univariate.continuous.student_t import StudentTDistribution
+from pysp.stats.univariate.continuous.uniform import UniformDistribution
+from pysp.stats.univariate.continuous.weibull import WeibullDistribution
+from pysp.stats.univariate.discrete.bernoulli import BernoulliDistribution
+from pysp.stats.univariate.discrete.binomial import BinomialDistribution
+from pysp.stats.univariate.discrete.geometric import GeometricDistribution
+from pysp.stats.univariate.discrete.negative_binomial import NegativeBinomialDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
 # (pysp instance, scipy frozen, "pdf"|"pmf", evaluation points)
 CONTINUOUS = [

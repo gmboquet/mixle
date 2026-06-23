@@ -10,12 +10,12 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.base.beta import BetaDistribution
 from pysp.stats.sets.bernoulli_set import (
     BernoulliSetDataEncoder,
     BernoulliSetDistribution,
     BernoulliSetEstimator,
 )
+from pysp.stats.univariate.continuous.beta import BetaDistribution
 from pysp.utils.special import digamma
 
 

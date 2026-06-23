@@ -32,8 +32,8 @@ import numpy as np
 from numpy.random import RandomState
 
 import pysp.utils.vector as vec
-from pysp.engines.arithmetic import maxrandint
 from pysp.capability import Neutral, supports
+from pysp.engines.arithmetic import maxrandint
 from pysp.enumeration.algorithms import BufferedStream, best_first_union
 from pysp.stats.combinator.null_dist import NullAccumulator, NullAccumulatorFactory, NullDistribution, NullEstimator
 from pysp.stats.combinator.sequence import SequenceDistribution

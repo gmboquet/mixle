@@ -215,7 +215,7 @@ def _struct_spec_for(node, a):
 
 def _spec_slot_defs(spec):
     """The scalar slots a structural spec expands to: a list of (prior, support, name)."""
-    from pysp.stats.base.gamma import GammaDistribution
+    from pysp.stats.univariate.continuous.gamma import GammaDistribution
 
     if isinstance(spec, _SimplexSpec):  # Gamma representation of the Dirichlet, one slot per entry
         base, kk = spec.name or "w", len(spec.alpha)
@@ -1456,7 +1456,7 @@ def _group_stats(data):
 
 def _hier_normal_normal(rv, n_i, sum_i, sumsq_i, max_its, tol):
     """mu_i ~ Normal(m, tau^2); y_ij ~ Normal(mu_i, sigma^2). Exact conjugate EM."""
-    from pysp.stats.base.gaussian import GaussianDistribution
+    from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
 
     N = float(n_i.sum())
     gbar = sum_i / np.maximum(n_i, 1.0)
@@ -1485,7 +1485,7 @@ def _hier_normal_normal(rv, n_i, sum_i, sumsq_i, max_its, tol):
 def _hier_gamma_poisson(rv, n_i, sum_i, sumsq_i, max_its, tol):
     """lambda_i ~ Gamma(a, b); y_ij ~ Poisson(lambda_i). Conjugate E-step +
     moment-matched population M-step (law of total variance)."""
-    from pysp.stats.base.gamma import GammaDistribution
+    from pysp.stats.univariate.continuous.gamma import GammaDistribution
 
     gm = sum_i / np.maximum(n_i, 1.0)
     m = float(gm.mean())
@@ -1511,7 +1511,7 @@ def _hier_gamma_poisson(rv, n_i, sum_i, sumsq_i, max_its, tol):
 
 def _hier_beta_bernoulli(rv, n_i, sum_i, sumsq_i, max_its, tol):
     """p_i ~ Beta(a, b); y_ij ~ Bernoulli(p_i). Conjugate E-step + moment-matched M-step."""
-    from pysp.stats.base.beta import BetaDistribution
+    from pysp.stats.univariate.continuous.beta import BetaDistribution
 
     gp = sum_i / np.maximum(n_i, 1.0)
     m = float(gp.mean())

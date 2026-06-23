@@ -3,7 +3,7 @@
 Defines KnowledgeGraphDistribution, KnowledgeGraphSampler, KnowledgeGraphAccumulatorFactory,
 KnowledgeGraphAccumulator, KnowledgeGraphEstimator, and KnowledgeGraphDataEncoder for use with the
 regular pysparkplug estimation framework (``optimize`` / ``seq_log_density`` / the PPL surface), like
-the other ``pysp.stats.graph`` distributions.
+the other graph distributions.
 
 Data type: a triple ``(h, r, t)`` of integer indices -- head entity, relation, tail entity. The model
 embeds each entity and relation in ``dim`` dimensions and scores a triple by the DistMult bilinear form

@@ -15,9 +15,15 @@ STANDARD = [
 class DocstringReferencesTest(unittest.TestCase):
     def test_standard_families_cite_a_reference(self):
         for name in STANDARD:
-            mod = importlib.import_module(f"pysp.stats.base.{name}")
+            mod = None
+            for pkg in ("univariate.continuous", "univariate.discrete"):
+                try:
+                    mod = importlib.import_module(f"pysp.stats.{pkg}.{name}")
+                    break
+                except ModuleNotFoundError:
+                    continue
             with self.subTest(module=name):
-                self.assertIsNotNone(mod.__doc__)
+                self.assertIsNotNone(mod, f"{name} not found in the univariate subpackages")
                 self.assertIn("Reference", mod.__doc__)
 
 

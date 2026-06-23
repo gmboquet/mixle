@@ -11,8 +11,8 @@ from pysp.stats import (
     GaussianEstimator,
     HiddenMarkovModelDistribution,
 )
-from pysp.stats.graph.markov_chain import stationary_distribution
 from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator
+from pysp.stats.sequences.markov_chain import stationary_distribution
 
 
 class StationaryDistributionTest(unittest.TestCase):

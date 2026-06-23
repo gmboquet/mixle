@@ -5,8 +5,8 @@ import unittest
 import numpy as np
 import scipy.stats as ss
 
-from pysp.stats.base.binomial import BinomialDistribution
-from pysp.stats.base.poisson import PoissonDistribution
+from pysp.stats.univariate.discrete.binomial import BinomialDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 from pysp.utils.evaluation import chi_square_test
 
 

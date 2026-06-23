@@ -11,7 +11,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.base.categorical import CategoricalDataEncoder, CategoricalEstimator
+from pysp.stats.univariate.discrete.categorical import CategoricalDataEncoder, CategoricalEstimator
 
 
 class CategoricalSeqUpdateTestCase(unittest.TestCase):

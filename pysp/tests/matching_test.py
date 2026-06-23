@@ -8,7 +8,7 @@ import numpy as np
 
 from pysp.inference.estimation import fit
 from pysp.stats import MatchingDistribution
-from pysp.stats.graph.matching import _edge_marginals, _permanent
+from pysp.stats.rankings.matching import _edge_marginals, _permanent
 
 _W = np.array([[2.0, 1.0, 3.0], [1.0, 4.0, 1.0], [2.0, 1.0, 5.0]])
 

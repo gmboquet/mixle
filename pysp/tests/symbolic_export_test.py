@@ -3,7 +3,6 @@ import unittest
 
 import numpy as np
 
-from pysp.engines import arithmetic as ar
 from pysp.engines import (
     SYMBOLIC_ENGINE,
     SymbolicExpression,
@@ -11,6 +10,7 @@ from pysp.engines import (
     to_sage,
     to_sympy,
 )
+from pysp.engines import arithmetic as ar
 
 HAS_SYMPY = importlib.util.find_spec("sympy") is not None
 
@@ -32,7 +32,7 @@ HAS_SAGE = _SAGE_MODULE is not None
 
 def _gaussian_log_density_expr(mu=0.0, sigma2=1.0):
     """Symbolic Gaussian log-density expression in symbol ``x``."""
-    from pysp.stats.base.gaussian import GaussianDistribution
+    from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
 
     x = SYMBOLIC_ENGINE.symbol("x")
     return GaussianDistribution(mu, sigma2).backend_seq_log_density(x, SYMBOLIC_ENGINE), x

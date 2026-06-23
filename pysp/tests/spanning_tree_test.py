@@ -9,7 +9,7 @@ import numpy as np
 
 from pysp.inference.estimation import fit
 from pysp.stats import SpanningTreeDistribution
-from pysp.stats.graph.spanning_tree import _edge_marginals, _smoothed_edge_target
+from pysp.stats.trees.spanning_tree import _edge_marginals, _smoothed_edge_target
 
 
 def _all_trees(n):

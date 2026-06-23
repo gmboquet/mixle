@@ -9,7 +9,7 @@ concentration kappa >= 0 has log-density
         log(f(theta; mu, kappa)) = kappa * cos(theta - mu) - log(2*pi*I_0(kappa)),
 
 the circular analogue of a Gaussian (kappa = 0 is uniform on the circle; large kappa concentrates near
-mu). This is the one-dimensional companion to :class:`~pysp.stats.multivariate.von_mises_fisher` (the von
+mu). This is the one-dimensional companion to :class:`~pysp.stats.directional.von_mises_fisher` (the von
 Mises-Fisher distribution on a sphere).
 
 It is a two-parameter exponential family with sufficient statistics ``(cos theta, sin theta)``:

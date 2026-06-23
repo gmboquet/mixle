@@ -10,10 +10,10 @@ import numpy as np
 
 import pysp
 from pysp.capability import HasCDF
-from pysp.stats.base.gumbel import GumbelDistribution
-from pysp.stats.base.half_normal import HalfNormalDistribution
-from pysp.stats.base.inverse_gamma import InverseGammaDistribution
-from pysp.stats.base.inverse_gaussian import InverseGaussianDistribution
+from pysp.stats.univariate.continuous.gumbel import GumbelDistribution
+from pysp.stats.univariate.continuous.half_normal import HalfNormalDistribution
+from pysp.stats.univariate.continuous.inverse_gamma import InverseGammaDistribution
+from pysp.stats.univariate.continuous.inverse_gaussian import InverseGaussianDistribution
 
 CASES = [
     GumbelDistribution(1.0, 2.0),

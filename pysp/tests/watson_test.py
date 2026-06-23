@@ -7,7 +7,7 @@ from scipy.special import hyp1f1
 
 from pysp.inference import estimate
 from pysp.stats import WatsonDistribution
-from pysp.stats.multivariate.watson import _kummer_ratio
+from pysp.stats.directional.watson import _kummer_ratio
 
 
 class WatsonTest(unittest.TestCase):

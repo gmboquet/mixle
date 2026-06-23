@@ -14,11 +14,6 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.base.beta import BetaDistribution as SBeta
-from pysp.stats.base.categorical import CategoricalDistribution as SCat
-from pysp.stats.base.categorical import CategoricalEstimator as SCatEst
-from pysp.stats.base.gaussian import GaussianDistribution as SGauss
-from pysp.stats.base.gaussian import GaussianEstimator as SGaussEst
 from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution as SDir
 from pysp.stats.bayes.normal_gamma import NormalGammaDistribution as SNG
 from pysp.stats.combinator.composite import CompositeDistribution as SComp
@@ -27,6 +22,11 @@ from pysp.stats.combinator.conditional import ConditionalDistribution as SCond
 from pysp.stats.combinator.ignored import IgnoredDistribution as SIgnored
 from pysp.stats.combinator.optional import OptionalDistribution as SOpt
 from pysp.stats.combinator.sequence import SequenceDistribution as SSeq
+from pysp.stats.univariate.continuous.beta import BetaDistribution as SBeta
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution as SGauss
+from pysp.stats.univariate.continuous.gaussian import GaussianEstimator as SGaussEst
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution as SCat
+from pysp.stats.univariate.discrete.categorical import CategoricalEstimator as SCatEst
 
 NG = (0.3, 2.0, 4.0, 5.0)
 DIR = {"a": 2.0, "b": 3.0, "c": 1.5}

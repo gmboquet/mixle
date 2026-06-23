@@ -29,7 +29,6 @@ from pysp.enumeration.algorithms import (
     bounded_best_first_union_index,
     freeze,
 )
-from pysp.stats.compute.posterior import CategoricalLatentPosterior
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from pysp.stats.compute.pdist import (
@@ -43,6 +42,7 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from pysp.stats.compute.posterior import CategoricalLatentPosterior
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.special import digamma
 

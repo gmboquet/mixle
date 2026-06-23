@@ -20,21 +20,21 @@ import numpy as np
 
 from pysp.inference.estimation import optimize
 from pysp.stats import seq_encode, seq_log_density_sum
-from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.base.integer_multinomial import IntegerMultinomialDistribution, IntegerMultinomialEstimator
 from pysp.stats.combinator.composite import CompositeDistribution, CompositeEstimator
 from pysp.stats.combinator.conditional import ConditionalDistribution, ConditionalDistributionEstimator
-from pysp.stats.graph.markov_transform import MarkovTransformDistribution, MarkovTransformEstimator
-from pysp.stats.graph.sparse_markov_transform import (
-    SparseMarkovAssociationDistribution,
-    SparseMarkovAssociationEstimator,
-)
 from pysp.stats.latent.hidden_association import HiddenAssociationDistribution, HiddenAssociationEstimator
 from pysp.stats.latent.indian_buffet_process import IndianBuffetProcessDistribution, IndianBuffetProcessEstimator
 from pysp.stats.latent.integer_hidden_association import (
     IntegerHiddenAssociationDistribution,
     IntegerHiddenAssociationEstimator,
 )
+from pysp.stats.multivariate.integer_multinomial import IntegerMultinomialDistribution, IntegerMultinomialEstimator
+from pysp.stats.sequences.markov_transform import MarkovTransformDistribution, MarkovTransformEstimator
+from pysp.stats.sequences.sparse_markov_transform import (
+    SparseMarkovAssociationDistribution,
+    SparseMarkovAssociationEstimator,
+)
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution, CategoricalEstimator
 
 
 def _devnull():

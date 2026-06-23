@@ -6,7 +6,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.inference.estimation import optimize
-from pysp.stats.graph.plackett_luce import (
+from pysp.stats.rankings.plackett_luce import (
     PlackettLuceAccumulator,
     PlackettLuceDistribution,
     PlackettLucePartialAccumulator,

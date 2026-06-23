@@ -637,8 +637,8 @@ class ParameterPosteriorTestCase(unittest.TestCase):
 class ConjugatePosteriorTestCase(unittest.TestCase):
     def _stats(self):
         import pysp.stats as stats
-        from pysp.stats.base.beta import BetaDistribution as BBeta
-        from pysp.stats.base.gamma import GammaDistribution as BGamma
+        from pysp.stats.univariate.continuous.beta import BetaDistribution as BBeta
+        from pysp.stats.univariate.continuous.gamma import GammaDistribution as BGamma
 
         return stats, BBeta, BGamma
 

@@ -6,21 +6,21 @@ import scipy.stats as ss
 
 import pysp
 from pysp.capability import HasEntropy
-from pysp.stats.base.bernoulli import BernoulliDistribution
-from pysp.stats.base.beta import BetaDistribution
-from pysp.stats.base.exponential import ExponentialDistribution
-from pysp.stats.base.gamma import GammaDistribution
-from pysp.stats.base.gaussian import GaussianDistribution
-from pysp.stats.base.geometric import GeometricDistribution
-from pysp.stats.base.gumbel import GumbelDistribution
-from pysp.stats.base.half_normal import HalfNormalDistribution
-from pysp.stats.base.laplace import LaplaceDistribution
-from pysp.stats.base.log_gaussian import LogGaussianDistribution
-from pysp.stats.base.logistic import LogisticDistribution
-from pysp.stats.base.pareto import ParetoDistribution
-from pysp.stats.base.rayleigh import RayleighDistribution
-from pysp.stats.base.uniform import UniformDistribution
-from pysp.stats.base.weibull import WeibullDistribution
+from pysp.stats.univariate.continuous.beta import BetaDistribution
+from pysp.stats.univariate.continuous.exponential import ExponentialDistribution
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.continuous.gumbel import GumbelDistribution
+from pysp.stats.univariate.continuous.half_normal import HalfNormalDistribution
+from pysp.stats.univariate.continuous.laplace import LaplaceDistribution
+from pysp.stats.univariate.continuous.log_gaussian import LogGaussianDistribution
+from pysp.stats.univariate.continuous.logistic import LogisticDistribution
+from pysp.stats.univariate.continuous.pareto import ParetoDistribution
+from pysp.stats.univariate.continuous.rayleigh import RayleighDistribution
+from pysp.stats.univariate.continuous.uniform import UniformDistribution
+from pysp.stats.univariate.continuous.weibull import WeibullDistribution
+from pysp.stats.univariate.discrete.bernoulli import BernoulliDistribution
+from pysp.stats.univariate.discrete.geometric import GeometricDistribution
 
 # (pysp instance, scipy frozen with the same parameters)
 CASES = [

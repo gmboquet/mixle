@@ -7,9 +7,9 @@ over the weighted structure it enumerates.
 
 import unittest
 
-from pysp.stats.base.categorical import CategoricalDistribution
-from pysp.stats.base.poisson import PoissonDistribution
 from pysp.stats.combinator.composite import CompositeDistribution
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
 
 class EnumeratorMethodsTest(unittest.TestCase):

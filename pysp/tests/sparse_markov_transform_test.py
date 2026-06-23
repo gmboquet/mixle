@@ -12,7 +12,7 @@ import warnings
 import numpy as np
 
 from pysp.stats.combinator.null_dist import NullDataEncoder
-from pysp.stats.graph.sparse_markov_transform import (
+from pysp.stats.sequences.sparse_markov_transform import (
     SparseMarkovAssociationAccumulator,
     SparseMarkovAssociationDataEncoder,
     SparseMarkovAssociationEstimator,

@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 
 from pysp.enumeration.assignment import best_assignment, k_best_assignments
-from pysp.stats.graph.matching import MatchingDistribution
+from pysp.stats.rankings.matching import MatchingDistribution
 
 
 def _brute(cost):

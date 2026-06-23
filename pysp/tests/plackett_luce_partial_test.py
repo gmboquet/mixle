@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.graph.plackett_luce import PlackettLuceDistribution
+from pysp.stats.rankings.plackett_luce import PlackettLuceDistribution
 
 
 def _dist():
