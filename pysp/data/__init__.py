@@ -1,20 +1,62 @@
-"""Data adapters and observation representations for pysparkplug.
+"""Data layer for pysparkplug -- a typed, structure-aware way to get records into the encoder contract.
 
-These are input/representation helpers (pandas DataFrame adapters, graph
-observation encoding, Spark RDD sampling) — not probability distributions,
-so they live outside ``pysp.stats``.
+The core abstraction is :class:`~pysp.data.core.DataSource`: a lazy, typed (:class:`~pysp.data.schema.Schema`),
+structured (:class:`~pysp.data.structure.SampleStructure`) reference to data. It is purely additive --
+``seq_encode(list)`` and ``seq_encode(rdd)`` are unchanged; a ``DataSource`` is simply a third accepted
+input that funnels into the same encoder contract. The DataFrame / graph / RDD adapters below remain
+input/representation helpers (not probability distributions), so they live outside ``pysp.stats``.
 """
 
+from pysp.data.core import DataSource, MaterializedSource, as_source
 from pysp.data.dataframe import dataframe_records, seq_encode_dataframe
 from pysp.data.graph_data import GraphDataEncoder, GraphObservation
 from pysp.data.rdd_sampler import sample_rdd, sample_seq_as_rdd, take_sample
+from pysp.data.schema import (
+    Boolean,
+    Categorical,
+    Count,
+    Field,
+    FieldType,
+    Nested,
+    Optional,
+    Real,
+    Schema,
+    Text,
+    Timestamp,
+    Vector,
+)
+from pysp.data.structure import EXCHANGEABLE, IID, SEQUENTIAL, SampleStructure, partially_exchangeable
 
 __all__ = [
+    # core abstraction
+    "DataSource",
+    "MaterializedSource",
+    "as_source",
+    # schema / logical types
+    "Schema",
+    "Field",
+    "FieldType",
+    "Real",
+    "Count",
+    "Categorical",
+    "Boolean",
+    "Vector",
+    "Timestamp",
+    "Text",
+    "Optional",
+    "Nested",
+    # sample structure
+    "SampleStructure",
+    "IID",
+    "EXCHANGEABLE",
+    "SEQUENTIAL",
+    "partially_exchangeable",
+    # input/representation adapters
     "GraphDataEncoder",
     "GraphObservation",
     "dataframe_records",
+    "seq_encode_dataframe",
     "sample_rdd",
     "sample_seq_as_rdd",
-    "seq_encode_dataframe",
     "take_sample",
 ]
