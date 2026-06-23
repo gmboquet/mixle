@@ -42,36 +42,60 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
+#: Node attribute marking a nonterminal: its value is the left-hand-side symbol to rewrite during
+#: a derivation. A node is rewritable iff this attribute is present and indexes a rule in the grammar.
+_NONTERMINAL = "nonterminal"
+
 
 class GrammarRule:
-    """Lightweight graph-grammar rule."""
+    """A node-replacement rule: rewrite a nonterminal node with ``graph``, then reconnect via ``embedding``.
+
+    The right-hand side ``graph`` is a networkx graph whose nodes are terminals (carrying ``label`` /
+    ``node_color``) or nonterminals (carrying a ``nonterminal`` attribute equal to some rule's
+    left-hand side, enabling recursive derivation). ``embedding`` is an NLC-style connection relation:
+    an iterable of ``(neighbour_label, rhs_node_label)`` pairs. When this rule replaces a node v, each
+    former neighbour u of v is reconnected to every right-hand-side node w with
+    ``(label(u), label(w))`` in the relation (the original edge data is preserved). ``embedding=None``
+    means "no relation given": each former neighbour is connected to the right-hand side's canonical
+    connector (its first node), which keeps derivations connected.
+    """
 
     __pysp_serializable__ = True
 
-    def __init__(self, lhs, graph, frequency=1.0) -> None:
+    def __init__(self, lhs, graph, frequency=1.0, embedding=None) -> None:
         _require_networkx()
         self.lhs = lhs
         self.graph = graph.copy()
         self.frequency = float(frequency)
+        self.embedding = None if embedding is None else [tuple(pair) for pair in embedding]
+
+    @property
+    def embedding_relation(self):
+        """The embedding as a set of ``(neighbour_label, rhs_node_label)`` tuples (empty if ``None``)."""
+        return set() if self.embedding is None else set(self.embedding)
 
     def __pysp_getstate__(self):
         return {
             "lhs": self.lhs,
             "graph": json_graph.node_link_data(self.graph, edges="edges"),
             "frequency": self.frequency,
+            "embedding": None if self.embedding is None else [list(pair) for pair in self.embedding],
         }
 
     def __pysp_setstate__(self, state):
         self.lhs = state["lhs"]
         self.graph = json_graph.node_link_graph(state["graph"], edges="edges")
         self.frequency = float(state["frequency"])
+        emb = state.get("embedding")
+        self.embedding = None if emb is None else [tuple(pair) for pair in emb]
 
     def __str__(self) -> str:
-        return "GrammarRule(lhs=%s, frequency=%s, nodes=%s, edges=%s)" % (
+        return "GrammarRule(lhs=%s, frequency=%s, nodes=%s, edges=%s, embedding=%s)" % (
             repr(self.lhs),
             repr(self.frequency),
             self.graph.number_of_nodes(),
             self.graph.number_of_edges(),
+            "default" if self.embedding is None else "%d pair(s)" % len(self.embedding),
         )
 
 
@@ -125,7 +149,7 @@ class VertexReplacementGrammar:
 
 
 def _copy_rule(rule):
-    return GrammarRule(rule.lhs, rule.graph, rule.frequency)
+    return GrammarRule(rule.lhs, rule.graph, rule.frequency, embedding=rule.embedding)
 
 
 def _isomorphic_rule_graph(g1, g2):
@@ -154,53 +178,110 @@ def decomp_pair(sub_rule, method="connected"):
     return [(len(component), graph.subgraph(component).copy()) for component in components]
 
 
-def generate_graph(rule_dict, target_n=100, rng=None):
-    """Generate a connected graph by repeated vertex-replacement-style rule application.
+def _rhs_has_nonterminal(graph, rule_dict):
+    """True if any node of ``graph`` is a nonterminal that some rule can rewrite."""
+    return any(graph.nodes[n].get(_NONTERMINAL) in rule_dict for n in graph.nodes)
 
-    Starts from a single sampled rule right-hand side, then grows the graph by sampling further
-    right-hand sides (with probability proportional to rule frequency) and gluing each new block to
-    the current graph with one edge between a random existing node and a random new node, until the
-    graph reaches ``target_n`` nodes. A fully embedding-aware vertex-replacement derivation would
-    reconnect a replaced node's neighbours according to per-rule connection instructions; the rule
-    format here does not carry those, so this connected approximation is used (it keeps every
-    generated graph in a single component rather than a disjoint union of rule graphs).
 
-    Returns:
-        Tuple of (networkx graph, list of the left-hand sides applied in order).
+def _choose_rule(rules, rng, rule_dict, prefer_terminal):
+    """Pick one rule with probability proportional to frequency.
+
+    When ``prefer_terminal`` is set, restrict to rules whose right-hand side has no nonterminals (so the
+    derivation can terminate); fall back to all rules if the symbol has no terminal-only rule.
+    """
+    candidates = [r for r in rules if r.frequency > 0.0]
+    if not candidates:
+        return None
+    if prefer_terminal:
+        terminal = [r for r in candidates if not _rhs_has_nonterminal(r.graph, rule_dict)]
+        if terminal:
+            candidates = terminal
+    weights = np.asarray([r.frequency for r in candidates], dtype=float)
+    weights /= weights.sum()
+    return candidates[int(rng.choice(len(candidates), p=weights))]
+
+
+def _apply_rule(graph, node, rule, next_id, rng):
+    """Replace ``node`` with a fresh copy of ``rule``'s right-hand side and embed it.
+
+    The replaced node's incident edges are reconnected to the right-hand side according to the rule's
+    NLC embedding relation -- each former neighbour u joins every right-hand-side node w with
+    ``(label(u), label(w))`` in the relation -- or, when the rule has no relation, to the canonical
+    connector (the first right-hand-side node). Returns the next free integer node id.
+    """
+    rhs = rule.graph
+    mapping = {n: next_id + i for i, n in enumerate(rhs.nodes())}
+    next_id += len(mapping)
+    if not mapping:  # empty right-hand side: just delete the nonterminal
+        graph.remove_node(node)
+        return next_id
+    for n in rhs.nodes:
+        graph.add_node(mapping[n], **dict(rhs.nodes[n]))
+    for a, b, data in rhs.edges(data=True):
+        graph.add_edge(mapping[a], mapping[b], **dict(data))
+
+    neighbours = [(u, dict(graph.get_edge_data(u, node))) for u in graph.neighbors(node) if u != node]
+    relation = rule.embedding_relation
+    if not relation:
+        connector = mapping[next(iter(rhs.nodes()))]
+        for u, edge_data in neighbours:
+            graph.add_edge(u, connector, **edge_data)
+    else:
+        for u, edge_data in neighbours:
+            u_label = graph.nodes[u].get("label")
+            for n in rhs.nodes:
+                if (u_label, rhs.nodes[n].get("label")) in relation:
+                    graph.add_edge(u, mapping[n], **edge_data)
+    graph.remove_node(node)
+    return next_id
+
+
+def generate_graph(rule_dict, target_n=100, rng=None, start_symbol=None):
+    """Generate a graph by a node-label-controlled (NLC) vertex-replacement derivation.
+
+    Starts from a single nonterminal node carrying ``start_symbol`` (default: the left-hand side with
+    the most total rule frequency). Repeatedly picks a nonterminal node, chooses one of its symbol's
+    rules with probability proportional to frequency, deletes the node, splices in a fresh copy of the
+    rule's right-hand side, and reconnects the deleted node's former neighbours via the rule's embedding
+    relation. Derivation is recursive: right-hand sides may themselves carry nonterminal nodes.
+
+    ``target_n`` is a soft node budget, not an exact size: once it is reached the derivation prefers
+    terminal-only rules so it can finish, and any nonterminals still left after the step cap are demoted
+    to terminals. A non-recursive grammar therefore yields exactly its right-hand side, while a
+    recursive one grows until the budget. Returns (networkx graph, list of symbols rewritten in order).
     """
     rng = np.random.RandomState() if rng is None else rng
-    rules = [rule for rlist in rule_dict.values() for rule in rlist if rule.frequency > 0.0]
-    if len(rules) == 0:
+    if not rule_dict:
+        return nx.Graph(), []
+    if start_symbol is None:
+        start_symbol = max(rule_dict, key=lambda s: sum(r.frequency for r in rule_dict[s]))
+    if start_symbol not in rule_dict:
         return nx.Graph(), []
 
-    weights = np.asarray([rule.frequency for rule in rules], dtype=float)
-    weights /= weights.sum()
-    out = nx.Graph()
+    target_n = max(1, int(target_n))
+    graph = nx.Graph()
+    graph.add_node(0, **{_NONTERMINAL: start_symbol})
+    next_id = 1
     rule_ordering = []
-    offset = 0
-    target_n = max(0, int(target_n))
-    max_steps = max(1, target_n + len(rules))
+    max_steps = 10 * target_n + 100
 
     for _ in range(max_steps):
-        if out.number_of_nodes() >= target_n:
+        nonterminals = [v for v in graph.nodes if graph.nodes[v].get(_NONTERMINAL) in rule_dict]
+        if not nonterminals:
             break
-        rule = rules[int(rng.choice(len(rules), p=weights))]
-        graph = rule.graph.copy()
-        if graph.number_of_nodes() == 0:
-            break
-        relabel = {node: offset + i for i, node in enumerate(graph.nodes())}
-        graph = nx.relabel_nodes(graph, relabel, copy=True)
-        new_nodes = list(graph.nodes())
-        existing_nodes = list(out.nodes())
-        out = nx.compose(out, graph)
-        if existing_nodes:  # glue the new block on so the result stays connected
-            a = existing_nodes[rng.randint(len(existing_nodes))]
-            b = new_nodes[rng.randint(len(new_nodes))]
-            out.add_edge(a, b)
-        offset += graph.number_of_nodes()
-        rule_ordering.append(rule.lhs)
+        node = nonterminals[rng.randint(len(nonterminals))]
+        symbol = graph.nodes[node][_NONTERMINAL]
+        over_budget = graph.number_of_nodes() >= target_n
+        rule = _choose_rule(rule_dict[symbol], rng, rule_dict, prefer_terminal=over_budget)
+        if rule is None:
+            graph.nodes[node].pop(_NONTERMINAL, None)  # no usable rule -> treat as terminal
+            continue
+        next_id = _apply_rule(graph, node, rule, next_id, rng)
+        rule_ordering.append(symbol)
 
-    return out, rule_ordering
+    for v in graph.nodes:  # demote any nonterminals left after the budget/step cap
+        graph.nodes[v].pop(_NONTERMINAL, None)
+    return graph, rule_ordering
 
 
 def get_degree_dist(rule_list):
@@ -239,7 +320,7 @@ def _background_log_prob(graph, degree_counts):
 class GrammarDistribution(SequenceEncodableProbabilityDistribution):
     """GrammarDistribution object for evaluating the likelihood of node-replacement grammars (VertexReplacementGrammar objects)."""
 
-    def __init__(self, grammar, mix_p, decomp_level=0, lhs_delta=0, name=None, orig_n=100):
+    def __init__(self, grammar, mix_p, decomp_level=0, lhs_delta=0, name=None, orig_n=100, start_symbol=None):
         """GrammarDistribution object defined by a model grammar and mixing parameters.
 
         Args:
@@ -248,7 +329,8 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
             decomp_level (int): Maximum recursion depth for decomposing unmatched rules.
             lhs_delta (int): Allowed slack when matching rule left-hand sides.
             name (Optional[str]): String name of object instance.
-            orig_n (int): Target number of nodes used when sampling graphs.
+            orig_n (int): Soft node budget used when sampling graphs by derivation.
+            start_symbol: Left-hand side to begin a derivation from (default: the most frequent one).
 
         Attributes:
             grammar: VertexReplacementGrammar object serving as the model grammar.
@@ -256,7 +338,8 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
             decomp_level (int): Maximum recursion depth for decomposing unmatched rules.
             lhs_delta (int): Allowed slack when matching rule left-hand sides.
             name (Optional[str]): String name of object instance.
-            orig_n (int): Target number of nodes used when sampling graphs.
+            orig_n (int): Soft node budget used when sampling graphs by derivation.
+            start_symbol: Left-hand side to begin a derivation from (default: the most frequent one).
 
         """
         _require_networkx()
@@ -266,6 +349,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         self.decomp_level = decomp_level
         self.lhs_delta = lhs_delta
         self.orig_n = orig_n
+        self.start_symbol = start_symbol
 
     def __str__(self):
 
@@ -396,7 +480,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
             GrammarSampler object.
 
         """
-        return GrammarSampler(self.grammar, orig_n=self.orig_n, seed=seed)
+        return GrammarSampler(self.grammar, orig_n=self.orig_n, seed=seed, start_symbol=self.start_symbol)
 
     def estimator(self, pseudo_count=None):
         """Create a GrammarEstimator object.
@@ -418,47 +502,53 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
 class GrammarSampler(DistributionSampler):
     """GrammarSampler object for sampling graphs generated from a node-replacement grammar."""
 
-    def __init__(self, grammar, orig_n=100, seed=None):
+    def __init__(self, grammar, orig_n=100, seed=None, start_symbol=None):
         """GrammarSampler object.
 
         Args:
             grammar: VertexReplacementGrammar object to generate graphs from.
-            orig_n (int): Default target number of nodes for generated graphs.
+            orig_n (int): Soft node budget for generated graphs (see generate_graph).
             seed (Optional[int]): Seed for the local random generator.
+            start_symbol: Left-hand side to begin each derivation from (default: the most frequent one).
 
         Attributes:
             grammar: VertexReplacementGrammar object to generate graphs from.
-            orig_n (int): Default target number of nodes for generated graphs.
+            orig_n (int): Soft node budget for generated graphs.
+            start_symbol: Left-hand side to begin each derivation from.
 
         """
         self.grammar = grammar
         self.orig_n = orig_n
+        self.start_symbol = start_symbol
         self.rng = np.random.RandomState(seed)
 
     def sample(self):
-        """Generate a single graph from the grammar with roughly orig_n nodes.
+        """Generate a single graph from the grammar by an NLC vertex-replacement derivation.
 
         Returns:
             A networkx graph generated from the grammar.
 
         """
-        g, rule_ordering = generate_graph(rule_dict=self.grammar.rule_dict, target_n=self.orig_n, rng=self.rng)
-
+        g, _ = generate_graph(
+            rule_dict=self.grammar.rule_dict, target_n=self.orig_n, rng=self.rng, start_symbol=self.start_symbol
+        )
         return g
 
     def sample_seq(self, size_arr):
-        """Generate one graph per entry of size_arr, each targeting that many nodes.
+        """Generate one graph per entry of size_arr, each with that node budget.
 
         Args:
-            size_arr: Sequence of target node counts.
+            size_arr: Sequence of node budgets.
 
         Returns:
-            List of networkx graphs, one per requested size.
+            List of networkx graphs, one per requested budget.
 
         """
         rv = []
         for size in size_arr:
-            g, rule_ordering = generate_graph(rule_dict=self.grammar.rule_dict, target_n=size, rng=self.rng)
+            g, _ = generate_graph(
+                rule_dict=self.grammar.rule_dict, target_n=size, rng=self.rng, start_symbol=self.start_symbol
+            )
             rv.append(g)
         return rv
 

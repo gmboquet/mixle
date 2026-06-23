@@ -163,12 +163,14 @@ class GrammarTestCase(unittest.TestCase):
         self.assertIsInstance(fitted, GrammarDistribution)
         self.assertEqual(fitted.grammar.rule_dict[2][0].frequency, 6.0)
 
+        # the grammar is non-recursive (its right-hand side has no nonterminal), so a derivation
+        # reproduces exactly that right-hand side regardless of the node budget.
         sampler = GrammarSampler(grammar, orig_n=4, seed=1)
         graph = sampler.sample()
-        self.assertGreaterEqual(graph.number_of_nodes(), 4)
+        self.assertEqual(graph.number_of_nodes(), 2)
         graphs = sampler.sample_seq([2, 3])
         self.assertEqual(len(graphs), 2)
-        self.assertTrue(all(g.number_of_nodes() >= 2 for g in graphs))
+        self.assertTrue(all(g.number_of_nodes() == 2 for g in graphs))
 
     @staticmethod
     def _labeled_edge():
@@ -176,6 +178,24 @@ class GrammarTestCase(unittest.TestCase):
         g.add_node(0, label="A", node_color="")
         g.add_node(1, label="B", node_color="")
         g.add_edge(0, 1, weight=1.0, edge_color="")
+        return g
+
+    @staticmethod
+    def _recursive_grammar(embedding=None):
+        # symbol 1 -> [C - T - nonterminal(1)] (grow) | [E] (terminate); optional embedding relation.
+        from pysp.stats.sequences.grammar import GrammarRule, VertexReplacementGrammar
+
+        grow = nx.Graph()
+        grow.add_node(0, label="C", node_color="")
+        grow.add_node(1, label="T", node_color="")
+        grow.add_node(2, nonterminal=1)
+        grow.add_edge(0, 1, weight=1.0, edge_color="")
+        grow.add_edge(1, 2, weight=1.0, edge_color="")
+        stop = nx.Graph()
+        stop.add_node(0, label="E", node_color="")
+        g = VertexReplacementGrammar()
+        g.add_rule(GrammarRule(1, grow, frequency=5.0, embedding=embedding))
+        g.add_rule(GrammarRule(1, stop, frequency=1.0))
         return g
 
     def test_log_density_is_a_valid_log_probability(self):
@@ -211,11 +231,22 @@ class GrammarTestCase(unittest.TestCase):
         self.assertEqual(without.log_density(obs), float("-inf"))  # no direct match, no background
         self.assertTrue(np.isfinite(with_decomp.log_density(obs)))  # matched component-by-component
 
-    def test_sampler_generates_a_connected_graph(self):
+    def test_recursive_derivation_grows_and_stays_connected(self):
         from pysp.stats.sequences.grammar import GrammarSampler
 
-        g = GrammarSampler(self._grammar(), orig_n=6, seed=1).sample()
-        self.assertGreaterEqual(g.number_of_nodes(), 6)
+        g = GrammarSampler(self._recursive_grammar(), orig_n=8, seed=0, start_symbol=1).sample()
+        self.assertGreaterEqual(g.number_of_nodes(), 4)  # grew via recursion toward the budget
+        self.assertTrue(nx.is_connected(g))
+        self.assertTrue(all("nonterminal" not in g.nodes[n] for n in g.nodes))  # fully derived
+
+    def test_embedding_controls_reconnection(self):
+        from pysp.stats.sequences.grammar import GrammarSampler
+
+        # the embedding connects a replaced node's 'T' neighbour to right-hand-side 'T' nodes; the
+        # default would instead attach to the connector 'C', so 'T'-'T' edges prove the relation fired.
+        g = GrammarSampler(self._recursive_grammar(embedding=[("T", "T")]), orig_n=8, seed=2, start_symbol=1).sample()
+        tt_edges = [(a, b) for a, b in g.edges if g.nodes[a].get("label") == "T" and g.nodes[b].get("label") == "T"]
+        self.assertTrue(tt_edges)
         self.assertTrue(nx.is_connected(g))
 
     def test_accumulator_keeps_num_rules_consistent(self):
