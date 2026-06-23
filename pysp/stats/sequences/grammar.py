@@ -6,12 +6,17 @@ isomorphism (on node labels/colors and edge colors/weights). Defines the Grammar
 GrammarSampler, GrammarAccumulatorFactory, GrammarEstimatorAccumulator, GrammarEstimator, and the
 GrammarDataEncoder classes for use with pysparkplug.
 
-Data type: a graph-grammar object (VertexReplacementGrammar) with ``rule_list`` and ``rule_dict``
-attributes. The model defines a probability over rules; the log-density of an observed grammar is the
-sum over its rules of ``log p(rule)``, where ``p(rule)`` mixes a frequency-based match probability
-(isomorphic model rule, left-hand side within ``lhs_delta``, optionally via connected-component
-decomposition up to ``decomp_level``) with a node-degree background model weighted by ``mix_p``. Both
-mixture components are valid probabilities, so the log-density is <= 0.
+Data type: the observations are GRAPHS (networkx graphs). The model is parameterised by a grammar
+whose rules describe local node neighbourhoods (estimate it from graphs with GrammarEstimator). The
+log-density of a graph factorises over its nodes: each node contributes the model probability of its
+radius-1 ego pattern (its degree and labelled neighbourhood; see ``graph_to_grammar``), and the
+log-density is the sum of those log-probabilities. Each ego pattern's probability mixes a
+frequency-based match probability (isomorphic model pattern, degree within ``lhs_delta``, optionally
+via connected-component decomposition up to ``decomp_level``) with a node-degree background weighted
+by ``mix_p``; both components are valid probabilities, so the log-density is <= 0. ``sample()`` runs a
+vertex-replacement derivation that emits graphs, so sampling and scoring share one sample space.
+Computing the exact graph likelihood under a grammar needs parsing (intractable), so this local
+(radius-1) factorisation is used.
 
 """
 
@@ -150,6 +155,25 @@ class VertexReplacementGrammar:
 
 def _copy_rule(rule):
     return GrammarRule(rule.lhs, rule.graph, rule.frequency, embedding=rule.embedding)
+
+
+def graph_to_grammar(graph):
+    """Map a graph to its node-neighbourhood grammar: one rule per node, keyed by degree.
+
+    Each node v yields a rule whose left-hand side is deg(v) and whose right-hand side is the labelled
+    radius-1 ego graph around v (v, its neighbours, and the induced edges), with frequency 1. This is
+    the in-tree graph -> grammar bridge that lets GrammarDistribution score and estimate from graphs:
+    a graph's likelihood factorises over its nodes as the product of the model probability of each
+    node's ego pattern. Computing the exact likelihood of a graph under a vertex-replacement grammar
+    would require parsing (intractable), so this local (radius-1) factorisation is used instead.
+    """
+    grammar = VertexReplacementGrammar(name="ego")
+    for v in graph.nodes:
+        degree = graph.degree(v)
+        ego = nx.ego_graph(graph, v, radius=1, undirected=True)
+        grammar.rule_dict.setdefault(degree, []).append(GrammarRule(degree, ego, 1.0))
+    grammar.refresh_rules()
+    return grammar
 
 
 def _isomorphic_rule_graph(g1, g2):
@@ -318,7 +342,12 @@ def _background_log_prob(graph, degree_counts):
 
 
 class GrammarDistribution(SequenceEncodableProbabilityDistribution):
-    """GrammarDistribution object for evaluating the likelihood of node-replacement grammars (VertexReplacementGrammar objects)."""
+    """GrammarDistribution: a distribution over GRAPHS parameterised by a node-replacement grammar.
+
+    Observations are networkx graphs. ``log_density`` scores a graph by the product over its nodes of
+    the model probability of each node's ego pattern, ``sample`` emits graphs by derivation, and the
+    estimator learns the model grammar from graphs -- so all three share the graph sample space.
+    """
 
     def __init__(self, grammar, mix_p, decomp_level=0, lhs_delta=0, name=None, orig_n=100, start_symbol=None):
         """GrammarDistribution object defined by a model grammar and mixing parameters.
@@ -373,7 +402,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         See log_density() for details.
 
         Args:
-            x: Observed VertexReplacementGrammar object.
+            x: Observed graph (a networkx graph).
 
         Returns:
             Density at observation x.
@@ -405,29 +434,30 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         return prob
 
     def log_density(self, x):
-        """Log-density of the grammar distribution at an observed grammar x.
+        """Log-density of the grammar distribution at an observed GRAPH x.
 
-        The observed grammar is treated as a bag of rules drawn i.i.d. from the model, so the
-        log-density is the sum over its rules of ``log p(rule)``. Each rule's probability is a
+        The graph's likelihood factorises over its nodes: each node v contributes the model probability
+        of its radius-1 ego pattern (its degree and labelled neighbourhood; see ``graph_to_grammar``),
+        and the log-density is the sum of those log-probabilities. Each ego pattern's probability is a
         two-component mixture::
 
-            p(rule) = (1 - mix_p) * p_match(rule) + mix_p * p_background(rule)
+            p(pattern) = (1 - mix_p) * p_match(pattern) + mix_p * p_background(pattern)
 
-        where ``p_match`` is the frequency of isomorphic model rules (left-hand side within
+        where ``p_match`` is the frequency of model ego patterns isomorphic to it (degree within
         ``lhs_delta``, optionally via connected-component decomposition up to ``decomp_level``) over the
-        model's total rule frequency, and ``p_background`` is the rule's mean node-degree probability
-        under the model degree distribution. Both components lie in [0, 1], so each ``p(rule)`` is a
-        valid probability and the log-density is <= 0. An empty grammar has log-density 0 (the empty
-        product over rules).
+        model's total frequency, and ``p_background`` is the pattern's mean node-degree probability under
+        the model degree distribution. Both components lie in [0, 1], so the log-density is <= 0. An
+        empty graph has log-density 0 (the empty product over nodes).
 
         Args:
-            x: Observed VertexReplacementGrammar object.
+            x: Observed graph (a networkx graph).
 
         Returns:
-            Log-density at observation x (a float <= 0, or -inf if some rule has zero probability).
+            Log-density at observation x (a float <= 0, or -inf if some node pattern has zero probability).
 
         """
-        if x is None or len(x.rule_list) == 0:
+        observed = graph_to_grammar(x)
+        if len(observed.rule_list) == 0:
             return 0.0
 
         total_freq = sum(r.frequency for r in self.grammar.rule_list)
@@ -436,7 +466,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         degree_counts = get_degree_dist(self.grammar.rule_list) if self.grammar.rule_list else {"inf": 1}
 
         log_p = 0.0
-        for t_rule in x.rule_list:
+        for t_rule in observed.rule_list:
             p_match = self._match_prob(t_rule.lhs, t_rule.graph, total_freq, self.decomp_level)
             p_background = np.exp(_background_log_prob(t_rule.graph, degree_counts))
             p = (1.0 - self.mix_p) * p_match + self.mix_p * p_background
@@ -447,10 +477,10 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
 
     # combine list of grammars into singular grammar? need to take multiple sample outputs as input
     def seq_encode(self, x):
-        """Encode a sequence of grammar observations for vectorized calls (identity encoding).
+        """Encode a sequence of observed graphs for vectorized calls (identity encoding).
 
         Args:
-            x: Sequence of VertexReplacementGrammar objects.
+            x: Sequence of observed graphs (networkx graphs).
 
         Returns:
             The input sequence unchanged.
@@ -462,7 +492,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         """Evaluate log_density() at each encoded observation.
 
         Args:
-            x: Sequence of VertexReplacementGrammar objects (from seq_encode).
+            x: Sequence of observed graphs (from seq_encode).
 
         Returns:
             Numpy array of log-densities, one per observation.
@@ -582,38 +612,22 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.grammar = VertexReplacementGrammar("mu_level_dl", "leiden", "", 4)
         self.keys = keys
 
-    def update(self, grammar, weight, estimate):
-        """Merge an observed grammar into the accumulated grammar with the given weight.
+    def _merge_grammar(self, observed, weight):
+        """Merge a node-pattern grammar (an observation's ego patterns, or another accumulator's stat).
 
-        Rules isomorphic to an already-accumulated rule (matching left-hand side, edge colors, weights, and
-        node labels/colors) have their frequency incremented by weight times the observed frequency; new rules
-        are copied in with weight-scaled frequency.
-
-        Args:
-            grammar: Observed grammar object.
-            weight (float): Weight of the observation.
-            estimate (Optional[GrammarDistribution]): Previous estimate (unused).
-
-        Returns:
-            The accumulated VertexReplacementGrammar object.
-
+        Ego patterns isomorphic to an already-accumulated one (matching degree, edge colors/weights,
+        node labels/colors) have their frequency incremented by the weight; new patterns are added with
+        weight-scaled frequency.
         """
-        #   change to check for node color as well
-        #            em = iso.numerical_edge_match('weight',1)
-        #            rgrammar = estimate.grammar
         rgrammar = self.grammar
-        #            for grammar in x:
-        #                rgrammar.rule_list += grammar.rule_list
-        rgrammar.cost += grammar.cost
-        for lhs in grammar.rule_dict:
+        rgrammar.cost += observed.cost
+        for lhs in observed.rule_dict:
             if lhs not in rgrammar.rule_dict:
-                #                        rgrammar.rule_dict[lhs] = []
-                rgrammar.rule_dict[lhs] = [_copy_rule(rule) for rule in grammar.rule_dict[lhs]]
+                rgrammar.rule_dict[lhs] = [_copy_rule(rule) for rule in observed.rule_dict[lhs]]
                 for rule in rgrammar.rule_dict[lhs]:
                     rule.frequency *= weight
-            #                    rgrammar.rule_dict[lhs] += grammar.rule_dict[lhs]
             else:
-                for rule in grammar.rule_dict[lhs]:
+                for rule in observed.rule_dict[lhs]:
                     found_rule = False
                     for r_rule in rgrammar.rule_dict[lhs]:
                         if _isomorphic_rule_graph(r_rule.graph, rule.graph):
@@ -628,11 +642,28 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         rgrammar.refresh_rules()  # keep rule_list and num_rules consistent with rule_dict
         return rgrammar
 
-    def initialize(self, x, weight, rng):
-        """Initialize the accumulator with a single weighted observation.
+    def update(self, x, weight, estimate):
+        """Merge an observed GRAPH into the accumulated model with the given weight.
+
+        The graph is mapped to its node-neighbourhood grammar (``graph_to_grammar``) and those ego
+        patterns are merged into the accumulator.
 
         Args:
-            x: Observed VertexReplacementGrammar object.
+            x: Observed graph (a networkx graph).
+            weight (float): Weight of the observation.
+            estimate (Optional[GrammarDistribution]): Previous estimate (unused).
+
+        Returns:
+            The accumulated VertexReplacementGrammar object (the node-pattern model).
+
+        """
+        return self._merge_grammar(graph_to_grammar(x), weight)
+
+    def initialize(self, x, weight, rng):
+        """Initialize the accumulator with a single weighted observed graph.
+
+        Args:
+            x: Observed graph (a networkx graph).
             weight (float): Weight of the observation.
             rng: RandomState (unused).
 
@@ -643,10 +674,10 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.update(x, weight, None)
 
     def seq_initialize(self, x, weights, rng):
-        """Initialize the accumulator with a sequence of weighted observations.
+        """Initialize the accumulator with a sequence of weighted observed graphs.
 
         Args:
-            x: Sequence of VertexReplacementGrammar objects (from seq_encode).
+            x: Sequence of observed graphs (from seq_encode).
             weights: Sequence of observation weights.
             rng: RandomState (unused).
 
@@ -658,10 +689,10 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.initialize(x[i], weights[i], rng)
 
     def seq_update(self, x, weights, estimate):
-        """Merge a sequence of weighted observed grammars into the accumulated grammar.
+        """Merge a sequence of weighted observed graphs into the accumulated model.
 
         Args:
-            x: Sequence of VertexReplacementGrammar objects (from seq_encode).
+            x: Sequence of observed graphs (from seq_encode).
             weights: Sequence of observation weights.
             estimate (Optional[GrammarDistribution]): Previous estimate (unused).
 
@@ -676,7 +707,7 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.update(grammar, weight, estimate)
 
     def combine(self, suff_stat):
-        """Merge the sufficient statistic of another accumulator (a VertexReplacementGrammar object) into this one.
+        """Merge the sufficient statistic of another accumulator (a node-pattern grammar) into this one.
 
         Args:
             suff_stat: VertexReplacementGrammar object from another accumulator's value().
@@ -685,7 +716,7 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             This GrammarEstimatorAccumulator object.
 
         """
-        self.update(suff_stat, 1.0, None)
+        self._merge_grammar(suff_stat, 1.0)  # suff_stat is already an ego-pattern grammar, not a graph
         return self
 
     def value(self):
@@ -811,7 +842,7 @@ class GrammarEstimator(ParameterEstimator):
 
 
 class GrammarDataEncoder(DataSequenceEncoder):
-    """GrammarDataEncoder object for encoding sequences of grammar observations (identity encoding)."""
+    """GrammarDataEncoder object for encoding sequences of observed graphs (identity encoding)."""
 
     def __str__(self):
         """Returns string representation of GrammarDataEncoder object."""
@@ -830,10 +861,10 @@ class GrammarDataEncoder(DataSequenceEncoder):
         return isinstance(other, GrammarDataEncoder)
 
     def seq_encode(self, x):
-        """Encode a sequence of grammar observations for vectorized calls (identity encoding).
+        """Encode a sequence of observed graphs for vectorized calls (identity encoding).
 
         Args:
-            x: Sequence of VertexReplacementGrammar objects.
+            x: Sequence of observed graphs (networkx graphs).
 
         Returns:
             The input sequence unchanged.

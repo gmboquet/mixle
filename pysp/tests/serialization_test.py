@@ -133,7 +133,8 @@ class DistributionSerializationTestCase(unittest.TestCase):
         self.assertIsInstance(loaded.grammar, VertexReplacementGrammar)
         self.assertEqual(loaded.grammar.name, "json")
         self.assertEqual(len(loaded.grammar.rule_list), 1)
-        self.assertAlmostEqual(loaded.log_density(grammar), dist.log_density(grammar), places=12)
+        # log_density scores a graph; the round-trip must preserve it.
+        self.assertAlmostEqual(loaded.log_density(graph), dist.log_density(graph), places=12)
 
     def test_bayes_json_round_trip_representative_models(self):
         cat = stats.CategoricalDistribution({"x": 0.7, "y": 0.3}, name="c")
