@@ -2,7 +2,9 @@ import io
 import unittest
 
 import numpy as np
-import pandas as pd
+import pytest
+
+pd = pytest.importorskip("pandas")  # pandas is an optional extra; skip this suite if it is not installed
 
 from pysp.data import dataframe_records, seq_encode_dataframe
 from pysp.inference.estimation import optimize
