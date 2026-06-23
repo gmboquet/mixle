@@ -13,6 +13,8 @@ from typing import Any
 
 import numpy as np
 
+from pysp.doe.designs import _qmc_unit
+
 __all__ = ["sobol_indices", "morris_screening"]
 
 
@@ -23,11 +25,15 @@ def _scale(unit: np.ndarray, bounds: np.ndarray) -> np.ndarray:
 
 
 def _sobol_unit(n: int, d: int, seed: int) -> np.ndarray:
-    """``n`` low-discrepancy points in ``[0,1]^d`` (Sobol if available, else stratified random)."""
-    try:
-        from scipy.stats.qmc import Sobol
+    """``n`` low-discrepancy points in ``[0,1]^d`` via the shared DoE QMC engine.
 
-        return Sobol(d=d, scramble=True, seed=seed).random(n)
+    Reuses ``designs._qmc_unit`` (scrambled Sobol', stratified-random fallback on older scipy) so
+    the sensitivity sampler and the DoE designs draw from one source.
+    """
+    try:
+        from scipy.stats import qmc
+
+        return _qmc_unit(qmc.Sobol, d, n, True, np.random.RandomState(seed))
     except Exception:  # pragma: no cover - qmc fallback
         return np.random.RandomState(seed).random((n, d))
 
