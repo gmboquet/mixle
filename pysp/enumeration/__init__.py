@@ -51,7 +51,7 @@ from pysp.enumeration.model_enumeration import quantized_best_first_decode
 
 # --- the count-budget seek / unrank index + the count semiring (rank-by-index machinery) ---
 from pysp.enumeration.quantization.core import count_budget_index
-from pysp.enumeration.quantization.semiring import CountSemiring, DecomposableSemiring
+from pysp.enumeration.quantization.semiring import CountSemiring, DecomposableSemiring, TropicalSemiring
 
 # --- the contract (implemented by distributions AND relations) ---
 from pysp.stats.compute.pdist import (
@@ -79,6 +79,7 @@ __all__ = [
     "LazyQuantizedEnumerationIndex",
     "CountSemiring",
     "DecomposableSemiring",
+    "TropicalSemiring",
     # k-best algorithms
     "best_first_union",
     "merge_enumerators",

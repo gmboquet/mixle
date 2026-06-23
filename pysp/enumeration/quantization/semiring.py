@@ -229,6 +229,76 @@ class CountSemiring(DecomposableSemiring):
         return prefix
 
 
+class _Trop:
+    """Carrier element for :class:`TropicalSemiring`: the best log-prob and its witness.
+
+    ``best_lp`` is the maximum achievable log-probability of the sub-reduction (``-inf`` for the
+    additive identity / an impossible branch); ``witness`` is the flat tuple of chosen leaf atoms in
+    composition order (``None`` when ``best_lp`` is ``-inf``).
+    """
+
+    __slots__ = ("best_lp", "witness")
+
+    def __init__(self, best_lp: float, witness: tuple | None) -> None:
+        self.best_lp = float(best_lp)
+        self.witness = witness
+
+
+class TropicalSemiring(DecomposableSemiring):
+    """Max-plus (Viterbi) carrier: the single best configuration and its log-probability.
+
+    The second realization of :class:`DecomposableSemiring` -- it *swaps only the carrier* (the
+    contract this module was built around). Where :class:`CountSemiring` counts the support in each
+    quantized bin, the tropical carrier folds the same ``leaf``/``plus``/``times`` reduction over the
+    ``(max, +)`` semiring: ``plus`` keeps the higher-probability alternative, ``times``/``product``
+    add log-probabilities and concatenate witnesses. The result is the Viterbi (most-probable)
+    configuration and its exact log-probability -- the *top* of the descending-probability order, and
+    hence an exact bound usable by any family expressible in ``leaf``/``plus``/``times``.
+
+    Crucially this includes the **non-decomposable** families (HMM / Mixture): exact *counting*
+    couples across structure (which is why the count index does not serve them), but the Viterbi bound
+    factors cleanly through the tropical fold. (Exact bounded *counting* for those families is the
+    state-augmented count DP -- a further step; for HMM the exact descending enumeration is already
+    available via :func:`pysp.enumeration.hmm_paths.hmm_best_paths`.)
+
+    The witness is the *flat* tuple of leaf atoms along the best configuration (the tropical carrier
+    keeps a single witness, not the per-child structured value the count carrier reconstructs on
+    unrank), which is exactly what a Viterbi decode wants. ``quantizer`` / ``max_fine_bucket`` are
+    accepted for interface symmetry but unused -- the tropical fold needs no quantization.
+    """
+
+    def zero(self) -> _Trop:
+        return _Trop(float("-inf"), None)
+
+    def one(self) -> _Trop:
+        return _Trop(0.0, ())
+
+    def leaf(self, value: Any, log_prob: float, quantizer: Quantizer | None = None) -> _Trop:
+        return _Trop(float(log_prob), (value,))
+
+    def plus(self, a: _Trop, b: _Trop) -> _Trop:
+        return a if a.best_lp >= b.best_lp else b
+
+    def times(
+        self, a: _Trop, b: _Trop, quantizer: Quantizer | None = None, max_fine_bucket: int | None = None
+    ) -> _Trop:
+        if a.witness is None or b.witness is None:
+            return _Trop(float("-inf"), None)
+        return _Trop(a.best_lp + b.best_lp, a.witness + b.witness)
+
+    def product(
+        self, elements: Sequence[_Trop], quantizer: Quantizer | None = None, max_fine_bucket: int | None = None
+    ) -> _Trop:
+        total_lp = 0.0
+        witness: tuple = ()
+        for e in elements:
+            if e.witness is None:
+                return _Trop(float("-inf"), None)
+            total_lp += e.best_lp
+            witness = witness + e.witness
+        return _Trop(total_lp, witness)
+
+
 # --- Axis B: ordered search (the existing enumerator), named for symmetry -------------------
 
 OrderedStream = Iterator[tuple[Any, float]]
