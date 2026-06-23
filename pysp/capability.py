@@ -328,8 +328,8 @@ class Optimizable(PredicateCapability):
 
 # All capability facets named in docs/ABSTRACTIONS.md are now formalised. ConjugateUpdatable and
 # TemporalPointProcess (which previously needed a family-surface unification) are detectable above;
-# the PDE forward-operator contract lives in ppl/_operator.py (ForwardOperator) and ppl/dynamics
-# (DynamicsOperator ABC); the DOE Surrogate/Acquisition contracts live in doe/_contracts.py.
+# the DOE Surrogate/Acquisition contracts live in doe/_contracts.py. (The PDE forward-operator and
+# dynamics-operator contracts moved out with the pysparkplug-pde plugin.)
 
 
 # Capabilities that apply to distributions (iterated by ``capabilities(dist)``). EngineResidentEStep,
@@ -641,20 +641,6 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "subsystem role",
         "DecomposableSemiring (ABC)",
         "pysp.enumeration.quantization",
-    ),
-    CapabilitySpec(
-        "DynamicsOperator",
-        "a PDE/ODE evolution operator",
-        "subsystem role",
-        "DynamicsOperator (ABC)",
-        "pysp.ppl.physics.dynamics",
-    ),
-    CapabilitySpec(
-        "ForwardOperator",
-        "the PDE forward solve + adjoint namespace",
-        "subsystem role",
-        "ForwardOperator/ForwardModel protocols",
-        "pysp.ppl.physics._operator",
     ),
     CapabilitySpec(
         "Surrogate",

@@ -465,6 +465,6 @@ register_composite("DiagGaussian", _diag_dist, _diag_est, dist_cls=DiagonalGauss
 
 # Linear-Gaussian state space (time series): the StateSpace composite self-registers (with its
 # Kalman/RTS+EM fit_fn) when statespace.py is imported. The PDE-constrained PDEStateSpace composite
-# self-registers from its own module, fired by whichever package owns it (pysp.ppl.physics here; the
-# pysparkplug-pde plugin once relocated) -- so this lowering hub no longer references the PDE stack.
+# self-registers from the pysparkplug-pde plugin's modules when that package is imported -- so this
+# lowering hub (and pysp generally) no longer references the PDE stack.
 from pysp.ppl import statespace  # noqa: F401, E402  (import-time StateSpace registration)

@@ -59,7 +59,6 @@ from pysp.ppl.distributions import (
     EMG,
     LDA,
     MVN,
-    PDE,
     Bernoulli,
     Beta,
     Binomial,
@@ -112,19 +111,6 @@ from pysp.ppl.field import (
     joint,
     multistart,
 )
-from pysp.ppl.physics.dynamics import (
-    AdvectionDiffusionOperator,
-    AdvectionOperator,
-    DiffusionOperator,
-    available_dynamics_operators,
-    make_operator,
-    register_dynamics_operator,
-)
-from pysp.ppl.physics.flow import NavierStokes2D
-from pysp.ppl.physics.inverse import Differential
-from pysp.ppl.physics.multiphysics import CoupledPDESystem, solve_poisson
-from pysp.ppl.physics.shape import level_set_material, shape_optimize
-from pysp.ppl.physics.wave import WaveEquation2D
 from pysp.ppl.priors import Potts, TotalVariation
 
 __all__ = [
@@ -161,13 +147,6 @@ __all__ = [
     "DiagGaussian",
     "LocalLevel",
     "AR1",
-    "PDE",
-    "DiffusionOperator",
-    "AdvectionOperator",
-    "AdvectionDiffusionOperator",
-    "make_operator",
-    "register_dynamics_operator",
-    "available_dynamics_operators",
     "Graph",
     "Field",
     "Group",
@@ -207,16 +186,9 @@ __all__ = [
     "Cox",
     "joint",
     "FieldModel",
-    "Differential",
-    "shape_optimize",
-    "level_set_material",
     "TotalVariation",
     "Potts",
     "multistart",
-    "NavierStokes2D",
-    "solve_poisson",
-    "CoupledPDESystem",
-    "WaveEquation2D",
     "conformal",
     "ConformalRegressor",
     "ConformalClassifier",
