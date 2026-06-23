@@ -34,7 +34,7 @@ class IISTest(unittest.TestCase):
             with self.subTest(seed=seed):
                 a2, b2 = a[sub], b[sub]
                 self.assertFalse(_feasible(a2, b2, bounds))  # the subset is infeasible
-                for k in range(len(sub)):                    # ... and minimal
+                for k in range(len(sub)):  # ... and minimal
                     self.assertTrue(_feasible(np.delete(a2, k, 0), np.delete(b2, k, 0), bounds))
 
     def test_unique_conflict(self):

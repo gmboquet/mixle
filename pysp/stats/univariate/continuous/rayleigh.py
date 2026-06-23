@@ -181,7 +181,7 @@ class RayleighDistribution(SequenceEncodableProbabilityDistribution):
         """Excess kurtosis -(6pi^2-24pi+16)/(4-pi)^2."""
         import math
 
-        return float(-(6.0 * math.pi ** 2 - 24.0 * math.pi + 16.0) / (4.0 - math.pi) ** 2)
+        return float(-(6.0 * math.pi**2 - 24.0 * math.pi + 16.0) / (4.0 - math.pi) ** 2)
 
     def mode(self) -> float:
         """Mode (sigma)."""

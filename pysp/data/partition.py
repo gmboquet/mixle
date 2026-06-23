@@ -47,8 +47,13 @@ def num_chunks_for(size: int, num_chunks: int = 1, chunk_size: int | None = None
     return max(1, int(num_chunks))
 
 
-def encode_partitions(records: Sequence[Any], encoder: Any, structure: SampleStructure = EXCHANGEABLE,
-                      num_chunks: int = 1, chunk_size: int | None = None) -> list[tuple[int, Any]]:
+def encode_partitions(
+    records: Sequence[Any],
+    encoder: Any,
+    structure: SampleStructure = EXCHANGEABLE,
+    num_chunks: int = 1,
+    chunk_size: int | None = None,
+) -> list[tuple[int, Any]]:
     """Partition ``records`` by ``structure`` and ``encoder.seq_encode`` each part -> ``[(count, payload)]``."""
     n = num_chunks_for(len(records), num_chunks, chunk_size)
     return [(len(part), encoder.seq_encode(part)) for part in partition_records(records, structure, n)]

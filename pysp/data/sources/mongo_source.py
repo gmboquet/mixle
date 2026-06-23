@@ -16,10 +16,18 @@ except ImportError:  # pragma: no cover - exercised only without pymongo
     _pymongo = None
 
 
-def read_mongo(uri: str, database: str, collection: str, query: dict | None = None,
-               columns: list[str] | None = None, *, structure: SampleStructure = EXCHANGEABLE,
-               schema: Schema | None = None) -> LazySource:
+def read_mongo(
+    uri: str,
+    database: str,
+    collection: str,
+    query: dict | None = None,
+    columns: list[str] | None = None,
+    *,
+    structure: SampleStructure = EXCHANGEABLE,
+    schema: Schema | None = None,
+) -> LazySource:
     """Read documents matching ``query`` from ``database.collection`` at ``uri`` into a lazy DataSource."""
+
     def factory():
         if _pymongo is None:
             from pysp.utils.optional_deps import require
@@ -36,4 +44,5 @@ def read_mongo(uri: str, database: str, collection: str, query: dict | None = No
                 picked = [doc[c] for c in columns]
                 records.append(picked[0] if len(picked) == 1 else tuple(picked))
         return records
+
     return LazySource(factory, structure, schema)

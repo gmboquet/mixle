@@ -65,5 +65,6 @@ def _cdf(arr: np.ndarray):
     return stats.weibull_min.cdf(arr, shape, loc=0.0, scale=scale)
 
 
-register(Detector(name="weibull", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=2))
+register(
+    Detector(name="weibull", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=2)
+)

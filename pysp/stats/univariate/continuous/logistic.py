@@ -128,7 +128,7 @@ class LogisticDistribution(SequenceEncodableProbabilityDistribution):
 
     def variance(self) -> float:
         """Variance Var[X] of the distribution."""
-        return float((np.pi ** 2 / 3.0) * self.scale * self.scale)
+        return float((np.pi**2 / 3.0) * self.scale * self.scale)
 
     def entropy(self) -> float:
         """Differential entropy log(scale) + 2."""

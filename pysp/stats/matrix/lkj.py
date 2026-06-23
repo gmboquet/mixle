@@ -208,8 +208,13 @@ class LKJAccumulatorFactory(StatisticAccumulatorFactory):
 class LKJEstimator(ParameterEstimator):
     """Maximum-likelihood estimator for the concentration ``eta`` at fixed dimension ``dim``."""
 
-    def __init__(self, dim: int, eta_bounds: tuple[float, float] = (0.05, 1.0e4), name: str | None = None,
-                 keys: str | None = None) -> None:
+    def __init__(
+        self,
+        dim: int,
+        eta_bounds: tuple[float, float] = (0.05, 1.0e4),
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         self.dim = int(dim)
         self.eta_bounds = eta_bounds
         self.name = name

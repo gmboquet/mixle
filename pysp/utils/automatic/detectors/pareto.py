@@ -75,5 +75,6 @@ def _cdf(arr: np.ndarray):
     return stats.pareto.cdf(arr, b=alpha, scale=xm)
 
 
-register(Detector(name="pareto", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=1))
+register(
+    Detector(name="pareto", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=1)
+)

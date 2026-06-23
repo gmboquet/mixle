@@ -217,7 +217,9 @@ class GeneralizedGaussianAccumulatorFactory(StatisticAccumulatorFactory):
 class GeneralizedGaussianEstimator(ParameterEstimator):
     """Method-of-moments estimator: ``mu`` = mean, ``beta`` from excess kurtosis, ``alpha`` from variance."""
 
-    def __init__(self, beta_bounds: tuple[float, float] = (0.25, 50.0), name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self, beta_bounds: tuple[float, float] = (0.25, 50.0), name: str | None = None, keys: str | None = None
+    ) -> None:
         self.beta_bounds = beta_bounds
         self.name = name
         self.keys = keys
@@ -225,7 +227,9 @@ class GeneralizedGaussianEstimator(ParameterEstimator):
     def accumulator_factory(self) -> GeneralizedGaussianAccumulatorFactory:
         return GeneralizedGaussianAccumulatorFactory(name=self.name, keys=self.keys)
 
-    def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float, float]) -> GeneralizedGaussianDistribution:
+    def estimate(
+        self, nobs: float | None, suff_stat: tuple[float, float, float, float, float]
+    ) -> GeneralizedGaussianDistribution:
         from scipy.optimize import brentq
 
         count, s1, s2, s3, s4 = suff_stat

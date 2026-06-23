@@ -20,7 +20,10 @@ class KentTest(unittest.TestCase):
             d = Kent(g, kappa, beta)
             integ = mp.e ** mp.mpf(-d._log_c) * mp.quad(
                 lambda th, k=kappa, b=beta: mp.quad(
-                    lambda ph: mp.e ** (k * mp.cos(th) + b * ((mp.sin(th) * mp.cos(ph)) ** 2 - (mp.sin(th) * mp.sin(ph)) ** 2)) * mp.sin(th),
+                    lambda ph: (
+                        mp.e ** (k * mp.cos(th) + b * ((mp.sin(th) * mp.cos(ph)) ** 2 - (mp.sin(th) * mp.sin(ph)) ** 2))
+                        * mp.sin(th)
+                    ),
                     [0, 2 * mp.pi],
                 ),
                 [0, mp.pi],
@@ -63,8 +66,11 @@ class KentTest(unittest.TestCase):
                 self.assertAlmostEqual(abs(m.gamma[:, 0] @ g[:, 0]), 1.0, delta=1e-2)
 
     def test_vmf_limit_and_constraints(self):
-        self.assertAlmostEqual(Kent(np.eye(3), 5.0, 0.0).density(np.array([1.0, 0.0, 0.0])),
-                               np.exp(-Kent(np.eye(3), 5.0, 0.0)._log_c + 5.0), places=6)
+        self.assertAlmostEqual(
+            Kent(np.eye(3), 5.0, 0.0).density(np.array([1.0, 0.0, 0.0])),
+            np.exp(-Kent(np.eye(3), 5.0, 0.0)._log_c + 5.0),
+            places=6,
+        )
         with self.assertRaises(ValueError):
             Kent(np.eye(3), 4.0, 2.0)  # 2*beta >= kappa
 

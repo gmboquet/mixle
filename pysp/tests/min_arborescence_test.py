@@ -49,9 +49,9 @@ class MinArborescenceTest(unittest.TestCase):
                 else:
                     self.assertIsNotNone(res)
                     total, parent = res
-                    self.assertAlmostEqual(total, bf, places=9)              # optimal cost
+                    self.assertAlmostEqual(total, bf, places=9)  # optimal cost
                     self.assertEqual(parent[0], -1)
-                    self.assertAlmostEqual(                                  # parent[] really sums to total
+                    self.assertAlmostEqual(  # parent[] really sums to total
                         sum(w[parent[v], v] for v in range(n) if v != 0), total, places=9
                     )
 
@@ -59,7 +59,7 @@ class MinArborescenceTest(unittest.TestCase):
         inf = np.inf
         w = np.array([[inf, 2.0, 9.0], [inf, inf, 3.0], [inf, inf, inf]])
         total, parent = min_arborescence(w, 0)
-        self.assertEqual(total, 5.0)        # 0->1 (2) + 1->2 (3) beats 0->2 (9)
+        self.assertEqual(total, 5.0)  # 0->1 (2) + 1->2 (3) beats 0->2 (9)
         self.assertEqual(parent, [-1, 0, 1])
 
 

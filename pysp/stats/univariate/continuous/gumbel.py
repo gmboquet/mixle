@@ -171,7 +171,7 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
         """Skewness 12*sqrt(6)*zeta(3)/pi^3."""
         import math
 
-        return float(12.0 * math.sqrt(6.0) * 1.2020569031595942 / math.pi ** 3)
+        return float(12.0 * math.sqrt(6.0) * 1.2020569031595942 / math.pi**3)
 
     def kurtosis(self) -> float:
         """Excess kurtosis (12/5)."""

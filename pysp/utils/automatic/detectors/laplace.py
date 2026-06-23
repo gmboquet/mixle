@@ -38,5 +38,6 @@ def _cdf(arr: np.ndarray):
     return stats.laplace.cdf(arr, loc=loc, scale=b)
 
 
-register(Detector(name="laplace", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=2))
+register(
+    Detector(name="laplace", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=2)
+)

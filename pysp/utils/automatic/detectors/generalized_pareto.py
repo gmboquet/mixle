@@ -95,5 +95,14 @@ def _cdf(arr: np.ndarray):
         return None
 
 
-register(Detector(name="generalized_pareto", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=2))
+register(
+    Detector(
+        name="generalized_pareto",
+        kind="continuous",
+        applies=_applies,
+        score=_score,
+        factory=_factory,
+        cdf=_cdf,
+        n_params=2,
+    )
+)

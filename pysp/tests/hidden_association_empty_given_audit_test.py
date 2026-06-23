@@ -60,9 +60,7 @@ class EmptyGivenAuditTestCase(unittest.TestCase):
     def test_em_update_empty_given_no_nan_stats(self):
         dist = _make_dist()
         est = HiddenAssociationEstimator(
-            cond_estimator=ConditionalDistributionEstimator(
-                {"a": CategoricalEstimator(), "b": CategoricalEstimator()}
-            ),
+            cond_estimator=ConditionalDistributionEstimator({"a": CategoricalEstimator(), "b": CategoricalEstimator()}),
             len_estimator=CategoricalEstimator(),
         )
         acc = est.accumulator_factory().make()

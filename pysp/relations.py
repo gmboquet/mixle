@@ -192,9 +192,7 @@ def nearest_first(
 # ---------------------------------------------------------------------------
 # Stable matching (Gale-Shapley)
 # ---------------------------------------------------------------------------
-def stable_matching(
-    proposer_prefs: Sequence[Sequence[int]], receiver_prefs: Sequence[Sequence[int]]
-) -> list[int]:
+def stable_matching(proposer_prefs: Sequence[Sequence[int]], receiver_prefs: Sequence[Sequence[int]]) -> list[int]:
     """Proposer-optimal stable matching via Gale-Shapley.
 
     ``proposer_prefs[i]`` is proposer ``i``'s receivers in descending preference; ``receiver_prefs[j]``
@@ -544,10 +542,7 @@ def min_arborescence(weight: Any, root: int = 0) -> tuple[float, list[int]] | No
     w = np.asarray(weight, dtype=np.float64)
     n = w.shape[0]
     edges = [
-        (u, v, float(w[u, v]))
-        for u in range(n)
-        for v in range(n)
-        if u != v and v != root and np.isfinite(w[u, v])
+        (u, v, float(w[u, v])) for u in range(n) for v in range(n) if u != v and v != root and np.isfinite(w[u, v])
     ]
     chosen = _edmonds(set(range(n)), edges, root)
     if chosen is None:
@@ -670,8 +665,9 @@ def cardinality_constrained_milp(
     rhs.append(float(max_nonzero))
     ext_c = np.concatenate([c, np.zeros(n)])
     ext_bounds = [*list(bounds), *([(0.0, 1.0)] * n)]
-    res = branch_and_bound_milp(ext_c, np.array(rows), np.array(rhs), integer=range(n, 2 * n),
-                                bounds=ext_bounds, sense=sense)
+    res = branch_and_bound_milp(
+        ext_c, np.array(rows), np.array(rhs), integer=range(n, 2 * n), bounds=ext_bounds, sense=sense
+    )
     if res is None:
         return None
     value, x_ext = res

@@ -28,18 +28,18 @@ class CliqueTest(unittest.TestCase):
             mc = max_clique(a)
             mis = max_independent_set(a)
             with self.subTest(seed=seed):
-                self.assertTrue(all(a[i, j] for i, j in itertools.combinations(mc, 2)))       # is a clique
-                self.assertEqual(len(mc), _brute_clique_size(a))                              # and maximum
+                self.assertTrue(all(a[i, j] for i, j in itertools.combinations(mc, 2)))  # is a clique
+                self.assertEqual(len(mc), _brute_clique_size(a))  # and maximum
                 self.assertTrue(all(not a[i, j] for i, j in itertools.combinations(mis, 2)))  # is independent
                 comp = 1 - a
                 if n:
                     np.fill_diagonal(comp, 0)
-                self.assertEqual(len(mis), _brute_clique_size(comp))                          # and maximum
+                self.assertEqual(len(mis), _brute_clique_size(comp))  # and maximum
 
     def test_known(self):
-        self.assertEqual(len(max_clique(1 - np.eye(5, dtype=int))), 5)        # K5
+        self.assertEqual(len(max_clique(1 - np.eye(5, dtype=int))), 5)  # K5
         self.assertEqual(len(max_independent_set(1 - np.eye(5, dtype=int))), 1)
-        self.assertEqual(len(max_clique(np.zeros((4, 4), dtype=int))), 1)     # no edges
+        self.assertEqual(len(max_clique(np.zeros((4, 4), dtype=int))), 1)  # no edges
         self.assertEqual(len(max_independent_set(np.zeros((4, 4), dtype=int))), 4)
 
 

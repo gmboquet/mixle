@@ -41,8 +41,8 @@ class CardinalityMILPTest(unittest.TestCase):
             with self.subTest(seed=seed):
                 self.assertIsNotNone(res)
                 value, x = res
-                self.assertAlmostEqual(value, bf, places=5)                  # optimal objective
-                self.assertLessEqual(int(np.sum(np.abs(x) > 1e-6)), k)       # cardinality respected
+                self.assertAlmostEqual(value, bf, places=5)  # optimal objective
+                self.assertLessEqual(int(np.sum(np.abs(x) > 1e-6)), k)  # cardinality respected
 
     def test_sparsity_enforced(self):
         # want all three at +2 (c<0) but only 1 allowed nonzero -> pick the most negative cost

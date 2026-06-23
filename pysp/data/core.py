@@ -39,8 +39,9 @@ class DataSource(Protocol):
 class MaterializedSource:
     """An in-memory :class:`DataSource` wrapping a ``Sequence`` -- what a bare list becomes."""
 
-    def __init__(self, data: Sequence[Any], structure: SampleStructure = EXCHANGEABLE,
-                 schema: Schema | None = None) -> None:
+    def __init__(
+        self, data: Sequence[Any], structure: SampleStructure = EXCHANGEABLE, schema: Schema | None = None
+    ) -> None:
         self._data = data
         self.structure = structure
         self.schema = schema
@@ -58,8 +59,9 @@ class MaterializedSource:
     def partition(self, n: int, *, by: Any = None) -> list[MaterializedSource]:
         """Split into ``n`` structure-safe sub-sources (group-aware for partially-exchangeable data)."""
         structure = self.structure if by is None else SampleStructure("partially_exchangeable", by)
-        return [MaterializedSource(p, structure, self.schema)
-                for p in partition_records(self.materialize(), structure, n)]
+        return [
+            MaterializedSource(p, structure, self.schema) for p in partition_records(self.materialize(), structure, n)
+        ]
 
     def encode(self, encoder: Any, num_chunks: int = 1, chunk_size: int | None = None) -> list[tuple[int, Any]]:
         return encode_partitions(self.materialize(), encoder, self.structure, num_chunks, chunk_size)
@@ -72,8 +74,13 @@ class LazySource:
     is actually encoded; the records are read (and schema-coerced) once and cached.
     """
 
-    def __init__(self, factory: Any, structure: SampleStructure = EXCHANGEABLE, schema: Schema | None = None,
-                 length: int | None = None) -> None:
+    def __init__(
+        self,
+        factory: Any,
+        structure: SampleStructure = EXCHANGEABLE,
+        schema: Schema | None = None,
+        length: int | None = None,
+    ) -> None:
         self._factory = factory
         self.structure = structure
         self.schema = schema
