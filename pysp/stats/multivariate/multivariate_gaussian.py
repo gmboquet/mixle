@@ -13,6 +13,9 @@ covariance matrix.
 The log-density is given by
     log(p(x)) = -0.5*k*log(2*pi) - 0.5*log|covar| - 0.5*(x-mu)' covar^{-1} (x-mu).
 
+
+
+Reference: Mardia, Kent & Bibby, *Multivariate Analysis* (Academic Press, 1979).
 """
 
 from collections.abc import Sequence

@@ -11,6 +11,9 @@ so larger ``alpha`` favours more, smaller blocks. It is the partition prior unde
 mixtures; an observation here is a partition of ``n`` items given as a label vector (the labels are
 arbitrary -- the density is relabeling-invariant). ``alpha`` is fit by maximum likelihood, the
 monotone solve ``alpha (psi(alpha + n) - psi(alpha)) = mean number of blocks``.
+
+
+Reference: Pitman, *Combinatorial Stochastic Processes* (Springer, 2006).
 """
 
 import math

@@ -18,6 +18,9 @@ contract, so it composes with ``estimate``, mixtures, HMMs, and anything else th
 intensity is computed *exactly* from streaming sufficient statistics -- the centered 4th moment
 ``sum_t (y_t . y_t)^2`` decomposes into ``sum x``, ``sum x x^T``, ``sum x ||x||^2`` and ``sum ||x||^4`` --
 so it works under ``seq_update`` and ``combine`` (distributed) without holding the data.
+
+
+Reference: Ledoit & Wolf, 'A well-conditioned estimator for large-dimensional covariance matrices', J. Multivariate Anal. (2004).
 """
 
 from __future__ import annotations

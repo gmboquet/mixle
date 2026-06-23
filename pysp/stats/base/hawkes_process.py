@@ -28,6 +28,9 @@ the offspring-delay statistic are accumulated in O(n) via a companion recursion,
 sufficient statistics ``(S0, G, W, n_events, total_window)`` and the closed-form M-step
 ``mu = S0/total_window``, ``beta = G/W``, ``alpha = beta * G / n_events`` (the standard
 edge-effect-free branching estimator; exact as ``window -> inf``).
+
+
+Reference: Hawkes, 'Spectra of some self-exciting and mutually exciting point processes', Biometrika (1971).
 """
 
 import math

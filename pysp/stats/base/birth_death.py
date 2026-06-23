@@ -19,6 +19,9 @@ window length ``T``, and a time-ordered list of ``(time, type)`` events with ``t
 where ``n_i`` is the population just before event ``i`` and ``I = integral_0^T n(t) dt`` (``n`` is
 piecewise constant between events). The MLE is closed-form: each rate is its event count divided by
 ``I`` (summed over trajectories).
+
+
+Reference: Feller, *An Introduction to Probability Theory and Its Applications*, Vol. 1 (Wiley).
 """
 
 import math

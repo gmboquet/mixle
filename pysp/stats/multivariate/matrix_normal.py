@@ -12,6 +12,9 @@ and ``V`` by ``1/c`` is the same law), so the estimator anchors ``V[0,0] = 1``. 
 standard flip-flop MLE: alternate the closed-form updates of ``U`` given ``V`` and ``V`` given ``U`` to
 convergence -- here from a fixed sufficient statistic (the row-blocked second moment), so it converges
 inside a single ``estimate`` call.
+
+
+Reference: Dawid, 'Some matrix-variate distribution theory', Biometrika (1981).
 """
 
 import math

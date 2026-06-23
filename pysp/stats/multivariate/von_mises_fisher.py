@@ -24,6 +24,9 @@ Numerical notes:
     (Abramowitz & Stegun 9.7.7) implemented in lniv_uniform() when ive underflows. Both the normalizing
     constant and the Bessel-ratio Newton iteration in VonMisesFisherEstimator.estimate() rely on lniv().
 
+
+
+Reference: Mardia & Jupp, *Directional Statistics* (Wiley, 2000).
 """
 
 import sys

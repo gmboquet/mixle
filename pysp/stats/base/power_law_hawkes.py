@@ -12,6 +12,9 @@ conditional intensity
 is the forecast rate; ``log_density`` is the exact realization likelihood, ``sampler`` draws catalogues by
 branching, and the estimator fits ``(mu, A, alpha, c, p)`` by maximum likelihood. Domain-neutral: an event
 catalogue is just ``(times, marks)`` on a window ``[0, T]``.
+
+
+Reference: Hawkes, 'Spectra of some self-exciting and mutually exciting point processes', Biometrika (1971).
 """
 
 from __future__ import annotations
