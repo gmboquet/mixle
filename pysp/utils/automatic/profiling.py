@@ -1427,7 +1427,7 @@ def analyze_structure(
     Marginal validation is a bounded deterministic train/validation split over
     scalar fields, meant as a cheap predictive sanity check on the BIC choice.
     """
-    rows = list(data)
+    rows = list(normalize_input(data))  # accept a DataFrame / RDD / DataSource, not only a bare list
     total_rows = len(rows)
     estimator = get_estimator(rows, pseudo_count=pseudo_count, emp_suff_stat=emp_suff_stat, use_bstats=use_bstats)
     field_series = _extract_field_series(rows)
@@ -1964,5 +1964,37 @@ class DatumNode:
         return self.dict_children[key]
 
 
+def normalize_input(data, *, rdd_cap: int = 200000):
+    """Coerce a profiler input to a list of records, accepting more than a bare Python list.
+
+    Recognized inputs (each yields the same record stream the profiler/encoder consume):
+    * a pysp :class:`~pysp.data.core.DataSource` (typed/structured) -> its ``records()``;
+    * a pandas ``DataFrame`` (duck-typed via ``columns``/``itertuples``; pandas is never imported) ->
+      one record per row across its columns (scalar for a single column, tuple otherwise);
+    * a Spark ``RDD`` -> the first ``rdd_cap`` rows (profiling works on a bounded sample);
+    * anything else (a list / sequence) is returned unchanged.
+    """
+    if hasattr(data, "records") and hasattr(data, "structure"):  # a pysp DataSource
+        try:
+            from pysp.data.core import DataSource
+
+            if isinstance(data, DataSource):
+                return list(data.records())
+        except Exception:
+            pass
+    if hasattr(data, "columns") and hasattr(data, "itertuples"):  # a pandas DataFrame (duck-typed)
+        from pysp.data.sources.pandas_source import dataframe_records
+
+        return dataframe_records(data)
+    try:
+        from pysp.utils.optional_deps import RDD_TYPES
+
+        if RDD_TYPES and isinstance(data, RDD_TYPES):  # a Spark RDD -> a bounded local sample
+            return data.take(int(rdd_cap))
+    except Exception:
+        pass
+    return data
+
+
 def get_estimator(data, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
-    return DatumNode(data=data).get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+    return DatumNode(data=normalize_input(data)).get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
