@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.data.graph_data import (
+from pysp.data.sources.graph_source import (
     GraphDataEncoder,
     GraphObservation,
     _bernoulli_log_likelihood,

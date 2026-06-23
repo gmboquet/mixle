@@ -25,7 +25,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from pysp.data.graph_data import GraphDataEncoder, GraphObservation, _extract_observation
+from pysp.data.sources.graph_source import GraphDataEncoder, GraphObservation, _extract_observation
 from pysp.stats.compute.pdist import (
     DistributionSampler,
     ParameterEstimator,
