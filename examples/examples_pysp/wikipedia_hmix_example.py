@@ -10,7 +10,7 @@ import sys
 import numpy as np
 
 from pysp.stats import *
-from pysp.utils.estimation import optimize
+from pysp.inference import optimize
 
 if __name__ == '__main__':
     num_topics = 6

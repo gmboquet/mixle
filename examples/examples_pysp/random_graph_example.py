@@ -2,7 +2,7 @@
 import numpy as np
 
 from pysp.stats import *
-from pysp.utils.estimation import optimize
+from pysp.inference import optimize
 
 if __name__ == '__main__':
     p_mat = np.zeros((4, 4))

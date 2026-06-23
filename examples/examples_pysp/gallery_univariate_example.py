@@ -6,6 +6,7 @@ self-contained (random data only). This is the quickest tour of pysparkplug's sc
 """
 
 from pysp.stats import *
+from pysp.inference import estimate
 
 # (label, true distribution, estimator) -- continuous then discrete.
 CASES = [

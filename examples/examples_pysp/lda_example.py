@@ -8,7 +8,7 @@ import numpy as np
 
 import pysp.utils.optsutil as ops
 from pysp.stats import *
-from pysp.utils.estimation import optimize
+from pysp.inference import optimize
 
 if __name__ == '__main__':
     num_topics = 4

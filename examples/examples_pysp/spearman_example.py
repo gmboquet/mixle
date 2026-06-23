@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from pysp.stats.graph.spearman_rho import SpearmanRankingDistribution, SpearmanRankingEstimator
+from pysp.stats import SpearmanRankingDistribution, SpearmanRankingEstimator
 
 if __name__ == '__main__':
 

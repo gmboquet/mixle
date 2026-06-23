@@ -11,6 +11,7 @@ import numpy as np
 
 import pysp.utils.optsutil as ops
 from pysp.stats import *
+from pysp.inference import seq_estimate, seq_initialize
 
 if __name__ == '__main__':
     num_topics = 6

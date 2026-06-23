@@ -9,7 +9,7 @@ process. optimize() is unchanged - it recognizes the handle.
 import numpy as np
 
 from pysp.stats import *
-from pysp.utils.estimation import optimize
+from pysp.inference import optimize
 from pysp.utils.evaluation import partition_data
 from pysp.utils.parallel.multiprocessing import MPEncodedData
 
