@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from pysp.stats.graph.spearman_rho import SpearmanRankingDistribution, SpearmanRankingEstimator
-from pysp.utils.estimation import optimize
+from pysp.stats import SpearmanRankingDistribution, SpearmanRankingEstimator
+from pysp.inference import optimize
 
 if __name__ == '__main__':
     dist = SpearmanRankingDistribution([2, 3, 0, 1])

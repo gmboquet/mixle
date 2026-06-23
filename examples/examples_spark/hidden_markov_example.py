@@ -2,8 +2,8 @@
 
 from pyspark import SparkContext, SparkConf
 from pysp.stats import *
-from pysp.data.rdd_sampler import sample_rdd
-from pysp.utils.estimation import best_of
+from pysp.data.sources.spark_source import sample_rdd
+from pysp.inference import best_of
 import numpy as np
 
 if __name__ == '__main__':

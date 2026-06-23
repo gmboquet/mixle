@@ -11,7 +11,8 @@ sparse-association (SparseMarkovAssociation) models are exercised in pysp/tests.
 import numpy as np
 
 from pysp.stats import *
-from pysp.utils.estimation import optimize
+from pysp.stats import ICLTreeEstimator
+from pysp.inference import optimize
 
 RNG = lambda: np.random.RandomState(1)
 

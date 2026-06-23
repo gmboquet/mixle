@@ -2,7 +2,8 @@
 
 from pyspark import SparkContext, SparkConf
 from pysp.stats import *
-from pysp.data.rdd_sampler import sample_rdd
+from pysp.inference import initialize, seq_estimate
+from pysp.data.sources.spark_source import sample_rdd
 from pysp.utils.evaluation import empirical_kl_divergence
 import numpy as np
 
@@ -53,7 +54,7 @@ if __name__ == '__main__':
 
 
 	# Estimate parameters
-	# Note: Checkout pysp.utils.estimation.best_of/optimize for methods that handle this computation
+	# Note: Checkout pysp.inference.best_of/optimize for methods that handle this computation
 
 	mm = initialize(train_data, iest, rng, 0.05)
 

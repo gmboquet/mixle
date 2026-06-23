@@ -11,7 +11,7 @@ import numpy as np
 
 from pysp.stats import *
 from pysp.stats.combinator.transform import AffineTransform
-from pysp.utils.estimation import optimize
+from pysp.inference import estimate, initialize, optimize
 
 if __name__ == '__main__':
     print('# Composite: a record of (Gaussian, Categorical, Poisson)')
