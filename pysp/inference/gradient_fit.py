@@ -554,7 +554,11 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
                     value = torch.exp(raw[_coupled_raw_name(spec.name, anchor, spec.constraint)])
                     shape = engine.asarray(param_prior.get("shape", 1.0))
                     rate = engine.asarray(param_prior.get("rate", 0.0))
-                    lp = lp + torch.sum((shape - 1.0) * torch.log(value) - rate * value)
+                    # Clamp away from 0: a saturated Adam tail can drive exp(raw) to underflow to
+                    # exactly 0.0, making log(value) == -inf so (shape-1)*log(value) becomes NaN
+                    # (shape == 1) or diverges (shape < 1), poisoning the whole MAP objective.
+                    value_safe = torch.clamp(value, min=1.0e-12)
+                    lp = lp + torch.sum((shape - 1.0) * torch.log(value_safe) - rate * value)
                     matched = True
                 continue
             if param_prior is None:
@@ -565,7 +569,11 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
             if pfam == "gamma" and spec.constraint in ("positive", "positive_vector", "positive_matrix"):
                 shape = engine.asarray(param_prior.get("shape", 1.0))
                 rate = engine.asarray(param_prior.get("rate", 0.0))
-                lp = lp + torch.sum((shape - 1.0) * torch.log(value) - rate * value)
+                # Clamp away from 0: a saturated Adam tail can drive exp(raw) to underflow to
+                # exactly 0.0, making log(value) == -inf so (shape-1)*log(value) becomes NaN
+                # (shape == 1) or diverges (shape < 1), poisoning the whole MAP objective.
+                value_safe = torch.clamp(value, min=1.0e-12)
+                lp = lp + torch.sum((shape - 1.0) * torch.log(value_safe) - rate * value)
                 matched = True
             elif pfam == "beta" and spec.constraint == "unit_interval":
                 alpha = engine.asarray(param_prior.get("alpha", 1.0))
