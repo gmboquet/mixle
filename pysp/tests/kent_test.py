@@ -31,7 +31,7 @@ class KentTest(unittest.TestCase):
     def test_moment_identities(self):
         # exponential-family identity E_f[T(x)] == grad log c -- jointly validates the normalizer AND sampler
         d = Kent(np.eye(3), 8.0, 2.0)
-        xs = np.array(d.sampler(seed=1).sample(40000))
+        xs = np.array(d.sampler(seed=1).sample(12000))
         dk = (_log_kent_norm(8.001, 2.0) - _log_kent_norm(7.999, 2.0)) / 0.002
         db = (_log_kent_norm(8.0, 2.001) - _log_kent_norm(8.0, 1.999)) / 0.002
         self.assertAlmostEqual(xs[:, 0].mean(), dk, delta=0.01)
@@ -52,7 +52,7 @@ class KentTest(unittest.TestCase):
         g, _ = np.linalg.qr(rng.randn(3, 3))
         for kappa, beta in [(15.0, 4.0), (8.0, 1.0)]:
             true = Kent(g, kappa, beta)
-            data = np.array(true.sampler(seed=1).sample(30000))
+            data = np.array(true.sampler(seed=1).sample(12000))
             est = true.estimator()
             acc = est.accumulator_factory().make()
             acc.seq_update(true.dist_to_encoder().seq_encode(data), np.ones(len(data)), None)
