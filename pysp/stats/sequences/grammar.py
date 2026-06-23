@@ -1,12 +1,17 @@
 """Evaluate, estimate, and sample from a graph-grammar distribution over networks.
 
-Defines the GrammarDistribution, GrammarSampler, GrammarAccumulatorFactory, GrammarEstimatorAccumulator,
-GrammarEstimator, and the GrammarDataEncoder classes for use with pysparkplug.
+This is a GRAPH grammar (a vertex/node-replacement grammar over networkx graphs), not a string/text
+grammar: each rule is ``(lhs, right-hand-side graph, frequency)`` and rules are matched by graph
+isomorphism (on node labels/colors and edge colors/weights). Defines the GrammarDistribution,
+GrammarSampler, GrammarAccumulatorFactory, GrammarEstimatorAccumulator, GrammarEstimator, and the
+GrammarDataEncoder classes for use with pysparkplug.
 
-Data type: A graph grammar object with ``rule_list`` and ``rule_dict`` attributes. The likelihood of an observed
-grammar is computed rule-by-rule against the model grammar: a rule contributes the (frequency-weighted) probability of
-an isomorphic model rule with a matching (or nearby, controlled by lhs_delta) left-hand side, mixed with a
-degree-distribution background model weighted by mix_p.
+Data type: a graph-grammar object (VertexReplacementGrammar) with ``rule_list`` and ``rule_dict``
+attributes. The model defines a probability over rules; the log-density of an observed grammar is the
+sum over its rules of ``log p(rule)``, where ``p(rule)`` mixes a frequency-based match probability
+(isomorphic model rule, left-hand side within ``lhs_delta``, optionally via connected-component
+decomposition up to ``decomp_level``) with a node-degree background model weighted by ``mix_p``. Both
+mixture components are valid probabilities, so the log-density is <= 0.
 
 """
 
@@ -123,18 +128,6 @@ def _copy_rule(rule):
     return GrammarRule(rule.lhs, rule.graph, rule.frequency)
 
 
-def _edge_weights(graph):
-    for a in graph:
-        for b in graph[a]:
-            edge_data = graph[a][b]
-            if "weight" in edge_data:
-                yield edge_data.get("weight", 1.0)
-            else:
-                for value in edge_data.values():
-                    if isinstance(value, dict):
-                        yield value.get("weight", 1.0)
-
-
 def _isomorphic_rule_graph(g1, g2):
     g1i = nx.convert_node_labels_to_integers(g1)
     g2i = nx.convert_node_labels_to_integers(g2)
@@ -162,9 +155,18 @@ def decomp_pair(sub_rule, method="connected"):
 
 
 def generate_graph(rule_dict, target_n=100, rng=None):
-    """Generate a graph by sampling rule right-hand-side graphs and taking their disjoint union.
+    """Generate a connected graph by repeated vertex-replacement-style rule application.
 
-    It preserves the sampler API but does not implement full node-replacement derivation machinery.
+    Starts from a single sampled rule right-hand side, then grows the graph by sampling further
+    right-hand sides (with probability proportional to rule frequency) and gluing each new block to
+    the current graph with one edge between a random existing node and a random new node, until the
+    graph reaches ``target_n`` nodes. A fully embedding-aware vertex-replacement derivation would
+    reconnect a replaced node's neighbours according to per-rule connection instructions; the rule
+    format here does not carry those, so this connected approximation is used (it keeps every
+    generated graph in a single component rather than a disjoint union of rule graphs).
+
+    Returns:
+        Tuple of (networkx graph, list of the left-hand sides applied in order).
     """
     rng = np.random.RandomState() if rng is None else rng
     rules = [rule for rlist in rule_dict.values() for rule in rlist if rule.frequency > 0.0]
@@ -182,14 +184,19 @@ def generate_graph(rule_dict, target_n=100, rng=None):
     for _ in range(max_steps):
         if out.number_of_nodes() >= target_n:
             break
-        idx = int(rng.choice(len(rules), p=weights))
-        rule = rules[idx]
+        rule = rules[int(rng.choice(len(rules), p=weights))]
         graph = rule.graph.copy()
         if graph.number_of_nodes() == 0:
             break
         relabel = {node: offset + i for i, node in enumerate(graph.nodes())}
         graph = nx.relabel_nodes(graph, relabel, copy=True)
+        new_nodes = list(graph.nodes())
+        existing_nodes = list(out.nodes())
         out = nx.compose(out, graph)
+        if existing_nodes:  # glue the new block on so the result stays connected
+            a = existing_nodes[rng.randint(len(existing_nodes))]
+            b = new_nodes[rng.randint(len(new_nodes))]
+            out.add_edge(a, b)
         offset += graph.number_of_nodes()
         rule_ordering.append(rule.lhs)
 
@@ -197,23 +204,36 @@ def generate_graph(rule_dict, target_n=100, rng=None):
 
 
 def get_degree_dist(rule_list):
-    """Compute the edge-weight histogram over the graphs of a list of grammar rules.
+    """Node-degree histogram over the graphs of a list of grammar rules.
 
     Args:
         rule_list: List of rule objects, each with a networkx graph attribute.
 
     Returns:
-        Dict mapping observed edge weight to its count, with an extra 'inf' bucket of count 1 for unseen weights.
+        Dict mapping an observed node degree to its count, plus an ``'inf'`` bucket of count 1 that
+        reserves smoothing mass for degrees not seen in the model.
 
     """
     dist = {}
     for rule in rule_list:
-        for d in _edge_weights(rule.graph):
-            if d not in dist:
-                dist[d] = 0
-            dist[d] += 1
+        for _, degree in rule.graph.degree():
+            dist[degree] = dist.get(degree, 0) + 1
     dist["inf"] = 1
     return dist
+
+
+def _background_log_prob(graph, degree_counts):
+    """Mean log-probability of a graph's node degrees under the model's degree distribution.
+
+    Each node contributes the (Laplace-smoothed) model probability of its degree; degrees unseen in
+    the model fall back to the ``'inf'`` smoothing bucket. The returned value is in ``(-inf, 0]`` so
+    its exponential is a proper probability in ``(0, 1]`` suitable for the background mixture term.
+    """
+    total = float(sum(degree_counts.values()))
+    if graph.number_of_nodes() == 0:
+        return float(np.log(degree_counts["inf"] / total))
+    log_ps = [np.log(degree_counts.get(degree, degree_counts["inf"]) / total) for _, degree in graph.degree()]
+    return float(np.mean(log_ps))
 
 
 class GrammarDistribution(SequenceEncodableProbabilityDistribution):
@@ -277,84 +297,69 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         """
         return np.exp(self.log_density(x))
 
-    def log_density(self, x):
-        """Log-density of the grammar distribution at observation x.
+    def _match_prob(self, lhs, graph, total_freq, depth):
+        """Model match probability of a single rule (lhs, graph), in [0, 1].
 
-        Each rule of the observed grammar is matched (up to isomorphism, with left-hand side slack lhs_delta)
-        against the model grammar; matched rules contribute their frequency-weighted probability mixed with a
-        degree-distribution background term weighted by mix_p. Unmatched rules can be recursively decomposed up
-        to decomp_level times. The per-rule probabilities are averaged and logged.
+        The direct term is the total frequency of model rules isomorphic to ``graph`` whose left-hand
+        side is within ``lhs_delta`` of ``lhs``, divided by the model's total rule frequency. If nothing
+        matches and ``depth`` remains, the graph is split into connected components and the match
+        probabilities of the parts are multiplied (a conservative decomposition fallback).
+        """
+        matched = 0.0
+        for cand_lhs in range(lhs - self.lhs_delta, lhs + self.lhs_delta + 1):
+            for m_rule in self.grammar.rule_dict.get(cand_lhs, ()):
+                if _isomorphic_rule_graph(m_rule.graph, graph):
+                    matched += m_rule.frequency
+        if matched > 0.0 or depth <= 0:
+            return matched / total_freq
+        decomposition = decomp_pair((lhs, graph))
+        if not decomposition:
+            return 0.0
+        prob = 1.0
+        for sub_lhs, sub_graph in decomposition:
+            prob *= self._match_prob(sub_lhs, sub_graph, total_freq, depth - 1)
+        return prob
+
+    def log_density(self, x):
+        """Log-density of the grammar distribution at an observed grammar x.
+
+        The observed grammar is treated as a bag of rules drawn i.i.d. from the model, so the
+        log-density is the sum over its rules of ``log p(rule)``. Each rule's probability is a
+        two-component mixture::
+
+            p(rule) = (1 - mix_p) * p_match(rule) + mix_p * p_background(rule)
+
+        where ``p_match`` is the frequency of isomorphic model rules (left-hand side within
+        ``lhs_delta``, optionally via connected-component decomposition up to ``decomp_level``) over the
+        model's total rule frequency, and ``p_background`` is the rule's mean node-degree probability
+        under the model degree distribution. Both components lie in [0, 1], so each ``p(rule)`` is a
+        valid probability and the log-density is <= 0. An empty grammar has log-density 0 (the empty
+        product over rules).
 
         Args:
             x: Observed VertexReplacementGrammar object.
 
         Returns:
-            Log-density at observation x.
+            Log-density at observation x (a float <= 0, or -inf if some rule has zero probability).
 
         """
-        total_p = 0.0
-        # change to check for colors as well
-        #                em = iso.numerical_edge_match('weight',1)
-        model_grammar = self.grammar
-        model_dd = get_degree_dist(model_grammar.rule_list)
-
-        if len(x.rule_list) == 0:
+        if x is None or len(x.rule_list) == 0:
             return 0.0
 
-        else:
-            total = 0.0
-            for t_rule in x.rule_list:
-                p = 0.0
-                found_rule = False
-                for i in np.append(
-                    np.arange(t_rule.lhs, t_rule.lhs + self.lhs_delta + 1),
-                    np.arange(t_rule.lhs - self.lhs_delta, t_rule.lhs),
-                ):
-                    if i in model_grammar.rule_dict:
-                        found_rule = True
-                        f_sum = sum([r.frequency for r in model_grammar.rule_dict[i]])
-                        for m_rule in model_grammar.rule_dict[i]:
-                            if _isomorphic_rule_graph(m_rule.graph, t_rule.graph):
-                                p += (1.0 - self.mix_p) * (1.0 * m_rule.frequency) / f_sum
+        total_freq = sum(r.frequency for r in self.grammar.rule_list)
+        if total_freq <= 0.0:
+            total_freq = 1.0  # degenerate/empty model -> rely entirely on the background term
+        degree_counts = get_degree_dist(self.grammar.rule_list) if self.grammar.rule_list else {"inf": 1}
 
-                if self.mix_p > 0.0:
-                    rule_dd = get_degree_dist([t_rule])
-                    for d, freq in rule_dd.items():
-                        if d in model_dd:
-                            dp = (self.mix_p * 1.0 * model_dd[d] / sum(model_dd.values())) ** freq
-                            p += dp
-                        else:
-                            dp = (self.mix_p * 1.0 * model_dd["inf"] / sum(model_dd.values())) ** freq
-                            p += dp
-
-                # recursive decomp: only do if not found and has a decomp level set
-                if not found_rule and self.decomp_level > 0:
-                    recurs = 0
-                    sub_rules = [(t_rule.lhs, t_rule.graph)]
-                    while len(sub_rules) > 0 and recurs < self.decomp_level:
-                        recurs += 1
-                        new_sub_rules = []
-                        for sub_rule in sub_rules:
-                            found_rule = False
-                            if sub_rule[0] in model_grammar.rule_dict:
-                                f_sum = sum([r.frequency for r in model_grammar.rule_dict[sub_rule[0]]])
-                                for m_rule in model_grammar.rule_dict[sub_rule[0]]:
-                                    if _isomorphic_rule_graph(m_rule.graph, sub_rule[1]):
-                                        found_rule = True
-                                        p += (1.0 - self.mix_p) * (1.0 * m_rule.frequency) / f_sum
-                            if not found_rule:
-                                decomp = decomp_pair(sub_rule, "leiden")
-                                for d in decomp:
-                                    new_sub_rules.append(d)
-
-                        sub_rules = new_sub_rules
-
-                total_p += p
-                total += 1.0
-            if total > 0:
-                total_p /= total
-            rv = np.log(total_p)
-            return rv
+        log_p = 0.0
+        for t_rule in x.rule_list:
+            p_match = self._match_prob(t_rule.lhs, t_rule.graph, total_freq, self.decomp_level)
+            p_background = np.exp(_background_log_prob(t_rule.graph, degree_counts))
+            p = (1.0 - self.mix_p) * p_match + self.mix_p * p_background
+            if p <= 0.0:
+                return float("-inf")
+            log_p += float(np.log(p))
+        return log_p
 
     # combine list of grammars into singular grammar? need to take multiple sample outputs as input
     def seq_encode(self, x):
@@ -500,7 +505,6 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         #            for grammar in x:
         #                rgrammar.rule_list += grammar.rule_list
         rgrammar.cost += grammar.cost
-        rgrammar.num_rules += grammar.num_rules
         for lhs in grammar.rule_dict:
             if lhs not in rgrammar.rule_dict:
                 #                        rgrammar.rule_dict[lhs] = []
@@ -521,9 +525,7 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                         crule.frequency *= weight
                         rgrammar.rule_dict[lhs].append(crule)
 
-        rgrammar.rule_list = []
-        for rlist in rgrammar.rule_dict.values():
-            rgrammar.rule_list += rlist
+        rgrammar.refresh_rules()  # keep rule_list and num_rules consistent with rule_dict
         return rgrammar
 
     def initialize(self, x, weight, rng):
