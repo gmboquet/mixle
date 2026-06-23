@@ -42,6 +42,12 @@ numba = ["numba", "tbb"]
 # pandas is only used by the DataFrame data adapter (which duck-types and never imports pandas);
 # it is optional so the base install stays lean.
 pandas = ["pandas"]
+# data-layer connectors (pysp.data.sources) -- each lazy + optional.
+arrow = ["pyarrow"]
+sql = ["sqlalchemy"]
+mongo = ["pymongo"]
+hadoop = ["pyarrow", "fsspec"]
+data = ["pandas", "pyarrow", "sqlalchemy", "pymongo", "fsspec"]
 # GMP-backed (FFT) big-integer multiply for the structural count-DP's large histogram convolutions.
 gmpy2 = ["gmpy2"]
 spark = ["pyspark"]
@@ -56,7 +62,7 @@ sage = ["passagemath-symbolics"]
 test = ["pytest>=8", "pytest-xdist"]
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
 lint = ["ruff==0.15.17", "mypy"]
-all = ["numba", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn", "pandas"]
+all = ["numba", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn", "pandas", "pyarrow", "sqlalchemy"]
 
 [project.urls]
 Homepage = "https://github.com/gmboquet/pysparkplug"

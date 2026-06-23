@@ -101,3 +101,51 @@ class StructureCapabilityTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             check_model_structure(st.GaussianDistribution(0, 1).estimator(), SEQUENTIAL, strict=True)
+
+
+class ConnectorTest(unittest.TestCase):
+    def test_open_csv_roundtrip_and_fit(self):
+        import os
+        import tempfile
+
+        from pysp.data import Field, Real, Schema, open_source
+        from pysp.inference.estimation import fit
+
+        path = tempfile.mktemp(suffix=".csv")
+        xs = np.random.RandomState(0).randn(400) * 2.0 + 5.0
+        with open(path, "w") as fh:
+            fh.write("x\n" + "\n".join(str(v) for v in xs))
+        try:
+            src = open_source("csv", path, columns=["x"], schema=Schema((Field("x", Real()),)))
+            m = fit(src, st.GaussianDistribution(0, 1).estimator(), max_its=10, out=None)
+            self.assertAlmostEqual(m.mu, 5.0, delta=0.3)
+            self.assertAlmostEqual(m.sigma2, 4.0, delta=0.6)
+        finally:
+            os.unlink(path)
+
+    def test_jsonl_records(self):
+        import json
+        import os
+        import tempfile
+
+        from pysp.data import open_source
+
+        path = tempfile.mktemp(suffix=".jsonl")
+        with open(path, "w") as fh:
+            for i in range(5):
+                fh.write(json.dumps({"a": i, "b": i * i}) + "\n")
+        try:
+            recs = list(open_source("jsonl", path).records())
+            self.assertEqual(recs[2], {"a": 2, "b": 4})
+        finally:
+            os.unlink(path)
+
+    def test_unknown_kind_and_missing_driver(self):
+        from pysp.data import open_source
+        from pysp.data.sources import sql_source
+
+        with self.assertRaises(ValueError):
+            open_source("does_not_exist", "x")
+        if getattr(sql_source, "_sa", None) is None:  # only when sqlalchemy is absent
+            with self.assertRaises(ImportError):
+                sql_source.read_sql("sqlite://", "select 1").materialize()
