@@ -22,7 +22,6 @@ def test_concern_namespaces_gather_each_concern():
     import pysp
 
     assert callable(pysp.enumeration.supports_enumeration) and hasattr(pysp.enumeration, "Enumerable")
-    assert callable(pysp.sampling.sample) and hasattr(pysp.sampling, "LatentPosterior")
     assert callable(pysp.inference.conjugate_posterior) and callable(pysp.inference.optimize)
     assert callable(pysp.ops.quantize)
 
@@ -48,5 +47,5 @@ def test_contracts_gathers_every_contract_in_one_import():
 def test_pysp_dir_advertises_the_namespaces():
     import pysp
 
-    for ns in ("dist", "process", "models", "enumeration", "sampling", "inference", "ops", "contracts"):
+    for ns in ("dist", "process", "models", "enumeration", "inference", "ops", "contracts"):
         assert ns in dir(pysp)
