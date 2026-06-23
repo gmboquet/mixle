@@ -63,7 +63,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             name (Optional[str]): Set a name for the object instance.
             prior (Optional): Joint parameter prior ``(p_prior, dist_prior)``. ``p_prior`` is a conjugate
                 Beta prior on the missing probability ``p`` (a
-                :class:`~pysp.stats.base.beta.BetaDistribution`); ``dist_prior`` is the underlying
+                :class:`~pysp.stats.univariate.continuous.beta.BetaDistribution`); ``dist_prior`` is the underlying
                 distribution's prior, distributed via ``set_prior``. ``None`` (default) leaves a plain
                 point model (existing behavior byte-identical).
 
@@ -109,7 +109,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         self._set_p_prior(prior[0])
 
     def _set_p_prior(self, p_prior: Any) -> None:
-        from pysp.stats.base.beta import BetaDistribution
+        from pysp.stats.univariate.continuous.beta import BetaDistribution
 
         self.prior = p_prior
         if isinstance(p_prior, BetaDistribution):
@@ -659,7 +659,7 @@ class OptionalEstimator(ParameterEstimator):
         ``prior=None`` is a no-op (empirical/pseudo-count path stays byte-identical). The first element
         is a conjugate Beta prior on ``p``; the second is pushed to the base estimator via ``set_prior``.
         """
-        from pysp.stats.base.beta import BetaDistribution
+        from pysp.stats.univariate.continuous.beta import BetaDistribution
 
         if prior is None:
             return
@@ -680,7 +680,7 @@ class OptionalEstimator(ParameterEstimator):
         ``psum`` is the missing weight, ``nsum`` the observed weight; the posterior mode of the Beta is
         used for ``p`` and the base distribution is delegated to the inner estimator.
         """
-        from pysp.stats.base.beta import BetaDistribution
+        from pysp.stats.univariate.continuous.beta import BetaDistribution
 
         psum = suff_stat[0][0]
         nsum = suff_stat[0][1]

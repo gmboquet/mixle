@@ -59,12 +59,12 @@ class ClassNameAliasTestCase(unittest.TestCase):
 
     def test_family_stem_aliases(self):
         from pysp.stats.combinator import conditional as cond
-        from pysp.stats.graph import grammar
         from pysp.stats.latent import gaussian_mixture
         from pysp.stats.latent import hidden_markov as hm
         from pysp.stats.latent import quantized_hidden_markov_model as qhmm
         from pysp.stats.latent import segmental_hidden_markov_model as seg
         from pysp.stats.latent import tree_hidden_markov_model as tree
+        from pysp.stats.sequences import grammar
 
         self.assertIs(hm.HiddenMarkovModelEstimator, hm.HiddenMarkovEstimator)
         self.assertIs(hm.HiddenMarkovModelSampler, hm.HiddenMarkovSampler)
@@ -109,7 +109,7 @@ class ClassNameAliasTestCase(unittest.TestCase):
 
 class WeightsAliasTestCase(unittest.TestCase):
     def _components(self):
-        from pysp.stats.base.categorical import CategoricalDistribution
+        from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
 
         return [CategoricalDistribution({"a": 1.0}), CategoricalDistribution({"a": 0.5, "b": 0.5})]
 
@@ -154,8 +154,8 @@ class WeightsAliasTestCase(unittest.TestCase):
 
 class ProbMapVecCovarAliasTestCase(unittest.TestCase):
     def test_prob_map(self):
-        from pysp.stats.base.categorical import CategoricalDistribution
         from pysp.stats.sets.bernoulli_set import BernoulliSetDistribution
+        from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
 
         self.assertEqual(
             CategoricalDistribution(prob_map={"a": 0.6, "b": 0.4}).pmap,
@@ -166,8 +166,8 @@ class ProbMapVecCovarAliasTestCase(unittest.TestCase):
             CategoricalDistribution({"a": 1.0}, prob_map={"a": 1.0})
 
     def test_prob_vec(self):
-        from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
-        from pysp.stats.base.integer_multinomial import IntegerMultinomialDistribution
+        from pysp.stats.multivariate.integer_multinomial import IntegerMultinomialDistribution
+        from pysp.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution
 
         self.assertTrue(
             np.allclose(
@@ -205,8 +205,8 @@ class ProbMapVecCovarAliasTestCase(unittest.TestCase):
 
 class NumValuesMaxIterAliasTestCase(unittest.TestCase):
     def test_num_values(self):
-        from pysp.stats.graph.markov_transform import MarkovTransformEstimator
-        from pysp.stats.graph.sparse_markov_transform import SparseMarkovAssociationEstimator
+        from pysp.stats.sequences.markov_transform import MarkovTransformEstimator
+        from pysp.stats.sequences.sparse_markov_transform import SparseMarkovAssociationEstimator
         from pysp.stats.sets.integer_bernoulli_edit import IntegerBernoulliEditEstimator
         from pysp.stats.sets.integer_bernoulli_set import IntegerBernoulliSetEstimator
         from pysp.stats.sets.integer_step_bernoulli_edit import IntegerStepBernoulliEditEstimator
@@ -225,7 +225,7 @@ class NumValuesMaxIterAliasTestCase(unittest.TestCase):
 
     def test_max_iter(self):
         from pysp.inference.em import RestartEM
-        from pysp.stats.base.categorical import CategoricalDistribution
+        from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
 
         model = CategoricalDistribution({"a": 1.0})
         self.assertEqual(RestartEM([model], max_iter=13).max_its, 13)

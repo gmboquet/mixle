@@ -3,9 +3,9 @@
 import unittest
 
 import pysp
-from pysp.stats.base.gaussian import GaussianDistribution
-from pysp.stats.base.pareto import ParetoDistribution
-from pysp.stats.base.poisson import PoissonDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.continuous.pareto import ParetoDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
 
 class SummarizeTest(unittest.TestCase):

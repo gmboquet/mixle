@@ -73,7 +73,7 @@ class ParameterPosteriorSamplerOptionTestCase(unittest.TestCase):
     """The bridge accepts nuts + an injected gradient (works without torch via finite-diff)."""
 
     def _poisson_setup(self):
-        from pysp.stats.base.poisson import PoissonDistribution
+        from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
         truth = PoissonDistribution(4.0)
         data = truth.sampler(0).sample(300)

@@ -19,7 +19,7 @@ Conventions exercised here:
     ``(weight_prior, component_priors)``;
   * sequence encoders are obtained via ``dist.dist_to_encoder().seq_encode(...)``;
   * the Markov chain / HMM use dict-based parameterizations and integer states
-    (see pysp.stats.graph.markov_chain / hidden_markov);
+    (see pysp.stats.sequences.markov_chain / hidden_markov);
   * pysp.stats leaf distributions return -inf from scalar log_density for
     out-of-support values but raise ValueError at seq_encode time (a deliberate
     input-validation contract).
@@ -37,20 +37,6 @@ from pysp.inference.estimation import fit as fit_driver
 from pysp.stats import (
     seq_encode,
 )
-from pysp.stats.base.beta import BetaDistribution
-from pysp.stats.base.binomial import BinomialDistribution, BinomialEstimator
-from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.base.exponential import ExponentialDistribution, ExponentialEstimator
-from pysp.stats.base.gamma import GammaDistribution
-from pysp.stats.base.gaussian import GaussianDistribution, GaussianEstimator
-from pysp.stats.base.geometric import GeometricDistribution
-from pysp.stats.base.integer_categorical import (
-    IntegerCategoricalDistribution,
-    IntegerCategoricalEstimator,
-)
-from pysp.stats.base.log_gaussian import LogGaussianDistribution
-from pysp.stats.base.point_mass import PointMassDistribution
-from pysp.stats.base.poisson import PoissonDistribution, PoissonEstimator
 from pysp.stats.bayes.dict_dirichlet import DictDirichletDistribution
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.bayes.dirichlet_process_mixture import DirichletProcessMixtureEstimator
@@ -63,7 +49,6 @@ from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
 from pysp.stats.bayes.normal_wishart import NormalWishartDistribution
 from pysp.stats.combinator.conditional import ConditionalDistribution
 from pysp.stats.combinator.optional import OptionalDistribution
-from pysp.stats.graph.markov_chain import MarkovChainDistribution, MarkovChainEstimator
 from pysp.stats.latent.hidden_markov import (
     HiddenMarkovModelDistribution,
     HiddenMarkovModelEstimator,
@@ -77,7 +62,22 @@ from pysp.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDistribution,
     MultivariateGaussianEstimator,
 )
+from pysp.stats.sequences.markov_chain import MarkovChainDistribution, MarkovChainEstimator
 from pysp.stats.sets.bernoulli_set import BernoulliSetDistribution
+from pysp.stats.univariate.continuous.beta import BetaDistribution
+from pysp.stats.univariate.continuous.exponential import ExponentialDistribution, ExponentialEstimator
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.univariate.continuous.log_gaussian import LogGaussianDistribution
+from pysp.stats.univariate.discrete.binomial import BinomialDistribution, BinomialEstimator
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.univariate.discrete.geometric import GeometricDistribution
+from pysp.stats.univariate.discrete.integer_categorical import (
+    IntegerCategoricalDistribution,
+    IntegerCategoricalEstimator,
+)
+from pysp.stats.univariate.discrete.point_mass import PointMassDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution, PoissonEstimator
 from pysp.utils.evaluation import k_fold_split_index
 from pysp.utils.special import stirling2
 
@@ -310,7 +310,7 @@ class PriorDensityTestCase(unittest.TestCase):
                     _encode(dist, data)
 
     def test_seq_expected_log_density_falls_back_without_conjugate_prior(self):
-        from pysp.stats.base.bernoulli import BernoulliDistribution
+        from pysp.stats.univariate.discrete.bernoulli import BernoulliDistribution
 
         cases = [
             (BernoulliDistribution(0.3), [True, False]),

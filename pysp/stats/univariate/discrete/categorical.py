@@ -5,7 +5,7 @@ CategoricalEstimator, and the CategoricalDataEncoder classes for use with pyspar
 
 Data type: Any. The data type is taken as the categorical object and a probability is estimated.
 
-If Data type is int, consider using pysp.stats.base.integer_categorical (IntegerCategoricalDistribution) instead.
+If Data type is int, consider using pysp.stats.univariate.discrete.integer_categorical (IntegerCategoricalDistribution) instead.
 
 
 

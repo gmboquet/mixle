@@ -341,7 +341,7 @@ class MultinomialExponentialFamilyForm:
     (``eta = eta_0``), the sufficient statistic is the count-weighted sum ``T(x) = sum_j c_j T_0(v_j)``,
     ``log h(x) = sum_j c_j log h_0(v_j)``, and ``A`` is the element's per-trial partition (the joint
     scales by the total count ``n = sum_j c_j``).  Built by
-    :meth:`~pysp.stats.base.categorical_multinomial.MultinomialDistribution.to_exponential_family`.
+    :meth:`~pysp.stats.multivariate.categorical_multinomial.MultinomialDistribution.to_exponential_family`.
     """
 
     distribution: ProbabilityDistribution

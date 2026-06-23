@@ -10,7 +10,7 @@ from pysp import ops
 
 # --------------------------------------------------------------- the headline: quantize
 def test_quantize_turns_a_continuous_distribution_enumerable():
-    from pysp.stats.base.gaussian import GaussianDistribution
+    from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
 
     g = GaussianDistribution(0.0, 1.0)
     # before: continuous, not enumerable
@@ -30,8 +30,8 @@ def test_quantize_turns_a_continuous_distribution_enumerable():
 
 # --------------------------------------------------------------- operations are capability-gated
 def test_ops_dispatch_on_capability_not_class():
-    from pysp.stats.base.gaussian import GaussianDistribution
     from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
+    from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
 
     mvn = MultivariateGaussianDistribution(np.zeros(2), np.eye(2))
     assert type(ops.condition(mvn, {0: 1.0})).__name__ == "MultivariateGaussianDistribution"
@@ -62,8 +62,8 @@ def test_enumeration_module_is_one_home_for_the_concern():
 def test_enumeration_spans_distributions_and_relations():
     import pysp.enumeration as enum
     from pysp.relations import Assignment
-    from pysp.stats.base.categorical import CategoricalDistribution
     from pysp.stats.compute.pdist import DistributionEnumerator
+    from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
 
     # both a distribution and a relation implement the same enumerator() contract and report Enumerable
     cat = CategoricalDistribution({"a": 0.6, "b": 0.4})

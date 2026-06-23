@@ -5,8 +5,8 @@ import unittest
 import numpy as np
 import scipy.stats as ss
 
-from pysp.stats.base.gamma import GammaDistribution
-from pysp.stats.base.gaussian import GaussianDistribution
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
 from pysp.utils.evaluation import ks_test
 
 

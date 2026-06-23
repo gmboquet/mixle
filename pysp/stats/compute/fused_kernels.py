@@ -58,23 +58,6 @@ from typing import Any
 
 import numpy as np
 
-from pysp.stats.base.bernoulli import BernoulliDistribution
-from pysp.stats.base.binomial import BinomialDistribution
-from pysp.stats.base.categorical import CategoricalDistribution
-from pysp.stats.base.exponential import ExponentialDistribution
-from pysp.stats.base.gamma import GammaDistribution
-from pysp.stats.base.gaussian import GaussianDistribution
-from pysp.stats.base.geometric import GeometricDistribution
-from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
-from pysp.stats.base.log_gaussian import LogGaussianDistribution
-from pysp.stats.base.logistic import LogisticDistribution
-from pysp.stats.base.negative_binomial import NegativeBinomialDistribution
-from pysp.stats.base.pareto import ParetoDistribution
-from pysp.stats.base.poisson import PoissonDistribution
-from pysp.stats.base.rayleigh import RayleighDistribution
-from pysp.stats.base.student_t import StudentTDistribution
-from pysp.stats.base.uniform import UniformDistribution
-from pysp.stats.base.weibull import WeibullDistribution
 from pysp.stats.combinator.composite import CompositeDistribution
 from pysp.stats.combinator.ignored import IgnoredDistribution
 from pysp.stats.combinator.null_dist import NullDistribution
@@ -82,6 +65,23 @@ from pysp.stats.combinator.optional import OptionalDistribution
 from pysp.stats.combinator.sequence import SequenceDistribution
 from pysp.stats.latent.mixture import MixtureDistribution
 from pysp.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
+from pysp.stats.univariate.continuous.exponential import ExponentialDistribution
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.continuous.log_gaussian import LogGaussianDistribution
+from pysp.stats.univariate.continuous.logistic import LogisticDistribution
+from pysp.stats.univariate.continuous.pareto import ParetoDistribution
+from pysp.stats.univariate.continuous.rayleigh import RayleighDistribution
+from pysp.stats.univariate.continuous.student_t import StudentTDistribution
+from pysp.stats.univariate.continuous.uniform import UniformDistribution
+from pysp.stats.univariate.continuous.weibull import WeibullDistribution
+from pysp.stats.univariate.discrete.bernoulli import BernoulliDistribution
+from pysp.stats.univariate.discrete.binomial import BinomialDistribution
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
+from pysp.stats.univariate.discrete.geometric import GeometricDistribution
+from pysp.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution
+from pysp.stats.univariate.discrete.negative_binomial import NegativeBinomialDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 from pysp.utils.optional_deps import numba
 
 __all__ = ["CompiledMixture", "build_kernel"]

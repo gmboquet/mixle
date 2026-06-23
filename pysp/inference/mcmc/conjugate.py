@@ -82,7 +82,7 @@ def sample_conjugate_posterior(
             sigma2 = 1.0 / tau
             samples.append(type(dist)(float(mu), sigma2) if return_distributions else (float(mu), float(sigma2)))
     elif cls_name == "PoissonDistribution":
-        from pysp.stats.base.gamma import GammaDistribution
+        from pysp.stats.univariate.continuous.gamma import GammaDistribution
 
         if not isinstance(posterior, GammaDistribution):
             raise NotImplementedError("sample_conjugate_posterior(Poisson) requires a Gamma posterior.")
@@ -91,7 +91,7 @@ def sample_conjugate_posterior(
             lam = rng.gamma(shape=k, scale=theta)
             samples.append(type(dist)(lam) if return_distributions else float(lam))
     elif cls_name == "ExponentialDistribution":
-        from pysp.stats.base.gamma import GammaDistribution
+        from pysp.stats.univariate.continuous.gamma import GammaDistribution
 
         if not isinstance(posterior, GammaDistribution):
             raise NotImplementedError("sample_conjugate_posterior(Exponential) requires a Gamma posterior.")
@@ -101,7 +101,7 @@ def sample_conjugate_posterior(
             beta = 1.0 / rate
             samples.append(type(dist)(beta) if return_distributions else float(beta))
     else:
-        from pysp.stats.base.beta import BetaDistribution
+        from pysp.stats.univariate.continuous.beta import BetaDistribution
 
         if not isinstance(posterior, BetaDistribution):
             raise NotImplementedError("sample_conjugate_posterior(%s) requires a Beta posterior." % cls_name)
@@ -132,15 +132,15 @@ def _default_conjugate_prior(cls_name: str) -> Any:
 
         return NormalGammaDistribution(0.0, 1.0e-8, 0.500001, 1.0)
     if cls_name == "PoissonDistribution":
-        from pysp.stats.base.gamma import GammaDistribution
+        from pysp.stats.univariate.continuous.gamma import GammaDistribution
 
         return GammaDistribution(1.0001, 1.0e6)
     if cls_name == "ExponentialDistribution":
-        from pysp.stats.base.gamma import GammaDistribution
+        from pysp.stats.univariate.continuous.gamma import GammaDistribution
 
         return GammaDistribution(1.0001, 1.0e6)
     if cls_name in ("BernoulliDistribution", "BinomialDistribution", "GeometricDistribution"):
-        from pysp.stats.base.beta import BetaDistribution
+        from pysp.stats.univariate.continuous.beta import BetaDistribution
 
         return BetaDistribution(1.000001, 1.000001)
     return None

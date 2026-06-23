@@ -209,9 +209,9 @@ class CapabilityMatrixTestCase(unittest.TestCase):
         from pysp.stats.bayes.dirichlet import DirichletDistribution
         from pysp.stats.bayes.normal_gamma import NormalGammaDistribution
         from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
+        from pysp.stats.directional.von_mises_fisher import VonMisesFisherDistribution
         from pysp.stats.latent.gaussian_mixture import GaussianMixtureDistribution
         from pysp.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
-        from pysp.stats.multivariate.von_mises_fisher import VonMisesFisherDistribution
 
         # (name, dist, value, expected density_rank method): families with no enumerator still expose a
         # CDF -- exact-analytic where a closed-form probability-ordered cumulative exists (the

@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from pysp.ppl import Categorical, Exponential, Gamma, Markov, Mix, Normal, Poisson, Seq, compare, free
-from pysp.stats.base.gaussian import GaussianDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
 
 
 class PPLCoreTestCase(unittest.TestCase):

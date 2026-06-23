@@ -31,9 +31,9 @@ from typing import Any, TypeVar
 
 import numpy as np
 
+from pysp.capability import Neutral, supports
 from pysp.engines.arithmetic import *
 from pysp.engines.arithmetic import maxrandint
-from pysp.capability import Neutral, supports
 from pysp.enumeration.algorithms import BufferedStream, frontier_merge
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,

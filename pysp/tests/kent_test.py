@@ -7,7 +7,7 @@ import numpy as np
 import pysp
 from pysp.capability import Fittable
 from pysp.stats import KentDistribution as Kent
-from pysp.stats.multivariate.kent import _log_kent_norm
+from pysp.stats.directional.kent import _log_kent_norm
 
 
 class KentTest(unittest.TestCase):

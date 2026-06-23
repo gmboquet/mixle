@@ -24,7 +24,6 @@ from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.engines.arithmetic import *
 from pysp.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
-from pysp.stats.base.categorical import CategoricalFisherView
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -34,6 +33,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.stats.univariate.discrete.categorical import CategoricalFisherView
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.special import digamma
 

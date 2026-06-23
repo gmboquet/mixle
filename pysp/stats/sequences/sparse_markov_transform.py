@@ -26,9 +26,9 @@ from typing import Any, TypeVar
 import numpy as np
 from scipy.sparse import csr_matrix, lil_matrix
 
+from pysp.capability import Neutral, supports
 from pysp.engines.arithmetic import *
 from pysp.engines.arithmetic import maxrandint
-from pysp.capability import Neutral, supports
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -43,7 +43,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.graph._keyed_accumulator import InitTransKeyedAccumulator
+from pysp.stats.sequences._keyed_accumulator import InitTransKeyedAccumulator
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.optsutil import count_by_value
 

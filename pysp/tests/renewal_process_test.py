@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.base.gamma import GammaDistribution
-from pysp.stats.base.renewal_process import RenewalProcessDistribution
+from pysp.stats.processes.renewal_process import RenewalProcessDistribution
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
 
 
 class RenewalProcessTest(unittest.TestCase):

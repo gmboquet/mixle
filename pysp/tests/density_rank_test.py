@@ -12,12 +12,12 @@ import unittest
 import numpy as np
 
 from pysp.enumeration.density_rank import count_dp_rank, count_dp_seek, density_rank
-from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution
-from pysp.stats.base.poisson import PoissonDistribution
 from pysp.stats.combinator.composite import CompositeDistribution
 from pysp.stats.combinator.sequence import SequenceDistribution
 from pysp.stats.latent.hidden_markov import HiddenMarkovModelDistribution
 from pysp.stats.latent.mixture import MixtureDistribution
+from pysp.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
 
 class DensityRankTestCase(unittest.TestCase):
@@ -249,7 +249,7 @@ class CountDPTopPTestCase(unittest.TestCase):
 
     def test_bracket_contains_true_nucleus_size(self):
         from pysp.enumeration.density_rank import count_dp_top_p
-        from pysp.stats.base.categorical import CategoricalDistribution
+        from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
 
         cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
         intc = IntegerCategoricalDistribution(0, [0.6, 0.3, 0.1])
@@ -265,7 +265,7 @@ class CountDPTopPTestCase(unittest.TestCase):
     def test_leaf_bracket_is_exact(self):
         # A leaf has no convolution smear, so the bracket collapses to the exact nucleus size.
         from pysp.enumeration.density_rank import count_dp_top_p
-        from pysp.stats.base.categorical import CategoricalDistribution
+        from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
 
         leaf = CategoricalDistribution({i: w for i, w in enumerate([0.3, 0.25, 0.15, 0.1, 0.08, 0.06, 0.04, 0.02])})
         for p in (0.3, 0.55, 0.8, 0.95, 1.0):
@@ -276,7 +276,7 @@ class CountDPTopPTestCase(unittest.TestCase):
     def test_huge_support_without_enumeration(self):
         # A support too large to enumerate (6**12) still returns a bracket quickly.
         from pysp.enumeration.density_rank import count_dp_top_p
-        from pysp.stats.base.categorical import CategoricalDistribution
+        from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
 
         rng = np.random.RandomState(0)
         big = CompositeDistribution(
@@ -292,7 +292,7 @@ class CountDPTopPTestCase(unittest.TestCase):
 
     def test_edge_cases(self):
         from pysp.enumeration.density_rank import count_dp_top_p
-        from pysp.stats.base.categorical import CategoricalDistribution
+        from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
 
         leaf = CategoricalDistribution({"a": 0.6, "b": 0.4})
         self.assertEqual((count_dp_top_p(leaf, 0.0).size_lower, count_dp_top_p(leaf, 0.0).size_upper), (0, 0))

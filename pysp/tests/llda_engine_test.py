@@ -6,9 +6,9 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
 from pysp.stats.compute.backend import backend_seq_log_density
 from pysp.stats.latent.labeled_lda import LabeledLDADistribution, LabeledLDAEstimator
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution, CategoricalEstimator
 
 try:
     from pysp.engines import TorchEngine

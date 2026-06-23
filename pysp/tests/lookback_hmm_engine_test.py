@@ -6,11 +6,14 @@ import numpy as np
 
 import pysp.stats.latent.lookback_hidden_markov_model as new_mod
 from pysp.engines import NUMPY_ENGINE
-from pysp.stats.base.categorical import CategoricalDistribution, CategoricalEstimator
-from pysp.stats.base.integer_categorical import IntegerCategoricalDistribution, IntegerCategoricalEstimator
 from pysp.stats.combinator.null_dist import NullEstimator
 from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
 from pysp.stats.compute.backend import backend_seq_log_density
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution, CategoricalEstimator
+from pysp.stats.univariate.discrete.integer_categorical import (
+    IntegerCategoricalDistribution,
+    IntegerCategoricalEstimator,
+)
 
 try:
     from pysp.engines import TorchEngine

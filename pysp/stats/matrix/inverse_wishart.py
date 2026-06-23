@@ -28,7 +28,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableProbabilityDistribution,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.multivariate.wishart import WishartDistribution, _MeanScatterAccumulator
+from pysp.stats.matrix.wishart import WishartDistribution, _MeanScatterAccumulator
 
 
 class InverseWishartDistribution(SequenceEncodableProbabilityDistribution):

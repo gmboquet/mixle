@@ -3,11 +3,11 @@
 import math
 import unittest
 
-from pysp.stats.base.bernoulli import BernoulliDistribution
-from pysp.stats.base.binomial import BinomialDistribution
-from pysp.stats.base.geometric import GeometricDistribution
-from pysp.stats.base.negative_binomial import NegativeBinomialDistribution
-from pysp.stats.base.poisson import PoissonDistribution
+from pysp.stats.univariate.discrete.bernoulli import BernoulliDistribution
+from pysp.stats.univariate.discrete.binomial import BinomialDistribution
+from pysp.stats.univariate.discrete.geometric import GeometricDistribution
+from pysp.stats.univariate.discrete.negative_binomial import NegativeBinomialDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
 # (dist, support-lo, evaluation points)
 CASES = [

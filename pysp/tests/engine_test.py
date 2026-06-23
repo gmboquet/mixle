@@ -4,7 +4,6 @@ import unittest
 
 import numpy as np
 
-from pysp.engines import arithmetic as ar
 from pysp.engines import (
     NUMPY_ENGINE,
     NumpyEngine,
@@ -15,6 +14,7 @@ from pysp.engines import (
     engine_with_precision,
     precision_name,
 )
+from pysp.engines import arithmetic as ar
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 if HAS_TORCH:

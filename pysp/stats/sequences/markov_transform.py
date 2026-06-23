@@ -34,7 +34,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from pysp.stats.graph._keyed_accumulator import InitTransKeyedAccumulator
+from pysp.stats.sequences._keyed_accumulator import InitTransKeyedAccumulator
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.optsutil import count_by_value
 

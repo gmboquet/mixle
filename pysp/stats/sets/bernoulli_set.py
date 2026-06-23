@@ -27,7 +27,6 @@ import numpy as np
 from numpy.random import RandomState
 
 from pysp.enumeration.algorithms import BufferedStream, ProductEnumerator
-from pysp.stats.base.beta import BetaDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -38,6 +37,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.stats.univariate.continuous.beta import BetaDistribution
 from pysp.utils.aliasing import MISSING, coalesce_alias
 from pysp.utils.special import digamma
 

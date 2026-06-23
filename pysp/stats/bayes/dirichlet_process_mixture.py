@@ -39,7 +39,6 @@ from numpy.random import RandomState
 import pysp.utils.vector as vec
 from pysp.engines.arithmetic import maxrandint
 from pysp.stats.compute._sampling import scatter_component_draws
-from pysp.stats.base.gamma import GammaDistribution
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -48,6 +47,7 @@ from pysp.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
 from pysp.utils.special import betaln, digamma
 
 default_prior = GammaDistribution(2, 1)

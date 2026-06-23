@@ -37,11 +37,10 @@ from numpy.random import RandomState
 from scipy.special import logsumexp
 
 import pysp.utils.vector as vec
+from pysp.capability import Neutral, supports
 from pysp.engines.arithmetic import *
 from pysp.engines.arithmetic import maxrandint
-from pysp.capability import Neutral, supports
 from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge, best_first_union_max
-from pysp.stats.compute.posterior import MarkovChainLatentPosterior
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -60,13 +59,14 @@ from pysp.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from pysp.stats.graph.markov_chain import MarkovChainDistribution, stationary_distribution
+from pysp.stats.compute.posterior import MarkovChainLatentPosterior
 from pysp.stats.latent._hidden_markov_numba_kernels import (
     numba_baum_welch2,
     numba_baum_welch_alphas,
     numba_seq_log_density,
 )
 from pysp.stats.latent.mixture import MixtureDistribution
+from pysp.stats.sequences.markov_chain import MarkovChainDistribution, stationary_distribution
 from pysp.utils.aliasing import MISSING, coalesce_alias, require
 from pysp.utils.optional_deps import HAS_NUMBA, numba
 

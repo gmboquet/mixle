@@ -5,16 +5,16 @@ import unittest
 
 import numpy as np
 
-from pysp.stats.base.categorical import CategoricalDistribution
-from pysp.stats.base.exponential import ExponentialDistribution
-from pysp.stats.base.gamma import GammaDistribution
-from pysp.stats.base.gaussian import GaussianDistribution
-from pysp.stats.base.poisson import PoissonDistribution
 from pysp.stats.combinator.exponential_tilt import (
     ExponentialTiltedDistribution,
     register_exponential_tilt,
     registered_tilt_families,
 )
+from pysp.stats.univariate.continuous.exponential import ExponentialDistribution
+from pysp.stats.univariate.continuous.gamma import GammaDistribution
+from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
+from pysp.stats.univariate.discrete.poisson import PoissonDistribution
 
 TOL = 1e-9
 

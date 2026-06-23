@@ -23,13 +23,13 @@ from typing import Any
 
 import numpy as np
 
-from pysp.stats.base.von_mises import VonMisesDistribution, VonMisesEstimator
 from pysp.stats.compute.pdist import (
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     StatisticAccumulatorFactory,
 )
+from pysp.stats.directional.von_mises import VonMisesDistribution, VonMisesEstimator
 
 __all__ = [
     "to_unix_seconds",
@@ -84,7 +84,7 @@ class PeriodicTimeDistribution(SequenceEncodableProbabilityDistribution):
     The cycle phase ``phi = 2*pi*(t mod P)/P`` is distributed von Mises around a peak; this is a proper
     density over *time* within one period (a constant Jacobian ``log(2*pi/P)`` makes it integrate to 1).
     It follows the pysp Distribution / Sampler / Estimator / Accumulator / DataEncoder contract by
-    delegating the circular density to :class:`~pysp.stats.base.von_mises.VonMisesDistribution`, so
+    delegating the circular density to :class:`~pysp.stats.directional.von_mises.VonMisesDistribution`, so
     recurring time-of-day / day-of-week / seasonal patterns compose with the rest of the library.
 
     ``period`` is the cycle (``'day'``, ``'week'``, ``'year'``, ... or seconds); ``loc`` is the peak phase

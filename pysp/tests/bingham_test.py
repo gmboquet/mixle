@@ -35,7 +35,7 @@ class BinghamTest(unittest.TestCase):
 
     def test_moment_identity(self):
         # E[(m_i.x)^2] == d log c / d z_i jointly validates the normalizer and the ACG-rejection sampler
-        from pysp.stats.multivariate.bingham import _bingham_norm
+        from pysp.stats.directional.bingham import _bingham_norm
 
         d = B(np.eye(3), [-6.0, -2.0, 0.0])
         xs = np.array(d.sampler(seed=1).sample(12000))

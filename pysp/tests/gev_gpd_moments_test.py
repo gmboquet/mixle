@@ -6,8 +6,8 @@ import scipy.stats as ss
 
 import pysp
 from pysp.capability import HasMoments
-from pysp.stats.base.generalized_extreme_value import GeneralizedExtremeValueDistribution as GEV
-from pysp.stats.base.generalized_pareto import GeneralizedParetoDistribution as GPD
+from pysp.stats.univariate.continuous.generalized_extreme_value import GeneralizedExtremeValueDistribution as GEV
+from pysp.stats.univariate.continuous.generalized_pareto import GeneralizedParetoDistribution as GPD
 
 
 class GEVGPDMomentsTest(unittest.TestCase):

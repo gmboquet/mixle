@@ -7,8 +7,8 @@ HMM initial/transition/emission statistics.
 
 import unittest
 
-from pysp.stats.base.categorical import CategoricalEstimator
 from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator
+from pysp.stats.univariate.discrete.categorical import CategoricalEstimator
 
 
 class HiddenMarkovKeysTestCase(unittest.TestCase):
