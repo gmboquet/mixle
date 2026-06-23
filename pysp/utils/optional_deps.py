@@ -14,12 +14,25 @@ through to their local implementations. Install with:
     pip install pysparkplug[spark]
 """
 
-__all__ = ["numba", "HAS_NUMBA", "pyspark", "HAS_PYSPARK", "RDD_TYPES", "require"]
+__all__ = ["numba", "HAS_NUMBA", "pyspark", "HAS_PYSPARK", "RDD_TYPES", "gmpy2", "HAS_GMPY2", "require"]
 
 
 def require(name: str, extra: str):
     """Raise a helpful error for a feature that needs an uninstalled extra."""
     raise ImportError("%s is required for this feature; install it with pip install pysparkplug[%s]" % (name, extra))
+
+
+# gmpy2: when installed, the structural count-DP routes its large histogram convolutions through GMP's
+# FFT-based big-integer multiply (Schoenhage-Strassen), ~100x faster than CPython's Karatsuba on the
+# multi-megabyte operands that wide deep-sequence convolutions produce. When missing, gmpy2 is None and
+# the convolution falls back to the exact CPython big-int path. Install with: pip install pysparkplug[gmpy2]
+try:
+    import gmpy2
+
+    HAS_GMPY2 = True
+except ImportError:
+    gmpy2 = None
+    HAS_GMPY2 = False
 
 
 try:
