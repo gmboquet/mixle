@@ -13,8 +13,8 @@ except ImportError:
 
 if HAS_TORCH:
     from pysp.ppl import GP, RBF, Differential, NavierStokes2D, free, joint
-    from pysp.ppl.ops import make_ops
-    from pysp.ppl.pde_solve import laplacian
+    from pysp.ppl.physics.ops import make_ops
+    from pysp.ppl.physics.pde_solve import laplacian
 
 
 @unittest.skipUnless(HAS_TORCH, "requires PyTorch")

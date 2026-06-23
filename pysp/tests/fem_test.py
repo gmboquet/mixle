@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from scipy.spatial import Delaunay
 
-from pysp.ppl.fem import boundary_nodes, fem_poisson
+from pysp.ppl.physics.fem import boundary_nodes, fem_poisson
 
 
 def _mesh_square(n):

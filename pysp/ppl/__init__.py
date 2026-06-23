@@ -87,14 +87,6 @@ from pysp.ppl.distributions import (
     Uniform,
     Weibull,
 )
-from pysp.ppl.dynamics import (
-    AdvectionDiffusionOperator,
-    AdvectionOperator,
-    DiffusionOperator,
-    available_dynamics_operators,
-    make_operator,
-    register_dynamics_operator,
-)
 from pysp.ppl.field import (
     GP,
     RBF,
@@ -120,12 +112,20 @@ from pysp.ppl.field import (
     joint,
     multistart,
 )
-from pysp.ppl.flow import NavierStokes2D
-from pysp.ppl.inverse import Differential
-from pysp.ppl.multiphysics import CoupledPDESystem, solve_poisson
+from pysp.ppl.physics.dynamics import (
+    AdvectionDiffusionOperator,
+    AdvectionOperator,
+    DiffusionOperator,
+    available_dynamics_operators,
+    make_operator,
+    register_dynamics_operator,
+)
+from pysp.ppl.physics.flow import NavierStokes2D
+from pysp.ppl.physics.inverse import Differential
+from pysp.ppl.physics.multiphysics import CoupledPDESystem, solve_poisson
+from pysp.ppl.physics.shape import level_set_material, shape_optimize
+from pysp.ppl.physics.wave import WaveEquation2D
 from pysp.ppl.priors import Potts, TotalVariation
-from pysp.ppl.shape import level_set_material, shape_optimize
-from pysp.ppl.wave import WaveEquation2D
 
 __all__ = [
     "RandomVariable",

@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.multiphysics import solve_elasticity
+from pysp.ppl.physics.multiphysics import solve_elasticity
 
 
 class ElasticityTest(unittest.TestCase):

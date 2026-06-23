@@ -13,7 +13,7 @@ except ImportError:
 
 if HAS_TORCH:
     from pysp.ppl import GP, RBF, Differential, GaussianField, RandomWalk, joint
-    from pysp.ppl.pde_solve import divergence_form, helmholtz_operator, laplacian, sparse_solve
+    from pysp.ppl.physics.pde_solve import divergence_form, helmholtz_operator, laplacian, sparse_solve
 
 
 @unittest.skipUnless(HAS_TORCH, "requires PyTorch")

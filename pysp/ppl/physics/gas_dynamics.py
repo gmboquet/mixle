@@ -85,7 +85,9 @@ def exact_riemann_solution(left: State, right: State, x: Any, t: float, *, gamma
         s = xi / t
         if s < u_star:  # left of the contact
             if p_star > p_l:  # left shock
-                s_shock = u_l - a_l * math.sqrt((gamma + 1.0) / (2.0 * gamma) * p_star / p_l + (gamma - 1.0) / (2.0 * gamma))
+                s_shock = u_l - a_l * math.sqrt(
+                    (gamma + 1.0) / (2.0 * gamma) * p_star / p_l + (gamma - 1.0) / (2.0 * gamma)
+                )
                 if s < s_shock:
                     rho, u, p = rho_l, u_l, p_l
                 else:
@@ -105,7 +107,9 @@ def exact_riemann_solution(left: State, right: State, x: Any, t: float, *, gamma
                     p = p_l * (c / a_l) ** (2.0 * gamma / (gamma - 1.0))
         else:  # right of the contact
             if p_star > p_r:  # right shock
-                s_shock = u_r + a_r * math.sqrt((gamma + 1.0) / (2.0 * gamma) * p_star / p_r + (gamma - 1.0) / (2.0 * gamma))
+                s_shock = u_r + a_r * math.sqrt(
+                    (gamma + 1.0) / (2.0 * gamma) * p_star / p_r + (gamma - 1.0) / (2.0 * gamma)
+                )
                 if s > s_shock:
                     rho, u, p = rho_r, u_r, p_r
                 else:
@@ -158,8 +162,9 @@ def _hll_flux(ul: np.ndarray, ur: np.ndarray, gamma: float) -> np.ndarray:
     return (sr * _euler_flux(ul, gamma) - sl * _euler_flux(ur, gamma) + sl * sr * (ur - ul)) / (sr - sl)
 
 
-def solve_euler_1d(rho0: Any, u0: Any, p0: Any, dx: float, t_final: float, *, gamma: float = 1.4,
-                   cfl: float = 0.4) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def solve_euler_1d(
+    rho0: Any, u0: Any, p0: Any, dx: float, t_final: float, *, gamma: float = 1.4, cfl: float = 0.4
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Evolve the 1-D Euler equations with a conservative HLL finite-volume scheme (outflow boundaries).
 
     Args:
@@ -173,7 +178,9 @@ def solve_euler_1d(rho0: Any, u0: Any, p0: Any, dx: float, t_final: float, *, ga
         The final ``(rho, u, p)`` arrays. Captures shocks/contacts at the correct speeds and converges to
         :func:`exact_riemann_solution` under grid refinement.
     """
-    prim = np.vstack([np.asarray(rho0, dtype=np.float64), np.asarray(u0, dtype=np.float64), np.asarray(p0, dtype=np.float64)])
+    prim = np.vstack(
+        [np.asarray(rho0, dtype=np.float64), np.asarray(u0, dtype=np.float64), np.asarray(p0, dtype=np.float64)]
+    )
     n = prim.shape[1]
     u = np.array([_to_conserved(prim[:, i], gamma) for i in range(n)]).T
     t = 0.0

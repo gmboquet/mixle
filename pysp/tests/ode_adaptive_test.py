@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from scipy.integrate import solve_ivp
 
-from pysp.ppl.dynamics import integrate_adaptive
+from pysp.ppl.physics.dynamics import integrate_adaptive
 
 
 class AdaptiveODETest(unittest.TestCase):

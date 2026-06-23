@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.dynamics import integrate_dae, integrate_stiff
+from pysp.ppl.physics.dynamics import integrate_dae, integrate_stiff
 
 
 class DAETest(unittest.TestCase):

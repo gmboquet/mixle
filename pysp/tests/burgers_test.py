@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.dynamics import burgers_rhs, integrate_adaptive
+from pysp.ppl.physics.dynamics import burgers_rhs, integrate_adaptive
 
 
 class BurgersTest(unittest.TestCase):

@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from scipy.stats import norm
 
-from pysp.ppl.dynamics import black_scholes_rhs, integrate_adaptive
+from pysp.ppl.physics.dynamics import black_scholes_rhs, integrate_adaptive
 
 
 def _bs_call(s, k, r, sig, t):

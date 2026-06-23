@@ -58,8 +58,8 @@ if TYPE_CHECKING:  # let static tools / __all__ see the lazily-resolved subsyste
     from pysp.engines.base import ComputeEngine
     from pysp.enumeration.quantization.semiring import DecomposableSemiring
     from pysp.inference.em import EMStrategy
-    from pysp.ppl._operator import ForwardOperator
-    from pysp.ppl.dynamics import DynamicsOperator
+    from pysp.ppl.physics._operator import ForwardOperator
+    from pysp.ppl.physics.dynamics import DynamicsOperator
     from pysp.relations import Relation
     from pysp.stats.compute.kernel import Kernel, KernelFactory
     from pysp.utils.parallel.planner import EncodedFold
@@ -73,8 +73,8 @@ _LAZY: dict[str, tuple[str, str]] = {
     "DecomposableSemiring": ("pysp.enumeration.quantization.semiring", "DecomposableSemiring"),
     "EMStrategy": ("pysp.inference.em", "EMStrategy"),
     "EncodedFold": ("pysp.utils.parallel.planner", "EncodedFold"),
-    "DynamicsOperator": ("pysp.ppl.dynamics", "DynamicsOperator"),
-    "ForwardOperator": ("pysp.ppl._operator", "ForwardOperator"),
+    "DynamicsOperator": ("pysp.ppl.physics.dynamics", "DynamicsOperator"),
+    "ForwardOperator": ("pysp.ppl.physics._operator", "ForwardOperator"),
     "Surrogate": ("pysp.doe._contracts", "Surrogate"),
     "Acquisition": ("pysp.doe._contracts", "Acquisition"),
     "Criterion": ("pysp.doe._contracts", "Criterion"),

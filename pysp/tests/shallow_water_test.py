@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.dynamics import integrate_adaptive, shallow_water_rhs
+from pysp.ppl.physics.dynamics import integrate_adaptive, shallow_water_rhs
 
 
 class ShallowWaterTest(unittest.TestCase):
