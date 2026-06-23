@@ -27,7 +27,6 @@ _NAMESPACES = (
     "process",
     "models",
     "enumeration",
-    "sampling",
     "inference",
     "ops",
     "contracts",
