@@ -29,7 +29,7 @@ from pysp.enumeration.algorithms import (
     bounded_best_first_union_index,
     freeze,
 )
-from pysp.sampling.latent_posterior import CategoricalLatentPosterior
+from pysp.stats.compute.posterior import CategoricalLatentPosterior
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from pysp.stats.compute.pdist import (
@@ -581,7 +581,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         """Return the latent posterior ``q(z | x)`` over component labels for raw observations ``x``.
 
         ``q(z)`` is the exact independent-categorical posterior whose marginals are the EM
-        responsibilities. The returned :class:`~pysp.sampling.latent_posterior.CategoricalLatentPosterior`
+        responsibilities. The returned :class:`~pysp.stats.compute.posterior.CategoricalLatentPosterior`
         can ``.marginals()`` (the responsibilities), ``.sample(rng)`` component labels, ``.mode()``
         (the MAP labels), or ``.entropy()``.
         """
@@ -597,7 +597,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         ``x``. Draws are grouped by component and scattered (vectorized) via the shared sampling
         helper.
         """
-        from pysp.sampling._sampling import scatter_component_draws
+        from pysp.stats.compute._sampling import scatter_component_draws
 
         rng = RandomState(seed)
         z = self.latent_posterior(x).sample(rng)

@@ -1,30 +1,36 @@
-"""The sampling concern — one home for drawing from a model and inferring its latent state.
+"""Deprecated shim: sampling is no longer a standalone concern.
 
-Like :mod:`pysp.enumeration`, sampling is a concern shared across objects: every distribution and
-relation can be sampled, latent-variable models expose a q(z|x) latent posterior, and fitted models
-can draw posterior-predictive data. This module gathers the contract (:class:`DistributionSampler` /
-:class:`ConditionalSampler`), the unified :func:`sample` entry point, and the
-:class:`LatentPosterior` spine — a re-export shim today (nothing moves), the exemplar layout in
-``docs/ARCHITECTURE.md``.
+Drawing from a model is intrinsic behavior (every model exposes ``.sampler()``), not a concern with
+its own input precondition, so the package was dissolved and its parts re-filed by function:
+
+* the ``Posterior`` / ``LatentPosterior`` hierarchy now lives in :mod:`pysp.stats.compute.posterior`
+  (the compute layer, beside the sampler contracts);
+* the ``sample()`` facade is :func:`pysp.stats.sample`;
+* the parameter / predictive posteriors and the ``posterior(model, ...)`` factory live in
+  :mod:`pysp.inference.posterior` (inference *produces* posteriors).
+
+This module re-exports the former names for backward compatibility; import from the homes above.
 """
 
 from __future__ import annotations
 
 from pysp.capability import PosteriorPredictive
-from pysp.sampling.latent_posterior import (
+from pysp.stats.compute.pdist import ConditionalSampler, DistributionSampler
+from pysp.stats.compute.posterior import (
     CategoricalLatentPosterior,
     LatentPosterior,
     MarkovChainLatentPosterior,
     MeanFieldLDAPosterior,
+    Posterior,
 )
-from pysp.sampling.sampling_api import sample
-from pysp.stats.compute.pdist import ConditionalSampler, DistributionSampler
+from pysp.stats.sampling_api import sample
 
 __all__ = [
     "sample",
     "DistributionSampler",
     "ConditionalSampler",
     "PosteriorPredictive",
+    "Posterior",
     "LatentPosterior",
     "CategoricalLatentPosterior",
     "MarkovChainLatentPosterior",

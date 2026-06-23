@@ -3,8 +3,8 @@
 The objects: the leaf distributions, multivariate families, combinators, latent-variable models and
 priors. A friendly namespace alias of :mod:`pysp.stats` during the concern-oriented reorg
 (``docs/ARCHITECTURE.md``) — a re-export, so every ``pysp.stats`` import keeps working. The
-cross-cutting *concerns* live in :mod:`pysp.enumeration`, :mod:`pysp.sampling`,
-:mod:`pysp.inference`, and :mod:`pysp.ops`.
+cross-cutting *concerns* live in :mod:`pysp.enumeration`, :mod:`pysp.inference`,
+and :mod:`pysp.ops` (sampling is intrinsic behavior, not a concern: ``pysp.stats.sample``).
 """
 
 from __future__ import annotations
