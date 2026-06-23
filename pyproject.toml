@@ -66,7 +66,10 @@ testpaths = ["pysp/tests"]
 python_files = ["*_test.py"]
 python_classes = ["*Test", "*TestCase"]
 python_functions = ["test_*"]
-addopts = "-ra --strict-markers"
+# Parallel by default (pytest-xdist): the full suite drops from ~7.5 min to ~2.5 min on a 10-core box.
+# Override with `-n0` for serial debugging (pdb / `-s` live output) or tiny single-file runs where the
+# worker-startup overhead (~4 s) outweighs the gain. Use `-m "not slow"` for a ~1.5 min broad lane.
+addopts = "-ra --strict-markers -n auto"
 markers = [
     "fast: quick correctness tests suitable for every commit.",
     "slow: heavier stochastic, integration, or exhaustive tests for full CI.",
