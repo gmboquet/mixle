@@ -8,9 +8,14 @@ rank** (:class:`RankableByIndex`) through the count-budget seek index.
 
 This module gathers that concern in one place — the contract, the capability lens, the k-best
 algorithms, the count-budget unranking, and the count semiring — so you can read off *what
-enumeration is* and *who participates* without hunting through ``utils``/``stats``. It is the exemplar
-of the concern-oriented layout in ``docs/ARCHITECTURE.md``; today it re-exports the existing
-implementations (a shim), so nothing moves or breaks.
+enumeration is* and *who participates* without hunting through ``utils``/``stats``. The implementations
+live here, split by concern: generic stream primitives in :mod:`~pysp.enumeration.streams`, best-first
+/ product search in :mod:`~pysp.enumeration.best_first`, the quantized seek/unrank index and the
+structural count-budget index in :mod:`~pysp.enumeration.quantization`, and the k-best combinatorial
+enumerators in :mod:`~pysp.enumeration.assignment` / :mod:`~pysp.enumeration.spanning`. Only the
+*contract* (:class:`DistributionEnumerator`) lives in the compute layer and is re-exported here.
+``pysp.enumeration.algorithms`` remains as a back-compat re-export of the stream / best-first / index
+names. Layout per ``docs/ARCHITECTURE.md``.
 
 Who plugs in: every finite/countable leaf (Categorical, Poisson, …), the combinators over enumerable
 children (Sequence, Composite, Mixture, …), the graph/ranking families (Markov chains, Mallows,

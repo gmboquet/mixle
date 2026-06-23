@@ -265,7 +265,7 @@ def bounded_dedup_stream(
     from collections import OrderedDict
 
     if key is None:
-        from pysp.enumeration.algorithms import freeze as key
+        from pysp.enumeration.streams import freeze as key
     seen: OrderedDict = OrderedDict()
     for value, lp in stream:
         k = key(value)

@@ -663,7 +663,7 @@ def _joint_bucket_histogram(components, quantizer, max_fine_bucket):
     Returns ``{(b_1, ..., b_K): count}``. Raises EnumerationError for component structures not
     handled here (only Composite and atomic/enumerable leaves are supported).
     """
-    from pysp.enumeration.algorithms import freeze
+    from pysp.enumeration.streams import freeze
     from pysp.stats.combinator.composite import CompositeDistribution
     from pysp.stats.compute.pdist import EnumerationError
 
