@@ -578,13 +578,23 @@ def _numeric_candidate_bics(arr: np.ndarray, nobs: int) -> dict[str, float]:
     if arr.size and np.all(arr > 0.0):
         candidates["lognormal"] = _lognormal_bic_bits(arr, nobs)
         candidates["gamma"] = _gamma_bic_bits(arr, nobs)
-    # registered continuous detectors (additive -- a richer family only wins if its BIC beats the builtins)
+    # registered continuous detectors (additive -- a richer family only wins if its BIC beats the builtins).
+    # A flexible (>=3-parameter) shape family needs enough distinct values to be estimated honestly;
+    # without this, it overfits a handful of repeated points and steals the recommendation from a simple
+    # family (the same reason the 2-component mixture is gated on >=12 distinct values above).
     if arr.size:
         from pysp.utils.automatic.detectors import continuous_detectors
 
+        n_distinct = int(np.unique(arr).size)
         for d in continuous_detectors():
-            if d.name not in candidates and d.applies(arr):
-                candidates[d.name] = d.score(arr, nobs)
+            if d.name in candidates or not d.applies(arr):
+                continue
+            # a non-builtin family must see real data variety to justify winning over a simple builtin;
+            # otherwise it overfits a few repeated points (a 2-param tail family on 2-3 distinct values, a
+            # 3-param shape family on a dozen). The builtins stay ungated as the safe defaults.
+            if n_distinct < (15 if d.n_params >= 3 else 10):
+                continue
+            candidates[d.name] = d.score(arr, nobs)
     return _clean_scores(candidates)
 
 
