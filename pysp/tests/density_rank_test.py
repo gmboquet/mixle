@@ -46,12 +46,14 @@ class DensityRankTestCase(unittest.TestCase):
     def test_sampling_fallback_matches_exact_within_error(self):
         # Force the sampling path with a tiny exact budget; estimate must land near the exact G.
         for x in (3, 7, 11):
-            exact_mass, _ = self._brute(x)
+            exact_mass, exact_rank = self._brute(x)
             r = density_rank(self.mix, x, max_exact=2, n_samples=40000, seed=1)
             self.assertFalse(r.exact)
             self.assertEqual(r.method, "sampling")
-            self.assertIsNone(r.rank)
             self.assertLess(abs(r.cumulative_probability - exact_mass), 5.0 * r.stderr + 0.01)
+            # rank is now the unbiased Monte-Carlo count estimate (not None): near the exact rank.
+            self.assertIsNotNone(r.rank)
+            self.assertLessEqual(abs(r.rank - exact_rank), 5.0 * r.rank_stderr + 1.0)
 
     def test_cumulative_probability_monotone_in_rank(self):
         # More probable observations have smaller cumulative probability G (they sit earlier).
