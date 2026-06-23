@@ -24,9 +24,12 @@ The two axes trade in one currency -- ``(value, log_prob)`` pairs under a shared
     approximately-ordered stream when exact best-first is too expensive.
 
 So a family implements whichever axis is natural and the bridges synthesize the other (lossily).
-This module is the contract; the witness-retaining semiring is the engine for everything
-count-shaped, and a future tropical carrier will add Viterbi bounds (BoundedCount) for the
-non-decomposable families (HMM/Mixture) by swapping only the carrier.
+This module is the contract; :class:`CountSemiring` is the witness-retaining carrier for everything
+count-shaped, and :class:`TropicalSemiring` is the ``(max, +)`` carrier that computes the Viterbi
+configuration and its log-prob -- an exact bound that factors through the non-decomposable families
+(HMM/Mixture) by swapping only the carrier. (Exact bounded *counting* for those families needs the
+state-augmented count DP and is not yet implemented; exact HMM path enumeration lives in
+:mod:`pysp.enumeration.hmm_paths`.)
 """
 
 import abc
