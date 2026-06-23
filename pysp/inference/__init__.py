@@ -29,6 +29,9 @@ from pysp.inference.em import EMStrategy, run_em
 from pysp.inference.estimation import best_of, fit, optimize
 from pysp.inference.fisher import FisherView, FixedFisherView, to_fisher
 
+# the Posterior algebra — inference produces posteriors; you draw from them through one interface
+from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
+
 # sampling-based inference — the engine-agnostic NUTS/ADVI facade (target must be sampleable/differentiable)
 from pysp.inference.target import (
     AdviResult,
@@ -74,6 +77,10 @@ __all__ = [
     "best_of",
     "run_em",
     "EMStrategy",
+    # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
+    "posterior",
+    "ParameterPosterior",
+    "PredictivePosterior",
     # closed-form conjugate Bayes
     "ConjugateUpdatable",
     "conjugate_posterior",
