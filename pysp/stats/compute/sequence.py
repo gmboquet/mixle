@@ -75,6 +75,14 @@ def seq_encode(
         else:
             raise Exception("At least one arg: encoder, estimator, or dist must be passed.")
 
+    # DataSource branch (additive) -- a structured/typed source routes through its structure-aware
+    # encoder and returns the same [(count, payload)] shape; the bare-list and RDD paths are untouched.
+    # Imported lazily so stats does not depend on pysp.data at module load (data depends on stats).
+    from pysp.data.core import DataSource
+
+    if isinstance(data, DataSource):
+        return data.encode(encoder, num_chunks=num_chunks, chunk_size=chunk_size)
+
     if isinstance(data, RDD_TYPES):
         sc = data.context
         temp_encoder = pickle.dumps(encoder, protocol=0)
