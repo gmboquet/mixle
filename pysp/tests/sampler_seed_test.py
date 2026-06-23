@@ -264,6 +264,7 @@ def _stats_public_distribution_catalog():
         "WrappedNormalDistribution": stats.WrappedNormalDistribution(0.7, 0.8),
         "LKJDistribution": stats.LKJDistribution(3, 2.0),
         "KentDistribution": stats.KentDistribution(__import__("numpy").eye(3), 8.0, 2.0),
+        "BinghamDistribution": stats.BinghamDistribution(__import__("numpy").eye(3), [-5.0, -2.0, 0.0]),
         "GeneralizedGaussianDistribution": stats.GeneralizedGaussianDistribution(1.0, 2.0, 1.5),
         "NakagamiDistribution": stats.NakagamiDistribution(2.5, 3.0),
         "RicianDistribution": stats.RicianDistribution(2.0, 1.5),
