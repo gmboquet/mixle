@@ -1,19 +1,27 @@
-"""``LatentPosterior``: a first-class ``q(z | x)`` over a model's latent variables.
+"""The ``Posterior`` hierarchy: a uniform, samplable object for any model-derived distribution.
 
-The spine of the sampling overhaul. Today each latent model handles its hidden variables implicitly
-inside EM (the E-step returns raw responsibility arrays) and exposes no way to *sample* them, while
-mean-field models scatter their variational parameters (LDA's per-document ``gamma``/per-token
-``phi``, HMM's ``gamma``/``xi``, VMP factors) by hand. ``LatentPosterior`` makes ``q(z | x)`` a single
-object -- *exact* for mixtures/HMMs, *mean-field* for LDA/VMP -- so the EM E-step, latent sampling,
-and (for mean-field) the ELBO are all just methods on it:
+``Posterior`` is the shared base contract -- *inference produces posteriors; you draw from them
+through one interface*. Every realization answers the same questions where they are defined::
 
-    marginals()   -> the per-latent marginal responsibilities (the EM E-step output)
-    sample(rng)   -> a draw  z ~ q(z | x)   (Gibbs / latent / posterior-predictive)
-    mode()        -> the MAP latent configuration (argmax / Viterbi)
-    entropy()     -> H[q]                    (the ELBO entropy term)
+    sample(rng)        -> a single draw
+    samples(n, rng)    -> n draws (loop by default; vectorized override where cheaper)
+    mean() / mode()    -> the posterior mean / MAP configuration
+    marginals()        -> per-component marginals (e.g. the EM E-step responsibilities)
+    entropy()          -> H[q]                       (the ELBO entropy term)
+    interval(level)    -> a credible interval
 
+This base lives in the compute layer next to the sampler contracts (``DistributionSampler`` /
+``ConditionalSampler`` in :mod:`pysp.stats.compute.pdist`) so both ``pysp.stats`` and
+``pysp.inference`` can build on it without a layering inversion. The richer realizations that need
+inference machinery -- parameter posteriors (conjugate / MCMC) and the posterior-predictive, plus the
+``posterior(model, ...)`` factory -- live in :mod:`pysp.inference.posterior`.
+
+``LatentPosterior`` is the latent ``q(z | x)`` subtype implemented here: each latent model handles its
+hidden variables implicitly inside EM (the E-step returns raw responsibility arrays); ``LatentPosterior``
+makes ``q(z | x)`` a single object -- *exact* for mixtures/HMMs, *mean-field* for LDA/VMP -- so the EM
+E-step (``marginals``), latent sampling (``sample``), and the ELBO entropy term are methods on it.
 Mean-field realizations additionally provide ``expected_complete_ll(dist)`` / ``update(dist)`` /
-``elbo(dist)`` (added with the LDA/VMP realizations); for exact posteriors those are not needed.
+``elbo(dist)``; for exact posteriors those are not needed.
 """
 
 from abc import ABC, abstractmethod
@@ -41,7 +49,46 @@ def _entropy(p: np.ndarray) -> float:
         return float(-np.sum(np.where(p > 0.0, p * np.log(p), 0.0)))
 
 
-class LatentPosterior(ABC):
+class Posterior(ABC):
+    """A model-derived distribution exposing one uniform interface for draws and summaries.
+
+    Only :meth:`sample` (a single draw) is required. :meth:`samples` loops it by default; vectorized
+    subtypes override it. ``mean`` / ``mode`` / ``marginals`` / ``entropy`` / ``interval`` raise
+    :class:`NotImplementedError` unless a subtype defines them, so each realization implements exactly
+    the summaries that are meaningful for it.
+    """
+
+    @abstractmethod
+    def sample(self, rng: Any = None) -> Any:
+        """Draw a single sample from the posterior (``rng`` is a seed, ``RandomState``, or ``None``)."""
+
+    def samples(self, n: int, rng: Any = None) -> Any:
+        """Draw ``n`` samples; loops :meth:`sample` by default (override for a vectorized draw)."""
+        rng = _as_rng(rng)
+        return [self.sample(rng) for _ in range(int(n))]
+
+    def mean(self) -> Any:
+        """The posterior mean ``E[.]`` (not defined for every realization)."""
+        raise NotImplementedError(f"{type(self).__name__} does not define mean()")
+
+    def mode(self) -> Any:
+        """The maximum-a-posteriori configuration (not defined for every realization)."""
+        raise NotImplementedError(f"{type(self).__name__} does not define mode()")
+
+    def marginals(self) -> Any:
+        """Per-component marginals -- e.g. the EM E-step responsibilities (not always defined)."""
+        raise NotImplementedError(f"{type(self).__name__} does not define marginals()")
+
+    def entropy(self) -> Any:
+        """The entropy ``H[q]`` (not always defined)."""
+        raise NotImplementedError(f"{type(self).__name__} does not define entropy()")
+
+    def interval(self, level: float = 0.9) -> Any:
+        """A central credible interval at the given ``level`` (not always defined)."""
+        raise NotImplementedError(f"{type(self).__name__} does not define interval()")
+
+
+class LatentPosterior(Posterior):
     """The posterior ``q(z | x)`` over a model's latent variables (exact or mean-field)."""
 
     @abstractmethod

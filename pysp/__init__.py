@@ -8,7 +8,9 @@ The structure (see ``docs/ARCHITECTURE.md`` and ``docs/CAPABILITIES.md``):
   POMDPs — which aren't full Distribution-contract families but still participate in some concerns),
   and :mod:`pysp.relations`.
 * **Concerns** — what you can do, each its own module: :mod:`pysp.enumeration`,
-  :mod:`pysp.sampling`, :mod:`pysp.inference`, :mod:`pysp.ops`.
+  :mod:`pysp.inference`, :mod:`pysp.ops`. (Drawing from a model is intrinsic behavior, not a separate
+  concern: :func:`pysp.stats.sample` is the verb, and the ``Posterior`` hierarchy that inference
+  produces lives in :mod:`pysp.stats.compute.posterior` / :mod:`pysp.inference.posterior`.)
 * **Kernel** — :mod:`pysp.contracts` (every ABC/Protocol in one import) and the capability meta-layer
   re-exported here (:func:`supports`, :func:`capabilities`, :func:`describe`, :func:`catalog`,
   :func:`what_supports`, :func:`require`).

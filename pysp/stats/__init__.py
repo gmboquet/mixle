@@ -402,6 +402,7 @@ __all__ = [
     "ProbabilisticPCAEstimator",
     "ProbabilisticPCADataEncoder",
     "MixtureDistribution",
+    "Posterior",
     "LatentPosterior",
     "CategoricalLatentPosterior",
     "MarkovChainLatentPosterior",
@@ -645,14 +646,6 @@ __all__ = [
 
 ### Abstract Classes
 ### Generic Distributions
-from pysp.sampling.latent_posterior import (
-    CategoricalLatentPosterior,
-    LatentPosterior,
-    MarkovChainLatentPosterior,
-    MeanFieldLDAPosterior,
-)
-from pysp.sampling.sampling_api import sample
-
 ### Discrete base distributions
 from pysp.stats.base.bernoulli import (
     BernoulliDataEncoder,
@@ -728,6 +721,12 @@ from pysp.stats.base.generalized_extreme_value import (
     GeneralizedExtremeValueDistribution,
     GeneralizedExtremeValueEstimator,
     GeneralizedExtremeValueSampler,
+)
+from pysp.stats.base.generalized_gaussian import (
+    GeneralizedGaussianDataEncoder,
+    GeneralizedGaussianDistribution,
+    GeneralizedGaussianEstimator,
+    GeneralizedGaussianSampler,
 )
 from pysp.stats.base.generalized_pareto import (
     GeneralizedParetoDataEncoder,
@@ -819,6 +818,12 @@ from pysp.stats.base.multivariate_hawkes import (
     MultivariateHawkesProcessEstimator,
     MultivariateHawkesProcessSampler,
 )
+from pysp.stats.base.nakagami import (
+    NakagamiDataEncoder,
+    NakagamiDistribution,
+    NakagamiEstimator,
+    NakagamiSampler,
+)
 from pysp.stats.base.negative_binomial import (
     NegativeBinomialDataEncoder,
     NegativeBinomialDistribution,
@@ -841,12 +846,24 @@ from pysp.stats.base.poisson import (
     PoissonEstimator,
     PoissonSampler,
 )
+from pysp.stats.base.projected_normal import (
+    ProjectedNormalDataEncoder,
+    ProjectedNormalDistribution,
+    ProjectedNormalEstimator,
+    ProjectedNormalSampler,
+)
 from pysp.stats.base.rayleigh import RayleighDataEncoder, RayleighDistribution, RayleighEstimator, RayleighSampler
 from pysp.stats.base.renewal_process import (
     RenewalProcessDataEncoder,
     RenewalProcessDistribution,
     RenewalProcessEstimator,
     RenewalProcessSampler,
+)
+from pysp.stats.base.rician import (
+    RicianDataEncoder,
+    RicianDistribution,
+    RicianEstimator,
+    RicianSampler,
 )
 from pysp.stats.base.skellam import (
     SkellamDataEncoder,
@@ -875,41 +892,17 @@ from pysp.stats.base.von_mises import (
     VonMisesSampler,
 )
 from pysp.stats.base.weibull import WeibullDataEncoder, WeibullDistribution, WeibullEstimator, WeibullSampler
-from pysp.stats.base.projected_normal import (
-    ProjectedNormalDataEncoder,
-    ProjectedNormalDistribution,
-    ProjectedNormalEstimator,
-    ProjectedNormalSampler,
-)
-from pysp.stats.base.rician import (
-    RicianDataEncoder,
-    RicianDistribution,
-    RicianEstimator,
-    RicianSampler,
-)
-from pysp.stats.base.nakagami import (
-    NakagamiDataEncoder,
-    NakagamiDistribution,
-    NakagamiEstimator,
-    NakagamiSampler,
-)
-from pysp.stats.base.generalized_gaussian import (
-    GeneralizedGaussianDataEncoder,
-    GeneralizedGaussianDistribution,
-    GeneralizedGaussianEstimator,
-    GeneralizedGaussianSampler,
+from pysp.stats.base.wrapped_cauchy import (
+    WrappedCauchyDataEncoder,
+    WrappedCauchyDistribution,
+    WrappedCauchyEstimator,
+    WrappedCauchySampler,
 )
 from pysp.stats.base.wrapped_normal import (
     WrappedNormalDataEncoder,
     WrappedNormalDistribution,
     WrappedNormalEstimator,
     WrappedNormalSampler,
-)
-from pysp.stats.base.wrapped_cauchy import (
-    WrappedCauchyDataEncoder,
-    WrappedCauchyDistribution,
-    WrappedCauchyEstimator,
-    WrappedCauchySampler,
 )
 from pysp.stats.bayes.conjugate import (
     ConjugatePosterior,
@@ -1133,6 +1126,13 @@ from pysp.stats.compute.pdist import (  # noqa: F401
     scale_suff_stat,
     validate_estimator_keys,
 )
+from pysp.stats.compute.posterior import (
+    CategoricalLatentPosterior,
+    LatentPosterior,
+    MarkovChainLatentPosterior,
+    MeanFieldLDAPosterior,
+    Posterior,
+)
 from pysp.stats.compute.stacked import (
     StackedComponentParams,
     StackedMixtureKernel,
@@ -1327,6 +1327,12 @@ from pysp.stats.latent.semi_supervised_mixture import (
     SemiSupervisedMixtureEstimator,
     SemiSupervisedMixtureSampler,
 )
+from pysp.stats.multivariate.bingham import (
+    BinghamDataEncoder,
+    BinghamDistribution,
+    BinghamEstimator,
+    BinghamSampler,
+)
 from pysp.stats.multivariate.covariance_shrinkage import LedoitWolfEstimator
 from pysp.stats.multivariate.diagonal_gaussian import (
     DiagonalGaussianDataEncoder,
@@ -1345,6 +1351,18 @@ from pysp.stats.multivariate.inverse_wishart import (
     InverseWishartDistribution,
     InverseWishartEstimator,
     InverseWishartSampler,
+)
+from pysp.stats.multivariate.kent import (
+    KentDataEncoder,
+    KentDistribution,
+    KentEstimator,
+    KentSampler,
+)
+from pysp.stats.multivariate.lkj import (
+    LKJDataEncoder,
+    LKJDistribution,
+    LKJEstimator,
+    LKJSampler,
 )
 from pysp.stats.multivariate.matrix_normal import (
     MatrixNormalDataEncoder,
@@ -1376,30 +1394,13 @@ from pysp.stats.multivariate.watson import (
     WatsonEstimator,
     WatsonSampler,
 )
-from pysp.stats.multivariate.bingham import (
-    BinghamDataEncoder,
-    BinghamDistribution,
-    BinghamEstimator,
-    BinghamSampler,
-)
-from pysp.stats.multivariate.kent import (
-    KentDataEncoder,
-    KentDistribution,
-    KentEstimator,
-    KentSampler,
-)
-from pysp.stats.multivariate.lkj import (
-    LKJDataEncoder,
-    LKJDistribution,
-    LKJEstimator,
-    LKJSampler,
-)
 from pysp.stats.multivariate.wishart import (
     WishartDataEncoder,
     WishartDistribution,
     WishartEstimator,
     WishartSampler,
 )
+from pysp.stats.sampling_api import sample
 from pysp.stats.sets.bernoulli_set import (
     BernoulliSetDataEncoder,
     BernoulliSetDistribution,
