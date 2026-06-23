@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 import pysp.ppl as ppl
-from pysp.ppl.dynamics import (
+from pysp.ppl.physics.dynamics import (
     DiffusionOperator,
     available_dynamics_operators,
     laplacian_matrix,
@@ -13,7 +13,7 @@ from pysp.ppl.dynamics import (
     register_dynamics_operator,
     upwind_gradient_matrix,
 )
-from pysp.ppl.pde import kalman_rts_em
+from pysp.ppl.physics.pde import kalman_rts_em
 
 
 class OperatorMatrixTestCase(unittest.TestCase):
@@ -67,7 +67,7 @@ class OperatorRegistryTestCase(unittest.TestCase):
             op = make_operator("diffusion_alias_test", diffusivity=0.1, n=6)
             self.assertIsInstance(op, DiffusionOperator)
         finally:
-            from pysp.ppl.dynamics import _DYNAMICS_OPERATORS
+            from pysp.ppl.physics.dynamics import _DYNAMICS_OPERATORS
 
             _DYNAMICS_OPERATORS.pop("diffusion_alias_test", None)
 

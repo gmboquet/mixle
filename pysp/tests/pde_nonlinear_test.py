@@ -5,8 +5,8 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.dynamics import laplacian_matrix
-from pysp.ppl.pde import fit_pde_parameters, fit_reaction_diffusion
+from pysp.ppl.physics.dynamics import laplacian_matrix
+from pysp.ppl.physics.pde import fit_pde_parameters, fit_reaction_diffusion
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 

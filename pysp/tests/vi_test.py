@@ -70,7 +70,7 @@ class VariationalSparsePathTestCase(unittest.TestCase):
         n = 40
         x = np.linspace(0, 1, n)
         h = x[1] - x[0]
-        from pysp.ppl.pde_solve import divergence_form
+        from pysp.ppl.physics.pde_solve import divergence_form
 
         logk_true = 0.8 * np.sin(3 * np.pi * x) - 0.3 * x
         kt = torch.as_tensor(np.exp(logk_true))

@@ -21,7 +21,7 @@ __all__ = ["solve_poisson", "CoupledPDESystem", "solve_elasticity"]
 
 def _diffusion_blocks(shape, kappa, spacing):
     """The COO pieces of ``-div(kappa grad)`` with Dirichlet (identity) boundary rows, on a grid (numpy)."""
-    from pysp.ppl.pde_solve import _grid_faces
+    from pysp.ppl.physics.pde_solve import _grid_faces
 
     g = _grid_faces(shape, spacing)
     n = g["n"]

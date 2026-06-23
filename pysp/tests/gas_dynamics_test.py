@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.gas_dynamics import _star_region, exact_riemann_solution, solve_euler_1d
+from pysp.ppl.physics.gas_dynamics import _star_region, exact_riemann_solution, solve_euler_1d
 
 
 class GasDynamicsTest(unittest.TestCase):

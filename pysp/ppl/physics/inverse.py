@@ -36,9 +36,9 @@ from typing import Any
 
 import numpy as np
 
-from pysp.ppl._operator import ForwardModel, ObserveFn, RhsFn
 from pysp.ppl.field import Proxy, _ParamSpec
-from pysp.ppl.ops import _Params, make_ops
+from pysp.ppl.physics._operator import ForwardModel, ObserveFn, RhsFn
+from pysp.ppl.physics.ops import _Params, make_ops
 
 __all__ = ["Differential"]
 

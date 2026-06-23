@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.dynamics import integrate_adaptive, lane_emden_rhs
+from pysp.ppl.physics.dynamics import integrate_adaptive, lane_emden_rhs
 
 _ANALYTIC = {0: lambda x: 1 - x**2 / 6, 1: lambda x: np.sin(x) / x, 5: lambda x: 1.0 / np.sqrt(1 + x**2 / 3)}
 

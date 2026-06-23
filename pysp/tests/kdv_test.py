@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.dynamics import integrate_adaptive, kdv_rhs
+from pysp.ppl.physics.dynamics import integrate_adaptive, kdv_rhs
 
 
 class KdVTest(unittest.TestCase):

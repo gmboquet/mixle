@@ -9,8 +9,8 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.dynamics import DiffusionOperator
-from pysp.ppl.pde import fit_diffusivity
+from pysp.ppl.physics.dynamics import DiffusionOperator
+from pysp.ppl.physics.pde import fit_diffusivity
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 

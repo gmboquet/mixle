@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.dynamics import spectral_derivative
+from pysp.ppl.physics.dynamics import spectral_derivative
 
 
 class SpectralDerivativeTest(unittest.TestCase):

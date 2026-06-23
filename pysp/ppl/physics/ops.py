@@ -105,20 +105,20 @@ class _Ops:
 
     # ODE integration (a forward model convenience): rhs(u, t) -> du/dt
     def integrate(self, rhs, y0, t_grid, *, method: str = "rk4"):
-        from pysp.ppl.pde_solve import _integrate_ops
+        from pysp.ppl.physics.pde_solve import _integrate_ops
 
         return _integrate_ops(rhs, y0, self.tensor(t_grid), self._t, method)
 
     def integrate_record(self, step, y0, n_steps, record, *, checkpoint=None):
         """Step a time-dependent system, recording ``record(y, i)`` each step; ``checkpoint=K`` runs the
         adjoint-state scheme (recompute K-step segments in the backward pass) for O(sqrt(steps)) memory."""
-        from pysp.ppl.pde_solve import _integrate_record
+        from pysp.ppl.physics.pde_solve import _integrate_record
 
         return _integrate_record(step, y0, int(n_steps), record, self._t, checkpoint=checkpoint)
 
     def matvec(self, rows, cols, vals, n, x):
         """Differentiable sparse matrix-vector product ``A x`` (apply an assembled operator without a solve)."""
-        from pysp.ppl.pde_solve import _matvec
+        from pysp.ppl.physics.pde_solve import _matvec
 
         return _matvec(rows, cols, vals, n, x, self._t)
 
@@ -140,23 +140,23 @@ class _Ops:
 
     # differentiable grid assembly + adjoint sparse solve (the PDE forward operators)
     def divergence_form(self, kappa, shape, *, spacing=1.0):
-        from pysp.ppl.pde_solve import divergence_form
+        from pysp.ppl.physics.pde_solve import divergence_form
 
         return divergence_form(kappa, shape, spacing=spacing, torch=self._t)
 
     def helmholtz_operator(self, slowness2, shape, *, omega, spacing=1.0):
-        from pysp.ppl.pde_solve import helmholtz_operator
+        from pysp.ppl.physics.pde_solve import helmholtz_operator
 
         return helmholtz_operator(slowness2, shape, omega=omega, spacing=spacing, torch=self._t)
 
     def laplacian(self, shape, *, spacing=1.0):
-        from pysp.ppl.pde_solve import laplacian
+        from pysp.ppl.physics.pde_solve import laplacian
 
         return laplacian(shape, spacing=spacing, torch=self._t)
 
     def sparse_solve(self, rows, cols, vals, n, b):
         """Solve ``A u = b`` for ``A = sparse(rows, cols, vals)`` with adjoint gradients (one extra solve)."""
-        from pysp.ppl.pde_solve import sparse_solve
+        from pysp.ppl.physics.pde_solve import sparse_solve
 
         return sparse_solve(vals, rows, cols, n, b)
 

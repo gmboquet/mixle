@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.schrodinger import norm, probability_density, schrodinger_split_step
+from pysp.ppl.physics.schrodinger import norm, probability_density, schrodinger_split_step
 
 
 class SchrodingerTest(unittest.TestCase):

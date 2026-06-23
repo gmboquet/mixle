@@ -840,7 +840,7 @@ def fit_field(
         return loss
 
     opt.step(closure)
-    from pysp.ppl.pde_solve import sparse_used_since
+    from pysp.ppl.physics.pde_solve import sparse_used_since
 
     sparse_used_since(reset=True)
     obj = float(neg_log_post(u).detach())  # one eval to detect whether the forward uses the sparse solve
