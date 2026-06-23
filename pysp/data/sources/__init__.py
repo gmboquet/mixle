@@ -20,6 +20,10 @@ _KINDS: dict[str, tuple[str, str]] = {
     "feather": ("arrow_source", "read_feather"),
     "arrow": ("arrow_source", "read_feather"),
     "sql": ("sql_source", "read_sql"),
+    "dataframe": ("pandas_source", "read_dataframe"),
+    "pandas": ("pandas_source", "read_dataframe"),
+    "mongo": ("mongo_source", "read_mongo"),
+    "remote": ("hadoop_source", "read_remote"),
 }
 
 
