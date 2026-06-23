@@ -40,6 +40,8 @@ import math
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
+from pysp.utils.optional_deps import gmpy2
+
 _LOG2 = math.log(2.0)
 _TOL = 1.0e-9
 
@@ -47,6 +49,12 @@ _TOL = 1.0e-9
 # double loop to Kronecker substitution. Below it, the big-integer pack/unpack overhead is not
 # worth it (and delta-shaped operands convolve trivially). Tuned from microbenchmarks.
 _KRONECKER_MIN_PRODUCT = 2048
+
+# Above this packed-operand bit length, route the Kronecker multiply through gmpy2/GMP (FFT-based)
+# when available. GMP's FFT crossover over Karatsuba is a few thousand bits; 50k bits keeps the mpz
+# round-trip off small multiplies while capturing the ~100x win on the multi-megabyte operands that
+# wide deep-sequence convolutions produce.
+_GMPY2_MIN_BITS = 50_000
 
 
 def _convolve_kronecker(a: list[int], b: list[int], width: int) -> list[int]:
@@ -78,7 +86,17 @@ def _convolve_kronecker(a: list[int], b: list[int], width: int) -> list[int]:
         if c:
             buf_b[i * slot : i * slot + slot] = c.to_bytes(slot, "little")
 
-    product = int.from_bytes(buf_a, "little") * int.from_bytes(buf_b, "little")
+    int_a = int.from_bytes(buf_a, "little")
+    int_b = int.from_bytes(buf_b, "little")
+    # Route the multiply through GMP's FFT-based bignum multiply when gmpy2 is installed and the
+    # operands are large: CPython's int multiply is Karatsuba (O(n^1.585)), which degrades into tens
+    # of seconds once the packed operands reach a few megabytes, whereas GMP uses Schoenhage-Strassen
+    # (O(n log n)) and is ~100x faster there. The result is bit-identical (exact integer multiply);
+    # below the threshold the mpz round-trip is not worth it, so plain int is used.
+    if gmpy2 is not None and min(int_a.bit_length(), int_b.bit_length()) > _GMPY2_MIN_BITS:
+        product = int(gmpy2.mpz(int_a) * gmpy2.mpz(int_b))
+    else:
+        product = int_a * int_b
     prod_bytes = product.to_bytes((product.bit_length() + 7) // 8 or 1, "little")
 
     out = [0] * width
