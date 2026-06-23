@@ -64,3 +64,37 @@ class SpectralFlowTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BoussinesqTest(unittest.TestCase):
+    def test_passive_scalar_heat_equation_limit(self):
+        # buoyancy=0, u=0: temperature obeys the heat equation, a mode k decays as e^{-kappa k^2 t}
+        from pysp.ppl.spectral_flow import incompressible_boussinesq_spectral as bq
+
+        n, kappa, t, dt = 48, 0.2, 0.5, 0.002
+        x = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        xx, _ = np.meshgrid(x, x, indexing="ij")
+        t0 = np.cos(2 * xx)  # wavenumber 2
+        (_u, _v), temp = bq((np.zeros((n, n)), np.zeros((n, n))), t0, 0.1, kappa, 0.0, dt, int(t / dt))
+        self.assertLess(np.abs(temp - t0 * np.exp(-kappa * 4 * t)).max(), 1e-10)
+
+    def test_buoyancy_drives_flow_from_rest(self):
+        from pysp.ppl.spectral_flow import incompressible_boussinesq_spectral as bq
+        from pysp.ppl.spectral_flow import kinetic_energy as ke
+
+        n = 48
+        x = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        xx, yy = np.meshgrid(x, x, indexing="ij")
+        (u, v), _t = bq((np.zeros((n, n)), np.zeros((n, n))), 0.1 * np.cos(xx) * np.sin(yy),
+                        0.05, 0.05, 1.0, 0.002, 100)
+        self.assertGreater(ke((u, v)), 0.0)  # potential -> kinetic energy
+
+    def test_3d_passive_limit(self):
+        from pysp.ppl.spectral_flow import incompressible_boussinesq_spectral as bq
+
+        n, kappa, t, dt = 16, 0.1, 0.2, 0.005
+        x = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        _x, _y, zz = np.meshgrid(x, x, x, indexing="ij")
+        t0 = np.cos(zz)
+        (_u, _v, _w), temp = bq((np.zeros((n, n, n)),) * 3, t0, 0.1, kappa, 0.0, dt, int(t / dt))
+        self.assertLess(np.abs(temp - t0 * np.exp(-kappa * t)).max(), 1e-10)
