@@ -405,14 +405,19 @@ class BernoulliEstimator(ParameterEstimator):
         With a Beta(a, b) prior and weighted counts of successes ``psum`` and failures
         ``nsum``, the posterior is Beta(a + psum, b + nsum) and the returned point
         estimate is the posterior mode ``(psum + a - 1) / (psum + nsum + a + b - 2)``;
-        the posterior is carried forward as the fitted model's prior.
+        the posterior is carried forward as the fitted model's prior. On the boundary
+        where the mode is undefined (``new_a <= 1`` or ``new_b <= 1``, e.g. an empty
+        Beta(1, 1) update) the posterior mean ``new_a / (new_a + new_b)`` is returned.
         """
         count, psum = suff_stat
         nsum = count - psum
         a, b = self.prior.get_parameters()
         new_a = a + psum
         new_b = b + nsum
-        p = (psum + a - 1.0) / (psum + nsum + a + b - 2.0)
+        if new_a > 1.0 and new_b > 1.0:
+            p = (psum + a - 1.0) / (psum + nsum + a + b - 2.0)
+        else:
+            p = new_a / (new_a + new_b)
         return BernoulliDistribution(p, name=self.name, keys=self.keys, prior=BetaDistribution(new_a, new_b))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> BernoulliDistribution:
