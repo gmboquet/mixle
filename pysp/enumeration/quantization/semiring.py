@@ -27,9 +27,16 @@ So a family implements whichever axis is natural and the bridges synthesize the 
 This module is the contract; :class:`CountSemiring` is the witness-retaining carrier for everything
 count-shaped, and :class:`TropicalSemiring` is the ``(max, +)`` carrier that computes the Viterbi
 configuration and its log-prob -- an exact bound that factors through the non-decomposable families
-(HMM/Mixture) by swapping only the carrier. (Exact bounded *counting* for those families needs the
-state-augmented count DP and is not yet implemented; exact HMM path enumeration lives in
-:mod:`pysp.enumeration.hmm_paths`.)
+(HMM/Mixture) by swapping only the carrier.
+
+For those non-decomposable families the *state-augmented* count DP IS implemented -- as a conservative
+upper bound -- by ``HiddenMarkovModelDistribution.quantized_count_index`` (a forward count DP over the
+(state-path, observation) trellis) and ``MixtureDistribution.quantized_count_index`` (a ``plus``-fold of
+weight-scaled component indices). What is *not* available is the EXACT MARGINAL count/rank, which sums
+over the latent and is provably hard (mixture/HMM marginal rank is k-SUM- / W[1]-hard); the exact head
+plus a certified unbiased Monte-Carlo estimator for the tail lives in
+:mod:`pysp.enumeration.density_rank` (``density_rank``), and exact HMM *path* enumeration in
+:mod:`pysp.enumeration.hmm_paths`.
 """
 
 import abc
