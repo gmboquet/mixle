@@ -1,21 +1,17 @@
-"""Estimate a Spearman ranking model from encoded permutation observations."""
+"""Fit a Spearman ranking model (a distribution over permutations) with the optimize helper."""
 
 import numpy as np
 
 from pysp.stats import SpearmanRankingDistribution, SpearmanRankingEstimator
+from pysp.inference import optimize
 
 if __name__ == '__main__':
+    # A modal ranking of 4 items; sample permutations concentrated around it.
+    dist = SpearmanRankingDistribution([2, 3, 0, 1])
+    data = dist.sampler(1).sample(1000)
 
-    dist = SpearmanRankingDistribution([2,3,0,1])
+    # Estimate the modal ranking (and dispersion) back from the sample.
+    fit = optimize(data=data, estimator=SpearmanRankingEstimator(4), init_p=0.10, rng=np.random.RandomState(1))
 
-    data = dist.sampler(1).sample(100)
-
-    est = SpearmanRankingEstimator(4)
-    acc = est.accumulator_factory().make()
-
-    enc_data = dist.dist_to_encoder().seq_encode(data)
-    acc.seq_update(enc_data, np.ones(len(data)), None)
-
-    est_model = est.estimate(None, acc.value())
-
-    print(str(est_model))
+    print('true: %s' % dist)
+    print('fit : %s' % fit)
