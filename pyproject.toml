@@ -93,6 +93,8 @@ markers = [
     "distribution: distribution interface, density, sampler, estimator, and encoder tests.",
     "bayes: Bayesian (conjugate/variational) distribution and fit/streaming tests.",
     "automatic: automatic model detection/profiling tests.",
+    "ppl: probabilistic-programming dialect (free/joint/fit) tests.",
+    "doe: design-of-experiments, Bayesian-optimization, and sensitivity-analysis tests.",
     "enumeration: support enumeration and quantized-index tests.",
     "fisher: Fisher information/view tests.",
     "hvis: model-based embedding (t-SNE / UMAP / ...) affinity and embedding tests.",

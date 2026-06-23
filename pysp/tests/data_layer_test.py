@@ -77,7 +77,9 @@ class StructureCapabilityTest(unittest.TestCase):
     def test_supported_structures_inference(self):
         from pysp.data.structure import supported_structures
 
-        self.assertEqual(supported_structures(st.GaussianDistribution(0, 1).estimator()), frozenset({"iid", "exchangeable"}))
+        self.assertEqual(
+            supported_structures(st.GaussianDistribution(0, 1).estimator()), frozenset({"iid", "exchangeable"})
+        )
         hmm = st.HiddenMarkovModelDistribution([st.GaussianDistribution(0, 1)], [1.0], [[1.0]])
         self.assertEqual(supported_structures(hmm.estimator()), frozenset({"sequential"}))
 
