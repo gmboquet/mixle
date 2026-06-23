@@ -223,7 +223,13 @@ def _reduce_occurrence(graph, mapping, rule, symbol):
 
 
 def _reductions(graph, grammar):
-    """Yield ``(reduced_graph, rule, symbol_total_frequency)`` for every valid single reverse step."""
+    """Yield ``(reduced_graph, rule, symbol_total_frequency)`` for every valid single reverse step.
+
+    Reductions are deduplicated by (rule, occurrence node-set): an occurrence's internal automorphisms
+    yield several isomorphism mappings, but they are the *same* derivation step (one rule applied at one
+    location). Counting them once is required for the marginal likelihood (summing over derivations) and
+    harmless for the Viterbi maximum.
+    """
     totals = {s: float(sum(r.frequency for r in rules)) for s, rules in grammar.rule_dict.items()}
     for symbol, rules in grammar.rule_dict.items():
         if totals[symbol] <= 0.0:
@@ -234,9 +240,14 @@ def _reductions(graph, grammar):
             matcher = iso.GraphMatcher(
                 graph, rule.graph, node_match=_grammar_node_match, edge_match=_grammar_edge_match
             )
+            seen = set()
             for mapping in matcher.subgraph_isomorphisms_iter():
+                occurrence = frozenset(mapping)
+                if occurrence in seen:
+                    continue
                 reduced = _reduce_occurrence(graph, mapping, rule, symbol)
                 if reduced is not None:
+                    seen.add(occurrence)  # one step per (rule, occurrence); skip automorphic duplicates
                     yield reduced, rule, totals[symbol]
 
 
@@ -276,6 +287,45 @@ def best_derivation(graph, grammar, start_symbol, budget=_PARSE_BUDGET):
     if graph.number_of_nodes() == 0:
         return float("-inf"), None  # the start symbol always derives at least one node
     return solve(graph, 3 * graph.number_of_nodes() + 10)
+
+
+def marginal_log_prob(graph, grammar, start_symbol, budget=_PARSE_BUDGET):
+    """Marginal log-likelihood of a graph: log-sum over ALL derivations that yield it.
+
+    This is the inside (sum-product) recursion over the reduction state graph -- identical to
+    ``best_derivation`` but combining a state's children with ``logsumexp`` instead of ``max``, so it
+    sums ``prod freq(rule)/total(lhs)`` over every parse rather than taking the single best one. It is
+    therefore >= the Viterbi value and equals the exact marginal when the whole parse forest is explored.
+
+    The search is budget-bounded; if the budget truncates the forest, the result is the log-sum over the
+    *explored* parses -- a variational ELBO (the tightest bound for a posterior supported on that set),
+    still tighter than Viterbi. Returns -inf if the grammar cannot derive the graph at all.
+    """
+    remaining = [budget]
+
+    def inside(h, depth):
+        if h.number_of_nodes() == 1 and h.number_of_edges() == 0:
+            (only,) = h.nodes
+            if h.nodes[only].get(_NONTERMINAL) == start_symbol:
+                return 0.0  # the start symbol: one (empty) completion, probability 1
+        if depth <= 0 or remaining[0] <= 0:
+            return float("-inf")
+        terms = []
+        for reduced, rule, total in _reductions(h, grammar):
+            remaining[0] -= 1
+            if remaining[0] <= 0:
+                break
+            sub = inside(reduced, depth - 1)
+            if sub != float("-inf"):
+                terms.append(float(np.log(rule.frequency / total)) + sub)
+        if not terms:
+            return float("-inf")
+        high = max(terms)
+        return high + float(np.log(sum(np.exp(t - high) for t in terms)))  # logsumexp
+
+    if graph.number_of_nodes() == 0:
+        return float("-inf")
+    return inside(graph, 3 * graph.number_of_nodes() + 10)
 
 
 def _isomorphic_rule_graph(g1, g2):
@@ -507,15 +557,16 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         return max(self.grammar.rule_dict, key=lambda s: sum(r.frequency for r in self.grammar.rule_dict[s]))
 
     def log_density(self, x):
-        """Log-density of the grammar distribution at an observed GRAPH x.
+        """Log-density of the grammar distribution at an observed GRAPH x -- the marginal likelihood.
 
-        This is the grammar's own likelihood, computed by PARSING: ``x`` is reduced back to the start
-        symbol along the grammar's productions (``best_derivation``), and the score is the log-probability
-        of the best (Viterbi) derivation that yields it -- the sum over its rule applications of
-        ``log(freq(rule) / total(lhs))``. A graph the grammar cannot generate scores ``-inf``.
+        ``x`` is parsed (reduced back to the start symbol along the grammar's productions) and the score
+        is the log-sum over ALL derivations that yield it, ``log sum_D prod_i freq(r_i)/total(lhs_i)``,
+        computed by the inside (sum-product) recursion (``marginal_log_prob``). A graph the grammar
+        cannot generate scores ``-inf``.
 
-        The best derivation is the max over derivations, a tractable lower bound on the exact likelihood
-        (sum over all derivations), which is intractable because general graph-grammar parsing is NP-hard.
+        This is the true marginal, not the Viterbi (single best-derivation) lower bound. The parse search
+        is budget-bounded; if the budget truncates the parse forest the result is a variational ELBO over
+        the explored derivations -- still >= the Viterbi value. ``best_derivation`` exposes the MAP parse.
 
         Args:
             x: Observed graph (a networkx graph).
@@ -527,7 +578,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         start = self._resolve_start()
         if start is None:
             return float("-inf")
-        return best_derivation(x, self.grammar, start)[0]
+        return marginal_log_prob(x, self.grammar, start)
 
     # combine list of grammars into singular grammar? need to take multiple sample outputs as input
     def seq_encode(self, x):
