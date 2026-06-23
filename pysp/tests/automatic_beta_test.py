@@ -20,9 +20,7 @@ class AutomaticBetaTest(unittest.TestCase):
         for a, b in ((2.0, 5.0), (0.7, 0.7)):
             data = list(rng.beta(a, b, size=5000))
             model = fit(data, get_estimator(data), max_its=25, out=None)
-            self.assertIsInstance(
-                model, BetaDistribution, msg="failed to recover Beta for (a=%s, b=%s)" % (a, b)
-            )
+            self.assertIsInstance(model, BetaDistribution, msg="failed to recover Beta for (a=%s, b=%s)" % (a, b))
 
     def test_does_not_steal_gaussian(self):
         rng = np.random.RandomState(1)

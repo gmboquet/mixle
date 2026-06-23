@@ -24,7 +24,8 @@ class AutomaticGeneralizedExtremeValueTest(unittest.TestCase):
             data = list(stats.genextreme.rvs(c, loc=loc, scale=scale, size=5000, random_state=rng))
             model = fit(data, get_estimator(data), max_its=25, out=None)
             self.assertIsInstance(
-                model, GeneralizedExtremeValueDistribution,
+                model,
+                GeneralizedExtremeValueDistribution,
                 msg=f"GEV(c={c}) not recovered; got {type(model).__name__}",
             )
 

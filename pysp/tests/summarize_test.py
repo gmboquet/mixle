@@ -16,7 +16,9 @@ class SummarizeTest(unittest.TestCase):
         self.assertAlmostEqual(s["std"], 2.0)
         self.assertAlmostEqual(s["skewness"], 0.0)
         self.assertAlmostEqual(s["kurtosis"], 0.0)
-        self.assertAlmostEqual(s["entropy"], 0.5 * __import__("math").log(2 * __import__("math").pi * __import__("math").e * 4.0))
+        self.assertAlmostEqual(
+            s["entropy"], 0.5 * __import__("math").log(2 * __import__("math").pi * __import__("math").e * 4.0)
+        )
         self.assertAlmostEqual(s["median"], 1.0)
 
     def test_discrete_summary_has_median_via_quantile(self):

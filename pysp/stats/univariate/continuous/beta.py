@@ -245,8 +245,7 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         from scipy.special import betaln, digamma
 
         a, b = self.a, self.b
-        return float(betaln(a, b) - (a - 1.0) * digamma(a) - (b - 1.0) * digamma(b)
-                     + (a + b - 2.0) * digamma(a + b))
+        return float(betaln(a, b) - (a - 1.0) * digamma(a) - (b - 1.0) * digamma(b) + (a + b - 2.0) * digamma(a + b))
 
     def mode(self) -> float:
         """Mode (a-1)/(a+b-2) for a,b>1; boundary otherwise."""

@@ -25,7 +25,10 @@ class LKJTest(unittest.TestCase):
         def z3(eta):
             def inner(a, b):
                 rad = mp.sqrt((1 - a * a) * (1 - b * b))
-                return mp.quad(lambda c: (1 - a * a - b * b - c * c + 2 * a * b * c) ** (eta - 1), [a * b - rad, a * b + rad])
+                return mp.quad(
+                    lambda c: (1 - a * a - b * b - c * c + 2 * a * b * c) ** (eta - 1), [a * b - rad, a * b + rad]
+                )
+
             return mp.quad(lambda a: mp.quad(lambda b: inner(a, b), [-1, 1]), [-1, 1])
 
         self.assertTrue(mp.almosteq(mp.e ** mp.mpf(LKJ(3, 2.0)._log_c) * z3(2.0), 1, 1e-8))

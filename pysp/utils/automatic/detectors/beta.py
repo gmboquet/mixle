@@ -63,5 +63,6 @@ def _cdf(arr: np.ndarray):
     return stats.beta.cdf(arr, a, b)
 
 
-register(Detector(name="beta", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=2))
+register(
+    Detector(name="beta", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=2)
+)

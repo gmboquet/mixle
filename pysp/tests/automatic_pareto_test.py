@@ -16,7 +16,8 @@ class AutomaticParetoTest(unittest.TestCase):
             data = list(xm * (rng.pareto(alpha, size=5000) + 1.0))
             m = fit(data, get_estimator(data), max_its=25, out=None)
             self.assertEqual(
-                type(m).__name__, "ParetoDistribution",
+                type(m).__name__,
+                "ParetoDistribution",
                 msg=f"failed to recover Pareto(xm={xm}, alpha={alpha})",
             )
 

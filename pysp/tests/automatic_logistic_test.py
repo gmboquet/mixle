@@ -19,9 +19,7 @@ class AutomaticLogisticTest(unittest.TestCase):
             rng = np.random.RandomState(0)
             data = list(rng.logistic(loc=loc, scale=scale, size=5000))
             model = fit(data, get_estimator(data), max_its=25, out=None)
-            self.assertIsInstance(
-                model, LogisticDistribution, msg=f"logistic(loc={loc}, scale={scale}) not recovered"
-            )
+            self.assertIsInstance(model, LogisticDistribution, msg=f"logistic(loc={loc}, scale={scale}) not recovered")
 
     def test_no_steal_gaussian(self):
         rng = np.random.RandomState(1)

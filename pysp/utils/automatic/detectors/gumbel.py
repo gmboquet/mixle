@@ -20,7 +20,7 @@ def _sample_skew(arr: np.ndarray) -> float | None:
     var = float(np.mean(d * d))
     if not (var > 0.0):
         return None
-    return float(np.mean(d ** 3)) / (var ** 1.5)
+    return float(np.mean(d**3)) / (var**1.5)
 
 
 def _applies(arr: np.ndarray) -> bool:
@@ -77,5 +77,6 @@ def _cdf(arr: np.ndarray):
     return stats.gumbel_r.cdf(arr, loc=loc, scale=scale)
 
 
-register(Detector(name="gumbel", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=2))
+register(
+    Detector(name="gumbel", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=2)
+)

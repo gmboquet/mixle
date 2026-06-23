@@ -99,5 +99,8 @@ def _cdf(arr: np.ndarray):
     return stats.exponnorm.cdf(arr, 1.0 / (lam * sigma), loc=mu, scale=sigma)
 
 
-register(Detector(name="exgaussian", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=3))
+register(
+    Detector(
+        name="exgaussian", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=3
+    )
+)

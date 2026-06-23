@@ -58,5 +58,14 @@ def _cdf(arr: np.ndarray):
     return stats.nbinom.cdf(arr.astype(np.int64), r, p)
 
 
-register(Detector(name="negative_binomial", kind="discrete", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=2))
+register(
+    Detector(
+        name="negative_binomial",
+        kind="discrete",
+        applies=_applies,
+        score=_score,
+        factory=_factory,
+        cdf=_cdf,
+        n_params=2,
+    )
+)

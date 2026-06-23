@@ -71,8 +71,21 @@ def partially_exchangeable(by: str | Callable[[Any], Any]) -> SampleStructure:
 # are IID. The default for a bare list is EXCHANGEABLE, so the check is opt-in and never fires on
 # existing call sites -- it only catches a mismatch once a user explicitly tags a source.
 
-_SEQUENTIAL_HINTS = ("markov", "hmm", "hawkes", "pcfg", "grammar", "renewal", "sequence", "segmental",
-                     "lookback", "inhomogeneous", "birth_death", "temporal", "autoreg")
+_SEQUENTIAL_HINTS = (
+    "markov",
+    "hmm",
+    "hawkes",
+    "pcfg",
+    "grammar",
+    "renewal",
+    "sequence",
+    "segmental",
+    "lookback",
+    "inhomogeneous",
+    "birth_death",
+    "temporal",
+    "autoreg",
+)
 _GROUPED_HINTS = ("hdp", "hierarchical", "labeled_lda", "labeledlda", "ldadistribution", "lda")
 _EXCHANGEABLE_HINTS = ("mixture", "dirichletprocess", "dirichlet_process", "pitman", "buffet", "latent")
 
@@ -97,9 +110,11 @@ def check_model_structure(model: Any, structure: SampleStructure, *, strict: boo
     """
     if structure.kind in supported_structures(model):
         return
-    msg = ("data is %s, but %s consumes %s -- the structure assumption does not match (e.g. an i.i.d. "
-           "model on an ordered series silently strides away the order)." % (
-               structure, type(model).__name__, "/".join(sorted(supported_structures(model)))))
+    msg = (
+        "data is %s, but %s consumes %s -- the structure assumption does not match (e.g. an i.i.d. "
+        "model on an ordered series silently strides away the order)."
+        % (structure, type(model).__name__, "/".join(sorted(supported_structures(model))))
+    )
     if strict:
         raise ValueError(msg)
     import warnings

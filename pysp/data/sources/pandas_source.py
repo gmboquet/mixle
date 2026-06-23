@@ -98,7 +98,13 @@ def seq_encode_dataframe(
     )
 
 
-def read_dataframe(df: Any, fields: FieldSpec = None, *, as_dict: bool = False,
-                   structure: SampleStructure = EXCHANGEABLE, schema: Schema | None = None) -> MaterializedSource:
+def read_dataframe(
+    df: Any,
+    fields: FieldSpec = None,
+    *,
+    as_dict: bool = False,
+    structure: SampleStructure = EXCHANGEABLE,
+    schema: Schema | None = None,
+) -> MaterializedSource:
     """Wrap a pandas DataFrame's selected columns as a DataSource (scalar/tuple/dict records)."""
     return MaterializedSource(dataframe_records(df, fields=fields, as_dict=as_dict), structure, schema)

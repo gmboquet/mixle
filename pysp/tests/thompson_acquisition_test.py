@@ -29,8 +29,9 @@ class ThompsonAcquisitionTest(unittest.TestCase):
         x = rng.rand(12, 1)
         y = (x[:, 0] - 0.7) ** 2
         props = [
-            propose_next(x, y, bounds=[(0.0, 1.0)], acq="thompson",
-                         acq_kwargs={"rng": np.random.RandomState(s)}, seed=s)[0]
+            propose_next(
+                x, y, bounds=[(0.0, 1.0)], acq="thompson", acq_kwargs={"rng": np.random.RandomState(s)}, seed=s
+            )[0]
             for s in range(8)
         ]
         # the median proposal lands in the low-objective region around 0.7

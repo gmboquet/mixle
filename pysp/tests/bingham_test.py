@@ -20,7 +20,15 @@ class BinghamTest(unittest.TestCase):
             zz = d.z
             integ = mp.e ** mp.mpf(-d._log_c) * mp.quad(
                 lambda th, zz=zz: mp.quad(
-                    lambda ph: mp.e ** (zz[0] * (mp.sin(th) * mp.cos(ph)) ** 2 + zz[1] * (mp.sin(th) * mp.sin(ph)) ** 2 + zz[2] * mp.cos(th) ** 2) * mp.sin(th),
+                    lambda ph: (
+                        mp.e
+                        ** (
+                            zz[0] * (mp.sin(th) * mp.cos(ph)) ** 2
+                            + zz[1] * (mp.sin(th) * mp.sin(ph)) ** 2
+                            + zz[2] * mp.cos(th) ** 2
+                        )
+                        * mp.sin(th)
+                    ),
                     [0, 2 * mp.pi],
                 ),
                 [0, mp.pi],
@@ -51,7 +59,9 @@ class BinghamTest(unittest.TestCase):
     def test_seq_matches_scalar(self):
         d = B(np.eye(3), [-5.0, -2.0, 0.0])
         xs = d.sampler(seed=0).sample(6)
-        self.assertTrue(np.allclose([d.log_density(x) for x in xs], d.seq_log_density(d.dist_to_encoder().seq_encode(xs))))
+        self.assertTrue(
+            np.allclose([d.log_density(x) for x in xs], d.seq_log_density(d.dist_to_encoder().seq_encode(xs)))
+        )
 
     def test_estimator_recovers_params(self):
         rng = np.random.RandomState(2)

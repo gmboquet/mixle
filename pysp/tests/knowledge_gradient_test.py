@@ -28,7 +28,7 @@ class KnowledgeGradientTest(unittest.TestCase):
             mean = rng.randn(n)
             kg = knowledge_gradient(mean, cov)
             with self.subTest(seed=seed):
-                self.assertTrue(np.all(kg >= -1e-9))                 # KG is non-negative
+                self.assertTrue(np.all(kg >= -1e-9))  # KG is non-negative
                 self.assertTrue(np.allclose(kg, _kg_mc(mean, cov), atol=0.02))
 
     def test_propose_finds_optimum_region(self):

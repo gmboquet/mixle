@@ -15,7 +15,9 @@ class LogEITest(unittest.TestCase):
     def test_matches_log_ei_when_well_conditioned(self):
         mean = np.array([0.0, 0.5, 1.0, 1.5])
         std = np.array([1.0, 1.0, 1.0, 1.0])
-        self.assertTrue(np.allclose(log_expected_improvement(mean, std, 1.0), np.log(expected_improvement(mean, std, 1.0))))
+        self.assertTrue(
+            np.allclose(log_expected_improvement(mean, std, 1.0), np.log(expected_improvement(mean, std, 1.0)))
+        )
 
     def test_finite_in_both_tails_where_ei_underflows(self):
         # deep no-improvement tail: EI underflows to 0 (log -> -inf) but logEI stays finite

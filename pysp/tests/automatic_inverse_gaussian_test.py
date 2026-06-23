@@ -30,15 +30,11 @@ def test_does_not_steal_gaussian():
     rng = np.random.RandomState(1)
     data = [float(x) for x in rng.normal(0.0, 1.0, size=5000)]
     model = _recommend(data)
-    assert not isinstance(model, InverseGaussianDistribution), (
-        "inverse_gaussian stole Gaussian(0,1) data"
-    )
+    assert not isinstance(model, InverseGaussianDistribution), "inverse_gaussian stole Gaussian(0,1) data"
 
 
 def test_does_not_steal_exponential():
     rng = np.random.RandomState(2)
     data = [float(x) for x in rng.exponential(1.0, size=5000)]
     model = _recommend(data)
-    assert not isinstance(model, InverseGaussianDistribution), (
-        "inverse_gaussian stole Exponential(scale=1) data"
-    )
+    assert not isinstance(model, InverseGaussianDistribution), "inverse_gaussian stole Exponential(scale=1) data"

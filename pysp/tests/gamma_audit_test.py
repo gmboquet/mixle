@@ -43,8 +43,7 @@ def test_pseudo_count_logmean_prior_pulls_toward_prior_shape():
     # lie between the prior mean (3.0) and the MLE -- never further from the
     # prior than the MLE itself.
     assert abs(fit_prior.k - true_k) <= abs(fit_mle.k - true_k) + 1e-9, (
-        f"prior-shape {fit_prior.k} is further from prior mean {true_k} "
-        f"than the MLE {fit_mle.k}"
+        f"prior-shape {fit_prior.k} is further from prior mean {true_k} than the MLE {fit_mle.k}"
     )
 
 

@@ -18,7 +18,7 @@ class ADMMTest(unittest.TestCase):
             x = admm_bounded_least_squares(a, b, 0.0, np.inf, max_iter=8000)
             xs, _ = nnls(a, b)
             with self.subTest(seed=seed):
-                self.assertTrue(np.all(x >= -1e-7))                       # non-negative
+                self.assertTrue(np.all(x >= -1e-7))  # non-negative
                 self.assertAlmostEqual(np.linalg.norm(a @ x - b), np.linalg.norm(a @ xs - b), places=4)
 
     def test_box_matches_scipy(self):

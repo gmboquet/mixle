@@ -20,8 +20,15 @@ except ImportError:  # pragma: no cover - exercised only without fsspec
 _TEXT = {"csv", "json", "jsonl", "ndjson"}
 
 
-def read_remote(path: str, fmt: str, columns: list[str] | None = None, *,
-                structure: SampleStructure = EXCHANGEABLE, schema: Schema | None = None, **storage_options: Any):
+def read_remote(
+    path: str,
+    fmt: str,
+    columns: list[str] | None = None,
+    *,
+    structure: SampleStructure = EXCHANGEABLE,
+    schema: Schema | None = None,
+    **storage_options: Any,
+):
     """Read a remote (``s3://`` / ``gcs://`` / ``hdfs://``) file by ``fmt`` via fsspec + the local reader."""
     if _fsspec is None:
         from pysp.utils.optional_deps import require

@@ -57,5 +57,6 @@ def _cdf(arr: np.ndarray):
     return stats.logistic.cdf(arr, loc=loc, scale=scale)
 
 
-register(Detector(name="logistic", kind="continuous", applies=_applies, score=_score,
-                  factory=_factory, cdf=_cdf, n_params=2))
+register(
+    Detector(name="logistic", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=2)
+)

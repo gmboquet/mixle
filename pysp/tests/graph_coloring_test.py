@@ -34,9 +34,9 @@ class GraphColoringTest(unittest.TestCase):
             a = a + a.T
             k, col = graph_coloring(a)
             with self.subTest(seed=seed):
-                self.assertTrue(_proper(col, a))            # proper coloring
+                self.assertTrue(_proper(col, a))  # proper coloring
                 self.assertEqual(max(col) + 1 if n else 0, k)  # uses exactly k colors
-                self.assertEqual(k, _brute_chromatic(a))    # and k is minimal
+                self.assertEqual(k, _brute_chromatic(a))  # and k is minimal
 
     def test_known_graphs(self):
         self.assertEqual(graph_coloring(1 - np.eye(5, dtype=int))[0], 5)  # K5
