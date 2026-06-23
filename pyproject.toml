@@ -33,8 +33,6 @@ dependencies = [
     "numpy",
     "scipy",
     "mpmath",
-    "networkx",
-    "tqdm",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +46,8 @@ sql = ["sqlalchemy"]
 mongo = ["pymongo"]
 hadoop = ["pyarrow", "fsspec"]
 data = ["pandas", "pyarrow", "sqlalchemy", "pymongo", "fsspec"]
+# graph-grammar models (pysp.stats.sequences.grammar) are the only networkx user; lazy + optional.
+grammar = ["networkx"]
 # GMP-backed (FFT) big-integer multiply for the structural count-DP's large histogram convolutions.
 gmpy2 = ["gmpy2"]
 spark = ["pyspark"]
@@ -62,7 +62,7 @@ sage = ["passagemath-symbolics"]
 test = ["pytest>=8", "pytest-xdist"]
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
 lint = ["ruff==0.15.17", "mypy"]
-all = ["numba", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn", "pandas", "pyarrow", "sqlalchemy"]
+all = ["numba", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn", "pandas", "pyarrow", "sqlalchemy", "networkx"]
 
 [project.urls]
 Homepage = "https://github.com/gmboquet/pysparkplug"

@@ -1,9 +1,13 @@
+import importlib.util
 import json
 import unittest
 
-import networkx as nx
 import numpy as np
 from scipy.sparse import csr_matrix
+
+HAS_NETWORKX = importlib.util.find_spec("networkx") is not None
+if HAS_NETWORKX:
+    import networkx as nx
 
 import pysp.stats as stats
 from pysp.stats.bayes.dirichlet_process_mixture import (
@@ -112,6 +116,7 @@ class DistributionSerializationTestCase(unittest.TestCase):
         sparse_loaded = self.assert_stats_roundtrip(sparse, [([(0, 1.0)], [(1, 1.0)])])
         self.assertEqual(sparse_loaded.cond_prob_mat.getformat(), "csr")
 
+    @unittest.skipUnless(HAS_NETWORKX, "networkx is not installed")
     def test_grammar_distribution_json_round_trip(self):
         from pysp.stats.sequences.grammar import GrammarDistribution, GrammarRule, VertexReplacementGrammar
 
