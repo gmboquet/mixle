@@ -40,6 +40,8 @@ dependencies = [
 
 [project.optional-dependencies]
 numba = ["numba", "tbb"]
+# GMP-backed (FFT) big-integer multiply for the structural count-DP's large histogram convolutions.
+gmpy2 = ["gmpy2"]
 spark = ["pyspark"]
 dask = ["dask", "distributed"]
 torch = ["torch"]
