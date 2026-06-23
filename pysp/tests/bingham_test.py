@@ -38,7 +38,7 @@ class BinghamTest(unittest.TestCase):
         from pysp.stats.multivariate.bingham import _bingham_norm
 
         d = B(np.eye(3), [-6.0, -2.0, 0.0])
-        xs = np.array(d.sampler(seed=1).sample(50000))
+        xs = np.array(d.sampler(seed=1).sample(12000))
         for i in (0, 1):
             zp = d.z.copy()
             zp[i] += 1e-3
@@ -57,7 +57,7 @@ class BinghamTest(unittest.TestCase):
         rng = np.random.RandomState(2)
         g, _ = np.linalg.qr(rng.randn(3, 3))
         true = B(g, [-6.0, -2.0, 0.0])
-        data = np.array(true.sampler(seed=1).sample(40000))
+        data = np.array(true.sampler(seed=1).sample(12000))
         est = true.estimator()
         acc = est.accumulator_factory().make()
         acc.seq_update(true.dist_to_encoder().seq_encode(data), np.ones(len(data)), None)

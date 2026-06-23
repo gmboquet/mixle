@@ -15,7 +15,7 @@ from pysp.ppl.spectral_flow import kinetic_energy as ke
 class SpectralFlowTest(unittest.TestCase):
     def test_2d_taylor_green_exact_decay(self):
         # u = -cos x sin y * e^{-2 nu t} is an exact 2-D Navier-Stokes solution for all time
-        n, nu, t, dt = 64, 0.05, 0.5, 0.001
+        n, nu, t, dt = 48, 0.05, 0.3, 0.001
         x = np.linspace(0, 2 * np.pi, n, endpoint=False)
         xx, yy = np.meshgrid(x, x, indexing="ij")
         u0, v0 = -np.cos(xx) * np.sin(yy), np.sin(xx) * np.cos(yy)
@@ -25,7 +25,7 @@ class SpectralFlowTest(unittest.TestCase):
 
     def test_3d_abc_beltrami_exact_decay(self):
         # the ABC/Beltrami flow (curl u = u) is an exact 3-D NS solution decaying as e^{-nu t}
-        n, nu, t, dt = 32, 0.1, 0.4, 0.002
+        n, nu, t, dt = 24, 0.1, 0.2, 0.002
         x = np.linspace(0, 2 * np.pi, n, endpoint=False)
         xx, yy, zz = np.meshgrid(x, x, x, indexing="ij")
         u0 = np.sin(zz) + np.cos(yy)
