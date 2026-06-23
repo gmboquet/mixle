@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.wave_pml import solve_wave_pml
+from pysp.ppl.physics.wave_pml import solve_wave_pml
 
 
 class WavePMLTest(unittest.TestCase):

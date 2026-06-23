@@ -647,14 +647,14 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "a PDE/ODE evolution operator",
         "subsystem role",
         "DynamicsOperator (ABC)",
-        "pysp.ppl.dynamics",
+        "pysp.ppl.physics.dynamics",
     ),
     CapabilitySpec(
         "ForwardOperator",
         "the PDE forward solve + adjoint namespace",
         "subsystem role",
         "ForwardOperator/ForwardModel protocols",
-        "pysp.ppl._operator",
+        "pysp.ppl.physics._operator",
     ),
     CapabilitySpec(
         "Surrogate",

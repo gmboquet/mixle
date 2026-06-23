@@ -13,7 +13,7 @@ except ImportError:
 
 if HAS_TORCH:
     from pysp.ppl import Differential, GaussianField, RandomWalk, free, joint
-    from pysp.ppl.ops import make_ops
+    from pysp.ppl.physics.ops import make_ops
 
 
 def _sim(rhs, y0, t, ops=None):

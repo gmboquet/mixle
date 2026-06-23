@@ -6,7 +6,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.linalg import expm
 
-from pysp.ppl.dynamics import integrate_stiff
+from pysp.ppl.physics.dynamics import integrate_stiff
 
 
 class StiffODETest(unittest.TestCase):

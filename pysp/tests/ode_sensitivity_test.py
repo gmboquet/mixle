@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.dynamics import integrate_adaptive, integrate_sensitivity
+from pysp.ppl.physics.dynamics import integrate_adaptive, integrate_sensitivity
 
 
 class ODESensitivityTest(unittest.TestCase):

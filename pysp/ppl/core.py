@@ -1480,7 +1480,7 @@ class RandomVariable:
             and isinstance(self._family, CompositeFamily)
             and self._family.name == "PDEStateSpace"
         ):
-            from pysp.ppl import pde as _pde
+            from pysp.ppl.physics import pde as _pde
 
             return _pde.pde_fit(self, data, **kw)
 

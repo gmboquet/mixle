@@ -19,7 +19,7 @@ import math
 import numpy as np
 
 from pysp.ppl.core import RandomVariable
-from pysp.ppl.dynamics import DynamicsOperator
+from pysp.ppl.physics.dynamics import DynamicsOperator
 
 
 class PDEStateSpaceResult:
@@ -217,7 +217,7 @@ def fit_diffusivity(
     import torch
 
     from pysp.inference.objectives import optimize_torch_objective
-    from pysp.ppl.dynamics import laplacian_matrix
+    from pysp.ppl.physics.dynamics import laplacian_matrix
 
     y = np.asarray(observations, dtype=float)
     if y.ndim != 2 or y.shape[0] < 2:
@@ -324,7 +324,7 @@ def fit_reaction_diffusion(
     """
     import torch
 
-    from pysp.ppl.dynamics import laplacian_matrix
+    from pysp.ppl.physics.dynamics import laplacian_matrix
 
     y = np.asarray(observations, dtype=float)
     n = y.shape[1]

@@ -13,7 +13,7 @@ except ImportError:
 
 if HAS_TORCH:
     from pysp.ppl import Differential, WaveEquation2D, free, joint
-    from pysp.ppl.ops import make_ops
+    from pysp.ppl.physics.ops import make_ops
 
 
 @unittest.skipUnless(HAS_TORCH, "requires PyTorch")

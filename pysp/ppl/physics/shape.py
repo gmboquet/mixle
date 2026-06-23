@@ -46,7 +46,7 @@ def shape_optimize(
     """
     import torch
 
-    from pysp.ppl.ops import make_ops
+    from pysp.ppl.physics.ops import make_ops
 
     ops = make_ops()
     phi = torch.tensor(np.asarray(phi0, dtype=float), requires_grad=True)

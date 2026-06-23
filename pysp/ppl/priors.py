@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from pysp.ppl.field import Proxy
-from pysp.ppl.pde_solve import _grid_faces
+from pysp.ppl.physics.pde_solve import _grid_faces
 
 
 class _PenaltyProxy(Proxy):

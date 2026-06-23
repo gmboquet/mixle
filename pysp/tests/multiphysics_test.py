@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl.multiphysics import CoupledPDESystem, _diffusion_blocks, solve_poisson
+from pysp.ppl.physics.multiphysics import CoupledPDESystem, _diffusion_blocks, solve_poisson
 
 
 def _manufactured(d, n=21):

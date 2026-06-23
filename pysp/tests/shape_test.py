@@ -34,7 +34,7 @@ class ShapeOptimizeTestCase(unittest.TestCase):
         self.assertGreater(acc, 0.95)
 
     def test_smoothed_heaviside_is_monotone_and_bounded(self):
-        from pysp.ppl.ops import make_ops
+        from pysp.ppl.physics.ops import make_ops
 
         ops = make_ops()
         phi = torch.linspace(-2, 2, 50)
