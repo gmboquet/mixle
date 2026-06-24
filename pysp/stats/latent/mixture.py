@@ -287,7 +287,9 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         if not self.has_conj_prior:
             return self.seq_log_density(x)
         cc = self.expected_nparams
-        ll = np.asarray([u.seq_expected_log_density(x) for u in self.components]).T + cc
+        ll = np.asarray(
+            [u.seq_expected_log_density(_component_enc(x, i)) for i, u in enumerate(self.components)]
+        ).T + cc
         ml = np.max(ll, axis=1, keepdims=True)
         return np.log(np.sum(np.exp(ll - ml), axis=1)) + ml.flatten()
 
@@ -432,7 +434,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         for i in range(self.num_components):
             if not self.zw[i]:
-                temp = self.components[i].seq_log_density(enc_data)
+                temp = self.components[i].seq_log_density(_component_enc(enc_data, i))
                 if not ll_mat_init:
                     ll_mat = np.zeros((len(temp), self.num_components))
                     ll_mat.fill(-np.inf)
@@ -468,7 +470,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         for i in range(self.num_components):
             if not self.zw[i]:
-                temp = self.components[i].seq_log_density(enc_data)
+                temp = self.components[i].seq_log_density(_component_enc(enc_data, i))
                 if not ll_mat_init:
                     ll_mat = np.zeros((len(temp), self.num_components))
                     ll_mat.fill(-np.inf)
@@ -511,10 +513,10 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         scores = []
         for i in range(self.num_components):
             if self.zw[i]:
-                base = backend_seq_log_density(self.components[0], x, engine)
+                base = backend_seq_log_density(self.components[0], _component_enc(x, 0), engine)
                 scores.append(base * 0.0 + engine.asarray(-np.inf))
             else:
-                scores.append(backend_seq_log_density(self.components[i], x, engine))
+                scores.append(backend_seq_log_density(self.components[i], _component_enc(x, i), engine))
         return engine.stack(scores, axis=1)
 
     def backend_seq_log_density(self, x: T1, engine: Any) -> Any:
@@ -560,7 +562,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         for i in range(self.num_components):
             if not self.zw[i]:
-                temp = self.components[i].seq_log_density(enc_data)
+                temp = self.components[i].seq_log_density(_component_enc(enc_data, i))
                 if not ll_mat_init:
                     ll_mat = np.zeros((len(temp), self.num_components))
                     ll_mat.fill(-np.inf)
@@ -707,8 +709,8 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> "MixtureDataEncoder":
         """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
-        dist_encoder = self.components[0].dist_to_encoder()
-        return MixtureDataEncoder(encoder=dist_encoder)
+        dist_encoders = [c.dist_to_encoder() for c in self.components]
+        return MixtureDataEncoder(encoder=dist_encoders)
 
     def enumerator(self) -> "MixtureEnumerator":
         """Returns a MixtureEnumerator iterating the union of component supports in descending
@@ -1060,7 +1062,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
         for i in range(estimate.num_components):
             if not estimate.zw[i]:
-                temp = estimate.components[i].seq_log_density(enc_data)
+                temp = estimate.components[i].seq_log_density(_component_enc(enc_data, i))
 
                 if not ll_mat_init:
                     ll_mat = np.zeros((len(temp), self.num_components), dtype=np.float64)
@@ -1100,7 +1102,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         for i in range(self.num_components):
             w_loc = ll_mat[:, i]
             self.comp_counts[i] += w_loc.sum()
-            self.accumulators[i].seq_update(enc_data, w_loc, estimate.components[i])
+            self.accumulators[i].seq_update(_component_enc(enc_data, i), w_loc, estimate.components[i])
 
     def update(self, x: T, weight: float, estimate: "MixtureDistribution") -> None:
         """Update sufficient statistics of MixtureAccumulator with weighted observation.
@@ -1212,7 +1214,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         ww *= np.reshape(weights, (sz, 1))
 
         for i in range(self.num_components):
-            self.accumulators[i].seq_initialize(x, ww[:, i], self._acc_rng[i])
+            self.accumulators[i].seq_initialize(_component_enc(x, i), ww[:, i], self._acc_rng[i])
             self.comp_counts[i] += np.sum(ww[:, i])
 
     def _feature_matrix(self, x: Any, keep_idx: np.ndarray) -> np.ndarray | None:
@@ -1222,6 +1224,8 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         simple real-valued array — e.g. composite/tuple encodings, ragged sequences, non-numeric
         dtypes. k-means++ only makes sense for vector-space leaves (Gaussian / diagonal Gaussian).
         """
+        if isinstance(x, _HeteroMixtureEncoded):
+            return None
         try:
             arr = np.asarray(x)
         except (TypeError, ValueError):
@@ -1408,8 +1412,8 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self) -> "MixtureDataEncoder":
         """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
-        acc_encoder = self.accumulators[0].acc_to_encoder()
-        return MixtureDataEncoder(encoder=acc_encoder)
+        acc_encoders = [a.acc_to_encoder() for a in self.accumulators]
+        return MixtureDataEncoder(encoder=acc_encoders)
 
 
 class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
@@ -1642,33 +1646,72 @@ class MixtureEstimator(ParameterEstimator):
         return MixtureDistribution(components, w, name=self.name)
 
 
+class _HeteroMixtureEncoded:
+    """Per-component encodings for a heterogeneous mixture (components of differing families).
+
+    Wraps a tuple ``encodings[i]`` holding the sequence encoding produced by component ``i``'s
+    own encoder, so each component is fed the encoding its ``seq_*`` methods expect. Homogeneous
+    mixtures bypass this wrapper entirely and encode once (bit-identical to the legacy path).
+    """
+
+    __slots__ = ("encodings",)
+
+    def __init__(self, encodings: tuple[Any, ...]) -> None:
+        self.encodings = encodings
+
+
+def _component_enc(enc_data: Any, i: int) -> Any:
+    """Select the encoding destined for component ``i``.
+
+    For a homogeneous mixture (single shared encoding) this returns ``enc_data`` unchanged; for a
+    heterogeneous mixture it returns that component's own encoding from the wrapper.
+    """
+    if isinstance(enc_data, _HeteroMixtureEncoded):
+        return enc_data.encodings[i]
+    return enc_data
+
+
 class MixtureDataEncoder(DataSequenceEncoder):
-    def __init__(self, encoder: DataSequenceEncoder) -> None:
+    def __init__(self, encoder: DataSequenceEncoder | Sequence[DataSequenceEncoder]) -> None:
         """MixtureDataEncoder used for sequence encoding data for use with vectorized 'seq_' functions.
 
         Data type: Data must be type T, that matches the data type of each Mixture component.
 
+        Components may belong to different distribution families. When the per-component encoders
+        are all equal the mixture encodes the data once and shares it (bit-identical to the legacy
+        single-encoder behaviour); when they differ each component's data is encoded separately and
+        carried in a :class:`_HeteroMixtureEncoded` wrapper.
+
         Args:
-            encoder (DataSequenceEncoder): DataSequenceEncoder corresponding to the component Distributions.
+            encoder: A single DataSequenceEncoder (shared by all components) or a sequence of
+                per-component DataSequenceEncoder objects.
 
         Attributes:
-            encoder (DataSequenceEncoder): DataSequenceEncoder for encoding sequence of iid data.
+            encoders (list[DataSequenceEncoder]): Per-component encoders.
+            encoder (DataSequenceEncoder): First component encoder (kept for backward compatibility).
+            homogeneous (bool): True when all component encoders are equal.
 
         """
-        self.encoder = encoder
+        if isinstance(encoder, DataSequenceEncoder):
+            encoders: list[DataSequenceEncoder] = [encoder]
+        else:
+            encoders = list(encoder)
+        self.encoders = encoders
+        self.encoder = encoders[0]
+        self.homogeneous = all(e == encoders[0] for e in encoders)
 
     def __str__(self) -> str:
         """Returns string representation of MixtureDataEncoder object."""
-        return "MixtureDataEncoder(" + str(self.encoder) + ")"
+        if self.homogeneous:
+            return "MixtureDataEncoder(" + str(self.encoder) + ")"
+        return "MixtureDataEncoder([" + ", ".join(str(e) for e in self.encoders) + "])"
 
     def __eq__(self, other: object) -> bool:
         """Checks if an object is equivalent to a MixtureDataEncoder instance.
 
-        If 'other' object is a MixtureDataEncoder, 'other' must have member variable encoder that is equal to
-        encoder member variable of MixtureDataEncoder instance.
-
-        If 'other' object is not a MixtureDataEncoder, then 'other' must be equivalent to the encoder of
-        MixtureDataEncoder instance.
+        If 'other' object is a MixtureDataEncoder, the two must carry equivalent per-component
+        encoders. If 'other' is not a MixtureDataEncoder, it is compared against the (single) shared
+        encoder, preserving the legacy homogeneous-mixture behaviour.
 
         Args:
             other (object): Object to be compared to MixtureDataEncoder instance.
@@ -1678,25 +1721,26 @@ class MixtureDataEncoder(DataSequenceEncoder):
 
         """
         if not isinstance(other, MixtureDataEncoder):
-            return self.encoder == other
-        else:
-            if other.encoder == self.encoder:
-                return True
-            else:
-                return False
+            return self.homogeneous and self.encoder == other
+        if len(other.encoders) != len(self.encoders):
+            return False
+        return all(a == b for a, b in zip(self.encoders, other.encoders))
 
     def seq_encode(self, x: Sequence[T]) -> Any:
-        """Sequence encoder a sequence of iid observations that match the data type of 'encoder' member variable.
+        """Sequence encode a sequence of iid observations drawn from the mixture distribution.
 
-        Note: MixtureDataEncoder attribute 'encoder' is an encoder for the components of the MixtureDistribution.
-        The data type for 'encoder' is T.
+        For a homogeneous mixture this delegates to the single shared component encoder. For a
+        heterogeneous mixture each component encoder encodes the data separately and the encodings
+        are bundled in a :class:`_HeteroMixtureEncoded` wrapper.
 
         Args:
-            x (Sequence[T]): A Sequence of iid observations drawn from a mixture distribution with component
-                distributions consistent with 'encoder'.
+            x (Sequence[T]): A Sequence of iid observations drawn from a mixture distribution with
+                component distributions consistent with the per-component encoders.
 
         Returns:
-            Data encoded sequence produced from a DataSequenceEncoder 'encoder' for data type T.
+            Encoded sequence (single shared encoding, or a per-component wrapper).
 
         """
-        return self.encoder.seq_encode(x)
+        if self.homogeneous:
+            return self.encoder.seq_encode(x)
+        return _HeteroMixtureEncoded(tuple(e.seq_encode(x) for e in self.encoders))
