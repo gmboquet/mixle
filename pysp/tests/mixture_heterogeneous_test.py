@@ -57,9 +57,7 @@ class HeterogeneousMixtureTestCase(unittest.TestCase):
 
     def test_heterogeneous_encoder_roundtrip(self):
         data = self._gauss_gamma_data(n=200)
-        model = MixtureDistribution(
-            [GaussianDistribution(8.0, 1.0), GammaDistribution(2.0, 1.0)], [0.6, 0.4]
-        )
+        model = MixtureDistribution([GaussianDistribution(8.0, 1.0), GammaDistribution(2.0, 1.0)], [0.6, 0.4])
         enc = model.dist_to_encoder()
         self.assertFalse(enc.homogeneous)
 
@@ -80,9 +78,7 @@ class HeterogeneousMixtureTestCase(unittest.TestCase):
     def test_homogeneous_encoding_unchanged(self):
         rng = np.random.RandomState(5)
         data = (rng.randn(300) + np.where(rng.rand(300) < 0.5, 0.0, 6.0)).tolist()
-        model = MixtureDistribution(
-            [GaussianDistribution(0.0, 1.0), GaussianDistribution(6.0, 1.0)], [0.5, 0.5]
-        )
+        model = MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(6.0, 1.0)], [0.5, 0.5])
         enc = model.dist_to_encoder()
         self.assertTrue(enc.homogeneous)
 

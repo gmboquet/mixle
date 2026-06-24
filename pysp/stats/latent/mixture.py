@@ -287,9 +287,9 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         if not self.has_conj_prior:
             return self.seq_log_density(x)
         cc = self.expected_nparams
-        ll = np.asarray(
-            [u.seq_expected_log_density(_component_enc(x, i)) for i, u in enumerate(self.components)]
-        ).T + cc
+        ll = (
+            np.asarray([u.seq_expected_log_density(_component_enc(x, i)) for i, u in enumerate(self.components)]).T + cc
+        )
         ml = np.max(ll, axis=1, keepdims=True)
         return np.log(np.sum(np.exp(ll - ml), axis=1)) + ml.flatten()
 
