@@ -59,12 +59,12 @@ class ClassNameAliasTestCase(unittest.TestCase):
 
     def test_family_stem_aliases(self):
         from pysp.stats.combinator import conditional as cond
+        from pysp.stats.graphs import vertex_replacement_grammar as grammar
         from pysp.stats.latent import gaussian_mixture
         from pysp.stats.latent import hidden_markov as hm
         from pysp.stats.latent import quantized_hidden_markov_model as qhmm
         from pysp.stats.latent import segmental_hidden_markov_model as seg
         from pysp.stats.latent import tree_hidden_markov_model as tree
-        from pysp.stats.sequences import grammar
 
         self.assertIs(hm.HiddenMarkovModelEstimator, hm.HiddenMarkovEstimator)
         self.assertIs(hm.HiddenMarkovModelSampler, hm.HiddenMarkovSampler)

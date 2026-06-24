@@ -1,23 +1,24 @@
-"""Evaluate, estimate, and sample from a graph-grammar distribution over networks.
+"""Vertex-replacement (NLC) graph grammar -- a distribution over networks you can score, fit, and sample.
 
-This is a GRAPH grammar (a vertex/node-replacement grammar over networkx graphs), not a string/text
-grammar: each rule is ``(lhs, right-hand-side graph, frequency)`` and rules are matched by graph
-isomorphism (on node labels/colors and edge colors/weights). Defines the GrammarDistribution,
-GrammarSampler, GrammarAccumulatorFactory, GrammarEstimatorAccumulator, GrammarEstimator, and the
-GrammarDataEncoder classes for use with pysparkplug.
+A node-label-controlled (NLC) vertex-replacement grammar: each rule rewrites a single nonterminal NODE
+with a right-hand-side graph and reconnects it to the replaced node's former neighbours via an NLC
+embedding relation (pairs of ``(neighbour_label, rhs_node_label)``). This is one kind of graph grammar;
+the other main kind -- hyperedge replacement -- lives in ``hyperedge_replacement_grammar``.
 
-Data type: the observations are GRAPHS (networkx graphs). The model is parameterised by a grammar
-whose rules describe local node neighbourhoods (estimate it from graphs with GrammarEstimator). The
-log-density of a graph factorises over its nodes: each node contributes the model probability of its
-radius-1 ego pattern (its degree and labelled neighbourhood; see ``graph_to_grammar``), and the
-log-density is the sum of those log-probabilities. Each ego pattern's probability mixes a
-frequency-based match probability (isomorphic model pattern, degree within ``lhs_delta``, optionally
-via connected-component decomposition up to ``decomp_level``) with a node-degree background weighted
-by ``mix_p``; both components are valid probabilities, so the log-density is <= 0. ``sample()`` runs a
-vertex-replacement derivation that emits graphs, so sampling and scoring share one sample space.
-Computing the exact graph likelihood under a grammar needs parsing (intractable), so this local
-(radius-1) factorisation is used.
+Observations are GRAPHS (networkx graphs); the model is parameterised by a ``VertexReplacementGrammar``.
 
+- ``log_density(graph)`` is the grammar's MARGINAL likelihood: the graph is parsed (reduced back to the
+  start symbol along the productions) and the score is the log-sum over ALL derivations that yield it
+  (the inside / sum-product recursion, ``marginal_log_prob``). It is exact when the parse forest is
+  fully explored, a variational lower bound (ELBO) if the budget truncates it, and ``-inf`` if the
+  grammar cannot derive the graph. ``best_derivation`` gives the single best (Viterbi) parse.
+- ``sample()`` runs a real vertex-replacement derivation, so sampling and scoring share one space.
+- the estimator learns rule FREQUENCIES from graphs by Viterbi parse-counting (the rule structure is
+  given; inducing the structure from graphs is a separate problem, out of scope).
+
+Defines ``VertexReplacementRule``, ``VertexReplacementGrammar``, and the
+``VertexReplacementGrammar{Distribution,Sampler,Estimator,Accumulator,AccumulatorFactory,DataEncoder}``
+classes. Pre-0.4 generic ``Grammar*`` spellings remain as aliases.
 """
 
 import numpy as np
@@ -52,7 +53,7 @@ from pysp.stats.compute.pdist import (
 _NONTERMINAL = "nonterminal"
 
 
-class GrammarRule:
+class VertexReplacementRule:
     """A node-replacement rule: rewrite a nonterminal node with ``graph``, then reconnect via ``embedding``.
 
     The right-hand side ``graph`` is a networkx graph whose nodes are terminals (carrying ``label`` /
@@ -95,7 +96,7 @@ class GrammarRule:
         self.embedding = None if emb is None else [tuple(pair) for pair in emb]
 
     def __str__(self) -> str:
-        return "GrammarRule(lhs=%s, frequency=%s, nodes=%s, edges=%s, embedding=%s)" % (
+        return "VertexReplacementRule(lhs=%s, frequency=%s, nodes=%s, edges=%s, embedding=%s)" % (
             repr(self.lhs),
             repr(self.frequency),
             self.graph.number_of_nodes(),
@@ -120,7 +121,7 @@ class VertexReplacementGrammar:
         self.cost = 0.0
         self.num_rules = 0
 
-    def add_rule(self, rule: GrammarRule) -> None:
+    def add_rule(self, rule: VertexReplacementRule) -> None:
         self.rule_dict.setdefault(rule.lhs, []).append(rule)
         self.refresh_rules()
 
@@ -154,7 +155,7 @@ class VertexReplacementGrammar:
 
 
 def _copy_rule(rule):
-    return GrammarRule(rule.lhs, rule.graph, rule.frequency, embedding=rule.embedding)
+    return VertexReplacementRule(rule.lhs, rule.graph, rule.frequency, embedding=rule.embedding)
 
 
 #: Default cap on reduction-step expansions while parsing a single graph (graph-grammar parsing is
@@ -488,8 +489,8 @@ def get_degree_dist(rule_list):
     return dist
 
 
-class GrammarDistribution(SequenceEncodableProbabilityDistribution):
-    """GrammarDistribution: a distribution over GRAPHS parameterised by a node-replacement grammar.
+class VertexReplacementGrammarDistribution(SequenceEncodableProbabilityDistribution):
+    """VertexReplacementGrammarDistribution: a distribution over GRAPHS parameterised by a node-replacement grammar.
 
     Observations are networkx graphs. ``log_density`` scores a graph by the product over its nodes of
     the model probability of each node's ego pattern, ``sample`` emits graphs by derivation, and the
@@ -497,7 +498,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
     """
 
     def __init__(self, grammar, mix_p, decomp_level=0, lhs_delta=0, name=None, orig_n=100, start_symbol=None):
-        """GrammarDistribution object defined by a model grammar and mixing parameters.
+        """VertexReplacementGrammarDistribution object defined by a model grammar and mixing parameters.
 
         Args:
             grammar: VertexReplacementGrammar object serving as the model grammar.
@@ -530,7 +531,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
     def __str__(self):
 
         return (
-            "GrammarDistribution("
+            "VertexReplacementGrammarDistribution("
             + str(self.grammar)
             + ","
             + str(self.mix_p)
@@ -633,41 +634,41 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         return values, exact
 
     def sampler(self, seed=None):
-        """Create a GrammarSampler object from the model grammar of this instance.
+        """Create a VertexReplacementGrammarSampler object from the model grammar of this instance.
 
         Args:
             seed (Optional[int]): Seed for the sampler random generator.
 
         Returns:
-            GrammarSampler object.
+            VertexReplacementGrammarSampler object.
 
         """
-        return GrammarSampler(self.grammar, orig_n=self.orig_n, seed=seed, start_symbol=self.start_symbol)
+        return VertexReplacementGrammarSampler(self.grammar, orig_n=self.orig_n, seed=seed, start_symbol=self.start_symbol)
 
     def estimator(self, pseudo_count=None):
-        """Create a GrammarEstimator object.
+        """Create a VertexReplacementGrammarEstimator object.
 
         Args:
             pseudo_count (Optional[float]): Added to rule frequencies when estimating.
 
         Returns:
-            GrammarEstimator object.
+            VertexReplacementGrammarEstimator object.
 
         """
-        return GrammarEstimator(
+        return VertexReplacementGrammarEstimator(
             grammar=self.grammar, start_symbol=self.start_symbol, pseudo_count=pseudo_count, name=self.name
         )
 
     def dist_to_encoder(self):
-        """Returns a GrammarDataEncoder object for encoding sequences of data."""
-        return GrammarDataEncoder()
+        """Returns a VertexReplacementGrammarDataEncoder object for encoding sequences of data."""
+        return VertexReplacementGrammarDataEncoder()
 
 
-class GrammarSampler(DistributionSampler):
-    """GrammarSampler object for sampling graphs generated from a node-replacement grammar."""
+class VertexReplacementGrammarSampler(DistributionSampler):
+    """VertexReplacementGrammarSampler object for sampling graphs generated from a node-replacement grammar."""
 
     def __init__(self, grammar, orig_n=100, seed=None, start_symbol=None):
-        """GrammarSampler object.
+        """VertexReplacementGrammarSampler object.
 
         Args:
             grammar: VertexReplacementGrammar object to generate graphs from.
@@ -731,12 +732,12 @@ def _zeroed_counts(grammar):
     """A copy of ``grammar``'s rule structure with every frequency set to 0 (a counts accumulator)."""
     counts = VertexReplacementGrammar(grammar.type, grammar.clustering, grammar.name, grammar.mu)
     for symbol, rules in grammar.rule_dict.items():
-        counts.rule_dict[symbol] = [GrammarRule(r.lhs, r.graph, 0.0, embedding=r.embedding) for r in rules]
+        counts.rule_dict[symbol] = [VertexReplacementRule(r.lhs, r.graph, 0.0, embedding=r.embedding) for r in rules]
     counts.refresh_rules()
     return counts
 
 
-class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
+class VertexReplacementGrammarAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate Viterbi rule-firing counts: parse each observed graph and tally how often each rule fires.
 
     This estimates rule FREQUENCIES only. The rule STRUCTURE (which right-hand sides / embeddings exist)
@@ -843,12 +844,12 @@ class GrammarEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self):
-        """Returns a GrammarDataEncoder object for encoding sequences of data."""
-        return GrammarDataEncoder()
+        """Returns a VertexReplacementGrammarDataEncoder object for encoding sequences of data."""
+        return VertexReplacementGrammarDataEncoder()
 
 
-class GrammarAccumulatorFactory(StatisticAccumulatorFactory):
-    """Creates GrammarEstimatorAccumulator objects carrying the rule structure to estimate frequencies for."""
+class VertexReplacementGrammarAccumulatorFactory(StatisticAccumulatorFactory):
+    """Creates VertexReplacementGrammarAccumulator objects carrying the rule structure to estimate frequencies for."""
 
     def __init__(self, grammar=None, start_symbol=None, keys=None):
         self.grammar = grammar
@@ -856,12 +857,12 @@ class GrammarAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self):
-        """Returns a new GrammarEstimatorAccumulator object."""
-        return GrammarEstimatorAccumulator(grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys)
+        """Returns a new VertexReplacementGrammarAccumulator object."""
+        return VertexReplacementGrammarAccumulator(grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys)
 
 
-class GrammarEstimator(ParameterEstimator):
-    """Estimate a GrammarDistribution's rule FREQUENCIES from graphs by Viterbi parse-counting.
+class VertexReplacementGrammarEstimator(ParameterEstimator):
+    """Estimate a VertexReplacementGrammarDistribution's rule FREQUENCIES from graphs by Viterbi parse-counting.
 
     The rule structure is supplied via ``grammar`` (e.g. from ``dist.estimator()``): each training graph is
     parsed with the current model and the rules its best derivation fires are counted; frequencies are the
@@ -870,7 +871,7 @@ class GrammarEstimator(ParameterEstimator):
     """
 
     def __init__(self, grammar=None, start_symbol=None, pseudo_count=None, name=None, keys=None):
-        """GrammarEstimator object.
+        """VertexReplacementGrammarEstimator object.
 
         Args:
             grammar: VertexReplacementGrammar giving the rule structure whose frequencies are estimated.
@@ -887,52 +888,52 @@ class GrammarEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self):
-        """Returns a GrammarAccumulatorFactory carrying the rule structure."""
-        return GrammarAccumulatorFactory(grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys)
+        """Returns a VertexReplacementGrammarAccumulatorFactory carrying the rule structure."""
+        return VertexReplacementGrammarAccumulatorFactory(grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys)
 
     def accumulatorFactory(self):
         """Deprecated alias for accumulator_factory()."""
         return self.accumulator_factory()
 
     def estimate(self, nobs, suff_stat):
-        """Build a GrammarDistribution from accumulated rule-firing counts (frequencies).
+        """Build a VertexReplacementGrammarDistribution from accumulated rule-firing counts (frequencies).
 
         Args:
             nobs (Optional[float]): Weighted number of observations (unused).
             suff_stat: VertexReplacementGrammar of accumulated rule-firing counts.
 
         Returns:
-            GrammarDistribution object.
+            VertexReplacementGrammarDistribution object.
 
         """
         grammar = suff_stat if suff_stat is not None else self.grammar
         if grammar is None:
-            raise ValueError("GrammarEstimator needs a rule structure (grammar=...) to estimate frequencies.")
+            raise ValueError("VertexReplacementGrammarEstimator needs a rule structure (grammar=...) to estimate frequencies.")
         if self.pseudo_count is not None:
             for rlist in grammar.rule_dict.values():
                 for rule in rlist:
                     rule.frequency += self.pseudo_count
-        return GrammarDistribution(grammar, 0.01, start_symbol=self.start_symbol, name=self.name)
+        return VertexReplacementGrammarDistribution(grammar, 0.01, start_symbol=self.start_symbol, name=self.name)
 
 
-class GrammarDataEncoder(DataSequenceEncoder):
-    """GrammarDataEncoder object for encoding sequences of observed graphs (identity encoding)."""
+class VertexReplacementGrammarDataEncoder(DataSequenceEncoder):
+    """VertexReplacementGrammarDataEncoder object for encoding sequences of observed graphs (identity encoding)."""
 
     def __str__(self):
-        """Returns string representation of GrammarDataEncoder object."""
-        return "GrammarDataEncoder"
+        """Returns string representation of VertexReplacementGrammarDataEncoder object."""
+        return "VertexReplacementGrammarDataEncoder"
 
     def __eq__(self, other):
-        """Encoders are interchangeable iff other is also a GrammarDataEncoder.
+        """Encoders are interchangeable iff other is also a VertexReplacementGrammarDataEncoder.
 
         Args:
             other (object): Object to compare against.
 
         Returns:
-            True if other is a GrammarDataEncoder instance.
+            True if other is a VertexReplacementGrammarDataEncoder instance.
 
         """
-        return isinstance(other, GrammarDataEncoder)
+        return isinstance(other, VertexReplacementGrammarDataEncoder)
 
     def seq_encode(self, x):
         """Encode a sequence of observed graphs for vectorized calls (identity encoding).
@@ -947,9 +948,14 @@ class GrammarDataEncoder(DataSequenceEncoder):
         return x
 
 
-# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
-GrammarAccumulator = GrammarEstimatorAccumulator
-
-
-# Backward-compatible alias for the former VRG (vertex replacement grammar) name.
+# --- Backward-compatible aliases -------------------------------------------------------------------
+# The precise names above are canonical; these keep the pre-0.4 generic "Grammar*" spellings working.
+GrammarRule = VertexReplacementRule
+GrammarDistribution = VertexReplacementGrammarDistribution
+GrammarSampler = VertexReplacementGrammarSampler
+GrammarEstimator = VertexReplacementGrammarEstimator
+GrammarEstimatorAccumulator = VertexReplacementGrammarAccumulator
+GrammarAccumulator = VertexReplacementGrammarAccumulator
+GrammarAccumulatorFactory = VertexReplacementGrammarAccumulatorFactory
+GrammarDataEncoder = VertexReplacementGrammarDataEncoder
 VRG = VertexReplacementGrammar
