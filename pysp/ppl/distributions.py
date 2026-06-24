@@ -100,6 +100,41 @@ def NegativeBinomial(r: Any, p: Any, *, name: str | None = None, keys: str | Non
     return RandomVariable._sample("NegativeBinomial", (r, p), name=name, keys=keys)
 
 
+def HalfNormal(sigma: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Half-normal on ``[0, inf)`` with scale ``sigma`` -- the standard weakly-informative scale prior."""
+    return RandomVariable._sample("HalfNormal", (sigma,), name=name, keys=keys)
+
+
+def InverseGamma(alpha: Any, beta: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Inverse-gamma(``alpha``, ``beta``) -- the classic conjugate prior for a variance."""
+    return RandomVariable._sample("InverseGamma", (alpha, beta), name=name, keys=keys)
+
+
+def InverseGaussian(mu: Any, lam: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Inverse-Gaussian (Wald) with mean ``mu`` and shape ``lam`` -- a positive, right-skewed law."""
+    return RandomVariable._sample("InverseGaussian", (mu, lam), name=name, keys=keys)
+
+
+def Gumbel(loc: Any, scale: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Gumbel (type-I extreme-value) with ``loc`` and ``scale`` -- for maxima / extremes."""
+    return RandomVariable._sample("Gumbel", (loc, scale), name=name, keys=keys)
+
+
+def SkewNormal(loc: Any, scale: Any, shape: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Skew-normal with ``loc``, ``scale``, and ``shape`` (skewness; ``shape=0`` recovers the Normal)."""
+    return RandomVariable._sample("SkewNormal", (loc, scale, shape), name=name, keys=keys)
+
+
+def Skellam(mu1: Any, mu2: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Skellam: the difference of two independent ``Poisson(mu1)`` and ``Poisson(mu2)`` counts."""
+    return RandomVariable._sample("Skellam", (mu1, mu2), name=name, keys=keys)
+
+
+def LogSeries(p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Logarithmic (log-series) distribution on ``{1, 2, ...}`` with parameter ``p`` in ``(0, 1)``."""
+    return RandomVariable._sample("LogSeries", (p,), name=name, keys=keys)
+
+
 def Categorical(
     probs: Any, *, dim: int | None = None, name: str | None = None, keys: str | None = None
 ) -> RandomVariable:
