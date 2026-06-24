@@ -217,6 +217,11 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
+    def density_semantics(self):
+        from pysp.stats.compute.pdist import join_density_semantics
+
+        return join_density_semantics(c.density_semantics() for c in [self.dist])
+
     def log_density(self, x: Sequence[T]) -> float:
         """Evaluate the log-density of SequenceDistribution at observed sequence x.
 

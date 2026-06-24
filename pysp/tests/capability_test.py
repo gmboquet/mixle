@@ -283,3 +283,24 @@ def test_lda_log_density_is_flagged_as_a_lower_bound():
 
 def test_exact_density_is_in_the_catalog():
     assert "ExactDensity" in {s.name for s in cap.catalog()}
+
+
+def test_combinators_propagate_density_semantics_from_children():
+    from pysp.stats.combinator.composite import CompositeDistribution
+    from pysp.stats.combinator.optional import OptionalDistribution
+    from pysp.stats.compute.pdist import DensitySemantics, join_density_semantics
+    from pysp.stats.latent.lda import LDADistribution
+
+    lda = LDADistribution(np.array([[0.7, 0.3], [0.2, 0.8]]), [2.0, 2.0])  # LOWER_BOUND
+    g = GaussianDistribution(0.0, 1.0)  # EXACT
+    # a mixture/composite over an exact child stays exact; over an ELBO child it becomes a lower bound
+    assert cap.supports(MixtureDistribution([g, g], [0.5, 0.5]), cap.ExactDensity)
+    assert not cap.supports(MixtureDistribution([lda, g], [0.5, 0.5]), cap.ExactDensity)
+    assert not cap.supports(CompositeDistribution([g, lda]), cap.ExactDensity)
+    assert OptionalDistribution(lda, p=0.1).density_semantics() is DensitySemantics.LOWER_BOUND
+    # mixing a lower and an upper bound loses the direction -> ESTIMATE
+    assert (
+        join_density_semantics([DensitySemantics.LOWER_BOUND, DensitySemantics.UPPER_BOUND])
+        is DensitySemantics.ESTIMATE
+    )
+    assert join_density_semantics([DensitySemantics.EXACT, DensitySemantics.EXACT]) is DensitySemantics.EXACT

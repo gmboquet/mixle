@@ -291,6 +291,18 @@ class GrammarTestCase(unittest.TestCase):
         self.assertIsInstance(fit, GrammarDistribution)
         self.assertTrue(np.isfinite(fit.log_density(self._edge("A", "B"))))
 
+    def test_seq_log_density_reports_per_row_exactness(self):
+        from pysp.stats.compute.pdist import DensitySemantics
+
+        dist = self._freq_dist()
+        self.assertIs(dist.density_semantics(), DensitySemantics.LOWER_BOUND)  # static: can truncate
+        values, exact = dist.seq_log_density([self._edge("A", "B"), self._edge("A", "Z")], with_status=True)
+        self.assertAlmostEqual(values[0], float(np.log(0.5)), places=9)
+        self.assertEqual(values[1], float("-inf"))  # not derivable
+        self.assertTrue(bool(exact[0]) and bool(exact[1]))  # small graphs: parsed exactly, not truncated
+        val, ok = dist.log_density(self._edge("A", "B"), with_status=True)
+        self.assertTrue(ok)
+
     def test_log_density_of_a_sample_is_finite(self):
         # sample() emits a graph and log_density scores a graph -- one sample space.
         dist = self._freq_dist()

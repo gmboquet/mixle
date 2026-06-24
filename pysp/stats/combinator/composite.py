@@ -173,6 +173,11 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
         return rv
 
+    def density_semantics(self):
+        from pysp.stats.compute.pdist import join_density_semantics
+
+        return join_density_semantics(c.density_semantics() for c in self.dists)
+
     def log_density(self, x: tuple[Any, ...]) -> float:
         """Evaluates log-density of CompositeDistribution for single observation tuple x.
 
