@@ -36,6 +36,14 @@ from pysp.stats.univariate.continuous.generalized_extreme_value import (
     GeneralizedExtremeValueDistribution,
     GeneralizedExtremeValueEstimator,
 )
+from pysp.stats.univariate.continuous.generalized_gaussian import (
+    GeneralizedGaussianDistribution,
+    GeneralizedGaussianEstimator,
+)
+from pysp.stats.univariate.continuous.generalized_pareto import (
+    GeneralizedParetoDistribution,
+    GeneralizedParetoEstimator,
+)
 from pysp.stats.univariate.continuous.gumbel import GumbelDistribution, GumbelEstimator
 from pysp.stats.univariate.continuous.half_normal import HalfNormalDistribution, HalfNormalEstimator
 from pysp.stats.univariate.continuous.inverse_gamma import InverseGammaDistribution, InverseGammaEstimator
@@ -43,8 +51,10 @@ from pysp.stats.univariate.continuous.inverse_gaussian import InverseGaussianDis
 from pysp.stats.univariate.continuous.laplace import LaplaceDistribution, LaplaceEstimator
 from pysp.stats.univariate.continuous.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
 from pysp.stats.univariate.continuous.logistic import LogisticDistribution, LogisticEstimator
+from pysp.stats.univariate.continuous.nakagami import NakagamiDistribution, NakagamiEstimator
 from pysp.stats.univariate.continuous.pareto import ParetoDistribution, ParetoEstimator
 from pysp.stats.univariate.continuous.rayleigh import RayleighDistribution, RayleighEstimator
+from pysp.stats.univariate.continuous.rician import RicianDistribution, RicianEstimator
 from pysp.stats.univariate.continuous.skew_normal import SkewNormalDistribution, SkewNormalEstimator
 from pysp.stats.univariate.continuous.student_t import StudentTDistribution, StudentTEstimator
 from pysp.stats.univariate.continuous.tweedie import TweedieDistribution, TweedieEstimator
@@ -291,6 +301,46 @@ register_family(
     positive=(True, True),
     seed_at=lambda v, s: {"mu": max(abs(float(v)), 1e-2), "phi": 1.0, "p": 1.5},
     read=lambda d: {"mu": d.mu, "phi": d.phi, "p": d.p},
+)
+register_family(
+    "GeneralizedGaussian",
+    GeneralizedGaussianDistribution,
+    GeneralizedGaussianEstimator,
+    lambda mu, alpha, beta: {"mu": float(mu), "alpha": float(alpha), "beta": float(beta)},
+    arity=3,
+    positive=(False, True, True),
+    seed_at=lambda v, s: {"mu": float(v), "alpha": max(float(s) or 1.0, 1e-2), "beta": 2.0},
+    read=lambda d: {"mu": d.mu, "alpha": d.alpha, "beta": d.beta},
+)
+register_family(
+    "GeneralizedPareto",
+    GeneralizedParetoDistribution,
+    GeneralizedParetoEstimator,
+    lambda scale, shape, loc: {"scale": float(scale), "shape": float(shape), "loc": float(loc)},
+    arity=3,
+    positive=(True, False, False),
+    seed_at=lambda v, s: {"scale": max(float(s) or 1.0, 1e-2), "shape": 0.1, "loc": 0.0},
+    read=lambda d: {"scale": d.scale, "shape": d.shape, "loc": d.loc},
+)
+register_family(
+    "Nakagami",
+    NakagamiDistribution,
+    NakagamiEstimator,
+    lambda m, omega: {"m": float(m), "omega": float(omega)},
+    arity=2,
+    positive=(True, True),
+    seed_at=lambda v, s: {"m": 1.0, "omega": max(float(v) ** 2, 1e-2)},
+    read=lambda d: {"m": d.m, "omega": d.omega},
+)
+register_family(
+    "Rician",
+    RicianDistribution,
+    RicianEstimator,
+    lambda nu, sigma: {"nu": float(nu), "sigma": float(sigma)},
+    arity=2,
+    positive=(True, True),
+    seed_at=lambda v, s: {"nu": max(abs(float(v)), 1e-2), "sigma": max(float(s) or 1.0, 1e-2)},
+    read=lambda d: {"nu": d.nu, "sigma": d.sigma},
 )
 
 
