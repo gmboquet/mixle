@@ -19,6 +19,12 @@ input points scaled into the supplied per-dimension bounds:
 
 from __future__ import annotations
 
+from pysp.doe.analysis import (
+    FactorialEffects,
+    ResponseSurface,
+    factorial_effects,
+    response_surface,
+)
 from pysp.doe.bayesopt import (
     BayesOptResult,
     OptimizationResult,
@@ -93,6 +99,10 @@ __all__ = [
     "simplex_lattice",
     "simplex_centroid",
     "to_pseudocomponents",
+    "factorial_effects",
+    "FactorialEffects",
+    "response_surface",
+    "ResponseSurface",
     "OptimizationResult",
     "BayesOptResult",
     "expected_improvement",
