@@ -31,11 +31,16 @@ from pysp.stats.univariate.continuous.exgaussian import (
 from pysp.stats.univariate.continuous.exponential import ExponentialDistribution, ExponentialEstimator
 from pysp.stats.univariate.continuous.gamma import GammaDistribution, GammaEstimator
 from pysp.stats.univariate.continuous.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.univariate.continuous.gumbel import GumbelDistribution, GumbelEstimator
+from pysp.stats.univariate.continuous.half_normal import HalfNormalDistribution, HalfNormalEstimator
+from pysp.stats.univariate.continuous.inverse_gamma import InverseGammaDistribution, InverseGammaEstimator
+from pysp.stats.univariate.continuous.inverse_gaussian import InverseGaussianDistribution, InverseGaussianEstimator
 from pysp.stats.univariate.continuous.laplace import LaplaceDistribution, LaplaceEstimator
 from pysp.stats.univariate.continuous.log_gaussian import LogGaussianDistribution, LogGaussianEstimator
 from pysp.stats.univariate.continuous.logistic import LogisticDistribution, LogisticEstimator
 from pysp.stats.univariate.continuous.pareto import ParetoDistribution, ParetoEstimator
 from pysp.stats.univariate.continuous.rayleigh import RayleighDistribution, RayleighEstimator
+from pysp.stats.univariate.continuous.skew_normal import SkewNormalDistribution, SkewNormalEstimator
 from pysp.stats.univariate.continuous.student_t import StudentTDistribution, StudentTEstimator
 from pysp.stats.univariate.continuous.uniform import UniformDistribution, UniformEstimator
 from pysp.stats.univariate.continuous.weibull import WeibullDistribution, WeibullEstimator
@@ -47,8 +52,10 @@ from pysp.stats.univariate.discrete.integer_categorical import (
     IntegerCategoricalDistribution,
     IntegerCategoricalEstimator,
 )
+from pysp.stats.univariate.discrete.logseries import LogSeriesDistribution, LogSeriesEstimator
 from pysp.stats.univariate.discrete.negative_binomial import NegativeBinomialDistribution, NegativeBinomialEstimator
 from pysp.stats.univariate.discrete.poisson import PoissonDistribution, PoissonEstimator
+from pysp.stats.univariate.discrete.skellam import SkellamDistribution, SkellamEstimator
 
 # --- family registration: (user-facing args) -> (underlying *Distribution kwargs) ---
 register_family(
@@ -178,6 +185,76 @@ register_family(
     support=("positive", "unit"),
     init_fit=_nb_init,
     read=lambda d: {"r": d.r, "p": d.p},
+)
+register_family(
+    "HalfNormal",
+    HalfNormalDistribution,
+    HalfNormalEstimator,
+    lambda sigma: {"sigma": float(sigma)},
+    arity=1,
+    positive=(True,),
+    seed_at=lambda v, s: {"sigma": max(float(s) or abs(float(v)) or 1.0, 1e-2)},
+    read=lambda d: {"sigma": d.sigma},
+)
+register_family(
+    "InverseGamma",
+    InverseGammaDistribution,
+    InverseGammaEstimator,
+    lambda alpha, beta: {"alpha": float(alpha), "beta": float(beta)},
+    arity=2,
+    positive=(True, True),
+    seed_at=lambda v, s: {"alpha": 3.0, "beta": max(2.0 * abs(float(v)), 1e-2)},
+    read=lambda d: {"alpha": d.alpha, "beta": d.beta},
+)
+register_family(
+    "InverseGaussian",
+    InverseGaussianDistribution,
+    InverseGaussianEstimator,
+    lambda mu, lam: {"mu": float(mu), "lam": float(lam)},
+    arity=2,
+    positive=(True, True),
+    seed_at=lambda v, s: {"mu": max(abs(float(v)), 1e-2), "lam": max(abs(float(v)), 1e-2)},
+    read=lambda d: {"mu": d.mu, "lam": d.lam},
+)
+register_family(
+    "Gumbel",
+    GumbelDistribution,
+    GumbelEstimator,
+    lambda loc, scale: {"loc": float(loc), "scale": float(scale)},
+    arity=2,
+    positive=(False, True),
+    seed_at=lambda v, s: {"loc": float(v), "scale": max(float(s) or 1.0, 1e-2)},
+    read=lambda d: {"loc": d.loc, "scale": d.scale},
+)
+register_family(
+    "SkewNormal",
+    SkewNormalDistribution,
+    SkewNormalEstimator,
+    lambda loc, scale, shape: {"loc": float(loc), "scale": float(scale), "shape": float(shape)},
+    arity=3,
+    positive=(False, True, False),
+    seed_at=lambda v, s: {"loc": float(v), "scale": max(float(s) or 1.0, 1e-2), "shape": 0.0},
+    read=lambda d: {"loc": d.loc, "scale": d.scale, "shape": d.shape},
+)
+register_family(
+    "Skellam",
+    SkellamDistribution,
+    SkellamEstimator,
+    lambda mu1, mu2: {"mu1": float(mu1), "mu2": float(mu2)},
+    arity=2,
+    positive=(True, True),
+    seed_at=lambda v, s: {"mu1": max(abs(float(v)), 1.0), "mu2": 1.0},
+    read=lambda d: {"mu1": d.mu1, "mu2": d.mu2},
+)
+register_family(
+    "LogSeries",
+    LogSeriesDistribution,
+    LogSeriesEstimator,
+    lambda p: {"p": float(p)},
+    arity=1,
+    support=("unit",),
+    seed_at=lambda v, s: {"p": 0.5},
+    read=lambda d: {"p": d.p},
 )
 
 
