@@ -121,6 +121,11 @@ from pysp.ppl.field import (
     joint,
     multistart,
 )
+from pysp.ppl.predictive import (
+    posterior_predictive_check,
+    prior_predictive,
+    prior_predictive_check,
+)
 from pysp.ppl.priors import Potts, TotalVariation
 
 __all__ = [
@@ -171,6 +176,9 @@ __all__ = [
     "Field",
     "Group",
     "compare",
+    "posterior_predictive_check",
+    "prior_predictive",
+    "prior_predictive_check",
     "constrain",
     "Constraint",
     "Event",
