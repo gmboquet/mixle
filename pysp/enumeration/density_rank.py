@@ -474,6 +474,191 @@ def count_dp_seek(
     return CountDPSeekResult(value, log_prob, index, wl, wu, False, oversample)
 
 
+@dataclass
+class MarginalSeekResult:
+    """The value at a descending index, with a *guaranteed* bracket on its TRUE marginal rank.
+
+    :func:`count_dp_seek` brackets only the *tropical* rank for a marginal family (mixture): its count
+    index bins by the dominant-component cost ``M(x)`` and over-counts values shared by several
+    components, so neither the cost gap nor the multiplicity is accounted for. This result closes both
+    gaps soundly:
+
+      * **cost gap** -- the window is widened by the family's ``tropical_displacement_bits`` (``log2(K)``
+        for a ``K``-component mixture, since ``M(x) <= log p(x) <= M(x) + log K``), so every value below
+        the window is provably more probable than ``value`` and every value above it provably less.
+      * **multiplicity gap** -- a shared value is counted at most ``K`` times, so the count strictly
+        below the window over-states the distinct rank by at most ``K``; dividing by ``K`` restores a
+        sound lower bound.
+
+    Hence ``[true_rank_lower, true_rank_upper]`` provably contains ``#{u : log p(u) > log p(value)}``.
+    Two regimes pin it exactly (``exact``): a decomposable / provably-disjoint family (no displacement,
+    no over-count -> the structural count IS the distinct rank), or a shallow index whose whole prefix
+    fits the resolve budget (unranked and de-duplicated against the true ``log_density``). Otherwise the
+    bracket is the honest, provable envelope -- the #P-hard core (de-duplicating an arbitrarily deep
+    overlapping prefix) is exactly what cannot be done cheaply.
+
+    Attributes:
+        value: the observation at tropical descending ``index``.
+        log_prob: exact ``log p(value)`` (the true marginal, re-evaluated -- not the tropical cost).
+        index: the requested 0-based (tropical) index.
+        true_rank_lower, true_rank_upper: guaranteed bracket on ``value``'s TRUE marginal rank.
+        exact: the bracket collapsed to the exact true rank (then the two bounds are equal).
+        oversample: the quantizer oversample used (higher -> finer buckets -> tighter bracket).
+    """
+
+    value: Any
+    log_prob: float
+    index: int
+    true_rank_lower: int
+    true_rank_upper: int
+    exact: bool
+    oversample: int
+
+    @property
+    def semantics(self):
+        """``DensitySemantics.EXACT`` when the rank is pinned, else ``ESTIMATE`` (a provable bracket)."""
+        from pysp.stats.compute.pdist import DensitySemantics
+
+        return DensitySemantics.EXACT if self.exact else DensitySemantics.ESTIMATE
+
+
+def marginal_seek(
+    dist: Any,
+    index: int,
+    oversample: int = 64,
+    bin_width_bits: float = 1.0,
+    resolve_max: int = 8192,
+    tol: float = 1.0e-9,
+    max_fine_bucket_cap: int = 1 << 30,
+) -> MarginalSeekResult:
+    """Seek descending ``index`` with a GUARANTEED bracket on the value's true marginal rank.
+
+    For a decomposable family this matches :func:`count_dp_seek` (zero displacement, exact count). For
+    a marginal family (mixture) the structural count index is the *tropical* projection; this widens the
+    rank window by the family's :meth:`~pysp.stats.compute.pdist.ProbabilityDistribution.tropical_displacement_bits`
+    so the bracket provably bounds the TRUE marginal rank, divides the below-window count by the
+    component multiplicity to stay sound against over-counting, and -- when the whole prefix is small or
+    the family is decomposable/disjoint -- resolves the window against the true ``log_density`` to pin
+    the exact rank in ``O(window)`` rather than ``O(index)``.
+
+    Raises ``EnumerationError`` when no structural count index exists (e.g. a continuous-component
+    mixture), and ``IndexError`` when ``index`` is beyond the reachable structural count -- both exactly
+    like :func:`count_dp_seek`, whose depth-deepening loop this shares. A large probability *gap* (a
+    value separated from the rest by many bits, e.g. an outcome that only a ~1e-6-weight component can
+    emit) can make that loop conclude the support is exhausted early, so such deep-gap indices are
+    unreachable; this never affects reachable indices, since every unreached value is strictly *less*
+    probable than everything reached. The returned ``value`` sits at the *tropical* index; for the value
+    at a true descending index use :func:`pysp.enumeration.best_first.sound_top_k`.
+    """
+    from pysp.enumeration.quantization.core import Quantizer
+    from pysp.enumeration.streams import freeze
+    from pysp.stats.compute.pdist import EnumerationError
+
+    if index < 0:
+        raise IndexError("index must be non-negative")
+    q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
+
+    # Smear covers (a) the ~1-bit quantization boundary and (b) the tropical cost gap log2(K) between
+    # the structural count cost and the true marginal log-density. With smear >= the displacement,
+    # every value whose tropical bucket is strictly below the window is provably MORE probable than the
+    # located value, and every value strictly above it is provably LESS probable (see the class doc).
+    disp_bits = 0.0
+    disp_fn = getattr(dist, "tropical_displacement_bits", None)
+    if callable(disp_fn):
+        disp_bits = float(disp_fn())
+    mult_cap = max(1, round(2.0**disp_bits))  # worst-case copies of a shared value (K)
+    smear = oversample + math.ceil(disp_bits * oversample / bin_width_bits)
+
+    # Deepen the depth bound until the located bucket's widened window is fully built or the structural
+    # count stops growing -- the same coverage-driven loop as count_dp_seek. ``exhausted`` records that
+    # deepening stopped adding support (the histogram now holds every value), in which case the window
+    # is complete even when ``hi_b`` runs past the last non-empty bucket -- those buckets are just empty.
+    mfb = max(2 * smear, 64)
+    idx = None
+    prev_total = -1
+    exhausted = False
+    while True:
+        idx, _truncated = dist.quantized_count_index(q, max_fine_bucket=mfb)
+        if idx is None:
+            raise EnumerationError(dist, reason="no structural count index for seek")
+        total = idx.total()
+        located = _locate_bucket(idx.hist, index)
+        if located is not None:
+            built_top = idx.hist.base + len(idx.hist.data) - 1
+            if located[0] + smear <= built_top:
+                break
+        if total == prev_total and total > 0:
+            exhausted = True
+            break
+        if mfb >= max_fine_bucket_cap:
+            break
+        prev_total = total
+        mfb *= 2
+
+    located = _locate_bucket(idx.hist, index)
+    if located is None:
+        raise IndexError("index %d is beyond the structural support count %d" % (index, idx.total()))
+    b_star, offset = located
+    value, _trop_lp = idx.get_in_bucket(b_star, offset)
+    t = float(dist.log_density(value))  # TRUE marginal log-density of the located value
+
+    # Center the rank window on ``value``'s TRUE bucket, not the located copy's bucket ``b_star``. A
+    # value can surface as a low-weight *non-dominant* copy far down the tropical order while being
+    # genuinely probable (true rank small): all of its copies sit at buckets >= fine_bucket(M(value)) >=
+    # fine_bucket(log p(value)) = fb_t, so b_star >= fb_t. The displacement theorem brackets the rank
+    # only when the window is centered on fb_t; ``b_star >= fb_t`` guarantees the built depth still
+    # covers ``fb_t + smear``.
+    hist = idx.hist
+    fb_t = q.fine_bucket(t)
+    lo_b, hi_b = fb_t - smear, fb_t + smear
+    raw_below = sum(hist.count_at(b) for b in range(hist.base, lo_b))
+    raw_within = sum(hist.count_at(b) for b in range(lo_b, hi_b + 1))
+    built_top = hist.base + len(hist.data) - 1
+    window_built = hi_b <= built_top or exhausted
+
+    # Exact path 1 -- no displacement and no over-count (decomposable, or a provably-disjoint mixture
+    # reporting disp_bits == 0): raw_below is already the exact distinct count strictly below the window
+    # (all provably more probable), so resolving the window against the true log_density pins the rank.
+    if mult_cap == 1 and window_built and raw_within <= resolve_max:
+        seen: set = set()
+        strictly_more = 0
+        for b in range(lo_b, hi_b + 1):
+            for off in range(hist.count_at(b)):
+                u, _ = idx.get_in_bucket(b, off)
+                key = freeze(u)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if float(dist.log_density(u)) > t + tol:
+                    strictly_more += 1
+        rank = raw_below + strictly_more
+        return MarginalSeekResult(value, t, index, rank, rank, True, oversample)
+
+    # Exact path 2 -- shallow index: the whole prefix up to the window is small, so unrank and
+    # de-duplicate [base, hi_b] against the true log_density. Every value more probable than ``value``
+    # has its dominant copy at a bucket <= b_star <= hi_b, so this distinct set is complete.
+    if window_built and (raw_below + raw_within) <= resolve_max:
+        seen = set()
+        strictly_more = 0
+        for b in range(hist.base, hi_b + 1):
+            for off in range(hist.count_at(b)):
+                u, _ = idx.get_in_bucket(b, off)
+                key = freeze(u)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if float(dist.log_density(u)) > t + tol:
+                    strictly_more += 1
+        return MarginalSeekResult(value, t, index, strictly_more, strictly_more, True, oversample)
+
+    # Bracket fallback -- the deep overlapping case. raw_below over-counts the distinct rank by at most
+    # mult_cap (each shared value appears once per component), so ceil(raw_below / mult_cap) is a sound
+    # floor; raw_below + raw_within is a sound ceiling (every more-probable value has a copy <= hi_b).
+    lower = -(-raw_below // mult_cap)  # ceil division
+    upper = raw_below + raw_within
+    return MarginalSeekResult(value, t, index, lower, upper, lower == upper, oversample)
+
+
 def _mass_histogram(dist, quantizer, max_fine_bucket):
     """Probability MASS per fine bucket of bits -- ``{bucket: sum of p(y) over y in that bucket}``.
 
