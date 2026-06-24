@@ -108,6 +108,49 @@ def maximin_latin_hypercube(
     return best_design
 
 
+def _maxpro_criterion(unit: np.ndarray) -> float:
+    """MaxPro criterion of a unit design: ``sum_{i<j} 1 / prod_k (x_ik - x_jk)^2`` (lower is better)."""
+    diff = unit[:, None, :] - unit[None, :, :]
+    prod = np.prod(diff * diff + 1e-12, axis=2)
+    iu = np.triu_indices(unit.shape[0], k=1)
+    return float(np.sum(1.0 / prod[iu]))
+
+
+def maxpro_design(
+    bounds: Bounds, n: int, seed: int | RandomState | None = None, *, iterations: int = 2000
+) -> np.ndarray:
+    """Return a maximum-projection (MaxPro) space-filling design (Joseph, Gul & Ba 2015).
+
+    MaxPro minimizes ``sum_{i<j} 1 / prod_k (x_ik - x_jk)^2``, which forces the points to spread out in
+    *every* subspace projection, not just the full space. That makes it the design of choice when only
+    some of the inputs turn out to matter (factor screening / sloppy models): even projected onto the
+    active subset, the points stay space-filling. Starts from a Latin-hypercube (preserving 1-D
+    uniformity) and improves it by accept-if-better within-column swaps. Returns an ``(n, d)`` array.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive.")
+    b = _as_bounds(bounds)
+    rng = _as_rng(seed)
+    d = b.shape[0]
+    n = int(n)
+    unit = np.empty((n, d), dtype=np.float64)
+    for j in range(d):
+        unit[:, j] = (rng.permutation(n) + rng.random_sample(n)) / n
+    if n < 2 or d == 0:
+        return _scale_unit(unit, b)
+    best = _maxpro_criterion(unit)
+    for _ in range(int(iterations)):
+        col = int(rng.randint(d))
+        i, j = rng.choice(n, size=2, replace=False)
+        unit[[i, j], col] = unit[[j, i], col]  # swap preserves the LHS column (a permutation of strata)
+        trial = _maxpro_criterion(unit)
+        if trial < best:
+            best = trial
+        else:
+            unit[[i, j], col] = unit[[j, i], col]  # revert
+    return _scale_unit(unit, b)
+
+
 def _qmc_unit(engine_cls: Any, d: int, n: int, scramble: bool, rng: RandomState) -> np.ndarray:
     """Draw ``n`` points in ``[0, 1]^d`` from a scipy ``qmc`` engine, seeded from ``rng``.
 
