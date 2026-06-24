@@ -1,7 +1,7 @@
-"""Tests for pysp.stats.sequences.grammar, pysp.stats.sequences.markov_transform, and pysp.stats.sequences.sparse_markov_transform.
+"""Tests for pysp.stats.graphs.vertex_replacement_grammar, pysp.stats.sequences.markov_transform, and pysp.stats.sequences.sparse_markov_transform.
 
 Covers: clean grammar module imports without cnrg, the in-tree grammar accumulator/sampler path, the
-GrammarDistribution.estimator() fix, markov_transform sample/estimate smoke on tiny data, and DataSequenceEncoder
+VertexReplacementGrammarDistribution.estimator() fix, markov_transform sample/estimate smoke on tiny data, and DataSequenceEncoder
 equality / encode round-trip consistency.
 """
 
@@ -89,14 +89,14 @@ class ImportTestCase(unittest.TestCase):
 
     def test_grammar_imports_without_cnrg(self):
         # The module must import cleanly even when the optional 'cnrg' package is absent.
-        mod = importlib.import_module("pysp.stats.sequences.grammar")
+        mod = importlib.import_module("pysp.stats.graphs.vertex_replacement_grammar")
         for name in (
-            "GrammarDistribution",
-            "GrammarSampler",
-            "GrammarEstimatorAccumulator",
+            "VertexReplacementGrammarDistribution",
+            "VertexReplacementGrammarSampler",
+            "VertexReplacementGrammarAccumulator",
             "GrammarAccumulatorFactory",
-            "GrammarEstimator",
-            "GrammarDataEncoder",
+            "VertexReplacementGrammarEstimator",
+            "VertexReplacementGrammarDataEncoder",
         ):
             self.assertTrue(hasattr(mod, name), name)
 
@@ -105,22 +105,25 @@ class ImportTestCase(unittest.TestCase):
 class GrammarTestCase(unittest.TestCase):
     @staticmethod
     def _grammar():
-        from pysp.stats.sequences.grammar import GrammarRule, VertexReplacementGrammar
+        from pysp.stats.graphs.vertex_replacement_grammar import VertexReplacementGrammar, VertexReplacementRule
 
         graph = nx.Graph()
         graph.add_node(0, label="A", node_color="")
         graph.add_node(1, label="B", node_color="")
         graph.add_edge(0, 1, weight=1.0, edge_color="")
         grammar = VertexReplacementGrammar(name="tiny")
-        grammar.add_rule(GrammarRule(2, graph, frequency=3.0))
+        grammar.add_rule(VertexReplacementRule(2, graph, frequency=3.0))
         return grammar
 
     def test_estimator_does_not_pass_distribution_as_pseudo_count(self):
-        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarEstimator
+        from pysp.stats.graphs.vertex_replacement_grammar import (
+            VertexReplacementGrammarDistribution,
+            VertexReplacementGrammarEstimator,
+        )
 
-        dist = GrammarDistribution(None, 0.01, name="g")
+        dist = VertexReplacementGrammarDistribution(None, 0.01, name="g")
         est = dist.estimator()
-        self.assertIsInstance(est, GrammarEstimator)
+        self.assertIsInstance(est, VertexReplacementGrammarEstimator)
         self.assertIsNone(est.pseudo_count)
         self.assertEqual(est.name, "g")
 
@@ -128,27 +131,33 @@ class GrammarTestCase(unittest.TestCase):
         self.assertEqual(est2.pseudo_count, 2.0)
 
     def test_accumulator_factory_and_alias(self):
-        from pysp.stats.sequences.grammar import GrammarAccumulatorFactory, GrammarEstimator
+        from pysp.stats.graphs.vertex_replacement_grammar import (
+            GrammarAccumulatorFactory,
+            VertexReplacementGrammarEstimator,
+        )
 
-        est = GrammarEstimator()
+        est = VertexReplacementGrammarEstimator()
         self.assertIsInstance(est.accumulator_factory(), GrammarAccumulatorFactory)
         self.assertIsInstance(est.accumulatorFactory(), GrammarAccumulatorFactory)
 
     def test_encoder_equality(self):
-        from pysp.stats.sequences.grammar import GrammarDataEncoder, GrammarDistribution
+        from pysp.stats.graphs.vertex_replacement_grammar import (
+            VertexReplacementGrammarDataEncoder,
+            VertexReplacementGrammarDistribution,
+        )
 
-        dist = GrammarDistribution(None, 0.01)
+        dist = VertexReplacementGrammarDistribution(None, 0.01)
         enc = dist.dist_to_encoder()
-        self.assertEqual(enc, GrammarDataEncoder())
+        self.assertEqual(enc, VertexReplacementGrammarDataEncoder())
         self.assertNotEqual(enc, object())
         data = ["a", "b"]
         self.assertEqual(enc.seq_encode(data), data)
-        self.assertEqual(str(enc), "GrammarDataEncoder")
+        self.assertEqual(str(enc), "VertexReplacementGrammarDataEncoder")
 
     @staticmethod
     def _recursive_grammar(embedding=None):
         # symbol 1 -> [C - T - nonterminal(1)] (grow) | [E] (terminate); optional embedding relation.
-        from pysp.stats.sequences.grammar import GrammarRule, VertexReplacementGrammar
+        from pysp.stats.graphs.vertex_replacement_grammar import VertexReplacementGrammar, VertexReplacementRule
 
         grow = nx.Graph()
         grow.add_node(0, label="C", node_color="")
@@ -159,8 +168,8 @@ class GrammarTestCase(unittest.TestCase):
         stop = nx.Graph()
         stop.add_node(0, label="E", node_color="")
         g = VertexReplacementGrammar()
-        g.add_rule(GrammarRule(1, grow, frequency=5.0, embedding=embedding))
-        g.add_rule(GrammarRule(1, stop, frequency=1.0))
+        g.add_rule(VertexReplacementRule(1, grow, frequency=5.0, embedding=embedding))
+        g.add_rule(VertexReplacementRule(1, stop, frequency=1.0))
         return g
 
     @staticmethod
@@ -184,43 +193,49 @@ class GrammarTestCase(unittest.TestCase):
 
     def _freq_dist(self):
         # an unambiguous grammar: S -> A-B | A-C | A-D with true frequencies 5 : 3 : 2
-        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarRule, VertexReplacementGrammar
+        from pysp.stats.graphs.vertex_replacement_grammar import (
+            VertexReplacementGrammar,
+            VertexReplacementGrammarDistribution,
+            VertexReplacementRule,
+        )
 
         g = VertexReplacementGrammar()
         for lb, freq in (("B", 5.0), ("C", 3.0), ("D", 2.0)):
-            g.add_rule(GrammarRule("S", self._edge("A", lb), freq))
-        return GrammarDistribution(g, 0.0, start_symbol="S")
+            g.add_rule(VertexReplacementRule("S", self._edge("A", lb), freq))
+        return VertexReplacementGrammarDistribution(g, 0.0, start_symbol="S")
 
     # --- generation: the sampler runs a real derivation and emits graphs ---
     def test_non_recursive_grammar_derives_its_right_hand_side(self):
-        from pysp.stats.sequences.grammar import GrammarSampler
+        from pysp.stats.graphs.vertex_replacement_grammar import VertexReplacementGrammarSampler
 
-        sampler = GrammarSampler(self._grammar(), orig_n=4, seed=1)  # non-recursive -> exactly the RHS
+        sampler = VertexReplacementGrammarSampler(self._grammar(), orig_n=4, seed=1)  # non-recursive -> exactly the RHS
         self.assertEqual(sampler.sample().number_of_nodes(), 2)
         self.assertTrue(all(g.number_of_nodes() == 2 for g in sampler.sample_seq([2, 3])))
 
     def test_recursive_derivation_grows_and_stays_connected(self):
-        from pysp.stats.sequences.grammar import GrammarSampler
+        from pysp.stats.graphs.vertex_replacement_grammar import VertexReplacementGrammarSampler
 
-        g = GrammarSampler(self._recursive_grammar(), orig_n=8, seed=0, start_symbol=1).sample()
+        g = VertexReplacementGrammarSampler(self._recursive_grammar(), orig_n=8, seed=0, start_symbol=1).sample()
         self.assertGreaterEqual(g.number_of_nodes(), 4)  # grew via recursion toward the budget
         self.assertTrue(nx.is_connected(g))
         self.assertTrue(all("nonterminal" not in g.nodes[n] for n in g.nodes))  # fully derived
 
     def test_embedding_controls_reconnection(self):
-        from pysp.stats.sequences.grammar import GrammarSampler
+        from pysp.stats.graphs.vertex_replacement_grammar import VertexReplacementGrammarSampler
 
         # the embedding connects a replaced node's 'T' neighbour to right-hand-side 'T' nodes; the
         # default would instead attach to the connector 'C', so 'T'-'T' edges prove the relation fired.
-        g = GrammarSampler(self._recursive_grammar(embedding=[("T", "T")]), orig_n=8, seed=2, start_symbol=1).sample()
+        g = VertexReplacementGrammarSampler(
+            self._recursive_grammar(embedding=[("T", "T")]), orig_n=8, seed=2, start_symbol=1
+        ).sample()
         tt_edges = [(a, b) for a, b in g.edges if g.nodes[a].get("label") == "T" and g.nodes[b].get("label") == "T"]
         self.assertTrue(tt_edges)
         self.assertTrue(nx.is_connected(g))
 
     def test_sample_honors_size_argument(self):
-        from pysp.stats.sequences.grammar import GrammarSampler
+        from pysp.stats.graphs.vertex_replacement_grammar import VertexReplacementGrammarSampler
 
-        sampler = GrammarSampler(self._grammar(), orig_n=2, seed=1)
+        sampler = VertexReplacementGrammarSampler(self._grammar(), orig_n=2, seed=1)
         self.assertIsInstance(sampler.sample(), nx.Graph)
         batch = sampler.sample(5)
         self.assertEqual(len(batch), 5)
@@ -236,10 +251,10 @@ class GrammarTestCase(unittest.TestCase):
     def test_marginal_likelihood_sums_over_derivations(self):
         # ambiguous grammar: A-B derives two ways (directly, or A-nt(T) then T->B), each probability 1/2,
         # so the marginal log-density is log(1/2 + 1/2) = 0 -- strictly above the Viterbi lower bound.
-        from pysp.stats.sequences.grammar import (
-            GrammarDistribution,
-            GrammarRule,
+        from pysp.stats.graphs.vertex_replacement_grammar import (
             VertexReplacementGrammar,
+            VertexReplacementGrammarDistribution,
+            VertexReplacementRule,
             best_derivation,
         )
 
@@ -250,10 +265,10 @@ class GrammarTestCase(unittest.TestCase):
         b = nx.Graph()
         b.add_node(0, label="B", node_color="")
         g = VertexReplacementGrammar()
-        g.add_rule(GrammarRule("S", self._edge("A", "B"), 1.0))
-        g.add_rule(GrammarRule("S", a_t, 1.0))
-        g.add_rule(GrammarRule("T", b, 1.0))
-        dist = GrammarDistribution(g, 0.0, start_symbol="S")
+        g.add_rule(VertexReplacementRule("S", self._edge("A", "B"), 1.0))
+        g.add_rule(VertexReplacementRule("S", a_t, 1.0))
+        g.add_rule(VertexReplacementRule("T", b, 1.0))
+        dist = VertexReplacementGrammarDistribution(g, 0.0, start_symbol="S")
         marginal = dist.log_density(self._edge("A", "B"))
         viterbi = best_derivation(self._edge("A", "B"), g, "S")[0]
         self.assertAlmostEqual(marginal, 0.0, places=9)  # log(1/2 + 1/2)
@@ -261,12 +276,15 @@ class GrammarTestCase(unittest.TestCase):
         self.assertGreater(marginal, viterbi)
 
     def test_generated_graphs_parse_and_foreign_graphs_are_neg_inf(self):
-        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarSampler
+        from pysp.stats.graphs.vertex_replacement_grammar import (
+            VertexReplacementGrammarDistribution,
+            VertexReplacementGrammarSampler,
+        )
 
         recursive = self._recursive_grammar()
-        dist = GrammarDistribution(recursive, 0.0, start_symbol=1)
+        dist = VertexReplacementGrammarDistribution(recursive, 0.0, start_symbol=1)
         for s in range(8):
-            g = GrammarSampler(recursive, orig_n=8, seed=s, start_symbol=1).sample()
+            g = VertexReplacementGrammarSampler(recursive, orig_n=8, seed=s, start_symbol=1).sample()
             lp = dist.log_density(g)  # a graph the grammar generated must be derivable -> finite
             self.assertTrue(np.isfinite(lp))
             self.assertLessEqual(lp, 1e-9)
@@ -284,11 +302,11 @@ class GrammarTestCase(unittest.TestCase):
 
     def test_estimate_driver_integration(self):
         from pysp.inference import estimate
-        from pysp.stats.sequences.grammar import GrammarDistribution
+        from pysp.stats.graphs.vertex_replacement_grammar import VertexReplacementGrammarDistribution
 
         dist = self._freq_dist()
         fit = estimate([dist.sampler(seed=s).sample() for s in range(60)], dist.estimator())
-        self.assertIsInstance(fit, GrammarDistribution)
+        self.assertIsInstance(fit, VertexReplacementGrammarDistribution)
         self.assertTrue(np.isfinite(fit.log_density(self._edge("A", "B"))))
 
     def test_seq_log_density_reports_per_row_exactness(self):

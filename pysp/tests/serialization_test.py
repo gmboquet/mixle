@@ -118,17 +118,21 @@ class DistributionSerializationTestCase(unittest.TestCase):
 
     @unittest.skipUnless(HAS_NETWORKX, "networkx is not installed")
     def test_grammar_distribution_json_round_trip(self):
-        from pysp.stats.sequences.grammar import GrammarDistribution, GrammarRule, VertexReplacementGrammar
+        from pysp.stats.graphs.vertex_replacement_grammar import (
+            VertexReplacementGrammar,
+            VertexReplacementGrammarDistribution,
+            VertexReplacementRule,
+        )
 
         graph = nx.Graph()
         graph.add_node(0, label="A", node_color="")
         graph.add_node(1, label="B", node_color="")
         graph.add_edge(0, 1, weight=1.0, edge_color="")
         grammar = VertexReplacementGrammar(name="json")
-        grammar.add_rule(GrammarRule(2, graph, frequency=3.0))
+        grammar.add_rule(VertexReplacementRule(2, graph, frequency=3.0))
 
-        dist = GrammarDistribution(grammar, 0.01, orig_n=4)
-        loaded = GrammarDistribution.from_json(dist.to_json())
+        dist = VertexReplacementGrammarDistribution(grammar, 0.01, orig_n=4)
+        loaded = VertexReplacementGrammarDistribution.from_json(dist.to_json())
 
         self.assertIsInstance(loaded.grammar, VertexReplacementGrammar)
         self.assertEqual(loaded.grammar.name, "json")
