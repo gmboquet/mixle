@@ -295,7 +295,7 @@ def count_dp_rank(
     bin_width_bits: float = 1.0,
     smear: int | None = None,
     resolve_max: int = 8192,
-    tol: float = 1.0e-9,
+    tol: float = 1.0e-12,  # rank tie threshold; must match the 1e-12 convention the true rank is defined by
 ) -> CountDPRankResult:
     """Approximate rank of ``value`` via the structural count DP -- for decomposable families.
 
@@ -412,7 +412,7 @@ def count_dp_seek(
     bin_width_bits: float = 1.0,
     smear: int | None = None,
     resolve_max: int = 8192,
-    tol: float = 1.0e-9,
+    tol: float = 1.0e-12,  # rank tie threshold; must match the 1e-12 convention the true rank is defined by
     max_fine_bucket_cap: int = 1 << 30,
 ) -> CountDPSeekResult:
     """Seek the observation at descending-probability ``index`` -- the inverse of :func:`count_dp_rank`.
