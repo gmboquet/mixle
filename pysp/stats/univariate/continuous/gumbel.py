@@ -109,12 +109,19 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
         except (TypeError, ValueError):
             return -np.inf
         z = (xx - self.loc) / self.scale
+        # exp(-z) overflows on the far-left tail (z -> -inf); math.exp raises OverflowError there, so
+        # short-circuit to the correct -inf limit instead of crashing on a valid observation.
+        if -z > 709.0:
+            return -np.inf
         return -self.log_scale - z - math.exp(-z)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         z = (x - self.loc) / self.scale
-        return -self.log_scale - z - np.exp(-z)
+        # exp(-z) overflows to +inf on the far-left tail; the result correctly -> -inf, so silence the
+        # benign overflow warning rather than let it surface to the caller.
+        with np.errstate(over="ignore"):
+            return -self.log_scale - z - np.exp(-z)
 
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""

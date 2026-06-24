@@ -75,21 +75,44 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
         With scalar alpha the dimension is len(x); with dict alpha the observation is scored with the
         concentration entries matching its keys.
         """
+        # Boundary handling mirrors the array Dirichlet (dirichlet.py): a zero coordinate makes the
+        # density +inf when its alpha < 1 (integrable singularity) and 0 (log -inf) when alpha > 1; an
+        # alpha == 1 coordinate contributes nothing there. +inf takes precedence over -inf. Without this,
+        # ``log(0) * (alpha - 1)`` silently produced +inf and, with mixed boundaries, +inf + -inf = NaN.
         if self.is_unbounded:
             a = self.alpha
             n = len(x)
             c = gammaln(a) * n - gammaln(a * n)
             if a == 1:
                 return float(-c)
-            else:
-                return float(np.sum(np.log(list(x.values()))) * (a - 1) - c)
+            vals = np.asarray(list(x.values()), dtype=float)
+            if np.any(vals < 0.0):
+                return float(-np.inf)
+            if np.any(vals == 0.0):
+                return float(np.inf if a < 1.0 else -np.inf)
+            return float(np.sum(np.log(vals)) * (a - 1) - c)
         else:
             rv = 0.0
             asum = 0.0
+            saw_pos_inf = False
+            saw_neg_inf = False
             for k, v in x.items():
                 a = self.alpha[k]
-                rv += np.log(v) * (a - 1) - gammaln(a)
                 asum += a
+                if v < 0.0:
+                    return float(-np.inf)
+                if v == 0.0:
+                    if a < 1.0:
+                        saw_pos_inf = True
+                    elif a > 1.0:
+                        saw_neg_inf = True
+                    # a == 1 contributes nothing at the boundary
+                    continue
+                rv += np.log(v) * (a - 1) - gammaln(a)
+            if saw_pos_inf:
+                return float(np.inf)
+            if saw_neg_inf:
+                return float(-np.inf)
             return float(rv + gammaln(asum))
 
     def seq_log_density(self, x: list[dict[Any, float]]) -> np.ndarray:

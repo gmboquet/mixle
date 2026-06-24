@@ -768,11 +768,17 @@ class DiagonalGaussianEstimator(ParameterEstimator):
 
         new_mu = (sum_x + old_mu * old_lam) / (old_lam + nobs_loc1)
 
-        new_b0 = sum_xx - sample_mean2 * sum_xxx
+        # Per-coordinate scatter ``sum_xx - (sum_x)^2/n`` is cancellation-prone (see GaussianEstimator):
+        # floor it at 0 so a near-constant coordinate cannot drive ``new_b``/variance negative, which the
+        # diagonal Gaussian's constructor does NOT validate (silent NaN log-density otherwise).
+        new_b0 = np.maximum(sum_xx - sample_mean2 * sum_xxx, 0.0)
         new_b1 = (old_lam * nobs_loc1 / new_n) * np.power(sample_mean1 - old_mu, 2)
         new_b = old_b + 0.5 * (new_b0 + new_b1)
 
-        new_sigma2 = new_b / (new_a - 0.5)
+        denom = new_a - 0.5  # per-coordinate array
+        safe_denom = np.where(denom > 0.0, denom, 1.0)
+        new_sigma2 = np.where(denom > 0.0, new_b / safe_denom, self.min_covar)
+        new_sigma2 = np.maximum(new_sigma2, self.min_covar)  # match the MLE-path variance floor
 
         new_prior = MultivariateNormalGammaDistribution(new_mu, new_n, new_a, new_b)
         return DiagonalGaussianDistribution(new_mu, new_sigma2, name=self.name, prior=new_prior)
