@@ -619,6 +619,52 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             total += s
         return total
 
+    def tropical_displacement_bits(self) -> float:
+        """``log2(#positive-weight components)`` -- the tropical-vs-marginal cost gap (in bits).
+
+        The marginal ``log p(x) = logsumexp_k (log w_k + log p_k(x))`` is bounded by its largest term
+        ``M(x) = max_k (log w_k + log p_k(x))`` via ``M(x) <= log p(x) <= M(x) + log K``, where ``K`` is
+        the number of components that can contribute (positive weight). The structural seek bins by the
+        tropical cost ``M(x)``; :func:`pysp.enumeration.density_rank.marginal_seek` widens its smear
+        window by this many bits so the reported rank bracket provably contains the TRUE marginal rank.
+        ``K <= 1`` means the marginal is a single term -> ``0.0`` (the seek is then exact). When the
+        component supports are *provably disjoint* every value lands in one component, so ``M(x)`` equals
+        the marginal and there is likewise no displacement -> ``0.0`` (the seek is exact and tight).
+        """
+        k = int(np.count_nonzero(np.asarray(self.w) > 0.0))
+        if k <= 1:
+            return 0.0
+        if self._components_provably_disjoint():
+            return 0.0
+        return math.log2(k)
+
+    def _components_provably_disjoint(self, probe_cap: int = 2048) -> bool:
+        """True only if the positive-weight component supports are pairwise disjoint, by enumeration.
+
+        Sound but conservative: it materializes each component's support into a shared ``seen`` set and
+        returns False on the first collision. If any component cannot enumerate (continuous leaf) or the
+        combined support exceeds ``probe_cap`` distinct points, it also returns False -- so a ``False``
+        never wrongly blocks the safe bracketed seek, it only forgoes the exact disjoint fast path.
+        """
+        seen: set = set()
+        pulled = 0
+        for k, comp in enumerate(self.components):
+            if self.w[k] <= 0.0:
+                continue
+            try:
+                enumerator = comp.enumerator()
+            except Exception:
+                return False
+            for value, _lp in enumerator:
+                key = freeze(value)
+                if key in seen:
+                    return False  # shared support point -> components overlap
+                seen.add(key)
+                pulled += 1
+                if pulled > probe_cap:
+                    return False  # too large to certify cheaply; assume overlap (conservative)
+        return True
+
     def to_fisher(self, **kwargs):
         """Structural Fisher view for the mixture."""
         if hasattr(self, "components") and hasattr(self, "w"):

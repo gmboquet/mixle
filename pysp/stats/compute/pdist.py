@@ -169,6 +169,22 @@ class ProbabilityDistribution(ABC):
         """
         return DensitySemantics.EXACT
 
+    def tropical_displacement_bits(self) -> float:
+        """Worst-case gap (in bits) between this law's structural *count* cost and its true log-density.
+
+        The structural count-DP (and the ``seek`` built on it) bins each value by a cost that is
+        EXACT for decomposable families -- composites/sequences/markov chains whose ``log p(x)`` is a
+        sum of independent per-factor terms -- so this returns ``0.0`` by default.
+
+        For a marginal family the latent index is summed out and the count index bins by the
+        *tropical* (dominant-component/path) cost ``M(x)`` instead of the true ``log p(x)``. Because
+        ``M(x) <= log p(x) <= M(x) + log N`` for an ``N``-way logsumexp, the two costs differ by at
+        most ``log2(N)`` bits. :func:`pysp.enumeration.density_rank.marginal_seek` widens its rank
+        bracket by exactly this many bits so the bracket is a *guaranteed* bound on the true marginal
+        rank (not merely the tropical rank); override to return ``log2(N)`` for such a family.
+        """
+        return 0.0
+
     @abstractmethod
     def log_density(self, x: Any) -> float:
         """Return the log-density or log-mass at a single observation."""
@@ -735,6 +751,21 @@ class DistributionEnumerator(ABC):
         from pysp.enumeration.density_rank import count_dp_seek
 
         return count_dp_seek(self.dist, index)
+
+    def seek_certified(self, index: int):
+        """The value at descending ``index`` with a GUARANTEED bracket on its TRUE marginal rank.
+
+        Unlike :meth:`seek` -- whose bracket bounds only the *tropical* rank for a marginal family
+        (mixture/HMM) -- this widens the rank window by the family's ``tropical_displacement_bits`` and
+        divides out the component over-count, so the returned
+        :class:`~pysp.enumeration.density_rank.MarginalSeekResult` ``[true_rank_lower, true_rank_upper]``
+        provably contains ``#{u : log p(u) > log p(value)}``. It pins the rank exactly (``.exact``) for
+        decomposable / provably-disjoint families and for shallow indices, and otherwise returns the
+        honest provable envelope. For a decomposable family it agrees with :meth:`seek`.
+        """
+        from pysp.enumeration.density_rank import marginal_seek
+
+        return marginal_seek(self.dist, index)
 
     def cumulative(self, value: Any):
         """``G(value) = P(p(Y) >= p(value))`` -- total mass of outcomes at least as probable as ``value``."""

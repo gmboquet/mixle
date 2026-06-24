@@ -89,6 +89,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "lda_len_test.py": ("latent",),
     "llda_alpha_test.py": ("latent", "integration"),
     "lookback_lag0_test.py": ("hmm",),
+    "marginal_seek_test.py": ("enumeration",),
     "model_helpers_test.py": ("latent", "graph", "pomdp", "knowledge_graph", "causal", "grammar"),
     "mcmc_test.py": ("stochastic",),
     "numerics_test.py": ("distribution",),
