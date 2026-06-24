@@ -572,7 +572,7 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
 
         return DensitySemantics.LOWER_BOUND
 
-    def log_density(self, x):
+    def log_density(self, x, with_status=False):
         """Log-density of the grammar distribution at an observed GRAPH x -- the marginal likelihood.
 
         ``x`` is parsed (reduced back to the start symbol along the grammar's productions) and the score
@@ -587,14 +587,18 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         Args:
             x: Observed graph (a networkx graph).
 
+        Args (cont.):
+            with_status: if True, return ``(value, exact)`` where ``exact`` is False iff the parse
+                forest was truncated (so ``value`` may be a lower bound); if False, return just ``value``.
+
         Returns:
             Log-density at observation x (<= 0, or -inf if the grammar cannot derive x).
 
         """
         start = self._resolve_start()
         if start is None:
-            return float("-inf")
-        return marginal_log_prob(x, self.grammar, start)
+            return (float("-inf"), True) if with_status else float("-inf")
+        return marginal_log_prob(x, self.grammar, start, with_status=with_status)
 
     # combine list of grammars into singular grammar? need to take multiple sample outputs as input
     def seq_encode(self, x):
@@ -609,17 +613,24 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         """
         return x
 
-    def seq_log_density(self, x):
+    def seq_log_density(self, x, with_status=False):
         """Evaluate log_density() at each encoded observation.
 
         Args:
             x: Sequence of observed graphs (from seq_encode).
+            with_status: if True, also return a boolean mask that is True for rows whose marginal was
+                computed exactly (the parse forest was not truncated) and False where it is a bound.
 
         Returns:
-            Numpy array of log-densities, one per observation.
+            A numpy array of log-densities, or ``(values, exact_mask)`` when ``with_status`` is True.
 
         """
-        return np.asarray([self.log_density(xx) for xx in x])
+        if not with_status:
+            return np.asarray([self.log_density(xx) for xx in x])
+        pairs = [self.log_density(xx, with_status=True) for xx in x]
+        values = np.asarray([v for v, _ in pairs])
+        exact = np.asarray([e for _, e in pairs], dtype=bool)
+        return values, exact
 
     def sampler(self, seed=None):
         """Create a GrammarSampler object from the model grammar of this instance.

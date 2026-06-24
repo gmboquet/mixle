@@ -197,6 +197,11 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         """
         return np.exp(self.log_density(x))
 
+    def density_semantics(self):
+        from pysp.stats.compute.pdist import join_density_semantics
+
+        return join_density_semantics(c.density_semantics() for c in [self.dist])
+
     def log_density(self, x: T) -> float:
         """Evalute the log density of the Optional distribution at x.
 

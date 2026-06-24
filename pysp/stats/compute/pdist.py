@@ -32,6 +32,26 @@ class DensitySemantics(Enum):
     ESTIMATE = "estimate"  # an approximation with no guaranteed direction (plug-in / Monte Carlo)
 
 
+def join_density_semantics(semantics) -> "DensitySemantics":
+    """Combine child density semantics for a combinator whose log_density is monotone in its children.
+
+    A combinator whose score rises with each child's log_density -- a mixture's ``logsumexp``, a
+    composite's sum -- inherits: a lower bound if any child is a lower bound, an upper bound if any is
+    an upper bound, exactness only if all children are exact, and an undirected ``ESTIMATE`` if bounds
+    of both directions (or any estimate) are mixed.
+    """
+    kinds = set(semantics)
+    has_lower = DensitySemantics.LOWER_BOUND in kinds
+    has_upper = DensitySemantics.UPPER_BOUND in kinds
+    if DensitySemantics.ESTIMATE in kinds or (has_lower and has_upper):
+        return DensitySemantics.ESTIMATE
+    if has_lower:
+        return DensitySemantics.LOWER_BOUND
+    if has_upper:
+        return DensitySemantics.UPPER_BOUND
+    return DensitySemantics.EXACT
+
+
 class EnumerationError(NotImplementedError):
     """Raised when a distribution (or a child of a combinator) cannot enumerate its support.
 
