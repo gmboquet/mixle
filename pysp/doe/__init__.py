@@ -26,6 +26,11 @@ from pysp.doe.analysis import (
     factorial_effects,
     response_surface,
 )
+from pysp.doe.batch import (
+    monte_carlo_qei,
+    propose_local_penalization,
+    propose_qei_batch,
+)
 from pysp.doe.bayesopt import (
     BayesOptResult,
     OptimizationResult,
@@ -140,6 +145,9 @@ __all__ = [
     "pareto_mask",
     "multi_minimize",
     "BayesianOptimizer",
+    "monte_carlo_qei",
+    "propose_qei_batch",
+    "propose_local_penalization",
     # analysis half (sensitivity / propagation / calibration)
     "sobol_indices",
     "morris_screening",
