@@ -257,3 +257,29 @@ def test_what_supports_filters_by_capability():
 
     pool = [GaussianDistribution(0, 1), MultivariateGaussianDistribution(np.zeros(2), np.eye(2)), _cat()]
     assert pysp.what_supports(cap.Conditionable, pool) == ["MultivariateGaussianDistribution"]
+
+
+# --------------------------------------------------------------- density exactness (ExactDensity)
+def test_exact_density_is_the_default():
+    from pysp.stats.compute.pdist import DensitySemantics
+
+    for d in (GaussianDistribution(0.0, 1.0), _cat(), MixtureDistribution([GaussianDistribution(0, 1)], [1.0])):
+        assert d.density_semantics() is DensitySemantics.EXACT
+        assert cap.supports(d, cap.ExactDensity)
+        assert "ExactDensity" in cap.capabilities(d)
+
+
+def test_lda_log_density_is_flagged_as_a_lower_bound():
+    from pysp.stats.compute.pdist import DensitySemantics
+    from pysp.stats.latent.lda import LDADistribution
+
+    lda = LDADistribution(np.array([[0.7, 0.3], [0.2, 0.8]]), [2.0, 2.0])
+    assert lda.density_semantics() is DensitySemantics.LOWER_BOUND
+    assert not cap.supports(lda, cap.ExactDensity)
+    assert "ExactDensity" not in cap.capabilities(lda)
+    with pytest.raises(cap.CapabilityError):
+        cap.require(lda, cap.ExactDensity, "exact-likelihood test")
+
+
+def test_exact_density_is_in_the_catalog():
+    assert "ExactDensity" in {s.name for s in cap.catalog()}

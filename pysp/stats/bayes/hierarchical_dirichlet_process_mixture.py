@@ -158,6 +158,11 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
         """Density of a group x; see log_density()."""
         return np.exp(self.log_density(x))
 
+    def density_semantics(self):
+        from pysp.stats.compute.pdist import DensitySemantics
+
+        return DensitySemantics.ESTIMATE  # plug-in with expected global weights (expected-table-count approx.)
+
     def log_density(self, x: Any) -> float:
         """Score a group with the global weights beta (expected weights of a
         new group)."""

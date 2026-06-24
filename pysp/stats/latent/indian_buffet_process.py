@@ -237,6 +237,11 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         """Return the probability density or mass at a single observation."""
         return float(np.exp(self.log_density(x)))
 
+    def density_semantics(self):
+        from pysp.stats.compute.pdist import DensitySemantics
+
+        return DensitySemantics.ESTIMATE  # plug-in using E_q[pi_k], not the exact marginal
+
     def log_density(self, x: Any) -> float:
         """Plug-in log-density of one feature row using E_q[pi_k]."""
         xx = _to_binary_vector(x, self.num_features, self.data_format)
