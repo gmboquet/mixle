@@ -47,6 +47,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "spanning_tree_test.py": ("graph", "stochastic", "slow"),
     "survival_test.py": ("distribution", "integration", "slow"),
     "thompson_acquisition_test.py": ("doe", "stochastic", "slow"),
+    "doe_factorial_test.py": ("doe",),
     "automatic_scientific_test.py": ("automatic", "integration", "slow"),
     "automatic_test.py": ("automatic", "distribution"),
     "base_dist_test.py": ("distribution", "integration", "slow"),
