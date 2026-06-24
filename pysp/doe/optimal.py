@@ -92,6 +92,51 @@ def i_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
     return float(-np.mean(pred_var))
 
 
+def g_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
+    """G-optimality merit: ``-max`` prediction variance over ``ref`` (``-inf`` if singular).
+
+    Where I-optimality minimizes the *average* prediction variance, G-optimality minimizes its
+    *worst case* over the reference region, so the fitted surface has a bounded error everywhere.
+    Returns the negative maximum of ``g M^{-1} g`` over the reference rows (falls back to the largest
+    coefficient variance ``max diag(M^{-1})`` when no reference set is given).
+    """
+    try:
+        if ref is None:
+            return float(-np.max(np.diag(np.linalg.solve(info, np.eye(info.shape[0])))))
+        sol = np.linalg.solve(info, ref.T)
+    except np.linalg.LinAlgError:
+        return -np.inf
+    return float(-np.max(np.einsum("ij,ji->i", ref, sol)))
+
+
+def e_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
+    """E-optimality merit: the smallest eigenvalue of ``M`` (higher is better).
+
+    Maximizing the minimum eigenvalue of the information matrix shrinks the variance along the
+    *worst-determined* parameter contrast, so no direction in coefficient space is left poorly
+    estimated. ``0`` for a singular (rank-deficient) design.
+    """
+    return float(np.linalg.eigvalsh(info)[0])  # eigvalsh is ascending -> [0] is the smallest
+
+
+def c_criterion(c: np.ndarray) -> Criterion:
+    """Return a c-optimality criterion targeting the linear combination ``c'.beta`` of coefficients.
+
+    c-optimality minimizes the variance of a *specific* quantity of interest ``c'.beta`` (e.g. a
+    contrast or a prediction at one point). The returned criterion has merit ``-c' M^{-1} c`` (``-inf``
+    if singular), so it plugs straight into :func:`optimal_design` or :func:`register_criterion`.
+    """
+    cvec = np.asarray(c, dtype=np.float64)
+
+    def criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
+        try:
+            return float(-cvec @ np.linalg.solve(info, cvec))
+        except np.linalg.LinAlgError:
+            return -np.inf
+
+    return criterion
+
+
 # --- criterion registry ("register, don't branch") ----------------------------------------------
 # A criterion is ``fn(info, *, ref) -> merit`` where ``merit`` is maximized over candidate designs.
 _CRITERIA: dict[str, Criterion] = {}
@@ -128,6 +173,8 @@ def _get_criterion(criterion: str | Criterion) -> Criterion:
 register_criterion("d", d_criterion, aliases=("d_optimal", "d-optimal", "det"))
 register_criterion("a", a_criterion, aliases=("a_optimal", "a-optimal", "trace"))
 register_criterion("i", i_criterion, aliases=("i_optimal", "i-optimal", "iv"))
+register_criterion("g", g_criterion, aliases=("g_optimal", "g-optimal", "minimax"))
+register_criterion("e", e_criterion, aliases=("e_optimal", "e-optimal", "eigen"))
 
 
 def _exchange(
