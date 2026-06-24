@@ -70,6 +70,7 @@ from pysp.doe.designs import (
     halton_design,
     latin_hypercube,
     maximin_latin_hypercube,
+    maxpro_design,
     random_design,
     sobol_design,
 )
@@ -113,6 +114,7 @@ __all__ = [
     "halton_design",
     "latin_hypercube",
     "maximin_latin_hypercube",
+    "maxpro_design",
     "random_design",
     "sobol_design",
     "fractional_factorial",
