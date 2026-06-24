@@ -15,7 +15,7 @@ import numpy as np
 
 from pysp.doe.designs import _qmc_unit
 
-__all__ = ["sobol_indices", "morris_screening"]
+__all__ = ["sobol_indices", "morris_screening", "fast_indices", "dgsm"]
 
 
 def _scale(unit: np.ndarray, bounds: np.ndarray) -> np.ndarray:
@@ -128,3 +128,88 @@ def morris_screening(
         "sigma": sigma,
         "names": list(names) if names else [f"x{i}" for i in range(d)],
     }
+
+
+def fast_indices(
+    func: Callable[[np.ndarray], np.ndarray],
+    bounds: Sequence[tuple[float, float]],
+    n: int = 600,
+    *,
+    harmonics: int = 6,
+    seed: int = 0,
+    names: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """First-order sensitivity indices via Random Balance Designs FAST (RBD-FAST).
+
+    A Fourier alternative to :func:`sobol_indices` for the *first-order* indices: every input is driven
+    along the same triangle-wave search curve but under an independent random permutation, the model is
+    evaluated once over the ``n`` points, and for each input the output -- reordered along that input's
+    curve -- has its variance concentrated at the base frequency's first ``harmonics`` harmonics. The
+    ratio of that power to the total is the first-order index (with the Tarantola bias correction). Cost
+    is a single batch of ``n`` evaluations, independent of dimension.
+
+    Returns ``{'S1': (d,), 'names': [...], 'var': float}``.
+    """
+    bounds = np.asarray(bounds, dtype=float)
+    d = len(bounds)
+    rng = np.random.RandomState(seed)
+    s = np.linspace(-np.pi, np.pi, int(n), endpoint=False)
+    base = 0.5 + np.arcsin(np.sin(s)) / np.pi  # triangle wave, uniform on [0, 1]
+    perms = [rng.permutation(int(n)) for _ in range(d)]
+    x = np.column_stack([base[perms[i]] for i in range(d)])
+    y = np.asarray(func(_scale(x, bounds)), dtype=float).ravel()
+    s1 = np.zeros(d)
+    var = float(np.var(y))
+    out_names = list(names) if names else [f"x{i}" for i in range(d)]
+    if var <= 0:
+        return {"S1": s1, "names": out_names, "var": 0.0}
+    m = int(harmonics)
+    for i in range(d):
+        yi = y[np.argsort(perms[i])]  # reorder output along input i's search-curve coordinate
+        spectrum = np.abs(np.fft.rfft(yi - yi.mean())) ** 2
+        total = float(spectrum[1:].sum())
+        raw = float(spectrum[1 : m + 1].sum()) / total if total > 0 else 0.0
+        # Tarantola (2006) bias correction: an uninformative input has expected raw ~ 2m/(n-1).
+        s1[i] = (raw - 2.0 * m / (int(n) - 1)) / (1.0 - 2.0 * m / (int(n) - 1))
+    return {"S1": np.clip(s1, 0.0, 1.0), "names": out_names, "var": var}
+
+
+def dgsm(
+    func: Callable[[np.ndarray], np.ndarray],
+    bounds: Sequence[tuple[float, float]],
+    n: int = 1024,
+    *,
+    seed: int = 0,
+    rel_step: float = 1.0e-4,
+    names: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Derivative-based global sensitivity measures (DGSM): mean squared partial derivatives.
+
+    ``nu[i] = E[(df/dx_i)^2]`` over the input box, estimated by central finite differences at ``n``
+    low-discrepancy points. Unlike the first-order Sobol index, a DGSM is nonzero whenever an input
+    matters *anywhere* -- including purely through interactions -- so it is a cheap, robust screen that
+    upper-bounds the total Sobol index (Sobol & Kucherenko, via the Poincare inequality:
+    ``ST[i] <= (L_i / pi)^2 * nu[i] / Var(y)`` for a uniform input of width ``L_i``). The reported
+    ``importance`` is ``L_i^2 * nu[i]`` normalized to sum to one -- a dimensionless influence ranking.
+
+    Returns ``{'nu': (d,), 'importance': (d,), 'names': [...]}``.
+    """
+    bounds = np.asarray(bounds, dtype=float)
+    d = len(bounds)
+    x = _scale(_sobol_unit(int(n), d, seed), bounds)
+    span = bounds[:, 1] - bounds[:, 0]
+    nu = np.zeros(d)
+    for i in range(d):
+        h = rel_step * span[i]
+        xp = x.copy()
+        xm = x.copy()
+        xp[:, i] = np.minimum(x[:, i] + h, bounds[i, 1])
+        xm[:, i] = np.maximum(x[:, i] - h, bounds[i, 0])
+        step = xp[:, i] - xm[:, i]
+        yp = np.asarray(func(xp), dtype=float).ravel()
+        ym = np.asarray(func(xm), dtype=float).ravel()
+        nu[i] = float(np.mean(((yp - ym) / np.where(step > 0, step, 1.0)) ** 2))
+    weighted = span**2 * nu
+    total = float(weighted.sum())
+    importance = weighted / total if total > 0 else np.zeros(d)
+    return {"nu": nu, "importance": importance, "names": list(names) if names else [f"x{i}" for i in range(d)]}
