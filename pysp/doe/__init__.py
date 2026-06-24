@@ -1,12 +1,20 @@
 """Design and analysis of computer experiments for pysparkplug.
 
 This package covers the full loop of reasoning about an expensive black-box model ``f(x)`` over a
-bounded input space: space-filling / classical designs, sequential Bayesian-optimization loops on top
-of the existing GP and regression machinery, and the *analysis* half -- global sensitivity (which
-inputs drive the output variance), forward uncertainty propagation, and Kennedy-O'Hagan calibration
-to field data. (The analysis tools were previously the standalone ``pysp.uq`` package; folded in here
-they share this package's quasi-Monte-Carlo sampling, GP surrogate, and kernels instead of
-re-implementing them.)
+bounded input space:
+
+* **Designs** -- space-filling (Latin hypercube, maximin, Sobol'/Halton, MaxPro maximum-projection),
+  classical factorial / fractional-factorial / Plackett-Burman / response-surface / mixture, and
+  optimal designs (D/A/I/G/E/c criteria).
+* **Bayesian optimization** -- the single-point acquisitions (EI/PI/UCB/Thompson/knowledge-gradient),
+  plus the research frontier: rigorous Monte-Carlo q-EI and local-penalization *batch* design,
+  Max-value Entropy Search, trust-region BO (TuRBO) for high dimensions, constrained and
+  multi-objective BO, and cost-aware *multi-fidelity* BO.
+* **Active learning & optimal design** -- sequential design to learn a surrogate (ALM / ALC-IMSE) or
+  model parameters (expected information gain, closed-form and nested-Monte-Carlo).
+* **Analysis** -- global sensitivity (Sobol'/Morris/FAST/DGSM), forward uncertainty propagation, and
+  Kennedy-O'Hagan calibration to field data. (These were the standalone ``pysp.uq`` package; folded in
+  here they share this package's quasi-Monte-Carlo sampling, GP surrogate, and kernels.)
 
 The space-filling and classical design generators all return a plain ``(n, d)`` numpy matrix of
 input points scaled into the supplied per-dimension bounds:
