@@ -317,8 +317,10 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
                 pr_obs[:, i] = self.topics[i].seq_log_density(enc_x)
 
             pr_max0 = pr_obs.max(axis=1)
-            pr_obs -= pr_max0[:, None]
-            np.exp(pr_obs, out=pr_obs)
+            with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+                pr_obs -= pr_max0[:, None]
+                np.exp(pr_obs, out=pr_obs)
+            pr_obs[np.isnan(pr_obs).any(axis=1), :] = 0.0  # impossible observation -> zero emission row
 
             betas = np.ones_like(pr_obs, dtype=np.float64)
             etas = np.zeros((len(xbi), num_states), dtype=np.float64)
@@ -383,15 +385,20 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
                 pr_obs[:, i] = self.topics[i].seq_log_density(enc_x)
 
             pr_max0 = pr_obs.max(axis=1)
-            pr_obs -= pr_max0[:, None]
-            np.exp(pr_obs, out=pr_obs)
+            with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+                pr_obs -= pr_max0[:, None]
+                np.exp(pr_obs, out=pr_obs)
+            pr_obs[np.isnan(pr_obs).any(axis=1), :] = 0.0  # impossible observation -> zero emission row
 
             #  set the leaf nodes
             betas[xln, :] *= pr_obs[xln, :] * p_level[xlnl, :]
             betas_sum = np.sum(betas[xln, :], axis=1, keepdims=True)
-            betas[xln, :] /= betas_sum
+            # divide by a clamped sum (impossible leaf -> betas_sum 0 -> keep beta 0, avoid 0/0), but keep
+            # the true betas_sum for the log below so an impossible leaf correctly drives ll to -inf.
+            betas[xln, :] /= np.where(betas_sum > 0.0, betas_sum, 1.0)
 
-            ll_ret += np.bincount(xlni, weights=np.log(betas_sum.flatten()) + pr_max0[xln], minlength=num_trees)
+            with np.errstate(divide="ignore"):
+                ll_ret += np.bincount(xlni, weights=np.log(betas_sum.flatten()) + pr_max0[xln], minlength=num_trees)
 
             #  upward pass on betas
             for level in range(len(level_idx) - 1, -1, -1):
@@ -405,17 +412,21 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
                 etas[xbis, :] += temp
 
                 # within-segment sums (batch-independent, unlike a cumsum-difference)
-                log_etas = np.add.reduceat(np.log(etas[xbis, :]), eta_p[level][:-1], axis=0)
+                with np.errstate(divide="ignore"):  # an impossible subtree gives etas 0 -> log -inf -> beta 0
+                    log_etas = np.add.reduceat(np.log(etas[xbis, :]), eta_p[level][:-1], axis=0)
 
                 betas[p_nxt[level], :] *= np.exp(log_etas) * pr_obs[p_nxt[level], :]
                 betas[p_nxt[level], :] *= p_level[level, :]
                 betas_sum = np.sum(betas[p_nxt[level], :], axis=1, keepdims=True)
 
-                betas[p_nxt[level], :] /= betas_sum
+                # clamp the divisor (impossible node -> betas_sum 0 -> keep beta 0, avoid 0/0), keeping the
+                # true betas_sum for the log so an impossible subtree correctly drives ll to -inf.
+                betas[p_nxt[level], :] /= np.where(betas_sum > 0.0, betas_sum, 1.0)
 
-                ll_ret += np.bincount(
-                    i_nxt[level], weights=np.log(betas_sum.flatten()) + pr_max0[p_nxt[level]], minlength=num_trees
-                )
+                with np.errstate(divide="ignore"):
+                    ll_ret += np.bincount(
+                        i_nxt[level], weights=np.log(betas_sum.flatten()) + pr_max0[p_nxt[level]], minlength=num_trees
+                    )
 
             if len_enc is not None and len_enc[1] is not None:
                 len_ll = self.len_dist.seq_log_density(len_enc[1])
@@ -2064,6 +2075,8 @@ def numba_seq_log_density(
                 beta_sum += temp
 
             ll_sum += math.log(beta_sum) + b_max[leaf_node]
+            if beta_sum <= 0.0:  # impossible observation: log above gave -inf; keep beta 0, avoid 0/0 -> NaN
+                beta_sum = 1.0
 
             for i in range(num_states):
                 beta_mat[leaf_node, i] /= beta_sum
@@ -2100,6 +2113,8 @@ def numba_seq_log_density(
                 beta_sum += beta_mat[p, i]
 
             ll_sum += math.log(beta_sum) + b_max[p]
+            if beta_sum <= 0.0:  # impossible subtree: keep beta 0, avoid 0/0 -> NaN
+                beta_sum = 1.0
 
             for i in range(num_states):
                 beta_mat[p, i] /= beta_sum
