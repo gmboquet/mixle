@@ -53,6 +53,12 @@ from pysp.doe.designs import (
     random_design,
     sobol_design,
 )
+from pysp.doe.factorial import (
+    box_behnken,
+    central_composite,
+    fractional_factorial,
+    plackett_burman,
+)
 from pysp.doe.multiobjective import (
     MultiObjectiveResult,
     multi_minimize,
@@ -79,6 +85,10 @@ __all__ = [
     "maximin_latin_hypercube",
     "random_design",
     "sobol_design",
+    "fractional_factorial",
+    "plackett_burman",
+    "central_composite",
+    "box_behnken",
     "OptimizationResult",
     "BayesOptResult",
     "expected_improvement",
