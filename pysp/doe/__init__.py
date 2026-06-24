@@ -65,6 +65,11 @@ from pysp.doe.designs import (
     random_design,
     sobol_design,
 )
+from pysp.doe.entropy import (
+    max_value_entropy_search,
+    propose_mes,
+    sample_max_values,
+)
 from pysp.doe.factorial import (
     box_behnken,
     central_composite,
@@ -148,6 +153,9 @@ __all__ = [
     "monte_carlo_qei",
     "propose_qei_batch",
     "propose_local_penalization",
+    "max_value_entropy_search",
+    "sample_max_values",
+    "propose_mes",
     # analysis half (sensitivity / propagation / calibration)
     "sobol_indices",
     "morris_screening",
