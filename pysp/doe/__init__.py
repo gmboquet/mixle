@@ -22,6 +22,7 @@ from __future__ import annotations
 from pysp.doe.analysis import (
     FactorialEffects,
     ResponseSurface,
+    design_diagnostics,
     factorial_effects,
     response_surface,
 )
@@ -106,6 +107,7 @@ __all__ = [
     "FactorialEffects",
     "response_surface",
     "ResponseSurface",
+    "design_diagnostics",
     "OptimizationResult",
     "BayesOptResult",
     "expected_improvement",
