@@ -90,6 +90,21 @@ E2 = tuple[tuple[np.ndarray, np.ndarray, np.ndarray], Any | None]
 # path byte-identically.
 
 
+def _zero_impossible_emission_rows(pr_obs: np.ndarray) -> None:
+    """Zero emission rows for impossible observations before they reach the Baum-Welch kernels.
+
+    An observation with zero emission probability under *every* state (all-``-inf`` log-emissions) makes
+    the max-subtraction ``-inf - (-inf)`` NaN after ``exp``. Fed to the linear-space Baum-Welch kernels
+    that NaN poisons ``pi``/``xi``/``alpha`` and hence the EM sufficient statistics with no error. Such an
+    observation contributes zero emission mass under every state, so zeroing the row is correct: the
+    forward pass then assigns the sequence zero mass (log-likelihood ``-inf``) instead of NaN. A normal
+    row keeps its max state at ``exp(0) = 1`` and is never NaN, so this is a no-op on ordinary data.
+    """
+    bad = np.isnan(pr_obs).any(axis=1)
+    if bad.any():
+        pr_obs[bad, :] = 0.0
+
+
 def hmm_dirichlet_default_prior(num_states: int):
     """Returns the default ``(init_prior, row_priors)`` pair of unit-parameter Dirichlets.
 
@@ -848,8 +863,10 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
 
         pr_max = pr_obs.max(axis=1, keepdims=True)
-        pr_obs -= pr_max
-        np.exp(pr_obs, out=pr_obs)
+        with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+            pr_obs -= pr_max
+            np.exp(pr_obs, out=pr_obs)
+        _zero_impossible_emission_rows(pr_obs)
 
         alphas = np.zeros((tot_cnt, num_states), dtype=np.float64)
         xi_acc = np.zeros((seq_cnt, num_states, num_states), dtype=np.float64)
@@ -2147,8 +2164,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
 
             pr_max = pr_obs.max(axis=1, keepdims=True)
-            pr_obs -= pr_max
-            np.exp(pr_obs, out=pr_obs)
+            with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+                pr_obs -= pr_max
+                np.exp(pr_obs, out=pr_obs)
+            _zero_impossible_emission_rows(pr_obs)
 
             # When the fused-EM fast path requests it, compute the per-sequence data log-likelihood
             # from the already-scored emissions via the (read-only) forward kernel, reusing pr_obs so

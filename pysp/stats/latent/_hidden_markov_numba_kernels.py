@@ -40,6 +40,8 @@ def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll,
 
         llsum += math.log(alpha_sum)
         llsum += max_ll[s0]
+        if alpha_sum <= 0.0:  # impossible observation: log above already gave -inf; clamp the divisor so the
+            alpha_sum = 1.0  # recursion stays 0 (-> ll -inf) instead of 0/0 -> NaN
 
         for s in range(s0 + 1, s1):
             for i in range(num_states):
@@ -56,6 +58,8 @@ def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll,
 
             llsum += math.log(alpha_sum)
             llsum += max_ll[s]
+            if alpha_sum <= 0.0:  # impossible observation mid-sequence: keep ll -inf, avoid 0/0 -> NaN
+                alpha_sum = 1.0
 
         out[n] = llsum
 
@@ -82,6 +86,8 @@ def numba_baum_welch(
             alpha_loc[s0, i] = temp
             alpha_sum += temp
         # alpha_sum = temp if temp > alpha_sum else alpha_sum
+        if alpha_sum <= 0.0:  # impossible observation (zero emission in every state): keep alpha 0, avoid 0/0 -> NaN
+            alpha_sum = 1.0
         for i in range(num_states):
             alpha_loc[s0, i] /= alpha_sum
 
@@ -96,7 +102,8 @@ def numba_baum_welch(
                 alpha_loc[s, i] = temp
                 alpha_sum += temp
             # alpha_sum = temp if temp > alpha_sum else alpha_sum
-
+            if alpha_sum <= 0.0:  # impossible observation: keep alpha 0, avoid 0/0 -> NaN
+                alpha_sum = 1.0
             for i in range(num_states):
                 alpha_loc[s, i] /= alpha_sum
 
@@ -111,6 +118,8 @@ def numba_baum_welch(
         for s in range(s1 - 2, s0 - 1, -1):
             sp1 = s + 1
 
+            if beta_sum <= 0.0:  # impossible observation: keep beta 0, avoid x/0 -> NaN/inf in the backward pass
+                beta_sum = 1.0
             for j in range(num_states):
                 beta_buff[j] = prev_beta[j] * prob_mat[sp1, j] / beta_sum
 
@@ -172,6 +181,8 @@ def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, al
             alpha_loc[s0, i] = temp
             alpha_sum += temp
         # alpha_sum = temp if temp > alpha_sum else alpha_sum
+        if alpha_sum <= 0.0:  # impossible observation (zero emission in every state): keep alpha 0, avoid 0/0 -> NaN
+            alpha_sum = 1.0
         for i in range(num_states):
             alpha_loc[s0, i] /= alpha_sum
 
@@ -186,7 +197,8 @@ def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, al
                 alpha_loc[s, i] = temp
                 alpha_sum += temp
             # alpha_sum = temp if temp > alpha_sum else alpha_sum
-
+            if alpha_sum <= 0.0:  # impossible observation: keep alpha 0, avoid 0/0 -> NaN
+                alpha_sum = 1.0
             for i in range(num_states):
                 alpha_loc[s, i] /= alpha_sum
 
@@ -201,6 +213,8 @@ def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, al
         for s in range(s1 - 2, s0 - 1, -1):
             sp1 = s + 1
 
+            if beta_sum <= 0.0:  # impossible observation: keep beta 0, avoid x/0 -> NaN/inf in the backward pass
+                beta_sum = 1.0
             for j in range(num_states):
                 beta_buff[j] = prev_beta[j] * prob_mat[sp1, j] / beta_sum
 
@@ -262,6 +276,8 @@ def numba_baum_welch_alphas(num_states, tz, prob_mat, init_pvec, tran_mat, weigh
             alpha_loc[s0, i] = temp
             alpha_sum += temp
         # alpha_sum = temp if temp > alpha_sum else alpha_sum
+        if alpha_sum <= 0.0:  # impossible observation (zero emission in every state): keep alpha 0, avoid 0/0 -> NaN
+            alpha_sum = 1.0
         for i in range(num_states):
             alpha_loc[s0, i] /= alpha_sum
 
@@ -276,6 +292,7 @@ def numba_baum_welch_alphas(num_states, tz, prob_mat, init_pvec, tran_mat, weigh
                 alpha_loc[s, i] = temp
                 alpha_sum += temp
             # alpha_sum = temp if temp > alpha_sum else alpha_sum
-
+            if alpha_sum <= 0.0:  # impossible observation: keep alpha 0, avoid 0/0 -> NaN
+                alpha_sum = 1.0
             for i in range(num_states):
                 alpha_loc[s, i] /= alpha_sum
