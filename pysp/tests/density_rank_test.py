@@ -110,6 +110,26 @@ class CountDPRankTestCase(unittest.TestCase):
         self.assertLessEqual(r.window_lower, r.rank)
         self.assertLessEqual(r.rank, r.window_upper)
 
+    def test_gap_band_tie_not_collapsed(self):
+        # Two genuinely-distinct outcomes whose log-densities differ by a gap in the band (1e-12, 1e-9)
+        # must NOT be collapsed as a tie: the exact-resolution tie threshold is 1e-12, the convention the
+        # true rank is defined by. With a looser 1e-9 the gap-band pair would merge and the rank be wrong.
+        from pysp.stats.univariate.discrete.categorical import CategoricalDistribution
+
+        gap = 2e-10  # strictly inside (1e-12, 1e-9)
+        p0 = 0.2
+        p1 = p0 * math.exp(gap)
+        rest = (1 - p0 - p1) / 2
+        # descending probability: c, d (~0.3) > b (0.2*e^gap) > a (0.2)
+        cat = CategoricalDistribution({"a": p0, "b": p1, "c": rest, "d": rest})
+        self.assertEqual(count_dp_rank(cat, "a", oversample=64).rank, 3)  # c, d, b all strictly above
+        self.assertEqual(count_dp_rank(cat, "b", oversample=64).rank, 2)  # c, d strictly above
+        # the seek inverse resolves the gap-band pair exactly too
+        rb = count_dp_seek(cat, 2, oversample=64)
+        ra = count_dp_seek(cat, 3, oversample=64)
+        self.assertEqual((rb.value, rb.exact, rb.rank_lower, rb.rank_upper), ("b", True, 2, 2))
+        self.assertEqual((ra.value, ra.exact, ra.rank_lower, ra.rank_upper), ("a", True, 3, 3))
+
 
 class CountDPSeekTestCase(unittest.TestCase):
     """count_dp_seek: arbitrary-index unranking (inverse of count_dp_rank) with a true-rank bracket."""
