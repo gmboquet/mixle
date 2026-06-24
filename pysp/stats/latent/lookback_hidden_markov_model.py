@@ -340,8 +340,10 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             pr_obs[ims, i] = self.topics[i].seq_log_density(enc_sdata).astype(np.float64)
 
         pr_max0 = pr_obs.max(axis=1)
-        pr_obs -= pr_max0[:, None]
-        np.exp(pr_obs, out=pr_obs)
+        with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+            pr_obs -= pr_max0[:, None]
+            np.exp(pr_obs, out=pr_obs)
+        pr_obs[np.isnan(pr_obs).any(axis=1), :] = 0.0  # impossible observation -> zero emission row
 
         alpha_buff = np.zeros((num_seq, num_states), dtype=np.float64)
         next_alpha = np.zeros((num_seq, num_states), dtype=np.float64)
@@ -420,8 +422,10 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             pr_obs[ims, i] = self.topics[i].seq_log_density(enc_sdata)
 
         pr_max = pr_obs.max(axis=1, keepdims=True)
-        pr_obs -= pr_max
-        np.exp(pr_obs, out=pr_obs)
+        with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+            pr_obs -= pr_max
+            np.exp(pr_obs, out=pr_obs)
+        pr_obs[np.isnan(pr_obs).any(axis=1), :] = 0.0  # impossible observation -> zero emission row
 
         alphas = np.zeros((tot_cnt, num_states), dtype=np.float64)
         xi_acc = np.zeros((seq_cnt, num_states, num_states), dtype=np.float64)
@@ -833,8 +837,10 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             pr_obs[ims, i] = estimate.topics[i].seq_log_density(enc_sdata)
 
         pr_max = pr_obs.max(axis=1, keepdims=True)
-        pr_obs -= pr_max
-        np.exp(pr_obs, out=pr_obs)
+        with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+            pr_obs -= pr_max
+            np.exp(pr_obs, out=pr_obs)
+        pr_obs[np.isnan(pr_obs).any(axis=1), :] = 0.0  # impossible observation -> zero emission row
 
         # When the fused-EM fast path requests it, compute the per-sequence data
         # log-likelihood from the already-scored emissions via the (read-only)
