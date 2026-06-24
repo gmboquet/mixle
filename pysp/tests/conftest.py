@@ -82,6 +82,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "hidden_association_keys_test.py": ("latent",),
     "hmm_keys_test.py": ("hmm",),
     "hmm_zero_prob_test.py": ("hmm", "numba"),
+    "tree_hmm_zero_prob_test.py": ("hmm", "numba"),
     "hvis_test.py": ("hvis", "integration", "slow"),
     "ibp_test.py": ("distribution", "latent"),
     "int_hidden_association_test.py": ("latent",),
