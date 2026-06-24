@@ -465,7 +465,8 @@ def advi(
         :class:`AdviResult` with ``samples`` ``(samples, d)`` drawn from the fitted Gaussian q (in
         the *same* space ``target_batch`` consumes), plus the fitted ``mean`` and ``scale``.
     """
-    from pysp.ppl.autograd import _advi_optimize, torch_available
+    from pysp.inference._advi import _advi_optimize
+    from pysp.inference.mcmc.gradients import torch_available
 
     if not torch_available():
         raise RuntimeError("pysp.inference.advi requires PyTorch.")
