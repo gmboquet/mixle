@@ -65,10 +65,6 @@ jobs:
     name: full / py3.12
     # Runs in parallel with `fast` (no `needs:`) to cut wall-clock; -n auto parallelizes within.
     runs-on: ubuntu-latest
-    env:
-      # numba's @njit(cache=True) kernels write here; caching the dir across runs gives a WARM cache so
-      # the HMM/sampling tests skip cold JIT compilation (the dominant cost on CI's fresh runners).
-      NUMBA_CACHE_DIR: ${{ github.workspace }}/.numba_cache
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -76,23 +72,11 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Cache numba JIT compilation
-        # Rolling cache: the per-sha key never hits exactly (so a fresh warm cache is saved every run),
-        # and restore-keys loads the most recent prior one. numba re-JITs only functions whose source
-        # changed (it keys its own files by source hash), so the cache stays correct across commits.
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/.numba_cache
-          key: numba-${{ runner.os }}-py312-${{ github.sha }}
-          restore-keys: |
-            numba-${{ runner.os }}-py312-
       - name: Install package and test harness
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test,numba]"
+          python -m pip install -e ".[test]"
       - name: Run full non-optional suite
-        # numba runs the HMM/sampling tests' default (fast) path; the fast / py3.* jobs keep .[test]
-        # (no numba) so the pure-numpy path is still covered.
         run: python -m pytest -m "not optional and not benchmark" -n auto
 
   optional:
