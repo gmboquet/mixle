@@ -131,6 +131,7 @@ from pysp.ppl.predictive import (
     prior_predictive_check,
 )
 from pysp.ppl.priors import Potts, TotalVariation
+from pysp.ppl.summarize import hdi, posterior_summary
 from pysp.ppl.survival import censored_loglik, fit_censored, kaplan_meier
 
 __all__ = [
@@ -191,6 +192,8 @@ __all__ = [
     "fit_censored",
     "censored_loglik",
     "kaplan_meier",
+    "hdi",
+    "posterior_summary",
     "constrain",
     "Constraint",
     "Event",
