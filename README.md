@@ -133,7 +133,9 @@ heterogeneous record as one distribution**. One observation under each:
   PLSI, probabilistic PCA, HMMs (standard, segmental, lookback, tree, quantized), PCFGs, Markov chains,
   hidden associations, IBP, Pitman-Yor processes, Bernoulli sets.
 - **Permutations & graphs:** Mallows / Plackett-Luce, matchings, spanning trees, random graphs
-  (Erdős–Rényi, stochastic block, random dot-product), Spearman ranking.
+  (Erdős–Rényi, stochastic block, random dot-product), Spearman ranking, and graph grammars over
+  networks (vertex-replacement / NLC and hyperedge-replacement) — `log_density` is the marginal
+  likelihood, computed by parsing the graph back to the start symbol.
 - **Bayesian:** conjugate priors (NormalGamma, NormalWishart, MvnGamma, Dirichlet, SymmetricDirichlet)
   and variational Dirichlet-process / hierarchical-DP mixtures.
 
