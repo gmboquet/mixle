@@ -86,6 +86,7 @@ from pysp.doe.factorial import (
     plackett_burman,
 )
 from pysp.doe.mixture import simplex_centroid, simplex_lattice, to_pseudocomponents
+from pysp.doe.multifidelity import multi_fidelity_minimize
 from pysp.doe.multiobjective import (
     MultiObjectiveResult,
     multi_minimize,
@@ -175,6 +176,7 @@ __all__ = [
     "active_learning_design",
     "expected_information_gain_linear",
     "expected_information_gain_nmc",
+    "multi_fidelity_minimize",
     # analysis half (sensitivity / propagation / calibration)
     "sobol_indices",
     "morris_screening",
