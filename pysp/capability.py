@@ -43,6 +43,7 @@ __all__ = [
     "RankableByIndex",
     "ExponentialFamily",
     "ConjugateUpdatable",
+    "ExactDensity",
     "SetValued",
     "HasCDF",
     "HasMoments",
@@ -239,6 +240,28 @@ class ConjugateUpdatable(PredicateCapability):
             return False
 
 
+class ExactDensity(PredicateCapability):
+    """``log_density`` returns the exact ``log p(x)``, not a bound or an approximation.
+
+    False for models whose ``log_density`` is a variational lower bound (e.g. LDA / LLDA return a
+    per-document ELBO) or a plug-in / Monte-Carlo estimate (e.g. HDPM, IBP). ``supports(x, ExactDensity)``
+    lets code that needs an exact likelihood ``require`` it instead of silently trusting a bound.
+    Detection: ``x.density_semantics()`` (default :attr:`DensitySemantics.EXACT`).
+    """
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        from pysp.stats.compute.pdist import DensitySemantics
+
+        fn = getattr(obj, "density_semantics", None)
+        if not callable(fn):
+            return False
+        try:
+            return fn() is DensitySemantics.EXACT
+        except Exception:
+            return False
+
+
 class Neutral(PredicateCapability):
     """The identity / no-op element of a combinator (a Null distribution, accumulator, or encoder)."""
 
@@ -345,6 +368,7 @@ ALL_CAPABILITIES: tuple[type, ...] = (
     RankableByIndex,
     ExponentialFamily,
     ConjugateUpdatable,
+    ExactDensity,
     SetValued,
     HasCDF,
     HasMoments,
@@ -486,6 +510,13 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "closed-form conjugate Bayesian posterior",
         "distribution facet",
         "conjugate_posterior registry",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "ExactDensity",
+        "log_density is the exact log p(x), not an ELBO / approximation",
+        "distribution facet",
+        "density_semantics()",
         "pysp.capability",
     ),
     CapabilitySpec(
@@ -715,6 +746,15 @@ def describe(obj: Any) -> str:
     )
     lines = ["%s — %s." % (name, _category(have))]
     lines.append("  can:       " + " · ".join(can))
+    if "ExactDensity" not in have and hasattr(obj, "density_semantics"):  # flag non-exact densities
+        from pysp.stats.compute.pdist import DensitySemantics
+
+        label = {
+            DensitySemantics.LOWER_BOUND: "variational lower bound (ELBO)",
+            DensitySemantics.UPPER_BOUND: "upper bound",
+            DensitySemantics.ESTIMATE: "plug-in / stochastic estimate",
+        }.get(obj.density_semantics(), "approximation")
+        lines.append("  density:   log_density is a %s, NOT exact log p(x)" % label)
     engines = obj.supported_engines() if hasattr(obj, "supported_engines") else None
     if engines:
         lines.append("  engines:   " + ", ".join(engines))

@@ -859,6 +859,7 @@ from pysp.stats.compute.kernel import (
 # intentionally NOT in __all__: the distribution catalog scanners (star-import / sampler-seed /
 # serialization-registry) must stay concrete-distributions-only.
 from pysp.stats.compute.pdist import (  # noqa: F401
+    DensitySemantics,
     DistributionEnumerator,
     DistributionSampler,
     EnumerationError,

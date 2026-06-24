@@ -161,6 +161,11 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         """
         return np.exp(self.log_density(x))
 
+    def density_semantics(self):
+        from pysp.stats.compute.pdist import DensitySemantics
+
+        return DensitySemantics.LOWER_BOUND  # per-document variational ELBO, not the exact marginal
+
     def log_density(self, x: Sequence[tuple[int, float]]) -> float:
         """Evaluate the log-density of a single LDA document.
 
