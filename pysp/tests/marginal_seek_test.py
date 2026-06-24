@@ -145,11 +145,48 @@ class MarginalSeekTest(unittest.TestCase):
         with self.assertRaises(EnumerationError):
             marginal_seek(m, 0)
 
+    def test_extreme_weight_shared_points_tie_threshold(self):
+        # regression: a 1e-9-weight component adds only ~1e-9 nats to shared points, so a genuinely
+        # more-probable value must NOT be dropped as a tie. With a too-loose tol the exact rank of
+        # value 0 came back 0 though points 5..9 are strictly more probable (true rank 5).
+        c1 = stats.CategoricalDistribution({i: 0.1 for i in range(10)})  # support 0..9
+        c2 = stats.CategoricalDistribution({i: 0.1 for i in range(5, 15)})  # overlaps 5..9
+        m = stats.MixtureDistribution([c1, c2], [0.999999999, 1e-9])
+        support = _union_logdensity(m)
+        r = marginal_seek(m, 0)
+        self.assertTrue(r.exact)
+        self.assertEqual(r.true_rank_lower, _true_rank(support, m, r.value))
+        self.assertEqual(r.true_rank_lower, r.true_rank_upper)
+
+    def test_near_tie_gap_band(self):
+        # regression: distinct values whose marginal log p differ by a gap in (1e-12, 1e-9) must be
+        # ranked, not collapsed -- the resolve comparison's tie threshold matches the rank convention.
+        import math
+
+        n = 6
+        base = 1.0 / n
+        gap = 2e-12
+        da = {i: base * math.exp(gap * i) for i in range(n)}
+        db = {i: base * math.exp(-gap * i) for i in range(n)}
+        da = {k: v / sum(da.values()) for k, v in da.items()}
+        db = {k: v / sum(db.values()) for k, v in db.items()}
+        m = stats.MixtureDistribution(
+            [stats.CategoricalDistribution(da), stats.CategoricalDistribution(db)], [0.6, 0.4]
+        )
+        support = _union_logdensity(m)
+        for i in range(len(support)):
+            r = marginal_seek(m, i)
+            tr = _true_rank(support, m, r.value)
+            self.assertLessEqual(r.true_rank_lower, tr)
+            self.assertLessEqual(tr, r.true_rank_upper)
+            if r.exact:
+                self.assertEqual(r.true_rank_lower, tr)
+
     def test_randomized_soundness_sweep(self):
         # broad fuzz: many random mixtures x all indices x random resolve budgets -> never a violation
         rng = np.random.RandomState(0)
         prng = random.Random(0)
-        for _ in range(60):
+        for _ in range(80):
             k = prng.randint(2, 5)
             n = prng.randint(4, 30)
             dom = [str(i) for i in range(n)]
@@ -157,7 +194,14 @@ class MarginalSeekTest(unittest.TestCase):
                 stats.CategoricalDistribution(dict(zip(dom, rng.dirichlet([prng.choice([0.3, 0.8, 1.5])] * n))))
                 for _ in range(k)
             ]
-            m = stats.MixtureDistribution(comps, list(rng.dirichlet([1.0] * k)))
+            # mix in EXTREME weight asymmetry: a non-dominant component then adds only ~1e-9 nats to a
+            # shared value, the regime that broke the resolve-step tie threshold.
+            if prng.random() < 0.4:
+                w = np.full(k, prng.choice([1e-9, 1e-10, 5e-10]))
+                w[prng.randrange(k)] = 1.0
+            else:
+                w = rng.dirichlet([1.0] * k)
+            m = stats.MixtureDistribution(comps, list(w / w.sum()))
             support = _union_logdensity(m)
             resolve_max = prng.choice([1, 4, 64, 10**9])
             for i in range(len(support)):
