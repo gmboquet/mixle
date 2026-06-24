@@ -131,6 +131,7 @@ from pysp.ppl.predictive import (
     prior_predictive_check,
 )
 from pysp.ppl.priors import Potts, TotalVariation
+from pysp.ppl.survival import censored_loglik, fit_censored, kaplan_meier
 
 __all__ = [
     "RandomVariable",
@@ -187,6 +188,9 @@ __all__ = [
     "posterior_predictive_check",
     "prior_predictive",
     "prior_predictive_check",
+    "fit_censored",
+    "censored_loglik",
+    "kaplan_meier",
     "constrain",
     "Constraint",
     "Event",
