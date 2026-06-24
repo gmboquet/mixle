@@ -722,6 +722,21 @@ class FieldPosterior:
         return out
 
 
+# Register FieldPosterior with the core sampler so ``pysp.stats.sample(field_post, n)`` dispatches here
+# without the core ``sampling_api`` importing this (ppl) module -- the dependency stays ppl -> core.
+def _register_field_posterior_sampling() -> None:
+    from pysp.stats.compute.sampling_api import SAMPLE_UNHANDLED, _resolve_rng, register_sample_dispatch
+
+    @register_sample_dispatch
+    def _sample_field_posterior(model, size, *, seed, rng, **kwargs):
+        if isinstance(model, FieldPosterior):
+            return model.sample(1 if size is None else size, rng=_resolve_rng(seed, rng), **kwargs)
+        return SAMPLE_UNHANDLED
+
+
+_register_field_posterior_sampling()
+
+
 def _support_transforms(support: str):
     if support == "positive":
         return (lambda u, t: t.exp(u) if hasattr(t, "exp") else np.exp(u), lambda v: np.log(np.clip(v, 1e-12, None)))

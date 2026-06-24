@@ -23,13 +23,27 @@ import numpy as np
 
 from pysp.engines.arithmetic import maxrandint
 
-__all__ = ["sample"]
+__all__ = ["sample", "register_sample_dispatch"]
 
 
 def _resolve_rng(seed: int | None, rng: np.random.RandomState | None) -> np.random.RandomState:
     if rng is not None:
         return rng
     return np.random.RandomState(seed)
+
+
+# Out-of-core samplable handlers. A higher layer (e.g. ``pysp.ppl`` for ``FieldPosterior``) registers a
+# dispatcher for its own types here, so this core module never imports upward to name them -- keeping the
+# dependency graph strictly ppl -> core. Each handler is ``fn(model, size, *, seed, rng, **kwargs)`` and
+# returns a draw, or the ``SAMPLE_UNHANDLED`` sentinel if ``model`` is not its type.
+SAMPLE_UNHANDLED: Any = object()
+_SAMPLE_DISPATCHERS: list[Any] = []
+
+
+def register_sample_dispatch(fn):
+    """Register a :func:`sample` handler for a type the core layer must not import. Returns ``fn``."""
+    _SAMPLE_DISPATCHERS.append(fn)
+    return fn
 
 
 def sample(
@@ -64,13 +78,12 @@ def sample(
     if isinstance(model, Relation):
         return model.sampler(seed=seed, rng=rng, **kwargs).sample(size)
 
-    # FieldPosterior -- joint field/parameter draws (importing lazily; field.py needs torch).
-    try:
-        from pysp.ppl.field import FieldPosterior
-    except Exception:  # pragma: no cover - torch optional
-        FieldPosterior = ()  # type: ignore[assignment]
-    if FieldPosterior and isinstance(model, FieldPosterior):
-        return model.sample(1 if size is None else size, rng=_resolve_rng(seed, rng), **kwargs)
+    # Out-of-core samplables registered by higher layers (e.g. pysp.ppl FieldPosterior -- joint
+    # field/parameter draws). Iterated before LatentPosterior to preserve the original dispatch order.
+    for _dispatch in _SAMPLE_DISPATCHERS:
+        out = _dispatch(model, size, seed=seed, rng=rng, **kwargs)
+        if out is not SAMPLE_UNHANDLED:
+            return out
 
     # LatentPosterior -- latent-variable draws (one per call; loop for a collection).
     from pysp.stats.compute.posterior import LatentPosterior
