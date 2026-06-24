@@ -59,6 +59,7 @@ from pysp.doe.factorial import (
     fractional_factorial,
     plackett_burman,
 )
+from pysp.doe.mixture import simplex_centroid, simplex_lattice, to_pseudocomponents
 from pysp.doe.multiobjective import (
     MultiObjectiveResult,
     multi_minimize,
@@ -89,6 +90,9 @@ __all__ = [
     "plackett_burman",
     "central_composite",
     "box_behnken",
+    "simplex_lattice",
+    "simplex_centroid",
+    "to_pseudocomponents",
     "OptimizationResult",
     "BayesOptResult",
     "expected_improvement",
