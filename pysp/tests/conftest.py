@@ -40,6 +40,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "ppl_composite_sampling_test.py": ("ppl", "stochastic", "slow"),
     "ppl_inference_test.py": ("ppl", "stochastic", "slow"),
     "ppl_new_distributions_test.py": ("ppl", "stochastic"),
+    "ppl_predictive_test.py": ("ppl", "stochastic"),
     "ppl_leaf_families_test.py": ("ppl", "stochastic", "slow"),
     "ppl_vector_params_test.py": ("ppl", "stochastic", "slow"),
     "reflective_hmc_test.py": ("stochastic", "slow"),
