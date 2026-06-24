@@ -8,6 +8,7 @@ import itertools
 import math
 import sys
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import Any, Generic, Optional, TypeVar
 
 import numpy as np
@@ -15,6 +16,20 @@ import numpy as np
 from pysp.engines.arithmetic import *
 
 SS = TypeVar("SS")
+
+
+class DensitySemantics(Enum):
+    """What a distribution's ``log_density`` returns relative to the true log-density.
+
+    The default contract is :attr:`EXACT`; override ``density_semantics()`` on models whose
+    ``log_density`` is a variational bound or an approximation, so callers can tell an exact likelihood
+    from one (e.g. LDA's per-document ELBO). Surfaced via the ``ExactDensity`` capability and ``describe``.
+    """
+
+    EXACT = "exact"  # the true log p(x)
+    LOWER_BOUND = "lower_bound"  # value <= true log p(x); e.g. a variational ELBO
+    UPPER_BOUND = "upper_bound"  # value >= true log p(x)
+    ESTIMATE = "estimate"  # an approximation with no guaranteed direction (plug-in / Monte Carlo)
 
 
 class EnumerationError(NotImplementedError):
@@ -123,6 +138,16 @@ class ProbabilityDistribution(ABC):
         from pysp.capability import capabilities
 
         return capabilities(self)
+
+    def density_semantics(self) -> DensitySemantics:
+        """What ``log_density`` returns relative to the true log-density (default: exact).
+
+        Override to declare that this distribution's ``log_density`` is a variational lower bound
+        (ELBO), an upper bound, or an approximation rather than the exact ``log p(x)``. This is surfaced
+        as the ``ExactDensity`` capability and noted in :func:`pysp.describe`, so code that needs an
+        exact likelihood can ``require(x, ExactDensity)`` instead of silently trusting a bound.
+        """
+        return DensitySemantics.EXACT
 
     @abstractmethod
     def log_density(self, x: Any) -> float:

@@ -289,19 +289,27 @@ def best_derivation(graph, grammar, start_symbol, budget=_PARSE_BUDGET):
     return solve(graph, 3 * graph.number_of_nodes() + 10)
 
 
-def marginal_log_prob(graph, grammar, start_symbol, budget=_PARSE_BUDGET):
+def marginal_log_prob(graph, grammar, start_symbol, budget=_PARSE_BUDGET, with_status=False):
     """Marginal log-likelihood of a graph: log-sum over ALL derivations that yield it.
 
     This is the inside (sum-product) recursion over the reduction state graph -- identical to
     ``best_derivation`` but combining a state's children with ``logsumexp`` instead of ``max``, so it
     sums ``prod freq(rule)/total(lhs)`` over every parse rather than taking the single best one. It is
-    therefore >= the Viterbi value and equals the exact marginal when the whole parse forest is explored.
+    therefore >= the Viterbi value and equals the EXACT marginal when the whole parse forest is explored.
 
-    The search is budget-bounded; if the budget truncates the forest, the result is the log-sum over the
-    *explored* parses -- a variational ELBO (the tightest bound for a posterior supported on that set),
-    still tighter than Viterbi. Returns -inf if the grammar cannot derive the graph at all.
+    The search is bounded by ``budget`` (reduction expansions) and a recursion depth of ``3n+10``. If
+    either cap is reached the forest is truncated and the result is the log-sum over the *explored*
+    parses -- a variational ELBO (the tightest bound for a posterior on that set), still >= Viterbi.
+    For acyclic grammars on graphs that fit the budget, neither cap is hit and the value is exact.
+
+    Args:
+        with_status: if True, return ``(value, exact)`` where ``exact`` is False iff a cap was reached
+            (so the value may be a lower bound); if False, return just ``value``.
+
+    Returns -inf if the grammar cannot derive the graph at all.
     """
     remaining = [budget]
+    truncated = [False]
 
     def inside(h, depth):
         if h.number_of_nodes() == 1 and h.number_of_edges() == 0:
@@ -309,11 +317,13 @@ def marginal_log_prob(graph, grammar, start_symbol, budget=_PARSE_BUDGET):
             if h.nodes[only].get(_NONTERMINAL) == start_symbol:
                 return 0.0  # the start symbol: one (empty) completion, probability 1
         if depth <= 0 or remaining[0] <= 0:
+            truncated[0] = True  # a cap was reached -> the explored forest may be incomplete
             return float("-inf")
         terms = []
         for reduced, rule, total in _reductions(h, grammar):
             remaining[0] -= 1
             if remaining[0] <= 0:
+                truncated[0] = True
                 break
             sub = inside(reduced, depth - 1)
             if sub != float("-inf"):
@@ -323,9 +333,8 @@ def marginal_log_prob(graph, grammar, start_symbol, budget=_PARSE_BUDGET):
         high = max(terms)
         return high + float(np.log(sum(np.exp(t - high) for t in terms)))  # logsumexp
 
-    if graph.number_of_nodes() == 0:
-        return float("-inf")
-    return inside(graph, 3 * graph.number_of_nodes() + 10)
+    value = float("-inf") if graph.number_of_nodes() == 0 else inside(graph, 3 * graph.number_of_nodes() + 10)
+    return (value, not truncated[0]) if with_status else value
 
 
 def _isomorphic_rule_graph(g1, g2):
@@ -555,6 +564,13 @@ class GrammarDistribution(SequenceEncodableProbabilityDistribution):
         if not self.grammar.rule_dict:
             return None
         return max(self.grammar.rule_dict, key=lambda s: sum(r.frequency for r in self.grammar.rule_dict[s]))
+
+    def density_semantics(self):
+        # exact (the inside sum) unless the parse budget/depth truncates the forest -> conservatively a
+        # lower bound. marginal_log_prob(..., with_status=True) certifies whether a given call was exact.
+        from pysp.stats.compute.pdist import DensitySemantics
+
+        return DensitySemantics.LOWER_BOUND
 
     def log_density(self, x):
         """Log-density of the grammar distribution at an observed GRAPH x -- the marginal likelihood.
