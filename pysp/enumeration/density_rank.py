@@ -528,7 +528,7 @@ def marginal_seek(
     oversample: int = 64,
     bin_width_bits: float = 1.0,
     resolve_max: int = 8192,
-    tol: float = 1.0e-9,
+    tol: float = 1.0e-12,
     max_fine_bucket_cap: int = 1 << 30,
 ) -> MarginalSeekResult:
     """Seek descending ``index`` with a GUARANTEED bracket on the value's true marginal rank.
@@ -615,6 +615,11 @@ def marginal_seek(
     raw_within = sum(hist.count_at(b) for b in range(lo_b, hi_b + 1))
     built_top = hist.base + len(hist.data) - 1
     window_built = hi_b <= built_top or exhausted
+
+    # ``tol`` is the rank's TIE THRESHOLD: a window value counts as strictly more probable only when its
+    # true log-density exceeds ``t`` by more than ``tol``. It must match the convention the true rank is
+    # defined by (1e-12) -- a looser value (e.g. 1e-9) would drop a genuinely-more-probable value whose
+    # gap is a non-dominant component's tiny ~1e-9-nat contribution, corrupting the "exact" rank.
 
     # Exact path 1 -- no displacement and no over-count (decomposable, or a provably-disjoint mixture
     # reporting disp_bits == 0): raw_below is already the exact distinct count strictly below the window
