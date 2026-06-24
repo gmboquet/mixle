@@ -57,6 +57,7 @@ from pysp.ppl.core import (
 from pysp.ppl.distributions import (
     AR1,
     EMG,
+    GEV,
     LDA,
     MVN,
     Bernoulli,
@@ -90,7 +91,9 @@ from pysp.ppl.distributions import (
     Skellam,
     SkewNormal,
     StudentT,
+    Tweedie,
     Uniform,
+    VonMises,
     Weibull,
 )
 from pysp.ppl.field import (
@@ -151,6 +154,9 @@ __all__ = [
     "SkewNormal",
     "Skellam",
     "LogSeries",
+    "VonMises",
+    "GEV",
+    "Tweedie",
     "Dirichlet",
     "Mix",
     "SemiMix",
