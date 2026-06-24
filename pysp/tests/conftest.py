@@ -56,6 +56,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "doe_entropy_test.py": ("doe",),
     "doe_turbo_test.py": ("doe", "slow"),
     "doe_active_test.py": ("doe", "slow"),
+    "doe_multifidelity_test.py": ("doe", "slow"),
     "doe_mixture_test.py": ("doe",),
     "doe_analysis_test.py": ("doe",),
     "doe_criteria_sensitivity_test.py": ("doe",),
