@@ -4,7 +4,15 @@ import unittest
 
 import numpy as np
 
-from pysp.doe import central_composite, factorial_effects, fractional_factorial, response_surface
+from pysp.doe import (
+    central_composite,
+    design_diagnostics,
+    factorial_effects,
+    fractional_factorial,
+    latin_hypercube,
+    response_surface,
+)
+from pysp.doe.optimal import polynomial_features
 
 
 class FactorialEffectsTest(unittest.TestCase):
@@ -50,6 +58,23 @@ class ResponseSurfaceTest(unittest.TestCase):
         x = self._ccd()
         self.assertEqual(response_surface(x, 1 + x[:, 0] ** 2 + x[:, 1] ** 2).kind, "minimum")
         self.assertEqual(response_surface(x, 5 + x[:, 0] ** 2 - x[:, 1] ** 2).kind, "saddle")
+
+
+class DesignDiagnosticsTest(unittest.TestCase):
+    def test_orthogonal_factorial_is_perfectly_efficient(self):
+        x = fractional_factorial([(-1, 1)] * 3, "a b c", coded=True)
+        d = design_diagnostics(x, polynomial_features(1))
+        self.assertAlmostEqual(d["d_efficiency"], 1.0)
+        self.assertAlmostEqual(d["a_efficiency"], 1.0)
+        self.assertAlmostEqual(d["g_efficiency"], 1.0)
+        self.assertAlmostEqual(d["condition_number"], 1.0)
+        self.assertAlmostEqual(d["max_correlation"], 0.0)
+
+    def test_factorial_beats_random_lhs(self):
+        ff = design_diagnostics(fractional_factorial([(-1, 1)] * 3, "a b c", coded=True), polynomial_features(1))
+        lhs = design_diagnostics(latin_hypercube([(-1, 1)] * 3, 8, seed=1), polynomial_features(1))
+        self.assertGreaterEqual(ff["d_efficiency"], lhs["d_efficiency"])
+        self.assertLessEqual(ff["max_correlation"], lhs["max_correlation"])
 
 
 if __name__ == "__main__":

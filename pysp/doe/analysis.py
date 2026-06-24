@@ -177,4 +177,58 @@ def response_surface(x, y) -> ResponseSurface:
     return ResponseSurface(coef, names, b, bmat, xs, eig, kind, rstd)
 
 
-__all__ = ["FactorialEffects", "factorial_effects", "ResponseSurface", "response_surface"]
+def design_diagnostics(design, model, *, ref=None) -> dict:
+    """Quality diagnostics for a design under a model -- "is this a good design to run?".
+
+    Builds the model matrix ``F = model(design)`` and reports, relative to a hypothetical perfectly
+    orthogonal design (where each is ``1.0``):
+
+      * ``d_efficiency`` -- ``det(M)**(1/p) / n``: overall coefficient-estimation precision;
+      * ``a_efficiency`` -- ``p / (n * trace(M^-1))``: average coefficient variance;
+      * ``g_efficiency`` -- ``p / (n * max prediction variance)`` over ``ref`` (or the design itself);
+      * ``condition_number`` of ``M`` (large => near-collinear / fragile to fit);
+      * ``max_correlation`` -- the largest absolute pairwise correlation among the non-intercept model
+        columns (the aliasing check; ``0`` for an orthogonal design).
+
+    ``model`` is a model-matrix function such as :func:`pysp.doe.optimal.polynomial_features`. Use it on
+    the *coded* design for meaningful efficiencies.
+    """
+    f = np.asarray(model(design), dtype=np.float64)
+    n, p = f.shape
+    m = f.T @ f
+    sign, logdet = np.linalg.slogdet(m)
+    d_eff = float(np.exp(logdet / p) / n) if sign > 0 else 0.0
+    try:
+        inv = np.linalg.inv(m)
+        a_eff = float(p / (n * np.trace(inv)))
+        cond = float(np.linalg.cond(m))
+        pts = np.asarray(ref, dtype=np.float64) if ref is not None else f
+        pred_var = np.einsum("ij,jk,ik->i", pts, inv, pts)
+        g_eff = float(p / (n * np.max(pred_var)))
+    except np.linalg.LinAlgError:
+        a_eff = g_eff = 0.0
+        cond = float("inf")
+    cols = f[:, 1:] if p > 1 and np.allclose(f[:, 0], 1.0) else f
+    if cols.shape[1] >= 2:
+        corr = np.corrcoef(cols, rowvar=False)
+        max_corr = float(np.max(np.abs(corr - np.eye(corr.shape[0]))))
+    else:
+        max_corr = 0.0
+    return {
+        "d_efficiency": d_eff,
+        "a_efficiency": a_eff,
+        "g_efficiency": g_eff,
+        "condition_number": cond,
+        "max_correlation": max_corr,
+        "n_runs": int(n),
+        "n_params": int(p),
+    }
+
+
+__all__ = [
+    "FactorialEffects",
+    "factorial_effects",
+    "ResponseSurface",
+    "response_surface",
+    "design_diagnostics",
+]
