@@ -19,6 +19,14 @@ input points scaled into the supplied per-dimension bounds:
 
 from __future__ import annotations
 
+from pysp.doe.active import (
+    active_learning_design,
+    alc_scores,
+    alm_scores,
+    expected_information_gain_linear,
+    expected_information_gain_nmc,
+    propose_active_learning,
+)
 from pysp.doe.analysis import (
     FactorialEffects,
     ResponseSurface,
@@ -159,6 +167,12 @@ __all__ = [
     "propose_mes",
     "turbo_minimize",
     "TrustRegion",
+    "alm_scores",
+    "alc_scores",
+    "propose_active_learning",
+    "active_learning_design",
+    "expected_information_gain_linear",
+    "expected_information_gain_nmc",
     # analysis half (sensitivity / propagation / calibration)
     "sobol_indices",
     "morris_screening",
