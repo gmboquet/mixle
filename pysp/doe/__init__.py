@@ -74,7 +74,10 @@ from pysp.doe.multiobjective import (
 from pysp.doe.optimal import (
     a_criterion,
     available_criteria,
+    c_criterion,
     d_criterion,
+    e_criterion,
+    g_criterion,
     i_criterion,
     optimal_design,
     polynomial_features,
@@ -82,7 +85,7 @@ from pysp.doe.optimal import (
 )
 from pysp.doe.optimizer import BayesianOptimizer
 from pysp.doe.propagate import propagate, register_propagator, unscented_transform
-from pysp.doe.sensitivity import morris_screening, sobol_indices
+from pysp.doe.sensitivity import dgsm, fast_indices, morris_screening, sobol_indices
 
 __all__ = [
     "Bounds",
@@ -122,6 +125,9 @@ __all__ = [
     "d_criterion",
     "a_criterion",
     "i_criterion",
+    "g_criterion",
+    "e_criterion",
+    "c_criterion",
     "register_criterion",
     "available_criteria",
     "ConstrainedBayesOptResult",
@@ -135,6 +141,8 @@ __all__ = [
     # analysis half (sensitivity / propagation / calibration)
     "sobol_indices",
     "morris_screening",
+    "fast_indices",
+    "dgsm",
     "propagate",
     "register_propagator",
     "unscented_transform",
