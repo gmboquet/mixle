@@ -135,6 +135,25 @@ def LogSeries(p: Any, *, name: str | None = None, keys: str | None = None) -> Ra
     return RandomVariable._sample("LogSeries", (p,), name=name, keys=keys)
 
 
+def VonMises(mu: Any, kappa: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Von Mises (circular normal) on the angle ``(-pi, pi]`` with mean ``mu`` and concentration ``kappa``."""
+    return RandomVariable._sample("VonMises", (mu, kappa), name=name, keys=keys)
+
+
+def GEV(loc: Any, scale: Any, shape: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Generalized extreme value with ``loc``, ``scale``, ``shape`` (the block-maxima limit law)."""
+    return RandomVariable._sample("GEV", (loc, scale, shape), name=name, keys=keys)
+
+
+def Tweedie(mu: Any, phi: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Tweedie compound Poisson-Gamma (power ``p=1.5``) with mean ``mu`` and dispersion ``phi``.
+
+    A positive distribution with an atom at zero -- the standard model for non-negative data that is
+    part-zero, part-continuous (insurance claims, rainfall, ecological biomass).
+    """
+    return RandomVariable._sample("Tweedie", (mu, phi), name=name, keys=keys)
+
+
 def Categorical(
     probs: Any, *, dim: int | None = None, name: str | None = None, keys: str | None = None
 ) -> RandomVariable:
