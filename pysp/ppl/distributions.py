@@ -154,6 +154,30 @@ def Tweedie(mu: Any, phi: Any, *, name: str | None = None, keys: str | None = No
     return RandomVariable._sample("Tweedie", (mu, phi), name=name, keys=keys)
 
 
+def GeneralizedGaussian(mu: Any, alpha: Any, beta: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Generalized Gaussian (exponential power) with ``mu``, scale ``alpha``, shape ``beta``.
+
+    ``beta=2`` is the Normal and ``beta=1`` is the Laplace, so it interpolates between light and heavy
+    tails -- a flexible symmetric error model.
+    """
+    return RandomVariable._sample("GeneralizedGaussian", (mu, alpha, beta), name=name, keys=keys)
+
+
+def GeneralizedPareto(scale: Any, shape: Any, loc: Any = 0.0, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Generalized Pareto (``scale``, tail ``shape``, threshold ``loc``) -- the peaks-over-threshold tail law."""
+    return RandomVariable._sample("GeneralizedPareto", (scale, shape, loc), name=name, keys=keys)
+
+
+def Nakagami(m: Any, omega: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Nakagami-``m`` distribution with shape ``m`` and spread ``omega`` (signal-fading amplitudes)."""
+    return RandomVariable._sample("Nakagami", (m, omega), name=name, keys=keys)
+
+
+def Rician(nu: Any, sigma: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Rician (Rice) distribution with non-centrality ``nu`` and scale ``sigma`` (signal-plus-noise magnitude)."""
+    return RandomVariable._sample("Rician", (nu, sigma), name=name, keys=keys)
+
+
 def Categorical(
     probs: Any, *, dim: int | None = None, name: str | None = None, keys: str | None = None
 ) -> RandomVariable:

@@ -13,10 +13,14 @@ from pysp.ppl import free
 from pysp.stats.directional.von_mises import VonMisesDistribution
 from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
 from pysp.stats.univariate.continuous.generalized_extreme_value import GeneralizedExtremeValueDistribution
+from pysp.stats.univariate.continuous.generalized_gaussian import GeneralizedGaussianDistribution
+from pysp.stats.univariate.continuous.generalized_pareto import GeneralizedParetoDistribution
 from pysp.stats.univariate.continuous.gumbel import GumbelDistribution
 from pysp.stats.univariate.continuous.half_normal import HalfNormalDistribution
 from pysp.stats.univariate.continuous.inverse_gamma import InverseGammaDistribution
 from pysp.stats.univariate.continuous.inverse_gaussian import InverseGaussianDistribution
+from pysp.stats.univariate.continuous.nakagami import NakagamiDistribution
+from pysp.stats.univariate.continuous.rician import RicianDistribution
 from pysp.stats.univariate.continuous.skew_normal import SkewNormalDistribution
 from pysp.stats.univariate.continuous.tweedie import TweedieDistribution
 from pysp.stats.univariate.discrete.logseries import LogSeriesDistribution
@@ -61,6 +65,20 @@ class NewPplDistributionsTest(unittest.TestCase):
 
     def test_tweedie(self):
         self._recovers(TweedieDistribution(3.0, 1.0, 1.5), lambda: P.Tweedie(free, free), {"mu": 3.0}, n=4000)
+
+    def test_generalized_gaussian(self):
+        self._recovers(
+            GeneralizedGaussianDistribution(0.0, 1.5, 2.0), lambda: P.GeneralizedGaussian(free, free, free), {"alpha": 1.5}
+        )
+
+    def test_generalized_pareto(self):
+        self._recovers(GeneralizedParetoDistribution(2.0, 0.2, 0.0), lambda: P.GeneralizedPareto(free, free, free), {"scale": 2.0}, rel=0.3)
+
+    def test_nakagami(self):
+        self._recovers(NakagamiDistribution(2.0, 4.0), lambda: P.Nakagami(free, free), {"m": 2.0, "omega": 4.0})
+
+    def test_rician(self):
+        self._recovers(RicianDistribution(3.0, 1.0), lambda: P.Rician(free, free), {"nu": 3.0, "sigma": 1.0})
 
     def test_half_normal_as_scale_prior(self):
         # the canonical use: a weakly-informative scale prior recovered by MAP
