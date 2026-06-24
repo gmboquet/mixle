@@ -14,6 +14,7 @@ import numpy as np
 from pysp.ppl.core import register_composite, register_family
 from pysp.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
 from pysp.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
+from pysp.stats.directional.von_mises import VonMisesDistribution, VonMisesEstimator
 from pysp.stats.latent.hidden_markov import HiddenMarkovEstimator, HiddenMarkovModelDistribution
 from pysp.stats.latent.lda import LDADistribution, LDAEstimator
 from pysp.stats.latent.mixture import MixtureDistribution, MixtureEstimator
@@ -31,6 +32,10 @@ from pysp.stats.univariate.continuous.exgaussian import (
 from pysp.stats.univariate.continuous.exponential import ExponentialDistribution, ExponentialEstimator
 from pysp.stats.univariate.continuous.gamma import GammaDistribution, GammaEstimator
 from pysp.stats.univariate.continuous.gaussian import GaussianDistribution, GaussianEstimator
+from pysp.stats.univariate.continuous.generalized_extreme_value import (
+    GeneralizedExtremeValueDistribution,
+    GeneralizedExtremeValueEstimator,
+)
 from pysp.stats.univariate.continuous.gumbel import GumbelDistribution, GumbelEstimator
 from pysp.stats.univariate.continuous.half_normal import HalfNormalDistribution, HalfNormalEstimator
 from pysp.stats.univariate.continuous.inverse_gamma import InverseGammaDistribution, InverseGammaEstimator
@@ -42,6 +47,7 @@ from pysp.stats.univariate.continuous.pareto import ParetoDistribution, ParetoEs
 from pysp.stats.univariate.continuous.rayleigh import RayleighDistribution, RayleighEstimator
 from pysp.stats.univariate.continuous.skew_normal import SkewNormalDistribution, SkewNormalEstimator
 from pysp.stats.univariate.continuous.student_t import StudentTDistribution, StudentTEstimator
+from pysp.stats.univariate.continuous.tweedie import TweedieDistribution, TweedieEstimator
 from pysp.stats.univariate.continuous.uniform import UniformDistribution, UniformEstimator
 from pysp.stats.univariate.continuous.weibull import WeibullDistribution, WeibullEstimator
 from pysp.stats.univariate.discrete.bernoulli import BernoulliDistribution, BernoulliEstimator
@@ -255,6 +261,36 @@ register_family(
     support=("unit",),
     seed_at=lambda v, s: {"p": 0.5},
     read=lambda d: {"p": d.p},
+)
+register_family(
+    "VonMises",
+    VonMisesDistribution,
+    VonMisesEstimator,
+    lambda mu, kappa: {"mu": float(mu), "kappa": float(kappa)},
+    arity=2,
+    positive=(False, True),
+    seed_at=lambda v, s: {"mu": float(v), "kappa": 1.0},
+    read=lambda d: {"mu": d.mu, "kappa": d.kappa},
+)
+register_family(
+    "GEV",
+    GeneralizedExtremeValueDistribution,
+    GeneralizedExtremeValueEstimator,
+    lambda loc, scale, shape: {"loc": float(loc), "scale": float(scale), "shape": float(shape)},
+    arity=3,
+    positive=(False, True, False),
+    seed_at=lambda v, s: {"loc": float(v), "scale": max(float(s) or 1.0, 1e-2), "shape": 0.1},
+    read=lambda d: {"loc": d.loc, "scale": d.scale, "shape": d.shape},
+)
+register_family(
+    "Tweedie",
+    TweedieDistribution,
+    TweedieEstimator,
+    lambda mu, phi: {"mu": float(mu), "phi": float(phi), "p": 1.5},  # compound Poisson-Gamma at p=1.5
+    arity=2,
+    positive=(True, True),
+    seed_at=lambda v, s: {"mu": max(abs(float(v)), 1e-2), "phi": 1.0, "p": 1.5},
+    read=lambda d: {"mu": d.mu, "phi": d.phi, "p": d.p},
 )
 
 

@@ -8,16 +8,17 @@ recovering its parameters through the PPL EM/MLE path.
 
 import unittest
 
-import numpy as np
-
 import pysp.ppl as P
 from pysp.ppl import free
+from pysp.stats.directional.von_mises import VonMisesDistribution
 from pysp.stats.univariate.continuous.gaussian import GaussianDistribution
+from pysp.stats.univariate.continuous.generalized_extreme_value import GeneralizedExtremeValueDistribution
 from pysp.stats.univariate.continuous.gumbel import GumbelDistribution
 from pysp.stats.univariate.continuous.half_normal import HalfNormalDistribution
 from pysp.stats.univariate.continuous.inverse_gamma import InverseGammaDistribution
 from pysp.stats.univariate.continuous.inverse_gaussian import InverseGaussianDistribution
 from pysp.stats.univariate.continuous.skew_normal import SkewNormalDistribution
+from pysp.stats.univariate.continuous.tweedie import TweedieDistribution
 from pysp.stats.univariate.discrete.logseries import LogSeriesDistribution
 from pysp.stats.univariate.discrete.skellam import SkellamDistribution
 
@@ -51,6 +52,15 @@ class NewPplDistributionsTest(unittest.TestCase):
 
     def test_logseries(self):
         self._recovers(LogSeriesDistribution(0.6), lambda: P.LogSeries(free), {"p": 0.6})
+
+    def test_von_mises(self):
+        self._recovers(VonMisesDistribution(0.5, 3.0), lambda: P.VonMises(free, free), {"mu": 0.5, "kappa": 3.0})
+
+    def test_gev(self):
+        self._recovers(GeneralizedExtremeValueDistribution(1.0, 2.0, 0.1), lambda: P.GEV(free, free, free), {"loc": 1.0, "scale": 2.0})
+
+    def test_tweedie(self):
+        self._recovers(TweedieDistribution(3.0, 1.0, 1.5), lambda: P.Tweedie(free, free), {"mu": 3.0}, n=4000)
 
     def test_half_normal_as_scale_prior(self):
         # the canonical use: a weakly-informative scale prior recovered by MAP
