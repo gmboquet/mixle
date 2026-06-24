@@ -737,12 +737,6 @@ def _register_field_posterior_sampling() -> None:
 _register_field_posterior_sampling()
 
 
-def _support_transforms(support: str):
-    if support == "positive":
-        return (lambda u, t: t.exp(u) if hasattr(t, "exp") else np.exp(u), lambda v: np.log(np.clip(v, 1e-12, None)))
-    return (lambda u, t: u, lambda v: v)
-
-
 class _NoField:
     """A degenerate field (no shared latent) so fit_field also serves pure-parameter inference."""
 

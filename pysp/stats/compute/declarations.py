@@ -960,15 +960,6 @@ def _generated_numba_row_matrix(statistics: Sequence[Any]) -> np.ndarray:
     return np.ascontiguousarray(np.concatenate(columns, axis=1), dtype=np.float64)
 
 
-def _generated_numba_row_vector(value: Any, row_count: int, name: str) -> np.ndarray:
-    arr = np.asarray(_numpy_engine().to_numpy(value), dtype=np.float64)
-    if arr.ndim == 0:
-        return np.full(row_count, float(arr), dtype=np.float64)
-    if arr.ndim != 1 or arr.shape[0] != row_count:
-        raise ValueError("generated numba %s must be scalar or a row vector." % name)
-    return np.ascontiguousarray(arr, dtype=np.float64)
-
-
 def _generated_numba_base(value: Any, row_count: int) -> np.ndarray:
     """Return a base measure as a scalar-filled ``(n,)`` vector or a component ``(n, k)`` matrix.
 
