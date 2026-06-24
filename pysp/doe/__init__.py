@@ -97,6 +97,7 @@ from pysp.doe.optimal import (
 from pysp.doe.optimizer import BayesianOptimizer
 from pysp.doe.propagate import propagate, register_propagator, unscented_transform
 from pysp.doe.sensitivity import dgsm, fast_indices, morris_screening, sobol_indices
+from pysp.doe.trust_region import TrustRegion, turbo_minimize
 
 __all__ = [
     "Bounds",
@@ -156,6 +157,8 @@ __all__ = [
     "max_value_entropy_search",
     "sample_max_values",
     "propose_mes",
+    "turbo_minimize",
+    "TrustRegion",
     # analysis half (sensitivity / propagation / calibration)
     "sobol_indices",
     "morris_screening",
