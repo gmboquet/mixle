@@ -26,6 +26,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "lookback_terminal_states_test.py": ("hmm", "integration", "slow"),
     "ppl_engine_test.py": ("ppl", "integration", "slow"),
     "graph_distribution_test.py": ("graph", "integration", "slow"),
+    "hyperedge_replacement_grammar_test.py": ("graph", "pcfg", "slow"),
     "hawkes_process_test.py": ("distribution", "stochastic", "slow"),
     "hmm_terminal_states_test.py": ("hmm", "integration", "slow"),
     "infer_backends_test.py": ("numba", "integration", "slow"),
