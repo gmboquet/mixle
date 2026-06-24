@@ -63,13 +63,6 @@ def _log_kent_norm(kappa: float, beta: float) -> float:
     return _LOG_2PI + kappa + float(logsumexp(log_terms))
 
 
-def _orthonormalize(gamma: np.ndarray) -> np.ndarray:
-    """Project a ``3 x 3`` matrix to the nearest orthonormal frame (columns g1, g2, g3)."""
-    q, r = np.linalg.qr(np.asarray(gamma, dtype=np.float64))
-    q = q * np.sign(np.diag(r))  # fix QR sign ambiguity so columns align with the input
-    return q
-
-
 class KentDistribution(SequenceEncodableProbabilityDistribution):
     """Kent (FB5) distribution on ``S^2`` with orientation ``gamma`` (3x3), concentration and ovalness."""
 
