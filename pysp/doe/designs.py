@@ -108,47 +108,99 @@ def maximin_latin_hypercube(
     return best_design
 
 
+_MAXPRO_TINY = 1e-12
+
+
 def _maxpro_criterion(unit: np.ndarray) -> float:
     """MaxPro criterion of a unit design: ``sum_{i<j} 1 / prod_k (x_ik - x_jk)^2`` (lower is better)."""
     diff = unit[:, None, :] - unit[None, :, :]
-    prod = np.prod(diff * diff + 1e-12, axis=2)
+    prod = np.prod(diff * diff + _MAXPRO_TINY, axis=2)
     iu = np.triu_indices(unit.shape[0], k=1)
     return float(np.sum(1.0 / prod[iu]))
 
 
-def maxpro_design(
-    bounds: Bounds, n: int, seed: int | RandomState | None = None, *, iterations: int = 2000
-) -> np.ndarray:
-    """Return a maximum-projection (MaxPro) space-filling design (Joseph, Gul & Ba 2015).
+def _maxpro_obj_grad(flat: np.ndarray, n: int, d: int) -> tuple[float, np.ndarray]:
+    """Log MaxPro criterion ``log sum_{i<j} 1/prod_k diff^2`` and its gradient wrt the flattened design.
 
-    MaxPro minimizes ``sum_{i<j} 1 / prod_k (x_ik - x_jk)^2``, which forces the points to spread out in
-    *every* subspace projection, not just the full space. That makes it the design of choice when only
-    some of the inputs turn out to matter (factor screening / sloppy models): even projected onto the
-    active subset, the points stay space-filling. Starts from a Latin-hypercube (preserving 1-D
-    uniformity) and improves it by accept-if-better within-column swaps. Returns an ``(n, d)`` array.
+    Optimizing the log keeps the objective scale-free (the raw criterion spans many orders of magnitude).
+    The gradient is analytic: ``dC/dx_il = -2 sum_{j!=i} w_ij / (x_il - x_jl)`` with ``w_ij = 1/prod_k
+    (x_ik - x_jk)^2``, and ``d log C = dC / C``.
     """
-    if n <= 0:
-        raise ValueError("n must be positive.")
-    b = _as_bounds(bounds)
-    rng = _as_rng(seed)
-    d = b.shape[0]
-    n = int(n)
-    unit = np.empty((n, d), dtype=np.float64)
-    for j in range(d):
-        unit[:, j] = (rng.permutation(n) + rng.random_sample(n)) / n
-    if n < 2 or d == 0:
-        return _scale_unit(unit, b)
+    x = flat.reshape(n, d)
+    diff = x[:, None, :] - x[None, :, :]  # (n, n, d)
+    sq = diff * diff
+    w = np.exp(-np.sum(np.log(sq + _MAXPRO_TINY), axis=2))  # (n, n), = 1/prod_k diff^2
+    np.fill_diagonal(w, 0.0)
+    total = 0.5 * float(np.sum(w))  # symmetric sum -> halve for i<j
+    inv_diff = diff / (sq + _MAXPRO_TINY)  # ~ 1/diff, finite at diff=0 (diagonal -> 0)
+    grad = -2.0 * np.einsum("ij,ijk->ik", w, inv_diff)  # (n, d); j=i excluded since w_ii=0
+    return float(np.log(max(total, _MAXPRO_TINY))), (grad / max(total, _MAXPRO_TINY)).ravel()
+
+
+def _maxpro_swap(unit: np.ndarray, rng: RandomState, iterations: int) -> np.ndarray:
+    """MaxProLHD coordinate exchange: accept-if-better within-column swaps preserving the LHS structure."""
     best = _maxpro_criterion(unit)
+    n, d = unit.shape
     for _ in range(int(iterations)):
         col = int(rng.randint(d))
         i, j = rng.choice(n, size=2, replace=False)
-        unit[[i, j], col] = unit[[j, i], col]  # swap preserves the LHS column (a permutation of strata)
+        unit[[i, j], col] = unit[[j, i], col]
         trial = _maxpro_criterion(unit)
         if trial < best:
             best = trial
         else:
             unit[[i, j], col] = unit[[j, i], col]  # revert
-    return _scale_unit(unit, b)
+    return unit
+
+
+def maxpro_design(
+    bounds: Bounds, n: int, seed: int | RandomState | None = None, *, restarts: int = 3, swaps: int = 1500, maxiter: int = 300
+) -> np.ndarray:
+    """Return a maximum-projection (MaxPro) space-filling design (Joseph, Gul & Ba 2015).
+
+    MaxPro minimizes ``sum_{i<j} 1 / prod_k (x_ik - x_jk)^2``, which forces the points to spread out in
+    *every* subspace projection, not just the full space -- the design of choice when only some inputs
+    turn out to matter (factor screening / sloppy models), since the points stay space-filling even
+    projected onto the active subset.
+
+    Built by the paper's two-stage procedure, repeated from ``restarts`` Latin-hypercube starts: (1) a
+    MaxProLHD coordinate-exchange phase (``swaps`` within-column swaps) finds a good basin while keeping
+    the LHS structure, then (2) continuous L-BFGS-B optimization (analytic gradient, ``maxiter`` steps)
+    moves the points off the grid to the true MaxPro optimum -- the refinement that cuts the criterion
+    by far more than the swap phase alone. The best design over restarts is returned as an ``(n, d)`` array.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive.")
+    from scipy.optimize import minimize
+
+    b = _as_bounds(bounds)
+    rng = _as_rng(seed)
+    d = b.shape[0]
+    n = int(n)
+    if n < 2 or d == 0:
+        unit = np.empty((n, d), dtype=np.float64)
+        for j in range(d):
+            unit[:, j] = (rng.permutation(n) + rng.random_sample(n)) / n
+        return _scale_unit(unit, b)
+
+    box = [(_MAXPRO_TINY, 1.0 - _MAXPRO_TINY)] * (n * d)
+    best_unit: np.ndarray | None = None
+    best_crit = np.inf
+    for _ in range(max(1, int(restarts))):
+        start = np.empty((n, d), dtype=np.float64)
+        for j in range(d):
+            start[:, j] = (rng.permutation(n) + rng.random_sample(n)) / n
+        start = _maxpro_swap(start, rng, swaps)  # stage 1: coordinate exchange (LHD basin)
+        res = minimize(  # stage 2: continuous refinement off the grid
+            _maxpro_obj_grad, start.ravel(), args=(n, d), method="L-BFGS-B", jac=True, bounds=box,
+            options={"maxiter": int(maxiter)},
+        )
+        cand = np.clip(res.x.reshape(n, d), 0.0, 1.0)
+        crit = _maxpro_criterion(cand)
+        if crit < best_crit:
+            best_crit, best_unit = crit, cand
+    assert best_unit is not None
+    return _scale_unit(best_unit, b)
 
 
 def _qmc_unit(engine_cls: Any, d: int, n: int, scramble: bool, rng: RandomState) -> np.ndarray:
