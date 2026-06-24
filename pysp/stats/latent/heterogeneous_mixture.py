@@ -141,6 +141,11 @@ class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution)
         """
         return exp(self.log_density(x))
 
+    def density_semantics(self):
+        from pysp.stats.compute.pdist import join_density_semantics
+
+        return join_density_semantics(c.density_semantics() for c in self.components)
+
     def log_density(self, x: T) -> float:
         """Evaluate log-density of heterogeneous mixture distribution at observation x.
 
