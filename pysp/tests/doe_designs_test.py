@@ -10,9 +10,11 @@ from pysp.doe import (
     halton_design,
     latin_hypercube,
     maximin_latin_hypercube,
+    maxpro_design,
     random_design,
     sobol_design,
 )
+from pysp.doe.designs import _maxpro_criterion
 
 
 def _within_bounds(x, bounds):
@@ -74,6 +76,16 @@ class DoeDesignsTest(unittest.TestCase):
 
         plain = latin_hypercube(self.bounds, n, seed=2)
         self.assertGreaterEqual(min_dist(mm) + 1e-12, min_dist(plain))
+
+    def test_maxpro_is_valid_lhs_and_better_projections(self):
+        bounds = [(0.0, 1.0)] * 4
+        mp = maxpro_design(bounds, 20, seed=0, iterations=3000)
+        self.assertEqual(mp.shape, (20, 4))
+        self.assertTrue(_within_bounds(mp, bounds))
+        self.assertTrue(_lhs_one_per_stratum(mp, bounds, 20))  # preserves 1-D uniformity
+        # the optimized design has a far lower projection (MaxPro) criterion than a plain LHS
+        lhs = latin_hypercube(bounds, 20, seed=0)
+        self.assertLess(_maxpro_criterion(mp - 0.0), _maxpro_criterion(lhs))
 
     def test_full_factorial_grid_size_and_corners(self):
         x = full_factorial([(0.0, 1.0), (0.0, 10.0)], levels=3)
