@@ -142,6 +142,54 @@ class NestedRecursiveTest(unittest.TestCase):
         self._check(est, init, data)
 
 
+class CostAwareExecutorTest(unittest.TestCase):
+    """The executor threads the heaviest axis by COMPUTE COST (consistent with the C2 planner)."""
+
+    def test_threads_heavy_narrow_axis_over_wide_cheap_axis(self):
+        from pysp.utils.parallel.model_parallel import _parallel_ids
+
+        heavy = stats.MixtureDistribution(
+            [stats.MultivariateGaussianDistribution([0.0] * 15, np.eye(15).tolist()) for _ in range(3)], [1 / 3] * 3
+        )
+        wide = stats.MixtureDistribution([stats.GaussianDistribution(float(i), 1.0) for i in range(20)], [1 / 20] * 20)
+        ids = _parallel_ids(stats.CompositeDistribution((heavy, wide)), 8)
+        self.assertIn(id(heavy), ids)  # the 3-way D=15 mixture (heavy) is chosen...
+        self.assertNotIn(id(wide), ids)  # ...over the 20-way scalar mixture (wider but cheap)
+
+    def test_cost_heterogeneous_model_is_bit_identical(self):
+        # a composite of [3-way MVGaussian mixture, 20-way scalar mixture]: whichever axis the executor
+        # threads, the in-process fold must stay exactly equal to the serial path.
+        d = 6
+        est = stats.CompositeEstimator(
+            (
+                stats.MixtureEstimator([stats.MultivariateGaussianEstimator(dim=d) for _ in range(3)]),
+                stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(20)]),
+            )
+        )
+        rng = np.random.RandomState(5)
+        init = stats.CompositeDistribution(
+            (
+                stats.MixtureDistribution(
+                    [
+                        stats.MultivariateGaussianDistribution((rng.randn(d) * 3).tolist(), np.eye(d).tolist())
+                        for _ in range(3)
+                    ],
+                    [1 / 3] * 3,
+                ),
+                stats.MixtureDistribution(
+                    [stats.GaussianDistribution(float(i) - 10, 1.0) for i in range(20)], [1 / 20] * 20
+                ),
+            )
+        )
+        data = [
+            ((rng.randn(d) + 3 * (rng.randint(3) - 1)).tolist(), float(rng.randn() + (rng.randint(20) - 10)))
+            for _ in range(300)
+        ]
+        local = optimize(data, est, prev_estimate=init, max_its=6, out=None, backend="local")
+        mp = optimize(data, est, prev_estimate=init, max_its=6, out=None, backend="model_parallel", num_workers=4)
+        self.assertEqual(str(local), str(mp))
+
+
 class FallbackTest(unittest.TestCase):
     def test_leaf_model_falls_back_and_is_identical(self):
         # a plain Gaussian is atomic -> replicated accumulation, still exact via the same handle.
