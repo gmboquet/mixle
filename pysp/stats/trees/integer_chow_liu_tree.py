@@ -731,14 +731,3 @@ class IntegerChowLiuTreeDataEncoder(DataSequenceEncoder):
 
         """
         return np.asarray(x, dtype=int)
-
-
-# Backward-compatible aliases for the former ICLTree* names (the family was renamed
-# IntegerChowLiuTree to spell out the Integer Chow-Liu Tree acronym).
-ICLTreeDistribution = IntegerChowLiuTreeDistribution
-ICLTreeEnumerator = IntegerChowLiuTreeEnumerator
-ICLTreeSampler = IntegerChowLiuTreeSampler
-ICLTreeAccumulator = IntegerChowLiuTreeAccumulator
-ICLTreeAccumulatorFactory = IntegerChowLiuTreeAccumulatorFactory
-ICLTreeEstimator = IntegerChowLiuTreeEstimator
-ICLTreeDataEncoder = IntegerChowLiuTreeDataEncoder
