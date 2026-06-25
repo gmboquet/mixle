@@ -144,6 +144,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "objectives_test.py": ("torch", "optional"),
     "parallel_test.py": ("parallel", "integration", "slow"),
     "placement_test.py": ("parallel", "planner"),
+    "model_decomposition_test.py": ("parallel", "planner"),
     "ppl_separation_test.py": ("ppl",),
     "random_graph_models_test.py": ("graph",),
     "quantized_hmm_test.py": ("hmm", "integration", "slow"),
