@@ -2,7 +2,7 @@
 
 Verifies the forward evidence against brute-force path enumeration (with and without a prior), that a one-hot
 prior clamps the hidden path, that supervised (one-hot) and unsupervised EM recover a known model, the encoder /
-seq_log_density consistency, the sampler, and that the former IndPi* names still resolve as aliases.
+seq_log_density consistency, and the sampler.
 """
 
 import itertools
@@ -13,7 +13,6 @@ import numpy as np
 from pysp.inference.estimation import optimize
 from pysp.stats import GaussianDistribution as G
 from pysp.stats.latent.semi_supervised_hidden_markov_model import (
-    IndPiHiddenMarkovModelDistribution,
     SemiSupervisedHiddenMarkovModelDistribution,
 )
 
@@ -118,9 +117,6 @@ class SemiSupervisedHMMTestCase(unittest.TestCase):
         self.assertGreaterEqual(len(s[0]), 4)
         batch = d.sampler(seed=7).sample(5)
         self.assertEqual(len(batch), 5)
-
-    def test_indpi_aliases_resolve(self):
-        self.assertIs(IndPiHiddenMarkovModelDistribution, SemiSupervisedHiddenMarkovModelDistribution)
 
 
 if __name__ == "__main__":

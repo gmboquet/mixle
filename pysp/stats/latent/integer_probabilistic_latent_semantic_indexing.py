@@ -1373,13 +1373,3 @@ def _register_int_plsi_engine_kernel():
 
 
 _register_int_plsi_engine_kernel()
-
-
-# Backward-compatible aliases for the former IntegerPLSI (probabilistic latent semantic indexing) names.
-IntegerPLSIDistribution = IntegerProbabilisticLatentSemanticIndexingDistribution
-IntegerPLSISampler = IntegerProbabilisticLatentSemanticIndexingSampler
-IntegerPLSIEstimator = IntegerProbabilisticLatentSemanticIndexingEstimator
-IntegerPLSIAccumulator = IntegerProbabilisticLatentSemanticIndexingAccumulator
-IntegerPLSIAccumulatorFactory = IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory
-IntegerPLSIDataEncoder = IntegerProbabilisticLatentSemanticIndexingDataEncoder
-IntegerPLSIEnumerator = IntegerProbabilisticLatentSemanticIndexingEnumerator

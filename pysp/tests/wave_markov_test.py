@@ -94,7 +94,7 @@ class ImportTestCase(unittest.TestCase):
             "VertexReplacementGrammarDistribution",
             "VertexReplacementGrammarSampler",
             "VertexReplacementGrammarAccumulator",
-            "GrammarAccumulatorFactory",
+            "VertexReplacementGrammarAccumulatorFactory",
             "VertexReplacementGrammarEstimator",
             "VertexReplacementGrammarDataEncoder",
         ):
@@ -130,15 +130,15 @@ class GrammarTestCase(unittest.TestCase):
         est2 = dist.estimator(pseudo_count=2.0)
         self.assertEqual(est2.pseudo_count, 2.0)
 
-    def test_accumulator_factory_and_alias(self):
+    def test_accumulator_factory(self):
         from pysp.stats.graphs.vertex_replacement_grammar import (
-            GrammarAccumulatorFactory,
+            VertexReplacementGrammarAccumulatorFactory,
             VertexReplacementGrammarEstimator,
         )
 
         est = VertexReplacementGrammarEstimator()
-        self.assertIsInstance(est.accumulator_factory(), GrammarAccumulatorFactory)
-        self.assertIsInstance(est.accumulatorFactory(), GrammarAccumulatorFactory)
+        self.assertIsInstance(est.accumulator_factory(), VertexReplacementGrammarAccumulatorFactory)
+        self.assertIsInstance(est.accumulatorFactory(), VertexReplacementGrammarAccumulatorFactory)
 
     def test_encoder_equality(self):
         from pysp.stats.graphs.vertex_replacement_grammar import (

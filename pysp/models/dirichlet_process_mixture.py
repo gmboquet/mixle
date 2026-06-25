@@ -315,8 +315,3 @@ def _variational_predictive_objective(model: TruncatedDirichletProcessMixtureMod
     log_scores = _component_log_density_matrix(model.components, data)
     weighted = log_scores + model.expected_log_weights[None, :]
     return float(np.sum([vec.log_sum(row) for row in weighted]))
-
-
-# Backward-compatible aliases for the former DPM (Dirichlet process mixture) names.
-TruncatedDPMModel = TruncatedDirichletProcessMixtureModel
-TruncatedDPMFitResult = TruncatedDirichletProcessMixtureFitResult

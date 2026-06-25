@@ -1232,13 +1232,6 @@ from pysp.stats.trees.chow_liu_tree import (
     ChowLiuTreeEstimator,
     ChowLiuTreeSampler,
 )
-
-# Backward-compatible ICLTree* aliases (redundant import alias marks an intentional re-export).
-from pysp.stats.trees.integer_chow_liu_tree import ICLTreeDataEncoder as ICLTreeDataEncoder  # noqa: F401
-from pysp.stats.trees.integer_chow_liu_tree import ICLTreeDistribution as ICLTreeDistribution  # noqa: F401
-from pysp.stats.trees.integer_chow_liu_tree import ICLTreeEnumerator as ICLTreeEnumerator  # noqa: F401
-from pysp.stats.trees.integer_chow_liu_tree import ICLTreeEstimator as ICLTreeEstimator  # noqa: F401
-from pysp.stats.trees.integer_chow_liu_tree import ICLTreeSampler as ICLTreeSampler  # noqa: F401
 from pysp.stats.trees.integer_chow_liu_tree import (
     IntegerChowLiuTreeDataEncoder,
     IntegerChowLiuTreeDistribution,
@@ -1629,11 +1622,6 @@ _LAZY_NAMES: dict[str, str] = {
     "IntegerProbabilisticLatentSemanticIndexingDistribution": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
     "IntegerProbabilisticLatentSemanticIndexingEstimator": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
     "IntegerProbabilisticLatentSemanticIndexingSampler": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
-    # int_plsi backward-compatible aliases (former IntegerPLSI* names)
-    "IntegerPLSIDataEncoder": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
-    "IntegerPLSIDistribution": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
-    "IntegerPLSIEstimator": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
-    "IntegerPLSISampler": "pysp.stats.latent.integer_probabilistic_latent_semantic_indexing",
     # int_hidden_association (imports int_plsi + numba)
     "IntegerHiddenAssociationDataEncoder": "pysp.stats.latent.integer_hidden_association",
     "IntegerHiddenAssociationDistribution": "pysp.stats.latent.integer_hidden_association",
