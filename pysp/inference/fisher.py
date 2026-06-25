@@ -28,6 +28,7 @@ import numpy as np
 Path = tuple[str, ...]
 
 
+# --- sufficient-statistic vectorizer (the Fisher accumulator core) ----------
 class SufficientStatisticVectorizer:
     """Flatten nested sufficient-statistic structures into numeric vectors.
 
@@ -136,6 +137,7 @@ class SufficientStatisticVectorizer:
         return [".".join(p) for p in self.labels]
 
 
+# --- FisherView base ---------------------------------------------------------
 class FisherView:
     """Accumulator-backed Fisher-geometry view of a distribution.
 
@@ -424,6 +426,7 @@ class FisherView:
         raise NotImplementedError("generic Fisher views do not expose canonical natural parameters")
 
 
+# --- generic & composite views (fixed-coordinate / count / composite / mixture)
 class FixedFisherView(FisherView):
     """Distribution-specific Fisher view with fixed vector coordinates."""
 
@@ -910,6 +913,7 @@ class JointMixtureFisherView(MixtureFisherView):
         return out
 
 
+# --- view helpers (info extraction / encoding / finite-support enumeration) --
 def _is_null_dist(dist: Any) -> bool:
     return dist is None or type(dist).__name__ == "NullDistribution"
 
@@ -1060,6 +1064,7 @@ def _length_support(dist: Any, tol: float = 1.0e-12, max_terms: int = 20000) -> 
     return None
 
 
+# --- specialized views (empirical / sequence / multinomial / optional / HMM / PCFG)
 class EmpiricalMetricFixedFisherView(FixedFisherView):
     """Fixed-coordinate view whose whitening falls back to empirical Fisher."""
 
@@ -2111,6 +2116,7 @@ class HiddenMarkovFisherView(FixedFisherView):
             )
 
 
+# --- data coercion + the public to_fisher dispatch --------------------------
 def _as_float_array(data: Any) -> np.ndarray:
     return np.asarray(data, dtype=np.float64)
 
