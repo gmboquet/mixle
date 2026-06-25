@@ -123,6 +123,7 @@ def distribution_log_target(dist: Any, evidence: Callable[[Any], float] | None =
     return lambda x: float(dist.log_density(x)) + float(evidence(x))
 
 
+# --- MCMC samplers (MH / ensemble / Gibbs / HMC / reflective / dense / NUTS) -
 def metropolis_hastings(
     log_target: LogTarget,
     initial: Any,
@@ -857,6 +858,7 @@ def _find_reasonable_eps(theta, lp0, grad0, leapfrog, kinetic, sqrt_m, shape, rn
     return float(eps)
 
 
+# --- sampling, posterior-predictive & multi-chain diagnostics ---------------
 def sample_distribution(
     dist: Any,
     initial: Any,
@@ -998,6 +1000,7 @@ def run_chains(
     return results, gelman_rubin(results)
 
 
+# --- numeric state, mass & leapfrog helpers ---------------------------------
 def _copy_state(x: Any) -> Any:
     if isinstance(x, np.ndarray):
         return x.copy()
