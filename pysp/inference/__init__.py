@@ -32,6 +32,20 @@ from pysp.inference.fisher import FisherView, FixedFisherView, to_fisher
 # the Posterior algebra — inference produces posteriors; you draw from them through one interface
 from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 
+# proper scoring rules — fair currency for comparing probabilistic forecasts / interval methods
+from pysp.inference.scoring import (
+    brier_decomposition,
+    brier_score,
+    crps_ensemble,
+    crps_gaussian,
+    energy_score,
+    interval_score,
+    log_score,
+    pinball_loss,
+    skill_score,
+    winkler_score,
+)
+
 # sampling-based inference — the engine-agnostic NUTS/ADVI facade (target must be sampleable/differentiable)
 from pysp.inference.target import (
     AdviResult,
@@ -81,6 +95,17 @@ __all__ = [
     "posterior",
     "ParameterPosterior",
     "PredictivePosterior",
+    # proper scoring rules (lower is better; pair with resampling for score-difference CIs)
+    "log_score",
+    "brier_score",
+    "brier_decomposition",
+    "crps_ensemble",
+    "crps_gaussian",
+    "interval_score",
+    "winkler_score",
+    "pinball_loss",
+    "energy_score",
+    "skill_score",
     # closed-form conjugate Bayes
     "ConjugateUpdatable",
     "conjugate_posterior",
