@@ -94,12 +94,21 @@ class SpectrumDecisionTest(unittest.TestCase):
         self.assertEqual(plan.model_parallel, 1)
         self.assertEqual(plan.data_parallel, 8)
 
-    def test_atomic_model_single_observation_is_honestly_diagnosed(self):
-        # a single dense HMM on one observation: no splittable axis, N<P -> 1 worker, reported as such
-        plan = balance_plan(_hmm(50), _cluster(8), n_data=1)
+    def test_massive_hmm_single_observation_is_model_parallel(self):
+        # the goal case: a massive HMM on ONE observation splits along its state axis across the cluster
+        plan = balance_plan(_hmm(50, d=10), _cluster(8), n_data=1)
+        self.assertEqual(plan.data_parallel, 1)  # cannot data-parallel a single observation
+        self.assertEqual(plan.model_parallel, 8)  # ...so split the 50 states across all 8 workers
+        self.assertEqual(plan.workers_used, 8)
+        self.assertEqual(
+            plan.axis, __import__("pysp.stats.compute.decomposition", fromlist=["DecompAxis"]).DecompAxis.STATE
+        )
+
+    def test_truly_atomic_model_single_observation_is_honestly_diagnosed(self):
+        # a lone leaf on one observation genuinely has no axis to split -> 1 worker, reported as such
+        plan = balance_plan(stats.GaussianDistribution(0.0, 1.0), _cluster(8), n_data=1)
         self.assertEqual(plan.workers_used, 1)
         self.assertIn("no splittable axis", plan.rationale)
-        self.assertIn("structured decomposition", plan.rationale)
 
 
 class HmmRealizationTest(unittest.TestCase):
@@ -125,6 +134,25 @@ class HmmRealizationTest(unittest.TestCase):
             return float(np.sum(m.seq_log_density(m.dist_to_encoder().seq_encode(data))))
 
         self.assertTrue(np.isclose(ll(base), ll(fit), rtol=1e-6), (ll(base), ll(fit)))
+
+    def test_rich_emission_hmm_state_parallel_is_bit_identical(self):
+        from pysp.utils.parallel.model_parallel import ModelParallelEstimator
+
+        # the massive/rich-emission HMM case: per-state emission scoring + accumulation are threaded
+        # across states inside Baum-Welch; the forward-backward stays serial; the fit is bit-identical.
+        emit = [stats.MultivariateGaussianDistribution((np.zeros(6)).tolist(), np.eye(6).tolist()) for _ in range(8)]
+        init = stats.HiddenMarkovModelDistribution(
+            emit, [1 / 8] * 8, (np.ones((8, 8)) / 8).tolist(), len_dist=stats.PoissonDistribution(10.0)
+        )
+        est = stats.HiddenMarkovEstimator(
+            [stats.MultivariateGaussianEstimator(dim=6) for _ in range(8)], len_estimator=stats.PoissonEstimator()
+        )
+        data = [init.sampler(seed=s).sample() for s in range(50)]
+        base = optimize(data, est, prev_estimate=init, max_its=4, out=None, backend="local")
+        mp = optimize(
+            data, ModelParallelEstimator(est, num_workers=4), prev_estimate=init, max_its=4, out=None, backend="local"
+        )
+        self.assertEqual(str(base), str(mp))
 
 
 class FlopBalanceTest(unittest.TestCase):
