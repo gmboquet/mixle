@@ -2052,7 +2052,7 @@ def numba_seq_log_density(
             for i in range(num_states):
                 temp = pr_obs[s0, i] * p_level[0, i]
                 beta_sum += temp
-            out[n] = math.log(beta_sum) + pr_max0[s0]
+            out[n] = (math.log(beta_sum) if beta_sum > 0.0 else -np.inf) + pr_max0[s0]
 
         ll_sum = 0.0
         beta_mat = betas[s0:s1, :]
@@ -2074,7 +2074,7 @@ def numba_seq_log_density(
                 beta_mat[leaf_node, i] *= temp
                 beta_sum += temp
 
-            ll_sum += math.log(beta_sum) + b_max[leaf_node]
+            ll_sum += (math.log(beta_sum) if beta_sum > 0.0 else -np.inf) + b_max[leaf_node]
             if beta_sum <= 0.0:  # impossible observation: log above gave -inf; keep beta 0, avoid 0/0 -> NaN
                 beta_sum = 1.0
 
@@ -2112,7 +2112,7 @@ def numba_seq_log_density(
 
                 beta_sum += beta_mat[p, i]
 
-            ll_sum += math.log(beta_sum) + b_max[p]
+            ll_sum += (math.log(beta_sum) if beta_sum > 0.0 else -np.inf) + b_max[p]
             if beta_sum <= 0.0:  # impossible subtree: keep beta 0, avoid 0/0 -> NaN
                 beta_sum = 1.0
 
