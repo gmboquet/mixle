@@ -328,9 +328,7 @@ def _stats_public_distribution_catalog():
         ),
         "MallowsDistribution": stats.MallowsDistribution([0, 2, 1, 3], theta=1.0),
         "GeneralizedMallowsDistribution": stats.GeneralizedMallowsDistribution([0, 2, 1, 3], 1.0, "cayley"),
-        "GeneralizedMallowsModelDistribution": stats.GeneralizedMallowsModelDistribution(
-            [0, 2, 1, 3], [1.5, 1.0, 0.5]
-        ),
+        "GeneralizedMallowsModelDistribution": stats.GeneralizedMallowsModelDistribution([0, 2, 1, 3], [1.5, 1.0, 0.5]),
         "BradleyTerryDistribution": stats.BradleyTerryDistribution([1.5, 0.5, -0.5, -1.5]),
         "ThurstoneDistribution": stats.ThurstoneDistribution([1.5, 0.5, -0.5, -1.5]),
         "ThurstoneMostellerDistribution": stats.ThurstoneMostellerDistribution([1.5, 0.5, -0.5, -1.5]),

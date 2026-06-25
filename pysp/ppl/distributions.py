@@ -154,7 +154,9 @@ def Tweedie(mu: Any, phi: Any, *, name: str | None = None, keys: str | None = No
     return RandomVariable._sample("Tweedie", (mu, phi), name=name, keys=keys)
 
 
-def GeneralizedGaussian(mu: Any, alpha: Any, beta: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+def GeneralizedGaussian(
+    mu: Any, alpha: Any, beta: Any, *, name: str | None = None, keys: str | None = None
+) -> RandomVariable:
     """Generalized Gaussian (exponential power) with ``mu``, scale ``alpha``, shape ``beta``.
 
     ``beta=2`` is the Normal and ``beta=1`` is the Laplace, so it interpolates between light and heavy
@@ -163,7 +165,9 @@ def GeneralizedGaussian(mu: Any, alpha: Any, beta: Any, *, name: str | None = No
     return RandomVariable._sample("GeneralizedGaussian", (mu, alpha, beta), name=name, keys=keys)
 
 
-def GeneralizedPareto(scale: Any, shape: Any, loc: Any = 0.0, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+def GeneralizedPareto(
+    scale: Any, shape: Any, loc: Any = 0.0, *, name: str | None = None, keys: str | None = None
+) -> RandomVariable:
     """Generalized Pareto (``scale``, tail ``shape``, threshold ``loc``) -- the peaks-over-threshold tail law."""
     return RandomVariable._sample("GeneralizedPareto", (scale, shape, loc), name=name, keys=keys)
 

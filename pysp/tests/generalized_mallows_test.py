@@ -16,7 +16,10 @@ _CLOSED = ("kendall", "cayley", "hamming")
 def _brute_logz(metric, theta, n):
     ident = np.arange(n)
     return math.log(
-        sum(math.exp(-theta * permutation_distance(np.array(p), ident, metric)) for p in itertools.permutations(range(n)))
+        sum(
+            math.exp(-theta * permutation_distance(np.array(p), ident, metric))
+            for p in itertools.permutations(range(n))
+        )
     )
 
 
@@ -41,9 +44,7 @@ class NormalizerTest(unittest.TestCase):
     def test_expected_distance_matches_brute_force(self):
         for metric in _CLOSED:
             for theta in (1e-9, 0.4, 1.3, 3.0):
-                self.assertAlmostEqual(
-                    expected_distance(metric, theta, 6), _brute_expected(metric, theta, 6), places=7
-                )
+                self.assertAlmostEqual(expected_distance(metric, theta, 6), _brute_expected(metric, theta, 6), places=7)
 
     def test_density_sums_to_one_all_metrics(self):
         for metric in METRICS:

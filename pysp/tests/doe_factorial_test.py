@@ -45,7 +45,7 @@ class CentralCompositeTest(unittest.TestCase):
     def test_structure_and_rotatable_alpha(self):
         x = central_composite([(-1, 1)] * 3, center=4, alpha="rotatable", coded=True)
         self.assertEqual(x.shape, (8 + 6 + 4, 3))  # factorial + axial + center
-        self.assertAlmostEqual(np.max(np.abs(x)), 8 ** 0.25)  # axial distance = (2^k)^(1/4)
+        self.assertAlmostEqual(np.max(np.abs(x)), 8**0.25)  # axial distance = (2^k)^(1/4)
         self.assertEqual(int(np.sum(np.all(x == 0.0, axis=1))), 4)  # center replicates
 
     def test_face_centered_inside_cube(self):

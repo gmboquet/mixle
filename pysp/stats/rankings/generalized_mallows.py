@@ -108,9 +108,7 @@ def expected_distance(metric: str, theta: float, n: int) -> float:
             return float(n - 1)  # E[fixed points] = 1 under the uniform permutation
     phi = math.exp(-theta)
     if metric == "kendall":
-        return float(
-            sum(phi / (1.0 - phi) - (i + 1) * phi ** (i + 1) / (1.0 - phi ** (i + 1)) for i in range(1, n))
-        )
+        return float(sum(phi / (1.0 - phi) - (i + 1) * phi ** (i + 1) / (1.0 - phi ** (i + 1)) for i in range(1, n)))
     if metric == "cayley":
         return float(sum(i * phi / (1.0 + i * phi) for i in range(1, n)))
     if metric == "hamming":

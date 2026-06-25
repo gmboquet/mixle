@@ -41,7 +41,12 @@ class TurboOptimizeTest(unittest.TestCase):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             res = turbo_minimize(
-                lambda x: float(np.sum((x - opt) ** 2)), [(-2.0, 2.0)] * 6, n_init=12, max_evals=120, batch_size=2, seed=0
+                lambda x: float(np.sum((x - opt) ** 2)),
+                [(-2.0, 2.0)] * 6,
+                n_init=12,
+                max_evals=120,
+                batch_size=2,
+                seed=0,
             )
         self.assertLess(np.linalg.norm(res["x"] - opt), 0.5)
         self.assertEqual(res["X"].shape[1], 6)

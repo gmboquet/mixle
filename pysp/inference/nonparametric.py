@@ -46,9 +46,7 @@ class MannWhitneyResult:
     alternative: str
 
 
-def mann_whitney_u(
-    x: Any, y: Any, *, alternative: str = "two-sided", use_continuity: bool = True
-) -> MannWhitneyResult:
+def mann_whitney_u(x: Any, y: Any, *, alternative: str = "two-sided", use_continuity: bool = True) -> MannWhitneyResult:
     """Mann-Whitney U / Wilcoxon rank-sum test for two independent samples.
 
     Tests whether ``x`` is stochastically greater/less than ``y``. Uses mid-ranks for ties, the
@@ -388,9 +386,7 @@ def friedman_test(*measurements: Any) -> TestResult:
     ranks = np.apply_along_axis(stats.rankdata, 1, data)
     rsum = ranks.sum(axis=0)
     tie = sum(_tie_term(ranks[b]) for b in range(nblocks))
-    q = (12.0 * np.sum(rsum**2) - 3.0 * nblocks**2 * k * (k + 1) ** 2) / (
-        nblocks * k * (k + 1) - tie / (k - 1)
-    )
+    q = (12.0 * np.sum(rsum**2) - 3.0 * nblocks**2 * k * (k + 1) ** 2) / (nblocks * k * (k + 1) - tie / (k - 1))
     df = k - 1
     p = float(stats.chi2.sf(q, df))
     w = q / (nblocks * (k - 1))

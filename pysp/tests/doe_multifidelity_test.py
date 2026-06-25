@@ -23,8 +23,14 @@ class MultiFidelityTest(unittest.TestCase):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             res = multi_fidelity_minimize(
-                obj, [(-1.0, 1.0)] * 3, fidelities=(0.5, 1.0), costs=(1.0, 5.0),
-                n_init=5, max_cost=80.0, n_candidates=200, seed=0,
+                obj,
+                [(-1.0, 1.0)] * 3,
+                fidelities=(0.5, 1.0),
+                costs=(1.0, 5.0),
+                n_init=5,
+                max_cost=80.0,
+                n_candidates=200,
+                seed=0,
             )
         n_low = int(np.sum(res["X"][:, -1] == 0.5))
         n_high = int(np.sum(res["X"][:, -1] == 1.0))
