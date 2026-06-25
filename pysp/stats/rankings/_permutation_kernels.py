@@ -18,6 +18,8 @@ pure Python (via the numba shim) when numba is absent -- the results are identic
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from pysp.utils.optional_deps import numba
@@ -161,6 +163,84 @@ def _seq_distance(R: np.ndarray, mid: int) -> np.ndarray:
         else:
             out[k] = ulam_perm(r)
     return out
+
+
+# --- assignment-model normalizers: exact permanent + Sinkhorn/Bethe approximation ----------------
+@numba.njit("float64(float64[:, :])", cache=True)
+def ryser_log_permanent(M: np.ndarray) -> float:
+    """log permanent of a non-negative matrix via Ryser's formula with Gray-code subset enumeration."""
+    n = M.shape[0]
+    if n == 0:
+        return 0.0
+    row = np.zeros(n)
+    total = 0.0
+    nbits = 0
+    prevg = 0
+    for k in range(1, 1 << n):
+        g = k ^ (k >> 1)  # Gray code: exactly one bit flips between successive subsets
+        diff = g ^ prevg
+        j, d = 0, diff
+        while (d & 1) == 0:
+            d >>= 1
+            j += 1
+        if g & (1 << j):
+            nbits += 1
+            for i in range(n):
+                row[i] += M[i, j]
+        else:
+            nbits -= 1
+            for i in range(n):
+                row[i] -= M[i, j]
+        prod = 1.0
+        for i in range(n):
+            prod *= row[i]
+        if ((n - nbits) & 1) == 0:
+            total += prod
+        else:
+            total -= prod
+        prevg = g
+    return math.log(total) if total > 0.0 else -np.inf
+
+
+@numba.njit("Tuple((float64[:, :], float64))(float64[:, :], int64)", cache=True)
+def sinkhorn_bethe(s: np.ndarray, n_iter: int) -> tuple[np.ndarray, float]:
+    """Log-domain Sinkhorn on the kernel ``exp(s)``: returns the doubly-stochastic marginals ``P`` and a
+    Bethe estimate of ``log permanent(exp(s))`` (the scalable approximation for the assignment model)."""
+    n = s.shape[0]
+    f = np.zeros(n)
+    g = np.zeros(n)
+    for _ in range(n_iter):
+        for i in range(n):  # row scaling: make row i sum to 1
+            mx = -np.inf
+            for j in range(n):
+                v = s[i, j] + g[j]
+                if v > mx:
+                    mx = v
+            acc = 0.0
+            for j in range(n):
+                acc += math.exp(s[i, j] + g[j] - mx)
+            f[i] = -(mx + math.log(acc))
+        for j in range(n):  # column scaling: make column j sum to 1
+            mx = -np.inf
+            for i in range(n):
+                v = s[i, j] + f[i]
+                if v > mx:
+                    mx = v
+            acc = 0.0
+            for i in range(n):
+                acc += math.exp(s[i, j] + f[i] - mx)
+            g[j] = -(mx + math.log(acc))
+    p = np.empty((n, n))
+    for i in range(n):
+        for j in range(n):
+            p[i, j] = math.exp(s[i, j] + f[i] + g[j])
+    # Bethe free energy: log Z ~ sum P*s + Bethe entropy (Vontobel 2013)
+    logz = 0.0
+    for i in range(n):
+        for j in range(n):
+            pij = min(max(p[i, j], 1e-300), 1.0 - 1e-15)
+            logz += p[i, j] * s[i, j] - pij * math.log(pij) + (1.0 - pij) * math.log1p(-pij)
+    return p, logz
 
 
 # --- python-facing helpers -----------------------------------------------------------------------

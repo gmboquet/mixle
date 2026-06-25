@@ -50,6 +50,7 @@ from pysp.stats.rankings._permutation_kernels import (
     hamming_perm,
     kendall_perm,
     metric_id,
+    ryser_log_permanent,
     seq_distance_to_center,
     spearman_perm,
     ulam_perm,
@@ -189,42 +190,6 @@ def _mh_sample(rank_center, theta, mid, n_samples, burn, thin, seed):
 
 
 # --- #P-hard normalizers (footrule / spearman / ulam): exact small-n + numba Monte-Carlo ----------
-@numba.njit("float64(float64[:, :])", cache=True)
-def _ryser_log_permanent(M):
-    """log permanent of a non-negative matrix via Ryser's formula with Gray-code subset enumeration."""
-    n = M.shape[0]
-    if n == 0:
-        return 0.0
-    row = np.zeros(n)
-    total = 0.0
-    nbits = 0
-    prevg = 0
-    for k in range(1, 1 << n):
-        g = k ^ (k >> 1)  # Gray code: exactly one bit flips between successive subsets
-        diff = g ^ prevg
-        j, d = 0, diff
-        while (d & 1) == 0:
-            d >>= 1
-            j += 1
-        if g & (1 << j):
-            nbits += 1
-            for i in range(n):
-                row[i] += M[i, j]
-        else:
-            nbits -= 1
-            for i in range(n):
-                row[i] -= M[i, j]
-        prod = 1.0
-        for i in range(n):
-            prod *= row[i]
-        if ((n - nbits) & 1) == 0:
-            total += prod
-        else:
-            total -= prod
-        prevg = g
-    return math.log(total) if total > 0.0 else -np.inf
-
-
 @numba.njit("int64[:](int64, int64, int64, int64)", cache=True)
 def _uniform_distances(n, mid, n_mc, seed):
     """Distances-from-identity of n_mc uniform random permutations (Fisher-Yates), for MC normalizers."""
@@ -280,7 +245,7 @@ def metric_log_normalizer(
         i = np.arange(n)
         d = np.abs(i[:, None] - i[None, :]) if metric == "footrule" else (i[:, None] - i[None, :]) ** 2
         m = np.ascontiguousarray(phi ** d.astype(float), dtype=float)
-        return float(_ryser_log_permanent(m))
+        return float(ryser_log_permanent(m))
     if metric == "ulam" and n <= max_enum:  # exact: enumerate the LIS-distance histogram
         vals, counts = _exact_histogram(metric, n)
         return float(logsumexp(np.log(counts) - theta * vals))
