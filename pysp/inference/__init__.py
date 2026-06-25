@@ -43,6 +43,19 @@ from pysp.inference.em import EMStrategy, run_em
 from pysp.inference.estimation import best_of, fit, optimize
 from pysp.inference.fisher import FisherView, FixedFisherView, to_fisher
 
+# multiple-testing correction (FWER / FDR) and evidence combination
+from pysp.inference.multiple_testing import (
+    adjust_pvalues,
+    benjamini_hochberg,
+    benjamini_yekutieli,
+    bonferroni,
+    fisher_combine,
+    hochberg,
+    holm,
+    stouffer_combine,
+    tippett_combine,
+)
+
 # the Posterior algebra — inference produces posteriors; you draw from them through one interface
 from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 
@@ -120,6 +133,16 @@ __all__ = [
     "pit_calibration_error",
     "interval_coverage",
     "coverage_curve",
+    # multiple-testing correction (FWER/FDR) and evidence combination
+    "bonferroni",
+    "holm",
+    "hochberg",
+    "benjamini_hochberg",
+    "benjamini_yekutieli",
+    "adjust_pvalues",
+    "fisher_combine",
+    "stouffer_combine",
+    "tippett_combine",
     # proper scoring rules (lower is better; pair with resampling for score-difference CIs)
     "log_score",
     "brier_score",
