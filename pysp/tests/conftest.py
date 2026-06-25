@@ -39,6 +39,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "nuts_torch_test.py": ("torch", "optional", "stochastic", "slow"),
     "ppl_composite_sampling_test.py": ("ppl", "stochastic", "slow"),
     "ppl_relabel_test.py": ("ppl", "stochastic", "slow"),
+    "ppl_convergence_diagnostics_test.py": ("ppl", "stochastic", "slow"),
     "ppl_inference_test.py": ("ppl", "stochastic", "slow"),
     "ppl_new_distributions_test.py": ("ppl", "stochastic"),
     "ppl_predictive_test.py": ("ppl", "stochastic"),

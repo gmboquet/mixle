@@ -84,6 +84,10 @@ class Posterior:
         self.rhat = None  # {param: Gelman-Rubin R-hat} (multi-chain)
         self.ess = None  # combined effective sample size (multi-chain)
         self.n_chains = 1
+        self.split_rhat = None  # {param: rank-normalized split-R-hat} (Vehtari 2021)
+        self.bulk_ess = None  # {param: bulk effective sample size}
+        self.tail_ess = None  # {param: tail effective sample size}
+        self.num_divergences = 0  # NUTS divergent transitions (post-warmup, summed over chains)
 
     def pointwise_log_likelihood(self, data) -> np.ndarray:
         """Return the ``(n_draws, n_obs)`` log-likelihood of ``data`` under each posterior draw.
@@ -129,6 +133,12 @@ class Posterior:
             out["_rhat"] = self.rhat
             out["_ess"] = self.ess
             out["_n_chains"] = self.n_chains
+        if self.split_rhat is not None:
+            out["_split_rhat"] = self.split_rhat
+            out["_bulk_ess"] = self.bulk_ess
+            out["_tail_ess"] = self.tail_ess
+        if self.num_divergences:
+            out["_num_divergences"] = self.num_divergences
         return out
 
 
@@ -465,6 +475,17 @@ def _init_scale(slots, dstd, n) -> np.ndarray:
     return np.asarray([max((dstd if s.support == "real" else 1.0) / root, 1e-3) for s in slots], dtype=float)
 
 
+def _attach_convergence(post, slots, arr, results) -> None:
+    """Attach rank-normalized split-R-hat / bulk-ESS / tail-ESS (per parameter) and the summed NUTS
+    divergence count. ``arr`` is the relabeled unconstrained draws, shape ``(n_chains, n_draws, d)``."""
+    from pysp.ppl.diagnostics import bulk_ess, split_rhat, tail_ess
+
+    post.split_rhat = {s.name: float(split_rhat(arr[:, :, k])) for k, s in enumerate(slots)}
+    post.bulk_ess = {s.name: float(bulk_ess(arr[:, :, k])) for k, s in enumerate(slots)}
+    post.tail_ess = {s.name: float(tail_ess(arr[:, :, k])) for k, s in enumerate(slots)}
+    post.num_divergences = int(sum(int(np.sum(getattr(r, "divergences", np.zeros(0)))) for r in results))
+
+
 def _finalize(rv, slots, res, build) -> RandomVariable:
     """Convert unconstrained chain samples to value space, build the posterior-mean
     distribution, and attach a Posterior result. Shared by RW-MCMC and HMC."""
@@ -482,6 +503,8 @@ def _finalize(rv, slots, res, build) -> RandomVariable:
             vals[:, k] = u[:, k]
     mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
     post = Posterior(slots, vals, res)
+    # split-R-hat / bulk-/tail-ESS work on a single chain (split into halves) + count its divergences
+    _attach_convergence(post, slots, u[None, :, :], [res])
 
     def predictive(n, rng):
         idx = rng.randint(len(vals), size=n)
@@ -697,6 +720,7 @@ def _finalize_chains(rv, slots, results, build) -> RandomVariable:
         post.ess = float(sum(np.atleast_1d(r.effective_sample_size()).min() for r in results))
     except Exception:
         post.ess = None
+    _attach_convergence(post, slots, np.stack([u[:n] for u in us], axis=0), results)
 
     def predictive(n_, rng_):
         idx = rng_.randint(len(vals), size=n_)
