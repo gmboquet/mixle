@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from scipy.stats import norm, spearmanr
 
-from pysp.stats.processes.max_stable import SmithMaxStable, fit_smith_maxstable
+from pysp.analysis.max_stable import SmithMaxStable, fit_smith_maxstable
 
 
 class SmithMaxStableTest(unittest.TestCase):

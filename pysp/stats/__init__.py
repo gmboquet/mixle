@@ -413,49 +413,7 @@ __all__ = [
     "MixtureEnumerator",
     "MultivariateGaussianDistribution",
     "MultivariateGaussianEstimator",
-    "LedoitWolfEstimator",
     # sampling completeness / richness / diversity from frequency counts
-    "turing_coverage",
-    "good_turing",
-    "chao1",
-    "chao2",
-    "ace",
-    "ice",
-    "hill_numbers",
-    "rarefaction_curve",
-    # rank aggregation / consensus / permutation distances
-    "borda_count",
-    "copeland",
-    "kemeny_consensus",
-    "mallows_fit",
-    "kendall_distance",
-    "spearman_footrule",
-    "cayley_distance",
-    # extreme-value & boundary estimation (GPD/POT, tail index, endpoints, records)
-    "gpd_fit",
-    "GPDFit",
-    "peaks_over_threshold",
-    "return_level",
-    "hill_estimator",
-    "moment_estimator",
-    "mean_residual_life",
-    "endpoint_estimator",
-    "record_times",
-    "n_records",
-    # kernel density / mode / point-process intensity
-    "kde",
-    "KDE",
-    "silverman_bandwidth",
-    "scott_bandwidth",
-    "kde_mode",
-    "intensity",
-    # geostatistics: variograms and kriging
-    "Variogram",
-    "empirical_variogram",
-    "fit_variogram",
-    "ordinary_kriging",
-    "universal_kriging",
-    "calibrate_variance",
     "MultivariateGaussianSampler",
     "MultivariateGaussianDataEncoder",
     "NullDistribution",
@@ -932,16 +890,6 @@ from pysp.stats.compute.stacked import (
     stacked_component_strategy,
     tie_component_shard_values,
 )
-from pysp.stats.coverage import (
-    ace,
-    chao1,
-    chao2,
-    good_turing,
-    hill_numbers,
-    ice,
-    rarefaction_curve,
-    turing_coverage,
-)
 from pysp.stats.directional.bingham import (
     BinghamDataEncoder,
     BinghamDistribution,
@@ -990,18 +938,6 @@ from pysp.stats.directional.wrapped_normal import (
     WrappedNormalEstimator,
     WrappedNormalSampler,
 )
-from pysp.stats.extreme import (
-    GPDFit,
-    endpoint_estimator,
-    gpd_fit,
-    hill_estimator,
-    mean_residual_life,
-    moment_estimator,
-    n_records,
-    peaks_over_threshold,
-    record_times,
-    return_level,
-)
 from pysp.stats.graphs.erdos_renyi_graph import (
     ErdosRenyiGraphAccumulator,
     ErdosRenyiGraphAccumulatorFactory,
@@ -1028,22 +964,6 @@ from pysp.stats.graphs.stochastic_block_graph import (
     StochasticBlockGraphDistribution,
     StochasticBlockGraphEstimator,
     StochasticBlockGraphSampler,
-)
-from pysp.stats.kde import (
-    KDE,
-    intensity,
-    kde,
-    kde_mode,
-    scott_bandwidth,
-    silverman_bandwidth,
-)
-from pysp.stats.kriging import (
-    Variogram,
-    calibrate_variance,
-    empirical_variogram,
-    fit_variogram,
-    ordinary_kriging,
-    universal_kriging,
 )
 from pysp.stats.latent.dirac_length import (
     DiracLengthMixtureDistribution,
@@ -1124,7 +1044,6 @@ from pysp.stats.latent.semi_supervised_mixture import (
     SemiSupervisedMixtureEstimator,
     SemiSupervisedMixtureSampler,
 )
-from pysp.stats.matrix.covariance_shrinkage import LedoitWolfEstimator
 from pysp.stats.matrix.inverse_wishart import (
     InverseWishartDataEncoder,
     InverseWishartDistribution,
@@ -1228,15 +1147,6 @@ from pysp.stats.processes.renewal_process import (
     RenewalProcessDistribution,
     RenewalProcessEstimator,
     RenewalProcessSampler,
-)
-from pysp.stats.rank_aggregation import (
-    borda_count,
-    cayley_distance,
-    copeland,
-    kemeny_consensus,
-    kendall_distance,
-    mallows_fit,
-    spearman_footrule,
 )
 from pysp.stats.rankings.mallows import (
     MallowsDataEncoder,
