@@ -81,15 +81,17 @@ def _parallel_ids(model: Any, num_workers: int | None) -> frozenset[int]:
         seen.add(id(node))
         dc = decomposition_for(node)
         kids = shard_children(node, dc)
-        if dc.is_shardable and len(kids) == dc.num_units and dc.num_units >= 2:
+        threadable = dc.axis in (DecompAxis.FACTOR, DecompAxis.COMPONENT)  # the only axes _fold threads via _run
+        if threadable and dc.is_shardable and len(kids) == dc.num_units and dc.num_units >= 2:
             works = [subtree_work(k) for k in kids if k is not None]
             if works:
                 total = float(sum(works))
                 p = dc.num_units if not num_workers else min(num_workers, dc.num_units)
                 benefits[id(node)] = total - max(max(works), total / max(1, p))
-        for child in kids:
-            if child is not None:
-                walk(child)
+        if threadable:  # don't descend a STATE/SEQUENCE node's children (e.g. an HMM's 1000s of emission
+            for child in kids:  # states): the executor can't thread inside them, and walking them is pure cost
+                if child is not None:
+                    walk(child)
 
     walk(model)
     if not benefits:
