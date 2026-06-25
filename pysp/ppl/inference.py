@@ -45,6 +45,7 @@ class _Slot:
     support: str = "real"  # 'real' | 'positive' (log) | 'unit' (logit) reparameterization
     group: int | None = None  # index of the exchangeable mixture component this slot belongs to
     role: str = "param"  # 'param' (a component's parameter) | 'weight' (its mixture weight)
+    parent_args: dict[int, int] | None = None  # hierarchical prior: {prior-arg position -> child slot index}
 
 
 def _to_value(support: str, u: float):
@@ -155,9 +156,33 @@ def _require_flat(rv: RandomVariable):
 
 def _slots_of(rv: RandomVariable, fam) -> list[_Slot]:
     slots: list[_Slot] = []
+    nested = [len(rv._args)]  # synthetic, build-ignored indices for hierarchical hyperparameters
+
+    def add_prior(handle: RandomVariable, index: int, support: str) -> None:
+        """Add a slot for prior RV ``handle`` at ``index``; recurse into any random hyperparameters.
+
+        A flat prior (constant hyperparameters) lowers to a fixed distribution. A *hierarchical* prior
+        -- one whose own parameter is another random variable, e.g. ``Normal(0, tau)`` with ``tau``
+        estimated -- instead gets each random hyperparameter its own (build-ignored) slot, and records
+        the ``prior-arg -> child-slot`` map so the prior log-density is scored as a function of them.
+        """
+        pfam = handle._family
+        parent_args: dict[int, int] = {}
+        for j, arg in enumerate(handle._args):
+            if isinstance(arg, RandomVariable):
+                child = nested[0]
+                nested[0] += 1
+                parent_args[j] = child
+                add_prior(arg, child, pfam.support[j])  # hyperparameter sits on the parent family's support
+        nm = handle.name or f"arg{index}"
+        if parent_args:
+            slots.append(_Slot(index, None, support == "positive", nm, handle, support, parent_args=parent_args))
+        else:
+            slots.append(_Slot(index, lower(handle, target="dist"), support == "positive", nm, handle, support))
+
     for i, a in enumerate(rv._args):
         if isinstance(a, RandomVariable):
-            slots.append(_Slot(i, lower(a, target="dist"), fam.positive[i], a.name or f"arg{i}", a, fam.support[i]))
+            add_prior(a, i, fam.support[i])
         elif a is free:
             slots.append(_Slot(i, None, fam.positive[i], f"arg{i}", None, fam.support[i]))
     if not slots:
@@ -449,7 +474,12 @@ def _build_target(rv: RandomVariable, data):
             return _NEG_INF
         plp = 0.0
         for s in slots:
-            if s.prior is not None:
+            if s.parent_args:  # hierarchical prior: rebuild it with the sampled hyperparameter values
+                pargs = list(s.handle._args)
+                for j, child in s.parent_args.items():
+                    pargs[j] = vals[child]
+                plp += float(s.handle._family.make_dist(tuple(pargs), s.handle._name).log_density(vals[s.index]))
+            elif s.prior is not None:
                 plp += float(s.prior.log_density(vals[s.index]))
         return ll + plp + logj
 
