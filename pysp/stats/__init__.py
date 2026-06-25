@@ -506,6 +506,12 @@ __all__ = [
     "LowRankPermutationAccumulator",
     "LowRankPermutationAccumulatorFactory",
     "LowRankPermutationDataEncoder",
+    "ThurstoneDistribution",
+    "ThurstoneSampler",
+    "ThurstoneEstimator",
+    "ThurstoneAccumulator",
+    "ThurstoneAccumulatorFactory",
+    "ThurstoneDataEncoder",
     "SpanningTreeDistribution",
     "SpanningTreeSampler",
     "SpanningTreeEstimator",
@@ -1231,6 +1237,14 @@ from pysp.stats.rankings.spearman_rho import (
     SpearmanRankingEnumerator,
     SpearmanRankingEstimator,
     SpearmanRankingSampler,
+)
+from pysp.stats.rankings.thurstone import (
+    ThurstoneAccumulator,
+    ThurstoneAccumulatorFactory,
+    ThurstoneDataEncoder,
+    ThurstoneDistribution,
+    ThurstoneEstimator,
+    ThurstoneSampler,
 )
 from pysp.stats.sequences.integer_markov_chain import (
     IntegerMarkovChainDataEncoder,

@@ -332,6 +332,7 @@ def _stats_public_distribution_catalog():
             [0, 2, 1, 3], [1.5, 1.0, 0.5]
         ),
         "BradleyTerryDistribution": stats.BradleyTerryDistribution([1.5, 0.5, -0.5, -1.5]),
+        "ThurstoneDistribution": stats.ThurstoneDistribution([1.5, 0.5, -0.5, -1.5]),
         "LowRankPermutationDistribution": stats.LowRankPermutationDistribution(
             np.linspace(-0.6, 0.6, 8).reshape(4, 2), np.linspace(0.5, -0.5, 8).reshape(4, 2)
         ),
