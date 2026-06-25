@@ -5,15 +5,20 @@ the **data is replicated** and the **model's shardable axis is distributed acros
 the duck-typed ``EncodedDataHandle`` contract, so ``optimize(..., backend="model_parallel")`` reaches it
 through the unchanged dispatch path -- no edits to ``optimize`` / ``_em_loop`` / ``sequence.py``.
 
-This first cut handles the universal, exact case: a **FACTOR**-decomposable model (Composite / Record).
-Its sufficient statistic is a tuple of *independent* per-factor stats (``CompositeAccumulator.seq_update``
-updates each child with its own data slice), so distributing the per-factor accumulations across a thread
-pool is **bit-identical** to the single-node fold (each factor writes its own accumulator -- no races, no
-new reduction algebra). Any other model (mixtures, leaves, HMMs, ...) falls back to ordinary replicated
-accumulation, so the backend is correct for *every* family and never worse than ``backend="local"``.
+Two model-parallel axes are handled, both **bit-identical** to the single-node fold:
 
-The COMPONENT axis (mixtures) -- which couples components through the responsibility logsumexp -- is the
-next milestone, reusing ``pysp.stats.compute.stacked``. See ``~/codex/notes/model-parallel-design.md``.
+* **FACTOR** (Composite / Record) -- the sufficient statistic is a tuple of *independent* per-factor
+  stats (``CompositeAccumulator.seq_update`` updates each child with its own data slice), so distributing
+  the per-factor accumulations across a thread pool is exact (each factor writes its own accumulator --
+  no races, no new reduction algebra).
+* **COMPONENT** (mixtures) -- the responsibility ``logsumexp`` couples the components, so the (cheap)
+  normalization runs centrally on the gathered score matrix while the *expensive* per-component emission
+  scoring and the per-component accumulation are distributed -- an exact mirror of
+  ``MixtureAccumulator.seq_update``.
+
+Any other model (leaves, HMMs, sequences, ...) falls back to ordinary replicated accumulation, so the
+backend is correct for *every* family and never worse than ``backend="local"``. See
+``~/codex/notes/model-parallel-design.md``.
 """
 
 from __future__ import annotations
@@ -57,35 +62,85 @@ class ModelParallelEncodedData(EncodedDataHandle):
         self.num_workers = num_workers
 
     # --- the model-parallel E-step --------------------------------------------------------------
-    def _factor_parallel(self, acc: Any, model: Any) -> bool:
-        """True when ``model`` splits along independent factors and ``acc`` mirrors that structure."""
-        dc = decomposition_for(model)
+    def _map(self, fn: Any, items: Any) -> None:
+        """Run ``fn`` over ``items`` across the worker pool (the model-axis units run in parallel)."""
+        items = list(items)
+        workers = self.num_workers or min(len(items), max(1, os.cpu_count() or 1))
+        if workers > 1 and len(items) > 1:
+            with ThreadPoolExecutor(max_workers=int(workers)) as pool:
+                list(pool.map(fn, items))  # order-independent: each unit writes its own disjoint state
+        else:
+            for it in items:
+                fn(it)
+
+    def _factor_ok(self, acc: Any, model: Any, dc: Any) -> bool:
         accs = getattr(acc, "accumulators", None)
         dists = getattr(model, "dists", None)
-        if dc.axis is not DecompAxis.FACTOR or accs is None or dists is None:
-            return False
         return (
-            len(accs) == dc.num_units == len(dists)
+            dc.axis is DecompAxis.FACTOR
+            and accs is not None
+            and dists is not None
+            and len(accs) == dc.num_units == len(dists)
             and isinstance(self.enc, (tuple, list))
             and len(self.enc) == len(accs)
         )
 
+    def _component_ok(self, acc: Any, model: Any, dc: Any) -> bool:
+        return (
+            dc.axis is DecompAxis.COMPONENT
+            and hasattr(acc, "comp_counts")
+            and getattr(model, "num_components", None) == dc.num_units
+            and len(getattr(acc, "accumulators", ())) == dc.num_units
+            and hasattr(model, "log_w")
+            and hasattr(model, "zw")
+        )
+
+    def _fold_component(self, acc: Any, model: Any, weights: np.ndarray) -> None:
+        """Mixture component-parallel E-step: distribute the per-component scoring + accumulation while
+        the (cheap) responsibility normalization runs centrally -- a bit-identical mirror of
+        ``MixtureAccumulator.seq_update`` (the logsumexp couples the components, so it cannot be sharded)."""
+        from pysp.stats.latent.mixture import _component_enc
+
+        k = int(model.num_components)
+        enc = self.enc
+        log_w = np.asarray(model.log_w, dtype=np.float64)
+        zw = model.zw
+        ll_mat = np.zeros((self.size, k), dtype=np.float64)
+        ll_mat.fill(-np.inf)
+
+        def score(i: int) -> None:  # distributed: the expensive per-component emission scoring
+            if not zw[i]:
+                ll_mat[:, i] = model.components[i].seq_log_density(_component_enc(enc, i)) + log_w[i]
+
+        self._map(score, range(k))
+
+        # central, exact normalization (identical buffer reuse to MixtureAccumulator.seq_update)
+        ll_max = ll_mat.max(axis=1, keepdims=True)
+        bad_rows = np.isinf(ll_max.flatten())
+        ll_mat[bad_rows, :] = log_w.copy()
+        ll_max[bad_rows] = np.max(log_w)
+        ll_mat -= ll_max
+        np.exp(ll_mat, out=ll_mat)
+        np.sum(ll_mat, axis=1, keepdims=True, out=ll_max)
+        np.divide(weights[:, None], ll_max, out=ll_max)
+        ll_mat *= ll_max  # ll_mat[:, i] is now responsibility_i * weight
+
+        def accum(i: int) -> None:  # distributed: disjoint per-component sufficient statistics
+            w_loc = ll_mat[:, i]
+            acc.comp_counts[i] += w_loc.sum()
+            acc.accumulators[i].seq_update(_component_enc(enc, i), w_loc, model.components[i])
+
+        self._map(accum, range(k))
+
     def _fold(self, estimator: Any, model: Any, weights: np.ndarray) -> Any:
-        """Build and run the E-step accumulator -- factor-parallel when possible, else replicated."""
+        """Build and run the E-step accumulator -- model-parallel along the declared axis, else replicated."""
         acc = estimator.accumulator_factory().make()
-        if self._factor_parallel(acc, model):
+        dc = decomposition_for(model)
+        if self._factor_ok(acc, model, dc):
             accs = acc.accumulators  # CompositeAccumulator.seq_update does exactly this, per factor
-
-            def do(i: int) -> None:
-                accs[i].seq_update(self.enc[i], weights, model.dists[i])
-
-            workers = self.num_workers or min(len(accs), max(1, os.cpu_count() or 1))
-            if workers > 1 and len(accs) > 1:
-                with ThreadPoolExecutor(max_workers=int(workers)) as pool:
-                    list(pool.map(do, range(len(accs))))  # order-independent: disjoint per-factor accumulators
-            else:
-                for i in range(len(accs)):
-                    do(i)
+            self._map(lambda i: accs[i].seq_update(self.enc[i], weights, model.dists[i]), range(len(accs)))
+        elif self._component_ok(acc, model, dc):
+            self._fold_component(acc, model, weights)
         else:
             acc.seq_update(self.enc, weights, model)
         return acc
