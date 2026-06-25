@@ -126,6 +126,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "low_rank_permutation_test.py": ("distribution", "numba", "stochastic"),
     "thurstone_test.py": ("distribution", "numba", "stochastic"),
     "paired_comparison_test.py": ("distribution", "stochastic"),
+    "ewens_test.py": ("distribution", "numba", "stochastic"),
     "generalized_mallows_test.py": ("distribution", "numba", "stochastic"),
     "generalized_mallows_model_test.py": ("distribution", "numba", "stochastic"),
     "survival_regression_test.py": ("distribution", "stochastic"),
