@@ -442,6 +442,13 @@ __all__ = [
     "endpoint_estimator",
     "record_times",
     "n_records",
+    # kernel density / mode / point-process intensity
+    "kde",
+    "KDE",
+    "silverman_bandwidth",
+    "scott_bandwidth",
+    "kde_mode",
+    "intensity",
     "MultivariateGaussianSampler",
     "MultivariateGaussianDataEncoder",
     "NullDistribution",
@@ -1014,6 +1021,14 @@ from pysp.stats.graphs.stochastic_block_graph import (
     StochasticBlockGraphDistribution,
     StochasticBlockGraphEstimator,
     StochasticBlockGraphSampler,
+)
+from pysp.stats.kde import (
+    KDE,
+    intensity,
+    kde,
+    kde_mode,
+    scott_bandwidth,
+    silverman_bandwidth,
 )
 from pysp.stats.latent.dirac_length import (
     DiracLengthMixtureDistribution,
