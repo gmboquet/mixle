@@ -5,9 +5,10 @@ regressor -- returns a *prediction variance* that grows with distance from data.
 correlation is encoded by a variogram ``gamma(h)`` (how fast values decorrelate with separation ``h``):
 
   * :func:`empirical_variogram` / :func:`fit_variogram` -- estimate and fit a variogram model
-    (spherical / exponential / gaussian / matern) with **nugget** (measurement error / micro-scale
-    variance), **sill** (total variance), and **range** (correlation length), plus geometric
-    **anisotropy** (direction-dependent range).
+    (spherical / exponential / gaussian / matern; the Gaussian model is also reachable as
+    ``"squared_exponential"`` / ``"rbf"``, its covariance being the squared-exponential kernel) with
+    **nugget** (measurement error / micro-scale variance), **sill** (total variance), and **range**
+    (correlation length), plus geometric **anisotropy** (direction-dependent range).
   * :func:`ordinary_kriging` -- BLUP with an unknown constant mean; exact interpolation with no nugget,
     smoothing with one, and **heteroscedastic** (per-observation) noise.
   * :func:`universal_kriging` -- kriging with a polynomial trend / external drift.
@@ -34,7 +35,8 @@ def _shape(model: str, h: np.ndarray, rng: float, nu: float = 1.5) -> np.ndarray
         s = np.where(h < rng, 1.5 * h / r - 0.5 * (h / r) ** 3, 1.0)
     elif model == "exponential":
         s = 1.0 - np.exp(-h / r)
-    elif model == "gaussian":
+    elif model in ("gaussian", "squared_exponential", "squared-exponential", "rbf"):
+        # the Gaussian variogram; its covariance psill*exp(-(h/r)^2) is the squared-exponential (RBF) kernel
         s = 1.0 - np.exp(-((h / r) ** 2))
     elif model == "matern":
         sqrt2nu = np.sqrt(2.0 * nu) * h / r
@@ -42,7 +44,10 @@ def _shape(model: str, h: np.ndarray, rng: float, nu: float = 1.5) -> np.ndarray
         corr = (2.0 ** (1.0 - nu) / special.gamma(nu)) * (sqrt2nu**nu) * special.kv(nu, sqrt2nu)
         s = 1.0 - np.where(h == 0, 1.0, corr)
     else:
-        raise ValueError("model must be 'spherical', 'exponential', 'gaussian', or 'matern'.")
+        raise ValueError(
+            "model must be 'spherical', 'exponential', 'gaussian' "
+            "(aka 'squared_exponential' / 'rbf'), or 'matern'."
+        )
     return np.clip(s, 0.0, 1.0)
 
 
@@ -51,7 +56,8 @@ class Variogram:
     """A fitted variogram model ``gamma(h) = nugget + psill * shape(h)``.
 
     Attributes:
-        model: ``"spherical"``, ``"exponential"``, ``"gaussian"``, or ``"matern"``.
+        model: ``"spherical"``, ``"exponential"``, ``"gaussian"`` (aka ``"squared_exponential"`` /
+            ``"rbf"`` -- covariance ``psill * exp(-(h/rng)**2)``), or ``"matern"``.
         nugget: discontinuity at ``h=0`` (measurement error / micro-scale variance).
         psill: partial sill (correlated variance); ``nugget + psill`` is the total sill.
         rng: range (correlation length).
