@@ -414,6 +414,15 @@ __all__ = [
     "MultivariateGaussianDistribution",
     "MultivariateGaussianEstimator",
     "LedoitWolfEstimator",
+    # sampling completeness / richness / diversity from frequency counts
+    "turing_coverage",
+    "good_turing",
+    "chao1",
+    "chao2",
+    "ace",
+    "ice",
+    "hill_numbers",
+    "rarefaction_curve",
     "MultivariateGaussianSampler",
     "MultivariateGaussianDataEncoder",
     "NullDistribution",
@@ -889,6 +898,16 @@ from pysp.stats.compute.stacked import (
     stacked_component_params,
     stacked_component_strategy,
     tie_component_shard_values,
+)
+from pysp.stats.coverage import (
+    ace,
+    chao1,
+    chao2,
+    good_turing,
+    hill_numbers,
+    ice,
+    rarefaction_curve,
+    turing_coverage,
 )
 from pysp.stats.directional.bingham import (
     BinghamDataEncoder,
