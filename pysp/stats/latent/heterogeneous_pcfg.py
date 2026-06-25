@@ -12,6 +12,8 @@ Epsilon productions and unary nonterminal productions are intentionally not
 modeled.
 """
 
+from __future__ import annotations
+
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
@@ -26,6 +28,15 @@ from pysp.enumeration.algorithms import (
     LazyQuantizedEnumerationIndex,
     ProductEnumerator,
     best_first_union,
+)
+from pysp.inference.fisher import (
+    FisherView,
+    FixedFisherView,
+    Path,
+    SufficientStatisticVectorizer,
+    _seq_encode_model,
+    _structured_values_matrix,
+    to_fisher,
 )
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -450,16 +461,14 @@ class HeterogeneousPCFGDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Inside-outside Fisher view for the PCFG."""
         if hasattr(self, "terminal_rules") and hasattr(self, "_inside_outside"):
-            from pysp.inference.fisher import HeterogeneousPCFGFisherView
-
             return HeterogeneousPCFGFisherView(self)
         return super().to_fisher(**kwargs)
 
-    def sampler(self, seed: int | None = None) -> "HeterogeneousPCFGSampler":
+    def sampler(self, seed: int | None = None) -> HeterogeneousPCFGSampler:
         """Return a sampler for drawing observations from this distribution."""
         return HeterogeneousPCFGSampler(self, seed)
 
-    def enumerator(self) -> "HeterogeneousPCFGEnumerator":
+    def enumerator(self) -> HeterogeneousPCFGEnumerator:
         """Return an exact support enumerator for acyclic enumerable PCFGs."""
         return HeterogeneousPCFGEnumerator(self)
 
@@ -475,7 +484,7 @@ class HeterogeneousPCFGDistribution(SequenceEncodableProbabilityDistribution):
         """
         return _HeterogeneousPCFGQuantizedIndexBuilder(self, max_bits, bin_width_bits).build()
 
-    def estimator(self, pseudo_count: float | None = None) -> "HeterogeneousPCFGEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> HeterogeneousPCFGEstimator:
         """Return an estimator for fitting this distribution from data."""
         binary_rules = [
             (self.nonterminals[p], self.nonterminals[l], self.nonterminals[r], float(q))
@@ -494,7 +503,7 @@ class HeterogeneousPCFGDistribution(SequenceEncodableProbabilityDistribution):
             name=self.name,
         )
 
-    def dist_to_encoder(self) -> "HeterogeneousPCFGDataEncoder":
+    def dist_to_encoder(self) -> HeterogeneousPCFGDataEncoder:
         """Return the data encoder used by this distribution for vectorized methods."""
         return HeterogeneousPCFGDataEncoder([d.dist_to_encoder() for d in self.emissions])
 
@@ -836,7 +845,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
         for r, acc in enumerate(self.emission_accumulators):
             acc.seq_update(enc_by_rule[r], terminal_weights[:, r], estimate.emissions[r])
 
-    def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, Sequence[Any]]) -> "HeterogeneousPCFGAccumulator":
+    def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, Sequence[Any]]) -> HeterogeneousPCFGAccumulator:
         terminal_counts, binary_counts, emission_values = suff_stat
         self.terminal_counts += terminal_counts
         self.binary_counts += binary_counts
@@ -847,7 +856,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
     def value(self) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...]]:
         return self.terminal_counts, self.binary_counts, tuple(a.value() for a in self.emission_accumulators)
 
-    def from_value(self, x: tuple[np.ndarray, np.ndarray, Sequence[Any]]) -> "HeterogeneousPCFGAccumulator":
+    def from_value(self, x: tuple[np.ndarray, np.ndarray, Sequence[Any]]) -> HeterogeneousPCFGAccumulator:
         terminal_counts, binary_counts, emission_values = x
         self.terminal_counts = terminal_counts
         self.binary_counts = binary_counts
@@ -879,7 +888,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
         for acc in self.emission_accumulators:
             acc.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> "HeterogeneousPCFGDataEncoder":
+    def acc_to_encoder(self) -> HeterogeneousPCFGDataEncoder:
         return HeterogeneousPCFGDataEncoder([a.acc_to_encoder() for a in self.emission_accumulators])
 
 
@@ -1251,3 +1260,180 @@ class HeterogeneousPCFGDataEncoder(DataSequenceEncoder):
             flat.extend(seq)
         enc_by_rule = tuple(enc.seq_encode(flat) for enc in self.terminal_encoders)
         return lengths, enc_by_rule
+
+
+# --- Fisher view(s) co-located with this family ---
+class HeterogeneousPCFGFisherView(FixedFisherView):
+    """Inside-outside Fisher view for heterogeneous PCFGs.
+
+    Coordinates are expected complete-data rule counts followed by terminal
+    emission sufficient statistics gated by the posterior probability of the
+    corresponding terminal rule at each token.  For finite enumerable PCFGs,
+    the model Fisher is the exact observed Fisher covariance of these
+    posterior-expected complete-data statistics under the model distribution.
+    Recursive or infinite-support grammars should use observed_fisher_* on data.
+    """
+
+    _max_model_enum_terms = 100000
+    _model_mass_tol = 1.0e-8
+
+    def __init__(self, dist: Any) -> None:
+        self.dist = dist
+        self.child_views = [to_fisher(d) for d in dist.emissions]
+        self._model_cache: tuple[np.ndarray, np.ndarray] | None = None
+        super().__init__(dist, self._labels_from_children())
+
+    def _labels_from_children(self) -> list[Path]:
+        labels: list[Path] = [("terminal_rule", str(r)) for r in range(self.dist.num_terminal_rules)]
+        labels.extend(("binary_rule", str(r)) for r in range(self.dist.num_binary_rules))
+        for r, view in enumerate(self.child_views):
+            labels.extend(("terminal_emission", str(r)) + label for label in view.vectorizer.labels)
+        return labels
+
+    def _refresh_labels(self) -> None:
+        self.labels = self._labels_from_children()
+        self.vectorizer = SufficientStatisticVectorizer(self.labels)
+        self._model_cache = None
+
+    def _matrix_from_values(self, values: Sequence[Any]) -> np.ndarray:
+        if not values:
+            return np.zeros((0, len(self.labels)), dtype=np.float64)
+
+        terminal = np.vstack([np.asarray(v[0], dtype=np.float64).reshape(-1) for v in values])
+        binary = np.vstack([np.asarray(v[1], dtype=np.float64).reshape(-1) for v in values])
+        blocks = [terminal, binary]
+
+        for r, view in enumerate(self.child_views):
+            emission_values = [v[2][r] for v in values]
+            blocks.append(_structured_values_matrix(view, emission_values))
+
+        self._refresh_labels()
+        return np.hstack(blocks)
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        model = self.dist if estimate is None else estimate
+        enc = _seq_encode_model(model, list(data))
+        return self._statistics_from_encoded(enc, estimate=model)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        model = self.dist if estimate is None else estimate
+        lengths, enc_by_rule = enc_data
+        lengths = np.asarray(lengths, dtype=np.int64)
+        nobs = len(lengths)
+        total = int(lengths.sum())
+
+        terminal_ld = np.empty((total, model.num_terminal_rules), dtype=np.float64)
+        child_stats: list[np.ndarray] = []
+        for r, dist in enumerate(model.emissions):
+            if total > 0:
+                terminal_ld[:, r] = dist.seq_log_density(enc_by_rule[r])
+                child_stats.append(self.child_views[r].seq_expected_statistics(enc_by_rule[r], estimate=dist))
+            else:
+                terminal_ld = np.empty((0, model.num_terminal_rules), dtype=np.float64)
+                child_stats.append(np.zeros((0, len(self.child_views[r].vectorizer.labels)), dtype=np.float64))
+
+        self._refresh_labels()
+        terminal_counts = np.zeros((nobs, model.num_terminal_rules), dtype=np.float64)
+        binary_counts = np.zeros((nobs, model.num_binary_rules), dtype=np.float64)
+        emission_blocks = [np.zeros((nobs, stats.shape[1]), dtype=np.float64) for stats in child_stats]
+
+        offsets = np.concatenate(([0], np.cumsum(lengths))).astype(np.int64)
+        for i, n in enumerate(lengths):
+            if n <= 0:
+                continue
+            start = int(offsets[i])
+            stop = int(offsets[i + 1])
+            _, terminal_post, binary_count, _ = model._inside_outside(terminal_ld[start:stop])
+            terminal_counts[i] = terminal_post.sum(axis=0)
+            binary_counts[i] = binary_count
+            for r, stats in enumerate(child_stats):
+                if stats.shape[1] > 0:
+                    emission_blocks[r][i] = np.dot(terminal_post[:, r], stats[start:stop])
+
+        blocks = [terminal_counts, binary_counts]
+        blocks.extend(emission_blocks)
+        return np.hstack(blocks) if blocks else np.zeros((nobs, 0), dtype=np.float64)
+
+    def _enumerated_model_mean_cov(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._model_cache is not None:
+            return self._model_cache
+
+        values: list[Any] = []
+        probs: list[float] = []
+        try:
+            iterator = iter(self.dist.enumerator())
+            exhausted = False
+            for _ in range(self._max_model_enum_terms):
+                try:
+                    value, log_prob = next(iterator)
+                except StopIteration:
+                    exhausted = True
+                    break
+                if np.isfinite(log_prob):
+                    values.append(value)
+                    probs.append(float(math.exp(log_prob)))
+            if not exhausted:
+                raise NotImplementedError(
+                    "PCFG model Fisher requires finite enumerable support; use observed_fisher_information()."
+                )
+        except NotImplementedError:
+            raise
+        except Exception as exc:
+            raise NotImplementedError(
+                "PCFG model Fisher requires finite enumerable support; use observed_fisher_information()."
+            ) from exc
+
+        if not values:
+            raise NotImplementedError("PCFG model Fisher requires non-empty finite support.")
+
+        weights = np.asarray(probs, dtype=np.float64)
+        total = float(weights.sum())
+        if total <= 0.0 or not np.isfinite(total) or abs(total - 1.0) > self._model_mass_tol:
+            raise NotImplementedError("PCFG finite support did not sum to one; use observed_fisher_information().")
+        weights /= total
+
+        stats = self.expected_statistics_matrix(data=values)
+        mean = np.dot(weights, stats)
+        second = np.dot((weights[:, None] * stats).T, stats)
+        cov = second - np.outer(mean, mean)
+        cov = 0.5 * (cov + cov.T)
+        diag = np.maximum(np.diag(cov), 0.0)
+        cov[np.diag_indices_from(cov)] = diag
+        self._model_cache = (mean, cov)
+        return self._model_cache
+
+    def _model_mean(self) -> np.ndarray:
+        return self._enumerated_model_mean_cov()[0]
+
+    def _model_fisher(self) -> np.ndarray:
+        return self._enumerated_model_mean_cov()[1]
+
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
+        try:
+            return FixedFisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
+        except NotImplementedError:
+            if stats is not None:
+                return FisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge)
+            raise
+
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        try:
+            return FixedFisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs
+            )
+        except NotImplementedError:
+            if stats is None:
+                raise
+            return FisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge
+            )

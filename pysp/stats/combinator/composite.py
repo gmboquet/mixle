@@ -9,10 +9,12 @@ must be compatible with data type T_k.
 
 """
 
+from __future__ import annotations
+
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from typing import Any, Optional, TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
@@ -24,6 +26,7 @@ from pysp.enumeration.algorithms import (
     ProductEnumerator,
     QuantizedCrossIndex,
 )
+from pysp.inference.fisher import Path
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -39,6 +42,9 @@ from pysp.stats.compute.pdist import (
 T = tuple[Any, ...]
 E = TypeVar("E")
 SS = TypeVar("SS")
+
+
+from pysp.inference.fisher import FixedFisherView, SufficientStatisticVectorizer, to_fisher
 
 
 def _distribute_child_prior(child: Any, prior: Any) -> None:
@@ -235,7 +241,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         return CompositeGradientFitState(self, [recurse(dist, engine, torch, leaves) for dist in self.dists])
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence["CompositeDistribution"], engine: Any) -> dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence[CompositeDistribution], engine: Any) -> dict[str, Any]:
         """Return stacked child parameters for homogeneous composite mixtures."""
         from pysp.stats.compute.stacked import stacked_component_params
 
@@ -305,8 +311,6 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Structural Fisher view (product of child views)."""
         if hasattr(self, "dists"):
-            from pysp.inference.fisher import CompositeFisherView
-
             return CompositeFisherView(self)
         return super().to_fisher(**kwargs)
 
@@ -330,7 +334,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             engine=eng,
         )
 
-    def sampler(self, seed: int | None = None) -> "CompositeSampler":
+    def sampler(self, seed: int | None = None) -> CompositeSampler:
         """Create CompositeSampler for sampling from CompositeDistribution instance.
 
         Args:
@@ -342,7 +346,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """
         return CompositeSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "CompositeEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> CompositeEstimator:
         """Create CompositeEstimator for estimating CompositeDistribution.
 
         Args:
@@ -354,7 +358,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """
         return CompositeEstimator([d.estimator(pseudo_count=pseudo_count) for d in self.dists])
 
-    def dist_to_encoder(self) -> "CompositeDataEncoder":
+    def dist_to_encoder(self) -> CompositeDataEncoder:
         """Creates CompositeDataEncoder for encoding sequence of tuple data.
 
         Passes 'encoders', which is a list of DataSequenceEncoders for each component of the CompositeDistribution.
@@ -367,11 +371,11 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
         return CompositeDataEncoder(encoders=encoders)
 
-    def enumerator(self) -> "CompositeEnumerator":
+    def enumerator(self) -> CompositeEnumerator:
         """Creates CompositeEnumerator iterating tuples in descending joint probability order."""
         return CompositeEnumerator(self)
 
-    def conditional_enumerator(self, given: Mapping[int, Any]) -> "CompositeConditionalEnumerator":
+    def conditional_enumerator(self, given: Mapping[int, Any]) -> CompositeConditionalEnumerator:
         """Enumerate complete tuples consistent with the fixed positions in ``given``, best-first.
 
         ``given`` is a mapping ``{position: value}`` pinning a subset of coordinates (most-probable
@@ -578,7 +582,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class CompositeEnumerator(DistributionEnumerator):
-    def __init__(self, dist: "CompositeDistribution") -> None:
+    def __init__(self, dist: CompositeDistribution) -> None:
         """Enumerates tuples of the component supports in descending joint probability order.
 
         Joint log-density is the sum of component log-densities, so this is a best-first
@@ -600,7 +604,7 @@ class CompositeEnumerator(DistributionEnumerator):
 
 
 class CompositeConditionalEnumerator(DistributionEnumerator):
-    def __init__(self, dist: "CompositeDistribution", given: dict[int, Any]) -> None:
+    def __init__(self, dist: CompositeDistribution, given: dict[int, Any]) -> None:
         """Enumerate complete tuples consistent with the fixed positions ``given``, best-first.
 
         Best-first over the product of the *free* coordinates' enumerations, offset by the fixed
@@ -634,7 +638,7 @@ class CompositeConditionalEnumerator(DistributionEnumerator):
 
 
 class CompositeSampler(DistributionSampler):
-    def __init__(self, dist: "CompositeDistribution", seed: int | None = None) -> None:
+    def __init__(self, dist: CompositeDistribution, seed: int | None = None) -> None:
         """CompositeSampler used to generate samples from CompositeDistribution.
 
         Args:
@@ -697,7 +701,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         self._init_rng = False
         self._acc_rng: list[RandomState] | None = None
 
-    def update(self, x: T, weight: float, estimate: Optional["CompositeDistribution"]) -> None:
+    def update(self, x: T, weight: float, estimate: CompositeDistribution | None) -> None:
         """Calls update on each CompositeAccumulator component[k], passing x[k] and weight along with estimate
             if provided.
 
@@ -775,7 +779,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             rv.extend(self.accumulators[i].get_seq_lambda())
         return rv
 
-    def seq_update(self, x: tuple[Any, ...], weights: np.ndarray, estimate: Optional["CompositeDistribution"]) -> None:
+    def seq_update(self, x: tuple[Any, ...], weights: np.ndarray, estimate: CompositeDistribution | None) -> None:
         """Vectorized aggregation of sufficient statistics for each component of CompositeAccumulator.
 
         Requires sequence encoded input x, from CompositeDataEncoder.seq_encode(data).
@@ -794,7 +798,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[i].seq_update(x[i], weights, estimate.dists[i] if estimate is not None else None)
 
     def seq_update_engine(
-        self, x: tuple[Any, ...], weights: Any, estimate: Optional["CompositeDistribution"], engine: Any
+        self, x: tuple[Any, ...], weights: Any, estimate: CompositeDistribution | None, engine: Any
     ) -> None:
         """Engine-resident E-step: route each component accumulator through the active engine so
         nested families stay resident. Matches seq_update.
@@ -806,7 +810,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
                 self.accumulators[i], x[i], weights, estimate.dists[i] if estimate is not None else None, engine
             )
 
-    def combine(self, suff_stat: SS) -> "CompositeAccumulator":
+    def combine(self, suff_stat: SS) -> CompositeAccumulator:
         """Aggregate the sufficient statistics of CompositeAccumulator with input suff_stat.
 
         Args:
@@ -826,7 +830,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         component."""
         return tuple([x.value() for x in self.accumulators])
 
-    def from_value(self, x: SS) -> "CompositeAccumulator":
+    def from_value(self, x: SS) -> CompositeAccumulator:
         """Set CompositeAccumulator instance sufficient statistics to x.
 
         Args:
@@ -842,7 +846,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> "CompositeAccumulator":
+    def scale(self, c: float) -> CompositeAccumulator:
         """Scale each child accumulator using its family-specific protocol."""
         for acc in self.accumulators:
             acc.scale(c)
@@ -887,7 +891,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         for u in self.accumulators:
             u.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> "CompositeDataEncoder":
+    def acc_to_encoder(self) -> CompositeDataEncoder:
         """Creates CompositeDataEncoder for encoding sequence of tuple data.
 
         encoders is a list of DataSequenceEncoders for each component of the CompositeDistribution.
@@ -918,7 +922,7 @@ class CompositeAccumulatorFactory(StatisticAccumulatorFactory):
         self.factories = factories
         self.keys = keys
 
-    def make(self) -> "CompositeAccumulator":
+    def make(self) -> CompositeAccumulator:
         """Create a CompositeAccumulator object from list of StatisticAccumulatorFactory objects.
 
         Returns:
@@ -976,14 +980,14 @@ class CompositeEstimator(ParameterEstimator):
         for est, p in zip(self.estimators, prior):
             _distribute_child_prior(est, p)
 
-    def model_log_density(self, model: "CompositeDistribution") -> float:
+    def model_log_density(self, model: CompositeDistribution) -> float:
         """Sum the child estimators' ``model_log_density`` on the corresponding child models (ELBO global term)."""
         rv = 0.0
         for est, d in zip(self.estimators, model.dists):
             rv += est.model_log_density(d)
         return rv
 
-    def accumulator_factory(self) -> "CompositeAccumulatorFactory":
+    def accumulator_factory(self) -> CompositeAccumulatorFactory:
         """Creates CompositeAccumulatorFactory from each ParameterEstimator in estimators.
 
         Returns:
@@ -992,7 +996,7 @@ class CompositeEstimator(ParameterEstimator):
         """
         return CompositeAccumulatorFactory([u.accumulator_factory() for u in self.estimators], self.keys)
 
-    def estimate(self, nobs: float | None, suff_stat: SS) -> "CompositeDistribution":
+    def estimate(self, nobs: float | None, suff_stat: SS) -> CompositeDistribution:
         """Estimate a CompositeDistribution from an aggregated sufficient statistics Tuple for a given number of
             observations (nobs).
 
@@ -1083,3 +1087,52 @@ class CompositeDataEncoder(DataSequenceEncoder):
             enc_data.append(encoder.seq_encode([u[i] for u in x]))
 
         return tuple(enc_data)
+
+
+# --- Fisher view(s) co-located with this family ---
+class CompositeFisherView(FixedFisherView):
+    def __init__(self, dist: Any) -> None:
+        self.child_views = [to_fisher(d) for d in dist.dists]
+        labels: list[Path] = []
+        for i, view in enumerate(self.child_views):
+            labels.extend((str(i),) + label for label in view.vectorizer.labels)
+        super().__init__(dist, labels)
+
+    def _refresh_labels(self) -> None:
+        labels: list[Path] = []
+        for i, view in enumerate(self.child_views):
+            labels.extend((str(i),) + label for label in view.vectorizer.labels)
+        self.labels = labels
+        self.vectorizer = SufficientStatisticVectorizer(self.labels)
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        mats = []
+        ests = [None] * len(self.child_views) if estimate is None else estimate.dists
+        for i, view in enumerate(self.child_views):
+            child_data = [x[i] for x in data]
+            mats.append(view.expected_statistics_matrix(data=child_data, estimate=ests[i]))
+        self._refresh_labels()
+        return np.hstack(mats) if mats else np.zeros((len(data), 0), dtype=np.float64)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        mats = []
+        ests = [None] * len(self.child_views) if estimate is None else estimate.dists
+        for i, view in enumerate(self.child_views):
+            mats.append(view.seq_expected_statistics(enc_data[i], estimate=ests[i]))
+        self._refresh_labels()
+        n = mats[0].shape[0] if mats else 0
+        return np.hstack(mats) if mats else np.zeros((n, 0), dtype=np.float64)
+
+    def _model_mean(self) -> np.ndarray:
+        return np.concatenate([view.mean_statistics() for view in self.child_views])
+
+    def _model_fisher(self) -> np.ndarray:
+        blocks = [np.asarray(view.fisher_information(ridge=0.0), dtype=np.float64) for view in self.child_views]
+        dim = sum(block.shape[0] for block in blocks)
+        out = np.zeros((dim, dim), dtype=np.float64)
+        pos = 0
+        for block in blocks:
+            n = block.shape[0]
+            out[pos : pos + n, pos : pos + n] = block
+            pos += n
+        return out

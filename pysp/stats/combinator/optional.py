@@ -4,6 +4,8 @@ Defines the OptionalDistribution, OptionalSampler, OptionalAccumulatorFactory, O
 OptionalEstimator, and the OptionalDataEncoder classes for use with pysparkplug.
 
 This distribution assigns a probability (p) to data being missing. With probability (1-p) the data is assumed to come
+from __future__ import annotations
+
 from a base distribution set by the user.
 
 The OptionalDistribution allows for potentially missing data. The value p (the probability of being missing)
@@ -35,6 +37,9 @@ from pysp.utils.special import digamma
 T = TypeVar("T")
 E = TypeVar("E")
 SS = TypeVar("SS")
+
+
+from pysp.inference.fisher import EmpiricalMetricFixedFisherView, FixedFisherView, to_fisher
 
 
 class OptionalDistribution(SequenceEncodableProbabilityDistribution):
@@ -364,8 +369,6 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Fisher view for the optional/missing-gate."""
         if hasattr(self, "dist"):
-            from pysp.inference.fisher import OptionalFisherView
-
             return OptionalFisherView(self)
         return super().to_fisher(**kwargs)
 
@@ -775,3 +778,114 @@ class OptionalDataEncoder(DataSequenceEncoder):
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 OptionalAccumulator = OptionalEstimatorAccumulator
 OptionalAccumulatorFactory = OptionalEstimatorAccumulatorFactory
+
+
+# --- Fisher view(s) co-located with this family ---
+class OptionalFisherView(EmpiricalMetricFixedFisherView):
+    def __init__(self, dist: Any) -> None:
+        self.child_view = to_fisher(dist.dist)
+        self.has_gate = getattr(dist, "has_p", getattr(dist, "p", None) is not None)
+        self._encoded_missing_first = hasattr(dist, "missing_value_is_nan")
+        labels = []
+        if self.has_gate:
+            labels.extend([("missing",), ("present",)])
+        labels.extend(("present_stat",) + label for label in self.child_view.vectorizer.labels)
+        super().__init__(dist, labels)
+
+    def _is_missing(self, x: Any) -> bool:
+        if getattr(self.dist, "missing_value_is_nan", getattr(self.dist, "mv_is_nan", False)):
+            return isinstance(x, (np.floating, float)) and np.isnan(x)
+        return x == self.dist.missing_value or x is self.dist.missing_value
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        n = len(data)
+        d = len(self.child_view.vectorizer.labels)
+        child = np.zeros((n, d), dtype=np.float64)
+        present_idx = []
+        present_values = []
+        gate = np.zeros((n, 2), dtype=np.float64) if self.has_gate else None
+        for i, x in enumerate(data):
+            missing = self._is_missing(x)
+            if gate is not None:
+                gate[i, 0 if missing else 1] = 1.0
+            if not missing:
+                present_idx.append(i)
+                present_values.append(x)
+        if present_values:
+            child[np.asarray(present_idx, dtype=np.int64)] = self.child_view.expected_statistics_matrix(
+                data=present_values
+            )
+        return np.hstack((gate, child)) if gate is not None else child
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        n, idx_a, idx_b, enc_child = enc_data
+        z_idx, nz_idx = (idx_a, idx_b) if self._encoded_missing_first else (idx_b, idx_a)
+        d = len(self.child_view.vectorizer.labels)
+        child = np.zeros((n, d), dtype=np.float64)
+        if len(nz_idx):
+            child[np.asarray(nz_idx, dtype=np.int64)] = self.child_view.seq_expected_statistics(enc_child)
+        if self.has_gate:
+            gate = np.zeros((n, 2), dtype=np.float64)
+            gate[np.asarray(z_idx, dtype=np.int64), 0] = 1.0
+            gate[np.asarray(nz_idx, dtype=np.int64), 1] = 1.0
+            return np.hstack((gate, child))
+        return child
+
+    def _model_mean(self) -> np.ndarray:
+        if not self.has_gate:
+            raise NotImplementedError
+        p = float(self.dist.p)
+        q = 1.0 - p
+        return np.concatenate((np.asarray([p, q]), q * self.child_view.mean_statistics()))
+
+    def _model_fisher(self) -> np.ndarray:
+        if not self.has_gate:
+            raise NotImplementedError
+        p = float(self.dist.p)
+        q = 1.0 - p
+        mu = np.asarray(self.child_view.mean_statistics(), dtype=np.float64)
+        info = np.asarray(self.child_view.fisher_information(ridge=0.0), dtype=np.float64)
+        d = len(mu)
+        out = np.zeros((2 + d, 2 + d), dtype=np.float64)
+        gate_mean = np.asarray([p, q])
+        out[:2, :2] = np.diag(gate_mean) - np.outer(gate_mean, gate_mean)
+        out[0, 2:] = -p * q * mu
+        out[2:, 0] = out[0, 2:]
+        out[1, 2:] = p * q * mu
+        out[2:, 1] = out[1, 2:]
+        out[2:, 2:] = q * info + p * q * np.outer(mu, mu)
+        return out
+
+    def mean_statistics(self, stats: np.ndarray | None = None, model: bool = True, **kwargs: Any) -> np.ndarray:
+        try:
+            return FixedFisherView.mean_statistics(self, stats=stats, model=model, **kwargs)
+        except NotImplementedError:
+            return EmpiricalMetricFixedFisherView.mean_statistics(self, stats=stats, **kwargs)
+
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
+        try:
+            return FixedFisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
+        except NotImplementedError:
+            return EmpiricalMetricFixedFisherView.fisher_information(
+                self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs
+            )
+
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        try:
+            return FixedFisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs
+            )
+        except NotImplementedError:
+            return EmpiricalMetricFixedFisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs
+            )
