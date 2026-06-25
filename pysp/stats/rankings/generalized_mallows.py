@@ -5,17 +5,21 @@ The Mallows family concentrates probability around a central permutation ``sigma
 
     p(sigma) = exp(-theta * d(sigma, sigma0)) / Z(theta, n),
 
-generalizing :class:`~pysp.stats.rankings.mallows.MallowsDistribution` (Kendall-only) to any of the
+generalizing :class:`~pysp.stats.rankings.mallows.MallowsDistribution` (Kendall-only) to any of the six
 metrics in :mod:`pysp.stats.rankings._permutation_kernels`. The per-datum distance is the numba kernel;
-this module supplies the metric-specific normalizer ``Z`` and the moment ``E_theta[d]`` used to fit
-``theta``. Three metrics have a closed-form (or fast-DP) normalizer and are handled here:
+this module supplies the metric-specific normalizer ``Z``. Three metrics have a closed-form (fast-DP)
+normalizer and moment ``E_theta[d]``:
 
     kendall   Z = prod_{i=1}^{n-1} (1 - phi^{i+1}) / (1 - phi)          (phi = e^{-theta})
     cayley    Z = prod_{i=1}^{n-1} (1 + i phi)
     hamming   Z = sum_{m=0}^{n} C(n, m) D_m phi^m                       (D_m = subfactorial)
 
-(footrule / Spearman / Ulam, whose normalizer is a permanent / LIS-distribution and #P-hard, are added
-separately with exact-small-n + numba-approximation normalizers.)
+The other three are #P-hard and use an exact small-``n`` normalizer with a numba Monte-Carlo fallback
+beyond a size cap (the fallback is an *approximation*, controlled by ``n_mc`` / ``seed``):
+
+    footrule  Z = perm(phi^{|i-j|})    exact Ryser permanent for n <= max_exact (16), else MC
+    spearman  Z = perm(phi^{(i-j)^2})  exact Ryser permanent for n <= max_exact (16), else MC
+    ulam      Z = sum over the LIS-distance histogram, exact for n <= max_enum (9), else MC
 
 Data type: ``List[int]`` -- a full ordering, a permutation of ``0..n-1`` with ``x[r]`` the item at rank
 ``r`` (best first).
@@ -184,6 +188,139 @@ def _mh_sample(rank_center, theta, mid, n_samples, burn, thin, seed):
     return out
 
 
+# --- #P-hard normalizers (footrule / spearman / ulam): exact small-n + numba Monte-Carlo ----------
+@numba.njit("float64(float64[:, :])", cache=True)
+def _ryser_log_permanent(M):
+    """log permanent of a non-negative matrix via Ryser's formula with Gray-code subset enumeration."""
+    n = M.shape[0]
+    if n == 0:
+        return 0.0
+    row = np.zeros(n)
+    total = 0.0
+    nbits = 0
+    prevg = 0
+    for k in range(1, 1 << n):
+        g = k ^ (k >> 1)  # Gray code: exactly one bit flips between successive subsets
+        diff = g ^ prevg
+        j, d = 0, diff
+        while (d & 1) == 0:
+            d >>= 1
+            j += 1
+        if g & (1 << j):
+            nbits += 1
+            for i in range(n):
+                row[i] += M[i, j]
+        else:
+            nbits -= 1
+            for i in range(n):
+                row[i] -= M[i, j]
+        prod = 1.0
+        for i in range(n):
+            prod *= row[i]
+        if ((n - nbits) & 1) == 0:
+            total += prod
+        else:
+            total -= prod
+        prevg = g
+    return math.log(total) if total > 0.0 else -np.inf
+
+
+@numba.njit("int64[:](int64, int64, int64, int64)", cache=True)
+def _uniform_distances(n, mid, n_mc, seed):
+    """Distances-from-identity of n_mc uniform random permutations (Fisher-Yates), for MC normalizers."""
+    np.random.seed(seed)
+    out = np.empty(n_mc, dtype=np.int64)
+    p = np.arange(n).astype(np.int64)
+    for k in range(n_mc):
+        for i in range(n - 1, 0, -1):
+            j = np.random.randint(0, i + 1)
+            tmp = p[i]
+            p[i] = p[j]
+            p[j] = tmp
+        out[k] = _perm_distance(p, mid)
+    return out
+
+
+_SAMPLE_CACHE: dict[tuple, np.ndarray] = {}
+_HIST_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _uniform_sample(metric: str, n: int, n_mc: int, seed: int) -> np.ndarray:
+    key = (metric, n, n_mc, seed)
+    if key not in _SAMPLE_CACHE:
+        _SAMPLE_CACHE[key] = np.asarray(_uniform_distances(n, metric_id(metric), n_mc, seed), dtype=float)
+    return _SAMPLE_CACHE[key]
+
+
+def _exact_histogram(metric: str, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Full enumeration of S_n: distinct distance values and their counts (small n only)."""
+    key = (metric, n)
+    if key not in _HIST_CACHE:
+        import itertools
+
+        perms = np.array(list(itertools.permutations(range(n))), dtype=np.int64)
+        ds = seq_distance_to_center(perms, np.arange(n, dtype=np.int64), metric)
+        vals, counts = np.unique(ds, return_counts=True)
+        _HIST_CACHE[key] = (vals.astype(float), counts.astype(float))
+    return _HIST_CACHE[key]
+
+
+def metric_log_normalizer(
+    metric: str, theta: float, n: int, *, n_mc: int = 20000, seed: int = 0, max_exact: int = 16, max_enum: int = 9
+) -> float:
+    """``log Z`` for any metric: closed form / exact permanent / exact enumeration / Monte-Carlo."""
+    if metric in _CLOSED_FORM:
+        return log_normalizer(metric, theta, n)
+    if n <= 1:
+        return 0.0
+    if theta <= 0.0:
+        return float(math.lgamma(n + 1))
+    phi = math.exp(-theta)
+    if metric in ("footrule", "spearman") and n <= max_exact:  # exact: Z = perm(phi^{d_ij})
+        i = np.arange(n)
+        d = np.abs(i[:, None] - i[None, :]) if metric == "footrule" else (i[:, None] - i[None, :]) ** 2
+        m = np.ascontiguousarray(phi ** d.astype(float), dtype=float)
+        return float(_ryser_log_permanent(m))
+    if metric == "ulam" and n <= max_enum:  # exact: enumerate the LIS-distance histogram
+        vals, counts = _exact_histogram(metric, n)
+        return float(logsumexp(np.log(counts) - theta * vals))
+    du = _uniform_sample(metric, n, n_mc, seed)  # Monte-Carlo: Z ~ n! * E_uniform[phi^d]
+    return float(math.lgamma(n + 1) + logsumexp(-theta * du) - math.log(du.size))
+
+
+def metric_solve_theta(
+    metric: str, mean_distance: float, n: int, *, n_mc: int = 20000, seed: int = 0, max_enum: int = 9
+) -> float:
+    """Fit ``theta`` to a target mean distance for any metric (closed form, else IS over a distance pool)."""
+    if metric in _CLOSED_FORM:
+        return solve_theta(metric, mean_distance, n)
+    if n <= max_enum:  # exact distance population from full enumeration
+        d_pop, w_pop = _exact_histogram(metric, n)
+    else:  # uniform Monte-Carlo population (self-normalized importance sampling for E_theta[d])
+        d_pop, w_pop = _uniform_sample(metric, n, n_mc, seed), None
+    log_w = np.log(w_pop) if w_pop is not None else np.zeros(d_pop.size)
+    uniform_mean = float(np.sum(d_pop * np.exp(log_w - logsumexp(log_w))))
+    if n <= 1 or mean_distance >= uniform_mean:
+        return 0.0
+    if mean_distance <= float(d_pop.min()):
+        return _MAX_THETA
+
+    def e_dist(theta: float) -> float:
+        lw = -theta * d_pop + log_w
+        return float(np.sum(d_pop * np.exp(lw - logsumexp(lw))))
+
+    lo, hi = 0.0, 1.0
+    while e_dist(hi) > mean_distance and hi < _MAX_THETA:
+        hi *= 2.0
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        if e_dist(mid) > mean_distance:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 class GeneralizedMallowsDistribution(SequenceEncodableProbabilityDistribution):
     """Mallows distribution under a configurable distance ``metric`` (closed-form normalizer metrics)."""
 
@@ -204,6 +341,10 @@ class GeneralizedMallowsDistribution(SequenceEncodableProbabilityDistribution):
         metric: str = "kendall",
         name: str | None = None,
         keys: str | None = None,
+        n_mc: int = 20000,
+        seed: int = 0,
+        max_exact: int = 16,
+        max_enum: int = 9,
     ) -> None:
         s0 = np.asarray(sigma0, dtype=int)
         n = len(s0)
@@ -211,15 +352,23 @@ class GeneralizedMallowsDistribution(SequenceEncodableProbabilityDistribution):
             raise ValueError("sigma0 must be a permutation of 0,...,n-1 with n >= 2.")
         if theta < 0.0 or not np.isfinite(theta):
             raise ValueError("GeneralizedMallowsDistribution requires theta >= 0.")
-        if metric not in _CLOSED_FORM:
-            raise ValueError(f"metric must be one of {_CLOSED_FORM} in this class, got {metric!r}.")
+        if metric not in METRICS:
+            raise ValueError(f"metric must be one of {METRICS}, got {metric!r}.")
         self.sigma0 = s0
         self.theta = float(theta)
         self.metric = metric
         self.dim = n
         self.rank0 = np.empty(n, dtype=np.int64)
         self.rank0[s0] = np.arange(n)
-        self.log_z = log_normalizer(metric, self.theta, n)
+        self.n_mc = int(n_mc)
+        self.seed = int(seed)
+        self.max_exact = int(max_exact)
+        self.max_enum = int(max_enum)
+        # exact for kendall/cayley/hamming; permanent (footrule/spearman) or enumeration (ulam) up to the
+        # caps; Monte-Carlo beyond -- an approximation (documented) so very large n stays tractable.
+        self.log_z = metric_log_normalizer(
+            metric, self.theta, n, n_mc=self.n_mc, seed=self.seed, max_exact=self.max_exact, max_enum=self.max_enum
+        )
         self.name = name
         self.keys = keys
 
@@ -250,7 +399,16 @@ class GeneralizedMallowsDistribution(SequenceEncodableProbabilityDistribution):
         return GeneralizedMallowsSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> GeneralizedMallowsEstimator:
-        return GeneralizedMallowsEstimator(dim=self.dim, metric=self.metric, name=self.name, keys=self.keys)
+        return GeneralizedMallowsEstimator(
+            dim=self.dim,
+            metric=self.metric,
+            name=self.name,
+            keys=self.keys,
+            n_mc=self.n_mc,
+            seed=self.seed,
+            max_exact=self.max_exact,
+            max_enum=self.max_enum,
+        )
 
     def dist_to_encoder(self) -> GeneralizedMallowsDataEncoder:
         return GeneralizedMallowsDataEncoder(dim=self.dim)
@@ -399,17 +557,25 @@ class GeneralizedMallowsEstimator(ParameterEstimator):
         reservoir: int = 10000,
         name: str | None = None,
         keys: str | None = None,
+        n_mc: int = 20000,
+        seed: int = 0,
+        max_exact: int = 16,
+        max_enum: int = 9,
     ) -> None:
         if dim is None or dim < 2:
             raise ValueError("GeneralizedMallowsEstimator requires dim >= 2.")
-        if metric not in _CLOSED_FORM:
-            raise ValueError(f"metric must be one of {_CLOSED_FORM}, got {metric!r}.")
+        if metric not in METRICS:
+            raise ValueError(f"metric must be one of {METRICS}, got {metric!r}.")
         self.dim = int(dim)
         self.metric = metric
         self.theta = theta
         self.reservoir = reservoir
         self.name = name
         self.keys = keys
+        self.n_mc = int(n_mc)
+        self.seed = int(seed)
+        self.max_exact = int(max_exact)
+        self.max_enum = int(max_enum)
 
     def accumulator_factory(self) -> GeneralizedMallowsAccumulatorFactory:
         return GeneralizedMallowsAccumulatorFactory(dim=self.dim, reservoir=self.reservoir, keys=self.keys)
@@ -417,8 +583,16 @@ class GeneralizedMallowsEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat) -> GeneralizedMallowsDistribution:
         count, rank_count, precede, res_x, res_w = suff_stat
         n = self.dim
+        kw = dict(
+            name=self.name,
+            keys=self.keys,
+            n_mc=self.n_mc,
+            seed=self.seed,
+            max_exact=self.max_exact,
+            max_enum=self.max_enum,
+        )
         if count <= 0.0:
-            return GeneralizedMallowsDistribution(np.arange(n), 0.0, self.metric, name=self.name, keys=self.keys)
+            return GeneralizedMallowsDistribution(np.arange(n), 0.0, self.metric, **kw)
         if self.metric == "kendall":  # Copeland consensus
             scores = precede.sum(axis=1) - precede.sum(axis=0)
         else:  # Borda consensus: order items by ascending mean rank
@@ -435,8 +609,10 @@ class GeneralizedMallowsEstimator(ParameterEstimator):
             w = np.asarray(res_w, dtype=float)
             dist = seq_distance_to_center(x, rank0, self.metric)
             mean_distance = float(np.sum(dist * w) / np.sum(w))
-            theta = solve_theta(self.metric, mean_distance, n)
-        return GeneralizedMallowsDistribution(sigma0, theta, self.metric, name=self.name, keys=self.keys)
+            theta = metric_solve_theta(
+                self.metric, mean_distance, n, n_mc=self.n_mc, seed=self.seed, max_enum=self.max_enum
+            )
+        return GeneralizedMallowsDistribution(sigma0, theta, self.metric, **kw)
 
 
 class GeneralizedMallowsDataEncoder(DataSequenceEncoder):
