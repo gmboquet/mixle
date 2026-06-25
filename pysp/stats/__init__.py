@@ -431,6 +431,17 @@ __all__ = [
     "kendall_distance",
     "spearman_footrule",
     "cayley_distance",
+    # extreme-value & boundary estimation (GPD/POT, tail index, endpoints, records)
+    "gpd_fit",
+    "GPDFit",
+    "peaks_over_threshold",
+    "return_level",
+    "hill_estimator",
+    "moment_estimator",
+    "mean_residual_life",
+    "endpoint_estimator",
+    "record_times",
+    "n_records",
     "MultivariateGaussianSampler",
     "MultivariateGaussianDataEncoder",
     "NullDistribution",
@@ -964,6 +975,18 @@ from pysp.stats.directional.wrapped_normal import (
     WrappedNormalDistribution,
     WrappedNormalEstimator,
     WrappedNormalSampler,
+)
+from pysp.stats.extreme import (
+    GPDFit,
+    endpoint_estimator,
+    gpd_fit,
+    hill_estimator,
+    mean_residual_life,
+    moment_estimator,
+    n_records,
+    peaks_over_threshold,
+    record_times,
+    return_level,
 )
 from pysp.stats.graphs.erdos_renyi_graph import (
     ErdosRenyiGraphAccumulator,
