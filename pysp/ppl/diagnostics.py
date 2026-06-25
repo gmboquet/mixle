@@ -30,6 +30,104 @@ def _lppd_pointwise(loglik: np.ndarray) -> np.ndarray:
     return _logsumexp(loglik, axis=0) - np.log(s)
 
 
+# ------------------------------------------- convergence diagnostics (Vehtari et al. 2021, Bayesian Analysis)
+# Rank-normalized split-R-hat and bulk/tail effective sample size -- the modern Stan/ArviZ standard. The
+# inputs are an ``(n_chains, n_draws)`` array of draws for one scalar parameter.
+
+
+def _autocov(x: np.ndarray) -> np.ndarray:
+    """Biased autocovariance of a 1-D series at all lags via FFT."""
+    n = x.size
+    c = x - x.mean()
+    m = 1 << int(2 * n - 1).bit_length()
+    f = np.fft.rfft(c, n=m)
+    ac = np.fft.irfft(f * np.conjugate(f), n=m)[:n].real
+    return ac / n
+
+
+def _ess_chains(x: np.ndarray) -> float:
+    """Stan effective sample size for one parameter, ``x`` of shape ``(n_chains, n_draws)``."""
+    m, n = x.shape
+    if n < 4:
+        return float(m * n)
+    acov = np.array([_autocov(x[c]) for c in range(m)])
+    mean_acov = acov.mean(axis=0)
+    chain_var = acov[:, 0] * n / (n - 1.0)
+    w = float(chain_var.mean())
+    if not np.isfinite(w) or w <= 0:
+        return float(m * n)
+    b = n * float(np.var(x.mean(axis=1), ddof=1)) if m > 1 else 0.0
+    var_plus = (n - 1.0) / n * w + b / n
+    rho = 1.0 - (w - mean_acov) / var_plus  # rho[0] == 1
+    # Geyer initial monotone positive sequence on paired autocorrelations.
+    pairs = []
+    k = 0
+    while 2 * k + 2 < n:
+        p = rho[2 * k + 1] + rho[2 * k + 2]
+        if p < 0:
+            break
+        pairs.append(p)
+        k += 1
+    for i in range(1, len(pairs)):
+        pairs[i] = min(pairs[i], pairs[i - 1])  # enforce monotone decreasing
+    tau = max(1.0 + 2.0 * float(sum(pairs)), 1.0)
+    return float(m * n / tau)
+
+
+def _rank_normalize(x: np.ndarray) -> np.ndarray:
+    """Blom rank-normalization to normal scores: ``Phi^{-1}((rank - 3/8) / (N - 1/4))``."""
+    from scipy.stats import norm, rankdata
+
+    r = rankdata(x).reshape(x.shape)
+    return norm.ppf((r - 0.375) / (x.size - 0.25))
+
+
+def _classic_rhat(x: np.ndarray) -> float:
+    """Potential scale reduction from chains ``x`` of shape ``(n_chains, n_draws)``."""
+    m, n = x.shape
+    if m < 2 or n < 2:
+        return float("nan")
+    w = float(np.var(x, axis=1, ddof=1).mean())
+    b = n * float(np.var(x.mean(axis=1), ddof=1))
+    if w <= 0:
+        return float("nan")
+    return float(np.sqrt(((n - 1.0) / n * w + b / n) / w))
+
+
+def split_rhat(draws: np.ndarray) -> float:
+    """Rank-normalized split-R-hat for one parameter (``draws`` is ``(n_chains, n_draws)``).
+
+    Splits each chain in half (catching within-chain non-stationarity), rank-normalizes, then takes the
+    potential scale reduction. Values within ~0.01 of 1.0 indicate convergence; > 1.01 is a warning.
+    """
+    x = np.atleast_2d(np.asarray(draws, dtype=float))
+    half = x.shape[1] // 2
+    if half < 2:
+        return float("nan")
+    split = np.concatenate([x[:, :half], x[:, half : 2 * half]], axis=0)
+    return _classic_rhat(_rank_normalize(split).reshape(split.shape))
+
+
+def bulk_ess(draws: np.ndarray) -> float:
+    """Bulk effective sample size: ESS of the rank-normalized draws (efficiency in the distribution body)."""
+    x = np.atleast_2d(np.asarray(draws, dtype=float))
+    return _ess_chains(_rank_normalize(x).reshape(x.shape))
+
+
+def tail_ess(draws: np.ndarray) -> float:
+    """Tail effective sample size: the smaller of the 5% and 95% quantile-indicator ESS (tail efficiency)."""
+    x = np.atleast_2d(np.asarray(draws, dtype=float))
+    q05, q95 = np.quantile(x, 0.05), np.quantile(x, 0.95)
+    lower = _ess_chains((x <= q05).astype(float))
+    upper = _ess_chains((x >= q95).astype(float))
+    return float(min(lower, upper))
+
+
+def convergence_diagnostics(draws: np.ndarray) -> dict:
+    """Return ``{'split_rhat', 'bulk_ess', 'tail_ess'}`` for one parameter's ``(n_chains, n_draws)`` draws."""
+    return {"split_rhat": split_rhat(draws), "bulk_ess": bulk_ess(draws), "tail_ess": tail_ess(draws)}
+
+
 def waic(loglik: np.ndarray) -> dict:
     """Return the WAIC of a ``(n_draws, n_obs)`` pointwise log-likelihood matrix."""
     loglik = np.atleast_2d(np.asarray(loglik, dtype=float))
