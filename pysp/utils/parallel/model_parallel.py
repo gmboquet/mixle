@@ -125,13 +125,35 @@ def _component_ok(acc: Any, model: Any, dc: Any) -> bool:
     )
 
 
+def _component_encs(model: Any, enc: Any, k: int) -> list[Any]:
+    """Per-component encodings, routing for BOTH mixture kinds: a homogeneous ``MixtureDistribution``
+    shares one encoding across components (``_component_enc``), while a ``HeterogeneousMixtureDistribution``
+    encodes as ``(tag_list, enc_data)`` and routes component ``i`` to the encoding of its distribution
+    *type* ``enc_data[tag]`` (one tag per family, possibly shared by several components)."""
+    from pysp.stats.latent.heterogeneous_mixture import HeterogeneousMixtureDistribution
+
+    if isinstance(model, HeterogeneousMixtureDistribution):
+        tag_list, enc_data = enc
+        out: list[Any] = [None] * k
+        for tag, tag_idxs in enumerate(tag_list):
+            for i in tag_idxs:
+                out[i] = enc_data[tag]
+        return out
+
+    from pysp.stats.latent.mixture import _component_enc
+
+    return [_component_enc(enc, i) for i in range(k)]
+
+
 def _fold_component_into(
     acc: Any, model: Any, enc: Any, weights: np.ndarray, parallel: bool, sub: frozenset[int], num_workers: int | None
 ) -> None:
-    """Mixture component E-step: distribute per-component scoring + accumulation, normalize centrally."""
-    from pysp.stats.latent.mixture import _component_enc
+    """Mixture component E-step: distribute per-component scoring + accumulation, normalize centrally.
 
+    Works for both the homogeneous ``MixtureDistribution`` and the ``HeterogeneousMixtureDistribution``
+    (which share this exact responsibility arithmetic and differ only in per-component encoding routing)."""
     k = int(model.num_components)
+    cenc = _component_encs(model, enc, k)
     log_w = np.asarray(model.log_w, dtype=np.float64)
     zw = model.zw
     ll_mat = np.zeros((len(weights), k), dtype=np.float64)
@@ -139,7 +161,7 @@ def _fold_component_into(
 
     def score(i: int) -> None:  # distributed: the expensive per-component emission scoring
         if not zw[i]:
-            ll_mat[:, i] = model.components[i].seq_log_density(_component_enc(enc, i)) + log_w[i]
+            ll_mat[:, i] = model.components[i].seq_log_density(cenc[i]) + log_w[i]
 
     _run(parallel, score, range(k), num_workers)
 
@@ -156,7 +178,7 @@ def _fold_component_into(
     def accum(i: int) -> None:  # distributed: disjoint per-component statistics, recursing into the child
         w_loc = ll_mat[:, i]
         acc.comp_counts[i] += w_loc.sum()
-        _fold_into(acc.accumulators[i], model.components[i], _component_enc(enc, i), w_loc, sub, num_workers)
+        _fold_into(acc.accumulators[i], model.components[i], cenc[i], w_loc, sub, num_workers)
 
     _run(parallel, accum, range(k), num_workers)
 

@@ -190,6 +190,41 @@ class CostAwareExecutorTest(unittest.TestCase):
         self.assertEqual(str(local), str(mp))
 
 
+class HeterogeneousMixtureTest(unittest.TestCase):
+    """Heterogeneous mixtures (per-type encoding routing) are model-parallel and bit-identical too."""
+
+    def _hetero(self, comps, ests, data, w):
+        from pysp.stats.latent.heterogeneous_mixture import (
+            HeterogeneousMixtureDistribution,
+            HeterogeneousMixtureEstimator,
+        )
+
+        init = HeterogeneousMixtureDistribution(components=comps, w=np.asarray(w))
+        est = HeterogeneousMixtureEstimator(ests)
+        local = optimize(data, est, prev_estimate=init, max_its=6, out=None, backend="local")
+        mp = optimize(data, est, prev_estimate=init, max_its=6, out=None, backend="model_parallel", num_workers=3)
+        self.assertEqual(str(local), str(mp))
+
+    def test_distinct_families(self):
+        rng = np.random.RandomState(0)
+        data = [float(abs(rng.randn())) for _ in range(300)]
+        self._hetero(
+            [stats.GaussianDistribution(0.0, 1.0), stats.ExponentialDistribution(1.0)],
+            [stats.GaussianEstimator(), stats.ExponentialEstimator()],
+            data,
+            [0.5, 0.5],
+        )
+
+    def test_multiple_components_share_a_type_tag(self):
+        rng = np.random.RandomState(1)
+        data = [float(abs(rng.randn() * 2)) for _ in range(300)]
+        comps = [stats.GaussianDistribution(float(i) - 1, 1.0) for i in range(3)] + [
+            stats.ExponentialDistribution(float(i) + 1) for i in range(2)
+        ]
+        ests = [stats.GaussianEstimator() for _ in range(3)] + [stats.ExponentialEstimator() for _ in range(2)]
+        self._hetero(comps, ests, data, [1 / 5] * 5)
+
+
 class FallbackTest(unittest.TestCase):
     def test_leaf_model_falls_back_and_is_identical(self):
         # a plain Gaussian is atomic -> replicated accumulation, still exact via the same handle.
