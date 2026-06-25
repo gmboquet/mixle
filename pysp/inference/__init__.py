@@ -53,6 +53,7 @@ from pysp.inference.cross_validation import (
     time_series_split,
 )
 from pysp.inference.em import EMStrategy, run_em
+from pysp.inference.errors_in_variables import DemingFit, deming_regression, propagate_uncertainty, simex
 from pysp.inference.estimation import best_of, fit, optimize
 from pysp.inference.fisher import FisherView, FixedFisherView, to_fisher
 
@@ -255,6 +256,11 @@ __all__ = [
     "kendall_tau",
     "goodman_kruskal_gamma",
     "somers_d",
+    # measurement error: errors-in-variables, SIMEX, Monte-Carlo uncertainty propagation
+    "deming_regression",
+    "DemingFit",
+    "simex",
+    "propagate_uncertainty",
     # cross-validation fold generators (i.i.d., grouped, temporal, spatial-block, nested)
     "kfold",
     "blocked_kfold",
