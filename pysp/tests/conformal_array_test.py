@@ -23,13 +23,14 @@ def _fit_predict(x_tr, y_tr, x_eval):
 class SplitConformalTest(unittest.TestCase):
     def setUp(self):
         rng = np.random.RandomState(0)
-        self.X = rng.uniform(-3, 3, (600, 1))
-        self.y = 2 + 1.5 * self.X.ravel() + rng.normal(0, 1, 600)
-        self.cal_pred = _fit_predict(self.X[:400], self.y[:400], self.X[400:])
-        self.cal_y = self.y[400:]
-        self.Xt = rng.uniform(-3, 3, (4000, 1))
-        self.yt = 2 + 1.5 * self.Xt.ravel() + rng.normal(0, 1, 4000)
-        self.tp = _fit_predict(self.X[:400], self.y[:400], self.Xt)
+        self.X = rng.uniform(-3, 3, (1500, 1))
+        self.y = 2 + 1.5 * self.X.ravel() + rng.normal(0, 1, 1500)
+        # a large calibration set keeps the single-split coverage variance small
+        self.cal_pred = _fit_predict(self.X[:500], self.y[:500], self.X[500:])
+        self.cal_y = self.y[500:]
+        self.Xt = rng.uniform(-3, 3, (8000, 1))
+        self.yt = 2 + 1.5 * self.Xt.ravel() + rng.normal(0, 1, 8000)
+        self.tp = _fit_predict(self.X[:500], self.y[:500], self.Xt)
 
     def test_two_sided_coverage(self):
         lo, hi = split_conformal(self.cal_pred, self.cal_y, self.tp, alpha=0.1)
