@@ -56,6 +56,20 @@ from pysp.inference.em import EMStrategy, run_em
 from pysp.inference.estimation import best_of, fit, optimize
 from pysp.inference.fisher import FisherView, FixedFisherView, to_fisher
 
+# generalized linear models + penalized / robust / quantile regression on plain arrays
+from pysp.inference.glm import (
+    Family,
+    GLMResult,
+    PenalizedResult,
+    RegressionFit,
+    elastic_net,
+    glm,
+    lasso,
+    quantile_regression,
+    ridge_regression,
+    robust_regression,
+)
+
 # multiple-testing correction (FWER / FDR) and evidence combination
 from pysp.inference.multiple_testing import (
     adjust_pvalues,
@@ -188,6 +202,17 @@ __all__ = [
     "cluster_robust_covariance",
     "newey_west_covariance",
     "robust_standard_errors",
+    # GLM + penalized / robust / quantile regression (array-level)
+    "glm",
+    "GLMResult",
+    "Family",
+    "ridge_regression",
+    "elastic_net",
+    "lasso",
+    "PenalizedResult",
+    "robust_regression",
+    "quantile_regression",
+    "RegressionFit",
     # cross-validation fold generators (i.i.d., grouped, temporal, spatial-block, nested)
     "kfold",
     "blocked_kfold",
