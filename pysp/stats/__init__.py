@@ -482,6 +482,12 @@ __all__ = [
     "MallowsEstimator",
     "MallowsDataEncoder",
     "MallowsEnumerator",
+    "GeneralizedMallowsDistribution",
+    "GeneralizedMallowsSampler",
+    "GeneralizedMallowsEstimator",
+    "GeneralizedMallowsAccumulator",
+    "GeneralizedMallowsAccumulatorFactory",
+    "GeneralizedMallowsDataEncoder",
     "SpanningTreeDistribution",
     "SpanningTreeSampler",
     "SpanningTreeEstimator",
@@ -1147,6 +1153,14 @@ from pysp.stats.processes.renewal_process import (
     RenewalProcessDistribution,
     RenewalProcessEstimator,
     RenewalProcessSampler,
+)
+from pysp.stats.rankings.generalized_mallows import (
+    GeneralizedMallowsAccumulator,
+    GeneralizedMallowsAccumulatorFactory,
+    GeneralizedMallowsDataEncoder,
+    GeneralizedMallowsDistribution,
+    GeneralizedMallowsEstimator,
+    GeneralizedMallowsSampler,
 )
 from pysp.stats.rankings.mallows import (
     MallowsDataEncoder,
