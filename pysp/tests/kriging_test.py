@@ -44,6 +44,26 @@ class VariogramTest(unittest.TestCase):
         self.assertGreater(vg.rng, 0)
         self.assertLess(vg.nugget, vg.psill)  # correlated structure dominates the nugget
 
+    def test_squared_exponential_is_gaussian_with_rbf_covariance(self):
+        # 'squared_exponential' / 'rbf' are aliases of the Gaussian model; covariance is exp(-(h/rng)^2)
+        h = np.array([0.0, 1.0, 2.0, 4.0])
+        for name in ("squared_exponential", "squared-exponential", "rbf"):
+            vg = Variogram(name, nugget=0.1, psill=2.0, rng=1.5)
+            np.testing.assert_allclose(vg.cov_field(h), 2.0 * np.exp(-((h / 1.5) ** 2)))
+            np.testing.assert_allclose(vg.gamma(h), Variogram("gaussian", 0.1, 2.0, 1.5).gamma(h))
+
+    def test_squared_exponential_fit_and_krige_match_gaussian(self):
+        rng = np.random.RandomState(2)
+        X = rng.uniform(0, 10, (50, 2))
+        z = np.sin(X[:, 0]) + np.cos(X[:, 1])
+        q = np.array([[5.0, 5.0], [1.0, 9.0]])
+        a = fit_variogram(X, z, model="gaussian")
+        b = fit_variogram(X, z, model="squared_exponential")
+        np.testing.assert_allclose([a.nugget, a.psill, a.rng], [b.nugget, b.psill, b.rng])
+        pa = ordinary_kriging(X, z, a, q)["prediction"]
+        pb = ordinary_kriging(X, z, Variogram("rbf", a.nugget, a.psill, a.rng), q)["prediction"]
+        np.testing.assert_allclose(pa, pb)
+
 
 class KrigingTest(unittest.TestCase):
     def setUp(self):
