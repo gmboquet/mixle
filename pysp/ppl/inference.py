@@ -43,6 +43,8 @@ class _Slot:
     name: str | None  # parameter name (prior's name, else "argN")
     handle: Any  # the prior RandomVariable (for .posterior(handle)), or None
     support: str = "real"  # 'real' | 'positive' (log) | 'unit' (logit) reparameterization
+    group: int | None = None  # index of the exchangeable mixture component this slot belongs to
+    role: str = "param"  # 'param' (a component's parameter) | 'weight' (its mixture weight)
 
 
 def _to_value(support: str, u: float):
@@ -279,17 +281,28 @@ def _collect_composite(rv: RandomVariable):
     def collect(node: RandomVariable):
         fam = node._family
         if isinstance(fam, CompositeFamily):
+            # Components of a finite mixture are exchangeable -> tag their slots with the component
+            # index so parallel chains can be relabeled (label-switching) before pooling / R-hat.
+            exch = fam.name in ("Mixture", "SemiMix")
             for a in node._args:
                 if isinstance(a, (list, tuple)):
-                    for c in a:
+                    for gi, c in enumerate(a):
                         if isinstance(c, RandomVariable):
+                            before = len(slots)
                             collect(c)
+                            if exch:  # tag only the outermost exchangeable level (nested groups keep theirs)
+                                for s in slots[before:]:
+                                    if s.group is None:
+                                        s.group = gi
                     continue
                 spec = _struct_spec_for(node, a)
                 if spec is not None:  # structural vector/matrix parameter -> scalar slots
                     handle = _handle_of(a)  # a param(...) handle is referenceable in constraints
-                    for prior, support, nm in _spec_slot_defs(spec):
-                        slots.append(_Slot(len(slots), prior, support == "positive", nm, handle, support))
+                    for gi, (prior, support, nm) in enumerate(_spec_slot_defs(spec)):
+                        s = _Slot(len(slots), prior, support == "positive", nm, handle, support)
+                        if exch:  # mixture weights: weight j pairs with component j -> permute together
+                            s.group, s.role = gi, "weight"
+                        slots.append(s)
                 elif isinstance(a, RandomVariable):
                     collect(a)  # child model
             return
@@ -494,6 +507,48 @@ def _u_to_vals(slots, u) -> np.ndarray:
     return vals
 
 
+def _exchangeable_layout(slots) -> list[list[int]] | None:
+    """Slot positions per exchangeable mixture component, ``[[comp0 slots], [comp1 slots], ...]``.
+
+    Each inner list is that component's slots in canonical order (parameters as collected, then its
+    weight if free); all components share the same layout. Returns None if there is no exchangeable
+    structure with >= 2 identically-shaped components (nothing to relabel).
+    """
+    groups: dict[int, list[tuple[int, str]]] = {}
+    for k, s in enumerate(slots):
+        if s.group is not None:
+            groups.setdefault(s.group, []).append((k, s.role))
+    if len(groups) < 2:
+        return None
+    layout, param_counts = [], set()
+    for g in sorted(groups):
+        params = [k for k, r in groups[g] if r == "param"]
+        weights = [k for k, r in groups[g] if r == "weight"]
+        layout.append(params + weights)
+        param_counts.add(len(params))
+    if len({len(comp) for comp in layout}) != 1 or param_counts == {0} or len(param_counts) != 1:
+        return None  # heterogeneous components, or a group with no parameter to sort on
+    return layout
+
+
+def _relabel_chain(u_chain: np.ndarray, layout: list[list[int]]) -> np.ndarray:
+    """Relabel a chain's draws so exchangeable components are sorted by their first parameter.
+
+    Resolves label-switching: each draw is permuted so component blocks are ordered by their leading
+    (location) parameter. Applied per chain before pooling, it makes independent parallel chains agree
+    on a labeling -- correct pooled posterior and meaningful R-hat -- without constraining the sampler.
+    """
+    first = [comp[0] for comp in layout]  # leading parameter of each component = sort key
+    out = u_chain.copy()
+    order = np.argsort(u_chain[:, first], axis=1)  # (n_draws, n_components) per-draw rank of components
+    for i, tgt in enumerate(layout):  # component sorted into rank i pulls from the rank-i source block
+        src_rank = order[:, i]
+        for col, tgt_slot in enumerate(tgt):
+            src_slots = np.array([layout[g][col] for g in range(len(layout))])
+            out[:, tgt_slot] = u_chain[np.arange(u_chain.shape[0]), src_slots[src_rank]]
+    return out
+
+
 def _gelman_rubin(chains_u: np.ndarray) -> np.ndarray:
     """Per-dimension Gelman-Rubin R-hat from (n_chains, n_draws, d) unconstrained samples."""
     m, n, _ = chains_u.shape
@@ -618,8 +673,16 @@ def _run_chains(run_one, worker, worker_args, chains: int, parallel, rng):
 
 
 def _finalize_chains(rv, slots, results, build) -> RandomVariable:
-    """Combine multiple chains: pool value-space draws, attach R-hat and combined ESS."""
+    """Combine multiple chains: pool value-space draws, attach R-hat and combined ESS.
+
+    For mixtures the chains are first relabeled (label-switching): independent chains may settle on
+    different component orderings, which would smear the pooled posterior and blow up R-hat. Sorting
+    each chain's components by their leading parameter aligns them so the pooled summary is correct.
+    """
     us = [np.asarray(r.samples, dtype=float).reshape(len(r.samples), -1) for r in results]
+    layout = _exchangeable_layout(slots)
+    if layout is not None:
+        us = [_relabel_chain(u, layout) for u in us]
     n = min(len(u) for u in us)
     rhat = _gelman_rubin(np.stack([u[:n] for u in us], axis=0))
     vals = _u_to_vals(slots, np.concatenate(us, axis=0))
