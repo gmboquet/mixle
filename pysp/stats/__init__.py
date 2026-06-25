@@ -449,6 +449,13 @@ __all__ = [
     "scott_bandwidth",
     "kde_mode",
     "intensity",
+    # geostatistics: variograms and kriging
+    "Variogram",
+    "empirical_variogram",
+    "fit_variogram",
+    "ordinary_kriging",
+    "universal_kriging",
+    "calibrate_variance",
     "MultivariateGaussianSampler",
     "MultivariateGaussianDataEncoder",
     "NullDistribution",
@@ -1029,6 +1036,14 @@ from pysp.stats.kde import (
     kde_mode,
     scott_bandwidth,
     silverman_bandwidth,
+)
+from pysp.stats.kriging import (
+    Variogram,
+    calibrate_variance,
+    empirical_variogram,
+    fit_variogram,
+    ordinary_kriging,
+    universal_kriging,
 )
 from pysp.stats.latent.dirac_length import (
     DiracLengthMixtureDistribution,
