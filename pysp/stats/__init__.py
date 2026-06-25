@@ -423,6 +423,14 @@ __all__ = [
     "ice",
     "hill_numbers",
     "rarefaction_curve",
+    # rank aggregation / consensus / permutation distances
+    "borda_count",
+    "copeland",
+    "kemeny_consensus",
+    "mallows_fit",
+    "kendall_distance",
+    "spearman_footrule",
+    "cayley_distance",
     "MultivariateGaussianSampler",
     "MultivariateGaussianDataEncoder",
     "NullDistribution",
@@ -1167,6 +1175,15 @@ from pysp.stats.processes.renewal_process import (
     RenewalProcessDistribution,
     RenewalProcessEstimator,
     RenewalProcessSampler,
+)
+from pysp.stats.rank_aggregation import (
+    borda_count,
+    cayley_distance,
+    copeland,
+    kemeny_consensus,
+    kendall_distance,
+    mallows_fit,
+    spearman_footrule,
 )
 from pysp.stats.rankings.mallows import (
     MallowsDataEncoder,
