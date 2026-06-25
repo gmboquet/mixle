@@ -107,6 +107,25 @@ from pysp.inference.fisher import (
 )
 
 
+def _par_states(num_states: int, fn: Any, workers: int | None) -> None:
+    """Run ``fn(i)`` for each state -- across a thread pool when ``workers`` is set, else serially.
+
+    Used to parallelize the per-state emission scoring and per-state sufficient-statistic accumulation
+    (each writes a disjoint column / a disjoint accumulator), which is the dominant cost of an HMM with
+    rich emissions and is what lets a massive HMM use the cluster on even a single observation sequence
+    (the forward-backward recursion stays serial). Threading only reorders disjoint writes, so the result
+    is bit-identical to the serial loop; ``workers=None`` IS the serial loop (zero behaviour change).
+    """
+    if workers and workers > 1 and num_states > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=int(workers)) as pool:
+            list(pool.map(fn, range(num_states)))
+    else:
+        for i in range(num_states):
+            fn(i)
+
+
 def _zero_impossible_emission_rows(pr_obs: np.ndarray) -> None:
     """Zero emission rows for impossible observations before they reach the Baum-Welch kernels.
 
@@ -1039,6 +1058,26 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             terminal_states=self.terminal_states,
         )
 
+    def decomposition(self):
+        """The HMM splits along its STATE axis (the per-state emission distributions).
+
+        Unlike a mixture this is NOT suff-stat-separable -- the forward-backward couples all states across
+        time -- so the executor does not reduce it; instead the per-state *emission scoring* and
+        *accumulation* (the dominant cost for rich emissions) are distributed inside the Baum-Welch E-step
+        (host-shard mode, ``engine_axis=None``), while the recursion stays serial. Exposing the axis lets
+        the balance planner use the cluster for a massive HMM even on a single observation sequence."""
+        from pysp.stats.compute.decomposition import DecompAxis, Decomposition, ReductionOp
+
+        return Decomposition(
+            axis=DecompAxis.STATE,
+            num_units=self.n_states,
+            reduction=ReductionOp.SUM,
+            exact=True,
+            child_roles=("state",) * self.n_states,
+            engine_axis=None,
+            key_pooling=False,
+        )
+
     def dist_to_encoder(self) -> HiddenMarkovDataEncoder:
         """Returns HiddenMarkovDataEncoder object for encoding sequences of iid HMM observations."""
         emission_encoder = self.topics[0].dist_to_encoder()
@@ -1675,6 +1714,10 @@ class HiddenMarkovSampler(DistributionSampler):
 
 
 class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
+    # Per-state emission scoring + accumulation are distributed across this many threads when set (by the
+    # model-parallel executor for a massive/rich-emission HMM); None = serial, the default (no change).
+    _state_workers: int | None = None
+
     def __init__(
         self,
         accumulators: Sequence[SequenceEncodableStatisticAccumulator],
@@ -2050,9 +2093,11 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             pr_obs = np.zeros((tot_cnt, num_states))
             alphas = np.zeros((tot_cnt, num_states))
 
-            # Compute state likelihood vectors and scale the max to one
-            for i in range(num_states):
+            # Compute state likelihood vectors and scale the max to one (state-parallel: disjoint columns)
+            def _score0(i: int) -> None:
                 pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+
+            _par_states(num_states, _score0, self._state_workers)
 
             pr_max0 = pr_obs.max(axis=1, keepdims=True)
             with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
@@ -2140,11 +2185,13 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
                 self.trans_counts += xi_loc.sum(axis=0)
 
-            # Aggregate sufficient statistics
-            for i in range(num_states):
+            # Aggregate sufficient statistics (state-parallel: disjoint per-state accumulators)
+            def _accum0(i: int) -> None:
                 # alphas[:,i] *= weights[idx_vec]/np.maximum(len_vec[idx_vec], 1.0)
                 alphas[:, i] *= weights[idx_vec]
                 self.accumulators[i].seq_update(enc_data, alphas[:, i], estimate.topics[i])
+
+            _par_states(num_states, _accum0, self._state_workers)
 
             self.state_counts += alphas.sum(axis=0)
 
@@ -2177,9 +2224,11 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             init_pvec = estimate.w
             tran_mat = estimate.transitions
 
-            # Compute state likelihood vectors and scale the max to one
-            for i in range(num_states):
+            # Compute state likelihood vectors and scale the max to one (state-parallel: disjoint columns)
+            def _score1(i: int) -> None:
                 pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+
+            _par_states(num_states, _score1, self._state_workers)
 
             pr_max = pr_obs.max(axis=1, keepdims=True)
             with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
@@ -2209,8 +2258,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
             # numba_baum_welch2.parallel_diagnostics(level=4)
 
-            for i in range(num_states):
+            def _accum1(i: int) -> None:  # state-parallel: disjoint per-state accumulators
                 self.accumulators[i].seq_update(enc_data, alphas[:, i], estimate.topics[i])
+
+            _par_states(num_states, _accum1, self._state_workers)
 
             self.state_counts += alphas.sum(axis=0)
 

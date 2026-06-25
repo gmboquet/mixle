@@ -124,6 +124,8 @@ def shard_children(node: Any, dc: Decomposition | None = None) -> tuple[Any, ...
         return tuple(getattr(node, "dists", ()) or ())
     if dc.axis is DecompAxis.TOPIC:
         return tuple(getattr(node, "topics", ()) or ())
+    if dc.axis is DecompAxis.STATE:
+        return tuple(getattr(node, "topics", ()) or getattr(node, "components", ()) or ())
     if dc.axis is DecompAxis.SEQUENCE:
         base = getattr(node, "dist", None)
         return (base,) if base is not None else ()
