@@ -154,7 +154,13 @@ def _maxpro_swap(unit: np.ndarray, rng: RandomState, iterations: int) -> np.ndar
 
 
 def maxpro_design(
-    bounds: Bounds, n: int, seed: int | RandomState | None = None, *, restarts: int = 3, swaps: int = 1500, maxiter: int = 300
+    bounds: Bounds,
+    n: int,
+    seed: int | RandomState | None = None,
+    *,
+    restarts: int = 3,
+    swaps: int = 1500,
+    maxiter: int = 300,
 ) -> np.ndarray:
     """Return a maximum-projection (MaxPro) space-filling design (Joseph, Gul & Ba 2015).
 
@@ -192,7 +198,12 @@ def maxpro_design(
             start[:, j] = (rng.permutation(n) + rng.random_sample(n)) / n
         start = _maxpro_swap(start, rng, swaps)  # stage 1: coordinate exchange (LHD basin)
         res = minimize(  # stage 2: continuous refinement off the grid
-            _maxpro_obj_grad, start.ravel(), args=(n, d), method="L-BFGS-B", jac=True, bounds=box,
+            _maxpro_obj_grad,
+            start.ravel(),
+            args=(n, d),
+            method="L-BFGS-B",
+            jac=True,
+            bounds=box,
             options={"maxiter": int(maxiter)},
         )
         cand = np.clip(res.x.reshape(n, d), 0.0, 1.0)

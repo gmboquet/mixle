@@ -135,8 +135,12 @@ class LowRankPermutationDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> LowRankPermutationEstimator:
         return LowRankPermutationEstimator(
-            dim=self.dim, rank=self.rank, max_exact=self.max_exact, sinkhorn_iter=self.sinkhorn_iter,
-            name=self.name, keys=self.keys,
+            dim=self.dim,
+            rank=self.rank,
+            max_exact=self.max_exact,
+            sinkhorn_iter=self.sinkhorn_iter,
+            name=self.name,
+            keys=self.keys,
         )
 
     def dist_to_encoder(self) -> LowRankPermutationDataEncoder:

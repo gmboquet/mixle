@@ -32,13 +32,24 @@ def _hmm(use_numba, zero_symbol):
 
 
 def _has_nan(model) -> list[str]:
-    bad = [a for a in ("log_w", "log_transitions", "w", "transitions") if np.any(np.isnan(np.asarray(getattr(model, a), float)))]
-    bad += [f"topic{i}" for i, c in enumerate(model.topics) if np.any(np.isnan(np.asarray(list(c.pmap.values()), float)))]
+    bad = [
+        a
+        for a in ("log_w", "log_transitions", "w", "transitions")
+        if np.any(np.isnan(np.asarray(getattr(model, a), float)))
+    ]
+    bad += [
+        f"topic{i}" for i, c in enumerate(model.topics) if np.any(np.isnan(np.asarray(list(c.pmap.values()), float)))
+    ]
     return bad
 
 
 # 'c' has zero emission probability in every state -> impossible observation, mid-sequence.
-_IMPOSSIBLE = [["a", "b", "a", "b", "a"], ["b", "a", "b", "a", "b"], ["a", "b", "c", "b", "a"], ["b", "a", "b", "b", "a"]]
+_IMPOSSIBLE = [
+    ["a", "b", "a", "b", "a"],
+    ["b", "a", "b", "a", "b"],
+    ["a", "b", "c", "b", "a"],
+    ["b", "a", "b", "b", "a"],
+]
 _NORMAL = [["a", "b", "a", "b", "a"], ["b", "a", "b", "a", "b"], ["a", "a", "b", "b", "a"], ["b", "b", "a", "a", "b"]]
 
 
@@ -47,7 +58,9 @@ class HmmZeroProbTest(unittest.TestCase):
         for use_numba in (True, False):
             with warnings.catch_warnings():
                 warnings.simplefilter("error")  # a NaN/overflow warning fails the test
-                res = optimize(_IMPOSSIBLE, _hmm(use_numba, True).estimator(), max_its=5, out=None, rng=np.random.RandomState(1))
+                res = optimize(
+                    _IMPOSSIBLE, _hmm(use_numba, True).estimator(), max_its=5, out=None, rng=np.random.RandomState(1)
+                )
             self.assertEqual(_has_nan(res), [], f"use_numba={use_numba}")
 
     def test_impossible_sequence_log_density_is_neg_inf_not_nan(self):
@@ -65,7 +78,11 @@ class HmmZeroProbTest(unittest.TestCase):
 
         def flat(m):
             return np.concatenate(
-                [np.asarray(m.log_w, float).ravel(), np.asarray(m.log_transitions, float).ravel(), np.asarray(m.transitions, float).ravel()]
+                [
+                    np.asarray(m.log_w, float).ravel(),
+                    np.asarray(m.log_transitions, float).ravel(),
+                    np.asarray(m.transitions, float).ravel(),
+                ]
             )
 
         self.assertTrue(np.array_equal(flat(rn), flat(rp), equal_nan=True))

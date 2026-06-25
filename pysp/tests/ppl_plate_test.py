@@ -58,7 +58,9 @@ class GroupedNutsTest(unittest.TestCase):
         data, _ = _hier_data()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            fit = _model(True, free_mu=True).fit(data, how="nuts", draws=500, burn=500, chains=2, rng=np.random.RandomState(2))
+            fit = _model(True, free_mu=True).fit(
+                data, how="nuts", draws=500, burn=500, chains=2, rng=np.random.RandomState(2)
+            )
         self.assertTrue(np.isfinite(fit.summary()["mu"]["mean"]))
 
     def test_numeric_ensemble_path(self):
@@ -74,7 +76,9 @@ class GroupedNutsTest(unittest.TestCase):
         def total_div(noncentered):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                fit = _model(noncentered).fit(data, how="nuts", draws=500, burn=600, chains=2, rng=np.random.RandomState(0))
+                fit = _model(noncentered).fit(
+                    data, how="nuts", draws=500, burn=600, chains=2, rng=np.random.RandomState(0)
+                )
             return fit.summary().get("_num_divergences", 0)
 
         self.assertLessEqual(total_div(True), total_div(False) + 5)  # non-centered no worse, usually better

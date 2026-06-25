@@ -42,7 +42,9 @@ class RelabelParallelChainsTest(unittest.TestCase):
         model = Mix([Normal(mi, 1.2) for mi in m])
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            fit = model.fit(data, how="nuts", draws=300, burn=300, chains=6, parallel=False, rng=np.random.RandomState(7))
+            fit = model.fit(
+                data, how="nuts", draws=300, burn=300, chains=6, parallel=False, rng=np.random.RandomState(7)
+            )
         s = fit.summary()
         means = sorted(s[f"m{i}"]["mean"] for i in range(3))
         # without relabeling these chains disagree (R-hat ~25, means smeared to ~0); after relabeling
