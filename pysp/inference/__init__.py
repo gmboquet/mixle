@@ -39,6 +39,19 @@ from pysp.inference.calibration import (
     reliability_curve,
     top_label_confidence,
 )
+from pysp.inference.cross_validation import (
+    NestedFold,
+    blocked_kfold,
+    group_kfold,
+    kfold,
+    leave_one_group_out,
+    leave_one_out,
+    nested_kfold,
+    purged_kfold,
+    spatial_block_kfold,
+    stratified_kfold,
+    time_series_split,
+)
 from pysp.inference.em import EMStrategy, run_em
 from pysp.inference.estimation import best_of, fit, optimize
 from pysp.inference.fisher import FisherView, FixedFisherView, to_fisher
@@ -175,6 +188,18 @@ __all__ = [
     "cluster_robust_covariance",
     "newey_west_covariance",
     "robust_standard_errors",
+    # cross-validation fold generators (i.i.d., grouped, temporal, spatial-block, nested)
+    "kfold",
+    "blocked_kfold",
+    "leave_one_out",
+    "stratified_kfold",
+    "leave_one_group_out",
+    "group_kfold",
+    "time_series_split",
+    "purged_kfold",
+    "spatial_block_kfold",
+    "nested_kfold",
+    "NestedFold",
     # proper scoring rules (lower is better; pair with resampling for score-difference CIs)
     "log_score",
     "brier_score",
