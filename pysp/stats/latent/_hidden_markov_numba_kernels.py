@@ -38,9 +38,9 @@ def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll,
             next_alpha[i] = temp
             alpha_sum += temp
 
-        llsum += math.log(alpha_sum)
+        llsum += math.log(alpha_sum) if alpha_sum > 0.0 else -np.inf  # guarded: math.log(0) raises off-numba
         llsum += max_ll[s0]
-        if alpha_sum <= 0.0:  # impossible observation: log above already gave -inf; clamp the divisor so the
+        if alpha_sum <= 0.0:  # impossible observation: log above gave -inf; clamp the divisor so the
             alpha_sum = 1.0  # recursion stays 0 (-> ll -inf) instead of 0/0 -> NaN
 
         for s in range(s0 + 1, s1):
@@ -56,7 +56,7 @@ def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll,
                 next_alpha[i] = temp
                 alpha_sum += temp
 
-            llsum += math.log(alpha_sum)
+            llsum += math.log(alpha_sum) if alpha_sum > 0.0 else -np.inf  # guarded: math.log(0) raises off-numba
             llsum += max_ll[s]
             if alpha_sum <= 0.0:  # impossible observation mid-sequence: keep ll -inf, avoid 0/0 -> NaN
                 alpha_sum = 1.0
