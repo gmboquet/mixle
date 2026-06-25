@@ -327,6 +327,14 @@ def _stats_public_distribution_catalog():
             np.linspace(-1, 1, 18).reshape(6, 3), np.linspace(-0.5, 0.5, 6).reshape(2, 3)
         ),
         "MallowsDistribution": stats.MallowsDistribution([0, 2, 1, 3], theta=1.0),
+        "GeneralizedMallowsDistribution": stats.GeneralizedMallowsDistribution([0, 2, 1, 3], 1.0, "cayley"),
+        "GeneralizedMallowsModelDistribution": stats.GeneralizedMallowsModelDistribution(
+            [0, 2, 1, 3], [1.5, 1.0, 0.5]
+        ),
+        "BradleyTerryDistribution": stats.BradleyTerryDistribution([1.5, 0.5, -0.5, -1.5]),
+        "LowRankPermutationDistribution": stats.LowRankPermutationDistribution(
+            np.linspace(-0.6, 0.6, 8).reshape(4, 2), np.linspace(0.5, -0.5, 8).reshape(4, 2)
+        ),
         "SpanningTreeDistribution": stats.SpanningTreeDistribution(
             [[0.0, 2.0, 1.0, 3.0], [2.0, 0.0, 4.0, 1.0], [1.0, 4.0, 0.0, 2.0], [3.0, 1.0, 2.0, 0.0]]
         ),
