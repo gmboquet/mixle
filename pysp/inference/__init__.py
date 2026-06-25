@@ -119,6 +119,20 @@ from pysp.inference.scoring import (
     winkler_score,
 )
 
+# survival / time-to-event estimators and hazard regression
+from pysp.inference.survival import (
+    CoxResult,
+    FrailtyCoxResult,
+    aalen_additive,
+    aalen_johansen,
+    cox_ph,
+    discrete_time_hazard,
+    frailty_cox,
+    kaplan_meier,
+    nelson_aalen,
+    to_person_period,
+)
+
 # sampling-based inference — the engine-agnostic NUTS/ADVI facade (target must be sampleable/differentiable)
 from pysp.inference.target import (
     AdviResult,
@@ -213,6 +227,17 @@ __all__ = [
     "robust_regression",
     "quantile_regression",
     "RegressionFit",
+    # survival / time-to-event estimators and hazard regression
+    "kaplan_meier",
+    "nelson_aalen",
+    "cox_ph",
+    "CoxResult",
+    "to_person_period",
+    "discrete_time_hazard",
+    "aalen_johansen",
+    "aalen_additive",
+    "frailty_cox",
+    "FrailtyCoxResult",
     # cross-validation fold generators (i.i.d., grouped, temporal, spatial-block, nested)
     "kfold",
     "blocked_kfold",
