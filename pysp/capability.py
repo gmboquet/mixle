@@ -41,6 +41,7 @@ __all__ = [
     "Enumerable",
     "FiniteSupport",
     "RankableByIndex",
+    "Shardable",
     "ExponentialFamily",
     "ConjugateUpdatable",
     "ExactDensity",
@@ -211,6 +212,23 @@ class RankableByIndex(PredicateCapability):
         return Enumerable.check(obj) and FiniteSupport.check(obj)
 
 
+class Shardable(PredicateCapability):
+    """Declares a non-atomic model-parallel decomposition axis (``decomposition().is_shardable``).
+
+    The cheap string predicate gates planning; the rich :class:`~pysp.stats.compute.decomposition.Decomposition`
+    is built only when a node is actually sharded. See ``~/codex/notes/model-parallel-design.md``.
+    """
+
+    @classmethod
+    def check(cls, obj: Any) -> bool:
+        from pysp.stats.compute.decomposition import decomposition_for
+
+        try:
+            return bool(decomposition_for(obj).is_shardable)
+        except Exception:
+            return False
+
+
 class ExponentialFamily(PredicateCapability):
     """Declares an exponential-family form (generated stacked kernels + conjugate estimation)."""
 
@@ -366,6 +384,7 @@ ALL_CAPABILITIES: tuple[type, ...] = (
     Enumerable,
     FiniteSupport,
     RankableByIndex,
+    Shardable,
     ExponentialFamily,
     ConjugateUpdatable,
     ExactDensity,
@@ -496,6 +515,13 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "random access / unrank the support by integer rank",
         "distribution facet",
         "count_budget_index()",
+        "pysp.capability",
+    ),
+    CapabilitySpec(
+        "Shardable",
+        "declares a model-parallel decomposition axis (split across devices)",
+        "distribution facet",
+        "decomposition()",
         "pysp.capability",
     ),
     CapabilitySpec(

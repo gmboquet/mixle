@@ -711,6 +711,22 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         else:
             return MixtureEstimator([u.estimator() for u in self.components], name=self.name, prior=self.prior)
 
+    def decomposition(self):
+        """Mixture components split along the component axis. Responsibilities (logsumexp) are computed
+        INSIDE a shard; across shards the per-component sufficient stats SUM-reduce plus one scalar
+        total-count all-reduce -- the homogeneous stacked-kernel + DTensor path (engine_axis=0)."""
+        from pysp.stats.compute.decomposition import DecompAxis, Decomposition, ReductionOp
+
+        return Decomposition(
+            axis=DecompAxis.COMPONENT,
+            num_units=self.num_components,
+            reduction=ReductionOp.LOGSUMEXP_RESPONSIBILITY,
+            exact=True,
+            child_roles=("component",) * self.num_components,
+            engine_axis=0,
+            key_pooling=getattr(self, "keys", None) is not None,
+        )
+
     def dist_to_encoder(self) -> MixtureDataEncoder:
         """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
         dist_encoders = [c.dist_to_encoder() for c in self.components]

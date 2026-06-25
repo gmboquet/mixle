@@ -358,6 +358,18 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """
         return CompositeEstimator([d.estimator(pseudo_count=pseudo_count) for d in self.dists])
 
+    def decomposition(self):
+        """Composite factors are independent: split along the factor axis, sufficient stats SUM-reduce."""
+        from pysp.stats.compute.decomposition import DecompAxis, Decomposition, ReductionOp
+
+        return Decomposition(
+            axis=DecompAxis.FACTOR,
+            num_units=self.count,
+            reduction=ReductionOp.SUM,
+            exact=True,
+            child_roles=("factor",) * self.count,
+        )
+
     def dist_to_encoder(self) -> CompositeDataEncoder:
         """Creates CompositeDataEncoder for encoding sequence of tuple data.
 

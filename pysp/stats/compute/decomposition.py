@@ -70,7 +70,7 @@ class Decomposition:
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def atomic(cls) -> "Decomposition":
+    def atomic(cls) -> Decomposition:
         """The default: this node is not split -- it is replicated across shards."""
         return cls()
 

@@ -246,6 +246,18 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
             tuple(zip(self.fields, self.sources)), [d.estimator(pseudo_count=pseudo_count) for d in self.dists]
         )
 
+    def decomposition(self):
+        """Record fields are independent: split along the field (factor) axis, sufficient stats SUM-reduce."""
+        from pysp.stats.compute.decomposition import DecompAxis, Decomposition, ReductionOp
+
+        return Decomposition(
+            axis=DecompAxis.FACTOR,
+            num_units=self.count,
+            reduction=ReductionOp.SUM,
+            exact=True,
+            child_roles=tuple(self.fields),
+        )
+
     def dist_to_encoder(self) -> RecordDataEncoder:
         """Return a data encoder for this record field/source layout."""
         return RecordDataEncoder(tuple(zip(self.fields, self.sources)), [d.dist_to_encoder() for d in self.dists])
