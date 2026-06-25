@@ -46,6 +46,7 @@ class _Slot:
     group: int | None = None  # index of the exchangeable mixture component this slot belongs to
     role: str = "param"  # 'param' (a component's parameter) | 'weight' (its mixture weight)
     parent_args: dict[int, int] | None = None  # hierarchical prior: {prior-arg position -> child slot index}
+    reparam: str | None = None  # 'loc_scale' -> sample z~N(0,1), value = loc + scale*z (non-centered)
 
 
 def _to_value(support: str, u: float):
@@ -175,7 +176,11 @@ def _slots_of(rv: RandomVariable, fam) -> list[_Slot]:
                 parent_args[j] = child
                 add_prior(arg, child, pfam.support[j])  # hyperparameter sits on the parent family's support
         nm = handle.name or f"arg{index}"
-        if parent_args:
+        if handle._reparam == "loc_scale":
+            # Non-centered: sample z ~ N(0,1) (real) and set value = loc + scale*z. The slot is real
+            # regardless of the model's support, and carries parent_args so loc/scale resolve at eval.
+            slots.append(_Slot(index, None, False, nm, handle, "real", parent_args=parent_args, reparam="loc_scale"))
+        elif parent_args:
             slots.append(_Slot(index, None, support == "positive", nm, handle, support, parent_args=parent_args))
         else:
             slots.append(_Slot(index, lower(handle, target="dist"), support == "positive", nm, handle, support))
@@ -188,6 +193,14 @@ def _slots_of(rv: RandomVariable, fam) -> list[_Slot]:
     if not slots:
         raise ValueError("model has no `free`/prior parameters to infer.")
     return slots
+
+
+def _loc_scale(s: _Slot, vals: dict):
+    """Resolve the (loc, scale) of a non-centered Normal slot from constants / hyperparameter slots."""
+    pa = s.parent_args or {}
+    loc = vals[pa[0]] if 0 in pa else float(s.handle._args[0])
+    scale = vals[pa[1]] if 1 in pa else float(s.handle._args[1])
+    return loc, scale
 
 
 def _encoder_for(fam):
@@ -443,6 +456,9 @@ def _target_parts(rv: RandomVariable, data):
         vals, logj = {}, 0.0
         for k, s in enumerate(slots):
             v, lj = _to_value(s.support, u[k])
+            if s.reparam == "loc_scale":  # v was z ~ N(0,1); the parameter is loc + scale*z
+                loc, scale = _loc_scale(s, vals)
+                v = loc + scale * v
             vals[s.index] = v
             logj += lj
         return vals, logj
@@ -474,7 +490,11 @@ def _build_target(rv: RandomVariable, data):
             return _NEG_INF
         plp = 0.0
         for s in slots:
-            if s.parent_args:  # hierarchical prior: rebuild it with the sampled hyperparameter values
+            if s.reparam == "loc_scale":  # prior is N(0,1) on the latent z = (value - loc) / scale
+                loc, scale = _loc_scale(s, vals)
+                z = (vals[s.index] - loc) / scale
+                plp += -0.5 * z * z - 0.5 * math.log(2.0 * math.pi)
+            elif s.parent_args:  # hierarchical prior: rebuild it with the sampled hyperparameter values
                 pargs = list(s.handle._args)
                 for j, child in s.parent_args.items():
                     pargs[j] = vals[child]
@@ -523,14 +543,7 @@ def _finalize(rv, slots, res, build) -> RandomVariable:
     layout = _exchangeable_layout(slots)  # resolve within-chain mixture label-switching too
     if layout is not None:
         u = _relabel_chain(u, layout)
-    vals = np.empty_like(u)
-    for k, s in enumerate(slots):
-        if s.support == "positive":
-            vals[:, k] = np.exp(u[:, k])
-        elif s.support == "unit":
-            vals[:, k] = 1.0 / (1.0 + np.exp(-u[:, k]))
-        else:
-            vals[:, k] = u[:, k]
+    vals = _u_to_vals(slots, u)
     mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
     post = Posterior(slots, vals, res)
     # split-R-hat / bulk-/tail-ESS work on a single chain (split into halves) + count its divergences
@@ -550,11 +563,21 @@ def _finalize(rv, slots, res, build) -> RandomVariable:
 
 
 def _u_to_vals(slots, u) -> np.ndarray:
-    """Map an (n, d) unconstrained sample array to constrained parameter values per slot."""
+    """Map an (n, d) unconstrained sample array to constrained parameter values per slot.
+
+    Applies each slot's support transform, and for a non-centered slot the deterministic
+    ``value = loc + scale * z`` (resolving loc/scale from the already-computed hyperparameter columns --
+    children precede parents in slot order, so they are ready)."""
     u = np.asarray(u, dtype=float).reshape(len(u), -1)
     vals = np.empty_like(u)
+    idx_to_col = {s.index: k for k, s in enumerate(slots)}
     for k, s in enumerate(slots):
-        if s.support == "positive":
+        if s.reparam == "loc_scale":
+            pa = s.parent_args or {}
+            loc = vals[:, idx_to_col[pa[0]]] if 0 in pa else float(s.handle._args[0])
+            scale = vals[:, idx_to_col[pa[1]]] if 1 in pa else float(s.handle._args[1])
+            vals[:, k] = loc + scale * u[:, k]
+        elif s.support == "positive":
             vals[:, k] = np.exp(u[:, k])
         elif s.support == "unit":
             vals[:, k] = 1.0 / (1.0 + np.exp(-u[:, k]))

@@ -165,13 +165,23 @@ class GradTarget:
         torch = self._torch
         return v if torch.is_tensor(v) else torch.as_tensor(float(v), dtype=torch.float64)
 
+    def _loc_scale(self, s, vals):
+        """(loc, scale) tensors of a non-centered Normal slot, from constants / hyperparameter slots."""
+        pa = s.parent_args or {}
+        loc = vals[pa[0]] if 0 in pa else self._t(s.handle._args[0])
+        scale = vals[pa[1]] if 1 in pa else self._t(s.handle._args[1])
+        return loc, scale
+
     def _logtarget_tensor(self, u):
         torch = self._torch
         vals: dict[int, Any] = {}
         logj = u.new_zeros(())
         for k, s in enumerate(self.slots):
             uk = u[k]
-            if s.support == "positive":
+            if s.reparam == "loc_scale":  # uk is z ~ N(0,1); the parameter is loc + scale*z (non-centered)
+                loc, scale = self._loc_scale(s, vals)
+                vals[s.index] = loc + scale * uk
+            elif s.support == "positive":
                 vals[s.index] = torch.exp(uk)
                 logj = logj + uk
             elif s.support == "unit":
@@ -185,7 +195,11 @@ class GradTarget:
         ll = apply(full, self._data_terms, self._x, self._eng).sum()
         plp = u.new_zeros(())
         for s in self.slots:
-            if s.handle is not None:
+            if s.reparam == "loc_scale":  # prior is N(0,1) on z = (value - loc)/scale
+                loc, scale = self._loc_scale(s, vals)
+                z = (vals[s.index] - loc) / scale
+                plp = plp + (-0.5 * z * z - 0.5 * math.log(2.0 * math.pi))
+            elif s.handle is not None:
                 pf = s.handle._family.name
                 theta = vals[s.index]
                 prep_p, apply_p = self._scorers[pf]
@@ -214,7 +228,10 @@ class GradTarget:
         logj = U.new_zeros(B)
         for k, s in enumerate(self.slots):
             uk = U[:, k]
-            if s.support == "positive":
+            if s.reparam == "loc_scale":
+                loc, scale = self._loc_scale(s, vals)
+                vals[s.index] = loc + scale * uk
+            elif s.support == "positive":
                 vals[s.index] = torch.exp(uk)
                 logj = logj + uk
             elif s.support == "unit":
@@ -228,7 +245,11 @@ class GradTarget:
         ll = apply(full, data_terms, x, self._eng).sum(dim=1) * lik_scale  # (B, N) -> (B,)
         plp = U.new_zeros(B)
         for s in self.slots:
-            if s.handle is not None:
+            if s.reparam == "loc_scale":
+                loc, scale = self._loc_scale(s, vals)
+                z = (vals[s.index] - loc) / scale
+                plp = plp + (-0.5 * z * z - 0.5 * math.log(2.0 * math.pi))
+            elif s.handle is not None:
                 pf = s.handle._family.name
                 prep_p, apply_p = self._scorers[pf]
                 pargs = [
