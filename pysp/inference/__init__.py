@@ -25,6 +25,20 @@ exactly this reason.
 from __future__ import annotations
 
 from pysp.capability import ConjugateUpdatable
+
+# calibration diagnostics — "is my probability / interval actually calibrated?"
+from pysp.inference.calibration import (
+    coverage_curve,
+    expected_calibration_error,
+    interval_coverage,
+    maximum_calibration_error,
+    pit_calibration_error,
+    pit_ensemble,
+    pit_histogram,
+    pit_values,
+    reliability_curve,
+    top_label_confidence,
+)
 from pysp.inference.em import EMStrategy, run_em
 from pysp.inference.estimation import best_of, fit, optimize
 from pysp.inference.fisher import FisherView, FixedFisherView, to_fisher
@@ -95,6 +109,17 @@ __all__ = [
     "posterior",
     "ParameterPosterior",
     "PredictivePosterior",
+    # calibration diagnostics (reliability diagrams, ECE/MCE, PIT, coverage curves)
+    "reliability_curve",
+    "expected_calibration_error",
+    "maximum_calibration_error",
+    "top_label_confidence",
+    "pit_values",
+    "pit_ensemble",
+    "pit_histogram",
+    "pit_calibration_error",
+    "interval_coverage",
+    "coverage_curve",
     # proper scoring rules (lower is better; pair with resampling for score-difference CIs)
     "log_score",
     "brier_score",
