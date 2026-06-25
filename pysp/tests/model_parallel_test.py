@@ -190,6 +190,20 @@ class CostAwareExecutorTest(unittest.TestCase):
         self.assertEqual(str(local), str(mp))
 
 
+class RecordFactorTest(unittest.TestCase):
+    def test_record_is_factor_parallel_and_identical(self):
+        # RecordDistribution is a dict-keyed FACTOR combinator (distinct encoding from tuple Composite)
+        est = stats.RecordEstimator({"x": stats.GaussianEstimator(), "y": stats.PoissonEstimator()})
+        init = stats.RecordDistribution(
+            {"x": stats.GaussianDistribution(0.0, 1.0), "y": stats.PoissonDistribution(1.0)}
+        )
+        rng = np.random.RandomState(0)
+        data = [{"x": float(rng.randn()), "y": int(rng.poisson(3))} for _ in range(200)]
+        local = optimize(data, est, prev_estimate=init, max_its=6, out=None, backend="local")
+        mp = optimize(data, est, prev_estimate=init, max_its=6, out=None, backend="model_parallel", num_workers=2)
+        self.assertEqual(str(local), str(mp))
+
+
 class HeterogeneousMixtureTest(unittest.TestCase):
     """Heterogeneous mixtures (per-type encoding routing) are model-parallel and bit-identical too."""
 
