@@ -560,7 +560,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
     def to_fisher(self, **kwargs):
         """Forward-backward Fisher view for the quantized HMM."""
         if hasattr(self, "topics") and hasattr(self, "transitions"):
-            from pysp.inference.fisher import HiddenMarkovFisherView
+            from pysp.stats.latent.hidden_markov import HiddenMarkovFisherView
 
             return HiddenMarkovFisherView(self)
         return super().to_fisher(**kwargs)

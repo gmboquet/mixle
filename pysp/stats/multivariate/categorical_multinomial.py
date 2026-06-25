@@ -35,6 +35,7 @@ from numpy.random import RandomState
 from pysp.capability import Neutral, supports
 from pysp.engines.arithmetic import maxrandint
 from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge
+from pysp.inference.fisher import Path
 from pysp.stats.combinator.null_dist import NullAccumulator, NullAccumulatorFactory, NullDistribution, NullEstimator
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -53,6 +54,9 @@ T1 = TypeVar("T1")  ## encoded type for dist
 T2 = TypeVar("T2")  ## encoded type for len_dist
 SS1 = TypeVar("SS1")  ## suff stat type for dist
 SS2 = TypeVar("SS2")  ## suff stat type for len_dist
+
+
+from pysp.stats.combinator.sequence import SequenceFisherView
 
 
 class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
@@ -361,8 +365,6 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Structural Fisher view for the multinomial bag."""
         if hasattr(self, "dist") and hasattr(self, "len_dist"):
-            from pysp.inference.fisher import MultinomialFisherView
-
             return MultinomialFisherView(self)
         return super().to_fisher(**kwargs)
 
@@ -1044,3 +1046,52 @@ class MultinomialDataEncoder(DataSequenceEncoder):
             rv5 = None
 
         return rv1, rv2, rv3, rv4, rv5, rv6, rv7
+
+
+# --- Fisher view(s) co-located with this family ---
+class MultinomialFisherView(SequenceFisherView):
+    """Fisher view for bag/count observations with a count-weighted child model.
+
+    The model Fisher uses the canonical multinomial/count sufficient-statistic
+    moments that match estimation.  The repo's MultinomialDistribution
+    log_density intentionally omits the multinomial coefficient in its
+    enumerator score; that coefficient is a base-measure term, not an
+    accumulator statistic.
+    """
+
+    def _labels_from_children(self) -> list[Path]:
+        labels = [("value",) + label for label in self.child_view.vectorizer.labels]
+        if self.len_view is not None:
+            labels.extend(("length",) + label for label in self.len_view.vectorizer.labels)
+        return labels
+
+    def _aggregate_weighted_flat(
+        self, flat_stats: np.ndarray, idx: np.ndarray, counts: np.ndarray, totals: np.ndarray
+    ) -> np.ndarray:
+        out = np.zeros((len(totals), flat_stats.shape[1]), dtype=np.float64)
+        if len(idx) == 0:
+            return out
+        weights = np.asarray(counts, dtype=np.float64)
+        if self.dist.len_normalized:
+            totals = np.asarray(totals, dtype=np.float64)
+            inv = np.zeros_like(totals, dtype=np.float64)
+            nz = totals != 0.0
+            inv[nz] = 1.0 / totals[nz]
+            weights = weights * inv[idx]
+        np.add.at(out, idx, flat_stats * weights[:, None])
+        return out
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        idx, _, _, enc_seq, enc_len, counts, totals = enc_data
+        idx = np.asarray(idx, dtype=np.int64)
+        totals = np.asarray(totals, dtype=np.float64)
+        if len(idx):
+            flat = self.child_view.seq_expected_statistics(enc_seq)
+            elem = self._aggregate_weighted_flat(flat, idx, np.asarray(counts, dtype=np.float64), totals)
+        else:
+            elem = np.zeros((len(totals), len(self.child_view.mean_statistics())), dtype=np.float64)
+        blocks = [elem]
+        if self.len_view is not None:
+            blocks.append(self.len_view.seq_expected_statistics(enc_len))
+        self._refresh_labels()
+        return np.hstack(blocks) if blocks else np.zeros((len(totals), 0), dtype=np.float64)

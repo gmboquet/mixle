@@ -12,6 +12,8 @@ estimation. Likelihood evaluations delegate to the base distribution on the valu
 
 """
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
@@ -32,6 +34,9 @@ from pysp.stats.compute.pdist import (
 D = TypeVar("D")
 E = TypeVar("E")
 SS = TypeVar("SS")
+
+
+from pysp.inference.fisher import FixedFisherView, to_fisher
 
 
 class WeightedDistribution(SequenceEncodableProbabilityDistribution):
@@ -122,7 +127,7 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         return backend_seq_log_density(self.dist, x[0], engine)
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence["WeightedDistribution"], engine: Any) -> dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence[WeightedDistribution], engine: Any) -> dict[str, Any]:
         """Return stacked child parameters for homogeneous weighted-wrapper mixtures."""
         from pysp.stats.compute.stacked import stacked_component_params
 
@@ -155,19 +160,17 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         )
         return stacked_component_sufficient_statistics(x[0], ww, params["child_route"], engine, child_estimator)
 
-    def dist_to_encoder(self) -> "WeightedDataEncoder":
+    def dist_to_encoder(self) -> WeightedDataEncoder:
         """Returns a WeightedDataEncoder for encoding sequences of (value, weight) observations."""
         return WeightedDataEncoder(encoder=self.dist.dist_to_encoder())
 
     def to_fisher(self, **kwargs):
         """Fisher view for the weighted wrapper."""
         if hasattr(self, "dist"):
-            from pysp.inference.fisher import WeightedFisherView
-
             return WeightedFisherView(self)
         return super().to_fisher(**kwargs)
 
-    def estimator(self, pseudo_count: float | None = None) -> "WeightedEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> WeightedEstimator:
         """Create a WeightedEstimator wrapping the base distribution's estimator.
 
         Args:
@@ -182,7 +185,7 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         else:
             return WeightedEstimator(estimator=self.dist.estimator(), name=self.name)
 
-    def sampler(self, seed: int | None = None) -> "WeightedSampler":
+    def sampler(self, seed: int | None = None) -> WeightedSampler:
         """Create a WeightedSampler producing (value, weight) pairs.
 
         Args:
@@ -194,7 +197,7 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         """
         return WeightedSampler(self, seed)
 
-    def enumerator(self) -> "DistributionEnumerator":
+    def enumerator(self) -> DistributionEnumerator:
         """Delegates to the base distribution's enumerator (log_density is pure delegation)."""
         return child_enumerator(self.dist, "WeightedDistribution.dist")
 
@@ -307,7 +310,7 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.accumulator.seq_initialize(x[0], weights * x[1], rng)
 
-    def combine(self, suff_stat: SS) -> "WeightedAccumulator":
+    def combine(self, suff_stat: SS) -> WeightedAccumulator:
         """Combine the base accumulator's sufficient statistics with suff_stat.
 
         Args:
@@ -320,7 +323,7 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator.combine(suff_stat)
         return self
 
-    def from_value(self, x: SS) -> "WeightedAccumulator":
+    def from_value(self, x: SS) -> WeightedAccumulator:
         """Set the base accumulator's sufficient statistics from x.
 
         Args:
@@ -338,7 +341,7 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
         """Returns the base accumulator's sufficient statistics."""
         return self.accumulator.value()
 
-    def scale(self, c: float) -> "WeightedAccumulator":
+    def scale(self, c: float) -> WeightedAccumulator:
         """Scale the child accumulator through its family-specific protocol."""
         self.accumulator.scale(c)
         return self
@@ -351,7 +354,7 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
         """Replace keyed sufficient statistics of the base accumulator from stats_dict."""
         self.accumulator.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> "WeightedDataEncoder":
+    def acc_to_encoder(self) -> WeightedDataEncoder:
         """Returns a WeightedDataEncoder for encoding sequences of (value, weight) observations."""
         return WeightedDataEncoder(encoder=self.accumulator.acc_to_encoder())
 
@@ -373,7 +376,7 @@ class WeightedAccumulatorFactory(StatisticAccumulatorFactory):
         self.factory = factory
         self.name = name
 
-    def make(self) -> "WeightedAccumulator":
+    def make(self) -> WeightedAccumulator:
         """Returns a new WeightedAccumulator wrapping a fresh base accumulator."""
         return WeightedAccumulator(accumulator=self.factory.make(), name=self.name)
 
@@ -395,11 +398,11 @@ class WeightedEstimator(ParameterEstimator):
         self.estimator = estimator
         self.name = name
 
-    def accumulator_factory(self) -> "WeightedAccumulatorFactory":
+    def accumulator_factory(self) -> WeightedAccumulatorFactory:
         """Returns a WeightedAccumulatorFactory wrapping the base estimator's factory."""
         return WeightedAccumulatorFactory(factory=self.estimator.accumulator_factory(), name=self.name)
 
-    def estimate(self, nobs: float | None, suff_stat: SS) -> "WeightedDistribution":
+    def estimate(self, nobs: float | None, suff_stat: SS) -> WeightedDistribution:
         """Estimate a WeightedDistribution from the base distribution's sufficient statistics.
 
         Args:
@@ -449,3 +452,30 @@ class WeightedDataEncoder(DataSequenceEncoder):
 
         """
         return self.encoder.seq_encode([xx[0] for xx in x]), np.asarray([xx[1] for xx in x], dtype=float)
+
+
+# --- Fisher view(s) co-located with this family ---
+class WeightedFisherView(FixedFisherView):
+    def __init__(self, dist: Any) -> None:
+        self.child_view = to_fisher(dist.dist)
+        super().__init__(dist, list(self.child_view.vectorizer.labels))
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        values = [x[0] for x in data]
+        weights = np.asarray([x[1] for x in data], dtype=np.float64)
+        return self.child_view.expected_statistics_matrix(data=values) * weights[:, None]
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        enc_child, weights = enc_data
+        return self.child_view.seq_expected_statistics(enc_child) * np.asarray(weights, dtype=np.float64)[:, None]
+
+    def _model_mean(self) -> np.ndarray:
+        return self.child_view.mean_statistics()
+
+    def _model_fisher(self) -> np.ndarray:
+        return np.asarray(self.child_view.fisher_information(ridge=0.0), dtype=np.float64)
+
+    def score_center(self, stats: np.ndarray | None = None, **kwargs: Any) -> np.ndarray:
+        if stats is None:
+            stats = self.expected_statistics_matrix(**kwargs)
+        return np.asarray(stats, dtype=np.float64).mean(axis=0)
