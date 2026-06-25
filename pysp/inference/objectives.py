@@ -28,6 +28,7 @@ ObjectiveCallable = Callable[[Any, Any, Any], Any]
 ParameterObjectiveCallable = Callable[[Mapping[str, Any], Any, Any], Any]
 
 
+# --- objective declarations & objective classes ----------------------------
 @dataclass
 class ObjectiveFitResult:
     """Optimization result for arbitrary differentiable objectives.
@@ -248,6 +249,7 @@ class CallableObjective:
         return self.fn(model, enc, engine)
 
 
+# --- objective fitting drivers ----------------------------------------------
 def fit_objective(
     enc: Any,
     model: SequenceEncodableProbabilityDistribution,
@@ -284,45 +286,14 @@ def fit_objective(
 
     opt = _make_optimizer(torch, optimizer, leaves, lr)
     sign = 1.0 if maximize else -1.0
-    iterations = max(1, int(max_its))
-    converged = False
 
     def objective_value():
         shadow = _gradient_shadow_state(state, torch)
         return objective(shadow, enc, engine)
 
-    history = [_objective_scalar(objective_value())]
-    best_value = history[0]
-    best_iteration = 0
-    best_state = _clone_parameter_state(leaves)
-    for i in range(iterations):
-        if optimizer == "lbfgs":
-
-            def closure():
-                opt.zero_grad()
-                loss = -sign * objective_value()
-                loss.backward()
-                return loss
-
-            loss = opt.step(closure)
-        else:
-            opt.zero_grad()
-            loss = -sign * objective_value()
-            loss.backward()
-            opt.step()
-
-        cur = _objective_scalar(objective_value())
-        history.append(cur)
-        if out is not None and (i + 1) % max(1, int(print_iter)) == 0:
-            out.write("objective iteration %d: value=%e\n" % (i + 1, cur))
-        if _objective_is_better(cur, best_value, maximize=maximize):
-            best_value = cur
-            best_iteration = len(history) - 1
-            best_state = _clone_parameter_state(leaves)
-        if len(history) > 2 and abs(cur - history[-2]) < tol * max(1.0, abs(cur)):
-            iterations = i + 1
-            converged = True
-            break
+    history, best_value, best_iteration, best_state, iterations, converged = _run_objective_optimization(
+        opt, optimizer, objective_value, leaves, sign, max(1, int(max_its)), tol, maximize, out, print_iter, "objective"
+    )
 
     final_delta = history[-1] - history[-2] if len(history) > 1 else None
     if restore_best:
@@ -426,41 +397,9 @@ def optimize_torch_objective(
         raise ValueError("optimize_torch_objective requires at least one trainable parameter.")
     opt = _make_optimizer(torch, optimizer, params, lr)
     sign = 1.0 if maximize else -1.0
-    iterations = max(1, int(max_its))
-    converged = False
-    history = [_objective_scalar(objective())]
-    best_value = history[0]
-    best_iteration = 0
-    best_state = _clone_parameter_state(params)
-
-    for i in range(iterations):
-        if optimizer == "lbfgs":
-
-            def closure():
-                opt.zero_grad()
-                loss = -sign * objective()
-                loss.backward()
-                return loss
-
-            loss = opt.step(closure)
-        else:
-            opt.zero_grad()
-            loss = -sign * objective()
-            loss.backward()
-            opt.step()
-
-        cur = _objective_scalar(objective())
-        history.append(cur)
-        if out is not None and (i + 1) % max(1, int(print_iter)) == 0:
-            out.write("torch objective iteration %d: value=%e\n" % (i + 1, cur))
-        if _objective_is_better(cur, best_value, maximize=maximize):
-            best_value = cur
-            best_iteration = len(history) - 1
-            best_state = _clone_parameter_state(params)
-        if len(history) > 2 and abs(cur - history[-2]) < tol * max(1.0, abs(cur)):
-            iterations = i + 1
-            converged = True
-            break
+    history, best_value, best_iteration, best_state, iterations, converged = _run_objective_optimization(
+        opt, optimizer, objective, params, sign, max(1, int(max_its)), tol, maximize, out, print_iter, "torch objective"
+    )
 
     if restore_best:
         _restore_parameter_state(torch, params, best_state)
@@ -590,6 +529,62 @@ def fit_parameter_objective(
         final_gradient_norm=final_gradient_norm,
     )
     return result if return_result else result.as_tuple()
+
+
+def projection_samples(
+    source: SequenceEncodableProbabilityDistribution, sample_size: int, seed: int | None = None
+) -> Sequence[Any]:
+    """Draw reusable samples for Monte-Carlo projection experiments."""
+    if sample_size <= 0:
+        raise ValueError("sample_size must be positive.")
+    rng = RandomState(seed)
+    return source.sampler(seed=int(rng.randint(2**31 - 1))).sample(size=int(sample_size))
+
+
+# --- private optimization & constraint helpers ------------------------------
+def _run_objective_optimization(
+    opt, optimizer, eval_fn, params, sign, iterations, tol, maximize, out, print_iter, label
+):
+    """Shared Adam / L-BFGS optimization loop for the objective fitters.
+
+    Steps ``opt`` to maximize ``sign * eval_fn()`` for up to ``iterations`` steps (early-stopping when
+    the value change falls below ``tol``), tracking the best parameter state of ``params``. Returns
+    ``(history, best_value, best_iteration, best_state, iterations_run, converged)``.
+    """
+    history = [_objective_scalar(eval_fn())]
+    best_value = history[0]
+    best_iteration = 0
+    best_state = _clone_parameter_state(params)
+    converged = False
+    for i in range(iterations):
+        if optimizer == "lbfgs":
+
+            def closure():
+                opt.zero_grad()
+                loss = -sign * eval_fn()
+                loss.backward()
+                return loss
+
+            opt.step(closure)
+        else:
+            opt.zero_grad()
+            loss = -sign * eval_fn()
+            loss.backward()
+            opt.step()
+
+        cur = _objective_scalar(eval_fn())
+        history.append(cur)
+        if out is not None and (i + 1) % max(1, int(print_iter)) == 0:
+            out.write("%s iteration %d: value=%e\n" % (label, i + 1, cur))
+        if _objective_is_better(cur, best_value, maximize=maximize):
+            best_value = cur
+            best_iteration = len(history) - 1
+            best_state = _clone_parameter_state(params)
+        if len(history) > 2 and abs(cur - history[-2]) < tol * max(1.0, abs(cur)):
+            iterations = i + 1
+            converged = True
+            break
+    return history, best_value, best_iteration, best_state, iterations, converged
 
 
 def _make_optimizer(torch: Any, optimizer: str, parameters: Sequence[Any], lr: float) -> Any:
@@ -759,13 +754,3 @@ def _detach_objective_value(value: Any) -> Any:
         arr = value.detach().cpu().numpy()
         return float(arr) if np.ndim(arr) == 0 else arr
     return value
-
-
-def projection_samples(
-    source: SequenceEncodableProbabilityDistribution, sample_size: int, seed: int | None = None
-) -> Sequence[Any]:
-    """Draw reusable samples for Monte-Carlo projection experiments."""
-    if sample_size <= 0:
-        raise ValueError("sample_size must be positive.")
-    rng = RandomState(seed)
-    return source.sampler(seed=int(rng.randint(2**31 - 1))).sample(size=int(sample_size))
