@@ -65,17 +65,47 @@ class FactorParallelExactnessTest(unittest.TestCase):
         )
 
 
-class FallbackTest(unittest.TestCase):
-    def test_non_factor_model_falls_back_and_is_identical(self):
-        # a mixture is not FACTOR-decomposable -> the handle uses replicated accumulation, still exact.
-        est = stats.MixtureEstimator([stats.GaussianEstimator(), stats.GaussianEstimator()])
+class ComponentParallelTest(unittest.TestCase):
+    """Mixtures are component-parallel: scoring + accumulation distributed, normalization central, exact."""
+
+    def _mixture(self):
+        est = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(4)])
         init = stats.MixtureDistribution(
-            [stats.GaussianDistribution(-1.0, 1.0), stats.GaussianDistribution(1.0, 1.0)], [0.5, 0.5]
+            [stats.GaussianDistribution(float(i) - 1.5, 1.0) for i in range(4)], [0.25] * 4
         )
         rng = np.random.RandomState(1)
-        data = [float(rng.randn() + (2 * (rng.rand() < 0.5) - 1)) for _ in range(300)]
-        local = optimize(data, est, prev_estimate=init, max_its=8, out=None, backend="local")
-        mp = optimize(data, est, prev_estimate=init, max_its=8, out=None, backend="model_parallel")
+        data = [float(rng.randn() + 3 * (rng.randint(4) - 1.5)) for _ in range(400)]
+        return est, init, data
+
+    def test_component_estep_bit_identical(self):
+        est, init, data = self._mixture()
+        enc = init.dist_to_encoder().seq_encode(data)
+        local = est.accumulator_factory().make()
+        local.seq_update(enc, np.ones(len(data)), init)
+        d = {}
+        local.key_merge(d)
+        local.key_replace(d)
+        m_local = est.estimate(float(len(data)), local.value())
+        mp = ModelParallelEncodedData(data, estimator=est, model=init, num_workers=3)
+        m_mp = mp.pysp_seq_estimate(est, init)
+        self.assertEqual(str(m_local), str(m_mp))
+
+    def test_optimize_end_to_end_bit_identical(self):
+        est, init, data = self._mixture()
+        local = optimize(data, est, prev_estimate=init, max_its=10, out=None, backend="local")
+        mp = optimize(data, est, prev_estimate=init, max_its=10, out=None, backend="model_parallel")
+        self.assertEqual(str(local), str(mp))
+
+
+class FallbackTest(unittest.TestCase):
+    def test_leaf_model_falls_back_and_is_identical(self):
+        # a plain Gaussian is atomic -> replicated accumulation, still exact via the same handle.
+        est = stats.GaussianEstimator()
+        init = stats.GaussianDistribution(0.0, 1.0)
+        rng = np.random.RandomState(2)
+        data = [float(rng.randn() * 2 + 1) for _ in range(200)]
+        local = optimize(data, est, prev_estimate=init, max_its=5, out=None, backend="local")
+        mp = optimize(data, est, prev_estimate=init, max_its=5, out=None, backend="model_parallel")
         self.assertEqual(str(local), str(mp))
 
 
