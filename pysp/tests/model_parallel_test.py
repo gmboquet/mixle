@@ -1,13 +1,21 @@
-"""Model-parallel executor (C3.P0): factor-parallel EM is bit-identical to the replicated path."""
+"""Model-parallel estimation (C3): the model axis is distributed; bit-identical to the replicated path,
+and composes with every data backend (local / mp / Spark / MPI) for the data x model decomposition."""
 
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import numpy as np
 
 import pysp.stats as stats
 from pysp.inference import optimize
-from pysp.utils.parallel.model_parallel import ModelParallelEncodedData
+from pysp.utils.parallel.model_parallel import ModelParallelEncodedData, ModelParallelEstimator
 from pysp.utils.parallel.planner import available_encoded_data_backends, encoded_data
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _composite():
@@ -144,6 +152,129 @@ class FallbackTest(unittest.TestCase):
         local = optimize(data, est, prev_estimate=init, max_its=5, out=None, backend="local")
         mp = optimize(data, est, prev_estimate=init, max_its=5, out=None, backend="model_parallel")
         self.assertEqual(str(local), str(mp))
+
+
+def _mixture_data(seed=7, k=6, n=800):
+    est = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(k)])
+    init = stats.MixtureDistribution([stats.GaussianDistribution(float(i) - 2.5, 1.0) for i in range(k)], [1 / k] * k)
+    rng = np.random.RandomState(seed)
+    data = [float(rng.randn() + 3 * (rng.randint(k) - 2.5)) for _ in range(n)]
+    return est, init, data
+
+
+def _ll(model, data):
+    return float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
+
+
+class DataModelCompositionTest(unittest.TestCase):
+    """ModelParallelEstimator distributes the model axis and composes with any data backend."""
+
+    def test_local_backend_is_bit_identical(self):
+        # model-parallel estimator + the single-partition local backend == plain estimator, exactly
+        est, init, data = _mixture_data()
+        base = optimize(data, est, prev_estimate=init, max_its=8, out=None, backend="local")
+        dm = optimize(
+            data, ModelParallelEstimator(est, num_workers=3), prev_estimate=init, max_its=8, out=None, backend="local"
+        )
+        self.assertEqual(str(base), str(dm))
+
+    def test_mp_backend_data_and_model_parallel(self):
+        # data sharded across worker processes + model axis distributed in each -> matches base LL
+        est, init, data = _mixture_data()
+        base = optimize(data, est, prev_estimate=init, max_its=8, out=None, backend="local")
+        dm = optimize(
+            data,
+            ModelParallelEstimator(est, num_workers=2),
+            prev_estimate=init,
+            max_its=8,
+            out=None,
+            backend="mp",
+            num_workers=2,
+        )
+        self.assertTrue(np.isclose(_ll(base, data), _ll(dm, data), rtol=1e-6), (_ll(base, data), _ll(dm, data)))
+
+
+class SparkDataModelTest(unittest.TestCase):
+    def test_spark_data_and_model_parallel(self):
+        try:
+            from pyspark import SparkConf, SparkContext
+        except ImportError:
+            self.skipTest("pyspark not installed")
+        java_home = os.environ.get("JAVA_HOME")
+        java_bin = (os.path.join(java_home, "bin", "java") if java_home else None) or shutil.which("java")
+        try:  # the macOS /usr/bin/java stub exists but is non-functional -> probe it, skip if it fails
+            if java_bin is None or subprocess.run([java_bin, "-version"], capture_output=True).returncode != 0:
+                self.skipTest("no functional Java runtime for Spark")
+        except OSError:
+            self.skipTest("no functional Java runtime for Spark")
+
+        est, init, data = _mixture_data()
+        base = optimize(data, est, prev_estimate=init, max_its=8, out=None, backend="local")
+        sc = SparkContext(conf=SparkConf().setMaster("local[3]").setAppName("mp-dm").set("spark.ui.enabled", "false"))
+        try:
+            sc.setLogLevel("ERROR")
+            rdd = sc.parallelize(data, 4)
+            dm = optimize(
+                rdd,
+                ModelParallelEstimator(est, num_workers=2),
+                prev_estimate=init,
+                max_its=8,
+                out=None,
+                backend="spark",
+            )
+        finally:
+            sc.stop()
+        self.assertTrue(np.isclose(_ll(base, data), _ll(dm, data), rtol=1e-6), (_ll(base, data), _ll(dm, data)))
+
+
+_MPI_SCRIPT = r"""
+import sys
+import numpy as np
+sys.path.insert(0, %(repo)r)
+import pysp.stats as stats
+from pysp.inference import optimize
+from pysp.utils.parallel.mpi import MPIEncodedData, mpi_out
+from pysp.utils.parallel import ModelParallelEstimator
+from mpi4py import MPI
+
+est = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(6)])
+init = stats.MixtureDistribution([stats.GaussianDistribution(float(i) - 2.5, 1.0) for i in range(6)], [1 / 6] * 6)
+rng = np.random.RandomState(7)
+data = [float(rng.randn() + 3 * (rng.randint(6) - 2.5)) for _ in range(800)]  # identical on every rank
+
+mp_est = ModelParallelEstimator(est, num_workers=2)
+enc = MPIEncodedData(data, estimator=mp_est)  # data sharded round-robin across ranks
+dm = optimize(None, mp_est, enc_data=enc, prev_estimate=init, max_its=8, out=mpi_out())
+
+if MPI.COMM_WORLD.Get_rank() == 0:
+    base = optimize(data, est, prev_estimate=init, max_its=8, out=None, backend="local")
+    def ll(m):
+        return float(np.sum(m.seq_log_density(m.dist_to_encoder().seq_encode(data))))
+    assert np.isclose(ll(base), ll(dm), rtol=1e-6), (ll(base), ll(dm))
+    print("MPI-DM-OK")
+"""
+
+
+class MPIDataModelTest(unittest.TestCase):
+    def test_mpi_data_and_model_parallel(self):
+        try:
+            import mpi4py  # noqa: F401
+        except ImportError:
+            self.skipTest("mpi4py not installed")
+        launcher = shutil.which("mpiexec") or shutil.which("mpirun")
+        if launcher is None:
+            self.skipTest("no MPI launcher on PATH")
+
+        with tempfile.TemporaryDirectory() as td:
+            script = os.path.join(td, "mpi_dm.py")
+            with open(script, "w") as f:
+                f.write(_MPI_SCRIPT % {"repo": REPO})
+            env = dict(os.environ, PYTHONPATH=REPO)
+            res = subprocess.run(
+                [launcher, "-n", "3", sys.executable, script], capture_output=True, text=True, timeout=600, env=env
+            )
+        self.assertEqual(res.returncode, 0, "mpi launch failed:\n%s\n%s" % (res.stdout, res.stderr))
+        self.assertIn("MPI-DM-OK", res.stdout)
 
 
 if __name__ == "__main__":
