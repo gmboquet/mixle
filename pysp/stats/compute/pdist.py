@@ -578,6 +578,17 @@ class SequenceEncodableProbabilityDistribution(ProbabilityDistribution):
 
         return capabilities_for(self).supports_engine(engine)
 
+    def decomposition(self) -> "Decomposition":
+        """Return how this distribution may be split across devices (model parallelism).
+
+        Defaults to :meth:`Decomposition.atomic` -- not split, replicated. Combinators / latent
+        families override this to declare their component / factor / state axis. See
+        :mod:`pysp.stats.compute.decomposition`.
+        """
+        from pysp.stats.compute.decomposition import Decomposition
+
+        return Decomposition.atomic()
+
     def seq_ld_lambda(self):
         """Return vectorized log-density callables for encoded data."""
         return [self.seq_log_density]
