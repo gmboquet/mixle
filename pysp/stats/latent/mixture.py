@@ -13,6 +13,8 @@ If component distribution P(Y|Z=k) has data type (T), then the Mixture distribut
 
 """
 
+from __future__ import annotations
+
 import math
 from collections.abc import Mapping, Sequence
 from typing import Any, TypeVar
@@ -29,6 +31,7 @@ from pysp.enumeration.algorithms import (
     bounded_best_first_union_index,
     freeze,
 )
+from pysp.inference.fisher import Path
 from pysp.stats.bayes.dirichlet import DirichletDistribution
 from pysp.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from pysp.stats.compute.pdist import (
@@ -50,6 +53,9 @@ T = TypeVar("T")  ### Type of Mixture component data.
 T1 = TypeVar("T1")  ### Type of encoded data.
 T2 = TypeVar("T2")  ### Type of component suff_stat
 key_type = tuple[str, str] | tuple[None, None]
+
+
+from pysp.inference.fisher import FixedFisherView, SufficientStatisticVectorizer, to_fisher
 
 
 def mixture_prior(
@@ -331,7 +337,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         """
         return vec.log_sum(np.asarray([u.log_density(x) for u in self.components]) + self.log_w)
 
-    def conditional(self, observed: dict[int, float]) -> "MixtureDistribution":
+    def conditional(self, observed: dict[int, float]) -> MixtureDistribution:
         """Return the conditional mixture over the unobserved coordinates given ``observed``.
 
         The conditional of a mixture is *itself a mixture*: for ``sum_k w_k f_k`` observing ``x_o``,
@@ -584,7 +590,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         return ll_mat
 
-    def latent_posterior(self, x: Sequence[T]) -> "CategoricalLatentPosterior":
+    def latent_posterior(self, x: Sequence[T]) -> CategoricalLatentPosterior:
         """Return the latent posterior ``q(z | x)`` over component labels for raw observations ``x``.
 
         ``q(z)`` is the exact independent-categorical posterior whose marginals are the EM
@@ -670,12 +676,10 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Structural Fisher view for the mixture."""
         if hasattr(self, "components") and hasattr(self, "w"):
-            from pysp.inference.fisher import MixtureFisherView
-
             return MixtureFisherView(self)
         return super().to_fisher(**kwargs)
 
-    def sampler(self, seed: int | None = None) -> "MixtureSampler":
+    def sampler(self, seed: int | None = None) -> MixtureSampler:
         """Create MixtureSampler for sampling from MixtureDistribution instance.
 
         Args:
@@ -687,7 +691,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         """
         return MixtureSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "MixtureEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> MixtureEstimator:
         """Create MixtureEstimator for estimating MixtureDistribution.
 
         Args:
@@ -707,12 +711,12 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         else:
             return MixtureEstimator([u.estimator() for u in self.components], name=self.name, prior=self.prior)
 
-    def dist_to_encoder(self) -> "MixtureDataEncoder":
+    def dist_to_encoder(self) -> MixtureDataEncoder:
         """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
         dist_encoders = [c.dist_to_encoder() for c in self.components]
         return MixtureDataEncoder(encoder=dist_encoders)
 
-    def enumerator(self) -> "MixtureEnumerator":
+    def enumerator(self) -> MixtureEnumerator:
         """Returns a MixtureEnumerator iterating the union of component supports in descending
         mixture probability order."""
         return MixtureEnumerator(self)
@@ -1035,7 +1039,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self._init_rng: bool = False
         self._acc_rng: list[RandomState] | None = None
 
-    def seq_update(self, x: T1, weights: np.ndarray, estimate: "MixtureDistribution") -> None:
+    def seq_update(self, x: T1, weights: np.ndarray, estimate: MixtureDistribution) -> None:
         """Vectorized update of sufficient statistics from encoded sequence of observations x.
 
         Args value x is a sequence encoded sequence of mixture observations. The data type for each mixture observation
@@ -1104,7 +1108,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             self.comp_counts[i] += w_loc.sum()
             self.accumulators[i].seq_update(_component_enc(enc_data, i), w_loc, estimate.components[i])
 
-    def update(self, x: T, weight: float, estimate: "MixtureDistribution") -> None:
+    def update(self, x: T, weight: float, estimate: MixtureDistribution) -> None:
         """Update sufficient statistics of MixtureAccumulator with weighted observation.
 
         Requires previous estimate of MixtureDistribution.
@@ -1286,7 +1290,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         ww[kept_rows, assign] = 1.0 - floor * (k - 1)
         return ww
 
-    def combine(self, suff_stat: tuple[np.ndarray, tuple[T2, ...]]) -> "MixtureAccumulator":
+    def combine(self, suff_stat: tuple[np.ndarray, tuple[T2, ...]]) -> MixtureAccumulator:
         """Merge the sufficient statistics of suff_stat with MixtureAccumulator instance.
 
         Arg suff_stat is a Tuple of length two containing,
@@ -1323,7 +1327,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         """
         return self.comp_counts, tuple([u.value() for u in self.accumulators])
 
-    def from_value(self, x: tuple[np.ndarray, tuple[T2, ...]]) -> "MixtureAccumulator":
+    def from_value(self, x: tuple[np.ndarray, tuple[T2, ...]]) -> MixtureAccumulator:
         """Set sufficient statistics of MixtureAccumulator instance to x.
 
         The sufficient statistics value 'x' is a Tuple of length two containing,
@@ -1344,7 +1348,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[i].from_value(x[1][i])
         return self
 
-    def scale(self, c: float) -> "MixtureAccumulator":
+    def scale(self, c: float) -> MixtureAccumulator:
         """Scale component counts and delegate child sufficient statistics."""
         self.comp_counts *= c
         for acc in self.accumulators:
@@ -1410,7 +1414,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         for u in self.accumulators:
             u.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> "MixtureDataEncoder":
+    def acc_to_encoder(self) -> MixtureDataEncoder:
         """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
         acc_encoders = [a.acc_to_encoder() for a in self.accumulators]
         return MixtureDataEncoder(encoder=acc_encoders)
@@ -1445,7 +1449,7 @@ class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
         self.init = init
 
-    def make(self) -> "MixtureAccumulator":
+    def make(self) -> MixtureAccumulator:
         """Return MixtureAccumulator object with SequenceEncodableStatisticAccumulator objects for the components
         and keys passed."""
         return MixtureAccumulator(
@@ -1516,7 +1520,7 @@ class MixtureEstimator(ParameterEstimator):
         self.has_conj_prior = False
         self.set_prior(prior)
 
-    def accumulator_factory(self) -> "MixtureAccumulatorFactory":
+    def accumulator_factory(self) -> MixtureAccumulatorFactory:
         """Returns MixtureAccumulatorFactory object passing component StatisticAccumulatorFactory objects and keys."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         return MixtureAccumulatorFactory(est_factories, keys=self.keys, name=self.name, init=self.init)
@@ -1546,7 +1550,7 @@ class MixtureEstimator(ParameterEstimator):
                 _set_estimator_prior(d, p)
         self.has_conj_prior = isinstance(self.prior, (DirichletDistribution, SymmetricDirichletDistribution))
 
-    def model_log_density(self, model: "MixtureDistribution") -> float:
+    def model_log_density(self, model: MixtureDistribution) -> float:
         """Log density of the model parameters under this estimator's prior (ELBO global term).
 
         Returns the Dirichlet weight-prior log-density evaluated at ``model.w`` plus the sum of
@@ -1564,7 +1568,7 @@ class MixtureEstimator(ParameterEstimator):
                     rv += float(term)
         return rv
 
-    def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, tuple[Any, ...]]) -> "MixtureDistribution":
+    def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, tuple[Any, ...]]) -> MixtureDistribution:
         """Estimate MixtureDistribution from aggregated sufficient statistics.
 
         Args suff_stat is a Tuple length two containing:
@@ -1744,3 +1748,114 @@ class MixtureDataEncoder(DataSequenceEncoder):
         if self.homogeneous:
             return self.encoder.seq_encode(x)
         return _HeteroMixtureEncoded(tuple(e.seq_encode(x) for e in self.encoders))
+
+
+# --- Fisher view(s) co-located with this family ---
+class MixtureFisherView(FixedFisherView):
+    """Complete-data Fisher view for finite mixture distributions.
+
+    Coordinates are component assignment indicators followed by each
+    component's sufficient statistics gated by that assignment.  Observed data
+    map to posterior-expected complete-data statistics.
+    """
+
+    def __init__(self, dist: Any) -> None:
+        self.child_views = [to_fisher(d) for d in dist.components]
+        labels = self._labels_from_children()
+        super().__init__(dist, labels)
+
+    def _labels_from_children(self) -> list[Path]:
+        labels: list[Path] = [("component", str(k)) for k in range(len(self.child_views))]
+        for k, view in enumerate(self.child_views):
+            labels.extend(("component_stat", str(k)) + label for label in view.vectorizer.labels)
+        return labels
+
+    def _refresh_labels(self) -> None:
+        self.labels = self._labels_from_children()
+        self.vectorizer = SufficientStatisticVectorizer(self.labels)
+
+    def _posterior_from_data(self, data: Sequence[Any]) -> np.ndarray:
+        return np.asarray([self.dist.posterior(x) for x in data], dtype=np.float64)
+
+    def _posterior_from_encoded(self, enc_data: Any) -> np.ndarray:
+        return np.asarray(self.dist.seq_posterior(enc_data), dtype=np.float64)
+
+    def _component_stats_from_data(self, data: Sequence[Any]) -> list[np.ndarray]:
+        return [view.expected_statistics_matrix(data=data) for view in self.child_views]
+
+    def _component_stats_from_encoded(self, enc_data: Any) -> list[np.ndarray]:
+        return [view.seq_expected_statistics(enc_data) for view in self.child_views]
+
+    @staticmethod
+    def _join_stats(z: np.ndarray, child_stats: Sequence[np.ndarray]) -> np.ndarray:
+        blocks = [z]
+        for k, stats in enumerate(child_stats):
+            blocks.append(z[:, [k]] * stats)
+        return np.hstack(blocks)
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        values = list(data)
+        z = self._posterior_from_data(values)
+        mats = self._component_stats_from_data(values)
+        self._refresh_labels()
+        return self._join_stats(z, mats)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        z = self._posterior_from_encoded(enc_data)
+        mats = self._component_stats_from_encoded(enc_data)
+        self._refresh_labels()
+        return self._join_stats(z, mats)
+
+    def structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
+        z = self.dist.posterior(x) if estimate is None else estimate.posterior(x)
+        child_values = tuple(z[k] * self.child_views[k].sufficient_statistics(x) for k in range(len(self.child_views)))
+        return weight * z, child_values
+
+    def _component_means(self) -> list[np.ndarray]:
+        return [np.asarray(view.mean_statistics(), dtype=np.float64) for view in self.child_views]
+
+    def _component_moments(self) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        means = self._component_means()
+        infos = [np.asarray(view.fisher_information(ridge=0.0), dtype=np.float64) for view in self.child_views]
+        return means, infos
+
+    def _model_mean(self) -> np.ndarray:
+        w = np.asarray(self.dist.w, dtype=np.float64)
+        means = self._component_means()
+        return np.concatenate([w] + [w[k] * means[k] for k in range(len(means))])
+
+    def _model_fisher(self) -> np.ndarray:
+        w = np.asarray(self.dist.w, dtype=np.float64)
+        means, infos = self._component_moments()
+        k_count = len(means)
+        dims = [len(mu) for mu in means]
+        offsets = []
+        pos = k_count
+        for dim in dims:
+            offsets.append(pos)
+            pos += dim
+
+        out = np.zeros((pos, pos), dtype=np.float64)
+        out[:k_count, :k_count] = np.diag(w) - np.outer(w, w)
+
+        for i in range(k_count):
+            for k in range(k_count):
+                cov = ((w[k] if i == k else 0.0) - w[i] * w[k]) * means[k]
+                s = offsets[k]
+                e = s + dims[k]
+                out[i, s:e] = cov
+                out[s:e, i] = cov
+
+        for k in range(k_count):
+            sk = offsets[k]
+            ek = sk + dims[k]
+            muk = means[k]
+            out[sk:ek, sk:ek] = w[k] * infos[k] + w[k] * (1.0 - w[k]) * np.outer(muk, muk)
+            for l in range(k + 1, k_count):
+                sl = offsets[l]
+                el = sl + dims[l]
+                block = -w[k] * w[l] * np.outer(muk, means[l])
+                out[sk:ek, sl:el] = block
+                out[sl:el, sk:ek] = block.T
+
+        return out

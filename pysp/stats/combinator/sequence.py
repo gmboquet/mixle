@@ -15,8 +15,10 @@ for an observation x of data type Sequence[T] having length n.
 
 """
 
+from __future__ import annotations
+
 from collections.abc import Sequence
-from typing import Any, Optional, TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
@@ -24,6 +26,7 @@ from numpy.random import RandomState
 from pysp.capability import Neutral, supports
 from pysp.engines.arithmetic import maxrandint
 from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge, ProductEnumerator
+from pysp.inference.fisher import Path
 from pysp.stats.combinator.composite import _distribute_child_prior
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
@@ -50,6 +53,18 @@ SS1 = TypeVar("SS1")  # Generic type for sufficient statistic of base dist.
 SS2 = TypeVar("SS2")  # Generic type for sufficient statistics of length dist.
 
 E = tuple[np.ndarray, np.ndarray, np.ndarray, E1, E2 | None]
+
+
+from pysp.inference.fisher import (
+    FisherView,
+    FixedFisherView,
+    SufficientStatisticVectorizer,
+    _full_info_from_view,
+    _is_null_dist,
+    _length_support,
+    _seq_encode_model,
+    to_fisher,
+)
 
 
 class SequenceDistribution(SequenceEncodableProbabilityDistribution):
@@ -305,7 +320,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         return ll_sum
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence["SequenceDistribution"], engine: Any) -> dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence[SequenceDistribution], engine: Any) -> dict[str, Any]:
         """Return stacked child routes for homogeneous sequence mixtures."""
         from pysp.stats.compute.stacked import stacked_component_params
 
@@ -412,8 +427,6 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Structural Fisher view for the sequence."""
         if hasattr(self, "dist"):
-            from pysp.inference.fisher import SequenceFisherView
-
             return SequenceFisherView(self)
         return super().to_fisher(**kwargs)
 
@@ -437,7 +450,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             return None
         return IIDExponentialFamilyForm(distribution=self, element=element, engine=eng)
 
-    def sampler(self, seed: int | None = None) -> "SequenceSampler":
+    def sampler(self, seed: int | None = None) -> SequenceSampler:
         """Create a SequenceSampler object from instance of SequenceDistribution.
 
         Note: If member len_dist (SequenceEncodableDistribution) is NullDistribution() and or not compatible with
@@ -455,7 +468,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         else:
             return SequenceSampler(self.dist, self.len_dist, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "SequenceEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> SequenceEstimator:
         """Create SequenceEstimator from instance of SequenceDistribution with pseudo_count passed if not None."""
         len_est = self.len_dist.estimator(pseudo_count=pseudo_count)
 
@@ -466,7 +479,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             name=self.name,
         )
 
-    def dist_to_encoder(self) -> "SequenceDataEncoder":
+    def dist_to_encoder(self) -> SequenceDataEncoder:
         """Create SequenceDataEncoder for encoding sequences of iid observations of SequenceDistribution.
 
         Base distribution DataSequenceEncoder and length distribution DataSequenceEncoder objects are passed.
@@ -480,7 +493,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         encoders = (dist_encoder, len_encoder)
         return SequenceDataEncoder(encoders=encoders)
 
-    def enumerator(self) -> "SequenceEnumerator":
+    def enumerator(self) -> SequenceEnumerator:
         """Returns SequenceEnumerator iterating sequences in descending probability order."""
         return SequenceEnumerator(self)
 
@@ -808,7 +821,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         if not self.null_len_accumulator:
             self.len_accumulator.seq_initialize(enc_nseq, weights, self._len_rng)
 
-    def seq_update(self, x: E, weights: np.ndarray, estimate: Optional["SequenceDistribution"]) -> None:
+    def seq_update(self, x: E, weights: np.ndarray, estimate: SequenceDistribution | None) -> None:
         """Vectorized update of SequenceAccumulator sufficient statistics from sequence encoded x.
 
         Args:
@@ -830,7 +843,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         if not self.null_len_accumulator:
             self.len_accumulator.seq_update(enc_nseq, weights, estimate.len_dist if estimate is not None else None)
 
-    def seq_update_engine(self, x: E, weights: Any, estimate: Optional["SequenceDistribution"], engine: Any) -> None:
+    def seq_update_engine(self, x: E, weights: Any, estimate: SequenceDistribution | None, engine: Any) -> None:
         """Engine-resident E-step: per-element weights are gathered/normalized on the active engine
         and the base/length accumulators are routed through the engine. Matches seq_update.
         """
@@ -852,7 +865,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
                 self.len_accumulator, enc_nseq, w_eng, estimate.len_dist if estimate is not None else None, engine
             )
 
-    def combine(self, suff_stat: tuple[SS1, SS2 | None]) -> "SequenceAccumulator":
+    def combine(self, suff_stat: tuple[SS1, SS2 | None]) -> SequenceAccumulator:
         """Combine the sufficient statistics of SequenceAccumulator instance with suff_stat arg.
 
         Args:
@@ -874,7 +887,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         """Return Tuple[SS1, Optional[SS2]], sufficient statistics of base accumulator and length accumulator."""
         return self.accumulator.value(), self.len_accumulator.value()
 
-    def from_value(self, x: tuple[SS1, SS2 | None]) -> "SequenceAccumulator":
+    def from_value(self, x: tuple[SS1, SS2 | None]) -> SequenceAccumulator:
         """Set the SequenceAccumulator base accumulator and length accumulator to values of x.
 
         Args:
@@ -892,7 +905,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> "SequenceAccumulator":
+    def scale(self, c: float) -> SequenceAccumulator:
         """Scale element and length sufficient statistics through their accumulators."""
         self.accumulator.scale(c)
         if not self.null_len_accumulator:
@@ -947,7 +960,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         if not self.null_len_accumulator:
             self.len_accumulator.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> "SequenceDataEncoder":
+    def acc_to_encoder(self) -> SequenceDataEncoder:
         """Create SequenceDataEncoder for encoding sequences of iid observations of SequenceDistribution.
 
         Base distribution DataSequenceEncoder and length distribution DataSequenceEncoder objects are passed.
@@ -995,7 +1008,7 @@ class SequenceAccumulatorFactory(StatisticAccumulatorFactory):
         self.len_normalized = len_normalized
         self.keys = keys
 
-    def make(self) -> "SequenceAccumulator":
+    def make(self) -> SequenceAccumulator:
         """Return SequenceAccumulator with SequenceEncodableStatisticAccumulator objects created from dist_factory and
         len_factory."""
         len_acc = self.len_factory.make()
@@ -1064,18 +1077,18 @@ class SequenceEstimator(ParameterEstimator):
         _distribute_child_prior(self.estimator, prior[0])
         _distribute_child_prior(self.len_estimator, prior[1])
 
-    def model_log_density(self, model: "SequenceDistribution") -> float:
+    def model_log_density(self, model: SequenceDistribution) -> float:
         """Sum the entry and length estimators' ``model_log_density`` on the corresponding children."""
         return self.estimator.model_log_density(model.dist) + self.len_estimator.model_log_density(model.len_dist)
 
-    def accumulator_factory(self) -> "SequenceAccumulatorFactory":
+    def accumulator_factory(self) -> SequenceAccumulatorFactory:
         """Return SequenceAccumulatorFactory from len_estimator and estimator member variables with keys passed."""
         len_factory = self.len_estimator.accumulator_factory()
         dist_factory = self.estimator.accumulator_factory()
 
         return SequenceAccumulatorFactory(dist_factory, len_factory, self.len_normalized, self.keys)
 
-    def estimate(self, nobs: float | None, suff_stat: tuple[Any, Any | None]) -> "SequenceDistribution":
+    def estimate(self, nobs: float | None, suff_stat: tuple[Any, Any | None]) -> SequenceDistribution:
         if isinstance(self.len_estimator, NullEstimator):
             return SequenceDistribution(
                 self.estimator.estimate(nobs, suff_stat[0]),
@@ -1196,3 +1209,151 @@ class SequenceDataEncoder(DataSequenceEncoder):
         rv5 = self.len_encoder.seq_encode(nx)
 
         return rv1, rv2, rv3, rv4, rv5
+
+
+# --- Fisher view(s) co-located with this family ---
+class SequenceFisherView(FixedFisherView):
+    """Structured Fisher view for iid sequence distributions."""
+
+    def __init__(self, dist: Any) -> None:
+        self.child_view = to_fisher(dist.dist)
+        self.len_view = None if _is_null_dist(getattr(dist, "len_dist", None)) else to_fisher(dist.len_dist)
+        super().__init__(dist, self._labels_from_children())
+
+    def _labels_from_children(self) -> list[Path]:
+        labels = [("element",) + label for label in self.child_view.vectorizer.labels]
+        if self.len_view is not None:
+            labels.extend(("length",) + label for label in self.len_view.vectorizer.labels)
+        return labels
+
+    def _refresh_labels(self) -> None:
+        self.labels = self._labels_from_children()
+        self.vectorizer = SufficientStatisticVectorizer(self.labels)
+
+    @staticmethod
+    def _lengths_from_encoded(enc_data: Any) -> np.ndarray:
+        _, inv_len, nonzero, _, _ = enc_data
+        lengths = np.zeros(len(inv_len), dtype=np.int64)
+        nz = np.asarray(nonzero, dtype=bool)
+        lengths[nz] = np.rint(1.0 / np.asarray(inv_len, dtype=np.float64)[nz]).astype(np.int64)
+        return lengths
+
+    def _aggregate_flat(
+        self, flat_stats: np.ndarray, idx: np.ndarray, n: int, inv_len: np.ndarray | None
+    ) -> np.ndarray:
+        out = np.zeros((n, flat_stats.shape[1]), dtype=np.float64)
+        if len(idx) == 0:
+            return out
+        weights = np.asarray(inv_len, dtype=np.float64)[idx] if self.dist.len_normalized else 1.0
+        if np.isscalar(weights):
+            np.add.at(out, idx, flat_stats)
+        else:
+            np.add.at(out, idx, flat_stats * weights[:, None])
+        return out
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        enc = _seq_encode_model(self.dist if estimate is None else estimate, list(data))
+        return self._statistics_from_encoded(enc, estimate=estimate)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        idx, inv_len, _, enc_seq, enc_len = enc_data
+        n = len(inv_len)
+        if len(idx):
+            flat = self.child_view.seq_expected_statistics(enc_seq)
+            elem = self._aggregate_flat(flat, np.asarray(idx, dtype=np.int64), n, inv_len)
+        else:
+            elem = np.zeros((n, len(self.child_view.mean_statistics())), dtype=np.float64)
+        blocks = [elem]
+        if self.len_view is not None:
+            blocks.append(self.len_view.seq_expected_statistics(enc_len))
+        self._refresh_labels()
+        return np.hstack(blocks) if blocks else np.zeros((n, 0), dtype=np.float64)
+
+    def _sequence_model_mean_cov(self) -> tuple[np.ndarray, np.ndarray]:
+        support = _length_support(self.dist.len_dist)
+        if support is None:
+            raise NotImplementedError("sequence model Fisher requires a supported length distribution")
+        lengths, probs = support
+        child_mu = np.asarray(self.child_view.mean_statistics(), dtype=np.float64)
+        child_cov = _full_info_from_view(self.child_view)
+        child_outer = np.outer(child_mu, child_mu)
+
+        elem_mean = np.zeros_like(child_mu)
+        elem_second = np.zeros((len(child_mu), len(child_mu)), dtype=np.float64)
+        elem_cond_means = []
+        for n_float, p in zip(lengths, probs):
+            n = max(int(round(n_float)), 0)
+            if self.dist.len_normalized:
+                if n > 0:
+                    cond_mean = child_mu
+                    cond_second = child_cov / float(n) + child_outer
+                else:
+                    cond_mean = np.zeros_like(child_mu)
+                    cond_second = np.zeros_like(elem_second)
+            else:
+                cond_mean = float(n) * child_mu
+                cond_second = float(n) * child_cov + float(n * n) * child_outer
+            elem_mean += p * cond_mean
+            elem_second += p * cond_second
+            elem_cond_means.append(cond_mean)
+
+        elem_cov = elem_second - np.outer(elem_mean, elem_mean)
+        if self.len_view is not None:
+            len_mat = self.len_view.expected_statistics_matrix(data=[int(round(v)) for v in lengths])
+            len_mean = np.dot(probs, len_mat)
+            len_second = np.dot((probs[:, None] * len_mat).T, len_mat)
+            len_cov = len_second - np.outer(len_mean, len_mean)
+            elem_len_second = np.zeros((len(child_mu), len(len_mean)), dtype=np.float64)
+            for cond_mean, len_row, p in zip(elem_cond_means, len_mat, probs):
+                elem_len_second += p * np.outer(cond_mean, len_row)
+            cross = elem_len_second - np.outer(elem_mean, len_mean)
+
+            mean = np.concatenate((elem_mean, len_mean))
+            cov = np.zeros((len(mean), len(mean)), dtype=np.float64)
+            d = len(child_mu)
+            cov[:d, :d] = elem_cov
+            cov[:d, d:] = cross
+            cov[d:, :d] = cross.T
+            cov[d:, d:] = len_cov
+        else:
+            mean = elem_mean
+            cov = elem_cov
+
+        cov = 0.5 * (cov + cov.T)
+        diag = np.maximum(np.diag(cov), 0.0)
+        cov[np.diag_indices_from(cov)] = diag
+        return mean, cov
+
+    def _model_mean(self) -> np.ndarray:
+        return self._sequence_model_mean_cov()[0]
+
+    def _model_fisher(self) -> np.ndarray:
+        return self._sequence_model_mean_cov()[1]
+
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
+        try:
+            return super().fisher_information(stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
+        except NotImplementedError:
+            return FisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
+
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        try:
+            return super().fisher_vectors(
+                stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs
+            )
+        except NotImplementedError:
+            if stats is None:
+                stats = self.expected_statistics_matrix(**kwargs)
+            return FisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge
+            )

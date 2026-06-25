@@ -15,6 +15,8 @@ the observations routed to it.
 
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
@@ -23,6 +25,7 @@ from numpy.random import RandomState
 
 from pysp.engines.arithmetic import *
 from pysp.enumeration.algorithms import BufferedStream, best_first_union_max
+from pysp.inference.fisher import Path
 from pysp.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -35,6 +38,9 @@ from pysp.stats.compute.pdist import (
 )
 
 T = TypeVar("T")
+
+
+from pysp.inference.fisher import EmpiricalMetricFixedFisherView, to_fisher
 
 
 def _child_accumulator_factory(estimator: ParameterEstimator) -> StatisticAccumulatorFactory:
@@ -165,7 +171,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence["SelectDistribution"], engine: Any) -> dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence[SelectDistribution], engine: Any) -> dict[str, Any]:
         """Return stacked child parameters for homogeneous select-wrapper mixtures."""
         from pysp.stats.compute.stacked import stacked_component_params
 
@@ -263,12 +269,10 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Fisher view for the select combinator."""
         if hasattr(self, "dists"):
-            from pysp.inference.fisher import SelectFisherView
-
             return SelectFisherView(self)
         return super().to_fisher(**kwargs)
 
-    def sampler(self, seed: int | None = None) -> "SelectSampler":
+    def sampler(self, seed: int | None = None) -> SelectSampler:
         """Creates a SelectSampler object for sampling from the child distributions.
 
         Args:
@@ -280,7 +284,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         """
         return SelectSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "SelectEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> SelectEstimator:
         """Creates a SelectEstimator with one child estimator per child distribution.
 
         Args:
@@ -292,7 +296,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         """
         return SelectEstimator([d.estimator(pseudo_count=pseudo_count) for d in self.dists], self.choice_function)
 
-    def dist_to_encoder(self) -> "SelectDataEncoder":
+    def dist_to_encoder(self) -> SelectDataEncoder:
         """Creates a SelectDataEncoder object for encoding sequences of SelectDistribution data.
 
         Returns:
@@ -302,7 +306,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         encoders = [d.dist_to_encoder() for d in self.dists]
         return SelectDataEncoder(encoders=encoders, choice_function=self.choice_function)
 
-    def enumerator(self) -> "SelectEnumerator":
+    def enumerator(self) -> SelectEnumerator:
         """Creates a SelectEnumerator iterating the union of child supports in descending
         select-density order. All children must support enumeration."""
         return SelectEnumerator(self)
@@ -536,7 +540,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[j].seq_initialize(enc_tuple[i], w, self._acc_rng[j])
             self.weights[j] += np.sum(w)
 
-    def combine(self, suff_stat: Sequence[tuple[float, Any]]) -> "SelectEstimatorAccumulator":
+    def combine(self, suff_stat: Sequence[tuple[float, Any]]) -> SelectEstimatorAccumulator:
         """Aggregate sufficient statistics suff_stat with this accumulator's statistics.
 
         Args:
@@ -557,7 +561,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """Returns the sufficient statistics as a list of (weight, child value) pairs."""
         return [(w, acc.value()) for w, acc in zip(self.weights, self.accumulators)]
 
-    def from_value(self, x: Sequence[tuple[float, Any]]) -> "SelectEstimatorAccumulator":
+    def from_value(self, x: Sequence[tuple[float, Any]]) -> SelectEstimatorAccumulator:
         """Set the accumulator's sufficient statistics to x.
 
         Args:
@@ -574,7 +578,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> "SelectEstimatorAccumulator":
+    def scale(self, c: float) -> SelectEstimatorAccumulator:
         for i in range(self.count):
             self.weights[i] *= c
             self.accumulators[i].scale(c)
@@ -606,7 +610,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         for acc in self.accumulators:
             acc.key_replace(stats_dict)
 
-    def acc_to_encoder(self) -> "SelectDataEncoder":
+    def acc_to_encoder(self) -> SelectDataEncoder:
         """Creates a SelectDataEncoder object for encoding sequences of SelectDistribution data.
 
         Returns:
@@ -636,7 +640,7 @@ class SelectEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         self.estimators = estimators
         self.choice_function = choice_function
 
-    def make(self) -> "SelectEstimatorAccumulator":
+    def make(self) -> SelectEstimatorAccumulator:
         """Creates a SelectEstimatorAccumulator with one child accumulator per child estimator.
 
         Returns:
@@ -668,7 +672,7 @@ class SelectEstimator(ParameterEstimator):
         self.choice_function = choice_function
         self.count = len(estimators)
 
-    def accumulator_factory(self) -> "SelectEstimatorAccumulatorFactory":
+    def accumulator_factory(self) -> SelectEstimatorAccumulatorFactory:
         """Creates a SelectEstimatorAccumulatorFactory from the child estimators.
 
         Returns:
@@ -677,7 +681,7 @@ class SelectEstimator(ParameterEstimator):
         """
         return SelectEstimatorAccumulatorFactory(self.estimators, self.choice_function)
 
-    def estimate(self, nobs: float | None, suff_stat: Sequence[tuple[float, Any]]) -> "SelectDistribution":
+    def estimate(self, nobs: float | None, suff_stat: Sequence[tuple[float, Any]]) -> SelectDistribution:
         """Estimate a SelectDistribution from aggregated sufficient statistics.
 
         Args:
@@ -786,3 +790,34 @@ class SelectDataEncoder(DataSequenceEncoder):
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 SelectAccumulator = SelectEstimatorAccumulator
 SelectAccumulatorFactory = SelectEstimatorAccumulatorFactory
+
+
+# --- Fisher view(s) co-located with this family ---
+class SelectFisherView(EmpiricalMetricFixedFisherView):
+    def __init__(self, dist: Any) -> None:
+        self.child_views = [to_fisher(d) for d in dist.dists]
+        labels: list[Path] = []
+        for i, view in enumerate(self.child_views):
+            labels.extend(("choice", str(i)) + label for label in view.vectorizer.labels)
+        super().__init__(dist, labels)
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        n = len(data)
+        blocks = [np.zeros((n, len(view.vectorizer.labels)), dtype=np.float64) for view in self.child_views]
+        grouped: dict[int, list[tuple[int, Any]]] = {}
+        for i, x in enumerate(data):
+            grouped.setdefault(int(self.dist.choice_function(x)), []).append((i, x))
+        for k, pairs in grouped.items():
+            idx = np.asarray([i for i, _ in pairs], dtype=np.int64)
+            vals = [x for _, x in pairs]
+            blocks[k][idx] = self.child_views[k].expected_statistics_matrix(data=vals)
+        return np.hstack(blocks) if blocks else np.zeros((n, 0), dtype=np.float64)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        xi, idx, enc_tuple = enc_data
+        n = sum(len(u) for u in xi)
+        blocks = [np.zeros((n, len(view.vectorizer.labels)), dtype=np.float64) for view in self.child_views]
+        for g, k in enumerate(idx):
+            rows = np.asarray(xi[g], dtype=np.int64)
+            blocks[int(k)][rows] = self.child_views[int(k)].seq_expected_statistics(enc_tuple[g])
+        return np.hstack(blocks) if blocks else np.zeros((n, 0), dtype=np.float64)

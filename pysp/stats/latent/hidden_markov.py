@@ -27,8 +27,11 @@ list of floats where the rows sum to 1.0. (3) is represented by a numpy array of
 
 """
 
+from __future__ import annotations
+
 import heapq
 import itertools
+import math
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
@@ -41,6 +44,7 @@ from pysp.capability import Neutral, supports
 from pysp.engines.arithmetic import *
 from pysp.engines.arithmetic import maxrandint
 from pysp.enumeration.algorithms import BufferedStream, LengthFrontierMerge, best_first_union_max
+from pysp.inference.fisher import Path
 from pysp.stats.combinator.null_dist import (
     NullAccumulator,
     NullAccumulatorFactory,
@@ -88,6 +92,19 @@ E2 = tuple[tuple[np.ndarray, np.ndarray, np.ndarray], Any | None]
 # Bayesian protocol), so the HMM only adds the chain-level prior and delegates emission terms to
 # the topic estimators.  ``prior=None`` (the default) preserves the existing MLE / pseudo-count
 # path byte-identically.
+
+
+from pysp.inference.fisher import (
+    FisherView,
+    FixedFisherView,
+    SufficientStatisticVectorizer,
+    _is_null_dist,
+    _length_support,
+    _second_diag_from_view,
+    _seq_encode_model,
+    _structured_values_matrix,
+    to_fisher,
+)
 
 
 def _zero_impossible_emission_rows(pr_obs: np.ndarray) -> None:
@@ -189,7 +206,7 @@ def terminal_forward_loglik(log_w: np.ndarray, log_a: np.ndarray, log_b: np.ndar
 
 def terminal_forward_backward(
     log_w: np.ndarray, log_a: np.ndarray, log_b: np.ndarray, term_mask: np.ndarray
-) -> tuple[float, "np.ndarray | None", "np.ndarray | None"]:
+) -> tuple[float, np.ndarray | None, np.ndarray | None]:
     """Terminal-state forward-backward; returns ``(loglik, gamma (L,K), xi (L-1,K,K))`` (gamma/xi None if 0-prob).
 
     The backward pass mirrors the forward: only the final position may be terminal, and only non-terminal
@@ -649,7 +666,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
             return rv
 
-    def _terminal_states_seq_log_density(self, x: E1 | E2) -> "np.ndarray":
+    def _terminal_states_seq_log_density(self, x: E1 | E2) -> np.ndarray:
         """Vectorized terminal-state forward: per-sequence stopping-time likelihood from encoded emissions."""
         x0, _ = x
         (tot_cnt, _idx_bands, _has_next, len_vec, idx_mat, _idx_vec, enc_data), _, _len_enc = x0
@@ -667,7 +684,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             out[s] = terminal_forward_loglik(self.log_w, self.log_transitions, log_b, self._terminal_mask)
         return out
 
-    def seq_log_density(self, x: E1 | E2) -> "np.ndarray":
+    def seq_log_density(self, x: E1 | E2) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
         if self.terminal_states is not None:
             return self._terminal_states_seq_log_density(x)
@@ -902,7 +919,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
         return ptr
 
-    def latent_posterior(self, x: list[T]) -> "MarkovChainLatentPosterior":
+    def latent_posterior(self, x: list[T]) -> MarkovChainLatentPosterior:
         """Return the exact chain posterior ``q(z | x)`` over hidden states for one observation sequence.
 
         The returned :class:`~pysp.stats.compute.posterior.MarkovChainLatentPosterior` can
@@ -974,12 +991,10 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     def to_fisher(self, **kwargs):
         """Forward-backward Fisher view for the HMM."""
         if hasattr(self, "topics") and hasattr(self, "transitions"):
-            from pysp.inference.fisher import HiddenMarkovFisherView
-
             return HiddenMarkovFisherView(self)
         return super().to_fisher(**kwargs)
 
-    def sampler(self, seed: int | None = None) -> "HiddenMarkovSampler":
+    def sampler(self, seed: int | None = None) -> HiddenMarkovSampler:
         """Create a HiddenMarkovSampler object with seed passed.
 
         Note: Throws exception if 'len_dist'and 'terminal_values' are not set.
@@ -1002,7 +1017,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
         return HiddenMarkovSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "HiddenMarkovEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> HiddenMarkovEstimator:
         """Create HiddenMarkovEstimator for estimating HiddenMarkovDistribution objects from aggregated sufficient
             statistics.
 
@@ -1025,7 +1040,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             terminal_states=self.terminal_states,
         )
 
-    def dist_to_encoder(self) -> "HiddenMarkovDataEncoder":
+    def dist_to_encoder(self) -> HiddenMarkovDataEncoder:
         """Returns HiddenMarkovDataEncoder object for encoding sequences of iid HMM observations."""
         emission_encoder = self.topics[0].dist_to_encoder()
         len_encoder = self.len_dist.dist_to_encoder()
@@ -1034,7 +1049,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             emission_encoder=emission_encoder, len_encoder=len_encoder, use_numba=self.use_numba
         )
 
-    def enumerator(self) -> "HiddenMarkovModelEnumerator":
+    def enumerator(self) -> HiddenMarkovModelEnumerator:
         """Returns HiddenMarkovModelEnumerator iterating observation sequences in descending
         marginal probability order."""
         return HiddenMarkovModelEnumerator(self)
@@ -1421,7 +1436,7 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
         counter = itertools.count()
         heap = []  # entries: (-score, counter, kind, payload)
 
-        def push_candidate(parent: "_HmmPrefix", rank: int) -> None:
+        def push_candidate(parent: _HmmPrefix, rank: int) -> None:
             if self._pool.get(rank) is None:
                 return
             pool_lp = self._pool.get(rank)[1]
@@ -1459,7 +1474,7 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
 
 
 class HiddenMarkovSampler(DistributionSampler):
-    def __init__(self, dist: "HiddenMarkovModelDistribution", seed: int | None = None) -> None:
+    def __init__(self, dist: HiddenMarkovModelDistribution, seed: int | None = None) -> None:
         """HiddenMarkovSampler object for sampling from HMM.
 
         If 'dist.len_dist' is set, samples HMM sequences with sequence lengths generated from 'len_dist'. If
@@ -2199,7 +2214,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             if self.len_accumulator is not None:
                 self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
 
-    def seq_update_engine(self, x, weights, estimate: "HiddenMarkovModelDistribution", engine) -> None:
+    def seq_update_engine(self, x, weights, estimate: HiddenMarkovModelDistribution, engine) -> None:
         """Engine-resident Baum-Welch E-step.
 
         Mirrors :meth:`seq_update` but computes the posteriors (gamma), expected transition counts
@@ -2266,7 +2281,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(
         self, suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[T1], T2 | None]
-    ) -> "HiddenMarkovAccumulator":
+    ) -> HiddenMarkovAccumulator:
         """Combine the sufficient statistics of HiddenMarkovAccumulator with suff_stat arg.
 
         Sufficient statistics in suff_stat are a Tuple containing:
@@ -2332,7 +2347,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(
         self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[T1], T2 | None]
-    ) -> "HiddenMarkovAccumulator":
+    ) -> HiddenMarkovAccumulator:
         """Set the sufficient statistics of HiddenMarkovAccumulator object instance to value x.
 
         Returned value x is a Tuple containing:
@@ -2367,7 +2382,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def scale(self, c: float) -> "HiddenMarkovAccumulator":
+    def scale(self, c: float) -> HiddenMarkovAccumulator:
         """Scale linear HMM sufficient statistics while preserving metadata."""
         self.init_counts *= c
         self.state_counts *= c
@@ -2448,7 +2463,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
         return None
 
-    def acc_to_encoder(self) -> "HiddenMarkovDataEncoder":
+    def acc_to_encoder(self) -> HiddenMarkovDataEncoder:
         """Returns HiddenMarkovDataEncoder object for encoding sequences of iid HMM observations."""
         emission_encoder = self.accumulators[0].acc_to_encoder()
         len_encoder = self.len_accumulator.acc_to_encoder()
@@ -2496,7 +2511,7 @@ class HiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
         self.len_factory = len_factory
         self.name = name
 
-    def make(self) -> "HiddenMarkovAccumulator":
+    def make(self) -> HiddenMarkovAccumulator:
         """Returns a HiddenMarkovAccumulator object."""
         len_acc = self.len_factory.make() if self.len_factory is not None else None
         return HiddenMarkovAccumulator(
@@ -2598,7 +2613,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
             isinstance(u, DirichletDistribution) for u in row_priors
         )
 
-    def model_log_density(self, model: "HiddenMarkovModelDistribution") -> float:
+    def model_log_density(self, model: HiddenMarkovModelDistribution) -> float:
         """Log-density of the model parameters under the priors (ELBO global term).
 
         Sums the Dirichlet log-densities of the initial-state and transition probabilities (floored
@@ -2626,7 +2641,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray, list[T1], T2 | None]
-    ) -> "HiddenMarkovModelDistribution":
+    ) -> HiddenMarkovModelDistribution:
         """Estimate HiddenMarkovModel from aggregated sufficient statistics contained in arg 'suff_stat'.
 
         Sufficient statistics in arg 'suff_stat' are a Tuple containing:
@@ -3090,3 +3105,489 @@ HiddenMarkovModelAccumulatorFactory = HiddenMarkovAccumulatorFactory
 HiddenMarkovModelDataEncoder = HiddenMarkovDataEncoder
 HiddenMarkovModelEstimator = HiddenMarkovEstimator
 HiddenMarkovModelSampler = HiddenMarkovSampler
+
+
+# --- Fisher view(s) co-located with this family ---
+class HiddenMarkovFisherView(FixedFisherView):
+    """Observed Fisher view for HMMs via forward-backward statistics.
+
+    The per-observation vectors are posterior-expected complete-data
+    sufficient statistics: initial-state counts, transition counts, per-state
+    emission statistics, optional length statistics, and state occupancies
+    when the model accumulator exposes them.  For finite enumerable HMMs, the
+    full model Fisher is the exact observed covariance of these statistics
+    under the model distribution.  For continuous or otherwise non-enumerable
+    HMMs, diagonal model moments remain available; use
+    observed_fisher_information() for empirical full covariance on data.
+    """
+
+    _max_model_enum_terms = 100000
+    _model_mass_tol = 1.0e-8
+
+    def __init__(self, dist: Any) -> None:
+        self.dist = dist
+        self.topic_views = [to_fisher(d) for d in dist.topics]
+        self.len_view = None if _is_null_dist(getattr(dist, "len_dist", None)) else to_fisher(dist.len_dist)
+        self._estimator = dist.estimator()
+        self._has_state_counts = hasattr(dist, "n_states")
+        self._model_cache: tuple[np.ndarray, np.ndarray] | None = None
+        self._diag_model_cache: tuple[np.ndarray, np.ndarray] | None = None
+        super().__init__(dist, self._labels_from_children())
+
+    def _num_states(self) -> int:
+        if hasattr(self.dist, "n_states"):
+            return int(self.dist.n_states)
+        return int(self.dist.num_states)
+
+    def _labels_from_children(self) -> list[Path]:
+        k = self._num_states()
+        labels: list[Path] = [("init", str(i)) for i in range(k)]
+        if self._has_state_counts:
+            labels.extend(("state", str(i)) for i in range(k))
+        labels.extend(("transition", str(i), str(j)) for i in range(k) for j in range(k))
+        for i, view in enumerate(self.topic_views):
+            labels.extend(("emission", str(i)) + label for label in view.vectorizer.labels)
+        if self.len_view is not None:
+            labels.extend(("length",) + label for label in self.len_view.vectorizer.labels)
+        return labels
+
+    def _refresh_labels(self) -> None:
+        self.labels = self._labels_from_children()
+        self.vectorizer = SufficientStatisticVectorizer(self.labels)
+        self._model_cache = None
+        self._diag_model_cache = None
+
+    def _accumulator_value_rows(self, enc_data: Any, model: Any | None = None) -> list[Any]:
+        model = self.dist if model is None else model
+        n = self._n_encoded(enc_data, model)
+        values = []
+        for i in range(n):
+            weights = np.zeros(n, dtype=np.float64)
+            weights[i] = 1.0
+            acc = self._estimator.accumulator_factory().make()
+            acc.seq_update(enc_data, weights, model)
+            values.append(acc.value())
+        return values
+
+    def _matrix_from_values(self, values: Sequence[Any]) -> np.ndarray:
+        if not values:
+            return np.zeros((0, len(self.labels)), dtype=np.float64)
+
+        init_idx, state_idx, trans_idx, topic_idx, len_idx = (
+            (1, 2, 3, 4, 5) if self._has_state_counts else (0, None, 1, 2, 3)
+        )
+        init = np.vstack([np.asarray(v[init_idx], dtype=np.float64) for v in values])
+        trans = np.vstack([np.asarray(v[trans_idx], dtype=np.float64).reshape(-1) for v in values])
+        blocks = [init]
+        if state_idx is not None:
+            blocks.append(np.vstack([np.asarray(v[state_idx], dtype=np.float64) for v in values]))
+        blocks.append(trans)
+
+        for s, view in enumerate(self.topic_views):
+            emission_values = [v[topic_idx][s] for v in values]
+            blocks.append(_structured_values_matrix(view, emission_values))
+
+        if self.len_view is not None:
+            len_values = [v[len_idx] for v in values]
+            blocks.append(_structured_values_matrix(self.len_view, len_values))
+
+        self._refresh_labels()
+        return np.hstack(blocks)
+
+    @staticmethod
+    def _sequence_forward_backward(
+        log_b: np.ndarray, init: np.ndarray, transition: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        n, k = log_b.shape
+        gamma = np.zeros((n, k), dtype=np.float64)
+        trans = np.zeros((k, k), dtype=np.float64)
+        init_row = np.zeros(k, dtype=np.float64)
+        if n == 0:
+            return init_row, gamma, trans
+
+        row_max = np.max(log_b, axis=1, keepdims=True)
+        safe_max = np.where(np.isfinite(row_max), row_max, 0.0)
+        with np.errstate(over="ignore", invalid="ignore"):
+            obs = np.exp(log_b - safe_max)
+        obs[~np.isfinite(obs)] = 0.0
+
+        alpha = np.zeros((n, k), dtype=np.float64)
+        scale = np.zeros(n, dtype=np.float64)
+        alpha[0] = np.asarray(init, dtype=np.float64) * obs[0]
+        scale[0] = alpha[0].sum()
+        if scale[0] <= 0.0 or not np.isfinite(scale[0]):
+            return init_row, gamma, trans
+        alpha[0] /= scale[0]
+
+        a_mat = np.asarray(transition, dtype=np.float64)
+        for t in range(1, n):
+            alpha[t] = np.dot(alpha[t - 1], a_mat) * obs[t]
+            scale[t] = alpha[t].sum()
+            if scale[t] <= 0.0 or not np.isfinite(scale[t]):
+                return init_row, gamma, trans
+            alpha[t] /= scale[t]
+
+        gamma[-1] = alpha[-1]
+        beta = np.ones(k, dtype=np.float64)
+        for t in range(n - 2, -1, -1):
+            bb = obs[t + 1] * beta
+            denom = scale[t + 1] if scale[t + 1] > 0.0 else 1.0
+            xi = alpha[t][:, None] * a_mat * bb[None, :] / denom
+            xi_sum = xi.sum()
+            if xi_sum > 0.0 and np.isfinite(xi_sum):
+                xi /= xi_sum
+                gamma[t] = xi.sum(axis=1)
+                trans += xi
+            beta = np.dot(a_mat, bb) / denom
+
+        init_row = gamma[0].copy()
+        return init_row, gamma, trans
+
+    def _emission_log_matrix(self, enc_obs: Any, model: Any) -> np.ndarray:
+        k = self._num_states()
+        return np.asarray([model.topics[i].seq_log_density(enc_obs) for i in range(k)], dtype=np.float64).T
+
+    def _hmm_rows_from_indexed_encoding(
+        self,
+        lengths: np.ndarray,
+        enc_obs: Any,
+        len_enc: Any,
+        row_indices: Sequence[np.ndarray],
+        flat_to_row: np.ndarray,
+        model: Any,
+    ) -> np.ndarray:
+        lengths = np.asarray(lengths, dtype=np.int64)
+        n = len(lengths)
+        k = self._num_states()
+        total = int(len(flat_to_row))
+
+        init = np.zeros((n, k), dtype=np.float64)
+        gamma = np.zeros((total, k), dtype=np.float64)
+        trans = np.zeros((n, k, k), dtype=np.float64)
+
+        if total > 0:
+            log_b_all = self._emission_log_matrix(enc_obs, model)
+            for i, rows in enumerate(row_indices):
+                rows = np.asarray(rows, dtype=np.int64)
+                if len(rows) == 0:
+                    continue
+                init_i, gamma_i, trans_i = self._sequence_forward_backward(log_b_all[rows], model.w, model.transitions)
+                init[i] = init_i
+                gamma[rows] = gamma_i
+                trans[i] = trans_i
+
+        blocks = [init]
+        if self._has_state_counts:
+            state = np.zeros((n, k), dtype=np.float64)
+            if total > 0:
+                np.add.at(state, np.asarray(flat_to_row, dtype=np.int64), gamma)
+            blocks.append(state)
+        blocks.append(trans.reshape((n, k * k)))
+
+        for s, view in enumerate(self.topic_views):
+            d = len(view.vectorizer.labels)
+            emission = np.zeros((n, d), dtype=np.float64)
+            if total > 0:
+                flat_stats = view.seq_expected_statistics(enc_obs, estimate=model.topics[s])
+                if flat_stats.shape[1] != d:
+                    d = flat_stats.shape[1]
+                    emission = np.zeros((n, d), dtype=np.float64)
+                np.add.at(emission, np.asarray(flat_to_row, dtype=np.int64), gamma[:, [s]] * flat_stats)
+            blocks.append(emission)
+
+        if self.len_view is not None:
+            blocks.append(self.len_view.seq_expected_statistics(len_enc, estimate=model.len_dist))
+
+        self._refresh_labels()
+        return np.hstack(blocks) if blocks else np.zeros((n, 0), dtype=np.float64)
+
+    def _stats_hmm_rows_from_encoded(self, enc_data: Any, model: Any) -> np.ndarray:
+        x0, x1 = enc_data
+        if x1 is None:
+            (tot_cnt, _, _, len_vec, idx_mat, idx_vec, enc_obs), _, len_enc = x0
+            row_indices = [idx_mat[i, idx_mat[i] >= 0] for i in range(idx_mat.shape[0])]
+            return self._hmm_rows_from_indexed_encoding(
+                np.asarray(len_vec, dtype=np.int64),
+                enc_obs,
+                len_enc,
+                row_indices,
+                np.asarray(idx_vec, dtype=np.int64),
+                model,
+            )
+
+        (idx, sz, enc_obs), len_enc = x1
+        offsets = np.concatenate(([0], np.cumsum(np.asarray(sz, dtype=np.int64))))
+        row_indices = [np.arange(offsets[i], offsets[i + 1], dtype=np.int64) for i in range(len(sz))]
+        return self._hmm_rows_from_indexed_encoding(
+            np.asarray(sz, dtype=np.int64), enc_obs, len_enc, row_indices, np.asarray(idx, dtype=np.int64), model
+        )
+
+    def _bstats_hmm_rows_from_encoded(self, enc_data: Any, model: Any) -> np.ndarray:
+        lengths, offsets, enc_obs, len_enc = enc_data
+        lengths = np.asarray(lengths, dtype=np.int64)
+        offsets = np.asarray(offsets, dtype=np.int64)
+        row_indices = [np.arange(offsets[i], offsets[i + 1], dtype=np.int64) for i in range(len(lengths))]
+        flat_to_row = np.repeat(np.arange(len(lengths), dtype=np.int64), lengths)
+        return self._hmm_rows_from_indexed_encoding(lengths, enc_obs, len_enc, row_indices, flat_to_row, model)
+
+    def _fast_statistics_from_encoded(self, enc_data: Any, model: Any) -> np.ndarray:
+        if isinstance(enc_data, tuple) and len(enc_data) == 2:
+            return self._stats_hmm_rows_from_encoded(enc_data, model)
+        if isinstance(enc_data, tuple) and len(enc_data) == 4:
+            return self._bstats_hmm_rows_from_encoded(enc_data, model)
+        raise NotImplementedError
+
+    def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
+        enc = _seq_encode_model(self.dist if estimate is None else estimate, list(data))
+        return self._statistics_from_encoded(enc, estimate=estimate)
+
+    def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        model = self.dist if estimate is None else estimate
+        try:
+            return self._fast_statistics_from_encoded(enc_data, model)
+        except NotImplementedError:
+            return self._matrix_from_values(self._accumulator_value_rows(enc_data, model))
+
+    def structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
+        model = self.dist if estimate is None else estimate
+        enc = _seq_encode_model(model, [x])
+        weights = np.asarray([weight], dtype=np.float64)
+        acc = self._estimator.accumulator_factory().make()
+        acc.seq_update(enc, weights, model)
+        return acc.value()
+
+    def _layout(self) -> tuple[int, list[int], int | None, int]:
+        k = self._num_states()
+        dims = [len(view.mean_statistics()) for view in self.topic_views]
+        len_offset = k + (k if self._has_state_counts else 0) + k * k + sum(dims)
+        total = len_offset + (0 if self.len_view is None else len(self.len_view.mean_statistics()))
+        return k, dims, len_offset if self.len_view is not None else None, total
+
+    def _inc_state(
+        self,
+        state: int,
+        init: bool,
+        prev_state: int | None,
+        total: int,
+        offsets: Sequence[int],
+        emission_mu: Sequence[np.ndarray],
+        emission_second: Sequence[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        k = self._num_states()
+        inc = np.zeros(total, dtype=np.float64)
+        inc2 = np.zeros(total, dtype=np.float64)
+        if init:
+            inc[state] = 1.0
+            inc2[state] = 1.0
+        transition_offset = k
+        if self._has_state_counts:
+            inc[k + state] = 1.0
+            inc2[k + state] = 1.0
+            transition_offset += k
+        if prev_state is not None:
+            j = transition_offset + prev_state * k + state
+            inc[j] = 1.0
+            inc2[j] = 1.0
+        s0 = offsets[state]
+        s1 = s0 + len(emission_mu[state])
+        inc[s0:s1] = emission_mu[state]
+        inc2[s0:s1] = emission_second[state]
+        return inc, inc2
+
+    def _path_moments_for_length(
+        self,
+        n: int,
+        total_no_len: int,
+        offsets: Sequence[int],
+        emission_mu: Sequence[np.ndarray],
+        emission_second: Sequence[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        k = self._num_states()
+        if n <= 0:
+            return np.zeros(total_no_len, dtype=np.float64), np.zeros(total_no_len, dtype=np.float64)
+
+        pi = np.asarray(self.dist.w, dtype=np.float64)
+        trans = np.asarray(self.dist.transitions, dtype=np.float64)
+        p_state = pi.copy()
+        first = np.zeros((k, total_no_len), dtype=np.float64)
+        second = np.zeros((k, total_no_len), dtype=np.float64)
+        for s in range(k):
+            inc, inc2 = self._inc_state(s, True, None, total_no_len, offsets, emission_mu, emission_second)
+            first[s] = pi[s] * inc
+            second[s] = pi[s] * inc2
+
+        for _ in range(1, n):
+            next_p = np.zeros(k, dtype=np.float64)
+            next_first = np.zeros_like(first)
+            next_second = np.zeros_like(second)
+            for prev in range(k):
+                if p_state[prev] <= 0.0:
+                    continue
+                for s in range(k):
+                    a = trans[prev, s]
+                    if a <= 0.0:
+                        continue
+                    inc, inc2 = self._inc_state(s, False, prev, total_no_len, offsets, emission_mu, emission_second)
+                    next_p[s] += p_state[prev] * a
+                    next_first[s] += a * (first[prev] + p_state[prev] * inc)
+                    next_second[s] += a * (second[prev] + 2.0 * inc * first[prev] + p_state[prev] * inc2)
+            p_state = next_p
+            first = next_first
+            second = next_second
+
+        return first.sum(axis=0), second.sum(axis=0)
+
+    def _diagonal_model_moments(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._diag_model_cache is not None:
+            return self._diag_model_cache
+
+        support = _length_support(self.dist.len_dist)
+        if support is None:
+            raise NotImplementedError("HMM model Fisher requires a supported length distribution")
+        lengths, probs = support
+        k, dims, len_offset, total = self._layout()
+        offsets = []
+        pos = k + (k if self._has_state_counts else 0) + k * k
+        for dim in dims:
+            offsets.append(pos)
+            pos += dim
+
+        emission_mu = [np.asarray(view.mean_statistics(), dtype=np.float64) for view in self.topic_views]
+        emission_second = [_second_diag_from_view(view) for view in self.topic_views]
+        total_no_len = pos
+
+        mean = np.zeros(total, dtype=np.float64)
+        second = np.zeros(total, dtype=np.float64)
+        len_mat = None
+        if self.len_view is not None:
+            len_mat = self.len_view.expected_statistics_matrix(data=[int(round(v)) for v in lengths])
+
+        for r, (n_float, p) in enumerate(zip(lengths, probs)):
+            n = max(int(round(n_float)), 0)
+            m, q = self._path_moments_for_length(n, total_no_len, offsets, emission_mu, emission_second)
+            row_mean = np.zeros(total, dtype=np.float64)
+            row_second = np.zeros(total, dtype=np.float64)
+            row_mean[:total_no_len] = m
+            row_second[:total_no_len] = q
+            if len_mat is not None and len_offset is not None:
+                row_mean[len_offset:] = len_mat[r]
+                row_second[len_offset:] = len_mat[r] * len_mat[r]
+            mean += p * row_mean
+            second += p * row_second
+
+        self._diag_model_cache = (mean, np.maximum(second - mean * mean, 0.0))
+        return self._diag_model_cache
+
+    def _enumerated_model_mean_cov(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._model_cache is not None:
+            return self._model_cache
+
+        values: list[Any] = []
+        probs: list[float] = []
+        try:
+            iterator = iter(self.dist.enumerator())
+            exhausted = False
+            for _ in range(self._max_model_enum_terms):
+                try:
+                    value, log_prob = next(iterator)
+                except StopIteration:
+                    exhausted = True
+                    break
+                if np.isfinite(log_prob):
+                    values.append(value)
+                    probs.append(float(math.exp(log_prob)))
+            if not exhausted:
+                raise NotImplementedError(
+                    "HMM full model Fisher requires finite enumerable support; use observed_fisher_information()."
+                )
+        except NotImplementedError:
+            raise
+        except Exception as exc:
+            raise NotImplementedError(
+                "HMM full model Fisher requires finite enumerable support; use observed_fisher_information()."
+            ) from exc
+
+        if not values:
+            raise NotImplementedError("HMM full model Fisher requires non-empty finite support.")
+
+        weights = np.asarray(probs, dtype=np.float64)
+        total = float(weights.sum())
+        if total <= 0.0 or not np.isfinite(total) or abs(total - 1.0) > self._model_mass_tol:
+            raise NotImplementedError("HMM finite support did not sum to one; use observed_fisher_information().")
+        weights /= total
+
+        stats = self.expected_statistics_matrix(data=values)
+        mean = np.dot(weights, stats)
+        second = np.dot((weights[:, None] * stats).T, stats)
+        cov = second - np.outer(mean, mean)
+        cov = 0.5 * (cov + cov.T)
+        diag = np.maximum(np.diag(cov), 0.0)
+        cov[np.diag_indices_from(cov)] = diag
+        self._model_cache = (mean, cov)
+        return self._model_cache
+
+    def _model_mean(self) -> np.ndarray:
+        try:
+            return self._enumerated_model_mean_cov()[0]
+        except NotImplementedError:
+            return self._diagonal_model_moments()[0]
+
+    def _model_fisher(self) -> np.ndarray:
+        try:
+            return self._enumerated_model_mean_cov()[1]
+        except NotImplementedError:
+            return np.diag(self._diagonal_model_moments()[1])
+
+    def fisher_information(
+        self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
+    ) -> np.ndarray:
+        if not diagonal:
+            try:
+                info = self._enumerated_model_mean_cov()[1]
+                return info + np.eye(info.shape[0]) * ridge
+            except NotImplementedError:
+                if stats is not None:
+                    return FisherView.fisher_information(self, stats=stats, diagonal=False, ridge=ridge)
+                raise NotImplementedError(
+                    "HMM full model Fisher requires finite enumerable support; "
+                    "use diagonal=True or observed_fisher_information()."
+                )
+        try:
+            return FixedFisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
+        except NotImplementedError:
+            return FisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
+
+    def fisher_vectors(
+        self,
+        stats: np.ndarray | None = None,
+        metric: str = "diagonal",
+        center: np.ndarray | None = None,
+        fisher: np.ndarray | None = None,
+        ridge: float = 1.0e-8,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        if metric == "full" and fisher is None:
+            try:
+                mean, info = self._enumerated_model_mean_cov()
+            except NotImplementedError:
+                if stats is not None:
+                    raise NotImplementedError(
+                        "HMM full model Fisher vectors require finite enumerable support; "
+                        'use metric="diagonal" or observed_fisher_vectors().'
+                    )
+                raise
+            if stats is None:
+                stats = self.expected_statistics_matrix(**kwargs)
+            return FisherView.fisher_vectors(
+                self, stats=stats, metric="full", center=mean if center is None else center, fisher=info, ridge=ridge
+            )
+        try:
+            return FixedFisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs
+            )
+        except NotImplementedError:
+            if stats is None:
+                stats = self.expected_statistics_matrix(**kwargs)
+            return FisherView.fisher_vectors(
+                self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge
+            )
