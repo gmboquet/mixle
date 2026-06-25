@@ -29,95 +29,7 @@ T = TypeVar("T")
 E0 = TypeVar("E0")
 
 
-def best_of(
-    data: Sequence[T] | None,
-    vdata: Sequence[T] | None,
-    est: ParameterEstimator,
-    trials: int,
-    max_its: int,
-    init_p: float,
-    delta: float,
-    rng: RandomState,
-    init_estimator: ParameterEstimator | None = None,
-    enc_data: list[tuple[int, E0]] | None = None,
-    enc_vdata: Sequence[tuple[int, E0]] | None = None,
-    out: IO = sys.stdout,
-    print_iter: int = 1,
-    reuse_estep_ll: bool = True,
-    objective: str = "auto",
-) -> tuple[float, SequenceEncodableProbabilityDistribution]:
-    """Performs EM algorithm for trials-number of randomized initial conditions. Returns the best model fit in terms of
-        maximum log-likelihood value from validation data.
-
-    Args:
-        data (Optional[List[T]]): List of data of type T. If None is given, enc_data must be provided as
-            List[Tuple[int, enc_data_type]].
-        vdata (Optional[Sequence[T]]): Optional validation set.
-        est (ParameterEstimator): ParameterEstimator for model to be estimated.
-        trials (int): Integer number >= 1, of randomized initial conditions to perform EM algorithm for.
-        max_its (int): Integer value >=1, sets the maximum number of iterations of EM to be performed as stopping criteria.
-        init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
-        delta (float): Stopping criteria for EM when |old-log-likelihood - new-log-likelihood| < delta.
-        rng (RandomState): RandomState for setting seed.
-        init_estimator (Optional[ParameterEstimator]): Optional ParameterEstimator used for fitting.
-        enc_data (Optional[List[Tuple[int, E]]]): Optional encoded data, if provided data need not be
-            provided. If None, enc_data is set from data.
-        enc_vdata (Optional[List[Tuple[int, E0]]]): Optional sequence encoded validation set.
-        out (I0): Text output stream.
-        print_iter (int): Print iterations (i.e. log-likelihood difference) every print_iter-iterations.
-        reuse_estep_ll (bool): Default True. Forwarded to each trial's ``optimize`` call -- reuse the
-            E-step likelihood for convergence instead of a separate scoring pass (see ``optimize``).
-            Set False to force the exact historical per-iteration scoring behavior.
-        objective (str): Convergence/selection objective forwarded to each trial's ``optimize`` call;
-            ``'auto'`` (default) selects MLE / MAP / variational Bayes from the prior (see ``optimize``).
-
-    Returns:
-        Tuple of log-likelihood of best fitting model and the best fitting model from number of trials.
-
-    """
-    if data is None and enc_data is None:
-        raise Exception("Optimization called with empty data or enc_data.")
-
-    max_its = max(1, max_its)
-    trials = max(1, trials)
-    i_est = est if init_estimator is None else init_estimator
-
-    # encode once and reuse across trials (each trial re-initializes from rng)
-    if enc_data is None:
-        encoder = _resolve_encoder(i_est)
-        enc_data = seq_encode(data, encoder)
-        if enc_vdata is None and vdata is not None:
-            enc_vdata = seq_encode(vdata, encoder)
-    elif enc_vdata is None and vdata is not None:
-        enc_vdata = seq_encode(vdata, _resolve_encoder(i_est))
-    score_data = enc_data if enc_vdata is None else enc_vdata
-
-    rv_ll, rv_mm = -np.inf, None
-    for kk in range(trials):
-        mm = optimize(
-            None,
-            est,
-            init_estimator=i_est,
-            enc_data=enc_data,
-            enc_vdata=enc_vdata,
-            max_its=max_its,
-            delta=delta,
-            init_p=init_p,
-            rng=rng,
-            out=out,
-            print_iter=print_iter,
-            reuse_estep_ll=reuse_estep_ll,
-            objective=objective,
-        )
-        _, vll = seq_log_density_sum(score_data, mm)
-        if out is not None:
-            out.write("Trial %d. VLL=%f\n" % (kk + 1, vll))
-        if vll > rv_ll:
-            rv_ll, rv_mm = vll, mm
-
-    return rv_ll, rv_mm
-
-
+# --- data-encoding helpers --------------------------------------------------
 def _local_encoded_chunks(enc_data: Any) -> list[tuple[int, Any]]:
     if hasattr(enc_data, "as_seq_chunk"):
         return [enc_data.as_seq_chunk()]
@@ -440,6 +352,82 @@ def _fused_em_loop(
     return chosen, (best_score if best_score is not None else 0.0)
 
 
+# --- objective resolution (MLE / MAP / VB selection + scorers) --------------
+def _data_objective_sum(enc_data: Any, model: SequenceEncodableProbabilityDistribution) -> float:
+    """Data-dependent part of the Bayesian fit objective.
+
+    For variational models exposing ``seq_local_elbo`` (e.g. variational mixtures, DPM) this is the
+    sum of per-observation local ELBO contributions; otherwise it is the observed-data log-likelihood
+    at the current (MAP) parameter estimates.
+    """
+    if hasattr(model, "seq_local_elbo"):
+        return float(sum(model.seq_local_elbo(u[1]).sum() for u in enc_data))
+    _, rv = seq_log_density_sum(enc_data, model)
+    return rv
+
+
+def _model_objective(estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution) -> float:
+    """Prior/global part of the Bayesian fit objective.
+
+    For MAP estimators this is the log-prior density of the estimated parameters; for variational
+    estimators it is the data-independent part of the ELBO (prior cross-entropies plus variational
+    entropies). Returns ``0.0`` when the estimator carries no usable prior.
+    """
+    fn = getattr(estimator, "model_log_density", None)
+    if fn is None:
+        return 0.0
+    rv = fn(model)
+    return 0.0 if rv is None else float(rv)
+
+
+_VALID_OBJECTIVES = ("auto", "mle", "map", "vb")
+
+
+def _resolve_objective(
+    objective: str, estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution
+) -> str:
+    """Resolve the convergence/selection objective for a fitting run.
+
+    The prior is the single switch: with ``objective='auto'`` (the default) a model that exposes a
+    variational ELBO (``seq_local_elbo``) is fit by ``'vb'``, an estimator that carries a parameter
+    prior (non-zero ``model_log_density``) by ``'map'`` (penalized log-likelihood), and everything
+    else by plain ``'mle'``. Pass an explicit ``'mle'`` / ``'map'`` / ``'vb'`` to override.
+    """
+    obj = (objective or "auto").lower()
+    if obj not in _VALID_OBJECTIVES:
+        raise ValueError("objective must be one of %r, got %r." % (_VALID_OBJECTIVES, objective))
+    if obj != "auto":
+        return obj
+    if hasattr(model, "seq_local_elbo"):
+        return "vb"
+    # Prefer the explicit prior signal: get_prior() is None exactly when the estimator carries no
+    # parameter prior. This is robust even when the log-prior happens to evaluate to 0.0 at init
+    # (which the model_log_density != 0.0 heuristic below would misclassify as MLE).
+    get_prior = getattr(estimator, "get_prior", None)
+    if callable(get_prior):
+        return "map" if get_prior() is not None else "mle"
+    if _model_objective(estimator, model) != 0.0:
+        return "map"
+    return "mle"
+
+
+def _objective_scorer(resolved: str, estimator: ParameterEstimator, engine: Any | None):
+    """Return a ``(enc, model) -> (count, score)`` scorer for the resolved objective.
+
+    ``'mle'`` scores the plain data log-likelihood (and is the only objective compatible with the
+    fused-E-step shortcut). ``'map'`` / ``'vb'`` score the penalized log-likelihood / ELBO
+    ``_data_objective_sum + _model_objective`` (the data term auto-adapts to ``seq_local_elbo``).
+    """
+    if resolved == "mle":
+        return _ll_sum_fn(engine)
+
+    def scorer(enc: Any, model: SequenceEncodableProbabilityDistribution) -> tuple[float, float]:
+        return 0.0, _data_objective_sum(enc, model) + _model_objective(estimator, model)
+
+    return scorer
+
+
+# --- public estimation drivers (optimize / fit / best_of) -------------------
 def optimize(
     data: Sequence[T] | None,
     estimator: ParameterEstimator,
@@ -659,80 +647,6 @@ def optimize(
             enc_data.close()
 
 
-def _data_objective_sum(enc_data: Any, model: SequenceEncodableProbabilityDistribution) -> float:
-    """Data-dependent part of the Bayesian fit objective.
-
-    For variational models exposing ``seq_local_elbo`` (e.g. variational mixtures, DPM) this is the
-    sum of per-observation local ELBO contributions; otherwise it is the observed-data log-likelihood
-    at the current (MAP) parameter estimates.
-    """
-    if hasattr(model, "seq_local_elbo"):
-        return float(sum(model.seq_local_elbo(u[1]).sum() for u in enc_data))
-    _, rv = seq_log_density_sum(enc_data, model)
-    return rv
-
-
-def _model_objective(estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution) -> float:
-    """Prior/global part of the Bayesian fit objective.
-
-    For MAP estimators this is the log-prior density of the estimated parameters; for variational
-    estimators it is the data-independent part of the ELBO (prior cross-entropies plus variational
-    entropies). Returns ``0.0`` when the estimator carries no usable prior.
-    """
-    fn = getattr(estimator, "model_log_density", None)
-    if fn is None:
-        return 0.0
-    rv = fn(model)
-    return 0.0 if rv is None else float(rv)
-
-
-_VALID_OBJECTIVES = ("auto", "mle", "map", "vb")
-
-
-def _resolve_objective(
-    objective: str, estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution
-) -> str:
-    """Resolve the convergence/selection objective for a fitting run.
-
-    The prior is the single switch: with ``objective='auto'`` (the default) a model that exposes a
-    variational ELBO (``seq_local_elbo``) is fit by ``'vb'``, an estimator that carries a parameter
-    prior (non-zero ``model_log_density``) by ``'map'`` (penalized log-likelihood), and everything
-    else by plain ``'mle'``. Pass an explicit ``'mle'`` / ``'map'`` / ``'vb'`` to override.
-    """
-    obj = (objective or "auto").lower()
-    if obj not in _VALID_OBJECTIVES:
-        raise ValueError("objective must be one of %r, got %r." % (_VALID_OBJECTIVES, objective))
-    if obj != "auto":
-        return obj
-    if hasattr(model, "seq_local_elbo"):
-        return "vb"
-    # Prefer the explicit prior signal: get_prior() is None exactly when the estimator carries no
-    # parameter prior. This is robust even when the log-prior happens to evaluate to 0.0 at init
-    # (which the model_log_density != 0.0 heuristic below would misclassify as MLE).
-    get_prior = getattr(estimator, "get_prior", None)
-    if callable(get_prior):
-        return "map" if get_prior() is not None else "mle"
-    if _model_objective(estimator, model) != 0.0:
-        return "map"
-    return "mle"
-
-
-def _objective_scorer(resolved: str, estimator: ParameterEstimator, engine: Any | None):
-    """Return a ``(enc, model) -> (count, score)`` scorer for the resolved objective.
-
-    ``'mle'`` scores the plain data log-likelihood (and is the only objective compatible with the
-    fused-E-step shortcut). ``'map'`` / ``'vb'`` score the penalized log-likelihood / ELBO
-    ``_data_objective_sum + _model_objective`` (the data term auto-adapts to ``seq_local_elbo``).
-    """
-    if resolved == "mle":
-        return _ll_sum_fn(engine)
-
-    def scorer(enc: Any, model: SequenceEncodableProbabilityDistribution) -> tuple[float, float]:
-        return 0.0, _data_objective_sum(enc, model) + _model_objective(estimator, model)
-
-    return scorer
-
-
 def fit(
     data: Sequence[T] | None,
     estimator: ParameterEstimator,
@@ -840,6 +754,96 @@ def fit(
         np.seterr(**div_error)
 
 
+def best_of(
+    data: Sequence[T] | None,
+    vdata: Sequence[T] | None,
+    est: ParameterEstimator,
+    trials: int,
+    max_its: int,
+    init_p: float,
+    delta: float,
+    rng: RandomState,
+    init_estimator: ParameterEstimator | None = None,
+    enc_data: list[tuple[int, E0]] | None = None,
+    enc_vdata: Sequence[tuple[int, E0]] | None = None,
+    out: IO = sys.stdout,
+    print_iter: int = 1,
+    reuse_estep_ll: bool = True,
+    objective: str = "auto",
+) -> tuple[float, SequenceEncodableProbabilityDistribution]:
+    """Performs EM algorithm for trials-number of randomized initial conditions. Returns the best model fit in terms of
+        maximum log-likelihood value from validation data.
+
+    Args:
+        data (Optional[List[T]]): List of data of type T. If None is given, enc_data must be provided as
+            List[Tuple[int, enc_data_type]].
+        vdata (Optional[Sequence[T]]): Optional validation set.
+        est (ParameterEstimator): ParameterEstimator for model to be estimated.
+        trials (int): Integer number >= 1, of randomized initial conditions to perform EM algorithm for.
+        max_its (int): Integer value >=1, sets the maximum number of iterations of EM to be performed as stopping criteria.
+        init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
+        delta (float): Stopping criteria for EM when |old-log-likelihood - new-log-likelihood| < delta.
+        rng (RandomState): RandomState for setting seed.
+        init_estimator (Optional[ParameterEstimator]): Optional ParameterEstimator used for fitting.
+        enc_data (Optional[List[Tuple[int, E]]]): Optional encoded data, if provided data need not be
+            provided. If None, enc_data is set from data.
+        enc_vdata (Optional[List[Tuple[int, E0]]]): Optional sequence encoded validation set.
+        out (I0): Text output stream.
+        print_iter (int): Print iterations (i.e. log-likelihood difference) every print_iter-iterations.
+        reuse_estep_ll (bool): Default True. Forwarded to each trial's ``optimize`` call -- reuse the
+            E-step likelihood for convergence instead of a separate scoring pass (see ``optimize``).
+            Set False to force the exact historical per-iteration scoring behavior.
+        objective (str): Convergence/selection objective forwarded to each trial's ``optimize`` call;
+            ``'auto'`` (default) selects MLE / MAP / variational Bayes from the prior (see ``optimize``).
+
+    Returns:
+        Tuple of log-likelihood of best fitting model and the best fitting model from number of trials.
+
+    """
+    if data is None and enc_data is None:
+        raise Exception("Optimization called with empty data or enc_data.")
+
+    max_its = max(1, max_its)
+    trials = max(1, trials)
+    i_est = est if init_estimator is None else init_estimator
+
+    # encode once and reuse across trials (each trial re-initializes from rng)
+    if enc_data is None:
+        encoder = _resolve_encoder(i_est)
+        enc_data = seq_encode(data, encoder)
+        if enc_vdata is None and vdata is not None:
+            enc_vdata = seq_encode(vdata, encoder)
+    elif enc_vdata is None and vdata is not None:
+        enc_vdata = seq_encode(vdata, _resolve_encoder(i_est))
+    score_data = enc_data if enc_vdata is None else enc_vdata
+
+    rv_ll, rv_mm = -np.inf, None
+    for kk in range(trials):
+        mm = optimize(
+            None,
+            est,
+            init_estimator=i_est,
+            enc_data=enc_data,
+            enc_vdata=enc_vdata,
+            max_its=max_its,
+            delta=delta,
+            init_p=init_p,
+            rng=rng,
+            out=out,
+            print_iter=print_iter,
+            reuse_estep_ll=reuse_estep_ll,
+            objective=objective,
+        )
+        _, vll = seq_log_density_sum(score_data, mm)
+        if out is not None:
+            out.write("Trial %d. VLL=%f\n" % (kk + 1, vll))
+        if vll > rv_ll:
+            rv_ll, rv_mm = vll, mm
+
+    return rv_ll, rv_mm
+
+
+# --- streaming / online estimation ------------------------------------------
 def constant(rho: float):
     """Return a constant streaming step-size schedule."""
     if rho <= 0.0 or rho > 1.0:
