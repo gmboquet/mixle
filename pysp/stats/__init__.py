@@ -500,6 +500,12 @@ __all__ = [
     "BradleyTerryAccumulator",
     "BradleyTerryAccumulatorFactory",
     "BradleyTerryDataEncoder",
+    "LowRankPermutationDistribution",
+    "LowRankPermutationSampler",
+    "LowRankPermutationEstimator",
+    "LowRankPermutationAccumulator",
+    "LowRankPermutationAccumulatorFactory",
+    "LowRankPermutationDataEncoder",
     "SpanningTreeDistribution",
     "SpanningTreeSampler",
     "SpanningTreeEstimator",
@@ -1189,6 +1195,14 @@ from pysp.stats.rankings.generalized_mallows_model import (
     GeneralizedMallowsModelDistribution,
     GeneralizedMallowsModelEstimator,
     GeneralizedMallowsModelSampler,
+)
+from pysp.stats.rankings.low_rank_permutation import (
+    LowRankPermutationAccumulator,
+    LowRankPermutationAccumulatorFactory,
+    LowRankPermutationDataEncoder,
+    LowRankPermutationDistribution,
+    LowRankPermutationEstimator,
+    LowRankPermutationSampler,
 )
 from pysp.stats.rankings.mallows import (
     MallowsDataEncoder,
