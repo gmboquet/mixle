@@ -78,6 +78,14 @@ from pysp.inference.glm import (
     robust_regression,
 )
 
+# model comparison: paired score differences + non-nested (Vuong/Clarke) tests
+from pysp.inference.model_comparison import (
+    clarke_test,
+    compare_elpd,
+    paired_score_difference,
+    vuong_test,
+)
+
 # multiple-testing correction (FWER / FDR) and evidence combination
 from pysp.inference.multiple_testing import (
     adjust_pvalues,
@@ -268,6 +276,11 @@ __all__ = [
     "DemingFit",
     "simex",
     "propagate_uncertainty",
+    # model comparison (paired score diffs, Vuong/Clarke non-nested, elpd comparison)
+    "paired_score_difference",
+    "vuong_test",
+    "clarke_test",
+    "compare_elpd",
     # conformal prediction (distribution-free intervals; split/J+/CV+/Mondrian/weighted)
     "split_conformal",
     "jackknife_plus",
