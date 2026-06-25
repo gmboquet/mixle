@@ -312,11 +312,36 @@ class ModelParallelEstimator(ParameterEstimator):
 
 register_encoded_data_backend("model_parallel", _model_parallel_backend, aliases=("mp_model",))
 
+
+# --- C2 -> C3 wiring: let the planner choose the axis and size the model split --------------------
+def auto_parallel_estimator(
+    estimator: Any, model: Any, resources: Any = None, *, n_data: int | None = None, min_components_per_shard: int = 1
+) -> tuple[Any, Any]:
+    """Consult the C2 planner (:func:`decompose_model`) and return ``(estimator, decomposition)``.
+
+    When the planner picks model-parallelism for ``model`` on ``resources``, the estimator is wrapped in
+    :class:`ModelParallelEstimator` sized to the planner's cuts; otherwise the plain estimator is returned
+    (replicate the model, shard the data -- already optimal when N dominates). Either way, run the returned
+    estimator through ``optimize(data, est, backend=<data backend>)``: the data axis is handled by
+    ``backend`` and the model axis, if any, by the wrapper -- composing into the data x model split. The
+    ``decomposition``'s ``rationale`` explains the choice. ``resources`` defaults to the local CPU slots
+    (use ``Resources.from_spark(sc)`` / ``Resources.from_mpi()`` to size the split to a real cluster)."""
+    from pysp.utils.parallel.model_decomposition import decompose_model
+    from pysp.utils.parallel.planner import Resources
+
+    resources = Resources.local() if resources is None else resources
+    dec = decompose_model(model, resources, n_data=n_data, min_components_per_shard=min_components_per_shard)
+    if dec.is_model_parallel:
+        return ModelParallelEstimator(estimator, num_workers=len(dec.cuts)), dec
+    return estimator, dec
+
+
 __all__ = [
     "ModelParallelEncodedData",
     "ModelParallelEstimator",
     "ModelParallelAccumulator",
     "ModelParallelAccumulatorFactory",
     "model_parallel_fold",
+    "auto_parallel_estimator",
     "_model_parallel_backend",
 ]

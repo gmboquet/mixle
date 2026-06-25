@@ -277,5 +277,51 @@ class MPIDataModelTest(unittest.TestCase):
         self.assertIn("MPI-DM-OK", res.stdout)
 
 
+class AutoWiringTest(unittest.TestCase):
+    """auto_parallel_estimator consults the C2 planner to pick the axis and size the model split."""
+
+    def test_wide_mixture_picks_model_parallel(self):
+        from pysp.utils.parallel import auto_parallel_estimator
+        from pysp.utils.parallel.planner import Resources
+
+        est = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(12)])
+        model = stats.MixtureDistribution([stats.GaussianDistribution(float(i), 1.0) for i in range(12)], [1 / 12] * 12)
+        chosen, dec = auto_parallel_estimator(est, model, Resources.local(4), n_data=40)
+        self.assertTrue(dec.is_model_parallel)
+        self.assertIsInstance(chosen, ModelParallelEstimator)
+        self.assertEqual(chosen.num_workers, len(dec.cuts))
+
+    def test_small_model_large_n_picks_data_parallel(self):
+        from pysp.utils.parallel import auto_parallel_estimator
+        from pysp.utils.parallel.planner import Resources
+
+        est = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(5)])
+        model = stats.MixtureDistribution([stats.GaussianDistribution(float(i), 1.0) for i in range(5)], [0.2] * 5)
+        chosen, dec = auto_parallel_estimator(est, model, Resources.local(4), n_data=100_000)
+        self.assertFalse(dec.is_model_parallel)
+        self.assertIs(chosen, est)  # plain estimator -> replicate model, shard data
+
+    def test_single_device_picks_data_parallel(self):
+        from pysp.utils.parallel import auto_parallel_estimator
+        from pysp.utils.parallel.planner import Resources
+
+        est = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(8)])
+        model = stats.MixtureDistribution([stats.GaussianDistribution(float(i), 1.0) for i in range(8)], [1 / 8] * 8)
+        chosen, dec = auto_parallel_estimator(est, model, Resources.local(1), n_data=40)
+        self.assertFalse(dec.is_model_parallel)
+        self.assertIs(chosen, est)
+
+    def test_auto_chosen_estimator_matches_base(self):
+        from pysp.utils.parallel import auto_parallel_estimator
+        from pysp.utils.parallel.planner import Resources
+
+        est, init, data = _mixture_data(k=8, n=400)
+        base = optimize(data, est, prev_estimate=init, max_its=8, out=None, backend="local")
+        chosen, dec = auto_parallel_estimator(est, init, Resources.local(4), n_data=len(data))
+        self.assertTrue(dec.is_model_parallel)  # 8 components over 4 cpus, small N
+        auto = optimize(data, chosen, prev_estimate=init, max_its=8, out=None, backend="local")
+        self.assertEqual(str(base), str(auto))  # single-partition local -> bit-identical
+
+
 if __name__ == "__main__":
     unittest.main()
