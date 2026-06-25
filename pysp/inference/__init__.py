@@ -69,6 +69,15 @@ from pysp.inference.resampling import (
     wild_bootstrap,
 )
 
+# robust / sandwich covariance for M-estimators and regression (honest SEs under misspecification)
+from pysp.inference.robust import (
+    cluster_robust_covariance,
+    newey_west_covariance,
+    ols_robust_covariance,
+    robust_standard_errors,
+    sandwich_covariance,
+)
+
 # proper scoring rules — fair currency for comparing probabilistic forecasts / interval methods
 from pysp.inference.scoring import (
     brier_decomposition,
@@ -160,6 +169,12 @@ __all__ = [
     "wild_bootstrap",
     "permutation_test",
     "PermutationResult",
+    # robust / sandwich covariance (HC0-3, cluster-robust, Newey-West HAC, generic M-estimator)
+    "sandwich_covariance",
+    "ols_robust_covariance",
+    "cluster_robust_covariance",
+    "newey_west_covariance",
+    "robust_standard_errors",
     # proper scoring rules (lower is better; pair with resampling for score-difference CIs)
     "log_score",
     "brier_score",
