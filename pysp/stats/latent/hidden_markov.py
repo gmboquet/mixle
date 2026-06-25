@@ -712,32 +712,31 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 pr_obs -= pr_max0
                 np.exp(pr_obs, out=pr_obs)
 
-            # Vectorized alpha pass
-            band = idx_bands[0]
-            alphas_prev = np.multiply(pr_obs[band[0] : band[1], :], w)
-            temp = alphas_prev.sum(axis=1, keepdims=True)
-            alphas_prev /= temp
+            # Vectorized alpha pass. Impossible-observation rows divide 0/0 and log 0; that produces
+            # NaN/-inf which is sanitized to -inf at the end, so the transient warnings are suppressed.
+            with np.errstate(invalid="ignore", divide="ignore"):
+                band = idx_bands[0]
+                alphas_prev = np.multiply(pr_obs[band[0] : band[1], :], w)
+                temp = alphas_prev.sum(axis=1, keepdims=True)
+                alphas_prev /= temp
 
-            np.log(temp, out=temp)
-            temp2 = pr_max0[band[0] : band[1], 0]
-            ll_ret[good[:, 0]] += temp[:, 0] + temp2
-
-            for i in range(1, max_len):
-                band = idx_bands[i]
-                has_next_loc = has_next[i - 1]
-
-                alphas_next = np.dot(alphas_prev[has_next_loc, :], a_mat)
-                alphas_next *= pr_obs[band[0] : band[1], :]
-                pr_max = alphas_next.sum(axis=1, keepdims=True)
-                alphas_next /= pr_max
-                alphas_prev = alphas_next
-
-                np.log(pr_max, out=pr_max)
+                np.log(temp, out=temp)
                 temp2 = pr_max0[band[0] : band[1], 0]
-                ll_ret[good[:, i]] += pr_max[:, 0] + temp2
+                ll_ret[good[:, 0]] += temp[:, 0] + temp2
 
-            # nz = len_vec != 0
-            # ll_ret[nz] /= len_vec[nz]
+                for i in range(1, max_len):
+                    band = idx_bands[i]
+                    has_next_loc = has_next[i - 1]
+
+                    alphas_next = np.dot(alphas_prev[has_next_loc, :], a_mat)
+                    alphas_next *= pr_obs[band[0] : band[1], :]
+                    pr_max = alphas_next.sum(axis=1, keepdims=True)
+                    alphas_next /= pr_max
+                    alphas_prev = alphas_next
+
+                    np.log(pr_max, out=pr_max)
+                    temp2 = pr_max0[band[0] : band[1], 0]
+                    ll_ret[good[:, i]] += pr_max[:, 0] + temp2
 
             ll_ret[np.isnan(ll_ret)] = -np.inf
 
@@ -2056,8 +2055,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
 
             pr_max0 = pr_obs.max(axis=1, keepdims=True)
-            pr_obs -= pr_max0
-            np.exp(pr_obs, out=pr_obs)
+            with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+                pr_obs -= pr_max0
+                np.exp(pr_obs, out=pr_obs)
+            _zero_impossible_emission_rows(pr_obs)
 
             # When the fused-EM fast path requests it, accumulate the per-sequence data
             # log-likelihood from the forward normalizers (un-floored row sums + emission max),
@@ -2092,7 +2093,9 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
             band2 = idx_bands[-1]
             prev_beta = np.ones((band2[1] - band2[0], num_states))
-            alphas[band2[0] : band2[1], :] /= alphas[band2[0] : band2[1], :].sum(axis=1, keepdims=True)
+            a_last = alphas[band2[0] : band2[1], :].sum(axis=1, keepdims=True)
+            a_last[a_last == 0] = 1.0  # impossible-observation rows are all-zero -> avoid 0/0 -> NaN
+            alphas[band2[0] : band2[1], :] /= a_last
 
             # Vectorized beta pass
             for i in range(max_len - 2, -1, -1):
