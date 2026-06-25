@@ -59,6 +59,16 @@ from pysp.inference.multiple_testing import (
 # the Posterior algebra — inference produces posteriors; you draw from them through one interface
 from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 
+# bootstrap / permutation inference for arbitrary statistics (distribution-free uncertainty)
+from pysp.inference.resampling import (
+    BootstrapResult,
+    PermutationResult,
+    block_bootstrap,
+    bootstrap,
+    permutation_test,
+    wild_bootstrap,
+)
+
 # proper scoring rules — fair currency for comparing probabilistic forecasts / interval methods
 from pysp.inference.scoring import (
     brier_decomposition,
@@ -143,6 +153,13 @@ __all__ = [
     "fisher_combine",
     "stouffer_combine",
     "tippett_combine",
+    # bootstrap / permutation inference (distribution-free uncertainty for any statistic)
+    "bootstrap",
+    "BootstrapResult",
+    "block_bootstrap",
+    "wild_bootstrap",
+    "permutation_test",
+    "PermutationResult",
     # proper scoring rules (lower is better; pair with resampling for score-difference CIs)
     "log_score",
     "brier_score",
