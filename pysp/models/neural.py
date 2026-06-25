@@ -318,9 +318,3 @@ def _torch_engine(
 
         engine = engine_with_precision(engine, precision)
     return torch, engine
-
-
-# Backward-compatible aliases for the former NN (neural network) spellings.
-CategoricalClassificationNN = CategoricalClassificationNeuralNetwork
-GaussianRegressionNN = GaussianRegressionNeuralNetwork
-PoissonRegressionNN = PoissonRegressionNeuralNetwork

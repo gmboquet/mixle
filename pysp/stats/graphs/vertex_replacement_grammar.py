@@ -643,7 +643,9 @@ class VertexReplacementGrammarDistribution(SequenceEncodableProbabilityDistribut
             VertexReplacementGrammarSampler object.
 
         """
-        return VertexReplacementGrammarSampler(self.grammar, orig_n=self.orig_n, seed=seed, start_symbol=self.start_symbol)
+        return VertexReplacementGrammarSampler(
+            self.grammar, orig_n=self.orig_n, seed=seed, start_symbol=self.start_symbol
+        )
 
     def estimator(self, pseudo_count=None):
         """Create a VertexReplacementGrammarEstimator object.
@@ -889,7 +891,9 @@ class VertexReplacementGrammarEstimator(ParameterEstimator):
 
     def accumulator_factory(self):
         """Returns a VertexReplacementGrammarAccumulatorFactory carrying the rule structure."""
-        return VertexReplacementGrammarAccumulatorFactory(grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys)
+        return VertexReplacementGrammarAccumulatorFactory(
+            grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys
+        )
 
     def accumulatorFactory(self):
         """Deprecated alias for accumulator_factory()."""
@@ -908,7 +912,9 @@ class VertexReplacementGrammarEstimator(ParameterEstimator):
         """
         grammar = suff_stat if suff_stat is not None else self.grammar
         if grammar is None:
-            raise ValueError("VertexReplacementGrammarEstimator needs a rule structure (grammar=...) to estimate frequencies.")
+            raise ValueError(
+                "VertexReplacementGrammarEstimator needs a rule structure (grammar=...) to estimate frequencies."
+            )
         if self.pseudo_count is not None:
             for rlist in grammar.rule_dict.values():
                 for rule in rlist:
@@ -946,16 +952,3 @@ class VertexReplacementGrammarDataEncoder(DataSequenceEncoder):
 
         """
         return x
-
-
-# --- Backward-compatible aliases -------------------------------------------------------------------
-# The precise names above are canonical; these keep the pre-0.4 generic "Grammar*" spellings working.
-GrammarRule = VertexReplacementRule
-GrammarDistribution = VertexReplacementGrammarDistribution
-GrammarSampler = VertexReplacementGrammarSampler
-GrammarEstimator = VertexReplacementGrammarEstimator
-GrammarEstimatorAccumulator = VertexReplacementGrammarAccumulator
-GrammarAccumulator = VertexReplacementGrammarAccumulator
-GrammarAccumulatorFactory = VertexReplacementGrammarAccumulatorFactory
-GrammarDataEncoder = VertexReplacementGrammarDataEncoder
-VRG = VertexReplacementGrammar

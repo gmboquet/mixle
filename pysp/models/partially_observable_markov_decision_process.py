@@ -322,9 +322,3 @@ def _as_simplex(x: Any, size: int, name: str) -> np.ndarray:
 def _normalize_last_axis(x: np.ndarray) -> np.ndarray:
     totals = x.sum(axis=-1, keepdims=True)
     return np.divide(x, totals, out=np.zeros_like(x), where=totals > 0.0)
-
-
-# Backward-compatible aliases for the former POMDP names.
-POMDPModel = PartiallyObservableMarkovDecisionProcessModel
-POMDPFilterResult = PartiallyObservableMarkovDecisionProcessFilterResult
-POMDPFitResult = PartiallyObservableMarkovDecisionProcessFitResult

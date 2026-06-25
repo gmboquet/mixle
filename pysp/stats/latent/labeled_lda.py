@@ -1609,13 +1609,3 @@ def seq_posterior(estimate, x):
 # --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
 LabeledLDAAccumulator = LabeledLDAEstimatorAccumulator
 LabeledLDAAccumulatorFactory = LabeledLDAEstimatorAccumulatorFactory
-
-
-# Backward-compatible aliases for the former LLDA (labeled LDA) names.
-LLDADistribution = LabeledLDADistribution
-LLDASampler = LabeledLDASampler
-LLDAEstimator = LabeledLDAEstimator
-LLDAEstimatorAccumulator = LabeledLDAEstimatorAccumulator
-LLDAEstimatorAccumulatorFactory = LabeledLDAEstimatorAccumulatorFactory
-LLDADataEncoder = LabeledLDADataEncoder
-LLDALabelSetStats = LabeledLDALabelSetStats

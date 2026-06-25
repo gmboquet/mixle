@@ -19,10 +19,6 @@ from pysp.models.dirichlet_process_mixture import (
     sample_crp_assignments,
     stick_breaking_weights,
 )
-
-# Backward-compatible DPM / POMDP aliases (redundant import alias marks an intentional re-export).
-from pysp.models.dirichlet_process_mixture import TruncatedDPMFitResult as TruncatedDPMFitResult  # noqa: F401
-from pysp.models.dirichlet_process_mixture import TruncatedDPMModel as TruncatedDPMModel  # noqa: F401
 from pysp.models.gaussian_process import GaussianProcessRegressor
 from pysp.models.grammar import (
     GrammarLearningResult,
@@ -39,22 +35,12 @@ from pysp.models.neural import (
     PoissonRegressionNeuralNetwork,
     make_mlp,
 )
-
-# Backward-compatible NN aliases (redundant import alias marks an intentional re-export).
-from pysp.models.neural import CategoricalClassificationNN as CategoricalClassificationNN  # noqa: F401
-from pysp.models.neural import GaussianRegressionNN as GaussianRegressionNN  # noqa: F401
-from pysp.models.neural import PoissonRegressionNN as PoissonRegressionNN  # noqa: F401
 from pysp.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessFilterResult,
     PartiallyObservableMarkovDecisionProcessFitResult,
     PartiallyObservableMarkovDecisionProcessModel,
     baum_welch_pomdp,
 )
-from pysp.models.partially_observable_markov_decision_process import (
-    POMDPFilterResult as POMDPFilterResult,  # noqa: F401
-)
-from pysp.models.partially_observable_markov_decision_process import POMDPFitResult as POMDPFitResult  # noqa: F401
-from pysp.models.partially_observable_markov_decision_process import POMDPModel as POMDPModel  # noqa: F401
 from pysp.models.random_forest import (
     RandomForestConditional,
     RandomForestEstimator,
