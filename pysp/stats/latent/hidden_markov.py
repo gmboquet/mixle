@@ -106,21 +106,34 @@ from pysp.inference.fisher import (
     to_fisher,
 )
 
+_STATE_POOLS: dict[int, Any] = {}  # cached thread pools by worker count (pool creation is not free)
 
-def _par_states(num_states: int, fn: Any, workers: int | None) -> None:
-    """Run ``fn(i)`` for each state -- across a thread pool when ``workers`` is set, else serially.
 
-    Used to parallelize the per-state emission scoring and per-state sufficient-statistic accumulation
-    (each writes a disjoint column / a disjoint accumulator), which is the dominant cost of an HMM with
-    rich emissions and is what lets a massive HMM use the cluster on even a single observation sequence
-    (the forward-backward recursion stays serial). Threading only reorders disjoint writes, so the result
-    is bit-identical to the serial loop; ``workers=None`` IS the serial loop (zero behaviour change).
-    """
-    if workers and workers > 1 and num_states > 1:
+def _state_pool(workers: int) -> Any:
+    pool = _STATE_POOLS.get(workers)
+    if pool is None:
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=int(workers)) as pool:
-            list(pool.map(fn, range(num_states)))
+        pool = ThreadPoolExecutor(max_workers=int(workers))
+        _STATE_POOLS[workers] = pool
+    return pool
+
+
+def _par_states(num_states: int, fn: Any, workers: int | None, work_hint: float = float("inf")) -> None:
+    """Run ``fn(i)`` for each state -- across a thread pool when ``workers`` is set AND the work is large
+    enough to amortize the dispatch, else serially.
+
+    Parallelizes the per-state emission scoring and per-state sufficient-statistic accumulation (each
+    writes a disjoint column / disjoint accumulator), the dominant cost of a *rich-emission* HMM -- this
+    is what lets such a massive HMM use the cluster even on a single observation sequence (the
+    forward-backward recursion stays serial; a dense-transition HMM is O(T*S^2)-bound and needs a
+    structured transition operator instead, not naive state threading). Threading only reorders disjoint
+    writes, so the result is bit-identical to the serial loop; ``workers`` None/1 IS the serial loop. The
+    pool is cached and reused, and small batches (``work_hint`` below a threshold) stay serial so the
+    balancer never makes a small problem slower.
+    """
+    if workers and workers > 1 and num_states > 1 and work_hint >= 5.0e6:
+        list(_state_pool(int(workers)).map(fn, range(num_states)))
     else:
         for i in range(num_states):
             fn(i)
@@ -2097,7 +2110,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             def _score0(i: int) -> None:
                 pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
 
-            _par_states(num_states, _score0, self._state_workers)
+            _par_states(num_states, _score0, self._state_workers, pr_obs.shape[0] * num_states)
 
             pr_max0 = pr_obs.max(axis=1, keepdims=True)
             with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
@@ -2191,7 +2204,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 alphas[:, i] *= weights[idx_vec]
                 self.accumulators[i].seq_update(enc_data, alphas[:, i], estimate.topics[i])
 
-            _par_states(num_states, _accum0, self._state_workers)
+            _par_states(num_states, _accum0, self._state_workers, alphas.shape[0] * num_states)
 
             self.state_counts += alphas.sum(axis=0)
 
@@ -2228,7 +2241,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             def _score1(i: int) -> None:
                 pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
 
-            _par_states(num_states, _score1, self._state_workers)
+            _par_states(num_states, _score1, self._state_workers, pr_obs.shape[0] * num_states)
 
             pr_max = pr_obs.max(axis=1, keepdims=True)
             with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
@@ -2261,7 +2274,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             def _accum1(i: int) -> None:  # state-parallel: disjoint per-state accumulators
                 self.accumulators[i].seq_update(enc_data, alphas[:, i], estimate.topics[i])
 
-            _par_states(num_states, _accum1, self._state_workers)
+            _par_states(num_states, _accum1, self._state_workers, alphas.shape[0] * num_states)
 
             self.state_counts += alphas.sum(axis=0)
 
