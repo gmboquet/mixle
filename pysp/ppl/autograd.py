@@ -189,7 +189,11 @@ class GradTarget:
                 pf = s.handle._family.name
                 theta = vals[s.index]
                 prep_p, apply_p = self._scorers[pf]
-                pargs = [self._t(z) for z in s.handle._args]
+                # hierarchical prior: substitute a sampled hyperparameter tensor for an RV-valued arg
+                pargs = [
+                    vals[s.parent_args[j]] if (s.parent_args and j in s.parent_args) else self._t(z)
+                    for j, z in enumerate(s.handle._args)
+                ]
                 xt = theta.reshape(1)
                 plp = plp + apply_p(pargs, prep_p(xt, torch), xt, self._eng).sum()
         return ll + plp + logj
@@ -227,7 +231,10 @@ class GradTarget:
             if s.handle is not None:
                 pf = s.handle._family.name
                 prep_p, apply_p = self._scorers[pf]
-                pargs = [self._t(z) for z in s.handle._args]
+                pargs = [
+                    vals[s.parent_args[j]].reshape(B, 1) if (s.parent_args and j in s.parent_args) else self._t(z)
+                    for j, z in enumerate(s.handle._args)
+                ]
                 xt = vals[s.index].reshape(B, 1)
                 plp = plp + apply_p(pargs, prep_p(xt, torch), xt, self._eng).sum(dim=1)
         return ll + plp + logj
@@ -455,10 +462,15 @@ def grad_target(rv: RandomVariable, data):
 
     if rv._family.name not in scorers:
         return None
-    for a in rv._args:  # every prior's family must also have a Torch scorer
-        if isinstance(a, RandomVariable):
-            if isinstance(a._family, CompositeFamily) or a._family.name not in scorers:
-                return None
+
+    def _prior_ok(a) -> bool:  # every prior family (including hierarchical hyperparameters) needs a scorer
+        if isinstance(a._family, CompositeFamily) or a._family.name not in scorers:
+            return False
+        return all(_prior_ok(z) for z in a._args if isinstance(z, RandomVariable))
+
+    for a in rv._args:
+        if isinstance(a, RandomVariable) and not _prior_ok(a):
+            return None
     _require_flat(rv)
     fam, slots, build, unpack, (dmean, dstd) = _target_parts(rv, data)
     return GradTarget(rv, data, slots, build, unpack, dmean, dstd)
