@@ -83,6 +83,16 @@ from pysp.inference.multiple_testing import (
     tippett_combine,
 )
 
+# ordinal (cumulative-link) regression + rank-concordance measures
+from pysp.inference.ordinal import (
+    OrdinalResult,
+    concordance_summary,
+    goodman_kruskal_gamma,
+    kendall_tau,
+    ordinal_regression,
+    somers_d,
+)
+
 # the Posterior algebra — inference produces posteriors; you draw from them through one interface
 from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 
@@ -238,6 +248,13 @@ __all__ = [
     "aalen_additive",
     "frailty_cox",
     "FrailtyCoxResult",
+    # ordinal regression + rank concordance
+    "ordinal_regression",
+    "OrdinalResult",
+    "concordance_summary",
+    "kendall_tau",
+    "goodman_kruskal_gamma",
+    "somers_d",
     # cross-validation fold generators (i.i.d., grouped, temporal, spatial-block, nested)
     "kfold",
     "blocked_kfold",
