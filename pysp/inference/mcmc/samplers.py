@@ -720,6 +720,8 @@ def nuts(
     samples: list[Any] = []
     log_probs: list[float] = []
     depths: list[int] = []
+    divergences: list[bool] = []
+    div_this = [False]  # set by build_tree when a leapfrog step diverges (energy error / non-finite)
     total = warmup + num_samples * thin
 
     # Optional diagonal mass-matrix adaptation: accumulate the position variance over the first half
@@ -739,6 +741,8 @@ def nuts(
             joint1 = lp1 - kinetic(r1)
             n1 = 1 if logu <= joint1 else 0
             s1 = 1 if (joint1 - logu) > -delta_max and np.isfinite(joint1) else 0
+            if s1 == 0:  # base-case termination == the Hamiltonian diverged (U-turns stop higher up)
+                div_this[0] = True
             a = min(1.0, math.exp(min(joint1 - joint0, 0.0))) if np.isfinite(joint1) else 0.0
             return theta1, r1, grad1, theta1, r1, grad1, theta1, lp1, grad1, n1, s1, a, 1
         tm, rm, gm, tp, rp, gp, tpr, lpr, gpr, n1, s1, a1, na1 = build_tree(theta, r, grad, logu, v, j - 1, eps, joint0)
@@ -756,6 +760,7 @@ def nuts(
         return tm, rm, gm, tp, rp, gp, tpr, lpr, gpr, n1, s1, a1, na1
 
     for it in range(total):
+        div_this[0] = False
         r0 = sqrt_m * rng.standard_normal(shape)
         joint0 = cur_lp - kinetic(r0)
         logu = joint0 - rng.exponential()  # log of a slice height u ~ Uniform(0, exp(joint0))
@@ -814,6 +819,7 @@ def nuts(
             samples.append(_restore_numeric_state(cur))
             log_probs.append(cur_lp)
             depths.append(j)
+            divergences.append(bool(div_this[0]))
 
     res = MCMCResult(
         samples=samples,
@@ -822,6 +828,7 @@ def nuts(
         transition_labels=tuple("nuts" for _ in samples),
     )
     object.__setattr__(res, "tree_depth", np.asarray(depths, dtype=int))  # frozen dataclass
+    object.__setattr__(res, "divergences", np.asarray(divergences, dtype=bool))  # post-warmup divergent draws
     object.__setattr__(res, "step_size", float(eps))
     object.__setattr__(res, "num_target_evals", int(eval_count[0]))
     object.__setattr__(res, "inverse_mass", np.asarray(minv, dtype=float))  # adapted (or fixed) diagonal
