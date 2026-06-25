@@ -51,7 +51,9 @@ class ThurstoneMostellerDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
-            engine_ready=("numpy",), kernel_status="numpy_only", numpy_only_reason="Probit pairwise likelihood is numpy-native."
+            engine_ready=("numpy",),
+            kernel_status="numpy_only",
+            numpy_only_reason="Probit pairwise likelihood is numpy-native.",
         )
 
     def __init__(self, mu: Sequence[float] | np.ndarray, name: str | None = None, keys: str | None = None) -> None:
@@ -66,7 +68,9 @@ class ThurstoneMostellerDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         return "ThurstoneMostellerDistribution(%s, name=%s, keys=%s)" % (
-            repr([float(v) for v in self.mu]), repr(self.name), repr(self.keys)
+            repr([float(v) for v in self.mu]),
+            repr(self.name),
+            repr(self.keys),
         )
 
     def density(self, x: tuple[int, int]) -> float:
@@ -305,7 +309,9 @@ class _BaseTieDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
-            engine_ready=("numpy",), kernel_status="numpy_only", numpy_only_reason="Paired-comparison-with-ties likelihood is numpy-native."
+            engine_ready=("numpy",),
+            kernel_status="numpy_only",
+            numpy_only_reason="Paired-comparison-with-ties likelihood is numpy-native.",
         )
 
     def __init__(self, log_w, nu, name, keys) -> None:
@@ -370,7 +376,10 @@ class DavidsonDistribution(_BaseTieDistribution):
 
     def __str__(self) -> str:
         return "DavidsonDistribution(%s, nu=%s, name=%s, keys=%s)" % (
-            repr([float(v) for v in self.log_w]), repr(self.nu), repr(self.name), repr(self.keys)
+            repr([float(v) for v in self.log_w]),
+            repr(self.nu),
+            repr(self.name),
+            repr(self.keys),
         )
 
     def _outcome_logp(self, lo, hi, o):
@@ -400,7 +409,10 @@ class RaoKupperDistribution(_BaseTieDistribution):
 
     def __str__(self) -> str:
         return "RaoKupperDistribution(%s, nu=%s, name=%s, keys=%s)" % (
-            repr([float(v) for v in self.log_w]), repr(self.nu), repr(self.name), repr(self.keys)
+            repr([float(v) for v in self.log_w]),
+            repr(self.nu),
+            repr(self.name),
+            repr(self.keys),
         )
 
     def _outcome_logp(self, lo, hi, o):

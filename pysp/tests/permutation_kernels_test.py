@@ -75,9 +75,7 @@ class PermutationKernelTest(unittest.TestCase):
                 for _ in range(6):
                     b = tuple(rng.permutation(n))
                     for m, f in _REFS.items():
-                        self.assertEqual(
-                            K.permutation_distance(np.array(a), np.array(b), m), f(a, b), msg=(m, a, b)
-                        )
+                        self.assertEqual(K.permutation_distance(np.array(a), np.array(b), m), f(a, b), msg=(m, a, b))
 
     def test_batched_matches_per_pair_large_n(self):
         rng = np.random.RandomState(1)

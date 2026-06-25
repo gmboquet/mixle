@@ -40,10 +40,14 @@ class NewPplDistributionsTest(unittest.TestCase):
         self._recovers(HalfNormalDistribution(2.0), lambda: P.HalfNormal(free), {"sigma": 2.0})
 
     def test_inverse_gamma(self):
-        self._recovers(InverseGammaDistribution(4.0, 6.0), lambda: P.InverseGamma(free, free), {"alpha": 4.0, "beta": 6.0})
+        self._recovers(
+            InverseGammaDistribution(4.0, 6.0), lambda: P.InverseGamma(free, free), {"alpha": 4.0, "beta": 6.0}
+        )
 
     def test_inverse_gaussian(self):
-        self._recovers(InverseGaussianDistribution(2.0, 3.0), lambda: P.InverseGaussian(free, free), {"mu": 2.0, "lam": 3.0})
+        self._recovers(
+            InverseGaussianDistribution(2.0, 3.0), lambda: P.InverseGaussian(free, free), {"mu": 2.0, "lam": 3.0}
+        )
 
     def test_gumbel(self):
         self._recovers(GumbelDistribution(1.0, 2.0), lambda: P.Gumbel(free, free), {"loc": 1.0, "scale": 2.0})
@@ -61,18 +65,29 @@ class NewPplDistributionsTest(unittest.TestCase):
         self._recovers(VonMisesDistribution(0.5, 3.0), lambda: P.VonMises(free, free), {"mu": 0.5, "kappa": 3.0})
 
     def test_gev(self):
-        self._recovers(GeneralizedExtremeValueDistribution(1.0, 2.0, 0.1), lambda: P.GEV(free, free, free), {"loc": 1.0, "scale": 2.0})
+        self._recovers(
+            GeneralizedExtremeValueDistribution(1.0, 2.0, 0.1),
+            lambda: P.GEV(free, free, free),
+            {"loc": 1.0, "scale": 2.0},
+        )
 
     def test_tweedie(self):
         self._recovers(TweedieDistribution(3.0, 1.0, 1.5), lambda: P.Tweedie(free, free), {"mu": 3.0}, n=4000)
 
     def test_generalized_gaussian(self):
         self._recovers(
-            GeneralizedGaussianDistribution(0.0, 1.5, 2.0), lambda: P.GeneralizedGaussian(free, free, free), {"alpha": 1.5}
+            GeneralizedGaussianDistribution(0.0, 1.5, 2.0),
+            lambda: P.GeneralizedGaussian(free, free, free),
+            {"alpha": 1.5},
         )
 
     def test_generalized_pareto(self):
-        self._recovers(GeneralizedParetoDistribution(2.0, 0.2, 0.0), lambda: P.GeneralizedPareto(free, free, free), {"scale": 2.0}, rel=0.3)
+        self._recovers(
+            GeneralizedParetoDistribution(2.0, 0.2, 0.0),
+            lambda: P.GeneralizedPareto(free, free, free),
+            {"scale": 2.0},
+            rel=0.3,
+        )
 
     def test_nakagami(self):
         self._recovers(NakagamiDistribution(2.0, 4.0), lambda: P.Nakagami(free, free), {"m": 2.0, "omega": 4.0})

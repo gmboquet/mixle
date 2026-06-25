@@ -250,9 +250,7 @@ class GeneralizedMallowsModelAccumulatorFactory(StatisticAccumulatorFactory):
 class GeneralizedMallowsModelEstimator(ParameterEstimator):
     """Copeland consensus for ``sigma0`` and a per-stage moment match for each ``theta_i``."""
 
-    def __init__(
-        self, dim: int, reservoir: int = 10000, name: str | None = None, keys: str | None = None
-    ) -> None:
+    def __init__(self, dim: int, reservoir: int = 10000, name: str | None = None, keys: str | None = None) -> None:
         if dim is None or dim < 2:
             raise ValueError("GeneralizedMallowsModelEstimator requires dim >= 2.")
         self.dim = int(dim)

@@ -45,8 +45,7 @@ def _shape(model: str, h: np.ndarray, rng: float, nu: float = 1.5) -> np.ndarray
         s = 1.0 - np.where(h == 0, 1.0, corr)
     else:
         raise ValueError(
-            "model must be 'spherical', 'exponential', 'gaussian' "
-            "(aka 'squared_exponential' / 'rbf'), or 'matern'."
+            "model must be 'spherical', 'exponential', 'gaussian' (aka 'squared_exponential' / 'rbf'), or 'matern'."
         )
     return np.clip(s, 0.0, 1.0)
 

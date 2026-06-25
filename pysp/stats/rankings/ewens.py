@@ -117,7 +117,10 @@ class EwensDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         return "EwensDistribution(dim=%d, theta=%s, name=%s, keys=%s)" % (
-            self.dim, repr(self.theta), repr(self.name), repr(self.keys)
+            self.dim,
+            repr(self.theta),
+            repr(self.name),
+            repr(self.keys),
         )
 
     def density(self, x: Sequence[int]) -> float:
