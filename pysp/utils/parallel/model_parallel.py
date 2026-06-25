@@ -10,9 +10,11 @@ Here the model's shardable axis is distributed. Two entry points share one recur
   ranks, mp pool) while the *model* axis is distributed inside each partition's accumulator. This is the
   data x model composition -- both axes at once.
 
-The fold (:func:`model_parallel_fold`) is **recursive**: it walks the model tree and distributes the
-per-unit work at the single *widest* shardable axis, recursing serially elsewhere (bounded threads, no
-nested pools). Each recursive case reproduces the corresponding accumulator's ``seq_update`` exactly:
+The fold (:func:`model_parallel_fold`) is **recursive**: it walks the whole model tree and threads the
+axes that a per-node **compute-cost** model says save the most wall-time (``_parallel_ids``, consistent
+with the C2 planner -- a narrow batch of heavy MVGaussians beats a wider batch of cheap leaves),
+recursing serially below any threaded node so no two pools ever nest. Each recursive case reproduces the
+corresponding accumulator's ``seq_update`` exactly:
 
 * **FACTOR** (Composite/Record) -- the per-factor accumulators are independent, so the per-factor
   ``seq_update`` calls are distributed (bit-identical).
@@ -56,16 +58,47 @@ def _run(parallel: bool, fn: Any, items: Any, num_workers: int | None) -> None:
             fn(it)
 
 
-def _spine_units(model: Any) -> int:
-    """The widest shardable ``num_units`` anywhere in the model tree -- the one axis we parallelize."""
-    from pysp.utils.parallel.model_decomposition import shard_children
+def _parallel_ids(model: Any, num_workers: int | None) -> frozenset[int]:
+    """The set of tree nodes to thread, chosen by COMPUTE COST (not unit count), consistent with the C2
+    planner -- so the executor parallelizes the genuinely heaviest axes, e.g. a narrow batch of D*D
+    MVGaussians over a wider batch of cheap categoricals.
 
-    dc = decomposition_for(model)
-    best = dc.num_units if dc.is_shardable else 1
-    for child in shard_children(model, dc):
-        if child is not None:
-            best = max(best, _spine_units(child))
-    return best
+    Every shardable node is scored with the planner's benefit = total_work - max(max_unit_work,
+    total_work / P) (greedy-schedule time saved; a fat bottleneck unit caps it). We thread every node tied
+    at the maximum benefit, which picks up several independent comparable axes (e.g. sibling mixtures of
+    equal cost) -- the recursion below disables nested selection, so no two chosen nodes are ever
+    ancestor/descendant and at most one pool is ever live (no nested pools, no oversubscription). Because
+    the choice only reorders disjoint writes, the fold stays bit-identical regardless of what is selected.
+    """
+    from pysp.utils.parallel.model_decomposition import shard_children, subtree_work
+
+    benefits: dict[int, float] = {}
+    seen: set[int] = set()
+
+    def walk(node: Any) -> None:
+        if id(node) in seen:
+            return
+        seen.add(id(node))
+        dc = decomposition_for(node)
+        kids = shard_children(node, dc)
+        if dc.is_shardable and len(kids) == dc.num_units and dc.num_units >= 2:
+            works = [subtree_work(k) for k in kids if k is not None]
+            if works:
+                total = float(sum(works))
+                p = dc.num_units if not num_workers else min(num_workers, dc.num_units)
+                benefits[id(node)] = total - max(max(works), total / max(1, p))
+        for child in kids:
+            if child is not None:
+                walk(child)
+
+    walk(model)
+    if not benefits:
+        return frozenset()
+    best = max(benefits.values())
+    if best <= 0.0:
+        return frozenset()
+    tol = 1e-9 * max(1.0, abs(best))
+    return frozenset(nid for nid, v in benefits.items() if v >= best - tol)
 
 
 def _factor_ok(acc: Any, model: Any, enc: Any, dc: Any) -> bool:
@@ -93,7 +126,7 @@ def _component_ok(acc: Any, model: Any, dc: Any) -> bool:
 
 
 def _fold_component_into(
-    acc: Any, model: Any, enc: Any, weights: np.ndarray, parallel: bool, nxt: int, num_workers: int | None
+    acc: Any, model: Any, enc: Any, weights: np.ndarray, parallel: bool, sub: frozenset[int], num_workers: int | None
 ) -> None:
     """Mixture component E-step: distribute per-component scoring + accumulation, normalize centrally."""
     from pysp.stats.latent.mixture import _component_enc
@@ -123,35 +156,36 @@ def _fold_component_into(
     def accum(i: int) -> None:  # distributed: disjoint per-component statistics, recursing into the child
         w_loc = ll_mat[:, i]
         acc.comp_counts[i] += w_loc.sum()
-        _fold_into(acc.accumulators[i], model.components[i], _component_enc(enc, i), w_loc, nxt, num_workers)
+        _fold_into(acc.accumulators[i], model.components[i], _component_enc(enc, i), w_loc, sub, num_workers)
 
     _run(parallel, accum, range(k), num_workers)
 
 
-def _fold_into(acc: Any, model: Any, enc: Any, weights: np.ndarray, target: int, num_workers: int | None) -> None:
-    """Recursively accumulate ``model``'s E-step into ``acc``, distributing the per-unit work at the single
-    widest shardable axis (``num_units == target``) and recursing serially below it."""
+def _fold_into(
+    acc: Any, model: Any, enc: Any, weights: np.ndarray, pset: frozenset[int], num_workers: int | None
+) -> None:
+    """Recursively accumulate ``model``'s E-step into ``acc``, threading a node iff it is one of the
+    cost-chosen axes (``pset``) and disabling selection below it so no two pools ever nest."""
     dc = decomposition_for(model)
+    parallel = id(model) in pset
+    sub: frozenset[int] = frozenset() if parallel else pset  # below a threaded node, recurse serially
     if _factor_ok(acc, model, enc, dc):
         accs = acc.accumulators
-        parallel = dc.num_units == target
-        nxt = -1 if parallel else target
         _run(
             parallel,
-            lambda i: _fold_into(accs[i], model.dists[i], enc[i], weights, nxt, num_workers),
+            lambda i: _fold_into(accs[i], model.dists[i], enc[i], weights, sub, num_workers),
             range(len(accs)),
             num_workers,
         )
     elif _component_ok(acc, model, dc):
-        parallel = dc.num_units == target
-        _fold_component_into(acc, model, enc, weights, parallel, -1 if parallel else target, num_workers)
+        _fold_component_into(acc, model, enc, weights, parallel, sub, num_workers)
     else:
         acc.seq_update(enc, weights, model)  # atomic / unknown node: the replicated base case
 
 
 def model_parallel_fold(acc: Any, model: Any, enc: Any, weights: np.ndarray, num_workers: int | None = None) -> None:
     """Run a model-parallel E-step of ``model`` over encoded ``enc`` into accumulator ``acc`` (in place)."""
-    _fold_into(acc, model, enc, weights, _spine_units(model), num_workers)
+    _fold_into(acc, model, enc, weights, _parallel_ids(model, num_workers), num_workers)
 
 
 # --- entry point 1: the in-process handle (data replicated, model distributed) --------------------
