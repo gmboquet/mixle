@@ -116,6 +116,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "multiple_testing_test.py": ("distribution",),
     "resampling_test.py": ("distribution", "stochastic"),
     "robust_covariance_test.py": ("distribution",),
+    "cross_validation_test.py": ("distribution",),
     "mixture_heterogeneous_test.py": ("distribution", "latent"),
     "numerics_test.py": ("distribution",),
     "numerical_guards_test.py": ("distribution", "bayes"),
