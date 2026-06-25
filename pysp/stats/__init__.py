@@ -522,6 +522,12 @@ __all__ = [
     "DavidsonEstimator",
     "RaoKupperDistribution",
     "RaoKupperEstimator",
+    "EwensDistribution",
+    "EwensSampler",
+    "EwensEstimator",
+    "EwensAccumulator",
+    "EwensAccumulatorFactory",
+    "EwensDataEncoder",
     "SpanningTreeDistribution",
     "SpanningTreeSampler",
     "SpanningTreeEstimator",
@@ -1195,6 +1201,14 @@ from pysp.stats.rankings.bradley_terry import (
     BradleyTerryDistribution,
     BradleyTerryEstimator,
     BradleyTerrySampler,
+)
+from pysp.stats.rankings.ewens import (
+    EwensAccumulator,
+    EwensAccumulatorFactory,
+    EwensDataEncoder,
+    EwensDistribution,
+    EwensEstimator,
+    EwensSampler,
 )
 from pysp.stats.rankings.generalized_mallows import (
     GeneralizedMallowsAccumulator,
