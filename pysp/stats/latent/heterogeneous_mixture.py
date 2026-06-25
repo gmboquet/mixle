@@ -450,6 +450,22 @@ class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution)
         else:
             return HeterogeneousMixtureEstimator([u.estimator() for u in self.components], name=self.name)
 
+    def decomposition(self):
+        """Heterogeneous mixture components split along the component axis (logsumexp responsibilities
+        inside a shard; per-component stats SUM-reduce). Components are NOT homogeneous, so there is no
+        stacked-parameter tensor to DTensor-shard (engine_axis=None -> host-shard executor mode)."""
+        from pysp.stats.compute.decomposition import DecompAxis, Decomposition, ReductionOp
+
+        return Decomposition(
+            axis=DecompAxis.COMPONENT,
+            num_units=self.num_components,
+            reduction=ReductionOp.LOGSUMEXP_RESPONSIBILITY,
+            exact=True,
+            child_roles=("component",) * self.num_components,
+            engine_axis=None,
+            key_pooling=getattr(self, "keys", None) is not None,
+        )
+
     def dist_to_encoder(self) -> "HeterogeneousMixtureDataEncoder":
         """Returns a HeterogeneousMixtureDataEncoder object for encoding sequences of iid observations from
         HeterogeneousMixtureDistribution."""

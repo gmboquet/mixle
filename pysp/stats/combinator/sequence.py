@@ -479,6 +479,13 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             name=self.name,
         )
 
+    def decomposition(self):
+        """Sequences are iid: this names the data (sequence) axis, sufficient stats SUM-reduce. The planner
+        sizes this axis from N (the data), not a fixed model count; the base ``dist`` may itself decompose."""
+        from pysp.stats.compute.decomposition import DecompAxis, Decomposition, ReductionOp
+
+        return Decomposition(axis=DecompAxis.SEQUENCE, num_units=1, reduction=ReductionOp.SUM, exact=True)
+
     def dist_to_encoder(self) -> SequenceDataEncoder:
         """Create SequenceDataEncoder for encoding sequences of iid observations of SequenceDistribution.
 
