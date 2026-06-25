@@ -83,6 +83,18 @@ def _to_u(support: str, val: float) -> float:
     return float(val)
 
 
+def _loc_scale(s: _Slot, vals: dict):
+    """Resolve the (loc, scale) of a non-centered Normal slot from constants / hyperparameter slots.
+
+    The non-centered transform value = loc + scale*z is a parameter-space map like ``_to_value`` above,
+    so it lives with the other reparameterizations; ``loc``/``scale`` come from constants or, when the
+    prior is hierarchical, the already-evaluated hyperparameter slots in ``vals``."""
+    pa = s.parent_args or {}
+    loc = vals[pa[0]] if 0 in pa else float(s.handle._args[0])
+    scale = vals[pa[1]] if 1 in pa else float(s.handle._args[1])
+    return loc, scale
+
+
 class Posterior:
     """Parameter-posterior result attached to a fitted RV's ``.result``.
 
@@ -207,14 +219,6 @@ def _slots_of(rv: RandomVariable, fam) -> list[_Slot]:
     if not slots:
         raise ValueError("model has no `free`/prior parameters to infer.")
     return slots
-
-
-def _loc_scale(s: _Slot, vals: dict):
-    """Resolve the (loc, scale) of a non-centered Normal slot from constants / hyperparameter slots."""
-    pa = s.parent_args or {}
-    loc = vals[pa[0]] if 0 in pa else float(s.handle._args[0])
-    scale = vals[pa[1]] if 1 in pa else float(s.handle._args[1])
-    return loc, scale
 
 
 def _encoder_for(fam):
@@ -520,7 +524,7 @@ def _build_target(rv: RandomVariable, data):
     return log_target, slots, fam, build, unpack, (dmean, dstd)
 
 
-# ------------------------ init + result assembly (finalize, diagnostics, relabeling)
+# --------------------------------- unconstrained-space init & value reconstruction
 def _init_u(slots, dmean, dstd) -> np.ndarray:
     u0 = []
     for s in slots:
@@ -540,43 +544,6 @@ def _init_scale(slots, dstd, n) -> np.ndarray:
     a transformed (positive/unit) slot ~ 1/sqrt(n). Adaptation then tunes the magnitude."""
     root = math.sqrt(max(n, 1))
     return np.asarray([max((dstd if s.support == "real" else 1.0) / root, 1e-3) for s in slots], dtype=float)
-
-
-def _attach_convergence(post, slots, arr, results) -> None:
-    """Attach rank-normalized split-R-hat / bulk-ESS / tail-ESS (per parameter) and the summed NUTS
-    divergence count. ``arr`` is the relabeled unconstrained draws, shape ``(n_chains, n_draws, d)``."""
-    from pysp.ppl.diagnostics import bulk_ess, split_rhat, tail_ess
-
-    post.split_rhat = {s.name: float(split_rhat(arr[:, :, k])) for k, s in enumerate(slots)}
-    post.bulk_ess = {s.name: float(bulk_ess(arr[:, :, k])) for k, s in enumerate(slots)}
-    post.tail_ess = {s.name: float(tail_ess(arr[:, :, k])) for k, s in enumerate(slots)}
-    post.num_divergences = int(sum(int(np.sum(getattr(r, "divergences", np.zeros(0)))) for r in results))
-
-
-def _finalize(rv, slots, res, build) -> RandomVariable:
-    """Convert unconstrained chain samples to value space, build the posterior-mean
-    distribution, and attach a Posterior result. Shared by RW-MCMC and HMC."""
-    u = np.asarray(res.samples, dtype=float).reshape(len(res.samples), -1)
-    layout = _exchangeable_layout(slots)  # resolve within-chain mixture label-switching too
-    if layout is not None:
-        u = _relabel_chain(u, layout)
-    vals = _u_to_vals(slots, u)
-    mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
-    post = Posterior(slots, vals, res)
-    # split-R-hat / bulk-/tail-ESS work on a single chain (split into halves) + count its divergences
-    _attach_convergence(post, slots, u[None, :, :], [res])
-
-    def predictive(n, rng):
-        idx = rng.randint(len(vals), size=n)
-        out = []
-        for j in idx:
-            d = build({s.index: float(vals[j, k]) for k, s in enumerate(slots)})
-            out.append(d.sampler(seed=int(rng.randint(1, 2**31))).sample())
-        return np.asarray(out)
-
-    post.predictive = predictive
-    post.build = build
-    return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
 
 
 def _u_to_vals(slots, u) -> np.ndarray:
@@ -601,6 +568,19 @@ def _u_to_vals(slots, u) -> np.ndarray:
         else:
             vals[:, k] = u[:, k]
     return vals
+
+
+# ------------------------------------ convergence diagnostics & mixture relabeling
+def _gelman_rubin(chains_u: np.ndarray) -> np.ndarray:
+    """Per-dimension Gelman-Rubin R-hat from (n_chains, n_draws, d) unconstrained samples."""
+    m, n, _ = chains_u.shape
+    if m < 2 or n < 2:
+        return np.full(chains_u.shape[-1], np.nan)
+    chain_means = chains_u.mean(axis=1)
+    W = chains_u.var(axis=1, ddof=1).mean(axis=0)
+    B = n * chain_means.var(axis=0, ddof=1)
+    var_hat = (n - 1) / n * W + B / n
+    return np.sqrt(np.maximum(var_hat / np.where(W > 0, W, 1.0), 0.0))
 
 
 def _exchangeable_layout(slots) -> list[list[int]] | None:
@@ -645,16 +625,42 @@ def _relabel_chain(u_chain: np.ndarray, layout: list[list[int]]) -> np.ndarray:
     return out
 
 
-def _gelman_rubin(chains_u: np.ndarray) -> np.ndarray:
-    """Per-dimension Gelman-Rubin R-hat from (n_chains, n_draws, d) unconstrained samples."""
-    m, n, _ = chains_u.shape
-    if m < 2 or n < 2:
-        return np.full(chains_u.shape[-1], np.nan)
-    chain_means = chains_u.mean(axis=1)
-    W = chains_u.var(axis=1, ddof=1).mean(axis=0)
-    B = n * chain_means.var(axis=0, ddof=1)
-    var_hat = (n - 1) / n * W + B / n
-    return np.sqrt(np.maximum(var_hat / np.where(W > 0, W, 1.0), 0.0))
+def _attach_convergence(post, slots, arr, results) -> None:
+    """Attach rank-normalized split-R-hat / bulk-ESS / tail-ESS (per parameter) and the summed NUTS
+    divergence count. ``arr`` is the relabeled unconstrained draws, shape ``(n_chains, n_draws, d)``."""
+    from pysp.ppl.diagnostics import bulk_ess, split_rhat, tail_ess
+
+    post.split_rhat = {s.name: float(split_rhat(arr[:, :, k])) for k, s in enumerate(slots)}
+    post.bulk_ess = {s.name: float(bulk_ess(arr[:, :, k])) for k, s in enumerate(slots)}
+    post.tail_ess = {s.name: float(tail_ess(arr[:, :, k])) for k, s in enumerate(slots)}
+    post.num_divergences = int(sum(int(np.sum(getattr(r, "divergences", np.zeros(0)))) for r in results))
+
+
+# ------------------------------------------------------------------- result assembly
+def _finalize(rv, slots, res, build) -> RandomVariable:
+    """Convert one chain's unconstrained samples to value space, relabel mixtures, attach the
+    convergence diagnostics, and build the posterior-mean distribution. Shared by RW-MCMC and HMC."""
+    u = np.asarray(res.samples, dtype=float).reshape(len(res.samples), -1)
+    layout = _exchangeable_layout(slots)  # resolve within-chain mixture label-switching too
+    if layout is not None:
+        u = _relabel_chain(u, layout)
+    vals = _u_to_vals(slots, u)
+    mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
+    post = Posterior(slots, vals, res)
+    # split-R-hat / bulk-/tail-ESS work on a single chain (split into halves) + count its divergences
+    _attach_convergence(post, slots, u[None, :, :], [res])
+
+    def predictive(n, rng):
+        idx = rng.randint(len(vals), size=n)
+        out = []
+        for j in idx:
+            d = build({s.index: float(vals[j, k]) for k, s in enumerate(slots)})
+            out.append(d.sampler(seed=int(rng.randint(1, 2**31))).sample())
+        return np.asarray(out)
+
+    post.predictive = predictive
+    post.build = build
+    return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
 
 
 # ---------------------------------------- parallel chains (workers + orchestration)
