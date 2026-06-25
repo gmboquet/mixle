@@ -96,5 +96,60 @@ class DecomposeTest(unittest.TestCase):
         self.assertGreater(sizes["fast"], sizes["slow"])
 
 
+class WholeTreeCostTest(unittest.TestCase):
+    """The planner searches the whole tree by COMPUTE COST, not just the root by unit count."""
+
+    def test_subtree_work_recurses_and_excludes_nothing(self):
+        from pysp.utils.parallel.model_decomposition import subtree_work
+
+        leaf = stats.GaussianDistribution(0.0, 1.0)
+        comp = stats.CompositeDistribution((_mixture(3), leaf))
+        self.assertGreater(subtree_work(comp), subtree_work(_mixture(3)))  # composite includes the leaf too
+        self.assertGreater(subtree_work(_mixture(3)), subtree_work(leaf))  # a 3-mixture out-weighs one leaf
+
+    def test_finds_axis_nested_below_the_root(self):
+        # the root is a thin 2-factor composite; the real axis is the 12-component mixture one level down
+        comp = stats.CompositeDistribution((_mixture(12), stats.GaussianDistribution(0.0, 1.0)))
+        dec = decompose_model(comp, _devices(4), n_data=40)
+        self.assertTrue(dec.is_model_parallel)
+        self.assertEqual(dec.axis, DecompAxis.COMPONENT)  # the nested mixture, not the root FACTOR axis
+        self.assertEqual(dec.num_units, 12)
+
+    def test_thin_imbalanced_parent_loses_to_balanced_child(self):
+        from pysp.utils.parallel.model_decomposition import best_parallel_axis
+
+        # root composite has 2 wildly imbalanced units [heavy mixture, tiny leaf]; the balanced 12-way
+        # mixture inside must win despite the parent's larger total_work (a fat unit caps parent speedup)
+        comp = stats.CompositeDistribution((_mixture(12), stats.GaussianDistribution(0.0, 1.0)))
+        best = best_parallel_axis(comp, max_workers=4)
+        self.assertEqual(best.num_units, 12)
+        self.assertEqual(best.axis, DecompAxis.COMPONENT)
+
+    def test_cost_aware_axis_prefers_heavier_units(self):
+        from pysp.utils.parallel.model_decomposition import best_parallel_axis
+
+        # a 4-way mixture of D=20 MVGaussians (heavy) vs an 8-way mixture of 2-cat (cheap): cost wins
+        heavy = stats.MixtureDistribution(
+            [stats.MultivariateGaussianDistribution([0.0] * 20, np.eye(20).tolist()) for _ in range(4)], [0.25] * 4
+        )
+        cheap = stats.MixtureDistribution(
+            [stats.CategoricalDistribution({"a": 0.5, "b": 0.5}) for _ in range(8)], [1 / 8] * 8
+        )
+        best = best_parallel_axis(stats.CompositeDistribution((heavy, cheap)), max_workers=4)
+        self.assertEqual(best.num_units, 4)  # the heavy 4-way axis, not the wider-but-cheap 8-way one
+
+    def test_cost_weighted_cuts_balance_work_not_count(self):
+        # two fast + two slow devices: the cost partition should give the fast devices more components
+        res = Resources(
+            devices=(
+                DeviceSpec(name="f0", kind="cpu", memory_bytes=8 * 1024**3, throughput=3.0),
+                DeviceSpec(name="s0", kind="cpu", memory_bytes=8 * 1024**3, throughput=1.0),
+            )
+        )
+        dec = decompose_model(_mixture(12), res, n_data=20)
+        sizes = {c.device.name: c.stop - c.start for c in dec.cuts}
+        self.assertGreater(sizes["f0"], sizes["s0"])
+
+
 if __name__ == "__main__":
     unittest.main()
