@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # PyPI distribution name; the import package is `pysp` (cf. scikit-learn -> sklearn).
 name = "pysp-learn"
-version = "0.4.0"
+version = "0.5.0"
 description = "A package for estimating heterogeneous probability density functions."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,14 +29,19 @@ classifiers = [
 ]
 # Base install covers all distributions and local (numpy) estimation; acceleration,
 # distribution, and embedding back-ends are opt-in extras (see [project.optional-dependencies]).
+# Lower bounds reflect the oldest releases that carry every API pysp calls and that are routinely
+# tested (numpy >=1.26 for the stable ndarray/linalg/errstate surface; scipy >=1.10 for
+# special.logsumexp + stats.binomtest/kstwo used by the inference layer; mpmath >=1.3). They are
+# floors, not pins -- newer majors are allowed.
 dependencies = [
-    "numpy",
-    "scipy",
-    "mpmath",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "mpmath>=1.3",
 ]
 
 [project.optional-dependencies]
-numba = ["numba", "tbb"]
+# numba >= 0.59 is the first series with Python 3.10-3.12 wheels and the njit features the kernels use.
+numba = ["numba>=0.59", "tbb"]
 # pandas is only used by the DataFrame data adapter (which duck-types and never imports pandas);
 # it is optional so the base install stays lean.
 pandas = ["pandas"]
@@ -62,7 +67,7 @@ sage = ["passagemath-symbolics"]
 test = ["pytest>=8", "pytest-xdist"]
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
 lint = ["ruff==0.15.17", "mypy"]
-all = ["numba", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn", "pandas", "pyarrow", "sqlalchemy", "networkx"]
+all = ["numba>=0.59", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn", "pandas", "pyarrow", "sqlalchemy", "networkx"]
 
 [project.urls]
 Homepage = "https://github.com/gmboquet/pysparkplug"
