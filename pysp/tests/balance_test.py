@@ -94,6 +94,38 @@ class SpectrumDecisionTest(unittest.TestCase):
         self.assertEqual(plan.model_parallel, 1)
         self.assertEqual(plan.data_parallel, 8)
 
+    def test_atomic_model_single_observation_is_honestly_diagnosed(self):
+        # a single dense HMM on one observation: no splittable axis, N<P -> 1 worker, reported as such
+        plan = balance_plan(_hmm(50), _cluster(8), n_data=1)
+        self.assertEqual(plan.workers_used, 1)
+        self.assertIn("no splittable axis", plan.rationale)
+        self.assertIn("structured decomposition", plan.rationale)
+
+
+class HmmRealizationTest(unittest.TestCase):
+    def test_tiny_hmm_big_data_realized_data_parallel_matches_local(self):
+        # case from the goal: a tiny HMM on a bunch of data -> data-parallel, balanced, correct
+        est = stats.HiddenMarkovEstimator(
+            [stats.GaussianEstimator() for _ in range(3)], len_estimator=stats.PoissonEstimator()
+        )
+        init = stats.HiddenMarkovModelDistribution(
+            [stats.GaussianDistribution(float(i) * 3, 1.0) for i in range(3)],
+            [1 / 3] * 3,
+            (np.ones((3, 3)) / 3).tolist(),
+            len_dist=stats.PoissonDistribution(6.0),
+        )
+        sampler = init.sampler(seed=1)
+        data = [sampler.sample() for _ in range(400)]  # 400 short sequences
+        base = optimize(data, est, prev_estimate=init, max_its=5, out=None, backend="local")
+        chosen, plan = auto_balanced_estimator(est, init, _cluster(4), n_data=len(data))
+        self.assertFalse(plan.is_model_parallel)  # data-parallel
+        fit = optimize(data, chosen, prev_estimate=init, max_its=5, out=None, backend="mp", num_workers=2)
+
+        def ll(m):
+            return float(np.sum(m.seq_log_density(m.dist_to_encoder().seq_encode(data))))
+
+        self.assertTrue(np.isclose(ll(base), ll(fit), rtol=1e-6), (ll(base), ll(fit)))
+
 
 class FlopBalanceTest(unittest.TestCase):
     def test_model_cuts_balance_work_not_count(self):

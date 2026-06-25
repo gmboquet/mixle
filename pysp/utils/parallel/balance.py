@@ -135,7 +135,15 @@ def balance_plan(model: Any, resources: Resources, *, n_data: int) -> BalancePla
             start += c
         cuts = tuple(out)
 
-    if m == 1:
+    if workers_used < p and m == 1 and max_units <= 1 and n_data < p:
+        # the honest corner: too few observations to data-parallel AND the model exposes no axis to split
+        # (e.g. a single dense HMM). Naive model-parallelism can't help -- this needs a STRUCTURED
+        # decomposition (sparse/banded/Kronecker transitions, or a Composite/Mixture of sub-models).
+        why = (
+            f"single-worker ({workers_used}/{p} used): N={n_data} too small to data-parallel and the model "
+            f"exposes no splittable axis (atomic). Model-parallelism needs a structured decomposition."
+        )
+    elif m == 1:
         why = f"data-parallel: model fits and N={n_data} fills {d}/{p} workers (no model-axis coupling)"
     elif d == 1:
         why = f"model-parallel x{m}: N={n_data} too small to data-parallel, split the model across {m} workers"
