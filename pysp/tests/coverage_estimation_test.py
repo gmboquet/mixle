@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import (
+from pysp.analysis import (
     ace,
     chao1,
     chao2,

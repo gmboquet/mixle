@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from numpy import trapezoid
 
-from pysp.stats import (
+from pysp.analysis import (
     intensity,
     kde,
     kde_mode,

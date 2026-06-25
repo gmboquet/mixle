@@ -114,7 +114,7 @@ def ensure_pysp_serialization_registry() -> None:
     from pysp.stats.compute.pdist import ParameterEstimator as StatsEstimator
     from pysp.stats.compute.pdist import ProbabilityDistribution as StatsDistribution
 
-    for package_name in ("pysp.stats",):
+    for package_name in ("pysp.stats", "pysp.analysis"):
         for module in _iter_distribution_modules(package_name):
             for _, cls in inspect.getmembers(module, inspect.isclass):
                 if cls.__module__ != module.__name__:

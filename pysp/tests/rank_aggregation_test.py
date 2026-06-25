@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.stats import (
+from pysp.analysis import (
     borda_count,
     cayley_distance,
     copeland,
