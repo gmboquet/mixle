@@ -469,6 +469,9 @@ def _finalize(rv, slots, res, build) -> RandomVariable:
     """Convert unconstrained chain samples to value space, build the posterior-mean
     distribution, and attach a Posterior result. Shared by RW-MCMC and HMC."""
     u = np.asarray(res.samples, dtype=float).reshape(len(res.samples), -1)
+    layout = _exchangeable_layout(slots)  # resolve within-chain mixture label-switching too
+    if layout is not None:
+        u = _relabel_chain(u, layout)
     vals = np.empty_like(u)
     for k, s in enumerate(slots):
         if s.support == "positive":
