@@ -16,9 +16,12 @@ Two model-parallel axes are handled, both **bit-identical** to the single-node f
   scoring and the per-component accumulation are distributed -- an exact mirror of
   ``MixtureAccumulator.seq_update``.
 
-Any other model (leaves, HMMs, sequences, ...) falls back to ordinary replicated accumulation, so the
-backend is correct for *every* family and never worse than ``backend="local"``. See
-``~/codex/notes/model-parallel-design.md``.
+The fold is **recursive**: it walks the whole model tree and distributes the per-unit work at the single
+*widest* shardable axis (e.g. the 1000 components of a mixture nested inside a composite field), recursing
+serially elsewhere -- so a nested model is parallelized along its dominant axis without spawning nested
+thread pools. Any node that does not opt into the contract (leaves, HMMs, sequences, ...) is the
+replicated base case, so the backend is correct for *every* family and never worse than
+``backend="local"``. See ``~/codex/notes/model-parallel-design.md``.
 """
 
 from __future__ import annotations
@@ -61,19 +64,30 @@ class ModelParallelEncodedData(EncodedDataHandle):
         self.enc = encoder.seq_encode(data)
         self.num_workers = num_workers
 
-    # --- the model-parallel E-step --------------------------------------------------------------
-    def _map(self, fn: Any, items: Any) -> None:
-        """Run ``fn`` over ``items`` across the worker pool (the model-axis units run in parallel)."""
+    # --- the model-parallel E-step (recursive: parallelize the single widest shardable axis) --------
+    def _run(self, parallel: bool, fn: Any, items: Any) -> None:
+        """Run ``fn`` over ``items`` -- across the worker pool when ``parallel``, else serially."""
         items = list(items)
         workers = self.num_workers or min(len(items), max(1, os.cpu_count() or 1))
-        if workers > 1 and len(items) > 1:
+        if parallel and workers > 1 and len(items) > 1:
             with ThreadPoolExecutor(max_workers=int(workers)) as pool:
                 list(pool.map(fn, items))  # order-independent: each unit writes its own disjoint state
         else:
             for it in items:
                 fn(it)
 
-    def _factor_ok(self, acc: Any, model: Any, dc: Any) -> bool:
+    def _spine_units(self, model: Any) -> int:
+        """The widest shardable ``num_units`` anywhere in the model tree -- the one axis we parallelize."""
+        from pysp.utils.parallel.model_decomposition import shard_children
+
+        dc = decomposition_for(model)
+        best = dc.num_units if dc.is_shardable else 1
+        for child in shard_children(model, dc):
+            if child is not None:
+                best = max(best, self._spine_units(child))
+        return best
+
+    def _factor_ok(self, acc: Any, model: Any, enc: Any, dc: Any) -> bool:
         accs = getattr(acc, "accumulators", None)
         dists = getattr(model, "dists", None)
         return (
@@ -81,8 +95,8 @@ class ModelParallelEncodedData(EncodedDataHandle):
             and accs is not None
             and dists is not None
             and len(accs) == dc.num_units == len(dists)
-            and isinstance(self.enc, (tuple, list))
-            and len(self.enc) == len(accs)
+            and isinstance(enc, (tuple, list))
+            and len(enc) == len(accs)
         )
 
     def _component_ok(self, acc: Any, model: Any, dc: Any) -> bool:
@@ -95,27 +109,46 @@ class ModelParallelEncodedData(EncodedDataHandle):
             and hasattr(model, "zw")
         )
 
-    def _fold_component(self, acc: Any, model: Any, weights: np.ndarray) -> None:
-        """Mixture component-parallel E-step: distribute the per-component scoring + accumulation while
-        the (cheap) responsibility normalization runs centrally -- a bit-identical mirror of
-        ``MixtureAccumulator.seq_update`` (the logsumexp couples the components, so it cannot be sharded)."""
+    def _fold_into(self, acc: Any, model: Any, enc: Any, weights: np.ndarray, target: int) -> None:
+        """Recursively accumulate ``model``'s E-step into ``acc``, distributing the per-unit work at the
+        single widest shardable axis (``num_units == target``) and recursing serially elsewhere. Each
+        recursive case reproduces the corresponding accumulator's ``seq_update`` exactly, so the whole
+        fold is bit-identical to the single-node path -- just distributed."""
+        dc = decomposition_for(model)
+        if self._factor_ok(acc, model, enc, dc):
+            accs = acc.accumulators
+            parallel = dc.num_units == target  # parallelize this axis only if it is the widest
+            nxt = -1 if parallel else target  # ...and then recurse serially below it
+            self._run(
+                parallel, lambda i: self._fold_into(accs[i], model.dists[i], enc[i], weights, nxt), range(len(accs))
+            )
+        elif self._component_ok(acc, model, dc):
+            self._fold_component_into(
+                acc, model, enc, weights, dc.num_units == target, -1 if dc.num_units == target else target
+            )
+        else:
+            acc.seq_update(enc, weights, model)  # atomic / unknown node: the replicated base case
+
+    def _fold_component_into(
+        self, acc: Any, model: Any, enc: Any, weights: np.ndarray, parallel: bool, nxt: int
+    ) -> None:
+        """Mixture component E-step: distribute the per-component scoring + accumulation, normalize the
+        coupling (responsibility logsumexp) centrally -- a bit-identical mirror of MixtureAccumulator."""
         from pysp.stats.latent.mixture import _component_enc
 
         k = int(model.num_components)
-        enc = self.enc
         log_w = np.asarray(model.log_w, dtype=np.float64)
         zw = model.zw
-        ll_mat = np.zeros((self.size, k), dtype=np.float64)
+        ll_mat = np.zeros((len(weights), k), dtype=np.float64)
         ll_mat.fill(-np.inf)
 
         def score(i: int) -> None:  # distributed: the expensive per-component emission scoring
             if not zw[i]:
                 ll_mat[:, i] = model.components[i].seq_log_density(_component_enc(enc, i)) + log_w[i]
 
-        self._map(score, range(k))
+        self._run(parallel, score, range(k))
 
-        # central, exact normalization (identical buffer reuse to MixtureAccumulator.seq_update)
-        ll_max = ll_mat.max(axis=1, keepdims=True)
+        ll_max = ll_mat.max(axis=1, keepdims=True)  # central, exact (identical buffer reuse to the serial path)
         bad_rows = np.isinf(ll_max.flatten())
         ll_mat[bad_rows, :] = log_w.copy()
         ll_max[bad_rows] = np.max(log_w)
@@ -125,24 +158,17 @@ class ModelParallelEncodedData(EncodedDataHandle):
         np.divide(weights[:, None], ll_max, out=ll_max)
         ll_mat *= ll_max  # ll_mat[:, i] is now responsibility_i * weight
 
-        def accum(i: int) -> None:  # distributed: disjoint per-component sufficient statistics
+        def accum(i: int) -> None:  # distributed: disjoint per-component statistics, recursing into the child
             w_loc = ll_mat[:, i]
             acc.comp_counts[i] += w_loc.sum()
-            acc.accumulators[i].seq_update(_component_enc(enc, i), w_loc, model.components[i])
+            self._fold_into(acc.accumulators[i], model.components[i], _component_enc(enc, i), w_loc, nxt)
 
-        self._map(accum, range(k))
+        self._run(parallel, accum, range(k))
 
     def _fold(self, estimator: Any, model: Any, weights: np.ndarray) -> Any:
-        """Build and run the E-step accumulator -- model-parallel along the declared axis, else replicated."""
+        """Build the E-step accumulator, distributing work at the widest shardable axis of the model tree."""
         acc = estimator.accumulator_factory().make()
-        dc = decomposition_for(model)
-        if self._factor_ok(acc, model, dc):
-            accs = acc.accumulators  # CompositeAccumulator.seq_update does exactly this, per factor
-            self._map(lambda i: accs[i].seq_update(self.enc[i], weights, model.dists[i]), range(len(accs)))
-        elif self._component_ok(acc, model, dc):
-            self._fold_component(acc, model, weights)
-        else:
-            acc.seq_update(self.enc, weights, model)
+        self._fold_into(acc, model, self.enc, weights, self._spine_units(model))
         return acc
 
     # --- EncodedDataHandle contract -------------------------------------------------------------
