@@ -39,6 +39,13 @@ from pysp.inference.calibration import (
     reliability_curve,
     top_label_confidence,
 )
+from pysp.inference.conformal import (
+    cv_plus,
+    jackknife_plus,
+    mondrian_conformal,
+    split_conformal,
+    weighted_conformal,
+)
 from pysp.inference.cross_validation import (
     NestedFold,
     blocked_kfold,
@@ -261,6 +268,12 @@ __all__ = [
     "DemingFit",
     "simex",
     "propagate_uncertainty",
+    # conformal prediction (distribution-free intervals; split/J+/CV+/Mondrian/weighted)
+    "split_conformal",
+    "jackknife_plus",
+    "cv_plus",
+    "mondrian_conformal",
+    "weighted_conformal",
     # cross-validation fold generators (i.i.d., grouped, temporal, spatial-block, nested)
     "kfold",
     "blocked_kfold",

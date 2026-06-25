@@ -4,14 +4,14 @@ Defines the OptionalDistribution, OptionalSampler, OptionalAccumulatorFactory, O
 OptionalEstimator, and the OptionalDataEncoder classes for use with pysparkplug.
 
 This distribution assigns a probability (p) to data being missing. With probability (1-p) the data is assumed to come
-from __future__ import annotations
-
 from a base distribution set by the user.
 
 The OptionalDistribution allows for potentially missing data. The value p (the probability of being missing)
 must be specified to sample from the distribution.
 
 """
+
+from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any, TypeVar
@@ -143,7 +143,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             return da - dab
         return db - dab + self.dist.expected_log_density(x)
 
-    def seq_expected_log_density(self, x: tuple[int, np.ndarray, np.ndarray, "E"]) -> np.ndarray:
+    def seq_expected_log_density(self, x: tuple[int, np.ndarray, np.ndarray, E]) -> np.ndarray:
         """Vectorized posterior-expected log-density; falls back to ``seq_log_density`` without a prior."""
         if not self.has_conj_prior:
             return self.seq_log_density(x)
@@ -285,13 +285,13 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         return OptionalGradientFitState(self, child, logit_p)
 
     @staticmethod
-    def _same_missing_value(a: "OptionalDistribution", b: "OptionalDistribution") -> bool:
+    def _same_missing_value(a: OptionalDistribution, b: OptionalDistribution) -> bool:
         if a.missing_value_is_nan or b.missing_value_is_nan:
             return a.missing_value_is_nan and b.missing_value_is_nan
         return a.missing_value == b.missing_value
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence["OptionalDistribution"], engine: Any) -> dict[str, Any]:
+    def backend_stacked_params(cls, dists: Sequence[OptionalDistribution], engine: Any) -> dict[str, Any]:
         """Return stacked optional-wrapper parameters for homogeneous mixture kernels."""
         from pysp.stats.compute.stacked import stacked_component_params
 
@@ -372,11 +372,11 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             return OptionalFisherView(self)
         return super().to_fisher(**kwargs)
 
-    def sampler(self, seed: int | None = None) -> "OptionalSampler":
+    def sampler(self, seed: int | None = None) -> OptionalSampler:
         """Return a sampler for drawing observations from this distribution."""
         return OptionalSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "OptionalEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> OptionalEstimator:
         """Return an estimator for fitting this distribution from data."""
         prior = None if self.prior is None else (self.prior, self.dist.get_prior())
         return OptionalEstimator(
@@ -388,18 +388,18 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             prior=prior,
         )
 
-    def dist_to_encoder(self) -> "OptionalDataEncoder":
+    def dist_to_encoder(self) -> OptionalDataEncoder:
         """Return the data encoder used by this distribution for vectorized methods."""
         return OptionalDataEncoder(encoder=self.dist.dist_to_encoder(), missing_value=self.missing_value)
 
-    def enumerator(self) -> "OptionalEnumerator":
+    def enumerator(self) -> OptionalEnumerator:
         """Returns an OptionalEnumerator iterating the support (including the missing value) in
         descending probability order."""
         return OptionalEnumerator(self)
 
 
 class OptionalEnumerator(DistributionEnumerator):
-    def __init__(self, dist: "OptionalDistribution") -> None:
+    def __init__(self, dist: OptionalDistribution) -> None:
         """Enumerates the base support scaled by (1-p), merged with the missing value at p.
 
         Base-support entries equal to the missing value are filtered out: log_density routes
@@ -431,7 +431,7 @@ class OptionalEnumerator(DistributionEnumerator):
 
 
 class OptionalSampler(DistributionSampler):
-    def __init__(self, dist: "OptionalDistribution", seed: int | None = None) -> None:
+    def __init__(self, dist: OptionalDistribution, seed: int | None = None) -> None:
         super().__init__(dist, seed)
         self.dist = dist
         self.sampler = self.dist.dist.sampler(self.new_seed())
@@ -551,7 +551,7 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.weights[1] += np.sum(nz_weights)
         self.accumulator.seq_initialize(enc_data, nz_weights, rng)
 
-    def combine(self, suff_stat: tuple[list[float], SS]) -> "OptionalEstimatorAccumulator":
+    def combine(self, suff_stat: tuple[list[float], SS]) -> OptionalEstimatorAccumulator:
         self.weights[0] += suff_stat[0][0]
         self.weights[1] += suff_stat[0][1]
         self.accumulator.combine(suff_stat[1])
@@ -561,13 +561,13 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
     def value(self) -> tuple[list[float], Any]:
         return self.weights, self.accumulator.value()
 
-    def from_value(self, x: tuple[list[float], SS]) -> "OptionalEstimatorAccumulator":
+    def from_value(self, x: tuple[list[float], SS]) -> OptionalEstimatorAccumulator:
         self.weights = x[0]
         self.accumulator.from_value(x[1])
 
         return self
 
-    def scale(self, c: float) -> "OptionalEstimatorAccumulator":
+    def scale(self, c: float) -> OptionalEstimatorAccumulator:
         """Scale missing/observed weights and delegate observed statistics."""
         self.weights[0] *= c
         self.weights[1] *= c
@@ -588,7 +588,7 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             else:
                 stats_dict[self.keys] = self
 
-    def acc_to_encoder(self) -> "OptionalDataEncoder":
+    def acc_to_encoder(self) -> OptionalDataEncoder:
         return OptionalDataEncoder(encoder=self.accumulator.acc_to_encoder(), missing_value=self.missing_value)
 
 
@@ -605,7 +605,7 @@ class OptionalEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
         self.name = name
 
-    def make(self) -> "OptionalEstimatorAccumulator":
+    def make(self) -> OptionalEstimatorAccumulator:
         return OptionalEstimatorAccumulator(
             self.estimator.accumulator_factory().make(), self.missing_value, keys=self.keys, name=self.name
         )
@@ -654,7 +654,7 @@ class OptionalEstimator(ParameterEstimator):
         self.has_conj_prior = False
         self.set_prior(prior)
 
-    def accumulator_factory(self) -> "OptionalEstimatorAccumulatorFactory":
+    def accumulator_factory(self) -> OptionalEstimatorAccumulatorFactory:
         return OptionalEstimatorAccumulatorFactory(self.estimator, self.missing_value, keys=self.keys, name=self.name)
 
     def get_prior(self) -> tuple[Any, Any]:
@@ -675,14 +675,14 @@ class OptionalEstimator(ParameterEstimator):
         self.prior = prior[0]
         self.has_conj_prior = isinstance(prior[0], BetaDistribution)
 
-    def model_log_density(self, model: "OptionalDistribution") -> float:
+    def model_log_density(self, model: OptionalDistribution) -> float:
         """Sum the Beta-prior log-density at ``p`` and the base estimator's term (ELBO global term)."""
         rv = self.estimator.model_log_density(model.dist)
         if self.has_conj_prior:
             rv += float(self.prior.log_density(model.p))
         return rv
 
-    def _estimate_conjugate(self, suff_stat: tuple[list[float], SS]) -> "OptionalDistribution":
+    def _estimate_conjugate(self, suff_stat: tuple[list[float], SS]) -> OptionalDistribution:
         """Closed-form Beta conjugate posterior update on ``p`` (carried forward as the fitted prior).
 
         ``psum`` is the missing weight, ``nsum`` the observed weight; the posterior mode of the Beta is
@@ -707,7 +707,7 @@ class OptionalEstimator(ParameterEstimator):
             prior=(new_prior, dist.get_prior()),
         )
 
-    def estimate(self, nobs: float | None, suff_stat: tuple[list[float], SS] | None) -> "OptionalDistribution":
+    def estimate(self, nobs: float | None, suff_stat: tuple[list[float], SS] | None) -> OptionalDistribution:
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
 
