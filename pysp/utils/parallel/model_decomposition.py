@@ -60,17 +60,59 @@ def _own_work(node: Any) -> float:
     return w
 
 
+def cost_children(model: Any) -> tuple[Any, ...]:
+    """ALL child distributions of a node (for COST), not just the shardable ones.
+
+    ``shard_children`` returns only the axis a node can be *split* along; for *costing* we need every
+    nested distribution's compute counted -- e.g. an HMM is atomic (not shardable here) yet its ``S``
+    emission distributions and ``len_dist`` are real work, and a heavy leaf buried under a non-shardable
+    wrapper still costs FLOPs. Discovery is reflective (any ``SequenceEncodableProbabilityDistribution``
+    held directly or inside a list/tuple/dict), so it works for *any* model without per-family wiring.
+    """
+    from pysp.stats.compute.pdist import SequenceEncodableProbabilityDistribution as _Dist
+
+    out: list[Any] = []
+    for v in getattr(model, "__dict__", {}).values():
+        if isinstance(v, _Dist):
+            out.append(v)
+        elif isinstance(v, (list, tuple)):
+            out.extend(x for x in v if isinstance(x, _Dist))
+        elif isinstance(v, dict):
+            out.extend(x for x in v.values() if isinstance(x, _Dist))
+    return tuple(out)
+
+
 def subtree_work(model: Any, _seen: dict[int, bool] | None = None) -> float:
-    """Total compute weight of a model subtree -- own emission cost plus all descendants (counted once)."""
+    """Total compute weight of a model subtree -- own emission cost plus ALL descendants (counted once).
+
+    Recurses over :func:`cost_children` (every nested distribution), so a unit's cost includes heavy
+    subtrees the executor can't split (a nested HMM, a GP leaf), making the balance honest about where the
+    FLOPs actually are -- not just where the model happens to be shardable.
+    """
     seen = _seen if _seen is not None else {}
     if id(model) in seen:
         return 0.0  # shared subtree: counted once (mirrors the byte-sizing policy)
     seen[id(model)] = True
     total = _own_work(model)
-    for child in shard_children(model):
-        if child is not None:
-            total += subtree_work(child, seen)
+    for child in cost_children(model):
+        total += subtree_work(child, seen)
     return total
+
+
+def compute_cost(model: Any, _seen: dict[int, bool] | None = None) -> tuple[float, int]:
+    """``(flops_per_observation_proxy, bytes)`` for the whole model -- compute load and memory footprint,
+    the two resources the balancer trades off (compute is the load, memory is the constraint)."""
+    seen = _seen if _seen is not None else {}
+    if id(model) in seen:
+        return 0.0, 0
+    seen[id(model)] = True
+    flops = _own_work(model)
+    total_bytes = _own_param_bytes(model)
+    for child in cost_children(model):
+        cf, cb = compute_cost(child, seen)
+        flops += cf
+        total_bytes += cb
+    return flops, total_bytes
 
 
 def shard_children(node: Any, dc: Decomposition | None = None) -> tuple[Any, ...]:
@@ -315,7 +357,9 @@ __all__ = [
     "NodeSize",
     "size_model_tree",
     "shard_children",
+    "cost_children",
     "subtree_work",
+    "compute_cost",
     "AxisCandidate",
     "tree_axes",
     "best_parallel_axis",
