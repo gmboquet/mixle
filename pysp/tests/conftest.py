@@ -119,6 +119,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "kde_test.py": ("distribution", "stochastic"),
     "extreme_value_test.py": ("distribution", "stochastic"),
     "ordinal_test.py": ("distribution",),
+    "nonparametric_test.py": ("distribution",),
     "rank_aggregation_test.py": ("distribution",),
     "survival_regression_test.py": ("distribution", "stochastic"),
     "scoring_rules_test.py": ("distribution",),

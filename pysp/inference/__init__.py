@@ -99,6 +99,28 @@ from pysp.inference.multiple_testing import (
     tippett_combine,
 )
 
+# classical nonparametric (rank-based) hypothesis tests
+from pysp.inference.nonparametric import (
+    DunnResult,
+    MannWhitneyResult,
+    TestResult,
+    WilcoxonResult,
+    brunner_munzel,
+    cliffs_delta,
+    dunn_test,
+    friedman_test,
+    jonckheere_terpstra,
+    kruskal_wallis,
+    ks_1samp,
+    ks_2samp,
+    mann_whitney_u,
+    mood_median_test,
+    page_trend_test,
+    runs_test,
+    sign_test,
+    wilcoxon_signed_rank,
+)
+
 # ordinal (cumulative-link) regression + rank-concordance measures
 from pysp.inference.ordinal import (
     OrdinalResult,
@@ -271,6 +293,25 @@ __all__ = [
     "kendall_tau",
     "goodman_kruskal_gamma",
     "somers_d",
+    # classical nonparametric (rank-based) hypothesis tests
+    "mann_whitney_u",
+    "MannWhitneyResult",
+    "wilcoxon_signed_rank",
+    "WilcoxonResult",
+    "sign_test",
+    "kruskal_wallis",
+    "friedman_test",
+    "brunner_munzel",
+    "mood_median_test",
+    "dunn_test",
+    "DunnResult",
+    "jonckheere_terpstra",
+    "page_trend_test",
+    "ks_1samp",
+    "ks_2samp",
+    "runs_test",
+    "cliffs_delta",
+    "TestResult",
     # measurement error: errors-in-variables, SIMEX, Monte-Carlo uncertainty propagation
     "deming_regression",
     "DemingFit",
