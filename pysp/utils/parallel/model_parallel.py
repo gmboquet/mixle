@@ -202,7 +202,12 @@ def _fold_into(
     elif _component_ok(acc, model, dc):
         _fold_component_into(acc, model, enc, weights, parallel, sub, num_workers)
     else:
-        acc.seq_update(enc, weights, model)  # atomic / unknown node: the replicated base case
+        # base case: an accumulator that is not suff-stat-separable (a leaf, or an HMM whose forward-backward
+        # couples all states). If it opts into internal state-parallelism (``_state_workers``, e.g. an HMM's
+        # per-state emission scoring/accumulation), hand it the worker budget; otherwise it runs replicated.
+        if hasattr(acc, "_state_workers"):
+            acc._state_workers = num_workers
+        acc.seq_update(enc, weights, model)
 
 
 def model_parallel_fold(acc: Any, model: Any, enc: Any, weights: np.ndarray, num_workers: int | None = None) -> None:
