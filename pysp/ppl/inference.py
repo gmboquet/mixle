@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from scipy.special import gammaln as _gammaln
 
 from pysp.ppl.core import (
     CompositeFamily,
@@ -509,7 +510,9 @@ def _build_target(rv: RandomVariable, data):
 def _init_u(slots, dmean, dstd) -> np.ndarray:
     u0 = []
     for s in slots:
-        if s.support == "positive":
+        if s.reparam == "loc_scale":
+            u0.append(0.0)  # a non-centered latent z ~ N(0, 1) starts at its mode
+        elif s.support == "positive":
             u0.append(_to_u("positive", max(dstd, 1e-2)))
         elif s.support == "unit":
             u0.append(0.0)  # logit(0.5)
@@ -954,6 +957,162 @@ def _penalize_target(log_target, penalty):
     return plt
 
 
+def _is_grouped(rv: RandomVariable) -> bool:
+    """A random-intercept model: a flat family whose slot-0 prior is a ``.each()`` group prior."""
+    return (
+        rv._kind == "sample"
+        and not isinstance(rv._family, CompositeFamily)
+        and len(rv._args) >= 1
+        and isinstance(rv._args[0], RandomVariable)
+        and rv._args[0]._scope == "grouped"
+    )
+
+
+# Backend-parameterized log-densities (one body, evaluated with numpy for the scalar target and torch
+# for the gradient, so the two can never drift). ``xp`` is numpy or torch. Distribution parameters may
+# be python-float constants or tensors; ``_xlog`` logs either, so a constant never reaches torch.log.
+def _xlog(v, xp):
+    if xp is np:
+        return np.log(v)
+    return xp.log(v) if xp.is_tensor(v) else math.log(v)
+
+
+def _lp_normal(x, m, s, xp):
+    return -0.9189385332046727 - _xlog(s, xp) - 0.5 * ((x - m) / s) ** 2
+
+
+def _lp_gamma(x, k, theta, xp):
+    # k, theta are constants here -> their log / gammaln terms are constants computed in numpy
+    return (k - 1.0) * _xlog(x, xp) - x / theta - (k * math.log(theta) + float(_gammaln(k)))
+
+
+def _lp_halfnormal(x, s, xp):
+    return 0.2257913526447274 - _xlog(s, xp) - 0.5 * (x / s) ** 2
+
+
+def _lp_exponential(x, rate, xp):
+    return math.log(rate) - rate * x
+
+
+_HYPER_LP = {  # prior family name -> log-density(value, const-args, xp)
+    "Normal": lambda v, a, xp: _lp_normal(v, a[0], a[1], xp),
+    "Gamma": lambda v, a, xp: _lp_gamma(v, a[0], a[1], xp),
+    "HalfNormal": lambda v, a, xp: _lp_halfnormal(v, a[0], xp),
+    "Exponential": lambda v, a, xp: _lp_exponential(v, a[0], xp),
+    "InverseGamma": lambda v, a, xp: _lp_gamma(1.0 / v, a[0], 1.0 / a[1], xp) - 2.0 * _xlog(v, xp),
+}
+
+
+def _grouped_target(rv: RandomVariable, data, want_grad: bool):
+    """Build the joint NUTS/HMC/ensemble target for a Normal-Normal random-intercept model.
+
+    ``y_gi ~ Normal(theta_g, sigma)``, ``theta_g ~ Normal(mu, tau)``, with ``mu``/``tau``/``sigma`` each a
+    constant, ``free``, or a (flat) prior, and the per-group ``theta`` sampled centered or, if the group
+    prior was marked ``.noncentered()``, as ``mu + tau*z``. Returns ``(log_target, grad, slots, build,
+    dmean, dstd)`` compatible with the existing finalize/Posterior path -- so the per-group latents and
+    hyperparameters all appear in the posterior summary.
+    """
+    if rv._family.name != "Normal":
+        raise NotImplementedError("grouped NUTS currently supports a Normal likelihood.")
+    prior = rv._args[0]
+    if prior._family.name != "Normal":
+        raise NotImplementedError("grouped NUTS currently supports a Normal group prior.")
+    noncentered = prior._reparam == "loc_scale"
+    groups = [np.asarray(g, dtype=float) for g in data]
+    G = len(groups)
+    if G < 1:
+        raise ValueError("grouped model needs at least one group of observations.")
+    counts = np.array([len(g) for g in groups], dtype=float)
+    sums = np.array([g.sum() for g in groups])
+    sumsq = np.array([float(np.sum(g * g)) for g in groups])
+    flat = np.concatenate(groups) if any(counts) else np.zeros(1)
+    dmean, dstd = float(flat.mean()), float(flat.std() or 1.0)
+
+    # Hyperparameters mu (slot 0 of prior), tau (slot 1 of prior), sigma (slot 1 of rv).
+    specs = [("mu", prior._args[0], "real"), ("tau", prior._args[1], "positive"), ("sigma", rv._args[1], "positive")]
+    slots: list[_Slot] = []
+    hyper_cols: dict[str, int] = {}
+    col = 0
+    for nm, arg, support in specs:
+        if isinstance(arg, RandomVariable) or arg is free:
+            prior_dist = lower(arg, target="dist") if isinstance(arg, RandomVariable) else None
+            slots.append(_Slot(col, prior_dist, support == "positive", arg.name if isinstance(arg, RandomVariable) and arg.name else nm, arg if isinstance(arg, RandomVariable) else None, support))
+            hyper_cols[nm] = col
+            col += 1
+        else:
+            hyper_cols[nm] = -1  # constant
+    n_hyper = col
+    const = {nm: float(arg) for (nm, arg, _support) in specs if hyper_cols[nm] < 0}
+    # per-group latent slots; non-centered ones reconstruct theta = loc + scale*z via the shared mu/tau
+    pa = {}
+    if hyper_cols["mu"] >= 0:
+        pa[0] = hyper_cols["mu"]
+    if hyper_cols["tau"] >= 0:
+        pa[1] = hyper_cols["tau"]
+    for g in range(G):
+        if noncentered:
+            slots.append(
+                _Slot(n_hyper + g, None, False, f"{prior.name or 'theta'}[{g}]", prior, "real", parent_args=dict(pa), reparam="loc_scale")
+            )
+        else:
+            slots.append(_Slot(n_hyper + g, None, False, f"{prior.name or 'theta'}[{g}]", None, "real"))
+
+    def _eval(u, xp):
+        # hyperparameters (unconstrained -> constrained, with Jacobian for the positive ones)
+        logj = u[0] * 0.0
+        h = {}
+        for nm, _arg, support in specs:
+            c = hyper_cols[nm]
+            if c < 0:
+                h[nm] = const[nm]
+            elif support == "positive":
+                h[nm] = xp.exp(u[c])
+                logj = logj + u[c]
+            else:
+                h[nm] = u[c]
+        mu, tau, sigma = h["mu"], h["tau"], h["sigma"]
+        lp = logj
+        # hyperpriors
+        for nm, arg, _support in specs:
+            if isinstance(arg, RandomVariable):
+                lp = lp + _HYPER_LP[arg._family.name](h[nm], [float(z) for z in arg._args], xp)
+        # per-group latents + likelihood (vectorized over groups)
+        z = u[n_hyper : n_hyper + G]
+        theta = mu + tau * z if noncentered else z
+        cnt = xp.asarray(counts) if xp is np else z.new_tensor(counts)
+        sm = xp.asarray(sums) if xp is np else z.new_tensor(sums)
+        ssq = xp.asarray(sumsq) if xp is np else z.new_tensor(sumsq)
+        # sum_i (y - theta)^2 = sumsq - 2 theta sum + count theta^2
+        sse = ssq - 2.0 * theta * sm + cnt * theta * theta
+        ll = xp.sum(-0.5 * cnt * 1.8378770664093453 - cnt * _xlog(sigma, xp) - 0.5 * sse / (sigma * sigma))
+        prior_z = xp.sum(_lp_normal(z, 0.0, 1.0, xp)) if noncentered else xp.sum(_lp_normal(theta, mu, tau, xp))
+        return lp + ll + prior_z
+
+    def log_target(u):
+        v = float(_eval(np.asarray(u, dtype=float), np))
+        return v if math.isfinite(v) else _NEG_INF
+
+    grad = None
+    if want_grad:
+        try:
+            import torch
+
+            def grad(u):  # noqa: F811
+                t = torch.tensor(np.asarray(u, dtype=float), dtype=torch.float64, requires_grad=True)
+                val = _eval(t, torch)
+                (g,) = torch.autograd.grad(val, t)
+                return g.detach().numpy()
+        except Exception:
+            grad = None
+
+    def build(vals):
+        mu = vals[hyper_cols["mu"]] if hyper_cols["mu"] >= 0 else const["mu"]
+        tau = vals[hyper_cols["tau"]] if hyper_cols["tau"] >= 0 else const["tau"]
+        return prior._family.make_dist((float(mu), float(tau)), prior._name)
+
+    return log_target, grad, slots, build, dmean, dstd
+
+
 def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=False):
     """Shared sampler setup: build the joint log-target (analytic-Torch when available, else the
     numeric encoder target), optionally its gradient, then layer on constraints/penalty.
@@ -965,6 +1124,13 @@ def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=Fal
     from pysp.ppl import autograd as _ag
 
     eff = _auto_penalty(constraints, penalty)
+    if _is_grouped(rv):  # random-intercept / plate model: per-group latents + shared hyperparameters
+        log_target, grad, slots, build, dmean, dstd = _grouped_target(rv, data, want_grad=want_grad)
+        soft = _soft_penalty(constraints, slots, eff)
+        feasible = None if soft is not None else _feasibility(constraints, slots)
+        log_target = _constrain_target(log_target, feasible)
+        log_target = _penalize_target(log_target, soft)
+        return log_target, grad, slots, build, dmean, dstd, feasible
     ag = None if (numpy_only or eff is not None) else _ag.grad_target(rv, data)
     if ag is not None:
         slots, build, dmean, dstd = ag.slots, ag.build, ag.dmean, ag.dstd
