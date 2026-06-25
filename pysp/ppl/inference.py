@@ -1153,7 +1153,7 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
     return log_target, grad, slots, build, dmean, dstd
 
 
-# ------------------------------------- MCMC/VI sampler setup and the how= drivers
+# ----------------------------- sampler setup + the general how= drivers (MCMC, MAP, VI)
 def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=False):
     """Shared sampler setup: build the joint log-target (analytic-Torch when available, else the
     numeric encoder target), optionally its gradient, then layer on constraints/penalty.
@@ -1422,6 +1422,159 @@ def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:
     common knobs (draws, burn, thin, rng, chains, parallel, constraints, penalty)."""
     d = len(_target_parts(rv, data)[1])
     return ensemble_fit(rv, data, **kw) if d <= 12 else nuts_fit(rv, data, **kw)
+
+
+def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None, penalty=None) -> RandomVariable:
+    from scipy.optimize import minimize
+
+    from pysp.ppl import autograd as _ag
+
+    g = _ag.grad_target(rv, data)
+    if g is not None and constraints is None and penalty is None:
+        # analytic-gradient MAP: L-BFGS on the joint posterior (fast, scales with #params)
+        u0 = _init_u(g.slots, g.dmean, g.dstd)
+
+        def neg(u):
+            v, gr = g.value_and_grad(u)
+            return -v, -gr
+
+        res = minimize(neg, u0, jac=True, method="L-BFGS-B", options={"maxiter": 1000})
+        vals, _ = g.unpack(res.x)
+        return RandomVariable._bound(g.build(vals), name=rv._name)
+
+    # derivative-free path (no Torch, an unsupported family, or a constrained / penalized region)
+    log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
+    # penalty=... enforces the constraints softly (a log-joint term), so it replaces hard rejection.
+    feasible = None if soft is not None else _feasibility(constraints, slots)
+    log_target = _penalize_target(log_target, soft)
+    u0 = _init_u(slots, dmean, dstd)
+    if feasible is not None:
+        u0 = _project_init(u0, feasible, np.random.RandomState() if rng is None else rng)
+
+    def objective(u):
+        if feasible is not None and not feasible(u):
+            return 1e18  # keep the constrained MAP inside the feasible region
+        return -log_target(u)
+
+    res = minimize(objective, u0, method="Nelder-Mead", options={"xatol": 1e-6, "fatol": 1e-6, "maxiter": 5000})
+    vals, _ = unpack(res.x)
+    return RandomVariable._bound(build(vals), name=rv._name)
+
+
+class _VIResult:
+    """Lightweight raw-result holder for a variational fit (mirrors MCMCResult's role)."""
+
+    def __init__(self, elbo, mean, std, objective_kind="kl_elbo", alpha=1.0, family="meanfield", batch_size=None):
+        self.elbo = float(elbo)
+        self.objective = float(elbo)  # alias; for alpha != 1 this is the tilted Renyi bound, not the ELBO
+        self.objective_kind = objective_kind
+        self.alpha = float(alpha)
+        self.family = family
+        self.batch_size = None if batch_size is None else int(batch_size)
+        self.variational_mean = mean
+        self.variational_std = std
+        self.acceptance_rate = None
+
+
+def vi_fit(
+    rv: RandomVariable,
+    data,
+    *,
+    samples: int = 4000,
+    mc: int = 16,
+    max_iter: int = 4000,
+    steps: int = 600,
+    lr: float = 0.05,
+    batch_size: int | None = None,
+    family: str = "meanfield",
+    alpha: float = 1.0,
+    rng=None,
+) -> RandomVariable:
+    """Variational Bayes (ADVI) — a Gaussian variational posterior fit by reparameterized-MC Adam.
+
+    ``family='meanfield'`` (diagonal q, default) or ``'fullrank'`` (full covariance via a Cholesky
+    factor, capturing posterior correlations). ``alpha`` selects the tilted Renyi objective:
+    ``alpha=1`` is the KL-ELBO (default), ``alpha=0`` the importance-weighted (IWAE) bound, and
+    ``alpha<1`` is mass-covering (widens the often-too-narrow KL fit). ``batch_size`` subsamples the
+    data per step (SGVB). Without Torch it falls back to derivative-free mean-field ELBO. Works for
+    *non-conjugate* priors; returns a variational Posterior with draws and posterior-predictive.
+    """
+    from pysp.ppl import autograd as _ag
+
+    if rng is None:
+        rng = np.random.RandomState()
+
+    ag = _ag.grad_target(rv, data)
+    if ag is not None:
+        slots, build = ag.slots, ag.build
+        u0 = _init_u(slots, ag.dmean, ag.dstd)
+        s0 = _init_scale(slots, ag.dstd, len(data))
+        vals, mean, std, objective = ag.advi(
+            u0,
+            s0,
+            samples=samples,
+            mc=mc,
+            steps=steps,
+            lr=lr,
+            rng=rng,
+            batch_size=batch_size,
+            family=family,
+            alpha=alpha,
+        )
+        objective_kind = "kl_elbo" if alpha == 1.0 else "renyi_tilted"
+    else:
+        from scipy.optimize import minimize
+
+        log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+        d = len(slots)
+        u0 = _init_u(slots, dmean, dstd)
+        s0 = _init_scale(slots, dstd, len(data))
+        eps = rng.standard_normal((mc, d))  # common random numbers
+        half_entropy_const = 0.5 * d * (1.0 + math.log(2.0 * math.pi))
+
+        def neg_elbo(phi):
+            mean, log_std = phi[:d], phi[d:]
+            std = np.exp(log_std)
+            U = mean + std * eps
+            ll = float(np.mean([log_target(U[i]) for i in range(mc)]))
+            return -(ll + float(np.sum(log_std)) + half_entropy_const)
+
+        res = minimize(
+            neg_elbo,
+            np.concatenate([u0, np.log(s0)]),
+            method="Nelder-Mead",
+            options={"maxiter": max_iter, "xatol": 1e-5, "fatol": 1e-5},
+        )
+        mean, std = res.x[:d], np.exp(res.x[d:])
+        Z = rng.standard_normal((samples, d))
+        U = mean + std * Z
+        # map unconstrained samples back per slot support (exp/sigmoid/identity); the old hand-rolled
+        # branch only handled positive support, passing unit-support (Beta/Bernoulli) values through unbounded
+        vals = _u_to_vals(slots, U)
+        objective = -float(res.fun)  # neg_elbo was minimized; the ELBO is its negation
+        objective_kind = "kl_elbo_common_random"
+
+    mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
+    post = Posterior(
+        slots,
+        vals,
+        _VIResult(
+            objective, mean, std, objective_kind=objective_kind, alpha=alpha, family=family, batch_size=batch_size
+        ),
+    )
+
+    def predictive(n, r):
+        idx = r.randint(len(vals), size=n)
+        out = []
+        for j in idx:
+            dd = build({s.index: float(vals[j, k]) for k, s in enumerate(slots)})
+            out.append(dd.sampler(seed=int(r.randint(1, 2**31))).sample())
+        return np.asarray(out)
+
+    post.predictive = predictive
+    post.build = build
+    return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
 
 
 # ---------------------------------------------------- closed-form conjugate Bayes
@@ -1776,7 +1929,7 @@ def conjugate_mixture_fit(rv: RandomVariable, data) -> RandomVariable:
     return RandomVariable._bound(fitted, name=rv._name, result=post)
 
 
-# ----------------------------------------------- hierarchical random effects (VB/EM)
+# ------------------------------------------- hierarchical random effects (conjugate EM)
 class HierarchicalPosterior:
     """Per-group posteriors q(mu_i) = Normal(group_means[i], group_vars[i]) plus the
     fitted hyperparameters of a Normal-Normal random-effects model.
@@ -1914,156 +2067,3 @@ def hierarchical_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float
     pop, group_means, group_vars, hyper = impl(rv, n_i, sum_i, sumsq_i, max_its, tol)
     post = HierarchicalPosterior(group_means, group_vars, hyper)
     return RandomVariable._bound(pop, name=rv._name, result=post)
-
-
-def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None, penalty=None) -> RandomVariable:
-    from scipy.optimize import minimize
-
-    from pysp.ppl import autograd as _ag
-
-    g = _ag.grad_target(rv, data)
-    if g is not None and constraints is None and penalty is None:
-        # analytic-gradient MAP: L-BFGS on the joint posterior (fast, scales with #params)
-        u0 = _init_u(g.slots, g.dmean, g.dstd)
-
-        def neg(u):
-            v, gr = g.value_and_grad(u)
-            return -v, -gr
-
-        res = minimize(neg, u0, jac=True, method="L-BFGS-B", options={"maxiter": 1000})
-        vals, _ = g.unpack(res.x)
-        return RandomVariable._bound(g.build(vals), name=rv._name)
-
-    # derivative-free path (no Torch, an unsupported family, or a constrained / penalized region)
-    log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
-    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
-    # penalty=... enforces the constraints softly (a log-joint term), so it replaces hard rejection.
-    feasible = None if soft is not None else _feasibility(constraints, slots)
-    log_target = _penalize_target(log_target, soft)
-    u0 = _init_u(slots, dmean, dstd)
-    if feasible is not None:
-        u0 = _project_init(u0, feasible, np.random.RandomState() if rng is None else rng)
-
-    def objective(u):
-        if feasible is not None and not feasible(u):
-            return 1e18  # keep the constrained MAP inside the feasible region
-        return -log_target(u)
-
-    res = minimize(objective, u0, method="Nelder-Mead", options={"xatol": 1e-6, "fatol": 1e-6, "maxiter": 5000})
-    vals, _ = unpack(res.x)
-    return RandomVariable._bound(build(vals), name=rv._name)
-
-
-class _VIResult:
-    """Lightweight raw-result holder for a variational fit (mirrors MCMCResult's role)."""
-
-    def __init__(self, elbo, mean, std, objective_kind="kl_elbo", alpha=1.0, family="meanfield", batch_size=None):
-        self.elbo = float(elbo)
-        self.objective = float(elbo)  # alias; for alpha != 1 this is the tilted Renyi bound, not the ELBO
-        self.objective_kind = objective_kind
-        self.alpha = float(alpha)
-        self.family = family
-        self.batch_size = None if batch_size is None else int(batch_size)
-        self.variational_mean = mean
-        self.variational_std = std
-        self.acceptance_rate = None
-
-
-def vi_fit(
-    rv: RandomVariable,
-    data,
-    *,
-    samples: int = 4000,
-    mc: int = 16,
-    max_iter: int = 4000,
-    steps: int = 600,
-    lr: float = 0.05,
-    batch_size: int | None = None,
-    family: str = "meanfield",
-    alpha: float = 1.0,
-    rng=None,
-) -> RandomVariable:
-    """Variational Bayes (ADVI) — a Gaussian variational posterior fit by reparameterized-MC Adam.
-
-    ``family='meanfield'`` (diagonal q, default) or ``'fullrank'`` (full covariance via a Cholesky
-    factor, capturing posterior correlations). ``alpha`` selects the tilted Renyi objective:
-    ``alpha=1`` is the KL-ELBO (default), ``alpha=0`` the importance-weighted (IWAE) bound, and
-    ``alpha<1`` is mass-covering (widens the often-too-narrow KL fit). ``batch_size`` subsamples the
-    data per step (SGVB). Without Torch it falls back to derivative-free mean-field ELBO. Works for
-    *non-conjugate* priors; returns a variational Posterior with draws and posterior-predictive.
-    """
-    from pysp.ppl import autograd as _ag
-
-    if rng is None:
-        rng = np.random.RandomState()
-
-    ag = _ag.grad_target(rv, data)
-    if ag is not None:
-        slots, build = ag.slots, ag.build
-        u0 = _init_u(slots, ag.dmean, ag.dstd)
-        s0 = _init_scale(slots, ag.dstd, len(data))
-        vals, mean, std, objective = ag.advi(
-            u0,
-            s0,
-            samples=samples,
-            mc=mc,
-            steps=steps,
-            lr=lr,
-            rng=rng,
-            batch_size=batch_size,
-            family=family,
-            alpha=alpha,
-        )
-        objective_kind = "kl_elbo" if alpha == 1.0 else "renyi_tilted"
-    else:
-        from scipy.optimize import minimize
-
-        log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
-        d = len(slots)
-        u0 = _init_u(slots, dmean, dstd)
-        s0 = _init_scale(slots, dstd, len(data))
-        eps = rng.standard_normal((mc, d))  # common random numbers
-        half_entropy_const = 0.5 * d * (1.0 + math.log(2.0 * math.pi))
-
-        def neg_elbo(phi):
-            mean, log_std = phi[:d], phi[d:]
-            std = np.exp(log_std)
-            U = mean + std * eps
-            ll = float(np.mean([log_target(U[i]) for i in range(mc)]))
-            return -(ll + float(np.sum(log_std)) + half_entropy_const)
-
-        res = minimize(
-            neg_elbo,
-            np.concatenate([u0, np.log(s0)]),
-            method="Nelder-Mead",
-            options={"maxiter": max_iter, "xatol": 1e-5, "fatol": 1e-5},
-        )
-        mean, std = res.x[:d], np.exp(res.x[d:])
-        Z = rng.standard_normal((samples, d))
-        U = mean + std * Z
-        # map unconstrained samples back per slot support (exp/sigmoid/identity); the old hand-rolled
-        # branch only handled positive support, passing unit-support (Beta/Bernoulli) values through unbounded
-        vals = _u_to_vals(slots, U)
-        objective = -float(res.fun)  # neg_elbo was minimized; the ELBO is its negation
-        objective_kind = "kl_elbo_common_random"
-
-    mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
-    post = Posterior(
-        slots,
-        vals,
-        _VIResult(
-            objective, mean, std, objective_kind=objective_kind, alpha=alpha, family=family, batch_size=batch_size
-        ),
-    )
-
-    def predictive(n, r):
-        idx = r.randint(len(vals), size=n)
-        out = []
-        for j in idx:
-            dd = build({s.index: float(vals[j, k]) for k, s in enumerate(slots)})
-            out.append(dd.sampler(seed=int(r.randint(1, 2**31))).sample())
-        return np.asarray(out)
-
-    post.predictive = predictive
-    post.build = build
-    return RandomVariable._bound(build(mean_vals), name=rv._name, result=post)
