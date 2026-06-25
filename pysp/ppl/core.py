@@ -918,7 +918,7 @@ class RandomVariable:
     state. Construct via the family functions in :mod:`pysp.ppl` or ``fit``.
     """
 
-    __slots__ = ("_kind", "_family", "_args", "_name", "_keys", "_dist", "_result", "_cache", "_scope")
+    __slots__ = ("_kind", "_family", "_args", "_name", "_keys", "_dist", "_result", "_cache", "_scope", "_reparam")
 
     def __init__(
         self,
@@ -931,6 +931,7 @@ class RandomVariable:
         dist=None,
         result: PosteriorResult | None = None,
         scope="shared",
+        reparam=None,
     ):
         # Private; use the classmethods / family functions. Treated as immutable.
         object.__setattr__(self, "_kind", kind)
@@ -942,6 +943,7 @@ class RandomVariable:
         object.__setattr__(self, "_result", result)
         object.__setattr__(self, "_cache", {})
         object.__setattr__(self, "_scope", scope)  # 'shared' | 'grouped'
+        object.__setattr__(self, "_reparam", reparam)  # None | 'loc_scale' (non-centered prior)
 
     def __setattr__(self, *a):  # enforce immutability (I2)
         raise AttributeError("RandomVariable is immutable")
@@ -951,7 +953,10 @@ class RandomVariable:
         # distributed fits). Families live in the module-level registry and are
         # restored by name; transient _result/_cache are dropped.
         fam_name = self._family.name if self._family is not None else None
-        return (_rv_reconstruct, (self._kind, fam_name, self._args, self._name, self._keys, self._dist, self._scope))
+        return (
+            _rv_reconstruct,
+            (self._kind, fam_name, self._args, self._name, self._keys, self._dist, self._scope, self._reparam),
+        )
 
     # -- constructors -------------------------------------------------------
     @classmethod
@@ -967,6 +972,28 @@ class RandomVariable:
             raise TypeError("each() applies to a distribution used as a prior.")
         return RandomVariable(
             "sample", family=self._family, args=self._args, name=self._name, keys=self._keys, scope="grouped"
+        )
+
+    def noncentered(self) -> RandomVariable:
+        """Sample this location-scale prior in non-centered form (offset/multiplier).
+
+        For ``mu = Normal(loc, scale)`` with a random ``scale`` (a hierarchical prior), the centered
+        parameterization couples ``mu``'s range to ``scale`` and creates Neal's funnel -- a geometry
+        HMC/NUTS samples badly. ``Normal(loc, scale).noncentered()`` instead samples a standard normal
+        ``z`` and sets ``mu = loc + scale * z``, whose geometry is independent of ``scale``. Mathematically
+        identical posterior, far better mixing (fewer divergences) when the data are weakly informative.
+        Applies to ``Normal`` priors; a no-op marker on others.
+        """
+        if self._kind != "sample" or self._family is None or self._family.name != "Normal":
+            raise TypeError("noncentered() applies to a Normal prior (a location-scale family).")
+        return RandomVariable(
+            "sample",
+            family=self._family,
+            args=self._args,
+            name=self._name,
+            keys=self._keys,
+            scope=self._scope,
+            reparam="loc_scale",
         )
 
     @property
@@ -1634,12 +1661,12 @@ def _param_handle(dim: int, *, name=None, kind: str = "vector", support: str = "
     return RandomVariable("param", args=(spec,), name=name)
 
 
-def _rv_reconstruct(kind, fam_name, args, name, keys, dist, scope):
+def _rv_reconstruct(kind, fam_name, args, name, keys, dist, scope, reparam=None):
     """Rebuild a RandomVariable from its picklable structural fields."""
     if kind == "bound":
         return RandomVariable._bound(dist, name=name)
     family = _FAMILIES[fam_name] if fam_name is not None else None
-    return RandomVariable(kind, family=family, args=args, name=name, keys=keys, scope=scope)
+    return RandomVariable(kind, family=family, args=args, name=name, keys=keys, scope=scope, reparam=reparam)
 
 
 # -------------------------------------------------------------------- the lowering

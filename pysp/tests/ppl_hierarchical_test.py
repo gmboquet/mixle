@@ -66,5 +66,54 @@ class HierarchicalPriorTest(unittest.TestCase):
             self.assertTrue(np.isfinite(s[k]["mean"]))
 
 
+class NonCenteredReparamTest(unittest.TestCase):
+    def _funnel(self, noncentered):
+        tau = Gamma(2.0, 1.0, name="tau")
+        mu = Normal(0.0, tau, name="mu")
+        return Normal(mu.noncentered() if noncentered else mu, 1.0)
+
+    def test_noncentered_gradient_matches_finite_difference(self):
+        from pysp.ppl.autograd import grad_target
+
+        data = np.random.RandomState(0).normal(2.0, 1.0, 60)
+        ag = grad_target(self._funnel(True), data)
+        u0 = np.array([0.2, -0.3])
+        _, g = ag.value_and_grad(u0)
+        gn = np.zeros(2)
+        eps = 1e-6
+        for i in range(2):
+            up, um = u0.copy(), u0.copy()
+            up[i] += eps
+            um[i] -= eps
+            gn[i] = (ag.log_target(up) - ag.log_target(um)) / (2 * eps)
+        np.testing.assert_allclose(g, gn, atol=1e-4)
+
+    def test_noncentered_matches_centered_posterior(self):
+        data = np.random.RandomState(0).normal(2.0, 1.0, 60)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            c = self._funnel(False).fit(data, how="nuts", draws=600, burn=600, chains=2, rng=np.random.RandomState(1))
+            nc = self._funnel(True).fit(data, how="nuts", draws=600, burn=600, chains=2, rng=np.random.RandomState(1))
+        # same model, different geometry -> same posterior
+        self.assertAlmostEqual(c.summary()["mu"]["mean"], nc.summary()["mu"]["mean"], delta=0.15)
+        self.assertAlmostEqual(c.summary()["tau"]["mean"], nc.summary()["tau"]["mean"], delta=0.5)
+
+    def test_noncentered_reduces_divergences_on_sharp_funnel(self):
+        data = np.random.RandomState(4).normal(0.0, 1.0, 3)  # weak data -> sharp prior funnel
+
+        def total_div(noncentered):
+            d = 0
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                for seed in range(3):
+                    fit = self._funnel(noncentered).fit(
+                        data, how="nuts", draws=600, burn=600, chains=2, rng=np.random.RandomState(seed)
+                    )
+                    d += fit.summary().get("_num_divergences", 0)
+            return d
+
+        self.assertGreater(total_div(False), 4 * total_div(True) + 10)  # non-centered is far smoother
+
+
 if __name__ == "__main__":
     unittest.main()
