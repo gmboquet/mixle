@@ -23,7 +23,7 @@ estimator that fits it have the same shape — so what you can express, you can 
 [Distribution catalog](#distribution-catalog) · [Probabilistic programming](#probabilistic-programming-pyspppl) ·
 [Frequentist & Bayesian](#frequentist--bayesian) · [Engines & orchestration](#engines--orchestration) ·
 [Enumeration & ranking](#enumeration--ranking) · [Beyond fitting](#beyond-fitting) ·
-[Companion packages](#companion-packages) · [Examples](#examples) · [Tests](#tests) · [License](#license)
+[Examples](#examples) · [Tests](#tests) · [License](#license)
 
 ## Installation
 
@@ -254,14 +254,6 @@ e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
 - **Supervised & non-iid models** (`pysp.models`): GP regression, neural regressors, random forests
   (a conditional `p(y | x)` leaf), random graphs, grammars, knowledge graphs.
 
-## Companion packages
-
-- [**pysparkplug-pde**](https://github.com/gmboquet/pysparkplug-pde) — PDE/ODE-constrained Bayesian
-  inverse problems (diffusion, Navier–Stokes, full-waveform inversion, FEM, level-set shape). Builds on
-  pysp's field models and plugs in on import: `import pysparkplug_pde` makes `PDE(operator).fit(...)`
-  and the forward solvers available, while pysp's core stays free of PDE machinery.
-- [**pysparkplug-notebooks**](https://github.com/gmboquet/pysparkplug-notebooks) — worked tutorials.
-
 ## Examples
 
 Self-contained scripts in [examples/](https://github.com/gmboquet/pysparkplug/tree/main/examples) —
@@ -292,6 +284,5 @@ vectorized-vs-scalar density agreement, EM convergence. See
 
 ## License
 
-MIT — see [LICENSE](https://github.com/gmboquet/pysparkplug/blob/main/LICENSE) and
-[NOTICE](https://github.com/gmboquet/pysparkplug/blob/main/NOTICE). Originally developed at Lawrence
-Livermore National Laboratory (LLNL-CODE-844837).
+MIT — see [LICENSE](https://github.com/gmboquet/pysparkplug/blob/main/LICENSE). Originally developed at
+Lawrence Livermore National Laboratory (LLNL-CODE-844837).
