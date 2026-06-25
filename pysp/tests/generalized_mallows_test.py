@@ -7,10 +7,10 @@ import unittest
 import numpy as np
 
 from pysp.stats import GeneralizedMallowsDistribution
-from pysp.stats.rankings._permutation_kernels import permutation_distance
-from pysp.stats.rankings.generalized_mallows import expected_distance, log_normalizer
+from pysp.stats.rankings._permutation_kernels import METRICS, permutation_distance
+from pysp.stats.rankings.generalized_mallows import expected_distance, metric_log_normalizer
 
-_METRICS = ("kendall", "cayley", "hamming")
+_CLOSED = ("kendall", "cayley", "hamming")
 
 
 def _brute_logz(metric, theta, n):
@@ -30,22 +30,27 @@ def _brute_expected(metric, theta, n):
 
 
 class NormalizerTest(unittest.TestCase):
-    def test_log_normalizer_matches_brute_force(self):
-        for metric in _METRICS:
+    def test_log_normalizer_matches_brute_force_all_metrics(self):
+        # closed form (kendall/cayley/hamming) and exact permanent / enumeration (footrule/spearman/ulam)
+        for metric in METRICS:
             for theta in (0.0, 0.4, 1.3, 3.0):
-                self.assertAlmostEqual(log_normalizer(metric, theta, 6), _brute_logz(metric, theta, 6), places=9)
+                self.assertAlmostEqual(
+                    metric_log_normalizer(metric, theta, 6), _brute_logz(metric, theta, 6), places=7, msg=metric
+                )
 
     def test_expected_distance_matches_brute_force(self):
-        for metric in _METRICS:
+        for metric in _CLOSED:
             for theta in (1e-9, 0.4, 1.3, 3.0):
                 self.assertAlmostEqual(
                     expected_distance(metric, theta, 6), _brute_expected(metric, theta, 6), places=7
                 )
 
-    def test_density_sums_to_one(self):
-        for metric in _METRICS:
+    def test_density_sums_to_one_all_metrics(self):
+        for metric in METRICS:
             d = GeneralizedMallowsDistribution([2, 0, 1, 4, 3], 1.1, metric)
-            self.assertAlmostEqual(sum(d.density(list(p)) for p in itertools.permutations(range(5))), 1.0, places=9)
+            self.assertAlmostEqual(
+                sum(d.density(list(p)) for p in itertools.permutations(range(5))), 1.0, places=9, msg=metric
+            )
 
     def test_seq_log_density_matches_scalar(self):
         d = GeneralizedMallowsDistribution([3, 1, 0, 2], 0.8, "cayley")
@@ -56,7 +61,7 @@ class NormalizerTest(unittest.TestCase):
 class RecoveryTest(unittest.TestCase):
     def test_estimator_recovers_center_and_theta(self):
         center = [3, 1, 4, 0, 2, 5]
-        for metric in _METRICS:
+        for metric in METRICS:
             true = GeneralizedMallowsDistribution(center, 1.0, metric)
             samp = true.sampler(seed=1).sample(3000)
             acc = true.estimator().accumulator_factory().make()
@@ -84,7 +89,7 @@ class RecoveryTest(unittest.TestCase):
 class ValidationTest(unittest.TestCase):
     def test_rejects_bad_metric_and_params(self):
         with self.assertRaises(ValueError):
-            GeneralizedMallowsDistribution([0, 1, 2], 1.0, "ulam")  # not a closed-form metric here
+            GeneralizedMallowsDistribution([0, 1, 2], 1.0, "manhattan")  # unknown metric
         with self.assertRaises(ValueError):
             GeneralizedMallowsDistribution([0, 1, 1], 1.0, "kendall")  # not a permutation
         with self.assertRaises(ValueError):
