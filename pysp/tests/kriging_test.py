@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from scipy.spatial.distance import cdist
 
-from pysp.stats import (
+from pysp.analysis import (
     Variogram,
     calibrate_variance,
     empirical_variogram,

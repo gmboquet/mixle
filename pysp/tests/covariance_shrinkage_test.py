@@ -4,8 +4,9 @@ import unittest
 
 import numpy as np
 
+from pysp.analysis import LedoitWolfEstimator
 from pysp.inference import estimate
-from pysp.stats import LedoitWolfEstimator, MultivariateGaussianDistribution
+from pysp.stats import MultivariateGaussianDistribution
 
 
 def _lw_reference(R):

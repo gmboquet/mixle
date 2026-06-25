@@ -5,8 +5,8 @@ import unittest
 
 import numpy as np
 
+from pysp.analysis.spatial_mixture import SpatialMixture
 from pysp.stats import GaussianEstimator, MultivariateGaussianDistribution, MultivariateGaussianEstimator
-from pysp.stats.latent.spatial_mixture import SpatialMixture
 
 
 def _layered_field(seed=0):
