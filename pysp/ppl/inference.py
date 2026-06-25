@@ -1,14 +1,27 @@
-"""Bayesian inference for pysp.ppl: parameter MCMC and MAP on a shared joint target.
+"""Bayesian inference for pysp.ppl: parameter MCMC, MAP, VI, and closed-form conjugate updates.
 
 A model whose parameter slots hold *distributions* (priors) or ``free`` defines a joint
-``log p(data | theta) + log p(theta)``. Both MAP (maximize) and MCMC (sample) run on the
-exact same target, scored with the existing vectorized ``seq_log_density`` and pysp's
+``log p(data | theta) + log p(theta)``. MAP (maximize), MCMC/HMC/NUTS (sample), and VI all run on
+the exact same target, scored with the existing vectorized ``seq_log_density`` and pysp's
 ``pysp.inference.mcmc`` kernels — no new inference engine.
 
-Flat ``Sample`` models (``Normal(Normal(0,10), free)``) and *composite* models (mixtures,
-sequences) are both supported: composites collect their leaf ``free``/prior parameters across
-the tree and rebuild a concrete model per evaluation (``_collect_composite``). Mixtures need an
-identifiability constraint (e.g. ordered component means) to break label-switching.
+What this module supports:
+  * Flat ``Sample`` models (``Normal(Normal(0, 10), free)``) and *composite* models (mixtures,
+    sequences): composites collect their leaf ``free``/prior parameters across the tree and rebuild
+    a concrete model per evaluation (``_collect_composite``).
+  * Hierarchical priors -- a prior whose own hyperparameter is another random variable
+    (``Normal(0, tau)`` with ``tau`` estimated), scored differentiably via parent-slot substitution.
+  * Non-centered reparameterization (``.noncentered()``) for funnel-prone location-scale priors.
+  * Grouped / random-intercept ("plate") models -- ``Normal(Normal(mu, tau).each(), sigma)`` sampled
+    jointly over the hyperparameters and every per-group latent.
+
+Identifiability is handled automatically: mixture chains are relabeled (sorted by a leading
+parameter) before pooling, so label-switching no longer needs a user-supplied ordering constraint.
+
+Section map (banners below): core slot/target construction; init + result assembly (finalize,
+convergence diagnostics, relabeling); parallel chains; inequality/region constraints; hierarchical
+& grouped models; sampler setup and the ``how=`` drivers; closed-form conjugate / conjugate-mixture
+/ hierarchical-EM updates.
 """
 
 from __future__ import annotations
@@ -507,6 +520,7 @@ def _build_target(rv: RandomVariable, data):
     return log_target, slots, fam, build, unpack, (dmean, dstd)
 
 
+# ------------------------ init + result assembly (finalize, diagnostics, relabeling)
 def _init_u(slots, dmean, dstd) -> np.ndarray:
     u0 = []
     for s in slots:
@@ -643,6 +657,7 @@ def _gelman_rubin(chains_u: np.ndarray) -> np.ndarray:
     return np.sqrt(np.maximum(var_hat / np.where(W > 0, W, 1.0), 0.0))
 
 
+# ---------------------------------------- parallel chains (workers + orchestration)
 def _mcmc_worker(seed, rv, data, kw):
     """Module-level (picklable) single RW-Metropolis chain (parallel path: no constraints)."""
     from pysp.inference.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
@@ -957,6 +972,7 @@ def _penalize_target(log_target, penalty):
     return plt
 
 
+# -------------------------- hierarchical priors & grouped (random-intercept) models
 def _is_grouped(rv: RandomVariable) -> bool:
     """A random-intercept model: a flat family whose slot-0 prior is a ``.each()`` group prior."""
     return (
@@ -1036,7 +1052,16 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
     for nm, arg, support in specs:
         if isinstance(arg, RandomVariable) or arg is free:
             prior_dist = lower(arg, target="dist") if isinstance(arg, RandomVariable) else None
-            slots.append(_Slot(col, prior_dist, support == "positive", arg.name if isinstance(arg, RandomVariable) and arg.name else nm, arg if isinstance(arg, RandomVariable) else None, support))
+            slots.append(
+                _Slot(
+                    col,
+                    prior_dist,
+                    support == "positive",
+                    arg.name if isinstance(arg, RandomVariable) and arg.name else nm,
+                    arg if isinstance(arg, RandomVariable) else None,
+                    support,
+                )
+            )
             hyper_cols[nm] = col
             col += 1
         else:
@@ -1052,7 +1077,16 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
     for g in range(G):
         if noncentered:
             slots.append(
-                _Slot(n_hyper + g, None, False, f"{prior.name or 'theta'}[{g}]", prior, "real", parent_args=dict(pa), reparam="loc_scale")
+                _Slot(
+                    n_hyper + g,
+                    None,
+                    False,
+                    f"{prior.name or 'theta'}[{g}]",
+                    prior,
+                    "real",
+                    parent_args=dict(pa),
+                    reparam="loc_scale",
+                )
             )
         else:
             slots.append(_Slot(n_hyper + g, None, False, f"{prior.name or 'theta'}[{g}]", None, "real"))
@@ -1113,6 +1147,7 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
     return log_target, grad, slots, build, dmean, dstd
 
 
+# ------------------------------------- MCMC/VI sampler setup and the how= drivers
 def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=False):
     """Shared sampler setup: build the joint log-target (analytic-Torch when available, else the
     numeric encoder target), optionally its gradient, then layer on constraints/penalty.
