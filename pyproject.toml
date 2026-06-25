@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # PyPI distribution name; the import package is `pysp` (cf. scikit-learn -> sklearn).
 name = "pysp-learn"
-version = "0.5.0"
+version = "0.5.1"
 description = "A package for estimating heterogeneous probability density functions."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -40,34 +40,36 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# numba >= 0.59 is the first series with Python 3.10-3.12 wheels and the njit features the kernels use.
-numba = ["numba>=0.59", "tbb"]
+# Extras are opt-in; the lower bounds are conservative floors (oldest releases with Python 3.10-3.12
+# wheels and the APIs pysp uses), not pins -- newer majors are allowed. numba >= 0.59 is the first
+# series with 3.10-3.12 wheels and the njit features the kernels use.
+numba = ["numba>=0.59", "tbb>=2021.6"]
 # pandas is only used by the DataFrame data adapter (which duck-types and never imports pandas);
 # it is optional so the base install stays lean.
-pandas = ["pandas"]
+pandas = ["pandas>=2.0"]
 # data-layer connectors (pysp.data.sources) -- each lazy + optional.
-arrow = ["pyarrow"]
-sql = ["sqlalchemy"]
-mongo = ["pymongo"]
-hadoop = ["pyarrow", "fsspec"]
-data = ["pandas", "pyarrow", "sqlalchemy", "pymongo", "fsspec"]
+arrow = ["pyarrow>=14"]
+sql = ["sqlalchemy>=2.0"]
+mongo = ["pymongo>=4.3"]
+hadoop = ["pyarrow>=14", "fsspec>=2023.1.0"]
+data = ["pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "pymongo>=4.3", "fsspec>=2023.1.0"]
 # graph-grammar models (pysp.stats.sequences.grammar) are the only networkx user; lazy + optional.
-grammar = ["networkx"]
+grammar = ["networkx>=3.0"]
 # GMP-backed (FFT) big-integer multiply for the structural count-DP's large histogram convolutions.
-gmpy2 = ["gmpy2"]
-spark = ["pyspark"]
-dask = ["dask", "distributed"]
-torch = ["torch"]
-mpi = ["mpi4py"]
-umap = ["umap-learn"]
-sympy = ["sympy"]
+gmpy2 = ["gmpy2>=2.1"]
+spark = ["pyspark>=3.4"]
+dask = ["dask>=2023.5.0", "distributed>=2023.5.0"]
+torch = ["torch>=2.0"]
+mpi = ["mpi4py>=3.1"]
+umap = ["umap-learn>=0.5.4"]
+sympy = ["sympy>=1.12"]
 # to_sage symbolic export. Full SageMath is not pip-installable; passagemath is its modular,
 # wheel-distributed fork (the symbolic subset suffices -- it provides sage.all__sagemath_symbolics).
-sage = ["passagemath-symbolics"]
-test = ["pytest>=8", "pytest-xdist"]
+sage = ["passagemath-symbolics>=10.4"]
+test = ["pytest>=8", "pytest-xdist>=3.0"]
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
-lint = ["ruff==0.15.17", "mypy"]
-all = ["numba>=0.59", "tbb", "pyspark", "dask", "distributed", "torch", "mpi4py", "umap-learn", "pandas", "pyarrow", "sqlalchemy", "networkx"]
+lint = ["ruff==0.15.17", "mypy>=1.0"]
+all = ["numba>=0.59", "tbb>=2021.6", "pyspark>=3.4", "dask>=2023.5.0", "distributed>=2023.5.0", "torch>=2.0", "mpi4py>=3.1", "umap-learn>=0.5.4", "pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "networkx>=3.0"]
 
 [project.urls]
 Homepage = "https://github.com/gmboquet/pysparkplug"
