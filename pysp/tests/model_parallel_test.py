@@ -226,6 +226,37 @@ class SparkDataModelTest(unittest.TestCase):
             sc.stop()
         self.assertTrue(np.isclose(_ll(base, data), _ll(dm, data), rtol=1e-6), (_ll(base, data), _ll(dm, data)))
 
+    def test_full_stack_auto_planner_on_spark(self):
+        # capstone: size the split to the real cluster (Resources.from_spark) -> planner picks the axis
+        # (C2) -> data x model on Spark (C3). The whole C1->C2->C3 pipeline end-to-end.
+        try:
+            from pyspark import SparkConf, SparkContext
+        except ImportError:
+            self.skipTest("pyspark not installed")
+        java_home = os.environ.get("JAVA_HOME")
+        java_bin = (os.path.join(java_home, "bin", "java") if java_home else None) or shutil.which("java")
+        try:
+            if java_bin is None or subprocess.run([java_bin, "-version"], capture_output=True).returncode != 0:
+                self.skipTest("no functional Java runtime for Spark")
+        except OSError:
+            self.skipTest("no functional Java runtime for Spark")
+
+        from pysp.utils.parallel import auto_parallel_estimator
+        from pysp.utils.parallel.planner import Resources
+
+        est, init, data = _mixture_data(k=10, n=1000)
+        base = optimize(data, est, prev_estimate=init, max_its=8, out=None, backend="local")
+        sc = SparkContext(conf=SparkConf().setMaster("local[3]").setAppName("mp-cap").set("spark.ui.enabled", "false"))
+        try:
+            sc.setLogLevel("ERROR")
+            chosen, dec = auto_parallel_estimator(est, init, Resources.from_spark(sc), n_data=len(data))
+            self.assertTrue(dec.is_model_parallel)  # 10 components over a multi-executor cluster
+            rdd = sc.parallelize(data, 4)
+            fit = optimize(rdd, chosen, prev_estimate=init, max_its=8, out=None, backend="spark")
+        finally:
+            sc.stop()
+        self.assertTrue(np.isclose(_ll(base, data), _ll(fit, data), rtol=1e-6), (_ll(base, data), _ll(fit, data)))
+
 
 _MPI_SCRIPT = r"""
 import sys
