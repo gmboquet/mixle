@@ -112,6 +112,35 @@ def ulam_perm(r: np.ndarray) -> int:
     return n - size
 
 
+# --- RIM insertion code: the per-stage statistic of the Generalized Mallows Model ----------------
+@numba.njit("int64[:, :](int64[:, :], int64[:])", cache=True)
+def _seq_rim_code(orderings: np.ndarray, sigma0: np.ndarray) -> np.ndarray:
+    """Repeated-Insertion-Model code ``J[i] = #{m < i : q[m] > q[i]}`` (q = observed rank of sigma0[i]).
+
+    ``J[i] in {0..i}`` is the back-jump of central item ``i`` under the RIM, ``sum_i J[i] = kendall``;
+    returns columns ``J[1..n-1]`` (``J[0] = 0`` is dropped). This is exactly the statistic the per-stage
+    RIM sampler inverts, so density and sampling stay consistent.
+    """
+    big_n, n = orderings.shape
+    out = np.empty((big_n, n - 1), dtype=np.int64)
+    rank = np.empty(n, dtype=np.int64)
+    q = np.empty(n, dtype=np.int64)
+    for t in range(big_n):
+        sig = orderings[t]
+        for rpos in range(n):
+            rank[sig[rpos]] = rpos  # observed rank of each item
+        for i in range(n):
+            q[i] = rank[sigma0[i]]
+        for i in range(1, n):
+            c = 0
+            qi = q[i]
+            for m in range(i):
+                if q[m] > qi:
+                    c += 1
+            out[t, i - 1] = c
+    return out
+
+
 # --- batched drivers: distance of every row of R (relative-rank vectors) from the identity -------
 @numba.njit("int64[:](int64[:,:], int64)", cache=True)
 def _seq_distance(R: np.ndarray, mid: int) -> np.ndarray:
@@ -144,6 +173,12 @@ def seq_distance_to_center(orderings: np.ndarray, rank_center: np.ndarray, metri
     """Vectorized distance of each ordering (row of an ``(N, n)`` array) to the center, under ``metric``."""
     o = np.atleast_2d(np.asarray(orderings, dtype=np.int64))
     return _seq_distance(relative_ranks(o, np.asarray(rank_center, dtype=np.int64)), metric_id(metric))
+
+
+def seq_rim_code(orderings: np.ndarray, sigma0: np.ndarray) -> np.ndarray:
+    """RIM insertion codes ``(N, n-1)`` of each ordering relative to the central permutation ``sigma0``."""
+    o = np.atleast_2d(np.asarray(orderings, dtype=np.int64))
+    return _seq_rim_code(o, np.asarray(sigma0, dtype=np.int64))
 
 
 def permutation_distance(a: np.ndarray, b: np.ndarray, metric: str = "kendall") -> int:
