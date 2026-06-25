@@ -112,6 +112,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "model_helpers_test.py": ("latent", "graph", "pomdp", "knowledge_graph", "causal", "grammar"),
     "mcmc_test.py": ("stochastic",),
     "glm_test.py": ("distribution",),
+    "survival_regression_test.py": ("distribution", "stochastic"),
     "scoring_rules_test.py": ("distribution",),
     "calibration_diagnostics_test.py": ("distribution",),
     "multiple_testing_test.py": ("distribution",),
