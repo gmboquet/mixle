@@ -97,6 +97,43 @@ class ComponentParallelTest(unittest.TestCase):
         self.assertEqual(str(local), str(mp))
 
 
+class NestedRecursiveTest(unittest.TestCase):
+    """Recursive fold: nested shardable models are model-parallel at the widest axis, still bit-identical."""
+
+    def _check(self, est, init, data, its=8):
+        local = optimize(data, est, prev_estimate=init, max_its=its, out=None, backend="local")
+        mp = optimize(data, est, prev_estimate=init, max_its=its, out=None, backend="model_parallel")
+        self.assertEqual(str(local), str(mp))
+
+    def test_composite_of_mixture_and_leaf(self):
+        # widest axis is the inner mixture's components, nested inside factor 0 of the composite
+        est = stats.CompositeEstimator(
+            (stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(5)]), stats.PoissonEstimator())
+        )
+        init = stats.CompositeDistribution(
+            (
+                stats.MixtureDistribution([stats.GaussianDistribution(float(i) - 2, 1.0) for i in range(5)], [0.2] * 5),
+                stats.PoissonDistribution(2.0),
+            )
+        )
+        rng = np.random.RandomState(3)
+        data = [(float(rng.randn() + 2 * (rng.randint(5) - 2)), int(rng.poisson(2))) for _ in range(400)]
+        self._check(est, init, data)
+
+    def test_mixture_of_composites(self):
+        def comp_est():
+            return stats.CompositeEstimator((stats.GaussianEstimator(), stats.PoissonEstimator()))
+
+        def comp(mu, lam):
+            return stats.CompositeDistribution((stats.GaussianDistribution(mu, 1.0), stats.PoissonDistribution(lam)))
+
+        est = stats.MixtureEstimator([comp_est(), comp_est(), comp_est()])
+        init = stats.MixtureDistribution([comp(-2.0, 1.0), comp(0.0, 3.0), comp(2.0, 6.0)], [1 / 3] * 3)
+        rng = np.random.RandomState(4)
+        data = [(float(rng.randn() + 2 * (rng.randint(3) - 1)), int(rng.poisson(3))) for _ in range(400)]
+        self._check(est, init, data)
+
+
 class FallbackTest(unittest.TestCase):
     def test_leaf_model_falls_back_and_is_identical(self):
         # a plain Gaussian is atomic -> replicated accumulation, still exact via the same handle.
