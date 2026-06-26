@@ -21,9 +21,18 @@ existing edges by the motif each is part of (so e.g. growth can favour triadic c
 bridges -- ties in dense neighbourhoods persist). Removal defaults off, so the constructor is backward
 compatible and a pure-growth grammar still scores a deletion as -inf.
 
+Adjacencies may be dense ``ndarray`` or ``scipy.sparse`` -- scoring and fitting never form the n*n bin
+matrix (they touch only the changed edges and the wedge structure of ``A @ A``), so a 200k-node graph
+scores in a fraction of a second where a dense adjacency would need hundreds of GB. (Sampling stays
+dense/moderate-scale.) ``LabeledTemporalGraphGrammarDistribution`` attaches node attributes (location,
+name, age, ...) and edge attributes (communication counts, channel, ...) as ordinary pysp distributions
+scored as emissions on top of the topology -- the whole thing fits jointly with the full distribution
+machinery (mixtures, every leaf family, the numba fusion).
+
 This is the temporal counterpart of the static vertex-/hyperedge-replacement grammars in this package.
-Scope: undirected, binary; edges add+remove, nodes appended. Node *removal* (needs identity tracking
-across snapshots), directed/weighted graphs, and node attributes are natural extensions.
+Scope: undirected, binary (the attribute models carry the labels); edges add+remove, nodes appended; dense
+or sparse. Node *removal* (needs identity tracking across snapshots), directed/weighted topology, and
+scalable sampling (rejection-based) are the natural extensions.
 """
 
 from __future__ import annotations
@@ -33,6 +42,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
+import scipy.sparse as sp
 from numpy.random import RandomState
 
 from pysp.stats.compute.pdist import (
@@ -45,6 +55,48 @@ from pysp.stats.compute.pdist import (
 )
 
 _EPS = 1.0e-12
+
+
+def _binarize(adj: Any) -> Any:
+    """Return a binary upper-or-full adjacency as a CSR array (sparse) or float ndarray (dense)."""
+    if sp.issparse(adj):
+        a = adj.tocsr().copy()
+        a.data[:] = 1.0
+        return a
+    return (np.asarray(adj, dtype=np.float64) > 0).astype(np.float64)
+
+
+def _pad(adj: Any, n: int) -> Any:
+    """Grow a (n0,n0) adjacency to (n,n) by appending isolated nodes (sparse or dense)."""
+    n0 = adj.shape[0]
+    if n == n0:
+        return adj
+    if sp.issparse(adj):
+        out = sp.lil_array((n, n))
+        out[:n0, :n0] = adj
+        return out.tocsr()
+    out = np.zeros((n, n), dtype=np.float64)
+    out[:n0, :n0] = adj
+    return out
+
+
+def _edge_diff(prev: Any, cur: Any) -> tuple:
+    """Upper-triangular (added_i, added_j, removed_i, removed_j) between two binary adjacencies.
+
+    ``prev`` is padded to ``cur``'s size; added = edges in cur not in prev, removed = edges in prev not in
+    cur. Works for sparse or dense and only ever touches the edges that actually changed."""
+    n1 = cur.shape[0]
+    pp = _pad(_binarize(prev), n1)
+    cc = _binarize(cur)
+    if sp.issparse(cur) or sp.issparse(prev):
+        d = sp.triu(sp.csr_array(cc) - sp.csr_array(pp), 1).tocoo()
+        added = d.data > 0
+        removed = d.data < 0
+        return d.row[added], d.col[added], d.row[removed], d.col[removed]
+    d = np.triu(cc - pp, 1)
+    ai, aj = np.where(d > 0)
+    ri, rj = np.where(d < 0)
+    return ai, aj, ri, rj
 
 
 # --- motifs ---------------------------------------------------------------------------------------
@@ -80,6 +132,49 @@ class CommonNeighbourMotif:
         non_candidate = (adj == 0) if on_edges else (adj > 0)  # removal scores edges; addition scores non-edges
         b[non_candidate | np.eye(n, dtype=bool)] = -1
         return b
+
+    def _bin(self, cn_vals: np.ndarray) -> np.ndarray:
+        return np.clip(np.searchsorted(self.bins, cn_vals, side="right") - 1, 0, len(self.bins) - 1)
+
+    def counts_and_binner(self, adj: Any, on_edges: bool) -> tuple:
+        """Return (candidate_counts[M], lookup(i, j) -> motif index) WITHOUT forming the n*n bin matrix.
+
+        Sparse-scalable: only the existing edges (O(m)) and the non-edges that close a triangle (O(wedges) =
+        ``A @ A``'s nonzeros) are ever enumerated; the bridge count (cn=0 non-edges) is the analytic
+        remainder ``pairs - edges - wedge_non_edges``. The lookup reads ``(A @ A)[i, j]`` for the handful of
+        observed edges. (For graphs with mega-hubs the wedge set itself is large -- the documented limit.)
+        """
+        adj = _binarize(adj)
+        n = adj.shape[0]
+        cn = adj @ adj
+        counts = np.zeros(self.num_motifs, dtype=np.float64)
+        if sp.issparse(adj):
+            au = sp.triu(adj, 1).tocoo()
+            cu = sp.triu(cn, 1).tocsr()
+            edge_mask = sp.csr_array((np.ones(au.nnz), (au.row, au.col)), shape=(n, n)) if au.nnz else None
+            if on_edges:
+                if au.nnz:
+                    np.add.at(counts, self._bin(np.asarray(cu[au.row, au.col]).ravel()), 1.0)
+            else:
+                non_edge_cn = cu if edge_mask is None else (cu - cu.multiply(edge_mask))
+                non_edge_cn.eliminate_zeros()
+                vals = non_edge_cn.tocoo().data
+                counts[0] += n * (n - 1) / 2 - au.nnz - vals.size  # bridges = pairs - edges - wedge non-edges
+                if vals.size:
+                    np.add.at(counts, self._bin(vals), 1.0)
+            csr = cn.tocsr()
+
+            def lookup(ii: np.ndarray, jj: np.ndarray) -> np.ndarray:
+                return self._bin(np.asarray(csr[ii, jj]).ravel()) if len(ii) else np.zeros(0, dtype=np.int64)
+        else:
+            ut = np.triu(np.ones((n, n), dtype=bool), 1)
+            sel = ut & ((adj > 0) if on_edges else (adj == 0))
+            np.add.at(counts, self._bin(cn[sel]), 1.0)
+
+            def lookup(ii: np.ndarray, jj: np.ndarray) -> np.ndarray:
+                return self._bin(cn[ii, jj]) if len(ii) else np.zeros(0, dtype=np.int64)
+
+        return counts, lookup
 
 
 # --- distribution ---------------------------------------------------------------------------------
@@ -126,55 +221,49 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
             )
         )
 
-    def _edit_log_density(self, ii, jj, bins, log_w, rate, cand) -> float:
+    def _edit_log_density(self, edit_bins: np.ndarray, log_w: np.ndarray, rate: float, cand: np.ndarray) -> float:
         """Shared add/remove term: per-motif Poisson(rate*w_m) x uniform anchor among motif-m candidates.
 
-        Equivalent to Poisson(total; rate) x Multinomial(w) x (1/cand_m per edit). Returns -inf if an edit
-        falls outside every motif or its candidate pool is empty (e.g. a removal when rate == 0)."""
-        k = ii.shape[0]
+        ``edit_bins`` is the motif index of each edited edge. Equivalent to Poisson(total; rate) x
+        Multinomial(w) x (1/cand_m per edit). Returns -inf if an edit's candidate pool is empty (e.g. a
+        removal when rate == 0)."""
+        k = len(edit_bins)
         lp = k * math.log(rate + _EPS) - rate - math.lgamma(k + 1)
-        for a, b in zip(ii.tolist(), jj.tolist()):
-            mtf = bins[a, b]
-            if mtf < 0 or cand[mtf] <= 0:
+        for mtf in edit_bins:
+            if cand[mtf] <= 0:
                 return float("-inf")
             lp += log_w[mtf] - math.log(cand[mtf])
         return lp
 
-    def _candidate_counts(self, bins: np.ndarray) -> np.ndarray:
-        ut = np.triu(np.ones(bins.shape, dtype=bool), 1)
-        return np.asarray([float(np.count_nonzero((bins == b) & ut)) for b in range(self.motif.num_motifs)])
-
-    def _transition_log_density(self, prev: np.ndarray, cur: np.ndarray) -> float:
+    def _transition_log_density(self, prev: Any, cur: Any) -> float:
         """log p(G_t | G_{t-1}): node-growth + an ADD grammar over new edges + a REMOVE grammar over deleted
         edges, each a per-motif Poisson scored against the PREVIOUS graph's structure (so order within a
-        step is irrelevant). Node removal is not modelled -> -inf."""
+        step is irrelevant). Works on dense OR sparse adjacencies. Node removal is not modelled -> -inf."""
         n0, n1 = prev.shape[0], cur.shape[0]
         if n1 < n0:  # node removal not modelled
             return float("-inf")
         new_nodes = n1 - n0
-        padded = np.zeros((n1, n1), dtype=prev.dtype)
-        padded[:n0, :n0] = prev
-        add_bins = self.motif.assign(padded, on_edges=False)  # motif of each non-edge (addition candidate)
-        rem_bins = self.motif.assign(prev, on_edges=True)  # motif of each edge (removal candidate)
-        ai, aj = np.where(np.triu((cur > 0) & (padded == 0), 1))  # new edges
-        ri, rj = np.where(np.triu((prev > 0) & (cur[:n0, :n0] == 0), 1))  # deleted edges
-        if ri.shape[0] and self.edge_remove_rate <= 0.0:  # a deletion under a no-removal (growth) grammar
+        ai, aj, ri, rj = _edge_diff(prev, cur)
+        if len(ri) and self.edge_remove_rate <= 0.0:  # a deletion under a no-removal (growth) grammar
             return float("-inf")
+        add_cand, add_lookup = self.motif.counts_and_binner(_pad(prev, n1), on_edges=False)
         lp = new_nodes * math.log(self.node_rate + _EPS) - self.node_rate - math.lgamma(new_nodes + 1)
-        lp += self._edit_log_density(ai, aj, add_bins, self.log_w, self.edge_rate, self._candidate_counts(add_bins))
+        lp += self._edit_log_density(add_lookup(np.asarray(ai), np.asarray(aj)), self.log_w, self.edge_rate, add_cand)
         if lp == float("-inf"):
             return lp
+        rem_cand, rem_lookup = self.motif.counts_and_binner(prev, on_edges=True)
         lp += self._edit_log_density(
-            ri, rj, rem_bins, self.log_rw, self.edge_remove_rate, self._candidate_counts(rem_bins)
+            rem_lookup(np.asarray(ri), np.asarray(rj)), self.log_rw, self.edge_remove_rate, rem_cand
         )
         return lp
 
     def log_density(self, x: Sequence[np.ndarray]) -> float:
         """Log-density of one dynamic graph: the sum of transition log-densities over the snapshot chain.
 
-        ``x`` is a sequence of binary adjacency matrices (the initial graph is taken as given -- its
-        marginal is not modelled, matching how the static grammars treat their start symbol)."""
-        snaps = [np.asarray(a, dtype=np.float64) for a in x]
+        ``x`` is a sequence of binary adjacency matrices -- dense ``ndarray`` or ``scipy.sparse`` (large
+        graphs). The initial graph is taken as given (its marginal is not modelled, matching how the static
+        grammars treat their start symbol)."""
+        snaps = list(x)
         if len(snaps) < 2:
             return 0.0
         return float(sum(self._transition_log_density(snaps[t - 1], snaps[t]) for t in range(1, len(snaps))))
@@ -208,6 +297,8 @@ class TemporalGraphGrammarSampler(DistributionSampler):
         d = self.dist
         if seed_graph is None:
             adj = np.zeros((n_init, n_init), dtype=np.float64)
+        elif sp.issparse(seed_graph):
+            adj = seed_graph.toarray().astype(np.float64)  # sampler is dense/moderate-scale (see module doc)
         else:
             adj = np.asarray(seed_graph, dtype=np.float64).copy()
         snaps = [adj.copy()]
@@ -261,26 +352,20 @@ class TemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
         self.nodes = 0.0
         self.steps = 0.0
 
-    def update(self, x: Sequence[np.ndarray], weight: float, estimate: Any | None) -> None:
-        snaps = [np.asarray(a, dtype=np.float64) for a in x]
+    def update(self, x: Sequence[Any], weight: float, estimate: Any | None) -> None:
+        snaps = list(x)  # adjacencies may be dense ndarrays or scipy.sparse
         for t in range(1, len(snaps)):
             prev, cur = snaps[t - 1], snaps[t]
-            n0, n1 = prev.shape[0], cur.shape[0]
-            padded = np.zeros((n1, n1), dtype=prev.dtype)
-            padded[:n0, :n0] = prev
-            add_bins = self.motif.assign(padded, on_edges=False)
-            rem_bins = self.motif.assign(prev, on_edges=True)
-            ai, aj = np.where(np.triu((cur > 0) & (padded == 0), 1))  # added edges
-            ri, rj = np.where(np.triu((prev > 0) & (cur[:n0, :n0] == 0), 1))  # removed edges
-            for a, b in zip(ai.tolist(), aj.tolist()):
-                if add_bins[a, b] >= 0:
-                    self.add_counts[add_bins[a, b]] += weight
-            for a, b in zip(ri.tolist(), rj.tolist()):
-                if rem_bins[a, b] >= 0:
-                    self.rem_counts[rem_bins[a, b]] += weight
-            self.edges += weight * ai.shape[0]
-            self.rem_edges += weight * ri.shape[0]
-            self.nodes += weight * (n1 - n0)
+            ai, aj, ri, rj = _edge_diff(prev, cur)
+            _, add_lookup = self.motif.counts_and_binner(_pad(prev, cur.shape[0]), on_edges=False)
+            _, rem_lookup = self.motif.counts_and_binner(prev, on_edges=True)
+            for m in add_lookup(np.asarray(ai), np.asarray(aj)):
+                self.add_counts[m] += weight
+            for m in rem_lookup(np.asarray(ri), np.asarray(rj)):
+                self.rem_counts[m] += weight
+            self.edges += weight * len(ai)
+            self.rem_edges += weight * len(ri)
+            self.nodes += weight * (cur.shape[0] - prev.shape[0])
             self.steps += weight
 
     def seq_update(self, x: Sequence[Sequence[np.ndarray]], weights: np.ndarray, estimate: Any | None) -> None:
@@ -373,6 +458,205 @@ class TemporalGraphGrammarDataEncoder(DataSequenceEncoder):
         return isinstance(other, TemporalGraphGrammarDataEncoder)
 
 
+# --- labelled (attributed) dynamic graphs ---------------------------------------------------------
+def _emission_ll(dist: Any, records: Sequence[Any]) -> float:
+    if dist is None or not records:
+        return 0.0
+    enc = dist.dist_to_encoder().seq_encode(list(records))
+    return float(np.sum(dist.seq_log_density(enc)))
+
+
+class LabeledTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
+    """A dynamic graph whose nodes and edges carry attributes.
+
+    Composes a structural :class:`TemporalGraphGrammarDistribution` (the topology over time) with two
+    ordinary pysp distributions: ``node_dist`` over per-node attribute records (location, name, age, ... --
+    typically a ``CompositeDistribution`` of leaves or a mixture) and ``edge_dist`` over per-edge attribute
+    records (communication counts, channel, weight, ...). An observation is ``(snapshots, node_features,
+    edge_features)``: the adjacency chain, one attribute record per node, and one per added edge. The
+    likelihood factorises -- structure x node attributes x edge attributes -- so the attribute models are
+    fit (and scored) with the full pysp distribution machinery (mixtures, fusion, all leaf families).
+    """
+
+    def __init__(
+        self,
+        structure: TemporalGraphGrammarDistribution,
+        node_dist: SequenceEncodableProbabilityDistribution | None = None,
+        edge_dist: SequenceEncodableProbabilityDistribution | None = None,
+        name: str | None = None,
+    ) -> None:
+        self.structure = structure
+        self.node_dist = node_dist
+        self.edge_dist = edge_dist
+        self.name = name
+
+    def __str__(self) -> str:
+        return "LabeledTemporalGraphGrammarDistribution(structure=%s, node_dist=%s, edge_dist=%s)" % (
+            self.structure,
+            self.node_dist,
+            self.edge_dist,
+        )
+
+    def log_density(self, x: tuple) -> float:
+        snaps, node_features, edge_features = x
+        return (
+            self.structure.log_density(snaps)
+            + _emission_ll(self.node_dist, node_features)
+            + _emission_ll(self.edge_dist, edge_features)
+        )
+
+    def seq_encode(self, x: Sequence[tuple]) -> Sequence[tuple]:
+        return x
+
+    def seq_log_density(self, x: Sequence[tuple]) -> np.ndarray:
+        return np.asarray([self.log_density(obs) for obs in x], dtype=np.float64)
+
+    def sampler(self, seed: int | None = None) -> LabeledTemporalGraphGrammarSampler:
+        return LabeledTemporalGraphGrammarSampler(self, seed)
+
+    def estimator(self, **kw: Any) -> LabeledTemporalGraphGrammarEstimator:
+        return LabeledTemporalGraphGrammarEstimator(
+            self.structure.estimator(**kw),
+            None if self.node_dist is None else self.node_dist.estimator(),
+            None if self.edge_dist is None else self.edge_dist.estimator(),
+            name=self.name,
+        )
+
+    def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class LabeledTemporalGraphGrammarSampler(DistributionSampler):
+    def __init__(self, dist: LabeledTemporalGraphGrammarDistribution, seed: int | None = None) -> None:
+        self.dist = dist
+        self.rng = RandomState(seed)
+        self.struct = dist.structure.sampler(self.rng.randint(2**31))
+
+    def sample_one(self, **kw: Any) -> tuple:
+        snaps = self.struct.sample_one(**kw)
+        n_final = snaps[-1].shape[0]
+        num_added = sum(len(_edge_diff(snaps[t - 1], snaps[t])[0]) for t in range(1, len(snaps)))
+        node_features = (
+            list(self.dist.node_dist.sampler(self.rng.randint(2**31)).sample(size=n_final))
+            if self.dist.node_dist is not None
+            else []
+        )
+        edge_features = (
+            list(self.dist.edge_dist.sampler(self.rng.randint(2**31)).sample(size=num_added))
+            if self.dist.edge_dist is not None and num_added
+            else []
+        )
+        return snaps, node_features, edge_features
+
+    def sample(self, size: int | None = None, **kw: Any) -> Any:
+        if size is None:
+            return self.sample_one(**kw)
+        return [self.sample_one(**kw) for _ in range(size)]
+
+
+class LabeledTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
+    def __init__(self, structure_acc: Any, node_acc: Any, edge_acc: Any) -> None:
+        self.structure_acc = structure_acc
+        self.node_acc = node_acc
+        self.edge_acc = edge_acc
+
+    def update(self, x: tuple, weight: float, estimate: Any | None) -> None:
+        snaps, node_features, edge_features = x
+        self.structure_acc.update(snaps, weight, None if estimate is None else estimate.structure)
+        if self.node_acc is not None and node_features:
+            nd = None if estimate is None else estimate.node_dist
+            enc = nd.dist_to_encoder().seq_encode(list(node_features)) if nd is not None else node_features
+            self.node_acc.seq_update(enc, np.full(len(node_features), weight), nd)
+        if self.edge_acc is not None and edge_features:
+            ed = None if estimate is None else estimate.edge_dist
+            enc = ed.dist_to_encoder().seq_encode(list(edge_features)) if ed is not None else edge_features
+            self.edge_acc.seq_update(enc, np.full(len(edge_features), weight), ed)
+
+    def seq_update(self, x: Sequence[tuple], weights: np.ndarray, estimate: Any | None) -> None:
+        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
+            self.update(obs, float(w), estimate)
+
+    def initialize(self, x: tuple, weight: float, rng: RandomState | None) -> None:
+        self.update(x, weight, None)
+
+    def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState | None) -> None:
+        self.seq_update(x, weights, None)
+
+    def combine(self, suff_stat: tuple) -> LabeledTemporalGraphGrammarAccumulator:
+        s, n, e = suff_stat
+        self.structure_acc.combine(s)
+        if self.node_acc is not None:
+            self.node_acc.combine(n)
+        if self.edge_acc is not None:
+            self.edge_acc.combine(e)
+        return self
+
+    def value(self) -> tuple:
+        return (
+            self.structure_acc.value(),
+            None if self.node_acc is None else self.node_acc.value(),
+            None if self.edge_acc is None else self.edge_acc.value(),
+        )
+
+    def from_value(self, x: tuple) -> LabeledTemporalGraphGrammarAccumulator:
+        self.structure_acc.from_value(x[0])
+        if self.node_acc is not None:
+            self.node_acc.from_value(x[1])
+        if self.edge_acc is not None:
+            self.edge_acc.from_value(x[2])
+        return self
+
+    def key_merge(self, stats_dict: dict) -> None:
+        pass
+
+    def key_replace(self, stats_dict: dict) -> None:
+        pass
+
+    def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class LabeledTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(self, structure_factory: Any, node_factory: Any, edge_factory: Any) -> None:
+        self.structure_factory = structure_factory
+        self.node_factory = node_factory
+        self.edge_factory = edge_factory
+
+    def make(self) -> LabeledTemporalGraphGrammarAccumulator:
+        return LabeledTemporalGraphGrammarAccumulator(
+            self.structure_factory.make(),
+            None if self.node_factory is None else self.node_factory.make(),
+            None if self.edge_factory is None else self.edge_factory.make(),
+        )
+
+
+class LabeledTemporalGraphGrammarEstimator(ParameterEstimator):
+    def __init__(
+        self, structure_estimator: Any, node_estimator: Any = None, edge_estimator: Any = None, name: str | None = None
+    ) -> None:
+        self.structure_estimator = structure_estimator
+        self.node_estimator = node_estimator
+        self.edge_estimator = edge_estimator
+        self.name = name
+        self.keys = None
+
+    def accumulator_factory(self) -> LabeledTemporalGraphGrammarAccumulatorFactory:
+        return LabeledTemporalGraphGrammarAccumulatorFactory(
+            self.structure_estimator.accumulator_factory(),
+            None if self.node_estimator is None else self.node_estimator.accumulator_factory(),
+            None if self.edge_estimator is None else self.edge_estimator.accumulator_factory(),
+        )
+
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> LabeledTemporalGraphGrammarDistribution:
+        s_val, n_val, e_val = suff_stat
+        return LabeledTemporalGraphGrammarDistribution(
+            self.structure_estimator.estimate(nobs, s_val),
+            None if self.node_estimator is None else self.node_estimator.estimate(nobs, n_val),
+            None if self.edge_estimator is None else self.edge_estimator.estimate(nobs, e_val),
+            name=self.name,
+        )
+
+
 __all__ = [
     "CommonNeighbourMotif",
     "TemporalGraphGrammarDistribution",
@@ -381,4 +665,9 @@ __all__ = [
     "TemporalGraphGrammarAccumulator",
     "TemporalGraphGrammarAccumulatorFactory",
     "TemporalGraphGrammarDataEncoder",
+    "LabeledTemporalGraphGrammarDistribution",
+    "LabeledTemporalGraphGrammarSampler",
+    "LabeledTemporalGraphGrammarEstimator",
+    "LabeledTemporalGraphGrammarAccumulator",
+    "LabeledTemporalGraphGrammarAccumulatorFactory",
 ]
