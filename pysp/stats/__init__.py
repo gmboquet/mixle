@@ -409,6 +409,7 @@ __all__ = [
     "ResponsibilityAttentionAccumulator",
     "ResponsibilityAttentionAccumulatorFactory",
     "ResponsibilityAttentionDataEncoder",
+    "sequence_to_triples",
     "Posterior",
     "LatentPosterior",
     "CategoricalLatentPosterior",
@@ -1088,6 +1089,7 @@ from pysp.stats.latent.responsibility_attention import (
     ResponsibilityAttentionDistribution,
     ResponsibilityAttentionEstimator,
     ResponsibilityAttentionSampler,
+    sequence_to_triples,
 )
 from pysp.stats.latent.segmental_hidden_markov_model import (
     SegmentalHiddenMarkovDataEncoder,
