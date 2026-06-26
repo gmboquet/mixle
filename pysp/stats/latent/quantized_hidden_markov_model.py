@@ -557,6 +557,41 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             )
         )
 
+    @classmethod
+    def left_to_right(
+        cls,
+        theta: float,
+        levels: Sequence[Any],
+        transition_exponents: Sequence[Sequence[int]] | np.ndarray,
+        emission_exponents: Sequence[Sequence[int]] | np.ndarray,
+        initial_exponents: Sequence[int] | np.ndarray | None = None,
+        **kwargs: Any,
+    ) -> "QuantizedHiddenMarkovModelDistribution":
+        """Construct a left-to-right (upper-triangular) quantized HMM.
+
+        ``transition_exponents`` must be upper triangular: every entry strictly below the diagonal is a
+        structural zero (negative exponent), so the hidden-state path is monotone non-decreasing (a Bakis
+        chain). This makes a sentence's state paths exactly its monotone *segmentations* -- only
+        polynomially many in the length (``O(L^{n-1})``) rather than the ``n^L`` of a general HMM -- which
+        bounds the path/sequence ambiguity. When the per-state emission supports are additionally disjoint
+        the model is *unambiguous* (one path per sentence); then the structural descending-probability
+        seek/unrank coincides with the exact marginal order (up to quantization granularity, no path
+        over-count), which a general HMM's structural seek cannot.
+
+        Raises:
+            ValueError: if ``transition_exponents`` is not square or not upper triangular.
+        """
+        t = np.asarray(transition_exponents)
+        if t.ndim != 2 or t.shape[0] != t.shape[1]:
+            raise ValueError("transition_exponents must be a square matrix")
+        below = t[np.tril_indices(t.shape[0], k=-1)]
+        if below.size and np.any(below >= 0):
+            raise ValueError(
+                "left_to_right requires upper-triangular transition_exponents: every entry below the "
+                "diagonal must be a structural zero (negative exponent)"
+            )
+        return cls(theta, levels, transition_exponents, emission_exponents, initial_exponents=initial_exponents, **kwargs)
+
     def to_fisher(self, **kwargs):
         """Forward-backward Fisher view for the quantized HMM."""
         if hasattr(self, "topics") and hasattr(self, "transitions"):
