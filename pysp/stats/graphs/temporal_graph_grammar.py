@@ -29,10 +29,16 @@ name, age, ...) and edge attributes (communication counts, channel, ...) as ordi
 scored as emissions on top of the topology -- the whole thing fits jointly with the full distribution
 machinery (mixtures, every leaf family, the numba fusion).
 
+Graphs may be **directed** (``directed=True``): the adjacency is asymmetric (i->j and j->i are distinct
+edges), the candidate space is the full off-diagonal, and ``A @ A`` counts transitive i->k->j paths -- a
+directed triadic-closure profile. **Weighted** edges are just an edge attribute: put a weight distribution
+(Poisson volume, Gaussian strength, ...) in the labeled model's ``edge_dist``, so a directed + weighted +
+attributed dynamic graph is a directed structure composed with node/edge emission models.
+
 This is the temporal counterpart of the static vertex-/hyperedge-replacement grammars in this package.
-Scope: undirected, binary (the attribute models carry the labels); edges add+remove, nodes appended; dense
-or sparse. Node *removal* (needs identity tracking across snapshots), directed/weighted topology, and
-scalable sampling (rejection-based) are the natural extensions.
+Scope: undirected or directed, binary topology (attribute models carry weights/labels); edges add+remove,
+nodes appended; dense or sparse. Node *removal* (needs identity tracking across snapshots) and scalable
+rejection sampling for huge graphs are the natural extensions.
 """
 
 from __future__ import annotations
@@ -80,20 +86,24 @@ def _pad(adj: Any, n: int) -> Any:
     return out
 
 
-def _edge_diff(prev: Any, cur: Any) -> tuple:
-    """Upper-triangular (added_i, added_j, removed_i, removed_j) between two binary adjacencies.
+def _edge_diff(prev: Any, cur: Any, directed: bool = False) -> tuple:
+    """(added_i, added_j, removed_i, removed_j) between two binary adjacencies.
 
     ``prev`` is padded to ``cur``'s size; added = edges in cur not in prev, removed = edges in prev not in
-    cur. Works for sparse or dense and only ever touches the edges that actually changed."""
+    cur. Undirected reads the upper triangle (each edge once); directed reads the full off-diagonal (i->j
+    and j->i are distinct edges). Works for sparse or dense and only touches the edges that actually
+    changed."""
     n1 = cur.shape[0]
     pp = _pad(_binarize(prev), n1)
     cc = _binarize(cur)
     if sp.issparse(cur) or sp.issparse(prev):
-        d = sp.triu(sp.csr_array(cc) - sp.csr_array(pp), 1).tocoo()
+        diff = sp.csr_array(cc) - sp.csr_array(pp)
+        d = (diff if directed else sp.triu(diff, 1)).tocoo()
         added = d.data > 0
         removed = d.data < 0
         return d.row[added], d.col[added], d.row[removed], d.col[removed]
-    d = np.triu(cc - pp, 1)
+    delta = cc - pp  # directed: full off-diagonal (diagonal is 0 -- no self-loops); undirected: upper tri
+    d = delta if directed else np.triu(delta, 1)
     ai, aj = np.where(d > 0)
     ri, rj = np.where(d < 0)
     return ai, aj, ri, rj
@@ -109,8 +119,9 @@ class CommonNeighbourMotif:
     so the motifs partition every candidate edge.
     """
 
-    def __init__(self, bins: Sequence[int] = (0, 1, 2, 3)) -> None:
+    def __init__(self, bins: Sequence[int] = (0, 1, 2, 3), directed: bool = False) -> None:
         self.bins = tuple(int(b) for b in bins)
+        self.directed = bool(directed)  # directed: A@A counts transitive i->k->j paths; candidates = full off-diagonal
         self.names = [f"cn>={self.bins[-1]}" if i == len(self.bins) - 1 else f"cn={b}" for i, b in enumerate(self.bins)]
 
     @property
@@ -148,9 +159,13 @@ class CommonNeighbourMotif:
         n = adj.shape[0]
         cn = adj @ adj
         counts = np.zeros(self.num_motifs, dtype=np.float64)
+        total_pairs = n * (n - 1) if self.directed else n * (n - 1) / 2  # off-diagonal candidate pairs
         if sp.issparse(adj):
-            au = sp.triu(adj, 1).tocoo()
-            cu = sp.triu(cn, 1).tocsr()
+            au = (adj if self.directed else sp.triu(adj, 1)).tocoo()
+            cu = cn.tocsr().copy() if self.directed else sp.triu(cn, 1).tocsr()
+            if self.directed:
+                cu.setdiag(0)  # drop i->k->i (the diagonal is not a candidate edge)
+                cu.eliminate_zeros()
             edge_mask = sp.csr_array((np.ones(au.nnz), (au.row, au.col)), shape=(n, n)) if au.nnz else None
             if on_edges:
                 if au.nnz:
@@ -159,7 +174,7 @@ class CommonNeighbourMotif:
                 non_edge_cn = cu if edge_mask is None else (cu - cu.multiply(edge_mask))
                 non_edge_cn.eliminate_zeros()
                 vals = non_edge_cn.tocoo().data
-                counts[0] += n * (n - 1) / 2 - au.nnz - vals.size  # bridges = pairs - edges - wedge non-edges
+                counts[0] += total_pairs - au.nnz - vals.size  # bridges = pairs - edges - wedge non-edges
                 if vals.size:
                     np.add.at(counts, self._bin(vals), 1.0)
             csr = cn.tocsr()
@@ -167,8 +182,9 @@ class CommonNeighbourMotif:
             def lookup(ii: np.ndarray, jj: np.ndarray) -> np.ndarray:
                 return self._bin(np.asarray(csr[ii, jj]).ravel()) if len(ii) else np.zeros(0, dtype=np.int64)
         else:
-            ut = np.triu(np.ones((n, n), dtype=bool), 1)
-            sel = ut & ((adj > 0) if on_edges else (adj == 0))
+            offdiag = ~np.eye(n, dtype=bool)
+            cand_mask = offdiag if self.directed else np.triu(np.ones((n, n), dtype=bool), 1)
+            sel = cand_mask & ((adj > 0) if on_edges else (adj == 0))
             np.add.at(counts, self._bin(cn[sel]), 1.0)
 
             def lookup(ii: np.ndarray, jj: np.ndarray) -> np.ndarray:
@@ -189,9 +205,11 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
         remove_weights: Sequence[float] | None = None,
         edge_remove_rate: float = 0.0,
         motif: CommonNeighbourMotif | None = None,
+        directed: bool = False,
         name: str | None = None,
     ) -> None:
-        self.motif = motif if motif is not None else CommonNeighbourMotif()
+        self.motif = motif if motif is not None else CommonNeighbourMotif(directed=directed)
+        self.directed = self.motif.directed
         m = self.motif.num_motifs
 
         def _norm(w: Sequence[float] | None) -> np.ndarray:
@@ -243,7 +261,7 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
         if n1 < n0:  # node removal not modelled
             return float("-inf")
         new_nodes = n1 - n0
-        ai, aj, ri, rj = _edge_diff(prev, cur)
+        ai, aj, ri, rj = _edge_diff(prev, cur, self.directed)
         if len(ri) and self.edge_remove_rate <= 0.0:  # a deletion under a no-removal (growth) grammar
             return float("-inf")
         add_cand, add_lookup = self.motif.counts_and_binner(_pad(prev, n1), on_edges=False)
@@ -313,23 +331,26 @@ class TemporalGraphGrammarSampler(DistributionSampler):
             # matches the weights and equals what the scorer reads off the snapshots. Per motif m the edit
             # count is Poisson(rate * w_m) -- the multinomial split of a Poisson(rate) total. Additions and
             # removals both act on the start-of-step graph (disjoint -- non-edges vs edges).
-            ut = np.triu(np.ones(adj.shape, dtype=bool), 1)
+            cand_mask = ~np.eye(adj.shape[0], dtype=bool) if d.directed else np.triu(np.ones(adj.shape, dtype=bool), 1)
             add_bins = d.motif.assign(adj, on_edges=False)
             rem_bins = d.motif.assign(adj, on_edges=True)
             toggles = []  # (i, j, value) applied after both grammars are sampled, against the pre-step graph
             for m in range(d.motif.num_motifs):
-                ai, aj = np.where((add_bins == m) & ut)
+                ai, aj = np.where((add_bins == m) & cand_mask)
                 if ai.shape[0]:
                     ka = min(self.rng.poisson(d.edge_rate * d.motif_weights[m]), ai.shape[0])
                     for idx in self.rng.choice(ai.shape[0], size=ka, replace=False):
                         toggles.append((ai[idx], aj[idx], 1.0))
-                ri, rj = np.where((rem_bins == m) & ut)
+                ri, rj = np.where((rem_bins == m) & cand_mask)
                 if ri.shape[0] and d.edge_remove_rate > 0.0:
                     kr = min(self.rng.poisson(d.edge_remove_rate * d.remove_weights[m]), ri.shape[0])
                     for idx in self.rng.choice(ri.shape[0], size=kr, replace=False):
                         toggles.append((ri[idx], rj[idx], 0.0))
             for i, j, v in toggles:
-                adj[i, j] = adj[j, i] = v
+                if d.directed:
+                    adj[i, j] = v
+                else:
+                    adj[i, j] = adj[j, i] = v
             snaps.append(adj.copy())
         return snaps
 
@@ -356,7 +377,7 @@ class TemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
         snaps = list(x)  # adjacencies may be dense ndarrays or scipy.sparse
         for t in range(1, len(snaps)):
             prev, cur = snaps[t - 1], snaps[t]
-            ai, aj, ri, rj = _edge_diff(prev, cur)
+            ai, aj, ri, rj = _edge_diff(prev, cur, self.motif.directed)
             _, add_lookup = self.motif.counts_and_binner(_pad(prev, cur.shape[0]), on_edges=False)
             _, rem_lookup = self.motif.counts_and_binner(prev, on_edges=True)
             for m in add_lookup(np.asarray(ai), np.asarray(aj)):
@@ -535,7 +556,8 @@ class LabeledTemporalGraphGrammarSampler(DistributionSampler):
     def sample_one(self, **kw: Any) -> tuple:
         snaps = self.struct.sample_one(**kw)
         n_final = snaps[-1].shape[0]
-        num_added = sum(len(_edge_diff(snaps[t - 1], snaps[t])[0]) for t in range(1, len(snaps)))
+        directed = getattr(self.dist.structure, "directed", False)
+        num_added = sum(len(_edge_diff(snaps[t - 1], snaps[t], directed)[0]) for t in range(1, len(snaps)))
         node_features = (
             list(self.dist.node_dist.sampler(self.rng.randint(2**31)).sample(size=n_final))
             if self.dist.node_dist is not None
