@@ -862,6 +862,7 @@ __all__ = [
     "LatentChurningTemporalGraphGrammarEstimator",
     "LatentChurningTemporalGraphGrammarAccumulator",
     "LatentChurningTemporalGraphGrammarAccumulatorFactory",
+    "regime_moment_init",
 ]
 
 
@@ -2217,3 +2218,94 @@ class LatentChurningTemporalGraphGrammarEstimator(ParameterEstimator):
         states = [est.estimate(nobs, sv) for est, sv in zip(self.state_estimators, state_vals)]
         rates = np.where(steps > 0, removed / np.where(steps > 0, steps, 1.0), 0.0)
         return LatentChurningTemporalGraphGrammarDistribution(states, rates, ip, tm, name=self.name)
+
+
+# --- moment-based regime initialisation (identifiability-grounded EM seeding) -----------------------
+def _regime_signatures(proto: Any, obs: Any) -> np.ndarray:
+    """Per-transition signature (T, F): the OBSERVED edit derivation summary that identifies a regime.
+
+    Because the motif partition is mutually exclusive the derivation is observed, so each transition exposes
+    its own sufficient statistics -- per-motif add/remove counts, node growth, and (if attributed) attribute
+    means. Regimes are, by the identifiability argument, separated in this signature space, so clustering the
+    signatures seeds EM near the true solution instead of at random."""
+    regimes = getattr(proto, "states", None) or proto.structures
+    attributed = hasattr(proto, "node_dists") and proto.node_dists is not None
+    edge_attr = hasattr(proto, "edge_dists") and proto.edge_dists is not None
+    snaps = obs[0] if (attributed or edge_attr) else obs
+    m = regimes[0].motif.num_motifs
+    nf = obs[1] if attributed else None
+    ef = obs[2] if edge_attr else None
+    out = []
+    for t in range(len(snaps) - 1):
+        nn, add_bins, _ac, rem_bins, _rc, valid = regimes[0].transition_components(snaps[t], snaps[t + 1])
+        a = np.bincount(add_bins, minlength=m).astype(float) if valid and len(add_bins) else np.zeros(m)
+        r = np.bincount(rem_bins, minlength=m).astype(float) if valid and len(rem_bins) else np.zeros(m)
+        feat = [*a.tolist(), *r.tolist(), float(nn if valid else 0)]
+        if attributed:
+            feat.append(_records_mean(nf[t]) if nf and t < len(nf) else 0.0)
+        if edge_attr:
+            feat.append(_records_mean(ef[t]) if ef and t < len(ef) else 0.0)
+        out.append(feat)
+    return np.asarray(out, dtype=np.float64) if out else np.zeros((0, 2 * m + 1))
+
+
+def _records_mean(records: Sequence[Any]) -> float:
+    vals = []
+    for r in records:
+        try:
+            vals.append(float(r))
+        except (TypeError, ValueError):
+            try:
+                vals.append(float(r[0]))
+            except (TypeError, ValueError, IndexError):
+                pass
+    return float(np.mean(vals)) if vals else 0.0
+
+
+def _kmeans_labels(x: np.ndarray, k: int, rng: RandomState, iters: int = 25) -> np.ndarray:
+    if x.shape[0] <= k:
+        return np.arange(x.shape[0]) % k
+    centers = x[rng.choice(x.shape[0], size=k, replace=False)]
+    labels = np.zeros(x.shape[0], dtype=np.int64)
+    for _ in range(iters):
+        d = ((x[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+        new = d.argmin(axis=1)
+        if np.array_equal(new, labels) and _ > 0:
+            break
+        labels = new
+        for c in range(k):
+            members = x[labels == c]
+            if members.shape[0]:
+                centers[c] = members.mean(axis=0)
+    return labels
+
+
+def regime_moment_init(estimator: Any, proto: Any, data: Sequence[Any], k: int, seed: int | None = None) -> Any:
+    """Seed a regime-switching grammar EM by clustering observed per-transition edit signatures.
+
+    Returns an initial distribution whose regimes are the k-means clusters of the (identifiable) transition
+    signatures. Because the derivation is observed, these signatures are sufficient statistics that separate
+    the regimes, so this avoids the local optima of random-restart EM. ``proto`` is any distribution of the
+    target class (used only for its motif/attribute structure); ``estimator`` produces the fitted result."""
+    rng = RandomState(seed)
+    sigs, spans = [], []
+    for obs in data:
+        s = _regime_signatures(proto, obs)
+        sigs.append(s)
+        spans.append(s.shape[0])
+    x = np.vstack([s for s in sigs if s.shape[0]]) if any(spans) else np.zeros((0, 1))
+    xs = (x - x.mean(axis=0)) / (x.std(axis=0) + 1.0e-9) if x.shape[0] else x
+    labels = _kmeans_labels(xs, k, rng)
+    acc = estimator.accumulator_factory().make()
+    off = 0
+    for obs, span in zip(data, spans):
+        if span == 0:
+            continue
+        lab = labels[off : off + span]
+        off += span
+        gamma = np.eye(k)[lab]  # hard one-hot responsibilities from the clustering
+        xi = np.zeros((max(span - 1, 0), k, k))
+        for t in range(span - 1):
+            xi[t] = np.outer(gamma[t], gamma[t + 1])
+        acc._accumulate(obs, 1.0, gamma, xi, None)  # Latent/Attributed _accumulate take the observation directly
+    return estimator.estimate(len(data), acc.value())
