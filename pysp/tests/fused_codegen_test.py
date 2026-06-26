@@ -242,6 +242,24 @@ class LeafFamilyTest(unittest.TestCase):
         data = [float(abs(x)) + 0.1 for x in self.rng.gamma(3, 2, 1500)]
         self.assertTrue(FusedEStepTest._matches(self, model, est, data))
 
+    def test_binomial(self):
+        # tabulated leaf: a (K,max+1) log-pmf table + map-reducible global min/max over x
+        model = self._mix([stats.BinomialDistribution(0.3, 10), stats.BinomialDistribution(0.7, 10)])
+        est = stats.MixtureEstimator([stats.BinomialEstimator(), stats.BinomialEstimator()])
+        data = [int(x) for x in self.rng.binomial(10, 0.4, 1200)]
+        self.assertTrue(fusible(model))
+        self.assertTrue(_ll_close(model, data))
+        self.assertTrue(FusedEStepTest._matches(self, model, est, data))
+
+    def test_negbinomial(self):
+        # tabulated leaf with a per-component weighted histogram feeding the iterative dispersion MLE
+        model = self._mix([stats.NegativeBinomialDistribution(3.0, 0.4), stats.NegativeBinomialDistribution(8.0, 0.6)])
+        est = stats.MixtureEstimator([stats.NegativeBinomialEstimator(), stats.NegativeBinomialEstimator()])
+        data = [int(x) for x in self.rng.negative_binomial(5, 0.5, 1200)]
+        self.assertTrue(fusible(model))
+        self.assertTrue(_ll_close(model, data))
+        self.assertTrue(FusedEStepTest._matches(self, model, est, data))
+
     def test_loggaussian(self):
         model = self._mix([stats.LogGaussianDistribution(0.0, 1.0), stats.LogGaussianDistribution(1.0, 0.5)])
         est = stats.MixtureEstimator([stats.LogGaussianEstimator(), stats.LogGaussianEstimator()])
