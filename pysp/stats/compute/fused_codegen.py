@@ -70,6 +70,15 @@ class LeafTemplate:
     # vector hooks (2-D data, inline per-dim loop, (K,D) accumulators; emit source lines)
     vec_row: Callable[[int, dict[str, str]], list[str]] | None = None  # -> add the leaf score to `acc`
     vec_accumulate: Callable[[int, dict[str, str]], list[str]] | None = None  # -> per-dim weighted-stat update
+    # tabulated hooks (low-cardinality integer x: precompute a (K, max+1) log-pmf table, look it up per row;
+    # accumulate sum_wx and -- when ``tab_hist`` -- a per-component weighted histogram (a map-reducible
+    # bincount). This is how discrete families whose MLE needs a max/min reduction (Binomial) or the full
+    # count distribution (NegativeBinomial's iterative dispersion) still fuse in one pass.)
+    tab_table: Callable[[list[Any], int], np.ndarray] | None = None  # (comps, max_x) -> (K, max_x+1) log-pmf
+    tab_hist: bool = False  # also accumulate a (K, max_x+1) weighted histogram
+    tab_to_value: Callable[[float, float, np.ndarray | None, int, int], tuple] | None = (
+        None  # (sx,count,hist_k,min,max)
+    )
     dtype: str = "float64"
 
 
@@ -314,6 +323,71 @@ register_leaf_template(
 )
 
 
+# --- tabulated leaves (low-cardinality integer x: table-scored + map-reducible histogram/min-max) --
+def _binomial_table(comps: list[Any], max_x: int) -> np.ndarray:
+    from scipy.special import gammaln
+
+    xs = np.arange(max_x + 1, dtype=np.float64)
+    tab = np.full((len(comps), max_x + 1), -np.inf, dtype=np.float64)
+    for k, c in enumerate(comps):
+        n = float(c.n)
+        mv = float(getattr(c, "min_val", 0) or 0)
+        xx = xs - mv
+        valid = (xx >= 0) & (xx <= n)
+        lp = np.log(c.p) if c.p > 0 else -np.inf
+        l1p = np.log1p(-c.p) if c.p < 1 else -np.inf
+        with np.errstate(invalid="ignore", divide="ignore"):
+            row = gammaln(n + 1) - gammaln(xx + 1) - gammaln(n - xx + 1) + xx * lp + (n - xx) * l1p
+        tab[k, valid] = row[valid]
+    return tab
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="binomial",
+        matches=lambda d: type(d).__name__ == "BinomialDistribution",
+        data=lambda enc: (_arr(enc[2]),),  # enc = (unique, inverse, x, min, max); accumulate over raw x
+        params=lambda comps: {},
+        kind="tabulated",
+        tab_table=_binomial_table,
+        acc_names=("sx",),
+        # value() = (count, sum, min_val, max_val); min/max are global reductions over x (weight-independent)
+        tab_to_value=lambda sx, count, hist, mn, mx: (count, sx, mn, mx),
+    )
+)
+
+
+def _negbinomial_table(comps: list[Any], max_x: int) -> np.ndarray:
+    from scipy.special import gammaln
+
+    xs = np.arange(max_x + 1, dtype=np.float64)
+    tab = np.empty((len(comps), max_x + 1), dtype=np.float64)
+    for k, c in enumerate(comps):  # NB(r,p): log p = lgamma(x+r) - lgamma(r) - lgamma(x+1) + r ln p + x ln(1-p)
+        tab[k] = gammaln(xs + c.r) - gammaln(c.r) - gammaln(xs + 1) + c.r * np.log(c.p) + xs * np.log1p(-c.p)
+    return tab
+
+
+def _hist_to_dict(hist_k: np.ndarray) -> dict[int, float]:
+    nz = np.nonzero(hist_k)[0]
+    return {int(x): float(hist_k[x]) for x in nz}
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="negbinomial",
+        matches=lambda d: type(d).__name__ == "NegativeBinomialDistribution",
+        data=lambda enc: (_arr(enc[0]),),  # enc = (x, lgamma(x+1)); accumulate sum_wx + weighted histogram
+        params=lambda comps: {},
+        kind="tabulated",
+        tab_table=_negbinomial_table,
+        acc_names=("sx", "hist"),
+        tab_hist=True,
+        # value() = (count, sum, histogram); the iterative dispersion MLE needs the full weighted count dist
+        tab_to_value=lambda sx, count, hist, mn, mx: (count, sx, _hist_to_dict(hist)),
+    )
+)
+
+
 # --- structure analysis ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class FusedPlan:
@@ -392,6 +466,8 @@ def _dummy(t: LeafTemplate) -> Any:
         "gamma": stats.GammaDistribution(1.0, 1.0),
         "loggaussian": stats.LogGaussianDistribution(0.0, 1.0),
         "diaggaussian": stats.DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0]),
+        "binomial": stats.BinomialDistribution(0.5, 1),
+        "negbinomial": stats.NegativeBinomialDistribution(1.0, 0.5),
         "mvgaussian": stats.MultivariateGaussianDistribution([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]]),
     }[t.name]
 
@@ -437,6 +513,12 @@ def _emit(plan: FusedPlan) -> dict[str, list[str]]:
         if t.kind == "vector":
             frag["row"].extend(t.vec_row(i, amap))  # type: ignore[misc]
             frag["acc"].extend(t.vec_accumulate(i, accmap))  # type: ignore[misc]
+        elif t.kind == "tabulated":
+            frag["param_args"].append(f"tab{i}")  # the (K, max+1) log-pmf table, looked up by int(x)
+            frag["row"].append(f"acc += tab{i}[k, int(x{i}_0[i])]")
+            frag["acc"].append(f"{accmap['sx']}[k] += r * x{i}_0[i]")
+            if t.tab_hist:
+                frag["acc"].append(f"{accmap['hist']}[k, int(x{i}_0[i])] += r")  # weighted count histogram
         else:
             vals = [f"{nm}[i]" for nm in _data_names(i, t)]
             frag["row"].append("acc += " + t.expr(vals, amap))  # type: ignore[misc]
@@ -569,19 +651,35 @@ def _component_factor_lists(model: Any, plan: FusedPlan) -> list[list[Any]]:
     return [_node_factors(model)]  # type: ignore[list-item]
 
 
-def _data_and_params(model: Any, plan: FusedPlan, enc: Any) -> tuple[list[np.ndarray], list[np.ndarray]]:
+def _data_and_params(
+    model: Any, plan: FusedPlan, enc: Any
+) -> tuple[list[np.ndarray], list[np.ndarray], dict[int, tuple[int, int]]]:
+    """Return (flattened data arrays, param arrays, tabulated-leaf context {i: (min_x, max_x)}).
+
+    Tabulated leaves additionally get a data-dependent ``(K, max_x+1)`` log-pmf table appended to the param
+    arrays (right after their -- empty -- ``params()`` block, matching the order :func:`_emit` assigns), and
+    their integer min/max over x recorded for ``to_value``.
+    """
     factor_lists = _component_factor_lists(model, plan)
     # A Composite encodes as a per-factor tuple; a bare leaf encodes as its own payload (which may itself
     # be a tuple, e.g. Poisson's (x, lgamma(x+1))) -- so key on the structure, not isinstance(enc, tuple).
     factor_encs = enc if plan.component_is_composite else (enc,)
     data_arrays: list[np.ndarray] = []
-    for i, t in enumerate(plan.leaf_templates):
-        data_arrays.extend(t.data(factor_encs[i]))  # arity arrays, flattened in leaf order
     param_arrays: list[np.ndarray] = []
+    tab_ctx: dict[int, tuple[int, int]] = {}
     for i, t in enumerate(plan.leaf_templates):
-        pdict = t.params([factor_lists[k][i] for k in range(plan.num_components)])
+        arrs = t.data(factor_encs[i])
+        data_arrays.extend(arrs)  # arity arrays, flattened in leaf order
+        comps_i = [factor_lists[k][i] for k in range(plan.num_components)]
+        pdict = t.params(comps_i)
         param_arrays.extend(np.ascontiguousarray(pdict[pn]) for pn in sorted(pdict.keys()))
-    return data_arrays, param_arrays
+        if t.kind == "tabulated":
+            x = arrs[0]
+            mx = int(np.rint(x.max())) if x.size else 0
+            mn = int(np.rint(x.min())) if x.size else 0
+            param_arrays.append(np.ascontiguousarray(t.tab_table(comps_i, mx)))  # type: ignore[misc]
+            tab_ctx[i] = (mn, mx)
+    return data_arrays, param_arrays, tab_ctx
 
 
 def fused_seq_log_density(model: Any, enc: Any) -> np.ndarray:
@@ -592,7 +690,7 @@ def fused_seq_log_density(model: Any, enc: Any) -> np.ndarray:
     plan = analyze(model)
     if plan is None:
         raise ValueError("%s is not a fusible composite/mixture." % type(model).__name__)
-    data_arrays, param_arrays = _data_and_params(model, plan, enc)
+    data_arrays, param_arrays, _ = _data_and_params(model, plan, enc)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
     out = np.empty(data_arrays[0].shape[0], dtype=np.float64)
     llbuf = np.empty(plan.num_components, dtype=np.float64)
@@ -605,7 +703,12 @@ def fusible_estep(model: Any) -> bool:
     plan = analyze(model)
     if plan is None:
         return False
-    hook = {"scalar": lambda t: t.acc_stmt, "vector": lambda t: t.vec_accumulate, "matrix": lambda t: t.mat_accumulate}
+    hook = {
+        "scalar": lambda t: t.acc_stmt,
+        "vector": lambda t: t.vec_accumulate,
+        "matrix": lambda t: t.mat_accumulate,
+        "tabulated": lambda t: t.tab_table,
+    }
     return all(hook[t.kind](t) is not None for t in plan.leaf_templates)
 
 
@@ -623,15 +726,15 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool 
     if plan is None or not fusible_estep(model):
         raise ValueError("%s is not a fusible E-step (an unsupported leaf)." % type(model).__name__)
     K = plan.num_components
-    data_arrays, param_arrays = _data_and_params(model, plan, enc)
+    data_arrays, param_arrays, tab_ctx = _data_and_params(model, plan, enc)
 
     # per-leaf accumulator arrays, in the same leaf order the generated signature expects. data_arrays is
-    # flattened by arity, so track the running offset to find each matrix leaf's (N,D) data array.
+    # flattened by arity, so track the running offset to find each leaf's first data array.
     scalar_acc: list[dict[str, np.ndarray]] = []
     matrix_acc: list[tuple[np.ndarray, np.ndarray]] = []
     acc_arrays: list[np.ndarray] = []
     offset = 0
-    for _i, t in enumerate(plan.leaf_templates):
+    for i, t in enumerate(plan.leaf_templates):
         if t.kind == "matrix":
             d = data_arrays[offset].shape[1]
             s1 = np.zeros((K, d), dtype=np.float64)
@@ -642,6 +745,12 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool 
         elif t.kind == "vector":
             d = data_arrays[offset].shape[1]  # (K,D) per-dim weighted statistics
             ad = {an: np.zeros((K, d), dtype=np.float64) for an in t.acc_names}
+            scalar_acc.append(ad)
+            matrix_acc.append((np.empty(0), np.empty(0)))
+            acc_arrays.extend(ad.values())
+        elif t.kind == "tabulated":
+            width = tab_ctx[i][1] + 1  # max_x + 1; sx is (K,), the histogram (if any) is (K, max_x+1)
+            ad = {an: np.zeros((K, width) if an == "hist" else K, dtype=np.float64) for an in t.acc_names}
             scalar_acc.append(ad)
             matrix_acc.append((np.empty(0), np.empty(0)))
             acc_arrays.extend(ad.values())
@@ -671,6 +780,10 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool 
         if t.kind == "matrix":
             s1, s2 = matrix_acc[i]
             return t.to_value((s1[k], s2[k]), float(comp_counts[k]))  # type: ignore[misc]
+        if t.kind == "tabulated":
+            mn, mx = tab_ctx[i]
+            hist_k = scalar_acc[i]["hist"][k] if t.tab_hist else None
+            return t.tab_to_value(float(scalar_acc[i]["sx"][k]), float(comp_counts[k]), hist_k, mn, mx)  # type: ignore[misc]
         stats_k = tuple(scalar_acc[i][an][k] for an in t.acc_names)
         return t.to_value(stats_k, float(comp_counts[k]))  # type: ignore[misc]
 
