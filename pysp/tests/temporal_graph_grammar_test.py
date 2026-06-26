@@ -177,5 +177,28 @@ class LabeledTemporalGraphGrammarTest(unittest.TestCase):
         self.assertAlmostEqual(fit.edge_dist.lam, 6.0, delta=0.3)  # edge communication count
 
 
+class HomophilyTemporalGraphGrammarTest(unittest.TestCase):
+    def test_recovers_homophily_and_types(self):
+        rng = np.random.RandomState(0)
+        M, K = 4, 3
+        base = np.array([[3.0, 0.7, 0.7], [0.7, 3.0, 0.7], [0.7, 0.7, 3.0]])  # same-type ~4x cross-type
+        rate = np.stack([base * w for w in (0.2, 0.4, 0.25, 0.15)])
+        gt = stats.HomophilyTemporalGraphGrammarDistribution(rate, [0.4, 0.35, 0.25], node_rate=1.0)
+        obs = [gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=24, p=0.3)) for s in range(150)]
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density(obs))))
+        est = stats.HomophilyTemporalGraphGrammarEstimator(M, K, stats.CommonNeighbourMotif(), pseudo_count=0.5)
+        acc = est.accumulator_factory().make()
+        acc.seq_update(obs, np.ones(len(obs)), None)
+        fit = est.estimate(float(len(obs)), acc.value())
+        same = np.mean([fit.rate[:, a, a].sum() for a in range(K)])
+        cross = np.mean([fit.rate[:, a, b].sum() for a in range(K) for b in range(K) if a != b])
+        self.assertGreater(same, 2.5 * cross)  # homophily recovered (same-type edges form much faster)
+        self.assertLess(float(np.max(np.abs(fit.type_weights - [0.4, 0.35, 0.25]))), 0.05)
+        # the fitted homophily grammar out-scores a homophily-blind (flat-affinity) one
+        flat = np.broadcast_to(fit.rate.mean(axis=(1, 2), keepdims=True), fit.rate.shape).copy()
+        blind = stats.HomophilyTemporalGraphGrammarDistribution(flat, fit.type_weights, fit.node_rate)
+        self.assertGreater(float(fit.seq_log_density(obs).sum()), float(blind.seq_log_density(obs).sum()))
+
+
 if __name__ == "__main__":
     unittest.main()
