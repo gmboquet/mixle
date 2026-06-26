@@ -8,6 +8,7 @@ objects.
 import sys
 import time
 from collections.abc import Sequence
+from functools import partial
 from typing import IO, Any, TypeVar
 
 import numpy as np
@@ -68,6 +69,32 @@ def _engine_seq_estimate(
         nobs += sz
         accumulator.combine(kernel.accumulate(enc, np.ones(sz, dtype=np.float64)))
     return estimator.estimate(nobs, accumulator.value())
+
+
+def _engine_fused_step(enc_data: Any, estimator: ParameterEstimator, prev_estimate: Any, engine: Any) -> tuple[Any, float | None]:
+    """Engine E/M step that also returns the data log-likelihood of ``prev_estimate``.
+
+    When the engine kernel records the E-step normalizer (the :class:`FusedKernel` does -- the data LL
+    falls out of the responsibility soft-max), it is returned so the EM loop reuses it instead of a
+    separate convergence-LL scoring pass. Returns ``(next_model, ll_or_None)``; ``None`` when the kernel
+    can't report it (the loop then scores ``prev_estimate`` itself). Local encoded chunks only.
+    """
+    validate_estimator_keys(estimator)
+    chunks = _local_encoded_chunks(enc_data)
+    kernel = prev_estimate.kernel(engine=engine, estimator=estimator)
+    accumulator = estimator.accumulator_factory().make()
+    nobs = 0.0
+    ll = 0.0
+    have_ll = True
+    for sz, enc in chunks:
+        nobs += sz
+        accumulator.combine(kernel.accumulate(enc, np.ones(sz, dtype=np.float64)))
+        chunk_ll = getattr(kernel, "last_ll", None)
+        if chunk_ll is None:
+            have_ll = False
+        else:
+            ll += float(chunk_ll)
+    return estimator.estimate(nobs, accumulator.value()), (ll if have_ll else None)
 
 
 def _dataframe_like(data: Any) -> bool:
@@ -614,17 +641,16 @@ def optimize(
         resolved_objective = _resolve_objective(objective, estimator, mm)
 
         # Fused EM (reuse the E-step likelihood normalizer instead of a separate score pass) is only
-        # valid for the plain-likelihood objective on the local encoded path with the default engine
-        # and exact E-step -- the reused normalizer is the data LL, not the penalized LL / ELBO.
+        # valid for the plain-likelihood objective on the local encoded path with an exact E-step --
+        # the reused normalizer is the data LL, not the penalized LL / ELBO. The default engine reads it
+        # from the accumulator; an explicit engine reads it from a kernel that reports it (the
+        # FusedKernel), and gracefully falls back to a scoring pass otherwise.
         fused_step_fn = None
-        if (
-            reuse_estep_ll
-            and resolved_objective == "mle"
-            and engine is None
-            and strategy is None
-            and isinstance(enc_data, list)
-        ):
-            fused_step_fn = _local_fused_step
+        if reuse_estep_ll and resolved_objective == "mle" and strategy is None and isinstance(enc_data, list):
+            if engine is None:
+                fused_step_fn = _local_fused_step
+            else:
+                fused_step_fn = partial(_engine_fused_step, engine=engine)
 
         best_model, _ = _em_loop(
             enc_data,

@@ -456,7 +456,7 @@ def _compile_estep(plan: FusedPlan) -> Callable:
             acc_args.extend(amap.values())
             vals = [f"{nm}[i]" for nm in _data_names(i, t)]
             scalar_acc.append(t.acc_stmt(vals, amap, "r"))  # type: ignore[misc]
-    args = ", ".join(data_args + param_args + ["weights", "logw", "comp_counts", *acc_args, "llbuf"])
+    args = ", ".join(data_args + param_args + ["weights", "logw", "comp_counts", *acc_args, "llbuf", "out_ll"])
     lines = [f"def _estep({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
     if plan.has_matrix:
         lines.append("    R = np.empty((n, kc))")  # responsibilities -- only matrix accumulation needs them
@@ -477,6 +477,7 @@ def _compile_estep(plan: FusedPlan) -> Callable:
         "        s = 0.0",
         "        for k in range(kc):",
         "            s += np.exp(llbuf[k] - m)",
+        "        out_ll[0] += wi * (m + np.log(s))",  # data log-likelihood, free as the posterior normalizer
         "        for k in range(kc):",
         "            r = np.exp(llbuf[k] - m) / s * wi",
         "            comp_counts[k] += r",
@@ -538,12 +539,15 @@ def fusible_estep(model: Any) -> bool:
     )
 
 
-def fused_accumulate(model: Any, enc: Any, weights: np.ndarray) -> Any:
+def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool = False) -> Any:
     """Run one fused E-step and return the sufficient statistic in the estimator's ``value()`` format.
 
     The whole E-step -- component scoring, responsibility soft-max, and per-leaf weighted-statistic
     accumulation (scalar inline, matrix via BLAS) -- runs in a single nopython pass, then is packed into
-    the exact tuple shape ``estimate(nobs, suff_stat)`` expects. Raises ``ValueError`` if not fusible.
+    the exact tuple shape ``estimate(nobs, suff_stat)`` expects. With ``return_ll`` the weighted data
+    log-likelihood (the posterior normalizer, computed for free in the same pass) is also returned as
+    ``(suff_stat, ll)`` so the EM loop can skip a separate scoring pass. Raises ``ValueError`` if not
+    fusible.
     """
     plan = analyze(model)
     if plan is None or not fusible_estep(model):
@@ -575,8 +579,9 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray) -> Any:
     comp_counts = np.zeros(K, dtype=np.float64)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
     llbuf = np.empty(K, dtype=np.float64)
+    out_ll = np.zeros(1, dtype=np.float64)
     _compile_estep(plan)(
-        *data_arrays, *param_arrays, np.asarray(weights, dtype=np.float64), logw, comp_counts, *acc_arrays, llbuf
+        *data_arrays, *param_arrays, np.asarray(weights, dtype=np.float64), logw, comp_counts, *acc_arrays, llbuf, out_ll
     )
 
     def leaf_value(i: int, t: LeafTemplate, k: int) -> Any:
@@ -590,9 +595,8 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray) -> Any:
         leaf_vals = [leaf_value(i, t, k) for i, t in enumerate(plan.leaf_templates)]
         return tuple(leaf_vals) if plan.component_is_composite else leaf_vals[0]
 
-    if plan.is_mixture:
-        return comp_counts, tuple(node_value(k) for k in range(K))
-    return node_value(0)
+    suff = (comp_counts, tuple(node_value(k) for k in range(K))) if plan.is_mixture else node_value(0)
+    return (suff, float(out_ll[0])) if return_ll else suff
 
 
 # --- kernel wiring (used by optimize(..., engine=FUSED_NUMPY_ENGINE) for fusible models) ------------
@@ -603,6 +607,7 @@ class FusedKernel:
         self.dist = dist
         self.engine = engine
         self.estimator = estimator
+        self.last_ll: float | None = None  # data LL of the last accumulate() pass (posterior normalizer)
 
     def encode(self, data: Any) -> Any:
         return self.dist.dist_to_encoder().seq_encode(data)
@@ -612,7 +617,8 @@ class FusedKernel:
 
     def accumulate(self, enc: Any, weights: Any) -> Any:
         w = np.asarray(self.engine.to_numpy(weights) if hasattr(self.engine, "to_numpy") else weights, dtype=np.float64)
-        return fused_accumulate(self.dist, getattr(enc, "engine_payload", enc), w)
+        suff, self.last_ll = fused_accumulate(self.dist, getattr(enc, "engine_payload", enc), w, return_ll=True)
+        return suff
 
     def refresh(self, dist: Any) -> None:
         self.dist = dist
