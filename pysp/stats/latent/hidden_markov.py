@@ -1562,7 +1562,9 @@ class HiddenMarkovSampler(DistributionSampler):
                 dist.topics[i].sampler(seed=self.rng.randint(0, maxrandint)) for i in range(dist.n_states)
             ]
 
-        if dist.len_dist is not None:
+        # A Null/Neutral len_dist is not a usable length sampler; leave len_sampler None so sample()
+        # dispatches to the terminal-value / terminal-state path instead of the (crashing) len path.
+        if dist.len_dist is not None and not supports(dist.len_dist, Neutral):
             self.len_sampler = dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
         else:
             self.len_sampler = None
