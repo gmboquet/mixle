@@ -591,6 +591,36 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             log_b[:, j] = [self.topics[j].log_density(x[t]) for t in range(n)]
         return terminal_forward_loglik(self.log_w, self.log_transitions, log_b, self._terminal_mask)
 
+    def _terminal_values_log_density(self, x: list[T]) -> float:
+        """Stopping-time density for ``terminal_values``: the length is endogenous (the chain emits until
+        the first terminal value), so the support is sequences whose ONLY terminal value is the last. The
+        score is the plain forward likelihood with NO ``len_dist`` factor (length is not modeled
+        independently); off-support sequences (no terminal value, or a terminal value before the end) get
+        ``-inf`` so the density is proper over its actual support."""
+        tv = self.terminal_values
+        if not x or (x[-1] not in tv) or any(xi in tv for xi in x[:-1]):
+            return -np.inf
+        n_states = self.n_states
+        comps = self.topics
+        a = self.log_w + np.array([comps[i].log_density(x[0]) for i in range(n_states)], dtype=np.float64)
+        if np.max(a) == -np.inf:
+            return -np.inf
+        m = a.max()
+        a = np.exp(a - m)
+        rv = float(np.log(a.sum()) + m)
+        cur = a / a.sum()
+        for k in range(1, len(x)):
+            cur = self.transitions.T @ cur
+            cur /= cur.sum()
+            lp = np.log(cur) + np.array([comps[i].log_density(x[k]) for i in range(n_states)], dtype=np.float64)
+            mm = lp.max()
+            if mm == -np.inf:
+                return -np.inf
+            e = np.exp(lp - mm)
+            rv += float(np.log(e.sum()) + mm)
+            cur = e / e.sum()
+        return rv
+
     def log_density(self, x: list[T]) -> float:
         """Returns the log-density of HMM for observed sequence x.
 
@@ -620,6 +650,9 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         """
         if self.terminal_states is not None:
             return self._terminal_states_log_density(x)
+
+        if self.terminal_values is not None:
+            return self._terminal_values_log_density(x)
 
         if x is None or len(x) == 0:
             return self.len_dist.log_density(0)  # this will return 0.0 if NullDistribution()
