@@ -365,5 +365,47 @@ class LatentRegimeTemporalGraphGrammarTest(unittest.TestCase):
         self.assertEqual(len(cur.decode(data[0])), len(data[0]) - 1)  # Viterbi labels every transition
 
 
+class RegimeSwitchingAttributesTest(unittest.TestCase):
+    def test_regime_drives_structure_and_node_and_edge_attributes(self):
+        rng = np.random.RandomState(0)
+        active = stats.TemporalGraphGrammarDistribution([0.1, 0.3, 0.35, 0.25], edge_rate=8.0, node_rate=2.0)
+        quiet = stats.TemporalGraphGrammarDistribution(
+            [0.25] * 4, edge_rate=1.0, node_rate=2.0, remove_weights=[0.4, 0.3, 0.2, 0.1], edge_remove_rate=5.0
+        )
+        gt = stats.LatentAttributedTemporalGraphGrammarDistribution(
+            [active, quiet],
+            [stats.GaussianDistribution(25.0, 16.0), stats.GaussianDistribution(55.0, 16.0)],  # young vs old
+            [stats.PoissonDistribution(10.0), stats.PoissonDistribution(2.0)],  # chatty vs quiet edges
+            [0.5, 0.5],
+            [[0.85, 0.15], [0.15, 0.85]],
+        )
+        data = [
+            gt.sampler(seed=s).sample_one(num_steps=14, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(90)
+        ]
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density(data))))
+        est = gt.estimator(pseudo_count=0.3)
+        acc = est.accumulator_factory().make()
+        acc.seq_initialize(data, np.ones(len(data)), np.random.RandomState(2))
+        cur = est.estimate(len(data), acc.value())
+        prev_ll = -np.inf
+        for _ in range(12):
+            acc = est.accumulator_factory().make()
+            acc.seq_update(data, np.ones(len(data)), cur)
+            cur = est.estimate(len(data), acc.value())
+            ll = float(cur.seq_log_density(data).sum())
+            self.assertGreaterEqual(ll, prev_ll - 1.0)  # EM monotone
+            prev_ll = ll
+        order = np.argsort([s.edge_rate for s in cur.structures])
+        q, a = order[0], order[1]
+        # the regime jointly drives structure AND both attribute streams
+        self.assertGreater(cur.structures[a].edge_rate, 5.0)  # active densifies
+        self.assertLess(cur.structures[q].edge_rate, 3.0)  # quiet doesn't
+        self.assertLess(cur.node_dists[a].mu, cur.node_dists[q].mu)  # active nodes younger
+        self.assertGreater(cur.edge_dists[a].lam, cur.edge_dists[q].lam)  # active edges chattier
+        self.assertAlmostEqual(cur.node_dists[a].mu, 25.0, delta=4.0)
+        self.assertAlmostEqual(cur.edge_dists[a].lam, 10.0, delta=2.0)
+        self.assertEqual(len(cur.decode(data[0])), len(data[0][0]) - 1)  # Viterbi labels every transition
+
+
 if __name__ == "__main__":
     unittest.main()
