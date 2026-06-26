@@ -421,6 +421,70 @@ register_leaf_template(
 )
 
 
+# Location-scale families with moment-matched estimators: value() = (sum_w x, sum_w x^2, n), exactly the
+# Gaussian statistics; only the (closed-form) density differs. z = (x - loc) / scale, inlined.
+def _locscale_params(comps: list[Any]) -> dict[str, np.ndarray]:
+    loc = np.array([c.loc for c in comps], dtype=np.float64)
+    scale = np.array([c.scale for c in comps], dtype=np.float64)
+    return {"loc": loc, "inv_scale": 1.0 / scale, "nls": -np.log(scale)}
+
+
+def _z(v: list[str], p: dict[str, str]) -> str:
+    return f"(({v[0]} - {p['loc']}[k]) * {p['inv_scale']}[k])"
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="gumbel",
+        matches=lambda d: type(d).__name__ == "GumbelDistribution",
+        data=lambda enc: (_arr(enc),),
+        params=_locscale_params,
+        expr=lambda v, p: f"{p['nls']}[k] - {_z(v, p)} - np.exp(-{_z(v, p)})",
+        acc_names=("sx", "sx2"),
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}; {a['sx2']}[k] += {r} * {v[0]} * {v[0]}",
+        to_value=lambda s, count: (s[0], s[1], count),  # (sum_w x, sum_w x^2, n)
+    )
+)
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="logistic",
+        matches=lambda d: type(d).__name__ == "LogisticDistribution",
+        data=lambda enc: (_arr(enc),),
+        params=_locscale_params,
+        expr=lambda v, p: f"{p['nls']}[k] - {_z(v, p)} - 2.0 * np.log1p(np.exp(-{_z(v, p)}))",
+        acc_names=("sx", "sx2"),
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}; {a['sx2']}[k] += {r} * {v[0]} * {v[0]}",
+        to_value=lambda s, count: (s[0], s[1], count),  # (sum_w x, sum_w x^2, n)
+    )
+)
+
+
+def _studentt_params(comps: list[Any]) -> dict[str, np.ndarray]:
+    from scipy.special import gammaln
+
+    loc = np.array([c.loc for c in comps], dtype=np.float64)
+    scale = np.array([c.scale for c in comps], dtype=np.float64)
+    df = np.array([c.df for c in comps], dtype=np.float64)
+    lognorm = gammaln(0.5 * (df + 1.0)) - gammaln(0.5 * df) - 0.5 * np.log(df * np.pi) - np.log(scale)
+    return {"loc": loc, "inv_scale": 1.0 / scale, "ndf": 0.5 * (df + 1.0), "inv_df": 1.0 / df, "lognorm": lognorm}
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="studentt",
+        matches=lambda d: type(d).__name__ == "StudentTDistribution",
+        data=lambda enc: (_arr(enc),),
+        params=_studentt_params,
+        expr=lambda v, p: f"{p['lognorm']}[k] - {p['ndf']}[k] * np.log1p({_z(v, p)} * {_z(v, p)} * {p['inv_df']}[k])",
+        acc_names=("sx", "sx2"),
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}; {a['sx2']}[k] += {r} * {v[0]} * {v[0]}",
+        to_value=lambda s, count: (s[0], s[1], count),  # (sum_w x, sum_w x^2, n)  -- moment-matched loc/scale
+    )
+)
+
+
 def _loggaussian_params(comps: list[Any]) -> dict[str, np.ndarray]:
     mu = np.array([c.mu for c in comps], dtype=np.float64)
     s2 = np.array([c.sigma2 for c in comps], dtype=np.float64)
@@ -739,6 +803,9 @@ def _dummy(t: LeafTemplate) -> Any:
         "wrappedcauchy": stats.WrappedCauchyDistribution(0.0, 0.5),
         "logseries": stats.LogSeriesDistribution(0.5),
         "pareto": stats.ParetoDistribution(2.0, 1.0),
+        "gumbel": stats.GumbelDistribution(0.0, 1.0),
+        "logistic": stats.LogisticDistribution(0.0, 1.0),
+        "studentt": stats.StudentTDistribution(5.0, 0.0, 1.0),
         "categorical": stats.CategoricalDistribution({"a": 0.5, "b": 0.5}),
         "intcategorical": stats.IntegerCategoricalDistribution(0, [0.5, 0.5]),
         "diaggaussian": stats.DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0]),
