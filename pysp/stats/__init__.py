@@ -723,6 +723,11 @@ __all__ = [
     "LabeledTemporalGraphGrammarEstimator",
     "LabeledTemporalGraphGrammarAccumulator",
     "LabeledTemporalGraphGrammarAccumulatorFactory",
+    "HomophilyTemporalGraphGrammarDistribution",
+    "HomophilyTemporalGraphGrammarSampler",
+    "HomophilyTemporalGraphGrammarEstimator",
+    "HomophilyTemporalGraphGrammarAccumulator",
+    "HomophilyTemporalGraphGrammarAccumulatorFactory",
     "StochasticBlockGraphDistribution",
     "StochasticBlockGraphSampler",
     "StochasticBlockGraphAccumulator",
@@ -1033,6 +1038,11 @@ from pysp.stats.graphs.erdos_renyi_graph import (
 )
 from pysp.stats.graphs.temporal_graph_grammar import (
     CommonNeighbourMotif,
+    HomophilyTemporalGraphGrammarAccumulator,
+    HomophilyTemporalGraphGrammarAccumulatorFactory,
+    HomophilyTemporalGraphGrammarDistribution,
+    HomophilyTemporalGraphGrammarEstimator,
+    HomophilyTemporalGraphGrammarSampler,
     LabeledTemporalGraphGrammarAccumulator,
     LabeledTemporalGraphGrammarAccumulatorFactory,
     LabeledTemporalGraphGrammarDistribution,

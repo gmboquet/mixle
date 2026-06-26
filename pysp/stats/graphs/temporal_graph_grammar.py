@@ -670,4 +670,250 @@ __all__ = [
     "LabeledTemporalGraphGrammarEstimator",
     "LabeledTemporalGraphGrammarAccumulator",
     "LabeledTemporalGraphGrammarAccumulatorFactory",
+    "HomophilyTemporalGraphGrammarDistribution",
+    "HomophilyTemporalGraphGrammarSampler",
+    "HomophilyTemporalGraphGrammarEstimator",
+    "HomophilyTemporalGraphGrammarAccumulator",
+    "HomophilyTemporalGraphGrammarAccumulatorFactory",
 ]
+
+
+# --- homophily: attribute-conditioned edge formation ----------------------------------------------
+class HomophilyTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
+    """A growth grammar whose edge formation depends on node ATTRIBUTES, not just structure (homophily).
+
+    Each node carries a categorical ``type`` (community / location-bucket / ...). The per-step number of new
+    edges of motif ``m`` between an (unordered) type pair (a, b) is ``Poisson(rate[m, a, b])``, placed
+    uniformly among the candidate non-edges of that motif and type pair. Making ``rate[m, a, a]`` larger
+    than ``rate[m, a, b]`` is homophily ("similar nodes connect more"); the rate tensor is the learnable
+    coupling between attributes and topology. New nodes draw their type from ``type_weights``.
+
+    Observation: ``(snapshots, node_types)`` -- the adjacency chain plus an int type per node. Exact and
+    closed-form: the rate tensor is just edge counts per (motif, type-pair) over steps, and the type
+    distribution is node-type counts. (Phase: growth-only, dense; add+remove and sparse compose with the
+    machinery above and are the natural extensions.)
+    """
+
+    def __init__(
+        self,
+        rate: np.ndarray,
+        type_weights: Sequence[float],
+        node_rate: float = 0.0,
+        motif: CommonNeighbourMotif | None = None,
+        name: str | None = None,
+    ) -> None:
+        self.motif = motif if motif is not None else CommonNeighbourMotif()
+        self.rate = np.asarray(rate, dtype=np.float64)  # (M, K, K), symmetric in the last two axes
+        self.M, self.K = self.rate.shape[0], self.rate.shape[1]
+        tw = np.asarray(type_weights, dtype=np.float64)
+        self.type_weights = tw / tw.sum()
+        self.log_tw = np.log(np.clip(self.type_weights, _EPS, None))
+        self.node_rate = float(node_rate)
+        self.name = name
+
+    def __str__(self) -> str:
+        return "HomophilyTemporalGraphGrammarDistribution(K=%d, type_w=%s, node_rate=%s)" % (
+            self.K,
+            np.array2string(self.type_weights, precision=3),
+            self.node_rate,
+        )
+
+    def _pair_axes(self, ii: np.ndarray, jj: np.ndarray, types: np.ndarray) -> tuple:
+        ti, tj = types[ii], types[jj]
+        return np.minimum(ti, tj), np.maximum(ti, tj)
+
+    def _cand_counts(self, padded: Any, types: np.ndarray) -> np.ndarray:
+        b = self.motif.assign(padded, on_edges=False)  # (n,n) non-edge motif bins, -1 elsewhere
+        ut = np.triu(np.ones(b.shape, dtype=bool), 1)
+        ii, jj = np.where(ut & (b >= 0))
+        a, bb = self._pair_axes(ii, jj, types)
+        cand = np.zeros((self.M, self.K, self.K), dtype=np.float64)
+        np.add.at(cand, (b[ii, jj], a, bb), 1.0)
+        return cand
+
+    def _transition_log_density(self, prev: Any, cur: Any, types: np.ndarray) -> float:
+        n0, n1 = prev.shape[0], cur.shape[0]
+        if n1 < n0:
+            return float("-inf")
+        ai, aj, ri, rj = _edge_diff(prev, cur)
+        if len(ri):  # growth-only homophily phase
+            return float("-inf")
+        padded = _pad(prev, n1)
+        cand = self._cand_counts(padded, types)
+        _, lookup = self.motif.counts_and_binner(padded, on_edges=False)
+        new_nodes = n1 - n0
+        lp = new_nodes * math.log(self.node_rate + _EPS) - self.node_rate - math.lgamma(new_nodes + 1)
+        lp -= float(self.rate.sum())  # the -rate Poisson normaliser over every (motif, type-pair) cell
+        if len(ai):
+            m = lookup(np.asarray(ai), np.asarray(aj))
+            a, b = self._pair_axes(np.asarray(ai), np.asarray(aj), types)
+            for mm, aa, bb in zip(m.tolist(), a.tolist(), b.tolist()):
+                if self.rate[mm, aa, bb] <= 0 or cand[mm, aa, bb] <= 0:
+                    return float("-inf")
+                lp += math.log(self.rate[mm, aa, bb]) - math.log(cand[mm, aa, bb])  # weight x uniform anchor
+        return lp
+
+    def log_density(self, x: tuple) -> float:
+        snaps, types = x
+        types = np.asarray(types, dtype=np.int64)
+        lp = float(np.sum(self.log_tw[types]))  # node-type likelihood (each node's type ~ Categorical)
+        lp += sum(self._transition_log_density(snaps[t - 1], snaps[t], types) for t in range(1, len(snaps)))
+        return lp
+
+    def seq_encode(self, x: Sequence[tuple]) -> Sequence[tuple]:
+        return x
+
+    def seq_log_density(self, x: Sequence[tuple]) -> np.ndarray:
+        return np.asarray([self.log_density(obs) for obs in x], dtype=np.float64)
+
+    def sampler(self, seed: int | None = None) -> HomophilyTemporalGraphGrammarSampler:
+        return HomophilyTemporalGraphGrammarSampler(self, seed)
+
+    def estimator(self, pseudo_count: float | None = None) -> HomophilyTemporalGraphGrammarEstimator:
+        return HomophilyTemporalGraphGrammarEstimator(self.M, self.K, self.motif, pseudo_count, self.name)
+
+    def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class HomophilyTemporalGraphGrammarSampler(DistributionSampler):
+    def __init__(self, dist: HomophilyTemporalGraphGrammarDistribution, seed: int | None = None) -> None:
+        self.dist = dist
+        self.rng = RandomState(seed)
+
+    def sample_one(self, num_steps: int = 8, seed_graph: np.ndarray | None = None, n_init: int = 8) -> tuple:
+        d = self.dist
+        adj = np.zeros((n_init, n_init)) if seed_graph is None else np.asarray(seed_graph, dtype=np.float64).copy()
+        types = list(self.rng.choice(d.K, size=adj.shape[0], p=d.type_weights))
+        snaps = [adj.copy()]
+        for _ in range(num_steps):
+            new_nodes = self.rng.poisson(d.node_rate)
+            if new_nodes:
+                n = adj.shape[0]
+                big = np.zeros((n + new_nodes, n + new_nodes))
+                big[:n, :n] = adj
+                adj = big
+                types += list(self.rng.choice(d.K, size=new_nodes, p=d.type_weights))
+            tarr = np.asarray(types)
+            b = d.motif.assign(adj, on_edges=False)
+            ut = np.triu(np.ones(adj.shape, dtype=bool), 1)
+            for m in range(d.M):
+                ii, jj = np.where((b == m) & ut)
+                if not ii.shape[0]:
+                    continue
+                a, bb = np.minimum(tarr[ii], tarr[jj]), np.maximum(tarr[ii], tarr[jj])
+                for aa in range(d.K):
+                    for cc in range(aa, d.K):
+                        sel = (a == aa) & (bb == cc)
+                        idx = np.where(sel)[0]
+                        if not idx.shape[0]:
+                            continue
+                        k = min(self.rng.poisson(d.rate[m, aa, cc]), idx.shape[0])
+                        for p in self.rng.choice(idx, size=k, replace=False):
+                            adj[ii[p], jj[p]] = adj[jj[p], ii[p]] = 1.0
+            snaps.append(adj.copy())
+        return snaps, np.asarray(types, dtype=np.int64)
+
+    def sample(self, size: int | None = None, **kw: Any) -> Any:
+        if size is None:
+            return self.sample_one(**kw)
+        return [self.sample_one(**kw) for _ in range(size)]
+
+
+class HomophilyTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
+    def __init__(self, M: int, K: int, motif: CommonNeighbourMotif) -> None:
+        self.M, self.K, self.motif = M, K, motif
+        self.edge_counts = np.zeros((M, K, K), dtype=np.float64)
+        self.type_counts = np.zeros(K, dtype=np.float64)
+        self.nodes = 0.0
+        self.steps = 0.0
+
+    def update(self, x: tuple, weight: float, estimate: Any | None) -> None:
+        snaps, types = x
+        types = np.asarray(types, dtype=np.int64)
+        np.add.at(self.type_counts, types, weight)
+        for t in range(1, len(snaps)):
+            prev, cur = snaps[t - 1], snaps[t]
+            ai, aj, _, _ = _edge_diff(prev, cur)
+            _, lookup = self.motif.counts_and_binner(_pad(prev, cur.shape[0]), on_edges=False)
+            if len(ai):
+                m = lookup(np.asarray(ai), np.asarray(aj))
+                a = np.minimum(types[np.asarray(ai)], types[np.asarray(aj)])
+                b = np.maximum(types[np.asarray(ai)], types[np.asarray(aj)])
+                np.add.at(self.edge_counts, (m, a, b), weight)
+            self.nodes += weight * (cur.shape[0] - prev.shape[0])
+            self.steps += weight
+
+    def seq_update(self, x: Sequence[tuple], weights: np.ndarray, estimate: Any | None) -> None:
+        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
+            self.update(obs, float(w), estimate)
+
+    def initialize(self, x: tuple, weight: float, rng: RandomState | None) -> None:
+        self.update(x, weight, None)
+
+    def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState | None) -> None:
+        self.seq_update(x, weights, None)
+
+    def combine(self, suff_stat: tuple) -> HomophilyTemporalGraphGrammarAccumulator:
+        ec, tc, n, s = suff_stat
+        self.edge_counts += ec
+        self.type_counts += tc
+        self.nodes += n
+        self.steps += s
+        return self
+
+    def value(self) -> tuple:
+        return self.edge_counts.copy(), self.type_counts.copy(), self.nodes, self.steps
+
+    def from_value(self, x: tuple) -> HomophilyTemporalGraphGrammarAccumulator:
+        self.edge_counts = np.asarray(x[0], dtype=np.float64).copy()
+        self.type_counts = np.asarray(x[1], dtype=np.float64).copy()
+        self.nodes, self.steps = float(x[2]), float(x[3])
+        return self
+
+    def key_merge(self, stats_dict: dict) -> None:
+        pass
+
+    def key_replace(self, stats_dict: dict) -> None:
+        pass
+
+    def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class HomophilyTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(self, M: int, K: int, motif: CommonNeighbourMotif) -> None:
+        self.M, self.K, self.motif = M, K, motif
+
+    def make(self) -> HomophilyTemporalGraphGrammarAccumulator:
+        return HomophilyTemporalGraphGrammarAccumulator(self.M, self.K, self.motif)
+
+
+class HomophilyTemporalGraphGrammarEstimator(ParameterEstimator):
+    def __init__(
+        self,
+        M: int,
+        K: int,
+        motif: CommonNeighbourMotif | None = None,
+        pseudo_count: float | None = None,
+        name: str | None = None,
+    ) -> None:
+        self.M, self.K = M, K
+        self.motif = motif if motif is not None else CommonNeighbourMotif()
+        self.pseudo_count = pseudo_count
+        self.name = name
+        self.keys = None
+
+    def accumulator_factory(self) -> HomophilyTemporalGraphGrammarAccumulatorFactory:
+        return HomophilyTemporalGraphGrammarAccumulatorFactory(self.M, self.K, self.motif)
+
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> HomophilyTemporalGraphGrammarDistribution:
+        edge_counts, type_counts, nodes, steps = suff_stat
+        rate = np.asarray(edge_counts, dtype=np.float64) / steps if steps > 0 else np.asarray(edge_counts)
+        tc = np.asarray(type_counts, dtype=np.float64).copy()
+        if self.pseudo_count is not None:
+            tc = tc + float(self.pseudo_count)
+        type_weights = tc / tc.sum() if tc.sum() > 0 else np.ones(self.K) / self.K
+        return HomophilyTemporalGraphGrammarDistribution(
+            rate, type_weights, nodes / steps if steps > 0 else 0.0, motif=self.motif, name=self.name
+        )
