@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from pysp.engines.base import ComputeEngine
-from pysp.engines.numpy_engine import NUMPY_ENGINE, NumpyEngine
+from pysp.engines.numpy_engine import FUSED_NUMPY_ENGINE, NUMPY_ENGINE, NumpyEngine
 from pysp.engines.precision import (
     auto_precision,
     engine_with_precision,
@@ -28,6 +28,7 @@ __all__ = [
     "SYMBOLIC_ENGINE",
     "TorchEngine",
     "NUMPY_ENGINE",
+    "FUSED_NUMPY_ENGINE",
     "auto_precision",
     "engine_of",
     "engine_with_precision",

@@ -20,11 +20,16 @@ class NumpyEngine(ComputeEngine):
     # on the host (no engine-resident round-trip to avoid).
     supports_numba = True
     resident_estep = False
+    # Opt-in: route a fusible composite/mixture of cheap leaves to the source-generated single-pass fused
+    # numba kernel (pysp.stats.compute.fused_codegen). Off on the default engine so the established kernels
+    # and their tight host-parity contracts are unchanged; ``FUSED_NUMPY_ENGINE`` flips it on.
+    prefer_fused = False
 
     device = "cpu"
 
-    def __init__(self, dtype: Any = None) -> None:
+    def __init__(self, dtype: Any = None, prefer_fused: bool = False) -> None:
         self.dtype = normalize_numpy_dtype(dtype)
+        self.prefer_fused = prefer_fused
 
     @property
     def accumulator_dtype(self) -> Any:
@@ -38,7 +43,7 @@ class NumpyEngine(ComputeEngine):
 
     def with_precision(self, precision: Any) -> NumpyEngine:
         """Return a NumPy engine using ``precision`` for floating arrays."""
-        return NumpyEngine(dtype=precision)
+        return NumpyEngine(dtype=precision, prefer_fused=self.prefer_fused)
 
     def asarray(self, x: Any, dtype: Any = None) -> np.ndarray:
         """Convert ``x`` to a NumPy ndarray under the engine dtype policy."""
@@ -115,6 +120,7 @@ class NumpyEngine(ComputeEngine):
 
 
 NUMPY_ENGINE = NumpyEngine()
+FUSED_NUMPY_ENGINE = NumpyEngine(prefer_fused=True)  # opt-in single-pass fused numba kernels
 
 
 def _has_float_arg(args: Any) -> bool:
