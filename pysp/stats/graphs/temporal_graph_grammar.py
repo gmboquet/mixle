@@ -841,6 +841,11 @@ __all__ = [
     "LatentTemporalGraphGrammarEstimator",
     "LatentTemporalGraphGrammarAccumulator",
     "LatentTemporalGraphGrammarAccumulatorFactory",
+    "LatentAttributedTemporalGraphGrammarDistribution",
+    "LatentAttributedTemporalGraphGrammarSampler",
+    "LatentAttributedTemporalGraphGrammarEstimator",
+    "LatentAttributedTemporalGraphGrammarAccumulator",
+    "LatentAttributedTemporalGraphGrammarAccumulatorFactory",
 ]
 
 
@@ -1568,3 +1573,336 @@ class LatentTemporalGraphGrammarEstimator(ParameterEstimator):
         tm = np.where(row > 0, tm / np.where(row > 0, row, 1.0), 1.0 / self.k)
         states = [est.estimate(nobs, sv) for est, sv in zip(self.state_estimators, state_vals)]
         return LatentTemporalGraphGrammarDistribution(states, ip, tm, name=self.name)
+
+
+# --- regime-switching ATTRIBUTES: a latent regime over structure AND node/edge attributes -----------
+class LatentAttributedTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
+    """A regime-switching dynamic graph where the hidden regime drives the STRUCTURE *and* the ATTRIBUTES.
+
+    Each of K regimes carries a full edit grammar plus (optionally) a node-attribute distribution and an
+    edge-attribute distribution, all switched by one latent Markov state z_t. So a single regime change can
+    densify the topology AND spike communication volume / shift node properties together -- e.g. an "active"
+    phase with bursty triadic closure and high message counts, vs a "quiet" phase. The per-transition
+    emission under regime k is ``structure_k(transition) + node_attrs_k(nodes added this step) +
+    edge_attrs_k(edges added this step)``; the sequence likelihood marginalises the regime path by the
+    forward algorithm and EM does forward-backward + a per-regime weighted M-step over each piece.
+
+    Observation = ``(snapshots, node_features, edge_features)`` where ``node_features[t]`` / ``edge_features[t]``
+    are the attribute records of the nodes / edges that appear at transition t (lists, length = #transitions).
+    """
+
+    def __init__(
+        self,
+        structures: Sequence[TemporalGraphGrammarDistribution],
+        node_dists: Sequence[Any] | None = None,
+        edge_dists: Sequence[Any] | None = None,
+        initial_probs: Sequence[float] | None = None,
+        transition_matrix: Sequence[Sequence[float]] | None = None,
+        name: str | None = None,
+    ) -> None:
+        self.structures = list(structures)
+        self.k = len(self.structures)
+        self.node_dists = None if node_dists is None else list(node_dists)
+        self.edge_dists = None if edge_dists is None else list(edge_dists)
+        ip = np.ones(self.k) / self.k if initial_probs is None else np.asarray(initial_probs, dtype=np.float64)
+        self.initial_probs = ip / ip.sum()
+        if transition_matrix is None:
+            self.transition_matrix = np.ones((self.k, self.k)) / self.k
+        else:
+            tm = np.asarray(transition_matrix, dtype=np.float64)
+            self.transition_matrix = tm / tm.sum(axis=1, keepdims=True)
+        self.log_init = np.log(np.clip(self.initial_probs, _EPS, None))
+        self.log_trans = np.log(np.clip(self.transition_matrix, _EPS, None))
+        self.name = name
+
+    def __str__(self) -> str:
+        return "LatentAttributedTemporalGraphGrammarDistribution(K=%d, node=%s, edge=%s)" % (
+            self.k,
+            self.node_dists is not None,
+            self.edge_dists is not None,
+        )
+
+    def _shared_motif(self) -> bool:
+        m0 = self.structures[0].motif
+        return all((s.motif.bins == m0.bins and s.motif.directed == m0.directed) for s in self.structures)
+
+    def _emission_logb(self, x: tuple) -> np.ndarray:
+        snaps, node_features, edge_features = x
+        t_steps = len(snaps) - 1
+        log_b = np.empty((t_steps, self.k))
+        shared = self._shared_motif()
+        for t in range(t_steps):
+            comp = self.structures[0].transition_components(snaps[t], snaps[t + 1]) if shared else None
+            nf = node_features[t] if node_features else []
+            ef = edge_features[t] if edge_features else []
+            for k in range(self.k):
+                st = self.structures[k]
+                ll = st.score_components(comp) if shared else st._transition_log_density(snaps[t], snaps[t + 1])
+                if self.node_dists is not None:
+                    ll += _emission_ll(self.node_dists[k], nf)
+                if self.edge_dists is not None:
+                    ll += _emission_ll(self.edge_dists[k], ef)
+                log_b[t, k] = ll
+        return log_b
+
+    def log_density(self, x: tuple) -> float:
+        snaps = x[0]
+        if len(snaps) < 2:
+            return 0.0
+        return _grammar_forward_backward(self._emission_logb(x), self.log_init, self.log_trans)[0]
+
+    def decode(self, x: tuple) -> list:
+        """Viterbi: the most likely regime governing each transition (jointly explaining structure+attrs)."""
+        log_b = self._emission_logb(x)
+        t_steps = log_b.shape[0]
+        if t_steps == 0:
+            return []
+        v = np.empty((t_steps, self.k))
+        ptr = np.zeros((t_steps, self.k), dtype=np.int64)
+        v[0] = self.log_init + log_b[0]
+        for t in range(1, t_steps):
+            scores = v[t - 1][:, None] + self.log_trans
+            ptr[t] = scores.argmax(axis=0)
+            v[t] = log_b[t] + scores.max(axis=0)
+        path = [int(v[-1].argmax())]
+        for t in range(t_steps - 1, 0, -1):
+            path.append(int(ptr[t][path[-1]]))
+        return path[::-1]
+
+    def seq_encode(self, x: Sequence[Any]) -> Sequence[Any]:
+        return x
+
+    def seq_log_density(self, x: Sequence[Any]) -> np.ndarray:
+        return np.asarray([self.log_density(obs) for obs in x], dtype=np.float64)
+
+    def sampler(self, seed: int | None = None) -> LatentAttributedTemporalGraphGrammarSampler:
+        return LatentAttributedTemporalGraphGrammarSampler(self, seed)
+
+    def estimator(self, pseudo_count: float | None = None) -> LatentAttributedTemporalGraphGrammarEstimator:
+        return LatentAttributedTemporalGraphGrammarEstimator(
+            [st.estimator(pseudo_count=pseudo_count) for st in self.structures],
+            None if self.node_dists is None else [d.estimator() for d in self.node_dists],
+            None if self.edge_dists is None else [d.estimator() for d in self.edge_dists],
+            pseudo_count=pseudo_count,
+            name=self.name,
+        )
+
+    def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class LatentAttributedTemporalGraphGrammarSampler(DistributionSampler):
+    def __init__(self, dist: LatentAttributedTemporalGraphGrammarDistribution, seed: int | None = None) -> None:
+        self.dist = dist
+        self.rng = RandomState(seed)
+        self.sub = [st.sampler(self.rng.randint(2**31)) for st in dist.structures]
+
+    def sample_one(self, num_steps: int = 10, seed_graph: np.ndarray | None = None, n_init: int = 5) -> tuple:
+        d = self.dist
+        adj = np.zeros((n_init, n_init)) if seed_graph is None else np.asarray(seed_graph, dtype=np.float64).copy()
+        snaps = [adj.copy()]
+        node_features: list = []
+        edge_features: list = []
+        z = int(self.rng.choice(d.k, p=d.initial_probs))
+        for _ in range(num_steps):
+            st = d.structures[z]
+            n_before = adj.shape[0]
+            new_nodes = int(self.rng.poisson(st.node_rate))
+            if new_nodes:
+                big = np.zeros((n_before + new_nodes, n_before + new_nodes))
+                big[:n_before, :n_before] = adj
+                adj = big
+            before = adj.copy()
+            self.sub[z]._edge_edit_step(adj)
+            num_added = len(_edge_diff(before, adj, st.directed)[0])
+            nf = (
+                list(d.node_dists[z].sampler(self.rng.randint(2**31)).sample(size=new_nodes))
+                if d.node_dists is not None and new_nodes
+                else []
+            )
+            ef = (
+                list(d.edge_dists[z].sampler(self.rng.randint(2**31)).sample(size=num_added))
+                if d.edge_dists is not None and num_added
+                else []
+            )
+            node_features.append(nf)
+            edge_features.append(ef)
+            snaps.append(adj.copy())
+            z = int(self.rng.choice(d.k, p=d.transition_matrix[z]))
+        return snaps, node_features, edge_features
+
+    def sample(self, size: int | None = None, **kw: Any) -> Any:
+        if size is None:
+            return self.sample_one(**kw)
+        return [self.sample_one(**kw) for _ in range(size)]
+
+
+class LatentAttributedTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
+    def __init__(self, k: int, struct_accs: Sequence[Any], node_accs: Any, edge_accs: Any) -> None:
+        self.k = k
+        self.struct_accs = list(struct_accs)
+        self.node_accs = node_accs
+        self.edge_accs = edge_accs
+        self.init_counts = np.zeros(k, dtype=np.float64)
+        self.trans_counts = np.zeros((k, k), dtype=np.float64)
+
+    def _accumulate(self, x: tuple, weight: float, gamma: np.ndarray, xi: np.ndarray, estimate: Any) -> None:
+        snaps, node_features, edge_features = x
+        self.init_counts += weight * gamma[0]
+        if xi.shape[0]:
+            self.trans_counts += weight * xi.sum(axis=0)
+        for kk in range(self.k):
+            s_est = None if estimate is None else estimate.structures[kk]
+            for t in range(len(snaps) - 1):
+                w = weight * gamma[t, kk]
+                if w <= 0:
+                    continue
+                self.struct_accs[kk].update([snaps[t], snaps[t + 1]], w, s_est)
+                if self.node_accs is not None and node_features and node_features[t]:
+                    nd = None if estimate is None else estimate.node_dists[kk]
+                    for r in node_features[t]:  # per-record update (raw values; works with or without an estimate)
+                        self.node_accs[kk].update(r, w, nd)
+                if self.edge_accs is not None and edge_features and edge_features[t]:
+                    ed = None if estimate is None else estimate.edge_dists[kk]
+                    for r in edge_features[t]:
+                        self.edge_accs[kk].update(r, w, ed)
+
+    def update(self, x: tuple, weight: float, estimate: Any | None) -> None:
+        if len(x[0]) < 2:
+            return
+        _, gamma, xi = _grammar_forward_backward(estimate._emission_logb(x), estimate.log_init, estimate.log_trans)
+        if gamma is None:
+            return
+        self._accumulate(x, weight, gamma, xi, estimate)
+
+    def initialize(self, x: tuple, weight: float, rng: RandomState | None) -> None:
+        if len(x[0]) < 2:
+            return
+        rng = rng if rng is not None else RandomState()
+        t_steps = len(x[0]) - 1
+        gamma = rng.dirichlet(np.ones(self.k), size=t_steps)
+        xi = np.zeros((max(t_steps - 1, 0), self.k, self.k))
+        for t in range(t_steps - 1):
+            xi[t] = np.outer(gamma[t], gamma[t + 1])
+        self._accumulate(x, weight, gamma, xi, None)
+
+    def seq_update(self, x: Sequence[Any], weights: np.ndarray, estimate: Any | None) -> None:
+        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
+            self.update(obs, float(w), estimate)
+
+    def seq_initialize(self, x: Sequence[Any], weights: np.ndarray, rng: RandomState | None) -> None:
+        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
+            self.initialize(obs, float(w), rng)
+
+    def combine(self, suff_stat: tuple) -> LatentAttributedTemporalGraphGrammarAccumulator:
+        ic, tc, sv, nv, ev = suff_stat
+        self.init_counts += ic
+        self.trans_counts += tc
+        for acc, v in zip(self.struct_accs, sv):
+            acc.combine(v)
+        if self.node_accs is not None:
+            for acc, v in zip(self.node_accs, nv):
+                acc.combine(v)
+        if self.edge_accs is not None:
+            for acc, v in zip(self.edge_accs, ev):
+                acc.combine(v)
+        return self
+
+    def value(self) -> tuple:
+        return (
+            self.init_counts.copy(),
+            self.trans_counts.copy(),
+            [acc.value() for acc in self.struct_accs],
+            None if self.node_accs is None else [acc.value() for acc in self.node_accs],
+            None if self.edge_accs is None else [acc.value() for acc in self.edge_accs],
+        )
+
+    def from_value(self, x: tuple) -> LatentAttributedTemporalGraphGrammarAccumulator:
+        self.init_counts = np.asarray(x[0], dtype=np.float64).copy()
+        self.trans_counts = np.asarray(x[1], dtype=np.float64).copy()
+        for acc, v in zip(self.struct_accs, x[2]):
+            acc.from_value(v)
+        if self.node_accs is not None:
+            for acc, v in zip(self.node_accs, x[3]):
+                acc.from_value(v)
+        if self.edge_accs is not None:
+            for acc, v in zip(self.edge_accs, x[4]):
+                acc.from_value(v)
+        return self
+
+    def key_merge(self, stats_dict: dict) -> None:
+        pass
+
+    def key_replace(self, stats_dict: dict) -> None:
+        pass
+
+    def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class LatentAttributedTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(self, k: int, struct_factories: Sequence[Any], node_factories: Any, edge_factories: Any) -> None:
+        self.k = k
+        self.struct_factories = list(struct_factories)
+        self.node_factories = node_factories
+        self.edge_factories = edge_factories
+
+    def make(self) -> LatentAttributedTemporalGraphGrammarAccumulator:
+        return LatentAttributedTemporalGraphGrammarAccumulator(
+            self.k,
+            [f.make() for f in self.struct_factories],
+            None if self.node_factories is None else [f.make() for f in self.node_factories],
+            None if self.edge_factories is None else [f.make() for f in self.edge_factories],
+        )
+
+
+class LatentAttributedTemporalGraphGrammarEstimator(ParameterEstimator):
+    """EM for the regime-switching attributed grammar: forward-backward E-step, per-regime weighted M-step
+    over structure + node attrs + edge attrs together."""
+
+    def __init__(
+        self,
+        structure_estimators: Sequence[Any],
+        node_estimators: Any = None,
+        edge_estimators: Any = None,
+        pseudo_count: float | None = None,
+        name: str | None = None,
+    ) -> None:
+        self.structure_estimators = list(structure_estimators)
+        self.k = len(self.structure_estimators)
+        self.node_estimators = node_estimators
+        self.edge_estimators = edge_estimators
+        self.pseudo_count = pseudo_count
+        self.name = name
+        self.keys = None
+
+    def accumulator_factory(self) -> LatentAttributedTemporalGraphGrammarAccumulatorFactory:
+        return LatentAttributedTemporalGraphGrammarAccumulatorFactory(
+            self.k,
+            [est.accumulator_factory() for est in self.structure_estimators],
+            None if self.node_estimators is None else [est.accumulator_factory() for est in self.node_estimators],
+            None if self.edge_estimators is None else [est.accumulator_factory() for est in self.edge_estimators],
+        )
+
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> LatentAttributedTemporalGraphGrammarDistribution:
+        init_counts, trans_counts, sv, nv, ev = suff_stat
+        pc = 0.0 if self.pseudo_count is None else float(self.pseudo_count)
+        ip = init_counts + pc
+        ip = ip / ip.sum() if ip.sum() > 0 else np.ones(self.k) / self.k
+        tm = trans_counts + pc
+        row = tm.sum(axis=1, keepdims=True)
+        tm = np.where(row > 0, tm / np.where(row > 0, row, 1.0), 1.0 / self.k)
+        structures = [est.estimate(nobs, v) for est, v in zip(self.structure_estimators, sv)]
+        node_dists = (
+            None
+            if self.node_estimators is None
+            else [est.estimate(nobs, v) for est, v in zip(self.node_estimators, nv)]
+        )
+        edge_dists = (
+            None
+            if self.edge_estimators is None
+            else [est.estimate(nobs, v) for est, v in zip(self.edge_estimators, ev)]
+        )
+        return LatentAttributedTemporalGraphGrammarDistribution(
+            structures, node_dists, edge_dists, ip, tm, name=self.name
+        )
