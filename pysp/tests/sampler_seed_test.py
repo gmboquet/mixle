@@ -416,6 +416,9 @@ def _stats_public_distribution_catalog():
         "VonMisesFisherDistribution": stats.VonMisesFisherDistribution([1.0, 0.0, 0.0], 2.0),
         "WeightedDistribution": stats.WeightedDistribution(stats.GaussianDistribution(0.0, 1.0)),
         "ErdosRenyiGraphDistribution": stats.ErdosRenyiGraphDistribution(0.4, num_nodes=6),
+        "TemporalGraphGrammarDistribution": stats.TemporalGraphGrammarDistribution(
+            [0.2, 0.4, 0.25, 0.15], edge_rate=2.0, node_rate=0.5
+        ),
         "StochasticBlockGraphDistribution": stats.StochasticBlockGraphDistribution(
             [[0.8, 0.2], [0.2, 0.7]], [0, 0, 1, 1, 0, 1]
         ),
