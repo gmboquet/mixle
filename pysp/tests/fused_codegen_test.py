@@ -78,5 +78,70 @@ class CorrectnessTest(unittest.TestCase):
         self.assertIs(_compile(analyze(m1)), _compile(analyze(m2)))  # same structure -> same compiled fn
 
 
+class FusedEStepTest(unittest.TestCase):
+    """The fused E-step (score + responsibilities + per-leaf weighted statistics) matches the numpy fit."""
+
+    def setUp(self):
+        self.rng = np.random.RandomState(0)
+
+    def _matches(self, model, est, data):
+        from pysp.stats.compute.fused_codegen import fused_accumulate
+
+        enc = model.dist_to_encoder().seq_encode(data)
+        w = np.ones(len(data))
+        m_fused = est.estimate(float(len(data)), fused_accumulate(model, enc, w))
+        acc = est.accumulator_factory().make()
+        acc.seq_update(enc, w, model)
+        d = {}
+        acc.key_merge(d)
+        acc.key_replace(d)
+        m_np = est.estimate(float(len(data)), acc.value())
+
+        def ll(m):
+            return float(np.sum(m.seq_log_density(enc)))
+
+        return np.isclose(ll(m_fused), ll(m_np), rtol=1e-9)
+
+    def test_single_leaf_estep(self):
+        data = [float(self.rng.randn() * 1.3 + 0.4) for _ in range(2000)]
+        self.assertTrue(self._matches(stats.GaussianDistribution(0.0, 1.0), stats.GaussianEstimator(), data))
+
+    def test_composite_estep(self):
+        c = stats.CompositeDistribution((stats.GaussianDistribution(0.0, 1.0), stats.ExponentialDistribution(1.0)))
+        e = stats.CompositeEstimator((stats.GaussianEstimator(), stats.ExponentialEstimator()))
+        data = [(float(self.rng.randn()), float(abs(self.rng.randn()) + 0.1)) for _ in range(2000)]
+        self.assertTrue(self._matches(c, e, data))
+
+    def test_mixture_estep(self):
+        m = stats.MixtureDistribution([stats.GaussianDistribution(float(i) - 1, 1.0) for i in range(3)], [1 / 3] * 3)
+        e = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(3)])
+        data = [float(self.rng.randn() + 3 * (self.rng.randint(3) - 1)) for _ in range(2000)]
+        self.assertTrue(self._matches(m, e, data))
+
+    def test_mixture_of_composite_estep(self):
+        m = stats.MixtureDistribution(
+            [
+                stats.CompositeDistribution(
+                    (stats.GaussianDistribution(float(k), 1.0), stats.ExponentialDistribution(float(k) + 1.0))
+                )
+                for k in range(3)
+            ],
+            [1 / 3] * 3,
+        )
+        e = stats.MixtureEstimator(
+            [stats.CompositeEstimator((stats.GaussianEstimator(), stats.ExponentialEstimator())) for _ in range(3)]
+        )
+        data = [(float(abs(self.rng.randn()) * 2), float(abs(self.rng.randn()) + 0.1)) for _ in range(2000)]
+        self.assertTrue(self._matches(m, e, data))
+
+    def test_estep_gating(self):
+        from pysp.stats.compute.fused_codegen import fusible_estep
+
+        self.assertTrue(fusible_estep(stats.GaussianDistribution(0.0, 1.0)))
+        # MVGaussian is not fused; a Categorical leaf has no accumulation template
+        self.assertFalse(fusible_estep(stats.MultivariateGaussianDistribution([0.0], [[1.0]])))
+        self.assertFalse(fusible_estep(stats.CategoricalDistribution({"a": 0.5, "b": 0.5})))
+
+
 if __name__ == "__main__":
     unittest.main()
