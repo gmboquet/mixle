@@ -133,5 +133,34 @@ class HmmTerminalStatesEMTest(unittest.TestCase):
         self.assertGreater(sum(m.log_density(s) for s in data), sum(init.log_density(s) for s in data))
 
 
+class HmmTerminalValuesSamplerTest(unittest.TestCase):
+    """Regression: sample() must dispatch to the terminal-VALUE path when len_dist is Null.
+
+    The len_dist defaults to NullDistribution() (never None), so len_sampler used to be a (non-None)
+    null sampler that preempted the terminal_values branch in sample() and crashed.
+    """
+
+    def _dist(self):
+        return HiddenMarkovModelDistribution(
+            [
+                CategoricalDistribution({"a": 0.6, "b": 0.3, ".": 0.1}),
+                CategoricalDistribution({"a": 0.2, "b": 0.3, ".": 0.5}),
+            ],
+            [0.7, 0.3],
+            [[0.6, 0.4], [0.3, 0.7]],
+            terminal_values={"."},
+        )
+
+    def test_sample_dispatches_to_terminal_value_path(self):
+        s = self._dist().sampler(seed=0).sample(50)  # previously raised TypeError via the len path
+        self.assertEqual(len(s), 50)
+        for seq in s:
+            self.assertEqual(seq[-1], ".")  # ends exactly at the first terminal value
+            self.assertNotIn(".", seq[:-1])
+
+    def test_sample_size_none(self):
+        self.assertEqual(self._dist().sampler(seed=1).sample()[-1], ".")
+
+
 if __name__ == "__main__":
     unittest.main()
