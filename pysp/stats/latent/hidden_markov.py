@@ -1616,27 +1616,27 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
         self._nt_maxlp = np.array([maxlp[j] for j in self._nt], dtype=np.float64)
         self._tm_maxlp = np.array([maxlp[j] for j in self._tm], dtype=np.float64)
 
-        # Viterbi upper bound: f_r[s] bounds "r non-terminal steps then a terminal step" out of state s.
+        # Backward suffix-value fixed point: beta[s] is the best (Viterbi) score of a *completion* --
+        # emit zero or more non-terminal symbols then a terminal symbol -- starting from state s. The
+        # terminal value anchors the end, so this is grown backwards from termination as a max-plus
+        # Bellman fixed point. e_nt[s] / e_t[s] are the best non-terminal / terminal emission log-probs.
         e_nt = emat[self._nt].max(axis=0) if self._nt else np.full(k, -np.inf)
         e_t = emat[self._tm].max(axis=0) if self._tm else np.full(k, -np.inf)
-        self._f_list = [e_t.copy()]
-        max0 = float(np.max(e_t))
-        if np.isfinite(max0) and np.any(np.isfinite(e_nt)):
-            for _ in range(5000):
-                fr = e_nt + np.max(self._log_a + self._f_list[-1][None, :], axis=1)
-                if not np.any(np.isfinite(fr)):
+        beta = e_t.copy()
+        if np.any(np.isfinite(e_nt)):
+            for _ in range(10000):  # max-plus value iteration; converges geometrically for a proper model
+                new = np.maximum(beta, e_nt + np.max(self._log_a + beta[None, :], axis=1))
+                if np.allclose(new, beta, rtol=0.0, atol=1e-12):  # handles +/-inf entries correctly
+                    beta = new
                     break
-                self._f_list.append(fr)
-                if float(np.max(fr)) <= max0 - 60.0:  # tail mass < e^-60 of the head; numerically negligible
-                    break
+                beta = new
+        self._beta = beta
         self._term_gen = self._iter_terminal_values()
 
     def _hbound(self, v: np.ndarray) -> float:
-        """Admissible upper bound on the best completion from pre-emission forward vector ``v``."""
-        best = -np.inf
-        for fr in self._f_list:
-            best = max(best, float(logsumexp(v + fr)))
-        return best
+        """Admissible upper bound on the best completion from pre-emission forward vector ``v``: the
+        backward suffix-value fixed point gives ``logsumexp_s(v[s] + beta[s])``."""
+        return float(logsumexp(v + self._beta))
 
     def _iter_terminal_values(self):
         counter = itertools.count()
