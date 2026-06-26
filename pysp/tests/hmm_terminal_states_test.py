@@ -162,5 +162,39 @@ class HmmTerminalValuesSamplerTest(unittest.TestCase):
         self.assertEqual(self._dist().sampler(seed=1).sample()[-1], ".")
 
 
+class HmmTerminalValuesDensityTest(unittest.TestCase):
+    """terminal_values is a stopping-time density: only sequences whose ONLY terminal value is the last
+    are in the support, and the length is endogenous (no len_dist factor). Off-support sequences must
+    score -inf so the density is proper (sums to 1 over its support)."""
+
+    def setUp(self):
+        self.d = HiddenMarkovModelDistribution(
+            [
+                CategoricalDistribution({"a": 0.5, "b": 0.3, ".": 0.2}),
+                CategoricalDistribution({"a": 0.2, "b": 0.3, ".": 0.5}),
+            ],
+            [0.6, 0.4],
+            [[0.7, 0.3], [0.4, 0.6]],
+            terminal_values={"."},
+        )
+
+    def test_off_support_is_minus_inf(self):
+        for seq in ([], ["a", "b"], ["a", ".", "b", "."], [".", "a", "."]):
+            self.assertEqual(self.d.log_density(seq), float("-inf"))
+
+    def test_on_support_matches_enumerator(self):
+        for seq, lp in self.d.enumerator().top_k(25):
+            self.assertAlmostEqual(self.d.log_density(seq), lp, places=10)
+
+    def test_density_is_proper(self):
+        # summing over EVERY finite sequence (incl. would-be off-support) now totals 1 (was > 1 before)
+        total = sum(
+            np.exp(self.d.log_density(list(s)))
+            for length in range(1, 13)
+            for s in itertools.product("ab.", repeat=length)
+        )
+        self.assertAlmostEqual(total, 1.0, delta=0.02)  # remaining mass is in sequences longer than 12
+
+
 if __name__ == "__main__":
     unittest.main()
