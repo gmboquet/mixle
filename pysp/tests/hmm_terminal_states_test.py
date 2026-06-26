@@ -195,6 +195,29 @@ class HmmTerminalValuesDensityTest(unittest.TestCase):
         )
         self.assertAlmostEqual(total, 1.0, delta=0.02)  # remaining mass is in sequences longer than 12
 
+    def test_ambiguous_terminal_defers_structural_count_index(self):
+        # shared emissions => a sequence has multiple paths => the structural (path-count) index would be
+        # only the tropical projection, so _terminal_values_count_index returns None and seek falls back
+        # to exact enumerate-and-bin.
+        from pysp.enumeration.quantization.core import Quantizer
+
+        self.assertIsNone(self.d._terminal_values_count_index(Quantizer(bin_width_bits=1.0, oversample=64), 256))
+        order = sorted(
+            (
+                (list(s), self.d.log_density(list(s)))
+                for length in range(1, 7)
+                for s in itertools.product("ab.", repeat=length)
+                if np.isfinite(self.d.log_density(list(s)))
+            ),
+            key=lambda kv: -kv[1],
+        )
+        seen = set()
+        for k in range(min(len(order), 20)):
+            v = tuple(self.d.enumerator().seek(k).value)
+            self.assertNotIn(v, seen)  # exact fallback: one sequence per index, no path over-count
+            seen.add(v)
+            self.assertAlmostEqual(self.d.log_density(list(v)), order[k][1], places=9)
+
 
 if __name__ == "__main__":
     unittest.main()
