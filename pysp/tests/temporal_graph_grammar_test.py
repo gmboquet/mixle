@@ -282,10 +282,12 @@ class ScalableSamplerTest(unittest.TestCase):
         self.assertTrue(all(sp.issparse(a) for a in snaps))
         self.assertGreaterEqual(snaps[-1].shape[0], 40_000)
 
-    def test_scalable_directed_not_supported(self):
-        gt = stats.TemporalGraphGrammarDistribution([0.25] * 4, edge_rate=3.0, directed=True)
-        with self.assertRaises(NotImplementedError):
-            gt.sampler(seed=0).sample_one_scalable(num_steps=2, seed_edges=[(0, 1), (1, 2)])
+    def test_scalable_directed_emits_asymmetric_sparse(self):
+        gt = stats.TemporalGraphGrammarDistribution([0.25] * 4, edge_rate=3.0, node_rate=1.0, directed=True)
+        snaps = gt.sampler(seed=0).sample_one_scalable(num_steps=4, seed_edges=[(0, 1), (1, 2), (2, 0), (3, 1)])
+        self.assertTrue(all(sp.issparse(a) for a in snaps))
+        g = snaps[-1].toarray()
+        self.assertFalse(np.array_equal(g, g.T))  # directed: asymmetric adjacency
 
 
 class ChurningTemporalGraphGrammarTest(unittest.TestCase):
@@ -405,6 +407,62 @@ class RegimeSwitchingAttributesTest(unittest.TestCase):
         self.assertAlmostEqual(cur.node_dists[a].mu, 25.0, delta=4.0)
         self.assertAlmostEqual(cur.edge_dists[a].lam, 10.0, delta=2.0)
         self.assertEqual(len(cur.decode(data[0])), len(data[0][0]) - 1)  # Viterbi labels every transition
+
+
+class GraphGrammarClosuresTest(unittest.TestCase):
+    def test_directed_scalable_sampling(self):
+        rng = np.random.RandomState(0)
+        gt = stats.TemporalGraphGrammarDistribution(
+            [0.3, 0.35, 0.2, 0.15],
+            edge_rate=6.0,
+            node_rate=1.0,
+            remove_weights=[0.4, 0.3, 0.2, 0.1],
+            edge_remove_rate=2.0,
+            directed=True,
+        )
+        big = [(int(rng.randint(2000)), int(rng.randint(2000))) for _ in range(8000)]
+        big = [(i, j) for i, j in big if i != j]
+        s = gt.sampler(seed=1).sample_one_scalable(num_steps=6, seed_edges=big)
+        g = s[-1].toarray()
+        self.assertTrue(all(sp.issparse(a) for a in s))
+        self.assertFalse(np.array_equal(g, g.T))  # genuinely directed
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density([s]))))  # the directed scorer accepts it
+        # the dominant (well-sampled) motifs recover; the cn>=3 motif is starved in a sparse directed graph
+        seqs = [
+            gt.sampler(seed=k).sample_one_scalable(
+                num_steps=6, seed_edges=[(int(rng.randint(150)), int(rng.randint(150))) for _ in range(400)]
+            )
+            for k in range(80)
+        ]
+        est = stats.TemporalGraphGrammarEstimator(stats.CommonNeighbourMotif(directed=True), pseudo_count=0.5)
+        acc = est.accumulator_factory().make()
+        acc.seq_update(seqs, np.ones(len(seqs)), None)
+        fit = est.estimate(len(seqs), acc.value())
+        self.assertLess(float(np.max(np.abs(fit.motif_weights[:3] - [0.3, 0.35, 0.2]))), 0.08)
+
+    def test_sparse_path_churn(self):
+        rng = np.random.RandomState(0)
+        edit = stats.TemporalGraphGrammarDistribution(
+            [0.2, 0.4, 0.25, 0.15],
+            edge_rate=5.0,
+            node_rate=3.0,
+            remove_weights=[0.5, 0.25, 0.15, 0.1],
+            edge_remove_rate=1.5,
+        )
+        ch = stats.ChurningTemporalGraphGrammarDistribution(edit, node_remove_rate=2.0)
+        dense = [
+            ch.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(50)
+        ]
+        sparse = [[(sp.csr_array(adj), ids) for adj, ids in obs] for obs in dense]
+        self.assertTrue(np.allclose(ch.seq_log_density(dense), ch.seq_log_density(sparse)))  # dense==sparse churn
+        ed = ch.estimator(0.5)
+        ad = ed.accumulator_factory().make()
+        ad.seq_update(dense, np.ones(len(dense)), ch)
+        asp = ed.accumulator_factory().make()
+        asp.seq_update(sparse, np.ones(len(sparse)), ch)
+        fd, fs = ed.estimate(len(dense), ad.value()), ed.estimate(len(sparse), asp.value())
+        self.assertAlmostEqual(fd.node_remove_rate, fs.node_remove_rate)
+        self.assertTrue(np.allclose(fd.edit_grammar.motif_weights, fs.edit_grammar.motif_weights))
 
 
 if __name__ == "__main__":

@@ -405,20 +405,29 @@ class TemporalGraphGrammarSampler(DistributionSampler):
           graph is sparse). ``max_reject`` attempts per bridge bound the loop; a shortfall is honest
           capping (same realized-rate semantics as the dense sampler when a motif's anchors run out).
 
-        Undirected, growth+removal. Returns a list of ``csr_array`` snapshots. The realized motif
+        Growth+removal; undirected or directed (directed: ordered i->j edges, full off-diagonal candidates,
+        ``A@A`` = transitive i->k->j wedges). Returns a list of ``csr_array`` snapshots. The realized motif
         distribution matches the weights, so a model fit on these snapshots recovers the grammar.
         """
         d = self.dist
-        if d.directed:
-            raise NotImplementedError("scalable sampling is undirected-only for now (directed is a follow-up).")
+        directed = d.directed
+
+        def canon(i: int, j: int) -> tuple:
+            return (i, j) if directed else ((i, j) if i < j else (j, i))
+
         n = n_init if seed_edges is None else (max(max(e) for e in seed_edges) + 1 if seed_edges else n_init)
-        edges = set() if seed_edges is None else {(min(i, j), max(i, j)) for i, j in seed_edges}
-        snaps = [self._csr(edges, n)]
+        edges = set() if seed_edges is None else {canon(i, j) for i, j in seed_edges}
+        snaps = [self._csr(edges, n, directed)]
         for _ in range(num_steps):
             n += int(self.rng.poisson(d.node_rate))  # new isolated nodes
-            a = self._csr(edges, n)
-            cnu = sp.triu(a @ a, 1).tocsr()  # upper-tri common-neighbour counts (the wedge structure)
-            em = self._edge_mask(edges, n)  # 1 at existing (upper-tri) edges
+            a = self._csr(edges, n, directed)
+            if directed:
+                cnu = (a @ a).tocsr().copy()  # full transitive-path counts (i->k->j)
+                cnu.setdiag(0)
+                cnu.eliminate_zeros()
+            else:
+                cnu = sp.triu(a @ a, 1).tocsr()  # upper-tri common-neighbour counts (the wedge structure)
+            em = self._edge_mask(edges, n)  # 1 at existing edges (canonical positions)
             edge_cn = cnu.multiply(em) if em is not None else None  # cn on existing edges (for removal binning)
             non_edge = cnu - edge_cn if edge_cn is not None else cnu  # cn on non-edges = the wedge non-edges
             non_edge.eliminate_zeros()
@@ -444,7 +453,7 @@ class TemporalGraphGrammarSampler(DistributionSampler):
                     i, j = int(self.rng.randint(n)), int(self.rng.randint(n))
                     if i == j:
                         continue
-                    key = (i, j) if i < j else (j, i)
+                    key = canon(i, j)
                     enc = key[0] * n + key[1]
                     pos = np.searchsorted(wedge_keys, enc)
                     is_wedge = pos < wedge_keys.size and wedge_keys[pos] == enc
@@ -469,7 +478,7 @@ class TemporalGraphGrammarSampler(DistributionSampler):
                         remove += [pool[idx] for idx in self.rng.choice(len(pool), size=k, replace=False)]
             edges |= set(add)
             edges -= set(remove)
-            snaps.append(self._csr(edges, n))
+            snaps.append(self._csr(edges, n, directed))
         return snaps
 
     @staticmethod
@@ -480,10 +489,12 @@ class TemporalGraphGrammarSampler(DistributionSampler):
         return sp.csr_array((np.ones(len(edges)), (ij[:, 0], ij[:, 1])), shape=(n, n))
 
     @staticmethod
-    def _csr(edges: set, n: int) -> Any:
+    def _csr(edges: set, n: int, directed: bool = False) -> Any:
         if not edges:
             return sp.csr_array((n, n))
         ij = np.fromiter((c for e in edges for c in e), dtype=np.int64, count=2 * len(edges)).reshape(-1, 2)
+        if directed:  # ordered edges, asymmetric adjacency
+            return sp.csr_array((np.ones(len(edges)), (ij[:, 0], ij[:, 1])), shape=(n, n))
         rows = np.concatenate([ij[:, 0], ij[:, 1]])
         cols = np.concatenate([ij[:, 1], ij[:, 0]])
         return sp.csr_array((np.ones(rows.size), (rows, cols)), shape=(n, n))
@@ -1091,6 +1102,14 @@ class HomophilyTemporalGraphGrammarEstimator(ParameterEstimator):
 
 
 # --- node churn: removal + addition with identity tracking -----------------------------------------
+def _node_removal_logp(rate: float, n_prev: int, k_removed: int) -> float:
+    """log p(remove k of n_prev nodes) = Poisson(k; rate) x uniform over which k-subset."""
+    if k_removed > n_prev:
+        return float("-inf")
+    lp = k_removed * math.log(rate + _EPS) - rate - math.lgamma(k_removed + 1)
+    return lp - math.lgamma(n_prev + 1) + math.lgamma(k_removed + 1) + math.lgamma(n_prev - k_removed + 1)
+
+
 def _align_by_ids(prev_adj: Any, prev_ids: Sequence[int], cur_adj: Any, cur_ids: Sequence[int]) -> tuple:
     """Align two snapshots by stable node id. Returns (prev_surviving_subgraph, cur_reordered, num_removed).
 
@@ -1106,6 +1125,12 @@ def _align_by_ids(prev_adj: Any, prev_ids: Sequence[int], cur_adj: Any, cur_ids:
     new = [k for k, nid in enumerate(cid) if nid not in pset]  # cur positions of brand-new nodes
     num_removed = len(pid) - len(surv)
     order = [cpos[nid] for nid in surv_ids] + new
+    if sp.issparse(prev_adj) or sp.issparse(cur_adj):  # keep large churned graphs sparse through the alignment
+        pa, ca = sp.csr_array(prev_adj), sp.csr_array(cur_adj)
+        si, oi = np.asarray(surv, dtype=np.int64), np.asarray(order, dtype=np.int64)
+        prev_surv = pa[si, :][:, si] if surv else sp.csr_array((0, 0))
+        cur_reord = ca[oi, :][:, oi] if order else sp.csr_array((0, 0))
+        return prev_surv, cur_reord, num_removed
     pa = np.asarray(prev_adj, dtype=np.float64)
     ca = np.asarray(cur_adj, dtype=np.float64)
     prev_surv = pa[np.ix_(surv, surv)] if surv else np.zeros((0, 0))
@@ -1120,7 +1145,8 @@ class ChurningTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistr
     transition first **removes** nodes (those whose id disappears; count ~ Poisson(node_remove_rate), chosen
     uniformly, their edges vanishing with them), then runs the wrapped edit grammar on the surviving
     subgraph (which also appends new nodes + adds/removes edges). So churn is a thin wrapper: identity
-    alignment + a node-removal Poisson term on top of all the existing motif/edge machinery. Dense.
+    alignment + a node-removal Poisson term on top of all the existing motif/edge machinery. Scoring and
+    fitting accept dense or ``scipy.sparse`` adjacencies (the id alignment slices either); the sampler is dense.
     """
 
     def __init__(
@@ -1140,10 +1166,7 @@ class ChurningTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistr
         )
 
     def _node_removal_log_density(self, n_prev: int, k_removed: int) -> float:
-        if k_removed > n_prev:
-            return float("-inf")
-        lp = k_removed * math.log(self.node_remove_rate + _EPS) - self.node_remove_rate - math.lgamma(k_removed + 1)
-        return lp - math.lgamma(n_prev + 1) + math.lgamma(k_removed + 1) + math.lgamma(n_prev - k_removed + 1)
+        return _node_removal_logp(self.node_remove_rate, n_prev, k_removed)
 
     def log_density(self, x: Sequence[tuple]) -> float:
         snaps = list(x)
