@@ -246,5 +246,47 @@ class DirectedTemporalGraphGrammarTest(unittest.TestCase):
         self.assertAlmostEqual(fit.edge_dist.lam, 5.0, delta=0.4)  # weighted-edge volume recovered
 
 
+class ScalableSamplerTest(unittest.TestCase):
+    def _seed_edges(self, rng, n=60, p=0.12):
+        a = np.triu((rng.rand(n, n) < p), 1)
+        ii, jj = np.where(a)
+        return list(zip(ii.tolist(), jj.tolist()))
+
+    def test_scalable_sampler_is_consistent_with_scorer(self):
+        rng = np.random.RandomState(7)
+        gt = stats.TemporalGraphGrammarDistribution(
+            [0.3, 0.35, 0.2, 0.15],
+            edge_rate=6.0,
+            node_rate=1.0,
+            remove_weights=[0.4, 0.3, 0.2, 0.1],
+            edge_remove_rate=2.0,
+        )
+        seqs = [
+            gt.sampler(seed=s).sample_one_scalable(num_steps=8, seed_edges=self._seed_edges(rng)) for s in range(120)
+        ]
+        self.assertTrue(all(sp.issparse(a) for seq in seqs for a in seq))  # never densified
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density(seqs))))
+        est = stats.TemporalGraphGrammarEstimator(pseudo_count=0.5)
+        acc = est.accumulator_factory().make()
+        acc.seq_update(seqs, np.ones(len(seqs)), None)
+        fit = est.estimate(float(len(seqs)), acc.value())
+        self.assertLess(float(np.max(np.abs(fit.motif_weights - [0.3, 0.35, 0.2, 0.15]))), 0.05)  # sampler == scorer
+        self.assertLess(float(np.max(np.abs(fit.remove_weights - [0.4, 0.3, 0.2, 0.1]))), 0.05)
+
+    def test_scalable_sampler_handles_large_graph(self):
+        rng = np.random.RandomState(0)
+        gt = stats.TemporalGraphGrammarDistribution([0.4, 0.3, 0.2, 0.1], edge_rate=5.0, node_rate=1.0)
+        big = [(int(rng.randint(40_000)), int(rng.randint(40_000))) for _ in range(120_000)]
+        big = [(i, j) for i, j in big if i != j]
+        snaps = gt.sampler(seed=1).sample_one_scalable(num_steps=2, seed_edges=big)  # dense would need ~13 GB
+        self.assertTrue(all(sp.issparse(a) for a in snaps))
+        self.assertGreaterEqual(snaps[-1].shape[0], 40_000)
+
+    def test_scalable_directed_not_supported(self):
+        gt = stats.TemporalGraphGrammarDistribution([0.25] * 4, edge_rate=3.0, directed=True)
+        with self.assertRaises(NotImplementedError):
+            gt.sampler(seed=0).sample_one_scalable(num_steps=2, seed_edges=[(0, 1), (1, 2)])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -354,6 +354,108 @@ class TemporalGraphGrammarSampler(DistributionSampler):
             snaps.append(adj.copy())
         return snaps
 
+    def sample_one_scalable(
+        self,
+        num_steps: int = 10,
+        seed_edges: Sequence[tuple] | None = None,
+        n_init: int = 5,
+        max_reject: int = 64,
+    ) -> list:
+        """Sample a dynamic graph for a LARGE sparse graph -- never materialises the n*n adjacency.
+
+        The dense :meth:`sample_one` is exact but O(n^2) in space (the full bin matrix). This path keeps the
+        graph as an edge set and emits ``scipy.sparse`` snapshots, costing O(edges + wedges) per step:
+
+        * triangle-closing motifs (cn>=1) are exactly the wedge non-edges -- the nonzeros of ``A @ A`` that
+          aren't edges -- so they are enumerated directly from the wedge structure, never the full pair grid;
+        * bridges (cn=0) dominate a sparse graph and can't be enumerated, so they are **rejection-sampled**:
+          draw random pairs and accept those that are neither an edge nor a wedge (acceptance ~ 1 when the
+          graph is sparse). ``max_reject`` attempts per bridge bound the loop; a shortfall is honest
+          capping (same realized-rate semantics as the dense sampler when a motif's anchors run out).
+
+        Undirected, growth+removal. Returns a list of ``csr_array`` snapshots. The realized motif
+        distribution matches the weights, so a model fit on these snapshots recovers the grammar.
+        """
+        d = self.dist
+        if d.directed:
+            raise NotImplementedError("scalable sampling is undirected-only for now (directed is a follow-up).")
+        n = n_init if seed_edges is None else (max(max(e) for e in seed_edges) + 1 if seed_edges else n_init)
+        edges = set() if seed_edges is None else {(min(i, j), max(i, j)) for i, j in seed_edges}
+        snaps = [self._csr(edges, n)]
+        for _ in range(num_steps):
+            n += int(self.rng.poisson(d.node_rate))  # new isolated nodes
+            a = self._csr(edges, n)
+            cnu = sp.triu(a @ a, 1).tocsr()  # upper-tri common-neighbour counts (the wedge structure)
+            em = self._edge_mask(edges, n)  # 1 at existing (upper-tri) edges
+            edge_cn = cnu.multiply(em) if em is not None else None  # cn on existing edges (for removal binning)
+            non_edge = cnu - edge_cn if edge_cn is not None else cnu  # cn on non-edges = the wedge non-edges
+            non_edge.eliminate_zeros()
+            nec = non_edge.tocoo()
+            w_i, w_j, w_bin = nec.row, nec.col, d.motif._bin(nec.data)  # wedge non-edges + their motif bin (>=1)
+            wedge_keys = w_i.astype(np.int64) * n + w_j  # encoded for O(log) membership in the bridge rejection
+            wedge_keys.sort()
+            add, remove = [], []
+            # triangle motifs (m>=1): the wedge non-edges in each bin, vectorised
+            for m in range(1, d.motif.num_motifs):
+                pool = np.where(w_bin == m)[0]
+                if pool.size:
+                    k = min(int(self.rng.poisson(d.edge_rate * d.motif_weights[m])), pool.size)
+                    pick = pool[self.rng.choice(pool.size, size=k, replace=False)]
+                    add += list(zip(w_i[pick].tolist(), w_j[pick].tolist()))
+            # bridges (m=0): rejection-sample random non-edge / non-wedge pairs
+            if n > 1:
+                k0 = int(self.rng.poisson(d.edge_rate * d.motif_weights[0]))
+                chosen: set = set()
+                for _try in range(k0 * max_reject):
+                    if len(chosen) >= k0:
+                        break
+                    i, j = int(self.rng.randint(n)), int(self.rng.randint(n))
+                    if i == j:
+                        continue
+                    key = (i, j) if i < j else (j, i)
+                    enc = key[0] * n + key[1]
+                    pos = np.searchsorted(wedge_keys, enc)
+                    is_wedge = pos < wedge_keys.size and wedge_keys[pos] == enc
+                    if key in edges or is_wedge or key in chosen:
+                        continue
+                    chosen.add(key)
+                add += list(chosen)
+            # removals: existing edges binned by their cn (enumerated -- O(edges))
+            if d.edge_remove_rate > 0.0 and edges:
+                ec = edge_cn.tocoo() if edge_cn is not None else None
+                rby: dict = {0: list(edges)}  # default every edge to the bridge bin, then reassign triangle edges
+                if ec is not None and ec.nnz:
+                    ekeys = {(int(i), int(j)) for i, j in zip(ec.row, ec.col)}
+                    rby[0] = [e for e in edges if e not in ekeys]
+                    ebins = d.motif._bin(ec.data)
+                    for i, j, b in zip(ec.row, ec.col, ebins):
+                        rby.setdefault(int(b), []).append((int(i), int(j)))
+                for m in range(d.motif.num_motifs):
+                    pool = rby.get(m, [])
+                    if pool:
+                        k = min(int(self.rng.poisson(d.edge_remove_rate * d.remove_weights[m])), len(pool))
+                        remove += [pool[idx] for idx in self.rng.choice(len(pool), size=k, replace=False)]
+            edges |= set(add)
+            edges -= set(remove)
+            snaps.append(self._csr(edges, n))
+        return snaps
+
+    @staticmethod
+    def _edge_mask(edges: set, n: int) -> Any:
+        if not edges:
+            return None
+        ij = np.fromiter((c for e in edges for c in e), dtype=np.int64, count=2 * len(edges)).reshape(-1, 2)
+        return sp.csr_array((np.ones(len(edges)), (ij[:, 0], ij[:, 1])), shape=(n, n))
+
+    @staticmethod
+    def _csr(edges: set, n: int) -> Any:
+        if not edges:
+            return sp.csr_array((n, n))
+        ij = np.fromiter((c for e in edges for c in e), dtype=np.int64, count=2 * len(edges)).reshape(-1, 2)
+        rows = np.concatenate([ij[:, 0], ij[:, 1]])
+        cols = np.concatenate([ij[:, 1], ij[:, 0]])
+        return sp.csr_array((np.ones(rows.size), (rows, cols)), shape=(n, n))
+
     def sample(self, size: int | None = None, *, num_steps: int = 10, n_init: int = 5) -> Any:
         if size is None:
             return self.sample_one(num_steps=num_steps, n_init=n_init)
