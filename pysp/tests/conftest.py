@@ -153,6 +153,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "ppl_separation_test.py": ("ppl",),
     "random_graph_models_test.py": ("graph",),
     "quantized_hmm_test.py": ("hmm", "integration", "slow"),
+    "quantized_triangular_hmm_test.py": ("hmm", "enumeration", "integration"),
     "quantized_index_test.py": ("enumeration",),
     "sampler_accuracy_test.py": ("distribution", "stochastic", "slow"),
     "sampler_seed_test.py": ("distribution", "stochastic"),
