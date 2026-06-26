@@ -143,5 +143,46 @@ class FusedEStepTest(unittest.TestCase):
         self.assertFalse(fusible_estep(stats.CategoricalDistribution({"a": 0.5, "b": 0.5})))
 
 
+class DispatchTest(unittest.TestCase):
+    """optimize(engine=<numba>) routes fusible models to the FusedKernel and matches the numpy fit."""
+
+    def test_optimize_on_numba_engine_matches_numpy_for_fusible_model(self):
+        from pysp.engines import FUSED_NUMPY_ENGINE
+        from pysp.inference import optimize
+        from pysp.stats.compute.fused_codegen import FusedKernel
+
+        K, L = 6, 4
+        init = stats.MixtureDistribution(
+            [
+                stats.CompositeDistribution(
+                    tuple(stats.GaussianDistribution(float(k + l) * 0.1, 1.0) for l in range(L))
+                )
+                for k in range(K)
+            ],
+            [1 / K] * K,
+        )
+        est = stats.MixtureEstimator(
+            [stats.CompositeEstimator(tuple(stats.GaussianEstimator() for _ in range(L))) for _ in range(K)]
+        )
+        self.assertIsInstance(init.kernel(engine=FUSED_NUMPY_ENGINE, estimator=est), FusedKernel)
+        rng = np.random.RandomState(0)
+        data = [tuple(float(rng.randn()) for _ in range(L)) for _ in range(4000)]
+        base = optimize(data, est, prev_estimate=init, max_its=8, out=None)
+        fused = optimize(data, est, prev_estimate=init, max_its=8, out=None, engine=FUSED_NUMPY_ENGINE)
+        ll = lambda m: float(np.sum(m.seq_log_density(m.dist_to_encoder().seq_encode(data))))  # noqa: E731
+        self.assertTrue(np.isclose(ll(base), ll(fused), rtol=1e-7))
+
+    def test_non_fusible_model_falls_back_on_numba_engine(self):
+        from pysp.engines import FUSED_NUMPY_ENGINE
+        from pysp.stats.compute.fused_codegen import FusedKernel
+
+        # an MVGaussian mixture is not fused -> must keep its existing engine kernel
+        m = stats.MixtureDistribution(
+            [stats.MultivariateGaussianDistribution([float(i)] * 3, np.eye(3).tolist()) for i in range(3)], [1 / 3] * 3
+        )
+        e = stats.MixtureEstimator([stats.MultivariateGaussianEstimator(dim=3) for _ in range(3)])
+        self.assertNotIsInstance(m.kernel(engine=FUSED_NUMPY_ENGINE, estimator=e), FusedKernel)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -108,8 +108,13 @@ class FusedPlan:
     component_is_composite: bool = False  # whether each leaf-bearing node is a Composite (vs a bare leaf)
 
 
-def _factors(dist: Any) -> list[Any]:
-    return list(getattr(dist, "dists", None) or [dist])  # a bare leaf is a 1-factor "composite"
+def _node_factors(node: Any) -> list[Any] | None:
+    """The leaf factors of a fusible *node* (an exact Composite, or a templated bare leaf), else None."""
+    if type(node).__name__ == "CompositeDistribution":
+        return list(node.dists)
+    if _template_for(node) is not None:
+        return [node]
+    return None
 
 
 def analyze(model: Any) -> FusedPlan | None:
@@ -117,30 +122,33 @@ def analyze(model: Any) -> FusedPlan | None:
 
     Handles: a single leaf, a Composite of leaves, a Mixture of leaves, and a Mixture of Composites
     (every component sharing the same leaf-type structure). Anything else -> None (fall back to numpy).
+
+    The structural nodes are matched by EXACT type, not duck-typing: mixture-flavoured relatives
+    (SemiSupervised / Joint / Hierarchical mixtures, Select, ...) carry ``components``/``log_w`` but have
+    different E-step semantics, so they must keep their own kernels.
     """
-    comps = getattr(model, "components", None)
-    log_w = getattr(model, "log_w", None)
-    if comps is not None and log_w is not None:  # a mixture
-        comps = list(comps)
-        per = [_factors(c) for c in comps]
-        widths = {len(p) for p in per}
-        if len(widths) != 1:
-            return None  # heterogeneous component structure
-        templates = [_template_for(f) for f in per[0]]
-        if any(t is None for t in templates):
+    tname = type(model).__name__
+    if tname == "MixtureDistribution":
+        comps = list(model.components)
+        per = [_node_factors(c) for c in comps]
+        if any(p is None for p in per):  # a component is not a plain Composite / templated leaf
+            return None
+        templates = [_template_for(f) for f in per[0]]  # type: ignore[union-attr]
+        if any(t is None for t in templates):  # a factor has no leaf template (e.g. an MVGaussian)
             return None
         # every component must have the same leaf types in the same order
-        for p in per:
-            if [_template_for(f) for f in p] != templates:
-                return None
-        comp_is_composite = getattr(comps[0], "dists", None) is not None
+        if any([_template_for(f) for f in p] != templates for p in per):  # type: ignore[union-attr]
+            return None
+        comp_is_composite = type(comps[0]).__name__ == "CompositeDistribution"
         sig = ("mix", tuple(t.name for t in templates), comp_is_composite)
         return FusedPlan(len(comps), True, tuple(templates), sig, comp_is_composite)  # type: ignore[arg-type]
-    factors = _factors(model)
-    templates = [_template_for(f) for f in factors]
-    if any(t is None for t in templates):
+    factors = _node_factors(model)
+    if factors is None:
         return None
-    is_composite = getattr(model, "dists", None) is not None
+    templates = [_template_for(f) for f in factors]
+    if any(t is None for t in templates):  # a composite factor has no leaf template
+        return None
+    is_composite = tname == "CompositeDistribution"
     sig = ("comp", tuple(t.name for t in templates), is_composite)
     return FusedPlan(1, False, tuple(templates), sig, is_composite)  # type: ignore[arg-type]
 
@@ -204,8 +212,8 @@ def _dummy(t: LeafTemplate) -> Any:
 
 def _component_factor_lists(model: Any, plan: FusedPlan) -> list[list[Any]]:
     if plan.is_mixture:
-        return [_factors(c) for c in model.components]
-    return [_factors(model)]
+        return [_node_factors(c) for c in model.components]  # type: ignore[misc]
+    return [_node_factors(model)]  # type: ignore[list-item]
 
 
 def fused_seq_log_density(model: Any, enc: Any) -> np.ndarray:
@@ -333,6 +341,54 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray) -> Any:
     return node_value(0)
 
 
+# --- kernel wiring (used by optimize(..., engine=<numba-capable>) for fusible models) --------------
+class FusedKernel:
+    """A duck-typed ``Kernel`` backed by the source-generated fused scorer and E-step."""
+
+    def __init__(self, dist: Any, engine: Any, estimator: Any = None) -> None:
+        self.dist = dist
+        self.engine = engine
+        self.estimator = estimator
+
+    def encode(self, data: Any) -> Any:
+        return self.dist.dist_to_encoder().seq_encode(data)
+
+    def score(self, enc: Any) -> np.ndarray:
+        return fused_seq_log_density(self.dist, getattr(enc, "engine_payload", enc))
+
+    def accumulate(self, enc: Any, weights: Any) -> Any:
+        w = np.asarray(self.engine.to_numpy(weights) if hasattr(self.engine, "to_numpy") else weights, dtype=np.float64)
+        return fused_accumulate(self.dist, getattr(enc, "engine_payload", enc), w)
+
+    def refresh(self, dist: Any) -> None:
+        self.dist = dist
+
+
+class FusedKernelFactory:
+    """Build a :class:`FusedKernel` on a numba-capable engine for fusible models, else delegate.
+
+    Scoring needs only :func:`fusible`; estimation also needs the fused E-step (:func:`fusible_estep`),
+    so when an estimator is present we require the stronger check. Everything else falls through to the
+    declaration/numba/generic factory (the previous behaviour), so registering this is never a regression.
+    """
+
+    def __init__(self, fallback: Any = None) -> None:
+        self._fallback = fallback
+
+    def _fallback_factory(self) -> Any:
+        if self._fallback is None:
+            from pysp.stats.compute.kernel import GeneratedNumbaKernelFactory
+
+            self._fallback = GeneratedNumbaKernelFactory()
+        return self._fallback
+
+    def build(self, dist: Any, engine: Any, estimator: Any = None) -> Any:
+        ok = fusible_estep(dist) if estimator is not None else fusible(dist)
+        if getattr(engine, "supports_numba", False) and ok:
+            return FusedKernel(dist, engine, estimator=estimator)
+        return self._fallback_factory().build(dist, engine, estimator=estimator)
+
+
 __all__ = [
     "LeafTemplate",
     "register_leaf_template",
@@ -341,5 +397,7 @@ __all__ = [
     "fusible_estep",
     "fused_seq_log_density",
     "fused_accumulate",
+    "FusedKernel",
+    "FusedKernelFactory",
     "FusedPlan",
 ]
