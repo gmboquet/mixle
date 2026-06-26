@@ -170,7 +170,28 @@ def _stats_public_distribution_catalog():
         start="S",
     )
 
+    _att_rng = np.random.RandomState(0)
+
+    def _att_emission(s, t):
+        e = _att_rng.rand(s, t) + 0.1
+        return e / e.sum(axis=1, keepdims=True)
+
+    responsibility_attention = stats.ResponsibilityAttentionDistribution(
+        _att_rng.randn(3, 2), _att_emission(3, 2), position_prior=np.ones(2) / 2, sigma2=0.5
+    )
+    variational_embedding_attention = stats.VariationalEmbeddingAttentionDistribution(
+        _att_rng.randn(3, 2), np.full((3, 2), np.log(0.3)), _att_emission(3, 2), np.ones(2) / 2, sigma2=0.5
+    )
+    chained_attention = stats.ChainedAttentionDistribution(0.1 * _att_rng.randn(2, 3, 3), _att_emission(3, 2), sigma2=0.1)
+    variational_multihop_attention = stats.VariationalMultiHopAttentionDistribution(
+        _att_rng.randn(3, 2), np.full((3, 2), np.log(0.3)), _att_emission(3, 3), sigma2=0.3
+    )
+
     return {
+        "ResponsibilityAttentionDistribution": responsibility_attention,
+        "VariationalEmbeddingAttentionDistribution": variational_embedding_attention,
+        "ChainedAttentionDistribution": chained_attention,
+        "VariationalMultiHopAttentionDistribution": variational_multihop_attention,
         "BernoulliDistribution": stats.BernoulliDistribution(0.3),
         "BetaDistribution": stats.BetaDistribution(2.0, 5.0),
         "LaplaceDistribution": stats.LaplaceDistribution(0.0, 1.5),
