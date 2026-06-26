@@ -505,5 +505,35 @@ class LatentChurningTemporalGraphGrammarTest(unittest.TestCase):
         self.assertEqual(len(cur.decode(data[0])), len(data[0]) - 1)
 
 
+class RegimeMomentInitTest(unittest.TestCase):
+    def test_moment_init_seeds_recoverable_em(self):
+        from pysp.stats.graphs.temporal_graph_grammar import regime_moment_init
+
+        rng = np.random.RandomState(0)
+        a = stats.TemporalGraphGrammarDistribution([0.15, 0.3, 0.35, 0.2], edge_rate=4.0, node_rate=2.0)
+        b = stats.TemporalGraphGrammarDistribution([0.2, 0.3, 0.3, 0.2], edge_rate=3.0, node_rate=2.0)
+        gt = stats.LatentAttributedTemporalGraphGrammarDistribution(
+            [a, b],
+            [stats.GaussianDistribution(20.0, 9.0), stats.GaussianDistribution(50.0, 9.0)],
+            [stats.PoissonDistribution(9.0), stats.PoissonDistribution(2.0)],
+            [0.5, 0.5],
+            [[0.85, 0.15], [0.15, 0.85]],
+        )
+        data = [
+            gt.sampler(seed=s).sample_one(num_steps=14, seed_graph=_seed_graph(rng, n=28, p=0.3)) for s in range(60)
+        ]
+        est = gt.estimator(0.3)
+        init = regime_moment_init(est, gt, data, 2, seed=1)  # signature-clustering seed (no random restarts)
+        self.assertIsInstance(init, stats.LatentAttributedTemporalGraphGrammarDistribution)
+        cur = init
+        for _ in range(10):
+            acc = est.accumulator_factory().make()
+            acc.seq_update(data, np.ones(len(data)), cur)
+            cur = est.estimate(len(data), acc.value())
+        ages = sorted(d.mu for d in cur.node_dists)
+        self.assertAlmostEqual(ages[0], 20.0, delta=4.0)  # the two attribute regimes are recovered from the seed
+        self.assertAlmostEqual(ages[1], 50.0, delta=4.0)
+
+
 if __name__ == "__main__":
     unittest.main()
