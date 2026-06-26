@@ -1162,8 +1162,12 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         def _fallback():
             return leaf_count_index(self.enumerator(), quantizer, max_fine_bucket, max_items=self._COUNT_INDEX_ITEM_CAP)
 
-        # terminal_values defines a (Null-length) stopping-time support that the enumerator handles, so
-        # the count index falls back to enumerate-and-bin -- check it BEFORE the Null-length guard.
+        # terminal_values defines a (Null-length) stopping-time support. A structural count DP over the
+        # trellis would count (path, sequence) PAIRS by a decomposable (sum-of-floors) cost, but a
+        # sequence's MARGINAL probability is a logsumexp over its paths and does not decompose -- so the
+        # structural index is the tropical/path projection (deep seek would return deep paths, not deep
+        # sequences). For exact k-th-most-probable-SEQUENCE seek/rank we therefore enumerate-and-bin the
+        # marginal order (O(index), exact) rather than count structurally.
         if getattr(self, "terminal_values", None):
             return _fallback()
 
