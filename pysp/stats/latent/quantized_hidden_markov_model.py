@@ -626,13 +626,19 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             use_numba=self.use_numba,
         )
 
-    def enumerator(self) -> "QuantizedHiddenMarkovModelEnumerator":
-        """Returns a quantized-HMM-specialized enumerator over observation sequences.
+    def enumerator(self):
+        """Returns an exact descending-probability enumerator over observation sequences.
 
-        The enumerator is exact like HiddenMarkovModelEnumerator, but avoids constructing
-        per-state categorical emission streams and instead uses the finite level set plus the
-        cached quantized emission log-probability matrix directly.
+        For the ordinary (length-distribution) case this is the quantized-HMM-specialized enumerator,
+        which avoids constructing per-state categorical streams and uses the cached quantized emission
+        log-probability matrix directly. For the ``terminal_values`` stopping-time case it delegates to
+        :class:`HiddenMarkovModelEnumerator`, which implements that support (the quantized specialization
+        only covers the length-distribution path).
         """
+        if self.terminal_values is not None:
+            from pysp.stats.latent.hidden_markov import HiddenMarkovModelEnumerator
+
+            return HiddenMarkovModelEnumerator(self)
         return QuantizedHiddenMarkovModelEnumerator(self)
 
 
