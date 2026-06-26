@@ -116,5 +116,51 @@ class EnumerationAndSeekTest(unittest.TestCase):
         self.assertTrue(np.isfinite(self.d.log_density(list(deep))))
 
 
+class TerminalTest(unittest.TestCase):
+    """The terminal (stopping-time) form of the left-to-right quantized HMM -- the sentence-generator
+    use case. Enumeration delegates to the base terminal enumerator; seek is exact (enumerate-and-bin
+    over the exact marginal order)."""
+
+    TLEVELS = ["a", "b", "c", "d", "."]
+    TEMIT = [[0, 1, -1, -1, -1], [-1, -1, 0, 1, -1], [-1, -1, -1, -1, 0]]  # s2 emits the terminal '.'
+    TTRANS = [[0, 1, 2], [-1, 0, 1], [-1, -1, 0]]
+
+    def _make(self):
+        return QuantizedHiddenMarkovModelDistribution.left_to_right(
+            0.5, self.TLEVELS, self.TTRANS, self.TEMIT, initial_exponents=[0, 1, 2], terminal_values={"."}
+        )
+
+    def _order(self, d, max_len=7):
+        out = []
+        for length in range(1, max_len + 1):
+            for pre in itertools.product(["a", "b", "c", "d"], repeat=length - 1):
+                seq = list(pre) + ["."]
+                lp = d.log_density(seq)
+                if np.isfinite(lp):
+                    out.append((seq, lp))
+        out.sort(key=lambda kv: -kv[1])
+        return out
+
+    def test_terminal_enumeration_and_exact_seek(self):
+        d = self._make()
+        order = self._order(d)
+        top = d.enumerator().top_k(10)
+        for (_, lp), (_, blp) in zip(top, order[:10]):
+            self.assertAlmostEqual(lp, blp, places=9)
+        logps = sorted((round(lp, 9) for _, lp in order), reverse=True)
+        seen, exact, dups = set(), 0, 0
+        k_max = min(len(order), 50)
+        for k in range(k_max):
+            v = tuple(d.enumerator().seek(k).value)
+            if v in seen:
+                dups += 1
+            seen.add(v)
+            self.assertEqual(v[-1], ".")  # in-support: ends at the terminal value
+            if abs(round(d.log_density(list(v)), 9) - logps[k]) < 1e-9:
+                exact += 1
+        self.assertEqual(dups, 0)
+        self.assertEqual(exact, k_max)  # terminal seek is exact (enumerate-and-bin over the marginal)
+
+
 if __name__ == "__main__":
     unittest.main()
