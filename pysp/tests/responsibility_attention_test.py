@@ -11,6 +11,7 @@ from pysp.stats.latent.mixture import MixtureEstimator
 from pysp.stats.latent.responsibility_attention import (
     ResponsibilityAttentionDistribution,
     ResponsibilityAttentionEstimator,
+    sequence_to_triples,
 )
 
 S, N, D, T = 16, 6, 16, 16
@@ -143,6 +144,87 @@ class CompositionTest(unittest.TestCase):
         _, ll = seq_log_density_sum(seq_encode(tr, model=mix), mix)
         self.assertTrue(np.isfinite(ll))
         self.assertAlmostEqual(float(np.sum(mix.w)), 1.0, places=6)
+
+
+class LearnedSigmaTest(unittest.TestCase):
+    def test_recovers_true_variance(self):
+        rng = np.random.RandomState(0)
+        truth = ResponsibilityAttentionDistribution(
+            rng.randn(S, D) * 2.0, np.eye(S)[:, :T], position_prior=np.ones(N) / N, sigma2=0.7
+        )
+        data = truth.sampler(1).sample(6000)
+        est = ResponsibilityAttentionEstimator(
+            num_symbols=S, context_length=N, query_dim=D, num_targets=T, sigma2=1.0, estimate_sigma2=True
+        )
+        model = optimize(data, est, max_its=40, rng=np.random.RandomState(1), out=io.StringIO())
+        self.assertAlmostEqual(model.sigma2, 0.7, delta=0.07)
+
+    def test_fixed_sigma2_is_unchanged(self):
+        rng = np.random.RandomState(2)
+        data = _recall_data(rng, 1000, np.arange(S))
+        est = ResponsibilityAttentionEstimator(
+            num_symbols=S, context_length=N, query_dim=D, num_targets=T, sigma2=0.42, estimate_sigma2=False
+        )
+        model = optimize(data, est, max_its=5, rng=np.random.RandomState(3), out=io.StringIO())
+        self.assertEqual(model.sigma2, 0.42)
+
+    def test_sigma2_em_still_monotone(self):
+        rng = np.random.RandomState(4)
+        tr = _recall_data(rng, 1500, rng.permutation(S))
+        est = ResponsibilityAttentionEstimator(
+            num_symbols=S, context_length=N, query_dim=D, num_targets=T, sigma2=1.0, estimate_sigma2=True
+        )
+        enc = est.accumulator_factory().make().acc_to_encoder().seq_encode(tr)
+        acc = est.accumulator_factory().make()
+        acc.seq_initialize(enc, np.ones(len(tr)), np.random.RandomState(5))
+        model = est.estimate(None, acc.value())
+        lls = []
+        for _ in range(12):
+            a = est.accumulator_factory().make()
+            a.seq_update(enc, np.ones(len(tr)), model)
+            model = est.estimate(None, a.value())
+            lls.append(float(model.seq_log_density(enc).sum()))
+        self.assertTrue(all(lls[i + 1] >= lls[i] - 1e-3 for i in range(len(lls) - 1)))
+
+
+class SequenceHelperTest(unittest.TestCase):
+    def test_triple_structure(self):
+        tokens = np.array([5, 1, 3, 2, 4, 0, 6])
+        tri = sequence_to_triples(tokens, context_length=3, num_symbols=8)
+        # first window ends at index 2; context = tokens[0:3]; query one-hot of tokens[2]; target tokens[3]
+        np.testing.assert_array_equal(tri[0][0], [5, 1, 3])
+        self.assertEqual(tri[0][2], 2)
+        self.assertEqual(len(tri[0][1]), 8)
+        self.assertEqual(np.argmax(tri[0][1]), 3)  # query is the current (last context) token
+        # one triple per valid prediction point
+        self.assertEqual(len(tri), len(tokens) - 3)
+
+    def test_embeddings_query(self):
+        emb = np.random.RandomState(0).randn(8, 4)
+        tri = sequence_to_triples(np.array([0, 1, 2, 3]), context_length=2, num_symbols=8, embeddings=emb)
+        np.testing.assert_allclose(tri[0][1], emb[1])  # query = embedding of the current token
+
+    def test_learns_markov_structure(self):
+        # a Markov(1) sequence: the single-hop head should learn the bigram (beats unigram, ~bigram-optimal)
+        rng = np.random.RandomState(1)
+        V = 8
+        P = rng.dirichlet(np.ones(V), size=V)
+        seq = [rng.randint(V)]
+        for _ in range(8000):
+            seq.append(int(rng.choice(V, p=P[seq[-1]])))
+        seq = np.array(seq)
+        tr = sequence_to_triples(seq[:6000], context_length=4, num_symbols=V)
+        est = ResponsibilityAttentionEstimator(num_symbols=V, context_length=4, query_dim=V, num_targets=V, sigma2=0.3)
+        model = optimize(tr, est, max_its=30, rng=np.random.RandomState(2), out=io.StringIO())
+        te = sequence_to_triples(seq[6000:], context_length=4, num_symbols=V)
+        ctx = np.array([x[0] for x in te])
+        q = np.array([x[1] for x in te])
+        t = np.array([x[2] for x in te])
+        acc = float(np.mean(model.predict_proba(ctx, q).argmax(1) == t))
+        uni_acc = float(np.mean(t == np.bincount(seq[:6000], minlength=V).argmax()))
+        bigram_opt = float(np.mean(t == P[seq[6000:][3:-1]].argmax(1)))
+        self.assertGreater(acc, uni_acc + 0.03)  # attention-bigram beats unigram
+        self.assertAlmostEqual(acc, bigram_opt, delta=0.04)  # and reaches ~bigram-optimal
 
 
 if __name__ == "__main__":

@@ -202,6 +202,7 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         self.key_mass = np.zeros(num_symbols)  # Σ r per symbol        (GMM mean denominator)
         self.emission_count = np.zeros((num_symbols, num_targets))  # Σ r·1[target] per symbol
         self.position_count = np.zeros(context_length)  # Σ r per position
+        self.query_sq = 0.0  # Σ r·||query||^2  (scalar; only needed for the learned-sigma2 M-step)
         self.keys = keys
         self.name = name
         self._rng: RandomState | None = None
@@ -215,6 +216,7 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         np.add.at(self.key_sum, flat_sym, (r[:, :, None] * y[:, None, :]).reshape(-1, self.query_dim))
         np.add.at(self.emission_count, (flat_sym, np.repeat(t, N)), flat_r)
         self.position_count += r.sum(axis=0)
+        self.query_sq += float(np.sum(r.sum(axis=1) * np.einsum("nd,nd->n", y, y)))
 
     def update(self, x, weight: float, estimate: ResponsibilityAttentionDistribution | None) -> None:
         enc = ResponsibilityAttentionDataEncoder().seq_encode([x])
@@ -236,20 +238,30 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         self._accumulate(x, r * weights[:, None])
 
     def combine(self, suff_stat) -> ResponsibilityAttentionAccumulator:
-        ks, km, ec, pc = suff_stat
+        ks, km, ec, pc, qsq = suff_stat
         self.key_sum += ks
         self.key_mass += km
         self.emission_count += ec
         self.position_count += pc
+        self.query_sq += float(qsq)
         return self
 
     def value(self):
         # copies: value() is a snapshot, so combine()/key_merge()/distributed reduction can never
         # alias an accumulator's own arrays
-        return (self.key_sum.copy(), self.key_mass.copy(), self.emission_count.copy(), self.position_count.copy())
+        return (
+            self.key_sum.copy(),
+            self.key_mass.copy(),
+            self.emission_count.copy(),
+            self.position_count.copy(),
+            self.query_sq,
+        )
 
     def from_value(self, x) -> ResponsibilityAttentionAccumulator:
-        self.key_sum, self.key_mass, self.emission_count, self.position_count = (np.asarray(v, dtype=float) for v in x)
+        self.key_sum, self.key_mass, self.emission_count, self.position_count = (
+            np.asarray(v, dtype=float) for v in x[:4]
+        )
+        self.query_sq = float(x[4])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -301,6 +313,8 @@ class ResponsibilityAttentionEstimator(ParameterEstimator):
         num_targets: int,
         *,
         sigma2: float = 1.0,
+        estimate_sigma2: bool = False,
+        min_sigma2: float = 1e-6,
         emission_smoothing: float = 1e-6,
         pseudo_count: float | None = None,
         name: str | None = None,
@@ -308,7 +322,11 @@ class ResponsibilityAttentionEstimator(ParameterEstimator):
     ) -> None:
         """Args:
         num_symbols, context_length, query_dim, num_targets: model dimensions ``S, N, D, T``.
-        sigma2: fixed gate variance carried into the fitted distribution.
+        sigma2: gate variance; the fixed value used when ``estimate_sigma2`` is False, and the initial
+            value otherwise.
+        estimate_sigma2: if True, learn the (shared, isotropic) gate variance by EM -- a closed-form
+            weighted-variance M-step using the extra ``Σ r ||query||^2`` sufficient statistic.
+        min_sigma2: variance floor for the learned-variance M-step (guards against collapse).
         emission_smoothing: additive smoothing on the emission categorical M-step.
         pseudo_count / name / keys: standard estimator controls.
         """
@@ -317,6 +335,8 @@ class ResponsibilityAttentionEstimator(ParameterEstimator):
         self.query_dim = query_dim
         self.num_targets = num_targets
         self.sigma2 = float(sigma2)
+        self.estimate_sigma2 = bool(estimate_sigma2)
+        self.min_sigma2 = float(min_sigma2)
         self.emission_smoothing = float(emission_smoothing)
         self.pseudo_count = pseudo_count
         self.name = name
@@ -328,7 +348,7 @@ class ResponsibilityAttentionEstimator(ParameterEstimator):
         )
 
     def estimate(self, nobs: float | None, suff_stat) -> ResponsibilityAttentionDistribution:
-        key_sum, key_mass, emission_count, position_count = suff_stat
+        key_sum, key_mass, emission_count, position_count, query_sq = suff_stat
         # keys: responsibility-weighted mean query per symbol (GMM mean update)
         denom = np.clip(key_mass, 1e-12, None)
         key_means = key_sum / denom[:, None]
@@ -338,8 +358,17 @@ class ResponsibilityAttentionEstimator(ParameterEstimator):
         # position prior: normalized responsibility counts
         total = position_count.sum()
         position_prior = position_count / total if total > 0 else np.ones(self.context_length) / self.context_length
+        # gate variance: shared isotropic weighted-variance M-step, using
+        #   Σ r ||y - mu_z||^2 = Σ r ||y||^2 - Σ_s ||key_sum_s||^2 / mass_s
+        if self.estimate_sigma2:
+            scatter = query_sq - float(np.sum(np.sum(key_sum * key_sum, axis=1) / denom))
+            mass = float(key_mass.sum())
+            sigma2 = scatter / (self.query_dim * mass) if mass > 0 else self.sigma2
+            sigma2 = max(sigma2, self.min_sigma2)
+        else:
+            sigma2 = self.sigma2
         return ResponsibilityAttentionDistribution(
-            key_means, emission, position_prior=position_prior, sigma2=self.sigma2, name=self.name
+            key_means, emission, position_prior=position_prior, sigma2=sigma2, name=self.name
         )
 
 
@@ -359,6 +388,58 @@ class ResponsibilityAttentionDataEncoder(DataSequenceEncoder):
         return ctx, y, t
 
 
+def sequence_to_triples(
+    tokens: Sequence[int],
+    context_length: int,
+    *,
+    num_symbols: int | None = None,
+    embeddings: np.ndarray | None = None,
+) -> list[tuple[np.ndarray, np.ndarray, int]]:
+    """Unroll a token sequence into the ``(context, query, target)`` triples this head consumes.
+
+    For each prediction point ``p`` (with a full window behind it and a next token ahead), emits
+    ``context = tokens[p-N+1 : p+1]`` (the ``N`` most recent tokens, *including* the current one),
+    ``query`` derived from the current token ``tokens[p]`` (its embedding, or a one-hot), and
+    ``target = tokens[p+1]``. This is the bridge from a real sequence to the iid-triple leaf.
+
+    Honest scope: with the *single-hop* leaf this yields an attention-weighted next-token model whose
+    predictive is a function of the current token (an attention-flavoured **bigram**) -- because the
+    emission is keyed by the attended token's identity, the prediction depends only on which token the
+    query selects. In-context copy / induction (example-specific values) is what the multi-hop /
+    stackable extension adds; this helper is the plumbing both share.
+
+    Args:
+        tokens: a 1-D sequence of integer token ids.
+        context_length: the attention window ``N``.
+        num_symbols: vocabulary size (for the one-hot query dim); inferred from ``tokens`` if omitted.
+        embeddings: optional ``(S, D)`` embedding table; if given the query is ``embeddings[token]``,
+            otherwise a one-hot of dimension ``num_symbols``.
+
+    Returns:
+        A list of ``(context, query, target)`` triples ready for :func:`pysp.inference.optimize`.
+    """
+    tok = np.asarray(tokens, dtype=int)
+    if tok.ndim != 1:
+        raise ValueError("tokens must be a 1-D sequence.")
+    S = (int(tok.max()) + 1) if num_symbols is None else int(num_symbols)
+    if embeddings is None:
+        eye = np.eye(S)
+
+        def emb(s: int) -> np.ndarray:
+            return eye[s]
+    else:
+        embeddings = np.asarray(embeddings, dtype=float)
+
+        def emb(s: int) -> np.ndarray:
+            return embeddings[s]
+
+    out = []
+    for p in range(context_length - 1, tok.shape[0] - 1):
+        ctx = tok[p - context_length + 1 : p + 1]
+        out.append((ctx.copy(), emb(int(tok[p])), int(tok[p + 1])))
+    return out
+
+
 __all__ = [
     "ResponsibilityAttentionDistribution",
     "ResponsibilityAttentionSampler",
@@ -366,4 +447,5 @@ __all__ = [
     "ResponsibilityAttentionAccumulatorFactory",
     "ResponsibilityAttentionEstimator",
     "ResponsibilityAttentionDataEncoder",
+    "sequence_to_triples",
 ]
