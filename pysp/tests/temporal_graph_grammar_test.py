@@ -200,5 +200,51 @@ class HomophilyTemporalGraphGrammarTest(unittest.TestCase):
         self.assertGreater(float(fit.seq_log_density(obs).sum()), float(blind.seq_log_density(obs).sum()))
 
 
+class DirectedTemporalGraphGrammarTest(unittest.TestCase):
+    def _dseed(self, rng, n=40, p=0.2):
+        a = (rng.rand(n, n) < p).astype(float)
+        np.fill_diagonal(a, 0.0)
+        return a  # asymmetric -> a genuine directed graph
+
+    def test_directed_round_trip_and_sparse_parity(self):
+        rng = np.random.RandomState(3)
+        gt = stats.TemporalGraphGrammarDistribution(
+            [0.2, 0.4, 0.25, 0.15],
+            edge_rate=4.0,
+            node_rate=0.5,
+            remove_weights=[0.5, 0.25, 0.15, 0.1],
+            edge_remove_rate=2.0,
+            directed=True,
+        )
+        self.assertTrue(gt.directed and gt.motif.directed)
+        seqs = [gt.sampler(seed=s).sample_one(num_steps=6, seed_graph=self._dseed(rng)) for s in range(60)]
+        g = seqs[0][-1]
+        self.assertFalse(np.array_equal(g, g.T))  # genuinely directed (A != A.T)
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density(seqs))))
+        sparse = [[sp.csr_array(a) for a in seq] for seq in seqs]
+        self.assertTrue(np.allclose(gt.seq_log_density(seqs), gt.seq_log_density(sparse)))  # directed sparse parity
+        est = stats.TemporalGraphGrammarEstimator(stats.CommonNeighbourMotif(directed=True), pseudo_count=0.5)
+        acc = est.accumulator_factory().make()
+        acc.seq_update(seqs, np.ones(len(seqs)), None)
+        fit = est.estimate(float(len(seqs)), acc.value())
+        self.assertTrue(fit.directed)
+        self.assertLess(float(np.max(np.abs(fit.motif_weights - [0.2, 0.4, 0.25, 0.15]))), 0.06)  # ADD recovered
+        self.assertLess(float(np.max(np.abs(fit.remove_weights - [0.5, 0.25, 0.15, 0.1]))), 0.06)  # REMOVE recovered
+
+    def test_directed_labeled_composes_with_weighted_edges(self):
+        # directed structure + a weighted-edge (Poisson volume) attribute = a directed, weighted, labeled graph
+        rng = np.random.RandomState(1)
+        struct = stats.TemporalGraphGrammarDistribution([0.3, 0.3, 0.2, 0.2], edge_rate=3.0, directed=True)
+        gt = LabeledTemporalGraphGrammarDistribution(struct, edge_dist=stats.PoissonDistribution(5.0))
+        obs = [gt.sampler(seed=s).sample_one(num_steps=5, seed_graph=self._dseed(rng, n=30)) for s in range(80)]
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density(obs))))
+        est = gt.estimator()
+        acc = est.accumulator_factory().make()
+        acc.seq_update(obs, np.ones(len(obs)), gt)
+        fit = est.estimate(float(len(obs)), acc.value())
+        self.assertTrue(fit.structure.directed)
+        self.assertAlmostEqual(fit.edge_dist.lam, 5.0, delta=0.4)  # weighted-edge volume recovered
+
+
 if __name__ == "__main__":
     unittest.main()
