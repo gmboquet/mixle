@@ -1126,13 +1126,18 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         from pysp.enumeration.quantization.core import CountHistogram, CountIndex, child_count_index, leaf_count_index
         from pysp.stats.compute.pdist import EnumerationError
 
-        if supports(self.len_dist, Neutral):
-            raise EnumerationError(self, reason="no length distribution is modeled (len_dist is Null)")
-
         def _fallback():
             return leaf_count_index(self.enumerator(), quantizer, max_fine_bucket, max_items=self._COUNT_INDEX_ITEM_CAP)
 
-        if getattr(self, "taus", None) is not None or getattr(self, "terminal_values", None):
+        # terminal_values defines a (Null-length) stopping-time support that the enumerator handles, so
+        # the count index falls back to enumerate-and-bin -- check it BEFORE the Null-length guard.
+        if getattr(self, "terminal_values", None):
+            return _fallback()
+
+        if supports(self.len_dist, Neutral):
+            raise EnumerationError(self, reason="no length distribution is modeled (len_dist is Null)")
+
+        if getattr(self, "taus", None) is not None:
             return _fallback()
 
         n = self.n_states
@@ -1427,8 +1432,10 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
         # enumerator without defining those attributes.
         if getattr(dist, "has_topics", False):
             raise EnumerationError(dist, reason="taus/topics parameterization is not supported")
+        self._terminal_values = None
         if getattr(dist, "terminal_values", None) is not None:
-            raise EnumerationError(dist, reason="terminal_values semantics are not supported")
+            self._setup_terminal_values(dist, set(dist.terminal_values), topics, log_w, log_transitions, path_root)
+            return
         len_dist = dist.len_dist if len_dist is None else len_dist
         if len_dist is None or supports(len_dist, Neutral):
             raise EnumerationError(dist, reason="no length distribution is modeled (len_dist is Null)")
@@ -1521,7 +1528,128 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
                 push_candidate(child, 0)
 
     def __next__(self) -> tuple[list[Any], float]:
+        if self._terminal_values is not None:
+            return next(self._term_gen)
         return next(self._merge)
+
+    # ------------------------------------------------------------------ terminal_values enumeration
+    def _setup_terminal_values(self, dist, term_set, topics, log_w, log_transitions, path_root) -> None:
+        """Best-first enumeration of the terminal-VALUE support.
+
+        With ``terminal_values`` a sequence is generated until the first terminal emission, so the
+        support is exactly the value-sequences ``x_1..x_L`` with ``x_L`` terminal and ``x_1..x_{L-1}``
+        non-terminal, each scored by the *plain* forward likelihood ``logsumexp_s alpha_L[s]`` (the
+        len_dist factor is 0 for the Null length this requires). Enumeration is A*-style over
+        non-terminal prefixes: a node carries the pre-emission forward vector ``proj`` and is either
+        *completed* by a terminal symbol or *extended* by a non-terminal one. The admissible heuristic
+        bounds the best completion via a Viterbi (max-product) recursion over future steps.
+        """
+        path_root = path_root if path_root is not None else type(dist).__name__
+        if not supports(dist.len_dist, Neutral):
+            raise EnumerationError(dist, reason="terminal_values enumeration requires a Null length distribution")
+        self._terminal_values = term_set
+        self._topics = list(dist.topics) if topics is None else list(topics)
+        self._n_states = len(self._topics)
+        self._log_w = np.asarray(dist.log_w if log_w is None else log_w, dtype=np.float64)
+        self._log_a = np.asarray(dist.log_transitions if log_transitions is None else log_transitions, np.float64)
+        k = self._n_states
+
+        # Materialize each state's (finite, discrete) emission support and the per-(symbol, state) matrix.
+        cap = 1 << 16
+        order: list[Any] = []
+        index: dict[Any, int] = {}
+        cells: list[tuple[int, int, float]] = []
+        for s, topic in enumerate(self._topics):
+            cnt = 0
+            for val, lp in child_enumerator(topic, "%s.topics[%d]" % (path_root, s)):
+                cnt += 1
+                if cnt > cap:
+                    raise EnumerationError(dist, reason="emission support too large for terminal_values enumeration")
+                if val not in index:
+                    index[val] = len(order)
+                    order.append(val)
+                cells.append((index[val], s, lp))
+        m = len(order)
+        emat = np.full((m, k), -np.inf, dtype=np.float64)
+        for j, s, lp in cells:
+            emat[j, s] = lp
+        self._sym = order
+        self._emat = emat
+        maxlp = emat.max(axis=1)
+        is_term = np.array([val in term_set for val in order], dtype=bool)
+        live = maxlp > -np.inf
+        self._nt = sorted((j for j in range(m) if live[j] and not is_term[j]), key=lambda j: -maxlp[j])
+        self._tm = sorted((j for j in range(m) if live[j] and is_term[j]), key=lambda j: -maxlp[j])
+        self._nt_maxlp = np.array([maxlp[j] for j in self._nt], dtype=np.float64)
+        self._tm_maxlp = np.array([maxlp[j] for j in self._tm], dtype=np.float64)
+
+        # Viterbi upper bound: f_r[s] bounds "r non-terminal steps then a terminal step" out of state s.
+        e_nt = emat[self._nt].max(axis=0) if self._nt else np.full(k, -np.inf)
+        e_t = emat[self._tm].max(axis=0) if self._tm else np.full(k, -np.inf)
+        self._f_list = [e_t.copy()]
+        max0 = float(np.max(e_t))
+        if np.isfinite(max0) and np.any(np.isfinite(e_nt)):
+            for _ in range(5000):
+                fr = e_nt + np.max(self._log_a + self._f_list[-1][None, :], axis=1)
+                if not np.any(np.isfinite(fr)):
+                    break
+                self._f_list.append(fr)
+                if float(np.max(fr)) <= max0 - 60.0:  # tail mass < e^-60 of the head; numerically negligible
+                    break
+        self._term_gen = self._iter_terminal_values()
+
+    def _hbound(self, v: np.ndarray) -> float:
+        """Admissible upper bound on the best completion from pre-emission forward vector ``v``."""
+        best = -np.inf
+        for fr in self._f_list:
+            best = max(best, float(logsumexp(v + fr)))
+        return best
+
+    def _iter_terminal_values(self):
+        counter = itertools.count()
+        heap: list = []
+        log_a = self._log_a
+
+        def push_term(node: _HmmPrefix, j: int) -> None:
+            if j < len(self._tm):
+                bound = float(logsumexp(node.proj)) + self._tm_maxlp[j]
+                if bound > -np.inf:
+                    heapq.heappush(heap, (-bound, next(counter), "term", (node, j)))
+
+        def push_ext(node: _HmmPrefix, i: int) -> None:
+            if i < len(self._nt):
+                proj_ub = logsumexp((node.proj + self._nt_maxlp[i])[:, None] + log_a, axis=0)
+                bound = self._hbound(proj_ub)
+                if bound > -np.inf:
+                    heapq.heappush(heap, (-bound, next(counter), "ext", (node, i)))
+
+        root = _HmmPrefix(0, (), self._log_w)
+        push_term(root, 0)
+        push_ext(root, 0)
+
+        while heap:
+            _, _, kind, payload = heapq.heappop(heap)
+            if kind == "done":
+                yield payload
+            elif kind == "term":
+                node, j = payload
+                push_term(node, j + 1)
+                sj = self._tm[j]
+                score = float(logsumexp(node.proj + self._emat[sj]))
+                if score > -np.inf:
+                    seq = list(node.values) + [self._sym[sj]]
+                    heapq.heappush(heap, (-score, next(counter), "done", (seq, score)))
+            else:
+                node, i = payload
+                push_ext(node, i + 1)
+                si = self._nt[i]
+                alpha = node.proj + self._emat[si]
+                if np.max(alpha) == -np.inf:
+                    continue
+                proj_child = logsumexp(alpha[:, None] + log_a, axis=0)
+                child = _HmmPrefix(node.t + 1, node.values + (self._sym[si],), proj_child)
+                push_term(child, 0)
+                push_ext(child, 0)
 
 
 class HiddenMarkovSampler(DistributionSampler):
