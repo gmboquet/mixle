@@ -40,10 +40,17 @@ is ``(adjacency, node_ids)``) so a transition can remove nodes -- those whose id
 vanishing with them -- before running the edit grammar on the surviving subgraph. Node churn is a thin
 wrapper: identity alignment + a node-removal Poisson term on top of all the motif/edge machinery.
 
+The dynamics carry a HIDDEN REGIME: ``LatentTemporalGraphGrammarDistribution`` is an HMM whose emission
+models ARE the edit grammars -- a latent Markov state z_t selects which of K grammars governs transition t,
+so the graph switches phases over time (bursty growth/densification, then fragmentation/decay -- dynamics a
+single grammar cannot produce). The sequence likelihood marginalises the regime path by the forward
+algorithm; EM (Baum-Welch) runs forward-backward then a per-regime weighted M-step reusing each grammar's
+accumulator; ``decode`` (Viterbi) recovers the active regime at each step.
+
 This is the temporal counterpart of the static vertex-/hyperedge-replacement grammars in this package.
 Scope: undirected or directed, binary topology (attribute models carry weights/labels); edges add+remove,
-nodes join+leave; dense or sparse scoring, dense or scalable (rejection) sampling. Sparse-path churn and
-directed scalable sampling are the remaining extensions.
+nodes join+leave; dense or sparse scoring, dense or scalable (rejection) sampling; optional hidden regime.
+Sparse-path churn and directed scalable sampling are the remaining extensions.
 """
 
 from __future__ import annotations
@@ -815,6 +822,11 @@ __all__ = [
     "ChurningTemporalGraphGrammarEstimator",
     "ChurningTemporalGraphGrammarAccumulator",
     "ChurningTemporalGraphGrammarAccumulatorFactory",
+    "LatentTemporalGraphGrammarDistribution",
+    "LatentTemporalGraphGrammarSampler",
+    "LatentTemporalGraphGrammarEstimator",
+    "LatentTemporalGraphGrammarAccumulator",
+    "LatentTemporalGraphGrammarAccumulatorFactory",
 ]
 
 
@@ -1265,3 +1277,268 @@ class ChurningTemporalGraphGrammarEstimator(ParameterEstimator):
             node_remove_rate=removed / steps if steps > 0 else 0.0,
             name=self.name,
         )
+
+
+# --- latent-regime dynamics: an HMM over graph-edit grammars ---------------------------------------
+def _grammar_forward_backward(log_b: np.ndarray, log_init: np.ndarray, log_trans: np.ndarray) -> tuple:
+    """Standard log-space forward-backward over the regime chain. Returns (loglik, gamma(T,K), xi(T-1,K,K)).
+
+    ``log_b[t, k]`` is the log-density of transition t under regime k. gamma/xi are None for a zero-probability
+    sequence (some transition impossible under every regime)."""
+    from scipy.special import logsumexp
+
+    t_steps, k = log_b.shape
+    if t_steps == 0:
+        return 0.0, np.zeros((0, k)), np.zeros((0, k, k))
+    la = np.empty((t_steps, k))
+    la[0] = log_init + log_b[0]
+    for t in range(1, t_steps):
+        la[t] = log_b[t] + logsumexp(la[t - 1][:, None] + log_trans, axis=0)
+    log_p = float(logsumexp(la[-1]))
+    if not np.isfinite(log_p):
+        return log_p, None, None
+    lb = np.zeros((t_steps, k))
+    for t in range(t_steps - 2, -1, -1):
+        lb[t] = logsumexp(log_trans + (log_b[t + 1] + lb[t + 1])[None, :], axis=1)
+    gamma = np.exp(la + lb - log_p)
+    xi = np.zeros((max(t_steps - 1, 0), k, k))
+    for t in range(t_steps - 1):
+        xi[t] = np.exp(la[t][:, None] + log_trans + (log_b[t + 1] + lb[t + 1])[None, :] - log_p)
+    return log_p, gamma, xi
+
+
+class LatentTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
+    """A dynamic graph whose edit grammar is governed by a hidden, time-evolving REGIME.
+
+    A latent state z_t (a Markov chain: ``initial_probs`` pi, ``transition_matrix`` A) selects which of K
+    edit grammars governs transition t. So the graph can switch regimes over time -- e.g. a bursty growth /
+    densification phase, then a fragmentation / decay phase -- dynamics a single grammar cannot express. The
+    sequence likelihood marginalises the regime path by the forward algorithm; emissions are the per-
+    transition edit log-densities of each regime's grammar, so this is an HMM whose emission models are the
+    graph-edit grammars and EM reuses each grammar's weighted accumulator for the M-step.
+
+    Observation = a plain list of adjacency snapshots (same as the base grammar) -- the regime is latent.
+    ``decode`` returns the most likely regime active at each transition (Viterbi).
+    """
+
+    def __init__(
+        self,
+        states: Sequence[TemporalGraphGrammarDistribution],
+        initial_probs: Sequence[float] | None = None,
+        transition_matrix: Sequence[Sequence[float]] | None = None,
+        name: str | None = None,
+    ) -> None:
+        self.states = list(states)
+        self.k = len(self.states)
+        ip = np.ones(self.k) / self.k if initial_probs is None else np.asarray(initial_probs, dtype=np.float64)
+        self.initial_probs = ip / ip.sum()
+        if transition_matrix is None:
+            self.transition_matrix = np.ones((self.k, self.k)) / self.k
+        else:
+            tm = np.asarray(transition_matrix, dtype=np.float64)
+            self.transition_matrix = tm / tm.sum(axis=1, keepdims=True)
+        self.log_init = np.log(np.clip(self.initial_probs, _EPS, None))
+        self.log_trans = np.log(np.clip(self.transition_matrix, _EPS, None))
+        self.name = name
+
+    def __str__(self) -> str:
+        return "LatentTemporalGraphGrammarDistribution(K=%d, A=%s)" % (
+            self.k,
+            np.array2string(self.transition_matrix, precision=2),
+        )
+
+    def _emission_logb(self, snaps: Sequence[Any]) -> np.ndarray:
+        """(T, K) per-transition, per-regime log-densities (T = number of transitions)."""
+        t_steps = len(snaps) - 1
+        log_b = np.empty((t_steps, self.k))
+        for t in range(t_steps):
+            prev, cur = snaps[t], snaps[t + 1]
+            for k, st in enumerate(self.states):
+                log_b[t, k] = st._transition_log_density(prev, cur)
+        return log_b
+
+    def log_density(self, x: Sequence[Any]) -> float:
+        snaps = list(x)
+        if len(snaps) < 2:
+            return 0.0
+        return _grammar_forward_backward(self._emission_logb(snaps), self.log_init, self.log_trans)[0]
+
+    def decode(self, x: Sequence[Any]) -> list:
+        """Viterbi: the most likely regime governing each transition."""
+        snaps = list(x)
+        log_b = self._emission_logb(snaps)
+        t_steps = log_b.shape[0]
+        if t_steps == 0:
+            return []
+        v = np.empty((t_steps, self.k))
+        ptr = np.zeros((t_steps, self.k), dtype=np.int64)
+        v[0] = self.log_init + log_b[0]
+        for t in range(1, t_steps):
+            scores = v[t - 1][:, None] + self.log_trans
+            ptr[t] = scores.argmax(axis=0)
+            v[t] = log_b[t] + scores.max(axis=0)
+        path = [int(v[-1].argmax())]
+        for t in range(t_steps - 1, 0, -1):
+            path.append(int(ptr[t][path[-1]]))
+        return path[::-1]
+
+    def seq_encode(self, x: Sequence[Any]) -> Sequence[Any]:
+        return x
+
+    def seq_log_density(self, x: Sequence[Any]) -> np.ndarray:
+        return np.asarray([self.log_density(obs) for obs in x], dtype=np.float64)
+
+    def sampler(self, seed: int | None = None) -> LatentTemporalGraphGrammarSampler:
+        return LatentTemporalGraphGrammarSampler(self, seed)
+
+    def estimator(self, pseudo_count: float | None = None) -> LatentTemporalGraphGrammarEstimator:
+        return LatentTemporalGraphGrammarEstimator(
+            [st.estimator(pseudo_count=pseudo_count) for st in self.states], pseudo_count=pseudo_count, name=self.name
+        )
+
+    def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class LatentTemporalGraphGrammarSampler(DistributionSampler):
+    def __init__(self, dist: LatentTemporalGraphGrammarDistribution, seed: int | None = None) -> None:
+        self.dist = dist
+        self.rng = RandomState(seed)
+        self.sub = [st.sampler(self.rng.randint(2**31)) for st in dist.states]
+
+    def sample_one(self, num_steps: int = 10, seed_graph: np.ndarray | None = None, n_init: int = 5) -> list:
+        d = self.dist
+        adj = np.zeros((n_init, n_init)) if seed_graph is None else np.asarray(seed_graph, dtype=np.float64).copy()
+        snaps = [adj.copy()]
+        z = int(self.rng.choice(d.k, p=d.initial_probs))
+        for _ in range(num_steps):
+            st = d.states[z]
+            new_nodes = int(self.rng.poisson(st.node_rate))
+            if new_nodes:
+                n = adj.shape[0]
+                big = np.zeros((n + new_nodes, n + new_nodes))
+                big[:n, :n] = adj
+                adj = big
+            self.sub[z]._edge_edit_step(adj)  # active regime's edit grammar
+            snaps.append(adj.copy())
+            z = int(self.rng.choice(d.k, p=d.transition_matrix[z]))  # regime evolves
+        return snaps
+
+    def sample(self, size: int | None = None, **kw: Any) -> Any:
+        if size is None:
+            return self.sample_one(**kw)
+        return [self.sample_one(**kw) for _ in range(size)]
+
+
+class LatentTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
+    def __init__(self, k: int, state_accs: Sequence[Any]) -> None:
+        self.k = k
+        self.state_accs = list(state_accs)
+        self.init_counts = np.zeros(k, dtype=np.float64)
+        self.trans_counts = np.zeros((k, k), dtype=np.float64)
+
+    def _accumulate(self, snaps: list, weight: float, gamma: np.ndarray, xi: np.ndarray, estimate: Any) -> None:
+        self.init_counts += weight * gamma[0]
+        if xi.shape[0]:
+            self.trans_counts += weight * xi.sum(axis=0)
+        for kk in range(self.k):
+            est_k = None if estimate is None else estimate.states[kk]
+            for t in range(len(snaps) - 1):
+                w = weight * gamma[t, kk]
+                if w > 0:
+                    self.state_accs[kk].update([snaps[t], snaps[t + 1]], w, est_k)
+
+    def update(self, x: Sequence[Any], weight: float, estimate: Any | None) -> None:
+        snaps = list(x)
+        if len(snaps) < 2:
+            return
+        log_b = estimate._emission_logb(snaps)
+        _, gamma, xi = _grammar_forward_backward(log_b, estimate.log_init, estimate.log_trans)
+        if gamma is None:
+            return
+        self._accumulate(snaps, weight, gamma, xi, estimate)
+
+    def initialize(self, x: Sequence[Any], weight: float, rng: RandomState | None) -> None:
+        snaps = list(x)
+        if len(snaps) < 2:
+            return
+        rng = rng if rng is not None else RandomState()
+        t_steps = len(snaps) - 1
+        gamma = rng.dirichlet(np.ones(self.k), size=t_steps)  # random soft regime assignment to seed EM
+        xi = np.zeros((max(t_steps - 1, 0), self.k, self.k))
+        for t in range(t_steps - 1):
+            xi[t] = np.outer(gamma[t], gamma[t + 1])
+        self._accumulate(snaps, weight, gamma, xi, None)
+
+    def seq_update(self, x: Sequence[Any], weights: np.ndarray, estimate: Any | None) -> None:
+        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
+            self.update(obs, float(w), estimate)
+
+    def seq_initialize(self, x: Sequence[Any], weights: np.ndarray, rng: RandomState | None) -> None:
+        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
+            self.initialize(obs, float(w), rng)
+
+    def combine(self, suff_stat: tuple) -> LatentTemporalGraphGrammarAccumulator:
+        ic, tc, states = suff_stat
+        self.init_counts += ic
+        self.trans_counts += tc
+        for acc, sv in zip(self.state_accs, states):
+            acc.combine(sv)
+        return self
+
+    def value(self) -> tuple:
+        return self.init_counts.copy(), self.trans_counts.copy(), [acc.value() for acc in self.state_accs]
+
+    def from_value(self, x: tuple) -> LatentTemporalGraphGrammarAccumulator:
+        self.init_counts = np.asarray(x[0], dtype=np.float64).copy()
+        self.trans_counts = np.asarray(x[1], dtype=np.float64).copy()
+        for acc, sv in zip(self.state_accs, x[2]):
+            acc.from_value(sv)
+        return self
+
+    def key_merge(self, stats_dict: dict) -> None:
+        pass
+
+    def key_replace(self, stats_dict: dict) -> None:
+        pass
+
+    def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class LatentTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(self, k: int, state_factories: Sequence[Any]) -> None:
+        self.k = k
+        self.state_factories = list(state_factories)
+
+    def make(self) -> LatentTemporalGraphGrammarAccumulator:
+        return LatentTemporalGraphGrammarAccumulator(self.k, [f.make() for f in self.state_factories])
+
+
+class LatentTemporalGraphGrammarEstimator(ParameterEstimator):
+    """EM (Baum-Welch) for the regime-switching grammar: forward-backward E-step, per-regime weighted M-step."""
+
+    def __init__(
+        self, state_estimators: Sequence[Any], pseudo_count: float | None = None, name: str | None = None
+    ) -> None:
+        self.state_estimators = list(state_estimators)
+        self.k = len(self.state_estimators)
+        self.pseudo_count = pseudo_count
+        self.name = name
+        self.keys = None
+
+    def accumulator_factory(self) -> LatentTemporalGraphGrammarAccumulatorFactory:
+        return LatentTemporalGraphGrammarAccumulatorFactory(
+            self.k, [est.accumulator_factory() for est in self.state_estimators]
+        )
+
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> LatentTemporalGraphGrammarDistribution:
+        init_counts, trans_counts, state_vals = suff_stat
+        pc = 0.0 if self.pseudo_count is None else float(self.pseudo_count)
+        ip = init_counts + pc
+        ip = ip / ip.sum() if ip.sum() > 0 else np.ones(self.k) / self.k
+        tm = trans_counts + pc
+        row = tm.sum(axis=1, keepdims=True)
+        tm = np.where(row > 0, tm / np.where(row > 0, row, 1.0), 1.0 / self.k)
+        states = [est.estimate(nobs, sv) for est, sv in zip(self.state_estimators, state_vals)]
+        return LatentTemporalGraphGrammarDistribution(states, ip, tm, name=self.name)
