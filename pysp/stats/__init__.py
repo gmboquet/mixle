@@ -417,6 +417,13 @@ __all__ = [
     "VariationalEmbeddingAttentionAccumulator",
     "VariationalEmbeddingAttentionAccumulatorFactory",
     "VariationalEmbeddingAttentionDataEncoder",
+    # chained (multi-hop) attention -- L-hop stack via forward-backward
+    "ChainedAttentionDistribution",
+    "ChainedAttentionEstimator",
+    "ChainedAttentionSampler",
+    "ChainedAttentionAccumulator",
+    "ChainedAttentionAccumulatorFactory",
+    "ChainedAttentionDataEncoder",
     "Posterior",
     "LatentPosterior",
     "CategoricalLatentPosterior",
@@ -1025,6 +1032,14 @@ from pysp.stats.graphs.stochastic_block_graph import (
     StochasticBlockGraphDistribution,
     StochasticBlockGraphEstimator,
     StochasticBlockGraphSampler,
+)
+from pysp.stats.latent.chained_attention import (
+    ChainedAttentionAccumulator,
+    ChainedAttentionAccumulatorFactory,
+    ChainedAttentionDataEncoder,
+    ChainedAttentionDistribution,
+    ChainedAttentionEstimator,
+    ChainedAttentionSampler,
 )
 from pysp.stats.latent.dirac_length import (
     DiracLengthMixtureDistribution,
