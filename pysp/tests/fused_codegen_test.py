@@ -20,14 +20,16 @@ class FusibilityTest(unittest.TestCase):
         self.assertTrue(fusible(stats.CompositeDistribution((g, stats.ExponentialDistribution(1.0)))))
         self.assertTrue(fusible(stats.MixtureDistribution([g, g], [0.5, 0.5])))
 
-    def test_blas_and_unsupported_leaves_are_not_fusible(self):
-        # MVGaussian is BLAS-bound (numpy gemm beats a scalar loop) -> deliberately not fused
-        self.assertFalse(fusible(stats.MultivariateGaussianDistribution([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]])))
+    def test_matrix_leaves_are_fusible(self):
+        # MVGaussian fuses via BLAS `@` (matmul quad form + weighted Gram), not a scalar loop
+        self.assertTrue(fusible(stats.MultivariateGaussianDistribution([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]])))
+
+    def test_unsupported_leaf_is_not_fusible(self):
         # a leaf with no template falls back to numpy
         self.assertFalse(fusible(stats.CategoricalDistribution({"a": 0.5, "b": 0.5})))
 
-    def test_mixture_with_a_blas_leaf_is_not_fusible(self):
-        # a composite factor that is BLAS-bound (MVGaussian) makes the whole mixture fall back to numpy
+    def test_mixture_mixing_scalar_and_matrix_leaves_is_fusible(self):
+        # a composite of a cheap scalar leaf + a BLAS matrix leaf fuses into one njit
         def comp(mu):
             return stats.CompositeDistribution(
                 (
@@ -36,7 +38,7 @@ class FusibilityTest(unittest.TestCase):
                 )
             )
 
-        self.assertFalse(fusible(stats.MixtureDistribution([comp(0.0), comp(1.0)], [0.5, 0.5])))
+        self.assertTrue(fusible(stats.MixtureDistribution([comp(0.0), comp(1.0)], [0.5, 0.5])))
 
 
 class CorrectnessTest(unittest.TestCase):
@@ -134,12 +136,45 @@ class FusedEStepTest(unittest.TestCase):
         data = [(float(abs(self.rng.randn()) * 2), float(abs(self.rng.randn()) + 0.1)) for _ in range(2000)]
         self.assertTrue(self._matches(m, e, data))
 
+    def test_mvgaussian_gmm_estep(self):
+        K, D = 4, 5
+        rng = np.random.RandomState(1)
+        m = stats.MixtureDistribution(
+            [stats.MultivariateGaussianDistribution((rng.randn(D)).tolist(), np.eye(D).tolist()) for _ in range(K)],
+            [1 / K] * K,
+        )
+        e = stats.MixtureEstimator([stats.MultivariateGaussianEstimator(dim=D) for _ in range(K)])
+        data = [(rng.randn(D) + rng.randint(K)).tolist() for _ in range(3000)]
+        self.assertTrue(self._matches(m, e, data))
+
+    def test_mixture_of_composite_scalar_and_matrix_estep(self):
+        K, D = 3, 4
+        rng = np.random.RandomState(2)
+
+        def comp(k):
+            return stats.CompositeDistribution(
+                (
+                    stats.GaussianDistribution(float(k), 1.0),
+                    stats.MultivariateGaussianDistribution((rng.randn(D)).tolist(), np.eye(D).tolist()),
+                )
+            )
+
+        m = stats.MixtureDistribution([comp(k) for k in range(K)], [1 / K] * K)
+        e = stats.MixtureEstimator(
+            [
+                stats.CompositeEstimator((stats.GaussianEstimator(), stats.MultivariateGaussianEstimator(dim=D)))
+                for _ in range(K)
+            ]
+        )
+        data = [(float(rng.randn()), (rng.randn(D)).tolist()) for _ in range(3000)]
+        self.assertTrue(self._matches(m, e, data))
+
     def test_estep_gating(self):
         from pysp.stats.compute.fused_codegen import fusible_estep
 
         self.assertTrue(fusible_estep(stats.GaussianDistribution(0.0, 1.0)))
-        # MVGaussian is not fused; a Categorical leaf has no accumulation template
-        self.assertFalse(fusible_estep(stats.MultivariateGaussianDistribution([0.0], [[1.0]])))
+        self.assertTrue(fusible_estep(stats.MultivariateGaussianDistribution([0.0], [[1.0]])))
+        # a Categorical leaf has no template -> not fusible
         self.assertFalse(fusible_estep(stats.CategoricalDistribution({"a": 0.5, "b": 0.5})))
 
 
@@ -176,11 +211,12 @@ class DispatchTest(unittest.TestCase):
         from pysp.engines import FUSED_NUMPY_ENGINE
         from pysp.stats.compute.fused_codegen import FusedKernel
 
-        # an MVGaussian mixture is not fused -> must keep its existing engine kernel
+        # a Categorical mixture has no leaf template -> must keep its existing engine kernel
         m = stats.MixtureDistribution(
-            [stats.MultivariateGaussianDistribution([float(i)] * 3, np.eye(3).tolist()) for i in range(3)], [1 / 3] * 3
+            [stats.CategoricalDistribution({"a": 0.7, "b": 0.3}), stats.CategoricalDistribution({"a": 0.2, "b": 0.8})],
+            [0.5, 0.5],
         )
-        e = stats.MixtureEstimator([stats.MultivariateGaussianEstimator(dim=3) for _ in range(3)])
+        e = stats.MixtureEstimator([stats.CategoricalEstimator() for _ in range(2)])
         self.assertNotIsInstance(m.kernel(engine=FUSED_NUMPY_ENGINE, estimator=e), FusedKernel)
 
 
