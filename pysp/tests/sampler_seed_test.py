@@ -424,6 +424,10 @@ def _stats_public_distribution_catalog():
             [0.5, 0.5],
             node_rate=0.5,
         ),
+        "ChurningTemporalGraphGrammarDistribution": stats.ChurningTemporalGraphGrammarDistribution(
+            stats.TemporalGraphGrammarDistribution([0.25] * 4, edge_rate=2.0, node_rate=1.0),
+            node_remove_rate=1.0,
+        ),
         "LabeledTemporalGraphGrammarDistribution": stats.LabeledTemporalGraphGrammarDistribution(
             stats.TemporalGraphGrammarDistribution([0.2, 0.4, 0.25, 0.15], edge_rate=2.0, node_rate=0.5),
             stats.GaussianDistribution(0.0, 1.0),

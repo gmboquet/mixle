@@ -288,5 +288,39 @@ class ScalableSamplerTest(unittest.TestCase):
             gt.sampler(seed=0).sample_one_scalable(num_steps=2, seed_edges=[(0, 1), (1, 2)])
 
 
+class ChurningTemporalGraphGrammarTest(unittest.TestCase):
+    def test_nodes_leave_and_rate_recovers(self):
+        rng = np.random.RandomState(5)
+        edit = stats.TemporalGraphGrammarDistribution(
+            [0.2, 0.4, 0.25, 0.15],
+            edge_rate=5.0,
+            node_rate=3.0,
+            remove_weights=[0.5, 0.25, 0.15, 0.1],
+            edge_remove_rate=1.5,
+        )
+        gt = stats.ChurningTemporalGraphGrammarDistribution(edit, node_remove_rate=2.0)
+        obs = [gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(120)]
+        # nodes genuinely leave: some id present in one snapshot is gone in the next
+        left = any(set(o[t - 1][1]) - set(o[t][1]) for o in obs for t in range(1, len(o)))
+        self.assertTrue(left)
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density(obs))))
+        est = gt.estimator(pseudo_count=0.5)
+        acc = est.accumulator_factory().make()
+        acc.seq_update(obs, np.ones(len(obs)), gt)
+        fit = est.estimate(float(len(obs)), acc.value())
+        self.assertAlmostEqual(fit.node_remove_rate, 2.0, delta=0.2)  # node-removal rate recovered
+        self.assertLess(float(np.max(np.abs(fit.edit_grammar.motif_weights - [0.2, 0.4, 0.25, 0.15]))), 0.05)
+        self.assertLess(float(np.max(np.abs(fit.edit_grammar.remove_weights - [0.5, 0.25, 0.15, 0.1]))), 0.05)
+
+    def test_removed_node_edges_not_charged_as_edge_removals(self):
+        # dropping a node removes its incident edges -- those must NOT be scored as edge-grammar deletions
+        # (a pure-growth edit grammar with node churn still has finite likelihood)
+        rng = np.random.RandomState(0)
+        edit = stats.TemporalGraphGrammarDistribution([0.25] * 4, edge_rate=4.0, node_rate=2.0)  # growth-only edges
+        gt = stats.ChurningTemporalGraphGrammarDistribution(edit, node_remove_rate=2.0)
+        obs = [gt.sampler(seed=s).sample_one(num_steps=6, seed_graph=_seed_graph(rng, n=25, p=0.3)) for s in range(40)]
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density(obs))))
+
+
 if __name__ == "__main__":
     unittest.main()
