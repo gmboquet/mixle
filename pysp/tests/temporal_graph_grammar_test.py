@@ -67,6 +67,34 @@ class TemporalGraphGrammarTest(unittest.TestCase):
             np.allclose(est.estimate(120.0, a1.value()).motif_weights, est.estimate(120.0, full.value()).motif_weights)
         )
 
+    def test_add_and_remove_grammars(self):
+        # a realistic full-edit grammar: growth favours triadic closure, decay favours bridges
+        add_w, rem_w = [0.15, 0.4, 0.3, 0.15], [0.5, 0.25, 0.15, 0.1]
+        gt = stats.TemporalGraphGrammarDistribution(
+            add_w, edge_rate=4.0, node_rate=0.5, remove_weights=rem_w, edge_remove_rate=2.5
+        )
+        seqs = [
+            gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(self.rng, n=40, p=0.25))
+            for s in range(150)
+        ]
+        # both grammars fire: there are removed edges somewhere (the chain is not monotone growth)
+        any_removed = any(
+            np.any((a[: b.shape[0], : b.shape[0]] > 0) & (b == 0))
+            if b.shape[0] <= a.shape[0]
+            else np.any((a > 0) & (b[: a.shape[0], : a.shape[0]] == 0))
+            for seq in seqs
+            for a, b in zip(seq, seq[1:])
+        )
+        self.assertTrue(any_removed)
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density(seqs))))
+        est = stats.TemporalGraphGrammarEstimator(pseudo_count=0.5)
+        acc = est.accumulator_factory().make()
+        acc.seq_update(seqs, np.ones(len(seqs)), None)
+        fit = est.estimate(float(len(seqs)), acc.value())
+        self.assertLess(float(np.max(np.abs(fit.motif_weights - add_w))), 0.05)  # ADD grammar recovered
+        self.assertLess(float(np.max(np.abs(fit.remove_weights - rem_w))), 0.05)  # REMOVE grammar recovered
+        self.assertAlmostEqual(fit.edge_remove_rate, 2.5, delta=0.3)
+
     def test_custom_motif_partition(self):
         # a coarser {bridge, closes-a-triangle} partition still round-trips. Uses a sparse seed so the
         # bridge motif (cn=0) keeps plentiful anchors as the graph fills (a dense seed starves it -> capping).
