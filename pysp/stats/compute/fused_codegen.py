@@ -79,6 +79,9 @@ class LeafTemplate:
     tab_to_value: Callable[[float, float, np.ndarray | None, int, int], tuple] | None = (
         None  # (sx,count,hist_k,min,max)
     )
+    # global min/max over x (a map-reducible reduction) for a scalar leaf whose value() needs it (Pareto's xm)
+    wants_minmax: bool = False
+    to_value_g: Callable[[tuple, float, float, float], tuple] | None = None  # (stats, count, min, max) -> value
     dtype: str = "float64"
 
 
@@ -374,6 +377,25 @@ register_leaf_template(
 
 register_leaf_template(
     LeafTemplate(
+        name="pareto",
+        matches=lambda d: type(d).__name__ == "ParetoDistribution",
+        data=lambda enc: (_arr(enc[0]), _arr(enc[1])),  # (x, log x)
+        params=lambda comps: (lambda al, xm: {"const": np.log(al) + al * np.log(xm), "am1": al + 1.0, "xm": xm})(
+            np.array([c.alpha for c in comps], dtype=np.float64), np.array([c.xm for c in comps], dtype=np.float64)
+        ),
+        arity=2,
+        # support x >= xm: log p = log a + a log xm - (a+1) log x; below the scale the component is impossible
+        expr=lambda v, p: f"(({p['const']}[k] - {p['am1']}[k] * {v[1]}) if {v[0]} >= {p['xm']}[k] else -np.inf)",
+        acc_names=("slogx",),
+        acc_stmt=lambda v, a, r: f"{a['slogx']}[k] += {r} * {v[1]}",
+        wants_minmax=True,  # the scale xm is estimated as the minimum observed x (a global reduction)
+        to_value_g=lambda s, count, mn, mx: (count, s[0], mn),  # (n, sum_w logx, min x)
+    )
+)
+
+
+register_leaf_template(
+    LeafTemplate(
         name="logseries",
         matches=lambda d: type(d).__name__ == "LogSeriesDistribution",
         data=_arr0,
@@ -652,6 +674,7 @@ def _dummy(t: LeafTemplate) -> Any:
         "vonmises": stats.VonMisesDistribution(0.0, 1.0),
         "wrappedcauchy": stats.WrappedCauchyDistribution(0.0, 0.5),
         "logseries": stats.LogSeriesDistribution(0.5),
+        "pareto": stats.ParetoDistribution(2.0, 1.0),
         "diaggaussian": stats.DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0]),
         "binomial": stats.BinomialDistribution(0.5, 1),
         "negbinomial": stats.NegativeBinomialDistribution(1.0, 0.5),
@@ -781,7 +804,7 @@ def _compile(plan: FusedPlan) -> Callable:
         "        s = 0.0",
         "        for k in range(kc):",
         "            s += np.exp(llbuf[k] - m)",
-        "        out[i] = m + np.log(s)",
+        "        out[i] = (m + np.log(s)) if m > -np.inf else -np.inf",  # all components -inf (out of support)
     ]
     fn = _njit("\n".join(lines), "_fused")
     _COMPILED[plan.signature] = fn
@@ -866,6 +889,9 @@ def _data_and_params(
             mn = int(np.rint(x.min())) if x.size else 0
             param_arrays.append(np.ascontiguousarray(t.tab_table(comps_i, mx)))  # type: ignore[misc]
             tab_ctx[i] = (mn, mx)
+        elif t.wants_minmax:
+            x = arrs[0]
+            tab_ctx[i] = (float(x.min()) if x.size else 0.0, float(x.max()) if x.size else 0.0)
     return data_arrays, param_arrays, tab_ctx
 
 
@@ -972,6 +998,9 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool 
             hist_k = scalar_acc[i]["hist"][k] if t.tab_hist else None
             return t.tab_to_value(float(scalar_acc[i]["sx"][k]), float(comp_counts[k]), hist_k, mn, mx)  # type: ignore[misc]
         stats_k = tuple(scalar_acc[i][an][k] for an in t.acc_names)
+        if t.wants_minmax:
+            mn, mx = tab_ctx[i]
+            return t.to_value_g(stats_k, float(comp_counts[k]), mn, mx)  # type: ignore[misc]
         return t.to_value(stats_k, float(comp_counts[k]))  # type: ignore[misc]
 
     def node_value(k: int) -> Any:
