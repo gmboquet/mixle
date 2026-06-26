@@ -431,6 +431,106 @@ class LeafFamilyTest(unittest.TestCase):
         self.assertTrue(FusedEStepTest._matches(self, model, est, data))
 
 
+class NestedTest(unittest.TestCase):
+    """Arbitrarily nested Composite/Mixture trees of scalar leaves fuse via the recursive path."""
+
+    def setUp(self):
+        self.rng = np.random.RandomState(5)
+        self.G = stats.GaussianDistribution
+
+    def _estep_ok(self, model, est, data):
+        from pysp.stats.compute.fused_codegen import fused_accumulate
+
+        enc = model.dist_to_encoder().seq_encode(data)
+        w = np.abs(self.rng.randn(len(data))) + 0.1
+        m_f = est.estimate(float(len(data)), fused_accumulate(model, enc, w))
+        acc = est.accumulator_factory().make()
+        acc.seq_update(enc, w, model)
+        d = {}
+        acc.key_merge(d)
+        acc.key_replace(d)
+        m_n = est.estimate(float(len(data)), acc.value())
+        ll = lambda m: float(np.sum(m.seq_log_density(enc)))  # noqa: E731
+        return np.isclose(ll(m_f), ll(m_n), rtol=1e-7)
+
+    def test_composite_with_a_mixture_factor(self):
+        G = self.G
+        model = stats.CompositeDistribution(
+            (G(1.0, 2.0), stats.MixtureDistribution([G(0.0, 1.0), G(4.0, 1.5)], [0.5, 0.5]))
+        )
+        est = stats.CompositeEstimator(
+            (stats.GaussianEstimator(), stats.MixtureEstimator([stats.GaussianEstimator(), stats.GaussianEstimator()]))
+        )
+        self.assertTrue(fusible(model))
+        data = [
+            (float(self.rng.randn() * 2 + 1), float(self.rng.randn() + 4 * self.rng.randint(2))) for _ in range(2500)
+        ]
+        self.assertTrue(_ll_close(model, data))
+        self.assertTrue(self._estep_ok(model, est, data))
+
+    def test_mixture_of_mixtures(self):
+        G = self.G
+        model = stats.MixtureDistribution(
+            [
+                stats.MixtureDistribution([G(0.0, 1.0), G(2.0, 1.0)], [0.5, 0.5]),
+                stats.MixtureDistribution([G(8.0, 1.0), G(10.0, 1.0)], [0.5, 0.5]),
+            ],
+            [0.5, 0.5],
+        )
+        est = stats.MixtureEstimator(
+            [
+                stats.MixtureEstimator([stats.GaussianEstimator(), stats.GaussianEstimator()]),
+                stats.MixtureEstimator([stats.GaussianEstimator(), stats.GaussianEstimator()]),
+            ]
+        )
+        self.assertTrue(fusible(model))
+        data = [float(self.rng.randn() + self.rng.choice([0, 2, 8, 10])) for _ in range(2500)]
+        self.assertTrue(_ll_close(model, data))
+        self.assertTrue(self._estep_ok(model, est, data))
+
+    def test_mixture_of_composite_with_nested_mixture(self):
+        G = self.G
+
+        def comp(k):
+            return stats.CompositeDistribution(
+                (G(float(k), 1.0), stats.MixtureDistribution([G(0.0, 1.0), G(3.0, 1.0)], [0.5, 0.5]))
+            )
+
+        model = stats.MixtureDistribution([comp(0), comp(1)], [0.5, 0.5])
+        est = stats.MixtureEstimator(
+            [
+                stats.CompositeEstimator(
+                    (
+                        stats.GaussianEstimator(),
+                        stats.MixtureEstimator([stats.GaussianEstimator(), stats.GaussianEstimator()]),
+                    )
+                )
+                for _ in range(2)
+            ]
+        )
+        self.assertTrue(fusible(model))
+        data = [
+            (float(self.rng.randn() + k), float(self.rng.randn() + 3 * self.rng.randint(2)))
+            for k in self.rng.randint(2, size=2500)
+        ]
+        self.assertTrue(_ll_close(model, data))
+        self.assertTrue(self._estep_ok(model, est, data))
+
+    def test_nested_with_a_matrix_leaf_is_not_recursively_fused(self):
+        # the recursive path is scalar-only; a nested model with an MVGaussian leaf falls back to numpy
+        from pysp.stats.compute.fused_nested import fusible_nested
+
+        model = stats.CompositeDistribution(
+            (
+                stats.GaussianDistribution(0.0, 1.0),
+                stats.MixtureDistribution(
+                    [stats.MultivariateGaussianDistribution([0.0, 0.0], np.eye(2).tolist())] * 2, [0.5, 0.5]
+                ),
+            )
+        )
+        self.assertFalse(fusible_nested(model))
+
+
 class DispatchTest(unittest.TestCase):
     """optimize(engine=<numba>) routes fusible models to the FusedKernel and matches the numpy fit."""
 
