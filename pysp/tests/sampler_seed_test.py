@@ -419,6 +419,11 @@ def _stats_public_distribution_catalog():
         "TemporalGraphGrammarDistribution": stats.TemporalGraphGrammarDistribution(
             [0.2, 0.4, 0.25, 0.15], edge_rate=2.0, node_rate=0.5
         ),
+        "HomophilyTemporalGraphGrammarDistribution": stats.HomophilyTemporalGraphGrammarDistribution(
+            np.stack([np.array([[3.0, 0.7], [0.7, 3.0]]) * w for w in (0.6, 0.4)]),
+            [0.5, 0.5],
+            node_rate=0.5,
+        ),
         "LabeledTemporalGraphGrammarDistribution": stats.LabeledTemporalGraphGrammarDistribution(
             stats.TemporalGraphGrammarDistribution([0.2, 0.4, 0.25, 0.15], edge_rate=2.0, node_rate=0.5),
             stats.GaussianDistribution(0.0, 1.0),
