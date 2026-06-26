@@ -178,6 +178,110 @@ class FusedEStepTest(unittest.TestCase):
         self.assertFalse(fusible_estep(stats.CategoricalDistribution({"a": 0.5, "b": 0.5})))
 
 
+class LeafFamilyTest(unittest.TestCase):
+    """Scalar families beyond Gaussian/Exponential: Poisson, Gamma (arity-2), Geometric, Bernoulli."""
+
+    def setUp(self):
+        self.rng = np.random.RandomState(7)
+
+    def _mix(self, leaves):
+        return stats.MixtureDistribution(leaves, [1.0 / len(leaves)] * len(leaves))
+
+    def test_new_families_score(self):
+        cases = [
+            (
+                self._mix([stats.PoissonDistribution(2.0), stats.PoissonDistribution(9.0)]),
+                [int(x) for x in self.rng.poisson(5, 400)],
+            ),
+            (
+                self._mix([stats.GammaDistribution(2.0, 1.0), stats.GammaDistribution(5.0, 2.0)]),
+                [float(abs(x)) + 0.1 for x in self.rng.gamma(3, 2, 400)],
+            ),
+            (
+                self._mix([stats.GeometricDistribution(0.3), stats.GeometricDistribution(0.7)]),
+                [int(x) + 1 for x in self.rng.geometric(0.4, 400)],
+            ),
+            (
+                self._mix([stats.BernoulliDistribution(0.3), stats.BernoulliDistribution(0.8)]),
+                [int(x) for x in (self.rng.rand(400) < 0.5)],
+            ),
+        ]
+        for model, data in cases:
+            self.assertTrue(fusible(model))
+            self.assertTrue(_ll_close(model, data), type(model.components[0]).__name__)
+
+    def test_new_families_estep(self):
+        specs = [
+            (
+                stats.PoissonDistribution,
+                stats.PoissonEstimator,
+                (2.0, 9.0),
+                lambda: [int(x) for x in self.rng.poisson(5, 1500)],
+            ),
+            (
+                stats.GeometricDistribution,
+                stats.GeometricEstimator,
+                (0.3, 0.7),
+                lambda: [int(x) + 1 for x in self.rng.geometric(0.4, 1500)],
+            ),
+            (
+                stats.BernoulliDistribution,
+                stats.BernoulliEstimator,
+                (0.3, 0.8),
+                lambda: [int(x) for x in (self.rng.rand(1500) < 0.5)],
+            ),
+        ]
+        for dist_cls, est_cls, (a, b), gen in specs:
+            model = self._mix([dist_cls(a), dist_cls(b)])
+            est = stats.MixtureEstimator([est_cls(), est_cls()])
+            self.assertTrue(FusedEStepTest._matches(self, model, est, gen()), dist_cls.__name__)
+
+    def test_gamma_estep(self):
+        model = self._mix([stats.GammaDistribution(2.0, 1.0), stats.GammaDistribution(5.0, 2.0)])
+        est = stats.MixtureEstimator([stats.GammaEstimator(), stats.GammaEstimator()])
+        data = [float(abs(x)) + 0.1 for x in self.rng.gamma(3, 2, 1500)]
+        self.assertTrue(FusedEStepTest._matches(self, model, est, data))
+
+    def test_heterogeneous_composite_scalar_multiarray_and_matrix(self):
+        # one fused kernel mixing a scalar leaf, two arity-2 leaves, and a BLAS matrix leaf
+        D = 3
+
+        def comp(k):
+            return stats.CompositeDistribution(
+                (
+                    stats.GaussianDistribution(float(k), 1.0),
+                    stats.PoissonDistribution(2.0 + k),
+                    stats.GammaDistribution(2.0, 1.0 + k),
+                    stats.MultivariateGaussianDistribution([float(k)] * D, np.eye(D).tolist()),
+                )
+            )
+
+        model = self._mix([comp(0), comp(1), comp(2)])
+        est = stats.MixtureEstimator(
+            [
+                stats.CompositeEstimator(
+                    (
+                        stats.GaussianEstimator(),
+                        stats.PoissonEstimator(),
+                        stats.GammaEstimator(),
+                        stats.MultivariateGaussianEstimator(dim=D),
+                    )
+                )
+                for _ in range(3)
+            ]
+        )
+        data = [
+            (
+                float(self.rng.randn()),
+                int(self.rng.poisson(3)),
+                float(abs(self.rng.randn()) + 0.1),
+                (self.rng.randn(D)).tolist(),
+            )
+            for _ in range(1500)
+        ]
+        self.assertTrue(FusedEStepTest._matches(self, model, est, data))
+
+
 class DispatchTest(unittest.TestCase):
     """optimize(engine=<numba>) routes fusible models to the FusedKernel and matches the numpy fit."""
 

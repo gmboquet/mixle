@@ -11,9 +11,10 @@ rows with the composite sum and the mixture log-sum-exp in nopython registers, n
 Two leaf flavours, each using the right primitive (numba supports BOTH a SIMD-vectorized scalar loop and
 BLAS via ``@``/``np.dot`` in nopython):
 
-* **scalar leaves** (Gaussian, Exponential, ...): univariate, O(1) per element. Their scalar log-density
-  is inlined into the row loop -- numba SIMD-vectorizes it, and fusing every factor into one pass with no
-  intermediate arrays beats numpy's multi-pass evaluation (~1.2-2.7x, growing with depth).
+* **scalar leaves** (Gaussian, Exponential, Poisson, Gamma, Geometric, Bernoulli): univariate, O(1) per
+  element. Their scalar log-density is inlined into the row loop -- numba SIMD-vectorizes it, and fusing
+  every factor into one pass with no intermediate arrays beats numpy's multi-pass evaluation. A leaf may
+  have ``arity > 1`` data arrays (e.g. Poisson carries ``(x, lgamma(x+1))``, Gamma ``(x, log x)``).
 * **matrix leaves** (MultivariateGaussian, ...): the quadratic form ``(x-mu)' P (x-mu)`` and the E-step's
   weighted Gram ``X' (r .* X)`` are matmuls -- emitted as numba ``@`` (BLAS). Fusing the score, the
   responsibility soft-max and the BLAS accumulation into one njit beats numpy's per-component dispatch
@@ -24,7 +25,9 @@ loop scores + forms responsibilities (storing them only when a matrix leaf needs
 matrix sufficient statistics are accumulated via BLAS after it. Pure-scalar models never materialize the
 responsibility matrix, so their fast path is byte-for-byte the original one.
 
-Anything with a leaf that has no template (e.g. Categorical) -> :func:`fusible` is False -> numpy.
+Generated kernels are compiled once and disk-cached (see :func:`_njit`), so the compile cost is paid once
+per structure *ever*, not per process. Anything with a leaf that has no template (e.g. Categorical) ->
+:func:`fusible` is False -> numpy.
 """
 
 from __future__ import annotations
@@ -42,22 +45,24 @@ import numpy as np
 class LeafTemplate:
     """How to fuse one leaf family.
 
-    ``kind="scalar"`` leaves use ``expr`` / ``acc_stmt`` (inlined scalar work over a 1-D data array).
-    ``kind="matrix"`` leaves use the ``mat_emit_*`` hooks (a 2-D data array + BLAS precompute/accumulate).
-    ``params`` stacks the leaf's parameters across the K mixture components; ``to_value`` packs a
-    component's accumulated statistics into the estimator's ``value()`` tuple.
+    ``kind="scalar"`` leaves use ``expr`` / ``acc_stmt`` over ``arity`` 1-D data arrays (the row values
+    are passed as a list ``vals`` of numba expressions). ``kind="matrix"`` leaves use the ``mat_*`` hooks
+    (a single 2-D data array + BLAS precompute/accumulate). ``params`` stacks the leaf's parameters across
+    the K mixture components; ``to_value`` packs a component's accumulated statistics into the estimator's
+    ``value()`` tuple.
     """
 
     name: str
     matches: Callable[[Any], bool]
-    data: Callable[[Any], np.ndarray]  # leaf encoding -> data array ((N,) scalar / (N,D) matrix)
+    data: Callable[[Any], tuple[np.ndarray, ...]]  # leaf encoding -> tuple of (N,...) data arrays
     params: Callable[[list[Any]], dict[str, np.ndarray]]  # K leaf dists -> {pname: (K,...) array}
     to_value: Callable[[tuple, float], tuple] | None = None  # (stats for comp k, count_k) -> leaf value
+    arity: int = 1  # number of data arrays this leaf consumes
     kind: str = "scalar"
-    # scalar hooks
-    expr: Callable[[str, dict[str, str]], str] | None = None  # (value_var, {pname: arg}) -> scoring expr
+    # scalar hooks (vals = [numba expr per data array], p/a = {name: arg}, r = responsibility var)
+    expr: Callable[[list[str], dict[str, str]], str] | None = None
     acc_names: tuple[str, ...] = ()  # per-leaf weighted-statistic accumulator arrays, shape (K,)
-    acc_stmt: Callable[[str, dict[str, str], str], str] | None = None  # (value_var, {acc: arg}, resp) -> stmts
+    acc_stmt: Callable[[list[str], dict[str, str], str], str] | None = None
     # matrix hooks (emit numba source lines; leaf index `i`, {pname: arg} map)
     mat_precompute: Callable[[int, dict[str, str]], list[str]] | None = None  # -> fill q{i} (K,N)
     mat_row: Callable[[int, dict[str, str]], str] | None = None  # -> per-(i,k) scoring expr
@@ -79,6 +84,10 @@ def _template_for(dist: Any) -> LeafTemplate | None:
     return None
 
 
+def _arr(enc: Any, dtype: Any = np.float64) -> np.ndarray:
+    return np.ascontiguousarray(enc, dtype=dtype)
+
+
 # --- scalar leaves --------------------------------------------------------------------------------
 def _gaussian_params(comps: list[Any]) -> dict[str, np.ndarray]:
     mu = np.array([c.mu for c in comps], dtype=np.float64)
@@ -90,31 +99,100 @@ register_leaf_template(
     LeafTemplate(
         name="gaussian",
         matches=lambda d: type(d).__name__ == "GaussianDistribution",
-        data=lambda enc: np.asarray(enc, dtype=np.float64),
+        data=lambda enc: (_arr(enc),),
         params=_gaussian_params,
-        expr=lambda x, p: f"{p['lognorm']}[k] - ({x} - {p['mu']}[k]) * ({x} - {p['mu']}[k]) * {p['inv2s2']}[k]",
+        expr=lambda v, p: f"{p['lognorm']}[k] - ({v[0]} - {p['mu']}[k]) * ({v[0]} - {p['mu']}[k]) * {p['inv2s2']}[k]",
         acc_names=("sx", "sx2"),
-        acc_stmt=lambda x, a, r: f"{a['sx']}[k] += {r} * {x}; {a['sx2']}[k] += {r} * {x} * {x}",
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}; {a['sx2']}[k] += {r} * {v[0]} * {v[0]}",
         to_value=lambda s, count: (s[0], s[1], count, count),  # (sum_wx, sum_wx2, sum_w, sum_w)
     )
 )
-
-
-def _exponential_params(comps: list[Any]) -> dict[str, np.ndarray]:
-    beta = np.array([c.beta for c in comps], dtype=np.float64)  # mean; rate = 1/beta
-    return {"rate": 1.0 / beta, "lograte": -np.log(beta)}
 
 
 register_leaf_template(
     LeafTemplate(
         name="exponential",
         matches=lambda d: type(d).__name__ == "ExponentialDistribution",
-        data=lambda enc: np.asarray(enc, dtype=np.float64),
-        params=_exponential_params,
-        expr=lambda x, p: f"{p['lograte']}[k] - {p['rate']}[k] * {x}",
+        data=lambda enc: (_arr(enc),),
+        params=lambda comps: (lambda beta: {"rate": 1.0 / beta, "lograte": -np.log(beta)})(
+            np.array([c.beta for c in comps], dtype=np.float64)
+        ),
+        expr=lambda v, p: f"{p['lograte']}[k] - {p['rate']}[k] * {v[0]}",
         acc_names=("sx",),
-        acc_stmt=lambda x, a, r: f"{a['sx']}[k] += {r} * {x}",
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}",
         to_value=lambda s, count: (count, s[0]),  # (sum_w, sum_wx)
+    )
+)
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="geometric",
+        matches=lambda d: type(d).__name__ == "GeometricDistribution",
+        data=lambda enc: (_arr(enc),),  # support {1,2,...}: log p((x)) = (x-1) ln(1-p) + ln p
+        params=lambda comps: (lambda p: {"logp": np.log(p), "log1mp": np.log1p(-p)})(
+            np.array([c.p for c in comps], dtype=np.float64)
+        ),
+        expr=lambda v, p: f"{p['logp']}[k] + ({v[0]} - 1.0) * {p['log1mp']}[k]",
+        acc_names=("sx",),
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}",
+        to_value=lambda s, count: (count, s[0]),  # (sum_w, sum_wx)
+    )
+)
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="bernoulli",
+        matches=lambda d: type(d).__name__ == "BernoulliDistribution",
+        data=lambda enc: (_arr(enc),),  # log p(x) = x*logit + ln(1-p)
+        params=lambda comps: (lambda p: {"logit": np.log(p) - np.log1p(-p), "log1mp": np.log1p(-p)})(
+            np.array([c.p for c in comps], dtype=np.float64)
+        ),
+        expr=lambda v, p: f"{p['log1mp']}[k] + {v[0]} * {p['logit']}[k]",
+        acc_names=("sx",),
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}",
+        to_value=lambda s, count: (count, s[0]),  # (sum_w, sum_wx)
+    )
+)
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="poisson",
+        matches=lambda d: type(d).__name__ == "PoissonDistribution",
+        data=lambda enc: (_arr(enc[0]), _arr(enc[1])),  # (x, lgamma(x+1));  log p = -lam + x ln lam - lgamma(x+1)
+        params=lambda comps: (lambda lam: {"lam": lam, "loglam": np.log(lam)})(
+            np.array([c.lam for c in comps], dtype=np.float64)
+        ),
+        arity=2,
+        expr=lambda v, p: f"{p['loglam']}[k] * {v[0]} - {p['lam']}[k] - {v[1]}",
+        acc_names=("sx",),
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}",
+        to_value=lambda s, count: (count, s[0]),  # (sum_w, sum_wx)
+    )
+)
+
+
+def _gamma_params(comps: list[Any]) -> dict[str, np.ndarray]:
+    k = np.array([c.k for c in comps], dtype=np.float64)
+    theta = np.array([c.theta for c in comps], dtype=np.float64)
+    from scipy.special import gammaln
+
+    return {"km1": k - 1.0, "inv_theta": 1.0 / theta, "norm": -k * np.log(theta) - gammaln(k)}
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="gamma",
+        matches=lambda d: type(d).__name__ == "GammaDistribution",
+        data=lambda enc: (_arr(enc[0]), _arr(enc[1])),  # (x, log x); log p = (k-1)lnx - x/th - k ln th - lgamma(k)
+        params=_gamma_params,
+        arity=2,
+        expr=lambda v, p: f"{p['norm']}[k] + {p['km1']}[k] * {v[1]} - {p['inv_theta']}[k] * {v[0]}",
+        acc_names=("sx", "slogx"),
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}; {a['slogx']}[k] += {r} * {v[1]}",
+        to_value=lambda s, count: (count, s[0], s[1]),  # (sum_w, sum_wx, sum_w_logx)
     )
 )
 
@@ -136,11 +214,11 @@ def _mv_precompute(i: int, p: dict[str, str]) -> list[str]:
     return [
         f"q{i} = np.empty((kc, n))",
         "for k in range(kc):",
-        f"    C{i} = x{i} - {p['mu']}[k]",
+        f"    C{i} = x{i}_0 - {p['mu']}[k]",
         f"    Z{i} = C{i} @ {p['prec']}[k]",
         "    for ii in range(n):",
         f"        qq{i} = 0.0",
-        f"        for jj in range(x{i}.shape[1]):",
+        f"        for jj in range(x{i}_0.shape[1]):",
         f"            qq{i} += Z{i}[ii, jj] * C{i}[ii, jj]",
         f"        q{i}[k, ii] = qq{i}",
     ]
@@ -151,8 +229,8 @@ def _mv_accumulate(i: int) -> list[str]:
     return [
         "for k in range(kc):",
         f"    Rk{i} = R[:, k].copy()",
-        f"    S1_{i}[k] = x{i}.T @ Rk{i}",
-        f"    S2_{i}[k] = x{i}.T @ (Rk{i}.reshape(-1, 1) * x{i})",
+        f"    S1_{i}[k] = x{i}_0.T @ Rk{i}",
+        f"    S2_{i}[k] = x{i}_0.T @ (Rk{i}.reshape(-1, 1) * x{i}_0)",
     ]
 
 
@@ -160,7 +238,7 @@ register_leaf_template(
     LeafTemplate(
         name="mvgaussian",
         matches=lambda d: type(d).__name__ == "MultivariateGaussianDistribution",
-        data=lambda enc: np.ascontiguousarray(enc, dtype=np.float64),
+        data=lambda enc: (_arr(enc),),
         params=_mvgaussian_params,
         kind="matrix",
         mat_precompute=_mv_precompute,
@@ -243,12 +321,20 @@ def _dummy(t: LeafTemplate) -> Any:
     return {
         "gaussian": stats.GaussianDistribution(0.0, 1.0),
         "exponential": stats.ExponentialDistribution(1.0),
+        "geometric": stats.GeometricDistribution(0.5),
+        "bernoulli": stats.BernoulliDistribution(0.5),
+        "poisson": stats.PoissonDistribution(1.0),
+        "gamma": stats.GammaDistribution(1.0, 1.0),
         "mvgaussian": stats.MultivariateGaussianDistribution([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]]),
     }[t.name]
 
 
 def _argmap(i: int, t: LeafTemplate) -> dict[str, str]:
     return {pn: f"p{i}_{pn}" for pn in sorted(t.params([_dummy(t)]).keys())}
+
+
+def _data_names(i: int, t: LeafTemplate) -> list[str]:
+    return [f"x{i}_{j}" for j in range(t.arity)]
 
 
 # --- code generation ------------------------------------------------------------------------------
@@ -262,18 +348,20 @@ def _leaf_io(plan: FusedPlan) -> tuple[list[str], list[str], list[str], list[str
     Returns (data_args, param_args, precompute_lines, row_terms). ``precompute_lines`` and the matrix
     ``row_terms`` are empty for a pure-scalar plan, so its generated source is unchanged.
     """
-    data_args = [f"x{i}" for i in range(len(plan.leaf_templates))]
+    data_args: list[str] = []
     param_args: list[str] = []
     precompute: list[str] = []
     row_terms: list[str] = []
     for i, t in enumerate(plan.leaf_templates):
+        data_args.extend(_data_names(i, t))
         amap = _argmap(i, t)
         param_args.extend(amap.values())
         if t.kind == "matrix":
             precompute.extend(t.mat_precompute(i, amap))  # type: ignore[misc]
             row_terms.append("acc += " + t.mat_row(i, amap))  # type: ignore[misc]
         else:
-            row_terms.append("acc += " + t.expr(f"x{i}[i]", amap))  # type: ignore[misc]
+            vals = [f"{nm}[i]" for nm in _data_names(i, t)]
+            row_terms.append("acc += " + t.expr(vals, amap))  # type: ignore[misc]
     return data_args, param_args, precompute, row_terms
 
 
@@ -331,7 +419,7 @@ def _compile(plan: FusedPlan) -> Callable:
         return cached
     data_args, param_args, precompute, row_terms = _leaf_io(plan)
     args = ", ".join(data_args + param_args + ["logw", "out", "llbuf"])
-    lines = [f"def _fused({args}):", "    n = x0.shape[0]", "    kc = logw.shape[0]"]
+    lines = [f"def _fused({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
     lines += ["    " + ln for ln in precompute]
     lines += ["    for i in range(n):", "        for k in range(kc):", "            acc = logw[k]"]
     lines += ["            " + rt for rt in row_terms]
@@ -366,9 +454,10 @@ def _compile_estep(plan: FusedPlan) -> Callable:
         else:
             amap = {an: f"a{i}_{an}" for an in t.acc_names}
             acc_args.extend(amap.values())
-            scalar_acc.append(t.acc_stmt(f"x{i}[i]", amap, "r"))  # type: ignore[misc]
+            vals = [f"{nm}[i]" for nm in _data_names(i, t)]
+            scalar_acc.append(t.acc_stmt(vals, amap, "r"))  # type: ignore[misc]
     args = ", ".join(data_args + param_args + ["weights", "logw", "comp_counts", *acc_args, "llbuf"])
-    lines = [f"def _estep({args}):", "    n = x0.shape[0]", "    kc = logw.shape[0]"]
+    lines = [f"def _estep({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
     if plan.has_matrix:
         lines.append("    R = np.empty((n, kc))")  # responsibilities -- only matrix accumulation needs them
     lines += ["    " + ln for ln in precompute]
@@ -410,8 +499,12 @@ def _component_factor_lists(model: Any, plan: FusedPlan) -> list[list[Any]]:
 
 def _data_and_params(model: Any, plan: FusedPlan, enc: Any) -> tuple[list[np.ndarray], list[np.ndarray]]:
     factor_lists = _component_factor_lists(model, plan)
-    factor_encs = enc if isinstance(enc, tuple) else (enc,)
-    data_arrays = [t.data(factor_encs[i]) for i, t in enumerate(plan.leaf_templates)]
+    # A Composite encodes as a per-factor tuple; a bare leaf encodes as its own payload (which may itself
+    # be a tuple, e.g. Poisson's (x, lgamma(x+1))) -- so key on the structure, not isinstance(enc, tuple).
+    factor_encs = enc if plan.component_is_composite else (enc,)
+    data_arrays: list[np.ndarray] = []
+    for i, t in enumerate(plan.leaf_templates):
+        data_arrays.extend(t.data(factor_encs[i]))  # arity arrays, flattened in leaf order
     param_arrays: list[np.ndarray] = []
     for i, t in enumerate(plan.leaf_templates):
         pdict = t.params([factor_lists[k][i] for k in range(plan.num_components)])
@@ -458,23 +551,26 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray) -> Any:
     K = plan.num_components
     data_arrays, param_arrays = _data_and_params(model, plan, enc)
 
-    # per-leaf accumulator arrays, in the same leaf order the generated signature expects
+    # per-leaf accumulator arrays, in the same leaf order the generated signature expects. data_arrays is
+    # flattened by arity, so track the running offset to find each matrix leaf's (N,D) data array.
     scalar_acc: list[dict[str, np.ndarray]] = []
     matrix_acc: list[tuple[np.ndarray, np.ndarray]] = []
     acc_arrays: list[np.ndarray] = []
-    for i, t in enumerate(plan.leaf_templates):
+    offset = 0
+    for _i, t in enumerate(plan.leaf_templates):
         if t.kind == "matrix":
-            d = data_arrays[i].shape[1]
+            d = data_arrays[offset].shape[1]
             s1 = np.zeros((K, d), dtype=np.float64)
             s2 = np.zeros((K, d, d), dtype=np.float64)
             matrix_acc.append((s1, s2))
             scalar_acc.append({})
             acc_arrays += [s1, s2]
         else:
-            d = {an: np.zeros(K, dtype=np.float64) for an in t.acc_names}
-            scalar_acc.append(d)
+            ad = {an: np.zeros(K, dtype=np.float64) for an in t.acc_names}
+            scalar_acc.append(ad)
             matrix_acc.append((np.empty(0), np.empty(0)))
-            acc_arrays.extend(d.values())
+            acc_arrays.extend(ad.values())
+        offset += t.arity
 
     comp_counts = np.zeros(K, dtype=np.float64)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
