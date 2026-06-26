@@ -25,8 +25,9 @@ class FusibilityTest(unittest.TestCase):
         self.assertTrue(fusible(stats.MultivariateGaussianDistribution([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]])))
 
     def test_unsupported_leaf_is_not_fusible(self):
-        # a leaf with no template falls back to numpy
-        self.assertFalse(fusible(stats.CategoricalDistribution({"a": 0.5, "b": 0.5})))
+        # Laplace keeps the raw observations (its MLE needs the weighted median, not a fixed reduction),
+        # so it has no template and falls back to numpy
+        self.assertFalse(fusible(stats.LaplaceDistribution(0.0, 1.0)))
 
     def test_mixture_mixing_scalar_and_matrix_leaves_is_fusible(self):
         # a composite of a cheap scalar leaf + a BLAS matrix leaf fuses into one njit
@@ -174,8 +175,9 @@ class FusedEStepTest(unittest.TestCase):
 
         self.assertTrue(fusible_estep(stats.GaussianDistribution(0.0, 1.0)))
         self.assertTrue(fusible_estep(stats.MultivariateGaussianDistribution([0.0], [[1.0]])))
-        # a Categorical leaf has no template -> not fusible
-        self.assertFalse(fusible_estep(stats.CategoricalDistribution({"a": 0.5, "b": 0.5})))
+        self.assertTrue(fusible_estep(stats.CategoricalDistribution({"a": 0.5, "b": 0.5})))
+        # Laplace keeps raw observations (weighted-median MLE) -> not fusible
+        self.assertFalse(fusible_estep(stats.LaplaceDistribution(0.0, 1.0)))
 
 
 class LeafFamilyTest(unittest.TestCase):
@@ -240,6 +242,32 @@ class LeafFamilyTest(unittest.TestCase):
         model = self._mix([stats.GammaDistribution(2.0, 1.0), stats.GammaDistribution(5.0, 2.0)])
         est = stats.MixtureEstimator([stats.GammaEstimator(), stats.GammaEstimator()])
         data = [float(abs(x)) + 0.1 for x in self.rng.gamma(3, 2, 1500)]
+        self.assertTrue(FusedEStepTest._matches(self, model, est, data))
+
+    def test_categorical(self):
+        # categorical kind: data is already a category index, scored from a (K,C) log-prob table; the only
+        # sufficient statistic is the per-category weighted count histogram
+        model = self._mix(
+            [
+                stats.CategoricalDistribution({"a": 0.6, "b": 0.3, "c": 0.1}),
+                stats.CategoricalDistribution({"a": 0.1, "b": 0.4, "c": 0.5}),
+            ]
+        )
+        est = stats.MixtureEstimator([stats.CategoricalEstimator(), stats.CategoricalEstimator()])
+        data = [["a", "b", "c"][i] for i in self.rng.randint(3, size=1500)]
+        self.assertTrue(_ll_close(model, data))
+        self.assertTrue(FusedEStepTest._matches(self, model, est, data))
+
+    def test_integer_categorical(self):
+        model = self._mix(
+            [
+                stats.IntegerCategoricalDistribution(0, [0.6, 0.3, 0.1]),
+                stats.IntegerCategoricalDistribution(0, [0.1, 0.4, 0.5]),
+            ]
+        )
+        est = stats.MixtureEstimator([stats.IntegerCategoricalEstimator(), stats.IntegerCategoricalEstimator()])
+        data = [int(i) for i in self.rng.randint(3, size=1500)]
+        self.assertTrue(_ll_close(model, data))
         self.assertTrue(FusedEStepTest._matches(self, model, est, data))
 
     def test_binomial(self):
@@ -423,12 +451,12 @@ class DispatchTest(unittest.TestCase):
         from pysp.engines import FUSED_NUMPY_ENGINE
         from pysp.stats.compute.fused_codegen import FusedKernel
 
-        # a Categorical mixture has no leaf template -> must keep its existing engine kernel
+        # a Laplace mixture has no leaf template -> must keep its existing engine kernel
         m = stats.MixtureDistribution(
-            [stats.CategoricalDistribution({"a": 0.7, "b": 0.3}), stats.CategoricalDistribution({"a": 0.2, "b": 0.8})],
+            [stats.LaplaceDistribution(0.0, 1.0), stats.LaplaceDistribution(2.0, 1.5)],
             [0.5, 0.5],
         )
-        e = stats.MixtureEstimator([stats.CategoricalEstimator() for _ in range(2)])
+        e = stats.MixtureEstimator([stats.LaplaceEstimator() for _ in range(2)])
         self.assertNotIsInstance(m.kernel(engine=FUSED_NUMPY_ENGINE, estimator=e), FusedKernel)
 
 
