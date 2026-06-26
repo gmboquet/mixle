@@ -424,6 +424,13 @@ __all__ = [
     "ChainedAttentionAccumulator",
     "ChainedAttentionAccumulatorFactory",
     "ChainedAttentionDataEncoder",
+    # variational multi-hop attention (2-hop chain over tied latent embeddings, annealed)
+    "VariationalMultiHopAttentionDistribution",
+    "VariationalMultiHopAttentionEstimator",
+    "VariationalMultiHopAttentionSampler",
+    "VariationalMultiHopAttentionAccumulator",
+    "VariationalMultiHopAttentionAccumulatorFactory",
+    "VariationalMultiHopAttentionDataEncoder",
     "Posterior",
     "LatentPosterior",
     "CategoricalLatentPosterior",
@@ -1136,6 +1143,14 @@ from pysp.stats.latent.variational_embedding_attention import (
     VariationalEmbeddingAttentionDistribution,
     VariationalEmbeddingAttentionEstimator,
     VariationalEmbeddingAttentionSampler,
+)
+from pysp.stats.latent.variational_multihop_attention import (
+    VariationalMultiHopAttentionAccumulator,
+    VariationalMultiHopAttentionAccumulatorFactory,
+    VariationalMultiHopAttentionDataEncoder,
+    VariationalMultiHopAttentionDistribution,
+    VariationalMultiHopAttentionEstimator,
+    VariationalMultiHopAttentionSampler,
 )
 from pysp.stats.matrix.inverse_wishart import (
     InverseWishartDataEncoder,

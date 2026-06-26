@@ -113,6 +113,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "mcmc_test.py": ("stochastic",),
     "responsibility_attention_test.py": ("distribution", "latent", "stochastic"),
     "chained_attention_test.py": ("distribution", "latent", "stochastic", "slow"),
+    "variational_multihop_attention_test.py": ("distribution", "latent", "stochastic", "slow"),
     "variational_embedding_attention_test.py": ("distribution", "latent", "stochastic", "slow"),
     "glm_test.py": ("distribution",),
     "model_comparison_test.py": ("distribution",),
