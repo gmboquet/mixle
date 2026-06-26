@@ -410,6 +410,13 @@ __all__ = [
     "ResponsibilityAttentionAccumulatorFactory",
     "ResponsibilityAttentionDataEncoder",
     "sequence_to_triples",
+    # variational-EM attention with tied latent embeddings
+    "VariationalEmbeddingAttentionDistribution",
+    "VariationalEmbeddingAttentionEstimator",
+    "VariationalEmbeddingAttentionSampler",
+    "VariationalEmbeddingAttentionAccumulator",
+    "VariationalEmbeddingAttentionAccumulatorFactory",
+    "VariationalEmbeddingAttentionDataEncoder",
     "Posterior",
     "LatentPosterior",
     "CategoricalLatentPosterior",
@@ -1106,6 +1113,14 @@ from pysp.stats.latent.semi_supervised_mixture import (
     SemiSupervisedMixtureDistribution,
     SemiSupervisedMixtureEstimator,
     SemiSupervisedMixtureSampler,
+)
+from pysp.stats.latent.variational_embedding_attention import (
+    VariationalEmbeddingAttentionAccumulator,
+    VariationalEmbeddingAttentionAccumulatorFactory,
+    VariationalEmbeddingAttentionDataEncoder,
+    VariationalEmbeddingAttentionDistribution,
+    VariationalEmbeddingAttentionEstimator,
+    VariationalEmbeddingAttentionSampler,
 )
 from pysp.stats.matrix.inverse_wishart import (
     InverseWishartDataEncoder,
