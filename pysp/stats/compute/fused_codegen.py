@@ -35,7 +35,11 @@ class LeafTemplate:
     matches: Callable[[Any], bool]
     data: Callable[[Any], np.ndarray]  # leaf encoding -> (N,) data array
     params: Callable[[list[Any]], dict[str, np.ndarray]]  # K leaf dists -> {pname: (K,) array}
-    expr: Callable[[str, dict[str, str]], str]  # (value_var, {pname: arg_name}) -> numba expression string
+    expr: Callable[[str, dict[str, str]], str]  # (value_var, {pname: arg_name}) -> numba scoring expression
+    # --- E-step accumulation (optional; a leaf without these can be scored but not fit via the fused path)
+    acc_names: tuple[str, ...] = ()  # per-leaf weighted-statistic accumulator arrays (shape (K,))
+    acc_stmt: Callable[[str, dict[str, str], str], str] | None = None  # (value_var, {acc: arg}, resp_var) -> stmts
+    to_value: Callable[[tuple, float], tuple] | None = None  # (accumulated stats for comp k, count_k) -> leaf value
     dtype: str = "float64"
 
 
@@ -66,6 +70,9 @@ register_leaf_template(
         data=lambda enc: np.asarray(enc, dtype=np.float64),
         params=_gaussian_params,
         expr=lambda x, p: f"{p['lognorm']}[k] - ({x} - {p['mu']}[k]) * ({x} - {p['mu']}[k]) * {p['inv2s2']}[k]",
+        acc_names=("sx", "sx2"),
+        acc_stmt=lambda x, a, r: f"{a['sx']}[k] += {r} * {x}; {a['sx2']}[k] += {r} * {x} * {x}",
+        to_value=lambda s, count: (s[0], s[1], count, count),  # (sum_wx, sum_wx2, sum_w, sum_w)
     )
 )
 
@@ -82,6 +89,9 @@ register_leaf_template(
         data=lambda enc: np.asarray(enc, dtype=np.float64),
         params=_exponential_params,
         expr=lambda x, p: f"{p['lograte']}[k] - {p['rate']}[k] * {x}",
+        acc_names=("sx",),
+        acc_stmt=lambda x, a, r: f"{a['sx']}[k] += {r} * {x}",
+        to_value=lambda s, count: (count, s[0]),  # (sum_w, sum_wx)
     )
 )
 
@@ -95,6 +105,7 @@ class FusedPlan:
     is_mixture: bool
     leaf_templates: tuple[LeafTemplate, ...]  # one per factor (composite factor order)
     signature: tuple
+    component_is_composite: bool = False  # whether each leaf-bearing node is a Composite (vs a bare leaf)
 
 
 def _factors(dist: Any) -> list[Any]:
@@ -122,14 +133,16 @@ def analyze(model: Any) -> FusedPlan | None:
         for p in per:
             if [_template_for(f) for f in p] != templates:
                 return None
-        sig = ("mix", tuple(t.name for t in templates))
-        return FusedPlan(len(comps), True, tuple(templates), sig)  # type: ignore[arg-type]
+        comp_is_composite = getattr(comps[0], "dists", None) is not None
+        sig = ("mix", tuple(t.name for t in templates), comp_is_composite)
+        return FusedPlan(len(comps), True, tuple(templates), sig, comp_is_composite)  # type: ignore[arg-type]
     factors = _factors(model)
     templates = [_template_for(f) for f in factors]
     if any(t is None for t in templates):
         return None
-    sig = ("comp", tuple(t.name for t in templates))
-    return FusedPlan(1, False, tuple(templates), sig)  # type: ignore[arg-type]
+    is_composite = getattr(model, "dists", None) is not None
+    sig = ("comp", tuple(t.name for t in templates), is_composite)
+    return FusedPlan(1, False, tuple(templates), sig, is_composite)  # type: ignore[arg-type]
 
 
 def fusible(model: Any) -> bool:
@@ -222,4 +235,111 @@ def fused_seq_log_density(model: Any, enc: Any) -> np.ndarray:
     return out
 
 
-__all__ = ["LeafTemplate", "register_leaf_template", "analyze", "fusible", "fused_seq_log_density", "FusedPlan"]
+# --- fused E-step (score + responsibilities + per-leaf weighted sufficient statistics, one njit) ----
+def fusible_estep(model: Any) -> bool:
+    plan = analyze(model)
+    return plan is not None and all(t.acc_stmt is not None for t in plan.leaf_templates)
+
+
+_ESTEP_COMPILED: dict[tuple, Callable] = {}
+
+
+def _compile_estep(plan: FusedPlan) -> Callable:
+    cached = _ESTEP_COMPILED.get(plan.signature)
+    if cached is not None:
+        return cached
+    import numba
+
+    data_args = [f"x{i}" for i in range(len(plan.leaf_templates))]
+    param_args: list[str] = []
+    acc_args: list[str] = []
+    ll_terms: list[str] = []
+    acc_stmts: list[str] = []
+    for i, t in enumerate(plan.leaf_templates):
+        pmap = {pn: f"p{i}_{pn}" for pn in sorted(t.params([_dummy(t)]).keys())}
+        param_args.extend(pmap.values())
+        ll_terms.append("acc += " + t.expr(f"x{i}[i]", pmap))
+        amap = {an: f"a{i}_{an}" for an in t.acc_names}
+        acc_args.extend(amap.values())
+        acc_stmts.append(t.acc_stmt(f"x{i}[i]", amap, "r"))  # type: ignore[misc]
+    args = ", ".join(data_args + param_args + ["weights", "logw", "comp_counts", *acc_args, "llbuf"])
+    ll = "\n            ".join(ll_terms)
+    accs = "\n            ".join(acc_stmts)  # aligns with the 12-space indent of {accs} in the template
+    src = f"""
+def _estep({args}):
+    n = x0.shape[0]
+    kc = logw.shape[0]
+    for i in range(n):
+        wi = weights[i]
+        for k in range(kc):
+            acc = logw[k]
+            {ll}
+            llbuf[k] = acc
+        m = llbuf[0]
+        for k in range(1, kc):
+            if llbuf[k] > m:
+                m = llbuf[k]
+        s = 0.0
+        for k in range(kc):
+            s += np.exp(llbuf[k] - m)
+        for k in range(kc):
+            r = np.exp(llbuf[k] - m) / s * wi
+            comp_counts[k] += r
+            {accs}
+"""
+    ns: dict[str, Any] = {"np": np}
+    exec(src, ns)  # noqa: S102 -- generated from a fixed template
+    fn = numba.njit(fastmath=True)(ns["_estep"])
+    _ESTEP_COMPILED[plan.signature] = fn
+    return fn
+
+
+def fused_accumulate(model: Any, enc: Any, weights: np.ndarray) -> Any:
+    """Run one fused E-step and return the sufficient statistic in the estimator's ``value()`` format.
+
+    The whole E-step -- component scoring, responsibility softmax, and per-leaf weighted statistic
+    accumulation -- runs in a single nopython pass; the result is then packed into the exact tuple shape
+    the corresponding ``estimate(nobs, suff_stat)`` expects (leaf / Composite / Mixture). Raises
+    ``ValueError`` if the model is not fused-E-step capable (a leaf lacks accumulation support)."""
+    plan = analyze(model)
+    if plan is None or any(t.acc_stmt is None for t in plan.leaf_templates):
+        raise ValueError("%s is not a fusible E-step (an unsupported leaf)." % type(model).__name__)
+    K = plan.num_components
+    factor_lists = _component_factor_lists(model, plan)
+    factor_encs = enc if isinstance(enc, tuple) else (enc,)
+    data_arrays = [t.data(factor_encs[i]) for i, t in enumerate(plan.leaf_templates)]
+    param_arrays: list[np.ndarray] = []
+    for i, t in enumerate(plan.leaf_templates):
+        pdict = t.params([factor_lists[k][i] for k in range(K)])
+        param_arrays.extend(pdict[pn] for pn in sorted(pdict.keys()))
+    per_leaf_acc = [{an: np.zeros(K, dtype=np.float64) for an in t.acc_names} for t in plan.leaf_templates]
+    acc_arrays = [arr for d in per_leaf_acc for arr in d.values()]
+    comp_counts = np.zeros(K, dtype=np.float64)
+    logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
+    llbuf = np.empty(K, dtype=np.float64)
+    _compile_estep(plan)(
+        *data_arrays, *param_arrays, np.asarray(weights, dtype=np.float64), logw, comp_counts, *acc_arrays, llbuf
+    )
+
+    def node_value(k: int) -> Any:
+        leaf_vals = [
+            t.to_value(tuple(per_leaf_acc[i][an][k] for an in t.acc_names), float(comp_counts[k]))  # type: ignore[misc]
+            for i, t in enumerate(plan.leaf_templates)
+        ]
+        return tuple(leaf_vals) if plan.component_is_composite else leaf_vals[0]
+
+    if plan.is_mixture:
+        return comp_counts, tuple(node_value(k) for k in range(K))
+    return node_value(0)
+
+
+__all__ = [
+    "LeafTemplate",
+    "register_leaf_template",
+    "analyze",
+    "fusible",
+    "fusible_estep",
+    "fused_seq_log_density",
+    "fused_accumulate",
+    "FusedPlan",
+]
