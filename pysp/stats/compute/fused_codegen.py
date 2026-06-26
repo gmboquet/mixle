@@ -209,6 +209,185 @@ register_leaf_template(
 )
 
 
+def _arr0(enc: Any) -> tuple[np.ndarray]:
+    """Raw x of a univariate encoding (enc[0] for the precomputed-transform tuples, else the array)."""
+    return (_arr(enc[0] if isinstance(enc, tuple) else enc),)
+
+
+# Each of these scalar leaves takes raw x and computes its transforms inline (numba has log/log1p/cos/sin),
+# so only the per-component normalizer is precomputed in numpy. Verified bit-accurate vs seq_log_density.
+register_leaf_template(
+    LeafTemplate(
+        name="halfnormal",
+        matches=lambda d: type(d).__name__ == "HalfNormalDistribution",
+        data=_arr0,
+        params=lambda comps: (lambda s2: {"a": 0.5 / s2, "lognorm": 0.5 * np.log(2.0 / np.pi) - 0.5 * np.log(s2)})(
+            np.array([c.sigma**2 for c in comps], dtype=np.float64)
+        ),
+        expr=lambda v, p: f"{p['lognorm']}[k] - {v[0]} * {v[0]} * {p['a']}[k]",
+        acc_names=("sx2",),
+        acc_stmt=lambda v, a, r: f"{a['sx2']}[k] += {r} * {v[0]} * {v[0]}",
+        to_value=lambda s, count: (count, s[0]),  # (n, sum_w x^2)
+    )
+)
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="rayleigh",
+        matches=lambda d: type(d).__name__ == "RayleighDistribution",
+        data=_arr0,
+        params=lambda comps: (lambda s2: {"a": 0.5 / s2, "lognorm": -np.log(s2)})(
+            np.array([c.sigma**2 for c in comps], dtype=np.float64)
+        ),
+        expr=lambda v, p: f"{p['lognorm']}[k] + np.log({v[0]}) - {v[0]} * {v[0]} * {p['a']}[k]",
+        acc_names=("sx2",),
+        acc_stmt=lambda v, a, r: f"{a['sx2']}[k] += {r} * {v[0]} * {v[0]}",
+        to_value=lambda s, count: (count, s[0]),  # (n, sum_w x^2)
+    )
+)
+
+
+def _inverse_gaussian_params(comps: list[Any]) -> dict[str, np.ndarray]:
+    mu = np.array([c.mu for c in comps], dtype=np.float64)
+    lam = np.array([c.lam for c in comps], dtype=np.float64)
+    return {
+        "c1": -lam / (2.0 * mu * mu),
+        "c2": -lam / 2.0,
+        "lognorm": 0.5 * (np.log(lam) - np.log(2.0 * np.pi)) + lam / mu,
+    }
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="inversegaussian",
+        matches=lambda d: type(d).__name__ == "InverseGaussianDistribution",
+        data=_arr0,
+        params=_inverse_gaussian_params,
+        expr=lambda v, p: f"{p['lognorm']}[k] - 1.5 * np.log({v[0]}) + {p['c1']}[k] * {v[0]} + {p['c2']}[k] / {v[0]}",
+        acc_names=("sx", "s1x"),
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}; {a['s1x']}[k] += {r} / {v[0]}",
+        to_value=lambda s, count: (count, s[0], s[1]),  # (n, sum_w x, sum_w / x)
+    )
+)
+
+
+def _beta_params(comps: list[Any]) -> dict[str, np.ndarray]:
+    from scipy.special import betaln
+
+    a = np.array([c.a for c in comps], dtype=np.float64)
+    b = np.array([c.b for c in comps], dtype=np.float64)
+    return {"am1": a - 1.0, "bm1": b - 1.0, "lognorm": -betaln(a, b)}
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="beta",
+        matches=lambda d: type(d).__name__ == "BetaDistribution",
+        data=lambda enc: (_arr(enc[0]), _arr(enc[1]), _arr(enc[2]), _arr(enc[3])),  # (log x, log(1-x), x, x^2)
+        params=_beta_params,
+        arity=4,
+        expr=lambda v, p: f"{p['lognorm']}[k] + {p['am1']}[k] * {v[0]} + {p['bm1']}[k] * {v[1]}",
+        acc_names=("slogx", "slog1mx", "sx", "sx2"),
+        acc_stmt=lambda v, a, r: (
+            f"{a['slogx']}[k] += {r} * {v[0]}; {a['slog1mx']}[k] += {r} * {v[1]}; "
+            f"{a['sx']}[k] += {r} * {v[2]}; {a['sx2']}[k] += {r} * {v[3]}"
+        ),
+        to_value=lambda s, count: (count, s[0], s[1], s[2], s[3]),  # (n, sumlogx, sumlog1mx, sumx, sumx2)
+    )
+)
+
+
+def _inverse_gamma_params(comps: list[Any]) -> dict[str, np.ndarray]:
+    from scipy.special import gammaln
+
+    a = np.array([c.alpha for c in comps], dtype=np.float64)
+    b = np.array([c.beta for c in comps], dtype=np.float64)
+    return {"ap1": a + 1.0, "beta": b, "lognorm": a * np.log(b) - gammaln(a)}
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="inversegamma",
+        matches=lambda d: type(d).__name__ == "InverseGammaDistribution",
+        data=lambda enc: (_arr(enc[0]), _arr(enc[1])),  # (log x, 1/x)
+        params=_inverse_gamma_params,
+        arity=2,
+        expr=lambda v, p: f"{p['lognorm']}[k] - {p['ap1']}[k] * {v[0]} - {p['beta']}[k] * {v[1]}",
+        acc_names=("s1x", "slogx"),
+        acc_stmt=lambda v, a, r: f"{a['s1x']}[k] += {r} * {v[1]}; {a['slogx']}[k] += {r} * {v[0]}",
+        to_value=lambda s, count: (count, s[0], -s[1]),  # (n, sum_w / x, sum_w log(1/x))  -- Gamma on 1/x
+    )
+)
+
+
+def _vonmises_params(comps: list[Any]) -> dict[str, np.ndarray]:
+    from scipy.special import i0
+
+    mu = np.array([c.mu for c in comps], dtype=np.float64)
+    kappa = np.array([c.kappa for c in comps], dtype=np.float64)
+    return {"kcos": kappa * np.cos(mu), "ksin": kappa * np.sin(mu), "lognorm": -np.log(2.0 * np.pi * i0(kappa))}
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="vonmises",
+        matches=lambda d: type(d).__name__ == "VonMisesDistribution",
+        data=lambda enc: (_arr(enc[0]), _arr(enc[1])),  # (cos x, sin x)
+        params=_vonmises_params,
+        arity=2,
+        expr=lambda v, p: f"{p['lognorm']}[k] + {p['kcos']}[k] * {v[0]} + {p['ksin']}[k] * {v[1]}",
+        acc_names=("scos", "ssin"),
+        acc_stmt=lambda v, a, r: f"{a['scos']}[k] += {r} * {v[0]}; {a['ssin']}[k] += {r} * {v[1]}",
+        to_value=lambda s, count: (count, s[0], s[1]),  # (n, sum_w cos, sum_w sin)
+    )
+)
+
+
+def _wrappedcauchy_params(comps: list[Any]) -> dict[str, np.ndarray]:
+    mu = np.array([c.mu for c in comps], dtype=np.float64)
+    rho = np.array([c.rho for c in comps], dtype=np.float64)
+    return {
+        "a": 1.0 + rho * rho,
+        "rcos": 2.0 * rho * np.cos(mu),
+        "rsin": 2.0 * rho * np.sin(mu),
+        "lognorm": np.log1p(-rho * rho) - np.log(2.0 * np.pi),
+    }
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="wrappedcauchy",
+        matches=lambda d: type(d).__name__ == "WrappedCauchyDistribution",
+        data=lambda enc: (_arr(enc[0]), _arr(enc[1])),  # (cos x, sin x)
+        params=_wrappedcauchy_params,
+        arity=2,
+        expr=lambda v, p: (
+            f"{p['lognorm']}[k] - np.log({p['a']}[k] - {p['rcos']}[k] * {v[0]} - {p['rsin']}[k] * {v[1]})"
+        ),
+        acc_names=("scos", "ssin"),
+        acc_stmt=lambda v, a, r: f"{a['scos']}[k] += {r} * {v[0]}; {a['ssin']}[k] += {r} * {v[1]}",
+        to_value=lambda s, count: (s[0], s[1], count),  # (sum_w cos, sum_w sin, n)
+    )
+)
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="logseries",
+        matches=lambda d: type(d).__name__ == "LogSeriesDistribution",
+        data=_arr0,
+        params=lambda comps: (lambda p: {"logp": np.log(p), "lognorm": -np.log(-np.log1p(-p))})(
+            np.array([c.p for c in comps], dtype=np.float64)
+        ),
+        expr=lambda v, p: f"{p['lognorm']}[k] + {v[0]} * {p['logp']}[k] - np.log({v[0]})",
+        acc_names=("sx",),
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}",
+        to_value=lambda s, count: (count, s[0]),  # (n, sum_w x)
+    )
+)
+
+
 def _loggaussian_params(comps: list[Any]) -> dict[str, np.ndarray]:
     mu = np.array([c.mu for c in comps], dtype=np.float64)
     s2 = np.array([c.sigma2 for c in comps], dtype=np.float64)
@@ -465,6 +644,14 @@ def _dummy(t: LeafTemplate) -> Any:
         "poisson": stats.PoissonDistribution(1.0),
         "gamma": stats.GammaDistribution(1.0, 1.0),
         "loggaussian": stats.LogGaussianDistribution(0.0, 1.0),
+        "halfnormal": stats.HalfNormalDistribution(1.0),
+        "rayleigh": stats.RayleighDistribution(1.0),
+        "inversegaussian": stats.InverseGaussianDistribution(1.0, 1.0),
+        "beta": stats.BetaDistribution(2.0, 2.0),
+        "inversegamma": stats.InverseGammaDistribution(2.0, 1.0),
+        "vonmises": stats.VonMisesDistribution(0.0, 1.0),
+        "wrappedcauchy": stats.WrappedCauchyDistribution(0.0, 0.5),
+        "logseries": stats.LogSeriesDistribution(0.5),
         "diaggaussian": stats.DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0]),
         "binomial": stats.BinomialDistribution(0.5, 1),
         "negbinomial": stats.NegativeBinomialDistribution(1.0, 0.5),
