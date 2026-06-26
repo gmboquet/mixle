@@ -6,6 +6,11 @@ import warnings
 import numpy as np
 
 from pysp.ppl import Gamma, Normal
+from pysp.ppl.autograd import torch_available
+
+# These checks call the autodiff path directly (grad_target / value_and_grad); that needs a torch
+# backend, which the no-optional-deps CI suite does not install. Skip there rather than fail.
+_HAS_AUTODIFF = torch_available()
 
 
 class HierarchicalPriorTest(unittest.TestCase):
@@ -14,6 +19,7 @@ class HierarchicalPriorTest(unittest.TestCase):
         mu = Normal(0.0, tau, name="mu")  # mu | tau ~ N(0, tau): the prior's scale is random
         return Normal(mu, 1.0)
 
+    @unittest.skipUnless(_HAS_AUTODIFF, "requires a torch autodiff backend")
     def test_autograd_gradient_matches_finite_difference(self):
         from pysp.ppl.autograd import grad_target
 
@@ -72,6 +78,7 @@ class NonCenteredReparamTest(unittest.TestCase):
         mu = Normal(0.0, tau, name="mu")
         return Normal(mu.noncentered() if noncentered else mu, 1.0)
 
+    @unittest.skipUnless(_HAS_AUTODIFF, "requires a torch autodiff backend")
     def test_noncentered_gradient_matches_finite_difference(self):
         from pysp.ppl.autograd import grad_target
 

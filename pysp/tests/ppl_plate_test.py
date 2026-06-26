@@ -6,6 +6,11 @@ import warnings
 import numpy as np
 
 from pysp.ppl import Gamma, Normal
+from pysp.ppl.autograd import torch_available
+
+# The grad-check and NUTS targets here require a torch autodiff backend (value_and_grad), which the
+# no-optional-deps CI suite does not install. Skip there instead of failing.
+_HAS_AUTODIFF = torch_available()
 
 
 def _hier_data(seed=0):
@@ -24,6 +29,7 @@ def _model(noncentered, free_mu=False):
 
 
 class GroupedTargetTest(unittest.TestCase):
+    @unittest.skipUnless(_HAS_AUTODIFF, "requires a torch autodiff backend")
     def test_gradient_matches_finite_difference(self):
         from pysp.ppl.inference import _grouped_target
 
@@ -43,6 +49,7 @@ class GroupedTargetTest(unittest.TestCase):
 
 
 class GroupedNutsTest(unittest.TestCase):
+    @unittest.skipUnless(_HAS_AUTODIFF, "requires a torch autodiff backend")
     def test_recovers_hyperparameters_and_group_latents(self):
         data, thetas = _hier_data()
         with warnings.catch_warnings():
@@ -54,6 +61,7 @@ class GroupedNutsTest(unittest.TestCase):
         self.assertAlmostEqual(s["theta[0]"]["mean"], thetas[0], delta=1.5)  # per-group latent recovered
         self.assertLess(max(s["_split_rhat"].values()), 1.15)
 
+    @unittest.skipUnless(_HAS_AUTODIFF, "requires a torch autodiff backend")
     def test_free_population_mean(self):
         data, _ = _hier_data()
         with warnings.catch_warnings():
@@ -70,6 +78,7 @@ class GroupedNutsTest(unittest.TestCase):
             fit = _model(True).fit(data, how="ensemble", draws=400, burn=300, rng=np.random.RandomState(2))
         self.assertAlmostEqual(fit.summary()["sigma"]["mean"], 2.0, delta=1.0)
 
+    @unittest.skipUnless(_HAS_AUTODIFF, "requires a torch autodiff backend")
     def test_noncentered_reduces_divergences(self):
         data, _ = _hier_data(seed=3)
 
