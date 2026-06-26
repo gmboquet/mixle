@@ -322,5 +322,48 @@ class ChurningTemporalGraphGrammarTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density(obs))))
 
 
+class LatentRegimeTemporalGraphGrammarTest(unittest.TestCase):
+    def test_recovers_regimes_transition_and_beats_single_grammar(self):
+        rng = np.random.RandomState(0)
+        growth = stats.TemporalGraphGrammarDistribution(
+            [0.1, 0.3, 0.35, 0.25], edge_rate=8.0, node_rate=1.0, edge_remove_rate=0.0
+        )
+        decay = stats.TemporalGraphGrammarDistribution(
+            [0.25] * 4, edge_rate=1.0, node_rate=0.0, remove_weights=[0.4, 0.3, 0.2, 0.1], edge_remove_rate=6.0
+        )
+        A = [[0.85, 0.15], [0.15, 0.85]]
+        gt = stats.LatentTemporalGraphGrammarDistribution([growth, decay], [0.5, 0.5], A)
+        data = [
+            gt.sampler(seed=s).sample_one(num_steps=12, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(80)
+        ]
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density(data))))
+        # single-grammar baseline
+        se = stats.TemporalGraphGrammarEstimator(pseudo_count=0.5)
+        sa = se.accumulator_factory().make()
+        sa.seq_update(data, np.ones(len(data)), None)
+        single = se.estimate(len(data), sa.value())
+        # EM
+        est = stats.LatentTemporalGraphGrammarEstimator([growth.estimator(0.2), decay.estimator(0.2)], pseudo_count=0.5)
+        acc = est.accumulator_factory().make()
+        acc.seq_initialize(data, np.ones(len(data)), np.random.RandomState(1))
+        cur = est.estimate(len(data), acc.value())
+        prev_ll = -np.inf
+        for _ in range(10):
+            acc = est.accumulator_factory().make()
+            acc.seq_update(data, np.ones(len(data)), cur)
+            cur = est.estimate(len(data), acc.value())
+            ll = float(cur.seq_log_density(data).sum())
+            self.assertGreaterEqual(ll, prev_ll - 1.0)  # EM does not decrease the likelihood
+            prev_ll = ll
+        order = np.argsort([s.edge_rate for s in cur.states])
+        lo, hi = cur.states[order[0]], cur.states[order[1]]
+        self.assertLess(lo.edge_rate, 3.0)  # decay regime
+        self.assertGreater(hi.edge_rate, 5.0)  # growth regime
+        self.assertGreater(lo.edge_remove_rate, hi.edge_remove_rate)  # decay removes, growth doesn't
+        self.assertGreater(np.min(np.diag(cur.transition_matrix)), 0.6)  # regimes persist
+        self.assertGreater(ll, float(single.seq_log_density(data).sum()))  # latent beats one grammar
+        self.assertEqual(len(cur.decode(data[0])), len(data[0]) - 1)  # Viterbi labels every transition
+
+
 if __name__ == "__main__":
     unittest.main()
