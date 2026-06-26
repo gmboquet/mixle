@@ -62,30 +62,51 @@ class _Ctx:
 
 
 def _shape(node: Any) -> Any:
-    """A structural signature so a Mixture can require homogeneous components (same tree shape)."""
+    """Structural signature of a BUILT tree -- the kernel cache key. Captures ALL children so distinct
+    heterogeneous mixtures never share a compiled kernel."""
     if isinstance(node, _Leaf):
         return ("leaf", node.template.name)
     if isinstance(node, _Composite):
         return ("comp", tuple(_shape(c) for c in node.children))
-    return ("mix", len(node.children), _shape(node.children[0]))
+    return ("mix", tuple(_shape(c) for c in node.children))
+
+
+def _model_shape(dist: Any) -> Any:
+    """Structural signature of a MODEL node (available before building). A Mixture is homogeneous (its
+    components share one encoder) iff all component shapes are equal; otherwise it is heterogeneous and
+    encodes each component separately (``_HeteroMixtureEncoded``)."""
+    tname = type(dist).__name__
+    if tname == "CompositeDistribution":
+        return ("comp", tuple(_model_shape(c) for c in dist.dists))
+    if tname == "MixtureDistribution":
+        return ("mix", tuple(_model_shape(c) for c in dist.components))
+    t = _template_for(dist)
+    return ("leaf", t.name if t is not None else tname)
+
+
+def _homogeneous(model: Any) -> bool:
+    shapes = [_model_shape(c) for c in model.components]
+    return all(s == shapes[0] for s in shapes)
 
 
 def _build(model: Any, path: tuple, ctx: _Ctx) -> Any | None:
     """Walk the model tree (no encoding needed -- the tree is the structure); the per-slot data arrays are
-    filled later by :func:`_fill_slots` from the real encoding."""
+    filled later by :func:`_fill_slots` from the real encoding. Heterogeneous mixtures (different-typed
+    components) unroll naturally -- each component just gets its own data slot (path branch ``("h", j)``)."""
     tname = type(model).__name__
     if tname == "CompositeDistribution":
-        children = [_build(c, path + (i,), ctx) for i, c in enumerate(model.dists)]
+        children = [_build(c, path + (("c", i),), ctx) for i, c in enumerate(model.dists)]
         if any(c is None for c in children):
             return None
         return _Composite(ctx.fresh(), children)
     if tname == "MixtureDistribution":
-        children = [_build(c, path, ctx) for c in model.components]  # components share the same path/encoding
-        if any(c is None for c in children):
-            return None
-        shapes = [_shape(c) for c in children]
-        if any(s != shapes[0] for s in shapes):  # heterogeneous components -> not handled here
-            return None
+        homo = _homogeneous(model)  # homogeneous components share the encoding (same slot/path); else split
+        children = []
+        for j, c in enumerate(model.components):
+            child = _build(c, path if homo else path + (("h", j),), ctx)
+            if child is None:
+                return None
+            children.append(child)
         return _Mixture(ctx.fresh(), children, np.asarray(model.log_w, dtype=np.float64))
     t = _template_for(model)
     if t is None or t.kind != "scalar":  # only scalar leaves nest cleanly (no precompute / BLAS / tables)
@@ -256,10 +277,15 @@ def _fill_slots(model: Any, path: tuple, enc: Any, ctx: _Ctx) -> None:
     if tname == "CompositeDistribution":
         encs = enc if isinstance(enc, tuple) else (enc,)
         for i, c in enumerate(model.dists):
-            _fill_slots(c, path + (i,), encs[i], ctx)
+            _fill_slots(c, path + (("c", i),), encs[i], ctx)
     elif tname == "MixtureDistribution":
-        for c in model.components:
-            _fill_slots(c, path, enc, ctx)
+        if _homogeneous(model):
+            for c in model.components:  # components share the encoding
+                _fill_slots(c, path, enc, ctx)
+        else:
+            sub = enc.encodings  # _HeteroMixtureEncoded: one encoding per component
+            for j, c in enumerate(model.components):
+                _fill_slots(c, path + (("h", j),), sub[j], ctx)
     elif path in ctx.slots:
         slot = ctx.slots[path][1]
         ctx.slot_data[slot] = ctx.slots[path][0].data(enc)

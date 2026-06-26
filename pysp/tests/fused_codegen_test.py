@@ -516,6 +516,34 @@ class NestedTest(unittest.TestCase):
         self.assertTrue(_ll_close(model, data))
         self.assertTrue(self._estep_ok(model, est, data))
 
+    def test_heterogeneous_mixture(self):
+        # different-typed components (the engine cannot stack these) -- the recursive path unrolls them
+        model = stats.MixtureDistribution([self.G(1.0, 1.0), stats.GammaDistribution(2.0, 1.0)], [0.5, 0.5])
+        est = stats.MixtureEstimator([stats.GaussianEstimator(), stats.GammaEstimator()])
+        self.assertTrue(fusible(model))
+        data = [float(abs(self.rng.randn()) + 0.3) for _ in range(2500)]
+        self.assertTrue(_ll_close(model, data))
+        self.assertTrue(self._estep_ok(model, est, data))
+
+    def test_heterogeneous_nested_mixture(self):
+        # Mixture[Gaussian, Mixture[Gamma, Exponential]] -- heterogeneous AND nested
+        model = stats.MixtureDistribution(
+            [
+                self.G(1.0, 1.0),
+                stats.MixtureDistribution(
+                    [stats.GammaDistribution(2.0, 1.0), stats.ExponentialDistribution(1.0)], [0.5, 0.5]
+                ),
+            ],
+            [0.5, 0.5],
+        )
+        est = stats.MixtureEstimator(
+            [stats.GaussianEstimator(), stats.MixtureEstimator([stats.GammaEstimator(), stats.ExponentialEstimator()])]
+        )
+        self.assertTrue(fusible(model))
+        data = [float(abs(self.rng.randn()) + 0.3) for _ in range(2500)]
+        self.assertTrue(_ll_close(model, data))
+        self.assertTrue(self._estep_ok(model, est, data))
+
     def test_nested_with_a_matrix_leaf_is_not_recursively_fused(self):
         # the recursive path is scalar-only; a nested model with an MVGaussian leaf falls back to numpy
         from pysp.stats.compute.fused_nested import fusible_nested
