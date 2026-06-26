@@ -141,6 +141,14 @@ class TerminalTest(unittest.TestCase):
         out.sort(key=lambda kv: -kv[1])
         return out
 
+    def test_disjoint_terminal_uses_structural_count_index(self):
+        from pysp.enumeration.quantization.core import Quantizer
+
+        d = self._make()  # state-disjoint emissions -> unambiguous -> cheap structural seek (not the fallback)
+        ci = d._terminal_values_count_index(Quantizer(bin_width_bits=1.0, oversample=64), 400)
+        self.assertIsNotNone(ci)
+        self.assertGreater(ci[0].total(), 0)
+
     def test_terminal_enumeration_and_exact_seek(self):
         d = self._make()
         order = self._order(d)

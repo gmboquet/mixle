@@ -1162,14 +1162,16 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         def _fallback():
             return leaf_count_index(self.enumerator(), quantizer, max_fine_bucket, max_items=self._COUNT_INDEX_ITEM_CAP)
 
-        # terminal_values defines a (Null-length) stopping-time support. A structural count DP over the
-        # trellis would count (path, sequence) PAIRS by a decomposable (sum-of-floors) cost, but a
-        # sequence's MARGINAL probability is a logsumexp over its paths and does not decompose -- so the
-        # structural index is the tropical/path projection (deep seek would return deep paths, not deep
-        # sequences). For exact k-th-most-probable-SEQUENCE seek/rank we therefore enumerate-and-bin the
-        # marginal order (O(index), exact) rather than count structurally.
+        # terminal_values is a (Null-length) stopping-time support. A structural count DP counts
+        # (path, sequence) PAIRS by a decomposable sum-of-floors cost; a sequence's MARGINAL probability
+        # is a logsumexp over paths and does NOT decompose, so for an AMBIGUOUS model the structural index
+        # is only the tropical/path projection (deep seek would return deep paths). When emissions are
+        # state-disjoint the model is UNAMBIGUOUS (one path per sequence) and the structural index counts
+        # each sequence exactly once at its (single-path == marginal) cost -- then it is exact and cheap.
+        # _terminal_values_count_index builds it for that case and returns None otherwise (-> fallback).
         if getattr(self, "terminal_values", None):
-            return _fallback()
+            ci = self._terminal_values_count_index(quantizer, max_fine_bucket)
+            return ci if ci is not None else _fallback()
 
         if supports(self.len_dist, Neutral):
             raise EnumerationError(self, reason="no length distribution is modeled (len_dist is Null)")
@@ -1350,6 +1352,223 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                     raise IndexError("offset outside hmm fine bucket %d" % fb)
                 o -= cnt_L
             raise IndexError("offset outside hmm fine bucket %d" % fb)
+
+        return CountIndex(total, getter), truncated
+
+    def _terminal_values_count_index(self, quantizer, max_fine_bucket: int):
+        """Structural count index for the terminal_values support, EXACT when emissions are state-disjoint
+        (one path per sequence, so the index carries each sequence once at its single-path == marginal
+        cost). Mirrors the forward count DP anchored at termination: a sequence is L-1 non-terminal
+        emissions then one terminal emission. Returns ``(CountIndex, truncated)``, or ``None`` when
+        emissions are not state-disjoint (the ambiguous case, where a path-count index would only be the
+        tropical projection -- the caller then falls back to exact enumerate-and-bin)."""
+        from pysp.enumeration.quantization.core import CountHistogram, CountIndex, leaf_count_index
+        from pysp.stats.compute.pdist import EnumerationError
+
+        tv = self.terminal_values
+        n = self.n_states
+        log_w = self.log_w
+        log_T = self.log_transitions
+        cap = self._COUNT_INDEX_ITEM_CAP
+        mfb = max_fine_bucket
+
+        # One descending pass per state: split each emission support into non-terminal / terminal items
+        # and verify unambiguity (each symbol emitted by at most one state).
+        nt_items: list[list] = [[] for _ in range(n)]
+        tm_items: list[list] = [[] for _ in range(n)]
+        sym_state: dict[Any, int] = {}
+        for s in range(n):
+            try:
+                cnt = 0
+                for v, lp in child_enumerator(self.topics[s], "HiddenMarkovModelDistribution.topics[%d]" % s):
+                    cnt += 1
+                    if cnt > cap:
+                        return None
+                    if lp == -np.inf:
+                        continue
+                    if sym_state.get(v, s) != s:
+                        return None  # symbol emitted by >1 state -> ambiguous, defer to the fallback
+                    sym_state[v] = s
+                    (tm_items if v in tv else nt_items)[s].append((v, lp))
+            except EnumerationError:
+                return None
+
+        truncated = False
+        emit_nt, emit_t = [], []
+        for s in range(n):
+            ci_nt, t1 = leaf_count_index(iter(nt_items[s]), quantizer, mfb, max_items=cap)
+            ci_t, t2 = leaf_count_index(iter(tm_items[s]), quantizer, mfb, max_items=cap)
+            emit_nt.append(ci_nt)
+            emit_t.append(ci_t)
+            truncated = truncated or t1 or t2
+
+        init_shift = [quantizer.fine_bucket(log_w[s]) if log_w[s] > -np.inf else None for s in range(n)]
+        into: list[list[tuple[int, float, int]]] = [[] for _ in range(n)]
+        for sp in range(n):
+            for s in range(n):
+                lt = float(log_T[s][sp])
+                if lt > -np.inf:
+                    into[sp].append((s, lt, quantizer.fine_bucket(lt)))
+
+        # Non-terminal prefix DP: nt[t][s] counts length-t all-non-terminal prefixes ending in state s.
+        nt: list[dict[int, CountHistogram]] = [None, {}]
+        ntpool: list[dict[int, CountHistogram]] = [None, {}]
+        for s in range(n):
+            if init_shift[s] is None or emit_nt[s].hist.is_empty():
+                continue
+            h = emit_nt[s].hist.shift(init_shift[s]).truncate(mfb)
+            if not h.is_empty():
+                nt[1][s] = h
+        max_t = 1 << 20
+        t = 2
+        while t <= max_t and nt[t - 1]:
+            prev = nt[t - 1]
+            cur: dict[int, CountHistogram] = {}
+            pcur: dict[int, CountHistogram] = {}
+            for sp in range(n):
+                if emit_nt[sp].hist.is_empty():
+                    continue
+                pool = CountHistogram.empty()
+                any_pred = False
+                for s, _lt, shift in into[sp]:
+                    ph = prev.get(s)
+                    if ph is not None and not ph.is_empty():
+                        pool = pool.add(ph.shift(shift).truncate(mfb))
+                        any_pred = True
+                if not any_pred or pool.is_empty():
+                    continue
+                ah = quantizer.convolve(pool, emit_nt[sp].hist, max_fine_bucket=mfb)
+                if ah.is_empty():
+                    continue
+                pcur[sp] = pool
+                cur[sp] = ah
+            if not cur:
+                break
+            nt.append(cur)
+            ntpool.append(pcur)
+            t += 1
+        if t > max_t:
+            truncated = True
+        built = len(nt) - 1
+
+        # Terminal-emission completion layer over every length L >= 1.
+        total = CountHistogram.empty()
+        contributing: list[tuple[int, int, CountHistogram | None, CountHistogram]] = []
+        for s in range(n):  # L == 1: [terminal] from the initial state
+            if init_shift[s] is None or emit_t[s].hist.is_empty():
+                continue
+            comp = emit_t[s].hist.shift(init_shift[s]).truncate(mfb)
+            if not comp.is_empty():
+                total = total.add(comp)
+                contributing.append((1, s, None, comp))
+        for length in range(2, built + 1):
+            prevnt = nt[length - 1]
+            if not prevnt:
+                continue
+            for s in range(n):
+                if emit_t[s].hist.is_empty():
+                    continue
+                pool = CountHistogram.empty()
+                any_pred = False
+                for pred, _lt, shift in into[s]:
+                    ph = prevnt.get(pred)
+                    if ph is not None and not ph.is_empty():
+                        pool = pool.add(ph.shift(shift).truncate(mfb))
+                        any_pred = True
+                if not any_pred or pool.is_empty():
+                    continue
+                comp = quantizer.convolve(pool, emit_t[s].hist, max_fine_bucket=mfb)
+                if comp.is_empty():
+                    continue
+                total = total.add(comp)
+                contributing.append((length, s, pool, comp))
+
+        def walk_nt(s: int, b: int, t: int, o: int, seq: list[Any]) -> float:
+            lp = 0.0
+            while t >= 2:
+                eh = emit_nt[s].hist
+                pool = ntpool[t][s]
+                picked = False
+                for be in range(eh.base, eh.base + len(eh.data)):
+                    ne = eh.count_at(be)
+                    if ne == 0:
+                        continue
+                    bp = b - be
+                    mp = pool.count_at(bp)
+                    if mp == 0:
+                        continue
+                    block = ne * mp
+                    if o < block:
+                        sym, slp = emit_nt[s].get_in_bucket(be, o // mp)
+                        seq[t - 1] = sym
+                        lp += slp
+                        po = o % mp
+                        for s_prev, lt, shift in into[s]:
+                            ph = nt[t - 1].get(s_prev)
+                            if ph is None:
+                                continue
+                            c = ph.count_at(bp - shift)
+                            if c == 0:
+                                continue
+                            if po < c:
+                                lp += lt
+                                s, b, t, o = s_prev, bp - shift, t - 1, po
+                                picked = True
+                                break
+                            po -= c
+                        if not picked:
+                            raise IndexError("offset outside terminal-hmm nt prefix")
+                        break
+                    o -= block
+                if not picked:
+                    raise IndexError("offset outside terminal-hmm nt prefix")
+            sym, slp = emit_nt[s].get_in_bucket(b - init_shift[s], o)
+            seq[0] = sym
+            return lp + slp + float(log_w[s])
+
+        def unrank(length: int, s_end: int, pool: CountHistogram | None, b: int, o: int) -> tuple[list[Any], float]:
+            seq: list[Any] = [None] * length
+            eh = emit_t[s_end].hist
+            for be in range(eh.base, eh.base + len(eh.data)):
+                ne = eh.count_at(be)
+                if ne == 0:
+                    continue
+                bp = b - be
+                if length == 1:
+                    mp = 1 if (init_shift[s_end] is not None and bp == init_shift[s_end]) else 0
+                else:
+                    mp = pool.count_at(bp)
+                if mp == 0:
+                    continue
+                block = ne * mp
+                if o < block:
+                    sym, slp = emit_t[s_end].get_in_bucket(be, o // mp)
+                    seq[length - 1] = sym
+                    if length == 1:
+                        return seq, slp + float(log_w[s_end])
+                    po = o % mp
+                    for pred, lt, shift in into[s_end]:
+                        ph = nt[length - 1].get(pred)
+                        if ph is None:
+                            continue
+                        c = ph.count_at(bp - shift)
+                        if c == 0:
+                            continue
+                        if po < c:
+                            return seq, slp + lt + walk_nt(pred, bp - shift, length - 1, po, seq)
+                        po -= c
+                    raise IndexError("offset outside terminal-hmm completion")
+                o -= block
+            raise IndexError("offset outside terminal-hmm fine bucket")
+
+        def getter(fb: int, off: int) -> tuple[Any, float]:
+            o = int(off)
+            for length, s_end, pool, comp in contributing:
+                c = comp.count_at(fb)
+                if o < c:
+                    return unrank(length, s_end, pool, fb, o)
+                o -= c
+            raise IndexError("offset outside terminal-hmm fine bucket %d" % fb)
 
         return CountIndex(total, getter), truncated
 
