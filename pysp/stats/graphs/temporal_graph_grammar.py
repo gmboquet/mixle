@@ -35,10 +35,15 @@ directed triadic-closure profile. **Weighted** edges are just an edge attribute:
 (Poisson volume, Gaussian strength, ...) in the labeled model's ``edge_dist``, so a directed + weighted +
 attributed dynamic graph is a directed structure composed with node/edge emission models.
 
+Nodes also LEAVE: ``ChurningTemporalGraphGrammarDistribution`` tracks stable node identities (each snapshot
+is ``(adjacency, node_ids)``) so a transition can remove nodes -- those whose id disappears, their edges
+vanishing with them -- before running the edit grammar on the surviving subgraph. Node churn is a thin
+wrapper: identity alignment + a node-removal Poisson term on top of all the motif/edge machinery.
+
 This is the temporal counterpart of the static vertex-/hyperedge-replacement grammars in this package.
 Scope: undirected or directed, binary topology (attribute models carry weights/labels); edges add+remove,
-nodes appended; dense or sparse. Node *removal* (needs identity tracking across snapshots) and scalable
-rejection sampling for huge graphs are the natural extensions.
+nodes join+leave; dense or sparse scoring, dense or scalable (rejection) sampling. Sparse-path churn and
+directed scalable sampling are the remaining extensions.
 """
 
 from __future__ import annotations
@@ -327,32 +332,38 @@ class TemporalGraphGrammarSampler(DistributionSampler):
                 big = np.zeros((n + new_nodes, n + new_nodes), dtype=np.float64)
                 big[:n, :n] = adj
                 adj = big
-            # batch, pre-step motif assignment (NO within-step refresh) so the realized motif distribution
-            # matches the weights and equals what the scorer reads off the snapshots. Per motif m the edit
-            # count is Poisson(rate * w_m) -- the multinomial split of a Poisson(rate) total. Additions and
-            # removals both act on the start-of-step graph (disjoint -- non-edges vs edges).
-            cand_mask = ~np.eye(adj.shape[0], dtype=bool) if d.directed else np.triu(np.ones(adj.shape, dtype=bool), 1)
-            add_bins = d.motif.assign(adj, on_edges=False)
-            rem_bins = d.motif.assign(adj, on_edges=True)
-            toggles = []  # (i, j, value) applied after both grammars are sampled, against the pre-step graph
-            for m in range(d.motif.num_motifs):
-                ai, aj = np.where((add_bins == m) & cand_mask)
-                if ai.shape[0]:
-                    ka = min(self.rng.poisson(d.edge_rate * d.motif_weights[m]), ai.shape[0])
-                    for idx in self.rng.choice(ai.shape[0], size=ka, replace=False):
-                        toggles.append((ai[idx], aj[idx], 1.0))
-                ri, rj = np.where((rem_bins == m) & cand_mask)
-                if ri.shape[0] and d.edge_remove_rate > 0.0:
-                    kr = min(self.rng.poisson(d.edge_remove_rate * d.remove_weights[m]), ri.shape[0])
-                    for idx in self.rng.choice(ri.shape[0], size=kr, replace=False):
-                        toggles.append((ri[idx], rj[idx], 0.0))
-            for i, j, v in toggles:
-                if d.directed:
-                    adj[i, j] = v
-                else:
-                    adj[i, j] = adj[j, i] = v
+            self._edge_edit_step(adj)
             snaps.append(adj.copy())
         return snaps
+
+    def _edge_edit_step(self, adj: np.ndarray) -> None:
+        """Apply one step of the ADD + REMOVE edge grammars to ``adj`` in place (dense).
+
+        Batch, pre-step motif assignment (NO within-step refresh) so the realized motif distribution matches
+        the weights and equals what the scorer reads off the snapshots. Per motif m the edit count is
+        Poisson(rate * w_m) -- the multinomial split of a Poisson(rate) total. Additions and removals both
+        act on the start-of-step graph (disjoint -- non-edges vs edges)."""
+        d = self.dist
+        cand_mask = ~np.eye(adj.shape[0], dtype=bool) if d.directed else np.triu(np.ones(adj.shape, dtype=bool), 1)
+        add_bins = d.motif.assign(adj, on_edges=False)
+        rem_bins = d.motif.assign(adj, on_edges=True)
+        toggles = []  # (i, j, value) applied after both grammars are sampled, against the pre-step graph
+        for m in range(d.motif.num_motifs):
+            ai, aj = np.where((add_bins == m) & cand_mask)
+            if ai.shape[0]:
+                ka = min(self.rng.poisson(d.edge_rate * d.motif_weights[m]), ai.shape[0])
+                for idx in self.rng.choice(ai.shape[0], size=ka, replace=False):
+                    toggles.append((ai[idx], aj[idx], 1.0))
+            ri, rj = np.where((rem_bins == m) & cand_mask)
+            if ri.shape[0] and d.edge_remove_rate > 0.0:
+                kr = min(self.rng.poisson(d.edge_remove_rate * d.remove_weights[m]), ri.shape[0])
+                for idx in self.rng.choice(ri.shape[0], size=kr, replace=False):
+                    toggles.append((ri[idx], rj[idx], 0.0))
+        for i, j, v in toggles:
+            if d.directed:
+                adj[i, j] = v
+            else:
+                adj[i, j] = adj[j, i] = v
 
     def sample_one_scalable(
         self,
@@ -799,6 +810,11 @@ __all__ = [
     "HomophilyTemporalGraphGrammarEstimator",
     "HomophilyTemporalGraphGrammarAccumulator",
     "HomophilyTemporalGraphGrammarAccumulatorFactory",
+    "ChurningTemporalGraphGrammarDistribution",
+    "ChurningTemporalGraphGrammarSampler",
+    "ChurningTemporalGraphGrammarEstimator",
+    "ChurningTemporalGraphGrammarAccumulator",
+    "ChurningTemporalGraphGrammarAccumulatorFactory",
 ]
 
 
@@ -1040,4 +1056,212 @@ class HomophilyTemporalGraphGrammarEstimator(ParameterEstimator):
         type_weights = tc / tc.sum() if tc.sum() > 0 else np.ones(self.K) / self.K
         return HomophilyTemporalGraphGrammarDistribution(
             rate, type_weights, nodes / steps if steps > 0 else 0.0, motif=self.motif, name=self.name
+        )
+
+
+# --- node churn: removal + addition with identity tracking -----------------------------------------
+def _align_by_ids(prev_adj: Any, prev_ids: Sequence[int], cur_adj: Any, cur_ids: Sequence[int]) -> tuple:
+    """Align two snapshots by stable node id. Returns (prev_surviving_subgraph, cur_reordered, num_removed).
+
+    Removed nodes = ids in prev but not cur; their incident edges vanish with them (not counted as edge
+    removals). ``cur`` is reordered so the surviving nodes (in prev order) come first and the genuinely-new
+    nodes are appended -- exactly the ``prev' -> cur`` layout the edit grammar expects (shared nodes keep
+    their index, new nodes at the end)."""
+    pid, cid = list(prev_ids), list(cur_ids)
+    cpos = {nid: k for k, nid in enumerate(cid)}
+    pset = set(pid)
+    surv = [k for k, nid in enumerate(pid) if nid in cpos]  # prev positions of survivors, in prev order
+    surv_ids = [pid[k] for k in surv]
+    new = [k for k, nid in enumerate(cid) if nid not in pset]  # cur positions of brand-new nodes
+    num_removed = len(pid) - len(surv)
+    order = [cpos[nid] for nid in surv_ids] + new
+    pa = np.asarray(prev_adj, dtype=np.float64)
+    ca = np.asarray(cur_adj, dtype=np.float64)
+    prev_surv = pa[np.ix_(surv, surv)] if surv else np.zeros((0, 0))
+    cur_reord = ca[np.ix_(order, order)] if order else np.zeros((0, 0))
+    return prev_surv, cur_reord, num_removed
+
+
+class ChurningTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
+    """Dynamic graph where nodes both JOIN and LEAVE, tracked by stable identity.
+
+    Each snapshot is ``(adjacency, node_ids)`` -- ``node_ids[i]`` is the persistent identity of row i. A
+    transition first **removes** nodes (those whose id disappears; count ~ Poisson(node_remove_rate), chosen
+    uniformly, their edges vanishing with them), then runs the wrapped edit grammar on the surviving
+    subgraph (which also appends new nodes + adds/removes edges). So churn is a thin wrapper: identity
+    alignment + a node-removal Poisson term on top of all the existing motif/edge machinery. Dense.
+    """
+
+    def __init__(
+        self,
+        edit_grammar: TemporalGraphGrammarDistribution,
+        node_remove_rate: float = 0.0,
+        name: str | None = None,
+    ) -> None:
+        self.edit_grammar = edit_grammar
+        self.node_remove_rate = float(node_remove_rate)
+        self.name = name
+
+    def __str__(self) -> str:
+        return "ChurningTemporalGraphGrammarDistribution(node_remove_rate=%s, edit=%s)" % (
+            self.node_remove_rate,
+            self.edit_grammar,
+        )
+
+    def _node_removal_log_density(self, n_prev: int, k_removed: int) -> float:
+        if k_removed > n_prev:
+            return float("-inf")
+        lp = k_removed * math.log(self.node_remove_rate + _EPS) - self.node_remove_rate - math.lgamma(k_removed + 1)
+        return lp - math.lgamma(n_prev + 1) + math.lgamma(k_removed + 1) + math.lgamma(n_prev - k_removed + 1)
+
+    def log_density(self, x: Sequence[tuple]) -> float:
+        snaps = list(x)
+        if len(snaps) < 2:
+            return 0.0
+        lp = 0.0
+        for t in range(1, len(snaps)):
+            pa, pid = snaps[t - 1]
+            ca, cid = snaps[t]
+            prev_surv, cur_reord, num_removed = _align_by_ids(pa, pid, ca, cid)
+            lp += self._node_removal_log_density(len(pid), num_removed)
+            if lp == float("-inf"):
+                return lp
+            lp += self.edit_grammar._transition_log_density(prev_surv, cur_reord)
+        return lp
+
+    def seq_encode(self, x: Sequence[Any]) -> Sequence[Any]:
+        return x
+
+    def seq_log_density(self, x: Sequence[Any]) -> np.ndarray:
+        return np.asarray([self.log_density(obs) for obs in x], dtype=np.float64)
+
+    def sampler(self, seed: int | None = None) -> ChurningTemporalGraphGrammarSampler:
+        return ChurningTemporalGraphGrammarSampler(self, seed)
+
+    def estimator(self, pseudo_count: float | None = None) -> ChurningTemporalGraphGrammarEstimator:
+        return ChurningTemporalGraphGrammarEstimator(
+            self.edit_grammar.estimator(pseudo_count=pseudo_count), name=self.name
+        )
+
+    def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class ChurningTemporalGraphGrammarSampler(DistributionSampler):
+    def __init__(self, dist: ChurningTemporalGraphGrammarDistribution, seed: int | None = None) -> None:
+        self.dist = dist
+        self.rng = RandomState(seed)
+        self.edit_sampler = dist.edit_grammar.sampler(self.rng.randint(2**31))
+
+    def sample_one(self, num_steps: int = 10, seed_graph: np.ndarray | None = None, n_init: int = 8) -> list:
+        d = self.dist
+        adj = np.zeros((n_init, n_init)) if seed_graph is None else np.asarray(seed_graph, dtype=np.float64).copy()
+        ids = list(range(adj.shape[0]))
+        next_id = adj.shape[0]
+        snaps = [(adj.copy(), list(ids))]
+        for _ in range(num_steps):
+            # 1) remove nodes (uniformly), dropping their incident edges
+            n = adj.shape[0]
+            k_rem = min(int(self.rng.poisson(d.node_remove_rate)), n)
+            if k_rem:
+                drop = set(self.rng.choice(n, size=k_rem, replace=False).tolist())
+                keep = [i for i in range(n) if i not in drop]
+                adj = adj[np.ix_(keep, keep)] if keep else np.zeros((0, 0))
+                ids = [ids[i] for i in keep]
+            # 2) add new nodes (node_rate), with fresh ids
+            new_nodes = int(self.rng.poisson(d.edit_grammar.node_rate))
+            if new_nodes:
+                m = adj.shape[0]
+                big = np.zeros((m + new_nodes, m + new_nodes))
+                big[:m, :m] = adj
+                adj = big
+                ids += list(range(next_id, next_id + new_nodes))
+                next_id += new_nodes
+            # 3) edge edits via the wrapped grammar (same realized motif distribution as the scorer)
+            if adj.shape[0]:
+                self.edit_sampler._edge_edit_step(adj)
+            snaps.append((adj.copy(), list(ids)))
+        return snaps
+
+    def sample(self, size: int | None = None, **kw: Any) -> Any:
+        if size is None:
+            return self.sample_one(**kw)
+        return [self.sample_one(**kw) for _ in range(size)]
+
+
+class ChurningTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
+    def __init__(self, edit_acc: Any) -> None:
+        self.edit_acc = edit_acc
+        self.removed = 0.0
+        self.steps = 0.0
+
+    def update(self, x: Sequence[tuple], weight: float, estimate: Any | None) -> None:
+        snaps = list(x)
+        edit_est = None if estimate is None else estimate.edit_grammar
+        for t in range(1, len(snaps)):
+            pa, pid = snaps[t - 1]
+            ca, cid = snaps[t]
+            prev_surv, cur_reord, num_removed = _align_by_ids(pa, pid, ca, cid)
+            self.removed += weight * num_removed
+            self.steps += weight
+            self.edit_acc.update([prev_surv, cur_reord], weight, edit_est)  # one transition's edge/node stats
+
+    def seq_update(self, x: Sequence[Any], weights: np.ndarray, estimate: Any | None) -> None:
+        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
+            self.update(obs, float(w), estimate)
+
+    def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        self.update(x, weight, None)
+
+    def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState | None) -> None:
+        self.seq_update(x, weights, None)
+
+    def combine(self, suff_stat: tuple) -> ChurningTemporalGraphGrammarAccumulator:
+        e, r, s = suff_stat
+        self.edit_acc.combine(e)
+        self.removed += r
+        self.steps += s
+        return self
+
+    def value(self) -> tuple:
+        return self.edit_acc.value(), self.removed, self.steps
+
+    def from_value(self, x: tuple) -> ChurningTemporalGraphGrammarAccumulator:
+        self.edit_acc.from_value(x[0])
+        self.removed, self.steps = float(x[1]), float(x[2])
+        return self
+
+    def key_merge(self, stats_dict: dict) -> None:
+        pass
+
+    def key_replace(self, stats_dict: dict) -> None:
+        pass
+
+    def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class ChurningTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(self, edit_factory: Any) -> None:
+        self.edit_factory = edit_factory
+
+    def make(self) -> ChurningTemporalGraphGrammarAccumulator:
+        return ChurningTemporalGraphGrammarAccumulator(self.edit_factory.make())
+
+
+class ChurningTemporalGraphGrammarEstimator(ParameterEstimator):
+    def __init__(self, edit_estimator: Any, name: str | None = None) -> None:
+        self.edit_estimator = edit_estimator
+        self.name = name
+        self.keys = None
+
+    def accumulator_factory(self) -> ChurningTemporalGraphGrammarAccumulatorFactory:
+        return ChurningTemporalGraphGrammarAccumulatorFactory(self.edit_estimator.accumulator_factory())
+
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> ChurningTemporalGraphGrammarDistribution:
+        edit_val, removed, steps = suff_stat
+        return ChurningTemporalGraphGrammarDistribution(
+            self.edit_estimator.estimate(nobs, edit_val),
+            node_remove_rate=removed / steps if steps > 0 else 0.0,
+            name=self.name,
         )
