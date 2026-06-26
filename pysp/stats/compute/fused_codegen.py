@@ -277,12 +277,52 @@ def _leaf_io(plan: FusedPlan) -> tuple[list[str], list[str], list[str], list[str
     return data_args, param_args, precompute, row_terms
 
 
+import hashlib  # noqa: E402
+import importlib.util  # noqa: E402
+import os  # noqa: E402
+import sys  # noqa: E402
+import tempfile  # noqa: E402
+import threading  # noqa: E402
+
+_CACHE_DIR = os.environ.get("PYSP_FUSED_CACHE_DIR") or os.path.join(tempfile.gettempdir(), "pysp_fused_cache")
+_NJIT_LOCK = threading.Lock()
+
+
 def _njit(src: str, fname: str) -> Callable:
+    """Compile generated source to a disk-cached ``njit`` function.
+
+    The source (``def _fused.../_estep...``) is written to a stable per-source module file and decorated
+    with ``numba.njit(cache=True)`` so numba persists the compiled kernel to disk: a fresh process that
+    fuses the same structure reuses it instead of paying the ~1-2s compile again (the matmul E-step kernel
+    is the costly one). ``exec``'d ``<string>`` source cannot do this -- numba's cache needs a file locator
+    -- so without the file the compile is paid every process. The module name is the source digest, so the
+    same structure maps to the same file (and cache) and different structures never collide. Any
+    filesystem/import problem falls back to an in-memory ``exec`` (no disk cache, identical result)."""
     import numba
 
-    ns: dict[str, Any] = {"np": np}
-    exec(src, ns)  # noqa: S102 -- source is generated from fixed templates, no user input
-    return numba.njit(fastmath=True)(ns[fname])
+    digest = hashlib.sha1(src.encode()).hexdigest()[:16]  # noqa: S324 -- cache key, not security
+    modname = f"_pysp_fused_{digest}"
+    with _NJIT_LOCK:
+        if modname in sys.modules:
+            return getattr(sys.modules[modname], fname)
+        try:
+            os.makedirs(_CACHE_DIR, exist_ok=True)
+            path = os.path.join(_CACHE_DIR, modname + ".py")
+            if not os.path.exists(path):
+                module_src = f"import numpy as np\nimport numba\n\n\n@numba.njit(fastmath=True, cache=True)\n{src}\n"
+                tmp = f"{path}.{os.getpid()}.tmp"
+                with open(tmp, "w") as fh:
+                    fh.write(module_src)
+                os.replace(tmp, path)  # atomic publish -> concurrent processes never read a partial file
+            spec = importlib.util.spec_from_file_location(modname, path)
+            mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+            sys.modules[modname] = mod
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+            return getattr(mod, fname)
+        except Exception:
+            ns: dict[str, Any] = {"np": np}
+            exec(src, ns)  # noqa: S102 -- generated from fixed templates, no user input
+            return numba.njit(fastmath=True)(ns[fname])
 
 
 def _compile(plan: FusedPlan) -> Callable:
