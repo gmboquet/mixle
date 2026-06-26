@@ -67,6 +67,9 @@ class LeafTemplate:
     mat_precompute: Callable[[int, dict[str, str]], list[str]] | None = None  # -> fill q{i} (K,N)
     mat_row: Callable[[int, dict[str, str]], str] | None = None  # -> per-(i,k) scoring expr
     mat_accumulate: Callable[[int], list[str]] | None = None  # -> fill S1_{i} (K,D), S2_{i} (K,D,D) via BLAS
+    # vector hooks (2-D data, inline per-dim loop, (K,D) accumulators; emit source lines)
+    vec_row: Callable[[int, dict[str, str]], list[str]] | None = None  # -> add the leaf score to `acc`
+    vec_accumulate: Callable[[int, dict[str, str]], list[str]] | None = None  # -> per-dim weighted-stat update
     dtype: str = "float64"
 
 
@@ -193,6 +196,68 @@ register_leaf_template(
         acc_names=("sx", "slogx"),
         acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}; {a['slogx']}[k] += {r} * {v[1]}",
         to_value=lambda s, count: (count, s[0], s[1]),  # (sum_w, sum_wx, sum_w_logx)
+    )
+)
+
+
+def _loggaussian_params(comps: list[Any]) -> dict[str, np.ndarray]:
+    mu = np.array([c.mu for c in comps], dtype=np.float64)
+    s2 = np.array([c.sigma2 for c in comps], dtype=np.float64)
+    return {"mu": mu, "inv2s2": 0.5 / s2, "lognorm": -0.5 * np.log(2.0 * np.pi * s2)}
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="loggaussian",
+        matches=lambda d: type(d).__name__ == "LogGaussianDistribution",
+        data=lambda enc: (_arr(enc),),  # the encoder already supplies log x; score = Gaussian(log x) - log x (Jacobian)
+        params=_loggaussian_params,
+        expr=lambda v, p: (
+            f"{p['lognorm']}[k] - {v[0]} - ({v[0]} - {p['mu']}[k]) * ({v[0]} - {p['mu']}[k]) * {p['inv2s2']}[k]"
+        ),
+        acc_names=("sx", "sx2"),
+        acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}; {a['sx2']}[k] += {r} * {v[0]} * {v[0]}",
+        to_value=lambda s, count: (s[0], s[1], count, count),  # (sum_w_logx, sum_w_logx2, sum_w, sum_w)
+    )
+)
+
+
+# --- vector leaves (2-D data, per-dim inline loop, (K,D) accumulators -- no matmul) ----------------
+def _diaggaussian_params(comps: list[Any]) -> dict[str, np.ndarray]:
+    mu = np.ascontiguousarray(np.stack([np.asarray(c.mu, dtype=np.float64) for c in comps]))
+    s2 = np.ascontiguousarray(np.stack([np.asarray(c.covar, dtype=np.float64) for c in comps]))  # diagonal variances
+    lognorm = -0.5 * np.sum(np.log(2.0 * np.pi * s2), axis=1)  # (K,)
+    return {"mu": mu, "inv2s2": 0.5 / s2, "lognorm": lognorm}
+
+
+def _diag_row(i: int, p: dict[str, str]) -> list[str]:
+    return [
+        f"acc += {p['lognorm']}[k]",
+        f"for d in range(x{i}_0.shape[1]):",
+        f"    diff{i} = x{i}_0[i, d] - {p['mu']}[k, d]",
+        f"    acc -= diff{i} * diff{i} * {p['inv2s2']}[k, d]",
+    ]
+
+
+def _diag_accumulate(i: int, a: dict[str, str]) -> list[str]:
+    return [
+        f"for d in range(x{i}_0.shape[1]):",
+        f"    {a['s1']}[k, d] += r * x{i}_0[i, d]",
+        f"    {a['s2']}[k, d] += r * x{i}_0[i, d] * x{i}_0[i, d]",
+    ]
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="diaggaussian",
+        matches=lambda d: type(d).__name__ == "DiagonalGaussianDistribution",
+        data=lambda enc: (_arr(enc),),
+        params=_diaggaussian_params,
+        kind="vector",
+        vec_row=_diag_row,
+        acc_names=("s1", "s2"),
+        vec_accumulate=_diag_accumulate,
+        to_value=lambda s, count: (s[0], s[1], count),  # (sum_wx (D,), sum_wxx (D,), sum_w)
     )
 )
 
@@ -325,6 +390,8 @@ def _dummy(t: LeafTemplate) -> Any:
         "bernoulli": stats.BernoulliDistribution(0.5),
         "poisson": stats.PoissonDistribution(1.0),
         "gamma": stats.GammaDistribution(1.0, 1.0),
+        "loggaussian": stats.LogGaussianDistribution(0.0, 1.0),
+        "diaggaussian": stats.DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0]),
         "mvgaussian": stats.MultivariateGaussianDistribution([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]]),
     }[t.name]
 
@@ -342,27 +409,39 @@ _COMPILED: dict[tuple, Callable] = {}
 _ESTEP_COMPILED: dict[tuple, Callable] = {}
 
 
-def _leaf_io(plan: FusedPlan) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Per-leaf code fragments shared by the scorer and the E-step.
+def _emit(plan: FusedPlan) -> dict[str, list[str]]:
+    """Per-leaf source fragments shared by the scorer and the E-step.
 
-    Returns (data_args, param_args, precompute_lines, row_terms). ``precompute_lines`` and the matrix
-    ``row_terms`` are empty for a pure-scalar plan, so its generated source is unchanged.
+    Each leaf contributes (by ``kind``): ``data``/``param`` argument names; ``precompute`` (matrix-only,
+    BLAS quad form before the row loop); ``row`` lines that add the leaf's score to ``acc`` inside the
+    component loop (scalar = one ``acc +=`` expr, vector = an inline per-dim loop, matrix = a precomputed
+    reference); E-step ``acc_args`` + ``acc`` lines (scalar/vector inline in the responsibility loop);
+    and matrix-only ``post`` lines (BLAS Gram accumulation after the row loop). Pure-scalar plans produce
+    empty ``precompute``/``post``, so their generated source is unchanged.
     """
-    data_args: list[str] = []
-    param_args: list[str] = []
-    precompute: list[str] = []
-    row_terms: list[str] = []
+    frag: dict[str, list[str]] = {
+        k: [] for k in ("data_args", "param_args", "precompute", "row", "acc_args", "acc", "post")
+    }
     for i, t in enumerate(plan.leaf_templates):
-        data_args.extend(_data_names(i, t))
+        frag["data_args"].extend(_data_names(i, t))
         amap = _argmap(i, t)
-        param_args.extend(amap.values())
+        frag["param_args"].extend(amap.values())
         if t.kind == "matrix":
-            precompute.extend(t.mat_precompute(i, amap))  # type: ignore[misc]
-            row_terms.append("acc += " + t.mat_row(i, amap))  # type: ignore[misc]
+            frag["precompute"].extend(t.mat_precompute(i, amap))  # type: ignore[misc]
+            frag["row"].append("acc += " + t.mat_row(i, amap))  # type: ignore[misc]
+            frag["acc_args"] += [f"S1_{i}", f"S2_{i}"]
+            frag["post"].extend(t.mat_accumulate(i))  # type: ignore[misc]
+            continue
+        accmap = {an: f"a{i}_{an}" for an in t.acc_names}
+        frag["acc_args"].extend(accmap.values())
+        if t.kind == "vector":
+            frag["row"].extend(t.vec_row(i, amap))  # type: ignore[misc]
+            frag["acc"].extend(t.vec_accumulate(i, accmap))  # type: ignore[misc]
         else:
             vals = [f"{nm}[i]" for nm in _data_names(i, t)]
-            row_terms.append("acc += " + t.expr(vals, amap))  # type: ignore[misc]
-    return data_args, param_args, precompute, row_terms
+            frag["row"].append("acc += " + t.expr(vals, amap))  # type: ignore[misc]
+            frag["acc"].append(t.acc_stmt(vals, accmap, "r"))  # type: ignore[misc]
+    return frag
 
 
 import hashlib  # noqa: E402
@@ -417,12 +496,13 @@ def _compile(plan: FusedPlan) -> Callable:
     cached = _COMPILED.get(plan.signature)
     if cached is not None:
         return cached
-    data_args, param_args, precompute, row_terms = _leaf_io(plan)
-    args = ", ".join(data_args + param_args + ["logw", "out", "llbuf"])
+    f = _emit(plan)
+    data_args = f["data_args"]
+    args = ", ".join(data_args + f["param_args"] + ["logw", "out", "llbuf"])
     lines = [f"def _fused({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
-    lines += ["    " + ln for ln in precompute]
+    lines += ["    " + ln for ln in f["precompute"]]
     lines += ["    for i in range(n):", "        for k in range(kc):", "            acc = logw[k]"]
-    lines += ["            " + rt for rt in row_terms]
+    lines += ["            " + rt for rt in f["row"]]
     lines += [
         "            llbuf[k] = acc",
         "        m = llbuf[0]",
@@ -443,31 +523,22 @@ def _compile_estep(plan: FusedPlan) -> Callable:
     cached = _ESTEP_COMPILED.get(plan.signature)
     if cached is not None:
         return cached
-    data_args, param_args, precompute, row_terms = _leaf_io(plan)
-    scalar_acc: list[str] = []
-    matrix_acc: list[str] = []
-    acc_args: list[str] = []
-    for i, t in enumerate(plan.leaf_templates):
-        if t.kind == "matrix":
-            acc_args += [f"S1_{i}", f"S2_{i}"]
-            matrix_acc += t.mat_accumulate(i)  # type: ignore[misc]
-        else:
-            amap = {an: f"a{i}_{an}" for an in t.acc_names}
-            acc_args.extend(amap.values())
-            vals = [f"{nm}[i]" for nm in _data_names(i, t)]
-            scalar_acc.append(t.acc_stmt(vals, amap, "r"))  # type: ignore[misc]
-    args = ", ".join(data_args + param_args + ["weights", "logw", "comp_counts", *acc_args, "llbuf", "out_ll"])
+    f = _emit(plan)
+    data_args = f["data_args"]
+    args = ", ".join(
+        data_args + f["param_args"] + ["weights", "logw", "comp_counts", *f["acc_args"], "llbuf", "out_ll"]
+    )
     lines = [f"def _estep({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
     if plan.has_matrix:
         lines.append("    R = np.empty((n, kc))")  # responsibilities -- only matrix accumulation needs them
-    lines += ["    " + ln for ln in precompute]
+    lines += ["    " + ln for ln in f["precompute"]]
     lines += [
         "    for i in range(n):",
         "        wi = weights[i]",
         "        for k in range(kc):",
         "            acc = logw[k]",
     ]
-    lines += ["            " + rt for rt in row_terms]
+    lines += ["            " + rt for rt in f["row"]]
     lines += [
         "            llbuf[k] = acc",
         "        m = llbuf[0]",
@@ -482,10 +553,10 @@ def _compile_estep(plan: FusedPlan) -> Callable:
         "            r = np.exp(llbuf[k] - m) / s * wi",
         "            comp_counts[k] += r",
     ]
-    lines += ["            " + st for st in scalar_acc]
+    lines += ["            " + st for st in f["acc"]]
     if plan.has_matrix:
         lines.append("            R[i, k] = r")
-    lines += ["    " + ln for ln in matrix_acc]
+    lines += ["    " + ln for ln in f["post"]]
     fn = _njit("\n".join(lines), "_estep")
     _ESTEP_COMPILED[plan.signature] = fn
     return fn
@@ -534,9 +605,8 @@ def fusible_estep(model: Any) -> bool:
     plan = analyze(model)
     if plan is None:
         return False
-    return all(
-        (t.acc_stmt is not None) if t.kind == "scalar" else (t.mat_accumulate is not None) for t in plan.leaf_templates
-    )
+    hook = {"scalar": lambda t: t.acc_stmt, "vector": lambda t: t.vec_accumulate, "matrix": lambda t: t.mat_accumulate}
+    return all(hook[t.kind](t) is not None for t in plan.leaf_templates)
 
 
 def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool = False) -> Any:
@@ -569,6 +639,12 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool 
             matrix_acc.append((s1, s2))
             scalar_acc.append({})
             acc_arrays += [s1, s2]
+        elif t.kind == "vector":
+            d = data_arrays[offset].shape[1]  # (K,D) per-dim weighted statistics
+            ad = {an: np.zeros((K, d), dtype=np.float64) for an in t.acc_names}
+            scalar_acc.append(ad)
+            matrix_acc.append((np.empty(0), np.empty(0)))
+            acc_arrays.extend(ad.values())
         else:
             ad = {an: np.zeros(K, dtype=np.float64) for an in t.acc_names}
             scalar_acc.append(ad)
@@ -581,7 +657,14 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool 
     llbuf = np.empty(K, dtype=np.float64)
     out_ll = np.zeros(1, dtype=np.float64)
     _compile_estep(plan)(
-        *data_arrays, *param_arrays, np.asarray(weights, dtype=np.float64), logw, comp_counts, *acc_arrays, llbuf, out_ll
+        *data_arrays,
+        *param_arrays,
+        np.asarray(weights, dtype=np.float64),
+        logw,
+        comp_counts,
+        *acc_arrays,
+        llbuf,
+        out_ll,
     )
 
     def leaf_value(i: int, t: LeafTemplate, k: int) -> Any:
