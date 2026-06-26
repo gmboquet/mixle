@@ -480,6 +480,71 @@ class InfiniteSupportMassDominanceTestCase(unittest.TestCase):
                 self.assertIn(x, seen, "mixture missing %d" % x)
 
 
+class HmmTerminalValuesEnumerationTestCase(unittest.TestCase):
+    """Enumeration of the terminal-VALUE stopping-time support (sequences ending at the first
+    terminal emission), scored by the plain forward likelihood."""
+
+    def _dist(self):
+        return HiddenMarkovModelDistribution(
+            [
+                CategoricalDistribution({"a": 0.5, "b": 0.3, ".": 0.2}),
+                CategoricalDistribution({"a": 0.2, "b": 0.3, ".": 0.5}),
+            ],
+            w=[0.6, 0.4],
+            transitions=[[0.7, 0.3], [0.4, 0.6]],
+            terminal_values={"."},
+        )
+
+    def _brute(self, d, max_len=10):
+        out = []
+        for length in range(1, max_len + 1):
+            for pre in itertools.product(["a", "b"], repeat=length - 1):
+                seq = list(pre) + ["."]
+                out.append((seq, d.log_density(seq)))
+        out.sort(key=lambda kv: -kv[1])
+        return out
+
+    def test_top_k_matches_brute_force(self):
+        d = self._dist()
+        top = d.enumerator().top_k(30)
+        brute = self._brute(d)[:30]
+        for (seq, lp), (bseq, blp) in zip(top, brute):
+            self.assertEqual(seq, bseq)
+            self.assertAlmostEqual(lp, blp, places=10)
+
+    def test_scores_equal_log_density(self):
+        d = self._dist()
+        for seq, lp in d.enumerator().top_k(30):
+            self.assertEqual(seq[-1], ".")  # ends at the terminal value
+            self.assertNotIn(".", seq[:-1])  # no interior terminal value
+            self.assertAlmostEqual(lp, d.log_density(seq), places=10)
+
+    def test_descending_order_and_mass_to_one(self):
+        d = self._dist()
+        items = d.enumerator().top_k(500)
+        lps = [lp for _, lp in items]
+        self.assertTrue(all(lps[i] >= lps[i + 1] - 1e-12 for i in range(len(lps) - 1)))
+        self.assertAlmostEqual(sum(math.exp(lp) for lp in lps), 1.0, delta=0.05)
+
+    def test_seek_and_from_index(self):
+        d = self._dist()
+        full = d.enumerator().top_k(20)
+        self.assertEqual([s for s, _ in d.enumerator().from_index(5, 10)], [s for s, _ in full[5:10]])
+        for k in (0, 3, 7):
+            self.assertEqual(d.enumerator().seek(k).value, full[k][0])
+
+    def test_terminal_values_with_length_dist_raises(self):
+        # terminal_values + a non-Null length distribution is ambiguous and is rejected.
+        with self.assertRaises(EnumerationError):
+            HiddenMarkovModelDistribution(
+                [CategoricalDistribution({"a": 0.5, ".": 0.5})],
+                w=[1.0],
+                transitions=[[1.0]],
+                len_dist=GeometricDistribution(0.5),
+                terminal_values={"."},
+            ).enumerator()
+
+
 class EnumerationErrorTestCase(unittest.TestCase):
     def test_continuous_raises(self):
         with self.assertRaises(EnumerationError):
@@ -524,15 +589,8 @@ class EnumerationErrorTestCase(unittest.TestCase):
         with self.assertRaises(EnumerationError):
             OptionalDistribution(CategoricalDistribution({"a": 1.0})).enumerator()
 
-    def test_hmm_terminal_values_raises(self):
-        with self.assertRaises(EnumerationError):
-            HiddenMarkovModelDistribution(
-                topics=[CategoricalDistribution({"a": 1.0})],
-                w=[1.0],
-                transitions=[[1.0]],
-                len_dist=GeometricDistribution(0.5),
-                terminal_values={"a"},
-            ).enumerator()
+    # terminal_values enumeration (with a Null length distribution) is supported; see
+    # HmmTerminalValuesEnumerationTestCase. The non-Null-length case is rejected there too.
 
     def test_markov_chain_default_value_raises(self):
         with self.assertRaises(EnumerationError):
