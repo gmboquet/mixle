@@ -291,6 +291,12 @@ class LeafFamilyTest(unittest.TestCase):
                 ang,
             ),
             ([stats.LogSeriesDistribution(0.4), stats.LogSeriesDistribution(0.7)], stats.LogSeriesEstimator, ge),
+            # Pareto: scale xm is the global min over x (a map-reducible reduction); all data >= xm
+            (
+                [stats.ParetoDistribution(0.5, 2.0), stats.ParetoDistribution(0.5, 4.0)],
+                stats.ParetoEstimator,
+                [0.5 + abs(x) + 0.05 for x in rng.randn(1500)],
+            ),
         ]
         for comps, est_cls, data in cases:
             model = self._mix(comps)
