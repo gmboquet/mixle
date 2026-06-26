@@ -265,27 +265,41 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
             lp += log_w[mtf] - math.log(cand[mtf])
         return lp
 
+    def transition_components(self, prev: Any, cur: Any) -> tuple:
+        """The PARAMETER-INDEPENDENT decomposition of a transition: ``(new_nodes, add_bins, add_cand,
+        rem_bins, rem_cand, valid)``. Depends only on the graph pair and the motif, NOT on the grammar's
+        weights/rates -- so K regimes sharing a motif can compute the (expensive A@A) decomposition ONCE and
+        score it K times via :meth:`score_components`. ``valid`` is False for an impossible node removal."""
+        n0, n1 = prev.shape[0], cur.shape[0]
+        if n1 < n0:  # fewer nodes -> a node was removed, which the bare grammar does not model
+            return 0, None, None, None, None, False
+        new_nodes = n1 - n0
+        ai, aj, ri, rj = _edge_diff(prev, cur, self.directed)
+        add_cand, add_lookup = self.motif.counts_and_binner(_pad(prev, n1), on_edges=False)
+        rem_cand, rem_lookup = self.motif.counts_and_binner(prev, on_edges=True)
+        add_bins = add_lookup(np.asarray(ai), np.asarray(aj))
+        rem_bins = rem_lookup(np.asarray(ri), np.asarray(rj))
+        return new_nodes, add_bins, add_cand, rem_bins, rem_cand, True
+
+    def score_components(self, components: tuple) -> float:
+        """Score a precomputed :meth:`transition_components` decomposition under THIS grammar's parameters."""
+        new_nodes, add_bins, add_cand, rem_bins, rem_cand, valid = components
+        if not valid:
+            return float("-inf")
+        if len(rem_bins) and self.edge_remove_rate <= 0.0:  # a deletion under a no-removal (growth) grammar
+            return float("-inf")
+        lp = new_nodes * math.log(self.node_rate + _EPS) - self.node_rate - math.lgamma(new_nodes + 1)
+        lp += self._edit_log_density(add_bins, self.log_w, self.edge_rate, add_cand)
+        if lp == float("-inf"):
+            return lp
+        lp += self._edit_log_density(rem_bins, self.log_rw, self.edge_remove_rate, rem_cand)
+        return lp
+
     def _transition_log_density(self, prev: Any, cur: Any) -> float:
         """log p(G_t | G_{t-1}): node-growth + an ADD grammar over new edges + a REMOVE grammar over deleted
         edges, each a per-motif Poisson scored against the PREVIOUS graph's structure (so order within a
         step is irrelevant). Works on dense OR sparse adjacencies. Node removal is not modelled -> -inf."""
-        n0, n1 = prev.shape[0], cur.shape[0]
-        if n1 < n0:  # node removal not modelled
-            return float("-inf")
-        new_nodes = n1 - n0
-        ai, aj, ri, rj = _edge_diff(prev, cur, self.directed)
-        if len(ri) and self.edge_remove_rate <= 0.0:  # a deletion under a no-removal (growth) grammar
-            return float("-inf")
-        add_cand, add_lookup = self.motif.counts_and_binner(_pad(prev, n1), on_edges=False)
-        lp = new_nodes * math.log(self.node_rate + _EPS) - self.node_rate - math.lgamma(new_nodes + 1)
-        lp += self._edit_log_density(add_lookup(np.asarray(ai), np.asarray(aj)), self.log_w, self.edge_rate, add_cand)
-        if lp == float("-inf"):
-            return lp
-        rem_cand, rem_lookup = self.motif.counts_and_binner(prev, on_edges=True)
-        lp += self._edit_log_density(
-            rem_lookup(np.asarray(ri), np.asarray(rj)), self.log_rw, self.edge_remove_rate, rem_cand
-        )
-        return lp
+        return self.score_components(self.transition_components(prev, cur))
 
     def log_density(self, x: Sequence[np.ndarray]) -> float:
         """Log-density of one dynamic graph: the sum of transition log-densities over the snapshot chain.
@@ -1347,14 +1361,26 @@ class LatentTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistrib
             np.array2string(self.transition_matrix, precision=2),
         )
 
+    def _shared_motif(self) -> bool:
+        m0 = self.states[0].motif
+        return all((s.motif.bins == m0.bins and s.motif.directed == m0.directed) for s in self.states)
+
     def _emission_logb(self, snaps: Sequence[Any]) -> np.ndarray:
-        """(T, K) per-transition, per-regime log-densities (T = number of transitions)."""
+        """(T, K) per-transition, per-regime log-densities (T = number of transitions).
+
+        When the regimes share a motif (the common case) the expensive A@A decomposition of each transition
+        is computed ONCE and scored across all K regimes -- O(T) heavy work instead of O(T*K)."""
         t_steps = len(snaps) - 1
         log_b = np.empty((t_steps, self.k))
-        for t in range(t_steps):
-            prev, cur = snaps[t], snaps[t + 1]
-            for k, st in enumerate(self.states):
-                log_b[t, k] = st._transition_log_density(prev, cur)
+        if self._shared_motif():
+            for t in range(t_steps):
+                comp = self.states[0].transition_components(snaps[t], snaps[t + 1])
+                for k, st in enumerate(self.states):
+                    log_b[t, k] = st.score_components(comp)
+        else:
+            for t in range(t_steps):
+                for k, st in enumerate(self.states):
+                    log_b[t, k] = st._transition_log_density(snaps[t], snaps[t + 1])
         return log_b
 
     def log_density(self, x: Sequence[Any]) -> float:
