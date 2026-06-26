@@ -18,6 +18,11 @@ Observation: ``(context_keys, context_values, query_symbol, target)``. ``n_hops 
 responsibility-attention head; ``n_hops = 2`` does transitive (``a->b->c``) lookup. The gate variance
 ``sigma2`` is the attention temperature -- keep it small (the one-hot query/key separation is only ``2``,
 so a large ``sigma2`` blurs the chained prediction).
+
+References: multi-hop content-addressed attention is the End-to-End Memory Network (Sukhbaatar, Szlam,
+Weston & Fergus 2015); the transitive lookup is a bAbI-style reasoning task and the 2-hop copy is the
+induction-head circuit (Olsson et al. 2022). Exact forward-backward over the alignment chain mirrors
+HMM-based word alignment (Vogel & Ney 1996), which -- like here -- keeps the marginal likelihood exact.
 """
 
 from __future__ import annotations

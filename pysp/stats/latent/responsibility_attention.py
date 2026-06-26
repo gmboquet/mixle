@@ -22,6 +22,16 @@ The observation is the triple ``(context, query, target)``; the context is condi
 covariate that defines the positions), so the density is the conditional ``p(query, target | context)``
 that EM maximizes. This is the single-hop leaf; deeper / stackable multi-hop versions compose several
 of these latents (a chain is forward--backward, an HME-style tree is nested responsibilities).
+
+This is not a new idea -- it is the EM-able / generative reading of attention. Closely related prior
+work: latent-alignment EM (Brown et al. 1993, IBM models; Vogel & Ney 1996, HMM word alignment),
+attention-as-kernel-smoothing (Tsai et al. 2019; Ramsauer et al. 2020, modern Hopfield), hierarchical
+mixtures of experts (Jordan & Jacobs 1994), and attention-as-a-latent-variable with variational
+inference (Deng, Kim, Chiu, Guo & Rush 2018, "Latent Alignment and Variational Attention"). The
+contribution here is packaging it as a *composable, EM-fit* ``pysp`` Distribution primitive -- which is
+exactly the "compose attention with probabilistic models / do posterior inference" gap Deng et al.
+identify -- and the empirical confirmation that *exact* marginalization (our closed-form E-step) is the
+right call, matching their finding that exact latent models beat soft attention.
 """
 
 from __future__ import annotations
