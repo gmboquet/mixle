@@ -242,6 +242,51 @@ class LeafFamilyTest(unittest.TestCase):
         data = [float(abs(x)) + 0.1 for x in self.rng.gamma(3, 2, 1500)]
         self.assertTrue(FusedEStepTest._matches(self, model, est, data))
 
+    def test_loggaussian(self):
+        model = self._mix([stats.LogGaussianDistribution(0.0, 1.0), stats.LogGaussianDistribution(1.0, 0.5)])
+        est = stats.MixtureEstimator([stats.LogGaussianEstimator(), stats.LogGaussianEstimator()])
+        data = [float(abs(x)) + 0.1 for x in self.rng.lognormal(0, 1, 1500)]
+        self.assertTrue(_ll_close(model, data))
+        self.assertTrue(FusedEStepTest._matches(self, model, est, data))
+
+    def test_diagonal_gaussian_gmm(self):
+        # the vector-leaf path: 2-D data, inline per-dim loop, (K,D) accumulators -- the workhorse GMM
+        D, K = 6, 4
+        rng = np.random.RandomState(3)
+        model = self._mix(
+            [
+                stats.DiagonalGaussianDistribution((rng.randn(D)).tolist(), (np.abs(rng.randn(D)) + 0.5).tolist())
+                for _ in range(K)
+            ]
+        )
+        est = stats.MixtureEstimator([stats.DiagonalGaussianEstimator(dim=D) for _ in range(K)])
+        data = [(rng.randn(D) + rng.randint(K)).tolist() for _ in range(2000)]
+        self.assertTrue(fusible(model))
+        self.assertTrue(_ll_close(model, data))
+        self.assertTrue(FusedEStepTest._matches(self, model, est, data))
+
+    def test_composite_scalar_and_vector_leaves(self):
+        D = 3
+        rng = np.random.RandomState(4)
+
+        def comp(k):
+            return stats.CompositeDistribution(
+                (
+                    stats.GaussianDistribution(float(k), 1.0),
+                    stats.DiagonalGaussianDistribution([float(k)] * D, [1.0] * D),
+                )
+            )
+
+        model = self._mix([comp(0), comp(1), comp(2)])
+        est = stats.MixtureEstimator(
+            [
+                stats.CompositeEstimator((stats.GaussianEstimator(), stats.DiagonalGaussianEstimator(dim=D)))
+                for _ in range(3)
+            ]
+        )
+        data = [(float(rng.randn()), (rng.randn(D)).tolist()) for _ in range(1500)]
+        self.assertTrue(FusedEStepTest._matches(self, model, est, data))
+
     def test_heterogeneous_composite_scalar_multiarray_and_matrix(self):
         # one fused kernel mixing a scalar leaf, two arity-2 leaves, and a BLAS matrix leaf
         D = 3
