@@ -12,6 +12,13 @@ form -- the softmax partition supplies the repulsion that prevents collapse, and
 Because tying makes identity matching trivial, the ``N(0,I)`` prior would otherwise collapse the unused
 embeddings; the estimator **anneals** the prior weight from ~0 upward over EM iterations so the data
 spreads the embeddings first. Observation: ``(context_keys, context_values, query_symbol, target)``.
+
+References: multi-hop attention = Memory Networks (Sukhbaatar et al. 2015); attention as a variational
+latent variable = Deng et al. 2018. The annealing is the practical face of Deterministic Annealing EM
+(Ueda & Nakano 1998) -- tempering the objective to escape the bad (collapsed) fixed point and reach an
+initialization-independent solution. (We checked: principled DAEM tempering does not improve the
+*closed-form* chained head, which is already at its initialization-independent global optimum; the
+annealing is only load-bearing here, where the latent-embedding prior creates the collapse basin.)
 """
 
 from __future__ import annotations

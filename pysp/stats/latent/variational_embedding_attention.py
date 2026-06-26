@@ -26,6 +26,11 @@ lookup/one-hot query cannot. Honest caveats: the objective is an ELBO (a bound, 
 not the exact likelihood); the embedding posterior is a *global* latent fit by an inner gradient step,
 so this estimator is single-process for the embedding update (the discrete-attention / emission /
 prior parts remain ordinary additive EM).
+
+References: variational attention as a latent variable (Deng, Kim, Chiu, Guo & Rush 2018); latent
+coordinates / embeddings via variational inference (Titsias & Lawrence 2010, Bayesian GP-LVM, which
+likewise makes nonlinearly-appearing latents tractable variationally). The reparameterized-ELBO E-step
+follows their recommendation of low-variance variational gradients over REINFORCE-style hard attention.
 """
 
 from __future__ import annotations
