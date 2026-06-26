@@ -779,7 +779,11 @@ def analyze(model: Any) -> FusedPlan | None:
 
 
 def fusible(model: Any) -> bool:
-    return analyze(model) is not None
+    if analyze(model) is not None:
+        return True
+    from pysp.stats.compute.fused_nested import fusible_nested  # nested scalar trees (Mixture-of-Mixture, ...)
+
+    return fusible_nested(model)
 
 
 def _dummy(t: LeafTemplate) -> Any:
@@ -1043,7 +1047,9 @@ def fused_seq_log_density(model: Any, enc: Any) -> np.ndarray:
     """
     plan = analyze(model)
     if plan is None:
-        raise ValueError("%s is not a fusible composite/mixture." % type(model).__name__)
+        from pysp.stats.compute.fused_nested import fused_nested_seq_log_density
+
+        return fused_nested_seq_log_density(model, enc)  # nested scalar tree (raises if not that either)
     data_arrays, param_arrays, _ = _data_and_params(model, plan, enc)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
     out = np.empty(data_arrays[0].shape[0], dtype=np.float64)
@@ -1056,7 +1062,9 @@ def fused_seq_log_density(model: Any, enc: Any) -> np.ndarray:
 def fusible_estep(model: Any) -> bool:
     plan = analyze(model)
     if plan is None:
-        return False
+        from pysp.stats.compute.fused_nested import fusible_nested  # nested scalar trees fit the E-step too
+
+        return fusible_nested(model)
     hook = {
         "scalar": lambda t: t.acc_stmt,
         "vector": lambda t: t.vec_accumulate,
@@ -1078,7 +1086,11 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool 
     fusible.
     """
     plan = analyze(model)
-    if plan is None or not fusible_estep(model):
+    if plan is None:
+        from pysp.stats.compute.fused_nested import fused_nested_accumulate
+
+        return fused_nested_accumulate(model, enc, weights, return_ll=return_ll)  # nested scalar tree
+    if not fusible_estep(model):
         raise ValueError("%s is not a fusible E-step (an unsupported leaf)." % type(model).__name__)
     K = plan.num_components
     data_arrays, param_arrays, tab_ctx = _data_and_params(model, plan, enc)
