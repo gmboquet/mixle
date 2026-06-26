@@ -402,6 +402,13 @@ __all__ = [
     "ProbabilisticPCAEstimator",
     "ProbabilisticPCADataEncoder",
     "MixtureDistribution",
+    # responsibility attention: EM-able mixture-over-positions attention head
+    "ResponsibilityAttentionDistribution",
+    "ResponsibilityAttentionEstimator",
+    "ResponsibilityAttentionSampler",
+    "ResponsibilityAttentionAccumulator",
+    "ResponsibilityAttentionAccumulatorFactory",
+    "ResponsibilityAttentionDataEncoder",
     "Posterior",
     "LatentPosterior",
     "CategoricalLatentPosterior",
@@ -1073,6 +1080,14 @@ from pysp.stats.latent.probabilistic_pca import (
     ProbabilisticPCADistribution,
     ProbabilisticPCAEstimator,
     ProbabilisticPCASampler,
+)
+from pysp.stats.latent.responsibility_attention import (
+    ResponsibilityAttentionAccumulator,
+    ResponsibilityAttentionAccumulatorFactory,
+    ResponsibilityAttentionDataEncoder,
+    ResponsibilityAttentionDistribution,
+    ResponsibilityAttentionEstimator,
+    ResponsibilityAttentionSampler,
 )
 from pysp.stats.latent.segmental_hidden_markov_model import (
     SegmentalHiddenMarkovDataEncoder,
