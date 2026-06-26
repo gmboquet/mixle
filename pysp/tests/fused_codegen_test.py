@@ -260,6 +260,45 @@ class LeafFamilyTest(unittest.TestCase):
         self.assertTrue(_ll_close(model, data))
         self.assertTrue(FusedEStepTest._matches(self, model, est, data))
 
+    def test_continuous_and_directional_families(self):
+        rng = np.random.RandomState(11)
+        pos = [abs(x) + 0.3 for x in rng.randn(1500)]
+        unit = [min(max(x, 0.02), 0.98) for x in rng.rand(1500)]
+        ang = [float(x) for x in rng.uniform(-3.14, 3.14, 1500)]
+        ge = [int(x) + 1 for x in rng.geometric(0.3, 1500)]
+        cases = [
+            ([stats.HalfNormalDistribution(1.0), stats.HalfNormalDistribution(2.0)], stats.HalfNormalEstimator, pos),
+            ([stats.RayleighDistribution(1.0), stats.RayleighDistribution(2.0)], stats.RayleighEstimator, pos),
+            (
+                [stats.InverseGaussianDistribution(1.0, 2.0), stats.InverseGaussianDistribution(2.0, 3.0)],
+                stats.InverseGaussianEstimator,
+                pos,
+            ),
+            (
+                [stats.InverseGammaDistribution(3.0, 2.0), stats.InverseGammaDistribution(2.0, 1.0)],
+                stats.InverseGammaEstimator,
+                pos,
+            ),
+            ([stats.BetaDistribution(2.0, 3.0), stats.BetaDistribution(4.0, 2.0)], stats.BetaEstimator, unit),
+            (
+                [stats.VonMisesDistribution(0.0, 2.0), stats.VonMisesDistribution(1.0, 1.0)],
+                stats.VonMisesEstimator,
+                ang,
+            ),
+            (
+                [stats.WrappedCauchyDistribution(0.0, 0.5), stats.WrappedCauchyDistribution(1.0, 0.3)],
+                stats.WrappedCauchyEstimator,
+                ang,
+            ),
+            ([stats.LogSeriesDistribution(0.4), stats.LogSeriesDistribution(0.7)], stats.LogSeriesEstimator, ge),
+        ]
+        for comps, est_cls, data in cases:
+            model = self._mix(comps)
+            est = stats.MixtureEstimator([est_cls() for _ in comps])
+            name = type(comps[0]).__name__
+            self.assertTrue(_ll_close(model, data), f"{name} score")
+            self.assertTrue(FusedEStepTest._matches(self, model, est, data), f"{name} estep")
+
     def test_loggaussian(self):
         model = self._mix([stats.LogGaussianDistribution(0.0, 1.0), stats.LogGaussianDistribution(1.0, 0.5)])
         est = stats.MixtureEstimator([stats.LogGaussianEstimator(), stats.LogGaussianEstimator()])
