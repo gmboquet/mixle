@@ -25,9 +25,15 @@ loop scores + forms responsibilities (storing them only when a matrix leaf needs
 matrix sufficient statistics are accumulated via BLAS after it. Pure-scalar models never materialize the
 responsibility matrix, so their fast path is byte-for-byte the original one.
 
+A discrete leaf whose value-keyed category counts are the sufficient statistic (Categorical) fuses too --
+the **categorical** kind scores from a precomputed (K, C) log-prob table and accumulates a (K, C) weighted
+count histogram. The general bar for fusion is a *map-reducible* sufficient statistic (a sum/count, a
+min/max, or a histogram -- not necessarily additive): that is what lets Binomial (n from max x) and
+NegativeBinomial (iterative dispersion over the count histogram) fuse despite non-additive/iterative MLEs.
+
 Generated kernels are compiled once and disk-cached (see :func:`_njit`), so the compile cost is paid once
-per structure *ever*, not per process. Anything with a leaf that has no template (e.g. Categorical) ->
-:func:`fusible` is False -> numpy.
+per structure *ever*, not per process. A leaf with no template (e.g. Laplace, whose weighted-median MLE
+keeps the raw observations) -> :func:`fusible` is False -> numpy.
 """
 
 from __future__ import annotations
@@ -82,6 +88,11 @@ class LeafTemplate:
     # global min/max over x (a map-reducible reduction) for a scalar leaf whose value() needs it (Pareto's xm)
     wants_minmax: bool = False
     to_value_g: Callable[[tuple, float, float, float], tuple] | None = None  # (stats, count, min, max) -> value
+    # categorical hooks (data is already a category index; score from a (K,C) log-prob table, accumulate a
+    # (K,C) weighted count histogram -- the only sufficient statistic). Generalizes the tabulated pattern to
+    # value-keyed categories (the table/value depend on the encoding's category list, so they get ``enc``).
+    cat_table: Callable[[list[Any], Any], np.ndarray] | None = None  # (comps, enc) -> (K, C) log-prob table
+    cat_to_value: Callable[[np.ndarray, Any, float], Any] | None = None  # (hist_k, enc, count) -> leaf value
     dtype: str = "float64"
 
 
@@ -589,6 +600,59 @@ register_leaf_template(
 )
 
 
+# --- categorical leaves (data is already a category index; (K,C) log-prob table + count histogram) ------
+def _categorical_table(comps: list[Any], enc: Any) -> np.ndarray:
+    values = enc[1]  # the shared category list the encoder assigned indices over
+    tab = np.empty((len(comps), len(values)), dtype=np.float64)
+    for k, c in enumerate(comps):
+        tab[k] = [float(c.log_density(v)) for v in values]  # -inf where a value is outside this component
+    return tab
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="categorical",
+        matches=lambda d: type(d).__name__ == "CategoricalDistribution",
+        data=lambda enc: (_arr(enc[0]),),  # enc = (index, values); index is already 0..C-1
+        params=lambda comps: {},
+        kind="categorical",
+        acc_names=("hist",),
+        cat_table=_categorical_table,
+        # value() is the weighted count dict {value: weight}
+        cat_to_value=lambda hist_k, enc, count: {
+            enc[1][c]: float(hist_k[c]) for c in range(len(enc[1])) if hist_k[c] != 0.0
+        },
+    )
+)
+
+
+def _int_categorical_table(comps: list[Any], enc: Any) -> np.ndarray:
+    mn = int(np.rint(np.asarray(enc).min())) if np.asarray(enc).size else 0
+    width = int(np.rint(np.asarray(enc).max())) - mn + 1 if np.asarray(enc).size else 1
+    tab = np.empty((len(comps), width), dtype=np.float64)
+    for k, c in enumerate(comps):
+        tab[k] = [float(c.log_density(mn + j)) for j in range(width)]
+    return tab
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="intcategorical",
+        matches=lambda d: type(d).__name__ == "IntegerCategoricalDistribution",
+        data=lambda enc: (_arr(enc) - int(np.rint(np.asarray(enc).min())) if np.asarray(enc).size else _arr(enc),),
+        params=lambda comps: {},
+        kind="categorical",
+        acc_names=("hist",),
+        cat_table=_int_categorical_table,
+        # value() = (min_val, weighted count vector over min_val .. max_val)
+        cat_to_value=lambda hist_k, enc, count: (
+            int(np.rint(np.asarray(enc).min())) if np.asarray(enc).size else 0,
+            hist_k.copy(),
+        ),
+    )
+)
+
+
 # --- structure analysis ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class FusedPlan:
@@ -675,6 +739,8 @@ def _dummy(t: LeafTemplate) -> Any:
         "wrappedcauchy": stats.WrappedCauchyDistribution(0.0, 0.5),
         "logseries": stats.LogSeriesDistribution(0.5),
         "pareto": stats.ParetoDistribution(2.0, 1.0),
+        "categorical": stats.CategoricalDistribution({"a": 0.5, "b": 0.5}),
+        "intcategorical": stats.IntegerCategoricalDistribution(0, [0.5, 0.5]),
         "diaggaussian": stats.DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0]),
         "binomial": stats.BinomialDistribution(0.5, 1),
         "negbinomial": stats.NegativeBinomialDistribution(1.0, 0.5),
@@ -729,6 +795,10 @@ def _emit(plan: FusedPlan) -> dict[str, list[str]]:
             frag["acc"].append(f"{accmap['sx']}[k] += r * x{i}_0[i]")
             if t.tab_hist:
                 frag["acc"].append(f"{accmap['hist']}[k, int(x{i}_0[i])] += r")  # weighted count histogram
+        elif t.kind == "categorical":
+            frag["param_args"].append(f"cat{i}")  # the (K, C) log-prob table, looked up by the category index
+            frag["row"].append(f"acc += cat{i}[k, int(x{i}_0[i])]")
+            frag["acc"].append(f"{accmap['hist']}[k, int(x{i}_0[i])] += r")  # weighted per-category count
         else:
             vals = [f"{nm}[i]" for nm in _data_names(i, t)]
             frag["row"].append("acc += " + t.expr(vals, amap))  # type: ignore[misc]
@@ -892,6 +962,10 @@ def _data_and_params(
         elif t.wants_minmax:
             x = arrs[0]
             tab_ctx[i] = (float(x.min()) if x.size else 0.0, float(x.max()) if x.size else 0.0)
+        elif t.kind == "categorical":
+            table = np.ascontiguousarray(t.cat_table(comps_i, factor_encs[i]))  # type: ignore[misc]
+            param_arrays.append(table)
+            tab_ctx[i] = (factor_encs[i], table.shape[1])  # (encoding for to_value, C for histogram width)
     return data_arrays, param_arrays, tab_ctx
 
 
@@ -921,6 +995,7 @@ def fusible_estep(model: Any) -> bool:
         "vector": lambda t: t.vec_accumulate,
         "matrix": lambda t: t.mat_accumulate,
         "tabulated": lambda t: t.tab_table,
+        "categorical": lambda t: t.cat_table,
     }
     return all(hook[t.kind](t) is not None for t in plan.leaf_templates)
 
@@ -967,6 +1042,12 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool 
             scalar_acc.append(ad)
             matrix_acc.append((np.empty(0), np.empty(0)))
             acc_arrays.extend(ad.values())
+        elif t.kind == "categorical":
+            width = tab_ctx[i][1]  # C categories; the only statistic is the (K, C) weighted count histogram
+            ad = {"hist": np.zeros((K, width), dtype=np.float64)}
+            scalar_acc.append(ad)
+            matrix_acc.append((np.empty(0), np.empty(0)))
+            acc_arrays.append(ad["hist"])
         else:
             ad = {an: np.zeros(K, dtype=np.float64) for an in t.acc_names}
             scalar_acc.append(ad)
@@ -997,6 +1078,9 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool 
             mn, mx = tab_ctx[i]
             hist_k = scalar_acc[i]["hist"][k] if t.tab_hist else None
             return t.tab_to_value(float(scalar_acc[i]["sx"][k]), float(comp_counts[k]), hist_k, mn, mx)  # type: ignore[misc]
+        if t.kind == "categorical":
+            enc_i, _ = tab_ctx[i]
+            return t.cat_to_value(scalar_acc[i]["hist"][k], enc_i, float(comp_counts[k]))  # type: ignore[misc]
         stats_k = tuple(scalar_acc[i][an][k] for an in t.acc_names)
         if t.wants_minmax:
             mn, mx = tab_ctx[i]
