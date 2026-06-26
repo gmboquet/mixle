@@ -465,5 +465,45 @@ class GraphGrammarClosuresTest(unittest.TestCase):
         self.assertTrue(np.allclose(fd.edit_grammar.motif_weights, fs.edit_grammar.motif_weights))
 
 
+class LatentChurningTemporalGraphGrammarTest(unittest.TestCase):
+    def test_regime_switches_turnover_and_grammar(self):
+        rng = np.random.RandomState(0)
+        stable = stats.TemporalGraphGrammarDistribution([0.1, 0.3, 0.35, 0.25], edge_rate=7.0, node_rate=3.0)
+        churn = stats.TemporalGraphGrammarDistribution(
+            [0.25] * 4, edge_rate=1.0, node_rate=3.0, remove_weights=[0.4, 0.3, 0.2, 0.1], edge_remove_rate=4.0
+        )
+        gt = stats.LatentChurningTemporalGraphGrammarDistribution(
+            [stable, churn],
+            node_remove_rates=[0.3, 4.0],
+            initial_probs=[0.5, 0.5],
+            transition_matrix=[[0.85, 0.15], [0.15, 0.85]],
+        )
+        data = [
+            gt.sampler(seed=s).sample_one(num_steps=14, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(90)
+        ]
+        # nodes genuinely leave (counts swing) and ids disappear
+        self.assertTrue(any(set(o[t - 1][1]) - set(o[t][1]) for o in data for t in range(1, len(o))))
+        self.assertTrue(np.all(np.isfinite(gt.seq_log_density(data))))
+        est = gt.estimator(pseudo_count=0.3)
+        acc = est.accumulator_factory().make()
+        acc.seq_initialize(data, np.ones(len(data)), np.random.RandomState(3))
+        cur = est.estimate(len(data), acc.value())
+        prev_ll = -np.inf
+        for _ in range(12):
+            acc = est.accumulator_factory().make()
+            acc.seq_update(data, np.ones(len(data)), cur)
+            cur = est.estimate(len(data), acc.value())
+            ll = float(cur.seq_log_density(data).sum())
+            self.assertGreaterEqual(ll, prev_ll - 1.0)  # EM monotone
+            prev_ll = ll
+        order = np.argsort([s.edge_rate for s in cur.states])
+        c, s = order[0], order[1]  # churn, stable
+        # the regime jointly switches the grammar AND the node-turnover rate
+        self.assertGreater(cur.states[s].edge_rate, 4.0)  # stable grows
+        self.assertLess(cur.node_remove_rates[s], 1.5)  # stable: slow turnover
+        self.assertGreater(cur.node_remove_rates[c], 2.5)  # churn: fast turnover
+        self.assertEqual(len(cur.decode(data[0])), len(data[0]) - 1)
+
+
 if __name__ == "__main__":
     unittest.main()

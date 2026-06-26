@@ -857,6 +857,11 @@ __all__ = [
     "LatentAttributedTemporalGraphGrammarEstimator",
     "LatentAttributedTemporalGraphGrammarAccumulator",
     "LatentAttributedTemporalGraphGrammarAccumulatorFactory",
+    "LatentChurningTemporalGraphGrammarDistribution",
+    "LatentChurningTemporalGraphGrammarSampler",
+    "LatentChurningTemporalGraphGrammarEstimator",
+    "LatentChurningTemporalGraphGrammarAccumulator",
+    "LatentChurningTemporalGraphGrammarAccumulatorFactory",
 ]
 
 
@@ -1929,3 +1934,286 @@ class LatentAttributedTemporalGraphGrammarEstimator(ParameterEstimator):
         return LatentAttributedTemporalGraphGrammarDistribution(
             structures, node_dists, edge_dists, ip, tm, name=self.name
         )
+
+
+# --- latent regime + node churn: regimes that also switch the turnover rate ------------------------
+class LatentChurningTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
+    """A regime-switching dynamic graph where the hidden regime also governs NODE TURNOVER.
+
+    Combines the latent regime HMM with identity-tracked node churn: each of K regimes carries a full edit
+    grammar AND its own node-removal rate, so the graph can switch between e.g. a stable phase (slow
+    turnover, triadic growth) and a churn phase (fast member departure, fragmentation). Each snapshot is
+    ``(adjacency, node_ids)``; per transition the active regime first removes nodes (those whose id
+    disappears) then edits the surviving subgraph, and the per-transition emission under regime k is
+    ``node_removal_k(#removed) + grammar_k(edit on the aligned surviving subgraph)``. The sequence likelihood
+    marginalises the regime path by the forward algorithm; EM does forward-backward then a per-regime
+    weighted M-step over both the grammar and the turnover rate. ``decode`` recovers the active regime.
+
+    Observation = ``(snapshots, node_ids)`` where ``node_ids`` is a list of per-snapshot id arrays. Dense.
+    """
+
+    def __init__(
+        self,
+        states: Sequence[TemporalGraphGrammarDistribution],
+        node_remove_rates: Sequence[float] | None = None,
+        initial_probs: Sequence[float] | None = None,
+        transition_matrix: Sequence[Sequence[float]] | None = None,
+        name: str | None = None,
+    ) -> None:
+        self.states = list(states)
+        self.k = len(self.states)
+        self.node_remove_rates = (
+            np.zeros(self.k) if node_remove_rates is None else np.asarray(node_remove_rates, dtype=np.float64)
+        )
+        ip = np.ones(self.k) / self.k if initial_probs is None else np.asarray(initial_probs, dtype=np.float64)
+        self.initial_probs = ip / ip.sum()
+        if transition_matrix is None:
+            self.transition_matrix = np.ones((self.k, self.k)) / self.k
+        else:
+            tm = np.asarray(transition_matrix, dtype=np.float64)
+            self.transition_matrix = tm / tm.sum(axis=1, keepdims=True)
+        self.log_init = np.log(np.clip(self.initial_probs, _EPS, None))
+        self.log_trans = np.log(np.clip(self.transition_matrix, _EPS, None))
+        self.name = name
+
+    def __str__(self) -> str:
+        return "LatentChurningTemporalGraphGrammarDistribution(K=%d, remove_rates=%s)" % (
+            self.k,
+            np.array2string(self.node_remove_rates, precision=2),
+        )
+
+    def _shared_motif(self) -> bool:
+        m0 = self.states[0].motif
+        return all((s.motif.bins == m0.bins and s.motif.directed == m0.directed) for s in self.states)
+
+    def _aligned(self, x: Sequence[tuple]) -> list:
+        snaps = list(x)  # list of (adjacency, node_ids) tuples
+        return [
+            (*_align_by_ids(snaps[t][0], snaps[t][1], snaps[t + 1][0], snaps[t + 1][1]), len(snaps[t][1]))
+            for t in range(len(snaps) - 1)
+        ]
+
+    def _emission_logb(self, x: tuple, aligned: list | None = None) -> np.ndarray:
+        aligned = aligned if aligned is not None else self._aligned(x)
+        log_b = np.empty((len(aligned), self.k))
+        shared = self._shared_motif()
+        for t, (prev_surv, cur_reord, num_removed, n_prev) in enumerate(aligned):
+            comp = self.states[0].transition_components(prev_surv, cur_reord) if shared else None
+            for k in range(self.k):
+                st = self.states[k]
+                struct = st.score_components(comp) if shared else st._transition_log_density(prev_surv, cur_reord)
+                log_b[t, k] = _node_removal_logp(self.node_remove_rates[k], n_prev, num_removed) + struct
+        return log_b
+
+    def log_density(self, x: tuple) -> float:
+        if len(x) < 2:
+            return 0.0
+        return _grammar_forward_backward(self._emission_logb(x), self.log_init, self.log_trans)[0]
+
+    def decode(self, x: tuple) -> list:
+        log_b = self._emission_logb(x)
+        t_steps = log_b.shape[0]
+        if t_steps == 0:
+            return []
+        v = np.empty((t_steps, self.k))
+        ptr = np.zeros((t_steps, self.k), dtype=np.int64)
+        v[0] = self.log_init + log_b[0]
+        for t in range(1, t_steps):
+            scores = v[t - 1][:, None] + self.log_trans
+            ptr[t] = scores.argmax(axis=0)
+            v[t] = log_b[t] + scores.max(axis=0)
+        path = [int(v[-1].argmax())]
+        for t in range(t_steps - 1, 0, -1):
+            path.append(int(ptr[t][path[-1]]))
+        return path[::-1]
+
+    def seq_encode(self, x: Sequence[Any]) -> Sequence[Any]:
+        return x
+
+    def seq_log_density(self, x: Sequence[Any]) -> np.ndarray:
+        return np.asarray([self.log_density(obs) for obs in x], dtype=np.float64)
+
+    def sampler(self, seed: int | None = None) -> LatentChurningTemporalGraphGrammarSampler:
+        return LatentChurningTemporalGraphGrammarSampler(self, seed)
+
+    def estimator(self, pseudo_count: float | None = None) -> LatentChurningTemporalGraphGrammarEstimator:
+        return LatentChurningTemporalGraphGrammarEstimator(
+            [st.estimator(pseudo_count=pseudo_count) for st in self.states], pseudo_count=pseudo_count, name=self.name
+        )
+
+    def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class LatentChurningTemporalGraphGrammarSampler(DistributionSampler):
+    def __init__(self, dist: LatentChurningTemporalGraphGrammarDistribution, seed: int | None = None) -> None:
+        self.dist = dist
+        self.rng = RandomState(seed)
+        self.sub = [st.sampler(self.rng.randint(2**31)) for st in dist.states]
+
+    def sample_one(self, num_steps: int = 10, seed_graph: np.ndarray | None = None, n_init: int = 8) -> tuple:
+        d = self.dist
+        adj = np.zeros((n_init, n_init)) if seed_graph is None else np.asarray(seed_graph, dtype=np.float64).copy()
+        ids = list(range(adj.shape[0]))
+        next_id = adj.shape[0]
+        snaps = [(adj.copy(), list(ids))]
+        z = int(self.rng.choice(d.k, p=d.initial_probs))
+        for _ in range(num_steps):
+            n = adj.shape[0]
+            k_rem = min(int(self.rng.poisson(d.node_remove_rates[z])), n)
+            if k_rem:
+                drop = set(self.rng.choice(n, size=k_rem, replace=False).tolist())
+                keep = [i for i in range(n) if i not in drop]
+                adj = adj[np.ix_(keep, keep)] if keep else np.zeros((0, 0))
+                ids = [ids[i] for i in keep]
+            new_nodes = int(self.rng.poisson(d.states[z].node_rate))
+            if new_nodes:
+                m = adj.shape[0]
+                big = np.zeros((m + new_nodes, m + new_nodes))
+                big[:m, :m] = adj
+                adj = big
+                ids += list(range(next_id, next_id + new_nodes))
+                next_id += new_nodes
+            if adj.shape[0]:
+                self.sub[z]._edge_edit_step(adj)
+            snaps.append((adj.copy(), list(ids)))
+            z = int(self.rng.choice(d.k, p=d.transition_matrix[z]))
+        return snaps
+
+    def sample(self, size: int | None = None, **kw: Any) -> Any:
+        if size is None:
+            return self.sample_one(**kw)
+        return [self.sample_one(**kw) for _ in range(size)]
+
+
+class LatentChurningTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
+    def __init__(self, k: int, state_accs: Sequence[Any]) -> None:
+        self.k = k
+        self.state_accs = list(state_accs)
+        self.init_counts = np.zeros(k, dtype=np.float64)
+        self.trans_counts = np.zeros((k, k), dtype=np.float64)
+        self.removed = np.zeros(k, dtype=np.float64)
+        self.steps = np.zeros(k, dtype=np.float64)
+
+    def _accumulate(self, aligned: list, weight: float, gamma: np.ndarray, xi: np.ndarray, estimate: Any) -> None:
+        self.init_counts += weight * gamma[0]
+        if xi.shape[0]:
+            self.trans_counts += weight * xi.sum(axis=0)
+        for kk in range(self.k):
+            s_est = None if estimate is None else estimate.states[kk]
+            for t, (prev_surv, cur_reord, num_removed, _n_prev) in enumerate(aligned):
+                w = weight * gamma[t, kk]
+                if w <= 0:
+                    continue
+                self.state_accs[kk].update([prev_surv, cur_reord], w, s_est)
+                self.removed[kk] += w * num_removed
+                self.steps[kk] += w
+
+    def update(self, x: tuple, weight: float, estimate: Any | None) -> None:
+        if len(x) < 2:
+            return
+        aligned = estimate._aligned(x)
+        _, gamma, xi = _grammar_forward_backward(
+            estimate._emission_logb(x, aligned), estimate.log_init, estimate.log_trans
+        )
+        if gamma is None:
+            return
+        self._accumulate(aligned, weight, gamma, xi, estimate)
+
+    def initialize(self, x: tuple, weight: float, rng: RandomState | None) -> None:
+        if len(x) < 2:
+            return
+        rng = rng if rng is not None else RandomState()
+        snaps = list(x)  # list of (adjacency, node_ids) tuples
+        aligned = [
+            (*_align_by_ids(snaps[t][0], snaps[t][1], snaps[t + 1][0], snaps[t + 1][1]), len(snaps[t][1]))
+            for t in range(len(snaps) - 1)
+        ]
+        t_steps = len(aligned)
+        gamma = rng.dirichlet(np.ones(self.k), size=t_steps)
+        xi = np.zeros((max(t_steps - 1, 0), self.k, self.k))
+        for t in range(t_steps - 1):
+            xi[t] = np.outer(gamma[t], gamma[t + 1])
+        self._accumulate(aligned, weight, gamma, xi, None)
+
+    def seq_update(self, x: Sequence[Any], weights: np.ndarray, estimate: Any | None) -> None:
+        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
+            self.update(obs, float(w), estimate)
+
+    def seq_initialize(self, x: Sequence[Any], weights: np.ndarray, rng: RandomState | None) -> None:
+        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
+            self.initialize(obs, float(w), rng)
+
+    def combine(self, suff_stat: tuple) -> LatentChurningTemporalGraphGrammarAccumulator:
+        ic, tc, rem, st, states = suff_stat
+        self.init_counts += ic
+        self.trans_counts += tc
+        self.removed += rem
+        self.steps += st
+        for acc, sv in zip(self.state_accs, states):
+            acc.combine(sv)
+        return self
+
+    def value(self) -> tuple:
+        return (
+            self.init_counts.copy(),
+            self.trans_counts.copy(),
+            self.removed.copy(),
+            self.steps.copy(),
+            [acc.value() for acc in self.state_accs],
+        )
+
+    def from_value(self, x: tuple) -> LatentChurningTemporalGraphGrammarAccumulator:
+        self.init_counts = np.asarray(x[0], dtype=np.float64).copy()
+        self.trans_counts = np.asarray(x[1], dtype=np.float64).copy()
+        self.removed = np.asarray(x[2], dtype=np.float64).copy()
+        self.steps = np.asarray(x[3], dtype=np.float64).copy()
+        for acc, sv in zip(self.state_accs, x[4]):
+            acc.from_value(sv)
+        return self
+
+    def key_merge(self, stats_dict: dict) -> None:
+        pass
+
+    def key_replace(self, stats_dict: dict) -> None:
+        pass
+
+    def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+        return TemporalGraphGrammarDataEncoder()
+
+
+class LatentChurningTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(self, k: int, state_factories: Sequence[Any]) -> None:
+        self.k = k
+        self.state_factories = list(state_factories)
+
+    def make(self) -> LatentChurningTemporalGraphGrammarAccumulator:
+        return LatentChurningTemporalGraphGrammarAccumulator(self.k, [f.make() for f in self.state_factories])
+
+
+class LatentChurningTemporalGraphGrammarEstimator(ParameterEstimator):
+    def __init__(
+        self, state_estimators: Sequence[Any], pseudo_count: float | None = None, name: str | None = None
+    ) -> None:
+        self.state_estimators = list(state_estimators)
+        self.k = len(self.state_estimators)
+        self.pseudo_count = pseudo_count
+        self.name = name
+        self.keys = None
+
+    def accumulator_factory(self) -> LatentChurningTemporalGraphGrammarAccumulatorFactory:
+        return LatentChurningTemporalGraphGrammarAccumulatorFactory(
+            self.k, [est.accumulator_factory() for est in self.state_estimators]
+        )
+
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> LatentChurningTemporalGraphGrammarDistribution:
+        init_counts, trans_counts, removed, steps, state_vals = suff_stat
+        pc = 0.0 if self.pseudo_count is None else float(self.pseudo_count)
+        ip = init_counts + pc
+        ip = ip / ip.sum() if ip.sum() > 0 else np.ones(self.k) / self.k
+        tm = trans_counts + pc
+        row = tm.sum(axis=1, keepdims=True)
+        tm = np.where(row > 0, tm / np.where(row > 0, row, 1.0), 1.0 / self.k)
+        states = [est.estimate(nobs, sv) for est, sv in zip(self.state_estimators, state_vals)]
+        rates = np.where(steps > 0, removed / np.where(steps > 0, steps, 1.0), 0.0)
+        return LatentChurningTemporalGraphGrammarDistribution(states, rates, ip, tm, name=self.name)
