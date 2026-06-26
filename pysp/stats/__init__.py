@@ -712,6 +712,12 @@ __all__ = [
     "ErdosRenyiGraphAccumulator",
     "ErdosRenyiGraphAccumulatorFactory",
     "ErdosRenyiGraphEstimator",
+    "TemporalGraphGrammarDistribution",
+    "TemporalGraphGrammarSampler",
+    "TemporalGraphGrammarEstimator",
+    "TemporalGraphGrammarAccumulator",
+    "TemporalGraphGrammarAccumulatorFactory",
+    "CommonNeighbourMotif",
     "StochasticBlockGraphDistribution",
     "StochasticBlockGraphSampler",
     "StochasticBlockGraphAccumulator",
@@ -1019,6 +1025,14 @@ from pysp.stats.graphs.erdos_renyi_graph import (
     ErdosRenyiGraphDistribution,
     ErdosRenyiGraphEstimator,
     ErdosRenyiGraphSampler,
+)
+from pysp.stats.graphs.temporal_graph_grammar import (
+    CommonNeighbourMotif,
+    TemporalGraphGrammarAccumulator,
+    TemporalGraphGrammarAccumulatorFactory,
+    TemporalGraphGrammarDistribution,
+    TemporalGraphGrammarEstimator,
+    TemporalGraphGrammarSampler,
 )
 from pysp.stats.graphs.knowledge_graph import (
     KnowledgeGraphDataEncoder,
