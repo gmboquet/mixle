@@ -419,6 +419,11 @@ def _stats_public_distribution_catalog():
         "TemporalGraphGrammarDistribution": stats.TemporalGraphGrammarDistribution(
             [0.2, 0.4, 0.25, 0.15], edge_rate=2.0, node_rate=0.5
         ),
+        "LabeledTemporalGraphGrammarDistribution": stats.LabeledTemporalGraphGrammarDistribution(
+            stats.TemporalGraphGrammarDistribution([0.2, 0.4, 0.25, 0.15], edge_rate=2.0, node_rate=0.5),
+            stats.GaussianDistribution(0.0, 1.0),
+            stats.PoissonDistribution(3.0),
+        ),
         "StochasticBlockGraphDistribution": stats.StochasticBlockGraphDistribution(
             [[0.8, 0.2], [0.2, 0.7]], [0, 0, 1, 1, 0, 1]
         ),
