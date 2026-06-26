@@ -293,6 +293,7 @@ class LeafFamilyTest(unittest.TestCase):
         pos = [abs(x) + 0.3 for x in rng.randn(1500)]
         unit = [min(max(x, 0.02), 0.98) for x in rng.rand(1500)]
         ang = [float(x) for x in rng.uniform(-3.14, 3.14, 1500)]
+        reals = [float(x) for x in rng.randn(1500)]
         ge = [int(x) + 1 for x in rng.geometric(0.3, 1500)]
         cases = [
             ([stats.HalfNormalDistribution(1.0), stats.HalfNormalDistribution(2.0)], stats.HalfNormalEstimator, pos),
@@ -324,6 +325,18 @@ class LeafFamilyTest(unittest.TestCase):
                 [stats.ParetoDistribution(0.5, 2.0), stats.ParetoDistribution(0.5, 4.0)],
                 stats.ParetoEstimator,
                 [0.5 + abs(x) + 0.05 for x in rng.randn(1500)],
+            ),
+            # location-scale with moment-matched (sumx, sumx^2, n) statistics + closed-form densities
+            ([stats.GumbelDistribution(0.0, 1.0), stats.GumbelDistribution(2.0, 1.5)], stats.GumbelEstimator, reals),
+            (
+                [stats.LogisticDistribution(0.0, 1.0), stats.LogisticDistribution(2.0, 1.5)],
+                stats.LogisticEstimator,
+                reals,
+            ),
+            (
+                [stats.StudentTDistribution(5.0, 0.0, 1.0), stats.StudentTDistribution(8.0, 2.0, 1.5)],
+                stats.StudentTEstimator,
+                reals,
             ),
         ]
         for comps, est_cls, data in cases:
