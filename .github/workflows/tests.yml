@@ -93,8 +93,8 @@ jobs:
       - name: Install optional test extras
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test,numba,torch,umap]"
+          python -m pip install -e ".[test,numba,torch,umap,jax]"
       - name: Run optional tests
-        run: python -m pytest -m "optional or torch or numba" -n auto
+        run: python -m pytest -m "optional or torch or numba or jax" -n auto
       - name: Run gated two-rank torchrun smoke
         run: PYSPARKPLUG_RUN_TORCHRUN_SMOKE=1 python -m pytest pysp/tests/torchrun_encoded_data_test.py -q

@@ -8,6 +8,8 @@ from typing import Any
 import numpy as np
 
 from pysp.engines.base import ComputeEngine
+from pysp.engines.jax_engine import JaxEngine
+from pysp.engines.jax_engine import jax as _jax
 from pysp.engines.numpy_engine import FUSED_NUMPY_ENGINE, NUMPY_ENGINE, NumpyEngine
 from pysp.engines.precision import (
     auto_precision,
@@ -27,6 +29,7 @@ __all__ = [
     "SymbolicExpression",
     "SYMBOLIC_ENGINE",
     "TorchEngine",
+    "JaxEngine",
     "NUMPY_ENGINE",
     "FUSED_NUMPY_ENGINE",
     "auto_precision",
@@ -59,6 +62,9 @@ if torch is not None:
 else:
     DTensor = None
 
+if _jax is not None:
+    _ARRAY_ENGINE_REGISTRY[_jax.Array] = JaxEngine()
+
 
 def register_array_type(array_type: type[Any], engine: ComputeEngine) -> None:
     """Register an array/tensor type with its owning engine."""
@@ -80,6 +86,8 @@ def _direct_engine(x: Any) -> ComputeEngine | None:
             if DTensor is not None and cls is DTensor and isinstance(engine, TorchEngine):
                 local = x.to_local()
                 return TorchEngine(device=str(local.device), dtype=x.dtype, mesh=x.device_mesh)
+            if _jax is not None and cls is _jax.Array and isinstance(engine, JaxEngine):
+                return JaxEngine(dtype=x.dtype)
             return engine
     return None
 
