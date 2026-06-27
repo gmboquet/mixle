@@ -20,6 +20,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "bingham_test.py": ("distribution", "stochastic", "slow"),
     "conformal_test.py": ("ppl", "integration", "slow"),
     "fused_codegen_test.py": ("numba", "optional"),
+    "jax_engine_test.py": ("jax", "optional"),
     "fused_em_hmm_family_test.py": ("hmm", "integration", "slow"),
     "fused_em_variational_test.py": ("latent", "integration", "slow"),
     "hmm_sampler_batching_test.py": ("hmm", "stochastic", "slow"),
