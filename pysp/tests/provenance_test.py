@@ -53,6 +53,17 @@ class ProvenanceHeaderTest(unittest.TestCase):
         self.assertEqual(back.schema, header.schema)
         self.assertEqual(back.model_type, header.model_type)
 
+    def test_convergence_trace_captured(self):
+        data = np.random.RandomState(1).normal(0.0, 1.0, 300).tolist()
+        _, header = fit_with_provenance(data, GaussianDistribution(5.0, 1.0).estimator(), max_its=30, delta=1e-7)
+        conv = header.training["convergence"]
+        self.assertGreater(len(conv), 0)
+        self.assertEqual(header.training["iterations"], conv[-1]["iter"])
+        self.assertTrue(header.training["converged"])
+        lls = [r["loglik"] for r in conv]
+        self.assertTrue(all(lls[i] <= lls[i + 1] + 1e-6 for i in range(len(lls) - 1)))  # EM monotone
+        self.assertIsNone(conv[0]["delta"])  # first delta nulled (no prior) -> JSON-clean
+
     def test_composite_schema(self):
         data = [(1.0, "x"), (2.0, "y"), (1.5, "x")]
         model = CompositeDistribution((GaussianDistribution(0, 1), CategoricalDistribution({"x": 0.5, "y": 0.5})))
