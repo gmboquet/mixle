@@ -8,6 +8,8 @@ input/representation helpers (not probability distributions), so they live outsi
 """
 
 from pysp.data.core import DataSource, LazySource, MaterializedSource, as_source
+from pysp.data.encoded_io import load_encoded, save_encoded
+from pysp.data.hashing import dataset_hash
 from pysp.data.schema import (
     Boolean,
     Categorical,
@@ -22,8 +24,6 @@ from pysp.data.schema import (
     Timestamp,
     Vector,
 )
-from pysp.data.encoded_io import load_encoded, save_encoded
-from pysp.data.hashing import dataset_hash
 from pysp.data.sources import kinds as source_kinds
 from pysp.data.sources import open as open_source
 from pysp.data.structure import EXCHANGEABLE, IID, SEQUENTIAL, SampleStructure, partially_exchangeable

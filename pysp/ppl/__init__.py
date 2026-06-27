@@ -54,6 +54,7 @@ from pysp.ppl.core import (
     ode_residual,
     ordered,
 )
+from pysp.ppl.diagnostics import loo_stack, loo_stacking_weights
 from pysp.ppl.distributions import (
     AR1,
     EMG,
@@ -100,7 +101,6 @@ from pysp.ppl.distributions import (
     VonMises,
     Weibull,
 )
-from pysp.ppl.diagnostics import loo_stack, loo_stacking_weights
 from pysp.ppl.field import (
     GP,
     RBF,

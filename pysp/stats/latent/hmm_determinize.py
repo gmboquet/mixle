@@ -49,7 +49,7 @@ def _row_probs(exponents: np.ndarray, theta: Fraction) -> list[list[Fraction]]:
     """Exact row-normalized probabilities theta^k / sum_j theta^{k_j} (negative exponent -> 0)."""
     out = []
     for row in np.asarray(exponents):
-        terms = [theta**int(k) if int(k) >= 0 else Fraction(0) for k in row]
+        terms = [theta ** int(k) if int(k) >= 0 else Fraction(0) for k in row]
         z = sum(terms)
         out.append([t / z if z != 0 else Fraction(0) for t in terms])
     return out

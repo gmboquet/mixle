@@ -858,7 +858,6 @@ from pysp.stats.combinator.optional import (
     OptionalEstimator,
     OptionalSampler,
 )
-from pysp.stats.missing import MISSING, composite_with_missing, marginalized
 from pysp.stats.combinator.record import (
     DictRecordDataEncoder,
     DictRecordDistribution,
@@ -1254,6 +1253,7 @@ from pysp.stats.matrix.wishart import (
     WishartEstimator,
     WishartSampler,
 )
+from pysp.stats.missing import MISSING, composite_with_missing, marginalized
 from pysp.stats.multivariate.categorical_multinomial import (
     MultinomialDataEncoder,
     MultinomialDistribution,
