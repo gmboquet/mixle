@@ -87,5 +87,46 @@ class NonDeterminizableTest(unittest.TestCase):
             d.determinize(max_states=64)
 
 
+class GeneralHmmTest(unittest.TestCase):
+    """Determinization of a GENERAL (non-quantized) terminal HMM: float probabilities are rationalized,
+    then determinized exactly. Plus the deepening sub-linear seek (robust to cost-spectrum gaps)."""
+
+    def _dist(self):
+        from pysp.stats import CategoricalDistribution as Cat
+        from pysp.stats import HiddenMarkovModelDistribution as H
+
+        return H(
+            [Cat({"a": 0.5, "b": 0.3, ".": 0.2}), Cat({"a": 0.3, "b": 0.4, ".": 0.3}), Cat({".": 1.0})],
+            w=[0.5, 0.4, 0.1],
+            transitions=[[0.0, 0.6, 0.4], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],  # acyclic, shared emissions
+            terminal_values={"."},
+        )
+
+    def test_general_determinization_exact_and_unambiguous(self):
+        d = self._dist()
+        det = d.determinize()
+        order = _brute(d, ["a", "b"])
+        for s, lp in order:
+            self.assertAlmostEqual(det.log_density(s), lp, places=10)  # rationalized -> exact here
+        enum = det.enumerator().top_k(len(order))
+        self.assertEqual(len({tuple(s) for s, _ in enum}), len(enum))
+        self.assertEqual([round(lp, 9) for _, lp in enum], [round(lp, 9) for _, lp in order])
+        self.assertAlmostEqual(sum(np.exp(lp) for _, lp in enum), 1.0, delta=1e-9)
+
+    def test_sublinear_seek_correct_and_bounded(self):
+        d = self._dist()
+        det = d.determinize()
+        order = _brute(d, ["a", "b"])
+        lp_o = [round(lp, 9) for _, lp in order]
+        seen = set()
+        for k in range(len(order)):
+            v = tuple(det.enumerator().seek(k).value)  # deepening structural seek, no prefix enumeration
+            self.assertNotIn(v, seen)
+            seen.add(v)
+            self.assertAlmostEqual(round(det.log_density(list(v)), 9), lp_o[k], places=9)
+        with self.assertRaises(IndexError):  # robustly bounded: index past support raises (no false-stop)
+            det.enumerator().seek(len(order))
+
+
 if __name__ == "__main__":
     unittest.main()
