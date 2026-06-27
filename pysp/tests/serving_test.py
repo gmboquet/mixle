@@ -77,6 +77,9 @@ class ModelServiceTest(unittest.TestCase):
             reg.register(model, "g")
             reg.promote("g", "v1")
             svc = ModelService.from_registry(reg, "g", reference=ref)
+            # the service carries the model's provenance header loaded from the registry
+            self.assertIsNotNone(svc.header)
+            self.assertEqual(svc.header["model_type"], "GaussianDistribution")
             self.assertTrue(svc.check_drift(rng.normal(4, 1, 500).tolist()).drift)
             self.assertEqual(svc.health()["drift_events"], 1)
 
