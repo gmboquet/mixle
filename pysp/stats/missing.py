@@ -65,3 +65,32 @@ def composite_with_missing(
     from pysp.stats.combinator.composite import CompositeDistribution
 
     return CompositeDistribution([marginalized(d, missing_value) for d in dists])
+
+
+def marginalize_estimator_leaves(estimator: Any, missing_value: Any = MISSING) -> Any:
+    """Wrap the leaf estimators of ``estimator`` so they marginalize ``missing_value``.
+
+    Recurses through ``CompositeEstimator`` (per field); every leaf estimator is wrapped in a
+    marginalizing ``OptionalEstimator`` (``est_prob=False`` -> no missingness rate is fit, the missing
+    value is integrated out). Used by ``pysp.ppl`` to fit a model from data with missing entries without
+    imputing them."""
+    from pysp.stats.combinator.composite import CompositeEstimator
+    from pysp.stats.combinator.optional import OptionalEstimator
+
+    if isinstance(estimator, CompositeEstimator):
+        return CompositeEstimator([marginalize_estimator_leaves(c, missing_value) for c in estimator.estimators])
+    return OptionalEstimator(estimator, missing_value=missing_value, est_prob=False)
+
+
+def unwrap_marginalized(dist: Any) -> Any:
+    """Inverse of :func:`marginalize_estimator_leaves` on a fitted distribution: strip the marginalizing
+    ``OptionalDistribution`` wrappers (recursing through ``CompositeDistribution``) to recover the base
+    model whose parameters were fit from the present entries."""
+    from pysp.stats.combinator.composite import CompositeDistribution
+    from pysp.stats.combinator.optional import OptionalDistribution
+
+    if isinstance(dist, CompositeDistribution):
+        return CompositeDistribution([unwrap_marginalized(d) for d in dist.dists])
+    if isinstance(dist, OptionalDistribution):
+        return dist.dist
+    return dist
