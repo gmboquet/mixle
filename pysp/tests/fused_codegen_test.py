@@ -3,9 +3,16 @@
 import unittest
 
 import numpy as np
+import pytest
 
 import pysp.stats as stats
 from pysp.stats.compute.fused_codegen import analyze, fused_seq_log_density, fusible
+from pysp.utils.optional_deps import HAS_NUMBA
+
+# The fused codegen path JIT-compiles with numba; without it these tests cannot run. They are also
+# marked ("numba", "optional") in conftest so the CI fast/full (no-numba) gates skip collection and the
+# optional-extras job (which installs numba) exercises them.
+pytestmark = pytest.mark.skipif(not HAS_NUMBA, reason="fused codegen requires numba")
 
 
 def _ll_close(model, data):
