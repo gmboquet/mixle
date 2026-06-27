@@ -100,6 +100,7 @@ from pysp.ppl.distributions import (
     VonMises,
     Weibull,
 )
+from pysp.ppl.diagnostics import loo_stack, loo_stacking_weights
 from pysp.ppl.field import (
     GP,
     RBF,
@@ -131,6 +132,7 @@ from pysp.ppl.predictive import (
     prior_predictive_check,
 )
 from pysp.ppl.priors import Potts, TotalVariation
+from pysp.ppl.provenance import fit_with_provenance
 from pysp.ppl.summarize import hdi, posterior_summary
 from pysp.ppl.survival import censored_loglik, fit_censored, kaplan_meier
 
@@ -190,6 +192,7 @@ __all__ = [
     "prior_predictive",
     "prior_predictive_check",
     "fit_censored",
+    "fit_with_provenance",
     "censored_loglik",
     "kaplan_meier",
     "hdi",
@@ -233,6 +236,8 @@ __all__ = [
     "Potts",
     "multistart",
     "conformal",
+    "loo_stack",
+    "loo_stacking_weights",
     "ConformalRegressor",
     "ConformalClassifier",
     "ConformalQuantileRegressor",

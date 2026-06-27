@@ -655,6 +655,21 @@ def kernel_for(
 ) -> Kernel:
     """Build the best registered kernel for ``dist`` and ``engine``."""
     engine = NUMPY_ENGINE if engine is None else engine
+    # On a numba-capable engine, a composite/mixture of cheap leaves runs its whole E-step in ONE fused
+    # nopython pass (no per-leaf boundary crossings/allocations) -- ~1.5-2.7x over the per-leaf kernels.
+    # Only engage where fusion actually helps (multi-factor or multi-component); single leaves and
+    # BLAS-bound / untemplated leaves fall through to the registered factories unchanged.
+    if getattr(engine, "prefer_fused", False):
+        from pysp.stats.compute.fused_codegen import FusedKernel, analyze, fusible, fusible_estep
+
+        plan = analyze(dist)
+        flat_worth_it = plan is not None and (plan.num_components > 1 or len(plan.leaf_templates) > 1)
+        # nested scalar trees (Mixture-of-Mixture, Composite-with-Mixture-factor, ...) the flat analyzer
+        # declines but the recursive path fuses -- they are always worth fusing (multi-node by construction)
+        nested_worth_it = plan is None and fusible(dist)
+        if flat_worth_it or nested_worth_it:
+            if estimator is None or fusible_estep(dist):
+                return FusedKernel(dist, engine, estimator=estimator)
     for cls in type(dist).mro():
         factory = _KERNEL_FACTORIES.get(cls)
         if factory is not None:

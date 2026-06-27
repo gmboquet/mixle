@@ -557,6 +557,41 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             )
         )
 
+    @classmethod
+    def left_to_right(
+        cls,
+        theta: float,
+        levels: Sequence[Any],
+        transition_exponents: Sequence[Sequence[int]] | np.ndarray,
+        emission_exponents: Sequence[Sequence[int]] | np.ndarray,
+        initial_exponents: Sequence[int] | np.ndarray | None = None,
+        **kwargs: Any,
+    ) -> "QuantizedHiddenMarkovModelDistribution":
+        """Construct a left-to-right (upper-triangular) quantized HMM.
+
+        ``transition_exponents`` must be upper triangular: every entry strictly below the diagonal is a
+        structural zero (negative exponent), so the hidden-state path is monotone non-decreasing (a Bakis
+        chain). This makes a sentence's state paths exactly its monotone *segmentations* -- only
+        polynomially many in the length (``O(L^{n-1})``) rather than the ``n^L`` of a general HMM -- which
+        bounds the path/sequence ambiguity. When the per-state emission supports are additionally disjoint
+        the model is *unambiguous* (one path per sentence); then the structural descending-probability
+        seek/unrank coincides with the exact marginal order (up to quantization granularity, no path
+        over-count), which a general HMM's structural seek cannot.
+
+        Raises:
+            ValueError: if ``transition_exponents`` is not square or not upper triangular.
+        """
+        t = np.asarray(transition_exponents)
+        if t.ndim != 2 or t.shape[0] != t.shape[1]:
+            raise ValueError("transition_exponents must be a square matrix")
+        below = t[np.tril_indices(t.shape[0], k=-1)]
+        if below.size and np.any(below >= 0):
+            raise ValueError(
+                "left_to_right requires upper-triangular transition_exponents: every entry below the "
+                "diagonal must be a structural zero (negative exponent)"
+            )
+        return cls(theta, levels, transition_exponents, emission_exponents, initial_exponents=initial_exponents, **kwargs)
+
     def to_fisher(self, **kwargs):
         """Forward-backward Fisher view for the quantized HMM."""
         if hasattr(self, "topics") and hasattr(self, "transitions"):
@@ -591,14 +626,33 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             use_numba=self.use_numba,
         )
 
-    def enumerator(self) -> "QuantizedHiddenMarkovModelEnumerator":
-        """Returns a quantized-HMM-specialized enumerator over observation sequences.
+    def enumerator(self):
+        """Returns an exact descending-probability enumerator over observation sequences.
 
-        The enumerator is exact like HiddenMarkovModelEnumerator, but avoids constructing
-        per-state categorical emission streams and instead uses the finite level set plus the
-        cached quantized emission log-probability matrix directly.
+        For the ordinary (length-distribution) case this is the quantized-HMM-specialized enumerator,
+        which avoids constructing per-state categorical streams and uses the cached quantized emission
+        log-probability matrix directly. For the ``terminal_values`` stopping-time case it delegates to
+        :class:`HiddenMarkovModelEnumerator`, which implements that support (the quantized specialization
+        only covers the length-distribution path).
         """
+        if self.terminal_values is not None:
+            from pysp.stats.latent.hidden_markov import HiddenMarkovModelEnumerator
+
+            return HiddenMarkovModelEnumerator(self)
         return QuantizedHiddenMarkovModelEnumerator(self)
+
+    def determinize(self, max_states: int = 1 << 16):
+        """Weighted determinization (Mohri 1997; Mohri & Riley 2002) of this terminal-value quantized HMM
+        into a :class:`~pysp.stats.latent.hmm_determinize.DeterminizedSequenceDistribution`.
+
+        Rebuilds the machine over belief states (exact rational arithmetic) so each sequence has a single
+        path and edge weights multiply to the exact marginal -- yielding exact, duplicate-free n-best
+        *sequences* (not n-best paths). Requires terminal_values. Raises EnumerationError if the belief
+        expansion exceeds ``max_states`` (the twins property fails -- not finitely determinizable; keep the
+        original HMM's exact O(index) enumerate-and-bin path instead)."""
+        from pysp.stats.latent.hmm_determinize import determinize_quantized_terminal
+
+        return determinize_quantized_terminal(self, max_states=max_states)
 
 
 class _QuantizedHmmPrefix:
