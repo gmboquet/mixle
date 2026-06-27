@@ -11,12 +11,14 @@ import unittest
 
 import numpy as np
 
-from pysp.inference import optimize
+from pysp.inference import estimate, optimize
 from pysp.stats import (
     MISSING,
     CategoricalDistribution,
     CompositeDistribution,
     GaussianDistribution,
+    HiddenMarkovModelDistribution,
+    IntegerCategoricalDistribution,
     MixtureDistribution,
     composite_with_missing,
     marginalized,
@@ -96,6 +98,44 @@ class MixtureImputationTest(unittest.TestCase):
         np.testing.assert_allclose(cond.w, [0.8, 0.2], atol=1e-9)  # cat=x favors component 1
         e_x0 = sum(w * c.dists[0].mu for w, c in zip(cond.w, cond.components))
         self.assertLess(e_x0, 0.0)  # pulled toward component 1's mean (-2)
+
+
+class HmmMissingEmissionsTest(unittest.TestCase):
+    """A sequence model with occasional missing emissions: wrap the per-state emissions in marginalized()
+    and pass MISSING for absent observations. Missing positions become uninformative in forward-backward
+    (no HMM code change); EM fits from present observations and latent_posterior smooths over the gaps."""
+
+    def _hmm(self, optional):
+        emits = [{"a": 0.7, "b": 0.2, "c": 0.1}, {"a": 0.1, "b": 0.3, "c": 0.6}]
+        topics = [(marginalized(CategoricalDistribution(e)) if optional else CategoricalDistribution(e)) for e in emits]
+        return HiddenMarkovModelDistribution(
+            topics, w=[0.6, 0.4], transitions=[[0.8, 0.2], [0.3, 0.7]], len_dist=IntegerCategoricalDistribution(4, [1.0])
+        )
+
+    def test_marginalized_emissions_equal_plain_when_nothing_missing(self):
+        plain, opt = self._hmm(False), self._hmm(True)
+        seqs = [["a", "b", "c", "a"], ["c", "c", "a", "b"], ["b", "a", "a", "c"]]
+        for s in seqs:
+            self.assertAlmostEqual(opt.log_density(s), plain.log_density(s), places=12)
+
+    def test_partial_sequence_scores_finite_and_smooths(self):
+        opt = self._hmm(True)
+        self.assertTrue(np.isfinite(opt.log_density(["a", MISSING, "c", MISSING])))
+        post = opt.latent_posterior(["a", MISSING, "c", MISSING])  # smoothed state path given present obs
+        z = post.sample(np.random.RandomState(0))
+        self.assertEqual(len(z), 4)
+
+    def test_em_recovers_from_partial_sequences(self):
+        true = self._hmm(False)
+        rng = np.random.RandomState(1)
+        data = [[MISSING if rng.rand() < 0.3 else e for e in seq] for seq in true.sampler(0).sample(5000)]
+        m = self._hmm(True)  # start from truth to isolate the missing mechanism from the HMM init-saddle
+        for _ in range(12):
+            m = estimate(data, self._hmm(True).estimator(), m)
+        em = [np.array([np.exp(t.dist.log_density(k)) for k in ["a", "b", "c"]]) for t in m.topics]
+        np.testing.assert_allclose(em[0], [0.7, 0.2, 0.1], atol=0.05)
+        np.testing.assert_allclose(em[1], [0.1, 0.3, 0.6], atol=0.05)
+        np.testing.assert_allclose(m.transitions, [[0.8, 0.2], [0.3, 0.7]], atol=0.06)
 
 
 if __name__ == "__main__":
