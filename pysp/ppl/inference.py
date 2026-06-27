@@ -439,7 +439,9 @@ def _composite_target_parts(rv: RandomVariable, data):
     slots, rebuild = _collect_composite(rv)
     try:
         arr = np.asarray(data, dtype=float)
-        dmean, dstd = float(arr.mean()), float(arr.std() or 1.0)
+        _fin = arr[np.isfinite(arr)]  # ignore NaN (missing) when seeding the init point
+        dmean = float(_fin.mean()) if _fin.size else 0.0
+        dstd = float(_fin.std() or 1.0) if _fin.size else 1.0
     except (ValueError, TypeError):
         dmean, dstd = 0.0, 1.0  # non-scalar data (sequences/vectors): use neutral init
 
@@ -468,7 +470,9 @@ def _target_parts(rv: RandomVariable, data):
     fam = _require_flat(rv)
     slots = _slots_of(rv, fam)
     arr = np.asarray(data, dtype=float)
-    dmean, dstd = float(arr.mean()), float(arr.std() or 1.0)
+    _fin = arr[np.isfinite(arr)]  # ignore NaN (missing) when seeding the init point
+    dmean = float(_fin.mean()) if _fin.size else 0.0
+    dstd = float(_fin.std() or 1.0) if _fin.size else 1.0
 
     def unpack(u):
         vals, logj = {}, 0.0
@@ -1154,7 +1158,7 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
 
 
 # ----------------------------- sampler setup + the general how= drivers (MCMC, MAP, VI)
-def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=False):
+def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=False, missing="error"):
     """Shared sampler setup: build the joint log-target (analytic-Torch when available, else the
     numeric encoder target), optionally its gradient, then layer on constraints/penalty.
 
@@ -1172,7 +1176,12 @@ def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=Fal
         log_target = _constrain_target(log_target, feasible)
         log_target = _penalize_target(log_target, soft)
         return log_target, grad, slots, build, dmean, dstd, feasible
-    ag = None if (numpy_only or eff is not None) else _ag.grad_target(rv, data)
+    ag = None if (numpy_only or eff is not None) else _ag.grad_target(rv, data, missing=missing)
+    if ag is None and missing == "marginalize":
+        raise NotImplementedError(
+            "missing='marginalize' on this path needs the Torch autograd target (flat model, no "
+            "constraints). For this model build it with pysp.stats.marginalized() leaves instead."
+        )
     if ag is not None:
         slots, build, dmean, dstd = ag.slots, ag.build, ag.dmean, ag.dstd
         log_target = ag.log_target
@@ -1214,6 +1223,7 @@ def ensemble_fit(
     rng=None,
     chains: int = 1,
     parallel: bool = False,
+    missing: str = "error",
 ) -> RandomVariable:
     """Affine-invariant ensemble MCMC (Goodman & Weare stretch move).
 
@@ -1269,13 +1279,14 @@ def mcmc_fit(
     parallel: bool = False,
     constraints=None,
     penalty=None,
+    missing: str = "error",
 ) -> RandomVariable:
     from pysp.inference.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
     if rng is None:
         rng = np.random.RandomState()
     log_target, _grad, slots, build, dmean, dstd, feasible = _prepare_target(
-        rv, data, constraints, penalty, want_grad=False
+        rv, data, constraints, penalty, want_grad=False, missing=missing
     )
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
@@ -1311,6 +1322,7 @@ def hmc_fit(
     parallel: bool = False,
     constraints=None,
     penalty=None,
+    missing: str = "error",
 ) -> RandomVariable:
     """Hamiltonian Monte Carlo over the parameter posterior.
 
@@ -1325,7 +1337,7 @@ def hmc_fit(
     if rng is None:
         rng = np.random.RandomState()
     log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
-        rv, data, constraints, penalty, want_grad=True
+        rv, data, constraints, penalty, want_grad=True, missing=missing
     )
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
@@ -1371,6 +1383,7 @@ def nuts_fit(
     parallel: bool = False,
     constraints=None,
     penalty=None,
+    missing: str = "error",
 ) -> RandomVariable:
     """No-U-Turn Sampler over the parameter posterior — auto-tuned HMC (trajectory length +
     dual-averaging step size), the default choice for correlated / higher-dimensional posteriors.
@@ -1384,7 +1397,7 @@ def nuts_fit(
     if rng is None:
         rng = np.random.RandomState()
     log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
-        rv, data, constraints, penalty, want_grad=True
+        rv, data, constraints, penalty, want_grad=True, missing=missing
     )
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
@@ -1424,12 +1437,17 @@ def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:
     return ensemble_fit(rv, data, **kw) if d <= 12 else nuts_fit(rv, data, **kw)
 
 
-def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None, penalty=None) -> RandomVariable:
+def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None, penalty=None, missing="error") -> RandomVariable:
     from scipy.optimize import minimize
 
     from pysp.ppl import autograd as _ag
 
-    g = _ag.grad_target(rv, data)
+    g = _ag.grad_target(rv, data, missing=missing)
+    if g is None and missing == "marginalize":
+        raise NotImplementedError(
+            "missing='marginalize' needs the Torch autograd target (flat model, no constraints); for this "
+            "model build it with pysp.stats.marginalized() leaves."
+        )
     if g is not None and constraints is None and penalty is None:
         # analytic-gradient MAP: L-BFGS on the joint posterior (fast, scales with #params)
         u0 = _init_u(g.slots, g.dmean, g.dstd)
@@ -1490,6 +1508,7 @@ def vi_fit(
     family: str = "meanfield",
     alpha: float = 1.0,
     rng=None,
+    missing: str = "error",
 ) -> RandomVariable:
     """Variational Bayes (ADVI) — a Gaussian variational posterior fit by reparameterized-MC Adam.
 
@@ -1505,7 +1524,12 @@ def vi_fit(
     if rng is None:
         rng = np.random.RandomState()
 
-    ag = _ag.grad_target(rv, data)
+    ag = _ag.grad_target(rv, data, missing=missing)
+    if ag is None and missing == "marginalize":
+        raise NotImplementedError(
+            "missing='marginalize' needs the Torch autograd target (flat model); for this model build it "
+            "with pysp.stats.marginalized() leaves."
+        )
     if ag is not None:
         slots, build = ag.slots, ag.build
         u0 = _init_u(slots, ag.dmean, ag.dstd)

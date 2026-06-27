@@ -237,7 +237,9 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
                 return self.dist.log_density(x) + self.log_pn
             else:
                 return self.log_p
-        # This is a degenerate use case that should probably be deprecated
+        # p is None: MARGINALIZE the missing value (it contributes log-density 0) instead of modeling a
+        # missingness probability -- the missing-at-random treatment for occasional missing entries.
+        # See pysp.stats.missing (MISSING sentinel + marginalized()/composite_with_missing() builders).
         else:
             if not_missing:
                 return self.dist.log_density(x)

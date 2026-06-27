@@ -1478,6 +1478,7 @@ class RandomVariable:
         engine: Any = None,
         precision: Any = None,
         print_iter: int = 0,
+        missing: str = "error",
         **kw,
     ) -> RandomVariable:
         """Estimate / infer parameters from ``data`` and return a bound RV.
@@ -1486,7 +1487,16 @@ class RandomVariable:
         the joint with priors), ``'mcmc'`` (posterior samples over parameters with priors),
         ``'auto'`` picks ``map`` when the model has priors else ``em``. EM threads pysp's
         parallel/distributed backends (``backend='mp'|'mpi'|'dask'``).
+
+        ``missing``: ``'error'`` (default) rejects non-finite entries; ``'marginalize'`` integrates a
+        missing entry (``NaN`` in the data) out of the likelihood instead of imputing it -- each leaf is
+        fit from its present rows only, so you get a well-defined mode/posterior over the present data (no
+        fabricated values). Supported on the EM path (the default for ``free`` models, i.e. the posterior
+        mode under flat priors); for ``how='map'/'mcmc'`` with missing data build the model with
+        ``pysp.stats.marginalized()`` leaves directly.
         """
+        if missing not in ("error", "marginalize"):
+            raise ValueError(f"missing={missing!r}; choose 'error' or 'marginalize'.")
         # ``auto`` and ``em`` are resolved/handled by ``fit`` itself; every other ``how`` is a pure
         # dispatch into the fitter registry.
         valid_how = {"auto", "em", *_FITTERS}
@@ -1550,14 +1560,31 @@ class RandomVariable:
         # Pure ``how`` -> fitter dispatch (everything except the EM/MLE fall-through below). The
         # registry replaces the old ``if how == ...`` ladder; the ``vmp`` Mixture special case lives
         # inside its registered fitter (a closure over the RV's family/args).
+        if missing == "marginalize" and how != "em":
+            # the autograd-target fitters marginalize NaN observations (flat models); thread the flag in.
+            if how in {"map", "mcmc", "hmc", "nuts", "vi", "ensemble", "sample"}:
+                kw["missing"] = missing
+            else:
+                raise NotImplementedError(
+                    f"missing='marginalize' is not wired for how={how!r} (closed-form/grouped path); use "
+                    "how='em'/'map'/'mcmc'/'hmc'/'nuts'/'vi'/'ensemble', or build the model with "
+                    "pysp.stats.marginalized() leaves."
+                )
         fitter = _FITTERS.get(how)
         if fitter is not None:
             return fitter(self, data, **kw)
         # EM / MLE path
         est = lower(self, target="estimator")
+        if missing == "marginalize":
+            import numpy as _np
+
+            from pysp.stats.missing import marginalize_estimator_leaves
+
+            est = marginalize_estimator_leaves(est, missing_value=_np.nan)
         # Warm-start finicky flat-family MLEs (e.g. negative-binomial) from a moment match.
         if (
             "prev_estimate" not in kw
+            and missing != "marginalize"  # data-driven warm-start would choke on NaN; let EM seed plainly
             and self._kind == "sample"
             and not isinstance(self._family, CompositeFamily)
             and getattr(self._family, "init_fit", None) is not None
@@ -1569,6 +1596,7 @@ class RandomVariable:
         # escapes the symmetric global-mean fixed point — "it just works".
         if (
             "prev_estimate" not in kw
+            and missing != "marginalize"
             and self._kind == "sample"
             and isinstance(self._family, CompositeFamily)
             and self._family.seed_fn is not None
@@ -1599,6 +1627,10 @@ class RandomVariable:
         finally:
             if not print_iter:
                 out.close()
+        if missing == "marginalize":
+            from pysp.stats.missing import unwrap_marginalized
+
+            fitted = unwrap_marginalized(fitted)  # strip the Optional wrappers; recover the base model
         return RandomVariable._bound(fitted, name=self._name)
 
     def __repr__(self) -> str:

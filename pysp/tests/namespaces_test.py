@@ -22,8 +22,16 @@ def test_concern_namespaces_gather_each_concern():
     import pysp
 
     assert callable(pysp.enumeration.supports_enumeration) and hasattr(pysp.enumeration, "Enumerable")
+    assert callable(pysp.enumeration.density_rank)
     assert callable(pysp.inference.conjugate_posterior) and callable(pysp.inference.optimize)
+    assert callable(pysp.ppl.loo_stack)
     assert callable(pysp.ops.quantize)
+    parallel = importlib.import_module("pysp.utils.parallel")
+    assert callable(parallel.plan) and callable(parallel.encoded_data)
+    assert hasattr(parallel, "Resources")
+    utils = importlib.import_module("pysp.utils")
+    assert callable(utils.analyze_structure)
+    assert callable(utils.htsne)
 
 
 def test_contracts_gathers_every_contract_in_one_import():

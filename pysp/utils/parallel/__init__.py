@@ -8,10 +8,22 @@ from pysp.utils.parallel.model_parallel import (  # noqa: E402
     auto_parallel_estimator,
     model_parallel_fold,
 )
+from pysp.utils.parallel.planner import (  # noqa: E402
+    Resources,
+    encoded_data,
+    is_encoded_data_handle,
+    model_sharding_plan,
+    plan,
+)
 
 __all__ = [
     "ModelParallelEstimator",
     "ModelParallelEncodedData",
     "model_parallel_fold",
     "auto_parallel_estimator",
+    "Resources",
+    "encoded_data",
+    "is_encoded_data_handle",
+    "model_sharding_plan",
+    "plan",
 ]
