@@ -5,11 +5,14 @@ statistics), so EM fits each field from its present rows only; for a mixture ove
 on the present fields yields the posterior over the missing ones (imputation).
 """
 
+import importlib.util
 import io
 import pickle
 import unittest
 
 import numpy as np
+
+_HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 from pysp.inference import estimate, optimize
 from pysp.stats import (
@@ -109,7 +112,10 @@ class HmmMissingEmissionsTest(unittest.TestCase):
         emits = [{"a": 0.7, "b": 0.2, "c": 0.1}, {"a": 0.1, "b": 0.3, "c": 0.6}]
         topics = [(marginalized(CategoricalDistribution(e)) if optional else CategoricalDistribution(e)) for e in emits]
         return HiddenMarkovModelDistribution(
-            topics, w=[0.6, 0.4], transitions=[[0.8, 0.2], [0.3, 0.7]], len_dist=IntegerCategoricalDistribution(4, [1.0])
+            topics,
+            w=[0.6, 0.4],
+            transitions=[[0.8, 0.2], [0.3, 0.7]],
+            len_dist=IntegerCategoricalDistribution(4, [1.0]),
         )
 
     def test_marginalized_emissions_equal_plain_when_nothing_missing(self):
@@ -159,9 +165,10 @@ class PplMissingTest(unittest.TestCase):
     def test_default_rejects_nan(self):
         from pysp.ppl import Normal, free
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(Exception):  # noqa: B017 -- the support check rejects NaN with a bare Exception
             Normal(free, free).fit(self._data())
 
+    @unittest.skipUnless(_HAS_TORCH, "full-Bayesian marginalization needs the torch autograd target")
     def test_full_bayesian_posterior_with_missing(self):
         # MAP/VI (and the samplers) marginalize NaNs through the autograd target -> posterior over the
         # present data, no imputation. Weak prior, so the location posterior ~ the present-data mean.
