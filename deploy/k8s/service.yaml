@@ -1,0 +1,13 @@
+# ClusterIP Service load-balancing across the scoring replicas. Expose externally with an Ingress or
+# by switching type to LoadBalancer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pysp-model
+spec:
+  selector: { app: pysp-model }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
