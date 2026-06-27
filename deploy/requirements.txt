@@ -1,0 +1,4 @@
+# Serving extras layered on top of pysparkplug (installed separately in the Dockerfile from source).
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2

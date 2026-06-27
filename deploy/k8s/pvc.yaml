@@ -1,0 +1,13 @@
+# Shared model registry storage. The server replicas read it; the seed Job and drift CronJob write it,
+# so it must be ReadWriteMany. If your cluster has no RWX StorageClass, back the registry with object
+# storage instead (e.g. mount s3 via a CSI driver, or adapt ModelRegistry to read/write S3) and drop this.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pysp-registry
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: <your-rwx-storage-class>
