@@ -356,7 +356,13 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         obs_idx = sorted(observed)
         if not obs_idx:
             return MixtureDistribution([c.condition({}) for c in self.components], self.w.copy())
-        x_o = np.array([observed[i] for i in obs_idx], dtype=float)
+        # numeric components (e.g. multivariate Gaussian) take the observed sub-vector as a float array;
+        # heterogeneous components (CompositeDistribution of mixed-type fields) take it as a tuple.
+        vals = [observed[i] for i in obs_idx]
+        try:
+            x_o = np.array(vals, dtype=float)
+        except (ValueError, TypeError):
+            x_o = tuple(vals)
         log_post = np.array(
             [self.log_w[k] + self.components[k].marginal(obs_idx).log_density(x_o) for k in range(self.num_components)]
         )

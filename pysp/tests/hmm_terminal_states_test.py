@@ -133,5 +133,91 @@ class HmmTerminalStatesEMTest(unittest.TestCase):
         self.assertGreater(sum(m.log_density(s) for s in data), sum(init.log_density(s) for s in data))
 
 
+class HmmTerminalValuesSamplerTest(unittest.TestCase):
+    """Regression: sample() must dispatch to the terminal-VALUE path when len_dist is Null.
+
+    The len_dist defaults to NullDistribution() (never None), so len_sampler used to be a (non-None)
+    null sampler that preempted the terminal_values branch in sample() and crashed.
+    """
+
+    def _dist(self):
+        return HiddenMarkovModelDistribution(
+            [
+                CategoricalDistribution({"a": 0.6, "b": 0.3, ".": 0.1}),
+                CategoricalDistribution({"a": 0.2, "b": 0.3, ".": 0.5}),
+            ],
+            [0.7, 0.3],
+            [[0.6, 0.4], [0.3, 0.7]],
+            terminal_values={"."},
+        )
+
+    def test_sample_dispatches_to_terminal_value_path(self):
+        s = self._dist().sampler(seed=0).sample(50)  # previously raised TypeError via the len path
+        self.assertEqual(len(s), 50)
+        for seq in s:
+            self.assertEqual(seq[-1], ".")  # ends exactly at the first terminal value
+            self.assertNotIn(".", seq[:-1])
+
+    def test_sample_size_none(self):
+        self.assertEqual(self._dist().sampler(seed=1).sample()[-1], ".")
+
+
+class HmmTerminalValuesDensityTest(unittest.TestCase):
+    """terminal_values is a stopping-time density: only sequences whose ONLY terminal value is the last
+    are in the support, and the length is endogenous (no len_dist factor). Off-support sequences must
+    score -inf so the density is proper (sums to 1 over its support)."""
+
+    def setUp(self):
+        self.d = HiddenMarkovModelDistribution(
+            [
+                CategoricalDistribution({"a": 0.5, "b": 0.3, ".": 0.2}),
+                CategoricalDistribution({"a": 0.2, "b": 0.3, ".": 0.5}),
+            ],
+            [0.6, 0.4],
+            [[0.7, 0.3], [0.4, 0.6]],
+            terminal_values={"."},
+        )
+
+    def test_off_support_is_minus_inf(self):
+        for seq in ([], ["a", "b"], ["a", ".", "b", "."], [".", "a", "."]):
+            self.assertEqual(self.d.log_density(seq), float("-inf"))
+
+    def test_on_support_matches_enumerator(self):
+        for seq, lp in self.d.enumerator().top_k(25):
+            self.assertAlmostEqual(self.d.log_density(seq), lp, places=10)
+
+    def test_density_is_proper(self):
+        # summing over EVERY finite sequence (incl. would-be off-support) now totals 1 (was > 1 before)
+        total = sum(
+            np.exp(self.d.log_density(list(s)))
+            for length in range(1, 13)
+            for s in itertools.product("ab.", repeat=length)
+        )
+        self.assertAlmostEqual(total, 1.0, delta=0.02)  # remaining mass is in sequences longer than 12
+
+    def test_ambiguous_terminal_defers_structural_count_index(self):
+        # shared emissions => a sequence has multiple paths => the structural (path-count) index would be
+        # only the tropical projection, so _terminal_values_count_index returns None and seek falls back
+        # to exact enumerate-and-bin.
+        from pysp.enumeration.quantization.core import Quantizer
+
+        self.assertIsNone(self.d._terminal_values_count_index(Quantizer(bin_width_bits=1.0, oversample=64), 256))
+        order = sorted(
+            (
+                (list(s), self.d.log_density(list(s)))
+                for length in range(1, 7)
+                for s in itertools.product("ab.", repeat=length)
+                if np.isfinite(self.d.log_density(list(s)))
+            ),
+            key=lambda kv: -kv[1],
+        )
+        seen = set()
+        for k in range(min(len(order), 20)):
+            v = tuple(self.d.enumerator().seek(k).value)
+            self.assertNotIn(v, seen)  # exact fallback: one sequence per index, no path over-count
+            seen.add(v)
+            self.assertAlmostEqual(self.d.log_density(list(v)), order[k][1], places=9)
+
+
 if __name__ == "__main__":
     unittest.main()

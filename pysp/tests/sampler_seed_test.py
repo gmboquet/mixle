@@ -170,7 +170,28 @@ def _stats_public_distribution_catalog():
         start="S",
     )
 
+    _att_rng = np.random.RandomState(0)
+
+    def _att_emission(s, t):
+        e = _att_rng.rand(s, t) + 0.1
+        return e / e.sum(axis=1, keepdims=True)
+
+    responsibility_attention = stats.ResponsibilityAttentionDistribution(
+        _att_rng.randn(3, 2), _att_emission(3, 2), position_prior=np.ones(2) / 2, sigma2=0.5
+    )
+    variational_embedding_attention = stats.VariationalEmbeddingAttentionDistribution(
+        _att_rng.randn(3, 2), np.full((3, 2), np.log(0.3)), _att_emission(3, 2), np.ones(2) / 2, sigma2=0.5
+    )
+    chained_attention = stats.ChainedAttentionDistribution(0.1 * _att_rng.randn(2, 3, 3), _att_emission(3, 2), sigma2=0.1)
+    variational_multihop_attention = stats.VariationalMultiHopAttentionDistribution(
+        _att_rng.randn(3, 2), np.full((3, 2), np.log(0.3)), _att_emission(3, 3), sigma2=0.3
+    )
+
     return {
+        "ResponsibilityAttentionDistribution": responsibility_attention,
+        "VariationalEmbeddingAttentionDistribution": variational_embedding_attention,
+        "ChainedAttentionDistribution": chained_attention,
+        "VariationalMultiHopAttentionDistribution": variational_multihop_attention,
         "BernoulliDistribution": stats.BernoulliDistribution(0.3),
         "BetaDistribution": stats.BetaDistribution(2.0, 5.0),
         "LaplaceDistribution": stats.LaplaceDistribution(0.0, 1.5),
@@ -395,6 +416,56 @@ def _stats_public_distribution_catalog():
         "VonMisesFisherDistribution": stats.VonMisesFisherDistribution([1.0, 0.0, 0.0], 2.0),
         "WeightedDistribution": stats.WeightedDistribution(stats.GaussianDistribution(0.0, 1.0)),
         "ErdosRenyiGraphDistribution": stats.ErdosRenyiGraphDistribution(0.4, num_nodes=6),
+        "TemporalGraphGrammarDistribution": stats.TemporalGraphGrammarDistribution(
+            [0.2, 0.4, 0.25, 0.15], edge_rate=2.0, node_rate=0.5
+        ),
+        "HomophilyTemporalGraphGrammarDistribution": stats.HomophilyTemporalGraphGrammarDistribution(
+            np.stack([np.array([[3.0, 0.7], [0.7, 3.0]]) * w for w in (0.6, 0.4)]),
+            [0.5, 0.5],
+            node_rate=0.5,
+        ),
+        "ChurningTemporalGraphGrammarDistribution": stats.ChurningTemporalGraphGrammarDistribution(
+            stats.TemporalGraphGrammarDistribution([0.25] * 4, edge_rate=2.0, node_rate=1.0),
+            node_remove_rate=1.0,
+        ),
+        "LatentTemporalGraphGrammarDistribution": stats.LatentTemporalGraphGrammarDistribution(
+            [
+                stats.TemporalGraphGrammarDistribution([0.1, 0.3, 0.35, 0.25], edge_rate=6.0, node_rate=1.0),
+                stats.TemporalGraphGrammarDistribution(
+                    [0.25] * 4, edge_rate=1.0, remove_weights=[0.4, 0.3, 0.2, 0.1], edge_remove_rate=4.0
+                ),
+            ],
+            initial_probs=[0.5, 0.5],
+            transition_matrix=[[0.8, 0.2], [0.2, 0.8]],
+        ),
+        "LatentAttributedTemporalGraphGrammarDistribution": stats.LatentAttributedTemporalGraphGrammarDistribution(
+            [
+                stats.TemporalGraphGrammarDistribution([0.1, 0.3, 0.35, 0.25], edge_rate=6.0, node_rate=1.0),
+                stats.TemporalGraphGrammarDistribution(
+                    [0.25] * 4, edge_rate=1.0, remove_weights=[0.4, 0.3, 0.2, 0.1], edge_remove_rate=4.0, node_rate=1.0
+                ),
+            ],
+            [stats.GaussianDistribution(25.0, 16.0), stats.GaussianDistribution(55.0, 16.0)],
+            [stats.PoissonDistribution(10.0), stats.PoissonDistribution(2.0)],
+            initial_probs=[0.5, 0.5],
+            transition_matrix=[[0.8, 0.2], [0.2, 0.8]],
+        ),
+        "LatentChurningTemporalGraphGrammarDistribution": stats.LatentChurningTemporalGraphGrammarDistribution(
+            [
+                stats.TemporalGraphGrammarDistribution([0.1, 0.3, 0.35, 0.25], edge_rate=6.0, node_rate=2.0),
+                stats.TemporalGraphGrammarDistribution(
+                    [0.25] * 4, edge_rate=1.0, node_rate=2.0, remove_weights=[0.4, 0.3, 0.2, 0.1], edge_remove_rate=3.0
+                ),
+            ],
+            node_remove_rates=[0.3, 3.0],
+            initial_probs=[0.5, 0.5],
+            transition_matrix=[[0.8, 0.2], [0.2, 0.8]],
+        ),
+        "LabeledTemporalGraphGrammarDistribution": stats.LabeledTemporalGraphGrammarDistribution(
+            stats.TemporalGraphGrammarDistribution([0.2, 0.4, 0.25, 0.15], edge_rate=2.0, node_rate=0.5),
+            stats.GaussianDistribution(0.0, 1.0),
+            stats.PoissonDistribution(3.0),
+        ),
         "StochasticBlockGraphDistribution": stats.StochasticBlockGraphDistribution(
             [[0.8, 0.2], [0.2, 0.7]], [0, 0, 1, 1, 0, 1]
         ),

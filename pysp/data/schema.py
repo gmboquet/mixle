@@ -164,9 +164,14 @@ class Schema:
         leaf yields a single field typed by its support (discrete -> Count, continuous -> Real, ...).
         """
         names = getattr(model, "fields", None)
-        children = getattr(model, "dists", None) or getattr(model, "components", None)
-        if names is not None and children is not None and len(names) == len(children):
-            return Schema(tuple(Field(str(n), _type_for(c)) for n, c in zip(names, children)))
+        dists = getattr(model, "dists", None)  # the independent factors of a composite/record (not mixture comps)
+        if dists is not None:
+            labels = (
+                [str(n) for n in names]
+                if (names is not None and len(names) == len(dists))
+                else [f"field_{i}" for i in range(len(dists))]
+            )
+            return Schema(tuple(Field(n, _type_for(c)) for n, c in zip(labels, dists)))
         return Schema((Field(getattr(model, "name", None) or "value", _type_for(model)),))
 
 

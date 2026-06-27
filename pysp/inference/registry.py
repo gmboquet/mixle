@@ -1,0 +1,110 @@
+"""A versioned model registry: store fitted models + their provenance, list versions, promote/swap.
+
+A filesystem-backed store so a production system can register every fitted model (with its
+:class:`~pysp.inference.provenance.ModelHeader`), list and load any version, and promote a chosen version
+to an alias (e.g. ``"production"``) -- the swap point a serving layer reads from. Models serialize through
+``pysp.utils.serialization`` (the safe registry-keyed JSON); headers are plain JSON dicts.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from typing import Any
+
+from pysp.utils.serialization import ensure_pysp_serialization_registry, from_serializable, to_serializable
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class ModelRegistry:
+    """A directory of named models, each with numbered versions and movable aliases."""
+
+    def __init__(self, root: str) -> None:
+        ensure_pysp_serialization_registry()
+        self.root = root
+        os.makedirs(root, exist_ok=True)
+
+    def _dir(self, name: str) -> str:
+        d = os.path.join(self.root, name)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def names(self) -> list[str]:
+        """Registered model names."""
+        return sorted(n for n in os.listdir(self.root) if os.path.isdir(os.path.join(self.root, n)))
+
+    def versions(self, name: str) -> list[str]:
+        """Version ids for ``name`` in registration order (``v1``, ``v2``, ...)."""
+        d = os.path.join(self.root, name)
+        if not os.path.isdir(d):
+            return []
+        vs = [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
+        return sorted(vs, key=lambda v: int(v[1:]) if v[1:].isdigit() else 0)
+
+    def register(self, model: Any, name: str, *, header: Any = None, metadata: dict | None = None) -> str:
+        """Store ``model`` under ``name`` as a new version; return its version id.
+
+        ``header`` defaults to ``model.header`` if present. The model is serialized with the safe pysp
+        registry; the header (a :class:`ModelHeader` or dict) and ``metadata`` are stored alongside."""
+        d = self._dir(name)
+        ver = f"v{len(self.versions(name)) + 1}"
+        attached = getattr(model, "header", None)
+        if header is None:
+            header = attached
+        hdr = header.to_dict() if hasattr(header, "to_dict") else header
+        # the header is stored separately; detach it so it is not serialized as part of the model state
+        # (a ModelHeader is not a registered serializable class).
+        had_attr = hasattr(model, "__dict__") and "header" in vars(model)
+        if had_attr:
+            del model.header
+        try:
+            model_ser = to_serializable(model)
+        finally:
+            if had_attr:
+                model.header = attached
+        payload = {
+            "version": ver,
+            "registered_at": _now(),
+            "model": model_ser,
+            "header": hdr,
+            "metadata": metadata or {},
+        }
+        with open(os.path.join(d, ver + ".json"), "w") as f:
+            json.dump(payload, f)
+        return ver
+
+    def get(self, name: str, version: str = "latest") -> tuple[Any, dict | None]:
+        """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered)."""
+        vs = self.versions(name)
+        if not vs:
+            raise KeyError(f"no versions registered for model {name!r}")
+        if version == "latest":
+            version = vs[-1]
+        with open(os.path.join(self.root, name, version + ".json")) as f:
+            payload = json.load(f)
+        return from_serializable(payload["model"]), payload.get("header")
+
+    def header(self, name: str, version: str = "latest") -> dict | None:
+        """Just the provenance header of a version (no model deserialization)."""
+        vs = self.versions(name)
+        if version == "latest":
+            version = vs[-1]
+        with open(os.path.join(self.root, name, version + ".json")) as f:
+            return json.load(f).get("header")
+
+    def promote(self, name: str, version: str, alias: str = "production") -> None:
+        """Point ``alias`` (e.g. ``"production"``) at ``version`` -- the atomic model swap."""
+        if version not in self.versions(name):
+            raise KeyError(f"{name!r} has no version {version!r}")
+        with open(os.path.join(self._dir(name), alias + ".alias"), "w") as f:
+            f.write(version)
+
+    def current(self, name: str, alias: str = "production") -> tuple[Any, dict | None]:
+        """Load the model an ``alias`` points at (falls back to ``latest`` if the alias is unset)."""
+        p = os.path.join(self.root, name, alias + ".alias")
+        version = open(p).read().strip() if os.path.exists(p) else "latest"
+        return self.get(name, version)
