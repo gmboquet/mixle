@@ -158,6 +158,26 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """Returns str name of CompositeDistribution with each dist as well."""
         return "CompositeDistribution((%s))" % (",".join(map(str, self.dists)))
 
+    def marginal(self, indices: Sequence[int]) -> CompositeDistribution:
+        """The marginal sub-composite over the given component ``indices``.
+
+        Because the components are independent, the marginal of a subset of coordinates is just the
+        sub-product over those coordinates. Used (with :meth:`condition`) by ``MixtureDistribution.conditional``
+        to score the observed coordinates of a partial observation."""
+        idx = sorted(indices)
+        return CompositeDistribution([self.dists[i] for i in idx])
+
+    def condition(self, observed: dict[int, Any]) -> CompositeDistribution:
+        """The conditional sub-composite over the UNobserved components given ``observed``.
+
+        ``observed`` maps a component index to its (present) value. Since the components are independent,
+        conditioning leaves the unobserved factors unchanged -- the conditional is the sub-product over the
+        coordinates not in ``observed`` (the observed values do not enter). This is the per-component piece
+        that makes ``MixtureDistribution.conditional`` return the posterior/imputation over the missing
+        fields of a partial observation."""
+        obs = set(observed)
+        return CompositeDistribution([self.dists[i] for i in range(self.count) if i not in obs])
+
     def density(self, x: tuple[Any, ...]) -> float:
         """Evaluates density of CompositeDistribution for single observation tuple x.
 

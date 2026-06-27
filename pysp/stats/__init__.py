@@ -450,6 +450,9 @@ __all__ = [
     "NullEstimator",
     "NullDataEncoder",
     "NullEnumerator",
+    "MISSING",
+    "marginalized",
+    "composite_with_missing",
     "OptionalDistribution",
     "OptionalSampler",
     "OptionalEstimator",
@@ -855,6 +858,7 @@ from pysp.stats.combinator.optional import (
     OptionalEstimator,
     OptionalSampler,
 )
+from pysp.stats.missing import MISSING, composite_with_missing, marginalized
 from pysp.stats.combinator.record import (
     DictRecordDataEncoder,
     DictRecordDistribution,
