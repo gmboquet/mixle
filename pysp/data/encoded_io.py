@@ -50,7 +50,5 @@ def load_encoded(path: str, *, encoder: Any = None) -> Any:
     if hashlib.sha256(body).hexdigest() != meta["digest"]:
         raise ValueError(f"{path!r} failed its integrity check (corrupt or truncated)")
     if encoder is not None and meta["encoder"] is not None and type(encoder).__name__ != meta["encoder"]:
-        raise ValueError(
-            f"encoder mismatch: file was encoded with {meta['encoder']}, got {type(encoder).__name__}"
-        )
+        raise ValueError(f"encoder mismatch: file was encoded with {meta['encoder']}, got {type(encoder).__name__}")
     return pickle.loads(body)

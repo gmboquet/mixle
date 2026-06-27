@@ -44,9 +44,7 @@ class ModelMonitor:
         """Drift report of ``current`` (production) data against the reference under the current model."""
         return detect_drift(self.model, self.reference, current, **self.thresholds)
 
-    def update(
-        self, current: Any, *, retrain: bool = True, combine_reference: bool = True, **fit_kw: Any
-    ) -> dict:
+    def update(self, current: Any, *, retrain: bool = True, combine_reference: bool = True, **fit_kw: Any) -> dict:
         """Check drift on ``current`` and, if drift is flagged and ``retrain``, fit a fresh model (with a
         new provenance header) and swap it in. Returns ``{report, action, model, header}`` and appends to
         :attr:`history`. ``combine_reference`` retrains on reference + current (else current only)."""
