@@ -38,9 +38,12 @@ class ModelService:
 
     @classmethod
     def from_registry(cls, registry: Any, name: str, *, alias: str = "production", **kw: Any) -> ModelService:
-        """Load the model an alias points at in ``registry`` and serve it."""
-        model, _header = registry.current(name, alias)
-        return cls(model, name=name, **kw)
+        """Load the model an alias points at in ``registry`` and serve it (carrying its provenance header)."""
+        model, header = registry.current(name, alias)
+        svc = cls(model, name=name, **kw)
+        if header is not None and svc.header is None:  # the registry stores the header separately
+            svc.header = header
+        return svc
 
     def _log(self, event: dict) -> None:
         self.activity.append(event)
