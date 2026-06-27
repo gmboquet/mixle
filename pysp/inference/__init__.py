@@ -142,6 +142,8 @@ from pysp.inference.drift import (
 )
 from pysp.inference.monitor import ModelMonitor
 from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
+from pysp.inference.registry import ModelRegistry
+from pysp.inference.serving import ModelService
 from pysp.inference.provenance import ModelHeader, build_header, environment_info, fit_with_provenance
 
 # bootstrap / permutation inference for arbitrary statistics (distribution-free uncertainty)
@@ -249,6 +251,9 @@ __all__ = [
     "ks_statistic",
     "js_divergence",
     "ModelMonitor",
+    # production: versioned registry + serving with activity/computation logging
+    "ModelRegistry",
+    "ModelService",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
