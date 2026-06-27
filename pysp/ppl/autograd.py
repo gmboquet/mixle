@@ -133,7 +133,7 @@ class GradTarget:
     the numerical builder so the caller constructs results identically.
     """
 
-    def __init__(self, rv, data, slots, build, unpack, dmean, dstd):
+    def __init__(self, rv, data, slots, build, unpack, dmean, dstd, missing="error"):
         import torch
 
         self._torch = torch
@@ -149,7 +149,17 @@ class GradTarget:
 
         self._eng = TorchEngine(dtype="float64")
         self._scorers = _scorers()
-        self._x = torch.tensor(np.asarray(data, dtype=float), dtype=torch.float64)
+        x_np = np.asarray(data, dtype=float)
+        # missing='marginalize': a NaN observation is integrated out -> its per-point log-density is
+        # zeroed in the sum (weight 0). Replace the NaN with a safe dummy first so the scorer/data_terms
+        # stay finite and no NaN poisons the gradient through the masked (zero-weight) branch.
+        self._w = None
+        if missing == "marginalize":
+            nan = np.isnan(x_np)
+            if nan.any():
+                x_np = np.where(nan, 0.0, x_np)
+                self._w = torch.tensor((~nan).astype(float), dtype=torch.float64)
+        self._x = torch.tensor(x_np, dtype=torch.float64)
         prep, _ = self._scorers[self._fam.name]
         self._data_terms = prep(self._x, torch)
         # fixed (non-inferred) args as python floats
@@ -192,7 +202,8 @@ class GradTarget:
                 vals[s.index] = uk
         full = [vals[i] if i in vals else self._t(self._fixed[i]) for i in range(len(self._rv._args))]
         _, apply = self._scorers[self._fam.name]
-        ll = apply(full, self._data_terms, self._x, self._eng).sum()
+        lp = apply(full, self._data_terms, self._x, self._eng)
+        ll = (lp * self._w).sum() if self._w is not None else lp.sum()  # missing rows have weight 0
         plp = u.new_zeros(())
         for s in self.slots:
             if s.reparam == "loc_scale":  # prior is N(0,1) on z = (value - loc)/scale
@@ -212,7 +223,7 @@ class GradTarget:
                 plp = plp + apply_p(pargs, prep_p(xt, torch), xt, self._eng).sum()
         return ll + plp + logj
 
-    def _logtarget_batch(self, U, x=None, data_terms=None, lik_scale=1.0):
+    def _logtarget_batch(self, U, x=None, data_terms=None, lik_scale=1.0, w=None):
         """Vectorized joint log-target for a batch ``U`` of shape ``(B, d)`` -> ``(B,)``.
 
         Identical math to :meth:`_logtarget_tensor` but with a leading batch axis: each
@@ -223,6 +234,8 @@ class GradTarget:
         torch = self._torch
         x = self._x if x is None else x
         data_terms = self._data_terms if data_terms is None else data_terms
+        if w is None:
+            w = self._w
         B = U.shape[0]
         vals: dict[int, Any] = {}
         logj = U.new_zeros(B)
@@ -242,7 +255,9 @@ class GradTarget:
                 vals[s.index] = uk
         full = [vals[i].reshape(B, 1) if i in vals else self._t(self._fixed[i]) for i in range(len(self._rv._args))]
         _, apply = self._scorers[self._fam.name]
-        ll = apply(full, data_terms, x, self._eng).sum(dim=1) * lik_scale  # (B, N) -> (B,)
+        lp = apply(full, data_terms, x, self._eng)  # (B, N)
+        lp = lp * w if w is not None else lp  # missing rows have weight 0
+        ll = lp.sum(dim=1) * lik_scale  # (B, N) -> (B,)
         plp = U.new_zeros(B)
         for s in self.slots:
             if s.reparam == "loc_scale":
@@ -309,7 +324,11 @@ class GradTarget:
             if use_mb:
                 idx = self._torch.as_tensor(rng.choice(n_data, size=int(batch_size), replace=False))
                 return self._logtarget_batch(
-                    u, self._x[idx], tuple(t[idx] for t in self._data_terms), n_data / float(batch_size)
+                    u,
+                    self._x[idx],
+                    tuple(t[idx] for t in self._data_terms),
+                    n_data / float(batch_size),
+                    w=None if self._w is None else self._w[idx],
                 )
             return self._logtarget_batch(u)
 
@@ -460,11 +479,12 @@ def _mixture_grad_target(rv, data, scorers):
     return MixtureGradTarget(rv, data, slots, build, dmean, dstd, comp_layouts, weight, fam0)
 
 
-def grad_target(rv: RandomVariable, data):
+def grad_target(rv: RandomVariable, data, missing: str = "error"):
     """Build a Torch autograd target for a flat model or a mixture-of-leaves, or ``None``.
 
     Returns ``None`` (caller falls back to the numerical path) when Torch is missing, or the model
     is neither a flat ``Sample`` nor a supported mixture, or any family has no Torch scorer.
+    ``missing='marginalize'`` integrates NaN observations out of the likelihood (flat models only here).
     """
     if not torch_available() or rv._kind != "sample":
         return None
@@ -474,6 +494,8 @@ def grad_target(rv: RandomVariable, data):
         return None
     if isinstance(rv._family, CompositeFamily):
         if rv._family.name == "Mixture":
+            if missing == "marginalize":
+                return None  # mixture-of-leaves missing handling not wired here; caller raises clearly
             try:
                 return _mixture_grad_target(rv, data, scorers)
             except Exception:
@@ -494,4 +516,4 @@ def grad_target(rv: RandomVariable, data):
             return None
     _require_flat(rv)
     fam, slots, build, unpack, (dmean, dstd) = _target_parts(rv, data)
-    return GradTarget(rv, data, slots, build, unpack, dmean, dstd)
+    return GradTarget(rv, data, slots, build, unpack, dmean, dstd, missing=missing)

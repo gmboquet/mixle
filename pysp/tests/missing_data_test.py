@@ -162,11 +162,24 @@ class PplMissingTest(unittest.TestCase):
         with self.assertRaises(Exception):
             Normal(free, free).fit(self._data())
 
-    def test_marginalize_only_on_em_path(self):
-        from pysp.ppl import Normal, free
+    def test_full_bayesian_posterior_with_missing(self):
+        # MAP/VI (and the samplers) marginalize NaNs through the autograd target -> posterior over the
+        # present data, no imputation. Weak prior, so the location posterior ~ the present-data mean.
+        from pysp.ppl import Normal
 
-        with self.assertRaises(NotImplementedError):
-            Normal(free, free).fit(self._data(), how="map", missing="marginalize")
+        rng = np.random.RandomState(2)
+        clean = rng.normal(3.0, 2.0, size=1500)
+        data = [float("nan") if rng.rand() < 0.3 else float(x) for x in clean]
+        present_mean = np.mean([x for x in data if not np.isnan(x)])
+        for how in ("map", "vi"):
+            m = Normal(Normal(0.0, 5.0), 2.0).fit(data, how=how, missing="marginalize")
+            self.assertAlmostEqual(m._dist.mu, present_mean, delta=0.1)
+
+    def test_unsupported_how_raises(self):
+        from pysp.ppl import Normal
+
+        with self.assertRaises(NotImplementedError):  # closed-form conjugate path isn't wired for missing
+            Normal(Normal(0.0, 5.0), 2.0).fit(self._data(), how="conjugate", missing="marginalize")
 
 
 if __name__ == "__main__":
