@@ -1561,11 +1561,15 @@ class RandomVariable:
         # registry replaces the old ``if how == ...`` ladder; the ``vmp`` Mixture special case lives
         # inside its registered fitter (a closure over the RV's family/args).
         if missing == "marginalize" and how != "em":
-            raise NotImplementedError(
-                f"missing='marginalize' currently supports the EM path (how='em'/'auto' for free models), "
-                f"not how={how!r}. For MAP/MCMC with missing data, build the model with "
-                "pysp.stats.marginalized() leaves."
-            )
+            # the autograd-target fitters marginalize NaN observations (flat models); thread the flag in.
+            if how in {"map", "mcmc", "hmc", "nuts", "vi", "ensemble", "sample"}:
+                kw["missing"] = missing
+            else:
+                raise NotImplementedError(
+                    f"missing='marginalize' is not wired for how={how!r} (closed-form/grouped path); use "
+                    "how='em'/'map'/'mcmc'/'hmc'/'nuts'/'vi'/'ensemble', or build the model with "
+                    "pysp.stats.marginalized() leaves."
+                )
         fitter = _FITTERS.get(how)
         if fitter is not None:
             return fitter(self, data, **kw)
