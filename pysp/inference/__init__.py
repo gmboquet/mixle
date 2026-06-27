@@ -132,6 +132,15 @@ from pysp.inference.ordinal import (
 )
 
 # the Posterior algebra — inference produces posteriors; you draw from them through one interface
+from pysp.inference.drift import (
+    DriftReport,
+    detect_drift,
+    js_divergence,
+    ks_statistic,
+    population_stability_index,
+    score_drift,
+)
+from pysp.inference.monitor import ModelMonitor
 from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 from pysp.inference.provenance import ModelHeader, build_header, environment_info, fit_with_provenance
 
@@ -232,6 +241,14 @@ __all__ = [
     "ModelHeader",
     "build_header",
     "environment_info",
+    # drift detection + production monitoring (retrain-and-swap, DOE-driven sampling)
+    "detect_drift",
+    "DriftReport",
+    "score_drift",
+    "population_stability_index",
+    "ks_statistic",
+    "js_divergence",
+    "ModelMonitor",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
