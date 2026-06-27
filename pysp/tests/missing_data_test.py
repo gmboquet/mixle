@@ -138,5 +138,36 @@ class HmmMissingEmissionsTest(unittest.TestCase):
         np.testing.assert_allclose(m.transitions, [[0.8, 0.2], [0.3, 0.7]], atol=0.06)
 
 
+class PplMissingTest(unittest.TestCase):
+    """The PPL fits from data with NaNs by marginalizing them out (no imputation): the mode/posterior is
+    over the present entries only. fit(..., missing='marginalize') on the EM path."""
+
+    def _data(self):
+        rng = np.random.RandomState(0)
+        clean = rng.normal(3.0, 2.0, size=4000)
+        return [float("nan") if rng.rand() < 0.3 else float(x) for x in clean]
+
+    def test_marginalize_matches_mle_over_present(self):
+        from pysp.ppl import Normal, free
+
+        data = self._data()
+        m = Normal(free, free).fit(data, missing="marginalize")
+        present = np.array([x for x in data if not np.isnan(x)])
+        self.assertAlmostEqual(m._dist.mu, present.mean(), places=4)  # fit == MLE over present (no imputation)
+        self.assertAlmostEqual(m._dist.sigma2, present.var(), places=3)
+
+    def test_default_rejects_nan(self):
+        from pysp.ppl import Normal, free
+
+        with self.assertRaises(Exception):
+            Normal(free, free).fit(self._data())
+
+    def test_marginalize_only_on_em_path(self):
+        from pysp.ppl import Normal, free
+
+        with self.assertRaises(NotImplementedError):
+            Normal(free, free).fit(self._data(), how="map", missing="marginalize")
+
+
 if __name__ == "__main__":
     unittest.main()
