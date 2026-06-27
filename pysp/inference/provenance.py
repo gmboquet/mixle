@@ -65,11 +65,29 @@ def _schema_of(model: Any) -> list[tuple[str, str]]:
         return []
 
 
+def _resource_usage() -> dict:
+    """Process CPU time and peak resident memory (best effort; empty on platforms without ``resource``)."""
+    try:
+        import resource
+
+        ru = resource.getrusage(resource.RUSAGE_SELF)
+        peak_mb = ru.ru_maxrss / 1e6 if sys.platform == "darwin" else ru.ru_maxrss / 1e3  # macOS bytes, Linux KB
+        return {"cpu_time_s": ru.ru_utime + ru.ru_stime, "peak_rss_mb": round(peak_mb, 1)}
+    except Exception:
+        return {}
+
+
+def _records(data: Any):
+    """Iterate a dataset uniformly, whether it is a list/sequence or a DataSource (``.records()``)."""
+    rec = getattr(data, "records", None)
+    return rec() if callable(rec) else data
+
+
 def _final_loglik(model: Any, data: Any) -> float | None:
     try:
         import numpy as np
 
-        enc = model.dist_to_encoder().seq_encode(list(data))
+        enc = model.dist_to_encoder().seq_encode(list(_records(data)))
         return float(np.sum(model.seq_log_density(enc)))
     except Exception:
         return None
@@ -87,6 +105,7 @@ class ModelHeader:
     final_loglik: float | None
     training: dict = field(default_factory=dict)
     timing: dict = field(default_factory=dict)
+    resources: dict = field(default_factory=dict)
     environment: dict = field(default_factory=dict)
     created_at: str = ""
 
@@ -109,6 +128,7 @@ class ModelHeader:
             f"  final_loglik: {self.final_loglik}",
             f"  training: {tr}" + (f"  [{n_iter} iters logged]" if n_iter else ""),
             f"  timing: {self.timing}",
+            f"  resources: {self.resources}",
             f"  env: python {self.environment.get('python')}, "
             f"pysp {self.environment.get('pysp_version')}, git {self.environment.get('git_commit')}",
             f"  created_at: {self.created_at}",
@@ -124,6 +144,7 @@ def build_header(
     started: float | None = None,
     finished: float | None = None,
     final_loglik: Any = "auto",
+    resources: dict | None = None,
     hash_sort: bool = False,
     hash_max_records: int | None = None,
 ) -> ModelHeader:
@@ -146,6 +167,7 @@ def build_header(
         final_loglik=ll,
         training=dict(training or {}),
         timing=timing,
+        resources=dict(resources or {}),
         environment=environment_info(),
         created_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -194,9 +216,13 @@ def fit_with_provenance(data: Any, estimator: Any, *, seed: int | None = None, *
         "backend": optimize_kw.get("backend", "local"),
         "seed": seed,
     }
+    cpu0 = _resource_usage().get("cpu_time_s")
     t0 = time.time()
     model = optimize(data, estimator, **optimize_kw)
     t1 = time.time()
+    usage = _resource_usage()
+    if cpu0 is not None and usage.get("cpu_time_s") is not None:
+        usage = {"cpu_time_s": round(usage["cpu_time_s"] - cpu0, 3), "peak_rss_mb": usage.get("peak_rss_mb")}
     if collector is not None:
         recs = collector.records
         training["convergence"] = recs
@@ -205,7 +231,7 @@ def fit_with_provenance(data: Any, estimator: Any, *, seed: int | None = None, *
         if delta is not None and recs:
             last = recs[-1]["delta"]
             training["converged"] = last is not None and last < delta
-    header = build_header(model, data, training=training, started=t0, finished=t1)
+    header = build_header(model, data, training=training, started=t0, finished=t1, resources=usage)
     try:
         model.header = header
     except Exception:
