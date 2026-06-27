@@ -59,6 +59,16 @@ from pysp.inference.cross_validation import (
     stratified_kfold,
     time_series_split,
 )
+
+# the Posterior algebra — inference produces posteriors; you draw from them through one interface
+from pysp.inference.drift import (
+    DriftReport,
+    detect_drift,
+    js_divergence,
+    ks_statistic,
+    population_stability_index,
+    score_drift,
+)
 from pysp.inference.em import EMStrategy, run_em
 from pysp.inference.errors_in_variables import DemingFit, deming_regression, propagate_uncertainty, simex
 from pysp.inference.estimation import best_of, fit, optimize
@@ -85,6 +95,7 @@ from pysp.inference.model_comparison import (
     paired_score_difference,
     vuong_test,
 )
+from pysp.inference.monitor import ModelMonitor
 
 # multiple-testing correction (FWER / FDR) and evidence combination
 from pysp.inference.multiple_testing import (
@@ -130,21 +141,9 @@ from pysp.inference.ordinal import (
     ordinal_regression,
     somers_d,
 )
-
-# the Posterior algebra — inference produces posteriors; you draw from them through one interface
-from pysp.inference.drift import (
-    DriftReport,
-    detect_drift,
-    js_divergence,
-    ks_statistic,
-    population_stability_index,
-    score_drift,
-)
-from pysp.inference.monitor import ModelMonitor
 from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
-from pysp.inference.registry import ModelRegistry
-from pysp.inference.serving import ModelService
 from pysp.inference.provenance import ModelHeader, build_header, environment_info, fit_with_provenance
+from pysp.inference.registry import ModelRegistry
 
 # bootstrap / permutation inference for arbitrary statistics (distribution-free uncertainty)
 from pysp.inference.resampling import (
@@ -178,6 +177,7 @@ from pysp.inference.scoring import (
     skill_score,
     winkler_score,
 )
+from pysp.inference.serving import ModelService
 
 # survival / time-to-event estimators and hazard regression
 from pysp.inference.survival import (

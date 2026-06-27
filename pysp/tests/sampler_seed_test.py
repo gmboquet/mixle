@@ -182,7 +182,9 @@ def _stats_public_distribution_catalog():
     variational_embedding_attention = stats.VariationalEmbeddingAttentionDistribution(
         _att_rng.randn(3, 2), np.full((3, 2), np.log(0.3)), _att_emission(3, 2), np.ones(2) / 2, sigma2=0.5
     )
-    chained_attention = stats.ChainedAttentionDistribution(0.1 * _att_rng.randn(2, 3, 3), _att_emission(3, 2), sigma2=0.1)
+    chained_attention = stats.ChainedAttentionDistribution(
+        0.1 * _att_rng.randn(2, 3, 3), _att_emission(3, 2), sigma2=0.1
+    )
     variational_multihop_attention = stats.VariationalMultiHopAttentionDistribution(
         _att_rng.randn(3, 2), np.full((3, 2), np.log(0.3)), _att_emission(3, 3), sigma2=0.3
     )

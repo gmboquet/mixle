@@ -590,7 +590,9 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
                 "left_to_right requires upper-triangular transition_exponents: every entry below the "
                 "diagonal must be a structural zero (negative exponent)"
             )
-        return cls(theta, levels, transition_exponents, emission_exponents, initial_exponents=initial_exponents, **kwargs)
+        return cls(
+            theta, levels, transition_exponents, emission_exponents, initial_exponents=initial_exponents, **kwargs
+        )
 
     def to_fisher(self, **kwargs):
         """Forward-backward Fisher view for the quantized HMM."""

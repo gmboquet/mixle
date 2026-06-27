@@ -54,9 +54,7 @@ def marginalized(dist: Any, missing_value: Any = MISSING) -> Any:
     return OptionalDistribution(dist, p=None, missing_value=missing_value)
 
 
-def composite_with_missing(
-    dists: Sequence[Any], missing_value: Any = MISSING
-) -> Any:
+def composite_with_missing(dists: Sequence[Any], missing_value: Any = MISSING) -> Any:
     """Build a ``CompositeDistribution`` over ``dists`` in which every field tolerates ``missing_value``.
 
     Each field is wrapped with :func:`marginalized`, so any field of an observation tuple may be
