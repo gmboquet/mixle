@@ -133,6 +133,7 @@ from pysp.inference.ordinal import (
 
 # the Posterior algebra — inference produces posteriors; you draw from them through one interface
 from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
+from pysp.inference.provenance import ModelHeader, build_header, environment_info, fit_with_provenance
 
 # bootstrap / permutation inference for arbitrary statistics (distribution-free uncertainty)
 from pysp.inference.resampling import (
@@ -226,6 +227,11 @@ __all__ = [
     "best_of",
     "run_em",
     "EMStrategy",
+    # reproducible model artifacts (header/provenance: config, data hash, timing, env, convergence)
+    "fit_with_provenance",
+    "ModelHeader",
+    "build_header",
+    "environment_info",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
