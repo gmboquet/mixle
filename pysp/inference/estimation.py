@@ -207,6 +207,11 @@ def _write_em_iter(
     """
     if out is None:
         return
+    # structured convergence record for provenance collectors (a custom ``out`` exposing em_record);
+    # text output is unaffected for ordinary streams.
+    rec = getattr(out, "em_record", None)
+    if rec is not None:
+        rec(i, float(ll), float(dll), float(vll) if has_vdata else None, obj_label)
     if obj_label is None:
         if has_vdata:
             out.write(
