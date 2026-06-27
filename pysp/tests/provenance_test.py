@@ -52,6 +52,32 @@ class ProvenanceHeaderTest(unittest.TestCase):
         self.assertEqual(back.dataset_hash, header.dataset_hash)
         self.assertEqual(back.schema, header.schema)
         self.assertEqual(back.model_type, header.model_type)
+        self.assertEqual(back.resources, header.resources)
+
+    def test_resources_captured(self):
+        data = np.random.RandomState(7).normal(0.0, 1.0, 2000).tolist()
+        _, header = fit_with_provenance(data, GaussianDistribution(0.0, 1.0).estimator(), max_its=20, out=None)
+        # resource module exists on this platform; if so, peak RSS and CPU time are recorded
+        if header.resources:
+            self.assertIn("peak_rss_mb", header.resources)
+            self.assertIn("cpu_time_s", header.resources)
+            self.assertGreaterEqual(header.resources["cpu_time_s"], 0.0)
+
+    def test_provenance_from_datasource(self):
+        import os
+        import tempfile
+
+        from pysp.data import Field, Real, Schema, open_source
+
+        data = np.random.RandomState(8).normal(2.0, 1.0, 500).tolist()
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "x.csv")
+            with open(path, "w") as f:
+                f.write("x\n" + "\n".join(map(str, data)))
+            src = open_source("csv", path, columns=["x"], schema=Schema((Field("x", Real()),)))
+            _, header = fit_with_provenance(src, GaussianDistribution(0.0, 1.0).estimator(), max_its=20, out=None)
+        self.assertEqual(header.n_records, 500)  # DataSource length flows through
+        self.assertIsNotNone(header.final_loglik)  # and it can still be scored for the header
 
     def test_convergence_trace_captured(self):
         data = np.random.RandomState(1).normal(0.0, 1.0, 300).tolist()
