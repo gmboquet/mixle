@@ -22,9 +22,12 @@ from pysp.data.schema import (
     Timestamp,
     Vector,
 )
+from pysp.data.encoded_io import load_encoded, save_encoded
+from pysp.data.hashing import dataset_hash
 from pysp.data.sources import kinds as source_kinds
 from pysp.data.sources import open as open_source
 from pysp.data.structure import EXCHANGEABLE, IID, SEQUENTIAL, SampleStructure, partially_exchangeable
+from pysp.data.validate import DataReport, check_dataset
 
 __all__ = [
     # core abstraction
@@ -53,6 +56,12 @@ __all__ = [
     "EXCHANGEABLE",
     "SEQUENTIAL",
     "partially_exchangeable",
+    # reproducibility: hashing, validation, encoded-data serialization
+    "dataset_hash",
+    "check_dataset",
+    "DataReport",
+    "save_encoded",
+    "load_encoded",
     # input/representation adapters
     "GraphDataEncoder",
     "GraphObservation",
