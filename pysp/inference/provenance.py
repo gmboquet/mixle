@@ -100,12 +100,14 @@ class ModelHeader:
         return cls(**{k: d.get(k) for k in cls.__dataclass_fields__})
 
     def __str__(self) -> str:
+        tr = {k: v for k, v in self.training.items() if k != "convergence"}  # the trace is long; summarize it
+        n_iter = len(self.training.get("convergence", []))
         lines = [
             f"ModelHeader[{self.model_type}]",
             f"  data: {self.n_records} records, hash={self.dataset_hash[:12]}…",
             f"  schema: {', '.join(f'{n}:{t}' for n, t in self.schema) or '(none)'}",
             f"  final_loglik: {self.final_loglik}",
-            f"  training: {self.training}",
+            f"  training: {tr}" + (f"  [{n_iter} iters logged]" if n_iter else ""),
             f"  timing: {self.timing}",
             f"  env: python {self.environment.get('python')}, "
             f"pysp {self.environment.get('pysp_version')}, git {self.environment.get('git_commit')}",
@@ -149,11 +151,41 @@ def build_header(
     )
 
 
+class _EMHistory:
+    """A silent ``out`` for ``optimize`` that captures the per-iteration convergence trace (via the
+    ``em_record`` hook in ``_write_em_iter``) without printing."""
+
+    def __init__(self) -> None:
+        self.records: list[dict] = []
+
+    def write(self, _s: str) -> None:  # discard the text lines; we keep the structured records
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def em_record(self, i: int, ll: float, dll: float, vll: float | None, obj_label: str | None) -> None:
+        finite_delta = dll == dll and abs(dll) != float("inf")  # null NaN/inf (e.g. the first iteration)
+        rec = {"iter": int(i), "loglik": ll, "delta": (dll if finite_delta else None)}
+        if vll is not None:
+            rec["valid_loglik"] = vll
+        if obj_label is not None:
+            rec["objective"] = obj_label
+        self.records.append(rec)
+
+
 def fit_with_provenance(data: Any, estimator: Any, *, seed: int | None = None, **optimize_kw: Any):
     """Fit ``estimator`` on ``data`` via EM (:func:`pysp.inference.optimize`) and return
     ``(model, header)``, the model carrying a ``.header`` :class:`ModelHeader` with the data hash,
-    schema, training settings, timing, final log-likelihood, and environment."""
+    schema, training settings + per-iteration convergence trace, timing, final log-likelihood, and
+    environment. Pass your own ``out=`` to print iterations (then the trace is not captured)."""
     from pysp.inference.estimation import optimize
+
+    capture = "out" not in optimize_kw
+    collector = _EMHistory() if capture else None
+    if collector is not None:
+        optimize_kw["out"] = collector
+        optimize_kw.setdefault("print_iter", 1)  # record every iteration, not every Nth
 
     training = {
         "method": "em",
@@ -165,6 +197,14 @@ def fit_with_provenance(data: Any, estimator: Any, *, seed: int | None = None, *
     t0 = time.time()
     model = optimize(data, estimator, **optimize_kw)
     t1 = time.time()
+    if collector is not None:
+        recs = collector.records
+        training["convergence"] = recs
+        training["iterations"] = recs[-1]["iter"] if recs else 0
+        delta = optimize_kw.get("delta")
+        if delta is not None and recs:
+            last = recs[-1]["delta"]
+            training["converged"] = last is not None and last < delta
     header = build_header(model, data, training=training, started=t0, finished=t1)
     try:
         model.header = header
