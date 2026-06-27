@@ -253,6 +253,11 @@ e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
 - **Embeddings** (`pysp.utils.hvis`): model-based t-SNE / UMAP over per-record posteriors.
 - **Supervised & non-iid models** (`pysp.models`): GP regression, neural regressors, random forests
   (a conditional `p(y | x)` leaf), random graphs, grammars, knowledge graphs.
+- **MLOps** (`pysp.inference`): reproducible model artifacts (`fit_with_provenance` → a `ModelHeader`
+  with config, data hash, convergence, timing, resources, env), drift detection + `ModelMonitor`
+  (retrain-and-swap), and a versioned `ModelRegistry` + `ModelService` (scoring + activity logging).
+  A container / Kubernetes serving layer lives in the separate
+  [pysparkplug-deploy](https://github.com/gmboquet/pysparkplug-deploy) package.
 
 ## Examples
 
