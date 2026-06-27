@@ -71,7 +71,9 @@ def _engine_seq_estimate(
     return estimator.estimate(nobs, accumulator.value())
 
 
-def _engine_fused_step(enc_data: Any, estimator: ParameterEstimator, prev_estimate: Any, engine: Any) -> tuple[Any, float | None]:
+def _engine_fused_step(
+    enc_data: Any, estimator: ParameterEstimator, prev_estimate: Any, engine: Any
+) -> tuple[Any, float | None]:
     """Engine E/M step that also returns the data log-likelihood of ``prev_estimate``.
 
     When the engine kernel records the E-step normalizer (the :class:`FusedKernel` does -- the data LL
