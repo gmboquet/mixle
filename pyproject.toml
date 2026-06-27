@@ -60,6 +60,8 @@ gmpy2 = ["gmpy2>=2.1"]
 spark = ["pyspark>=3.4"]
 dask = ["dask>=2023.5.0", "distributed>=2023.5.0"]
 torch = ["torch>=2.0"]
+# JaxEngine (XLA arrays, functional autograd) + the NumPyro NUTS sampler backend (how="nuts", backend="jax").
+jax = ["jax>=0.4", "numpyro>=0.13"]
 mpi = ["mpi4py>=3.1"]
 umap = ["umap-learn>=0.5.4"]
 sympy = ["sympy>=1.12"]
@@ -113,6 +115,7 @@ markers = [
     "kernel: fused kernel/compiled path tests.",
     "em: expectation-maximization strategy tests.",
     "torch: torch engine tests.",
+    "jax: JAX engine / NumPyro backend tests.",
     "numba: numba-accelerated path tests.",
     "mpi: MPI backend tests.",
     "dask: dask.distributed backend tests.",
