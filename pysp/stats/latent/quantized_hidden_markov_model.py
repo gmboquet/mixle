@@ -641,6 +641,19 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             return HiddenMarkovModelEnumerator(self)
         return QuantizedHiddenMarkovModelEnumerator(self)
 
+    def determinize(self, max_states: int = 1 << 16):
+        """Weighted determinization (Mohri 1997; Mohri & Riley 2002) of this terminal-value quantized HMM
+        into a :class:`~pysp.stats.latent.hmm_determinize.DeterminizedSequenceDistribution`.
+
+        Rebuilds the machine over belief states (exact rational arithmetic) so each sequence has a single
+        path and edge weights multiply to the exact marginal -- yielding exact, duplicate-free n-best
+        *sequences* (not n-best paths). Requires terminal_values. Raises EnumerationError if the belief
+        expansion exceeds ``max_states`` (the twins property fails -- not finitely determinizable; keep the
+        original HMM's exact O(index) enumerate-and-bin path instead)."""
+        from pysp.stats.latent.hmm_determinize import determinize_quantized_terminal
+
+        return determinize_quantized_terminal(self, max_states=max_states)
+
 
 class _QuantizedHmmPrefix:
     """Concrete observation prefix used by QuantizedHiddenMarkovModelEnumerator."""
