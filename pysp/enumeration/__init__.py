@@ -44,6 +44,7 @@ from pysp.enumeration.algorithms import (
     sound_top_k,
     supports_enumeration,
 )
+from pysp.enumeration.density_rank import DensityRankResult, density_rank
 
 # --- exact descending-probability enumeration of HMM state paths (list-Viterbi / A*) ---
 from pysp.enumeration.hmm_paths import hmm_best_paths
@@ -72,6 +73,8 @@ __all__ = [
     "EnumerationError",
     "child_enumerator",
     "supports_enumeration",
+    "DensityRankResult",
+    "density_rank",
     # rank-by-index (count-budget unranking)
     "count_budget_index",
     "quantized_index",

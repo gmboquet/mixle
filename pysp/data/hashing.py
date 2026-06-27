@@ -10,7 +10,7 @@ fingerprint (records are hashed independently and combined commutatively).
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -33,7 +33,9 @@ def _canonical(obj: Any) -> bytes:
     if isinstance(obj, str):
         return b"s" + obj.encode("utf-8")
     if isinstance(obj, np.ndarray):
-        return b"a" + str(obj.dtype).encode() + b":" + str(obj.shape).encode() + b":" + np.ascontiguousarray(obj).tobytes()
+        return (
+            b"a" + str(obj.dtype).encode() + b":" + str(obj.shape).encode() + b":" + np.ascontiguousarray(obj).tobytes()
+        )
     if isinstance(obj, Mapping):
         return b"d{" + b",".join(_canonical(k) + b":" + _canonical(v) for k, v in sorted(obj.items(), key=repr)) + b"}"
     if isinstance(obj, (tuple, list)):

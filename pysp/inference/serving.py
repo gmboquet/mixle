@@ -37,7 +37,7 @@ class ModelService:
         self.header = getattr(model, "header", None)
 
     @classmethod
-    def from_registry(cls, registry: Any, name: str, *, alias: str = "production", **kw: Any) -> "ModelService":
+    def from_registry(cls, registry: Any, name: str, *, alias: str = "production", **kw: Any) -> ModelService:
         """Load the model an alias points at in ``registry`` and serve it."""
         model, _header = registry.current(name, alias)
         return cls(model, name=name, **kw)

@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from pysp.inference.provenance import ModelHeader
-from pysp.ppl import Normal, free, fit_with_provenance
+from pysp.ppl import Normal, fit_with_provenance, free
 
 
 class PPLProvenanceTest(unittest.TestCase):
