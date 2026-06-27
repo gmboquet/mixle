@@ -1138,6 +1138,20 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         marginal probability order."""
         return HiddenMarkovModelEnumerator(self)
 
+    def determinize(self, max_states: int = 1 << 16, max_denominator: int = 10**9):
+        """Weighted determinization (Mohri 1997; Mohri & Riley 2002) of this terminal-value HMM into a
+        :class:`~pysp.stats.latent.hmm_determinize.DeterminizedSequenceDistribution`.
+
+        Rebuilds the (possibly ambiguous) machine over belief states so each sequence has a single path and
+        edge weights multiply to the exact marginal -- giving exact, duplicate-free n-best *sequences* and
+        sub-linear structural seek, where ranking the original HMM gives n-best *paths*. Float probabilities
+        are rationalized (``max_denominator``) for decidable belief-equality. Requires terminal_values and
+        finite/enumerable emissions; raises EnumerationError if not finitely determinizable within
+        ``max_states`` (the twins property fails -- keep the original HMM's exact O(index) path instead)."""
+        from pysp.stats.latent.hmm_determinize import determinize_terminal_hmm
+
+        return determinize_terminal_hmm(self, max_states=max_states, max_denominator=max_denominator)
+
     _COUNT_INDEX_ITEM_CAP = 1 << 18
 
     def quantized_count_index(self, quantizer, max_fine_bucket: int):
