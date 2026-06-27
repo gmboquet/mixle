@@ -116,8 +116,7 @@ class DriftReport:
         feats = ", ".join(f"{k}: psi={v['psi']:.3f}/ks={v['ks']:.3f}" for k, v in self.per_feature.items())
         return (
             f"DriftReport[{flag}]  score: ks={self.score.get('ks'):.3f}, "
-            f"mean_loglik_shift={self.score.get('mean_loglik_shift'):.3f}"
-            + (f"\n  features: {feats}" if feats else "")
+            f"mean_loglik_shift={self.score.get('mean_loglik_shift'):.3f}" + (f"\n  features: {feats}" if feats else "")
         )
 
 

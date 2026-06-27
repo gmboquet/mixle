@@ -113,7 +113,7 @@ class ModelHeader:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ModelHeader":
+    def from_dict(cls, d: dict) -> ModelHeader:
         d = dict(d)
         d["schema"] = [tuple(x) for x in d.get("schema", [])]
         return cls(**{k: d.get(k) for k in cls.__dataclass_fields__})
