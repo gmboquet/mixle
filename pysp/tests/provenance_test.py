@@ -8,7 +8,7 @@ import unittest
 import numpy as np
 
 from pysp.data import check_dataset, dataset_hash, load_encoded, save_encoded
-from pysp.inference import ModelHeader, fit_with_provenance
+from pysp.inference.production import Header, fit_with_provenance
 from pysp.stats import CategoricalDistribution, CompositeDistribution, GaussianDistribution
 
 
@@ -48,7 +48,7 @@ class ProvenanceHeaderTest(unittest.TestCase):
     def test_header_round_trips_through_dict(self):
         data = [1.0, 2.0, 3.0, 4.0]
         _, header = fit_with_provenance(data, GaussianDistribution(0.0, 1.0).estimator(), max_its=5, out=None)
-        back = ModelHeader.from_dict(header.to_dict())
+        back = Header.from_dict(header.to_dict())
         self.assertEqual(back.dataset_hash, header.dataset_hash)
         self.assertEqual(back.schema, header.schema)
         self.assertEqual(back.model_type, header.model_type)

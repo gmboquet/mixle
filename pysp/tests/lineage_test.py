@@ -8,7 +8,8 @@ import unittest
 import numpy as np
 
 from pysp.data import model_hash
-from pysp.inference import ModelRegistry, fit_with_provenance, optimize, verify_lineage
+from pysp.inference import optimize
+from pysp.inference.production import Registry, fit_with_provenance, verify_lineage
 from pysp.stats import GaussianDistribution, GaussianEstimator, MixtureEstimator
 
 
@@ -56,7 +57,7 @@ class LineageTraceTest(unittest.TestCase):
 class CheckpointChainTest(unittest.TestCase):
     def test_checkpoints_chain_and_verify(self):
         with tempfile.TemporaryDirectory() as d:
-            reg = ModelRegistry(d)
+            reg = Registry(d)
             optimize(
                 _data(),
                 _est(),
@@ -74,7 +75,7 @@ class CheckpointChainTest(unittest.TestCase):
 
     def test_verify_chain_detects_corruption(self):
         with tempfile.TemporaryDirectory() as d:
-            reg = ModelRegistry(d)
+            reg = Registry(d)
             optimize(
                 _data(),
                 _est(),

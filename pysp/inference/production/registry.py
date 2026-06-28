@@ -1,7 +1,7 @@
 """A versioned model registry: store fitted models + their provenance, list versions, promote/swap.
 
 A filesystem-backed store so a production system can register every fitted model (with its
-:class:`~pysp.inference.provenance.ModelHeader`), list and load any version, and promote a chosen version
+:class:`~pysp.inference.production.provenance.Header`), list and load any version, and promote a chosen version
 to an alias (e.g. ``"production"``) -- the swap point a serving layer reads from. Models serialize through
 ``pysp.utils.serialization`` (the safe registry-keyed JSON); headers are plain JSON dicts.
 """
@@ -21,7 +21,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class ModelRegistry:
+class Registry:
     """A directory of named models, each with numbered versions and movable aliases."""
 
     def __init__(self, root: str) -> None:
@@ -50,7 +50,7 @@ class ModelRegistry:
         """Store ``model`` under ``name`` as a new version; return its version id.
 
         ``header`` defaults to ``model.header`` if present. The model is serialized with the safe pysp
-        registry; the header (a :class:`ModelHeader` or dict) and ``metadata`` are stored alongside."""
+        registry; the header (a :class:`Header` or dict) and ``metadata`` are stored alongside."""
         d = self._dir(name)
         ver = f"v{len(self.versions(name)) + 1}"
         attached = getattr(model, "header", None)
@@ -58,7 +58,7 @@ class ModelRegistry:
             header = attached
         hdr = header.to_dict() if hasattr(header, "to_dict") else header
         # the header is stored separately; detach it so it is not serialized as part of the model state
-        # (a ModelHeader is not a registered serializable class).
+        # (a Header is not a registered serializable class).
         had_attr = hasattr(model, "__dict__") and "header" in vars(model)
         if had_attr:
             del model.header
@@ -86,7 +86,7 @@ class ModelRegistry:
         so the saved snapshots form a verifiable chain (see :meth:`verify_chain`). Resume an interrupted
         run from the latest checkpoint::
 
-            reg = ModelRegistry("ckpts")
+            reg = Registry("ckpts")
             optimize(data, est, on_step=reg.checkpointer("run", every=5))
             model, _ = reg.get("run")              # latest checkpoint
             optimize(data, est, prev_estimate=model)   # continue training
