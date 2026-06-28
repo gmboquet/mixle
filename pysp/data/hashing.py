@@ -43,6 +43,29 @@ def _canonical(obj: Any) -> bytes:
     return b"r" + repr(obj).encode()  # last resort: stable repr
 
 
+def model_hash(model: Any) -> str:
+    """Hex SHA-256 fingerprint of a fitted model's parameters (its serialized state).
+
+    Stable across processes: hashes the canonical form of ``to_serializable(model)``, so the same model
+    always yields the same hash and two models hash equal iff their serialized parameters match. Used to
+    fingerprint a checkpoint and chain EM iteration lineage (see ``pysp.inference.provenance``)."""
+    from pysp.utils.serialization import ensure_pysp_serialization_registry, to_serializable
+
+    ensure_pysp_serialization_registry()
+    # a fitted model may carry a non-serializable provenance header (attached post-fit); the fingerprint is
+    # of the parameters, so detach it for the canonical serialization (mirrors ModelRegistry.register).
+    attached = getattr(model, "header", None)
+    had_attr = hasattr(model, "__dict__") and "header" in vars(model)
+    if had_attr:
+        del model.header
+    try:
+        payload = to_serializable(model)
+    finally:
+        if had_attr:
+            model.header = attached
+    return hashlib.sha256(_canonical(payload)).hexdigest()
+
+
 def _records(data: Any) -> Iterable[Any]:
     if hasattr(data, "records") and callable(data.records):  # a pysp.data DataSource
         return data.records()

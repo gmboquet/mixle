@@ -162,6 +162,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "drift_test.py": ("distribution", "doe", "stochastic"),
     "serving_test.py": ("distribution", "serialization"),
     "checkpoint_test.py": ("distribution", "latent", "serialization"),
+    "lineage_test.py": ("distribution", "latent", "serialization"),
     "ppl_provenance_test.py": ("ppl", "serialization"),
     "quantized_index_test.py": ("enumeration",),
     "sampler_accuracy_test.py": ("distribution", "stochastic", "slow"),

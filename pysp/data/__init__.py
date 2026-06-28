@@ -9,7 +9,7 @@ input/representation helpers (not probability distributions), so they live outsi
 
 from pysp.data.core import DataSource, LazySource, MaterializedSource, as_source
 from pysp.data.encoded_io import load_encoded, save_encoded
-from pysp.data.hashing import dataset_hash
+from pysp.data.hashing import dataset_hash, model_hash
 from pysp.data.schema import (
     Boolean,
     Categorical,
@@ -58,6 +58,7 @@ __all__ = [
     "partially_exchangeable",
     # reproducibility: hashing, validation, encoded-data serialization
     "dataset_hash",
+    "model_hash",
     "check_dataset",
     "DataReport",
     "save_encoded",
