@@ -11,7 +11,7 @@ their own focused scripts (hidden_markov, lda, lookback_hmm, association, set_ed
 import numpy as np
 
 from pysp.stats import *
-from pysp.stats import ICLTreeEstimator
+from pysp.stats import IntegerChowLiuTreeEstimator
 from pysp.inference import optimize
 
 RNG = lambda: np.random.RandomState(1)
@@ -54,7 +54,7 @@ if __name__ == '__main__':
     base = rng.randint(0, 2, size=2000)
     icl_data = [[int(base[i]), int(base[i] ^ (rng.rand() < 0.1)), int(rng.rand() < 0.5)]
                 for i in range(2000)]
-    m = optimize(icl_data, ICLTreeEstimator(num_features=3, num_states=2), max_its=1, rng=RNG())
+    m = optimize(icl_data, IntegerChowLiuTreeEstimator(num_features=3, num_states=2), max_its=1, rng=RNG())
     print('  learned dependencies (feature, parent): %s'
           % [(int(a), None if b is None else int(b)) for a, b in m.dependency_list])
 

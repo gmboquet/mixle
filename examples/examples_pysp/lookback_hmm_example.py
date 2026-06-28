@@ -6,7 +6,7 @@ import numpy as np
 
 from pysp.stats import *
 from pysp.stats import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-from pysp.stats.latent.lookback_hidden_markov_model import LookbackHiddenMarkovDistribution, LookbackHiddenMarkovEstimator
+from pysp.stats.latent.lookback_hidden_markov_model import LookbackHiddenMarkovModelDistribution, LookbackHiddenMarkovModelEstimator
 from pysp.inference import optimize
 
 if __name__ == '__main__':
@@ -26,7 +26,7 @@ if __name__ == '__main__':
     transition = [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]
     w          = [0.4, 0.3, 0.3]
 
-    dist = LookbackHiddenMarkovDistribution(states, w=w, transitions=transition, lag=1, init_dist=init_dists, len_dist=len_dist)
+    dist = LookbackHiddenMarkovModelDistribution(states, w=w, transitions=transition, lag=1, init_dist=init_dists, len_dist=len_dist)
 
     data = dist.sampler(seed=1).sample(200)
 
@@ -39,7 +39,7 @@ if __name__ == '__main__':
 
     est0 = SequenceEstimator(IntegerCategoricalEstimator(), len_estimator=CategoricalEstimator())
     est1 = IntegerMarkovChainEstimator(3)
-    est  = LookbackHiddenMarkovEstimator([est1]*3, lag=1, init_estimators=[est0]*3, len_estimator=CategoricalEstimator())
+    est  = LookbackHiddenMarkovModelEstimator([est1]*3, lag=1, init_estimators=[est0]*3, len_estimator=CategoricalEstimator())
 
     model = optimize(data, est, max_its=1000, delta=None, rng=np.random.RandomState(1))
 
