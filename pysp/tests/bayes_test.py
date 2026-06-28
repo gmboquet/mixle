@@ -396,12 +396,21 @@ def _ng():
 class OptimizeConvergenceTestCase(unittest.TestCase):
     @staticmethod
     def run_optimize(est, data, max_its, seed=2, delta=1.0e-9):
-        buf = io.StringIO()
+        objs: list[float] = []
+
+        class _Trace:  # capture the per-iteration objective via the structured em_record hook
+            def write(self, _s):
+                pass
+
+            def flush(self):
+                pass
+
+            def em_record(self, i, ll, dll, vll, obj_label):
+                objs.append(ll)
+
         model = fit_driver(
-            data, est, max_its=max_its, delta=delta, rng=np.random.RandomState(seed), out=buf, print_iter=1
+            data, est, max_its=max_its, delta=delta, rng=np.random.RandomState(seed), out=_Trace(), print_iter=1
         )
-        lines = buf.getvalue().splitlines()
-        objs = [float(line.split("OBJ=")[1].split(",")[0]) for line in lines if "OBJ=" in line]
         return model, np.asarray(objs)
 
     def test_map_em_mixture_objective_monotone(self):
@@ -722,10 +731,7 @@ class HiddenMarkovModelTestCase(unittest.TestCase):
         est = HiddenMarkovModelEstimator(
             [GaussianEstimator(), GaussianEstimator()], len_estimator=CategoricalEstimator()
         )
-        buf = io.StringIO()
-        m = fit_driver(seqs, est, max_its=30, delta=1.0e-9, rng=np.random.RandomState(4), out=buf, print_iter=1)
-
-        objs = [float(line.split("OBJ=")[1].split(",")[0]) for line in buf.getvalue().splitlines() if "OBJ=" in line]
+        m, objs = OptimizeConvergenceTestCase.run_optimize(est, seqs, max_its=30, seed=4, delta=1.0e-9)
         self.assertGreater(len(objs), 3)
         self.assertTrue(np.all(np.diff(objs) >= -1.0e-6), "HMM penalized objective decreased: %s" % str(np.diff(objs)))
 

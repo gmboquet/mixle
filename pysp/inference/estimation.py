@@ -6,7 +6,6 @@ objects.
 """
 
 import sys
-import time
 from collections.abc import Sequence
 from functools import partial
 from typing import IO, Any, NamedTuple, TypeVar
@@ -320,6 +319,16 @@ def _em_loop(
         if ll_finite and ((dll >= 0) or (delta is None) or (not monotone)):
             model = nxt
 
+        # Best-model + reference update happen BEFORE the convergence break so the accepted step on the
+        # converging iteration is recorded (otherwise an immediate convergence returns the stale initial
+        # model). best-model selection is by validation score; record nxt (the model that achieved vll),
+        # not model (unchanged on a rejected step) -- and never select a non-finite step.
+        if ll_finite:
+            old_ll = ll
+            if track_best and best_vll < vll:
+                best_vll = vll
+                best_model = nxt
+
         converged = (delta is not None) and (dll < delta)
         if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
             _write_em_iter(out, i + 1, ll, dll, vll, has_v, obj_label)
@@ -327,14 +336,6 @@ def _em_loop(
             on_step(EMStep(i + 1, model, float(ll), float(dll)))
         if converged:
             break
-
-        if ll_finite:
-            old_ll = ll
-            # best-model selection is by validation score; record nxt (the model that achieved vll),
-            # not model (which is unchanged on a rejected step) -- and never select a non-finite step
-            if track_best and best_vll < vll:
-                best_vll = vll
-                best_model = nxt
 
     return (best_model if track_best else model), best_vll
 
@@ -744,74 +745,37 @@ def fit(
 
     Args otherwise mirror :func:`optimize` (local encoded path). Returns the model with the best
     validation log-likelihood seen during the run.
+
+    ``fit`` is a thin wrapper over :func:`optimize` -- they share the one EM/objective loop. ``fit`` adds
+    only the opt-in data-structure check and a Bayesian-leaning default ``delta`` (1e-6); it routes through
+    the standard per-iteration-scored loop (``reuse_estep_ll=False``). Reach for ``optimize`` directly for
+    the heavier knobs (engines, precision, distributed backends, the fused E-step).
     """
     if data is None and enc_data is None:
         raise Exception("fit called with empty data or enc_data.")
-
-    rng = RandomState() if rng is None else rng
-    est = estimator if init_estimator is None else init_estimator
     # opt-in sample-structure check: a tagged DataSource is verified against the model it feeds (warns on
     # a mismatch, e.g. a SEQUENTIAL source handed to an i.i.d. leaf). Bare lists carry no structure tag.
     if data is not None and getattr(data, "structure", None) is not None:
         from pysp.data.structure import check_model_structure
 
-        check_model_structure(est, data.structure)
-    div_error = np.seterr(divide="ignore")
-    try:
-        encoder = _resolve_encoder(est, prev_estimate)
-        if enc_data is None:
-            enc_data = seq_encode(data, encoder)
-        if enc_vdata is None:
-            enc_vdata = enc_data if vdata is None else seq_encode(vdata, encoder)
-
-        if prev_estimate is None:
-            p = 0.10 if init_p <= 0.0 else min(max(init_p, 0.0), 1.0)
-            mm = seq_initialize(enc_data=enc_data, estimator=est, rng=rng, p=p)
-        else:
-            mm = prev_estimate
-
-        resolved_objective = _resolve_objective(objective, estimator, mm)
-
-        def _obj_terms(model: SequenceEncodableProbabilityDistribution) -> tuple[float, float]:
-            # (data term, prior/global term) for the resolved objective; 'mle' drops the prior term.
-            if resolved_objective == "mle":
-                return _ll_sum_fn(None)(enc_data, model)[1], 0.0
-            return _data_objective_sum(enc_data, model), _model_objective(estimator, model)
-
-        data_ll, model_ll = _obj_terms(mm)
-        old_obj = data_ll + model_ll
-        _, best_vll = seq_log_density_sum(enc_vdata, mm)
-        best_model = mm
-
-        for i in range(max(1, max_its)):
-            mm_next = seq_estimate(enc_data, estimator, mm)
-
-            data_ll, model_ll = _obj_terms(mm_next)
-            obj = data_ll + model_ll
-            _, vll = seq_log_density_sum(enc_vdata, mm_next)
-            dobj = obj - old_obj
-
-            if (dobj >= 0) or (delta is None):
-                mm = mm_next
-                if best_vll < vll:
-                    best_vll = vll
-                    best_model = mm
-
-            converged = (delta is not None) and (dobj < delta)
-            if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
-                label = "Terminating" if converged else "Iteration"
-                out.write(
-                    "%s %d. OBJ=%f, dOBJ=%e, LL=%f, MLL=%f, VLL=%f\n"
-                    % (label, i + 1, obj, dobj, data_ll, model_ll, vll)
-                )
-            if converged:
-                break
-
-            old_obj = obj
-
-        return best_model
-    finally:
-        np.seterr(**div_error)
+        check_model_structure(estimator if init_estimator is None else init_estimator, data.structure)
+    return optimize(
+        data,
+        estimator,
+        max_its=max_its,
+        delta=delta,
+        init_estimator=init_estimator,
+        init_p=init_p,
+        rng=rng,
+        prev_estimate=prev_estimate,
+        vdata=vdata,
+        enc_data=enc_data,
+        enc_vdata=enc_vdata,
+        out=out,
+        print_iter=print_iter,
+        objective=objective,
+        reuse_estep_ll=False,
+    )
 
 
 def best_of(
@@ -1079,69 +1043,3 @@ class BayesianStreamingEstimator:
         self.model = None
         self.step = 0
         self.nobs = 0.0
-
-
-def iterate(
-    data: list[T],
-    estimator: ParameterEstimator | None,
-    max_its: int,
-    prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
-    init_p: float = 0.1,
-    rng: RandomState | None = None,
-    out: IO = sys.stdout,
-    enc_data: list[tuple[int, E0]] | None = None,
-    init_estimator: ParameterEstimator | None = None,
-    print_iter: int = 1,
-) -> SequenceEncodableProbabilityDistribution:
-    """Performs max_its-iterations of EM algorithm and returns next estimate (SequenceEncodableProbabilityDistribution).
-
-    Args:
-        data (List[T]): List of data type compatible with estimator.
-        estimator (Optional[ParameterEstimator]): Optional ParameterEstimator for distribution to be estimated from
-            data by EM algorithm. Can be None only if init_estimator is not None.
-        max_its (int): Total number of EM iterations to be performed before returning estimate.
-        prev_estimate (Optional[SequenceEncodableProbabilityDistribution]): Optional previous estimate of distribution
-            for data. Must be consistent with estimator or init_estimator.
-        init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
-        rng (Optional[RandomState]): RandomState used to set seed for initializing EM algorithm.
-        out (IO): IO stream to write out iterations of EM algorithm.
-        enc_data (Optional[List[Tuple[int, E]]]): Optional encoded data of form
-            List[Tuple[int, E]]. Formed from data if None.
-        init_estimator (Optional[ParameterEstimator]): ParameterEstimator to used to initialize EM algorithm parameters.
-            If None, estimator is used. Must be consistent with estimator.
-        print_iter (bool): Print iterations (i.e. log-likelihood) ever print_iter-iterations.
-
-    Returns:
-        SequenceEncodableProbabilityDistribution corresponding to estimator/init_estimator after max_its iterations of
-            EM algorithm.
-
-    """
-    if data is None and enc_data is None:
-        raise Exception("Optimization called with empty data or enc_data.")
-
-    rng = RandomState() if rng is None else rng
-    i_est = estimator if init_estimator is None else init_estimator
-    # the EM step uses estimator when provided, otherwise the init estimator (estimator may be None
-    # when only init_estimator is given); the encoder is structural so either estimator resolves it
-    step_est = estimator if estimator is not None else i_est
-
-    if enc_data is None:
-        enc_data = seq_encode(data, _resolve_encoder(i_est))
-
-    if prev_estimate is None:
-        mm = seq_initialize(enc_data, i_est, rng, init_p)
-    else:
-        mm = prev_estimate
-
-    if hasattr(enc_data, "cache"):
-        enc_data.cache()
-
-    # fixed-iteration stepping with timing only (no convergence/scoring): the
-    # lightweight path for callers that just want N EM steps
-    t0 = time.time()
-    for i in range(max_its):
-        mm = seq_estimate(enc_data, step_est, mm)
-        if out is not None and print_iter and (i + 1) % print_iter == 0:
-            out.write("Iteration %d\t E[dT]=%f.\n" % (i + 1, (time.time() - t0) / float(i + 1)))
-
-    return mm
