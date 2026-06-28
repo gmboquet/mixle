@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pysp.inference.provenance import ModelHeader
+from pysp.inference.production.provenance import Header
 from pysp.ppl import Normal, fit_with_provenance, free
 
 
@@ -30,7 +30,7 @@ class PPLProvenanceTest(unittest.TestCase):
 
     def test_header_round_trips(self):
         _, header = fit_with_provenance(Normal(free, free), self.data, how="em", max_its=20)
-        back = ModelHeader.from_dict(header.to_dict())
+        back = Header.from_dict(header.to_dict())
         self.assertEqual(back.dataset_hash, header.dataset_hash)
         self.assertEqual(back.training["surface"], "ppl")
 

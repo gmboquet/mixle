@@ -1,11 +1,12 @@
-"""EM checkpointing: the ``optimize(on_step=...)`` hook, ``ModelRegistry.checkpointer``, and resume."""
+"""EM checkpointing: the ``optimize(on_step=...)`` hook, ``Registry.checkpointer``, and resume."""
 
 import tempfile
 import unittest
 
 import numpy as np
 
-from pysp.inference import EMStep, ModelRegistry, optimize
+from pysp.inference import EMStep, optimize
+from pysp.inference.production import Registry
 from pysp.stats import GaussianEstimator, MixtureEstimator
 
 
@@ -45,7 +46,7 @@ class OnStepHookTest(unittest.TestCase):
 class CheckpointerTest(unittest.TestCase):
     def test_checkpointer_writes_every_n_with_metadata(self):
         with tempfile.TemporaryDirectory() as d:
-            reg = ModelRegistry(d)
+            reg = Registry(d)
             est = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])
             optimize(
                 _data(),
@@ -63,7 +64,7 @@ class CheckpointerTest(unittest.TestCase):
 
     def test_resume_from_checkpoint_does_not_regress(self):
         with tempfile.TemporaryDirectory() as d:
-            reg = ModelRegistry(d)
+            reg = Registry(d)
             est = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])
             data = _data()
             optimize(

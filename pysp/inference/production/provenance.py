@@ -1,10 +1,10 @@
 """Reproducible model artifacts: a descriptive header logging what trained a model and how.
 
-A :class:`ModelHeader` records the estimator/model configuration, a summary + content hash of the training
+A :class:`Header` records the estimator/model configuration, a summary + content hash of the training
 data, the data schema, the training settings and final objective, timing, and the software environment
 (versions + git commit). Attach one at fit time with :func:`fit_with_provenance` (or build one for any
 model + data with :func:`build_header`) so a fitted model is self-describing and a run can be reproduced
-and audited. Headers are plain dicts under the hood (:meth:`ModelHeader.to_dict`), so they serialize to
+and audited. Headers are plain dicts under the hood (:meth:`Header.to_dict`), so they serialize to
 JSON alongside the model.
 """
 
@@ -103,7 +103,7 @@ def _safe_model_hash(model: Any) -> str | None:
 
 
 @dataclass
-class ModelHeader:
+class Header:
     """A descriptive, serializable provenance record for a fitted model."""
 
     model_type: str
@@ -123,7 +123,7 @@ class ModelHeader:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> ModelHeader:
+    def from_dict(cls, d: dict) -> Header:
         d = dict(d)
         d["schema"] = [tuple(x) for x in d.get("schema", [])]
         return cls(**{k: d.get(k) for k in cls.__dataclass_fields__})
@@ -132,7 +132,7 @@ class ModelHeader:
         tr = {k: v for k, v in self.training.items() if k != "convergence"}  # the trace is long; summarize it
         n_iter = len(self.training.get("convergence", []))
         lines = [
-            f"ModelHeader[{self.model_type}]",
+            f"Header[{self.model_type}]",
             f"  data: {self.n_records} records, hash={self.dataset_hash[:12]}…",
             f"  model_hash: {self.model_hash[:12] + '…' if self.model_hash else None}",
             f"  schema: {', '.join(f'{n}:{t}' for n, t in self.schema) or '(none)'}",
@@ -158,8 +158,8 @@ def build_header(
     resources: dict | None = None,
     hash_sort: bool = False,
     hash_max_records: int | None = None,
-) -> ModelHeader:
-    """Build a :class:`ModelHeader` for ``model`` trained on ``data`` (does not run any fitting)."""
+) -> Header:
+    """Build a :class:`Header` for ``model`` trained on ``data`` (does not run any fitting)."""
     n = len(data) if hasattr(data, "__len__") else None
     timing: dict = {}
     if started is not None and finished is not None:
@@ -169,7 +169,7 @@ def build_header(
             "duration_s": round(finished - started, 6),
         }
     ll = _final_loglik(model, data) if final_loglik == "auto" else final_loglik
-    return ModelHeader(
+    return Header(
         model_type=type(model).__name__,
         model_summary=str(model),
         schema=_schema_of(model),
@@ -233,7 +233,7 @@ def fit_with_provenance(
     data: Any, estimator: Any, *, seed: int | None = None, lineage: bool = True, **optimize_kw: Any
 ):
     """Fit ``estimator`` on ``data`` via EM (:func:`pysp.inference.optimize`) and return
-    ``(model, header)``, the model carrying a ``.header`` :class:`ModelHeader` with the data hash, the
+    ``(model, header)``, the model carrying a ``.header`` :class:`Header` with the data hash, the
     final model hash, schema, training settings + per-iteration convergence trace, timing, final
     log-likelihood, and environment. Pass your own ``out=`` to print iterations (then the trace is not
     captured).
@@ -295,8 +295,8 @@ def verify_lineage(header: Any) -> bool:
     Returns True when every iteration that recorded a ``model_hash`` names the previous such iteration's
     hash as its ``parent_hash`` (so iteration i+1 provably descends from i), and True vacuously when the
     trace carries no lineage (``fit_with_provenance(lineage=False)`` or a custom ``out``). Returns False
-    on the first broken link. Accepts a :class:`ModelHeader` or its ``to_dict``."""
-    training = header.training if isinstance(header, ModelHeader) else dict(header or {}).get("training", {})
+    on the first broken link. Accepts a :class:`Header` or its ``to_dict``."""
+    training = header.training if isinstance(header, Header) else dict(header or {}).get("training", {})
     prev: str | None = None
     for rec in training.get("convergence", []):
         if "model_hash" not in rec:

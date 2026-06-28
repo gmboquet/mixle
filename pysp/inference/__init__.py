@@ -25,6 +25,7 @@ exactly this reason.
 from __future__ import annotations
 
 from pysp.capability import ConjugateUpdatable
+from pysp.inference import production
 
 # calibration diagnostics — "is my probability / interval actually calibrated?"
 from pysp.inference.calibration import (
@@ -59,16 +60,6 @@ from pysp.inference.cross_validation import (
     stratified_kfold,
     time_series_split,
 )
-
-# the Posterior algebra — inference produces posteriors; you draw from them through one interface
-from pysp.inference.drift import (
-    DriftReport,
-    detect_drift,
-    js_divergence,
-    ks_statistic,
-    population_stability_index,
-    score_drift,
-)
 from pysp.inference.em import EMStrategy, run_em
 from pysp.inference.errors_in_variables import DemingFit, deming_regression, propagate_uncertainty, simex
 from pysp.inference.estimation import EMStep, best_of, fit, optimize
@@ -95,7 +86,6 @@ from pysp.inference.model_comparison import (
     paired_score_difference,
     vuong_test,
 )
-from pysp.inference.monitor import ModelMonitor
 
 # multiple-testing correction (FWER / FDR) and evidence combination
 from pysp.inference.multiple_testing import (
@@ -142,14 +132,6 @@ from pysp.inference.ordinal import (
     somers_d,
 )
 from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
-from pysp.inference.provenance import (
-    ModelHeader,
-    build_header,
-    environment_info,
-    fit_with_provenance,
-    verify_lineage,
-)
-from pysp.inference.registry import ModelRegistry
 
 # bootstrap / permutation inference for arbitrary statistics (distribution-free uncertainty)
 from pysp.inference.resampling import (
@@ -183,7 +165,6 @@ from pysp.inference.scoring import (
     skill_score,
     winkler_score,
 )
-from pysp.inference.serving import ModelService
 
 # survival / time-to-event estimators and hazard regression
 from pysp.inference.survival import (
@@ -245,23 +226,9 @@ __all__ = [
     "best_of",
     "run_em",
     "EMStrategy",
-    # reproducible model artifacts (header/provenance: config, data hash, timing, env, convergence)
-    "fit_with_provenance",
-    "verify_lineage",
-    "ModelHeader",
-    "build_header",
-    "environment_info",
-    # drift detection + production monitoring (retrain-and-swap, DOE-driven sampling)
-    "detect_drift",
-    "DriftReport",
-    "score_drift",
-    "population_stability_index",
-    "ks_statistic",
-    "js_divergence",
-    "ModelMonitor",
-    # production: versioned registry + serving with activity/computation logging
-    "ModelRegistry",
-    "ModelService",
+    # MLOps / production layer (provenance, drift, registry, serving, monitor) lives in the
+    # pysp.inference.production subpackage -- imported as `from pysp.inference.production import ...`.
+    "production",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
