@@ -11,7 +11,7 @@ Two complementary views:
   the model -- exactly when to retrain.
 
 :func:`detect_drift` combines both into a :class:`DriftReport` with a single ``drift`` flag against
-thresholds, suitable for a monitoring loop (see :class:`pysp.inference.monitor.ModelMonitor`).
+thresholds, suitable for a monitoring loop (see :class:`pysp.inference.production.monitor.Monitor`).
 """
 
 from __future__ import annotations

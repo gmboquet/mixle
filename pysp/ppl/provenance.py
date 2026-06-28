@@ -2,7 +2,7 @@
 
 The estimator path has :func:`pysp.inference.fit_with_provenance`; this is its PPL counterpart. It times a
 ``rv.fit(...)`` (any ``how`` -- EM / MAP / MCMC / VI / ...), then builds a :class:`~pysp.inference.
-provenance.ModelHeader` from the fitted model's *lowered* distribution (``rv.dist``), so the header gets a
+provenance.Header` from the fitted model's *lowered* distribution (``rv.dist``), so the header gets a
 real schema and final log-likelihood alongside the data hash, training settings, timing, resources, and
 environment. The header is returned (and attached as ``rv.header`` when the RV permits attribute setting).
 """
@@ -20,7 +20,7 @@ def fit_with_provenance(rv: Any, data: Any, *, seed: int | None = None, **fit_kw
     header is built from the fitted model's lowered distribution so it carries schema + final log-likelihood
     where available; ``method`` records the requested ``how``. The header is returned regardless; it is
     also attached as ``fitted.header`` when the RandomVariable allows it (RVs with ``__slots__`` do not)."""
-    from pysp.inference.provenance import _resource_usage, build_header
+    from pysp.inference.production.provenance import _resource_usage, build_header
 
     cpu0 = _resource_usage().get("cpu_time_s")
     t0 = time.time()

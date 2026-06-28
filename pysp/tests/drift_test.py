@@ -1,17 +1,13 @@
-"""Model/data drift detection and the production ModelMonitor (retrain-and-swap, DOE-driven sampling)."""
+"""Model/data drift detection and the production Monitor (retrain-and-swap, DOE-driven sampling)."""
 
 import unittest
 
 import numpy as np
 
-from pysp.inference import (
-    ModelMonitor,
-    detect_drift,
-    fit_with_provenance,
-    ks_statistic,
-    population_stability_index,
-    score_drift,
-)
+from pysp.inference.production import Monitor, detect_drift, fit_with_provenance, score_drift
+
+# the per-feature drift metrics are importable but demoted from the blessed production surface
+from pysp.inference.production.drift import ks_statistic, population_stability_index
 from pysp.stats import GaussianDistribution
 
 
@@ -54,7 +50,7 @@ class ModelMonitorTest(unittest.TestCase):
         rng = np.random.RandomState(2)
         ref = rng.normal(0, 1, 2000).tolist()
         model, _ = fit_with_provenance(ref, GaussianDistribution(0, 1).estimator(), max_its=20)
-        mon = ModelMonitor(model, GaussianDistribution(0, 1).estimator(), ref)
+        mon = Monitor(model, GaussianDistribution(0, 1).estimator(), ref)
 
         clean = mon.update(rng.normal(0, 1, 800).tolist(), max_its=20)
         self.assertEqual(clean["action"], "none")  # no drift -> no retrain
@@ -69,7 +65,7 @@ class ModelMonitorTest(unittest.TestCase):
         rng = np.random.RandomState(3)
         ref = rng.normal(0, 1, 500).tolist()
         model, _ = fit_with_provenance(ref, GaussianDistribution(0, 1).estimator(), max_its=10)
-        mon = ModelMonitor(model, GaussianDistribution(0, 1).estimator(), ref)
+        mon = Monitor(model, GaussianDistribution(0, 1).estimator(), ref)
         pts = mon.suggest_samples([(0.0, 1.0), (-1.0, 1.0)], n=6)
         self.assertEqual(np.asarray(pts).shape, (6, 2))
 

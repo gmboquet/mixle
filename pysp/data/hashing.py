@@ -2,7 +2,7 @@
 
 ``dataset_hash(data)`` returns a hex SHA-256 over a canonical byte encoding of the records, so the exact
 dataset that trained a model can be fingerprinted and recorded in its header (see
-``pysp.inference.provenance``). The hash is *order-sensitive* (the same records in a different order hash
+``pysp.inference.production.provenance``). The hash is *order-sensitive* (the same records in a different order hash
 differently) -- it identifies an exact training sequence; pass ``sort=True`` for an order-insensitive
 fingerprint (records are hashed independently and combined commutatively).
 """
@@ -48,12 +48,12 @@ def model_hash(model: Any) -> str:
 
     Stable across processes: hashes the canonical form of ``to_serializable(model)``, so the same model
     always yields the same hash and two models hash equal iff their serialized parameters match. Used to
-    fingerprint a checkpoint and chain EM iteration lineage (see ``pysp.inference.provenance``)."""
+    fingerprint a checkpoint and chain EM iteration lineage (see ``pysp.inference.production.provenance``)."""
     from pysp.utils.serialization import ensure_pysp_serialization_registry, to_serializable
 
     ensure_pysp_serialization_registry()
     # a fitted model may carry a non-serializable provenance header (attached post-fit); the fingerprint is
-    # of the parameters, so detach it for the canonical serialization (mirrors ModelRegistry.register).
+    # of the parameters, so detach it for the canonical serialization (mirrors Registry.register).
     attached = getattr(model, "header", None)
     had_attr = hasattr(model, "__dict__") and "header" in vars(model)
     if had_attr:

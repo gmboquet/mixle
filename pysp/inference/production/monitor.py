@@ -1,6 +1,6 @@
 """Production model monitoring: watch for drift, retrain, and swap -- with provenance and a DOE hook.
 
-A :class:`ModelMonitor` wraps a fitted model + its estimator + a reference (training) sample. Feed it each
+A :class:`Monitor` wraps a fitted model + its estimator + a reference (training) sample. Feed it each
 production batch via :meth:`check` (drift report only) or :meth:`update` (check, and on drift retrain a
 fresh model -- recording a new provenance header -- and swap it in). Every action is appended to a history
 for audit. :meth:`suggest_samples` ties in ``pysp.doe`` so a drift signal (or any model objective) can
@@ -12,11 +12,11 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from pysp.inference.drift import DriftReport, detect_drift
-from pysp.inference.provenance import ModelHeader, fit_with_provenance
+from pysp.inference.production.drift import DriftReport, detect_drift
+from pysp.inference.production.provenance import Header, fit_with_provenance
 
 
-class ModelMonitor:
+class Monitor:
     """Stateful monitor for one deployed model: drift detection + retrain-and-swap + DOE-driven sampling."""
 
     def __init__(
@@ -38,7 +38,7 @@ class ModelMonitor:
             "loglik_shift_threshold": loglik_shift_threshold,
         }
         self.history: list[dict] = []
-        self.header: ModelHeader | None = getattr(model, "header", None)
+        self.header: Header | None = getattr(model, "header", None)
 
     def check(self, current: Any) -> DriftReport:
         """Drift report of ``current`` (production) data against the reference under the current model."""
