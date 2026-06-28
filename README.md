@@ -261,19 +261,24 @@ e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
 
 ## Examples
 
-Self-contained scripts in [examples/](https://github.com/gmboquet/pysparkplug/tree/main/examples) —
-each samples from a known model, refits, and recovers it (no downloads):
+Self-contained scripts in [examples/examples_pysp/](https://github.com/gmboquet/pysparkplug/tree/main/examples/examples_pysp)
+— each samples from a known model, refits, and recovers it (no downloads):
 
 ```sh
-cd examples/examples_pysp && python mixture_example.py
+cd examples/examples_pysp
+python gallery_univariate_example.py    # tour the scalar families (also gallery_{multivariate,combinators,…})
+python gallery_structured_example.py    # mixtures / HMMs / LDA / latent-variable models
+python ppl_example.py                   # the equation-style pysp.ppl surface
+python production_example.py            # provenance, registry, serving, drift, checkpoints
+python scaling_example.py               # the same fit distributed by backend= (local / mp / mpi / spark)
 ```
 
-**Spark** needs a JVM (Java 17/21), and workers must use the driver's Python:
+**Distributed backends** (see `scaling_example.py`): `local` and `mp` run out of the box; `mpi` and Spark
+need a launcher. Spark also needs a JVM (Java 17/21) with workers on the driver's Python:
 
 ```sh
 export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 export PYSPARK_PYTHON=/path/to/venv/bin/python PYSPARK_DRIVER_PYTHON=$PYSPARK_PYTHON
-python examples/examples_spark/mixture_example.py
 ```
 
 ## Tests
