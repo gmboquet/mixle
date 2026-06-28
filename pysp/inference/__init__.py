@@ -71,7 +71,7 @@ from pysp.inference.drift import (
 )
 from pysp.inference.em import EMStrategy, run_em
 from pysp.inference.errors_in_variables import DemingFit, deming_regression, propagate_uncertainty, simex
-from pysp.inference.estimation import best_of, fit, optimize
+from pysp.inference.estimation import EMStep, best_of, fit, optimize
 from pysp.inference.fisher import FisherView, FixedFisherView, to_fisher
 
 # generalized linear models + penalized / robust / quantile regression on plain arrays
@@ -235,6 +235,7 @@ __all__ = [
     "seq_initialize",
     "optimize",
     "fit",
+    "EMStep",
     "best_of",
     "run_em",
     "EMStrategy",

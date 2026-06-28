@@ -9,7 +9,7 @@ import sys
 import time
 from collections.abc import Sequence
 from functools import partial
-from typing import IO, Any, TypeVar
+from typing import IO, Any, NamedTuple, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
@@ -198,6 +198,20 @@ def _local_fused_step(enc_data, estimator, model):
     return nxt, getattr(accumulator, "_seq_ll", None)
 
 
+class EMStep(NamedTuple):
+    """One accepted EM iteration, handed to an ``optimize(on_step=...)`` callback.
+
+    ``iter`` is 1-based; ``model`` is the current accepted model -- snapshot it to checkpoint, and resume
+    with ``optimize(prev_estimate=...)``; ``log_density`` is the training objective at this step; ``delta``
+    is its gain over the previous step (``inf`` on the first iteration).
+    """
+
+    iter: int
+    model: Any
+    log_density: float
+    delta: float
+
+
 def _write_em_iter(
     out: IO | None, i: int, ll: float, dll: float, vll: float, has_vdata: bool, obj_label: str | None = None
 ) -> None:
@@ -246,6 +260,7 @@ def _em_loop(
     track_best: bool = True,
     fused_step_fn: Any | None = None,
     obj_label: str | None = None,
+    on_step: Any | None = None,
 ) -> tuple[SequenceEncodableProbabilityDistribution, float]:
     """Canonical EM iteration shared by the public estimation entry points.
 
@@ -283,6 +298,7 @@ def _em_loop(
             print_iter,
             track_best,
             obj_label,
+            on_step,
         )
 
     _, old_ll = ll_fn(enc_data, model)
@@ -307,6 +323,8 @@ def _em_loop(
         converged = (delta is not None) and (dll < delta)
         if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
             _write_em_iter(out, i + 1, ll, dll, vll, has_v, obj_label)
+        if on_step is not None:
+            on_step(EMStep(i + 1, model, float(ll), float(dll)))
         if converged:
             break
 
@@ -334,6 +352,7 @@ def _fused_em_loop(
     print_iter,
     track_best,
     obj_label=None,
+    on_step=None,
 ):
     """EM loop that reuses the E-step's likelihood normalizer instead of a separate score pass.
 
@@ -366,6 +385,8 @@ def _fused_em_loop(
         converged = (delta is not None) and (prev_ll is not None) and (dll < delta)
         if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
             _write_em_iter(out, i + 1, ll_model, dll, score, has_v, obj_label)
+        if on_step is not None:
+            on_step(EMStep(i + 1, nxt, float(ll_model), float(dll)))
         if converged:
             break
 
@@ -493,6 +514,7 @@ def optimize(
     strategy: Any | None = None,
     reuse_estep_ll: bool = True,
     objective: str = "auto",
+    on_step: Any | None = None,
 ) -> SequenceEncodableProbabilityDistribution:
     """Estimation of 'estimator' via EM algorithm for max_its iterations or until
         new_loglikelihood - old_loglikelihood < delta.
@@ -563,6 +585,10 @@ def optimize(
             same argument; both share this resolution so a Bayesian estimator is fit on the correct
             objective regardless of the verb used. (Only ``'mle'`` is compatible with the fused
             E-step shortcut; ``reuse_estep_ll`` is ignored for ``'map'``/``'vb'``.)
+        on_step (Optional[Callable[[EMStep], None]]): Optional per-iteration callback receiving an
+            :class:`EMStep` ``(iter, model, log_density, delta)`` for the accepted model. Use it to
+            checkpoint a long run -- e.g. ``on_step=registry.checkpointer('run', every=5)`` -- and
+            resume with ``prev_estimate=``. Called on every iteration regardless of ``print_iter``.
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
@@ -672,6 +698,7 @@ def optimize(
             print_iter=print_iter,
             fused_step_fn=fused_step_fn,
             obj_label={"mle": None, "map": "penalized-LL", "vb": "ELBO"}[resolved_objective],
+            on_step=on_step,
         )
 
         return best_model
