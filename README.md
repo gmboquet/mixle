@@ -261,11 +261,11 @@ e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
 
 ## Examples
 
-Self-contained scripts in [examples/examples_pysp/](https://github.com/gmboquet/pysparkplug/tree/main/examples/examples_pysp)
+Self-contained scripts in [examples/](https://github.com/gmboquet/pysparkplug/tree/main/examples)
 — each samples from a known model, refits, and recovers it (no downloads):
 
 ```sh
-cd examples/examples_pysp
+cd examples
 python gallery_univariate_example.py    # tour the scalar families (also gallery_{multivariate,combinators,…})
 python gallery_structured_example.py    # mixtures / HMMs / LDA / latent-variable models
 python ppl_example.py                   # the equation-style pysp.ppl surface
