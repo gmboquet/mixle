@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -77,6 +78,26 @@ class ModelRegistry:
             json.dump(payload, f)
         return ver
 
+    def checkpointer(self, name: str, *, every: int = 1) -> Callable[[Any], None]:
+        """Return an ``optimize(on_step=...)`` callback that snapshots the model under ``name`` every
+        ``every`` iterations (recording the iteration + log-density in the version metadata).
+
+        Resume an interrupted run from the latest checkpoint::
+
+            reg = ModelRegistry("ckpts")
+            optimize(data, est, on_step=reg.checkpointer("run", every=5))
+            model, _ = reg.get("run")              # latest checkpoint
+            optimize(data, est, prev_estimate=model)   # continue training
+        """
+
+        def _save(step: Any) -> None:
+            if every <= 1 or step.iter % every == 0:
+                self.register(
+                    step.model, name, metadata={"checkpoint_iter": step.iter, "log_density": step.log_density}
+                )
+
+        return _save
+
     def get(self, name: str, version: str = "latest") -> tuple[Any, dict | None]:
         """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered)."""
         vs = self.versions(name)
@@ -95,6 +116,14 @@ class ModelRegistry:
             version = vs[-1]
         with open(os.path.join(self.root, name, version + ".json")) as f:
             return json.load(f).get("header")
+
+    def metadata(self, name: str, version: str = "latest") -> dict:
+        """Just the ``metadata`` of a version (no model deserialization) -- e.g. a checkpoint's iteration."""
+        vs = self.versions(name)
+        if version == "latest":
+            version = vs[-1]
+        with open(os.path.join(self.root, name, version + ".json")) as f:
+            return json.load(f).get("metadata") or {}
 
     def promote(self, name: str, version: str, alias: str = "production") -> None:
         """Point ``alias`` (e.g. ``"production"``) at ``version`` -- the atomic model swap."""
