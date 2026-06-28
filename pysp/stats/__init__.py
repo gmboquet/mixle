@@ -758,6 +758,17 @@ __all__ = [
     "StochasticBlockGraphEstimator",
 ]
 
+# --- public surface curation -------------------------------------------------------------------------
+# The list above enumerates every imported name, but ~half is per-family plumbing a model author never
+# constructs: samplers (use ``dist.sampler()``), data encoders, and EM accumulators/factories. Those stay
+# importable for advanced/internal use, but they are demoted from the blessed public surface (``from
+# pysp.stats import *``, tooling that honors ``__all__``, docs) so users see distributions, estimators, the
+# combinators, enumerators, and helpers -- not the EM/encoding plumbing. The filter is by construction, so
+# a new family's sampler/encoder/accumulator is demoted automatically. (The kernel/codegen and backend
+# scoring layers stay public for now: they are reached via ``from pysp.stats import *`` in places.)
+_INTERNAL_SUFFIXES = ("Sampler", "DataEncoder", "Accumulator", "AccumulatorFactory")
+__all__ = [_n for _n in __all__ if not _n.endswith(_INTERNAL_SUFFIXES)]
+
 ### Abstract Classes
 ### Generic Distributions
 ### Discrete base distributions

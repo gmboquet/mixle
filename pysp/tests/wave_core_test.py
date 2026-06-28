@@ -214,7 +214,9 @@ class ExportsTestCase(unittest.TestCase):
         self.assertTrue(hasattr(stats, "SelectEstimator"))
         self.assertIn("SelectDistribution", stats.__all__)
         self.assertIn("SelectEstimator", stats.__all__)
-        self.assertIn("DiagonalGaussianSampler", stats.__all__)
+        # samplers are importable but demoted from the blessed public surface (use ``dist.sampler()``)
+        self.assertTrue(hasattr(stats, "DiagonalGaussianSampler"))
+        self.assertNotIn("DiagonalGaussianSampler", stats.__all__)
 
     def test_all_names_resolve(self):
         import pysp.stats as stats
