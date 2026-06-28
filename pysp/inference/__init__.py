@@ -142,7 +142,13 @@ from pysp.inference.ordinal import (
     somers_d,
 )
 from pysp.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
-from pysp.inference.provenance import ModelHeader, build_header, environment_info, fit_with_provenance
+from pysp.inference.provenance import (
+    ModelHeader,
+    build_header,
+    environment_info,
+    fit_with_provenance,
+    verify_lineage,
+)
 from pysp.inference.registry import ModelRegistry
 
 # bootstrap / permutation inference for arbitrary statistics (distribution-free uncertainty)
@@ -241,6 +247,7 @@ __all__ = [
     "EMStrategy",
     # reproducible model artifacts (header/provenance: config, data hash, timing, env, convergence)
     "fit_with_provenance",
+    "verify_lineage",
     "ModelHeader",
     "build_header",
     "environment_info",

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from pysp.data.hashing import dataset_hash
+from pysp.data.hashing import model_hash as _model_hash
 
 
 def _version(mod: str) -> str | None:
@@ -93,6 +94,14 @@ def _final_loglik(model: Any, data: Any) -> float | None:
         return None
 
 
+def _safe_model_hash(model: Any) -> str | None:
+    """Fingerprint a model's serialized parameters, or ``None`` if it isn't serializable."""
+    try:
+        return _model_hash(model)
+    except Exception:
+        return None
+
+
 @dataclass
 class ModelHeader:
     """A descriptive, serializable provenance record for a fitted model."""
@@ -103,6 +112,7 @@ class ModelHeader:
     n_records: int | None
     dataset_hash: str
     final_loglik: float | None
+    model_hash: str | None = None
     training: dict = field(default_factory=dict)
     timing: dict = field(default_factory=dict)
     resources: dict = field(default_factory=dict)
@@ -124,6 +134,7 @@ class ModelHeader:
         lines = [
             f"ModelHeader[{self.model_type}]",
             f"  data: {self.n_records} records, hash={self.dataset_hash[:12]}…",
+            f"  model_hash: {self.model_hash[:12] + '…' if self.model_hash else None}",
             f"  schema: {', '.join(f'{n}:{t}' for n, t in self.schema) or '(none)'}",
             f"  final_loglik: {self.final_loglik}",
             f"  training: {tr}" + (f"  [{n_iter} iters logged]" if n_iter else ""),
@@ -165,6 +176,7 @@ def build_header(
         n_records=n,
         dataset_hash=dataset_hash(data, sort=hash_sort, max_records=hash_max_records),
         final_loglik=ll,
+        model_hash=_safe_model_hash(model),
         training=dict(training or {}),
         timing=timing,
         resources=dict(resources or {}),
@@ -174,11 +186,17 @@ def build_header(
 
 
 class _EMHistory:
-    """A silent ``out`` for ``optimize`` that captures the per-iteration convergence trace (via the
-    ``em_record`` hook in ``_write_em_iter``) without printing."""
+    """A silent ``out`` + ``on_step`` sink that captures the per-iteration convergence trace.
+
+    ``em_record`` (the ``_write_em_iter`` hook) records the scalar trace -- loglik / delta / valid_loglik /
+    objective. ``__call__`` (the ``optimize(on_step=...)`` hook) fingerprints the accepted model each
+    iteration and chains it (``model_hash`` + the previous iteration's ``parent_hash``), so when both are
+    wired the trace is a verifiable hash chain: iteration i+1 records i's hash as its parent. Records are
+    merged by iteration, so either hook may be absent or fire in either order."""
 
     def __init__(self) -> None:
-        self.records: list[dict] = []
+        self._by_iter: dict[int, dict] = {}
+        self._prev_hash: str | None = None
 
     def write(self, _s: str) -> None:  # discard the text lines; we keep the structured records
         pass
@@ -186,21 +204,44 @@ class _EMHistory:
     def flush(self) -> None:
         pass
 
+    def _rec(self, i: int) -> dict:
+        return self._by_iter.setdefault(int(i), {"iter": int(i)})
+
     def em_record(self, i: int, ll: float, dll: float, vll: float | None, obj_label: str | None) -> None:
         finite_delta = dll == dll and abs(dll) != float("inf")  # null NaN/inf (e.g. the first iteration)
-        rec = {"iter": int(i), "loglik": ll, "delta": (dll if finite_delta else None)}
+        rec = self._rec(i)
+        rec["loglik"] = ll
+        rec["delta"] = dll if finite_delta else None
         if vll is not None:
             rec["valid_loglik"] = vll
         if obj_label is not None:
             rec["objective"] = obj_label
-        self.records.append(rec)
+
+    def __call__(self, step: Any) -> None:
+        rec = self._rec(step.iter)
+        h = _safe_model_hash(step.model)
+        rec["model_hash"] = h
+        rec["parent_hash"] = self._prev_hash
+        self._prev_hash = h
+
+    @property
+    def records(self) -> list[dict]:
+        return [self._by_iter[k] for k in sorted(self._by_iter)]
 
 
-def fit_with_provenance(data: Any, estimator: Any, *, seed: int | None = None, **optimize_kw: Any):
+def fit_with_provenance(
+    data: Any, estimator: Any, *, seed: int | None = None, lineage: bool = True, **optimize_kw: Any
+):
     """Fit ``estimator`` on ``data`` via EM (:func:`pysp.inference.optimize`) and return
-    ``(model, header)``, the model carrying a ``.header`` :class:`ModelHeader` with the data hash,
-    schema, training settings + per-iteration convergence trace, timing, final log-likelihood, and
-    environment. Pass your own ``out=`` to print iterations (then the trace is not captured)."""
+    ``(model, header)``, the model carrying a ``.header`` :class:`ModelHeader` with the data hash, the
+    final model hash, schema, training settings + per-iteration convergence trace, timing, final
+    log-likelihood, and environment. Pass your own ``out=`` to print iterations (then the trace is not
+    captured).
+
+    With ``lineage=True`` (default) each iteration in the convergence trace also records the accepted
+    model's ``model_hash`` and the previous iteration's ``parent_hash``, forming a verifiable hash chain
+    (check it with :func:`verify_lineage`). This fingerprints the model every iteration; pass
+    ``lineage=False`` to skip it for very large models. Any user ``on_step=`` is still called."""
     from pysp.inference.estimation import optimize
 
     capture = "out" not in optimize_kw
@@ -208,6 +249,15 @@ def fit_with_provenance(data: Any, estimator: Any, *, seed: int | None = None, *
     if collector is not None:
         optimize_kw["out"] = collector
         optimize_kw.setdefault("print_iter", 1)  # record every iteration, not every Nth
+        if lineage:  # also fingerprint the model each iteration -> a hash chain in the trace
+            user_on_step = optimize_kw.get("on_step")
+
+            def _on_step(step: Any) -> None:
+                collector(step)
+                if user_on_step is not None:
+                    user_on_step(step)
+
+            optimize_kw["on_step"] = _on_step
 
     training = {
         "method": "em",
@@ -237,3 +287,21 @@ def fit_with_provenance(data: Any, estimator: Any, *, seed: int | None = None, *
     except Exception:
         pass
     return model, header
+
+
+def verify_lineage(header: Any) -> bool:
+    """Check that a header's per-iteration convergence trace is an intact model-hash chain.
+
+    Returns True when every iteration that recorded a ``model_hash`` names the previous such iteration's
+    hash as its ``parent_hash`` (so iteration i+1 provably descends from i), and True vacuously when the
+    trace carries no lineage (``fit_with_provenance(lineage=False)`` or a custom ``out``). Returns False
+    on the first broken link. Accepts a :class:`ModelHeader` or its ``to_dict``."""
+    training = header.training if isinstance(header, ModelHeader) else dict(header or {}).get("training", {})
+    prev: str | None = None
+    for rec in training.get("convergence", []):
+        if "model_hash" not in rec:
+            continue
+        if rec.get("parent_hash") != prev:
+            return False
+        prev = rec["model_hash"]
+    return True
