@@ -82,19 +82,34 @@ class ModelRegistry:
         """Return an ``optimize(on_step=...)`` callback that snapshots the model under ``name`` every
         ``every`` iterations (recording the iteration + log-density in the version metadata).
 
-        Resume an interrupted run from the latest checkpoint::
+        Each checkpoint records its model ``model_hash`` and the previous checkpoint's ``parent_hash``,
+        so the saved snapshots form a verifiable chain (see :meth:`verify_chain`). Resume an interrupted
+        run from the latest checkpoint::
 
             reg = ModelRegistry("ckpts")
             optimize(data, est, on_step=reg.checkpointer("run", every=5))
             model, _ = reg.get("run")              # latest checkpoint
             optimize(data, est, prev_estimate=model)   # continue training
         """
+        from pysp.data.hashing import model_hash
+
+        parent: str | None = None
 
         def _save(step: Any) -> None:
+            nonlocal parent
             if every <= 1 or step.iter % every == 0:
+                h = model_hash(step.model)
                 self.register(
-                    step.model, name, metadata={"checkpoint_iter": step.iter, "log_density": step.log_density}
+                    step.model,
+                    name,
+                    metadata={
+                        "checkpoint_iter": step.iter,
+                        "log_density": step.log_density,
+                        "model_hash": h,
+                        "parent_hash": parent,
+                    },
                 )
+                parent = h
 
         return _save
 
@@ -137,3 +152,25 @@ class ModelRegistry:
         p = os.path.join(self.root, name, alias + ".alias")
         version = open(p).read().strip() if os.path.exists(p) else "latest"
         return self.get(name, version)
+
+    def verify_chain(self, name: str) -> bool:
+        """Verify the persisted checkpoint lineage for ``name`` (see :meth:`checkpointer`).
+
+        For each version carrying a ``model_hash``, checks that its ``parent_hash`` matches the previous
+        such version's hash *and* that re-hashing the loaded model reproduces the stored hash (catching
+        corruption or tampering). Returns True when every link holds, or vacuously when no version carries
+        lineage metadata."""
+        from pysp.data.hashing import model_hash
+
+        prev: str | None = None
+        for ver in self.versions(name):
+            stored = self.metadata(name, ver).get("model_hash")
+            if stored is None:
+                continue
+            if self.metadata(name, ver).get("parent_hash") != prev:
+                return False
+            model, _ = self.get(name, ver)
+            if model_hash(model) != stored:
+                return False
+            prev = stored
+        return True
