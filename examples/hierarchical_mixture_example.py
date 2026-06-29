@@ -1,8 +1,8 @@
 """Generate data and fit a hierarchical mixture model. This is a mixture sequence mixture distribution."""
 import numpy as np
 
-from pysp.stats import *
-from pysp.inference import optimize
+from mixle.stats import *
+from mixle.inference import optimize
 
 if __name__ == '__main__':
 

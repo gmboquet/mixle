@@ -1,4 +1,4 @@
-"""pysp.enumeration: exact descending-probability enumeration of discrete models.
+"""mixle.enumeration: exact descending-probability enumeration of discrete models.
 
 For any distribution with enumerable support, ``top_k`` returns the k most probable outcomes in
 exact descending order without normalizing the whole support, and ``supports_enumeration`` reports
@@ -7,13 +7,13 @@ whether a model qualifies. (For harder latent models, ``sound_top_k`` gives a ce
 
 import numpy as np
 
-from pysp.stats import (
+from mixle.stats import (
     CategoricalDistribution,
     CompositeDistribution,
     IntegerCategoricalDistribution,
     MixtureDistribution,
 )
-from pysp.enumeration import supports_enumeration, top_k
+from mixle.enumeration import supports_enumeration, top_k
 
 if __name__ == '__main__':
     cat = CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2})

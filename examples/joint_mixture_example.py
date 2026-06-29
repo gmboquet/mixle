@@ -2,9 +2,9 @@
 
 import numpy as np
 
-from pysp.stats import *
-from pysp.inference import best_of
-from pysp.utils.evaluation import empirical_kl_divergence, partition_data
+from mixle.stats import *
+from mixle.inference import best_of
+from mixle.utils.evaluation import empirical_kl_divergence, partition_data
 
 if __name__ == '__main__':
 

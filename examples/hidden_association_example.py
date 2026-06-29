@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from pysp.stats import *
-from pysp.inference import optimize
+from mixle.stats import *
+from mixle.inference import optimize
 
 if __name__ == '__main__':
     aa = 0.90

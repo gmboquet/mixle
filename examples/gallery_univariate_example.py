@@ -2,11 +2,11 @@
 
 For each family we instantiate a known distribution, draw an i.i.d. sample, fit a fresh estimator
 with the one-pass ``estimate`` helper, and print the true vs. recovered parameters. Fully
-self-contained (random data only). This is the quickest tour of pysparkplug's scalar leaf families.
+self-contained (random data only). This is the quickest tour of mixle's scalar leaf families.
 """
 
-from pysp.stats import *
-from pysp.inference import estimate
+from mixle.stats import *
+from mixle.inference import estimate
 
 # (label, true distribution, estimator) -- continuous then discrete.
 CASES = [

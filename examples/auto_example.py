@@ -2,9 +2,9 @@
 
 import numpy as np
 
-from pysp.stats import *
-from pysp.inference import estimate, initialize
-from pysp.utils.automatic import get_estimator
+from mixle.stats import *
+from mixle.inference import estimate, initialize
+from mixle.utils.automatic import get_estimator
 
 if __name__ == '__main__':
     data = [(1, None, 'a', [('a', 1), ('b', 2)]), (3, 2, 'b', [('a', 1), ('b', 2), ('c', 3)]),

@@ -1,6 +1,6 @@
-"""The pysp.ppl dialect: declare a model with ``free`` placeholders, observe data, and ``.fit()``.
+"""The mixle.ppl dialect: declare a model with ``free`` placeholders, observe data, and ``.fit()``.
 
-This is the concise, equation-style surface over pysparkplug's families. A ``free`` token marks a
+This is the concise, equation-style surface over mixle's families. A ``free`` token marks a
 parameter to estimate; literals stay fixed. The same RandomVariable answers the query verbs
 (``.sample`` / ``.mean`` / ``.posterior``) before and after fitting. No torch or Stan required --
 the fit is closed-form EM under the hood.
@@ -8,7 +8,7 @@ the fit is closed-form EM under the hood.
 
 import numpy as np
 
-from pysp.ppl import Exponential, Mix, Normal, Poisson, Seq, free
+from mixle.ppl import Exponential, Mix, Normal, Poisson, Seq, free
 
 if __name__ == '__main__':
     rng = np.random.RandomState(1)
