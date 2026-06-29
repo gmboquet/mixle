@@ -15,6 +15,7 @@ from numpy.random import RandomState
 
 from pysp.stats.compute.pdist import (
     ParameterEstimator,
+    ProbabilityDistribution,
     SequenceEncodableProbabilityDistribution,
     validate_estimator_keys,
 )
@@ -27,6 +28,35 @@ from pysp.stats.compute.sequence import (
 
 T = TypeVar("T")
 E0 = TypeVar("E0")
+
+
+# --- estimator coercion -----------------------------------------------------
+def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
+    """Resolve the ``estimator`` argument to a concrete ``ParameterEstimator``.
+
+    The fit verbs (``optimize`` / ``fit`` / ``best_of``) accept three spellings so a model's
+    *shape* need not be written twice:
+
+      * a :class:`ParameterEstimator` -- used as-is (the historical contract);
+      * a distribution **prototype** (any :class:`ProbabilityDistribution`) -- its matching
+        estimator tree is taken from ``proto.estimator()``, so you build the structure once and fit
+        it directly;
+      * ``None`` -- the estimator is inferred from raw ``data`` via
+        ``pysp.utils.automatic.get_estimator``.
+    """
+    if isinstance(estimator, ProbabilityDistribution):
+        return estimator.estimator()
+    if estimator is None:
+        if data is None:
+            raise ValueError(
+                "no estimator given and none can be inferred: pass a ParameterEstimator, a "
+                "distribution prototype, or raw `data` (estimator inference needs raw data, not "
+                "pre-encoded enc_data)."
+            )
+        from pysp.utils.automatic import get_estimator
+
+        return get_estimator(data)
+    return estimator
 
 
 # --- data-encoding helpers --------------------------------------------------
@@ -486,10 +516,10 @@ def _objective_scorer(resolved: str, estimator: ParameterEstimator, engine: Any 
 # --- public estimation drivers (optimize / fit / best_of) -------------------
 def optimize(
     data: Sequence[T] | None,
-    estimator: ParameterEstimator,
+    estimator: ParameterEstimator | ProbabilityDistribution | None = None,
     max_its: int = 10,
     delta: float | None = 1.0e-9,
-    init_estimator: ParameterEstimator | None = None,
+    init_estimator: ParameterEstimator | ProbabilityDistribution | None = None,
     init_p: float = 0.1,
     rng: RandomState | None = None,
     prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
@@ -523,8 +553,10 @@ def optimize(
     Args:
         data (Optional[List[T]]): List of data type T containing observed data. Must be compatible with data type of
             estimator.
-        estimator (ParameterEstimator): ParameterEstimator used to specify to-be-estimated distribution for observed
-            data.
+        estimator (ParameterEstimator | ProbabilityDistribution | None): What to fit. A ``ParameterEstimator``
+            is used as-is; a distribution **prototype** (any ``ProbabilityDistribution``) is coerced to its
+            matching estimator via ``proto.estimator()`` so you build the model shape only once; ``None``
+            infers an estimator from raw ``data`` (``pysp.utils.automatic.get_estimator``).
         max_its (int): Maximum number of EM iterations to be performed. Default value is 10 iterations.
         delta (Optional[float]): Stopping criteria for EM algorithm used if max_its is not set: Iterate until
             |old_loglikelihood - new_loglikelihood| < delta or iterations == max_its.
@@ -596,6 +628,9 @@ def optimize(
             is met.
 
     """
+    estimator = _coerce_estimator(estimator, data)
+    if init_estimator is not None:
+        init_estimator = _coerce_estimator(init_estimator, data)
     rng = RandomState() if rng is None else rng
     if precision == "auto":
         from pysp.engines import auto_precision
@@ -710,19 +745,11 @@ def optimize(
 
 def fit(
     data: Sequence[T] | None,
-    estimator: ParameterEstimator,
+    estimator: ParameterEstimator | ProbabilityDistribution | None = None,
     max_its: int = 10,
     delta: float | None = 1.0e-6,
-    init_estimator: ParameterEstimator | None = None,
-    init_p: float = 0.1,
-    rng: RandomState | None = None,
-    prev_estimate: SequenceEncodableProbabilityDistribution | None = None,
-    vdata: Sequence[T] | None = None,
-    enc_data: list[tuple[int, E0]] | None = None,
-    enc_vdata: list[tuple[int, E0]] | None = None,
-    out: IO | None = sys.stdout,
-    print_iter: int = 1,
-    objective: str = "auto",
+    init_estimator: ParameterEstimator | ProbabilityDistribution | None = None,
+    **kwargs: Any,
 ) -> SequenceEncodableProbabilityDistribution:
     """Fit a model in the Bayesian (variational / MAP) sense, returning the posterior-bearing model.
 
@@ -747,11 +774,16 @@ def fit(
     validation log-likelihood seen during the run.
 
     ``fit`` is a thin wrapper over :func:`optimize` -- they share the one EM/objective loop. ``fit`` adds
-    only the opt-in data-structure check and a Bayesian-leaning default ``delta`` (1e-6); it routes through
-    the standard per-iteration-scored loop (``reuse_estep_ll=False``). Reach for ``optimize`` directly for
-    the heavier knobs (engines, precision, distributed backends, the fused E-step).
+    only the opt-in data-structure check, a Bayesian-leaning default ``delta`` (1e-6), and the exact
+    per-iteration-scored loop (``reuse_estep_ll=False``). Every other :func:`optimize` keyword -- engines,
+    precision, distributed ``backend``, ``on_step``, the fused E-step -- is accepted here too and forwarded
+    verbatim, so reaching for a heavier knob never means switching verbs. ``estimator`` accepts the same
+    three spellings as :func:`optimize` (estimator, distribution prototype, or ``None`` to infer from data).
     """
-    if data is None and enc_data is None:
+    estimator = _coerce_estimator(estimator, data)
+    if init_estimator is not None:
+        init_estimator = _coerce_estimator(init_estimator, data)
+    if data is None and kwargs.get("enc_data") is None:
         raise Exception("fit called with empty data or enc_data.")
     # opt-in sample-structure check: a tagged DataSource is verified against the model it feeds (warns on
     # a mismatch, e.g. a SEQUENTIAL source handed to an i.i.d. leaf). Bare lists carry no structure tag.
@@ -759,35 +791,29 @@ def fit(
         from pysp.data.structure import check_model_structure
 
         check_model_structure(estimator if init_estimator is None else init_estimator, data.structure)
+    # fit owns these two defaults; reuse_estep_ll is forced off (exact per-iteration scoring). Everything
+    # else flows through **kwargs so any optimize knob works without changing verbs.
+    kwargs.setdefault("reuse_estep_ll", False)
     return optimize(
         data,
         estimator,
         max_its=max_its,
         delta=delta,
         init_estimator=init_estimator,
-        init_p=init_p,
-        rng=rng,
-        prev_estimate=prev_estimate,
-        vdata=vdata,
-        enc_data=enc_data,
-        enc_vdata=enc_vdata,
-        out=out,
-        print_iter=print_iter,
-        objective=objective,
-        reuse_estep_ll=False,
+        **kwargs,
     )
 
 
 def best_of(
     data: Sequence[T] | None,
     vdata: Sequence[T] | None,
-    est: ParameterEstimator,
+    est: ParameterEstimator | ProbabilityDistribution | None,
     trials: int,
     max_its: int,
     init_p: float,
     delta: float,
     rng: RandomState,
-    init_estimator: ParameterEstimator | None = None,
+    init_estimator: ParameterEstimator | ProbabilityDistribution | None = None,
     enc_data: list[tuple[int, E0]] | None = None,
     enc_vdata: Sequence[tuple[int, E0]] | None = None,
     out: IO = sys.stdout,
@@ -827,6 +853,9 @@ def best_of(
     if data is None and enc_data is None:
         raise Exception("Optimization called with empty data or enc_data.")
 
+    est = _coerce_estimator(est, data)
+    if init_estimator is not None:
+        init_estimator = _coerce_estimator(init_estimator, data)
     max_its = max(1, max_its)
     trials = max(1, trials)
     i_est = est if init_estimator is None else init_estimator
