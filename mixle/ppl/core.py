@@ -1606,6 +1606,32 @@ class RandomVariable:
             return "map", "a structural vector/matrix parameter or a fixed+free mix -> MAP"
         return "em", "all-free parameters, no priors -> maximum-likelihood EM"
 
+    def _resolve_posterior_ladder(self):
+        """Cheapest route that returns a *posterior* (uncertainty), not a point estimate -- the
+        ``how='posterior'`` escalation ladder: conjugate (exact) -> Laplace (Gaussian at the MAP) -> MCMC.
+
+        Unlike ``how='auto'`` (which stops at MAP for a non-conjugate prior and returns a point estimate),
+        this always climbs to the cheapest rung that yields posterior uncertainty, and reports which rung.
+        """
+        from mixle.ppl import inference as _inf
+
+        closed_form = (
+            _inf.conjugate_spec(self) is not None
+            or _inf.conjugate_mixture_spec(self) is not None
+            or _inf.stats_conjugate_supported(self)
+            or _inf._is_all_free_normal(self)
+        )
+        if closed_form:
+            return "conjugate", "exact closed-form (conjugate) posterior -- the cheapest rung"
+        flat = (
+            self._kind == "sample"
+            and not isinstance(self._family, CompositeFamily)
+            and not any(isinstance(a, _LinearPredictor) for a in self._args)
+        )
+        if flat:
+            return "laplace", "no closed form -> Laplace (Gaussian posterior at the MAP) -- the next rung up"
+        return "mcmc", "structured/composite model -> MCMC for the posterior -- the general rung"
+
     def explain_fit(self, *, how="auto", constraints=None, potentials=None, **_) -> dict:
         """Report which inference route ``.fit(how=...)`` will take, and why -- *without* fitting.
 
@@ -1614,7 +1640,9 @@ class RandomVariable:
         are the honest limits of that choice?". The route mirrors :meth:`fit` exactly (it shares
         :meth:`_resolve_auto` for the flat tree and re-checks the same structural short-circuits).
         """
-        if how != "auto":
+        if how == "posterior":
+            route, reason = self._resolve_posterior_ladder()
+        elif how != "auto":
             route, reason = how, f"explicit how={how!r}"
         elif self._kind == "sample" and any(_expr_has_gather(a) for a in self._args):
             route, reason = "indexed", "a data-indexed latent theta[Field(...)] -> per-observation MAP"
@@ -1695,7 +1723,7 @@ class RandomVariable:
             raise ValueError(f"missing={missing!r}; choose 'error' or 'marginalize'.")
         # ``auto`` and ``em`` are resolved/handled by ``fit`` itself; every other ``how`` is a pure
         # dispatch into the fitter registry.
-        valid_how = {"auto", "em", *_FITTERS}
+        valid_how = {"auto", "posterior", "em", *_FITTERS}
         if how not in valid_how:
             raise ValueError(f"unknown how={how!r}; choose from {sorted(valid_how)}.")
         if hasattr(data, "__len__") and len(data) == 0:
@@ -1770,6 +1798,10 @@ class RandomVariable:
                 f"how={how!r} cannot honor inequality constraints; use 'map', 'mcmc', 'hmc', "
                 "or 'ensemble' (or how='auto')."
             )
+        if how == "posterior":
+            # the escalation ladder: cheapest route that yields posterior uncertainty (conjugate ->
+            # Laplace -> MCMC). Unlike 'auto', never returns a bare point estimate.
+            how, _ = self._resolve_posterior_ladder()
         if how == "auto":
             how, _auto_reason = self._resolve_auto(
                 has_constraints=has_constraints,
