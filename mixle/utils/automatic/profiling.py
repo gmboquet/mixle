@@ -1998,3 +1998,35 @@ def normalize_input(data, *, rdd_cap: int = 200000):
 
 def get_estimator(data, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
     return DatumNode(data=normalize_input(data)).get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+
+
+def get_prototype(
+    data,
+    *,
+    seed: int | None = None,
+    p: float = 0.1,
+    pseudo_count: float | None = 1.0,
+    emp_suff_stat: bool = True,
+    use_bstats: bool = False,
+):
+    """Infer the model structure from raw ``data`` and return a prototype *distribution*.
+
+    Where :func:`get_estimator` returns the estimator (the thing you fit *with*), this returns a concrete,
+    *initialized-but-unfitted* distribution whose tree mirrors the detected families -- the thing you fit.
+    It is the "I just have data, show me the model" front door: inspect which families were chosen, tweak
+    them if you like, then ``optimize(data, prototype)`` (or ``prototype`` straight into ``fit``).
+
+        proto = get_prototype(records)     # see the inferred composite structure
+        model = optimize(records, proto)   # fit it (or pass proto to fit(...))
+
+    ``seed`` makes the (lightly randomized) initialization reproducible; ``p`` is the per-observation
+    keep-probability of the vectorized initializer. Remaining kwargs mirror :func:`get_estimator`.
+    """
+    import numpy as np
+
+    from mixle.stats.compute.sequence import seq_encode, seq_initialize
+
+    rows = normalize_input(data)
+    est = get_estimator(rows, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+    enc = seq_encode(rows, estimator=est)
+    return seq_initialize(enc_data=enc, estimator=est, rng=np.random.RandomState(seed), p=p)
