@@ -66,6 +66,43 @@ class StructuredVITestCase(unittest.TestCase):
         with self.assertRaises(TypeError):
             Guide(mu=3.0)  # not a RandomVariable handle
 
+    def test_admixture_lda_recovers_topics_without_lda_distribution(self):
+        # LDA via the guide surface: declare topic Dirichlet factors, fit by mean-field VI from
+        # primitives (no LDADistribution). Topics are recovered up to the usual label permutation.
+        import mixle.stats as S
+        from mixle.ppl import Dirichlet, admixture
+
+        V = 6
+        true = [
+            {0: 0.5, 1: 0.3, 2: 0.15, 3: 0.03, 4: 0.01, 5: 0.01},
+            {0: 0.01, 1: 0.01, 2: 0.03, 3: 0.15, 4: 0.3, 5: 0.5},
+        ]
+        gen = S.LDADistribution(
+            [S.CategoricalDistribution(t) for t in true],
+            alpha=[0.3, 0.3],
+            len_dist=S.CategoricalDistribution({30: 1.0}),
+        )
+        docs = [list(d) for d in gen.sampler(seed=1).sample(500)]
+        topics = [Dirichlet([0.1] * V, name=f"topic{k}") for k in range(2)]
+        post = admixture(docs, topics, alpha=0.3, max_its=80)
+
+        recovered = np.array([post.posterior(t)["mean"] for t in topics])  # (2, V)
+        truth = np.array([[t.get(v, 0.0) for v in range(V)] for t in true])
+        # best topic-label alignment (topics are unidentifiable up to permutation)
+        aligned = min(
+            max(np.max(np.abs(recovered - truth)), 0.0),
+            np.max(np.abs(recovered[::-1] - truth)),
+        )
+        self.assertLess(aligned, 0.07)
+        self.assertEqual(post.topics().shape, (2, V))
+        self.assertTrue(np.all(np.diff(post.log_likelihood_trace) >= -1e-6))  # LL non-decreasing
+
+    def test_admixture_rejects_non_dirichlet_topics(self):
+        from mixle.ppl import Normal, admixture
+
+        with self.assertRaises(TypeError):
+            admixture([[0, 1, 2]], [Normal(0, 1)], alpha=0.3)
+
     def test_summary_lists_named_latents_and_elbo(self):
         rng = np.random.RandomState(5)
         data = list(rng.normal(2.0, 1.0, 1000))

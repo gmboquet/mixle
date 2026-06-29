@@ -24,9 +24,12 @@ structure; omit it to take the conjugate default.
 
 Latents shared across several observation factors combine their evidence (pass several
 ``(model, data)`` pairs). Coverage today is conjugate-exponential structured VI over
-Gaussian/Gamma/Dirichlet factors, including hierarchies and shared latents. Non-conjugate q-families,
-and the categorical-emission / admixture factors an LDA needs, are extensions to the underlying VMP
-:class:`~mixle.ppl.vmp.Graph`, not to this surface -- a clear error is raised rather than a wrong answer.
+Gaussian/Gamma/Dirichlet factors, including hierarchies and shared latents.
+
+**Admixtures / LDA-class models** -- a *latent* per-token categorical that indexes shared topics, drawn
+from a per-group Dirichlet -- are expressed through :func:`admixture` (LDA is its categorical-word-emission
+special case), built from the same Dirichlet primitives by mean-field VI. Remaining gaps: non-conjugate
+q-families, and latent-feature (IBP-style) factors -- those raise a clear error rather than a wrong answer.
 """
 
 from __future__ import annotations
@@ -175,4 +178,114 @@ def structured_vi(observations, guide: Guide, *, max_its: int = 300, tol: float 
     return StructuredVIPosterior(res, guide)
 
 
-__all__ = ["Guide", "StructuredVIPosterior", "structured_vi"]
+# ---------------------------------------------------------------------------------------------------
+# The categorical-emission / admixture factor: LDA-class models expressed through this surface.
+#
+# An admixture adds a *latent* per-token categorical z (the topic assignment) drawn from a per-group
+# Dirichlet theta_d, indexing a shared set of Dirichlet topics beta_k -- the structure the plain
+# Dirichlet-Categorical factor lacks. Mean-field VI (Blei et al. 2003) fits it from the SAME Dirichlet
+# primitives the rest of this surface uses: q(beta_k)=Dirichlet (the declared topic handles),
+# q(theta_d)=Dirichlet (per document), q(z)=categorical responsibilities marginalized by coordinate
+# ascent. No LDADistribution -- LDA is just an admixture with categorical word-emission.
+# ---------------------------------------------------------------------------------------------------
+def _dirichlet_expectation(alpha):
+    from scipy.special import digamma
+
+    return digamma(alpha) - digamma(alpha.sum(axis=-1, keepdims=True))
+
+
+class AdmixturePosterior:
+    """Posterior from :func:`admixture` (LDA-class mean-field VI). ``posterior(topic_handle)`` returns
+    that topic's fitted Dirichlet ``{'alpha','mean'}``; ``topics()`` is ``E[beta]`` (K x V); ``doc_topics``
+    is the per-document mixing ``E[theta_d]``; ``log_likelihood`` is the fitted-model corpus LL trace."""
+
+    def __init__(self, lam, gamma, topic_handles, ll_trace):
+        import numpy as _np
+
+        self._lam = _np.asarray(lam)  # K x V topic Dirichlet posteriors
+        self._gamma = _np.asarray(gamma)  # D x K doc-topic Dirichlet posteriors
+        self._topics = list(topic_handles)
+        self.log_likelihood = float(ll_trace[-1]) if len(ll_trace) else float("nan")
+        self.log_likelihood_trace = _np.asarray(ll_trace)
+        self.acceptance_rate = None
+
+    def topics(self):
+        return self._lam / self._lam.sum(axis=1, keepdims=True)
+
+    def doc_topics(self, d=None):
+        m = self._gamma / self._gamma.sum(axis=1, keepdims=True)
+        return m if d is None else m[d]
+
+    def posterior(self, topic):
+        k = self._topics.index(topic) if topic in self._topics else int(topic)
+        a = self._lam[k]
+        return {"alpha": a, "mean": a / a.sum()}
+
+    def summary(self) -> dict:
+        return {"n_topics": self._lam.shape[0], "vocab_size": self._lam.shape[1], "log_likelihood": self.log_likelihood}
+
+
+def admixture(docs, topics, *, alpha=1.0, max_its: int = 100, inner_its: int = 40, tol: float = 1e-5, seed: int = 0):
+    """Fit an admixture (LDA-class) model by mean-field VI built from this surface's Dirichlet primitives.
+
+    ``docs`` is a corpus -- a list of documents, each a sequence of integer word ids over the vocabulary.
+    ``topics`` are the ``Dirichlet`` ``RandomVariable`` handles you declare as the per-topic variational
+    factors q(beta_k); their prior alpha vectors set the vocabulary size V and the topic-word prior eta.
+    ``alpha`` is the per-document topic Dirichlet prior. Returns an :class:`AdmixturePosterior`.
+
+    This is "LDA via the guide": LDA = an admixture whose emission is Categorical over words. The same
+    coordinate-ascent (q(theta_d), q(beta_k) Dirichlet + categorical responsibilities q(z)) fits any
+    admixture over a categorical vocabulary -- no ``LDADistribution`` involved.
+    """
+    import numpy as np
+
+    from mixle.ppl.core import RandomVariable
+
+    if not topics or any(not isinstance(t, RandomVariable) or t._family.name != "Dirichlet" for t in topics):
+        raise TypeError(
+            "`topics` must be a non-empty list of Dirichlet RandomVariable handles (the q(beta_k) factors)."
+        )
+    eta = np.array([np.asarray(t._args[0], dtype=float) for t in topics])  # (K, V) per-topic word priors
+    K, V = eta.shape
+    docs = [np.asarray(d, dtype=int) for d in docs]
+    if any(d.size and (d.max() >= V or d.min() < 0) for d in docs):
+        raise ValueError(f"document word ids must be in [0, {V}) for topics of vocabulary size {V}.")
+
+    rng = np.random.RandomState(seed)
+    lam = rng.gamma(100.0, 1.0 / 100.0, (K, V)) + eta  # random init breaks the topic-label symmetry
+    gamma = np.full((len(docs), K), float(alpha) + 1.0)
+    ll_trace = []
+    for _ in range(int(max_its)):
+        elog_beta = _dirichlet_expectation(lam)  # (K, V)
+        new_lam = eta.astype(float).copy()
+        ll = 0.0
+        beta_hat = lam / lam.sum(1, keepdims=True)
+        for d, w in enumerate(docs):
+            if w.size == 0:
+                continue
+            elog_beta_w = elog_beta[:, w]  # (K, n)
+            g = gamma[d].copy()
+            for _ in range(int(inner_its)):
+                elog_theta = _dirichlet_expectation(g)  # (K,)
+                from scipy.special import logsumexp
+
+                log_phi = elog_theta[:, None] + elog_beta_w  # (K, n)
+                log_phi -= logsumexp(log_phi, axis=0, keepdims=True)
+                phi = np.exp(log_phi)  # (K, n)  responsibilities q(z)
+                g_new = float(alpha) + phi.sum(axis=1)
+                if np.mean(np.abs(g_new - g)) < tol:
+                    g = g_new
+                    break
+                g = g_new
+            gamma[d] = g
+            np.add.at(new_lam, (slice(None), w), phi)  # lam[k, w_n] += phi[k, n]
+            theta_hat = g / g.sum()
+            ll += float(np.sum(np.log(theta_hat @ beta_hat[:, w] + 1e-300)))  # fitted-model doc LL
+        lam = new_lam
+        ll_trace.append(ll)
+        if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < 1e-6 * max(1.0, abs(ll_trace[-2])):
+            break
+    return AdmixturePosterior(lam, gamma, topics, ll_trace)
+
+
+__all__ = ["AdmixturePosterior", "Guide", "StructuredVIPosterior", "admixture", "structured_vi"]
