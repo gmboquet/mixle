@@ -8,13 +8,13 @@ triples). Observations are adjacency matrices; each true model exposes a matchin
 
 import numpy as np
 
-from pysp.stats import (
+from mixle.stats import (
     ErdosRenyiGraphDistribution,
     KnowledgeGraphDistribution,
     RandomDotProductGraphDistribution,
     StochasticBlockGraphDistribution,
 )
-from pysp.inference import estimate
+from mixle.inference import estimate
 
 if __name__ == '__main__':
     rng = np.random.RandomState(0)

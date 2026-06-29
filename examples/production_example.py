@@ -1,6 +1,6 @@
 """The production / MLOps layer: reproducible artifacts, a model registry, serving, drift, and checkpoints.
 
-Everything lives in ``pysp.inference.production``. This walks the lifecycle end to end on a toy Gaussian:
+Everything lives in ``mixle.inference.production``. This walks the lifecycle end to end on a toy Gaussian:
 
   1. fit a model *with provenance* -> a Header recording the data hash, model hash, training settings,
      timing, environment, and the per-iteration model-hash chain;
@@ -16,9 +16,9 @@ import tempfile
 
 import numpy as np
 
-from pysp.inference import optimize
-from pysp.inference.production import Registry, Service, detect_drift, fit_with_provenance, verify_lineage
-from pysp.stats import GaussianEstimator, MixtureEstimator
+from mixle.inference import optimize
+from mixle.inference.production import Registry, Service, detect_drift, fit_with_provenance, verify_lineage
+from mixle.stats import GaussianEstimator, MixtureEstimator
 
 if __name__ == "__main__":
     rng = np.random.RandomState(0)
@@ -30,7 +30,7 @@ if __name__ == "__main__":
     print("  data hash   :", header.dataset_hash[:16], "...")
     print("  model hash  :", header.model_hash[:16], "...")
     print("  iterations  :", header.training["iterations"], "| final loglik %.1f" % header.final_loglik)
-    print("  git / pysp  :", header.environment["git_commit"], "/", header.environment["pysp_version"])
+    print("  git / mixle  :", header.environment["git_commit"], "/", header.environment["pysp_version"])
 
     # 2. the per-iteration lineage is a verifiable hash chain.
     print("# lineage verified:", verify_lineage(header))

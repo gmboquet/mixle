@@ -5,14 +5,14 @@ sphere (Watson). Each true distribution exposes a matching estimator via ``.esti
 fit is a one-liner. (VonMisesFisher lives in the multivariate gallery.) Random data only.
 """
 
-from pysp.stats import (
+from mixle.stats import (
     ProjectedNormalDistribution,
     VonMisesDistribution,
     WatsonDistribution,
     WrappedCauchyDistribution,
     WrappedNormalDistribution,
 )
-from pysp.inference import estimate
+from mixle.inference import estimate
 
 CASES = [
     ('VonMises (circle)',       VonMisesDistribution(0.7, 4.0)),
