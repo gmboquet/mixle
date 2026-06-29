@@ -626,12 +626,12 @@ class AutoFusionCostModelTest(unittest.TestCase):
         return Mix([Comp((G(-2, 1), P(2.0))), Comp((G(2, 1), P(9.0)))], [0.5, 0.5])
 
     def test_gate(self):
-        from mixle.inference.estimation import _should_auto_fuse
+        from mixle.inference.fusion_policy import should_auto_fuse
 
         mix = self._mix()
-        self.assertTrue(_should_auto_fuse(mix, [(60000, None)], 30))  # large composite-mixture -> fuse
-        self.assertFalse(_should_auto_fuse(mix, [(2000, None)], 30))  # small -> stay on host
-        self.assertFalse(_should_auto_fuse(stats.GaussianDistribution(0, 1), [(10**7, None)], 100))  # bare leaf
+        self.assertTrue(should_auto_fuse(mix, [(60000, None)], 30))  # large composite-mixture -> fuse
+        self.assertFalse(should_auto_fuse(mix, [(2000, None)], 30))  # small -> stay on host
+        self.assertFalse(should_auto_fuse(stats.GaussianDistribution(0, 1), [(10**7, None)], 100))  # bare leaf
 
     def test_auto_fusion_is_parity_identical(self):
         from mixle.engines import NUMPY_ENGINE

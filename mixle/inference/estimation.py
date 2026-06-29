@@ -30,39 +30,6 @@ T = TypeVar("T")
 E0 = TypeVar("E0")
 
 
-# --- fusion cost model ------------------------------------------------------
-# Below this (observations x iterations) the single-pass fused numba kernel's one-time compile (~0.1s,
-# then disk-cached per model structure) is not amortized, so a fit on the default engine stays on the
-# host path. Measured crossover: fused only breaks even on a cold compile around 2-6e6 obs-iters, and
-# wins (~1.7x) once warm/cached -- so this conservative gate never slows a small/medium fit while
-# auto-using fusion for large or repeated workloads. Parity (fused == host) is guaranteed by the
-# fused_codegen / fused_em test suites.
-_FUSION_MIN_WORKLOAD = 1_500_000
-
-
-def _has_fusion_benefit(model: Any) -> bool:
-    """A multi-factor model where single-pass fusion eliminates real per-leaf dispatch (a mixture of >1
-    component, or a composite/record of >1 field). A bare leaf has nothing to fuse, so it stays on host."""
-    comps = getattr(model, "components", None)
-    if comps is not None and len(comps) > 1:
-        return True
-    dists = getattr(model, "dists", None)
-    return dists is not None and len(dists) > 1
-
-
-def _should_auto_fuse(model: Any, enc_data: Any, max_its: int) -> bool:
-    """True if the default-engine local MLE path should switch to the fused numba kernel for ``model``."""
-    try:
-        from mixle.stats.compute.fused_codegen import fusible, fusible_estep
-
-        if not (_has_fusion_benefit(model) and fusible(model) and fusible_estep(model)):
-            return False
-        n = sum(int(c[0]) for c in enc_data) if isinstance(enc_data, list) else 0
-        return n * max(int(max_its), 1) >= _FUSION_MIN_WORKLOAD
-    except Exception:
-        return False
-
-
 # --- estimator coercion -----------------------------------------------------
 def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
     """Resolve the ``estimator`` argument to a concrete ``ParameterEstimator``.
@@ -751,11 +718,13 @@ def optimize(
             and placement is None
             and strategy is None
             and resolved_objective == "mle"
-            and _should_auto_fuse(mm, enc_data, max_its)
         ):
-            from mixle.engines import FUSED_NUMPY_ENGINE
+            from mixle.inference.fusion_policy import should_auto_fuse
 
-            engine = FUSED_NUMPY_ENGINE
+            if should_auto_fuse(mm, enc_data, max_its):
+                from mixle.engines import FUSED_NUMPY_ENGINE
+
+                engine = FUSED_NUMPY_ENGINE
 
         # Fused EM (reuse the E-step likelihood normalizer instead of a separate score pass) is only
         # valid for the plain-likelihood objective on the local encoded path with an exact E-step --
