@@ -150,7 +150,13 @@ class ContinuousPretrainingTest(unittest.TestCase):
         s = Stream(chunks())
         cur = lambda: ((net(s.current[0]) - s.current[1]) ** 2).mean()
         losses = []
-        fit(minimize(cur, over=trainable(net)), data=s, steps_per_chunk=150, lr=0.02, callback=lambda i, p: losses.append(cur().item()))
+        fit(
+            minimize(cur, over=trainable(net)),
+            data=s,
+            steps_per_chunk=150,
+            lr=0.02,
+            callback=lambda i, p: losses.append(cur().item()),
+        )
         self.assertEqual(len(losses), 5)  # consumed every chunk
         self.assertLess(max(losses), 0.1)  # tracked each one
 
@@ -179,7 +185,11 @@ class ContinuousPretrainingTest(unittest.TestCase):
         ewc_net = copy.deepcopy(net)
         fit(minimize(lambda: ((naive(xb) - yb) ** 2).mean(), over=trainable(naive)), steps=500, lr=0.01)  # naive
         p = trainable(ewc_net)
-        fit(weighted([(lambda: ((ewc_net(xb) - yb) ** 2).mean(), 1.0), (ewc(p, fisher, anchor, 1.0), 1.0)], over=p), steps=500, lr=0.01)
+        fit(
+            weighted([(lambda: ((ewc_net(xb) - yb) ** 2).mean(), 1.0), (ewc(p, fisher, anchor, 1.0), 1.0)], over=p),
+            steps=500,
+            lr=0.01,
+        )
         self.assertLess(mse(ewc_net, xat, yat), 0.7 * mse(naive, xat, yat))  # EWC retains A much better
 
 
@@ -269,7 +279,9 @@ class ProgramEMBridgeTest(unittest.TestCase):
         chunk = lambda: [list(rng.randn(2)) for _ in range(50)] + [list(rng.randn(2) + 6.0) for _ in range(50)]
         stream = Stream([chunk() for _ in range(8)])
         est = MixtureEstimator([MVN(np.zeros(2), np.eye(2)).estimator() for _ in range(2)])
-        init = MixtureDistribution([MVN(np.array([1.0, 1.0]), np.eye(2)), MVN(np.array([3.0, 3.0]), np.eye(2))], [0.5, 0.5])
+        init = MixtureDistribution(
+            [MVN(np.array([1.0, 1.0]), np.eye(2)), MVN(np.array([3.0, 3.0]), np.eye(2))], [0.5, 0.5]
+        )
         move = streaming_em(est, stream, init, iters_per_chunk=2)
         fit(move, data=stream, steps_per_chunk=1)  # consume the stream; the stats model adapts online
         held = chunk()
@@ -283,7 +295,9 @@ class ProgramEMBridgeTest(unittest.TestCase):
         data = [list(rng.randn(2)) for _ in range(150)] + [list(rng.randn(2) + 6.0) for _ in range(150)]
         est = MixtureEstimator([MVN(np.zeros(2), np.eye(2)).estimator() for _ in range(2)])
         # deliberately off-center init so EM has work to do
-        init = MixtureDistribution([MVN(np.array([1.0, 1.0]), np.eye(2)), MVN(np.array([3.0, 3.0]), np.eye(2))], [0.5, 0.5])
+        init = MixtureDistribution(
+            [MVN(np.array([1.0, 1.0]), np.eye(2)), MVN(np.array([3.0, 3.0]), np.eye(2))], [0.5, 0.5]
+        )
         move = em(est, data, init)
         ll0 = sum(init.log_density(x) for x in data)
         fit(alternate(move), steps=15)  # the EM move runs inside the same program runner

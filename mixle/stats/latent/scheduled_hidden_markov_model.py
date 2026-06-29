@@ -340,7 +340,9 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: list[Any], weight: float, estimate: ScheduledHiddenMarkovModelDistribution) -> None:
         if len(x) == 0:
-            self._accumulate(x, weight, np.zeros((0, self.n_states)), np.zeros((0, self.n_states, self.n_states)), estimate)
+            self._accumulate(
+                x, weight, np.zeros((0, self.n_states)), np.zeros((0, self.n_states, self.n_states)), estimate
+            )
             return
         log_b = _log_b(estimate.emissions, estimate.schedule, x)
         _, gamma, xi = _forward_backward(estimate._log_inits, estimate._log_trans, log_b, estimate.schedule)
@@ -378,7 +380,12 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self) -> tuple:
         em = [[self.emission_acc[p][j].value() for j in range(self.n_states)] for p in range(self.n_phases)]
-        return (self.init_counts.copy(), self.trans_counts.copy(), em, None if self.len_acc is None else self.len_acc.value())
+        return (
+            self.init_counts.copy(),
+            self.trans_counts.copy(),
+            em,
+            None if self.len_acc is None else self.len_acc.value(),
+        )
 
     def from_value(self, value: tuple) -> ScheduledHMMAccumulator:
         ic, tc, em, lv = value
@@ -396,7 +403,9 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class ScheduledHMMAccumulatorFactory(StatisticAccumulatorFactory):
-    def __init__(self, n_states: int, schedule: PhaseSchedule, emission_estimator: Any, len_estimator: Any = None) -> None:
+    def __init__(
+        self, n_states: int, schedule: PhaseSchedule, emission_estimator: Any, len_estimator: Any = None
+    ) -> None:
         self.n_states = n_states
         self.schedule = schedule
         self.emission_estimator = emission_estimator
@@ -404,7 +413,9 @@ class ScheduledHMMAccumulatorFactory(StatisticAccumulatorFactory):
 
     def make(self) -> ScheduledHMMAccumulator:
         len_factory = None if self.len_estimator is None else self.len_estimator.accumulator_factory()
-        return ScheduledHMMAccumulator(self.n_states, self.schedule, self.emission_estimator.accumulator_factory(), len_factory)
+        return ScheduledHMMAccumulator(
+            self.n_states, self.schedule, self.emission_estimator.accumulator_factory(), len_factory
+        )
 
 
 class ScheduledHMMEstimator(ParameterEstimator):

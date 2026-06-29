@@ -16,9 +16,7 @@ class PosteriorLadderTestCase(unittest.TestCase):
         self.assertEqual(Poisson(Gamma(2, 1, name="lam")).explain_fit(how="posterior")["route"], "conjugate")
         self.assertEqual(Normal(Beta(2, 2, name="m"), 1.0).explain_fit(how="posterior")["route"], "laplace")
         self.assertEqual(Normal(free, free).explain_fit(how="posterior")["route"], "conjugate")  # NIG
-        self.assertEqual(
-            Mix([Normal(-2, 1), Normal(2, 1)], [0.5, 0.5]).explain_fit(how="posterior")["route"], "mcmc"
-        )
+        self.assertEqual(Mix([Normal(-2, 1), Normal(2, 1)], [0.5, 0.5]).explain_fit(how="posterior")["route"], "mcmc")
 
     def test_conjugate_rung_runs(self):
         rng = np.random.RandomState(0)

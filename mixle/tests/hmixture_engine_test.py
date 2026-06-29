@@ -5,7 +5,12 @@ import unittest
 import numpy as np
 
 from mixle.engines import NUMPY_ENGINE
-from mixle.stats import CategoricalDistribution, GaussianDistribution, GaussianEstimator, HierarchicalMixtureDistribution
+from mixle.stats import (
+    CategoricalDistribution,
+    GaussianDistribution,
+    GaussianEstimator,
+    HierarchicalMixtureDistribution,
+)
 from mixle.stats.latent.hierarchical_mixture import HierarchicalMixtureEstimator
 
 try:

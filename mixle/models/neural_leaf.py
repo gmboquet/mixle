@@ -42,7 +42,9 @@ def _torch() -> Any:
 class NeuralLeaf(SequenceEncodableProbabilityDistribution):
     """``p(y | x) = N(y; module(x), noise^2 I)`` as a mixle leaf. Observation is the pair ``(x, y)``."""
 
-    def __init__(self, module: Any, noise: float = 1.0, m_steps: int = 40, lr: float = 0.01, name: str | None = None) -> None:
+    def __init__(
+        self, module: Any, noise: float = 1.0, m_steps: int = 40, lr: float = 0.01, name: str | None = None
+    ) -> None:
         self.module = module
         self.noise = float(noise)
         self.m_steps = int(m_steps)
@@ -160,7 +162,9 @@ class NeuralLeafEstimator(ParameterEstimator):
     (generalized EM). The accumulator buffers responsibility-weighted ``(x, y)`` observations.
     """
 
-    def __init__(self, module: Any, noise: float = 1.0, m_steps: int = 40, lr: float = 0.01, name: str | None = None) -> None:
+    def __init__(
+        self, module: Any, noise: float = 1.0, m_steps: int = 40, lr: float = 0.01, name: str | None = None
+    ) -> None:
         self.module = module
         self.noise = float(noise)
         self.m_steps = int(m_steps)
